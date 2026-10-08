@@ -282,6 +282,9 @@ sum by (node) (galactic_nat_conns) / on (node) max by (node) (galactic_nat_conn_
 # Port exhaustion or no shard
 sum by (node, reason) (rate(galactic_nat_drops_total{reason=~".*_pat_exhausted|nat64_shard_unavailable"}[5m])) > 0
 
+# New flows dropped for want of a port, held for 15 minutes (GalacticNatPortExhausted)
+sum by (node, reason) (increase(galactic_nat_drops_total{reason=~"nat(66|64)_pat_exhausted"}[10m])) > 0
+
 # Drop rate by reason
 sum by (node, reason) (rate(galactic_nat_drops_total[5m])) > 0
 
@@ -299,7 +302,7 @@ sum by (node, interface, queue) (
 
 `config/monitoring/prometheusrule.yaml` (the `galactic-bgp` PrometheusRule,
 unit-tested with `task test:alerts`) covers routing, the NAT session table
-and the egress shards' uplinks. Every alert
+and ports, and the egress shards' uplinks. Every alert
 carries `service: galactic`, `team: connect` and a `runbook_url`.
 
 | Alert                                | Fires when                                              | For | Severity |
@@ -317,5 +320,6 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticRouterRoutesNotInstalled     | `galactic_router_route_install_failing > 0`             | 10m | warning  |
 | GalacticRouterMetricsDown            | `galactic-router` or `galactic-router-rr` scrape down   | 5m  | warning  |
 | GalacticNatSessionTableEvictingLive  | table over 90% full, oldest row under 7440 s            | 15m | warning  |
+| GalacticNatPortExhausted             | `*_pat_exhausted` drops in every 10-minute window       | 15m | warning  |
 | GalacticNatUplinkRxQueueStalled      | one uplink rx queue discards >1%, most siblings do not  | 10m | critical |
 | GalacticNatMetricsDown               | `galactic-nat` scrape down                              | 5m  | warning  |

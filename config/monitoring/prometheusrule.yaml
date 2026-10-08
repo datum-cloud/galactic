@@ -1,11 +1,11 @@
 # Alerts on the underlay (fabric-router's FRR, via frr-exporter and
 # fabric-config-agent), on galactic-router's BMP export and route installs,
-# on the galactic-nat egress shards' session tables and uplink NICs, and on
-# the fabric-api looking glass's gateway and node sidecars. A BGP
-# session that drops is also streamed to the BMP collector as a Peer Down carrying
-# the reason and any NOTIFICATION;
-# these rules are the Prometheus-side signal for the same events, so an alert
-# does not depend on the collector or the log pipeline behind it.
+# on the galactic-nat egress shards' session tables, masquerade ports and
+# uplink NICs, and on the fabric-api looking glass's gateway and node
+# sidecars. A BGP session that drops is also streamed to the BMP collector as
+# a Peer Down carrying the reason and any NOTIFICATION; these rules are the
+# Prometheus-side signal for the same events, so an alert does not depend on
+# the collector or the log pipeline behind it.
 #
 # This file is the tested source for these rules, not necessarily where they
 # run. On Datum's infra the edge clusters' vmalert records but never notifies,
@@ -252,6 +252,32 @@ spec:
               its least recently used row younger than the 7440s established-TCP timeout. The table is evicting
               idle sessions that have not expired, so tenants' long-lived connections through this shard break
               when they next send. galactic_nat_sessions shows which family and protocol hold the table.
+        # A shard drops a new flow when it finds no free masquerade port (or
+        # Echo Identifier) for it. It probes only 8 of 28000 ports per
+        # destination address and port, so a lone drop can happen while ports
+        # remain free, and they grow more frequent as a destination fills:
+        # about 1 in 250 new flows at half full. Drops in every 10-minute
+        # window for 15 minutes mean a destination is full or close to it.
+        # The counter lives in a pinned map and
+        # outlives the process, so only its increase is read.
+        - alert: GalacticNatPortExhausted
+          expr: >-
+            sum by (node, reason) (
+              increase(galactic_nat_drops_total{job="galactic-nat", reason=~"nat(66|64)_pat_exhausted"}[10m])
+            ) > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "The egress shard on {{ $labels.node }} is out of masquerade ports ({{ $labels.reason }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatportexhausted"
+            description: >-
+              The egress shard on {{ $labels.node }} has dropped new flows for want of a free masquerade port
+              ({{ $labels.reason }}) in every 10-minute window for 15 minutes, about {{ $value | humanize }} in the last
+              one. Each drop is a connection a tenant failed to open. Many flows to one destination address and
+              port fill its ports first.
         # One NIC receive queue dropping a steady share of its traffic while
         # most of the interface's queues do not (#673). The NIC drops these
         # before the XDP datapath sees them, so galactic_nat_drops_total stays
@@ -327,7 +353,8 @@ spec:
             runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatmetricsdown"
             description: >-
               Prometheus cannot reach galactic-nat's metrics port on {{ $labels.node }} (9182), so
-              GalacticNatSessionTableEvictingLive and GalacticNatUplinkRxQueueStalled cannot fire for it.
+              GalacticNatSessionTableEvictingLive, GalacticNatPortExhausted and GalacticNatUplinkRxQueueStalled
+              cannot fire for it.
     # fabric-api: the looking glass's cell gateway and node sidecars. None of
     # these fire merely because nobody ran a query: each is either a state
     # the components report continuously (availability, credentials,

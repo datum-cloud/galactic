@@ -387,6 +387,62 @@ tests:
                 idle sessions that have not expired, so tenants' long-lived connections through this shard break
                 when they next send. galactic_nat_sessions shows which family and protocol hold the table.
 
+  # Steady port-exhaustion drops fire once they have lasted 15m, and so do
+  # drops 9 minutes apart, since every 10-minute window still holds one. Two
+  # bursts 2 minutes apart hold the rule true for 12 minutes and never fire,
+  # which a for shorter than 12m would. Steady drops for another reason never
+  # fire. Counters grow every 30s: 10 drops is one every 3 seconds, 200 in 10
+  # minutes.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_nat_drops_total{job="galactic-nat",node="dfw-worker2",reason="nat66_pat_exhausted"}'
+        values: "0+10x60"
+      - series: 'galactic_nat_drops_total{job="galactic-nat",node="dfw-worker2",reason="nat64_pat_exhausted"}'
+        values: "0x60"
+      # dfw-worker3: one drop at 0.5m, 9.5m, 18.5m and 27.5m.
+      - series: 'galactic_nat_drops_total{job="galactic-nat",node="dfw-worker3",reason="nat64_pat_exhausted"}'
+        values: "0 1x17 2x17 3x17 4x6"
+      # sjc-worker2: 50 drops at 5m and 50 more at 7m, none after.
+      - series: 'galactic_nat_drops_total{job="galactic-nat",node="sjc-worker2",reason="nat66_pat_exhausted"}'
+        values: "0x9 50x3 100x47"
+      - series: 'galactic_nat_drops_total{job="galactic-nat",node="iad-worker2",reason="nat66_no_return_conn"}'
+        values: "0+10x60"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: GalacticNatPortExhausted
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: GalacticNatPortExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker2
+              reason: nat66_pat_exhausted
+            exp_annotations:
+              summary: "The egress shard on dfw-worker2 is out of masquerade ports (nat66_pat_exhausted)"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatportexhausted"
+              description: >-
+                The egress shard on dfw-worker2 has dropped new flows for want of a free masquerade port
+                (nat66_pat_exhausted) in every 10-minute window for 15 minutes, about 200 in the last
+                one. Each drop is a connection a tenant failed to open. Many flows to one destination address and
+                port fill its ports first.
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker3
+              reason: nat64_pat_exhausted
+            exp_annotations:
+              summary: "The egress shard on dfw-worker3 is out of masquerade ports (nat64_pat_exhausted)"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatportexhausted"
+              description: >-
+                The egress shard on dfw-worker3 has dropped new flows for want of a free masquerade port
+                (nat64_pat_exhausted) in every 10-minute window for 15 minutes, about 1.053 in the last
+                one. Each drop is a connection a tenant failed to open. Many flows to one destination address and
+                port fill its ports first.
+
   # A single stalled receive queue fires, and so do two of four, and so does
   # a queue that delivers nothing at all while discarding, at any rate; drops
   # spread across every queue (a burst) do not, nor does a single-queue
@@ -551,7 +607,8 @@ tests:
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatmetricsdown"
               description: >-
                 Prometheus cannot reach galactic-nat's metrics port on dfw-worker2 (9182), so
-                GalacticNatSessionTableEvictingLive and GalacticNatUplinkRxQueueStalled cannot fire for it.
+                GalacticNatSessionTableEvictingLive, GalacticNatPortExhausted and GalacticNatUplinkRxQueueStalled
+                cannot fire for it.
 
   # fabric-api: a gateway with executions in flight and no completions for
   # 10m fires; one that keeps completing queries, and one that is idle, do
