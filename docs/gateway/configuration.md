@@ -124,7 +124,10 @@ with no return-path role. Left unset, the gateway derives it at startup from
 the `BGPRouter` targeting its node: the node's locator address, its
 `srv6Locator` Block followed by its `nodeID` (`2001:db8:ff01::/48` and
 `nodeID: 4098` give `2001:db8:ff01:1002::`). Until that router exists with a
-locator and node ID, the gateway waits and stays not ready. Setting the
+locator and node ID, the gateway waits and stays not ready. The wait counts
+against the startup probe, which the base DaemonSet sets to 10 minutes: past
+that, the kubelet restarts the container and the wait starts over, so a
+router that is still missing shows up as restarts (#796). Setting the
 variable overrides the derived value, for a node that needs a different
 source.
 
