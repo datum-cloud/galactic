@@ -50,6 +50,7 @@ rules:
     verbs: ["get", "update", "patch"]
   - apiGroups: ["cloud.datumapis.com"]
     resources:
+      - vpcs
       - vpcattachments
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]

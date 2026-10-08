@@ -20,10 +20,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/config"
@@ -41,11 +43,13 @@ const reconcileResultError = "error"
 // resources or Linux routes.
 type ServiceRoutePolicyReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	NodeName     string
-	BGPNamespace string
-	Programmer   serviceroute.RouteProgrammer
-	Metrics      *serviceroute.Metrics
+	Scheme          *runtime.Scheme
+	NodeName        string
+	BGPNamespace    string
+	Programmer      serviceroute.RouteProgrammer
+	Metrics         *serviceroute.Metrics
+	FrontendEnabled bool
+	Now             func() time.Time
 
 	mu      sync.Mutex
 	Applied map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent
@@ -108,7 +112,15 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		logger.Error(err, "get ServiceRoutePolicy")
 		return ctrl.Result{}, err
 	}
+	if policy.DeletionTimestamp != nil {
+		return ctrl.Result{}, r.removePolicyLocked(req.NamespacedName)
+	}
 	endpoint := &networkv1alpha1.ServiceEndpoint{}
+	if policy.Spec.Frontend != nil && !r.FrontendEnabled {
+		joined := errors.Join(r.replacePolicyLocked(req.NamespacedName, nil),
+			r.setAccepted(ctx, policy, metav1.ConditionFalse, "FeatureDisabled", "service frontend translation is disabled"))
+		return ctrl.Result{}, joined
+	}
 	endpointKey := types.NamespacedName{Namespace: policy.Namespace, Name: policy.Spec.ServiceRef.Name}
 	if err := r.Get(ctx, endpointKey, endpoint); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -126,6 +138,21 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		logger.Error(err, "get ServiceEndpoint", "endpoint", policy.Spec.ServiceRef.Name)
 		return ctrl.Result{}, fmt.Errorf("get ServiceEndpoint %s/%s: %w", policy.Namespace, policy.Spec.ServiceRef.Name, err)
 	}
+	if endpoint.DeletionTimestamp != nil {
+		return ctrl.Result{}, errors.Join(r.removePolicyLocked(req.NamespacedName), r.setAccepted(ctx, policy,
+			metav1.ConditionFalse, "EndpointDeleting", "service endpoint is deleting"))
+	}
+	vpcIdentity, err := r.consumerVPCIdentity(ctx, policy)
+	if err != nil {
+		joined := errors.Join(r.replacePolicyLocked(req.NamespacedName, nil),
+			r.setAccepted(ctx, policy, metav1.ConditionFalse, "InvalidConsumerVPC", err.Error()))
+		return ctrl.Result{}, joined
+	}
+	if err := r.validateAuthorization(policy); err != nil {
+		return ctrl.Result{RequeueAfter: serviceRouteMapResyncInterval},
+			errors.Join(r.removePolicyLocked(req.NamespacedName), r.setAccepted(ctx, policy, metav1.ConditionFalse,
+				"InvalidAuthorization", err.Error()))
+	}
 	attachments := &cloudv1alpha1.VPCAttachmentList{}
 	if err := r.List(ctx, attachments); err != nil {
 		resultLabel = reconcileResultError
@@ -136,7 +163,20 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	for i := range attachments.Items {
 		all = append(all, &attachments.Items[i])
 	}
-	intents, err := serviceroute.Compile(policy, endpoint, all, r.NodeName, r.sidResolver(ctx))
+	conflicts, conflictErr := r.conflictingPolicies(ctx, all)
+	if conflictErr != nil {
+		return ctrl.Result{}, errors.Join(conflictErr, r.removePolicyLocked(req.NamespacedName))
+	}
+	if conflicts[req.NamespacedName] {
+		var errs []error
+		for key := range conflicts {
+			errs = append(errs, r.removePolicyLocked(key))
+		}
+		errs = append(errs, r.setAccepted(ctx, policy, metav1.ConditionFalse, "ConflictingPolicies",
+			"multiple policies claim a translated consumer tuple"))
+		return ctrl.Result{RequeueAfter: serviceRouteMapResyncInterval}, errors.Join(errs...)
+	}
+	intents, err := serviceroute.CompileForConsumerVPC(policy, endpoint, all, r.NodeName, r.sidResolver(ctx), vpcIdentity)
 	if err != nil {
 		var dependencyErr *serviceroute.DependencyNotReadyError
 		if errors.As(err, &dependencyErr) {
@@ -186,7 +226,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 	requeue := ctrl.Result{}
-	if len(intents) != 0 {
+	if len(intents) != 0 || policy.Spec.Frontend != nil {
 		requeue.RequeueAfter = serviceRouteMapResyncInterval
 	}
 	return requeue, nil
@@ -229,9 +269,12 @@ func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		return fmt.Errorf("add initial service route policy map sync: %w", err)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&networkv1alpha1.ServiceRoutePolicy{}).
+		For(&networkv1alpha1.ServiceRoutePolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&networkv1alpha1.ServiceRoutePolicy{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&networkv1alpha1.ServiceEndpoint{}, handler.EnqueueRequestsFromMapFunc(r.endpointPolicies)).
 		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies)).
+		Watches(&cloudv1alpha1.VPC{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies)).
 		Watches(&networkv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies)).
 		Watches(&networkv1alpha1.BGPVRFInstance{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies)).
 		Complete(r)
@@ -282,6 +325,10 @@ func (r *ServiceRoutePolicyReconciler) syncAllPolicies(ctx context.Context) erro
 		allAttachments = append(allAttachments, &attachments.Items[index])
 	}
 
+	conflicts, err := r.conflictingPolicies(ctx, allAttachments)
+	if err != nil {
+		return startupSyncError(err, true)
+	}
 	type compiledPolicy struct {
 		key     types.NamespacedName
 		intents []serviceroute.RouteIntent
@@ -292,6 +339,10 @@ func (r *ServiceRoutePolicyReconciler) syncAllPolicies(ctx context.Context) erro
 		policy := &policies.Items[index]
 		key := types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}
 		currentPolicies[key] = struct{}{}
+		if (policy.Spec.Frontend != nil && !r.FrontendEnabled) || r.validateAuthorization(policy) != nil || conflicts[key] {
+			compiled = append(compiled, compiledPolicy{key: key})
+			continue
+		}
 		endpoint := &networkv1alpha1.ServiceEndpoint{}
 		endpointKey := types.NamespacedName{Namespace: policy.Namespace, Name: policy.Spec.ServiceRef.Name}
 		if err := r.Get(ctx, endpointKey, endpoint); err != nil {
@@ -301,7 +352,13 @@ func (r *ServiceRoutePolicyReconciler) syncAllPolicies(ctx context.Context) erro
 			}
 			return startupSyncError(fmt.Errorf("get ServiceEndpoint %s for startup sync: %w", endpointKey, err), true)
 		}
-		intents, err := serviceroute.Compile(policy, endpoint, allAttachments, r.NodeName, r.sidResolver(ctx))
+		vpcIdentity, err := r.consumerVPCIdentity(ctx, policy)
+		if err != nil {
+			compiled = append(compiled, compiledPolicy{key: key})
+			continue
+		}
+		intents, err := serviceroute.CompileForConsumerVPC(
+			policy, endpoint, allAttachments, r.NodeName, r.sidResolver(ctx), vpcIdentity)
 		if err != nil {
 			// Invalid policies and node-local dependencies that are not ready
 			// both fail closed in the startup snapshot. Ordinary reconciliation
@@ -363,8 +420,38 @@ func (r *ServiceRoutePolicyReconciler) syncAllPolicies(ctx context.Context) erro
 	return startupSyncError(errors.Join(syncErrs...), !finalized)
 }
 
+func (r *ServiceRoutePolicyReconciler) consumerVPCIdentity(
+	ctx context.Context, policy *networkv1alpha1.ServiceRoutePolicy,
+) (string, error) {
+	if policy.Spec.ConsumerVPCRef == nil {
+		if policy.Spec.Frontend != nil {
+			return "", errors.New("frontend translation requires consumerVPCRef")
+		}
+		return "", nil
+	}
+	if policy.Spec.ConsumerVPCRef.Name == "" || policy.Spec.ConsumerVPCRef.UID == "" {
+		return "", errors.New("consumerVPCRef requires name and UID")
+	}
+	ref := policy.Spec.ConsumerVPCRef
+	vpc := &cloudv1alpha1.VPC{}
+	key := types.NamespacedName{Namespace: policy.Namespace, Name: ref.Name}
+	if err := r.Get(ctx, key, vpc); err != nil {
+		return "", fmt.Errorf("resolve consumer VPC %s: %w", key, err)
+	}
+	if vpc.DeletionTimestamp != nil {
+		return "", errors.New("consumer VPC is deleting")
+	}
+	if string(vpc.UID) != ref.UID {
+		return "", fmt.Errorf("consumer VPC %s UID is %q, policy pins %q", key, vpc.UID, ref.UID)
+	}
+	if vpc.Status.VPC == "" {
+		return "", fmt.Errorf("consumer VPC %s has no allocated status identity", key)
+	}
+	return vpc.Status.VPC, nil
+}
+
 func (r *ServiceRoutePolicyReconciler) endpointPolicies(ctx context.Context, obj client.Object) []ctrl.Request {
-	return r.policiesForEndpoint(ctx, obj.GetNamespace(), obj.GetName())
+	return r.allPolicies(ctx)
 }
 
 func (r *ServiceRoutePolicyReconciler) attachmentPolicies(ctx context.Context, _ client.Object) []ctrl.Request {
@@ -420,23 +507,6 @@ func (r *ServiceRoutePolicyReconciler) sidResolver(ctx context.Context) servicer
 		cache[identity] = append(net.IP(nil), resolved...)
 		return resolved, nil
 	}
-}
-
-func (r *ServiceRoutePolicyReconciler) policiesForEndpoint(ctx context.Context, namespace, name string) []ctrl.Request {
-	list := &networkv1alpha1.ServiceRoutePolicyList{}
-	if err := r.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		return nil
-	}
-	requests := make([]ctrl.Request, 0)
-	for _, policy := range list.Items {
-		if policy.Spec.ServiceRef.Name == name {
-			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
-				Namespace: policy.Namespace,
-				Name:      policy.Name,
-			}})
-		}
-	}
-	return requests
 }
 
 func (r *ServiceRoutePolicyReconciler) allPolicies(ctx context.Context) []ctrl.Request {

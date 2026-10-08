@@ -72,6 +72,20 @@ func (e *DependencyNotReadyError) Unwrap() error { return e.Err }
 func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment, localNode string, resolveSID SIDResolver,
 ) ([]RouteIntent, error) {
+	return compile(policy, endpoint, attachments, localNode, resolveSID, "")
+}
+
+// CompileForConsumerVPC compiles a policy while requiring selected consumer
+// attachments to carry the live provider VPC's allocated status identity.
+func CompileForConsumerVPC(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
+	attachments []*cloudv1alpha1.VPCAttachment, localNode string, resolveSID SIDResolver, consumerVPCIdentity string,
+) ([]RouteIntent, error) {
+	return compile(policy, endpoint, attachments, localNode, resolveSID, consumerVPCIdentity)
+}
+
+func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
+	attachments []*cloudv1alpha1.VPCAttachment, localNode string, resolveSID SIDResolver, consumerVPCIdentity string,
+) ([]RouteIntent, error) {
 	if policy == nil || endpoint == nil {
 		return nil, errors.New("service route policy and endpoint are required")
 	}
@@ -85,6 +99,16 @@ func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 	service, err := hostPrefix(endpoint.Spec.Address)
 	if err != nil {
 		return nil, fmt.Errorf("parse service endpoint address: %w", err)
+	}
+	frontend := cloneIPNet(service)
+	if policy.Spec.Frontend != nil {
+		frontend, err = hostPrefix(policy.Spec.Frontend.Address)
+		if err != nil {
+			return nil, fmt.Errorf("parse service frontend address: %w", err)
+		}
+		if (frontend.IP.To4() == nil) != (service.IP.To4() == nil) {
+			return nil, errors.New("service frontend and endpoint address families must match")
+		}
 	}
 	ports, err := servicePorts(policy, endpoint)
 	if err != nil {
@@ -104,6 +128,9 @@ func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 		if consumer.Status.HostInterface == "" || !consumerSelector.Matches(labels.Set(consumer.Labels)) {
 			continue
 		}
+		if !consumerMatchesVPC(policy, consumer, consumerVPCIdentity) {
+			continue
+		}
 		producer := chooseProducer(endpoint.Spec.DeliveryMode, consumer.Status.Node, producers)
 		if producer == nil {
 			continue
@@ -114,7 +141,7 @@ func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 			if consumer.Status.Node == localNode {
 				intents = append(intents, RouteIntent{
 					Attachment: consumerKey, ProducerAttachment: producerKey, Kind: RouteIntentLocal,
-					Service: cloneIPNet(service), ConsumerDevice: consumer.Status.HostInterface,
+					Service: cloneIPNet(service), Frontend: cloneIPNet(frontend), ConsumerDevice: consumer.Status.HostInterface,
 					ServiceDevice: producer.Status.HostInterface, Ports: clonePorts(ports),
 				})
 			}
@@ -135,7 +162,7 @@ func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 			}
 			intents = append(intents, RouteIntent{
 				Attachment: consumerKey, ProducerAttachment: producerKey, Kind: RouteIntentRemoteConsumer,
-				Service: cloneIPNet(service), ConsumerDevice: consumer.Status.HostInterface,
+				Service: cloneIPNet(service), Frontend: cloneIPNet(frontend), ConsumerDevice: consumer.Status.HostInterface,
 				ServiceSID: cloneIP(serviceSID), GrantID: grantID, Ports: clonePorts(ports),
 			})
 		}
@@ -147,11 +174,12 @@ func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 			}
 			intents = append(intents, RouteIntent{
 				Attachment: consumerKey, ProducerAttachment: producerKey, Kind: RouteIntentRemoteProducer,
-				Service: cloneIPNet(service), ServiceDevice: producer.Status.HostInterface,
+				Service: cloneIPNet(service), Frontend: cloneIPNet(frontend), ServiceDevice: producer.Status.HostInterface,
 				ConsumerSID: cloneIP(consumerSID), GrantID: grantID, Ports: clonePorts(ports),
 			})
 		}
 	}
+	setIntentAuthorization(policy, intents)
 	sort.Slice(intents, func(i, j int) bool {
 		if intents[i].Attachment != intents[j].Attachment {
 			return intents[i].Attachment.String() < intents[j].Attachment.String()
@@ -221,7 +249,8 @@ func producerCandidates(endpoint *networkv1alpha1.ServiceEndpoint,
 func readyAttachments(attachments []*cloudv1alpha1.VPCAttachment) []*cloudv1alpha1.VPCAttachment {
 	ready := make([]*cloudv1alpha1.VPCAttachment, 0, len(attachments))
 	for _, attachment := range attachments {
-		if attachment == nil || attachment.Status.ObservedGeneration != attachment.Generation ||
+		if attachment == nil || attachment.DeletionTimestamp != nil ||
+			attachment.Status.ObservedGeneration != attachment.Generation ||
 			attachment.Status.Node == "" || attachment.Status.VPC == "" || attachment.Status.VPCAttachment == "" ||
 			!apimeta.IsStatusConditionTrue(attachment.Status.Conditions, cloudv1alpha1.ConditionTypeReady) ||
 			!apimeta.IsStatusConditionTrue(attachment.Status.Conditions, cloudv1alpha1.ConditionTypeProgrammed) {
@@ -286,6 +315,19 @@ func serviceGrantID(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networ
 		_, _ = h.Write(length[:])
 		_, _ = h.Write([]byte(uid))
 	}
+	// Preserve direct-policy grant identifiers across mixed-version router fleets.
+	if policy.Spec.Frontend != nil || policy.Spec.ConsumerVPCRef != nil || policy.Spec.Authorization != nil {
+		_, _ = fmt.Fprintf(h, "|%d|%d|%d|%d|",
+			policy.Generation, endpoint.Generation, consumer.Generation, producer.Generation)
+		_, _ = h.Write([]byte(endpoint.Spec.Address))
+		if policy.Spec.Frontend != nil {
+			_, _ = h.Write([]byte(policy.Spec.Frontend.Address))
+		}
+		if policy.Spec.ConsumerVPCRef != nil {
+			_, _ = h.Write([]byte(policy.Spec.ConsumerVPCRef.Name))
+			_, _ = h.Write([]byte(policy.Spec.ConsumerVPCRef.UID))
+		}
+	}
 	for _, port := range ports {
 		_, _ = h.Write([]byte(port.Protocol))
 		var encoded [4]byte
@@ -316,4 +358,23 @@ func cloneIP(in net.IP) net.IP { return append(net.IP(nil), in...) }
 
 func clonePorts(in []networkv1alpha1.ServiceRouteProtocolPort) []networkv1alpha1.ServiceRouteProtocolPort {
 	return append([]networkv1alpha1.ServiceRouteProtocolPort(nil), in...)
+}
+
+func consumerMatchesVPC(policy *networkv1alpha1.ServiceRoutePolicy,
+	consumer *cloudv1alpha1.VPCAttachment, identity string,
+) bool {
+	if ref := policy.Spec.ConsumerVPCRef; ref != nil &&
+		(consumer.Namespace != policy.Namespace || consumer.Spec.VPC.Name != ref.Name) {
+		return false
+	}
+	return identity == "" || consumer.Status.VPC == identity
+}
+
+func setIntentAuthorization(policy *networkv1alpha1.ServiceRoutePolicy, intents []RouteIntent) {
+	if policy.Spec.Frontend == nil || policy.Spec.Authorization == nil {
+		return
+	}
+	for i := range intents {
+		intents[i].AuthorizationValidUntil = policy.Spec.Authorization.ValidUntil.Time
+	}
 }

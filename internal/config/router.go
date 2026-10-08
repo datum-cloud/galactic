@@ -51,14 +51,15 @@ var RouterBMPPolicies = []string{"pre-policy", "post-policy", "local-rib", "all"
 // --- Router environment variable keys --------------------------------------
 
 const (
-	EnvRouterNodeName       = "GALACTIC_ROUTER_NODE_NAME"
-	EnvRouterReflector      = "GALACTIC_ROUTER_REFLECTOR"
-	EnvRouterBGPListenPort  = "GALACTIC_ROUTER_BGP_LISTEN_PORT"
-	EnvRouterBGPLocalAddr   = "GALACTIC_ROUTER_BGP_LOCAL_ADDRESS"
-	EnvRouterMetricsPort    = "GALACTIC_ROUTER_METRICS_PORT"
-	EnvRouterGRPCHealthPort = "GALACTIC_ROUTER_GRPC_HEALTH_PORT"
-	EnvRouterGCNamespace    = "GALACTIC_ROUTER_GC_NAMESPACE"
-	EnvRouterGCInterval     = "GALACTIC_ROUTER_GC_INTERVAL"
+	EnvRouterNodeName               = "GALACTIC_ROUTER_NODE_NAME"
+	EnvRouterReflector              = "GALACTIC_ROUTER_REFLECTOR"
+	EnvRouterBGPListenPort          = "GALACTIC_ROUTER_BGP_LISTEN_PORT"
+	EnvRouterBGPLocalAddr           = "GALACTIC_ROUTER_BGP_LOCAL_ADDRESS"
+	EnvRouterMetricsPort            = "GALACTIC_ROUTER_METRICS_PORT"
+	EnvRouterGRPCHealthPort         = "GALACTIC_ROUTER_GRPC_HEALTH_PORT"
+	EnvRouterGCNamespace            = "GALACTIC_ROUTER_GC_NAMESPACE"
+	EnvRouterGCInterval             = "GALACTIC_ROUTER_GC_INTERVAL"
+	EnvRouterServiceFrontendEnabled = "GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED"
 
 	// EnvRouterWebhookEnabled gates the NetworkRule admission webhook. It
 	// defaults to false: enabling it requires TLS cert material this repo does
@@ -93,13 +94,14 @@ type RouterConfig struct {
 	// mesh. A distinct signal from the listen port: whether a node accepts
 	// inbound connections is not the same property as whether it is the
 	// fabric's route reflector.
-	Reflector      bool
-	BGPListenPort  int
-	BGPLocalAddr   string
-	MetricsPort    int
-	GRPCHealthPort int
-	GCNamespace    string
-	GCInterval     time.Duration
+	Reflector              bool
+	BGPListenPort          int
+	BGPLocalAddr           string
+	MetricsPort            int
+	GRPCHealthPort         int
+	GCNamespace            string
+	GCInterval             time.Duration
+	ServiceFrontendEnabled bool
 
 	// WebhookEnabled, WebhookPort, and WebhookCertDir configure the NetworkRule
 	// admission webhook. Disabled by default.
@@ -131,6 +133,7 @@ func NewRouterConfig() *RouterConfig {
 	v.SetDefault(KeyGRPCHealthPort, DefaultRouterGRPCHealthPort)
 	v.SetDefault("gc_namespace", DefaultRouterGCNamespace)
 	v.SetDefault("gc_interval", DefaultRouterGCInterval.String())
+	v.SetDefault("service_frontend_enabled", false)
 	v.SetDefault("webhook_enabled", false)
 	v.SetDefault("webhook_port", DefaultRouterWebhookPort)
 	v.SetDefault("webhook_cert_dir", "")
@@ -161,6 +164,7 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{FlagGRPCHealthPort, KeyGRPCHealthPort},
 		{"gc-namespace", "gc_namespace"},
 		{"gc-interval", "gc_interval"},
+		{"service-frontend-enabled", "service_frontend_enabled"},
 		{"webhook-enabled", "webhook_enabled"},
 		{"webhook-port", "webhook_port"},
 		{"webhook-cert-dir", "webhook_cert_dir"},
@@ -189,6 +193,7 @@ func (c *RouterConfig) readFields() {
 	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
 	c.GCNamespace = c.v.GetString("gc_namespace")
 	c.GCInterval = c.v.GetDuration("gc_interval")
+	c.ServiceFrontendEnabled = c.v.GetBool("service_frontend_enabled")
 	c.WebhookEnabled = c.v.GetBool("webhook_enabled")
 	c.WebhookPort = c.v.GetInt("webhook_port")
 	c.WebhookCertDir = c.v.GetString("webhook_cert_dir")

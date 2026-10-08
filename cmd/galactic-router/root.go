@@ -281,7 +281,8 @@ func runCmd(cfg *config.RouterConfig) error {
 	// controller process before informer reconciliation starts. A missing map is
 	// tolerated because the datapath loader may start after galactic-router;
 	// the first Apply retries initialization.
-	if err := setupServiceRouteController(mgr, nodeName, cfg.GCNamespace, serviceRouteMetrics); err != nil {
+	if err := setupServiceRouteController(mgr, nodeName, cfg.GCNamespace, cfg.ServiceFrontendEnabled,
+		serviceRouteMetrics); err != nil {
 		return fmt.Errorf("setup ServiceRoutePolicy controller: %w", err)
 	}
 
@@ -351,7 +352,7 @@ func runCmd(cfg *config.RouterConfig) error {
 
 func setupServiceRouteController(
 	mgr ctrl.Manager,
-	nodeName, bgpNamespace string,
+	nodeName, bgpNamespace string, frontendEnabled bool,
 	serviceRouteMetrics *serviceroute.Metrics,
 ) error {
 	programmer := &serviceroute.EBPFRouteProgrammer{}
@@ -360,13 +361,14 @@ func setupServiceRouteController(
 	}
 
 	return (&controller.ServiceRoutePolicyReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		NodeName:     nodeName,
-		BGPNamespace: bgpNamespace,
-		Programmer:   programmer,
-		Metrics:      serviceRouteMetrics,
-		Applied:      make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		NodeName:        nodeName,
+		BGPNamespace:    bgpNamespace,
+		Programmer:      programmer,
+		Metrics:         serviceRouteMetrics,
+		FrontendEnabled: frontendEnabled,
+		Applied:         make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
 	}).SetupWithManager(mgr)
 }
 
@@ -415,6 +417,8 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().DurationP("gc-interval", "",
 		config.DefaultRouterGCInterval,
 		"Cleanup interval")
+	cmd.Flags().Bool("service-frontend-enabled", false,
+		"Enable consumer-facing private-service address translation")
 	cmd.Flags().Bool("webhook-enabled", false,
 		"Enable the NetworkRule admission webhook (requires TLS cert material; see config/webhook/)")
 	cmd.Flags().IntP("webhook-port", "",

@@ -1,11 +1,12 @@
 # Private service routes
 
-`ServiceEndpoint` uses a direct-endpoint contract. Its declared
+`ServiceEndpoint` declares the producer destination. Its declared
 `spec.address`, `spec.protocol`, and `spec.port` are the exact destination tuple
 that the selected producer attachment must accept. Galactic does not interpret
 the address as a Kubernetes Service frontend: it does not discover
-EndpointSlices, select a backend address, or translate the destination before
-delivery.
+EndpointSlices or select a Kubernetes backend. A translated policy uses
+`spec.frontend.address` inside the consumer VPC and translates it to the
+endpoint address before delivery.
 
 The controller that publishes the `ServiceEndpoint` owns the service
 implementation and health. It must ensure every attachment selected by
@@ -30,15 +31,12 @@ carries the original packet through the SRv6 service tunnel. In both cases the
 producer receives the declared destination and the original consumer source
 unchanged.
 
-The [Private Service Connect proposal](../enhancements/networking/private-service-connect/README.md)
-describes the product capability and proposed frontend integration.
-
 ## No consumer-visible route
 
 Galactic does not add the service address or a service-specific route to a
 consumer, and does not inject a route into a consumer guest. Consumers send the
 packet through their ordinary default gateway. The attachment's TC-eBPF
-classifier matches the exact service tuple and redirects it to the selected
+classifier matches the exact service or frontend tuple and redirects it to the selected
 producer; unauthorized ports are dropped. Galactic also does not install a
 host route for the service address. The producer service may still need to
 configure or bind the address locally so its own network stack or listener
@@ -63,6 +61,22 @@ does not reference a `ServiceVIPBinding`, and the private service-route
 dataplane does not consult that translation to discover a backend. Reusing the
 same address in both APIs does not connect the two mechanisms.
 
-If a service needs a distinct frontend and backend address or port, its API
-must identify that backend explicitly and define its selection and health
-semantics. `ServiceEndpoint` intentionally carries no such fields.
+## Consumer service frontends
+
+Frontend translation is disabled by default. Enable it on participating routers
+with `--service-frontend-enabled` or `GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED=true`.
+The publishing controller supplies the producer address in `ServiceEndpoint`;
+`ServiceRoutePolicy.spec.frontend.address` supplies the consumer address.
+Both addresses must use the same IP family. Ports are not translated.
+
+A translated policy must pin the consumer VPC by name and UID and include an
+`authorization.validUntil` deadline within the next two minutes. Selected
+attachments must match that VPC's allocated network identity. Kernel checks
+stop new requests and established replies when the authorization expires, even
+if the controller or its API is unavailable. Renew authorization explicitly to
+restore access.
+
+Policies claiming the same frontend address, protocol, and port on one consumer
+attachment are rejected together. Separate VPC attachments can reuse that tuple.
+The publisher owns authorization renewal and service health; Galactic enforces
+network access and forwards packets. It does not interpret DNS records or zones.
