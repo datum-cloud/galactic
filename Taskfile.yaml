@@ -95,6 +95,12 @@ tasks:
       - buf lint
       - buf generate
 
+  generate:crd:
+    desc: Regenerate the FabricQuery deepcopy code and CRD (requires controller-gen)
+    cmds:
+      - controller-gen object:headerFile=hack/boilerplate.go.txt paths=./internal/fabric/api/...
+      - controller-gen crd paths=./internal/fabric/api/... output:crd:artifacts:config=config/fabric-api/crd
+
   build:ebpf:
     desc: Regenerate the eBPF uSID, edge gateway DSR, NAT egress, and XDP dispatcher datapaths (requires clang)
     run: once
@@ -154,6 +160,7 @@ tasks:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-nat ./cmd/galactic-nat
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-vrf ./cmd/galactic-vrf
       - go build -ldflags "{{.LDFLAGS}}" -o bin/fabric-config-agent ./cmd/fabric-config-agent
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/fabric-api ./cmd/fabric-api
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-usid ./cmd/galactic-usid
       - GOBIN={{.LOCALBIN}} go install github.com/containernetworking/plugins/plugins/main/host-device@v1.9.1
 

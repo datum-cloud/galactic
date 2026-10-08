@@ -1,0 +1,880 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: fabricqueries.network.datumapis.com
+spec:
+  group: network.datumapis.com
+  names:
+    kind: FabricQuery
+    listKind: FabricQueryList
+    plural: fabricqueries
+    shortNames:
+    - fq
+    singular: fabricquery
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.query.type
+      name: TYPE
+      type: string
+    - jsonPath: .spec.query.target
+      name: TARGET
+      type: string
+    - jsonPath: .spec.site
+      name: SITE
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Complete")].status
+      name: COMPLETE
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Complete")].reason
+      name: REASON
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FabricQuery is one public looking-glass query's work for one edge cell.
+          NSO owns its spec and lifecycle on the hub, Karmada propagates it to the
+          one pinned member cluster, and that cell's fabric-api gateway writes its
+          status. The spec is immutable.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: FabricQuerySpec is a canonical query pinned to one cell.
+            properties:
+              budgets:
+                description: |-
+                  Budgets bounds results. Zero fields take the cell's ceilings, and no
+                  field can raise a ceiling.
+                properties:
+                  maxCommunitiesPerPath:
+                    format: int32
+                    maximum: 64
+                    minimum: 0
+                    type: integer
+                  maxNodeResponseBytes:
+                    format: int32
+                    maximum: 131072
+                    minimum: 0
+                    type: integer
+                  maxNodes:
+                    format: int32
+                    maximum: 32
+                    minimum: 0
+                    type: integer
+                  maxObjectBytes:
+                    format: int32
+                    maximum: 393216
+                    minimum: 0
+                    type: integer
+                  maxPathsPerPrefix:
+                    format: int32
+                    maximum: 8
+                    minimum: 0
+                    type: integer
+                  maxPrefixes:
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                type: object
+              clusterName:
+                description: |-
+                  ClusterName is the Karmada member cluster the query is pinned to. A
+                  gateway executes only queries naming its own cluster.
+                maxLength: 253
+                minLength: 1
+                type: string
+              expiresAt:
+                description: ExpiresAt is the absolute expiration. Nothing executes
+                  after it.
+                format: date-time
+                type: string
+              nodeSelector:
+                description: |-
+                  NodeSelector restricts execution to fabric-router pods on matching
+                  nodes. Operator-set only; NSO never copies a tenant value here.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              query:
+                description: Query is the canonical query.
+                properties:
+                  addressFamily:
+                    description: AddressFamily selects IPv4 or IPv6.
+                    enum:
+                    - IPv4
+                    - IPv6
+                    type: string
+                  hostname:
+                    description: |-
+                      Hostname is the probe destination as the tenant wrote it, kept for
+                      display. Cells never resolve it.
+                    maxLength: 253
+                    type: string
+                  target:
+                    description: |-
+                      Target is the canonical target. For Ping and Traceroute it is the
+                      resolved numeric destination, identical for every node.
+                    maxLength: 255
+                    type: string
+                  type:
+                    description: QueryType is a looking-glass query type.
+                    enum:
+                    - RouteLookup
+                    - ASPath
+                    - Community
+                    - LargeCommunity
+                    - BGPSummary
+                    - Ping
+                    - Traceroute
+                    type: string
+                required:
+                - addressFamily
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: target is required, except for BGPSummary where it must
+                    be empty
+                  rule: 'self.type == ''BGPSummary'' ? !has(self.target) || size(self.target)
+                    == 0 : has(self.target) && size(self.target) > 0'
+                - message: hostname is only for probes
+                  rule: '!has(self.hostname) || self.type == ''Ping'' || self.type
+                    == ''Traceroute'''
+              requestID:
+                description: |-
+                  RequestID identifies the request across retries and is the nodes'
+                  duplicate-suppression key.
+                maxLength: 128
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                type: string
+              site:
+                description: |-
+                  Site is the location the cell serves; the cell's gateway executes
+                  only queries for its own site.
+                maxLength: 63
+                minLength: 1
+                type: string
+              source:
+                description: Source names the public LookingGlassQuery this request
+                  serves.
+                properties:
+                  cluster:
+                    description: Cluster is the project control plane.
+                    maxLength: 253
+                    type: string
+                  name:
+                    maxLength: 253
+                    type: string
+                  namespace:
+                    maxLength: 63
+                    type: string
+                  uid:
+                    maxLength: 64
+                    type: string
+                required:
+                - cluster
+                - name
+                - namespace
+                - uid
+                type: object
+            required:
+            - clusterName
+            - expiresAt
+            - query
+            - requestID
+            - site
+            - source
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
+          status:
+            description: |-
+              FabricQueryStatus is the cell's execution record: a start marker, then one
+              bounded terminal result. Once Complete is True it never changes.
+            properties:
+              attempt:
+                description: |-
+                  Attempt counts executions started for this request. It rises only
+                  when a gateway replaces one that stopped before persisting a result.
+                format: int32
+                type: integer
+              completionTime:
+                format: date-time
+                type: string
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              coverage:
+                description: Coverage accounts for every node discovered.
+                properties:
+                  expected:
+                    format: int32
+                    type: integer
+                  failed:
+                    format: int32
+                    type: integer
+                  omitted:
+                    format: int32
+                    type: integer
+                  successful:
+                    format: int32
+                    type: integer
+                required:
+                - expected
+                - failed
+                - omitted
+                - successful
+                type: object
+              nodes:
+                description: Nodes is the fixed node snapshot taken when execution
+                  started.
+                items:
+                  description: NodeTarget is one node in the execution snapshot.
+                  properties:
+                    certificatePod:
+                      description: CertificatePod is the pod whose identity the node's
+                        sidecar presents.
+                      maxLength: 253
+                      type: string
+                    hostIP:
+                      maxLength: 45
+                      type: string
+                    name:
+                      maxLength: 253
+                      type: string
+                    omittedReason:
+                      maxLength: 64
+                      type: string
+                    pod:
+                      maxLength: 253
+                      type: string
+                    podUID:
+                      maxLength: 64
+                      type: string
+                    selected:
+                      description: |-
+                        Selected is true for a node executed on. A discovered node that was
+                        not ready or exceeded the node budget is recorded with Selected false
+                        and OmittedReason set.
+                      type: boolean
+                  required:
+                  - name
+                  - pod
+                  - podUID
+                  - selected
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              observations:
+                description: Observations holds one entry per executed node, sorted
+                  by node.
+                items:
+                  description: NodeObservation is one node's answer, or its error.
+                  properties:
+                    asn:
+                      format: int64
+                      type: integer
+                    durationMilliseconds:
+                      format: int64
+                      type: integer
+                    errorCode:
+                      description: ErrorCode is set when the node produced no answer.
+                      maxLength: 64
+                      type: string
+                    errorMessage:
+                      maxLength: 256
+                      type: string
+                    frrVersion:
+                      maxLength: 64
+                      type: string
+                    matched:
+                      description: Matched counts matching prefixes; set only when
+                        MatchedIsExact.
+                      format: int32
+                      type: integer
+                    matchedIsExact:
+                      type: boolean
+                    node:
+                      maxLength: 253
+                      type: string
+                    ping:
+                      description: PingResult is a ping's outcome; loss is data.
+                      properties:
+                        destination:
+                          maxLength: 45
+                          type: string
+                        received:
+                          format: int32
+                          type: integer
+                        replies:
+                          items:
+                            description: ProbeReply is one probe packet's outcome.
+                            properties:
+                              address:
+                                maxLength: 45
+                                type: string
+                              icmpCode:
+                                format: int32
+                                type: integer
+                              icmpType:
+                                maxLength: 32
+                                type: string
+                              rttMicroseconds:
+                                format: int64
+                                type: integer
+                              sequence:
+                                format: int32
+                                type: integer
+                              timeout:
+                                type: boolean
+                            required:
+                            - sequence
+                            type: object
+                          maxItems: 3
+                          type: array
+                        rttAvgMicroseconds:
+                          format: int64
+                          type: integer
+                        rttMaxMicroseconds:
+                          format: int64
+                          type: integer
+                        rttMinMicroseconds:
+                          format: int64
+                          type: integer
+                        sent:
+                          format: int32
+                          type: integer
+                        source:
+                          maxLength: 45
+                          type: string
+                      required:
+                      - destination
+                      - received
+                      - sent
+                      - source
+                      type: object
+                    routerID:
+                      maxLength: 45
+                      type: string
+                    routes:
+                      description: RouteResult is a lookup or search answer.
+                      properties:
+                        index:
+                          description: |-
+                            Index is set when a search was answered from the node's search index,
+                            which follows bgpd's Loc-RIB over BMP; each prefix then carries its
+                            selected path only.
+                          properties:
+                            lastUpdate:
+                              description: LastUpdate is when the index last applied
+                                a route change.
+                              format: date-time
+                              type: string
+                            routes:
+                              description: Routes is the number of prefixes the index
+                                holds.
+                              format: int64
+                              type: integer
+                            syncedAt:
+                              description: |-
+                                SyncedAt is when the index's current BMP session delivered the full
+                                table.
+                              format: date-time
+                              type: string
+                            version:
+                              description: Version counts route changes applied; it
+                                only grows.
+                              format: int64
+                              type: integer
+                          type: object
+                        lookupKind:
+                          description: LookupKind is Exact, LongestMatch or Search.
+                          enum:
+                          - Exact
+                          - LongestMatch
+                          - Search
+                          type: string
+                        prefixes:
+                          items:
+                            description: PrefixObservation is one prefix as one router
+                              holds it.
+                            properties:
+                              installation:
+                                description: |-
+                                  Installation is zebra's evidence for one prefix, sampled separately from
+                                  the BGP answer.
+                                properties:
+                                  errorCode:
+                                    maxLength: 64
+                                    type: string
+                                  errorMessage:
+                                    maxLength: 256
+                                    type: string
+                                  present:
+                                    type: boolean
+                                  routes:
+                                    items:
+                                      description: ZebraRoute is one zebra RIB route.
+                                      properties:
+                                        distance:
+                                          format: int64
+                                          type: integer
+                                        installed:
+                                          type: boolean
+                                        metric:
+                                          format: int64
+                                          type: integer
+                                        nextHops:
+                                          items:
+                                            description: ZebraNextHop is one zebra
+                                              next hop.
+                                            properties:
+                                              active:
+                                                type: boolean
+                                              address:
+                                                maxLength: 45
+                                                type: string
+                                              blackhole:
+                                                type: boolean
+                                              fib:
+                                                type: boolean
+                                              interface:
+                                                maxLength: 16
+                                                type: string
+                                            type: object
+                                          maxItems: 16
+                                          type: array
+                                        protocol:
+                                          maxLength: 32
+                                          type: string
+                                        selected:
+                                          type: boolean
+                                      required:
+                                      - protocol
+                                      type: object
+                                    maxItems: 8
+                                    type: array
+                                  sampleTime:
+                                    format: date-time
+                                    type: string
+                                type: object
+                              paths:
+                                items:
+                                  description: Path is one BGP path. Best describes
+                                    the source router's own choice.
+                                  properties:
+                                    aggregated:
+                                      type: boolean
+                                    asPath:
+                                      maxLength: 2048
+                                      type: string
+                                    asPathSegments:
+                                      items:
+                                        description: ASSegment is one AS_PATH segment.
+                                        properties:
+                                          asns:
+                                            items:
+                                              format: int64
+                                              type: integer
+                                            maxItems: 255
+                                            type: array
+                                          type:
+                                            enum:
+                                            - as-sequence
+                                            - as-set
+                                            - as-confed-sequence
+                                            - as-confed-set
+                                            type: string
+                                        required:
+                                        - asns
+                                        - type
+                                        type: object
+                                      maxItems: 64
+                                      type: array
+                                    best:
+                                      type: boolean
+                                    communities:
+                                      items:
+                                        type: string
+                                      maxItems: 64
+                                      type: array
+                                    largeCommunities:
+                                      items:
+                                        type: string
+                                      maxItems: 64
+                                      type: array
+                                    lastUpdate:
+                                      format: date-time
+                                      type: string
+                                    local:
+                                      type: boolean
+                                    localPref:
+                                      format: int64
+                                      type: integer
+                                    med:
+                                      format: int64
+                                      type: integer
+                                    multipath:
+                                      type: boolean
+                                    nextHops:
+                                      items:
+                                        description: NextHop is one BGP next hop.
+                                        properties:
+                                          accessible:
+                                            type: boolean
+                                          address:
+                                            maxLength: 45
+                                            type: string
+                                          hostname:
+                                            maxLength: 253
+                                            type: string
+                                          scope:
+                                            maxLength: 16
+                                            type: string
+                                          used:
+                                            type: boolean
+                                        required:
+                                        - address
+                                        type: object
+                                      maxItems: 16
+                                      type: array
+                                    origin:
+                                      description: Origin is the BGP ORIGIN attribute.
+                                      maxLength: 16
+                                      type: string
+                                    originASN:
+                                      description: OriginASN is the originating AS;
+                                        0 when local or ambiguous.
+                                      format: int64
+                                      type: integer
+                                    peerAddress:
+                                      maxLength: 45
+                                      type: string
+                                    peerHostname:
+                                      maxLength: 253
+                                      type: string
+                                    peerRouterID:
+                                      maxLength: 45
+                                      type: string
+                                    peerType:
+                                      maxLength: 32
+                                      type: string
+                                    selectionReason:
+                                      maxLength: 64
+                                      type: string
+                                    totalCommunities:
+                                      format: int32
+                                      type: integer
+                                    totalLargeCommunities:
+                                      format: int32
+                                      type: integer
+                                    valid:
+                                      type: boolean
+                                    weight:
+                                      format: int64
+                                      type: integer
+                                  type: object
+                                maxItems: 8
+                                type: array
+                              prefix:
+                                maxLength: 49
+                                type: string
+                              totalPaths:
+                                format: int32
+                                type: integer
+                            required:
+                            - prefix
+                            type: object
+                          maxItems: 100
+                          type: array
+                      required:
+                      - lookupKind
+                      type: object
+                    sampleTime:
+                      format: date-time
+                      type: string
+                    summary:
+                      description: SummaryResult is a BGP summary.
+                      properties:
+                        asn:
+                          format: int64
+                          type: integer
+                        establishedPeers:
+                          format: int32
+                          type: integer
+                        peers:
+                          items:
+                            description: Peer is one BGP session. A session that is
+                              down is data.
+                            properties:
+                              address:
+                                maxLength: 45
+                                type: string
+                              connectionsDropped:
+                                format: int64
+                                type: integer
+                              connectionsEstablished:
+                                format: int64
+                                type: integer
+                              description:
+                                maxLength: 256
+                                type: string
+                              established:
+                                type: boolean
+                              hostname:
+                                maxLength: 253
+                                type: string
+                              localAS:
+                                format: int64
+                                type: integer
+                              messagesReceived:
+                                format: int64
+                                type: integer
+                              messagesSent:
+                                format: int64
+                                type: integer
+                              prefixesReceived:
+                                format: int64
+                                type: integer
+                              prefixesSent:
+                                format: int64
+                                type: integer
+                              remoteAS:
+                                format: int64
+                                type: integer
+                              state:
+                                maxLength: 32
+                                type: string
+                              uptimeSeconds:
+                                format: int64
+                                type: integer
+                            required:
+                            - address
+                            - state
+                            type: object
+                          maxItems: 256
+                          type: array
+                        routerID:
+                          maxLength: 45
+                          type: string
+                        totalPeers:
+                          format: int32
+                          type: integer
+                      required:
+                      - establishedPeers
+                      - totalPeers
+                      type: object
+                    traceroute:
+                      description: TracerouteResult is a traceroute's outcome; silent
+                        hops are data.
+                      properties:
+                        destination:
+                          maxLength: 45
+                          type: string
+                        hops:
+                          items:
+                            description: Hop is one traceroute hop.
+                            properties:
+                              probes:
+                                items:
+                                  description: ProbeReply is one probe packet's outcome.
+                                  properties:
+                                    address:
+                                      maxLength: 45
+                                      type: string
+                                    icmpCode:
+                                      format: int32
+                                      type: integer
+                                    icmpType:
+                                      maxLength: 32
+                                      type: string
+                                    rttMicroseconds:
+                                      format: int64
+                                      type: integer
+                                    sequence:
+                                      format: int32
+                                      type: integer
+                                    timeout:
+                                      type: boolean
+                                  required:
+                                  - sequence
+                                  type: object
+                                maxItems: 3
+                                type: array
+                              ttl:
+                                format: int32
+                                type: integer
+                            required:
+                            - ttl
+                            type: object
+                          maxItems: 20
+                          type: array
+                        reached:
+                          type: boolean
+                        source:
+                          maxLength: 45
+                          type: string
+                      required:
+                      - destination
+                      - source
+                      type: object
+                    truncated:
+                      type: boolean
+                  required:
+                  - node
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-map-keys:
+                - node
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the generation this status describes.
+                format: int64
+                type: integer
+              producerCluster:
+                description: |-
+                  ProducerCluster is the cluster that wrote this status; status
+                  aggregation refuses any producer other than spec.clusterName.
+                type: string
+              requestID:
+                description: RequestID echoes spec.requestID so status aggregation
+                  can check it.
+                type: string
+              startTime:
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
