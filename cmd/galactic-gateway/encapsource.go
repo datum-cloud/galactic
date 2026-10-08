@@ -36,7 +36,7 @@ func (e noRouterYetError) Error() string {
 
 // listRoutersError reports that listing BGPRouters failed: the API server was
 // unreachable, timed out, refused the request, or does not serve the kind.
-// resolveEncapSource retries it, logging the error on every attempt (#797).
+// resolveEncapSource retries it, logging the error on every attempt.
 type listRoutersError struct{ err error }
 
 func (e listRoutersError) Error() string { return "list BGPRouters: " + e.err.Error() }
@@ -56,10 +56,9 @@ func (e listRoutersError) Unwrap() error { return e.err }
 //
 // A node whose router is missing or still lacks a locator or node ID is
 // waited on, with backoff, until ctx is done, and so is a failed list of
-// BGPRouters: a brief API server outage during a rollout must not restart
-// the gateway (#797). Each failed list is logged as a warning, so an error
-// that persists, such as a missing RBAC grant, stays visible while it is
-// retried. The gateway cannot advertise a VIP without that router anyway, and
+// BGPRouters. Each failed list is logged as a warning, so an error that
+// persists, such as a missing RBAC grant, stays visible while it is retried.
+// The gateway cannot advertise a VIP without that router anyway, and
 // both health services stay NOT_SERVING meanwhile, so the wait is bounded by
 // the caller's startup probe: the kubelet restarts the container when it
 // expires, and the wait starts over.
