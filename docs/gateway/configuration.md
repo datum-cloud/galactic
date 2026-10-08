@@ -573,9 +573,9 @@ spec:
 - The binding is owned by the rule, so deleting the rule removes it, after
   the gateways have drained the VIP. A rule that loses `Accepted`, as it
   does whenever its namespace briefly has no `NetworkGateway`, keeps its
-  bindings, so the backend nodes' rows survive until the gateways return. A backend that moves to another node
-  or changes address has its binding deleted on the old node and a new one
-  written where it now runs.
+  bindings, so the backend nodes' rows survive until the gateways return.
+  A backend that moves to another node or changes address has its binding
+  deleted on the old node and a new one written where it now runs.
 
 The ingress row is keyed on the VIP, port and the backend's slot, the same
 hash of the backend's address and port the gateway writes into the uSID. So

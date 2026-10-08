@@ -12,6 +12,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
@@ -81,5 +82,34 @@ func TestDropConflictingBackends_SlotOnOtherNode(t *testing.T) {
 	})
 	if len(kept) != 2 || len(rejected) != 0 {
 		t.Errorf("kept = %d, rejected = %v, want both kept", len(kept), rejected)
+	}
+}
+
+// TestSelectRuleBackends_DropsConflictingBackends covers the selection both
+// the gateway and the binding writer use: an attachment repeating another's
+// address, and one whose backend shares a slot with another on its node, are
+// left out and reported as pending, so neither side plans flows or bindings
+// for them.
+func TestSelectRuleBackends_DropsConflictingBackends(t *testing.T) {
+	rule := newTestRule(testRuleName, testVPCRef, testVIP)
+	a, b := collidingAddrs(t, testBackendPort)
+
+	first := newBackendAttachment(testVPCRef, a.String())
+	first.Name = "first"
+	dup := newBackendAttachment(testVPCRef, a.String())
+	dup.Name = "dup"
+	slot := newBackendAttachment(testVPCRef, b.String())
+	slot.Name = "slot"
+
+	backends, pending, err := selectRuleBackends(rule, []*cloudv1alpha1.VPCAttachment{slot, dup, first})
+	if err != nil {
+		t.Fatalf("selectRuleBackends: %v", err)
+	}
+	if len(backends) != 1 || backends[0].addr != a || backends[0].attachment.Name != "dup" {
+		t.Errorf("backends = %+v, want only %s from the first attachment by name", backends, a)
+	}
+	joined := strings.Join(pending, "\n")
+	if !strings.Contains(joined, "/first: address") || !strings.Contains(joined, "/slot: backend") {
+		t.Errorf("pending = %v, want the repeated address and the slot collision reported", pending)
 	}
 }
