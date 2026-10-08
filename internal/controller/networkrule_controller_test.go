@@ -204,6 +204,42 @@ func TestNetworkRuleReconciler_SetsFinalizerAndAccepted(t *testing.T) {
 	}
 }
 
+// TestNetworkRuleReconciler_AcceptedFollowsSpecGeneration covers a spec edit to
+// an accepted rule: Accepted stays True but records the new generation, so
+// anything waiting on Accepted for the current spec, kubectl wait among them,
+// does not see a stale condition.
+func TestNetworkRuleReconciler_AcceptedFollowsSpecGeneration(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	rule.Generation = 2
+	rule.Finalizers = []string{networkRuleFinalizer}
+	meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
+		Type: bgpv1alpha1.ConditionTypeAccepted, Status: metav1.ConditionTrue,
+		Reason: "GatewayNodesRegistered", ObservedGeneration: 1,
+	})
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), rule).
+		Build()
+
+	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	got := &bgpv1alpha1.NetworkRule{}
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, got); err != nil {
+		t.Fatalf("get rule: %v", err)
+	}
+	cond := meta.FindStatusCondition(got.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.ObservedGeneration != got.Generation {
+		t.Errorf("Accepted = %+v, want True at generation %d", cond, got.Generation)
+	}
+}
+
 // TestNetworkRuleReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes
 // covers the converse of the above directly against updateAcceptedCondition:
 // with no NetworkGateway registered in the namespace, Accepted must be
