@@ -26,13 +26,22 @@ const (
 )
 
 // noRouterYetError reports that no BGPRouter targeting this node carries an SRv6
-// locator and node ID yet. resolveEncapSource retries it; every other error
-// is returned.
+// locator and node ID yet. resolveEncapSource retries it, as it does
+// listRoutersError; every other error is returned.
 type noRouterYetError struct{ nodeName string }
 
 func (e noRouterYetError) Error() string {
 	return "no BGPRouter with an SRv6 locator and node ID targets node " + e.nodeName
 }
+
+// listRoutersError reports that listing BGPRouters failed: the API server was
+// unreachable, timed out, refused the request, or does not serve the kind.
+// resolveEncapSource retries it, logging the error on every attempt (#797).
+type listRoutersError struct{ err error }
+
+func (e listRoutersError) Error() string { return "list BGPRouters: " + e.err.Error() }
+
+func (e listRoutersError) Unwrap() error { return e.err }
 
 // resolveEncapSource returns the outer-header source the edge datapath writes
 // on every packet it encapsulates: configured when it is set, and otherwise
@@ -46,10 +55,14 @@ func (e noRouterYetError) Error() string {
 // cluster-wide.
 //
 // A node whose router is missing or still lacks a locator or node ID is
-// waited on, with backoff, until ctx is done. The gateway cannot advertise a
-// VIP without that router anyway, and both health services stay NOT_SERVING
-// meanwhile, so the wait is bounded by the caller's startup probe: the
-// kubelet restarts the container when it expires, and the wait starts over.
+// waited on, with backoff, until ctx is done, and so is a failed list of
+// BGPRouters: a brief API server outage during a rollout must not restart
+// the gateway (#797). Each failed list is logged as a warning, so an error
+// that persists, such as a missing RBAC grant, stays visible while it is
+// retried. The gateway cannot advertise a VIP without that router anyway, and
+// both health services stay NOT_SERVING meanwhile, so the wait is bounded by
+// the caller's startup probe: the kubelet restarts the container when it
+// expires, and the wait starts over.
 // Two routers for this node that disagree on the address are an error, never
 // a guess.
 func resolveEncapSource(ctx context.Context, reader client.Reader, nodeName, configured string) (string, error) {
@@ -66,12 +79,17 @@ func resolveEncapSource(ctx context.Context, reader client.Reader, nodeName, con
 				"address", addr)
 			return addr.String(), nil
 		}
-		if !errors.As(err, &noRouterYetError{}) {
+		switch {
+		case errors.As(err, &listRoutersError{}):
+			slog.Warn("Listing BGPRouters to derive the edge gateway SRv6 encapsulation source failed; retrying",
+				"node", nodeName, "retryIn", delay, "error", err)
+		case errors.As(err, &noRouterYetError{}):
+			slog.Info("Waiting for this node's BGPRouter to derive the edge gateway SRv6 encapsulation source",
+				"node", nodeName, "retryIn", delay)
+		default:
 			return "", err
 		}
 
-		slog.Info("Waiting for this node's BGPRouter to derive the edge gateway SRv6 encapsulation source",
-			"node", nodeName, "retryIn", delay)
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -86,11 +104,11 @@ func resolveEncapSource(ctx context.Context, reader client.Reader, nodeName, con
 // encapSourceFromRouters derives this node's locator address from every
 // BGPRouter whose target is the Node nodeName (an empty kind counts as Node)
 // and that carries a locator and node ID. It returns noRouterYetError when
-// there is none.
+// there is none, and listRoutersError when the list fails.
 func encapSourceFromRouters(ctx context.Context, reader client.Reader, nodeName string) (netip.Addr, error) {
 	list := &bgpv1alpha1.BGPRouterList{}
 	if err := reader.List(ctx, list); err != nil {
-		return netip.Addr{}, fmt.Errorf("list BGPRouters: %w", err)
+		return netip.Addr{}, listRoutersError{err: err}
 	}
 
 	var (

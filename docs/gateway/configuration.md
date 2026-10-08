@@ -124,7 +124,10 @@ with no return-path role. Left unset, the gateway derives it at startup from
 the `BGPRouter` targeting its node: the node's locator address, its
 `srv6Locator` Block followed by its `nodeID` (`2001:db8:ff01::/48` and
 `nodeID: 4098` give `2001:db8:ff01:1002::`). Until that router exists with a
-locator and node ID, the gateway waits and stays not ready. The wait counts
+locator and node ID, the gateway waits and stays not ready. A failed read
+of BGPRouters from the API server is waited on the same way and logged as a
+warning on every retry (#797), so a brief API outage does not restart the
+gateway and a lasting one stays visible in its logs. The wait counts
 against the startup probe, which the base DaemonSet sets to 10 minutes: past
 that, the kubelet restarts the container and the wait starts over, so a
 router that is still missing shows up as restarts (#796). Setting the

@@ -467,7 +467,8 @@ to resolve backend uSIDs).
    `SRv6Address` when set; otherwise list `BGPRouter`s through the uncached
    API reader (the manager has not started) and derive the node's locator
    address from the one targeting this node, waiting with backoff until one
-   carries a locator and node ID. See
+   carries a locator and node ID. A failed list is retried on the same
+   backoff and logged as a warning each time (#797). See
    [SRv6 encap-source address](#srv6-encap-source-address).
 5. `setupGatewayDatapath` (`cmd/galactic-gateway/gateway.go`) — configure
    the required IPv6-forwarding sysctls on the public interface (see
