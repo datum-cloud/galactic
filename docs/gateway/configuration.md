@@ -598,6 +598,19 @@ error in their `Programmed` conditions. A rule can be
 `Programmed` on every gateway and still fail to reach a backend; this
 condition is where that shows.
 
+A node's own `galactic-router` is the only one that clears its condition,
+deletes its bindings and removes the teardown finalizer from bindings
+targeting it. When a node is decommissioned and its `Node` object deleted,
+the surviving routers do it instead: they remove its
+`<backend-node>/BackendsBound` condition from every rule, delete its
+generated bindings, and remove the finalizer from every binding targeting
+it, hand-written ones included, so none stays `Terminating`. Its kernel
+state went with the node. Each router checks at startup, on every `Node`
+deletion and every `--gc-interval`, so one that was down when the node left
+still cleans up. Delete the `Node` object only once the node is gone for
+good: if the node is still running, its bindings are deleted without
+teardown, and it writes them again on its next reconcile.
+
 ## Verifying the deployment
 
 Confirm the DaemonSet and CRDs exist and are healthy:
