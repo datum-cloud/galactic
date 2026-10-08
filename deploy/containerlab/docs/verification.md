@@ -203,7 +203,11 @@ that site's edge nodes originate, and two `ns60` backends on its compute node
 that answer TCP and UDP on port 80 with their pod name and the client address
 they saw. The site's `NetworkRule`s select both through their
 `VPCAttachment`s, and the compute node writes one `ServiceVIPBinding` per rule
-per backend. `verify:gateway-ingress` fails unless both backends answer.
+per backend, labelled `app.kubernetes.io/managed-by=galactic-router`.
+`verify:gateway` counts and checks only those, and `deploy:galactic-gateway`
+deletes any other binding in `galactic-system`, such as the hand-written ones
+an older lab applied. `verify:gateway-ingress` fails unless both backends
+answer.
 
 ```bash
 # NetworkGateways Ready, NetworkRules Accepted, ServiceVIPBindings Bound

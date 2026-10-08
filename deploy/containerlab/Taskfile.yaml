@@ -521,15 +521,18 @@ tasks:
           # Ready: the engine loaded every rule and advertised it. Accepted:
           # the rule found a gateway. Bound: the backend's node rewrites the
           # VIP for it. Each backend's node writes one binding per rule per
-          # ns60 backend: two rules, two backends.
-          bindings=$(docker exec ${cp} kubectl -n galactic-system get servicevipbindings -o name | wc -l)
+          # ns60 backend: two rules, two backends. Only the bindings
+          # galactic-router generated count; deploy:galactic-gateway deletes
+          # any other.
+          generated=app.kubernetes.io/managed-by=galactic-router
+          bindings=$(docker exec ${cp} kubectl -n galactic-system get servicevipbindings -l ${generated} -o name | wc -l)
           if [ "${bindings}" -ne 4 ]; then
-            echo "FAIL ${site}: ${bindings} ServiceVIPBindings, want 4" >&2
+            echo "FAIL ${site}: ${bindings} generated ServiceVIPBindings, want 4" >&2
             rc=1
           fi
-          for check in "networkgateway Ready" "networkrule Accepted" "servicevipbinding Bound"; do
+          for check in "networkgateway Ready --all" "networkrule Accepted --all" "servicevipbinding Bound -l=${generated}"; do
             set -- ${check}
-            if ! docker exec ${cp} kubectl -n galactic-system wait $1 --all \
+            if ! docker exec ${cp} kubectl -n galactic-system wait $1 $3 \
                 --for=condition=$2 --timeout=10s >/dev/null; then
               echo "FAIL ${site}: not every $1 is $2" >&2
               rc=1
