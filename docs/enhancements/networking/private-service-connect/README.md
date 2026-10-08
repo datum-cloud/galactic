@@ -16,10 +16,11 @@ latest-milestone: "TBD"
   - [Risks and mitigations](#risks-and-mitigations)
 - [Design Details](#design-details)
   - [System architecture](#system-architecture)
-  - [Proposed API surface](#proposed-api-surface)
+  - [Resource model and ownership](#resource-model-and-ownership)
   - [Endpoint declaration](#endpoint-declaration)
   - [Consumer access and frontend translation](#consumer-access-and-frontend-translation)
   - [Validation and compatibility](#validation-and-compatibility)
+  - [Reconciliation and selection](#reconciliation-and-selection)
   - [Status and lifecycle](#status-and-lifecycle)
   - [Data plane](#data-plane)
   - [Internal DNS integration](#internal-dns-integration)
@@ -131,29 +132,72 @@ The networking APIs live in the
 [network repository](https://github.com/datum-cloud/network/blob/main/api/v1alpha1/serviceroute_types.go).
 Galactic owns route compilation and packet handling. The
 [private-service routing reference](../../../router/private-service-routes.md)
-describes the existing direct-endpoint contract. API schemas, map layouts, and
-deployment configuration remain in those component repositories.
+documents packet handling for this contract. This enhancement defines the
+resource design; the network repository holds its schemas, and Galactic holds
+its controller and data-plane implementation.
 
-### Proposed API surface
+### Resource model and ownership
 
-Reuse the namespaced `ServiceEndpoint` and `ServiceRoutePolicy` APIs from the
-[network repository](https://github.com/datum-cloud/network/blob/main/api/v1alpha1/serviceroute_types.go).
-Add `consumerVPCRef` and `frontend` to `ServiceRoutePolicy`. These additions are
-implemented in the local prototype and remain proposed for the released API.
-No new per-VPC serving workload or DNS-specific Galactic resource is required.
+The design separates service publication from consumer authorization:
 
-These resources live in the edge API. Endpoint descriptors and consumer policies
-share the consumer VPC's namespace. A descriptor can select producer attachments
-in the service's namespace. Project APIs and federation hold intent and placement;
-the trusted integration resolves edge VPC names and API-assigned UIDs when it
-creates authorization. A project UID is not an edge VPC UID.
+- `ServiceEndpoint` describes what a producer offers: one destination address,
+  protocol, and port, the attachments that can serve it, and the delivery policy.
+  Declaring an endpoint grants no consumer access.
+- `ServiceRoutePolicy` describes who can use that endpoint: selected consumer
+  attachments, their VPC lifetime, permitted traffic, and an optional frontend.
+  The policy references the service contract rather than duplicating producer
+  selection or listener configuration.
 
-Only platform controllers can write endpoints, policies, and labels that select
-producers or authorize consumers. Service owners configure listener addresses
-and expose eligible producer attachments. Galactic compiles the selected
-attachments and exact service tuple into node programming.
+This separation lets service owners change eligible producers while networking
+integration changes consumer access independently. Several policies in one
+namespace can reference the same endpoint. Different consumer namespaces receive
+local descriptors that select shared producer attachments; the descriptors are
+control-plane data, not service deployments.
+
+```mermaid
+flowchart LR
+  subgraph C[Consumer edge namespace]
+    R[ServiceRoutePolicy]
+    E[ServiceEndpoint]
+    A[Consumer attachments]
+    R -->|serviceRef| E
+    R -->|Authorizes selected consumers| A
+  end
+  subgraph S[Service edge namespace]
+    P[Eligible producer attachments]
+  end
+  E -->|Selects producers| P
+```
+
+Both resources live in the edge API. `serviceRef` resolves in the policy's
+namespace. Producer references carry their attachment namespace; producer
+selectors can match attachments in the service namespace. Cross-namespace
+producer selection is a privileged platform operation, not a tenant permission.
+
+Project APIs and federation hold intent and placement. Trusted integration
+projects endpoint descriptors, resolves edge VPC names and API-assigned UIDs,
+and creates consumer policies. A project UID is not an edge VPC UID. The service
+owner supplies the exact service tuple and eligible producers. Only platform
+controllers can write these resources or the labels that select their attachments.
+
+The complete API design includes `consumerVPCRef` and `frontend` on
+`ServiceRoutePolicy`. Those fields extend the direct-delivery implementation;
+they are present in the local prototype and remain proposed for the released
+schema. This document defines both resources, including their current fields
+and proposed extensions.
 
 ### Endpoint declaration
+
+An endpoint names one directly delivered service tuple. Keeping one transport
+per endpoint makes publication, authorization, and failure reporting explicit.
+DNS uses separate UDP and TCP endpoints. `serviceClass` identifies the capability
+for integration and operations; it is not an authorization role or backend lookup.
+
+The owner must make the endpoint address reachable through every selected
+producer attachment and accepted by its listener. The address can carry a
+service-defined context, as Internal DNS does. Galactic delivers that address
+without choosing an application backend. Replica selection chooses the network
+attachment that receives the tuple.
 
 The following descriptor lives in `consumer-a`. It selects shared DNS producers
 through platform-managed labels, including producers in the DNS service's edge
@@ -195,6 +239,12 @@ separate UDP and TCP descriptors. Create `context-a-dns-tcp` with the same
 address, selector, placement, and port, and `protocol: tcp`.
 
 ### Consumer access and frontend translation
+
+A policy applies the endpoint contract to a consumer set. It can authorize many
+attachments in one VPC. The proposed lifetime reference prevents a recreated
+VPC with the same name from inheriting access. The frontend belongs to this
+consumer policy so different VPCs can use the same address for different service
+destinations without changing the producer contract.
 
 The policy references the endpoint in its own namespace. `consumerVPCRef` pins
 the VPC named `application-vpc` in `consumer-a` to its live edge UID. The selector
@@ -258,11 +308,49 @@ Admission and reconciliation must enforce:
 - Ports from 1 through 65535 and supported transport values.
 - A policy's allowed tuples within its endpoint's declared tuple.
 - Consistent placement and current producer and consumer identities.
+- No contradictory destination mappings for the same consumer attachment,
+  frontend address, protocol, and port. Policy order must not decide access.
+
+Conflict detection across policies still requires implementation review. Endpoint
+and policy regions must agree when both are set. Trusted placement and selectors
+establish location membership; a region string alone is not identity proof.
 
 Omitting `frontend` preserves direct delivery to the endpoint address. Existing
 policies without the new fields retain their existing contract; new translated
 access requires the lifetime pin. Frontend translation remains disabled by
 default until API and data-plane compatibility are qualified.
+
+### Reconciliation and selection
+
+Each Galactic node watches policies, endpoint descriptors, VPCs, and attachments
+in the edge API. It derives current desired programming through these steps:
+
+1. Resolve `serviceRef`, validate the service tuple and placement, and resolve
+   the pinned consumer VPC name and UID.
+2. Select producer attachments with current-generation `Ready` and `Programmed`
+   status, a node, allocated network identities, and a host interface. Service
+   owners must ensure selected producers are also healthy for the declared tuple.
+3. Select consumer attachments through protected labels and verify their live
+   VPC membership and programmed attachment identity.
+4. Choose one producer for each consumer. Prefer a local producer; `NodeLocal`
+   leaves the consumer without a path if none is available. `PreferNodeLocal`
+   permits a ready remote producer. Selection uses a deterministic attachment
+   ordering, not round-robin balancing or application health probes.
+5. Program this node's consumer and producer paths. Remote paths require both
+   sides' trusted attachment identities, matching service grants, and return
+   routing. Grants bind the policy, endpoint, and attachment lifetimes to the
+   permitted tuple and frontend.
+6. Remove obsolete programming when selection, references, or lifetimes change.
+   Restart reconciliation rebuilds current desired state and sweeps stale state.
+
+No eligible producer means no usable path; it does not make otherwise valid
+policy intent invalid. A missing endpoint or mismatched VPC identity invalidates
+the contract and requires stale access to be removed. An unresolved remote path
+prevents that node from serving even if the shared policy remains accepted.
+
+Service owners withdraw unhealthy producers through the endpoint's selection
+contract. Galactic's attachment readiness checks establish network eligibility;
+they do not substitute for service health.
 
 ### Status and lifecycle
 
@@ -283,6 +371,12 @@ The release needs node-level programming acknowledgments and a service-owned
 health signal before integration advertises the frontend. Their API shape
 remains a design decision; this proposal does not add a `Programmed` or `Ready`
 condition that the existing controllers cannot verify.
+
+Changing an endpoint tuple or producer selection re-evaluates its referencing
+policies. Explicit `protocolPorts` must still match; policies that omit them
+follow the endpoint's declared tuple. Deleting an endpoint leaves references
+unusable and removes their programming. Deleting a policy removes its access
+without deleting the shared producer service or consumer attachments.
 
 Service owners withdraw unhealthy producers. Networking integration deletes
 access when the consumer or service is deleted. Galactic removes obsolete
