@@ -258,8 +258,8 @@ spec:
         # remain free, and they grow more frequent as a destination fills:
         # about 1 in 250 new flows at half full. Drops in every 10-minute
         # window for 15 minutes mean a destination is full or close to it.
-        # The counter lives in a pinned map and
-        # outlives the process, so only its increase is read.
+        # The counter lives in a pinned map and outlives the process, so only
+        # its increase is read.
         - alert: GalacticNatPortExhausted
           expr: >-
             sum by (node, reason) (
