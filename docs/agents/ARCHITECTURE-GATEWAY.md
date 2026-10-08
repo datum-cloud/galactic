@@ -170,12 +170,13 @@ galactic/
 `config/galactic-gateway/base/` is **not** included in
 `config/galactic-gateway/`'s own kustomization and is **not** applied
 as-is — the same exemption `config/fabric-router/` documents in root
-`CLAUDE.md`, for the same reason: `GALACTIC_GATEWAY_SRV6_ADDRESS` must be
-unique per gateway node and has no generic default (see [SRv6 encap-source
-address](#srv6-encap-source-address) below). It's designed to be
+`CLAUDE.md`, for the same reason: `GALACTIC_GATEWAY_PUBLIC_INTERFACE` is
+deployment-specific and has no generic default. It's designed to be
 instantiated once per gateway node by a further overlay that pins it to one
-node (`kubernetes.io/hostname`) and sets that node's own
-public-interface/SRv6-address values.
+node (`kubernetes.io/hostname`) and sets that node's own public interface.
+The SRv6 encapsulation source needs no per-node value: it is derived from
+the node's `BGPRouter` (see [SRv6 encap-source
+address](#srv6-encap-source-address) below).
 
 ### Worked ContainerLab example
 
@@ -187,10 +188,10 @@ through the XDP dispatcher (the shard runs with
 the node itself, carries:
 
 - `node-patch.yaml` — sets `GALACTIC_GATEWAY_PUBLIC_INTERFACE` (`bond0`, the
-  transit-facing bond), `GALACTIC_GATEWAY_INTERNAL_INTERFACES` (`bond1`, the
-  compute-facing bond) and `GALACTIC_GATEWAY_SRV6_ADDRESS` (the node's own
-  uSID, `<locator>:<nodeID hex>::` from its `BGPRouter`, e.g.
-  `2001:db8:ff01:1002::` on `dfw-worker2`). The overlay's `kustomization.yaml`
+  transit-facing bond) and `GALACTIC_GATEWAY_INTERNAL_INTERFACES` (`bond1`, the
+  compute-facing bond). It leaves `GALACTIC_GATEWAY_SRV6_ADDRESS` unset, so
+  the lab exercises the derivation from the node's `BGPRouter`
+  (`2001:db8:ff01:1002::` on `dfw-worker2`). The overlay's `kustomization.yaml`
   pins the DaemonSet to the node via `kubernetes.io/hostname` and renames it
   `galactic-gateway-<node>`.
 - `networkgateway.yaml` — the `NetworkGateway` object itself (just
@@ -462,17 +463,22 @@ to resolve backend uSIDs).
    the vip table reachable (see [#360](#known-constraints) below for why
    this ordering was fixed deliberately).
 3. RBAC pre-flight (`checkWatchPermissions`).
-4. `setupGatewayDatapath` (`cmd/galactic-gateway/gateway.go`) — configure
+4. `resolveEncapSource` (`cmd/galactic-gateway/encapsource.go`) — use
+   `SRv6Address` when set; otherwise list `BGPRouter`s through the uncached
+   API reader (the manager has not started) and derive the node's locator
+   address from the one targeting this node, waiting with backoff until one
+   carries a locator and node ID. See
+   [SRv6 encap-source address](#srv6-encap-source-address).
+5. `setupGatewayDatapath` (`cmd/galactic-gateway/gateway.go`) — configure
    the required IPv6-forwarding sysctls on the public interface (see
    [Configuration](#configuration) below), load and attach the XDP program,
-   register the Prometheus metrics collector. `PublicInterface`/
-   `SRv6Address` are both required, not a jointly-optional pair with a
-   `NoopDatapath{}` fallback — the config validator already rejected either
-   being empty before `runCmd` was ever reached.
-5. Construct real (not stubbed) `gateway.NodeQuotaEnforcer` and
+   register the Prometheus metrics collector. `PublicInterface` is required,
+   with no `NoopDatapath{}` fallback — the config validator already rejected
+   it being empty before `runCmd` was ever reached.
+6. Construct real (not stubbed) `gateway.NodeQuotaEnforcer` and
    `gateway.PrometheusTelemetryEmitter`, wire `gateway.NewEngine`.
-6. Register `NetworkGatewayReconciler` and `NetworkRuleReconciler`.
-7. `mgr.Start(ctx)`.
+7. Register `NetworkGatewayReconciler` and `NetworkRuleReconciler`.
+8. `mgr.Start(ctx)`.
 
 ### `cmd/galactic-gateway/gateway.go` — datapath setup
 
@@ -531,11 +537,11 @@ normal while ingress traffic quietly stopped being intercepted at all.
 | ----------------------------------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GALACTIC_GATEWAY_NODE_NAME`        | Yes      | —       | Kubernetes node name                                                                                                                                                                                                                |
 | `GALACTIC_GATEWAY_PUBLIC_INTERFACE` | Yes      | —       | Public/underlay-facing uplink interface the XDP program attaches to. May name a Linux bonding master (`edgeattach.ResolveTargets` expands it to that bond's slaves — see [Known Constraints](#known-constraints))                   |
-| `GALACTIC_GATEWAY_SRV6_ADDRESS`     | Yes      | —       | This node's own plain SRv6-reachable IPv6 address, used as the DSR outer-header encap source (`encap_config_table`) — never compared against anything on a receive path; must be a native IPv6 address (rejected if IPv4 or 4-in-6) |
+| `GALACTIC_GATEWAY_SRV6_ADDRESS`     | No       | Derived | This node's own plain SRv6-reachable IPv6 address, used as the DSR outer-header encap source (`encap_config_table`) — never compared against anything on a receive path; must be a native IPv6 address (rejected if IPv4 or 4-in-6) |
 | `GALACTIC_GATEWAY_METRICS_PORT`     | No       | `8081`  | Prometheus metrics port                                                                                                                                                                                                             |
 | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT` | No       | `5181`  | gRPC health check port                                                                                                                                                                                                              |
 
-All three required fields are enforced by `GatewayConfig.Validate` at
+Both required fields are enforced by `GatewayConfig.Validate` at
 startup, not deferred to a later, less obvious kernel-datapath error — a
 node deployed without them crash-loops immediately rather than running
 degraded.
@@ -564,10 +570,18 @@ all, so it never reads this). It is never an address-translation source,
 never has return-path significance (DSR has no return path through this node at
 all), and is never published to any CRD status (`NetworkGatewayStatus`
 carries no self-address field — see [The two CRDs](#the-two-crds) above).
-It is operator-supplied per gateway node today, with no in-cluster
-mechanism deriving it automatically from a node's own `BGPRouter`
-locator/node-ID; see the [worked example](#worked-containerlab-example) for
-how a real deployment picks this value.
+
+Left unset, it is derived at startup (#707) from the `BGPRouter` whose
+`targetRef.name` is this node, searched across every namespace:
+`srv6.NodeLocatorAddress` returns the node's locator address, the
+`srv6Locator` Block and the `nodeID` with the Function and Argument fields
+zero (`2001:db8:ff01::/48` with `nodeID: 4098` gives
+`2001:db8:ff01:1002::`). That is the value deployments used to set by hand.
+It shares bits 1-64 with the CNI's `srv6.NodeSIDBase`, so both name the same
+node, but carries no End.DT46 function. The gateway waits, not ready, until
+such a router exists, and refuses to start if two routers for the node
+derive different addresses. A set value always wins, for a node that needs
+an override.
 
 ### Deployment (`config/galactic-gateway/base/daemonset.yaml`)
 
@@ -717,12 +731,13 @@ pod on that node is not a supported configuration.
   empty cache, so nodes would disagree for longer, and traffic would keep
   going to a pod that no longer exists. Dropping a backend because it is
   unhealthy is #704.
-- **SRv6 encap-source address has no in-cluster derivation mechanism.**
-  `GALACTIC_GATEWAY_SRV6_ADDRESS` is operator-supplied per gateway node
-  today; nothing in this repo yet computes it automatically from a node's
-  own `BGPRouter` locator/node-ID. The value is never published to any CRD
-  status: DSR rewrites nothing, so there is no translation source that
-  needs advertising as a node-reachability route.
+- **SRv6 encap-source address is derived, not published.**
+  `GALACTIC_GATEWAY_SRV6_ADDRESS` defaults to the node's locator address,
+  derived once at startup from its own `BGPRouter` (#707), rather than a
+  per-node operator value. A later change to that router's locator or node
+  ID takes effect on the next gateway restart. The value is never published
+  to any CRD status: DSR rewrites nothing, so there is no translation source
+  that needs advertising as a node-reachability route.
 - **Quota/telemetry are real but deliberately coarse.** `NodeQuotaEnforcer`
   enforces two node-level admission caps entirely from control-plane state
   already held by `Engine` (no eBPF map read required): max `NetworkRule`s
@@ -817,7 +832,7 @@ that tag into `config/galactic-gateway/base`.
 - **E2E coverage is lab-only.** `task verify:gateway-ingress` in `deploy/containerlab/` sends real traffic through every lab gateway node (see [Testing](#testing)). Before it, the `gatewayDatapathKeepAlive` incident described in [Entry Points](#cmd-galactic-gatewaygateway-go--datapath-setup) above was only discovered because ingress traffic silently stopped being intercepted. Nothing runs that check in CI, since it needs the containerlab lab.
 - **No `NetworkRule` admission webhook is deployed in this repo.** The CRD's own doc comment and `NetworkRuleReconciler`'s doc comment both describe an admission webhook that verifies VPC/VPCAttachment ownership before setting the `Accepted` condition — no `ValidatingWebhookConfiguration` exists in `config/` yet (`config/webhook/` doesn't exist). `updateAcceptedCondition` currently sets `Accepted=True` unconditionally once gateway nodes exist for the namespace, not gated on any ownership check.
 - **The uSID backend resolver's tenant-ownership check depends on `BGPVRFInstance` naming staying deterministic.** `verifyTenantOwnership` closes the ambiguous-match gap an earlier version of this resolver had, but it is only as strong as `crdnames.BGPVRFInstanceName(vpc, nodeName)` staying the exact name `galactic-bgp` writes — a divergence between the two would fail closed (a real backend never resolving) rather than open (a wrong-tenant resolve), which is the safer failure direction but still worth knowing about when either side of that naming contract changes.
-- **`GALACTIC_GATEWAY_SRV6_ADDRESS` has no in-cluster derivation mechanism.** It is operator-supplied per gateway node today; nothing in this repo yet computes it automatically from a node's own `BGPRouter` locator/node-ID. See [SRv6 encap-source address](#srv6-encap-source-address) above.
+- **The derived SRv6 encap source is read once, at startup.** Changing a gateway node's `BGPRouter` locator or node ID does not move its encapsulation source until `galactic-gateway` restarts. See [SRv6 encap-source address](#srv6-encap-source-address) above.
 - **The uSID TC-BPF/XDP FIB-lookup PMTUD gap applies here too.** When `bpf_fib_lookup()` returns `BPF_FIB_LKUP_RET_FRAG_NEEDED`, `edgedsr.c` counts `DROP_REASON_FIB_FRAG_NEEDED` and drops rather than emitting an ICMPv6 Packet Too Big — the same gap `internal/plumbing/ebpf/prog/usid.c`'s `usid_ingress` has for its FIB lookup (see [ARCHITECTURE-CNI.md#known-constraints](ARCHITECTURE-CNI.md#known-constraints)). `usid_egress` and the egress shard both send Packet Too Big now; closing it here is #700.
 - **`bpf_fib_lookup()` requires IPv6 forwarding sysctls on the public uplink, not just XDP driver support.** `setupGatewayDatapath` calls `sysctl.ConfigureFIBLookupUplinkSysctls` before attaching the datapath — without `net.ipv6.conf.<iface>.forwarding` and `net.ipv6.conf.all.forwarding` both set, the kernel returns `BPF_FIB_LKUP_RET_NOT_FWDED` for every lookup regardless of anything this program does, which `edgedsr.c`'s own drop-reason accounting cannot distinguish from a generic FIB lookup failure. Found via live-kernel investigation of a pre-existing containerlab veth/XDP_TX blocker: the sysctl gap, not `XDP_TX` itself, was the actual cause. A related, lab-only characteristic the same investigation turned up: native `XDP_TX` on a veth pair only promotes a frame into the peer's normal receive stack (visible to `tcpdump`) if the peer *also* runs an XDP program — otherwise delivery uses a raw fast-path invisible to normal tools. This does not apply to a real physical NIC uplink in production, where there is no "peer's own XDP program" question to begin with.
 - **A bonded public uplink attaches per-slave, with per-slave FIB-lookup sysctls to match.** Native-mode XDP against a Linux bonding master is not reliable: confirmed failing outright with "operation not supported" on a real gateway node (802.3ad over an igb/tg3 slave pair). Not every kernel's bonding driver categorically lacks `ndo_bpf` — some do implement it by forwarding the attach to every slave — but that still requires each slave's own driver to support native XDP itself, which not every NIC driver does (tg3 is a commonly cited example that doesn't), so this codebase never relies on attaching to the master working, on any kernel. `edgeattach.ResolveTargets` expands a bonding-master `GALACTIC_GATEWAY_PUBLIC_INTERFACE` to its slave interfaces (never the master itself — see `internal/plumbing/bond`, shared with `internal/plumbing/ebpf/attach`'s TC-BPF path, which attaches to the master *and* its slaves instead), and `setupGatewayDatapath` attaches to and configures FIB-lookup sysctls on every one of them. This is not cosmetic: `edgedsr.c`'s `push_outer_header` calls `bpf_fib_lookup()` with `ctx->ingress_ifindex` — confirmed against the source, not assumed — which for a native XDP program attached to a bond slave is that slave's own ifindex, not the bond master's, so `net.ipv6.conf.<slave>.forwarding` (not `net.ipv6.conf.<bond-master>.forwarding`) is what the kernel actually checks. A bonding master with no resolvable slaves is a hard startup error, not a silent fallback to attaching the master (which would only risk repeating the same failure). `edgeattach.Attach` is all-or-nothing across every resolved slave in one call — if any single slave's driver can't accept a native XDP attach (a real possibility per the tg3 note above, not independently confirmed against that node specifically), the whole datapath startup fails rather than running in a degraded, missing-that-slave's-traffic state. The attach step itself lives in `internal/plumbing/ebpf/xdpattach`, shared with `natattach`: every target is checked for native XDP support through the netdev generic netlink family before any is touched, and each bond slave is waited back into its aggregate (MII up, plus LACP collecting|distributing on an 802.3ad bond) before the next is attached (#583); this has not been exercised against real igb/tg3 hardware, only veth in tests, so whether all of a real bonded pair's slaves actually accept native XDP on the affected class of hardware is still open. Attaching per-slave rather than to the bond as a whole means the slave set has to be kept current after startup: `watchTargets` (`cmd/galactic-gateway/gateway.go`) re-runs `ResolveTargets` on every netlink link or route change, and every 30s with none, and hands the result to an `xdpattach.Set` per program (#647). The set attaches a member enslaved or replaced (new ifindex under the same name) since startup through the same gate, one at a time, and skips one whose bounce would leave its bond with no member carrying traffic; it never detaches a member that still exists, since detaching bounces the link as attaching does. Unlike the startup attach, one member failing there does not undo the rest: it is retried on the next pass, and while any resolved target lacks the program the gateway's `readiness` gRPC health service (`config.GRPCReadinessService`, the readinessProbe's `service`) reports NOT_SERVING, without failing liveness.
@@ -838,6 +853,7 @@ that tag into `config/galactic-gateway/base`.
 | Node-scoped aggregate reconcile (desired-state assembly, BGP wiring, crash recovery) | `internal/controller/networkgateway_controller.go:Reconcile`                                            |
 | Per-object lifecycle (finalizer teardown ordering, `Accepted`-condition maintenance) | `internal/controller/networkrule_controller.go:Reconcile`, `updateAcceptedCondition`, `reconcileDelete` |
 | Backend address → SRv6 uSID resolution (with tenant-ownership verification)          | `internal/controller/usidresolver.go:buildBackendSIDIndex`, `resolveUSID`, `verifyTenantOwnership`      |
+| SRv6 encap source (configured, or derived from this node's `BGPRouter`)              | `cmd/galactic-gateway/encapsource.go:resolveEncapSource`, `srv6.NodeLocatorAddress`                     |
 | Engine convergence loop                                                              | `internal/gateway/engine.go:Reconcile`, `applyRuleLocked`, `removeRuleLocked`                           |
 | Real datapath implementation (vip_table read/write, Maglev table construction)       | `internal/gateway/kerneldatapath.go:ApplyRule`, `RemoveRule`, `buildMaglevTable`                        |
 | Maglev consistent-hash ring                                                          | `internal/maglev/table.go:New`, `Lookup`, `Backends`                                                    |

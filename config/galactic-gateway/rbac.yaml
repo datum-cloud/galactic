@@ -9,7 +9,10 @@
 # buildBackendSIDIndex lists BGPRouter CRDs directly
 # (alongside BGPAdvertisement) to resolve a NetworkRule backend's SRv6
 # uSID. "No BGP client" and "no BGPRouter read access needed" are
-# different claims — only the first is true.
+# different claims — only the first is true. cmd/galactic-gateway's
+# resolveEncapSource also lists BGPRouters cluster-wide at startup, to derive
+# this node's SRv6 encapsulation source when
+# GALACTIC_GATEWAY_SRV6_ADDRESS is unset.
 #
 # galactic-gateway is a single-container pod (config/galactic-gateway/base/
 # daemonset.yaml) -- galactic-router runs alongside it on edge nodes as its

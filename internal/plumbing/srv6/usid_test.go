@@ -284,3 +284,60 @@ func TestNodeSIDBaseRejectsUnusableIdentity(t *testing.T) {
 		})
 	}
 }
+
+// TestNodeLocatorAddress pins galactic-gateway's derived encapsulation source
+// to the values deployments set by hand before #707: the node's Block and
+// Node-ID, with nothing after them. The lab rows are its four edge nodes.
+func TestNodeLocatorAddress(t *testing.T) {
+	tests := []struct {
+		name    string
+		locator string
+		nodeID  int32
+		want    string
+		wantErr bool
+	}{
+		{name: "dfw-worker2", locator: "2001:db8:ff01::/48", nodeID: 0x1002, want: "2001:db8:ff01:1002::"},
+		{name: "dfw-worker3", locator: "2001:db8:ff01::/48", nodeID: 0x1003, want: "2001:db8:ff01:1003::"},
+		{name: "sjc-worker2", locator: "2001:db8:ff02::/48", nodeID: 0x1002, want: "2001:db8:ff02:1002::"},
+		{name: "iad-worker2", locator: "2001:db8:ff03::/48", nodeID: 0x1002, want: "2001:db8:ff03:1002::"},
+		{name: "locator not a /48", locator: "2001:db8:ff01::/64", nodeID: 0x1002, wantErr: true},
+		{name: "IPv4 locator", locator: "10.0.0.0/8", nodeID: 0x1002, wantErr: true},
+		{name: "unparseable locator", locator: "not-a-prefix", nodeID: 0x1002, wantErr: true},
+		{name: "node ID zero", locator: testUSIDLocator, nodeID: 0, wantErr: true},
+		{name: "node ID in reserved range", locator: testUSIDLocator, nodeID: 0xE000, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NodeLocatorAddress(tc.locator, tc.nodeID)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("NodeLocatorAddress() = %s, want error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NodeLocatorAddress() error: %v", err)
+			}
+			if got.String() != tc.want {
+				t.Errorf("NodeLocatorAddress() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNodeLocatorAddressNamesSameNodeAsSIDBase checks that the gateway's
+// source and the CNI's SID base cannot drift apart: they share bits 1-64.
+func TestNodeLocatorAddressNamesSameNodeAsSIDBase(t *testing.T) {
+	addr, err := NodeLocatorAddress(testUSIDLocator, 9)
+	if err != nil {
+		t.Fatalf("NodeLocatorAddress() error: %v", err)
+	}
+	base, err := NodeSIDBase(testUSIDLocator, 9)
+	if err != nil {
+		t.Fatalf("NodeSIDBase() error: %v", err)
+	}
+	a, b := addr.As16(), base.As16()
+	if [8]byte(a[:8]) != [8]byte(b[:8]) {
+		t.Errorf("NodeLocatorAddress() %s and NodeSIDBase() %s differ in bits 1-64", addr, base)
+	}
+}

@@ -203,8 +203,8 @@ multi-cluster fabric's separate clusters/API servers the way BGP itself is.
 Shards run on edge nodes; set this per site to that site's own edge shards,
 in preference order, with no other site's as a fallback, so a site's egress
 never hairpins through another site's edge (the containerlab lab's
-`resources/galactic-cni/<site>/egress-shards-patch.yaml`). Same "operator-supplied, no in-cluster
-derivation yet" status as `GALACTIC_GATEWAY_SRV6_ADDRESS`.
+`resources/galactic-cni/<site>/egress-shards-patch.yaml`). Nothing in the
+cluster derives it yet.
 
 Resolved the same way as `GALACTIC_CNI_EBPF_INTERFACES` above: `galactic-cni
 init` reads it once from its own pod env and writes it into
