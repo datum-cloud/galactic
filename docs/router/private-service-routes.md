@@ -30,6 +30,9 @@ carries the original packet through the SRv6 service tunnel. In both cases the
 producer receives the declared destination and the original consumer source
 unchanged.
 
+The [Private Service Connect proposal](../enhancements/networking/private-service-connect/README.md)
+describes the product capability and proposed frontend integration.
+
 ## No consumer-visible route
 
 Galactic does not add the service address or a service-specific route to a
