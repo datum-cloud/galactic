@@ -225,7 +225,10 @@ that converges this node's whole gateway engine:
    is no primary/secondary subset to filter on — expands each rule's
    `backendSelector` into backends, the IPv6 interface addresses of the
    `VPCAttachment`s it selects in the rule's VPC (`rulebackends.go`'s
-   `selectRuleBackends`), resolves each to the SRv6 uSID of the node its
+   `selectRuleBackends`), leaves out each backend an older rule serves on
+   the same backend port and protocol (`ruleBackendOwners`: a backend node
+   translates a backend's replies back to only one VIP, so the newer rule's
+   flows would be dropped there), resolves each to the SRv6 uSID of the node its
    attachment reports via `usidresolver.go`'s `buildBackendSIDIndex`, writes
    the backend's slot (`srv6.BackendSlot`, a hash of its address and port)
    into bits 81–96 of that uSID so a node hosting several of the rule's
@@ -896,7 +899,7 @@ that tag into `config/galactic-gateway/base`.
 | Node-scoped aggregate reconcile (desired-state assembly, BGP wiring, crash recovery) | `internal/controller/networkgateway_controller.go:Reconcile`                                            |
 | Per-object lifecycle (finalizer teardown ordering, `Accepted`-condition maintenance) | `internal/controller/networkrule_controller.go:Reconcile`, `updateAcceptedCondition`, `reconcileDelete` |
 | Backend address → SRv6 uSID resolution (with tenant-ownership verification)          | `internal/controller/usidresolver.go:buildBackendSIDIndex`, `resolveUSID`, `verifyTenantOwnership`      |
-| Backend selection from `backendSelector` (shared with the binding writer)            | `internal/controller/rulebackends.go:selectRuleBackends`                                                |
+| Backend selection from `backendSelector` (shared with the binding writer)            | `internal/controller/rulebackends.go:selectRuleBackends`, `ruleBackendOwners`                           |
 | Backend-side `ServiceVIPBinding`s, generated per node                                | `internal/controller/networkrule_binding_controller.go` (runs in `galactic-router`)                     |
 | SRv6 encap source (configured, or derived from this node's `BGPRouter`)              | `cmd/galactic-gateway/encapsource.go:resolveEncapSource`, `srv6.NodeLocatorAddress`                     |
 | Engine convergence loop                                                              | `internal/gateway/engine.go:Reconcile`, `applyRuleLocked`, `removeRuleLocked`                           |

@@ -480,8 +480,20 @@ spec:
 A rule may carry at most one IPv6 VIP: a backend node rewrites a reply's
 source back to a single VIP, so a backend cannot answer for a second one. A
 rule with two fails to load on the gateways and reports `InvalidRule` on its
-backend nodes; split it into one rule per IPv6 VIP. IPv4 VIPs are not
-translated on the backend side (#705).
+backend nodes. IPv4 VIPs are not translated on the backend side (#705).
+
+For the same reason a backend serves only one rule on a given backend port.
+The node rewrites a reply by its source, the backend's address, port and
+protocol in its VPC, so two rules selecting the same backend on the same
+`backendPort` and `protocol` cannot both get their replies back. The oldest
+rule, by creation time and then namespace/name, serves the backend. Every
+newer rule leaves it out: the gateways send it none of that rule's flows,
+the rule's `<gateway-node>/Programmed` message names it as served by the
+older rule, and its `<backend-node>/BackendsBound` condition reports
+`BackendsClaimed`. A rule left with no backend at all is not loaded. To serve a
+second IPv6 VIP from the same backends, give its rule a different
+`backendPort` the backends also listen on. Deleting the older rule hands the
+backend to the next oldest.
 
 A selected attachment is a backend once its status names a node and its
 interface has an IPv6 address. Two attachments claiming one address, or two
@@ -606,7 +618,8 @@ sweep removes the old slot-0 rows.
 Each node summarizes its bindings on the rule as
 `<backend-node>/BackendsBound`: `True` with reason `Bound` once every one
 reports `Bound`, `False` with reason `BindingsNotBound` naming each that
-does not, or `InvalidRule` if the selector cannot be parsed or the rule
+does not, `BackendsClaimed` naming each backend on the node an older rule
+serves, or `InvalidRule` if the selector cannot be parsed or the rule
 has more than one IPv6 VIP. A node keeps the bindings it already wrote
 for an invalid rule, so its `vip_xlat_table` rows survive an invalid edit
 until the spec is fixed or the rule is deleted. Only a node that holds

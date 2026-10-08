@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -478,7 +479,7 @@ func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 			}
 			rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
-			dr, unresolved, err := buildDesiredRule(rule, idx)
+			dr, unresolved, err := buildDesiredRule(rule, idx, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("buildDesiredRule: err = nil, want an error; got %+v", dr)
@@ -514,13 +515,65 @@ func TestBuildDesiredRule_RefusesSecondIPv6VIP(t *testing.T) {
 		attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")},
 	}
 	rule := newTestRule(testRuleName, "vpc-1", "2001:db8:100::32", "2001:db8:100::33", testVIP)
-	if _, _, err := buildDesiredRule(rule, idx); err == nil {
+	if _, _, err := buildDesiredRule(rule, idx, nil); err == nil {
 		t.Fatal("buildDesiredRule: err = nil, want an error for two IPv6 VIPs")
 	}
 
 	rule.Spec.VIPAddresses = []string{"2001:db8:100::32", testVIP}
-	if _, _, err := buildDesiredRule(rule, idx); err != nil {
+	if _, _, err := buildDesiredRule(rule, idx, nil); err != nil {
 		t.Fatalf("buildDesiredRule with one IPv6 and one IPv4 VIP: %v", err)
+	}
+}
+
+// TestGatherRules_SharedBackendServesOldestRule covers two rules selecting the
+// same backend on the same backend port: its node can translate the backend's
+// replies back to only one VIP, so only the older rule load-balances to it,
+// and the newer one fails naming the rule that serves it. A third rule using
+// the backend on another port shares nothing and keeps it.
+func TestGatherRules_SharedBackendServesOldestRule(t *testing.T) {
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	idx := &backendSIDIndex{
+		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
+		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
+		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
+		attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")},
+	}
+	rule := func(name, vip string, created int64, backendPort int32) bgpv1alpha1.NetworkRule {
+		r := newTestRule(name, "vpc-1", vip)
+		r.CreationTimestamp = metav1.NewTime(time.Unix(created, 0))
+		r.Spec.BackendPort = backendPort
+		acceptRule(r)
+		return *r
+	}
+	rules := []bgpv1alpha1.NetworkRule{
+		rule("newer", "2001:db8:100::33", 200, testBackendPort),
+		rule("older", "2001:db8:100::32", 100, testBackendPort),
+		rule("other-port", "2001:db8:100::34", 300, testBackendPort+1),
+	}
+	r := &NetworkGatewayReconciler{NodeName: testNodeGWA}
+
+	desired, outcomes, _, err := r.gatherRules(context.Background(), testNamespace, rules, idx)
+	if err != nil {
+		t.Fatalf("gatherRules: %v", err)
+	}
+	byName := make(map[string]ruleOutcome, len(outcomes))
+	for _, o := range outcomes {
+		byName[o.rule.Name] = o
+	}
+
+	for _, name := range []string{"older", "other-port"} {
+		dr, ok := desired.Rules[testNamespace+"/"+name]
+		if !ok || len(dr.Backends) != 1 {
+			t.Errorf("rule %s desired = %+v, want it loaded with its one backend", name, dr)
+		}
+	}
+	if _, ok := desired.Rules[testNamespace+"/newer"]; ok {
+		t.Error("rule newer is loaded, want it left out: its only backend is served by rule older")
+	}
+	newer := byName["newer"]
+	wantOwner := "served by NetworkRule " + testNamespace + "/older"
+	if newer.buildErr == nil || !strings.Contains(newer.buildErr.Error(), wantOwner) {
+		t.Errorf("rule newer build error = %v, want it to name NetworkRule %s/older", newer.buildErr, testNamespace)
 	}
 }
 
@@ -537,7 +590,7 @@ func TestBuildDesiredRule_SameNodeBackendsGetTheirOwnSlot(t *testing.T) {
 		attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")},
 	}
 
-	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), idx)
+	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), idx, nil)
 	if err != nil {
 		t.Fatalf("buildDesiredRule: %v", err)
 	}
