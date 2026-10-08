@@ -1,0 +1,9 @@
+{
+ "vrfId": 0,
+ "vrfName": "default",
+ "tableVersion": 8,
+ "routerId": "10.255.0.1",
+ "defaultLocPrf": 100,
+ "localAS": 65000,
+ "routes": {  } , "totalRoutes": 0, "totalPaths": 8,"numRoutes":0
+ } 

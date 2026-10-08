@@ -88,6 +88,13 @@ tasks:
       - task: vet
       - task: build:binaries
 
+  generate:proto:
+    desc: Regenerate api/**/*.pb.go from the .proto files (requires buf, protoc-gen-go, protoc-gen-go-grpc)
+    dir: api
+    cmds:
+      - buf lint
+      - buf generate
+
   build:ebpf:
     desc: Regenerate the eBPF uSID, edge gateway DSR, NAT egress, and XDP dispatcher datapaths (requires clang)
     run: once
