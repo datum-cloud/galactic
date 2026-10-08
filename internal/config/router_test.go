@@ -43,6 +43,9 @@ func TestRouterConfigDefaults(t *testing.T) {
 	if cfg.Reflector {
 		t.Error("Reflector = true, want false")
 	}
+	if cfg.ServiceFrontendEnabled {
+		t.Error("service frontends must be disabled by default")
+	}
 	if cfg.WebhookEnabled {
 		t.Error("WebhookEnabled = true, want false (disabled by default)")
 	}
@@ -307,5 +310,12 @@ func TestParseBMPStation(t *testing.T) {
 				t.Errorf("= %q, %d, want %q, %d", host, port, tt.wantHost, tt.wantPort)
 			}
 		})
+	}
+}
+
+func TestRouterConfigServiceFrontendEnv(t *testing.T) {
+	t.Setenv(EnvRouterServiceFrontendEnabled, testBoolTrue)
+	if !NewRouterConfig().ServiceFrontendEnabled {
+		t.Fatal("explicit service frontend enablement was ignored")
 	}
 }

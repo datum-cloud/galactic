@@ -206,6 +206,8 @@ go.datum.net/cloud v0.1.1-0.20260918213150-260f797bbc5c h1:k0P5980+kS90zCa0M4Moh
 go.datum.net/cloud v0.1.1-0.20260918213150-260f797bbc5c/go.mod h1:HTeaepXL0EqiqNsQ13K4/kGEwv+VLJ//BGrUfVIFfEA=
 go.datum.net/network v0.3.1-0.20261006185716-0f099eb3b0ea h1:q/8ZPV2fjLwFTpTepNn/9HigADL9c9nQHWKKGWMRGHQ=
 go.datum.net/network v0.3.1-0.20261006185716-0f099eb3b0ea/go.mod h1:dqzM8WZczbiZ9bCvsxjkoI10GJqQ24NVWnc9boXgOkE=
+go.datum.net/network v0.3.1-0.20261008185758-e391e93cf3de h1:vGtnfrEwHrnH2YipcqgobhfPRFaA6OEtDFlvKYC+z9E=
+go.datum.net/network v0.3.1-0.20261008185758-e391e93cf3de/go.mod h1:LawI34k+ddtv3kRbmjiss0Lb6QKpSr60YP3fX1IG5RU=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0 h1:2yEATaop1/a1I4psnSLgWVPLWwCzkqWakgJy7xTDVy0=

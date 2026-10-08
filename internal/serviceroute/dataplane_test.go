@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 
@@ -33,6 +35,7 @@ const (
 	testRemoteServiceAddress = "10.0.0.53"
 	testConsumerDeviceName   = "consumer0"
 	testProducerDeviceName   = "producer0"
+	testOtherConsumerDevice  = "consumer-b"
 )
 
 func (t *recordingTable) Put(_ any, value any) error {
@@ -597,5 +600,245 @@ func TestEntriesIncludeConsumerAndProducerFragmentMarkers(t *testing.T) {
 		remoteEntries[0].access.ingressIfindex != 20 || remoteEntries[0].access.protocol != 0 ||
 		remoteEntries[0].access.port != 0 || remoteEntries[1].deny == nil || remoteEntries[2].grant == nil {
 		t.Fatalf("remote producer entries = %#v, want access marker, deny marker, then grant", remoteEntries)
+	}
+}
+
+func TestApplyRejectsExpiredAuthorization(t *testing.T) {
+	routes, access, grants := &recordingTable{}, &recordingTable{}, &recordingTable{}
+	programmer := testRouteProgrammer(routes, access, grants)
+	intent := localTestIntent()
+	intent.AuthorizationValidUntil = time.Now().Add(-time.Second)
+	if err := programmer.Apply(intent); err == nil {
+		t.Fatal("accepted expired authorization")
+	}
+	if routes.puts != 0 || access.puts != 0 || grants.puts != 0 {
+		t.Fatal("expired authorization changed forwarding maps")
+	}
+	renewed := intent
+	renewed.AuthorizationValidUntil = time.Now().Add(time.Minute)
+	if intentKey(intent) == intentKey(renewed) {
+		t.Fatal("authorization renewal retained old intent identity")
+	}
+}
+
+// Unlike recordingTable, this table keeps actual keys so generation sweeps can
+// prove that expired grants disappear while unrelated tenants retain theirs.
+type persistedPolicyTable struct {
+	rows   map[any]any
+	putErr error
+}
+
+func (table *persistedPolicyTable) Put(key, value any) error {
+	if table.putErr != nil {
+		return table.putErr
+	}
+	if table.rows == nil {
+		table.rows = make(map[any]any)
+	}
+	table.rows[key] = value
+	return nil
+}
+
+func (table *persistedPolicyTable) Delete(key any) error {
+	delete(table.rows, key)
+	return nil
+}
+
+func (table *persistedPolicyTable) Lookup(key, value any) error {
+	stored, ok := table.rows[key]
+	if !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	reflect.ValueOf(value).Elem().Set(reflect.ValueOf(stored))
+	return nil
+}
+
+func (table *persistedPolicyTable) Iterate() usidmap.Iterator {
+	iterator := &persistedPolicyIterator{}
+	for key, value := range table.rows {
+		iterator.entries = append(iterator.entries, [2]any{key, value})
+	}
+	return iterator
+}
+
+type persistedPolicyIterator struct{ entries [][2]any }
+
+func (iterator *persistedPolicyIterator) Next(key, value any) bool {
+	if len(iterator.entries) == 0 {
+		return false
+	}
+	entry := iterator.entries[0]
+	iterator.entries = iterator.entries[1:]
+	reflect.ValueOf(key).Elem().Set(reflect.ValueOf(entry[0]))
+	reflect.ValueOf(value).Elem().Set(reflect.ValueOf(entry[1]))
+	return true
+}
+
+func (*persistedPolicyIterator) Err() error { return nil }
+
+func leasedTestProgrammer() (*EBPFRouteProgrammer, *persistedPolicyTable, *persistedPolicyTable,
+	*persistedPolicyTable) {
+	routes, grants, gate := &persistedPolicyTable{}, &persistedPolicyTable{}, &persistedPolicyTable{}
+	programmer := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
+	programmer.tables = serviceroutemap.New(routes, &persistedPolicyTable{}, &persistedPolicyTable{}, grants,
+		&recordingTable{identityTokens: map[uint32]uint64{10: 100, 20: 200, 42: 420}}, gate, &persistedPolicyTable{})
+	programmer.mapIDs = [7]ebpf.MapID{1, 2, 3, 4, 5, 6, 7}
+	programmer.mapIDsValid = true
+	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return programmer.mapIDs, nil }
+	programmer.targetIndexFn = func(name string) (uint32, error) {
+		switch name {
+		case testConsumerDeviceName:
+			return 10, nil
+		case testProducerDeviceName:
+			return 20, nil
+		case testOtherConsumerDevice:
+			return 42, nil
+		default:
+			return 0, fmt.Errorf("unknown interface %q", name)
+		}
+	}
+	return programmer, routes, grants, gate
+}
+
+func waitForIntentExpiry(intent RouteIntent) {
+	time.Sleep(time.Until(intent.AuthorizationValidUntil) + time.Millisecond)
+}
+
+func policyGateEnabled(table *persistedPolicyTable) bool {
+	value, ok := table.rows[uint32(0)]
+	return ok && reflect.ValueOf(value).FieldByName("Enabled").Uint() != 0
+}
+
+func TestExpiredAuthorizationRemovalAndRenewalPreservesUnrelatedTenant(t *testing.T) {
+	for _, kind := range []RouteIntentKind{RouteIntentLocal, RouteIntentRemoteConsumer, RouteIntentRemoteProducer} {
+		t.Run(string(kind), func(t *testing.T) {
+			programmer, routes, grants, gate := leasedTestProgrammer()
+			intent := localTestIntent()
+			intent.Kind, intent.GrantID = kind, ServiceGrantID{1}
+			intent.ServiceSID, intent.ConsumerSID = net.ParseIP("fd00::1"), net.ParseIP("fd00::2")
+			intent.AuthorizationValidUntil = time.Now().Add(time.Second)
+			unrelated := localTestIntent()
+			unrelated.ConsumerDevice = testOtherConsumerDevice
+			if err := programmer.Apply(intent); err != nil {
+				t.Fatal(err)
+			}
+			if err := programmer.Apply(unrelated); err != nil {
+				t.Fatal(err)
+			}
+			if err := programmer.Finalize(); err != nil {
+				t.Fatal(err)
+			}
+			unrelatedEntries := programmer.appliedRefs[intentKey(unrelated)]
+			waitForIntentExpiry(intent)
+			if err := programmer.Remove(intent); err != nil {
+				t.Fatalf("Remove expired authorization: %v", err)
+			}
+			if len(routes.rows) != 1 || len(grants.rows) != 0 {
+				t.Fatalf("expired state remains: routes=%d grants=%d", len(routes.rows), len(grants.rows))
+			}
+			if len(programmer.desiredIntents) != 1 || len(programmer.appliedRefs) != 1 ||
+				!reflect.DeepEqual(programmer.appliedRefs[intentKey(unrelated)], unrelatedEntries) {
+				t.Fatal("expiry cleanup changed the unrelated tenant or retained expired desired state")
+			}
+			if !policyGateEnabled(gate) {
+				t.Fatal("expiry cleanup did not restore the unrelated tenant's finalized generation")
+			}
+			renewed := intent
+			renewed.AuthorizationValidUntil = time.Now().Add(time.Minute)
+			if err := programmer.Apply(renewed); err != nil {
+				t.Fatalf("Apply explicit renewal without restart: %v", err)
+			}
+			if err := programmer.Remove(intent); err != nil {
+				t.Fatalf("repeat old removal: %v", err)
+			}
+			if len(programmer.appliedRefs[intentKey(renewed)]) != 1 || len(programmer.desiredIntents) != 2 {
+				t.Fatal("old removal removed the explicit renewal")
+			}
+		})
+	}
+}
+
+func TestExpiredGenerationRetryKeepsPolicyClosedUntilValidStateRestored(t *testing.T) {
+	programmer, routes, _, gate := leasedTestProgrammer()
+	intent := localTestIntent()
+	intent.AuthorizationValidUntil = time.Now().Add(time.Second)
+	unrelated := localTestIntent()
+	unrelated.ConsumerDevice = testOtherConsumerDevice
+	for _, desired := range []RouteIntent{intent, unrelated} {
+		if err := programmer.Apply(desired); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := programmer.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	waitForIntentExpiry(intent)
+	routes.putErr = errors.New("transient unrelated route rebuild failure")
+	if err := programmer.Remove(intent); err == nil {
+		t.Fatal("expired removal succeeded despite a failed generation rebuild")
+	}
+	if policyGateEnabled(gate) || !programmer.generationIncomplete {
+		t.Fatal("partial expiry cleanup reopened the policy gate")
+	}
+	routes.putErr = nil
+	if err := programmer.Remove(intent); err != nil {
+		t.Fatalf("retry expired removal: %v", err)
+	}
+	if !policyGateEnabled(gate) || programmer.generationIncomplete || len(routes.rows) != 1 {
+		t.Fatal("retry did not restore the valid unrelated generation")
+	}
+}
+
+func TestMapReplayPrunesExpiredAuthorizationAndPreservesStartupGate(t *testing.T) {
+	for _, finalized := range []bool{false, true} {
+		t.Run(strconv.FormatBool(finalized), func(t *testing.T) {
+			programmer, oldRoutes, _, _ := leasedTestProgrammer()
+			intent := localTestIntent()
+			intent.AuthorizationValidUntil = time.Now().Add(time.Second)
+			unrelated := localTestIntent()
+			unrelated.ConsumerDevice = testOtherConsumerDevice
+			for _, desired := range []RouteIntent{intent, unrelated} {
+				if err := programmer.Apply(desired); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if finalized {
+				if err := programmer.Finalize(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			waitForIntentExpiry(intent)
+			newRoutes, newGate := &persistedPolicyTable{}, &persistedPolicyTable{}
+			// Simulate a replacement map set retaining both pinned route rows.
+			for key, value := range oldRoutes.rows {
+				if err := newRoutes.Put(key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			newIDs := [7]ebpf.MapID{11, 12, 13, 14, 15, 16, 17}
+			programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return newIDs, nil }
+			programmer.openMapSetFn = func(string) (*serviceroutemap.Tables, []*ebpf.Map, [7]ebpf.MapID, error) {
+				return serviceroutemap.New(newRoutes, &persistedPolicyTable{}, &persistedPolicyTable{},
+					&persistedPolicyTable{}, &recordingTable{identityTokens: map[uint32]uint64{10: 100, 20: 200, 42: 420}},
+					newGate, &persistedPolicyTable{}), nil, newIDs, nil
+			}
+			if err := programmer.Initialize(); err != nil {
+				t.Fatalf("replay after expiry: %v", err)
+			}
+			if len(programmer.desiredIntents) != 1 {
+				t.Fatal("replay retained expired desired authorization or lost the unrelated tenant")
+			}
+			if policyGateEnabled(newGate) != finalized {
+				t.Fatalf("replay gate enabled=%t, want prior finalized state %t", policyGateEnabled(newGate), finalized)
+			}
+			if !finalized {
+				if err := programmer.Finalize(); err != nil {
+					t.Fatalf("finalize complete startup snapshot: %v", err)
+				}
+			}
+			if len(newRoutes.rows) != 1 || !policyGateEnabled(newGate) {
+				t.Fatal("finalized replay did not sweep the expired pinned authorization")
+			}
+		})
 	}
 }

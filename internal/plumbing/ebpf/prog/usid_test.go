@@ -1525,10 +1525,11 @@ func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
 	setServiceIdentity(t, objs, 1)
 
 	service := netip.MustParseAddr("fd20:70::100")
+	frontend := netip.MustParseAddr("fd53::53")
 	if err := objs.ServiceRouteTable.Put(
-		serviceRouteKey(service),
+		serviceRouteKey(frontend),
 		UsidServiceRouteValue{
-			TargetIfindex: loopback, Mode: 1, ConsumerToken: 1, ProducerToken: 1,
+			TargetIfindex: loopback, Mode: 1, ConsumerToken: 1, ProducerToken: 1, BackendAddr: service.As16(),
 		},
 	); err != nil {
 		t.Fatalf("populate service_route_table: %v", err)
@@ -1538,13 +1539,13 @@ func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
 		Family:         egressRouteFamilyINET6,
 		Protocol:       6,
 		Port:           bits.ReverseBytes16(servicePort),
-		Addr:           service.As16(),
+		Addr:           frontend.As16(),
 	}, UsidServiceAccessValue{AttachmentToken: 1}); err != nil {
 		t.Fatalf("populate service_access_table: %v", err)
 	}
 
 	pkt := buildPlainV6PacketWithL4Ports(t,
-		netip.MustParseAddr("fd20:70::2"), service, 49152, servicePort)
+		netip.MustParseAddr("fd20:70::2"), frontend, 49152, servicePort)
 	ret, out, err := objs.UsidServiceEgress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
@@ -1585,7 +1586,7 @@ func TestUsidEgress_ServiceRouteDropsUnauthorizedPort(t *testing.T) {
 	service := netip.MustParseAddr("fd20:70::100")
 	if err := objs.ServiceRouteTable.Put(
 		serviceRouteKey(service),
-		UsidServiceRouteValue{TargetIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1},
+		UsidServiceRouteValue{TargetIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1, BackendAddr: service.As16()},
 	); err != nil {
 		t.Fatalf("populate service_route_table: %v", err)
 	}
@@ -1622,7 +1623,8 @@ func TestUsidServiceEgress_RemoteRequestPreservesInnerSource(t *testing.T) {
 		t.Fatalf("populate public uplink: %v", err)
 	}
 	if err := objs.ServiceRouteTable.Put(serviceRouteKey(service),
-		UsidServiceRouteValue{Mode: 2, ConsumerToken: 1, GrantId: grantID, TargetSid: targetSID.As16()}); err != nil {
+		UsidServiceRouteValue{Mode: 2, ConsumerToken: 1, GrantId: grantID, TargetSid: targetSID.As16(),
+			BackendAddr: service.As16()}); err != nil {
 		t.Fatalf("populate remote service route: %v", err)
 	}
 	if err := objs.ServiceAccessTable.Put(UsidServiceAccessKey{IngressIfindex: 1, Family: egressRouteFamilyINET6,
@@ -1635,8 +1637,8 @@ func TestUsidServiceEgress_RemoteRequestPreservesInnerSource(t *testing.T) {
 	if err != nil || ret != tcActRedirect {
 		t.Fatalf("remote request verdict = %d, err = %v; want TC_ACT_REDIRECT", ret, err)
 	}
-	if len(out) != len(pkt)+60 {
-		t.Fatalf("encapsulated length = %d, want %d", len(out), len(pkt)+60)
+	if len(out) != len(pkt)+76 {
+		t.Fatalf("encapsulated length = %d, want %d", len(out), len(pkt)+76)
 	}
 	if got := netip.AddrFrom16([16]byte(out[22:38])); got != wantOuterSource {
 		t.Errorf("outer source = %s, want %s", got, wantOuterSource)
@@ -1647,10 +1649,10 @@ func TestUsidServiceEgress_RemoteRequestPreservesInnerSource(t *testing.T) {
 	if out[54] != 1 || out[55] != 41 || out[56] != 1 || !bytes.Equal(out[58:74], grantID[:]) {
 		t.Errorf("service shim = % x, want version=1 inner=41 request=1 grant=%x", out[54:74], grantID)
 	}
-	if got := netip.AddrFrom16([16]byte(out[82:98])); got != consumer {
+	if got := netip.AddrFrom16([16]byte(out[98:114])); got != consumer {
 		t.Errorf("inner source = %s, want original consumer %s", got, consumer)
 	}
-	if got := netip.AddrFrom16([16]byte(out[98:114])); got != service {
+	if got := netip.AddrFrom16([16]byte(out[114:130])); got != service {
 		t.Errorf("inner destination = %s, want endpoint %s", got, service)
 	}
 }
@@ -1816,7 +1818,7 @@ func TestUsidServiceEgress_ReplyRequiresAuthorizedForwardFlow(t *testing.T) {
 	}
 	if err := objs.ServiceRouteTable.Put(
 		serviceRouteKey(service),
-		UsidServiceRouteValue{TargetIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1},
+		UsidServiceRouteValue{TargetIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1, BackendAddr: service.As16()},
 	); err != nil {
 		t.Fatalf("populate service_route_table: %v", err)
 	}
@@ -1844,7 +1846,7 @@ func TestUsidServiceEgress_ReplyRequiresAuthorizedForwardFlow(t *testing.T) {
 
 	if err := objs.ServiceRouteTable.Put(
 		serviceRouteKey(service),
-		UsidServiceRouteValue{TargetIfindex: 2, Mode: 1, ConsumerToken: 1, ProducerToken: 1},
+		UsidServiceRouteValue{TargetIfindex: 2, Mode: 1, ConsumerToken: 1, ProducerToken: 1, BackendAddr: service.As16()},
 	); err != nil {
 		t.Fatalf("replace service route target: %v", err)
 	}
@@ -1853,7 +1855,7 @@ func TestUsidServiceEgress_ReplyRequiresAuthorizedForwardFlow(t *testing.T) {
 	}
 	if err := objs.ServiceRouteTable.Put(
 		serviceRouteKey(service),
-		UsidServiceRouteValue{TargetIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1},
+		UsidServiceRouteValue{TargetIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1, BackendAddr: service.As16()},
 	); err != nil {
 		t.Fatalf("restore service route target: %v", err)
 	}
@@ -1876,7 +1878,7 @@ func TestUsidServiceEgress_ReclaimsCollisionFromStaleRemoteGrant(t *testing.T) {
 	grantID := [16]byte{9}
 
 	if err := objs.ServiceRouteTable.Put(serviceRouteKey(service), UsidServiceRouteValue{
-		TargetIfindex: 1, Mode: 1, ConsumerToken: currentToken, ProducerToken: currentToken,
+		TargetIfindex: 1, Mode: 1, ConsumerToken: currentToken, ProducerToken: currentToken, BackendAddr: service.As16(),
 	}); err != nil {
 		t.Fatalf("populate service route: %v", err)
 	}
@@ -1892,14 +1894,15 @@ func TestUsidServiceEgress_ReclaimsCollisionFromStaleRemoteGrant(t *testing.T) {
 		SourceAddr: service.As16(), DestAddr: consumer.As16(),
 	}
 	if err := objs.ServiceReverseTable.Put(reverseKey, UsidServiceReverseValue{
-		Mode: 2, ProducerToken: currentToken, GrantId: grantID, ReturnSid: [16]byte{1},
+		Mode: 2, ProducerToken: currentToken, GrantId: grantID, ReturnSid: [16]byte{1}, FrontendAddr: service.As16(),
 	}); err != nil {
 		t.Fatalf("seed stale remote reverse: %v", err)
 	}
 	if err := objs.ServiceRemoteGrantTable.Put(UsidServiceRemoteGrantKey{
 		ProducerIfindex: 1, Family: egressRouteFamilyINET6, Protocol: 6,
 		Port: bits.ReverseBytes16(8443), GrantId: grantID, Addr: service.As16(),
-	}, UsidServiceRemoteGrantValue{ProducerToken: currentToken, ConsumerSid: [16]byte{2}}); err != nil {
+	}, UsidServiceRemoteGrantValue{ProducerToken: currentToken, ConsumerSid: [16]byte{2},
+		FrontendAddr: service.As16()}); err != nil {
 		t.Fatalf("seed stale remote grant: %v", err)
 	}
 
@@ -1924,7 +1927,7 @@ func TestUsidServiceEgress_ReclaimsCollisionFromStaleLocalRoute(t *testing.T) {
 	service := netip.MustParseAddr("fd20:70::100")
 	consumer := netip.MustParseAddr("fd20:70::2")
 	if err := objs.ServiceRouteTable.Put(serviceRouteKey(service), UsidServiceRouteValue{
-		TargetIfindex: 1, Mode: 1, ConsumerToken: currentToken, ProducerToken: currentToken,
+		TargetIfindex: 1, Mode: 1, ConsumerToken: currentToken, ProducerToken: currentToken, BackendAddr: service.As16(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1940,7 +1943,7 @@ func TestUsidServiceEgress_ReclaimsCollisionFromStaleLocalRoute(t *testing.T) {
 		SourceAddr: service.As16(), DestAddr: consumer.As16(),
 	}
 	if err := objs.ServiceReverseTable.Put(reverseKey, UsidServiceReverseValue{
-		ConsumerIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1,
+		ConsumerIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1, FrontendAddr: service.As16(),
 	}); err != nil {
 		t.Fatal(err)
 	}

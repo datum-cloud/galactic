@@ -12,6 +12,7 @@ import (
 	"math/bits"
 	"net"
 	"path/filepath"
+	"time"
 
 	"github.com/cilium/ebpf"
 
@@ -38,13 +39,16 @@ const (
 )
 
 type serviceRouteValue struct {
-	TargetIfindex uint32
-	Mode          uint8
-	Pad           [3]uint8
-	ConsumerToken uint64
-	ProducerToken uint64
-	GrantID       [16]uint8
-	TargetSID     [16]uint8
+	TargetIfindex             uint32
+	Mode                      uint8
+	Pad                       [3]uint8
+	ConsumerToken             uint64
+	ProducerToken             uint64
+	GrantID                   [16]uint8
+	TargetSID                 [16]uint8
+	BackendAddress            [16]uint8
+	AuthorizationDeadlineNS   uint64
+	AuthorizationValidUntilNS int64
 }
 
 const (
@@ -111,6 +115,7 @@ type serviceReverseValue struct {
 	ProducerToken   uint64
 	GrantID         [16]uint8
 	ReturnSID       [16]uint8
+	FrontendAddress [16]uint8
 	LastSeenNS      uint64
 }
 
@@ -124,11 +129,21 @@ type serviceRemoteGrantKey struct {
 }
 
 type serviceRemoteGrantValue struct {
-	ConsumerSID   [16]uint8
-	ProducerToken uint64
+	ConsumerSID               [16]uint8
+	FrontendAddress           [16]uint8
+	ProducerToken             uint64
+	AuthorizationDeadlineNS   uint64
+	AuthorizationValidUntilNS int64
 }
 
 type servicePolicyStateValue struct{ Enabled uint8 }
+
+func addressBytes(address net.IP) []byte {
+	if ipv4 := address.To4(); ipv4 != nil {
+		return ipv4
+	}
+	return address.To16()
+}
 
 // RouteIdentity describes a forwarding key that must survive a complete
 // desired-state sweep.
@@ -181,6 +196,7 @@ type Tables struct {
 	identities   usidmap.Table
 	policyState  usidmap.Table
 	deny         usidmap.Table
+	leaseClockFn func() (time.Time, uint64, error)
 }
 
 // OpenPinned opens both service maps under pinDir. The caller owns the
@@ -509,11 +525,12 @@ func (t *Tables) SweepPolicy(snapshot PolicySnapshot) error {
 // RegisterRoute installs or replaces a service forwarding entry.
 func (t *Tables) RegisterRoute(
 	ingressIfindex uint32,
-	address net.IP,
+	address, backendAddress net.IP,
 	protocol uint8,
 	port uint16,
 	targetIfindex uint32,
 	consumerToken, producerToken uint64,
+	authorization ...time.Time,
 ) error {
 	key, err := routeKey(ingressIfindex, address, protocol, port)
 	if err != nil {
@@ -525,6 +542,10 @@ func (t *Tables) RegisterRoute(
 		ConsumerToken: consumerToken,
 		ProducerToken: producerToken,
 	}
+	copy(value.BackendAddress[:], addressBytes(backendAddress))
+	if err := t.authorizeRoute(key, &value, authorization); err != nil {
+		return err
+	}
 	if err := t.routes.Put(key, value); err != nil {
 		return fmt.Errorf("serviceroutemap: register route ifindex=%d address=%s: %w", ingressIfindex, address, err)
 	}
@@ -533,8 +554,8 @@ func (t *Tables) RegisterRoute(
 
 // RegisterRemoteRoute installs an authenticated service tunnel target while
 // keeping the original inner source address intact.
-func (t *Tables) RegisterRemoteRoute(ingressIfindex uint32, address net.IP, grantID [16]byte,
-	protocol uint8, port uint16, targetSID net.IP, consumerToken uint64) error {
+func (t *Tables) RegisterRemoteRoute(ingressIfindex uint32, address, backendAddress net.IP, grantID [16]byte,
+	protocol uint8, port uint16, targetSID net.IP, consumerToken uint64, authorization ...time.Time) error {
 	key, err := routeKey(ingressIfindex, address, protocol, port)
 	if err != nil {
 		return err
@@ -545,14 +566,20 @@ func (t *Tables) RegisterRemoteRoute(ingressIfindex uint32, address net.IP, gran
 	}
 	value := serviceRouteValue{Mode: routeModeRemote, GrantID: grantID, ConsumerToken: consumerToken}
 	copy(value.TargetSID[:], sid)
+	copy(value.BackendAddress[:], addressBytes(backendAddress))
+	if err := t.authorizeRoute(key, &value, authorization); err != nil {
+		return err
+	}
 	if err := t.routes.Put(key, value); err != nil {
 		return fmt.Errorf("serviceroutemap: register remote route: %w", err)
 	}
 	return nil
 }
 
-func (t *Tables) RegisterRemoteGrant(producerIfindex uint32, address net.IP, protocol uint8, port uint16,
-	grantID [16]byte, consumerSID net.IP, producerToken uint64) error {
+func (t *Tables) RegisterRemoteGrant(
+	producerIfindex uint32, address, frontendAddress net.IP, protocol uint8, port uint16,
+	grantID [16]byte, consumerSID net.IP, producerToken uint64, authorization ...time.Time,
+) error {
 	if t.remoteGrants == nil {
 		return errors.New("serviceroutemap: remote grant table unavailable")
 	}
@@ -566,6 +593,10 @@ func (t *Tables) RegisterRemoteGrant(producerIfindex uint32, address net.IP, pro
 	}
 	value := serviceRemoteGrantValue{ProducerToken: producerToken}
 	copy(value.ConsumerSID[:], sid)
+	copy(value.FrontendAddress[:], addressBytes(frontendAddress))
+	if err := t.authorizeGrant(key, &value, authorization); err != nil {
+		return err
+	}
 	if err := t.remoteGrants.Put(key, value); err != nil {
 		return fmt.Errorf("serviceroutemap: register remote grant: %w", err)
 	}
@@ -717,4 +748,77 @@ func remoteGrantKey(
 	key.Family = familyIPv6
 	copy(key.Address[:], ipv6)
 	return key, nil
+}
+
+// authorizationDeadline converts an absolute lease to the kernel monotonic clock.
+// Replaying the same lease retains the earlier pinned deadline even if wall time
+// moved backwards. A changed validUntil is an explicit authorization renewal.
+func (t *Tables) authorizationDeadline(
+	authorization []time.Time, previousUntil int64, previousDeadline uint64,
+) (int64, uint64, error) {
+	if len(authorization) == 0 || authorization[0].IsZero() {
+		return 0, 0, nil
+	}
+	clock := t.leaseClockFn
+	if clock == nil {
+		clock = authorizationClock
+	}
+	now, monotonic, err := clock()
+	if err != nil {
+		return 0, 0, fmt.Errorf("serviceroutemap: read authorization clock: %w", err)
+	}
+	until := authorization[0]
+	remaining := until.Sub(now)
+	if remaining <= 0 {
+		return 0, 0, errors.New("serviceroutemap: authorization expired")
+	}
+	deadline := monotonic + uint64(remaining)
+	if deadline < monotonic {
+		return 0, 0, errors.New("serviceroutemap: authorization deadline overflow")
+	}
+	if until.UnixNano() == previousUntil && previousDeadline != 0 && previousDeadline < deadline {
+		deadline = previousDeadline
+	}
+	if deadline <= monotonic {
+		return 0, 0, errors.New("serviceroutemap: pinned authorization expired")
+	}
+	return until.UnixNano(), deadline, nil
+}
+
+func (t *Tables) authorizeRoute(key serviceRouteKey, value *serviceRouteValue, authorization []time.Time) error {
+	if len(authorization) == 0 || authorization[0].IsZero() {
+		return nil
+	}
+	var old serviceRouteValue
+	if err := t.routes.Lookup(key, &old); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("serviceroutemap: lookup route authorization: %w", err)
+	}
+	until, deadline, err := t.authorizationDeadline(
+		authorization, old.AuthorizationValidUntilNS, old.AuthorizationDeadlineNS,
+	)
+	if err != nil {
+		return err
+	}
+	value.AuthorizationValidUntilNS, value.AuthorizationDeadlineNS = until, deadline
+	return nil
+}
+
+func (t *Tables) authorizeGrant(
+	key serviceRemoteGrantKey, value *serviceRemoteGrantValue, authorization []time.Time,
+) error {
+	if len(authorization) == 0 || authorization[0].IsZero() {
+		return nil
+	}
+	var old serviceRemoteGrantValue
+	if err := t.remoteGrants.Lookup(key, &old); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("serviceroutemap: lookup grant authorization: %w", err)
+	}
+	until, deadline, err := t.authorizationDeadline(
+		authorization, old.AuthorizationValidUntilNS, old.AuthorizationDeadlineNS,
+	)
+	if err != nil {
+		return err
+	}
+	value.AuthorizationValidUntilNS, value.AuthorizationDeadlineNS = until, deadline
+	return nil
 }

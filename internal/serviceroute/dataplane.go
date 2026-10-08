@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
@@ -25,16 +26,18 @@ import (
 )
 
 type routeRef struct {
-	ingressIfindex uint32
-	address        string
-	targetIfindex  uint32
-	mode           RouteIntentKind
-	protocol       uint8
-	port           uint16
-	grantID        ServiceGrantID
-	targetSID      [16]byte
-	consumerToken  uint64
-	producerToken  uint64
+	ingressIfindex          uint32
+	address                 string
+	backendAddress          string
+	targetIfindex           uint32
+	mode                    RouteIntentKind
+	protocol                uint8
+	port                    uint16
+	grantID                 ServiceGrantID
+	targetSID               [16]byte
+	consumerToken           uint64
+	producerToken           uint64
+	authorizationValidUntil int64
 }
 
 type accessRef struct {
@@ -83,13 +86,15 @@ type appliedEntry struct {
 }
 
 type grantRef struct {
-	producerIfindex uint32
-	address         string
-	protocol        uint8
-	port            uint16
-	grantID         ServiceGrantID
-	consumerSID     [16]byte
-	producerToken   uint64
+	producerIfindex         uint32
+	address                 string
+	frontendAddress         string
+	protocol                uint8
+	port                    uint16
+	grantID                 ServiceGrantID
+	consumerSID             [16]byte
+	producerToken           uint64
+	authorizationValidUntil int64
 }
 
 type routeState struct {
@@ -103,22 +108,23 @@ type routeState struct {
 type EBPFRouteProgrammer struct {
 	PinDir string
 
-	mu                   sync.Mutex
-	tables               *serviceroutemap.Tables
-	mapHandles           []*ebpf.Map
-	mapIDs               [7]ebpf.MapID
-	mapIDsValid          bool
-	routeRefs            map[string]routeState
-	accessRefs           map[accessKey]accessState
-	denyRefs             map[denyKey]denyState
-	grantRefs            map[grantRef]int
-	appliedRefs          map[string][][]appliedEntry
-	desiredIntents       map[string][]RouteIntent
-	pendingRollbacks     map[string][]appliedEntry
-	policyFinalized      bool
-	syncFailures         int
-	failedMutations      map[string]struct{}
-	generationIncomplete bool
+	mu                     sync.Mutex
+	tables                 *serviceroutemap.Tables
+	mapHandles             []*ebpf.Map
+	mapIDs                 [7]ebpf.MapID
+	mapIDsValid            bool
+	routeRefs              map[string]routeState
+	accessRefs             map[accessKey]accessState
+	denyRefs               map[denyKey]denyState
+	grantRefs              map[grantRef]int
+	appliedRefs            map[string][][]appliedEntry
+	desiredIntents         map[string][]RouteIntent
+	pendingRollbacks       map[string][]appliedEntry
+	policyFinalized        bool
+	syncFailures           int
+	failedMutations        map[string]struct{}
+	generationIncomplete   bool
+	generationWasFinalized bool
 
 	// These hooks keep map replacement and interface recreation tests
 	// deterministic without requiring a privileged kernel eBPF setup.
@@ -349,13 +355,28 @@ func (p *EBPFRouteProgrammer) ensureOpen() error {
 		p.desiredIntents = make(map[string][]RouteIntent)
 		return nil
 	}
+	restorePolicy := p.policyFinalized || (p.generationIncomplete && p.generationWasFinalized)
+	expired := p.expiredDesiredKeys(time.Now())
+	if len(expired) != 0 {
+		// A replacement map set can still contain pinned rows from an expired
+		// authorization. Never replay or sweep those rows while serving them.
+		if err := p.tables.SetPolicyEnabled(false); err != nil {
+			p.closeHandles()
+			return err
+		}
+		p.pruneDesiredKeys(expired)
+	}
 	if err := p.rebuildDesired(); err != nil {
 		p.closeHandles()
 		return err
 	}
-	if p.policyFinalized {
-		return p.finalizeLocked()
+	if restorePolicy {
+		if err := p.finalizeLocked(); err != nil {
+			return err
+		}
 	}
+	p.generationIncomplete = false
+	p.generationWasFinalized = false
 	return nil
 }
 
@@ -460,8 +481,12 @@ func (p *EBPFRouteProgrammer) rebuildDesired() error {
 }
 
 func (p *EBPFRouteProgrammer) repairDesired() error {
-	needsRepair := p.generationIncomplete
+	expired := p.expiredDesiredKeys(time.Now())
+	needsRepair := p.generationIncomplete || len(expired) != 0
 	for _, key := range sortedIntentKeys(p.desiredIntents) {
+		if _, isExpired := expired[key]; isExpired {
+			continue
+		}
 		intents := p.desiredIntents[key]
 		sets := p.appliedRefs[key]
 		if len(sets) != len(intents) {
@@ -489,8 +514,15 @@ func (p *EBPFRouteProgrammer) repairDesired() error {
 	if err := p.tables.SetPolicyEnabled(false); err != nil {
 		return err
 	}
+	if !p.generationIncomplete {
+		p.generationWasFinalized = p.policyFinalized
+	}
 	p.policyFinalized = false
 	p.generationIncomplete = true
+	// Expired desired state is not an invalid replacement intent. It is stale
+	// state to remove, including its access grants and reference counts. This
+	// also lets the caller Remove it or Apply an explicit renewal afterwards.
+	p.pruneDesiredKeys(expired)
 	if err := p.tables.SweepPolicy(serviceroutemap.PolicySnapshot{}); err != nil {
 		return fmt.Errorf("clear stale service policy generation: %w", err)
 	}
@@ -506,12 +538,34 @@ func (p *EBPFRouteProgrammer) repairDesired() error {
 		p.markSyncFailure("__generation__")
 		return err
 	}
-	if err := p.finalizeLocked(); err != nil {
-		p.markSyncFailure("__generation__")
-		return err
+	if p.generationWasFinalized {
+		if err := p.finalizeLocked(); err != nil {
+			p.markSyncFailure("__generation__")
+			return err
+		}
 	}
 	p.generationIncomplete = false
+	p.generationWasFinalized = false
 	return nil
+}
+
+func (p *EBPFRouteProgrammer) expiredDesiredKeys(now time.Time) map[string]struct{} {
+	expired := make(map[string]struct{})
+	for key, intents := range p.desiredIntents {
+		for _, intent := range intents {
+			if !intent.AuthorizationValidUntil.IsZero() && !now.Before(intent.AuthorizationValidUntil) {
+				expired[key] = struct{}{}
+				break
+			}
+		}
+	}
+	return expired
+}
+
+func (p *EBPFRouteProgrammer) pruneDesiredKeys(keys map[string]struct{}) {
+	for key := range keys {
+		delete(p.desiredIntents, key)
+	}
 }
 
 func (p *EBPFRouteProgrammer) markSyncFailure(key string) {
@@ -581,7 +635,14 @@ func (p *EBPFRouteProgrammer) retryRollback(key string) error {
 }
 
 func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error) {
+	if !intent.AuthorizationValidUntil.IsZero() && !time.Now().Before(intent.AuthorizationValidUntil) {
+		return nil, errors.New("service route authorization expired")
+	}
 	serviceIP := intent.Service.IP
+	frontendIP := serviceIP
+	if intent.Frontend != nil {
+		frontendIP = intent.Frontend.IP
+	}
 	entries := make([]appliedEntry, 0, 2*len(intent.Ports)+2)
 	if intent.Kind == RouteIntentRemoteProducer {
 		serviceIfindex, err := p.target(intent.ServiceDevice)
@@ -611,9 +672,10 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 			if err != nil {
 				return nil, err
 			}
-			ref := grantRef{producerIfindex: serviceIfindex, address: serviceIP.String(), protocol: protocol,
+			ref := grantRef{producerIfindex: serviceIfindex, address: serviceIP.String(),
+				frontendAddress: frontendIP.String(), protocol: protocol,
 				port: uint16(port.Port), grantID: intent.GrantID, consumerSID: consumerSID,
-				producerToken: producerToken}
+				producerToken: producerToken, authorizationValidUntil: authorizationUnixNano(intent.AuthorizationValidUntil)}
 			entries = append(entries, appliedEntry{grant: &ref})
 		}
 		return entries, nil
@@ -629,11 +691,11 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 	// A protocol/port-zero marker makes malformed or non-TCP/UDP traffic to a
 	// configured service fail closed without conflating distinct real tuples.
 	entries = append(entries, appliedEntry{access: &accessRef{
-		ingressIfindex: consumerIfindex, address: serviceIP.String(), attachmentToken: consumerToken,
+		ingressIfindex: consumerIfindex, address: frontendIP.String(), attachmentToken: consumerToken,
 		markerDirections: serviceroutemap.MarkerRequest,
 	}})
 	entries = append(entries, appliedEntry{deny: &denyRef{
-		ingressIfindex: consumerIfindex, address: serviceIP.String(), attachmentToken: consumerToken,
+		ingressIfindex: consumerIfindex, address: frontendIP.String(), attachmentToken: consumerToken,
 		markerDirections: serviceroutemap.MarkerRequest,
 	}})
 	var targetIfindex uint32
@@ -671,13 +733,14 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 			return nil, err
 		}
 		entries = append(entries, appliedEntry{access: &accessRef{
-			ingressIfindex: consumerIfindex, address: serviceIP.String(), protocol: protocol, port: uint16(port.Port),
+			ingressIfindex: consumerIfindex, address: frontendIP.String(), protocol: protocol, port: uint16(port.Port),
 			attachmentToken: consumerToken,
 		}})
-		ref := routeRef{ingressIfindex: consumerIfindex, address: serviceIP.String(), mode: intent.Kind,
+		ref := routeRef{ingressIfindex: consumerIfindex, address: frontendIP.String(),
+			backendAddress: serviceIP.String(), mode: intent.Kind,
 			protocol: protocol, port: uint16(port.Port), grantID: intent.GrantID,
 			targetIfindex: targetIfindex, targetSID: targetSID, consumerToken: consumerToken,
-			producerToken: producerToken}
+			producerToken: producerToken, authorizationValidUntil: authorizationUnixNano(intent.AuthorizationValidUntil)}
 		entries = append(entries, appliedEntry{route: &ref})
 	}
 	return entries, nil
@@ -707,8 +770,9 @@ func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
 	if entry.grant != nil {
 		if p.grantRefs[*entry.grant] == 0 {
 			g := entry.grant
-			if err := p.tables.RegisterRemoteGrant(g.producerIfindex, net.ParseIP(g.address), g.protocol, g.port,
-				[16]byte(g.grantID), net.IP(g.consumerSID[:]), g.producerToken); err != nil {
+			if err := p.tables.RegisterRemoteGrant(g.producerIfindex, net.ParseIP(g.address),
+				net.ParseIP(g.frontendAddress), g.protocol, g.port, [16]byte(g.grantID), net.IP(g.consumerSID[:]),
+				g.producerToken, authorizationTime(g.authorizationValidUntil)); err != nil {
 				return err
 			}
 		}
@@ -759,12 +823,14 @@ func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
 	var err error
 	if entry.route.mode == RouteIntentRemoteConsumer {
 		err = p.tables.RegisterRemoteRoute(entry.route.ingressIfindex, net.ParseIP(entry.route.address),
+			net.ParseIP(entry.route.backendAddress),
 			[16]byte(entry.route.grantID), entry.route.protocol, entry.route.port, net.IP(entry.route.targetSID[:]),
-			entry.route.consumerToken)
+			entry.route.consumerToken, authorizationTime(entry.route.authorizationValidUntil))
 	} else {
 		err = p.tables.RegisterRoute(entry.route.ingressIfindex, net.ParseIP(entry.route.address),
+			net.ParseIP(entry.route.backendAddress),
 			entry.route.protocol, entry.route.port, entry.route.targetIfindex,
-			entry.route.consumerToken, entry.route.producerToken)
+			entry.route.consumerToken, entry.route.producerToken, authorizationTime(entry.route.authorizationValidUntil))
 	}
 	if err != nil {
 		return err
@@ -945,9 +1011,10 @@ func routeRefKey(ref routeRef) string {
 
 func intentKey(intent RouteIntent) string {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "%s|%s|%s|%s|%s|%s|%s|%s|%x",
-		intent.Attachment, intent.ProducerAttachment, intent.Kind, intent.Service, intent.ConsumerDevice,
+	fmt.Fprintf(&builder, "%s|%s|%s|%s|%s|%s|%s|%s|%s|%x",
+		intent.Attachment, intent.ProducerAttachment, intent.Kind, intent.Service, intent.Frontend, intent.ConsumerDevice,
 		intent.ServiceDevice, intent.ServiceSID, intent.ConsumerSID, intent.GrantID)
+	fmt.Fprintf(&builder, "|lease:%d", authorizationUnixNano(intent.AuthorizationValidUntil))
 	for _, port := range intent.Ports {
 		fmt.Fprintf(&builder, "|%s:%d", port.Protocol, port.Port)
 	}
@@ -962,6 +1029,10 @@ func cloneRouteIntent(intent RouteIntent) RouteIntent {
 			Mask: append(net.IPMask(nil), intent.Service.Mask...),
 		}
 	}
+	if intent.Frontend != nil {
+		cloned.Frontend = &net.IPNet{IP: append(net.IP(nil), intent.Frontend.IP...),
+			Mask: append(net.IPMask(nil), intent.Frontend.Mask...)}
+	}
 	cloned.ServiceSID = append(net.IP(nil), intent.ServiceSID...)
 	cloned.ConsumerSID = append(net.IP(nil), intent.ConsumerSID...)
 	cloned.Ports = append([]api.ServiceRouteProtocolPort(nil), intent.Ports...)
@@ -973,4 +1044,18 @@ func (p *EBPFRouteProgrammer) pinDir() string {
 		return p.PinDir
 	}
 	return attach.PinDir
+}
+
+func authorizationUnixNano(until time.Time) int64 {
+	if until.IsZero() {
+		return 0
+	}
+	return until.UnixNano()
+}
+
+func authorizationTime(until int64) time.Time {
+	if until == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, until)
 }

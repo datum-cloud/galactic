@@ -11,6 +11,7 @@ import (
 	"net"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 
@@ -119,7 +120,7 @@ func TestTables_RegisterIPv6Route(t *testing.T) {
 	reverse := &fakeTable{}
 	tables := New(routes, access, reverse)
 	address := net.ParseIP("fd20:0:19::53")
-	if err := tables.RegisterRoute(42, address, ProtocolUDP, 53, 101, 420, 1010); err != nil {
+	if err := tables.RegisterRoute(42, address, address, ProtocolUDP, 53, 101, 420, 1010); err != nil {
 		t.Fatal(err)
 	}
 	key, ok := routes.putKey.(serviceRouteKey)
@@ -141,7 +142,7 @@ func TestTables_RegisterRemoteRoute(t *testing.T) {
 	routes := &fakeTable{}
 	tables := New(routes, &fakeTable{}, &fakeTable{}, &fakeTable{})
 	grant := [16]byte{1, 2, 3}
-	if err := tables.RegisterRemoteRoute(42, net.ParseIP("10.0.0.53"), grant,
+	if err := tables.RegisterRemoteRoute(42, net.ParseIP("10.0.0.53"), net.ParseIP("10.0.0.53"), grant,
 		ProtocolTCP, 443, net.ParseIP("fd00::1234"), 420); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +158,7 @@ func TestTables_RegisterRemoteGrant(t *testing.T) {
 	tables := New(&fakeTable{}, &fakeTable{}, &fakeTable{}, grants)
 	grantID := [16]byte{9, 8, 7}
 	consumerSID := net.ParseIP("fd00::42")
-	if err := tables.RegisterRemoteGrant(101, net.ParseIP("fd20::53"), ProtocolTCP, 443,
+	if err := tables.RegisterRemoteGrant(101, net.ParseIP("fd20::53"), net.ParseIP("fd20::53"), ProtocolTCP, 443,
 		grantID, consumerSID, 1010); err != nil {
 		t.Fatal(err)
 	}
@@ -352,5 +353,72 @@ func TestTablesSweepPolicyDeleteFailureIsRetryable(t *testing.T) {
 	}
 	if _, ok := reverse.entries[reverseKey]; !ok || reverse.deletes != 0 {
 		t.Fatal("reverse state was not preserved across retry")
+	}
+}
+
+func TestAuthorizationLeasePinnedReplayAndRenewal(t *testing.T) {
+	wall := time.Unix(1800000000, 0)
+	monotonic := uint64(10000000000)
+	until := wall.Add(10 * time.Second)
+	tests := []struct {
+		name   string
+		remote bool
+	}{{"LocalRoute", false}, {"RemoteGrant", true}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			routes, grants := &memoryTable{}, &memoryTable{}
+			tables := New(routes, &memoryTable{}, &memoryTable{}, grants)
+			clockWall, clockMono := wall, monotonic
+			tables.leaseClockFn = func() (time.Time, uint64, error) { return clockWall, clockMono, nil }
+			address := net.ParseIP("fd20:70::53")
+			register := func(expiry time.Time) error {
+				if tt.remote {
+					return tables.RegisterRemoteGrant(
+						1, address, address, ProtocolTCP, 53, [16]byte{1}, net.ParseIP("fd00:1::1"), 1, expiry,
+					)
+				}
+				return tables.RegisterRoute(1, address, address, ProtocolTCP, 53, 2, 1, 2, expiry)
+			}
+			deadline := func() uint64 {
+				if tt.remote {
+					for _, v := range grants.entries {
+						return v.(serviceRemoteGrantValue).AuthorizationDeadlineNS
+					}
+				}
+				for _, v := range routes.entries {
+					return v.(serviceRouteValue).AuthorizationDeadlineNS
+				}
+				return 0
+			}
+			if err := register(until); err != nil {
+				t.Fatal(err)
+			}
+			want := monotonic + uint64(10*time.Second)
+			if deadline() != want {
+				t.Fatalf("deadline=%d, want %d", deadline(), want)
+			}
+			// A restarted controller with a backward wall clock must not renew the lease.
+			clockWall, clockMono = wall.Add(-time.Second), monotonic+uint64(time.Second)
+			if err := register(until); err != nil {
+				t.Fatal(err)
+			}
+			if deadline() != want {
+				t.Fatalf("replay extended deadline to %d, want %d", deadline(), want)
+			}
+			// Expiry remains enforced by the pinned monotonic deadline, even under clock skew.
+			clockMono = want
+			if err := register(until); err == nil {
+				t.Fatal("accepted expired pinned authorization")
+			}
+			if err := register(until.Add(10 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if deadline() <= want {
+				t.Fatal("explicit renewal did not advance deadline")
+			}
+			if err := register(clockWall.Add(-time.Second)); err == nil {
+				t.Fatal("accepted expired absolute authorization")
+			}
+		})
 	}
 }

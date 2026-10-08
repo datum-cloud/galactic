@@ -1,0 +1,83 @@
+# Apply in a disposable edge API with existing VPCs and attachments.
+# Consumer attachments need access: a or access: b; the shared producer
+# attachment needs role: producer. Use envsubst to fill the variables.
+apiVersion: network.datumapis.com/v1alpha1
+kind: ServiceEndpoint
+metadata:
+  name: service-a
+  namespace: psc-test
+spec:
+  # Each service destination identifies one isolated producer context.
+  address: fd70:100::10
+  protocol: udp
+  port: 8443
+  # Prefer a local producer; allow the remote fixture to serve it otherwise.
+  deliveryMode: PreferNodeLocal
+  attachmentSelector:
+    matchLabels:
+      role: producer
+---
+apiVersion: network.datumapis.com/v1alpha1
+kind: ServiceEndpoint
+metadata:
+  name: service-b
+  namespace: psc-test
+spec:
+  address: fd70:100::11
+  protocol: udp
+  port: 8443
+  deliveryMode: PreferNodeLocal
+  attachmentSelector:
+    matchLabels:
+      role: producer
+---
+apiVersion: network.datumapis.com/v1alpha1
+kind: ServiceRoutePolicy
+metadata:
+  name: access-a
+  namespace: psc-test
+spec:
+  serviceRef:
+    name: service-a
+  # Pin access to the current consumer VPC lifetime.
+  consumerVPCRef:
+    name: consumer-a
+    uid: ${CONSUMER_A_UID}
+  # Both VPCs intentionally use the same frontend address and port.
+  frontend:
+    address: fd70:ffff::10
+  # Set a deadline within two minutes; renew explicitly during recovery tests.
+  authorization:
+    validUntil: ${AUTHORIZATION_VALID_UNTIL}
+  attachmentSelector:
+    matchLabels:
+      access: a
+  protocolPorts:
+    - protocol: udp
+      port: 8443
+    - protocol: tcp
+      port: 8443
+---
+apiVersion: network.datumapis.com/v1alpha1
+kind: ServiceRoutePolicy
+metadata:
+  name: access-b
+  namespace: psc-test
+spec:
+  serviceRef:
+    name: service-b
+  consumerVPCRef:
+    name: consumer-b
+    uid: ${CONSUMER_B_UID}
+  frontend:
+    address: fd70:ffff::10
+  authorization:
+    validUntil: ${AUTHORIZATION_VALID_UNTIL}
+  attachmentSelector:
+    matchLabels:
+      access: b
+  protocolPorts:
+    - protocol: udp
+      port: 8443
+    - protocol: tcp
+      port: 8443

@@ -216,6 +216,34 @@ func TestCompileUsesObservedNodeAndSelector(t *testing.T) {
 	}
 }
 
+func TestCompileTranslatesFrontendAndPinsConsumerVPC(t *testing.T) {
+	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal)
+	policy.Spec.Frontend = &networkv1alpha1.ServiceRouteFrontend{Address: "fd53::53"}
+	policy.Spec.ConsumerVPCRef = &networkv1alpha1.ServiceRouteVPCReference{Name: "consumer-vpc", UID: "vpc-uid"}
+	consumer := readyAttachment("platform", "selected", "consumer-uid", testNodeName, "consumer0",
+		testLabels(testAccessLabel, "yes"))
+	consumer.Spec.VPC.Name = "consumer-vpc"
+	forged := readyAttachment("platform", "forged", "forged-uid", testNodeName, "forged0",
+		testLabels(testAccessLabel, "yes"))
+	forged.Spec.VPC.Name = "other-vpc"
+	producer := readyAttachment("service", "producer", "producer-uid", testNodeName, "producer0",
+		testLabels(testProducerLabel, "yes"))
+
+	consumer.Status.VPC = "live-provider-identity"
+	forged.Status.VPC = "retired-provider-identity"
+	got, err := CompileForConsumerVPC(policy, endpoint,
+		[]*cloudv1alpha1.VPCAttachment{consumer, forged, producer}, testNodeName, nil, "live-provider-identity")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(got) != 1 || got[0].Attachment.Name != consumer.Name {
+		t.Fatalf("intents = %+v, want only live VPC member", got)
+	}
+	if got[0].Frontend.String() != "fd53::53/128" || got[0].Service.String() != "fd00::53/128" {
+		t.Fatalf("translation = %s -> %s", got[0].Frontend, got[0].Service)
+	}
+}
+
 func TestCompileUsesEndpointPortByDefault(t *testing.T) {
 	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal)
 	policy.Spec.ProtocolPorts = nil
@@ -402,5 +430,31 @@ func TestServiceGrantIDCanonicalizesPortOrder(t *testing.T) {
 	}
 	if idA != idB {
 		t.Fatalf("canonical grant IDs differ: %x / %x", idA, idB)
+	}
+}
+
+func TestServiceGrantGenerationCompatibility(t *testing.T) {
+	for _, translated := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Direct", true: "Translated"}[translated], func(t *testing.T) {
+			policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+			if translated {
+				policy.Spec.Frontend = &networkv1alpha1.ServiceRouteFrontend{Address: "fd70::1"}
+			}
+			consumer := readyAttachment("tenant", "client", "client", testNodeName, "client0", nil)
+			producer := readyAttachment("service", "server", "server", testRemoteNodeName, "server0", nil)
+			ports := []networkv1alpha1.ServiceRouteProtocolPort{{Protocol: "udp", Port: 53}}
+			before, err := serviceGrantID(policy, endpoint, consumer, producer, ports)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy.Generation++
+			after, err := serviceGrantID(policy, endpoint, consumer, producer, ports)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (before != after) != translated {
+				t.Fatal("legacy grants must remain compatible; translated grants must fence changed authorization")
+			}
+		})
 	}
 }
