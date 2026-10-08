@@ -1,25 +1,106 @@
+---
+status: provisional
+stage: alpha
+latest-milestone: "TBD"
+---
+
 # Private Service Connect
 
-Status: Proposed. Galactic has private-service routing primitives; frontend
-translation and integration extensions have local validation. Production
-readiness remains work in progress.
+- [Summary](#summary)
+- [Motivation](#motivation)
+  - [Goals](#goals)
+  - [Non-goals](#non-goals)
+- [Proposal](#proposal)
+  - [User stories](#user-stories)
+  - [Notes, constraints, and caveats](#notes-constraints-and-caveats)
+  - [Risks and mitigations](#risks-and-mitigations)
+- [Design Details](#design-details)
+  - [System architecture](#system-architecture)
+  - [Proposed API surface](#proposed-api-surface)
+  - [Endpoint declaration](#endpoint-declaration)
+  - [Consumer access and frontend translation](#consumer-access-and-frontend-translation)
+  - [Validation and compatibility](#validation-and-compatibility)
+  - [Status and lifecycle](#status-and-lifecycle)
+  - [Data plane](#data-plane)
+  - [Internal DNS integration](#internal-dns-integration)
+- [Production readiness review questionnaire](#production-readiness-review-questionnaire)
+- [Implementation history](#implementation-history)
+- [Drawbacks](#drawbacks)
+- [Alternatives](#alternatives)
+- [Infrastructure needed](#infrastructure-needed)
 
-The [Internal DNS overview](https://github.com/datum-cloud/enhancements/blob/docs/internal-dns-product-proposal/architecture/deliver/dns/internal-dns/README.md) describes the first consumer of
-this capability.
-
-## Product overview
+## Summary
 
 Private Service Connect gives a consumer VPC private access to a published
-service in a producer VPC. The producer owns the service and its availability.
-The platform authorizes access to specific addresses, protocols, and ports.
-Publishing an endpoint does not connect the entire producer network.
+service in a producer VPC. Consumers use a stable private endpoint while the
+platform selects an authorized, eligible producer. A shared service can serve
+many VPCs without a separate deployment for each consumer.
 
-A shared service can serve many consumer VPCs. Consumers receive a stable private
-endpoint while the platform selects an eligible producer. Internal DNS is the
-first integration in this proposal; arbitrary customer-published services and
-their management experience need separate release scope.
+## Motivation
 
-## System architecture
+Platform services need private connectivity from isolated consumer networks.
+Connecting entire VPCs exposes more of the producer network than a service
+requires. Private Service Connect grants access to a specific service tuple and
+keeps network identity trustworthy when consumers use overlapping addresses.
+
+The [Internal DNS overview](https://github.com/datum-cloud/enhancements/blob/docs/internal-dns-product-proposal/architecture/deliver/dns/internal-dns/README.md)
+describes the first integration: the same resolver address in each VPC reaches
+that network's isolated DNS context through a shared DNS fleet.
+
+### Goals
+
+- Give workloads private access to authorized services through their existing
+  network configuration.
+- Share producer capacity across consumer VPCs with overlapping addresses.
+- Preserve consumer identity through local delivery, remote delivery, and replies.
+- Withdraw access on resource deletion and stop selecting unhealthy producers.
+
+### Non-goals
+
+- Connecting entire producer and consumer networks.
+- Discovering service backends or performing application health checks in Galactic.
+- Defining customer-published services or their management experience.
+- Defining DNS contexts, record publication, or resolver cache isolation.
+
+## Proposal
+
+A service owner publishes an endpoint and maintains its availability. Trusted
+networking integration authorizes consumer attachments and assigns a private
+frontend. Galactic delivers only the permitted address, protocol, and port to an
+eligible producer. Service health and network programming are separate readiness
+requirements.
+
+### User stories
+
+- A workload uses the network's inherited DNS resolver without selecting a
+  resolver deployment or configuring a service-specific route.
+- Two VPCs use the same frontend address and receive their own service context.
+- A service owner adds ready producers to shared capacity and withdraws unhealthy
+  producers without changing the consumer-facing address.
+
+### Notes, constraints, and caveats
+
+Endpoint addresses must be reachable and accepted by the producer listener.
+Publishing an endpoint does not configure the producer address. The initial
+frontend design translates within one address family; cross-family translation
+requires a separate design. Addresses in the manifests are illustrative.
+
+A new consumer creates endpoint and authorization data, not a producer
+workload. Producer reselection does not promise continuity for established
+connections. Regional placement and fallback are explicit policies.
+
+### Risks and mitigations
+
+- Incorrect access: protect integration credentials and selection labels, and
+  pin authorization to the live consumer VPC identity.
+- Stale programming: reconcile current resource lifetimes after restart and
+  define a bounded revocation policy before rollout.
+- Endpoint advertised too early: require service health and verified consumer
+  and producer path programming before publishing workload configuration.
+
+## Design Details
+
+### System architecture
 
 Networking integration translates project intent into location-specific network
 state. Galactic programs each node from its edge API. Traffic uses the applied
@@ -53,34 +134,142 @@ Galactic owns route compilation and packet handling. The
 describes the existing direct-endpoint contract. API schemas, map layouts, and
 deployment configuration remain in those component repositories.
 
-## Control-plane design
+### Proposed API surface
 
-### Endpoints and authorization
+Reuse the namespaced `ServiceEndpoint` and `ServiceRoutePolicy` APIs from the
+[network repository](https://github.com/datum-cloud/network/blob/main/api/v1alpha1/serviceroute_types.go).
+Add `consumerVPCRef` and `frontend` to `ServiceRoutePolicy`. These additions are
+implemented in the local prototype and remain proposed for the released API.
+No new per-VPC serving workload or DNS-specific Galactic resource is required.
 
-`ServiceEndpoint` declares the exact destination address, transport, and port
-that its producer attachments accept. The service owner configures the listener,
-address reachability, and health. Galactic does not discover a hidden backend
-behind that address.
+These resources live in the edge API. Endpoint descriptors and consumer policies
+share the consumer VPC's namespace. A descriptor can select producer attachments
+in the service's namespace. Project APIs and federation hold intent and placement;
+the trusted integration resolves edge VPC names and API-assigned UIDs when it
+creates authorization. A project UID is not an edge VPC UID.
 
-`ServiceRoutePolicy` selects authorized consumer attachments and references an
-endpoint in the same namespace. The proposed consumer VPC lifetime reference
-limits access to the live VPC. The proposed frontend address maps a
-consumer-facing endpoint to the producer's declared destination.
+Only platform controllers can write endpoints, policies, and labels that select
+producers or authorize consumers. Service owners configure listener addresses
+and expose eligible producer attachments. Galactic compiles the selected
+attachments and exact service tuple into node programming.
 
-Consumer policies and endpoint descriptors live in the consumer VPC's edge
-namespace. A descriptor can select producer attachments in the service's edge
-namespace. Only trusted platform controllers can write authorization or labels
-that select producers and consumers.
+### Endpoint declaration
 
-The integration derives serving placement from trusted network location state.
-Independent locations have separate programming and readiness. Cross-region
-fallback requires an explicit policy.
+The following descriptor lives in `consumer-a`. It selects shared DNS producers
+through platform-managed labels, including producers in the DNS service's edge
+namespace. Each eligible producer must serve this destination and DNS context.
 
-### Readiness and lifecycle
+```yaml
+apiVersion: network.datumapis.com/v1alpha1
+kind: ServiceEndpoint
+metadata:
+  name: context-a-dns-udp
+  namespace: consumer-a
+spec:
+  serviceClass: internal-dns
+  # Exact destination accepted by the producer, after frontend translation.
+  address: "fd70:100::10"
+  port: 53
+  protocol: udp
+  deliveryMode: PreferNodeLocal
+  region: us-central-1
+  attachmentSelector:
+    matchLabels:
+      networking.datumapis.com/service: internal-dns
+      topology.kubernetes.io/region: us-central-1
+```
 
-Policy acceptance confirms valid configuration. Advertising a usable endpoint
-also requires consumer and producer paths to be programmed and the service
-listener to be healthy.
+| Field                | Design                                                                                                                     |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `serviceClass`       | Identifies the capability; it does not grant access.                                                                       |
+| `address`            | Exact service-side destination. The service owner makes it routable and accepted by its listener.                          |
+| `port`, `protocol`   | One transport tuple. Protocol values are lowercase `udp` or `tcp`.                                                         |
+| `deliveryMode`       | `NodeLocal` requires a local producer; `PreferNodeLocal` permits a ready remote producer.                                  |
+| `attachmentSelector` | Selects replicas through platform-managed labels. Each selected producer must serve the declared tuple.                    |
+| `attachmentRef`      | Alternative to a selector: identifies one producer attachment by `namespace` and `name`. Use exactly one selection method. |
+| `region`             | Optional selection boundary. An empty value does not impose a region restriction.                                          |
+
+The address is not a Kubernetes Service frontend or an address from which
+Galactic discovers backends. An endpoint has one transport tuple; DNS requires
+separate UDP and TCP descriptors. Create `context-a-dns-tcp` with the same
+address, selector, placement, and port, and `protocol: tcp`.
+
+### Consumer access and frontend translation
+
+The policy references the endpoint in its own namespace. `consumerVPCRef` pins
+the VPC named `application-vpc` in `consumer-a` to its live edge UID. The selector
+narrows eligible attachments; it does not replace the VPC identity check.
+
+```yaml
+apiVersion: network.datumapis.com/v1alpha1
+kind: ServiceRoutePolicy
+metadata:
+  name: application-vpc-dns-udp
+  namespace: consumer-a
+spec:
+  serviceRef:
+    name: context-a-dns-udp
+  # Proposed: name and API-assigned UID of the VPC in this namespace.
+  consumerVPCRef:
+    name: application-vpc
+    uid: "22222222-2222-4222-8222-222222222222"
+  attachmentSelector:
+    matchLabels:
+      networking.datumapis.com/vpc-uid: "22222222-2222-4222-8222-222222222222"
+  protocolPorts:
+    - protocol: udp
+      port: 53
+  region: us-central-1
+  # Proposed: consumer-facing address; restored as the reply source.
+  frontend:
+    address: "fd53::53"
+```
+
+| Field                 | Design                                                                                                         |
+| --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `serviceRef.name`     | References a `ServiceEndpoint` in the policy namespace.                                                        |
+| `consumerVPCRef.name` | Proposed. Resolves the consumer VPC in the policy namespace.                                                   |
+| `consumerVPCRef.uid`  | Proposed. Pins the live VPC lifetime; a recreated VPC requires new authorization.                              |
+| `attachmentSelector`  | Selects consumer attachments through protected labels. Galactic also verifies their VPC membership.            |
+| `protocolPorts`       | Permitted tuples, each within the endpoint's declared tuple. Empty uses that endpoint's protocol and port.     |
+| `region`              | Optional consumer placement boundary; it does not authorize cross-region fallback.                             |
+| `frontend.address`    | Proposed. Matches consumer requests, translates to `ServiceEndpoint.spec.address`, and is restored on replies. |
+
+Create a matching TCP policy referencing `context-a-dns-tcp` and permitting
+`tcp/53`, with the same VPC reference, selector, region, and frontend. UDP and TCP
+must satisfy the same authorization and readiness requirements.
+
+A second VPC uses the same `fd53::53` frontend. Its descriptors and policies live
+in its own namespace, pin its own VPC UID, and use another service destination,
+such as `fd70:100::20`. The producer deployment remains shared. DNS maps those
+destinations to different contexts; Galactic does not interpret that mapping.
+
+### Validation and compatibility
+
+The proposed frontend contract requires a complete `consumerVPCRef` with name
+and UID. Galactic must resolve that live VPC and reject missing or mismatched
+identities. Each selected consumer must belong to that VPC and have the expected
+programmed network identity. Platform-managed labels alone cannot grant access.
+
+Admission and reconciliation must enforce:
+
+- Exactly one endpoint attachment selection method.
+- Valid frontend and endpoint IP addresses in the same family.
+- Ports from 1 through 65535 and supported transport values.
+- A policy's allowed tuples within its endpoint's declared tuple.
+- Consistent placement and current producer and consumer identities.
+
+Omitting `frontend` preserves direct delivery to the endpoint address. Existing
+policies without the new fields retain their existing contract; new translated
+access requires the lifetime pin. Frontend translation remains disabled by
+default until API and data-plane compatibility are qualified.
+
+### Status and lifecycle
+
+`ServiceRoutePolicy.status.observedGeneration` identifies the spec generation
+that its conditions describe. `Accepted` reports valid configuration; it does
+not prove that every required node has programmed the path. `ServiceEndpoint`
+does not provide a listener-health status contract.
 
 ```mermaid
 flowchart TB
@@ -90,13 +279,18 @@ flowchart TB
   R --> W[Publish endpoint configuration to workloads]
 ```
 
-The service owner withdraws unhealthy producers. Networking integration removes
-access when the consumer or service is deleted. Recreated resources receive new
-identities; stale work must not restore previous access. The released design
-needs a node-level programming acknowledgment and a bounded revocation policy.
-The current route policy does not provide an authorization lease.
+The release needs node-level programming acknowledgments and a service-owned
+health signal before integration advertises the frontend. Their API shape
+remains a design decision; this proposal does not add a `Programmed` or `Ready`
+condition that the existing controllers cannot verify.
 
-## Data-plane design
+Service owners withdraw unhealthy producers. Networking integration deletes
+access when the consumer or service is deleted. Galactic removes obsolete
+programming and reconciles current lifetimes after restart. Recreated VPCs and
+endpoints must not inherit previous grants. The current route policy has no
+authorization lease; rollout requires a bounded revocation policy.
+
+### Data plane
 
 Galactic classifies traffic by the trusted consumer attachment and endpoint
 tuple. The proposed frontend translation changes the destination to the
@@ -141,7 +335,7 @@ disambiguation for overlapping consumers that use identical tuples.
 This path is separate from Galactic's gateway `ServiceVIPBinding` mechanism.
 Publishing a private endpoint does not create gateway load-balancer state.
 
-## Internal DNS integration
+### Internal DNS integration
 
 Internal DNS uses a well-known frontend address in each consumer VPC. Its
 networking integration maps that frontend to an authorized service-side
@@ -152,19 +346,76 @@ DNS contexts, record publication, health-aware discovery, and resolver leases
 belong to the [DNS component design](https://github.com/datum-cloud/dns-operator/blob/docs/internal-dns-architecture/docs/architecture/internal-dns/README.md).
 The generic private-service path does not interpret DNS resources.
 
-## Operations and remaining work
+## Production readiness review questionnaire
+
+The enhancement remains provisional. Complete and approve the release targets
+and outstanding contracts before changing it to implementable.
+
+### Feature enablement and rollback
+
+Keep frontend translation disabled by default. Enable it only with compatible
+API schemas and integration controllers. Disabling it can interrupt consumers
+that depend on the frontend; validate cleanup and recovery before rollout.
+
+### Rollout, upgrade, and rollback planning
+
+Qualify mixed controller versions, node restart, policy replay, deletion, and
+upgrade followed by rollback and reenablement. Avoid advertising endpoints while
+required nodes lack the configuration. No existing API removal is proposed.
+
+### Monitoring requirements
+
+Observe acceptance, node programming, producer health, selected traffic,
+translation failures, and revocation lag separately. Define availability,
+latency, and revocation targets. Consumer status must distinguish valid intent
+from a usable endpoint; its readiness projection remains to be designed.
+
+### Dependencies
+
+Networking integration supplies edge intent and authorization. VPC and
+attachment controllers and Galactic supply network identity and packet paths.
+Remote delivery requires the protected fabric and service grants. Service owners
+supply address reachability, listener configuration, and health eligibility.
+
+### Scalability
+
+Endpoint and policy counts grow with consumer destinations and transports;
+producer workload counts grow with shared capacity. Bound route and reverse-flow
+maps, API reconciliation cost, configuration churn, and connection state before
+release. Exhaustion must fail closed and produce an observable failure.
+
+### Troubleshooting
 
 An API outage can delay updates and revocation while nodes retain applied state.
-Define retention and revocation budgets before rollout. Restart and replay must
-reconcile current intent and remove obsolete programming. Producer reselection
-does not promise continuity for established connections.
+Define retention and revocation budgets. Diagnose invalid policies, missing VPCs,
+unready producers, path-programming failures, and reply collisions separately.
+Verify the declared service destination and return path before investigating the
+application protocol.
 
-Observe policy acceptance, path programming, producer health, selection failures,
-and revocation lag separately. The frontend extension defaults to disabled in
-the local prototype.
+## Implementation history
 
-Local kernel tests cover local and remote service translation and authorization.
-The internal DNS suite validates live queries over the local path. Normal
-router/CNI lifecycle, independent edge APIs, remote live DNS traffic, rollout,
-capacity, and regional failures remain unqualified. Producer address ownership,
-readiness, and safe address reclamation need production lifecycle handling.
+Initial proposal: [Galactic PR #798](https://github.com/datum-cloud/galactic/pull/798).
+Local kernel tests cover local and remote translation and authorization. Live
+Internal DNS queries validate the local path. Normal router/CNI lifecycle,
+independent edge APIs, remote live DNS traffic, scale, and regional failures
+remain unqualified.
+
+## Drawbacks
+
+Distinct service destinations and per-consumer policies add address allocation
+and lifecycle work. Stateful reply handling consumes node capacity and limits
+connection continuity during producer changes.
+
+## Alternatives
+
+VPC peering grants broader connectivity and requires additional routing policy.
+Per-consumer service deployments increase operating cost. A single shared
+service destination needs another trustworthy identity mechanism and an
+unambiguous return path for overlapping consumers.
+
+## Infrastructure needed
+
+Release the network API extensions and compatible Galactic controllers. Provide
+shared producer attachments, service address allocation and reclamation,
+protected integration permissions, endpoint readiness reporting, and staging
+coverage for local and remote traffic.
