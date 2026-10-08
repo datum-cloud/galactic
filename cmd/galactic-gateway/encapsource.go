@@ -47,7 +47,9 @@ func (e noRouterYetError) Error() string {
 //
 // A node whose router is missing or still lacks a locator or node ID is
 // waited on, with backoff, until ctx is done. The gateway cannot advertise a
-// VIP without that router anyway, and readiness stays NOT_SERVING meanwhile.
+// VIP without that router anyway, and both health services stay NOT_SERVING
+// meanwhile, so the wait is bounded by the caller's startup probe: the
+// kubelet restarts the container when it expires, and the wait starts over.
 // Two routers for this node that disagree on the address are an error, never
 // a guess.
 func resolveEncapSource(ctx context.Context, reader client.Reader, nodeName, configured string) (string, error) {

@@ -580,7 +580,9 @@ zero (`2001:db8:ff01::/48` with `nodeID: 4098` gives
 It shares bits 1-64 with the CNI's `srv6.NodeSIDBase`, so both name the same
 node, but carries no End.DT46 function. The gateway waits, not ready, until
 such a router exists, and refuses to start if two routers for the node
-derive different addresses. A set value always wins, for a node that needs
+derive different addresses. The wait counts against the startupProbe, which
+allows 10 minutes before the kubelet restarts the container and the wait
+starts over (#796). A set value always wins, for a node that needs
 an override.
 
 ### Deployment (`config/galactic-gateway/base/daemonset.yaml`)
