@@ -95,7 +95,8 @@ var (
 // A guest learns its default route only from an RA, and one that solicited
 // before the actor was listening has lost that solicitation, so the first
 // advertisement goes out the moment the actor starts and the burst covers a
-// guest whose network stack was not yet up to receive it.
+// guest whose network stack was not yet up to receive it. A solicited reply
+// counts toward the burst, as the RFC permits.
 const MaxInitialRtrAdvertisements = 3
 
 // nextUnsolicitedDelay returns the delay before the next unsolicited RA, given

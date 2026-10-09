@@ -714,6 +714,14 @@ type radvPending struct {
 	// carrier, so a guest that restarts gets a fresh, fast retry cycle.
 	failures int
 	retryAt  time.Time
+	// notReady counts consecutive starts that exhausted their retries on
+	// radv.ErrAddrNotReady. The first radvWarnAfterFailures-1 retry on the next
+	// reconcile with no backoff, since the address is normally still being
+	// assigned; from radvWarnAfterFailures on the interface has carrier but no
+	// usable link-local address (for instance IPv6 disabled), so one warning is
+	// logged and retries back off. It resets with failures, and on any other
+	// failure.
+	notReady int
 	// noCarrier records that the last reconcile found the interface without
 	// carrier, so the wait is logged once rather than on every tick.
 	noCarrier bool
@@ -837,7 +845,15 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 		p.missingSince = time.Time{}
 		seen[r.HostInterface] = struct{}{}
 
-		if _, running := actors.cancel[r.HostInterface]; running {
+		if cancel, running := actors.cancel[r.HostInterface]; running {
+			if !carrier {
+				// The guest went away while its actor kept running. Stop the
+				// actor, so the carrier's return starts a fresh one that sends
+				// an immediate advertisement and a new initial burst.
+				cancel()
+				delete(actors.cancel, r.HostInterface)
+				radvReadyToStart(p, r.HostInterface, carrier, now)
+			}
 			continue
 		}
 		if !radvReadyToStart(p, r.HostInterface, carrier, now) {
@@ -937,6 +953,7 @@ func radvReadyToStart(p *radvPending, iface string, carrier bool, now time.Time)
 		}
 		p.noCarrier = true
 		p.failures = 0
+		p.notReady = 0
 		p.retryAt = time.Time{}
 		return false
 	}
@@ -955,6 +972,16 @@ func radvPendingFor(actors *radvActorSet, iface string) *radvPending {
 	return p
 }
 
+// radvBackoff returns the delay after the nth consecutive failure: it starts at
+// radvReconcileInterval, doubles each time and stops at radvMaxRetryBackoff.
+func radvBackoff(n int) time.Duration {
+	backoff := radvReconcileInterval << min(max(n-1, 0), 16)
+	if backoff <= 0 || backoff > radvMaxRetryBackoff {
+		backoff = radvMaxRetryBackoff
+	}
+	return backoff
+}
+
 // radvActorFailed clears the map entry for an actor that could not start, so a
 // later reconcile sees the attachment as unserved and retries it once its
 // backoff has elapsed. Without it, reconcileRadvActors would stay convinced the
@@ -965,7 +992,8 @@ func radvPendingFor(actors *radvActorSet, iface string) *radvPending {
 // usable yet (radv.ErrAddrNotReady) is retried on the next reconcile and does
 // not count toward the backoff: the address is still being assigned, and
 // counting it would delay the guest's first advertisement for no fault of its
-// own.
+// own. Only when that keeps happening, radvWarnAfterFailures times in a row,
+// does it warn once and back off like an ordinary failure.
 //
 // Each attempt derives its context from one that lives as long as the process.
 // Only cancelling detaches the derived context. Deleting the entry alone leaves
@@ -980,16 +1008,24 @@ func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
 
 	p := radvPendingFor(actors, failure.iface)
 	if errors.Is(failure.err, radv.ErrAddrNotReady) {
-		p.retryAt = time.Time{}
-		slog.Debug("Router advertisement interface address not ready yet, will retry",
-			"err", failure.err, "hostInterface", failure.iface)
+		p.notReady++
+		if p.notReady < radvWarnAfterFailures {
+			p.retryAt = time.Time{}
+			slog.Debug("Router advertisement interface address not ready yet, will retry",
+				"err", failure.err, "hostInterface", failure.iface)
+			return
+		}
+		backoff := radvBackoff(p.notReady - radvWarnAfterFailures + 1)
+		p.retryAt = radvNow().Add(backoff)
+		if p.notReady == radvWarnAfterFailures {
+			slog.Warn("Router advertisement interface has carrier but no usable link-local address, backing off",
+				"err", failure.err, "hostInterface", failure.iface, "attempts", p.notReady, "maxBackoff", radvMaxRetryBackoff)
+		}
 		return
 	}
+	p.notReady = 0
 	p.failures++
-	backoff := radvReconcileInterval << min(p.failures-1, 16)
-	if backoff <= 0 || backoff > radvMaxRetryBackoff {
-		backoff = radvMaxRetryBackoff
-	}
+	backoff := radvBackoff(p.failures)
 	p.retryAt = radvNow().Add(backoff)
 
 	if p.failures == radvWarnAfterFailures {

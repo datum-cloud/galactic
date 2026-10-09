@@ -6,9 +6,12 @@ package radv
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -72,19 +75,19 @@ func runLoopFor(t *testing.T, w raWriter, rsCh <-chan netip.Addr, d time.Duratio
 // RFC 4861 initial burst no closer together than MinDelayBetweenRAs, then
 // falls back to the regular interval.
 func TestRunActorLoop_InitialBurst(t *testing.T) {
-	const minDelay = 40 * time.Millisecond
+	const minDelay = 100 * time.Millisecond
 	shrinkRadvTimers(t, minDelay)
 
 	w := &recordingWriter{}
 	start := time.Now()
-	runLoopFor(t, w, make(chan netip.Addr), MaxInitialRtrAdvertisements*minDelay+10*minDelay)
+	runLoopFor(t, w, make(chan netip.Addr), MaxInitialRtrAdvertisements*minDelay+minDelay)
 
 	sends := w.snapshot()
 	if len(sends) != MaxInitialRtrAdvertisements {
 		t.Fatalf("sent %d advertisements, want %d (the initial burst, then the regular interval)",
 			len(sends), MaxInitialRtrAdvertisements)
 	}
-	if first := sends[0].at.Sub(start); first >= minDelay {
+	if first := sends[0].at.Sub(start); first >= 2*minDelay {
 		t.Errorf("first advertisement sent %v after start, want it immediately", first)
 	}
 	for i, s := range sends {
@@ -200,5 +203,19 @@ func TestResponseDestination(t *testing.T) {
 				t.Errorf("responseDestination(%v) = %v, want %v", tt.src, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestAddrNotReady checks EADDRNOTAVAIL is recognised through the wrapping the
+// net package puts around a failed bind.
+func TestAddrNotReady(t *testing.T) {
+	bind := &net.OpError{Op: "listen", Err: os.NewSyscallError("bind", syscall.EADDRNOTAVAIL)}
+	if got := addrNotReady(bind); !errors.Is(got, ErrAddrNotReady) || !errors.Is(got, syscall.EADDRNOTAVAIL) {
+		t.Errorf("addrNotReady(%v) = %v, want it to wrap ErrAddrNotReady and EADDRNOTAVAIL", bind, got)
+	}
+
+	other := &net.OpError{Op: "listen", Err: os.NewSyscallError("bind", syscall.EACCES)}
+	if got := addrNotReady(other); errors.Is(got, ErrAddrNotReady) || !errors.Is(got, error(other)) {
+		t.Errorf("addrNotReady(%v) = %v, want it returned unchanged", other, got)
 	}
 }

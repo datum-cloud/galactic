@@ -42,7 +42,9 @@ type raWriter interface {
 // its default route without having to solicit one. Both jobs share one
 // connection and one last-sent clock, so a solicited reply also reschedules the
 // next unsolicited send rather than the guest receiving a redundant
-// advertisement moments later.
+// advertisement moments later. A solicited reply counts toward the initial
+// burst, which RFC 4861 section 6.2.4 permits, so a guest that solicits early
+// may see fewer than MaxInitialRtrAdvertisements unsolicited ones.
 //
 // Callers run one per recorded attachment, starting it when the attachment
 // appears and cancelling when it disappears or the daemon shuts down. It
@@ -98,12 +100,19 @@ func listen(ifi *net.Interface) (*ndp.Conn, error) {
 	if err != nil {
 		// The kernel refuses to bind an address that duplicate address
 		// detection still holds tentative.
-		if errors.Is(err, syscall.EADDRNOTAVAIL) {
-			return nil, fmt.Errorf("%w: %w", ErrAddrNotReady, err)
-		}
-		return nil, err
+		return nil, addrNotReady(err)
 	}
 	return conn, nil
+}
+
+// addrNotReady wraps err in ErrAddrNotReady when it is the kernel refusing to
+// bind an address, however deeply the net package wrapped EADDRNOTAVAIL, and
+// returns it unchanged otherwise.
+func addrNotReady(err error) error {
+	if errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return fmt.Errorf("%w: %w", ErrAddrNotReady, err)
+	}
+	return err
 }
 
 // hasLinkLocal reports whether addrs holds an IPv6 link-local unicast address.
@@ -164,10 +173,13 @@ func runActorLoop(
 	send := func(dst netip.Addr) {
 		ra := buildAdvertisement(mtu, hwAddr)
 		if err := conn.WriteTo(ra, nil, dst); err != nil {
+			// A failed write does not use up a slot in the initial burst, but
+			// the timer is still rescheduled so the next attempt is not lost.
 			slog.Warn("Failed to send router advertisement", "err", err, "hostInterface", iface, "dst", dst)
+		} else {
+			lastSent = time.Now()
+			sent++
 		}
-		lastSent = time.Now()
-		sent++
 		resendTimer.Reset(nextUnsolicitedDelay(sent))
 	}
 

@@ -189,7 +189,11 @@ var tapSettings = []struct {
 // silently.
 func ConfigureTapSysctls(iface string) error {
 	for _, entry := range tapSettings {
-		_ = gosysctl.Set(fmt.Sprintf(entry.format, iface), entry.value) // silently skip missing entries
+		name := fmt.Sprintf(entry.format, iface)
+		if err := gosysctl.Set(name, entry.value); err != nil {
+			// Non-fatal: a sysctl that does not exist is skipped.
+			logger.Debug("tap sysctl write failed", "sysctl", name, "err", err)
+		}
 	}
 	return nil
 }
