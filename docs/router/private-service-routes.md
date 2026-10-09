@@ -21,6 +21,14 @@ selected producer attachment and neighbor-resolvable on that attachment. A
 transparent socket bind by itself is insufficient when the producer VPC's FIB
 or neighbor discovery cannot deliver the VIP to that interface.
 
+Galactic treats an attachment as ready only when its status has
+`observedGeneration` equal to its generation, non-empty `node`, `vpc` and
+`vpcAttachment`, and `Ready` and `Programmed` both `True`. Galactic writes none
+of these. The controllers in
+[datum-cloud/cloud](https://github.com/datum-cloud/cloud) write them, partly
+from the `BGPAdvertisement` that `galactic-router` publishes for the
+attachment. Without them no attachment is ready and no route is programmed.
+
 Galactic selects one ready producer for each consumer. A node-local producer is
 preferred and ties are resolved deterministically by attachment namespace and
 name. More than one ready producer in the same node and VPC is rejected because

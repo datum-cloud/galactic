@@ -117,7 +117,7 @@ func selectRuleBackends(
 		}
 		key := types.NamespacedName{Namespace: attachment.Namespace, Name: attachment.Name}
 		if attachment.Status.Node == "" {
-			pending = append(pending, key.String()+": no node")
+			pending = append(pending, key.String()+": status.node not set by datum-cloud/cloud")
 			continue
 		}
 		addrs := attachmentIPv6Addresses(attachment)
