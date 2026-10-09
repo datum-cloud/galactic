@@ -35,8 +35,8 @@ var debounceInterval = 250 * time.Millisecond
 // whenever the underlay routing daemon withdraws those routes, which FRR does
 // for the length of every restart. Detaching on the first re-evaluation that
 // misses it drops all SRv6 traffic still arriving on that uplink until the
-// routes come back, 6 to 14 seconds in observed restarts. An uplink that
-// really stops carrying fabric routes still loses the hook once this passes.
+// routes come back. An uplink that really stops carrying fabric routes still
+// loses the hook once this passes.
 var detachHoldDown = 60 * time.Second
 
 // linkSubscribeFn and routeSubscribeFn are override points so tests can
@@ -207,11 +207,9 @@ func logDegradedSubscription(kind string, otherKindAlreadyNil bool) {
 //   - Every interface no longer present has this package's filter removed, so a
 //     downed or reassigned interface stops forwarding into whatever VRF its
 //     Argument used to resolve to. While its link still exists, that waits
-//     until it has been missing for detachHoldDown, so route churn such as an
-//     underlay routing daemon restart does not detach an uplink found only
-//     through BGP-learned routes. A link that no longer exists is dropped at
-//     once. When a hold-down ends, Watch re-evaluates on its own, with or
-//     without a netlink event.
+//     until it has been missing for detachHoldDown. A link that no longer
+//     exists is dropped at once. When a hold-down ends, Watch re-evaluates on
+//     its own, with or without a netlink event.
 //
 // A per-interface attach or detach failure is logged and retried on the next
 // re-evaluation, for as long as the mismatch persists. A resolution failure is
@@ -271,8 +269,7 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 	order := slices.Clone(initial)
 	w.publish(initial)
 
-	// missingSince records when each attached interface first dropped out of
-	// the resolved set, for detachHoldDown.
+	// missingSince records when each attached interface left the resolved set.
 	missingSince := make(map[string]time.Time)
 	var holdTimer *time.Timer
 	var holdC <-chan time.Time
@@ -404,13 +401,12 @@ func StartWatching(ctx context.Context, pinDir string) (
 // holdMissing returns the interfaces in current that are missing from next but
 // still inside their detachHoldDown, and the earliest time one of those holds
 // ends, zero when nothing is held. missingSince is updated in place: an
-// interface starts its hold the first time it is seen missing, and loses its
-// entry once it is resolved again or no longer attached. An expired entry is
-// kept while the interface stays attached, so a failed detach is retried
-// rather than held again.
+// interface's hold starts when it is first seen missing, and its entry is
+// dropped once it resolves again or is no longer attached. An expired entry
+// stays while the interface is attached, so a failed detach is retried.
 //
-// An interface whose link no longer resolves is never held. A deleted link has
-// no hook left to keep, and the name may come back as a different link.
+// An interface whose link is gone (netlink.LinkNotFoundError) is not held. Any
+// other lookup error holds it as if the link exists.
 func holdMissing(current, next map[string]struct{}, missingSince map[string]time.Time, now time.Time) (
 	held []string, expiry time.Time,
 ) {
@@ -428,8 +424,11 @@ func holdMissing(current, next map[string]struct{}, missingSince map[string]time
 			continue
 		}
 		if _, err := linkByNameFn(name); err != nil {
-			delete(missingSince, name)
-			continue
+			var notFound netlink.LinkNotFoundError
+			if errors.As(err, &notFound) {
+				delete(missingSince, name)
+				continue
+			}
 		}
 		since, ok := missingSince[name]
 		if !ok {

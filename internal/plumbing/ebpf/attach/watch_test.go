@@ -808,6 +808,15 @@ func holdDownScenario(t *testing.T, initial []string, resolves [][]string, extra
 	links ...string,
 ) (detached []string, published [][]string) {
 	t.Helper()
+	return holdDownScenarioErr(t, netlink.LinkNotFoundError{}, initial, resolves, extra, links...)
+}
+
+// holdDownScenarioErr is holdDownScenario with the error the fake link lookup
+// returns for names not in links.
+func holdDownScenarioErr(t *testing.T, missingErr error, initial []string, resolves [][]string, extra int,
+	links ...string,
+) (detached []string, published [][]string) {
+	t.Helper()
 
 	trigger := make(chan struct{}, 1)
 	routeSubscribeFn = stubRouteSubscribe(trigger)
@@ -817,7 +826,7 @@ func holdDownScenario(t *testing.T, initial []string, resolves [][]string, extra
 	t.Cleanup(func() { linkByNameFn = origLinkByName })
 	linkByNameFn = func(name string) (netlink.Link, error) {
 		if _, ok := exists[name]; !ok {
-			return nil, netlink.LinkNotFoundError{}
+			return nil, missingErr
 		}
 		return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}, nil
 	}
@@ -926,6 +935,20 @@ func TestWatch_DetachesDeletedLinkWithoutHoldDown(t *testing.T) {
 
 	if want := []string{lateUplink}; !reflect.DeepEqual(detached, want) {
 		t.Errorf("detached = %v, want %v", detached, want)
+	}
+}
+
+// TestWatch_HoldsOnLinkLookupError covers a link lookup that fails for a reason
+// other than the link being gone: the interface is held as if its link exists.
+func TestWatch_HoldsOnLinkLookupError(t *testing.T) {
+	withWatchTestDefaults(t)
+	detachHoldDown = time.Minute
+
+	detached, _ := holdDownScenarioErr(t, errors.New("netlink: resource busy"),
+		[]string{primaryUplink, lateUplink}, [][]string{{primaryUplink}}, 0, primaryUplink)
+
+	if len(detached) != 0 {
+		t.Errorf("detached %v after a transient lookup error, want nothing", detached)
 	}
 }
 
