@@ -285,7 +285,14 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("build backend uSID index: %w", err)
 	}
 
-	desired, outcomes, requeueAfter, err := r.gatherRules(ctx, gw.Namespace, ruleList.Items, sidIndex)
+	// One list for the whole pass, so each rule selects its backends from its
+	// own VPC's attachments (gatherRules groups them) without another list call.
+	attachments, err := listVPCAttachments(ctx, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	desired, outcomes, requeueAfter, err := r.gatherRules(ctx, gw.Namespace, ruleList.Items, attachments, sidIndex)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -341,10 +348,13 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 }
 
 // gatherRules builds this pass's engine state and rule outcomes from rules,
-// every NetworkRule in namespace, and settles the drain tracker against it. It
-// returns how long until a held rule's drain delay ends, or zero.
+// every NetworkRule in namespace, and settles the drain tracker against it.
+// attachments holds every VPCAttachment in the cluster; each rule selects from
+// those in its own VPC (groupAttachmentsByVPC). It returns how long until a
+// held rule's drain delay ends, or zero.
 func (r *NetworkGatewayReconciler) gatherRules(
-	ctx context.Context, namespace string, rules []bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex,
+	ctx context.Context, namespace string, rules []bgpv1alpha1.NetworkRule,
+	attachments []*cloudv1alpha1.VPCAttachment, sidIndex *backendSIDIndex,
 ) (gateway.EngineState, []ruleOutcome, time.Duration, error) {
 	logger := log.FromContext(ctx)
 	desired := gateway.EngineState{Rules: make(map[string]gateway.DesiredRule)}
@@ -361,7 +371,8 @@ func (r *NetworkGatewayReconciler) gatherRules(
 
 	// Every rule competes for its backends with every other rule in the
 	// namespace, the same set each backend node's binding writer compares.
-	owners := ruleBackendOwners(rules, sidIndex.attachments)
+	owners := ruleBackendOwners(rules, attachments)
+	byVPC := groupAttachmentsByVPC(attachments)
 
 	for i := range rules {
 		rule := &rules[i]
@@ -374,7 +385,7 @@ func (r *NetworkGatewayReconciler) gatherRules(
 			// the Programmed condition alone. Once they are gone, the drain
 			// tracker keeps it for ruleDrainDelay so the withdrawal can reach
 			// every peer before the datapath drops it.
-			o, draining, err := r.drainingOutcome(ctx, rule, sidIndex, owners)
+			o, draining, err := r.drainingOutcome(ctx, rule, byVPC[rule.Spec.VPCRef], sidIndex, owners)
 			if err != nil {
 				return desired, nil, 0, err
 			}
@@ -394,7 +405,7 @@ func (r *NetworkGatewayReconciler) gatherRules(
 			continue
 		}
 
-		dr, unresolved, err := buildDesiredRule(rule, sidIndex, owners)
+		dr, unresolved, err := buildDesiredRule(rule, byVPC[rule.Spec.VPCRef], sidIndex, owners)
 		if err != nil {
 			logger.Error(err, "build desired rule; skipping", "networkRule", rule.Name)
 			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err})
@@ -426,8 +437,10 @@ func (r *NetworkGatewayReconciler) clock() time.Time {
 // The rule is rebuilt as usual. If it no longer builds, for example because
 // its backends were deleted with it, the rule as this node last loaded it is
 // kept instead. If this node never loaded it, there is nothing to keep.
+// attachments are the candidates for rule's backends, as for buildDesiredRule.
 func (r *NetworkGatewayReconciler) drainingOutcome(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex, owners backendOwners,
+	ctx context.Context, rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
+	sidIndex *backendSIDIndex, owners backendOwners,
 ) (ruleOutcome, bool, error) {
 	if !controllerutil.ContainsFinalizer(rule, networkRuleFinalizer) {
 		return ruleOutcome{}, false, nil
@@ -444,7 +457,7 @@ func (r *NetworkGatewayReconciler) drainingOutcome(
 		return ruleOutcome{}, false, nil
 	}
 
-	dr, _, err := buildDesiredRule(rule, sidIndex, owners)
+	dr, _, err := buildDesiredRule(rule, attachments, sidIndex, owners)
 	if err != nil {
 		var ok bool
 		if dr, ok = r.drain.lastLoaded(rule.Namespace + "/" + rule.Name); !ok {
@@ -723,7 +736,7 @@ func pruneRuleAdvertisements(
 
 // buildDesiredRule converts rule into a gateway.DesiredRule. Its backends are
 // the IPv6 addresses of the VPCAttachments rule's BackendSelector picks from
-// sidIndex's attachments (selectRuleBackends), each resolved through sidIndex to the
+// attachments (selectRuleBackends), each resolved through sidIndex to the
 // SRv6 uSID of the node its attachment reports, with that backend's own slot
 // (backendSID), so a node hosting several of the rule's backends can tell which
 // one Maglev chose. There is no kernel VRF or FIB dependency.
@@ -741,7 +754,8 @@ func pruneRuleAdvertisements(
 // selector fails the rule outright, since that is a spec error rather than a
 // passing state.
 func buildDesiredRule(
-	rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex, owners backendOwners,
+	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
+	sidIndex *backendSIDIndex, owners backendOwners,
 ) (dr gateway.DesiredRule, unresolved []string, err error) {
 	vips := make([]netip.Addr, 0, len(rule.Spec.VIPAddresses))
 	for _, v := range rule.Spec.VIPAddresses {
@@ -756,7 +770,7 @@ func buildDesiredRule(
 		return gateway.DesiredRule{}, nil, err
 	}
 
-	sel, err := selectRuleBackends(rule, sidIndex.attachments, owners)
+	sel, err := selectRuleBackends(rule, attachments, owners)
 	if err != nil {
 		return gateway.DesiredRule{}, nil, err
 	}

@@ -11,7 +11,6 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
@@ -44,11 +43,10 @@ type backendSIDIndex struct {
 	routers      map[string]*bgpv1alpha1.BGPRouter
 	advs         []*bgpv1alpha1.BGPAdvertisement
 	vrfInstances map[string]*bgpv1alpha1.BGPVRFInstance // keyed by name: crdnames.BGPVRFInstanceName(vpc, nodeName)
-	attachments  []*cloudv1alpha1.VPCAttachment         // every VPCAttachment in the cluster; see selectRuleBackends
 }
 
 // buildBackendSIDIndex lists every BGPRouter, BGPAdvertisement, and
-// BGPVRFInstance in namespace, and every VPCAttachment in the cluster, once, so resolving many backends across a
+// BGPVRFInstance in namespace once, so resolving many backends across a
 // reconcile costs one set of list calls rather than one per backend.
 //
 // Advertisements with no VRFID or function set are excluded up front: those
@@ -84,12 +82,7 @@ func buildBackendSIDIndex(ctx context.Context, c client.Client, namespace string
 		vrfInstances[vrfList.Items[i].Name] = &vrfList.Items[i]
 	}
 
-	attachments, err := listVPCAttachments(ctx, c)
-	if err != nil {
-		return nil, err
-	}
-
-	return &backendSIDIndex{routers: routers, advs: advs, vrfInstances: vrfInstances, attachments: attachments}, nil
+	return &backendSIDIndex{routers: routers, advs: advs, vrfInstances: vrfInstances}, nil
 }
 
 // verifyTenantOwnership reports whether adv, matched against an address by

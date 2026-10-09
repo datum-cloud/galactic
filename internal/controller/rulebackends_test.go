@@ -5,14 +5,17 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/srv6"
@@ -238,5 +241,83 @@ func TestRuleBackendOwners(t *testing.T) {
 				t.Errorf("rule a selection = %+v, want it to keep its backend", selA)
 			}
 		})
+	}
+}
+
+// TestAttachmentsByVPC_SelectSameBackends covers both ways a rule's candidate
+// attachments are narrowed to its VPC: galactic-router's indexed list
+// (listVPCAttachmentsInVPC) and the gateway's grouping of one full list
+// (groupAttachmentsByVPC). For every rule, each must select exactly the
+// backends and pending attachments the unfiltered list does.
+func TestAttachmentsByVPC_SelectSameBackends(t *testing.T) {
+	inBlue := newBackendAttachment("vpc-blue", "fd00:10::1")
+	alsoBlue := newBackendAttachment("vpc-blue", "fd00:10::2")
+	alsoBlue.Name = "also-blue"
+	alsoBlue.Status.Node = ""
+	inGreen := newBackendAttachment("vpc-green", "fd00:20::1")
+	unobserved := newBackendAttachment("vpc-blue", "fd00:10::3")
+	unobserved.Name = "unobserved"
+	unobserved.Status.VPC = ""
+
+	scheme := newRuleTestScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&cloudv1alpha1.VPCAttachment{}, VPCAttachmentByVPC, vpcAttachmentVPC).
+		WithObjects(inBlue, alsoBlue, inGreen, unobserved).
+		Build()
+	ctx := context.Background()
+
+	all, err := listVPCAttachments(ctx, c)
+	if err != nil {
+		t.Fatalf("listVPCAttachments: %v", err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("full list = %d attachments, want 4", len(all))
+	}
+	byVPC := groupAttachmentsByVPC(all)
+
+	for _, vpc := range []string{"vpc-blue", "vpc-green", "vpc-empty"} {
+		t.Run(vpc, func(t *testing.T) {
+			rule := newTestRule(testRuleName, vpc, testVIP)
+			want, err := selectRuleBackends(rule, all, nil)
+			if err != nil {
+				t.Fatalf("selectRuleBackends over the full list: %v", err)
+			}
+
+			indexed, err := listVPCAttachmentsInVPC(ctx, c, vpc)
+			if err != nil {
+				t.Fatalf("listVPCAttachmentsInVPC: %v", err)
+			}
+			for _, a := range indexed {
+				if a.Status.VPC != vpc {
+					t.Errorf("indexed list for %s holds %s/%s in VPC %q", vpc, a.Namespace, a.Name, a.Status.VPC)
+				}
+			}
+
+			for name, candidates := range map[string][]*cloudv1alpha1.VPCAttachment{
+				"indexed list": indexed,
+				"grouped list": byVPC[vpc],
+			} {
+				got, err := selectRuleBackends(rule, candidates, nil)
+				if err != nil {
+					t.Fatalf("selectRuleBackends over the %s: %v", name, err)
+				}
+				if !slices.Equal(got.backends, want.backends) || !slices.Equal(got.pending, want.pending) {
+					t.Errorf("%s selects backends %v, pending %v; full list selects %v, pending %v",
+						name, got.backends, got.pending, want.backends, want.pending)
+				}
+			}
+		})
+	}
+}
+
+// TestListVPCAttachmentsInVPC_RequiresIndex covers the index being part of
+// the contract: a client without it fails the list rather than silently
+// returning every attachment or none.
+func TestListVPCAttachmentsInVPC_RequiresIndex(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newRuleTestScheme(t)).
+		WithObjects(newBackendAttachment(testVPCRef)).Build()
+	if _, err := listVPCAttachmentsInVPC(context.Background(), c, testVPCRef); err == nil {
+		t.Fatal("listVPCAttachmentsInVPC without the index: err = nil, want an error")
 	}
 }
