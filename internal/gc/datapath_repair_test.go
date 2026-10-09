@@ -237,6 +237,26 @@ func (f *repairFixture) addAddr(ifindex int, cidr string) {
 	f.addrs[ifindex] = append(f.addrs[ifindex], *addr)
 }
 
+// addAdvertisement adds the BGPAdvertisement galactic-bgp's ADD publishes for
+// (vpc, vpcAttachment) on router, carrying prefixes, or the no-addressing
+// annotation when noAddressing is set.
+func (f *repairFixture) addAdvertisement(router, vpc, vpcAttachment string, noAddressing bool, prefixes ...string) {
+	adv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      crdnames.BGPAdvertisementName(vpc, vpcAttachment, repairNode),
+			Namespace: repairNamespace,
+		},
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{RouterRef: bgpv1alpha1.RouterRef{Name: router}},
+	}
+	if noAddressing {
+		adv.Annotations = map[string]string{crdnames.AnnotationNoAddressing: crdnames.AnnotationNoAddressingValue}
+	}
+	for _, p := range prefixes {
+		adv.Spec.Prefixes = append(adv.Spec.Prefixes, bgpv1alpha1.Prefix(p))
+	}
+	f.objects = append(f.objects, adv)
+}
+
 // run installs the fixture's state behind every indirection and runs one
 // pass.
 func (f *repairFixture) run() (DatapathRepairResult, error) {
@@ -489,6 +509,94 @@ func TestRepairAttachmentDatapath_TapWithoutIPAM(t *testing.T) {
 	}
 	if kind, _, _ := f.mem.maps.EgressKind.Get(11); kind != usidmap.EgressKindTap {
 		t.Errorf("egress kind = %d, want EgressKindTap", kind)
+	}
+}
+
+// TestRepairAttachmentDatapath_AdvertisedPrefixes covers the guest prefixes
+// only the attachment's BGPAdvertisement records: a static address with no
+// gateway has no route in the kernel (#806).
+func TestRepairAttachmentDatapath_AdvertisedPrefixes(t *testing.T) {
+	const (
+		guest6 = "fd20:31:ff03::/96"
+		guest4 = "10.1.0.7/32"
+	)
+	tests := []struct {
+		name string
+		// gateway gives the attachment the kernel state a gateway installs:
+		// the pod-subnet route and the host gateway address.
+		gateway      bool
+		router       string
+		noAddressing bool
+		advertised   []string
+		wantRoutes   []string
+		wantCount    int
+		// wantGateway is whether a tenant_gw_table row is written at all.
+		wantGateway bool
+	}{
+		{
+			name:   "StaticNoGateway",
+			router: repairRouter,
+			// The IPv6 subnet as ADD records it, with the address's host bits.
+			advertised:  []string{"fd20:31:ff03::5/96", guest4},
+			wantRoutes:  []string{guest6, guest4},
+			wantCount:   2,
+			wantGateway: true,
+		},
+		{
+			name:        "AlreadyInKernel",
+			gateway:     true,
+			router:      repairRouter,
+			advertised:  []string{guest6},
+			wantRoutes:  []string{guest6, "fd20:31::1/128"},
+			wantCount:   2,
+			wantGateway: true,
+		},
+		{
+			name:         "NoAddressing",
+			router:       repairRouter,
+			noAddressing: true,
+		},
+		{
+			name:       "OtherRouter",
+			router:     "router-b",
+			advertised: []string{guest6},
+		},
+		{
+			name:       "UnparsablePrefix",
+			router:     repairRouter,
+			advertised: []string{"not-a-prefix", guest4},
+			wantRoutes: []string{guest4},
+			wantCount:  1,
+			// The advertisement still shows an IPAM result.
+			wantGateway: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRepairFixture(t)
+			vrf := f.addVRF("G0000000jUV", 10, 7)
+			f.addVRFInstance(crdnames.BGPVRFInstanceName("jU", repairNode), 0x21)
+			f.addHostLink(attachreg.InterfaceTypeVeth, "G0000000jUabcH", 11, vrf)
+			if tt.gateway {
+				f.addPodRoute(7, 11, guest6)
+				f.addAddr(11, "fd20:31::1/128")
+			}
+			f.addAdvertisement(tt.router, "jU", "abc", tt.noAddressing, tt.advertised...)
+
+			result, err := f.run()
+			if err != nil {
+				t.Fatalf("RepairAttachmentDatapath: %v", err)
+			}
+			if result.Rebuilt.LocalEgressRoutes != tt.wantCount {
+				t.Errorf("rebuilt %d local pass-through routes, want %d", result.Rebuilt.LocalEgressRoutes, tt.wantCount)
+			}
+			wantPassThrough(t, f.mem, 7, tt.wantRoutes...)
+
+			_, _, ok, err := f.mem.maps.Gateway.Get(11)
+			if err != nil || ok != tt.wantGateway {
+				t.Errorf("tenant_gw_table[11] present %v err %v, want present %v", ok, err, tt.wantGateway)
+			}
+		})
 	}
 }
 
