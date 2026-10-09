@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -75,6 +76,19 @@ func backendAddresses(bindings []bgpv1alpha1.ServiceVIPBinding) []string {
 		out = append(out, b.Spec.BackendAddress)
 	}
 	return out
+}
+
+// markBindingBound reports binding Bound for its current generation, as
+// ServiceVIPBindingReconciler does once its rows are programmed.
+func markBindingBound(t *testing.T, c client.Client, binding bgpv1alpha1.ServiceVIPBinding) {
+	t.Helper()
+	meta.SetStatusCondition(&binding.Status.Conditions, metav1.Condition{
+		Type: bgpv1alpha1.ConditionTypeBound, Status: metav1.ConditionTrue, Reason: reasonBindingsBound,
+		ObservedGeneration: binding.Generation,
+	})
+	if err := c.Status().Update(context.Background(), &binding); err != nil {
+		t.Fatalf("update binding status: %v", err)
+	}
 }
 
 func getBindingRule(t *testing.T, c client.Client) *bgpv1alpha1.NetworkRule {
@@ -315,14 +329,7 @@ func TestNetworkRuleBindingReconciler_BackendsBoundCondition(t *testing.T) {
 		t.Errorf("BackendsBound message = %q, want it to name the unbound backend", cond.Message)
 	}
 
-	binding := listBindings(t, c)[0]
-	meta.SetStatusCondition(&binding.Status.Conditions, metav1.Condition{
-		Type: bgpv1alpha1.ConditionTypeBound, Status: metav1.ConditionTrue, Reason: "Bound",
-		ObservedGeneration: binding.Generation,
-	})
-	if err := c.Status().Update(context.Background(), &binding); err != nil {
-		t.Fatalf("update binding status: %v", err)
-	}
+	markBindingBound(t, c, listBindings(t, c)[0])
 
 	reconcileBindings(t, r)
 	cond = meta.FindStatusCondition(getBindingRule(t, c).Status.Conditions, condType)
@@ -360,36 +367,63 @@ var invalidRuleEdits = []struct {
 }
 
 // TestNetworkRuleBindingReconciler_InvalidRuleOnServingNode covers a rule
-// made invalid while this node holds bindings for it: the bindings go, and
-// the node reports InvalidRule, and keeps reporting it on later passes once
-// it holds none.
+// made invalid while this node holds bindings for it: the bindings, and with
+// them the node's vip_xlat_table rows, stay untouched while the node reports
+// InvalidRule on every pass, and reverting the edit returns the rule to Bound
+// on the same bindings.
 func TestNetworkRuleBindingReconciler_InvalidRuleOnServingNode(t *testing.T) {
 	for _, tt := range invalidRuleEdits {
 		t.Run(tt.name, func(t *testing.T) {
 			r, c := newBindingWriter(t, newBindingTestRule(), newBackendAttachment(testVPCRef))
+			condType := backendsBoundConditionType(testComputeNodeName)
 			reconcileBindings(t, r)
-			if got := listBindings(t, c); len(got) != 1 {
-				t.Fatalf("bindings while valid = %d, want 1", len(got))
+			bindings := listBindings(t, c)
+			if len(bindings) != 1 {
+				t.Fatalf("bindings while valid = %d, want 1", len(bindings))
+			}
+			markBindingBound(t, c, bindings[0])
+			before := listBindings(t, c)[0]
+
+			// requireUnchanged fails unless the node's only binding is
+			// still the one written before the edit, never rewritten.
+			requireUnchanged := func(stage string) {
+				t.Helper()
+				got := listBindings(t, c)
+				if len(got) != 1 || got[0].Name != before.Name || got[0].ResourceVersion != before.ResourceVersion {
+					t.Fatalf("bindings %s = %+v, want %s unchanged at resourceVersion %s",
+						stage, got, before.Name, before.ResourceVersion)
+				}
 			}
 
+			original := getBindingRule(t, c).Spec.DeepCopy()
 			current := getBindingRule(t, c)
 			tt.edit(current)
 			if err := c.Update(context.Background(), current); err != nil {
 				t.Fatalf("update rule: %v", err)
 			}
-			condType := backendsBoundConditionType(testComputeNodeName)
 			for pass := 1; pass <= 2; pass++ {
 				reconcileBindings(t, r)
 
-				if got := listBindings(t, c); len(got) != 0 {
-					t.Errorf("pass %d: bindings = %d, want 0 for an invalid rule", pass, len(got))
-				}
+				requireUnchanged(fmt.Sprintf("on invalid pass %d", pass))
 				cond := meta.FindStatusCondition(getBindingRule(t, c).Status.Conditions, condType)
 				if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonBindingsInvalid ||
 					!strings.Contains(cond.Message, tt.message) {
 					t.Errorf("pass %d: BackendsBound = %+v, want False/%s naming %q",
 						pass, cond, reasonBindingsInvalid, tt.message)
 				}
+			}
+
+			current = getBindingRule(t, c)
+			current.Spec = *original
+			if err := c.Update(context.Background(), current); err != nil {
+				t.Fatalf("revert rule: %v", err)
+			}
+			reconcileBindings(t, r)
+
+			requireUnchanged("after the revert")
+			cond := meta.FindStatusCondition(getBindingRule(t, c).Status.Conditions, condType)
+			if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != reasonBindingsBound {
+				t.Errorf("BackendsBound after the revert = %+v, want True/%s", cond, reasonBindingsBound)
 			}
 		})
 	}
