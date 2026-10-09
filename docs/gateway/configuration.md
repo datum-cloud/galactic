@@ -494,6 +494,19 @@ it could not answer. Until then it appears in the rule's
 a backend whose node advertises no route for it yet. A rule with no backend
 at all is not loaded.
 
+Galactic never writes an attachment's status.
+[datum-cloud/cloud](https://github.com/datum-cloud/cloud)'s controllers do.
+One of them reads the `BGPAdvertisement` that `galactic-router` publishes for
+the attachment and copies the node of that advertisement's `BGPRouter` into
+`status.node`. Without them, an attachment with no `status.vpc` is never
+selected, so the rule reports no backends and no pending entry for it. An
+attachment whose `status.vpc` is set but whose `status.node` is not stays
+pending with `status.node not set by datum-cloud/cloud`. A rule whose
+attachments are all pending or unselected does not load. The containerlab lab
+runs none of these controllers, so
+`deploy/containerlab/scripts/publish-ns60-attachments.sh` patches
+`status.vpc` and `status.node` in by hand.
+
 Every accepted, non-deleting `NetworkRule` in the namespace is served by
 **every** `NetworkGateway` node identically — there is no
 `status.primaryNode`/placement field to set, and no per-node subset to

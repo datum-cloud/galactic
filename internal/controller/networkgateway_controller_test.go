@@ -441,10 +441,13 @@ func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 			wantUnresolved: []string{"[fd00:99::1]:8443"},
 		},
 		{
-			name:           "attachments not ready are pending",
-			attachments:    []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1"), pendingNode, ipv4Only},
-			wantBackends:   []string{testBackendAddr},
-			wantUnresolved: []string{"tenant-vpc-1/ipv4-only: no IPv6 address", "tenant-vpc-1/no-node: no node"},
+			name:         "attachments not ready are pending",
+			attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1"), pendingNode, ipv4Only},
+			wantBackends: []string{testBackendAddr},
+			wantUnresolved: []string{
+				"tenant-vpc-1/ipv4-only: no IPv6 address",
+				"tenant-vpc-1/no-node: status.node not set by datum-cloud/cloud",
+			},
 		},
 		{
 			name:         "other VPCs and unmatched labels are not selected",
