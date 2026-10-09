@@ -46,15 +46,6 @@ func TestRouterConfigDefaults(t *testing.T) {
 	if cfg.ServiceFrontendEnabled {
 		t.Error("service frontends must be disabled by default")
 	}
-	if cfg.WebhookEnabled {
-		t.Error("WebhookEnabled = true, want false (disabled by default)")
-	}
-	if cfg.WebhookPort != DefaultRouterWebhookPort {
-		t.Errorf("WebhookPort = %d, want %d", cfg.WebhookPort, DefaultRouterWebhookPort)
-	}
-	if cfg.WebhookCertDir != "" {
-		t.Errorf("WebhookCertDir = %q, want empty", cfg.WebhookCertDir)
-	}
 	if len(cfg.BMPStations) != 0 {
 		t.Errorf("BMPStations = %v, want none (BMP disabled by default)", cfg.BMPStations)
 	}
@@ -75,9 +66,6 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvRouterGRPCHealthPort, "5179")
 	t.Setenv(EnvRouterGCNamespace, "custom-ns")
 	t.Setenv(EnvRouterGCInterval, "10m")
-	t.Setenv(EnvRouterWebhookEnabled, testBoolTrue)
-	t.Setenv(EnvRouterWebhookPort, "9444")
-	t.Setenv(EnvRouterWebhookCertDir, "/tmp/certs")
 	t.Setenv(EnvRouterBMPStations, "gobmp.galactic-system.svc:5000, [2001:db8::5]:5000,")
 	t.Setenv(EnvRouterBMPPolicy, "local-rib")
 	t.Setenv(EnvRouterBMPStatisticsInterval, "0s")
@@ -107,15 +95,6 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	}
 	if cfg.GCInterval != 10*time.Minute {
 		t.Errorf("GCInterval = %v, want 10m", cfg.GCInterval)
-	}
-	if !cfg.WebhookEnabled {
-		t.Error("WebhookEnabled = false, want true")
-	}
-	if cfg.WebhookPort != 9444 {
-		t.Errorf("WebhookPort = %d, want 9444", cfg.WebhookPort)
-	}
-	if cfg.WebhookCertDir != "/tmp/certs" {
-		t.Errorf("WebhookCertDir = %q, want %q", cfg.WebhookCertDir, "/tmp/certs")
 	}
 	wantStations := []string{"gobmp.galactic-system.svc:5000", "[2001:db8::5]:5000"}
 	if strings.Join(cfg.BMPStations, ",") != strings.Join(wantStations, ",") {
@@ -186,14 +165,6 @@ func TestRouterConfigValidate(t *testing.T) {
 				EnvRouterGRPCHealthPort: "0",
 			},
 			wantErr: testErrGRPCHealthPortRange,
-		},
-		{
-			name: "invalid webhook port",
-			envVars: map[string]string{
-				EnvRouterNodeName:    testRouterNodeName,
-				EnvRouterWebhookPort: "0",
-			},
-			wantErr: "webhook port must be between",
 		},
 		{
 			name: "valid bmp stations",

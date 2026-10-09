@@ -445,17 +445,17 @@ There is deliberately **no** self-address or primary-node field on this
 status — DSR has nothing analogous to publish. Create one object per
 gateway node, named after that node (see the worked example above).
 
-### `NetworkRule` — tenant-writable ingress load-balancing spec
+### `NetworkRule` — internal ingress load-balancing spec
 
-| Field                  | Required | Type                   | Description                                                                                                                                                                                            |
-| ---------------------- | -------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the companion operator, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                       |
-| `spec.vipAddresses`    | Yes      | `[]string` (1–8)       | Ingress VIP addresses this rule provisions. The backend nodes translate IPv6 VIPs only (#705).                                                                                                         |
-| `spec.protocol`        | Yes      | `tcp` \| `udp`         | Transport protocol matched by `vipAddresses`/`port`.                                                                                                                                                   |
-| `spec.port`            | Yes      | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances.                                                                                                                                                |
-| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`cloud.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends. Must not be empty.                                 |
-| `spec.backendPort`     | Yes      | `int32` (1–65535)      | Destination port on every selected backend.                                                                                                                                                            |
-| `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes exist; see the admission-webhook caveat below), `<gateway-node>/Programmed` per gateway node, and `<backend-node>/BackendsBound` per node hosting a backend. |
+| Field                  | Required | Type                   | Description                                                                                                                                                                                                        |
+| ---------------------- | -------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the companion operator, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                                   |
+| `spec.vipAddresses`    | Yes      | `[]string` (1–8)       | Ingress VIP addresses this rule provisions. The backend nodes translate IPv6 VIPs only (#705).                                                                                                                     |
+| `spec.protocol`        | Yes      | `tcp` \| `udp`         | Transport protocol matched by `vipAddresses`/`port`.                                                                                                                                                               |
+| `spec.port`            | Yes      | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances.                                                                                                                                                            |
+| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`cloud.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends. Must not be empty.                                             |
+| `spec.backendPort`     | Yes      | `int32` (1–65535)      | Destination port on every selected backend.                                                                                                                                                                        |
+| `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes exist in the namespace; not an ownership check, see below), `<gateway-node>/Programmed` per gateway node, and `<backend-node>/BackendsBound` per node hosting a backend. |
 
 Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkrules.yaml`:
 
@@ -528,11 +528,12 @@ stops serving it. The rule's finalizer deletes its `BGPAdvertisement`s,
 and each node keeps the rule loaded until they are gone plus a 5-second
 drain delay, so traffic already on its way to the VIP is not dropped.
 
-> **Known constraint:** no `NetworkRule` admission webhook is deployed in
-> this repo today. `Accepted` is set `True` unconditionally once gateway
-> nodes exist for the namespace — anyone who can create a `NetworkRule` in
-> `galactic-system` can currently provision ingress for any `vpcRef`. See
-> ARCHITECTURE-GATEWAY.md's Known Constraints for detail.
+> **Note:** `NetworkRule` is not a tenant API. The platform API that serves
+> tenants writes it, after checking that the tenant owns the VPC `vpcRef`
+> names. Galactic does not repeat that check: `Accepted` means only that
+> gateway nodes exist in the namespace. Anyone RBAC allows to write a
+> `NetworkRule` in `galactic-system` can provision ingress for any `vpcRef`,
+> so grant that access only to platform controllers.
 
 ### `ServiceVIPBinding` — the backend-side half, generated by `galactic-router`
 

@@ -259,7 +259,7 @@ func TestNetworkRuleReconciler_AcceptedFollowsSpecGeneration(t *testing.T) {
 	rule.Finalizers = []string{networkRuleFinalizer}
 	meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
 		Type: bgpv1alpha1.ConditionTypeAccepted, Status: metav1.ConditionTrue,
-		Reason: "GatewayNodesRegistered", ObservedGeneration: 1,
+		Reason: reasonGatewayNodesRegistered, ObservedGeneration: 1,
 	})
 
 	fakeClient := fake.NewClientBuilder().

@@ -25,7 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/config"
@@ -39,7 +38,6 @@ import (
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/gobgp"
 	"go.datum.net/galactic/internal/serviceroute"
-	networkwebhook "go.datum.net/galactic/internal/webhook"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -93,15 +91,6 @@ func runCmd(cfg *config.RouterConfig) error {
 			BindAddress: fmt.Sprintf(":%d", metricsPort),
 		},
 	}
-	// The NetworkRule admission webhook is opt-in: enabling it requires TLS
-	// cert material plus the webhook configuration and service manifests to be
-	// applied.
-	if cfg.WebhookEnabled {
-		mgrOptions.WebhookServer = webhook.NewServer(webhook.Options{
-			Port:    cfg.WebhookPort,
-			CertDir: cfg.WebhookCertDir,
-		})
-	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOptions)
 	if err != nil {
@@ -140,17 +129,6 @@ func runCmd(cfg *config.RouterConfig) error {
 		<-ctx.Done()
 		grpcSrv.GracefulStop()
 	}()
-
-	if cfg.WebhookEnabled {
-		validator := &networkwebhook.NetworkRuleValidator{
-			// TODO(edge-gateway): a placeholder authorizer. Wire a real
-			// one here once the companion operator integration exists.
-			Authorizer: networkwebhook.AllowAllAuthorizer{},
-		}
-		if err := validator.SetupWebhookWithManager(mgr); err != nil {
-			return fmt.Errorf("setup NetworkRule webhook: %w", err)
-		}
-	}
 
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
@@ -469,13 +447,6 @@ func newRootCommand() *cobra.Command {
 		"Cleanup interval")
 	cmd.Flags().Bool("service-frontend-enabled", false,
 		"Enable consumer-facing private-service address translation")
-	cmd.Flags().Bool("webhook-enabled", false,
-		"Enable the NetworkRule admission webhook (requires TLS cert material; see config/webhook/)")
-	cmd.Flags().IntP("webhook-port", "",
-		config.DefaultRouterWebhookPort,
-		"Webhook server listen port")
-	cmd.Flags().StringP("webhook-cert-dir", "", "",
-		"Directory containing the webhook server's TLS cert/key; defaults to controller-runtime's own default")
 	cmd.Flags().String("bmp-stations", "",
 		"Comma-separated BMP collectors to stream to, each host:port; empty disables BMP")
 	cmd.Flags().String("bmp-policy", config.DefaultRouterBMPPolicy,

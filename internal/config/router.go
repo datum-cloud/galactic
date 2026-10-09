@@ -28,10 +28,6 @@ const (
 	DefaultRouterGCNamespace    = "galactic-system"
 	DefaultRouterGCInterval     = 5 * time.Minute
 
-	// DefaultRouterWebhookPort matches controller-runtime's own default, named
-	// here so callers need not import that package to read it.
-	DefaultRouterWebhookPort = 9443
-
 	// DefaultRouterBMPPolicy streams each peer's Adj-RIB-In before import
 	// policy, the full record of what every peer sent. On a route reflector
 	// that is every node's advertisements.
@@ -60,15 +56,6 @@ const (
 	EnvRouterGCNamespace            = "GALACTIC_ROUTER_GC_NAMESPACE"
 	EnvRouterGCInterval             = "GALACTIC_ROUTER_GC_INTERVAL"
 	EnvRouterServiceFrontendEnabled = "GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED"
-
-	// EnvRouterWebhookEnabled gates the NetworkRule admission webhook. It
-	// defaults to false: enabling it requires TLS cert material this repo does
-	// not provision, plus the webhook configuration and service manifests
-	// actually being applied. Turning it on without both is a broken deployment
-	// rather than a safe default.
-	EnvRouterWebhookEnabled = "GALACTIC_ROUTER_WEBHOOK_ENABLED"
-	EnvRouterWebhookPort    = "GALACTIC_ROUTER_WEBHOOK_PORT"
-	EnvRouterWebhookCertDir = "GALACTIC_ROUTER_WEBHOOK_CERT_DIR"
 
 	// EnvRouterBMPStations lists the BMP collectors to stream to, as a
 	// comma-separated list of host:port. Empty, the default, disables BMP.
@@ -103,12 +90,6 @@ type RouterConfig struct {
 	GCInterval             time.Duration
 	ServiceFrontendEnabled bool
 
-	// WebhookEnabled, WebhookPort, and WebhookCertDir configure the NetworkRule
-	// admission webhook. Disabled by default.
-	WebhookEnabled bool
-	WebhookPort    int
-	WebhookCertDir string
-
 	// BMPStations, BMPPolicy, and BMPStatisticsInterval configure BMP export to
 	// collectors. BMPStations holds each collector as host:port; empty
 	// disables BMP.
@@ -134,9 +115,6 @@ func NewRouterConfig() *RouterConfig {
 	v.SetDefault("gc_namespace", DefaultRouterGCNamespace)
 	v.SetDefault("gc_interval", DefaultRouterGCInterval.String())
 	v.SetDefault("service_frontend_enabled", false)
-	v.SetDefault("webhook_enabled", false)
-	v.SetDefault("webhook_port", DefaultRouterWebhookPort)
-	v.SetDefault("webhook_cert_dir", "")
 	v.SetDefault("bmp_stations", "")
 	v.SetDefault("bmp_policy", DefaultRouterBMPPolicy)
 	v.SetDefault("bmp_statistics_interval", DefaultRouterBMPStatisticsInterval.String())
@@ -165,9 +143,6 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{"gc-namespace", "gc_namespace"},
 		{"gc-interval", "gc_interval"},
 		{"service-frontend-enabled", "service_frontend_enabled"},
-		{"webhook-enabled", "webhook_enabled"},
-		{"webhook-port", "webhook_port"},
-		{"webhook-cert-dir", "webhook_cert_dir"},
 		{"bmp-stations", "bmp_stations"},
 		{"bmp-policy", "bmp_policy"},
 		{"bmp-statistics-interval", "bmp_statistics_interval"},
@@ -194,9 +169,6 @@ func (c *RouterConfig) readFields() {
 	c.GCNamespace = c.v.GetString("gc_namespace")
 	c.GCInterval = c.v.GetDuration("gc_interval")
 	c.ServiceFrontendEnabled = c.v.GetBool("service_frontend_enabled")
-	c.WebhookEnabled = c.v.GetBool("webhook_enabled")
-	c.WebhookPort = c.v.GetInt("webhook_port")
-	c.WebhookCertDir = c.v.GetString("webhook_cert_dir")
 	c.BMPStations = splitCommaList(c.v.GetString("bmp_stations"))
 	c.BMPPolicy = c.v.GetString("bmp_policy")
 	c.BMPStatisticsInterval = c.v.GetDuration("bmp_statistics_interval")
@@ -216,9 +188,6 @@ func (c *RouterConfig) Validate() error {
 	}
 	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
 		return errors.New("grpc health port must be between 1 and 65535")
-	}
-	if c.WebhookPort < 1 || c.WebhookPort > 65535 {
-		return errors.New("webhook port must be between 1 and 65535")
 	}
 	return c.validateBMP()
 }

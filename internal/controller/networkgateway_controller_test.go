@@ -119,7 +119,7 @@ func acceptRule(rule *bgpv1alpha1.NetworkRule) {
 	meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
 		Type:   bgpv1alpha1.ConditionTypeAccepted,
 		Status: metav1.ConditionTrue,
-		Reason: bgpv1alpha1.AcceptedReasonOwnershipVerified,
+		Reason: reasonGatewayNodesRegistered,
 	})
 }
 

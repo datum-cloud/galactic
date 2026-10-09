@@ -41,6 +41,10 @@ const networkRuleFinalizer = "galactic.datum.net/networkrule-teardown"
 // leaving its advertisement never withdrawn.
 const networkRuleLabel = "galactic.datum.net/network-rule"
 
+// reasonGatewayNodesRegistered is the Accepted reason once gateway nodes exist
+// in the rule's namespace, the only thing Accepted reports.
+const reasonGatewayNodesRegistered = "GatewayNodesRegistered"
+
 // gatewayNodeLabel is set on every BGPAdvertisement applyBGPAdvertisements
 // creates. Its value is gatewayNodeLabelValue of the originating gateway node's
 // name, so withdrawNodeAdvertisements can select one node's routes by label.
@@ -149,11 +153,12 @@ func (r *NetworkRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // updateAcceptedCondition sets the Accepted condition once gateway nodes exist
 // for this namespace.
 //
-// The admission webhook cannot do it: a validating webhook cannot write to the
-// status of a request it has not yet admitted. Without this, the gate
-// NetworkGatewayReconciler applies while gathering rules would exclude every
-// rule from every gateway node and never create its advertisement, since
-// nothing else in this repo sets the condition.
+// Accepted means only that: a gateway node is registered to serve the rule. It
+// is not an ownership check. NetworkRule is internal, written by the platform
+// API that serves tenants, which verifies the tenant owns the VPC before it
+// writes the rule; who may write it here is decided by RBAC on its namespace.
+// NetworkGatewayReconciler programs only accepted rules, and nothing else sets
+// the condition.
 func (r *NetworkRuleReconciler) updateAcceptedCondition(ctx context.Context, rule *bgpv1alpha1.NetworkRule) error {
 	nodes, err := gatewayNodeNames(ctx, r.Client, rule.Namespace)
 	if err != nil {
@@ -186,7 +191,7 @@ func (r *NetworkRuleReconciler) updateAcceptedCondition(ctx context.Context, rul
 	setRuleCondition(ruleCopy, metav1.Condition{
 		Type:    bgpv1alpha1.ConditionTypeAccepted,
 		Status:  metav1.ConditionTrue,
-		Reason:  "GatewayNodesRegistered",
+		Reason:  reasonGatewayNodesRegistered,
 		Message: "gateway nodes are registered for this namespace",
 	})
 	return r.Status().Update(ctx, ruleCopy)

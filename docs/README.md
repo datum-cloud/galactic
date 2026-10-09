@@ -34,7 +34,7 @@ data flow, module reference, known constraints):
 ## Configuration — the "how" of deploying and operating each binary
 
 - [router/configuration.md](router/configuration.md) — `galactic-router`
-  env vars/CLI flags, the webhook options, and DaemonSet examples.
+  env vars/CLI flags and DaemonSet examples.
 - [router/private-service-routes.md](router/private-service-routes.md) — the
   direct-endpoint contract for `ServiceEndpoint`, producer selection, and why
   consumers receive no guest-visible service route.
