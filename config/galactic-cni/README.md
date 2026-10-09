@@ -81,10 +81,10 @@ fails there, so raise the limit in the same change.
 
 The test reads that size from each map's fdinfo `memlock` line. It is the
 kernel's estimate of the map, not the memory cgroup's charge, and it grows
-slightly with CPU count. The 40Mi allowance doubles as margin for
-that gap. The end-to-end check is loading the datapath in a memory cgroup:
-with a 32M limit it fails at `service_reverse_table` with `cannot allocate
-memory`, and with 96M it loads.
+slightly with CPU count. The 40Mi allowance doubles as margin for that gap.
+The end-to-end check is loading the datapath in a memory cgroup: with a 32M
+limit it fails at `service_reverse_table` with `cannot allocate memory`, and
+with 96M it loads.
 
 ## The `bpf-fs` hostPath mount
 
