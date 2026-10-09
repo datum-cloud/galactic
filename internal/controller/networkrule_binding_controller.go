@@ -67,6 +67,11 @@ const (
 	// that serve the rule report it, and they keep their bindings until the
 	// spec is fixed.
 	reasonBindingsInvalid = "InvalidRule"
+
+	// reasonBindingsClaimed: at least one backend the rule selects on this
+	// node is served by an older rule on the same backend port, so it gets no
+	// binding for this rule.
+	reasonBindingsClaimed = "BackendsClaimed"
 )
 
 // NetworkRuleBindingReconciler writes, on its own node, the ServiceVIPBindings
@@ -88,6 +93,12 @@ const (
 // datapath derive the backend set from selectRuleBackends, and the binding's
 // slot from its backend address and port, so the slot the gateway encodes and
 // the row this node writes always agree.
+//
+// A backend's reply on a backend port can be translated back to only one VIP,
+// so a backend serves only the oldest rule selecting it on that port and
+// protocol (ruleBackendOwners). Every rule in the namespace is compared, the
+// same set the gateways compare, so a rule that loses a backend gets no binding
+// for it here and no flows for it from the gateways.
 //
 // The rule's "<node>/BackendsBound" condition summarizes this node's bindings,
 // so a rule that is Programmed on the gateways but cannot reach a backend on
@@ -129,7 +140,12 @@ func (r *NetworkRuleBindingReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	desired, buildErr := r.desiredBindings(rule, attachments)
+	rules := &bgpv1alpha1.NetworkRuleList{}
+	if err := r.List(ctx, rules, client.InNamespace(rule.Namespace)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("list NetworkRules in %s: %w", rule.Namespace, err)
+	}
+	owners := ruleBackendOwners(rules.Items, attachments)
+	desired, claimed, buildErr := r.desiredBindings(rule, attachments, owners)
 	if buildErr != nil {
 		// The spec cannot be built into bindings: a second IPv6 VIP, or a
 		// selector that does not parse. Deleting the bindings then would
@@ -144,7 +160,7 @@ func (r *NetworkRuleBindingReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if err := r.publishCondition(ctx, rule, nil, buildErr, len(existing) > 0); err != nil {
+		if err := r.publishCondition(ctx, rule, nil, nil, buildErr, len(existing) > 0); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -153,35 +169,42 @@ func (r *NetworkRuleBindingReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.applyBindings(ctx, rule, desired); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.publishCondition(ctx, rule, desired, nil, false); err != nil {
+	if err := r.publishCondition(ctx, rule, desired, claimed, nil, false); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
 
 // desiredBindings returns the bindings this node needs for rule: one for its
-// IPv6 VIP per selected backend on this node. The datapath translates IPv6
-// only, so a rule with no IPv6 VIP needs none, and ruleTranslatedVIP refuses a
-// rule with more than one.
+// IPv6 VIP per selected backend on this node that owners does not assign to
+// another rule. It also returns the backends on this node it left out for that
+// reason. The datapath translates IPv6 only, so a rule with no IPv6 VIP needs
+// none, and ruleTranslatedVIP refuses a rule with more than one.
 func (r *NetworkRuleBindingReconciler) desiredBindings(
-	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
-) ([]*bgpv1alpha1.ServiceVIPBinding, error) {
+	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
+) ([]*bgpv1alpha1.ServiceVIPBinding, []claimedBackend, error) {
 	vip, ok, err := ruleTranslatedVIP(rule)
 	if err != nil || !ok {
-		return nil, err
+		return nil, nil, err
 	}
-	backends, _, err := selectRuleBackends(rule, attachments)
+	sel, err := selectRuleBackends(rule, attachments, owners)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var out []*bgpv1alpha1.ServiceVIPBinding
-	for _, b := range backends {
+	for _, b := range sel.backends {
 		if b.node == r.NodeName {
 			out = append(out, r.newBinding(rule, vip, b))
 		}
 	}
-	return out, nil
+	var claimed []claimedBackend
+	for _, c := range sel.claimed {
+		if c.node == r.NodeName {
+			claimed = append(claimed, c)
+		}
+	}
+	return out, claimed, nil
 }
 
 // newBinding builds the binding for one VIP and one backend on this node.
@@ -277,7 +300,9 @@ func (r *NetworkRuleBindingReconciler) nodeBindings(
 
 // publishCondition sets this node's BackendsBound condition on rule, or removes
 // it when the node hosts none of the rule's backends, so a rule's status names
-// only the nodes that serve it.
+// only the nodes that serve it. claimed are the backends on this node that
+// another rule serves, which the condition reports as not bound, so a node
+// holding only claimed backends still has a stake in the rule.
 //
 // An invalid rule is reported only by the nodes that serve it: those that
 // hold bindings for it (served), which a build error leaves in place. Every
@@ -286,10 +311,10 @@ func (r *NetworkRuleBindingReconciler) nodeBindings(
 // node per edit, each conflicting with the others.
 func (r *NetworkRuleBindingReconciler) publishCondition(
 	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired []*bgpv1alpha1.ServiceVIPBinding,
-	buildErr error, served bool,
+	claimed []claimedBackend, buildErr error, served bool,
 ) error {
 	condType := backendsBoundConditionType(r.NodeName)
-	stake := len(desired) > 0
+	stake := len(desired) > 0 || len(claimed) > 0
 	if buildErr != nil {
 		stake = served
 	}
@@ -312,15 +337,28 @@ func (r *NetworkRuleBindingReconciler) publishCondition(
 		if err != nil {
 			return err
 		}
-		if len(unbound) == 0 {
+		// Claimed backends lead the list: they stay unbound until the
+		// owning rule lets them go, while the rest are usually transient.
+		problems := make([]string, 0, len(claimed)+len(unbound))
+		for _, c := range claimed {
+			problems = append(problems, c.String())
+		}
+		problems = append(problems, unbound...)
+		switch {
+		case len(problems) == 0:
 			cond.Status = metav1.ConditionTrue
 			cond.Reason = reasonBindingsBound
 			cond.Message = fmt.Sprintf("%d bindings bound on node %s", len(desired), r.NodeName)
-		} else {
+		case len(claimed) > 0:
+			cond.Status = metav1.ConditionFalse
+			cond.Reason = reasonBindingsClaimed
+			cond.Message = fmt.Sprintf("%d of %d backends on node %s not bound: %s",
+				len(problems), len(desired)+len(claimed), r.NodeName, cappedList(problems))
+		default:
 			cond.Status = metav1.ConditionFalse
 			cond.Reason = reasonBindingsPending
 			cond.Message = fmt.Sprintf("%d of %d bindings on node %s not bound: %s",
-				len(unbound), len(desired), r.NodeName, cappedList(unbound, maxReadyFailures))
+				len(unbound), len(desired), r.NodeName, cappedList(unbound))
 		}
 	}
 	return r.updateRuleCondition(ctx, rule, func(conds *[]metav1.Condition) bool {
@@ -406,12 +444,24 @@ func (r *NetworkRuleBindingReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		// Accepted. Other status writes, including this reconciler's own
 		// conditions and the gateways' Programmed conditions, change neither.
 		For(&bgpv1alpha1.NetworkRule{}, builder.WithPredicates(ruleBindingInputsChanged())).
+		// Rules in one namespace compete for backends, so a rule appearing,
+		// going, or changing its spec can give another rule a backend or take
+		// one away. Every rule in its namespace is re-queued.
+		Watches(&bgpv1alpha1.NetworkRule{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return namespaceRuleRequests(ctx, r.Client, obj.GetNamespace())
+			}),
+			builder.WithPredicates(ruleBindingInputsChanged()),
+		).
 		// An attachment can enter or leave the selection only of rules in
 		// its VPC, or move to or from this node, so only the rules whose
 		// VPC is its observed VPC are re-queued. An update maps both the old
 		// and the new object, so an attachment moving between VPCs
 		// re-queues the rules of both. Updates that change nothing
-		// selectRuleBackends reads are dropped.
+		// ruleCandidateBackends reads are dropped. This also covers backend
+		// ownership: rules compete for a backend only within its VPC, so
+		// every rule an attachment change can give a backend to or take one
+		// from is in that VPC and is re-queued here.
 		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return vpcRuleRequests(ctx, r.Client, obj)
@@ -467,6 +517,21 @@ func vpcRuleRequests(ctx context.Context, c client.Client, obj client.Object) []
 		if list.Items[i].Spec.VPCRef != attachment.Status.VPC {
 			continue
 		}
+		reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return reqs
+}
+
+// namespaceRuleRequests returns a reconcile request for every NetworkRule in
+// namespace.
+func namespaceRuleRequests(ctx context.Context, c client.Client, namespace string) []ctrlreconcile.Request {
+	list := &bgpv1alpha1.NetworkRuleList{}
+	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "list NetworkRules for NetworkRule change", "namespace", namespace)
+		return nil
+	}
+	reqs := make([]ctrlreconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
 		reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
 	}
 	return reqs

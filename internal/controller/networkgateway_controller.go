@@ -147,8 +147,9 @@ const (
 
 	// reasonBackendsUnresolved is the per-node Programmed reason for a rule
 	// this node's engine loaded without one or more backends whose uSID did
-	// not resolve, for example while a backend pod is being recreated. The
-	// rule keeps serving through the rest.
+	// not resolve, for example while a backend pod is being recreated, or
+	// that an older rule serves on the same backend port. The rule keeps
+	// serving through the rest.
 	reasonBackendsUnresolved = "BackendsUnresolved"
 
 	// reasonTerminating is the Ready reason for a NetworkGateway being deleted,
@@ -358,6 +359,10 @@ func (r *NetworkGatewayReconciler) gatherRules(
 	// tracker can tell a deleted rule from one that merely stopped building.
 	live := make(map[string]bool, len(rules))
 
+	// Every rule competes for its backends with every other rule in the
+	// namespace, the same set each backend node's binding writer compares.
+	owners := ruleBackendOwners(rules, sidIndex.attachments)
+
 	for i := range rules {
 		rule := &rules[i]
 		if !rule.DeletionTimestamp.IsZero() {
@@ -369,7 +374,7 @@ func (r *NetworkGatewayReconciler) gatherRules(
 			// the Programmed condition alone. Once they are gone, the drain
 			// tracker keeps it for ruleDrainDelay so the withdrawal can reach
 			// every peer before the datapath drops it.
-			o, draining, err := r.drainingOutcome(ctx, rule, sidIndex)
+			o, draining, err := r.drainingOutcome(ctx, rule, sidIndex, owners)
 			if err != nil {
 				return desired, nil, 0, err
 			}
@@ -389,7 +394,7 @@ func (r *NetworkGatewayReconciler) gatherRules(
 			continue
 		}
 
-		dr, unresolved, err := buildDesiredRule(rule, sidIndex)
+		dr, unresolved, err := buildDesiredRule(rule, sidIndex, owners)
 		if err != nil {
 			logger.Error(err, "build desired rule; skipping", "networkRule", rule.Name)
 			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err})
@@ -422,7 +427,7 @@ func (r *NetworkGatewayReconciler) clock() time.Time {
 // its backends were deleted with it, the rule as this node last loaded it is
 // kept instead. If this node never loaded it, there is nothing to keep.
 func (r *NetworkGatewayReconciler) drainingOutcome(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex,
+	ctx context.Context, rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex, owners backendOwners,
 ) (ruleOutcome, bool, error) {
 	if !controllerutil.ContainsFinalizer(rule, networkRuleFinalizer) {
 		return ruleOutcome{}, false, nil
@@ -439,7 +444,7 @@ func (r *NetworkGatewayReconciler) drainingOutcome(
 		return ruleOutcome{}, false, nil
 	}
 
-	dr, _, err := buildDesiredRule(rule, sidIndex)
+	dr, _, err := buildDesiredRule(rule, sidIndex, owners)
 	if err != nil {
 		var ok bool
 		if dr, ok = r.drain.lastLoaded(rule.Namespace + "/" + rule.Name); !ok {
@@ -541,18 +546,20 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 		cond.Reason = reasonBackendsUnresolved
 		cond.Message = fmt.Sprintf("loaded on node %s with %d of %d backends; unresolved: %s",
 			node, len(o.desired.Backends), len(o.desired.Backends)+len(o.unresolved),
-			cappedList(o.unresolved, maxReadyFailures))
+			cappedList(o.unresolved))
 	}
 	return cond
 }
 
-// cappedList joins the first max items with ", ", followed by a count of the
-// rest, so a long list stays under the metav1.Condition message limit.
-func cappedList(items []string, max int) string {
-	if len(items) <= max {
+// cappedList joins the first maxReadyFailures items with ", ", followed by a
+// count of the rest, so a long list stays under the metav1.Condition message
+// limit.
+func cappedList(items []string) string {
+	if len(items) <= maxReadyFailures {
 		return strings.Join(items, ", ")
 	}
-	return fmt.Sprintf("%s and %d more", strings.Join(items[:max], ", "), len(items)-max)
+	return fmt.Sprintf("%s and %d more",
+		strings.Join(items[:maxReadyFailures], ", "), len(items)-maxReadyFailures)
 }
 
 // maxReadyFailures caps how many failed rules the Ready message names, so a
@@ -721,9 +728,11 @@ func pruneRuleAdvertisements(
 // (backendSID), so a node hosting several of the rule's backends can tell which
 // one Maglev chose. There is no kernel VRF or FIB dependency.
 //
-// A selected attachment that is not a backend yet, or a backend whose uSID
-// does not resolve, is left out and returned in unresolved, so the rule keeps
-// serving through the rest. A backend pod being recreated is enough to cause
+// A selected attachment that is not a backend yet, a backend owners assigns to
+// another rule, or a backend whose uSID does not resolve, is left out and
+// returned in unresolved, so the rule keeps serving through the rest. A
+// backend owned by another rule is left out because its node writes no
+// binding for this rule, so a flow sent to it would be dropped there. A backend pod being recreated is enough to cause
 // this, since its BGPAdvertisement is gone until the new pod is attached.
 // Every gateway node resolves from the same API objects and the Maglev table
 // depends only on the backend set, so nodes that see the same objects build
@@ -732,7 +741,7 @@ func pruneRuleAdvertisements(
 // selector fails the rule outright, since that is a spec error rather than a
 // passing state.
 func buildDesiredRule(
-	rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex,
+	rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex, owners backendOwners,
 ) (dr gateway.DesiredRule, unresolved []string, err error) {
 	vips := make([]netip.Addr, 0, len(rule.Spec.VIPAddresses))
 	for _, v := range rule.Spec.VIPAddresses {
@@ -747,14 +756,18 @@ func buildDesiredRule(
 		return gateway.DesiredRule{}, nil, err
 	}
 
-	selected, unresolved, err := selectRuleBackends(rule, sidIndex.attachments)
+	sel, err := selectRuleBackends(rule, sidIndex.attachments, owners)
 	if err != nil {
 		return gateway.DesiredRule{}, nil, err
 	}
+	unresolved = sel.pending
+	for _, c := range sel.claimed {
+		unresolved = append(unresolved, c.String())
+	}
 
-	backends := make([]gateway.DesiredBackend, 0, len(selected))
+	backends := make([]gateway.DesiredBackend, 0, len(sel.backends))
 	var firstResolveErr error
-	for _, b := range selected {
+	for _, b := range sel.backends {
 		usid, err := sidIndex.resolveUSID(b.addr, rule.Spec.VPCRef, b.node)
 		if err == nil {
 			usid, err = backendSID(usid, b.addr, b.port)
@@ -772,9 +785,12 @@ func buildDesiredRule(
 		switch {
 		case firstResolveErr != nil:
 			return gateway.DesiredRule{}, nil, fmt.Errorf("none of %d backends resolves: %w", len(unresolved), firstResolveErr)
+		case len(sel.claimed) > 0 && len(sel.pending) == 0:
+			return gateway.DesiredRule{}, nil, fmt.Errorf("every selected backend is served by an older rule: %s",
+				cappedList(unresolved))
 		case len(unresolved) > 0:
 			return gateway.DesiredRule{}, nil, fmt.Errorf("no selected attachment is a backend yet: %s",
-				cappedList(unresolved, maxReadyFailures))
+				cappedList(unresolved))
 		default:
 			return gateway.DesiredRule{}, nil, fmt.Errorf("backendSelector matches no VPCAttachment in VPC %s",
 				rule.Spec.VPCRef)

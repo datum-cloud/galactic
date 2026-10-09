@@ -10,9 +10,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -536,5 +538,119 @@ func TestNetworkRuleBindingReconciler_BindingRuleRequests(t *testing.T) {
 		if reqs := r.bindingRuleRequests(obj); len(reqs) != 0 {
 			t.Errorf("requests for a %s binding = %v, want none", name, reqs)
 		}
+	}
+}
+
+// testOlderRule and testNewerRule are two rules competing for one backend,
+// the first created before the second.
+const (
+	testOlderRule = "older"
+	testNewerRule = "newer"
+)
+
+// reconcileRule reconciles this node's bindings for the rule named name.
+func reconcileRule(t *testing.T, r *NetworkRuleBindingReconciler, name string) {
+	t.Helper()
+	req := ctrl.Request{NamespacedName: client.ObjectKey{Namespace: testNamespace, Name: name}}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile %s: %v", name, err)
+	}
+}
+
+// newSharingBindingRule returns an accepted rule named name with the IPv6 VIP
+// vip, created at second created and using backendPort, selecting
+// newBackendAttachment's attachments in testVPCRef.
+func newSharingBindingRule(name, vip string, created int64, backendPort int32) *bgpv1alpha1.NetworkRule {
+	rule := newTestRule(name, testVPCRef, vip)
+	rule.UID = types.UID(name + "-uid")
+	rule.CreationTimestamp = metav1.NewTime(time.Unix(created, 0))
+	rule.Spec.BackendPort = backendPort
+	acceptRule(rule)
+	return rule
+}
+
+// TestNetworkRuleBindingReconciler_SharedBackendServesOldestRule covers two
+// rules selecting one backend on one backend port: the node can translate the
+// backend's replies back to only one VIP, so only the older rule gets a
+// binding, and the newer one reports the backend as served by the older rule
+// rather than writing a binding that could only report Conflict.
+func TestNetworkRuleBindingReconciler_SharedBackendServesOldestRule(t *testing.T) {
+	tests := []struct {
+		name             string
+		newerBackendPort int32
+		wantNewerBound   bool
+	}{
+		{name: "same backend port", newerBackendPort: testBackendPort},
+		{name: "different backend port", newerBackendPort: testBackendPort + 1, wantNewerBound: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			older := newSharingBindingRule(testOlderRule, testBindingVIP, 100, testBackendPort)
+			newer := newSharingBindingRule(testNewerRule, "2001:db8:100::33", 200, tt.newerBackendPort)
+			r, c := newBindingWriter(t, newer, older, newBackendAttachment(testVPCRef))
+
+			reconcileRule(t, r, testNewerRule)
+			reconcileRule(t, r, testOlderRule)
+
+			byRule := map[string]int{}
+			for _, b := range listBindings(t, c) {
+				byRule[b.Labels[networkRuleLabel]]++
+			}
+			if byRule[testOlderRule] != 1 {
+				t.Errorf("rule older bindings = %d, want 1", byRule[testOlderRule])
+			}
+			wantNewer := 0
+			if tt.wantNewerBound {
+				wantNewer = 1
+			}
+			if byRule[testNewerRule] != wantNewer {
+				t.Errorf("rule newer bindings = %d, want %d", byRule[testNewerRule], wantNewer)
+			}
+
+			current := &bgpv1alpha1.NetworkRule{}
+			key := client.ObjectKey{Namespace: testNamespace, Name: testNewerRule}
+			if err := c.Get(context.Background(), key, current); err != nil {
+				t.Fatalf("get rule newer: %v", err)
+			}
+			cond := meta.FindStatusCondition(current.Status.Conditions, backendsBoundConditionType(testComputeNodeName))
+			if tt.wantNewerBound {
+				if cond == nil || cond.Reason == reasonBindingsClaimed {
+					t.Errorf("rule newer BackendsBound = %+v, want its own binding reported", cond)
+				}
+				return
+			}
+			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonBindingsClaimed ||
+				!strings.Contains(cond.Message, "served by NetworkRule "+testNamespace+"/"+testOlderRule) {
+				t.Errorf("rule newer BackendsBound = %+v, want False/%s naming NetworkRule %s/older",
+					cond, reasonBindingsClaimed, testNamespace)
+			}
+		})
+	}
+}
+
+// TestNetworkRuleBindingReconciler_TakesOverBackendFromDeletedRule covers the
+// older rule going away: the newer rule's next reconcile, which the rule watch
+// triggers for every rule in the namespace, writes its binding.
+func TestNetworkRuleBindingReconciler_TakesOverBackendFromDeletedRule(t *testing.T) {
+	older := newSharingBindingRule(testOlderRule, testBindingVIP, 100, testBackendPort)
+	newer := newSharingBindingRule(testNewerRule, "2001:db8:100::33", 200, testBackendPort)
+	r, c := newBindingWriter(t, newer, older, newBackendAttachment(testVPCRef))
+	reconcileRule(t, r, testNewerRule)
+	if got := listBindings(t, c); len(got) != 0 {
+		t.Fatalf("bindings while rule older exists = %d, want 0", len(got))
+	}
+
+	if err := c.Delete(context.Background(), older); err != nil {
+		t.Fatalf("delete rule older: %v", err)
+	}
+	reqs := namespaceRuleRequests(context.Background(), c, testNamespace)
+	if len(reqs) != 1 || reqs[0].Name != testNewerRule {
+		t.Fatalf("requests after deleting rule older = %v, want rule newer", reqs)
+	}
+	reconcileRule(t, r, testNewerRule)
+
+	bindings := listBindings(t, c)
+	if len(bindings) != 1 || bindings[0].Labels[networkRuleLabel] != testNewerRule {
+		t.Errorf("bindings = %+v, want one for rule newer", bindings)
 	}
 }

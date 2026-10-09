@@ -30,8 +30,8 @@ import (
 //
 // galactic-gateway load-balances to it and galactic-router on node writes its
 // ServiceVIPBinding, and both derive it from the same objects through
-// selectRuleBackends, so the gateway never sends a flow to a node that has no
-// binding planned for it.
+// selectRuleBackends and ruleBackendOwners, so the gateway never sends a flow
+// to a node that has no binding planned for it.
 type ruleBackend struct {
 	attachment types.NamespacedName
 	node       string
@@ -62,12 +62,12 @@ func listVPCAttachments(ctx context.Context, c client.Client) ([]*cloudv1alpha1.
 
 // vpcAttachmentBackendChanged passes VPCAttachment events that can change some
 // rule's backend set: every create, delete and generic event, and an update
-// only when a field selectRuleBackends reads changed. Status writes that touch
+// only when a field ruleCandidateBackends reads changed. Status writes that touch
 // only conditions, observedGeneration, the container ID and the like are
 // dropped, so an attachment controller refreshing its conditions does not
 // trigger a pass on every gateway and router.
 //
-// The fields compared here are exactly those selectRuleBackends,
+// The fields compared here are exactly those ruleCandidateBackends,
 // attachmentIPv6Addresses and attachmentEgressKind read: labels (the
 // selector), status.vpc, status.node, spec.interface.addresses and
 // spec.interface.mode. Namespace and name are immutable. Keep this list in
@@ -89,19 +89,67 @@ func vpcAttachmentBackendChanged() predicate.Predicate {
 	}
 }
 
+// ruleSelection is what selectRuleBackends picks for one NetworkRule.
+type ruleSelection struct {
+	// backends are the rule's backends, sorted by address.
+	backends []ruleBackend
+
+	// pending lists the selected attachments that are not backends yet, as
+	// "namespace/name: reason", sorted.
+	pending []string
+
+	// claimed are the backends the rule's selector picks that an older rule
+	// serves (backendOwners), sorted by address.
+	claimed []claimedBackend
+}
+
+// claimedBackend is a backend one rule selects but another rule owns.
+type claimedBackend struct {
+	ruleBackend
+	owner types.NamespacedName
+}
+
+// String returns the backend and its owner, the form status messages use.
+func (c claimedBackend) String() string {
+	return fmt.Sprintf("%s: backend %s is served by NetworkRule %s", c.attachment, c.ruleBackend, c.owner)
+}
+
 // selectRuleBackends returns the backends rule's BackendSelector picks from
-// attachments, sorted by address, and the selected attachments that are not
-// backends yet, as "namespace/name: reason".
+// attachments, less those owners assigns to another rule.
 //
 // Only an attachment whose observed VPC equals rule.Spec.VPCRef is a
 // candidate, whatever its labels, so a selector cannot reach another tenant's
 // VPC. A selected attachment with no observed node, or no IPv6 interface
 // address, is pending rather than a backend: the DSR datapath carries only
 // IPv6 backends. An attachment with several IPv6 addresses contributes each of
-// them.
+// them. A backend owned by another rule is claimed rather than a backend: its
+// node can translate its replies back to only one rule's VIP.
 //
 // An invalid selector is a spec error and fails the rule.
 func selectRuleBackends(
+	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
+) (ruleSelection, error) {
+	candidates, pending, err := ruleCandidateBackends(rule, attachments)
+	if err != nil {
+		return ruleSelection{}, err
+	}
+	sel := ruleSelection{pending: pending}
+	self := client.ObjectKeyFromObject(rule)
+	for _, b := range candidates {
+		if owner, ok := owners[backendClaimFor(rule, b)]; ok && owner != self {
+			sel.claimed = append(sel.claimed, claimedBackend{ruleBackend: b, owner: owner})
+			continue
+		}
+		sel.backends = append(sel.backends, b)
+	}
+	return sel, nil
+}
+
+// ruleCandidateBackends returns every backend rule's BackendSelector picks
+// from attachments, whatever other rules select, sorted by address, and the
+// selected attachments that are not backends yet, as "namespace/name: reason".
+// See selectRuleBackends for which attachments qualify.
+func ruleCandidateBackends(
 	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
 ) (backends []ruleBackend, pending []string, err error) {
 	selector, err := ruleBackendSelector(rule)
@@ -152,6 +200,72 @@ func selectRuleBackends(
 	return backends, pending, nil
 }
 
+// backendClaim identifies the egress vip_xlat_table row a backend's node
+// writes for a rule: the reply from a backend address and port, over one
+// protocol, in one VPC. The row rewrites the reply's source to one VIP, so
+// only one rule can use a given claim.
+type backendClaim struct {
+	vpc      string
+	addr     netip.Addr
+	port     uint16
+	protocol bgpv1alpha1.NetworkRuleProtocol
+}
+
+// backendClaimFor returns the claim backend b of rule makes.
+func backendClaimFor(rule *bgpv1alpha1.NetworkRule, b ruleBackend) backendClaim {
+	return backendClaim{vpc: rule.Spec.VPCRef, addr: b.addr, port: b.port, protocol: rule.Spec.Protocol}
+}
+
+// backendOwners maps each backend claim to the rule that owns it.
+type backendOwners map[backendClaim]types.NamespacedName
+
+// ruleBackendOwners assigns every backend claim the rules make to the oldest
+// rule making it, by creation time and then namespace/name, so the gateway
+// and every backend node pick the same owner from the same objects.
+//
+// A rule makes claims only if its backend nodes would write bindings for it:
+// it has exactly one IPv6 VIP and a valid selector. A rule being deleted keeps
+// its claims, since its bindings, and their rows, last until it is gone.
+func ruleBackendOwners(
+	rules []bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
+) backendOwners {
+	ordered := make([]*bgpv1alpha1.NetworkRule, 0, len(rules))
+	for i := range rules {
+		ordered = append(ordered, &rules[i])
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ruleOlder(ordered[i], ordered[j]) })
+
+	owners := make(backendOwners)
+	for _, rule := range ordered {
+		if _, ok, err := ruleTranslatedVIP(rule); err != nil || !ok {
+			continue
+		}
+		backends, _, err := ruleCandidateBackends(rule, attachments)
+		if err != nil {
+			continue
+		}
+		for _, b := range backends {
+			claim := backendClaimFor(rule, b)
+			if _, taken := owners[claim]; !taken {
+				owners[claim] = client.ObjectKeyFromObject(rule)
+			}
+		}
+	}
+	return owners
+}
+
+// ruleOlder reports whether a was created before b, breaking a tie on
+// creation time, which has one-second resolution, by namespace and name.
+func ruleOlder(a, b *bgpv1alpha1.NetworkRule) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	}
+	if a.Namespace != b.Namespace {
+		return a.Namespace < b.Namespace
+	}
+	return a.Name < b.Name
+}
+
 // dropConflictingBackends removes, from backends in their sorted order, each
 // backend that cannot get its own vip_xlat_table rows, and returns why as
 // "namespace/name: reason".
@@ -196,7 +310,9 @@ func dropConflictingBackends(backends []ruleBackend) (kept []ruleBackend, reject
 // translate, or false if it has none. A rule may carry at most one: a backend
 // node rewrites a reply's source from the backend's address and port back to
 // a single VIP, so a backend cannot answer for a second IPv6 VIP and that
-// VIP's flows would be lost. IPv4 VIPs are not translated (#705).
+// VIP's flows would be lost. For the same reason a backend serves only one
+// rule on a given backendPort (ruleBackendOwners). IPv4 VIPs are not
+// translated (#705).
 func ruleTranslatedVIP(rule *bgpv1alpha1.NetworkRule) (netip.Addr, bool, error) {
 	var found []netip.Addr
 	for _, v := range rule.Spec.VIPAddresses {
@@ -215,7 +331,9 @@ func ruleTranslatedVIP(rule *bgpv1alpha1.NetworkRule) (netip.Addr, bool, error) 
 		return found[0], true, nil
 	default:
 		return netip.Addr{}, false, fmt.Errorf(
-			"rule has %d IPv6 VIPs but a backend can answer for only one; split it into one rule per IPv6 VIP",
+			"rule has %d IPv6 VIPs, but a backend node rewrites replies from one backend address, "+
+				"backendPort and protocol to only one VIP; serve each further IPv6 VIP from its own rule "+
+				"whose backends listen on a different backendPort",
 			len(found))
 	}
 }
