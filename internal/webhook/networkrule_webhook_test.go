@@ -36,8 +36,7 @@ func contextWithRequester(username string) context.Context {
 func testRule() *networkv1alpha1.NetworkRule {
 	return &networkv1alpha1.NetworkRule{
 		Spec: networkv1alpha1.NetworkRuleSpec{
-			VPCRef:           "vpc-1",
-			VPCAttachmentRef: "attach-1",
+			VPCRef: "vpc-1",
 		},
 	}
 }

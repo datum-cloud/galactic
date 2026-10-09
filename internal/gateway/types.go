@@ -39,12 +39,10 @@ type DesiredRule struct {
 	// NetworkRule), used as the map key in Engine's convergence pass.
 	Key string
 
-	// VPCRef and VPCAttachmentRef are opaque tenant identifiers, carried for
-	// telemetry labels and admission auditing. The datapath never needs them: a
-	// VIP is globally unique, so no tenant dimension disambiguates ingress
-	// traffic.
-	VPCRef           string
-	VPCAttachmentRef string
+	// VPCRef is the tenant's opaque VPC identifier, used to count rules against
+	// the per-tenant quota. The datapath never needs it: a VIP is globally
+	// unique, so no tenant dimension disambiguates ingress traffic.
+	VPCRef string
 
 	// VIPAddresses are the ingress VIP addresses this rule provisions.
 	VIPAddresses []netip.Addr

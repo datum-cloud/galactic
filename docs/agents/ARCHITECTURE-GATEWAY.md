@@ -103,10 +103,10 @@ per-VPC gateway design to colocate with the workload's own VRF.
 
 ### The two CRDs
 
-| CRD              | Scope                                                                | Written by                                                                                                                                     | Purpose                                                                                                                                                                                                                                                                                  |
-| ---------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NetworkGateway` | Namespaced, one per gateway node (`spec.targetRef.name` = node name) | Operator, once per gateway node (see [worked example](#worked-containerlab-example) below)                                                     | Node-scoped root object, mirroring `BGPRouter`'s pattern. Identifies which nodes participate in the anycast mesh and surfaces each node's engine health via `status.conditions`. Carries **no** self-address field — DSR rewrites nothing, so there is no translation source to publish. |
-| `NetworkRule`    | Namespaced, tenant-writable                                          | Tenant, via an admission webhook that verifies VPC/VPCAttachment ownership (**webhook not yet deployed in this repo** — see Known Constraints) | Ingress load-balancing spec: `vpcRef`/`vpcAttachmentRef` (opaque tenant identifiers), `vipAddresses` (1–8, IPv4/IPv6), `protocol` (`tcp`/`udp`), `port`, `backends` (1–64 `address:port` pairs). Served by every `NetworkGateway` in the namespace identically.                          |
+| CRD              | Scope                                                                | Written by                                                                                                                       | Purpose                                                                                                                                                                                                                                                                                  |
+| ---------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NetworkGateway` | Namespaced, one per gateway node (`spec.targetRef.name` = node name) | Operator, once per gateway node (see [worked example](#worked-containerlab-example) below)                                       | Node-scoped root object, mirroring `BGPRouter`'s pattern. Identifies which nodes participate in the anycast mesh and surfaces each node's engine health via `status.conditions`. Carries **no** self-address field — DSR rewrites nothing, so there is no translation source to publish. |
+| `NetworkRule`    | Namespaced, tenant-writable                                          | Tenant, via an admission webhook that verifies VPC ownership (**webhook not yet deployed in this repo** — see Known Constraints) | Ingress load-balancing spec: `vpcRef` (opaque tenant identifier), `vipAddresses` (1–8, IPv4/IPv6), `protocol` (`tcp`/`udp`), `port`, `backendSelector` (the VPCAttachments in `vpcRef` that serve it), `backendPort`. Served by every `NetworkGateway` in the namespace identically.     |
 
 Both are defined in `go.datum.net/network`'s `api/v1alpha1` package
 (`gateway_types.go`, `rule_types.go`) — the same external CRD module the
@@ -724,9 +724,8 @@ pod on that node is not a supported configuration.
 - **No tenant dimension in the datapath.** `vip_table` is keyed by `(proto,
   VIP port, VIP address)` only — a VIP is globally unique by construction,
   so no tenant/VPC field is needed to disambiguate ingress traffic.
-  `DesiredRule.VPCRef`/`VPCAttachmentRef` are carried through purely for
-  telemetry labeling and admission-webhook auditing, never consulted by the
-  datapath itself.
+  `DesiredRule.VPCRef` is carried through only for the per-tenant rule
+  quota, never consulted by the datapath itself.
 - **uSID resolution for backends.** There is no exported "IP → uSID" query
   anywhere else in this codebase (`internal/runtime/gobgp/monitor.go`
   decodes EVPN Prefix-SID attributes purely internally, for local kernel

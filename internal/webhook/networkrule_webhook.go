@@ -16,7 +16,7 @@ import (
 
 // NetworkRuleValidator is the admission validator for NetworkRule, verifying
 // through the pluggable Authorizer that the requesting identity may act on the
-// VPC and attachment the rule names before a create or update is admitted.
+// VPC the rule names before a create or update is admitted.
 type NetworkRuleValidator struct {
 	// Authorizer performs the actual check. Production callers must not leave
 	// this as AllowAllAuthorizer.
@@ -26,16 +26,16 @@ type NetworkRuleValidator struct {
 var _ admission.Validator[*networkv1alpha1.NetworkRule] = &NetworkRuleValidator{}
 
 // ValidateCreate verifies the requester is authorized for the NetworkRule's
-// vpc/vpcattachment before create is admitted.
+// VPC before create is admitted.
 func (v *NetworkRuleValidator) ValidateCreate(
 	ctx context.Context, rule *networkv1alpha1.NetworkRule,
 ) (admission.Warnings, error) {
 	return nil, v.authorize(ctx, rule)
 }
 
-// ValidateUpdate re-verifies authorization on update: a rule's VPC and
-// attachment references could otherwise be changed after creation to point at
-// another tenant's resources without the create-time check running again.
+// ValidateUpdate re-verifies authorization on update: a rule's VPC reference
+// could otherwise be changed after creation to point at another tenant's VPC
+// without the create-time check running again.
 func (v *NetworkRuleValidator) ValidateUpdate(
 	ctx context.Context, _, newRule *networkv1alpha1.NetworkRule,
 ) (admission.Warnings, error) {
@@ -74,8 +74,8 @@ func (v *NetworkRuleValidator) authorize(ctx context.Context, rule *networkv1alp
 	}
 	if !ok {
 		return fmt.Errorf(
-			"%s is not authorized for vpcRef %q / vpcAttachmentRef %q (%s)",
-			req.UserInfo.Username, rule.Spec.VPCRef, rule.Spec.VPCAttachmentRef,
+			"%s is not authorized for vpcRef %q (%s)",
+			req.UserInfo.Username, rule.Spec.VPCRef,
 			networkv1alpha1.AcceptedReasonOwnershipDenied)
 	}
 	return nil
