@@ -17,10 +17,13 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"go.datum.net/galactic/internal/crdnames"
@@ -493,7 +496,13 @@ type vipBindingRows struct {
 }
 
 // resolveVIPBindingRows resolves the two vip_xlat_table rows binding claims on
-// nodeName.
+// nodeName. The backend address must lie in a prefix the binding's VRF
+// advertises on nodeName: otherwise the node does not serve that address, and
+// rows written for it would report the binding Bound while every flow to it is
+// lost. This covers a hand-written binding, one generated from an attachment
+// whose interface is not up yet, and a stale attachment address. Teardown does
+// not resolve rows this way, so a binding whose advertisement is already gone
+// can still be deleted.
 func resolveVIPBindingRows(
 	idx *backendSIDIndex, nodeName string, binding *bgpv1alpha1.ServiceVIPBinding,
 ) (vipBindingRows, error) {
@@ -501,11 +510,17 @@ func resolveVIPBindingRows(
 	if err != nil {
 		return vipBindingRows{}, err
 	}
-	block, argument, err := resolveVIPBindingContextFromIndex(idx, nodeName, binding.Spec.VPCRef)
+	vrf, err := resolveVIPBindingVRF(idx, nodeName, binding.Spec.VPCRef)
 	if err != nil {
 		return vipBindingRows{}, fmt.Errorf("resolve VRF context for VIP binding: %w", err)
 	}
-	return rows.at(block, argument), nil
+	backendIP, _ := netip.AddrFromSlice(rows.backendAddr)
+	if !idx.vrfAdvertises(vrf.router.Name, vrf.instance.Spec.VRFID, backendIP.Unmap()) {
+		return vipBindingRows{}, fmt.Errorf(
+			"backend address %s is not in any prefix VPC %s's VRF %d advertises on node %q",
+			backendIP.Unmap(), binding.Spec.VPCRef, vrf.instance.Spec.VRFID, nodeName)
+	}
+	return rows.at(vrf.block, vrf.argument()), nil
 }
 
 // parseVIPBindingRows derives the two rows binding claims from its spec alone,
@@ -577,7 +592,8 @@ func (r *ServiceVIPBindingReconciler) nodeBindings(
 }
 
 // livePeers returns every other live binding on this node whose rows resolve.
-// One that does not resolve cannot be programmed, so it claims nothing.
+// One that does not resolve, including one whose backend address its VRF does
+// not advertise here, cannot be programmed, so it claims nothing.
 func (r *ServiceVIPBindingReconciler) livePeers(
 	ctx context.Context, idx *backendSIDIndex, binding *bgpv1alpha1.ServiceVIPBinding,
 ) ([]vipPeer, error) {
@@ -701,8 +717,31 @@ func resolveVIPBindingContext(
 func resolveVIPBindingContextFromIndex(
 	idx *backendSIDIndex, nodeName, vpcRef string,
 ) (block uint64, argument uint16, err error) {
+	vrf, err := resolveVIPBindingVRF(idx, nodeName, vpcRef)
+	if err != nil {
+		return 0, 0, err
+	}
+	return vrf.block, vrf.argument(), nil
+}
+
+// vipBindingVRF is vpcRef's VRF on a node: the node's BGPRouter, the uSID Block
+// from its locator, and the VPC's BGPVRFInstance targeting it.
+type vipBindingVRF struct {
+	router   *bgpv1alpha1.BGPRouter
+	instance *bgpv1alpha1.BGPVRFInstance
+	block    uint64
+}
+
+// argument is the vip_xlat_table key's Argument, the VRF's ID.
+func (v vipBindingVRF) argument() uint16 {
+	return uint16(v.instance.Spec.VRFID) //nolint:gosec // VRFID is kubebuilder-validated 1-65535
+}
+
+// resolveVIPBindingVRF finds vpcRef's VRF on nodeName. See
+// resolveVIPBindingContext.
+func resolveVIPBindingVRF(idx *backendSIDIndex, nodeName, vpcRef string) (vipBindingVRF, error) {
 	if vpcRef == "" {
-		return 0, 0, errors.New("binding has no vpcRef")
+		return vipBindingVRF{}, errors.New("binding has no vpcRef")
 	}
 	var router *bgpv1alpha1.BGPRouter
 	for _, rt := range idx.routers {
@@ -712,30 +751,51 @@ func resolveVIPBindingContextFromIndex(
 		}
 	}
 	if router == nil {
-		return 0, 0, fmt.Errorf("no BGPRouter targets node %q", nodeName)
+		return vipBindingVRF{}, fmt.Errorf("no BGPRouter targets node %q", nodeName)
 	}
 	if router.Spec.SRv6Locator == "" {
-		return 0, 0, fmt.Errorf("BGPRouter %s has no SRv6Locator set", router.Name)
+		return vipBindingVRF{}, fmt.Errorf("BGPRouter %s has no SRv6Locator set", router.Name)
 	}
 
 	prefix, err := netip.ParsePrefix(router.Spec.SRv6Locator)
 	if err != nil {
-		return 0, 0, fmt.Errorf("parse SRv6Locator %q of BGPRouter %s: %w", router.Spec.SRv6Locator, router.Name, err)
+		return vipBindingVRF{}, fmt.Errorf(
+			"parse SRv6Locator %q of BGPRouter %s: %w", router.Spec.SRv6Locator, router.Name, err)
 	}
-	block, err = uformat.Block(prefix.Addr())
+	block, err := uformat.Block(prefix.Addr())
 	if err != nil {
-		return 0, 0, fmt.Errorf("derive uSID Block from BGPRouter %s's SRv6Locator: %w", router.Name, err)
+		return vipBindingVRF{}, fmt.Errorf("derive uSID Block from BGPRouter %s's SRv6Locator: %w", router.Name, err)
 	}
 
 	name := crdnames.BGPVRFInstanceName(vpcRef, nodeName)
 	instance, ok := idx.vrfInstances[name]
 	if !ok {
-		return 0, 0, fmt.Errorf("VPC %s has no BGPVRFInstance %s on node %q", vpcRef, name, nodeName)
+		return vipBindingVRF{}, fmt.Errorf("VPC %s has no BGPVRFInstance %s on node %q", vpcRef, name, nodeName)
 	}
 	if !vrfInstanceTargetsRouter(instance, router) {
-		return 0, 0, fmt.Errorf("BGPVRFInstance %s does not target node %q's BGPRouter %s", name, nodeName, router.Name)
+		return vipBindingVRF{}, fmt.Errorf(
+			"BGPVRFInstance %s does not target node %q's BGPRouter %s", name, nodeName, router.Name)
 	}
-	return block, uint16(instance.Spec.VRFID), nil //nolint:gosec // VRFID is kubebuilder-validated 1-65535
+	return vipBindingVRF{router: router, instance: instance, block: block}, nil
+}
+
+// vrfAdvertises reports whether a BGPAdvertisement on routerName for vrfID has
+// a prefix containing addr. The index holds only advertisements with a VRFID
+// and Function, so a prefix the node advertises without SRv6 decap never
+// counts.
+func (idx *backendSIDIndex) vrfAdvertises(routerName string, vrfID int32, addr netip.Addr) bool {
+	for _, adv := range idx.advs {
+		if adv.Spec.RouterRef.Name != routerName || *adv.Spec.VRFID != vrfID {
+			continue
+		}
+		for _, p := range adv.Spec.Prefixes {
+			prefix, err := netip.ParsePrefix(string(p))
+			if err == nil && prefix.Contains(addr) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // vrfInstanceTargetsRouter reports whether vrf's router target, by reference or
@@ -762,12 +822,74 @@ func vrfInstanceTargetsRouter(vrf *bgpv1alpha1.BGPVRFInstance, router *bgpv1alph
 // is a leaf CRD written outside this repo and consumed only here. Besides the
 // object itself, a change to any binding on this node requeues the others, since
 // it can change which of them owns a shared vip_xlat_table row.
+//
+// A binding binds only once its VRF advertises a prefix containing its backend
+// address, and the attachment's advertisement can land after the binding. A
+// BGPAdvertisement on this node's router therefore requeues this node's
+// bindings, so one written first converges without waiting for an unrelated
+// event. Advertisements buildBackendSIDIndex ignores are filtered out.
 func (r *ServiceVIPBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.ServiceVIPBinding{}).
 		Watches(&bgpv1alpha1.ServiceVIPBinding{}, handler.EnqueueRequestsFromMapFunc(r.nodePeerRequests)).
+		Watches(&bgpv1alpha1.BGPAdvertisement{}, handler.EnqueueRequestsFromMapFunc(r.advertisementRequests),
+			builder.WithPredicates(bindingAdvertisementPredicate())).
 		Named("servicevipbinding").
 		Complete(r)
+}
+
+// bindingAdvertisementPredicate passes BGPAdvertisement events that can change
+// whether a binding's backend address is advertised: a create or delete of one
+// buildBackendSIDIndex keeps, or a spec change where either side is kept.
+func bindingAdvertisementPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool { return locatesBackend(e.Object) },
+		DeleteFunc: func(e event.DeleteEvent) bool { return locatesBackend(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil ||
+				e.ObjectOld.GetGeneration() == e.ObjectNew.GetGeneration() {
+				return false
+			}
+			return locatesBackend(e.ObjectOld) || locatesBackend(e.ObjectNew)
+		},
+		GenericFunc: func(e event.GenericEvent) bool { return locatesBackend(e.Object) },
+	}
+}
+
+// advertisementRequests maps a BGPAdvertisement on this node's BGPRouter to
+// every binding in its namespace that targets this node, including ones being
+// deleted. An advertisement on another node's router maps to nothing.
+func (r *ServiceVIPBindingReconciler) advertisementRequests(
+	ctx context.Context, obj client.Object,
+) []ctrlreconcile.Request {
+	adv, ok := obj.(*bgpv1alpha1.BGPAdvertisement)
+	if !ok {
+		return nil
+	}
+	logger := log.FromContext(ctx).WithValues("advertisement", client.ObjectKeyFromObject(adv))
+	router := &bgpv1alpha1.BGPRouter{}
+	key := client.ObjectKey{Namespace: adv.Namespace, Name: adv.Spec.RouterRef.Name}
+	if err := r.Get(ctx, key, router); err != nil {
+		if !apierrors.IsNotFound(err) {
+			logger.Error(err, "get BGPRouter to requeue ServiceVIPBindings", "router", key.Name)
+		}
+		return nil
+	}
+	if router.Spec.TargetRef.Name != r.NodeName {
+		return nil
+	}
+	list := &bgpv1alpha1.ServiceVIPBindingList{}
+	if err := r.List(ctx, list, client.InNamespace(adv.Namespace)); err != nil {
+		logger.Error(err, "list ServiceVIPBindings to requeue")
+		return nil
+	}
+	var reqs []ctrlreconcile.Request
+	for i := range list.Items {
+		if list.Items[i].Spec.TargetRef.Name == r.NodeName {
+			reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+		}
+	}
+	return reqs
 }
 
 // nodePeerRequests maps a binding targeting this node to every other binding in
