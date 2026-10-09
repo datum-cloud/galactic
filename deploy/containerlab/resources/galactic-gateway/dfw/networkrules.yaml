@@ -6,7 +6,6 @@ metadata:
   namespace: galactic-system
 spec:
   vpcRef: "60"
-  vpcAttachmentRef: "60"
   vipAddresses:
     - 2001:db8:6060:1::1
   protocol: tcp
@@ -24,7 +23,6 @@ metadata:
   namespace: galactic-system
 spec:
   vpcRef: "60"
-  vpcAttachmentRef: "60"
   vipAddresses:
     - 2001:db8:6060:1::1
   protocol: udp

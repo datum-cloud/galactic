@@ -42,7 +42,6 @@ func diffRuleKeys(active map[string]DesiredRule, desired map[string]DesiredRule)
 func rulesEqual(a, b DesiredRule) bool {
 	return a.Key == b.Key &&
 		a.VPCRef == b.VPCRef &&
-		a.VPCAttachmentRef == b.VPCAttachmentRef &&
 		a.Protocol == b.Protocol &&
 		a.Port == b.Port &&
 		slices.Equal(a.VIPAddresses, b.VIPAddresses) &&

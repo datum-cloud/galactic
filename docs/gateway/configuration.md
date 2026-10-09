@@ -447,16 +447,15 @@ gateway node, named after that node (see the worked example above).
 
 ### `NetworkRule` — tenant-writable ingress load-balancing spec
 
-| Field                   | Required | Type                   | Description                                                                                                                                                                                            |
-| ----------------------- | -------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `spec.vpcRef`           | Yes      | `string`               | Opaque VPC identifier (owned by the companion operator, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                       |
-| `spec.vpcAttachmentRef` | Yes      | `string`               | Opaque VPC attachment identifier, paired with `vpcRef`.                                                                                                                                                |
-| `spec.vipAddresses`     | Yes      | `[]string` (1–8)       | Ingress VIP addresses this rule provisions. The backend nodes translate IPv6 VIPs only (#705).                                                                                                         |
-| `spec.protocol`         | Yes      | `tcp` \| `udp`         | Transport protocol matched by `vipAddresses`/`port`.                                                                                                                                                   |
-| `spec.port`             | Yes      | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances.                                                                                                                                                |
-| `spec.backendSelector`  | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`cloud.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends. Must not be empty.                                 |
-| `spec.backendPort`      | Yes      | `int32` (1–65535)      | Destination port on every selected backend.                                                                                                                                                            |
-| `status.conditions`     | —        | —                      | `Accepted` (set `True` once gateway nodes exist; see the admission-webhook caveat below), `<gateway-node>/Programmed` per gateway node, and `<backend-node>/BackendsBound` per node hosting a backend. |
+| Field                  | Required | Type                   | Description                                                                                                                                                                                            |
+| ---------------------- | -------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the companion operator, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                       |
+| `spec.vipAddresses`    | Yes      | `[]string` (1–8)       | Ingress VIP addresses this rule provisions. The backend nodes translate IPv6 VIPs only (#705).                                                                                                         |
+| `spec.protocol`        | Yes      | `tcp` \| `udp`         | Transport protocol matched by `vipAddresses`/`port`.                                                                                                                                                   |
+| `spec.port`            | Yes      | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances.                                                                                                                                                |
+| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`cloud.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends. Must not be empty.                                 |
+| `spec.backendPort`     | Yes      | `int32` (1–65535)      | Destination port on every selected backend.                                                                                                                                                            |
+| `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes exist; see the admission-webhook caveat below), `<gateway-node>/Programmed` per gateway node, and `<backend-node>/BackendsBound` per node hosting a backend. |
 
 Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkrules.yaml`:
 
@@ -468,7 +467,6 @@ metadata:
   namespace: galactic-system
 spec:
   vpcRef: "60"
-  vpcAttachmentRef: "60"
   vipAddresses:
     - 2001:db8:6060:3::1
   protocol: tcp

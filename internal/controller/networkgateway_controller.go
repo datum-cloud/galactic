@@ -782,11 +782,10 @@ func buildDesiredRule(
 	}
 
 	return gateway.DesiredRule{
-		Key:              rule.Namespace + "/" + rule.Name,
-		VPCRef:           rule.Spec.VPCRef,
-		VPCAttachmentRef: rule.Spec.VPCAttachmentRef,
-		VIPAddresses:     vips,
-		Protocol:         string(rule.Spec.Protocol),
+		Key:          rule.Namespace + "/" + rule.Name,
+		VPCRef:       rule.Spec.VPCRef,
+		VIPAddresses: vips,
+		Protocol:     string(rule.Spec.Protocol),
 		//nolint:gosec // rule.Spec.Port is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkRuleSpec.Port)
 		Port:     uint16(rule.Spec.Port),
 		Backends: backends,

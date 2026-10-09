@@ -88,11 +88,10 @@ func newTestRule(name, vpcRef string, vips ...string) *bgpv1alpha1.NetworkRule {
 	return &bgpv1alpha1.NetworkRule{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name},
 		Spec: bgpv1alpha1.NetworkRuleSpec{
-			VPCRef:           vpcRef,
-			VPCAttachmentRef: "attach-1",
-			VIPAddresses:     vips,
-			Protocol:         bgpv1alpha1.NetworkRuleProtocolTCP,
-			Port:             443,
+			VPCRef:       vpcRef,
+			VIPAddresses: vips,
+			Protocol:     bgpv1alpha1.NetworkRuleProtocolTCP,
+			Port:         443,
 			BackendSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{testBackendLabel: testBackendLabelValue},
 			},

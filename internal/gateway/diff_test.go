@@ -76,7 +76,7 @@ func TestRulesEqual(t *testing.T) {
 		return DesiredBackend{Address: netip.MustParseAddr("2001:db8:1::10"), Port: 8080, USID: usid}
 	}
 	base := DesiredRule{
-		Key: testKeyA, VPCRef: "vpc", VPCAttachmentRef: "att",
+		Key: testKeyA, VPCRef: "vpc",
 		VIPAddresses: []netip.Addr{vip}, Protocol: "udp", Port: 80,
 		Backends: []DesiredBackend{backend(usidA)},
 	}
