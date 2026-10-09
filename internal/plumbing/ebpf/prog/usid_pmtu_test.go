@@ -9,9 +9,11 @@ import (
 	"encoding/binary"
 	"math"
 	"net/netip"
+	"runtime"
 	"testing"
 
 	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 )
@@ -426,9 +428,57 @@ func drainPMTUBucket(t *testing.T, objs *UsidObjects) {
 	}
 }
 
+// pinToCPU holds the test's goroutine on its OS thread and the thread on cpu
+// until the test ends. Test runs the program on the calling thread's CPU, and
+// pmtu_icmp_bucket is per CPU, so a test that moves between CPUs reads a
+// different bucket (#756). A second call moves the thread to another CPU.
+//
+// The thread's original CPU set is restored afterwards. A thread whose set
+// cannot be restored is left locked, which makes the runtime discard it rather
+// than reuse it.
+func pinToCPU(t *testing.T, cpu int) {
+	t.Helper()
+	runtime.LockOSThread()
+	var orig unix.CPUSet
+	if err := unix.SchedGetaffinity(0, &orig); err != nil {
+		runtime.UnlockOSThread()
+		t.Fatalf("read CPU affinity: %v", err)
+	}
+	var set unix.CPUSet
+	set.Set(cpu)
+	if err := unix.SchedSetaffinity(0, &set); err != nil {
+		runtime.UnlockOSThread()
+		t.Fatalf("pin to CPU %d: %v", cpu, err)
+	}
+	t.Cleanup(func() {
+		if err := unix.SchedSetaffinity(0, &orig); err != nil {
+			t.Errorf("restore CPU affinity: %v", err)
+			return
+		}
+		runtime.UnlockOSThread()
+	})
+}
+
+// allowedCPUs returns the CPUs the test may run on, in order.
+func allowedCPUs(t *testing.T) []int {
+	t.Helper()
+	var set unix.CPUSet
+	if err := unix.SchedGetaffinity(0, &set); err != nil {
+		t.Fatalf("read CPU affinity: %v", err)
+	}
+	var cpus []int
+	for cpu := 0; len(cpus) < set.Count(); cpu++ {
+		if set.IsSet(cpu) {
+			cpus = append(cpus, cpu)
+		}
+	}
+	return cpus
+}
+
 // TestPMTU_RateLimitAllowsBurst checks the bucket admits a burst and then
 // refuses, rather than refusing everything or nothing.
 func TestPMTU_RateLimitAllowsBurst(t *testing.T) {
+	pinToCPU(t, allowedCPUs(t)[0])
 	objs := pmtuFixture(t)
 	pkt := v6Packet(mssPodV6, mssRemoteV6, ipProtoUDP, 1500)
 	const burst = 100
@@ -437,8 +487,9 @@ func TestPMTU_RateLimitAllowsBurst(t *testing.T) {
 			t.Fatalf("error %d of the burst: verdict %d, err %v; want it sent", i+1, ret, err)
 		}
 	}
-	// Each refill takes a millisecond. Several more in a row cannot all be
-	// admitted, however slow the test runs.
+	// Each refill takes a millisecond, so several more in a row cannot all be
+	// admitted. That holds only on the CPU whose bucket the burst drained,
+	// which is why the test is pinned.
 	refused := 0
 	for range 50 {
 		if ret, _, _ := objs.UsidEgress.Test(pkt); ret == tcActShot {
@@ -447,6 +498,41 @@ func TestPMTU_RateLimitAllowsBurst(t *testing.T) {
 	}
 	if refused == 0 {
 		t.Error("no error refused after the burst, want the rate limit to apply")
+	}
+}
+
+// TestPMTU_RateLimitIsPerCPU checks a burst that drains one CPU's bucket leaves
+// another CPU's untouched. This is the move that made
+// TestPMTU_RateLimitAllowsBurst fail before it was pinned (#756).
+func TestPMTU_RateLimitIsPerCPU(t *testing.T) {
+	cpus := allowedCPUs(t)
+	if len(cpus) < 2 {
+		t.Skip("needs two CPUs")
+	}
+	pinToCPU(t, cpus[0])
+	objs := pmtuFixture(t)
+	pkt := v6Packet(mssPodV6, mssRemoteV6, ipProtoUDP, 1500)
+	for i := range 100 {
+		if ret, _, err := objs.UsidEgress.Test(pkt); err != nil || ret != tcActRedirect {
+			t.Fatalf("error %d of the burst: verdict %d, err %v; want it sent", i+1, ret, err)
+		}
+	}
+	// A refill can land during a slow burst, so the bucket is shown drained by
+	// one refusal in several sends, as in TestPMTU_RateLimitAllowsBurst.
+	refused := 0
+	for range 50 {
+		if ret, _, _ := objs.UsidEgress.Test(pkt); ret == tcActShot {
+			refused++
+		}
+	}
+	if refused == 0 {
+		t.Fatalf("no error refused after the burst on CPU %d, want its bucket drained", cpus[0])
+	}
+	pinToCPU(t, cpus[1])
+	for i := range 50 {
+		if ret, _, err := objs.UsidEgress.Test(pkt); err != nil || ret != tcActRedirect {
+			t.Fatalf("error %d on CPU %d: verdict %d, err %v; want it sent from that CPU's own bucket", i+1, cpus[1], ret, err)
+		}
 	}
 }
 
