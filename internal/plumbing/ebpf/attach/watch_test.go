@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -100,18 +101,23 @@ func withWatchTestDefaults(t *testing.T) {
 	origDebounce := debounceInterval
 	origHook := onReconcileDone
 	origReconcile := reconcileFn
+	origHoldDown := detachHoldDown
 	t.Cleanup(func() {
 		linkSubscribeFn, routeSubscribeFn = origLink, origRoute
 		resolveInterfacesFn = origResolve
 		debounceInterval = origDebounce
 		onReconcileDone = origHook
 		reconcileFn = origReconcile
+		detachHoldDown = origHoldDown
 	})
 
 	linkSubscribeFn = stubLinkSubscribe(nil)
 	routeSubscribeFn = stubRouteSubscribe(nil)
 	resolveInterfacesFn = func() ([]string, error) { return nil, nil }
 	debounceInterval = 10 * time.Millisecond
+	// Detach on the first miss, as the tests written before the hold-down
+	// expect. The hold-down tests set their own.
+	detachHoldDown = 0
 }
 
 // TestWatcher_AliveTracksLoopLifetime covers Watcher.Alive transitioning
@@ -788,5 +794,154 @@ func TestWatcher_OnChangeReplaysLastPublishedSet(t *testing.T) {
 	w.publish([]string{primaryUplink, lateUplink})
 	if got != nil {
 		t.Errorf("unchanged set published again: %v", got)
+	}
+}
+
+// lateMember is a member port of lateUplink.
+const lateMember = "eno3"
+
+// holdDownScenario runs Watch from initial through one route event per entry
+// in resolves, plus extra re-evaluations Watch starts on its own, and returns
+// every name reconcile was asked to detach and every set published after
+// initial. links names the interfaces whose link still exists.
+func holdDownScenario(t *testing.T, initial []string, resolves [][]string, extra int,
+	links ...string,
+) (detached []string, published [][]string) {
+	t.Helper()
+
+	trigger := make(chan struct{}, 1)
+	routeSubscribeFn = stubRouteSubscribe(trigger)
+
+	exists := toSet(links)
+	origLinkByName := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = origLinkByName })
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		if _, ok := exists[name]; !ok {
+			return nil, netlink.LinkNotFoundError{}
+		}
+		return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}, nil
+	}
+
+	resolved := make(chan []string, len(resolves)+extra)
+	for _, r := range resolves {
+		resolved <- r
+	}
+	last := resolves[len(resolves)-1]
+	for range extra {
+		resolved <- last
+	}
+	resolveInterfacesFn = func() ([]string, error) { return <-resolved, nil }
+
+	var mu sync.Mutex
+	reconcileFn = func(_ *ebpf.Program, current, next map[string]struct{}) map[string]struct{} {
+		_, removed := diffSets(current, next)
+		mu.Lock()
+		detached = append(detached, removed...)
+		mu.Unlock()
+		return next
+	}
+	reconciled := make(chan struct{}, len(resolves)+extra)
+	onReconcileDone = func() { reconciled <- struct{}{} }
+
+	w := newWatcher()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Watch(ctx, &ebpf.Program{}, initial, w) }()
+
+	wait := func() {
+		select {
+		case <-reconciled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("watch loop never re-evaluated")
+		}
+	}
+	for range resolves {
+		trigger <- struct{}{}
+		wait()
+	}
+	for range extra {
+		wait()
+	}
+	w.OnChange(func(names []string) { published = append(published, names) })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return detached, published
+}
+
+// TestWatch_HoldsFabricBondThroughRouteWithdrawal reproduces #778: FRR
+// withdraws the BGP-learned routes that make bond1 an uplink while it
+// restarts, and the loop detached bond1 and its members on the first
+// re-evaluation that missed them.
+func TestWatch_HoldsFabricBondThroughRouteWithdrawal(t *testing.T) {
+	withWatchTestDefaults(t)
+	detachHoldDown = time.Minute
+
+	all := []string{primaryUplink, "eno1", "eno2", lateUplink, lateMember, "eno4"}
+	detached, published := holdDownScenario(t, all, [][]string{
+		{primaryUplink, "eno1", "eno2"}, // FRR restarting: bond1's routes withdrawn
+		all,                             // FRR back
+	}, 0, all...)
+
+	if len(detached) != 0 {
+		t.Errorf("detached %v during a transient route withdrawal, want nothing", detached)
+	}
+	// OnChange replays the last published set: still all six, so nothing
+	// told the plugin the uplinks shrank either.
+	if want := [][]string{all}; !reflect.DeepEqual(published, want) {
+		t.Errorf("published sets = %v, want %v", published, want)
+	}
+}
+
+// TestWatch_DetachesWhenHoldDownEnds covers an uplink that really stops
+// carrying fabric routes: once the hold-down passes it is detached, with no
+// further netlink event to prompt the re-evaluation.
+func TestWatch_DetachesWhenHoldDownEnds(t *testing.T) {
+	withWatchTestDefaults(t)
+	detachHoldDown = 50 * time.Millisecond
+
+	all := []string{primaryUplink, lateUplink, lateMember}
+	detached, published := holdDownScenario(t, all, [][]string{{primaryUplink}}, 1, all...)
+
+	sort.Strings(detached)
+	if want := []string{lateUplink, lateMember}; !reflect.DeepEqual(detached, want) {
+		t.Errorf("detached = %v, want %v", detached, want)
+	}
+	if want := [][]string{{primaryUplink}}; !reflect.DeepEqual(published, want) {
+		t.Errorf("published sets = %v, want %v", published, want)
+	}
+}
+
+// TestWatch_DetachesDeletedLinkWithoutHoldDown covers a link that no longer
+// exists: there is no hook left to keep, so it leaves the set at once.
+func TestWatch_DetachesDeletedLinkWithoutHoldDown(t *testing.T) {
+	withWatchTestDefaults(t)
+	detachHoldDown = time.Minute
+
+	detached, _ := holdDownScenario(t, []string{primaryUplink, lateUplink}, [][]string{{primaryUplink}}, 0, primaryUplink)
+
+	if want := []string{lateUplink}; !reflect.DeepEqual(detached, want) {
+		t.Errorf("detached = %v, want %v", detached, want)
+	}
+}
+
+// TestWatch_PublishesHeldUplinksAfterResolvedOnes covers the published order
+// while an uplink is held: the resolved set comes first, so its first entry is
+// still the default-route interface, and held ones follow in the order they
+// were last published.
+func TestWatch_PublishesHeldUplinksAfterResolvedOnes(t *testing.T) {
+	withWatchTestDefaults(t)
+	detachHoldDown = time.Minute
+
+	initial := []string{primaryUplink, "eno6", lateUplink, lateMember}
+	_, published := holdDownScenario(t, initial, [][]string{{primaryUplink, "eno5"}}, 0,
+		primaryUplink, lateUplink, lateMember, "eno6", "eno5")
+
+	if want := [][]string{{primaryUplink, "eno5", "eno6", lateUplink, lateMember}}; !reflect.DeepEqual(published, want) {
+		t.Errorf("published sets = %v, want %v", published, want)
 	}
 }

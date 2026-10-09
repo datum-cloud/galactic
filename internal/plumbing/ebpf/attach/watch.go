@@ -27,6 +27,18 @@ import (
 // const, so tests can shrink it.
 var debounceInterval = 250 * time.Millisecond
 
+// detachHoldDown is how long an attached interface that drops out of the
+// resolved set keeps its hook before Watch detaches it, as long as its link
+// still exists. A var, not a const, so tests can shrink it.
+//
+// An uplink found only through BGP-learned routes leaves the resolved set
+// whenever the underlay routing daemon withdraws those routes, which FRR does
+// for the length of every restart. Detaching on the first re-evaluation that
+// misses it drops all SRv6 traffic still arriving on that uplink until the
+// routes come back, 6 to 14 seconds in observed restarts. An uplink that
+// really stops carrying fabric routes still loses the hook once this passes.
+var detachHoldDown = 60 * time.Second
+
 // linkSubscribeFn and routeSubscribeFn are override points so tests can
 // simulate interface and route change events without a live netlink socket or
 // root. A fake receives the channel Watch reads from and can push synthetic
@@ -194,7 +206,12 @@ func logDegradedSubscription(kind string, otherKindAlreadyNil bool) {
 //     the default-route interface, which a diff-only reconcile never notices.
 //   - Every interface no longer present has this package's filter removed, so a
 //     downed or reassigned interface stops forwarding into whatever VRF its
-//     Argument used to resolve to.
+//     Argument used to resolve to. While its link still exists, that waits
+//     until it has been missing for detachHoldDown, so route churn such as an
+//     underlay routing daemon restart does not detach an uplink found only
+//     through BGP-learned routes. A link that no longer exists is dropped at
+//     once. When a hold-down ends, Watch re-evaluates on its own, with or
+//     without a netlink event.
 //
 // A per-interface attach or detach failure is logged and retried on the next
 // re-evaluation, for as long as the mismatch persists. A resolution failure is
@@ -251,7 +268,26 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 	}
 
 	current := toSet(initial)
+	order := slices.Clone(initial)
 	w.publish(initial)
+
+	// missingSince records when each attached interface first dropped out of
+	// the resolved set, for detachHoldDown.
+	missingSince := make(map[string]time.Time)
+	var holdTimer *time.Timer
+	var holdC <-chan time.Time
+	resetHoldTimer := func(expiry time.Time) {
+		if holdTimer != nil {
+			holdTimer.Stop()
+		}
+		holdTimer, holdC = nil, nil
+		if expiry.IsZero() {
+			return
+		}
+		holdTimer = time.NewTimer(time.Until(expiry))
+		holdC = holdTimer.C
+	}
+	defer resetHoldTimer(time.Time{})
 
 	var debounceTimer *time.Timer
 	var debounceC <-chan time.Time
@@ -301,6 +337,12 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 			// event coalesces into one re-evaluation.
 			scheduleReevaluate()
 
+		case <-holdC:
+			// A hold-down ended. Re-evaluate so an interface that is still
+			// missing is detached without waiting for another event.
+			holdC = nil
+			scheduleReevaluate()
+
 		case <-debounceC:
 			debounceC = nil
 			next, err := resolveInterfacesFn()
@@ -309,8 +351,18 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 				onReconcileDone()
 				continue
 			}
-			current = reconcileFn(program, current, toSet(next))
-			w.publish(attachedInOrder(next, current))
+			fresh := toSet(next)
+			held, expiry := holdMissing(current, fresh, missingSince, time.Now())
+			for _, name := range held {
+				fresh[name] = struct{}{}
+			}
+			current = reconcileFn(program, current, fresh)
+			// Held interfaces go after the resolved ones, in their last
+			// published order, so the first entry stays the default-route
+			// interface.
+			order = attachedInOrder(append(slices.Clone(next), inOrder(held, order)...), current)
+			w.publish(order)
+			resetHoldTimer(expiry)
 			// The uplink set just moved, or a link/route event says it may
 			// have. Drop the cached ifindexes so an egress route resolved
 			// right after an interface appears is judged against the new set
@@ -347,6 +399,86 @@ func StartWatching(ctx context.Context, pinDir string) (
 	}()
 
 	return objs, ifaces, watcher, nil
+}
+
+// holdMissing returns the interfaces in current that are missing from next but
+// still inside their detachHoldDown, and the earliest time one of those holds
+// ends, zero when nothing is held. missingSince is updated in place: an
+// interface starts its hold the first time it is seen missing, and loses its
+// entry once it is resolved again or no longer attached. An expired entry is
+// kept while the interface stays attached, so a failed detach is retried
+// rather than held again.
+//
+// An interface whose link no longer resolves is never held. A deleted link has
+// no hook left to keep, and the name may come back as a different link.
+func holdMissing(current, next map[string]struct{}, missingSince map[string]time.Time, now time.Time) (
+	held []string, expiry time.Time,
+) {
+	for name := range missingSince {
+		_, attached := current[name]
+		_, resolved := next[name]
+		if !attached || resolved {
+			delete(missingSince, name)
+		}
+	}
+
+	var started, expired []string
+	for name := range current {
+		if _, ok := next[name]; ok {
+			continue
+		}
+		if _, err := linkByNameFn(name); err != nil {
+			delete(missingSince, name)
+			continue
+		}
+		since, ok := missingSince[name]
+		if !ok {
+			since = now
+			missingSince[name] = now
+			started = append(started, name)
+		}
+		deadline := since.Add(detachHoldDown)
+		if !now.Before(deadline) {
+			expired = append(expired, name)
+			continue
+		}
+		held = append(held, name)
+		if expiry.IsZero() || deadline.Before(expiry) {
+			expiry = deadline
+		}
+	}
+
+	sort.Strings(held)
+	if len(started) != 0 && detachHoldDown > 0 {
+		sort.Strings(started)
+		slog.Info("attach: interface left the resolved set, keeping it attached until the hold-down ends",
+			"interfaces", started, "holdDown", detachHoldDown)
+	}
+	if len(expired) != 0 {
+		sort.Strings(expired)
+		slog.Info("attach: hold-down ended with the interface still unresolved, detaching",
+			"interfaces", expired)
+	}
+	return held, expiry
+}
+
+// inOrder returns names sorted by their position in order, with any name order
+// does not contain after the rest, keeping their order in names.
+func inOrder(names, order []string) []string {
+	pos := make(map[string]int, len(order))
+	for i, name := range order {
+		pos[name] = i
+	}
+	out := slices.Clone(names)
+	sort.SliceStable(out, func(i, j int) bool {
+		pi, iok := pos[out[i]]
+		pj, jok := pos[out[j]]
+		if iok && jok {
+			return pi < pj
+		}
+		return iok && !jok
+	})
+	return out
 }
 
 // toSet converts a slice of interface names into a set, for
