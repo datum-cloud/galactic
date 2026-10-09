@@ -68,8 +68,8 @@ func TestUsid_MapMemoryFitsGalacticCNILimit(t *testing.T) {
 	}
 }
 
-// mapMemlock returns the bytes the kernel charges for m, as its fdinfo
-// reports them.
+// mapMemlock returns the size the kernel reports for m in its fdinfo. That
+// is the kernel's estimate of the map, not the memory cgroup's charge.
 func mapMemlock(m *ebpf.Map) (int64, error) {
 	f, err := os.Open(fmt.Sprintf("/proc/self/fdinfo/%d", m.FD()))
 	if err != nil {
