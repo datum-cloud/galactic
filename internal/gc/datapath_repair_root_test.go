@@ -84,6 +84,30 @@ func (a rootAttachment) localEgressPrefixes() []string {
 	return prefixes
 }
 
+// advertisement returns the BGPAdvertisement galactic-bgp's ADD publishes for
+// a on nodeName: the guest prefixes of its IPAM result, or the no-addressing
+// annotation when it has none.
+func (a rootAttachment) advertisement(nodeName string) *bgpv1alpha1.BGPAdvertisement {
+	adv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      crdnames.BGPAdvertisementName(a.vpc, a.vpcAttachment, nodeName),
+			Namespace: repairNamespace,
+		},
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{RouterRef: bgpv1alpha1.RouterRef{Name: repairRouter}},
+	}
+	if a.ipam == nil {
+		adv.Annotations = map[string]string{crdnames.AnnotationNoAddressing: crdnames.AnnotationNoAddressingValue}
+		return adv
+	}
+	if a.ipam.IPv6Subnet != nil {
+		adv.Spec.Prefixes = append(adv.Spec.Prefixes, bgpv1alpha1.Prefix(a.ipam.IPv6Subnet.String()))
+	}
+	if a.ipam.IPv4Address != nil {
+		adv.Spec.Prefixes = append(adv.Spec.Prefixes, bgpv1alpha1.Prefix(a.ipam.IPv4Address.String()+"/32"))
+	}
+	return adv
+}
+
 func (a rootAttachment) gateways() *attachreg.Gateways {
 	if a.ipam == nil {
 		return nil
@@ -287,9 +311,15 @@ func rebuildsWhatADDWrote(t *testing.T, reverse bool) {
 			IPv4Gateway: net.ParseIP("172.21.1.129"),
 		}},
 		{vpc: "kV", vpcAttachment: "ghi", ifaceType: attachreg.InterfaceTypeTap, vrfID: 0x22},
+		// A static address with no gateway: the kernel has no route for it,
+		// so only its BGPAdvertisement records the guest prefixes (#806).
+		{vpc: "mW", vpcAttachment: "pq", ifaceType: attachreg.InterfaceTypeVeth, vrfID: 0x23, ipam: &cniipam.IPAMResult{
+			IPv6Subnet:  mustCIDR(t, "fd20:31:ff03::/96"),
+			IPv4Address: net.ParseIP("10.1.0.7"),
+		}},
 	}
 
-	objects := make([]client.Object, 0, 3)
+	objects := make([]client.Object, 0, 1+3+len(attachments))
 	objects = append(objects, &bgpv1alpha1.BGPRouter{
 		ObjectMeta: metav1.ObjectMeta{Name: repairRouter, Namespace: repairNamespace},
 		Spec: bgpv1alpha1.BGPRouterSpec{
@@ -300,7 +330,7 @@ func rebuildsWhatADDWrote(t *testing.T, reverse bool) {
 	for _, vpc := range []struct {
 		name string
 		id   int32
-	}{{"jU", 0x21}, {"kV", 0x22}} {
+	}{{"jU", 0x21}, {"kV", 0x22}, {"mW", 0x23}} {
 		objects = append(objects, &bgpv1alpha1.BGPVRFInstance{
 			ObjectMeta: metav1.ObjectMeta{Name: crdnames.BGPVRFInstanceName(vpc.name, nodeName), Namespace: repairNamespace},
 			Spec: bgpv1alpha1.BGPVRFInstanceSpec{
@@ -310,6 +340,9 @@ func rebuildsWhatADDWrote(t *testing.T, reverse bool) {
 				ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: testRouteTarget}},
 			},
 		})
+	}
+	for _, a := range attachments {
+		objects = append(objects, a.advertisement(nodeName))
 	}
 	k8s := fake.NewClientBuilder().WithScheme(gcTestScheme(t)).WithObjects(objects...).Build()
 

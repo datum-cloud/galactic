@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
@@ -99,7 +100,9 @@ type discoveredAttachment struct {
 // attachment interface and enslaved to a VRF. The VRF's table supplies the
 // routing table ID, the link type the egress kind, the routes in that table
 // out the interface and the interface's own non-link-local addresses the local
-// prefixes and gateways. The Block and Node-ID come from nodeName's BGPRouter,
+// prefixes and gateways. The attachment's BGPAdvertisement adds the guest
+// prefixes ADD took from the IPAM result, which a family with no gateway never
+// routes in the kernel. The Block and Node-ID come from nodeName's BGPRouter,
 // and the Argument from the VPC's BGPVRFInstance on that router.
 //
 // Only a missing row is written. A row that exists is left alone, whoever
@@ -148,6 +151,10 @@ func RepairAttachmentDatapath(
 	if err != nil {
 		return result, err
 	}
+	advertised, err := addressingForRouter(ctx, k8s, cfg.Namespace, routerName)
+	if err != nil {
+		return result, err
+	}
 
 	maps, closer, err := openDatapathMapsFn(cfg.PinDir)
 	if err != nil {
@@ -166,7 +173,7 @@ func RepairAttachmentDatapath(
 		return cfg.ForeignTableID != nil && cfg.ForeignTableID(tableID)
 	}
 
-	attachments, counts, err := discoverAttachments(cfg.NodeName, block, vrfIDs, foreign)
+	attachments, counts, err := discoverAttachments(cfg.NodeName, block, vrfIDs, advertised, foreign)
 	result.Skipped, result.Pending = counts.skipped, counts.pending
 	if err != nil {
 		return result, err
@@ -335,6 +342,68 @@ func vrfIDsForRouter(
 	return ids, nil
 }
 
+// advertisedAddressing is what an attachment's BGPAdvertisement records of the
+// IPAM result CNI ADD registered it from.
+type advertisedAddressing struct {
+	// prefixes are the guest prefixes, the advertisement's spec.prefixes.
+	prefixes []string
+	// noAddressing is set when the attachment's config carries no ipam block,
+	// so ADD had no IPAM result at all.
+	noAddressing bool
+}
+
+// addressingForRouter returns the addressing every BGPAdvertisement in
+// namespace whose RouterRef names routerName records, keyed by advertisement
+// name.
+func addressingForRouter(
+	ctx context.Context, k8s client.Client, namespace, routerName string,
+) (map[string]advertisedAddressing, error) {
+	list := &bgpv1alpha1.BGPAdvertisementList{}
+	if err := k8s.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list BGPAdvertisements: %w", err)
+	}
+	out := make(map[string]advertisedAddressing, len(list.Items))
+	for _, adv := range list.Items {
+		if adv.Spec.RouterRef.Name != routerName {
+			continue
+		}
+		a := advertisedAddressing{
+			noAddressing: adv.Annotations[crdnames.AnnotationNoAddressing] == crdnames.AnnotationNoAddressingValue,
+		}
+		for _, p := range adv.Spec.Prefixes {
+			a.prefixes = append(a.prefixes, string(p))
+		}
+		out[adv.Name] = a
+	}
+	return out, nil
+}
+
+// mergePrefixes returns kernel followed by every prefix of advertised whose
+// network kernel does not already hold. A prefix that does not parse is
+// dropped, as registering it would fail.
+func mergePrefixes(kernel, advertised []string) []string {
+	seen := make(map[string]struct{}, len(kernel)+len(advertised))
+	for _, p := range kernel {
+		if _, n, err := net.ParseCIDR(p); err == nil {
+			seen[n.String()] = struct{}{}
+		}
+	}
+	merged := kernel
+	for _, p := range advertised {
+		_, n, err := net.ParseCIDR(p)
+		if err != nil {
+			slog.Debug("Datapath repair: ignoring unparsable advertised prefix", "prefix", p, "err", err)
+			continue
+		}
+		if _, ok := seen[n.String()]; ok {
+			continue
+		}
+		seen[n.String()] = struct{}{}
+		merged = append(merged, n.String())
+	}
+	return merged
+}
+
 // unpad reverses the zero padding an interface name applies to a base62
 // identifier, which CRD names do not carry.
 func unpad(s string) string {
@@ -357,8 +426,11 @@ type discoveryCounts struct {
 // to a VRF, whose VRF table foreign claims, whose link type is neither veth
 // nor tap, or whose BGPVRFInstance's VRFID is out of range is counted as
 // skipped; one whose VPC has no BGPVRFInstance on this node yet as pending.
+// advertised, keyed by BGPAdvertisement name, adds the guest prefixes the
+// kernel does not route.
 func discoverAttachments(
-	nodeName string, block uint64, vrfIDs map[string]int32, foreign func(uint32) bool,
+	nodeName string, block uint64, vrfIDs map[string]int32, advertised map[string]advertisedAddressing,
+	foreign func(uint32) bool,
 ) (attachments []discoveredAttachment, counts discoveryCounts, err error) {
 	links, err := listAllLinksFn()
 	if err != nil {
@@ -410,6 +482,14 @@ func discoverAttachments(
 		if err != nil {
 			errs = append(errs, fmt.Errorf("read addressing of %s: %w", attrs.Name, err))
 			continue
+		}
+		if adv, ok := advertised[crdnames.BGPAdvertisementName(vpc, vpcAttachment, nodeName)]; ok {
+			prefixes = mergePrefixes(prefixes, adv.prefixes)
+			// ADD writes an all-zero tenant_gw_table row for an IPAM result
+			// with no gateway, and none only when there was no IPAM result.
+			if gateways == nil && !adv.noAddressing && len(adv.prefixes) > 0 {
+				gateways = &attachreg.Gateways{}
+			}
 		}
 		attachments = append(attachments, discoveredAttachment{
 			Attachment: attachreg.Attachment{
@@ -477,10 +557,12 @@ func (c routeCache) get(tableID uint32) ([]netlink.Route, error) {
 // localAddressing recovers what CNI ADD registered as link's local prefixes and
 // gateways from the kernel. The guest prefixes are the pod-subnet routes the
 // master plugin installs in the VRF's table out link: unicast, not
-// kernel-generated, with no gateway and not link-scoped. The gateways are
-// link's own addresses that are not link-local, each also a host prefix. A link
-// with no such address, a tap with no IPAM, has nil gateways. Where a family
-// carries more than one address, the first the kernel lists is the gateway.
+// kernel-generated, with no gateway and not link-scoped. The master plugin
+// installs one only for a family with a gateway, so a family without one is
+// missing here; discoverAttachments adds it from the BGPAdvertisement. The
+// gateways are link's own addresses that are not link-local, each also a host
+// prefix. A link with no such address has nil gateways. Where a family carries
+// more than one address, the first the kernel lists is the gateway.
 func localAddressing(link netlink.Link, tableID uint32, routes routeCache) ([]string, *attachreg.Gateways, error) {
 	tableRoutes, err := routes.get(tableID)
 	if err != nil {

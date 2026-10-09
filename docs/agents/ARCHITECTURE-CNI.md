@@ -84,8 +84,11 @@ attachments whose `BGPRouter` or `BGPVRFInstance` has not appeared yet (the
 latter for up to ten minutes), and again on every eBPF GC tick. It finds
 attachments by their host interface name and VRF master, takes the routing
 table and egress kind from the kernel, the guest prefixes from the pod-subnet
-routes out that interface and the gateways from its own addresses, and the
-Block and Argument from the `BGPRouter` and `BGPVRFInstance`. It only writes a
+routes out that interface and from the attachment's `BGPAdvertisement`, the
+gateways from its own addresses, and the Block and Argument from the
+`BGPRouter` and `BGPVRFInstance`. The advertisement is needed because the
+master plugin routes a family's guest prefix only when that family has a
+gateway, while ADD registers it either way (#806). It only writes a
 row that is missing, and never one under the ingress sidecar's Block. The
 sidecar return path's tables are excluded by their reserved table ID range,
 since the sidecar's own `vrf_table` rows that also mark them may be among the
