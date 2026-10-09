@@ -451,7 +451,8 @@ unchanged.
 `vip_addr_table` is maintained by `edgemap.VIPTable` alongside `vip_table`
 itself, an address present exactly while some rule still uses it, with its
 own generation for the same crash-safe reconcile cutoff. Its counters live
-in `vip_return_stats_table` and surface as `galactic_edge_return_*`.
+in `vip_return_stats_table` and surface as `galactic_edge_return_*`,
+labeled by `vip` and `vpc`.
 
 ---
 
@@ -779,6 +780,27 @@ pod on that node is not a supported configuration.
   `edgedsr.c` alone populates, lazily, on a VIP's first matching packet —
   so re-registering a VIP (e.g. every controller reconcile pass) can never
   race, and therefore never lose, the datapath's own increments.
+- **Per-VIP series carry the owning VPC from process memory, not a map
+  (#709).** Every `galactic_edge_rule_*` and `galactic_edge_return_*` series
+  has a `vpc` label holding the rule's `spec.vpcRef`, the same opaque
+  identifier the CNI-side `galactic_usid_vrf_*` series carry in their own
+  `vpc` label (#672). `KernelDatapath` records it per `vip_table` key as it
+  applies each rule, and the collector reads that record at every scrape.
+  The CNI needed a pinned `vpc_attribution_table` because it is a separate
+  process from its collector; the gateway is not, so no new map, and no map
+  schema change, is involved. There is no `vpc_attachment` label: a rule's
+  backends come from a selector that can span many VPCAttachments, so none
+  owns a VIP. What follows from that:
+  - After a restart the counters survive in their pinned maps, but the
+    record starts empty, so the series read `vpc=""` until the first
+    reconcile re-applies every rule.
+  - Deleting a rule deletes its `vip_stats_table` rows, so its series
+    disappear rather than freeze. A return-path series disappears once no
+    rule uses its address.
+  - Two VPCs' rules sharing one VIP address on different ports each keep
+    their own `vpc` on the rule series, but that address's return series
+    reads `vpc=""`, since `edge_return` counts per address and cannot split
+    the traffic.
 - **Generation-based crash recovery, not a Geneve-interface scan.**
   `Engine.ReconcileOrphans` delegates to `edgemap.VIPTable.Reconcile`'s
   `Generation`-cutoff mechanism: a caller must capture

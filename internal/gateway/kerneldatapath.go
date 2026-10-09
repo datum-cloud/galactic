@@ -107,6 +107,16 @@ type KernelDatapath struct {
 	// unregister, and ApplyRule can prune a key the rule dropped since its last
 	// apply without the caller having tracked it.
 	vipKeysByName map[string][]edgemap.VIPKey
+
+	// vpcMu guards vpcByKey on its own, so a metrics scrape never waits on a
+	// rule's map writes under mu.
+	vpcMu sync.RWMutex
+
+	// vpcByKey maps each vip_table key this process registered to the VPC of
+	// the rule that registered it, for the metrics collector's vpc label. It
+	// is in memory only: after a restart it is empty until the first
+	// reconcile re-applies every rule.
+	vpcByKey map[edgemap.VIPKey]string
 }
 
 // NewKernelDatapath constructs a KernelDatapath and writes encapSrc into the
@@ -128,6 +138,7 @@ func NewKernelDatapath(objs *edgeprog.EdgedsrObjects, encapSrc netip.Addr) (*Ker
 			edgemap.KernelTable{Map: objs.VipTable}, edgemap.KernelTable{Map: objs.VipStatsTable},
 			edgemap.KernelTable{Map: objs.VipAddrTable}, edgemap.KernelTable{Map: objs.VipReturnStatsTable}),
 		vipKeysByName: make(map[string][]edgemap.VIPKey),
+		vpcByKey:      make(map[edgemap.VIPKey]string),
 	}, nil
 }
 
@@ -148,6 +159,12 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 		return err
 	}
 
+	// Attribute every key, and every key the rule already owns, before any
+	// write, so a scrape never lists a new entry without its VPC. A key whose
+	// write then fails emits no series, and is forgotten again below.
+	d.setVPCs(keys, rule.VPCRef)
+	d.setVPCs(d.vipKeysByName[rule.Key], rule.VPCRef)
+
 	for i, key := range keys {
 		if err := d.vipTable.Register(key, backends, maglevTable); err != nil {
 			// Record the keys that did land, alongside the ones this rule
@@ -156,6 +173,11 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 			for _, written := range keys[:i] {
 				if !slices.Contains(d.vipKeysByName[rule.Key], written) {
 					d.vipKeysByName[rule.Key] = append(d.vipKeysByName[rule.Key], written)
+				}
+			}
+			for _, unwritten := range keys[i:] {
+				if !slices.Contains(d.vipKeysByName[rule.Key], unwritten) {
+					d.clearVPC(unwritten)
 				}
 			}
 			return fmt.Errorf("kerneldatapath: apply rule %s: %w", rule.Key, err)
@@ -175,6 +197,7 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 		if err := d.vipTable.Unregister(old); err != nil {
 			return fmt.Errorf("kerneldatapath: apply rule %s: prune dropped key %+v: %w", rule.Key, old, err)
 		}
+		d.clearVPC(old)
 	}
 
 	d.vipKeysByName[rule.Key] = keys
@@ -190,9 +213,53 @@ func (d *KernelDatapath) RemoveRule(_ context.Context, key string) error {
 		if err := d.vipTable.Unregister(k); err != nil {
 			return fmt.Errorf("kerneldatapath: remove rule %s: %w", key, err)
 		}
+		d.clearVPC(k)
 	}
 	delete(d.vipKeysByName, key)
 	return nil
+}
+
+// setVPCs records vpc as the owner of every key in keys.
+func (d *KernelDatapath) setVPCs(keys []edgemap.VIPKey, vpc string) {
+	d.vpcMu.Lock()
+	defer d.vpcMu.Unlock()
+	if d.vpcByKey == nil {
+		d.vpcByKey = make(map[edgemap.VIPKey]string)
+	}
+	for _, k := range keys {
+		d.vpcByKey[k] = vpc
+	}
+}
+
+// clearVPC forgets the owner of key once its vip_table entry is gone.
+func (d *KernelDatapath) clearVPC(key edgemap.VIPKey) {
+	d.vpcMu.Lock()
+	defer d.vpcMu.Unlock()
+	delete(d.vpcByKey, key)
+}
+
+// VPCAttribution implements edgemetrics.VPCAttribution. Several rules can
+// share one VIP address on different ports or protocols, and edge_return counts
+// per address, so an address whose rules belong to more than one VPC is left
+// out of addrs rather than credited to any one of them.
+func (d *KernelDatapath) VPCAttribution() (rules map[edgemap.VIPKey]string, addrs map[netip.Addr]string) {
+	d.vpcMu.RLock()
+	defer d.vpcMu.RUnlock()
+
+	rules = make(map[edgemap.VIPKey]string, len(d.vpcByKey))
+	addrs = make(map[netip.Addr]string, len(d.vpcByKey))
+	shared := make(map[netip.Addr]struct{})
+	for key, vpc := range d.vpcByKey {
+		rules[key] = vpc
+		if prev, ok := addrs[key.VIP]; ok && prev != vpc {
+			shared[key.VIP] = struct{}{}
+		}
+		addrs[key.VIP] = vpc
+	}
+	for addr := range shared {
+		delete(addrs, addr)
+	}
+	return rules, addrs
 }
 
 // Generation returns vip_table's own monotonic-clock snapshot.
