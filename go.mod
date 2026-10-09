@@ -21,8 +21,8 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20261002201547-1d1c62507e3c
-	go.datum.net/cloud v0.1.1-0.20260918213150-260f797bbc5c
-	go.datum.net/network v0.3.1-0.20261009013235-5e00bde12789
+	go.datum.net/cloud v0.1.2
+	go.datum.net/network v0.4.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.44.0
