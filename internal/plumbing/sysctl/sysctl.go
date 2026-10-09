@@ -163,19 +163,37 @@ func sysctlName(segments []string) string {
 	return strings.Join(parts, ".")
 }
 
+// tapSettings are the sysctls ConfigureTapSysctls applies to a tap's host side.
+//
+// accept_dad is off because duplicate address detection holds the tap's
+// link-local address tentative for about a second after its VMM opens it, and
+// the node daemon's Router Advertisement sender cannot bind a tentative
+// address. A tap is a point-to-point link to one guest, so the address has
+// nothing to collide with. The tap is up but without carrier when this runs,
+// and the kernel assigns the link-local address only once carrier appears, so
+// the setting is in place before the address exists.
+var tapSettings = []struct {
+	format string
+	value  string
+}{
+	{"net.ipv4.conf.%s.rp_filter", "0"},
+	{"net.ipv6.conf.%s.rp_filter", "0"},
+	{"net.ipv4.conf.%s.forwarding", "1"},
+	{"net.ipv6.conf.%s.forwarding", "1"},
+	{"net.ipv6.conf.%s.accept_dad", "0"},
+}
+
 // ConfigureTapSysctls applies the sysctls appropriate for a tap connected to a
 // VM. Unlike ConfigureInterfaceSysctls it skips proxy ARP and NDP, the VM
 // handling its own address resolution. A sysctl that does not exist is skipped
 // silently.
 func ConfigureTapSysctls(iface string) error {
-	settings := map[string]string{
-		fmt.Sprintf("net.ipv4.conf.%s.rp_filter", iface):  "0",
-		fmt.Sprintf("net.ipv6.conf.%s.rp_filter", iface):  "0",
-		fmt.Sprintf("net.ipv4.conf.%s.forwarding", iface): "1",
-		fmt.Sprintf("net.ipv6.conf.%s.forwarding", iface): "1",
-	}
-	for key, val := range settings {
-		_ = gosysctl.Set(key, val) // silently skip missing entries
+	for _, entry := range tapSettings {
+		name := fmt.Sprintf(entry.format, iface)
+		if err := gosysctl.Set(name, entry.value); err != nil {
+			// Non-fatal: a sysctl that does not exist is skipped.
+			logger.Debug("tap sysctl write failed", "sysctl", name, "err", err)
+		}
 	}
 	return nil
 }

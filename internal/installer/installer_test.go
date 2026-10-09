@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -729,6 +730,109 @@ func awaitRadvFailure(t *testing.T, actors *radvActorSet) radvActorFailure {
 	return radvActorFailure{}
 }
 
+// testRadvCarrierLossCancelsRunningActor covers a guest that restarts: it loses
+// and regains carrier while its actor keeps running. The actor is cancelled on
+// the loss, so the carrier's return starts a fresh one, with its own initial
+// burst.
+func testRadvCarrierLossCancelsRunningActor(t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet) {
+	const iface = radvTestIface
+	var mu sync.Mutex
+	started := 0
+	stopped := make(chan struct{}, 4)
+	orig := radvRunActor
+	t.Cleanup(func() { radvRunActor = orig })
+	radvRunActor = func(ctx context.Context, _ string, _ int) error {
+		mu.Lock()
+		started++
+		mu.Unlock()
+		<-ctx.Done()
+		stopped <- struct{}{}
+		return nil
+	}
+	startedCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return started
+	}
+	awaitStarted := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for startedCount() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("actors started = %d, want %d", startedCount(), want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	env.links[iface] = radvTestLink{carrier: true}
+	reconcileRadvActors(ctx, actors)
+	awaitStarted(1)
+
+	env.links[iface] = radvTestLink{carrier: false}
+	reconcileRadvActors(ctx, actors)
+	if _, running := actors.cancel[iface]; running {
+		t.Fatalf("actor on %q still tracked after carrier was lost", iface)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("actor on %q not cancelled after carrier was lost", iface)
+	}
+
+	env.links[iface] = radvTestLink{carrier: true}
+	reconcileRadvActors(ctx, actors)
+	if _, running := actors.cancel[iface]; !running {
+		t.Fatalf("no fresh actor on %q after carrier returned", iface)
+	}
+	awaitStarted(2)
+}
+
+// testRadvAddrNotReadyBacksOff covers an interface with carrier that never gets
+// a usable link-local address: it retries at once at first, then warns and backs
+// off.
+func testRadvAddrNotReadyBacksOff(t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet) {
+	const iface = radvTestIface
+	env.links[iface] = radvTestLink{carrier: true}
+	notReady := radvActorFailure{iface: iface, err: radv.ErrAddrNotReady}
+
+	for i := 1; i < radvWarnAfterFailures; i++ {
+		reconcileRadvActors(ctx, actors)
+		if _, running := actors.cancel[iface]; !running {
+			t.Fatalf("exhaustion %d: actor on %q not started", i, iface)
+		}
+		radvActorFailed(actors, notReady)
+		if p := actors.pending[iface]; !p.retryAt.IsZero() || p.failures != 0 {
+			t.Fatalf("exhaustion %d: retryAt = %v, failures = %d, want an immediate retry", i, p.retryAt, p.failures)
+		}
+	}
+
+	reconcileRadvActors(ctx, actors)
+	radvActorFailed(actors, notReady)
+	p := actors.pending[iface]
+	if got := p.retryAt.Sub(env.now); got != radvReconcileInterval {
+		t.Fatalf("backoff at the warning threshold = %v, want %v", got, radvReconcileInterval)
+	}
+	reconcileRadvActors(ctx, actors)
+	if _, running := actors.cancel[iface]; running {
+		t.Fatalf("actor on %q retried inside its backoff", iface)
+	}
+
+	env.now = p.retryAt
+	reconcileRadvActors(ctx, actors)
+	radvActorFailed(actors, notReady)
+	if got := p.retryAt.Sub(env.now); got != 2*radvReconcileInterval {
+		t.Fatalf("second backoff = %v, want %v", got, 2*radvReconcileInterval)
+	}
+
+	// Losing carrier starts the count over.
+	env.links[iface] = radvTestLink{carrier: false}
+	reconcileRadvActors(ctx, actors)
+	if p.notReady != 0 || !p.retryAt.IsZero() {
+		t.Errorf("notReady = %d, retryAt = %v after carrier loss, want both reset", p.notReady, p.retryAt)
+	}
+}
+
 func TestReconcileRadvActors(t *testing.T) {
 	const iface = radvTestIface
 
@@ -841,6 +945,8 @@ func TestReconcileRadvActors(t *testing.T) {
 				awaitRadvFailure(t, actors)
 			},
 		},
+		{name: "CarrierLossCancelsRunningActor", run: testRadvCarrierLossCancelsRunningActor},
+		{name: "AddrNotReadyBacksOffAfterRepeatedExhaustion", run: testRadvAddrNotReadyBacksOff},
 		{
 			// A record whose interface is gone is removed once the grace
 			// period has passed, since no DEL is left to remove it.

@@ -75,6 +75,21 @@ func TestInterfaceSettings_hasAllEntries(t *testing.T) {
 	}
 }
 
+func TestTapSettings_disablesDAD(t *testing.T) {
+	// The Router Advertisement sender cannot bind a tentative link-local
+	// address, so a tap must come up with duplicate address detection off
+	// (#828).
+	for _, entry := range tapSettings {
+		if entry.format == "net.ipv6.conf.%s.accept_dad" {
+			if entry.value != "0" {
+				t.Errorf("tapSettings accept_dad = %q, want \"0\"", entry.value)
+			}
+			return
+		}
+	}
+	t.Error("tapSettings does not set net.ipv6.conf.<tap>.accept_dad")
+}
+
 // fakeProcSys builds a procfs sysctl root under a temporary directory holding
 // each of the given sysctls, by path segment, set to value with file mode
 // mode, and points the FIB-lookup helpers at it for the rest of the test.
