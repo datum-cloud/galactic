@@ -470,3 +470,146 @@ func TestNewKernelDatapath_RejectsIPv4EncapSource(t *testing.T) {
 		t.Error("NewKernelDatapath with an IPv4 encap source address: want an error, got nil")
 	}
 }
+
+// testVPCA and testVPCB are the VPC identifiers the attribution tests assign.
+const (
+	testVPCA = "vpcA"
+	testVPCB = "vpcB"
+)
+
+// TestKernelDatapath_VPCAttributionFollowsAppliedRules covers #709: the VPC a
+// rule carries labels its vip_table keys from apply until the key is pruned or
+// the rule removed.
+func TestKernelDatapath_VPCAttributionFollowsAppliedRules(t *testing.T) {
+	d := newTestKernelDatapath()
+	ctx := context.Background()
+	kept := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: netip.MustParseAddr("2001:db8:1::10")}
+	dropped := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: netip.MustParseAddr("2001:db8:1::11")}
+
+	rule := testDesiredRule(t, testKeyA, "2001:db8:1::10", "2001:db8:1::11")
+	rule.VPCRef = testVPCA
+	if err := d.ApplyRule(ctx, rule); err != nil {
+		t.Fatalf("ApplyRule: %v", err)
+	}
+	rules, addrs := d.VPCAttribution()
+	if rules[kept] != testVPCA || rules[dropped] != testVPCA {
+		t.Fatalf("rules = %v, want both keys attributed to vpcA", rules)
+	}
+	if addrs[kept.VIP] != testVPCA || addrs[dropped.VIP] != testVPCA {
+		t.Fatalf("addrs = %v, want both addresses attributed to vpcA", addrs)
+	}
+
+	rule.VIPAddresses = rule.VIPAddresses[:1]
+	if err := d.ApplyRule(ctx, rule); err != nil {
+		t.Fatalf("ApplyRule after dropping a VIP: %v", err)
+	}
+	rules, addrs = d.VPCAttribution()
+	if _, ok := rules[dropped]; ok {
+		t.Errorf("rules still attributes the pruned key %+v", dropped)
+	}
+	if _, ok := addrs[dropped.VIP]; ok {
+		t.Errorf("addrs still attributes the pruned address %s", dropped.VIP)
+	}
+
+	if err := d.RemoveRule(ctx, testKeyA); err != nil {
+		t.Fatalf("RemoveRule: %v", err)
+	}
+	if rules, addrs = d.VPCAttribution(); len(rules) != 0 || len(addrs) != 0 {
+		t.Errorf("after RemoveRule: rules = %v, addrs = %v, want both empty", rules, addrs)
+	}
+}
+
+// TestKernelDatapath_VPCAttributionOmitsSharedAddress covers an address two
+// VPCs' rules both use on different ports: each rule key keeps its own VPC, but
+// the per-address return counters cannot be split, so the address is left out.
+func TestKernelDatapath_VPCAttributionOmitsSharedAddress(t *testing.T) {
+	d := newTestKernelDatapath()
+	ctx := context.Background()
+
+	a := testDesiredRule(t, testKeyA, "2001:db8:1::10")
+	a.VPCRef = testVPCA
+	b := testDesiredRule(t, testKeyA+"-b", "2001:db8:1::10")
+	b.VPCRef = testVPCB
+	b.Port = 80
+	for _, rule := range []DesiredRule{a, b} {
+		if err := d.ApplyRule(ctx, rule); err != nil {
+			t.Fatalf("ApplyRule(%s): %v", rule.Key, err)
+		}
+	}
+
+	rules, addrs := d.VPCAttribution()
+	vip := netip.MustParseAddr("2001:db8:1::10")
+	if got := rules[edgemap.VIPKey{Proto: 6, VPort: 443, VIP: vip}]; got != testVPCA {
+		t.Errorf("port 443 key VPC = %q, want vpcA", got)
+	}
+	if got := rules[edgemap.VIPKey{Proto: 6, VPort: 80, VIP: vip}]; got != testVPCB {
+		t.Errorf("port 80 key VPC = %q, want vpcB", got)
+	}
+	if got, ok := addrs[vip]; ok {
+		t.Errorf("addrs[%s] = %q, want absent for an address two VPCs share", vip, got)
+	}
+}
+
+// TestKernelDatapath_VPCAttributionOnPartialApplyFailure covers a re-apply that
+// moves a rule to another VPC and then fails partway: every key the rule still
+// owns carries the new VPC, and a key that never landed is not attributed.
+func TestKernelDatapath_VPCAttributionOnPartialApplyFailure(t *testing.T) {
+	table := newFakeVIPTable()
+	d := &KernelDatapath{
+		vipTable: edgemap.NewVIPTable(
+			table, newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable()),
+		vipKeysByName: make(map[string][]edgemap.VIPKey),
+	}
+	ctx := context.Background()
+	owned := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: netip.MustParseAddr("2001:db8:1::10")}
+	unwritten := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: netip.MustParseAddr("2001:db8:1::11")}
+
+	rule := testDesiredRule(t, testKeyA, "2001:db8:1::10")
+	rule.VPCRef = testVPCA
+	if err := d.ApplyRule(ctx, rule); err != nil {
+		t.Fatalf("ApplyRule: %v", err)
+	}
+
+	// Re-apply under testVPCB with a second VIP, failing the first write: the
+	// already-owned key, which stays in vip_table under the rule.
+	table.failOnNthPut = table.putCount + 1
+	rule.VPCRef = testVPCB
+	rule.VIPAddresses = append(rule.VIPAddresses, unwritten.VIP)
+	if err := d.ApplyRule(ctx, rule); err == nil {
+		t.Fatal("ApplyRule: want an error from the injected Put failure, got nil")
+	}
+
+	rules, _ := d.VPCAttribution()
+	if got := rules[owned]; got != testVPCB {
+		t.Errorf("owned key VPC = %q, want %q", got, testVPCB)
+	}
+	if got, ok := rules[unwritten]; ok {
+		t.Errorf("unwritten key attributed to %q, want absent", got)
+	}
+}
+
+// TestKernelDatapath_VPCAttributionConcurrentWithApply runs scrapes alongside
+// applies and removals, for the race detector.
+func TestKernelDatapath_VPCAttributionConcurrentWithApply(t *testing.T) {
+	d := newTestKernelDatapath()
+	ctx := context.Background()
+	rule := testDesiredRule(t, testKeyA, "2001:db8:1::10", "2001:db8:1::11")
+	rule.VPCRef = testVPCA
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 200 {
+			d.VPCAttribution()
+		}
+	}()
+	for range 200 {
+		if err := d.ApplyRule(ctx, rule); err != nil {
+			t.Errorf("ApplyRule: %v", err)
+		}
+		if err := d.RemoveRule(ctx, testKeyA); err != nil {
+			t.Errorf("RemoveRule: %v", err)
+		}
+	}
+	<-done
+}

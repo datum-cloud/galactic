@@ -172,7 +172,7 @@ func setupGatewayDatapath(
 		abandon()
 		return nil, fmt.Errorf("construct kernel datapath: %w", err)
 	}
-	if err := metricsReg.Register(edgemetrics.NewCollectorFromObjects(objs)); err != nil {
+	if err := metricsReg.Register(edgemetrics.NewCollectorFromObjects(objs, datapath)); err != nil {
 		abandon()
 		return nil, fmt.Errorf("register edge gateway metrics collector: %w", err)
 	}

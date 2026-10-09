@@ -346,7 +346,7 @@ func TestCollector_CollectsRuleCounters(t *testing.T) {
 		}
 	}
 
-	c := NewCollector(vt, fakeDropReasons{})
+	c := NewCollector(vt, fakeDropReasons{}, nil)
 	metrics := collect(t, c)
 
 	packets := findMetric(t, metrics, rulePacketsDesc, "vip", "2001:db8:1::10")
@@ -391,7 +391,7 @@ func TestCollector_OmitsSecondsSinceLastPacketWhenNeverSeen(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	c := NewCollector(vt, fakeDropReasons{})
+	c := NewCollector(vt, fakeDropReasons{}, nil)
 	metrics := collect(t, c)
 
 	// 4 metrics per rule (packets/bytes/dropped/backends) when
@@ -423,7 +423,7 @@ func TestCollector_CollectsDropsByReason(t *testing.T) {
 	}
 	vt := edgemap.NewVIPTable(
 		newFakeVIPTable(), newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable())
-	c := NewCollector(vt, drops)
+	c := NewCollector(vt, drops, nil)
 	metrics := collect(t, c)
 
 	emptyBackends := findMetric(t, metrics, dropsDesc, "reason", "empty_backend_list")
@@ -463,7 +463,7 @@ func TestCollector_CollectsReturnCounters(t *testing.T) {
 		returnStats.entries[k] = edgeprog.EdgedsrVipStatsValue{Packets: 12, Bytes: 9000, DroppedPackets: 2}
 	}
 
-	c := NewCollector(vt, fakeDropReasons{})
+	c := NewCollector(vt, fakeDropReasons{}, nil)
 	metrics := collect(t, c)
 
 	for _, tc := range []struct {
@@ -483,5 +483,103 @@ func TestCollector_CollectsReturnCounters(t *testing.T) {
 		if got := metricValue(m); got != tc.want {
 			t.Errorf("%s = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// fakeAttribution is a fixed VPCAttribution.
+type fakeAttribution struct {
+	rules map[edgemap.VIPKey]string
+	addrs map[netip.Addr]string
+}
+
+func (f fakeAttribution) VPCAttribution() (map[edgemap.VIPKey]string, map[netip.Addr]string) {
+	return f.rules, f.addrs
+}
+
+// testVPC is the VPC identifier the attribution tests assign.
+const testVPC = "vpcA"
+
+// TestCollector_LabelsSeriesWithOwningVPC covers #709: every per-VIP series
+// carries the owning VPC, and an entry nothing attributes reads an empty vpc
+// label rather than going absent.
+func TestCollector_LabelsSeriesWithOwningVPC(t *testing.T) {
+	table := newFakeVIPTable()
+	statsTable := newFakeStatsTable()
+	addrs := newFakeAddrTable()
+	returnStats := newFakeReturnStatsTable()
+	vt := edgemap.NewVIPTable(table, statsTable, addrs, returnStats)
+
+	owned := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "2001:db8:1::10")}
+	unowned := edgemap.VIPKey{Proto: 17, VPort: 53, VIP: mustAddr(t, "2001:db8:1::20")}
+	backend := edgemap.Backend{
+		Addr: mustAddr(t, "fd00:10:1::20"), Port: 8443, USID: mustAddr(t, "2001:db8:2::1"),
+	}
+	for _, key := range []edgemap.VIPKey{owned, unowned} {
+		if err := vt.Register(key, []edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
+			t.Fatalf("Register(%+v): %v", key, err)
+		}
+	}
+	now := vt.Generation()
+	for k := range table.entries {
+		statsTable.entries[k] = edgeprog.EdgedsrVipStatsValue{Packets: 1, Bytes: 100, LastSeenNs: now}
+	}
+
+	c := NewCollector(vt, fakeDropReasons{}, fakeAttribution{
+		rules: map[edgemap.VIPKey]string{owned: testVPC},
+		addrs: map[netip.Addr]string{owned.VIP: testVPC},
+	})
+	metrics := collect(t, c)
+
+	for _, desc := range []*prometheus.Desc{
+		rulePacketsDesc, ruleBytesDesc, ruleDroppedDesc, ruleBackendsDesc, ruleSecondsSinceLastPacketDesc,
+	} {
+		if got := labelValue(findMetric(t, metrics, desc, "vip", owned.VIP.String()), "vpc"); got != testVPC {
+			t.Errorf("%v{vip=%s} vpc = %q, want %s", desc, owned.VIP, got, testVPC)
+		}
+		if got := labelValue(findMetric(t, metrics, desc, "vip", unowned.VIP.String()), "vpc"); got != "" {
+			t.Errorf("%v{vip=%s} vpc = %q, want empty", desc, unowned.VIP, got)
+		}
+	}
+	for _, desc := range []*prometheus.Desc{returnPacketsDesc, returnBytesDesc, returnDroppedDesc} {
+		if got := labelValue(findMetric(t, metrics, desc, "vip", owned.VIP.String()), "vpc"); got != testVPC {
+			t.Errorf("%v{vip=%s} vpc = %q, want %s", desc, owned.VIP, got, testVPC)
+		}
+		if got := labelValue(findMetric(t, metrics, desc, "vip", unowned.VIP.String()), "vpc"); got != "" {
+			t.Errorf("%v{vip=%s} vpc = %q, want empty", desc, unowned.VIP, got)
+		}
+	}
+}
+
+// TestCollector_SharedAddressKeepsRuleVPCs covers a VIP address two VPCs' rules
+// share: each rule series keeps its own VPC, while the address's return series,
+// which the attribution leaves out, reads an empty vpc label.
+func TestCollector_SharedAddressKeepsRuleVPCs(t *testing.T) {
+	table := newFakeVIPTable()
+	vt := edgemap.NewVIPTable(table, newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable())
+	vip := mustAddr(t, "2001:db8:1::10")
+	https := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: vip}
+	dns := edgemap.VIPKey{Proto: 17, VPort: 53, VIP: vip}
+	backend := edgemap.Backend{
+		Addr: mustAddr(t, "fd00:10:1::20"), Port: 8443, USID: mustAddr(t, "2001:db8:2::1"),
+	}
+	for _, key := range []edgemap.VIPKey{https, dns} {
+		if err := vt.Register(key, []edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
+			t.Fatalf("Register(%+v): %v", key, err)
+		}
+	}
+
+	c := NewCollector(vt, fakeDropReasons{}, fakeAttribution{
+		rules: map[edgemap.VIPKey]string{https: testVPC, dns: "vpcB"},
+	})
+	metrics := collect(t, c)
+
+	for _, tc := range []struct{ proto, want string }{{protoLabel(6), testVPC}, {protoLabel(17), "vpcB"}} {
+		m := findMetric(t, metrics, rulePacketsDesc, "proto", tc.proto)
+		if got := labelValue(m, "vpc"); got != tc.want {
+			t.Errorf("rule_packets_total{proto=%s} vpc = %q, want %q", tc.proto, got, tc.want)
+		}
+	}
+	if got := labelValue(findMetric(t, metrics, returnPacketsDesc, "vip", vip.String()), "vpc"); got != "" {
+		t.Errorf("return_packets_total{vip=%s} vpc = %q, want empty", vip, got)
 	}
 }

@@ -674,7 +674,10 @@ kubectl exec -n galactic-system <galactic-gateway-pod> -- \
 Relevant series: `galactic_edge_rule_packets_total`,
 `galactic_edge_rule_bytes_total`, `galactic_edge_rule_dropped_packets_total`,
 `galactic_edge_rule_backends`, `galactic_edge_rule_seconds_since_last_packet`
-(all labeled by `proto`/`port`/`vip`), `galactic_edge_drops_total` (labeled
+(all labeled by `proto`/`port`/`vip`/`vpc`),
+`galactic_edge_return_packets_total`, `galactic_edge_return_bytes_total` and
+`galactic_edge_return_dropped_packets_total` (labeled by `vip`/`vpc`),
+`galactic_edge_drops_total` (labeled
 by `reason`), and `galactic_edge_control_plane_drops_total` (rule
 applications rejected before ever reaching the datapath, e.g. quota
 denials). A rule with zero `rule_packets_total` and a client actually
@@ -682,6 +685,19 @@ sending traffic points at an upstream problem (BGP not carrying the route,
 underlay reachability) rather than this node's own datapath; nonzero
 `dropped_packets_total` for a rule with `rule_backends` at `0` means the
 rule's own backend list is empty.
+
+`vpc` is the owning rule's `spec.vpcRef`, the same identifier the CNI's
+`galactic_usid_vrf_*` series carry, so a sum by `vpc` attributes load
+balancer traffic to a tenant. It reads empty in three cases:
+
+1. Right after a gateway restart, until the first reconcile re-applies
+   every rule. The counters themselves survive the restart.
+2. On a return series whose VIP address is shared by rules of more than one
+   VPC, since return traffic is counted per address.
+3. On an entry no current rule owns, which the orphan sweep removes.
+
+Deleting a rule removes its series. There is no `vpc_attachment` label,
+since a rule's backends can span many VPCAttachments.
 
 Confirm the eBPF program is actually attached to the node's public
 interface — `edgeattach.Attach` requests **native XDP driver mode only**
