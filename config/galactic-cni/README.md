@@ -64,6 +64,28 @@ node running this manifest. The rationale for each capability:
   runtime-default seccomp profile, no privilege escalation, and a read-only
   root filesystem to limit the surrounding attack surface.
 
+## Memory limit
+
+The kernel charges eBPF map memory to the memory cgroup of the process that
+creates the map. `credential-refresh` creates the uSID datapath's maps when a
+node has none pinned: a new node, or one upgraded from a build that lacks a
+map. Those maps take about 59Mi, most of it `service_reverse_table`. When the
+container's limit leaves too little room for them, the map create fails with
+`cannot allocate memory` and the pod crash-loops (#808).
+
+`TestUsid_MapMemoryFitsGalacticCNILimit` in `internal/plumbing/ebpf/prog`
+loads the maps, sums the size the kernel reports for each, adds 40Mi for the
+process, and fails if the total exceeds this manifest's limit. It runs as
+root, in CI's `task test:unit-root` step. A map change that outgrows the limit
+fails there, so raise the limit in the same change.
+
+The test reads that size from each map's fdinfo `memlock` line. It is the
+kernel's estimate of the map, not the memory cgroup's charge, and it grows
+slightly with CPU count. The 40Mi allowance doubles as margin for that gap.
+The end-to-end check is loading the datapath in a memory cgroup: with a 32M
+limit it fails at `service_reverse_table` with `cannot allocate memory`, and
+with 96M it loads.
+
 ## The `bpf-fs` hostPath mount
 
 `/sys/fs/bpf` is the host's bpffs mount ("All maps pinned under
