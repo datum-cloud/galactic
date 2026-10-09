@@ -8092,7 +8092,7 @@ SOFTWARE.
 ## go.datum.net/cloud/api/v1alpha1
 
 * Name: go.datum.net/cloud/api/v1alpha1
-* Version: v0.1.1-0.20260918213150-260f797bbc5c
+* Version: v0.1.2
 * License: AGPL-3.0
 
 ```
@@ -8778,7 +8778,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ## go.datum.net/network/api/v1alpha1
 
 * Name: go.datum.net/network/api/v1alpha1
-* Version: v0.3.1-0.20261006185716-0f099eb3b0ea
+* Version: v0.4.0
 * License: AGPL-3.0
 
 ```
