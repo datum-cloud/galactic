@@ -87,6 +87,26 @@ var (
 	MaxRADelayTime     = 500 * time.Millisecond
 )
 
+// MaxInitialRtrAdvertisements is how many advertisements an actor sends
+// MinDelayBetweenRAs apart when it starts, before falling back to the jittered
+// NextInterval schedule. RFC 4861 section 6.2.4 allows up to three, at intervals
+// of at most 16 seconds.
+//
+// A guest learns its default route only from an RA, and one that solicited
+// before the actor was listening has lost that solicitation, so the first
+// advertisement goes out the moment the actor starts and the burst covers a
+// guest whose network stack was not yet up to receive it.
+const MaxInitialRtrAdvertisements = 3
+
+// nextUnsolicitedDelay returns the delay before the next unsolicited RA, given
+// how many advertisements this actor has sent so far.
+func nextUnsolicitedDelay(sent int) time.Duration {
+	if sent < MaxInitialRtrAdvertisements {
+		return MinDelayBetweenRAs
+	}
+	return NextInterval()
+}
+
 // nextResponseDelay returns a random delay in [0, MaxRADelayTime) to wait
 // before replying to a Router Solicitation.
 func nextResponseDelay() time.Duration {

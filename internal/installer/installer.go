@@ -744,10 +744,25 @@ var radvStaleRecordGrace = 30 * time.Second
 var radvMaxRetryBackoff = 5 * time.Minute
 
 // radvWarnAfterFailures is the consecutive failed start that is logged as a
-// warning. Earlier failures are routine, since a freshly attached guest's
-// link-local address is still completing duplicate address detection, and later
-// ones would repeat the same warning for as long as the failure lasts.
+// warning. Later ones would repeat the same warning for as long as the failure
+// lasts.
 const radvWarnAfterFailures = 3
+
+// radvAddrNotReadyRetryDelay and radvAddrNotReadyRetries bound how long an
+// actor goroutine keeps retrying a start that failed with radv.ErrAddrNotReady
+// before reporting it. The tap's link-local address appears, and leaves the
+// tentative state, moments after the tap gains carrier, often just after the
+// carrier event that started the actor, so a short local retry serves the
+// guest within a fraction of a second instead of waiting for the next tick.
+// Vars so tests can shrink them.
+var (
+	radvAddrNotReadyRetryDelay = 100 * time.Millisecond
+	radvAddrNotReadyRetries    = 20
+)
+
+// radvRunActor is the actor each started attachment runs. A var so tests can
+// fake its result without a real interface.
+var radvRunActor = radv.RunActor
 
 // radvNow is the clock reconcileRadvActors reads. A var so tests can move it.
 var radvNow = time.Now
@@ -834,7 +849,7 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 		actors.wg.Add(1)
 		go func(iface string, mtu int) {
 			defer actors.wg.Done()
-			if err := radv.RunActor(actorCtx, iface, mtu); err != nil {
+			if err := runRadvActor(actorCtx, iface, mtu); err != nil {
 				select {
 				case actors.failed <- radvActorFailure{iface: iface, err: err}:
 				default:
@@ -855,6 +870,23 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 	for iface := range actors.pending {
 		if _, ok := seen[iface]; !ok {
 			delete(actors.pending, iface)
+		}
+	}
+}
+
+// runRadvActor runs radvRunActor on iface, retrying a start that fails with
+// radv.ErrAddrNotReady every radvAddrNotReadyRetryDelay, up to
+// radvAddrNotReadyRetries times, before returning the error.
+func runRadvActor(ctx context.Context, iface string, mtu int) error {
+	for attempt := 0; ; attempt++ {
+		err := radvRunActor(ctx, iface, mtu)
+		if !errors.Is(err, radv.ErrAddrNotReady) || attempt >= radvAddrNotReadyRetries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(radvAddrNotReadyRetryDelay):
 		}
 	}
 }
@@ -929,6 +961,12 @@ func radvPendingFor(actors *radvActorSet, iface string) *radvPending {
 // actor is running. A report for an attachment that is already gone is a safe
 // no-op.
 //
+// A start that failed only because the interface's link-local address is not
+// usable yet (radv.ErrAddrNotReady) is retried on the next reconcile and does
+// not count toward the backoff: the address is still being assigned, and
+// counting it would delay the guest's first advertisement for no fault of its
+// own.
+//
 // Each attempt derives its context from one that lives as long as the process.
 // Only cancelling detaches the derived context. Deleting the entry alone leaves
 // it attached, so a retry loop grows this daemon's memory without bound.
@@ -941,6 +979,12 @@ func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
 	delete(actors.cancel, failure.iface)
 
 	p := radvPendingFor(actors, failure.iface)
+	if errors.Is(failure.err, radv.ErrAddrNotReady) {
+		p.retryAt = time.Time{}
+		slog.Debug("Router advertisement interface address not ready yet, will retry",
+			"err", failure.err, "hostInterface", failure.iface)
+		return
+	}
 	p.failures++
 	backoff := radvReconcileInterval << min(p.failures-1, 16)
 	if backoff <= 0 || backoff > radvMaxRetryBackoff {
@@ -983,8 +1027,9 @@ func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
 //     galactic-router's GC controller because the pinned maps exist only
 //     inside this container.
 //  8. Runs one radv.RunActor per recorded tap attachment, reconciled on a short
-//     ticker. Each actor resends Router Advertisements on a jittered schedule
-//     and replies to that guest's solicitations. This runs here, not from
+//     ticker and whenever a tap gains carrier. Each actor advertises as soon as
+//     it starts, resends Router Advertisements on a jittered schedule, and
+//     replies to that guest's solicitations. This runs here, not from
 //     galactic-tap's cmdAdd, because a guest's boot outlives that short-lived
 //     process. It is independent of the eBPF datapath and runs regardless.
 func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
@@ -1089,8 +1134,12 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	reconcileRadvActors(ctx, radvActors)
 	defer radvActors.wg.Wait()
 
-	radvReconcileTicker := time.NewTicker(radvReconcileInterval)
-	defer radvReconcileTicker.Stop()
+	// Reconciled every radvReconcileInterval, and again the moment a tap
+	// gains carrier, which is when its VMM opens it, so the guest's first
+	// advertisement does not wait for the next tick.
+	radvReconcileCh := make(chan struct{}, 1)
+	go signalEvery(ctx, radvReconcileInterval, radvReconcileCh)
+	go watchTapCarrier(ctx, radvReconcileCh)
 
 	tapNeighTicker := time.NewTicker(tapNeighReconcileInterval)
 	defer tapNeighTicker.Stop()
@@ -1164,7 +1213,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 					"removed", nptv6Result.EBPFNPTv6EntriesRemoved, "errors", nptv6Result.Errors)
 			}
 
-		case <-radvReconcileTicker.C:
+		case <-radvReconcileCh:
 			reconcileRadvActors(ctx, radvActors)
 
 		case <-tapNeighTicker.C:

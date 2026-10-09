@@ -6,37 +6,57 @@ package radv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mdlayher/ndp"
+	"golang.org/x/net/ipv6"
 )
+
+// ErrAddrNotReady is wrapped by RunActor's error when the interface has no
+// usable link-local address yet: the kernel has not assigned one, or duplicate
+// address detection still holds it tentative and the kernel refuses to bind
+// it. Both clear on their own within moments of the interface gaining carrier,
+// so a caller should retry soon rather than count it as a failure.
+var ErrAddrNotReady = errors.New("link-local address not ready")
+
+// raWriter is the part of *ndp.Conn runActorLoop sends through, so a test can
+// record what the loop sends and when.
+type raWriter interface {
+	WriteTo(m ndp.Message, cm *ipv6.ControlMessage, dst netip.Addr) error
+}
 
 // RunActor owns one tap attachment's whole Router Advertisement lifecycle for
 // as long as ctx lives: it sends unsolicited advertisements on the jittered
 // schedule, and replies to solicitations so a freshly booted or reconnected
 // guest need not wait out a full resend cycle.
 //
-// Both jobs share one connection and one last-sent clock, so a solicited reply
-// also reschedules the next unsolicited send rather than the guest receiving a
-// redundant advertisement moments later.
+// It sends the first advertisement as soon as the connection is open, then
+// MaxInitialRtrAdvertisements-1 more MinDelayBetweenRAs apart, so a guest gets
+// its default route without having to solicit one. Both jobs share one
+// connection and one last-sent clock, so a solicited reply also reschedules the
+// next unsolicited send rather than the guest receiving a redundant
+// advertisement moments later.
 //
 // Callers run one per recorded attachment, starting it when the attachment
 // appears and cancelling when it disappears or the daemon shuts down. It
 // returns nil on a clean cancellation; a non-nil error means it never got the
 // connection open, leaving nothing to clean up and the caller free to retry on
-// its next tick.
+// its next tick. An error wrapping ErrAddrNotReady means the interface's
+// link-local address is not usable yet.
 func RunActor(ctx context.Context, iface string, mtu int) error {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
 		return fmt.Errorf("look up interface %q: %w", iface, err)
 	}
 
-	conn, _, err := ndp.Listen(ifi, ndp.LinkLocal)
+	conn, err := listen(ifi)
 	if err != nil {
 		return fmt.Errorf("open NDP connection on %q: %w", iface, err)
 	}
@@ -60,6 +80,44 @@ func RunActor(ctx context.Context, iface string, mtu int) error {
 	_ = conn.Close()
 	wg.Wait()
 	return nil
+}
+
+// listen opens the NDP connection on ifi's link-local address. ndp.Listen
+// reports a missing address only as an untyped error, so the address is looked
+// for here first to tell that case apart.
+func listen(ifi *net.Interface) (*ndp.Conn, error) {
+	addrs, err := ifi.Addrs()
+	if err != nil {
+		return nil, fmt.Errorf("list addresses: %w", err)
+	}
+	if !hasLinkLocal(addrs) {
+		return nil, fmt.Errorf("no IPv6 link-local address assigned: %w", ErrAddrNotReady)
+	}
+
+	conn, _, err := ndp.Listen(ifi, ndp.LinkLocal)
+	if err != nil {
+		// The kernel refuses to bind an address that duplicate address
+		// detection still holds tentative.
+		if errors.Is(err, syscall.EADDRNOTAVAIL) {
+			return nil, fmt.Errorf("%w: %w", ErrAddrNotReady, err)
+		}
+		return nil, err
+	}
+	return conn, nil
+}
+
+// hasLinkLocal reports whether addrs holds an IPv6 link-local unicast address.
+func hasLinkLocal(addrs []net.Addr) bool {
+	for _, a := range addrs {
+		ipn, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if ipn.IP.To4() == nil && ipn.IP.IsLinkLocalUnicast() {
+			return true
+		}
+	}
+	return false
 }
 
 // readSolicitations is the blocking read loop, on its own goroutine since the
@@ -94,19 +152,23 @@ func readSolicitations(wg *sync.WaitGroup, conn *ndp.Conn, rsCh chan<- netip.Add
 // setup and teardown wrapper. See RunActor for the combined behavior it
 // implements.
 func runActorLoop(
-	ctx context.Context, conn *ndp.Conn, iface string, mtu int, hwAddr net.HardwareAddr, rsCh <-chan netip.Addr,
+	ctx context.Context, conn raWriter, iface string, mtu int, hwAddr net.HardwareAddr, rsCh <-chan netip.Addr,
 ) {
-	resendTimer := time.NewTimer(NextInterval())
+	// Fires at once: the first advertisement goes out as soon as the
+	// connection is open.
+	resendTimer := time.NewTimer(0)
 	defer resendTimer.Stop()
 
 	var lastSent time.Time
+	sent := 0
 	send := func(dst netip.Addr) {
 		ra := buildAdvertisement(mtu, hwAddr)
 		if err := conn.WriteTo(ra, nil, dst); err != nil {
 			slog.Warn("Failed to send router advertisement", "err", err, "hostInterface", iface, "dst", dst)
 		}
 		lastSent = time.Now()
-		resendTimer.Reset(NextInterval())
+		sent++
+		resendTimer.Reset(nextUnsolicitedDelay(sent))
 	}
 
 	for {

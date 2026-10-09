@@ -95,7 +95,7 @@ func TestDaemonsetManifest_RunContainerMountsSharedTCLockDirWritable(t *testing.
 // TestDaemonsetManifest_RunContainerMountsHostConflistDir above, this time
 // for radv.DefaultStateDir ("/var/lib/cni/ra"): reconcileRadvActors calls
 // radv.ListAttachments(radv.DefaultStateDir) from inside the run container
-// on every radvReconcileTicker tick. That directory is populated by
+// on every reconcile. That directory is populated by
 // galactic-tap's cmdAdd/cmdDel (internal/cnitap/ops_add.go,
 // internal/cnitap/ops_del.go) -- a separate binary invoked directly on the
 // host by the kubelet's own CNI exec, not inside this or any other
