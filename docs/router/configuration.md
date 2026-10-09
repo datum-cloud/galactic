@@ -14,22 +14,19 @@ flag name — the mapping is defined in `internal/config` (see `RouterConfig`
 and the `EnvRouter*` constants). Always use the exact name from the table
 below.
 
-| Option                   | Environment Variable                      | CLI Flag                    | Default                        |
-|--------------------------|-------------------------------------------|-----------------------------|--------------------------------|
-| Node name                | `GALACTIC_ROUTER_NODE_NAME`               | `--node-name`               | _(required)_                   |
-| Route reflector          | `GALACTIC_ROUTER_REFLECTOR`               | `--reflector`               | `false`                        |
-| BGP listen port          | `GALACTIC_ROUTER_BGP_LISTEN_PORT`         | `--bgp-listen-port`         | `179`                          |
-| BGP local address        | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`       | `--bgp-local-address`       | _(auto-detected from `lo`)_    |
-| Metrics port             | `GALACTIC_ROUTER_METRICS_PORT`            | `--metrics-port`            | `9179`                         |
-| gRPC health port         | `GALACTIC_ROUTER_GRPC_HEALTH_PORT`        | `--grpc-health-port`        | `5179`                         |
-| Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE`            | `--gc-namespace`            | `galactic-system`              |
-| Orphan-cleanup interval  | `GALACTIC_ROUTER_GC_INTERVAL`             | `--gc-interval`             | `5m`                           |
-| Webhook enabled          | `GALACTIC_ROUTER_WEBHOOK_ENABLED`         | `--webhook-enabled`         | `false`                        |
-| Webhook port             | `GALACTIC_ROUTER_WEBHOOK_PORT`            | `--webhook-port`            | `9443`                         |
-| Webhook cert dir         | `GALACTIC_ROUTER_WEBHOOK_CERT_DIR`        | `--webhook-cert-dir`        | _(controller-runtime default)_ |
-| BMP stations             | `GALACTIC_ROUTER_BMP_STATIONS`            | `--bmp-stations`            | _(empty; BMP disabled)_        |
-| BMP policy               | `GALACTIC_ROUTER_BMP_POLICY`              | `--bmp-policy`              | `pre-policy`                   |
-| BMP statistics interval  | `GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL` | `--bmp-statistics-interval` | `60s`                          |
+| Option                   | Environment Variable                      | CLI Flag                    | Default                     |
+|--------------------------|-------------------------------------------|-----------------------------|-----------------------------|
+| Node name                | `GALACTIC_ROUTER_NODE_NAME`               | `--node-name`               | _(required)_                |
+| Route reflector          | `GALACTIC_ROUTER_REFLECTOR`               | `--reflector`               | `false`                     |
+| BGP listen port          | `GALACTIC_ROUTER_BGP_LISTEN_PORT`         | `--bgp-listen-port`         | `179`                       |
+| BGP local address        | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`       | `--bgp-local-address`       | _(auto-detected from `lo`)_ |
+| Metrics port             | `GALACTIC_ROUTER_METRICS_PORT`            | `--metrics-port`            | `9179`                      |
+| gRPC health port         | `GALACTIC_ROUTER_GRPC_HEALTH_PORT`        | `--grpc-health-port`        | `5179`                      |
+| Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE`            | `--gc-namespace`            | `galactic-system`           |
+| Orphan-cleanup interval  | `GALACTIC_ROUTER_GC_INTERVAL`             | `--gc-interval`             | `5m`                        |
+| BMP stations             | `GALACTIC_ROUTER_BMP_STATIONS`            | `--bmp-stations`            | _(empty; BMP disabled)_     |
+| BMP policy               | `GALACTIC_ROUTER_BMP_POLICY`              | `--bmp-policy`              | `pre-policy`                |
+| BMP statistics interval  | `GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL` | `--bmp-statistics-interval` | `60s`                       |
 
 ## Required Options
 
@@ -157,35 +154,6 @@ the informer caches sync at startup.
 
 **Type:** duration
 **Default:** `5m`
-
-### `--webhook-enabled` / `GALACTIC_ROUTER_WEBHOOK_ENABLED`
-
-Enables the `NetworkRule` admission webhook. Disabled by default: turning it
-on requires TLS cert material this repo does not provision, plus the webhook
-`ValidatingWebhookConfiguration` and `Service` manifests actually being
-applied — enabling it without both is a broken deployment, not a safe
-default. When enabled, the webhook uses a placeholder allow-all authorizer
-(`internal/webhook`) until the companion operator integration exists.
-
-**Type:** boolean
-**Default:** `false`
-
-### `--webhook-port` / `GALACTIC_ROUTER_WEBHOOK_PORT`
-
-TCP port the webhook server binds when `--webhook-enabled` is set. Matches
-controller-runtime's own default so callers need not look it up separately.
-
-**Type:** integer
-**Default:** `9443`
-**Valid values:** `1`–`65535`
-
-### `--webhook-cert-dir` / `GALACTIC_ROUTER_WEBHOOK_CERT_DIR`
-
-Directory containing the webhook server's TLS certificate and key, when
-`--webhook-enabled` is set. Empty uses controller-runtime's own default.
-
-**Type:** string
-**Default:** _(empty; controller-runtime default)_
 
 ### `--bmp-stations` / `GALACTIC_ROUTER_BMP_STATIONS`
 

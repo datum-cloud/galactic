@@ -381,7 +381,7 @@ func (r *NetworkGatewayReconciler) gatherRules(
 		}
 		live[rule.Namespace+"/"+rule.Name] = true
 		if !meta.IsStatusConditionTrue(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
-			// Admission has not accepted this rule yet. Once accepted, a rule
+			// No gateway node has accepted this rule yet. Once accepted, a rule
 			// loses Accepted only when no NetworkGateway is left in the
 			// namespace (updateAcceptedCondition), and each node's NotFound
 			// branch has then already withdrawn its advertisements and cleared

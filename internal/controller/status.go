@@ -125,7 +125,7 @@ func setBindingCondition(binding *bgpv1alpha1.ServiceVIPBinding, condition metav
 }
 
 // setRuleCondition sets or updates a condition on a NetworkRule. It uses two
-// types: Accepted, from the admission ownership check, and Ready, from the
+// types: Accepted, once gateway nodes exist to serve it, and Ready, from the
 // engine's convergence result for that rule.
 func setRuleCondition(rule *bgpv1alpha1.NetworkRule, condition metav1.Condition) {
 	condition.ObservedGeneration = rule.Generation
