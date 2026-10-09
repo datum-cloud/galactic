@@ -61,7 +61,11 @@ type CleanupResult struct {
 	// reconciled against the same live set as EBPFVRFEntriesRemoved since
 	// the two tables share the same (Block, Argument) key and lifecycle.
 	EBPFVPCAttributionEntriesRemoved int
-	Errors                           int
+	// EBPFVIPXlatEntriesRemoved counts stale eBPF vip_xlat_table entries
+	// removed by galactic-router's controller.VIPXlatSweeper, rows no live
+	// ServiceVIPBinding on this node claims.
+	EBPFVIPXlatEntriesRemoved int
+	Errors                    int
 }
 
 // vrfNameRegex matches the deterministic VRF interface name Galactic

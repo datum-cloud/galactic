@@ -167,13 +167,20 @@ func runCmd(cfg *config.RouterConfig) error {
 	// matters only once a tap-kind binding is reconciled here, at which point
 	// the reconciler reports a clear error rather than silently doing nothing.
 	// Veth bindings work regardless.
-	var vipTranslationTable controller.VIPTranslationTable
+	//
+	// The same handle backs the GC ticker's vip_xlat_table sweep, which is
+	// skipped while the pin is missing.
+	var (
+		vipTranslationTable controller.VIPTranslationTable
+		vipXlatSweeper      *controller.VIPXlatSweeper
+	)
 	vipXlatTable, vipXlatCloser, vipXlatErr := vipxlatmap.OpenPinnedVipXlatTable(attach.PinDir)
 	if vipXlatErr != nil {
 		ctrl.Log.Error(vipXlatErr, "vip_xlat_table not available on this node; "+
 			"tap-kind ServiceVIPBinding objects will fail to bind until the eBPF uSID datapath is loaded")
 	} else {
 		vipTranslationTable = vipXlatTable
+		vipXlatSweeper = &controller.VIPXlatSweeper{Client: mgr.GetClient(), NodeName: nodeName, Table: vipXlatTable}
 		defer vipXlatCloser.Close() //nolint:errcheck // best-effort close of our own fd at shutdown
 	}
 
@@ -294,28 +301,7 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("setup GC controller: %w", err)
 	}
 
-	// The GC ticker runs until the manager's context is cancelled. The
-	// first pass waits for informer caches to sync, so it does not see an
-	// empty advertisement list and delete live VRFs.
-	go func() {
-		ticker := time.NewTicker(cfg.GCInterval)
-		defer ticker.Stop()
-
-		if !mgr.GetCache().WaitForCacheSync(ctx) {
-			log.Printf("GC: cache sync failed, skipping initial pass")
-			return
-		}
-		gcRec.RunGC(ctx)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				gcRec.RunGC(ctx)
-			}
-		}
-	}()
+	go runGCTicker(ctx, mgr, cfg.GCInterval, gcRec, vipXlatSweeper)
 
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
@@ -344,6 +330,39 @@ func runCmd(cfg *config.RouterConfig) error {
 	}
 
 	return nil
+}
+
+// runGCTicker runs the GC controller's passes every interval until ctx is
+// cancelled. The first pass waits for informer caches to sync, so it does not
+// see an empty advertisement list and delete live VRFs.
+//
+// vipXlatSweeper, nil when vip_xlat_table is not open, runs only on ticks,
+// never in that first pass, so the ServiceVIPBinding reconciler re-registers
+// every live binding before the first sweep.
+func runGCTicker(
+	ctx context.Context, mgr ctrl.Manager, interval time.Duration,
+	gcRec *controller.GCReconciler, vipXlatSweeper *controller.VIPXlatSweeper,
+) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	if !mgr.GetCache().WaitForCacheSync(ctx) {
+		log.Printf("GC: cache sync failed, skipping initial pass")
+		return
+	}
+	gcRec.RunGC(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			gcRec.RunGC(ctx)
+			if vipXlatSweeper != nil {
+				vipXlatSweeper.Sweep(ctx)
+			}
+		}
+	}
 }
 
 // setupVIPBindingControllers registers the two halves of this node's DSR
