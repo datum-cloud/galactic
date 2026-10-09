@@ -7,6 +7,7 @@ package loadcaps
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -81,4 +82,36 @@ func loadVariablePacketOffsetProgram() error {
 		return err
 	}
 	return p.Close()
+}
+
+func TestContainerMemoryLimit(t *testing.T) {
+	manifest := filepath.Join(t.TempDir(), "daemonset.yaml")
+	if err := os.WriteFile(manifest, []byte(`apiVersion: apps/v1
+kind: DaemonSet
+spec:
+  template:
+    spec:
+      containers:
+        - name: limited
+          resources:
+            limits:
+              memory: 128Mi
+        - name: unlimited
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ContainerMemoryLimit(manifest, "limited")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(128 << 20); got != want {
+		t.Errorf("ContainerMemoryLimit(limited) = %d, want %d", got, want)
+	}
+	if _, err := ContainerMemoryLimit(manifest, "unlimited"); err == nil {
+		t.Error("ContainerMemoryLimit(unlimited) returned no error for a container with no memory limit")
+	}
+	if _, err := ContainerMemoryLimit(manifest, "missing"); err == nil {
+		t.Error("ContainerMemoryLimit(missing) returned no error for a container not in the manifest")
+	}
 }

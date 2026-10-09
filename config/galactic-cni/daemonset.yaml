@@ -126,12 +126,17 @@ spec:
                 - NET_RAW
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+          # The kernel charges eBPF map memory to the cgroup of the process
+          # that creates the map, and this container creates the uSID
+          # datapath's maps (about 59Mi) on a node that has none pinned.
+          # TestUsid_MapMemoryFitsGalacticCNILimit fails when the maps plus
+          # the process outgrow this limit -- see config/galactic-cni/README.md.
           resources:
             requests:
               cpu: 5m
-              memory: 16Mi
+              memory: 96Mi
             limits:
-              memory: 32Mi
+              memory: 128Mi
           volumeMounts:
             - name: cni-net-dir
               mountPath: /host/etc/cni/net.d

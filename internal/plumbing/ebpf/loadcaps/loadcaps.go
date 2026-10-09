@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -44,13 +45,9 @@ var capabilityBits = map[string]int{
 // also applies, and the added list alone would understate what the container
 // holds.
 func ContainerCapabilities(manifestPath, containerName string) ([]string, error) {
-	data, err := os.ReadFile(manifestPath)
+	ds, err := readDaemonSet(manifestPath)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", manifestPath, err)
-	}
-	var ds appsv1.DaemonSet
-	if err := yaml.Unmarshal(data, &ds); err != nil {
-		return nil, fmt.Errorf("unmarshal %s: %w", manifestPath, err)
+		return nil, err
 	}
 	for _, c := range ds.Spec.Template.Spec.Containers {
 		if c.Name != containerName {
@@ -67,6 +64,42 @@ func ContainerCapabilities(manifestPath, containerName string) ([]string, error)
 		return added, nil
 	}
 	return nil, fmt.Errorf("no container %q in %s", containerName, manifestPath)
+}
+
+// ContainerMemoryLimit returns the memory limit, in bytes, of the named
+// container in a DaemonSet manifest.
+//
+// The kernel charges eBPF map memory to the memory cgroup of the process that
+// creates the map, so a container that creates maps needs a limit above what
+// those maps allocate.
+func ContainerMemoryLimit(manifestPath, containerName string) (int64, error) {
+	ds, err := readDaemonSet(manifestPath)
+	if err != nil {
+		return 0, err
+	}
+	for _, c := range ds.Spec.Template.Spec.Containers {
+		if c.Name != containerName {
+			continue
+		}
+		limit, ok := c.Resources.Limits[corev1.ResourceMemory]
+		if !ok {
+			return 0, fmt.Errorf("container %q in %s has no memory limit", containerName, manifestPath)
+		}
+		return limit.Value(), nil
+	}
+	return 0, fmt.Errorf("no container %q in %s", containerName, manifestPath)
+}
+
+func readDaemonSet(manifestPath string) (*appsv1.DaemonSet, error) {
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", manifestPath, err)
+	}
+	var ds appsv1.DaemonSet
+	if err := yaml.Unmarshal(data, &ds); err != nil {
+		return nil, fmt.Errorf("unmarshal %s: %w", manifestPath, err)
+	}
+	return &ds, nil
 }
 
 // Run calls fn on an OS thread whose effective and permitted capability sets
