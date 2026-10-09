@@ -151,7 +151,7 @@ for site in "${SITES[@]}"; do
   # The first packet draws the Packet Too Big; any after it fail locally,
   # which is the point.
   in_pod "${site}" ns10 "${pod}" ping -6 -c 2 -W 1 -M do -s "${BIG_PAYLOAD}" "${HOST6}" >/dev/null 2>&1 || true
-  learned=$(in_pod "${site}" ns10 "${pod}" ip -6 route get "${HOST6}" | grep -oE 'mtu [0-9]+' | awk '{print $2}')
+  learned=$(in_pod "${site}" ns10 "${pod}" ip -6 route get "${HOST6}" | grep -oE 'mtu [0-9]+' | awk '{print $2}' || true)
   if [ "${learned}" = "${NARROW_MTU}" ]; then
     echo "  ok   ${site}: route to ${HOST6} learned MTU ${learned}"
   else
@@ -186,7 +186,7 @@ docker exec "${NARROW_ROUTER}" ip link set "${NARROW_IFACE}" mtu "${NARROW_MTU}"
 for site in "${SITES[@]}"; do
   pod=${POD[${site}]}
   in_pod "${site}" ns10 "${pod}" ping -6 -c 2 -W 1 -M do -s "${BIG_PAYLOAD}" "${HOST4_SYNTH}" >/dev/null 2>&1 || true
-  learned=$(in_pod "${site}" ns10 "${pod}" ip -6 route get "${HOST4_SYNTH}" | grep -oE 'mtu [0-9]+' | awk '{print $2}')
+  learned=$(in_pod "${site}" ns10 "${pod}" ip -6 route get "${HOST4_SYNTH}" | grep -oE 'mtu [0-9]+' | awk '{print $2}' || true)
   if [ "${learned}" = "${NARROW_MTU64}" ]; then
     echo "  ok   ${site}: route to ${HOST4_SYNTH} learned MTU ${learned}"
   else
@@ -257,7 +257,7 @@ too_big_mtu() {
   rm -f "${capture}"
   [ -n "${port}" ] || return 0
   head -c 1450 /dev/zero | docker exec -i "${REMOTE}" nc -u -w2 -p 7777 "${pub}" "${port}" >/dev/null 2>&1 || true
-  docker exec "${REMOTE}" ip "${family}" route get "${pub}" | grep -oE 'mtu [0-9]+' | awk '{print $2}'
+  docker exec "${REMOTE}" ip "${family}" route get "${pub}" | grep -oE 'mtu [0-9]+' | awk '{print $2}' || true
   docker exec "${REMOTE}" ip "${flush}" route flush cache
 }
 

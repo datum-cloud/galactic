@@ -70,7 +70,7 @@ flush_pmtu() {
 # learned_mtu SITE NS POD FAMILY DST prints the MTU POD's route to DST has
 # learned, or nothing.
 learned_mtu() {
-  in_pod "$1" "$2" "$3" ip "$4" route get "$5" | grep -oE 'mtu [0-9]+' | awk '{print $2}'
+  in_pod "$1" "$2" "$3" ip "$4" route get "$5" | grep -oE 'mtu [0-9]+' | awk '{print $2}' || true
 }
 
 # pmtu_count NODE RESULT prints NODE's galactic_usid_pmtu_packets_total for
