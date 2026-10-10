@@ -22,7 +22,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20261002201547-1d1c62507e3c
 	go.datum.net/cloud v0.1.2
-	go.datum.net/network v0.4.0
+	go.datum.net/network v0.4.1-0.20261009192728-36ee528904ff
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.44.0
