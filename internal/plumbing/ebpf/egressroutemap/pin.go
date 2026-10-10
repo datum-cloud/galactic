@@ -54,3 +54,18 @@ func OpenPinnedPublicUplink(pinDir string) (*PublicUplink, io.Closer, error) {
 	}
 	return NewPublicUplink(usidmap.KernelTable{Map: m}), m, nil
 }
+
+// OpenPinnedShardGroupTable opens egress_shard_groups from its pinned path
+// under pinDir and returns a table over it. See OpenPinnedEgressRouteTable for
+// the pinning convention and close contract.
+//
+// A datapath older than the shard group map has no such pin, and the error
+// then matches os.ErrNotExist.
+func OpenPinnedShardGroupTable(pinDir string) (*ShardGroupTable, io.Closer, error) {
+	outer, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapEgressShardGroups), nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("egressroutemap: open pinned map %q under %q: %w",
+			prog.UsidMapEgressShardGroups, pinDir, err)
+	}
+	return NewShardGroupTable(NewKernelGroupStore(outer)), outer, nil
+}
