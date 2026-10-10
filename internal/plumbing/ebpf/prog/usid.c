@@ -74,6 +74,7 @@
 #define SEC(name) __attribute__((section(name), used))
 #define __uint(name, val) int (*name)[val]
 #define __type(name, val) typeof(val) *name
+#define __array(name, val) typeof(val) *name[]
 #define USID_ALWAYS_INLINE inline __attribute__((always_inline))
 #define USID_NOINLINE __attribute__((noinline))
 
@@ -592,6 +593,219 @@ struct egress_route_value {
 	__u8 smac[6];
 } __attribute__((packed));
 
+// ---------------------------------------------------------------------
+// Egress shard groups: active/active egress across a cluster's shards.
+//
+// An egress_route_table entry whose link_ifindex is
+// USID_EGRESS_GROUP_SENTINEL does not name one shard. It names a shard group,
+// and usid_egress picks a member per packet: from a pin in egress_shard_pin
+// when the tenant address already has a live one, and otherwise from the
+// group's Maglev table, indexed by a hash of the tenant's source. Every compute
+// node builds the same table from the same member set. The hash includes the
+// node-local VRF table ID, so a given tenant address keeps one shard, and one
+// public address, on the node it lives on: the paired pooling RFC 4787 REQ-2
+// asks for. The same address on another node may land elsewhere.
+//
+// A group serves one translation class: NAT66 (the ::/0 route) or NAT64
+// toward one prefix (that prefix's route). Its members are only the shards
+// that can translate that class, so a packet can never be placed on a shard
+// that would drop it for want of an address family or a prefix.
+//
+// The sentinel value's sid carries the group ID in its first four bytes, in
+// host byte order, and the tenant's Argument in the low 12 bits of bytes 8 and
+// 9, exactly where a shard SID carries it. Every other byte is zero. The
+// datapath completes the chosen shard's base SID with it, the same splice it
+// already does for the outer source.
+//
+// Like link_ifindex == 0 for pass-through, the sentinel can never collide with
+// a real registration: no interface has ifindex 0xFFFFFFFF.
+//
+// Publication. A group is one immutable snapshot: its Maglev table and every
+// member's SID, next hop, flags and slot generation in a single value, held in
+// a one-entry inner array map. galactic-cni builds a new inner map for every
+// change and swaps it into egress_shard_groups, an ARRAY_OF_MAPS, in one
+// update. The swap replaces an RCU-protected pointer, so a packet sees either
+// the old snapshot or the new one, never a mix; and the kernel frees the old
+// inner map only after every program that could still be reading it has
+// finished. No published snapshot is ever written again. An ordinary ARRAY
+// value, by contrast, is updated in place, so a packet reading it during an
+// update can see half of each record.
+//
+// None of this changes a map that predates it, so a node upgrading keeps every
+// pinned row it already has (see attach.Load).
+// ---------------------------------------------------------------------
+
+#define USID_EGRESS_GROUP_SENTINEL 0xFFFFFFFFu
+
+// USID_EGRESS_MAX_GROUPS bounds the group ID: one NAT66 group and up to three
+// NAT64 prefixes.
+#define USID_EGRESS_MAX_GROUPS 4
+
+// USID_EGRESS_MAX_SHARDS is a power of two so a shard index read out of a map
+// value can be masked into range for the verifier, as the gateway does with
+// EDGE_MAX_BACKENDS.
+#define USID_EGRESS_MAX_SHARDS 32
+
+// USID_EGRESS_MAGLEV_SIZE is prime, as Maglev requires, and the gateway's
+// table size. 1021 slots keep the disruption bound for up to ten shards.
+#define USID_EGRESS_MAGLEV_SIZE 1021
+
+// USID_EGRESS_SHARD_NONE marks a Maglev slot with no shard, which a table built
+// from an empty member set is made of.
+#define USID_EGRESS_SHARD_NONE 0xFF
+
+// egress_shard_group_value.flags.
+//
+// ENABLED is set while the group may carry traffic. A sentinel pointing at a
+// group that is missing or not enabled drops rather than guessing.
+//
+// HASH_FLOW selects the 5-tuple hash, which spreads one heavy tenant address
+// over every shard at the cost of paired pooling. Unset is the source-address
+// hash.
+//
+// CLOSING is control-plane state the datapath ignores: the cluster is moving
+// back to ordered mode, so CNI ADD writes no new sentinel, while sentinels
+// already written keep forwarding until galactic-cni has moved every one of
+// them off the group.
+#define USID_EGRESS_GROUP_ENABLED (1u << 0)
+#define USID_EGRESS_GROUP_HASH_FLOW (1u << 1)
+#define USID_EGRESS_GROUP_CLOSING (1u << 2)
+
+// egress_shard_group_value.class_kind: the translation the group serves.
+#define USID_EGRESS_CLASS_NAT66 1
+#define USID_EGRESS_CLASS_NAT64 2
+
+// egress_shard_member.flags.
+//
+// ALIVE means the shard's SID resolved to an uplink neighbor when the snapshot
+// was built. Only an alive shard is encapsulated toward, whether chosen by a
+// pin or by the Maglev table.
+//
+// DRAINING means the shard takes no new tenant addresses: it is absent from the
+// Maglev table but keeps serving the pins it already holds.
+#define USID_EGRESS_SHARD_ALIVE (1u << 0)
+#define USID_EGRESS_SHARD_DRAINING (1u << 1)
+
+// struct egress_shard_member is one group member, with the link and L2
+// addresses resolved ahead of time for the same reason egress_route_value
+// carries them. sid is the shard's base SID, with no tenant Argument.
+//
+// generation identifies the shard's tenure of this slot. It is allocated from
+// the group's next_slot_generation when a shard takes the slot, never reused,
+// and never zero for an occupied slot. A pin records it, and is honoured only
+// while the slot still carries the same value, so a slot handed to a new shard
+// cannot inherit the old one's pins.
+struct egress_shard_member {
+	__u8 sid[16];
+	__u32 link_ifindex;
+	__u8 dmac[6];
+	__u8 smac[6];
+	__u32 flags;
+	__u32 generation;
+};
+
+// struct egress_shard_group_value is one group snapshot, the only value of an
+// egress_shard_groups inner map.
+//
+// candidates counts the shards eligible for the group's class and active the
+// ones the Maglev table spreads new tenants across; a draining or unreachable
+// shard is a candidate that is not active. ineligible counts the cluster's
+// shards that cannot translate this class. CNI ADD and the metrics read these;
+// the datapath does not: a slot holding USID_EGRESS_SHARD_NONE is its empty
+// signal.
+//
+// pin_idle_sec is how long a pin outlives its last packet. Zero turns pins
+// off, leaving selection to the Maglev table alone.
+//
+// generation counts publications, for observability. next_slot_generation is
+// the next member generation to hand out; it only grows, and survives
+// disabling and re-enabling the group.
+struct egress_shard_group_value {
+	__u32 flags;
+	__u32 generation;
+	__u32 next_slot_generation;
+	__u16 candidates;
+	__u16 active;
+	__u16 ineligible;
+	__u8 class_kind;
+	__u8 pad0;
+	__u32 pin_idle_sec;
+	__u8 class_prefix[16];
+	__u8 maglev[USID_EGRESS_MAGLEV_SIZE];
+	__u8 pad1[3];
+	struct egress_shard_member shards[USID_EGRESS_MAX_SHARDS];
+};
+
+// struct egress_shard_pin_key is both the input to the shard hash and
+// egress_shard_pin's key. In source-hash mode only table_id, family and saddr
+// are set, so every flow from one tenant address shares one pin. In flow-hash
+// mode protocol, the ports and daddr are set too; the ports stay zero for a
+// fragment, so every fragment of a datagram, the first included, hashes alike.
+struct egress_shard_pin_key {
+	__u32 table_id;
+	__u8 family;
+	__u8 protocol;
+	__u8 group;
+	__u8 pad;
+	__be16 sport;
+	__be16 dport;
+	__u8 saddr[16];
+	__u8 daddr[16];
+};
+
+// struct egress_shard_pin_value records which slot a tenant address was sent
+// to, the slot's generation at the time, and when the pin last carried a
+// packet, on bpf_ktime_get_boot_ns's clock.
+struct egress_shard_pin_value {
+	__u64 last_seen_ns;
+	__u32 generation;
+	__u8 shard;
+	__u8 pad[3];
+};
+
+// struct egress_shard_counter is one shard slot's packet and byte count, per
+// CPU, for the share each shard carries.
+struct egress_shard_counter {
+	__u64 packets;
+	__u64 bytes;
+};
+
+// struct egress_shard_scratch_value holds what resolve_egress_group builds for
+// one packet: the pin key it hashes and looks up, and the route it resolves
+// the sentinel to, which usid_egress then encapsulates from exactly as it does
+// from an ordinary egress_route_table entry. Per CPU, for the same reason as
+// vip_xlat_key_scratch: neither fits on the stack alongside send_too_big's.
+struct egress_shard_scratch_value {
+	struct egress_shard_pin_key key;
+	struct egress_route_value route;
+};
+
+// enum egress_shard_stat indexes egress_shard_stats. Its own map rather than
+// drop_reasons slots, for the reason mss_clamp_stats is.
+enum egress_shard_stat {
+	// A sentinel named a group that is disabled, missing or has no shard in
+	// the slot its hash chose. The packet is dropped: failing open would send
+	// it untranslated into the node's main table.
+	EGRESS_SHARD_STAT_GROUP_EMPTY = 0,
+	// A pin named a shard that is no longer alive in that slot, or has idled
+	// out. The packet was re-placed by the Maglev table.
+	EGRESS_SHARD_STAT_PIN_STALE = 1,
+	// The packet followed a live pin.
+	EGRESS_SHARD_STAT_PIN_HIT = 2,
+	// The packet was placed by the Maglev table.
+	EGRESS_SHARD_STAT_MAGLEV = 3,
+	// The Maglev slot named a shard that is not alive. Dropped: the installer
+	// has not rebuilt the table since the shard went away.
+	EGRESS_SHARD_STAT_SHARD_DEAD = 4,
+	// Reading the tenant's addresses out of the packet failed. Dropped.
+	EGRESS_SHARD_STAT_PARSE_FAILED = 5,
+	__EGRESS_SHARD_STAT_COUNT,
+};
+
+// egress_shard_stats is sized above __EGRESS_SHARD_STAT_COUNT, as
+// mss_clamp_stats is.
+#define USID_EGRESS_SHARD_STATS_SLOTS 16
+
 // service_route_key scopes a private-service address to the exact consumer
 // attachment that policy selected. Using the ingress ifindex instead of the
 // shared VRF table prevents one selected attachment from granting every other
@@ -1030,6 +1244,68 @@ struct {
 	__type(key, struct egress_route_key);
 	__type(value, struct egress_route_value);
 } egress_route_table SEC(".maps");
+
+// egress_shard_group_inner describes one egress_shard_groups inner map: a
+// single immutable struct egress_shard_group_value. galactic-cni creates a new
+// one for every publication; nothing ever writes a published one.
+struct egress_shard_group_inner {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct egress_shard_group_value);
+};
+
+// egress_shard_group_template is one instance of the inner map type, never
+// read or written. It exists so the compiler emits the full BTF of struct
+// egress_shard_group_value: clang before 21 emits a type reached only through
+// an ARRAY_OF_MAPS inner definition as a forward declaration, which the loader
+// cannot size. libbpf's own map-in-map tests declare their inner maps the same
+// way. It costs one 2.4 KiB array.
+struct egress_shard_group_inner egress_shard_group_template SEC(".maps");
+
+// egress_shard_groups: one slot per group ID, each holding the group's current
+// snapshot. See the publication note above struct egress_shard_member. An
+// empty slot reads as a missing group, which drops.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+	__uint(max_entries, USID_EGRESS_MAX_GROUPS);
+	__type(key, __u32);
+	__array(values, struct egress_shard_group_inner);
+} egress_shard_groups SEC(".maps");
+
+// egress_shard_pin: see struct egress_shard_pin_key. An LRU, so a pin is
+// evicted under pressure rather than refusing a new one. An evicted pin falls
+// back to the Maglev table, which usually gives the same answer anyway. Sized
+// like the shard's own nat_conn_table.
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 65536);
+	__type(key, struct egress_shard_pin_key);
+	__type(value, struct egress_shard_pin_value);
+} egress_shard_pin SEC(".maps");
+
+// egress_shard_counters: see struct egress_shard_counter. Indexed by
+// group * USID_EGRESS_MAX_SHARDS + slot.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, USID_EGRESS_MAX_GROUPS * USID_EGRESS_MAX_SHARDS);
+	__type(key, __u32);
+	__type(value, struct egress_shard_counter);
+} egress_shard_counters SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, USID_EGRESS_SHARD_STATS_SLOTS);
+	__type(key, __u32);
+	__type(value, __u64);
+} egress_shard_stats SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct egress_shard_scratch_value);
+} egress_shard_scratch SEC(".maps");
 
 // Node-local private-service routes are exact attachment/service matches. They
 // remain separate from fabric routes so policy never creates a Linux route.
@@ -3303,6 +3579,235 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	return rc;
 }
 
+static USID_ALWAYS_INLINE void count_egress_shard_stat(__u32 stat)
+{
+	__u64 *count = bpf_map_lookup_elem(&egress_shard_stats, &stat);
+
+	if (count)
+		*count += 1;
+}
+
+// egress_shard_hash is 32-bit FNV-1a over every byte of key, the hash the
+// gateway's fnv1a_flow uses. load_egress_shard_key zeroes the key first, so
+// fields the hash mode does not use, and the padding, hash as zeros.
+// internal/plumbing/ebpf/egressroutemap rebuilds the same bytes to predict a
+// placement.
+static USID_ALWAYS_INLINE __u32 egress_shard_hash(const struct egress_shard_pin_key *key)
+{
+	const __u8 *p = (const __u8 *) key;
+	__u32 h = 2166136261u;
+
+#pragma unroll
+	for (int i = 0; i < (int) sizeof(*key); i++) {
+		h ^= p[i];
+		h *= 16777619u;
+	}
+	return h;
+}
+
+// load_egress_shard_key fills key from the packet about to be encapsulated.
+// It reads with bpf_skb_load_bytes rather than through packet pointers, so
+// nothing the caller derived from skb->data is invalidated.
+//
+// Source mode reads only the source address. Flow mode adds the destination,
+// the protocol and, for an unfragmented TCP or UDP packet, both ports. An IPv6
+// packet whose first next header is an extension header, a Fragment header
+// included, hashes on its addresses and that header's type, so every fragment
+// of a datagram goes to one shard.
+//
+// Returns 0 on success and -1 when the packet is too short to read.
+static USID_ALWAYS_INLINE int load_egress_shard_key(struct __sk_buff *skb, struct egress_shard_pin_key *key,
+						    __u32 table_id, __u8 family, __u32 group_id, int flow)
+{
+	__builtin_memset(key, 0, sizeof(*key));
+	key->table_id = table_id;
+	key->family = family;
+	key->group = (__u8) group_id;
+
+	if (family == USID_EGRESS_ROUTE_FAMILY_INET6) {
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, saddr), key->saddr, 16))
+			return -1;
+		if (!flow)
+			return 0;
+
+		__u8 nexthdr;
+
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, nexthdr), &nexthdr, 1))
+			return -1;
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, daddr), key->daddr, 16))
+			return -1;
+		key->protocol = nexthdr;
+		if (nexthdr == USID_IPPROTO_TCP || nexthdr == USID_IPPROTO_UDP) {
+			// sport and dport are adjacent in the key, as in the header.
+			if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + (__u32) sizeof(struct usid_ip6hdr), &key->sport, 4))
+				return -1;
+		}
+		return 0;
+	}
+
+	if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_iphdr, saddr), key->saddr, 4))
+		return -1;
+	if (!flow)
+		return 0;
+
+	struct usid_iphdr ip4;
+
+	if (bpf_skb_load_bytes(skb, USID_L3_OFFSET, &ip4, sizeof(ip4)))
+		return -1;
+	__builtin_memcpy(key->daddr, ip4.daddr, sizeof(ip4.daddr));
+	key->protocol = ip4.protocol;
+
+	__u16 frag = __builtin_bswap16(ip4.frag_off) & (USID_IPV4_FRAG_OFFSET_MASK | USID_IPV4_MORE_FRAGMENTS);
+
+	if (frag == 0 && (ip4.protocol == USID_IPPROTO_TCP || ip4.protocol == USID_IPPROTO_UDP)) {
+		__u32 ihl = (__u32) (ip4.ver_ihl & 0x0F) * 4;
+
+		if (ihl < USID_IPV4_MIN_HDR_LEN)
+			return -1;
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + ihl, &key->sport, 4))
+			return -1;
+	}
+	return 0;
+}
+
+// resolve_egress_group picks the shard a packet matching a group sentinel goes
+// to, and writes the route to encapsulate it with into egress_shard_scratch's
+// route: the shard's base SID completed with function_argument, the
+// sentinel's bytes 8 and 9, and the shard's link and L2 addresses.
+//
+// Everything it reads about the group comes from one published snapshot, so
+// the Maglev slot, the member's identity, its liveness and its next hop always
+// belong together: a snapshot is never written once published.
+//
+// A live pin wins. A pin is live while its slot is alive and still carries the
+// generation the pin recorded, and its last packet is no older than the
+// group's pin_idle_sec; a draining shard keeps its pins. Otherwise the Maglev
+// table chooses, and with pins on, the choice is pinned.
+//
+// Returns 0 when the route is ready and -1 when the packet must be dropped,
+// already counted in egress_shard_stats. Not inlined: usid_egress is already
+// close to the verifier's per-function stack and complexity budgets.
+static USID_NOINLINE int resolve_egress_group(struct __sk_buff *skb, __u32 table_id, __u32 family, __u32 group_id,
+					      __u32 function_argument)
+{
+	__u32 zero = 0;
+	struct egress_shard_scratch_value *s = bpf_map_lookup_elem(&egress_shard_scratch, &zero);
+
+	if (!s)
+		return -1;
+	if (group_id >= USID_EGRESS_MAX_GROUPS) {
+		count_egress_shard_stat(EGRESS_SHARD_STAT_GROUP_EMPTY);
+		return -1;
+	}
+
+	void *snapshot = bpf_map_lookup_elem(&egress_shard_groups, &group_id);
+
+	if (!snapshot) {
+		count_egress_shard_stat(EGRESS_SHARD_STAT_GROUP_EMPTY);
+		return -1;
+	}
+
+	struct egress_shard_group_value *g = bpf_map_lookup_elem(snapshot, &zero);
+
+	if (!g || !(g->flags & USID_EGRESS_GROUP_ENABLED)) {
+		count_egress_shard_stat(EGRESS_SHARD_STAT_GROUP_EMPTY);
+		return -1;
+	}
+	if (load_egress_shard_key(skb, &s->key, table_id, (__u8) family, group_id,
+				  (g->flags & USID_EGRESS_GROUP_HASH_FLOW) != 0)) {
+		count_egress_shard_stat(EGRESS_SHARD_STAT_PARSE_FAILED);
+		return -1;
+	}
+
+	__u64 now = bpf_ktime_get_boot_ns();
+	__u64 idle_ns = (__u64) g->pin_idle_sec * 1000000000ULL;
+	__u32 index = 0;
+	int placed = 0;
+
+	if (idle_ns) {
+		struct egress_shard_pin_value *pin = bpf_map_lookup_elem(&egress_shard_pin, &s->key);
+
+		if (pin) {
+			__u32 pinned = pin->shard;
+
+			USID_BARRIER_VAR(pinned);
+			pinned &= USID_EGRESS_MAX_SHARDS - 1;
+
+			struct egress_shard_member *m = &g->shards[pinned];
+			__u64 last = pin->last_seen_ns;
+			// Another CPU may have stamped the pin after now was read.
+			int fresh = last > now || now - last <= idle_ns;
+
+			if ((m->flags & USID_EGRESS_SHARD_ALIVE) && m->generation != 0 &&
+			    m->generation == pin->generation && fresh) {
+				index = pinned;
+				placed = 1;
+				pin->last_seen_ns = now;
+				count_egress_shard_stat(EGRESS_SHARD_STAT_PIN_HIT);
+			} else {
+				count_egress_shard_stat(EGRESS_SHARD_STAT_PIN_STALE);
+			}
+		}
+	}
+
+	if (!placed) {
+		__u32 slot = egress_shard_hash(&s->key) % USID_EGRESS_MAGLEV_SIZE;
+
+		USID_BARRIER_VAR(slot);
+		if (slot >= USID_EGRESS_MAGLEV_SIZE)
+			slot = USID_EGRESS_MAGLEV_SIZE - 1;
+
+		__u8 member = g->maglev[slot];
+
+		if (member == USID_EGRESS_SHARD_NONE) {
+			count_egress_shard_stat(EGRESS_SHARD_STAT_GROUP_EMPTY);
+			return -1;
+		}
+		// member is a plain byte read from a map value. The mask is the range
+		// check; the barrier keeps clang from dropping it as redundant.
+		index = member;
+		USID_BARRIER_VAR(index);
+		index &= USID_EGRESS_MAX_SHARDS - 1;
+		if (!(g->shards[index].flags & USID_EGRESS_SHARD_ALIVE)) {
+			count_egress_shard_stat(EGRESS_SHARD_STAT_SHARD_DEAD);
+			return -1;
+		}
+		count_egress_shard_stat(EGRESS_SHARD_STAT_MAGLEV);
+
+		if (idle_ns) {
+			struct egress_shard_pin_value pin_value = {
+				.last_seen_ns = now,
+				.generation = g->shards[index].generation,
+				.shard = (__u8) index,
+			};
+			// A failed insert costs nothing but the pin: the next packet asks
+			// the Maglev table again and almost always gets this answer.
+			bpf_map_update_elem(&egress_shard_pin, &s->key, &pin_value, 0 /* BPF_ANY */);
+		}
+	}
+
+	USID_BARRIER_VAR(index);
+	index &= USID_EGRESS_MAX_SHARDS - 1;
+
+	struct egress_shard_member *shard = &g->shards[index];
+
+	__builtin_memcpy(s->route.sid, shard->sid, sizeof(s->route.sid));
+	s->route.sid[8] = (__u8) ((s->route.sid[8] & 0xF0) | ((function_argument >> 8) & 0x0F));
+	s->route.sid[9] = (__u8) (function_argument & 0xFF);
+	s->route.link_ifindex = shard->link_ifindex;
+	__builtin_memcpy(s->route.dmac, shard->dmac, sizeof(s->route.dmac));
+	__builtin_memcpy(s->route.smac, shard->smac, sizeof(s->route.smac));
+
+	__u32 counter_key = group_id * USID_EGRESS_MAX_SHARDS + index;
+	struct egress_shard_counter *counter = bpf_map_lookup_elem(&egress_shard_counters, &counter_key);
+
+	if (counter) {
+		counter->packets += 1;
+		counter->bytes += skb->len;
+	}
+	return 0;
+}
+
 SEC("tc")
 int usid_egress(struct __sk_buff *skb)
 {
@@ -3575,6 +4080,28 @@ int usid_egress(struct __sk_buff *skb)
 
 	if (src_or == 0)
 		return TC_ACT_UNSPEC; // this node's own source SID isn't registered yet -- fail open rather than encapsulate with an all-zero source
+
+	// A shard group sentinel: pick this packet's shard and carry on from the
+	// route resolve_egress_group built, exactly as from an ordinary entry.
+	// Placed after the fail-open checks so a packet that is not going to be
+	// encapsulated neither moves a pin nor counts toward a shard's share.
+	if (rv->link_ifindex == USID_EGRESS_GROUP_SENTINEL) {
+		__u32 group_id;
+
+		__builtin_memcpy(&group_id, rv->sid, sizeof(group_id));
+		__u32 function_argument = ((__u32) rv->sid[8] << 8) | rv->sid[9];
+
+		if (resolve_egress_group(skb, vrf->vrf_table_id, route_family, group_id, function_argument))
+			return TC_ACT_SHOT;
+
+		__u32 shard_scratch_key = 0;
+		struct egress_shard_scratch_value *shard_scratch =
+			bpf_map_lookup_elem(&egress_shard_scratch, &shard_scratch_key);
+
+		if (!shard_scratch)
+			return TC_ACT_SHOT;
+		rv = &shard_scratch->route;
+	}
 
 	// Clamp the MSS of a SYN about to be encapsulated: past the last fail-open
 	// check above, so only traffic that really crosses the fabric is clamped,
