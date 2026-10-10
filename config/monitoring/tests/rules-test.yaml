@@ -674,6 +674,248 @@ tests:
                 GalacticNatSessionTableEvictingLive, GalacticNatPortExhausted and GalacticNatUplinkRxQueueStalled
                 cannot fire for it.
 
+  # Hashed egress, NAT66 class: the node's only shard becomes unreachable at
+  # 5m. GalacticEgressPoolEmpty fires after 2m, BelowMinimum after 10m. The
+  # NAT64 class on another node is retired (enabled 0) with no member and no
+  # route left, and fires nothing.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_cni_egress_pool_enabled{job="galactic-cni",node="dfw-worker",class="nat66"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_min_active{job="galactic-cni",node="dfw-worker"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat66",state="active"}'
+        values: "1x10 0x30"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat66",state="unreachable"}'
+        values: "0x10 1x30"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat66",state="draining"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_pool_enabled{job="galactic-cni",node="iad-worker",class="nat64:2001:db8:64::/96"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_pool_min_active{job="galactic-cni",node="iad-worker"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="iad-worker",class="nat64:2001:db8:64::/96",state="active"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="iad-worker",class="nat64:2001:db8:64::/96",state="unreachable"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_group_routes{job="galactic-cni",node="iad-worker",class="nat64:2001:db8:64::/96"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: GalacticEgressPoolEmpty
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GalacticEgressPoolEmpty
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              node: dfw-worker
+              class: nat66
+            exp_annotations:
+              summary: "No egress shard takes nat66 traffic from dfw-worker"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolempty"
+              description: >-
+                No egress shard in dfw-worker's nat66 group has taken new tenants for 2
+                minutes while the group has shards or routes, so new nat66 egress from that node is
+                dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
+                SID over an SRv6 uplink) or draining.
+      - eval_time: 14m
+        alertname: GalacticEgressPoolBelowMinimum
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: GalacticEgressPoolBelowMinimum
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker
+              class: nat66
+            exp_annotations:
+              summary: "dfw-worker has fewer active nat66 egress shards than the pool minimum"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolbelowminimum"
+              description: >-
+                dfw-worker has had 0 active nat66 egress shards for 10
+                minutes, below the GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE the cluster is configured for. The remaining
+                shards carry the metro's whole egress load for that class. galactic_cni_egress_pool_members shows
+                which shards are draining or unreachable.
+
+  # A group with no candidate left but routes still naming it (every
+  # EgressShard deleted) fires PoolEmpty: the missing members must not read
+  # as an idle pool.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="sjc-worker",class="nat66",state="active"}'
+        values: "0x20"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="sjc-worker",class="nat66",state="unreachable"}'
+        values: "0x20"
+      - series: 'galactic_cni_egress_group_routes{job="galactic-cni",node="sjc-worker",class="nat66"}'
+        values: "4x20"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GalacticEgressPoolEmpty
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              node: sjc-worker
+              class: nat66
+            exp_annotations:
+              summary: "No egress shard takes nat66 traffic from sjc-worker"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolempty"
+              description: >-
+                No egress shard in sjc-worker's nat66 group has taken new tenants for 2
+                minutes while the group has shards or routes, so new nat66 egress from that node is
+                dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
+                SID over an SRv6 uplink) or draining.
+
+  # A NAT64 class no shard can translate fires ClassUnserved after 15m, and
+  # neither PoolEmpty nor BelowMinimum, which would both be the wrong story.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_cni_egress_pool_enabled{job="galactic-cni",node="dfw-worker",class="nat64:2001:db8:64::/96"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_min_active{job="galactic-cni",node="dfw-worker"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat64:2001:db8:64::/96",state="active"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat64:2001:db8:64::/96",state="ineligible"}'
+        values: "2x40"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: GalacticEgressClassUnserved
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker
+              class: nat64:2001:db8:64::/96
+            exp_annotations:
+              summary: "No egress shard can translate nat64:2001:db8:64::/96 for dfw-worker"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegressclassunserved"
+              description: >-
+                dfw-worker is configured for nat64:2001:db8:64::/96 egress, but none of the cluster's
+                EgressShards can translate it: none has a masquerade address in that family, or none translates that
+                NAT64 prefix. galactic-cni logs the shards it kept out. Either give a shard that capability or remove
+                the prefix from GALACTIC_CNI_NAT64_PREFIX.
+      - eval_time: 16m
+        alertname: GalacticEgressPoolEmpty
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: GalacticEgressPoolBelowMinimum
+        exp_alerts: []
+
+  # Steady group_empty drops fire after 10m; a single burst of shard_dead
+  # drops, the race between a withdrawal and the rebuild, does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_cni_egress_shard_selections_total{job="galactic-cni",node="dfw-worker",result="group_empty"}'
+        values: "0+4x40"
+      - series: 'galactic_cni_egress_shard_selections_total{job="galactic-cni",node="sjc-worker",result="shard_dead"}'
+        values: "0x5 20x35"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GalacticEgressShardGroupDropping
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: GalacticEgressShardGroupDropping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker
+              result: group_empty
+            exp_annotations:
+              summary: "dfw-worker is dropping tenant egress bound for a shard group (group_empty)"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegressshardgroupdropping"
+              description: >-
+                usid_egress on dfw-worker has dropped tenant packets bound for an egress shard group
+                (group_empty) in every 5-minute window for 10 minutes, about 40 in the
+                last one. group_empty means no shard takes tenants; shard_dead means the group was not rebuilt
+                after a shard became unreachable, which points at galactic-cni's egress sweep.
+
+  # Hashed mode with a watch that never syncs fires after 10m; ordered mode
+  # with the same unsynced watch does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_cni_egress_mode{job="galactic-cni",node="dfw-worker",mode="hashed"}'
+        values: "1x30"
+      - series: 'galactic_cni_egress_shard_watch_synced{job="galactic-cni",node="dfw-worker"}'
+        values: "0x30"
+      - series: 'galactic_cni_egress_mode{job="galactic-cni",node="iad-worker",mode="hashed"}'
+        values: "0x30"
+      - series: 'galactic_cni_egress_shard_watch_synced{job="galactic-cni",node="iad-worker"}'
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: GalacticEgressShardWatchNotSynced
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker
+            exp_annotations:
+              summary: "galactic-cni on dfw-worker cannot list EgressShards"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegressshardwatchnotsynced"
+              description: >-
+                galactic-cni on dfw-worker runs hashed egress mode but its EgressShard watch has not listed
+                the cluster for 10 minutes. Its shard groups keep their last members, and a node that never
+                listed them has no group at all. Check galactic-cni's logs, its get/list/watch permission on
+                egressshards, and that the EgressShard CRD is installed.
+
+  # Refresh failing in every window fires after 15m; a single failure does
+  # not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_cni_egress_sweep_errors_total{job="galactic-cni",node="dfw-worker",stage="refresh"}'
+        values: "0+1x60"
+      - series: 'galactic_cni_egress_sweep_errors_total{job="galactic-cni",node="sjc-worker",stage="apply"}'
+        values: "0x5 1x55"
+    alert_rule_test:
+      - eval_time: 26m
+        alertname: GalacticEgressSweepFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker
+              stage: refresh
+            exp_annotations:
+              summary: "galactic-cni's egress sweep on dfw-worker keeps failing at refresh"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresssweepfailing"
+              description: >-
+                galactic-cni on dfw-worker has failed its egress sweep at the refresh step in
+                every 10-minute window for 15 minutes. Shard group membership and next hops are going stale, and a
+                switch back to ordered mode leaves routes on the groups until it succeeds.
+
+  - interval: 30s
+    input_series:
+      - series: 'up{job="galactic-cni",node="dfw-worker"}'
+        values: "0x20"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: GalacticCNIMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-cni
+              node: dfw-worker
+            exp_annotations:
+              summary: "galactic-cni metrics on dfw-worker cannot be scraped"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticcnimetricsdown"
+              description: >-
+                Prometheus cannot reach galactic-cni's metrics port on dfw-worker (9180), so no egress
+                shard group alert can fire for it.
+
   # fabric-api: a gateway with executions in flight and no completions for
   # 10m fires; one that keeps completing queries, and one that is idle, do
   # not.
