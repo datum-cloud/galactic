@@ -477,58 +477,59 @@ task deploy
 
 ## Tasks
 
-| Task                      | Description                                                                                                 |
-|---------------------------|-------------------------------------------------------------------------------------------------------------|
-| `build`                   | Build all container images (node, galactic-router, galactic-cni, frr, host)                                 |
-| `build:node`              | Build the custom `kindest/node:galactic` image                                                              |
-| `build:galactic-router`   | Build the galactic-router container from Go source                                                          |
-| `build:galactic-cni`      | Build the galactic-cni installer image                                                                      |
-| `build:galactic-gateway`  | Build the galactic-gateway edge load balancer image                                                         |
-| `build:frr`               | Build the FRR container from Alpine edge                                                                    |
-| `build:remote-host`       | Build the off-fabric nginx host image                                                                       |
-| `deploy`                  | Build images, apply host sysctls, and deploy the lab                                                        |
-| `deploy:topology`         | Deploy the ContainerLab topology (transit routers)                                                          |
-| `deploy:clusters`         | Create the three Kind clusters and export their kubeconfigs                                                 |
-| `deploy:images`           | Load container images into Kind clusters                                                                    |
-| `deploy:system`           | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC¹                              |
-| `deploy:cni`              | Install Cilium and Multus, then the galactic-cni DaemonSet                                                  |
-| `deploy:fabric`           | Apply FRR DaemonSets to all clusters                                                                        |
-| `deploy:bmp-collector`    | Install the BMP collector on iad-worker3, where the route reflector streams to it                           |
-| `deploy:galactic-router`  | Apply galactic-router DaemonSets and BGP CRs                                                                |
-| `deploy:galactic-gateway` | Install galactic-gateway on every edge node, with each site's VIP rules (after `deploy:scenarios`)          |
-| `deploy:scenarios`        | Deploy all VPC test scenarios                                                                               |
-| `deploy:ns10`             | Deploy ns10 test VPC (IPv6-only, fd20 ULA)                                                                  |
-| `deploy:ns20`             | Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)                                                          |
-| `deploy:ns30`             | Deploy ns30 test VPC (dfw only, 2 pods)                                                                     |
-| `deploy:ns40`             | Deploy ns40 test VPC (iad only, 2 pods)                                                                     |
-| `deploy:ns60`             | Deploy ns60 test VPC (two VIP backends per site, on one node)                                               |
-| `verify:fabric-metrics`   | Scrape every fabric-router's frr-exporter; fail on a failed collector or a session not Established          |
-| `verify:bmp`              | Check the route reflector and every fabric-router stream to the BMP collector, and that it agrees with each on every session's state |
-| `verify:underlay`         | Ping every underlay loopback from tr1 over both IPv4 and IPv6                                               |
-| `verify:gateway`          | Check every NetworkGateway is Ready, every NetworkRule Accepted, every generated ServiceVIPBinding Bound    |
-| `verify:gateway-ingress`  | TCP and UDP from the off-fabric host to each site's VIP, through every gateway node in turn                 |
-| `verify:gateway-restart`  | Restart dfw-worker2's gateway and shard in turn while the other carries traffic (#710)                      |
-| `verify:gateway-detach`   | Turn dfw-worker2's gateway datapath off: the ingress check must fail, then pass (not in `verify`)           |
-| `verify:nat-datapath`     | Full egress round trip to the off-fabric host, IPv6 (NAT66) and IPv4 (NAT64)                                |
-| `verify:nat-return-route` | Prove a reply from outside the fabric reaches each shard's masquerade addresses                             |
-| `verify:nat-local`        | Prove each site's tenants egress through that site's own edge shard                                         |
-| `verify:nat-collision`    | Prove two tenants sharing a ULA on one node do not share a translation                                      |
-| `verify:mss-clamp`        | Prove full-size TCP segments cross the fabric, out through NAT and across sites                             |
-| `verify:pmtu`             | Prove a packet too big for the fabric draws an ICMP error from its own node, between sites and through NAT  |
-| `verify:nat-icmp`         | Prove ping, traceroute and path MTU discovery work through each site's egress shard                         |
-| `verify:scenarios`        | Verify ping across all VPC test scenarios                                                                   |
-| `verify:ns10`             | Verify ns10 ping (IPv6-only, 3-site mesh)                                                                   |
-| `verify:ns20`             | Verify ns20 ping (dual-stack, 3-site mesh)                                                                  |
-| `verify:ns30`             | Verify ns30 ping (dfw only, 2 pods)                                                                         |
-| `verify:ns40`             | Verify ns40 ping (iad only, 2 pods)                                                                         |
-| `destroy`                 | Destroy the lab and remove all Kind clusters                                                                |
-| `restart`                 | Full rebuild — destroy then redeploy                                                                        |
-| `rebuild`                 | Full rebuild — clean (destroy + delete images/artifacts) then redeploy                                      |
-| `inspect`                 | Show running nodes and management addresses                                                                 |
-| `graph`                   | Generate a draw.io diagram for the topology                                                                 |
-| `host-setup`              | Apply required host sysctls (IPv6 forwarding, inotify limits)                                               |
-| `clean`                   | Destroy lab, delete built images, and remove lab artifacts                                                  |
-| `test`                    | Run all verification checks                                                                                 |
+| Task                       | Description                                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `build`                    | Build all container images (node, galactic-router, galactic-cni, frr, host)                                                          |
+| `build:node`               | Build the custom `kindest/node:galactic` image                                                                                       |
+| `build:galactic-router`    | Build the galactic-router container from Go source                                                                                   |
+| `build:galactic-cni`       | Build the galactic-cni installer image                                                                                               |
+| `build:galactic-gateway`   | Build the galactic-gateway edge load balancer image                                                                                  |
+| `build:frr`                | Build the FRR container from Alpine edge                                                                                             |
+| `build:remote-host`        | Build the off-fabric nginx host image                                                                                                |
+| `deploy`                   | Build images, apply host sysctls, and deploy the lab                                                                                 |
+| `deploy:topology`          | Deploy the ContainerLab topology (transit routers)                                                                                   |
+| `deploy:clusters`          | Create the three Kind clusters and export their kubeconfigs                                                                          |
+| `deploy:images`            | Load container images into Kind clusters                                                                                             |
+| `deploy:system`            | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC¹                                                       |
+| `deploy:cni`               | Install Cilium and Multus, then the galactic-cni DaemonSet                                                                           |
+| `deploy:fabric`            | Apply FRR DaemonSets to all clusters                                                                                                 |
+| `deploy:bmp-collector`     | Install the BMP collector on iad-worker3, where the route reflector streams to it                                                    |
+| `deploy:galactic-router`   | Apply galactic-router DaemonSets and BGP CRs                                                                                         |
+| `deploy:galactic-gateway`  | Install galactic-gateway on every edge node, with each site's VIP rules (after `deploy:scenarios`)                                   |
+| `deploy:scenarios`         | Deploy all VPC test scenarios                                                                                                        |
+| `deploy:ns10`              | Deploy ns10 test VPC (IPv6-only, fd20 ULA)                                                                                           |
+| `deploy:ns20`              | Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)                                                                                   |
+| `deploy:ns30`              | Deploy ns30 test VPC (dfw only, 2 pods)                                                                                              |
+| `deploy:ns40`              | Deploy ns40 test VPC (iad only, 2 pods)                                                                                              |
+| `deploy:ns60`              | Deploy ns60 test VPC (two VIP backends per site, on one node)                                                                        |
+| `verify:fabric-metrics`    | Scrape every fabric-router's frr-exporter; fail on a failed collector or a session not Established                                   |
+| `verify:bmp`               | Check the route reflector and every fabric-router stream to the BMP collector, and that it agrees with each on every session's state |
+| `verify:underlay`          | Ping every underlay loopback from tr1 over both IPv4 and IPv6                                                                        |
+| `verify:gateway`           | Check every NetworkGateway is Ready, every NetworkRule Accepted, every generated ServiceVIPBinding Bound                             |
+| `verify:gateway-ingress`   | TCP and UDP from the off-fabric host to each site's VIP, through every gateway node in turn                                          |
+| `verify:gateway-restart`   | Restart dfw-worker2's gateway and shard in turn while the other carries traffic (#710)                                               |
+| `verify:gateway-detach`    | Turn dfw-worker2's gateway datapath off: the ingress check must fail, then pass (not in `verify`)                                    |
+| `verify:nat-datapath`      | Full egress round trip to the off-fabric host, IPv6 (NAT66) and IPv4 (NAT64)                                                         |
+| `verify:nat-return-route`  | Prove a reply from outside the fabric reaches each shard's masquerade addresses                                                      |
+| `verify:nat-local`         | Prove each site's tenants egress through that site's own edge shard                                                                  |
+| `verify:nat-collision`     | Prove two tenants sharing a ULA on one node do not share a translation                                                               |
+| `verify:mss-clamp`         | Prove full-size TCP segments cross the fabric, out through NAT and across sites                                                      |
+| `verify:pmtu`              | Prove a packet too big for the fabric draws an ICMP error from its own node, between sites and through NAT                           |
+| `verify:nat-icmp`          | Prove ping, traceroute and path MTU discovery work through each site's egress shard                                                  |
+| `verify:nat-active-active` | Hashed egress on dfw: both shards carry tenants, a failure and a drain move only theirs                                              |
+| `verify:scenarios`         | Verify ping across all VPC test scenarios                                                                                            |
+| `verify:ns10`              | Verify ns10 ping (IPv6-only, 3-site mesh)                                                                                            |
+| `verify:ns20`              | Verify ns20 ping (dual-stack, 3-site mesh)                                                                                           |
+| `verify:ns30`              | Verify ns30 ping (dfw only, 2 pods)                                                                                                  |
+| `verify:ns40`              | Verify ns40 ping (iad only, 2 pods)                                                                                                  |
+| `destroy`                  | Destroy the lab and remove all Kind clusters                                                                                         |
+| `restart`                  | Full rebuild — destroy then redeploy                                                                                                 |
+| `rebuild`                  | Full rebuild — clean (destroy + delete images/artifacts) then redeploy                                                               |
+| `inspect`                  | Show running nodes and management addresses                                                                                          |
+| `graph`                    | Generate a draw.io diagram for the topology                                                                                          |
+| `host-setup`               | Apply required host sysctls (IPv6 forwarding, inotify limits)                                                                        |
+| `clean`                    | Destroy lab, delete built images, and remove lab artifacts                                                                           |
+| `test`                     | Run all verification checks                                                                                                          |
 
 ¹ Network CRDs come from the latest commit on `datum-cloud/network`'s `main`,
 not the version `go.mod` requires. Set `NETWORK_REF=<branch>` to track a

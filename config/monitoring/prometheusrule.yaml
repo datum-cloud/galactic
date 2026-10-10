@@ -355,6 +355,161 @@ spec:
               Prometheus cannot reach galactic-nat's metrics port on {{ $labels.node }} (9182), so
               GalacticNatSessionTableEvictingLive, GalacticNatPortExhausted and GalacticNatUplinkRxQueueStalled
               cannot fire for it.
+    # From galactic-cni (job galactic-cni, port 9180): its egress shard groups,
+    # one per translation class (nat66, or nat64:<prefix>), and its own
+    # control loop. A node in ordered mode with no group left publishes no
+    # pool series, so these rules key off galactic_cni_egress_mode and
+    # galactic_cni_egress_group_routes, which galactic-cni always exports,
+    # rather than read missing pool series as a healthy pool.
+    - name: galactic-cni-egress
+      rules:
+        # A class's group has shards, or routes still name it, but no shard
+        # takes tenants: every candidate is unreachable from this node or
+        # draining, or the cluster has none left. Every tenant of that class
+        # on the node without a live pin has no egress.
+        - alert: GalacticEgressPoolEmpty
+          expr: |
+            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="active"}) == 0
+            and on (node, class)
+            (
+              sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"draining|unreachable"}) > 0
+              or
+              sum by (node, class) (galactic_cni_egress_group_routes{job="galactic-cni"}) > 0
+            )
+          for: 2m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "No egress shard takes {{ $labels.class }} traffic from {{ $labels.node }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolempty"
+            description: >-
+              No egress shard in {{ $labels.node }}'s {{ $labels.class }} group has taken new tenants for 2
+              minutes while the group has shards or routes, so new {{ $labels.class }} egress from that node is
+              dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
+              SID over an SRv6 uplink) or draining.
+        # Fewer shards take tenants than the operator said the class should
+        # have. A class with no eligible shard at all is
+        # GalacticEgressClassUnserved instead.
+        - alert: GalacticEgressPoolBelowMinimum
+          expr: |
+            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="active"})
+              < on (node) group_left max by (node) (galactic_cni_egress_pool_min_active{job="galactic-cni"})
+            and on (node, class)
+            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|draining|unreachable"}) > 0
+            and on (node, class)
+            max by (node, class) (galactic_cni_egress_pool_enabled{job="galactic-cni"}) == 1
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $labels.node }} has fewer active {{ $labels.class }} egress shards than the pool minimum"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolbelowminimum"
+            description: >-
+              {{ $labels.node }} has had {{ $value }} active {{ $labels.class }} egress shards for 10
+              minutes, below the GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE the cluster is configured for. The remaining
+              shards carry the metro's whole egress load for that class. galactic_cni_egress_pool_members shows
+              which shards are draining or unreachable.
+        # Every EgressShard in the cluster is ready but none can translate
+        # this class: none has a masquerade address in its family, or none
+        # translates this NAT64 prefix. galactic-cni then installs no route
+        # for the class, so its traffic has no egress.
+        - alert: GalacticEgressClassUnserved
+          expr: |
+            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|draining|unreachable"}) == 0
+            and on (node, class)
+            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="ineligible"}) > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "No egress shard can translate {{ $labels.class }} for {{ $labels.node }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegressclassunserved"
+            description: >-
+              {{ $labels.node }} is configured for {{ $labels.class }} egress, but none of the cluster's
+              EgressShards can translate it: none has a masquerade address in that family, or none translates that
+              NAT64 prefix. galactic-cni logs the shards it kept out. Either give a shard that capability or remove
+              the prefix from GALACTIC_CNI_NAT64_PREFIX.
+        # usid_egress dropped tenant packets bound for a shard group: the
+        # group was empty or disabled, its Maglev table named a shard that
+        # was not alive, or the packet could not be parsed. Drops in every
+        # window for 10 minutes are not a passing rebuild.
+        - alert: GalacticEgressShardGroupDropping
+          expr: >-
+            sum by (node, result) (
+              increase(galactic_cni_egress_shard_selections_total{job="galactic-cni", result=~"group_empty|shard_dead|parse_failed"}[5m])
+            ) > 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $labels.node }} is dropping tenant egress bound for a shard group ({{ $labels.result }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegressshardgroupdropping"
+            description: >-
+              usid_egress on {{ $labels.node }} has dropped tenant packets bound for an egress shard group
+              ({{ $labels.result }}) in every 5-minute window for 10 minutes, about {{ $value | humanize }} in the
+              last one. group_empty means no shard takes tenants; shard_dead means the group was not rebuilt
+              after a shard became unreachable, which points at galactic-cni's egress sweep.
+        # Hashed mode is configured but galactic-cni has never listed the
+        # cluster's EgressShards: RBAC, the API server or the CRD is missing.
+        # Its groups keep whatever they last held, and a new node has none.
+        - alert: GalacticEgressShardWatchNotSynced
+          expr: |
+            max by (node) (galactic_cni_egress_mode{job="galactic-cni", mode="hashed"}) == 1
+            and on (node)
+            max by (node) (galactic_cni_egress_shard_watch_synced{job="galactic-cni"}) == 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "galactic-cni on {{ $labels.node }} cannot list EgressShards"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegressshardwatchnotsynced"
+            description: >-
+              galactic-cni on {{ $labels.node }} runs hashed egress mode but its EgressShard watch has not listed
+              the cluster for 10 minutes. Its shard groups keep their last members, and a node that never
+              listed them has no group at all. Check galactic-cni's logs, its get/list/watch permission on
+              egressshards, and that the EgressShard CRD is installed.
+        # A sweep step keeps failing: publishing a group, reading or rewriting
+        # egress_route_table, listing EgressShards, or retiring groups. While
+        # it fails, membership and next hops go stale, and a move back to
+        # ordered mode does not finish.
+        - alert: GalacticEgressSweepFailing
+          expr: |
+            sum by (node, stage) (increase(galactic_cni_egress_sweep_errors_total{job="galactic-cni"}[10m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "galactic-cni's egress sweep on {{ $labels.node }} keeps failing at {{ $labels.stage }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresssweepfailing"
+            description: >-
+              galactic-cni on {{ $labels.node }} has failed its egress sweep at the {{ $labels.stage }} step in
+              every 10-minute window for 15 minutes. Shard group membership and next hops are going stale, and a
+              switch back to ordered mode leaves routes on the groups until it succeeds.
+        - alert: GalacticCNIMetricsDown
+          expr: up{job="galactic-cni"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "galactic-cni metrics on {{ $labels.node }} cannot be scraped"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticcnimetricsdown"
+            description: >-
+              Prometheus cannot reach galactic-cni's metrics port on {{ $labels.node }} (9180), so no egress
+              shard group alert can fire for it.
     # fabric-api: the looking glass's cell gateway and node sidecars. None of
     # these fire merely because nobody ran a query: each is either a state
     # the components report continuously (availability, credentials,
