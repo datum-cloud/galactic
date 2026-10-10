@@ -197,7 +197,7 @@ of 100; refusals are counted as `rate_limited`.
 Comma-separated list of the `galactic-nat` shards' `Status.ShardSID`s this
 node's tenant VRFs egress through —
 `internal/plumbing/srv6.EgressDefaultRouteAdd` installs a VRF's default
-egress route toward the first one that resolves, at CNI ADD. It is
+egress route toward the first one that resolves, at CNI ADD, in ordered mode. It is
 operator-supplied since no single Kubernetes CRD is visible across this
 multi-cluster fabric's separate clusters/API servers the way BGP itself is.
 Shards run on edge nodes; set this per site to that site's own edge shards,
@@ -227,8 +227,62 @@ Because the destination therefore differs per tenant, a shard advertises its
 SID's covering `/64` rather than a host route; see
 `EgressShardReconciler.shardAdvertisementPrefixes`.
 
+In hashed egress mode (`GALACTIC_CNI_EGRESS_MODE=hashed`, below) this list
+does not decide placement. The cluster's `EgressShard`s do, and the list is
+read only to move VRFs back onto it when switching to ordered mode.
+
 **Type:** comma-separated string · **Default:** _(empty — no shard
 configured)_
+
+## `GALACTIC_CNI_EGRESS_MODE`
+
+How tenant VRFs reach the cluster's egress shards. Read by `galactic-cni run`
+(the `credential-refresh` container) only; CNI ADD follows whatever group it
+has written into the pinned datapath maps.
+
+- `ordered` sends each VRF to the first shard in
+  `GALACTIC_CNI_EGRESS_SHARD_SIDS` that resolves. The rest stand by.
+- `hashed` spreads tenants across every healthy `EgressShard` in the
+  cluster: `usid_egress` picks a shard per tenant address from a Maglev table
+  every compute node builds identically. See
+  [Active/active egress](../nat/configuration.md#active-active-egress).
+
+A value other than these stops the container at startup, and so does
+`hashed` with more than three entries in `GALACTIC_CNI_NAT64_PREFIX`: there
+is one shard group for NAT66 and one for each NAT64 prefix, four in all.
+
+**Type:** `ordered` or `hashed` · **Default:** `ordered`
+
+## `GALACTIC_CNI_EGRESS_HASH`
+
+What hashed mode hashes. `source` keeps every connection from one tenant
+address on one shard, and so on one public address. `flow` hashes the
+5-tuple, which spreads one heavy address over every shard but shows it to the
+internet from several public addresses. Read by `galactic-cni run` only.
+
+**Type:** `source` or `flow` · **Default:** `source`
+
+## `GALACTIC_CNI_EGRESS_PIN_IDLE`
+
+How long hashed mode keeps a tenant address on the shard its first packet
+went to, after its last packet, as a Go duration. Adding or draining a shard
+then leaves established sessions where they are. A tenant that keeps sending
+keeps its pin, and so keeps a draining shard in use, for as long as it
+sends. `0` turns pins off, and with it any way for a drain to preserve
+sessions. Pins are per compute node, at most 65536. Read by `galactic-cni run`
+only.
+
+**Type:** duration (`0`, or at least `1s`) · **Default:** `2h4m`, the egress
+shard's established-TCP idle timeout
+
+## `GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE`
+
+The fewest active egress shards the cluster should have. Exported as
+`galactic_cni_egress_pool_min_active` for `GalacticEgressPoolBelowMinimum`
+to compare against; it does not change forwarding. Read by `galactic-cni run`
+only.
+
+**Type:** non-negative integer · **Default:** `1`
 
 ## `GALACTIC_CNI_DAN_DIR`
 

@@ -398,6 +398,7 @@ tasks:
       - task: "verify:pmtu"
       - task: "verify:nat-icmp"
       - task: "verify:nat64-non-global"
+      - task: "verify:nat-active-active"
       - task: "verify:scenarios"
 
   # First, because every check after it rides these bonds: a member that
@@ -566,6 +567,15 @@ tasks:
     desc: Turn dfw-worker2's gateway datapath off and confirm the ingress check fails, then passes again
     cmds:
       - LAB={{.LAB}} ./scripts/verify-gateway-detach.sh
+
+  # Switches dfw's galactic-cni to hashed egress mode for its duration and
+  # back to ordered mode at the end, so the NAT checks around it, which expect
+  # dfw-worker2 to carry dfw's egress, see the lab as they left it. dfw is the
+  # only site with two shards.
+  "verify:nat-active-active":
+    desc: Verify dfw spreads egress across both shards in hashed mode, survives a shard failure and a drain, and returns to ordered mode
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-nat-active-active.sh
 
   "verify:nat-sharding":
     desc: Verify every edge node's EgressShard is programmed and advertised
