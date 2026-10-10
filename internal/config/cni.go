@@ -5,11 +5,14 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"go.datum.net/galactic/internal/plumbing/dan"
 )
@@ -95,7 +98,113 @@ const (
 	// Unset or empty means this fabric has no NAT64, and a VRF gets no such
 	// route -- not an error.
 	EnvCNINAT64Prefix = "GALACTIC_CNI_NAT64_PREFIX"
+
+	// EnvCNIEgressMode selects how a tenant VRF's egress reaches the
+	// cluster's egress shards. EgressModeOrdered, the default, sends each VRF
+	// to the first shard in EnvCNIEgressShardSIDs that resolves.
+	// EgressModeHashed spreads tenants across every healthy EgressShard in the
+	// cluster, picking a shard per tenant address in the datapath, and does not
+	// read EnvCNIEgressShardSIDs. Read only by galactic-cni run, which owns
+	// the shard group CNI ADD then follows.
+	EnvCNIEgressMode = "GALACTIC_CNI_EGRESS_MODE"
+
+	// EnvCNIEgressHash selects what hashed mode hashes: "source" (the
+	// default) keeps every connection from one tenant address on one shard
+	// and one public address, as RFC 4787 REQ-2 asks; "flow" hashes the
+	// 5-tuple, spreading one heavy address over every shard at the cost of
+	// that pairing.
+	EnvCNIEgressHash = "GALACTIC_CNI_EGRESS_HASH"
+
+	// EnvCNIEgressPinIdle is how long, as a Go duration, hashed mode keeps a
+	// tenant address on the shard it was first sent to after its last packet,
+	// so adding or draining a shard does not move established sessions. "0"
+	// turns pinning off. The default, DefaultEgressPinIdle, is the egress
+	// shard's longest idle timeout.
+	EnvCNIEgressPinIdle = "GALACTIC_CNI_EGRESS_PIN_IDLE"
+
+	// EnvCNIEgressPoolMinActive is the fewest active egress shards the cluster
+	// is expected to have. It is exported as a metric for the pool alert to
+	// compare against, and does not change forwarding. Default 1.
+	EnvCNIEgressPoolMinActive = "GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE"
 )
+
+// EgressMode is how tenant VRFs reach the cluster's egress shards; see
+// EnvCNIEgressMode.
+type EgressMode string
+
+// The EgressMode values.
+const (
+	EgressModeOrdered EgressMode = "ordered"
+	EgressModeHashed  EgressMode = "hashed"
+)
+
+// The EnvCNIEgressHash values.
+const (
+	EgressHashSource = "source"
+	EgressHashFlow   = "flow"
+)
+
+// DefaultEgressPinIdle is EnvCNIEgressPinIdle's default: 2 h 4 min, the
+// egress shard's established-TCP idle timeout (RFC 5382 REQ-5).
+const DefaultEgressPinIdle = 2*time.Hour + 4*time.Minute
+
+// EgressGroupConfig is galactic-cni run's hashed-mode configuration.
+type EgressGroupConfig struct {
+	Mode    EgressMode
+	Hash    string
+	PinIdle time.Duration
+	// MinActive is EnvCNIEgressPoolMinActive.
+	MinActive int
+}
+
+// ParseEgressGroupConfig reads the hashed-mode settings from getenv. Unset
+// values take their defaults; a set but invalid one is an error, so a typo
+// fails the installer at startup instead of silently running ordered.
+func ParseEgressGroupConfig(getenv func(string) string) (EgressGroupConfig, error) {
+	cfg := EgressGroupConfig{
+		Mode:      EgressModeOrdered,
+		Hash:      EgressHashSource,
+		PinIdle:   DefaultEgressPinIdle,
+		MinActive: 1,
+	}
+	var errs []error
+	switch mode := EgressMode(strings.TrimSpace(getenv(EnvCNIEgressMode))); mode {
+	case "":
+	case EgressModeOrdered, EgressModeHashed:
+		cfg.Mode = mode
+	default:
+		errs = append(errs, fmt.Errorf("%s=%q: want %q or %q", EnvCNIEgressMode, mode, EgressModeOrdered, EgressModeHashed))
+	}
+	switch hash := strings.TrimSpace(getenv(EnvCNIEgressHash)); hash {
+	case "":
+	case EgressHashSource, EgressHashFlow:
+		cfg.Hash = hash
+	default:
+		errs = append(errs, fmt.Errorf("%s=%q: want %q or %q", EnvCNIEgressHash, hash, EgressHashSource, EgressHashFlow))
+	}
+	if raw := strings.TrimSpace(getenv(EnvCNIEgressPinIdle)); raw != "" {
+		idle, err := time.ParseDuration(raw)
+		switch {
+		case raw == "0":
+			cfg.PinIdle = 0
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s=%q: %w", EnvCNIEgressPinIdle, raw, err))
+		case idle < time.Second:
+			errs = append(errs, fmt.Errorf("%s=%q: want 0 or at least 1s", EnvCNIEgressPinIdle, raw))
+		default:
+			cfg.PinIdle = idle
+		}
+	}
+	if raw := strings.TrimSpace(getenv(EnvCNIEgressPoolMinActive)); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			errs = append(errs, fmt.Errorf("%s=%q: want a non-negative integer", EnvCNIEgressPoolMinActive, raw))
+		} else {
+			cfg.MinActive = n
+		}
+	}
+	return cfg, errors.Join(errs...)
+}
 
 // --- CNIConfig -------------------------------------------------------------
 
