@@ -97,6 +97,16 @@ spec:
           # placeholder, not a published tag.
           image: ghcr.io/datum-cloud/galactic-cni:latest
           command: ["/galactic-cni", "run"]
+          env:
+            # How tenant VRFs reach the cluster's egress shards. "ordered"
+            # sends each VRF to the first reachable shard in
+            # GALACTIC_CNI_EGRESS_SHARD_SIDS. "hashed" spreads tenants across
+            # every EgressShard in this namespace, and also reads
+            # GALACTIC_CNI_EGRESS_HASH, GALACTIC_CNI_EGRESS_PIN_IDLE and
+            # GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE. See
+            # docs/nat/configuration.md#active-active-egress.
+            - name: GALACTIC_CNI_EGRESS_MODE
+              value: ordered
           # Documentation only: hostNetwork: true means these are the
           # process's actual listen ports on the node, not something
           # Kubernetes publishes -- containerPort here doesn't change
@@ -128,7 +138,7 @@ spec:
             readOnlyRootFilesystem: true
           # The kernel charges eBPF map memory to the cgroup of the process
           # that creates the map, and this container creates the uSID
-          # datapath's maps (about 59Mi) on a node that has none pinned.
+          # datapath's maps (about 67Mi) on a node that has none pinned.
           # TestUsid_MapMemoryFitsGalacticCNILimit fails when the maps plus
           # the process outgrow this limit -- see config/galactic-cni/README.md.
           resources:

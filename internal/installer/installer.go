@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,10 +36,8 @@ import (
 	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
-	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
-	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/radv"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -501,10 +500,10 @@ type ebpfDatapathState struct {
 	// Nil when the datapath is a test fake.
 	mssClamp *mssClampState
 
-	// egressShardSIDs is the configured egress shard list, in preference
-	// order, from the same host conflist CNI ADD reads it from. The egress
-	// route sweep uses it to keep each VRF on the first reachable shard.
-	egressShardSIDs []net.IP
+	// egressGroup is the egress route sweep: it keeps each VRF on the first
+	// reachable shard of the conflist's list in ordered mode, and on the
+	// cluster's shard group in hashed mode.
+	egressGroup *egressGroup
 
 	// egress is the same host conflist's raw egress configuration, which the
 	// datapath repair rebuilds a VRF's shard routes from exactly as CNI ADD
@@ -524,6 +523,11 @@ type ebpfDatapathState struct {
 // only forwarding path, so there is no partial or legacy state to fall back
 // to.
 func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathState, io.Closer, error) {
+	egressCfg, err := config.ParseEgressGroupConfig(os.Getenv)
+	if err != nil {
+		return ebpfDatapathState{}, nil, fmt.Errorf("egress shard configuration: %w", err)
+	}
+
 	attach.SetHooks(m.Events.Hooks())
 
 	datapath, ifaces, watcher, err := ebpfStartFn(ctx, attach.PinDir)
@@ -532,7 +536,12 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	}
 	slog.Info("eBPF uSID datapath loaded, pinned, and attached", "interfaces", ifaces, "pinDir", attach.PinDir)
 
-	state := ebpfDatapathState{ifaces: ifaces, watcher: watcher, sidecarReap: &sidecarReaper{}}
+	state := ebpfDatapathState{
+		ifaces: ifaces, watcher: watcher, sidecarReap: &sidecarReaper{},
+		egressGroup: newEgressGroup(egressCfg, nil, nil, attach.PinDir),
+	}
+	state.egressGroup.ctl = m.Egress
+	m.Egress.SetMode(string(egressCfg.Mode), string(config.EgressModeOrdered), string(config.EgressModeHashed))
 	watcher.OnChange(rewriteEBPFInterfaces)
 
 	// The closer is the loaded objects in production. A test fake stands in a
@@ -542,8 +551,12 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 		state.objs = objs
 		state.mssClamp = newMSSClampState(objs.MssClampTable, objs.EncapMtuTable)
 		state.mssClamp.reconcile()
+		state.egressGroup.counters = objs.EgressShardCounters
 		if err := m.RegisterDatapathCollector(objs); err != nil {
 			slog.Warn("Failed to register eBPF datapath metrics collector", "err", err)
+		}
+		if err := m.RegisterEgressShardCollector(objs, egressCfg.MinActive); err != nil {
+			slog.Warn("Failed to register egress shard metrics collector", "err", err)
 		}
 	}
 
@@ -557,15 +570,62 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 			"err", err)
 		return state, datapath, nil
 	}
-	state.egressShardSIDs = loadEgressShardSIDs(hostConf.EgressShardSIDs)
+	nat64, err := egressNAT64Prefixes(hostConf.NAT64Prefix)
+	if err != nil {
+		slog.Warn("Egress shard groups serve NAT66 only: the conflist's NAT64 prefix list does not parse", "err", err)
+	}
+	if err := checkEgressClasses(egressCfg, nat64); err != nil {
+		return state, datapath, fmt.Errorf("egress shard configuration: %w", err)
+	}
+	state.egressGroup = newEgressGroup(egressCfg, loadEgressShardSIDs(hostConf.EgressShardSIDs), nat64, attach.PinDir)
+	state.egressGroup.ctl = m.Egress
+	if state.objs != nil {
+		state.egressGroup.counters = state.objs.EgressShardCounters
+	}
 	state.egress = attachreg.EgressConfig{ShardSIDs: hostConf.EgressShardSIDs, NAT64Prefix: hostConf.NAT64Prefix}
 	if k8sClient, err := newK8sClientFn(); err != nil {
 		slog.Warn("eBPF vrf_table GC sweep disabled: failed to create k8s client", "err", err)
 	} else {
 		state.k8sClient, state.namespace, state.nodeName = k8sClient, hostConf.Namespace, hostConf.NodeName
 	}
+	if egressCfg.Mode == config.EgressModeHashed {
+		startHashedEgress(ctx, state.egressGroup, hostConf.Namespace)
+	}
 
 	return state, datapath, nil
+}
+
+// egressNAT64Prefixes parses the conflist's NAT64 prefix list into the
+// prefixes the NAT64 shard groups serve, in order.
+func egressNAT64Prefixes(raw string) ([]netip.Prefix, error) {
+	parsed, err := config.ParseNAT64Prefixes(raw)
+	if err != nil {
+		return nil, err
+	}
+	prefixes := make([]netip.Prefix, 0, len(parsed))
+	for _, p := range parsed {
+		addr, _ := netip.AddrFromSlice(p.IP)
+		ones, _ := p.Mask.Size()
+		prefixes = append(prefixes, netip.PrefixFrom(addr, ones).Masked())
+	}
+	return prefixes, nil
+}
+
+// startHashedEgress starts what hashed mode needs beyond the sweep itself: the
+// EgressShard watch its members come from, and the netlink watch that makes a
+// shard's withdrawal take effect at once. A watch that fails to start is
+// logged; the group keeps its last members and the ticker keeps sweeping.
+func startHashedEgress(ctx context.Context, g *egressGroup, namespace string) {
+	lister, err := startEgressShardWatchFn(ctx, namespace, g.kick)
+	if err != nil {
+		slog.Error("Hashed egress: EgressShard watch failed to start; the shard group keeps its last members",
+			"err", err)
+	} else {
+		g.shards = lister
+	}
+	go g.watchShardReachability(ctx)
+	slog.Info("Hashed egress mode: spreading tenant egress across the cluster's EgressShards",
+		"namespace", namespace, "hash", g.cfg.Hash, "pinIdle", g.cfg.PinIdle)
 }
 
 // loadEgressShardSIDs parses the host conflist's egress shard list for the
@@ -627,64 +687,6 @@ func startSidecarReturnSweep(ctx context.Context, sem chan struct{}, st ebpfData
 		go func() {
 			defer func() { <-sem }()
 			reconcileSidecarReturnPath(ctx, st)
-		}()
-	default:
-	}
-}
-
-// startEgressRouteRefreshSweep runs one egress_route_table re-resolution pass,
-// which also moves each VRF onto the first reachable of shardSIDs, off Run's
-// goroutine, for the same reason the two sweeps above run off it: an
-// entry whose next hop has no neighbor costs a solicit plus a poll, so a node
-// that has lost its fabric uplink would hold the select loop past the next tick
-// and starve the credential refresh, GC sweeps, and health check with it.
-//
-// sem is a size-1 semaphore, dropping a tick rather than queueing it when the
-// previous pass is still running.
-//
-// A missing pinned map is not an error worth logging on every tick: it means
-// the datapath is not loaded on this node, and the sweep has nothing to do.
-//
-// The ingress sidecar shares these pinned maps from inside a pod network
-// namespace, so the sweep first reads back which VRF routing tables that writer
-// owns and passes them to Refresh to be left alone. Failing to read that set
-// skips the whole sweep: a sweep that cannot tell the two writers apart
-// rewrites the sidecar's entries to host interfaces the pod does not have, and
-// a stale next hop is recoverable where that is not.
-func startEgressRouteRefreshSweep(sem chan struct{}, shardSIDs []net.IP) {
-	select {
-	case sem <- struct{}{}:
-		go func() {
-			defer func() { <-sem }()
-			table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(attach.PinDir)
-			if err != nil {
-				return
-			}
-			defer func() { _ = closer.Close() }()
-
-			registry, registryCloser, err := usidmap.OpenPinnedRegistry(attach.PinDir)
-			if err != nil {
-				return
-			}
-			defer func() { _ = registryCloser.Close() }()
-
-			foreignTableIDs, err := egressroutemap.SidecarOwnedTableIDs(registry.VRF)
-			if err != nil {
-				slog.Error("egress_route_table refresh sweep skipped: could not resolve entry ownership", "err", err)
-				return
-			}
-
-			result, err := table.Refresh(foreignTableIDs, shardSIDs)
-			if err != nil {
-				slog.Error("egress_route_table refresh sweep failed", "err", err,
-					"scanned", result.Scanned, "refreshed", result.Refreshed)
-				return
-			}
-			if result.Refreshed > 0 || result.Unresolved > 0 {
-				slog.Info("egress_route_table refresh sweep complete",
-					"scanned", result.Scanned, "refreshed", result.Refreshed, "reselected", result.Reselected,
-					"unresolved", result.Unresolved, "skipped", result.Skipped)
-			}
 		}()
 	default:
 	}
@@ -1189,7 +1191,8 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 
 	egressRouteRefreshTicker := time.NewTicker(egressRouteRefreshInterval)
 	defer egressRouteRefreshTicker.Stop()
-	egressRouteRefreshSem := make(chan struct{}, 1)
+	go ebpfState.egressGroup.run(ctx)
+	ebpfState.egressGroup.kick()
 
 	for {
 		select {
@@ -1283,8 +1286,15 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// stay wrong for the life of the node. The same pass moves each
 			// VRF onto the first reachable shard in the configured order,
 			// since the one ADD picked may just have been the first whose
-			// route happened to arrive.
-			startEgressRouteRefreshSweep(egressRouteRefreshSem, ebpfState.egressShardSIDs)
+			// route happened to arrive. In hashed mode it also re-resolves
+			// the cluster's shard group; see egressGroup.
+			//
+			// Off this goroutine, on egressGroup's own: an entry whose next
+			// hop has no neighbor costs a solicit plus a poll, so a node that
+			// has lost its fabric uplink would otherwise hold the select loop
+			// past the next tick and starve the credential refresh, GC
+			// sweeps and health check with it.
+			ebpfState.egressGroup.kick()
 
 		case failure := <-radvActors.failed:
 			radvActorFailed(radvActors, failure)
