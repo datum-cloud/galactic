@@ -106,7 +106,7 @@ per-VPC gateway design to colocate with the workload's own VRF.
 | CRD              | Scope                                                                | Written by                                                                                                                                    | Purpose                                                                                                                                                                                                                                                                                  |
 | ---------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `NetworkGateway` | Namespaced, one per gateway node (`spec.targetRef.name` = node name) | Operator, once per gateway node (see [worked example](#worked-containerlab-example) below)                                                    | Node-scoped root object, mirroring `BGPRouter`'s pattern. Identifies which nodes participate in the anycast mesh and surfaces each node's engine health via `status.conditions`. Carries **no** self-address field — DSR rewrites nothing, so there is no translation source to publish. |
-| `NetworkRule`    | Namespaced, internal                                                 | The platform API that serves tenants, after it verifies the tenant owns `vpcRef` (galactic does not repeat the check — see Known Constraints) | Ingress load-balancing spec: `vpcRef` (opaque tenant identifier), `vipAddresses` (1–8, IPv4/IPv6), `protocol` (`tcp`/`udp`), `port`, `backendSelector` (the VPCAttachments in `vpcRef` that serve it), `backendPort`. Served by every `NetworkGateway` in the namespace identically.     |
+| `NetworkRule`    | Namespaced, internal                                                 | The platform API that serves tenants, after it verifies the tenant owns `vpcRef` (galactic does not repeat the check — see Known Constraints) | Ingress load-balancing spec: `vpcRef` (opaque tenant identifier), `vipAddresses` (1–8, IPv4/IPv6; IPv4 is not served yet, #705), `protocol` (`tcp`/`udp`), `port`, `backendSelector` (the VPCAttachments in `vpcRef` that serve it), `backendPort`. Served by every `NetworkGateway` in the namespace identically.     |
 
 Both are defined in `go.datum.net/network`'s `api/v1alpha1` package
 (`gateway_types.go`, `rule_types.go`) — the same external CRD module the
@@ -270,13 +270,19 @@ that converges this node's whole gateway engine:
    advertised, and any route an earlier pass published for it is withdrawn,
    so the fabric never sends a VIP's traffic to a node with nothing loaded
    for it. A rule where only some backends resolve is loaded and advertised
-   with the rest (#713). Each node records the result on the rule as its
+   with the rest (#713). IPv4 VIPs are left out of the engine and never
+   advertised until the datapath serves them (#705), and a `-v4`
+   advertisement an earlier release made is withdrawn with the prune above.
+   The rule's IPv6 VIPs serve without them, and a rule with no other VIP is
+   not loaded. Each node records the result on the rule as its
    own `<node>/Programmed` condition (`Programmed`, `BackendsUnresolved`,
-   `LoadFailed`, or `InvalidRule`, with the error or the unresolved
-   backends in the message). The type is node-scoped because
+   `LoadFailed`, `InvalidRule`, or `NoServedVIP` for an IPv4-only rule, with
+   the error or the unresolved backends in the message), and, for a rule
+   with an IPv4 VIP, a `<node>/IPv4Served` condition that is `False` with
+   reason `Unsupported`. The type is node-scoped because
    `NetworkRule` status is shared by every gateway node while loading
    is per node; a node writes it only when it changes, and a
-   departing, deleted, or disabled node's condition is removed with its
+   departing, deleted, or disabled node's conditions are removed with its
    advertisements. The `NetworkGateway`'s `EngineDegraded` message
    lists every failed rule. Every rule
    advertisement carries a `networkRuleLabel` label and a plain (not
@@ -886,6 +892,7 @@ that tag into `config/galactic-gateway/base`.
 - **The return path is opt-in per node and fails closed at startup, not silently.** `edge_return` attaches only where `GALACTIC_GATEWAY_INTERNAL_INTERFACES` names an interface; a node that needs it and does not set it drops every reply in `KUBE-FORWARD` with nothing to say why, exactly as before this program existed. Where it *is* set, an attach failure is fatal to `setupGatewayDatapath` and the pod crash-loops rather than running with the forward half working and replies dying — the same all-or-nothing choice `edgeattach.Attach` already makes across a bond's slaves.
 - **A backend in another site replies through that site's edge node.** The gateway can pick a backend anywhere its `NetworkRule` reaches, and the reply then leaves through the edge node in front of *that* backend, whose own `vip_addr_table` must hold the same anycast VIP or the reply meets the unmodified kernel path and dies. Within one cluster the reconciler guarantees this; across clusters it depends on the same `NetworkRule` existing on both sides, which nothing in this repo enforces.
 - **Backends depend on an attachment controller outside this repo.** `selectRuleBackends` skips a `VPCAttachment` whose `status.vpc` is not the rule's VPC, and keeps a selected one pending until its `status.node` is set. Galactic writes neither field; controllers in datum-cloud/cloud do, `status.node` from the attachment's `BGPAdvertisement`. Without them an attachment with no `status.vpc` is silently unselected, one with `status.vpc` but no `status.node` is pending with `status.node not set by datum-cloud/cloud`, and a rule with no other backend never loads; the containerlab lab patches the status by hand (`deploy/containerlab/scripts/publish-ns60-attachments.sh`). See #821.
+- **IPv4 VIPs are accepted but not served.** A rule that predates the CRD's IPv6-only rule can still hold an IPv4 VIP, but `edge_lb` and `edge_return` parse only IPv6, `edgemap` refuses IPv4 keys, and backend nodes translate only IPv6 VIPs. So `buildDesiredRule` leaves IPv4 VIPs, plain or IPv4-mapped, out of the engine, no `-v4` advertisement is made, and each gateway node reports `<node>/IPv4Served=False` (`Unsupported`) on the rule. The address never draws traffic that nothing answers, and the rule's IPv6 VIP keeps serving. #705 tracks serving IPv4 VIPs.
 - **`vip_table` has no active GC beyond crash-recovery reconcile.** By design (see Key Design Decisions above) — DSR keeps no flow state to leak in the first place.
 - **Egress is out of this binary's scope, not unimplemented.** Egress translation is a separate, sharded tier (`galactic-nat`, its own binary — see `cmd/galactic-nat` and `internal/controller/egressshard_controller.go`). `NetworkRule`/this datapath remain ingress-only: external client → VIP → tenant backend.
 

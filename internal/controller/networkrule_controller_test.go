@@ -32,8 +32,12 @@ const (
 	testNodeGWB    = "gw-b"
 	testRouterName = "router-a"
 	testRuleName   = "rule-1"
-	testVIP        = "203.0.113.5"
-	testVIPPrefix  = testVIP + "/32"
+	testVIP        = "2001:db8:5::5"
+	testVIPPrefix  = testVIP + "/128"
+
+	// testVIP4 is an IPv4 VIP, which the gateway leaves out of the engine
+	// and never advertises until IPv4 VIPs are served (#705).
+	testVIP4 = "203.0.113.5"
 
 	// testBackendAddr is the default backend address newTestRule uses.
 	// testBackendRouterName/testBackendPrefix/testBackendVRFID describe the
@@ -60,10 +64,10 @@ const (
 	testRouteTargetValue = "65000:1"
 )
 
-// testRuleAdvV4 is node-qualified by testNodeGWA -- see
+// testRuleAdv is node-qualified by testNodeGWA -- see
 // NetworkGatewayReconciler.applyBGPAdvertisements's doc comment for why every
 // gateway node's own BGPAdvertisement name must include its node name.
-var testRuleAdvV4 = ruleAdvertisementName(testRuleName, testNodeGWA, "v4")
+var testRuleAdv = ruleAdvertisementName(testRuleName, testNodeGWA, "v6")
 
 func newRuleTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -436,7 +440,7 @@ func TestNetworkRuleReconciler_TeardownOrder_WithdrawsBGPBeforeRemovingFinalizer
 	adv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testNamespace,
-			Name:      testRuleAdvV4,
+			Name:      testRuleAdv,
 			Labels:    map[string]string{networkRuleLabel: testRuleName},
 		},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
@@ -460,7 +464,7 @@ func TestNetworkRuleReconciler_TeardownOrder_WithdrawsBGPBeforeRemovingFinalizer
 
 	// BGPAdvertisement must have been deleted (step 1: BGP withdrawal).
 	gotAdv := &bgpv1alpha1.BGPAdvertisement{}
-	err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), gotAdv)
+	err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdv), gotAdv)
 	if err == nil {
 		t.Fatal("BGPAdvertisement was not withdrawn on NetworkRule deletion")
 	}

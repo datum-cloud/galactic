@@ -152,6 +152,17 @@ const (
 	// serving through the rest.
 	reasonBackendsUnresolved = "BackendsUnresolved"
 
+	// reasonNoServedVIP is the per-node Programmed reason for a rule whose
+	// every VIP is IPv4, which the datapath cannot load, so nothing is loaded
+	// or advertised for it.
+	reasonNoServedVIP = "NoServedVIP"
+
+	// reasonIPv4Unsupported is the per-node IPv4Served reason for a rule with
+	// one or more IPv4 VIPs, which the datapath cannot load. They are left out
+	// of the engine and never advertised, and the rule's IPv6 VIPs serve
+	// without them.
+	reasonIPv4Unsupported = "Unsupported"
+
 	// reasonTerminating is the Ready reason for a NetworkGateway being deleted,
 	// whether observed on a live object carrying a deletion timestamp or
 	// reconstructed for the case where the object is already gone.
@@ -525,8 +536,8 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 			}
 		}
 
-		if err := r.setRuleProgrammed(ctx, o.rule, cond); err != nil {
-			logger.Error(err, "update NetworkRule Programmed condition", "networkRule", o.rule.Name)
+		if err := r.setRuleConditions(ctx, o.rule, cond, ipv4ServedCondition(r.NodeName, o.rule)); err != nil {
+			logger.Error(err, "update NetworkRule conditions", "networkRule", o.rule.Name)
 			statusErrs = append(statusErrs, fmt.Errorf("networkRule %s status: %w", o.rule.Name, err))
 		}
 	}
@@ -544,6 +555,9 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 	}
 	if o.buildErr != nil {
 		cond.Status, cond.Reason = metav1.ConditionFalse, reasonInvalidRule
+		if errors.Is(o.buildErr, errNoServedVIP) {
+			cond.Reason = reasonNoServedVIP
+		}
 		cond.Message = fmt.Sprintf("not loaded on node %s: %v", node, o.buildErr)
 		return cond
 	}
@@ -629,15 +643,42 @@ func programmedConditionType(node string) string {
 	return node + "/" + bgpv1alpha1.ConditionTypeProgrammed
 }
 
-// setRuleProgrammed writes cond to rule's status, skipping the write when
-// nothing changed. Every write fans out to every gateway node through the
-// NetworkRule watch, so an unconditional write would never settle.
+// ipv4ServedConditionType returns the NetworkRule condition type that records
+// whether node serves the rule's IPv4 VIPs. Like programmedConditionType, each
+// gateway node owns its own.
+func ipv4ServedConditionType(node string) string {
+	return node + "/IPv4Served"
+}
+
+// ipv4ServedCondition returns node's IPv4Served condition for rule, or nil
+// when rule has no IPv4 VIP, in which case the condition is removed. It is
+// always False, whether or not the rule built: IPv4 VIPs are left out of the
+// engine and never advertised, so the condition is what tells the rule's
+// owner that those addresses do not work.
+func ipv4ServedCondition(node string, rule *bgpv1alpha1.NetworkRule) *metav1.Condition {
+	if !hasIPv4VIP(rule) {
+		return nil
+	}
+	return &metav1.Condition{
+		Type:   ipv4ServedConditionType(node),
+		Status: metav1.ConditionFalse,
+		Reason: reasonIPv4Unsupported,
+		Message: fmt.Sprintf("IPv4 VIPs are not served on node %s yet (#705); "+
+			"they are not loaded or advertised, and the rule's IPv6 VIPs serve without them", node),
+	}
+}
+
+// setRuleConditions writes programmed and, when non-nil, ipv4 to rule's
+// status in one update, and removes node's IPv4Served condition when ipv4 is
+// nil. It skips the write when nothing changed. Every write fans out to every
+// gateway node through the NetworkRule watch, so an unconditional write would
+// never settle.
 //
 // Every gateway node and NetworkRuleReconciler write the same status, so a
 // write retries on conflict against a fresh read. A rule deleted mid-pass
 // has nothing left to record and counts as success.
-func (r *NetworkGatewayReconciler) setRuleProgrammed(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, cond metav1.Condition,
+func (r *NetworkGatewayReconciler) setRuleConditions(
+	ctx context.Context, rule *bgpv1alpha1.NetworkRule, programmed metav1.Condition, ipv4 *metav1.Condition,
 ) error {
 	key := client.ObjectKeyFromObject(rule)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -645,9 +686,17 @@ func (r *NetworkGatewayReconciler) setRuleProgrammed(
 		if err := r.Get(ctx, key, current); err != nil {
 			return err
 		}
-		c := cond
+		c := programmed
 		c.ObservedGeneration = current.Generation
-		if !meta.SetStatusCondition(&current.Status.Conditions, c) {
+		changed := meta.SetStatusCondition(&current.Status.Conditions, c)
+		if ipv4 != nil {
+			c4 := *ipv4
+			c4.ObservedGeneration = current.Generation
+			changed = meta.SetStatusCondition(&current.Status.Conditions, c4) || changed
+		} else {
+			changed = meta.RemoveStatusCondition(&current.Status.Conditions, ipv4ServedConditionType(r.NodeName)) || changed
+		}
+		if !changed {
 			return nil
 		}
 		return r.Status().Update(ctx, current)
@@ -658,10 +707,10 @@ func (r *NetworkGatewayReconciler) setRuleProgrammed(
 	return err
 }
 
-// clearNodeRuleConditions removes node's Programmed condition from every
-// NetworkRule in namespace, for a node that no longer serves any of them. A
-// write retries on conflict against a fresh read, and a rule deleted
-// mid-pass counts as cleared.
+// clearNodeRuleConditions removes node's Programmed and IPv4Served
+// conditions from every NetworkRule in namespace, for a node that no longer
+// serves any of them. A write retries on conflict against a fresh read, and a
+// rule deleted mid-pass counts as cleared.
 func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, node string) error {
 	list := &bgpv1alpha1.NetworkRuleList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -675,7 +724,9 @@ func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, no
 			if err := c.Get(ctx, key, current); err != nil {
 				return err
 			}
-			if !meta.RemoveStatusCondition(&current.Status.Conditions, programmedConditionType(node)) {
+			removed := meta.RemoveStatusCondition(&current.Status.Conditions, programmedConditionType(node))
+			removed = meta.RemoveStatusCondition(&current.Status.Conditions, ipv4ServedConditionType(node)) || removed
+			if !removed {
 				return nil
 			}
 			return c.Status().Update(ctx, current)
@@ -734,6 +785,28 @@ func pruneRuleAdvertisements(
 	return errors.Join(errs...)
 }
 
+// errNoServedVIP is buildDesiredRule's error for a rule whose every VIP is
+// IPv4, leaving nothing the datapath can load.
+var errNoServedVIP = errors.New("every VIP is IPv4, and IPv4 VIPs are not served yet (#705)")
+
+// isIPv4VIP reports whether vip is an IPv4 address, written plainly or as an
+// IPv4-mapped IPv6 address. The datapath serves neither form.
+func isIPv4VIP(vip netip.Addr) bool {
+	return vip.Unmap().Is4()
+}
+
+// hasIPv4VIP reports whether rule lists an IPv4 VIP in either form isIPv4VIP
+// accepts. Addresses that do not parse are left to buildDesiredRule, which
+// rejects them.
+func hasIPv4VIP(rule *bgpv1alpha1.NetworkRule) bool {
+	for _, v := range rule.Spec.VIPAddresses {
+		if addr, err := netip.ParseAddr(v); err == nil && isIPv4VIP(addr) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildDesiredRule converts rule into a gateway.DesiredRule. Its backends are
 // the IPv6 addresses of the VPCAttachments rule's BackendSelector picks from
 // attachments (selectRuleBackends), each resolved through sidIndex to the
@@ -753,17 +826,30 @@ func pruneRuleAdvertisements(
 // withdrawn rather than advertised with nothing behind it. An invalid VIP or
 // selector fails the rule outright, since that is a spec error rather than a
 // passing state.
+//
+// IPv4 VIPs, plain or IPv4-mapped (isIPv4VIP), are left out because the
+// datapath cannot serve them: loading one would fail the whole rule, and
+// advertising one would draw traffic nothing answers. The rule's IPv6 VIPs serve without them, and a
+// rule with no other VIP fails with errNoServedVIP.
 func buildDesiredRule(
 	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
 	sidIndex *backendSIDIndex, owners backendOwners,
 ) (dr gateway.DesiredRule, unresolved []string, err error) {
 	vips := make([]netip.Addr, 0, len(rule.Spec.VIPAddresses))
+	var withheld int
 	for _, v := range rule.Spec.VIPAddresses {
 		addr, err := netip.ParseAddr(v)
 		if err != nil {
 			return gateway.DesiredRule{}, nil, fmt.Errorf("invalid VIP address %q: %w", v, err)
 		}
+		if isIPv4VIP(addr) {
+			withheld++
+			continue
+		}
 		vips = append(vips, addr)
+	}
+	if len(vips) == 0 && withheld > 0 {
+		return gateway.DesiredRule{}, nil, errNoServedVIP
 	}
 
 	if _, _, err := ruleTranslatedVIP(rule); err != nil {
@@ -848,7 +934,10 @@ func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName
 }
 
 // applyBGPAdvertisements reconciles the BGPAdvertisements for a single rule,
-// one per non-empty VIP address family, named by ruleAdvertisementName. Once
+// one per non-empty VIP address family, named by ruleAdvertisementName.
+// desired never holds an IPv4 VIP (buildDesiredRule), so no "-v4"
+// advertisement is created, and the prune below withdraws any that exists.
+// Once
 // every one is applied, it deletes any other advertisement this node made for
 // the rule: one for a family whose VIPs are gone, or one under a name from an
 // earlier naming scheme.

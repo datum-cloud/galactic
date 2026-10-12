@@ -275,7 +275,7 @@ func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedRules(t *testing.
 	ruleA := newTestRule("rule-a", "vpc-1", testVIP)
 	acceptRule(ruleA)
 
-	ruleB := newTestRule("rule-b", "vpc-2", "203.0.113.6")
+	ruleB := newTestRule("rule-b", "vpc-2", "2001:db8:5::6")
 	acceptRule(ruleB)
 
 	notAccepted := newTestRule("not-accepted", "vpc-4", "203.0.113.8")
@@ -393,8 +393,8 @@ func TestNetworkGatewayReconciler_ServesThroughResolvedBackends(t *testing.T) {
 	}
 
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
-		t.Fatalf("get BGPAdvertisement %s: %v (the rule still serves, so it must stay advertised)", testRuleAdvV4, err)
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdv), adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s: %v (the rule still serves, so it must stay advertised)", testRuleAdv, err)
 	}
 
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonBackendsUnresolved)
@@ -513,12 +513,12 @@ func TestBuildDesiredRule_RefusesSecondIPv6VIP(t *testing.T) {
 		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
-	rule := newTestRule(testRuleName, "vpc-1", "2001:db8:100::32", "2001:db8:100::33", testVIP)
+	rule := newTestRule(testRuleName, "vpc-1", "2001:db8:100::32", "2001:db8:100::33", testVIP4)
 	if _, _, err := buildDesiredRule(rule, attachments, idx, nil); err == nil {
 		t.Fatal("buildDesiredRule: err = nil, want an error for two IPv6 VIPs")
 	}
 
-	rule.Spec.VIPAddresses = []string{"2001:db8:100::32", testVIP}
+	rule.Spec.VIPAddresses = []string{"2001:db8:100::32", testVIP4}
 	if _, _, err := buildDesiredRule(rule, attachments, idx, nil); err != nil {
 		t.Fatalf("buildDesiredRule with one IPv6 and one IPv4 VIP: %v", err)
 	}
@@ -680,8 +680,8 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 	}
 
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
-		t.Fatalf("get BGPAdvertisement %s: %v", testRuleAdvV4, err)
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdv), adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s: %v", testRuleAdv, err)
 	}
 	if adv.Spec.RouterRef.Name != testRouterName {
 		t.Errorf("RouterRef.Name = %q, want %q", adv.Spec.RouterRef.Name, testRouterName)
@@ -727,7 +727,7 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 	rule.UID = testRuleUID
 
 	preexisting := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRuleAdvV4}, // no label
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRuleAdv}, // no label
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: testRouterName},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
@@ -749,8 +749,8 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 	}
 
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
-		t.Fatalf("get BGPAdvertisement %s: %v", testRuleAdvV4, err)
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdv), adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s: %v", testRuleAdv, err)
 	}
 	if got := adv.Labels[networkRuleLabel]; got != testRuleName {
 		t.Errorf("Labels[%s] = %q, want %q (backfill on update path)", networkRuleLabel, got, testRuleName)
@@ -840,8 +840,8 @@ func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) 
 	}
 
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
-		t.Fatalf("get BGPAdvertisement %s: %v", testRuleAdvV4, err)
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdv), adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s: %v", testRuleAdv, err)
 	}
 
 	cond := gatewayReadyCondition(t, fakeClient)
@@ -883,9 +883,9 @@ func TestNetworkGatewayReconciler_DoesNotAdvertiseUnloadedRule(t *testing.T) {
 	}
 
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); !apierrors.IsNotFound(err) {
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdv), adv); !apierrors.IsNotFound(err) {
 		t.Fatalf("get BGPAdvertisement %s: err = %v, want NotFound (the rule never loaded); prefixes %v",
-			testRuleAdvV4, err, adv.Spec.Prefixes)
+			testRuleAdv, err, adv.Spec.Prefixes)
 	}
 
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionFalse, reasonLoadFailed)
@@ -925,8 +925,8 @@ func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsLoading(t *testing.T) {
 		t.Fatalf("first Reconcile: unexpected error: %v", err)
 	}
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
-		t.Fatalf("get BGPAdvertisement %s after a clean pass: %v", testRuleAdvV4, err)
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdv), adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s after a clean pass: %v", testRuleAdv, err)
 	}
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonProgrammed)
 
@@ -934,8 +934,8 @@ func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsLoading(t *testing.T) {
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("second Reconcile: unexpected error: %v", err)
 	}
-	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); !apierrors.IsNotFound(err) {
-		t.Fatalf("get BGPAdvertisement %s: err = %v, want NotFound (the rule stopped loading)", testRuleAdvV4, err)
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdv), adv); !apierrors.IsNotFound(err) {
+		t.Fatalf("get BGPAdvertisement %s: err = %v, want NotFound (the rule stopped loading)", testRuleAdv, err)
 	}
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionFalse, reasonLoadFailed)
 }
@@ -951,7 +951,7 @@ func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsBuilding(t *testing.T) {
 	stale := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testNamespace,
-			Name:      testRuleAdvV4,
+			Name:      testRuleAdv,
 			Labels:    map[string]string{networkRuleLabel: testRuleName, gatewayNodeLabel: testNodeGWA},
 		},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
@@ -974,8 +974,8 @@ func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsBuilding(t *testing.T) {
 	}
 
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); !apierrors.IsNotFound(err) {
-		t.Fatalf("get BGPAdvertisement %s: err = %v, want NotFound (the rule no longer builds)", testRuleAdvV4, err)
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdv), adv); !apierrors.IsNotFound(err) {
+		t.Fatalf("get BGPAdvertisement %s: err = %v, want NotFound (the rule no longer builds)", testRuleAdv, err)
 	}
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionFalse, reasonInvalidRule)
 }
@@ -1299,9 +1299,9 @@ func TestRuleToGatewayRequests_WrongTypeReturnsNil(t *testing.T) {
 }
 
 func TestPrefixesByFamily(t *testing.T) {
-	vips := []netip.Addr{netip.MustParseAddr(testVIP), netip.MustParseAddr("2001:db8::1")}
+	vips := []netip.Addr{netip.MustParseAddr(testVIP4), netip.MustParseAddr("2001:db8::1")}
 	v4, v6 := prefixesByFamily(vips)
-	if len(v4) != 1 || v4[0] != testVIPPrefix {
+	if len(v4) != 1 || v4[0] != testVIP4+"/32" {
 		t.Errorf("v4 = %v", v4)
 	}
 	if len(v6) != 1 || v6[0] != "2001:db8::1/128" {
@@ -1636,12 +1636,12 @@ func TestApplyBGPAdvertisements_PrunesOlderAdvertisements(t *testing.T) {
 	legacyV4 := ruleLabelOnly(legacyRuleAdvertisementName(testRuleName, testNodeGWA, "v4"))
 	legacyV6 := newAdvertisement(legacyRuleAdvertisementName(testRuleName, testNodeGWA, "v6"))
 	legacyV6.Labels = map[string]string{networkRuleLabel: testRuleName, gatewayNodeLabel: testNodeGWA}
-	staleV6 := newNodeAdvertisement(testRuleName, testNodeGWA, "v6")
+	staleV4 := newNodeAdvertisement(testRuleName, testNodeGWA, "v4")
 	otherNodeLegacy := ruleLabelOnly(legacyRuleAdvertisementName(testRuleName, testNodeGWB, "v4"))
 	otherNodeV6 := newNodeAdvertisement(testRuleName, testNodeGWB, "v6")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithObjects(rule, legacyV4, legacyV6, staleV6, otherNodeLegacy, otherNodeV6).
+		WithObjects(rule, legacyV4, legacyV6, staleV4, otherNodeLegacy, otherNodeV6).
 		Build()
 	ctx := context.Background()
 
@@ -1651,10 +1651,10 @@ func TestApplyBGPAdvertisements_PrunesOlderAdvertisements(t *testing.T) {
 		t.Fatalf("applyBGPAdvertisements: %v", err)
 	}
 
-	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdvV4), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
-		t.Errorf("get BGPAdvertisement %s: %v", testRuleAdvV4, err)
+	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdv), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+		t.Errorf("get BGPAdvertisement %s: %v", testRuleAdv, err)
 	}
-	for _, gone := range []*bgpv1alpha1.BGPAdvertisement{legacyV4, legacyV6, staleV6} {
+	for _, gone := range []*bgpv1alpha1.BGPAdvertisement{legacyV4, legacyV6, staleV4} {
 		err := fakeClient.Get(ctx, testRuleKey(gone.Name), &bgpv1alpha1.BGPAdvertisement{})
 		if !apierrors.IsNotFound(err) {
 			t.Errorf("BGPAdvertisement %s: err = %v, want NotFound", gone.Name, err)

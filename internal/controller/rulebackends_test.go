@@ -180,7 +180,7 @@ func TestRuleBackendOwners(t *testing.T) {
 		},
 		{
 			name:      "a rule with no IPv6 VIP claims nothing",
-			changeA:   func(r *bgpv1alpha1.NetworkRule) { r.Spec.VIPAddresses = []string{testVIP} },
+			changeA:   func(r *bgpv1alpha1.NetworkRule) { r.Spec.VIPAddresses = []string{testVIP4} },
 			wantOwner: "b",
 		},
 		{
