@@ -69,10 +69,10 @@ node running this manifest. The rationale for each capability:
 The kernel charges eBPF map memory to the memory cgroup of the process that
 creates the map. `credential-refresh` creates the uSID datapath's maps when a
 node has none pinned: a new node, or one upgraded from a build that lacks a
-map. Those maps take about 35Mi when created (the root unit test measures it), most
-of it the preallocated `service_reverse_table`. When the container's limit leaves too little room for
-them, the map create fails with `cannot allocate memory` and the pod
-crash-loops (#808).
+map. Those maps take about 35Mi when created (the root unit test measures it),
+most of it the preallocated `service_reverse_table`. When the container's limit
+leaves too little room for them, the map create fails with `cannot allocate
+memory` and the pod crash-loops (#808).
 
 The five service policy maps that only userspace writes
 (`service_route_table`, `service_access_table`, `service_deny_table`,

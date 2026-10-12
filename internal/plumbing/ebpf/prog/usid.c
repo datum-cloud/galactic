@@ -1034,9 +1034,10 @@ struct {
 // Node-local private-service routes are exact attachment/service matches. They
 // remain separate from fabric routes so policy never creates a Linux route.
 //
-// Only userspace writes service_route_table, attachment_identity_table, service_access_table,
-// service_deny_table and service_remote_grant_table, so they are BPF_F_NO_PREALLOC and an
-// empty one costs only its buckets. service_reverse_table stays preallocated: the datapath writes it.
+// Only userspace writes service_route_table, service_access_table,
+// service_deny_table, service_remote_grant_table and attachment_identity_table,
+// so they are BPF_F_NO_PREALLOC and an empty one costs only its buckets.
+// service_reverse_table stays preallocated: the datapath writes it.
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
