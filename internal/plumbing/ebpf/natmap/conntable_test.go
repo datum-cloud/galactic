@@ -345,3 +345,103 @@ func TestConnTable_CountSessionsEmpty(t *testing.T) {
 		t.Errorf("counts on an empty table = %+v, want nothing", counts)
 	}
 }
+
+// portRow is a live reverse UDP row holding shardPort on masq toward
+// peer:peerPort, the shape a reply's key takes.
+func portRow(family uint8, masq, peer string, peerPort, shardPort uint16, lastSeen uint32) ConnEntry {
+	e := sessionRow(family, 17, shardPort, peerPort, 0, lastSeen)
+	e.Saddr = netip.MustParseAddr(peer)
+	e.Sport = peerPort
+	e.Daddr = netip.MustParseAddr(masq)
+	return e
+}
+
+func TestConnTable_CountSessionsPorts(t *testing.T) {
+	const now uint32 = 100_000
+	masq6 := "2001:db8:9966::1"
+	masq4 := "::ffff:192.0.2.10"
+
+	fake := newFakeTable()
+	for _, e := range []ConnEntry{
+		// Three ports toward one destination, two toward another, one of
+		// them a port the first destination also holds.
+		portRow(natprog.FamilyIPv6, masq6, "2001:db8:1::1", 443, 35000, now),
+		portRow(natprog.FamilyIPv6, masq6, "2001:db8:1::1", 443, 35001, now),
+		portRow(natprog.FamilyIPv6, masq6, "2001:db8:1::1", 443, 35002, now),
+		portRow(natprog.FamilyIPv6, masq6, "2001:db8:1::1", 80, 35000, now),
+		portRow(natprog.FamilyIPv6, masq6, "2001:db8:2::1", 443, 35003, now),
+		// An expired session holds nothing.
+		portRow(natprog.FamilyIPv6, masq6, "2001:db8:1::1", 443, 35004, now-natprog.TimeoutUDP-1),
+		// NAT64 rows carry the masquerade address IPv4-mapped.
+		portRow(natprog.FamilyIPv4, masq4, "::ffff:198.51.100.7", 53, 40000, now),
+	} {
+		putEntry(t, fake, e)
+	}
+
+	counts, err := NewConnTable(fake).CountSessions(now)
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	want := map[MasqueradeKey]PortUsage{
+		{Family: natprog.FamilyIPv6, Address: netip.MustParseAddr(masq6), Proto: SessionProtoUDP}: {
+			InUse: 4, MaxPerDestination: 3,
+		},
+		{Family: natprog.FamilyIPv4, Address: netip.MustParseAddr("192.0.2.10"), Proto: SessionProtoUDP}: {
+			InUse: 1, MaxPerDestination: 1,
+		},
+	}
+	if len(counts.Ports) != len(want) {
+		t.Errorf("Ports = %v, want %v", counts.Ports, want)
+	}
+	for key, w := range want {
+		if got := counts.Ports[key]; got != w {
+			t.Errorf("Ports[%v] = %+v, want %+v", key, got, w)
+		}
+	}
+}
+
+// repeatingTable walks its rows twice, the way a walk the datapath's evictions
+// restart revisits rows it already returned.
+type repeatingTable struct{ *fakeTable }
+
+func (r repeatingTable) Iterate() Iterator {
+	return &repeatingIterator{table: r.fakeTable, current: r.fakeTable.Iterate()}
+}
+
+type repeatingIterator struct {
+	table   *fakeTable
+	current Iterator
+	second  bool
+}
+
+func (it *repeatingIterator) Next(keyOut, valueOut any) bool {
+	if it.current.Next(keyOut, valueOut) {
+		return true
+	}
+	if it.second {
+		return false
+	}
+	it.second = true
+	it.current = it.table.Iterate()
+	return it.current.Next(keyOut, valueOut)
+}
+
+func (it *repeatingIterator) Err() error { return it.current.Err() }
+
+func TestConnTable_CountSessionsPortsSurviveRestartedWalk(t *testing.T) {
+	const now uint32 = 100_000
+	fake := newFakeTable()
+	for _, port := range []uint16{35000, 35001} {
+		putEntry(t, fake, portRow(natprog.FamilyIPv6, "2001:db8:9966::1", "2001:db8:1::1", 443, port, now))
+	}
+	counts, err := NewConnTable(repeatingTable{fake}).CountSessions(now)
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	key := MasqueradeKey{
+		Family: natprog.FamilyIPv6, Address: netip.MustParseAddr("2001:db8:9966::1"), Proto: SessionProtoUDP,
+	}
+	if got, want := counts.Ports[key], (PortUsage{InUse: 2, MaxPerDestination: 2}); got != want {
+		t.Errorf("Ports after a walk that revisited every row = %+v, want %+v", got, want)
+	}
+}

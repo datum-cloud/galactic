@@ -145,8 +145,13 @@ func setupGatewayDatapath(
 	if attachMode == config.GatewayXDPAttachDispatch {
 		leaseCtx, stopLeases := context.WithCancel(ctx)
 		var leaseDone <-chan struct{}
+		lease := xdpdispatch.NewLeaseMetrics(edgemetrics.Namespace)
+		if err := lease.Register(metricsReg); err != nil {
+			stopLeases()
+			return nil, fmt.Errorf("register dispatcher lease metrics: %w", err)
+		}
 		objs, dispatcher, publicSet, returnSet, leaseDone, err = joinDispatcher(leaseCtx, xdpdispatch.PinDir,
-			edgeattach.PinDir, len(returnTargets) > 0)
+			edgeattach.PinDir, len(returnTargets) > 0, lease)
 		if err != nil {
 			stopLeases()
 			return nil, err
@@ -273,7 +278,9 @@ func attachDirect(ctx context.Context, dispatchDir, edgeDir string, targets, ret
 // the returned sets put the dispatcher on the targets and read coverage back.
 // The returned channel closes once both lease loops have stopped, which a
 // caller waits on before closing the dispatcher.
-func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, withReturn bool) (
+func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, withReturn bool,
+	lease *xdpdispatch.LeaseMetrics,
+) (
 	*edgeprog.EdgedsrObjects, *xdpdispatch.Dispatcher, targetSet, targetSet, <-chan struct{}, error,
 ) {
 	dispatcher, err := xdpdispatch.Open(ctx, dispatchDir)
@@ -326,10 +333,10 @@ func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, withReturn
 	var leases sync.WaitGroup
 	for _, slot := range []xdpdispatch.Slot{xdpdispatch.SlotGatewayLB, xdpdispatch.SlotGatewayReturn} {
 		leases.Go(func() {
-			dispatcher.Lease(ctx, slot, func(err error) {
+			dispatcher.Lease(ctx, slot, lease.Observe(slot, func(err error) {
 				slog.Error("Cannot renew an edge gateway slot's lease in the XDP dispatcher; "+
 					"the dispatcher skips the slot once it lapses", "slot", slot, "err", err)
-			})
+			}))
 		})
 	}
 	leaseDone := make(chan struct{})

@@ -46,12 +46,13 @@ func lockDir(ctx context.Context, dir string) (func(), error) {
 
 // Lease renews slot's lease every LeaseRenewal until ctx is done, starting
 // now. It leaves the lease in place when it stops, so a restart within
-// LeaseTTL never lets the slot lapse. A failed renewal is reported to onError,
-// which may be nil.
-func (d *Dispatcher) Lease(ctx context.Context, slot Slot, onError func(error)) {
+// LeaseTTL never lets the slot lapse. Every renewal's result, nil on success,
+// is reported to onRenew, which may be nil.
+func (d *Dispatcher) Lease(ctx context.Context, slot Slot, onRenew func(error)) {
 	renew := func() {
-		if err := d.Renew(slot); err != nil && onError != nil {
-			onError(err)
+		err := d.Renew(slot)
+		if onRenew != nil {
+			onRenew(err)
 		}
 	}
 	renew()

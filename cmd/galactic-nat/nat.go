@@ -325,7 +325,12 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 	case config.NATXDPAttachDispatch:
 		// The lease runs for the life of the process, so its done channel
 		// is not needed here.
-		if dispatcher, dispatchSet, _, err = joinDispatcher(ctx, xdpdispatch.PinDir, objs.NatIngress); err != nil {
+		lease := xdpdispatch.NewLeaseMetrics(metricsNamespace)
+		if err := lease.Register(metricsReg); err != nil {
+			_ = objs.Close()
+			return nil, fmt.Errorf("register dispatcher lease metrics: %w", err)
+		}
+		if dispatcher, dispatchSet, _, err = joinDispatcher(ctx, xdpdispatch.PinDir, objs.NatIngress, lease); err != nil {
 			_ = objs.Close()
 			return nil, err
 		}
@@ -389,11 +394,12 @@ func registerUplinkQueueStats(metricsReg prometheus.Registerer, d *natDatapath) 
 }
 
 // joinDispatcher opens the node's XDP dispatcher, fills this shard's slot with
-// program, and starts renewing the slot's lease for the life of ctx. It
+// program, and starts renewing the slot's lease for the life of ctx, recording
+// each renewal in lease, which may be nil. It
 // returns the set that keeps the dispatcher on the uplinks, and a channel
 // closed once the lease loop has stopped, which a caller waits on before
 // closing the dispatcher.
-func joinDispatcher(ctx context.Context, pinDir string, program *ebpf.Program) (
+func joinDispatcher(ctx context.Context, pinDir string, program *ebpf.Program, lease *xdpdispatch.LeaseMetrics) (
 	*xdpdispatch.Dispatcher, *xdpattach.DispatchSet, <-chan struct{}, error,
 ) {
 	dispatcher, err := xdpdispatch.Open(ctx, pinDir)
@@ -422,10 +428,10 @@ func joinDispatcher(ctx context.Context, pinDir string, program *ebpf.Program) (
 	leaseDone := make(chan struct{})
 	go func() {
 		defer close(leaseDone)
-		dispatcher.Lease(ctx, xdpdispatch.SlotNAT, func(err error) {
+		dispatcher.Lease(ctx, xdpdispatch.SlotNAT, lease.Observe(xdpdispatch.SlotNAT, func(err error) {
 			slog.Error("Cannot renew the egress translation slot's lease in the XDP dispatcher; "+
 				"the dispatcher skips the slot once it lapses", "err", err)
-		})
+		}))
 	}()
 	slog.Info("Egress translation datapath installed in the XDP dispatcher", "pinDir", pinDir)
 	return dispatcher, set, leaseDone, nil

@@ -439,6 +439,66 @@ spec:
               Compute nodes have encapsulated tenant traffic toward {{ $labels.shard_sid }} for 10 minutes, but the
               shard on {{ $labels.node }} translated none of it outbound. Check galactic_nat_uplink_covered,
               galactic_nat_datapath_attached and the shard's XDP attachment.
+        # A claim needs a free port toward one destination address and port,
+        # and probes 8 of the range's candidates. With a share u of that
+        # destination's ports held, a new flow fails with probability about
+        # u^8: 0.4% at half full, 1.7% at 60%, 17% at 80%. Half full is the
+        # last point before GalacticNatPortExhausted's drops become routine,
+        # so this warns while new flows still almost always succeed.
+        - alert: GalacticNatPortsNearExhaustion
+          expr: >-
+            max by (node, family, address, proto) (galactic_nat_masquerade_destination_ports_max{job="galactic-nat"})
+              / on (node) group_left () max by (node) (galactic_nat_masquerade_port_range{job="galactic-nat"}) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Masquerade {{ $labels.proto }} ports on {{ $labels.address }} are {{ $value | humanizePercentage }} used toward one destination"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatportsnearexhaustion"
+            description: >-
+              The egress shard on {{ $labels.node }} holds {{ $value | humanizePercentage }} of the {{ $labels.proto }}
+              ports on {{ $labels.address }} toward a single destination for 10 minutes. New flows to that destination
+              start failing as this approaches 100%, with GalacticNatPortExhausted.
+        # The lease is renewed every 10s for 120s, so it survives 11 failed
+        # renewals in a row. More than two failures in every 5-minute window
+        # means renewals keep failing, well before the lease is at risk.
+        - alert: GalacticNatDispatchLeaseFailing
+          expr: >-
+            increase(galactic_nat_dispatch_lease_renewals_total{job="galactic-nat", result="error"}[5m]) > 2
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "The egress shard on {{ $labels.node }} cannot renew its XDP dispatcher lease"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatdispatchleasefailing"
+            description: >-
+              galactic-nat on {{ $labels.node }} has failed to renew its {{ $labels.slot }} slot's lease in the XDP
+              dispatcher more than twice in every 5-minute window for 5 minutes. Once the lease expires the
+              dispatcher skips the slot and tenant traffic leaves untranslated. The shard's log names the error.
+        # No successful renewal in two minutes means the 120s lease has lapsed
+        # or is about to. Read from the renewal counter rather than the expiry
+        # timestamp, which would compare the node's clock with the evaluator's
+        # and page on skew alone; a two-minute window holds four samples at
+        # the 30s scrape, so jitter cannot empty it.
+        - alert: GalacticNatDispatchLeaseExpiring
+          expr: >-
+            changes(galactic_nat_dispatch_lease_renewals_total{job="galactic-nat", result="success"}[2m]) == 0
+          for: 0s
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "The egress shard's XDP dispatcher lease on {{ $labels.node }} has lapsed or is about to"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatdispatchleaseexpiring"
+            description: >-
+              galactic-nat on {{ $labels.node }} has not renewed its {{ $labels.slot }} slot lease for two minutes,
+              so the 120-second lease has lapsed or is about to. The dispatcher skips a lapsed slot, so the shard's
+              uplinks pass tenant traffic untranslated.
         - alert: GalacticNatMetricsDown
           expr: up{job="galactic-nat"} == 0
           for: 5m

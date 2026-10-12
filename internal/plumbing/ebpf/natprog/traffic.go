@@ -27,3 +27,13 @@ const (
 func TrafficSlot(family, direction, action uint32) uint32 {
 	return family*4 + direction*2 + action
 }
+
+// Masquerade port allocation, mirroring the datapath's NAT_PAT_* constants:
+// a claim probes up to PATProbeLimit candidates within PATPortRange ports
+// starting at PATPortBase. The range is per destination address and port, not
+// per masquerade address.
+const (
+	PATPortBase   uint16 = 32768
+	PATPortRange  uint16 = 28000
+	PATProbeLimit int    = 8
+)

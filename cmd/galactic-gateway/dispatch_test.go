@@ -94,7 +94,7 @@ type gatewayProcess struct {
 func startGateway(t *testing.T, d pinDirs) gatewayProcess {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	objs, dispatcher, public, _, leaseDone, err := joinDispatcher(ctx, d.dispatch, d.edge, false)
+	objs, dispatcher, public, _, leaseDone, err := joinDispatcher(ctx, d.dispatch, d.edge, false, nil)
 	if err != nil {
 		cancel()
 		t.Fatalf("gateway joinDispatcher: %v", err)

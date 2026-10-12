@@ -275,6 +275,35 @@ type SessionCounts struct {
 	// false, and OldestAge zero, when the walk found no reverse row.
 	OldestAge  uint32
 	HasReverse bool
+
+	// Ports describes the masquerade ports live sessions hold, by family,
+	// masquerade address and protocol.
+	Ports map[MasqueradeKey]PortUsage
+}
+
+// MasqueradeKey groups live sessions by the shard address and protocol their
+// masquerade port belongs to. Address is the IPv4 address itself for NAT64.
+type MasqueradeKey struct {
+	Family  uint8
+	Address netip.Addr
+	Proto   string
+}
+
+// PortUsage is how much of a masquerade address's port space live sessions
+// hold. A claim needs a free port toward one destination address and port, so
+// MaxPerDestination, the most ports held toward any single destination, is what
+// approaches exhaustion; InUse, the distinct ports held toward any destination,
+// can sit near the whole range on a healthy shard talking to many destinations.
+type PortUsage struct {
+	InUse             int
+	MaxPerDestination int
+}
+
+// portDestination is one destination address and port behind a masquerade key.
+type portDestination struct {
+	MasqueradeKey
+	peer     [16]byte
+	peerPort uint16
 }
 
 // sessionProto names a row's protocol as SessionKey reports it.
@@ -342,9 +371,13 @@ func sessionExpired(value *natprog.NatConnValue, now uint32) bool {
 // and are approximate either way.
 func (t *ConnTable) CountSessions(now uint32) (SessionCounts, error) {
 	var (
-		counts = SessionCounts{Rows: map[uint8]int{}, Live: map[SessionKey]int{}}
-		rawKey natprog.NatConnKey
-		value  natprog.NatConnValue
+		counts = SessionCounts{
+			Rows: map[uint8]int{}, Live: map[SessionKey]int{}, Ports: map[MasqueradeKey]PortUsage{},
+		}
+		rawKey  natprog.NatConnKey
+		value   natprog.NatConnValue
+		ports   = map[MasqueradeKey]map[uint16]struct{}{}
+		perDest = map[portDestination]map[uint16]struct{}{}
 	)
 	it := t.table.Iterate()
 	for it.Next(&rawKey, &value) {
@@ -358,10 +391,43 @@ func (t *ConnTable) CountSessions(now uint32) (SessionCounts, error) {
 		counts.HasReverse = true
 		if !sessionExpired(&value, now) {
 			counts.Live[SessionKey{Family: rawKey.Family, Proto: sessionProto(value.Proto)}]++
+			countPort(ports, perDest, &rawKey, &value)
 		}
+	}
+	for key, held := range ports {
+		counts.Ports[key] = PortUsage{InUse: len(held)}
+	}
+	for dest, held := range perDest {
+		usage := counts.Ports[dest.MasqueradeKey]
+		usage.MaxPerDestination = max(usage.MaxPerDestination, len(held))
+		counts.Ports[dest.MasqueradeKey] = usage
 	}
 	if err := it.Err(); err != nil {
 		return counts, fmt.Errorf("natmap: nat_conn_table: count: %w", err)
 	}
 	return counts, nil
+}
+
+// countPort records the masquerade port a live reverse row holds. The row's
+// key is the reply as it arrives: the destination as source, and the
+// masquerade address and port as destination. Ports are kept as sets, so a
+// row a restarted walk visits twice is still counted once.
+func countPort(ports map[MasqueradeKey]map[uint16]struct{}, perDest map[portDestination]map[uint16]struct{},
+	rawKey *natprog.NatConnKey, value *natprog.NatConnValue,
+) {
+	key := MasqueradeKey{
+		Family:  rawKey.Family,
+		Address: netip.AddrFrom16(rawKey.Daddr).Unmap(),
+		Proto:   sessionProto(value.Proto),
+	}
+	if ports[key] == nil {
+		ports[key] = map[uint16]struct{}{}
+	}
+	port := beU16(rawKey.Dport)
+	ports[key][port] = struct{}{}
+	dest := portDestination{MasqueradeKey: key, peer: rawKey.Saddr, peerPort: rawKey.Sport}
+	if perDest[dest] == nil {
+		perDest[dest] = map[uint16]struct{}{}
+	}
+	perDest[dest][port] = struct{}{}
 }
