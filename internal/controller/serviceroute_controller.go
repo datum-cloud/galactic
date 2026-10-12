@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"reflect"
 	"sort"
@@ -51,11 +52,25 @@ type ServiceRoutePolicyReconciler struct {
 	FrontendEnabled bool
 	Now             func() time.Time
 
+	// startupRetryWait waits between startup sync attempts and reports false
+	// once ctx is done. Tests replace it; nil waits on a real timer.
+	startupRetryWait func(ctx context.Context, d time.Duration) bool
+
 	mu      sync.Mutex
 	Applied map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent
 }
 
 const serviceRouteMapResyncInterval = 30 * time.Second
+
+// Startup sync retries back off from startupSyncInitialBackoff to
+// startupSyncMaxBackoff. A map that is not pinned yet logs at V(1) until it
+// has been missing for startupSyncMissingMapGrace, since the datapath loader
+// may legitimately start after galactic-router.
+const (
+	startupSyncInitialBackoff  = time.Second
+	startupSyncMaxBackoff      = time.Minute
+	startupSyncMissingMapGrace = 5 * time.Minute
+)
 
 type serviceRouteStartupSyncError struct {
 	err   error
@@ -294,26 +309,55 @@ func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 }
 
 func (r *ServiceRoutePolicyReconciler) runStartupSync(ctx context.Context) error {
+	const msg = "initial service route policy map adoption and sweep"
+	logger := log.FromContext(ctx)
+	backoff := startupSyncInitialBackoff
+	var missingSince time.Time
 	for {
 		err := r.syncAllPolicies(ctx)
 		if err == nil {
 			return nil
 		}
-		log.FromContext(ctx).Error(err, "initial service route policy map adoption and sweep")
 		if !startupSyncNeedsRetry(err) {
 			// The complete snapshot was finalized and policy forwarding was
 			// enabled. Per-policy errors are retried by their ordinary
 			// reconciles; globally gating the datapath again would disrupt all
 			// successfully established services.
+			logger.Error(err, msg)
 			return nil
 		}
-		timer := time.NewTimer(time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil
-		case <-timer.C:
+		if errors.Is(err, fs.ErrNotExist) {
+			now := r.now()
+			if missingSince.IsZero() {
+				missingSince = now
+			}
+			if missing := now.Sub(missingSince); missing < startupSyncMissingMapGrace {
+				logger.V(1).Info(msg+": service route maps not pinned yet", "error", err.Error(), "retryIn", backoff)
+			} else {
+				logger.Error(err, msg, "missingFor", missing.Round(time.Second), "retryIn", backoff)
+			}
+		} else {
+			missingSince = time.Time{}
+			logger.Error(err, msg, "retryIn", backoff)
 		}
+		if !r.waitStartupRetry(ctx, backoff) {
+			return nil
+		}
+		backoff = min(backoff*2, startupSyncMaxBackoff)
+	}
+}
+
+func (r *ServiceRoutePolicyReconciler) waitStartupRetry(ctx context.Context, d time.Duration) bool {
+	if r.startupRetryWait != nil {
+		return r.startupRetryWait(ctx, d)
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

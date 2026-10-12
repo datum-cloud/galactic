@@ -159,6 +159,8 @@ lives in `root.go`'s `runCmd`:
    for `ServiceVIPBindingReconciler`'s tap-kind branch — a missing pin (no
    eBPF uSID datapath loaded on this node yet) is logged, not fatal, and
    only matters once a tap-kind `ServiceVIPBinding` is actually reconciled.
+   A route reflector never runs `galactic-cni`, so the pin never exists
+   there and the reflector logs its absence at Info rather than as an error.
    The handle is opened once. When a `galactic-cni` upgrade changes the map's
    layout, `attach.Load` unpins and recreates the map, and this process keeps
    writing to the old one until it restarts, so restart `galactic-router`
@@ -170,15 +172,17 @@ lives in `root.go`'s `runCmd`:
    with the manager — see the peer-FSM design decision below.
 9. Register the controllers: BGPRouter, BGPPeer, BGPAdvertisement,
     BGPVRFInstance, BGPPolicy, Secret, Node, ServiceVIPBinding,
-    NetworkRuleBinding, NodeDeparture, ServiceRoutePolicy, and GC (the GC
-    controller also starts a ticker goroutine that waits for cache sync,
-    then runs on `--gc-interval`, default 5m; NodeDeparture sweeps on the
-    same interval, and when `vip_xlat_table` opened in step 6, each GC tick
-    after the first pass also sweeps it).
+    NetworkRuleBinding, NodeDeparture, ServiceRoutePolicy (plain role only;
+    a route reflector has no service route maps to program and skips it),
+    and GC (the GC controller also starts a ticker goroutine that waits for
+    cache sync, then runs on `--gc-interval`, default 5m; NodeDeparture
+    sweeps on the same interval, and when `vip_xlat_table` opened in step 6,
+    each GC tick after the first pass also sweeps it).
 10. `mgr.Start(ctx)` — blocks until the signal-handler context is cancelled.
 
-This is identical whether the pod is running in the plain role
-(`config/galactic-router/overlays/router/`, opt-in via
+Apart from the ServiceRoutePolicy controller and the `vip_xlat_table` log
+level noted above, this is identical whether the pod is running in the plain
+role (`config/galactic-router/overlays/router/`, opt-in via
 `galactic.datumapis.com/galactic=router` — deployed on both `compute` and
 `edge` nodes) or the route-reflector role (`config/galactic-router/overlays/control/`,
 `galactic.datumapis.com/galactic=control`) — `galactic-router` carries no
