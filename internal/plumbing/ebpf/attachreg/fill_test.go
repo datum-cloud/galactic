@@ -239,3 +239,45 @@ func TestFillNode_NotConfiguredWritesNothing(t *testing.T) {
 		t.Errorf("FillNode(zero) = %+v, %v, %v; want nothing", written, uplinkErr, err)
 	}
 }
+
+// memCounterTable is memTable as a usidmap.CounterTable, creating a row only
+// when it is absent.
+type memCounterTable struct{ memTable }
+
+func (m memCounterTable) Create(key, value any) error {
+	if _, ok := m.memTable[key]; ok {
+		return ebpf.ErrKeyExist
+	}
+	m.memTable[key] = value
+	return nil
+}
+
+// TestFillVRF_TrafficRowFollowsVRFRow checks the datapath repair creates a
+// VRF's vrf_traffic_counters row with its vrf_table row, and that removing the
+// VRF's rows removes it too.
+func TestFillVRF_TrafficRowFollowsVRFRow(t *testing.T) {
+	recordRouteAdds(t, nil)
+	m := newMemMaps(true)
+	traffic := memCounterTable{memTable{}}
+	m.Registry.VRF.WithTraffic(usidmap.NewVRFTrafficTable(traffic))
+	a := testAttachment()
+
+	written, err := m.FillVRF(a, EgressConfig{})
+	if err != nil {
+		t.Fatalf("FillVRF: %v", err)
+	}
+	key, err := uformat.NewVRFKey(a.Block, a.Argument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := traffic.memTable[uint64(key)]; !ok || len(traffic.memTable) != 1 {
+		t.Fatalf("traffic rows after FillVRF = %v, want one row for the VRF", traffic.memTable)
+	}
+
+	if err := m.RemoveVRFRows(a, written, nil, false); err != nil {
+		t.Fatalf("RemoveVRFRows: %v", err)
+	}
+	if len(traffic.memTable) != 0 {
+		t.Errorf("traffic rows after RemoveVRFRows = %v, want none", traffic.memTable)
+	}
+}

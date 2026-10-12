@@ -429,6 +429,43 @@ struct vpc_attribution_value {
 	__u64 generation;
 };
 
+// struct vrf_direction_counter is one direction's traffic for one VRF.
+//
+// packets and bytes count a packet once, when the program has committed to
+// forwarding it: its redirect succeeded, or, for same-node delivery, it was
+// handed to the kernel's VRF routing toward a local attachment. bytes is the
+// tenant packet's own length, its IPv4 or IPv6 header and payload, without
+// the Ethernet header or any SRv6 outer header, so the two directions measure
+// the same thing. A GSO or GRO super-packet counts as one packet carrying all
+// of its bytes.
+//
+// dropped_packets counts the packets dropped after the VRF was resolved, at
+// the same points count_claimed_drop bumps vrf_value's own dropped_packets,
+// split by the direction the packet was travelling. usid_service_egress's
+// drops and a failed public-uplink redirect are counted in drop_reasons only.
+struct vrf_direction_counter {
+	__u64 packets;
+	__u64 bytes;
+	__u64 dropped_packets;
+};
+
+// struct vrf_traffic_value is vrf_traffic_counters' value: one VRF's
+// traffic in each direction. ingress is SRv6 traffic usid_ingress
+// decapsulated into the VRF, plus same-node traffic delivered to one of its
+// attachments. egress is tenant traffic leaving the VRF through usid_egress
+// or usid_service_egress, encapsulated onto the fabric, sent to an egress
+// shard, sent unencapsulated out the public uplink, or delivered to another
+// attachment on this node.
+struct vrf_traffic_value {
+	struct vrf_direction_counter ingress;
+	struct vrf_direction_counter egress;
+};
+
+enum vrf_direction {
+	VRF_DIRECTION_INGRESS = 0,
+	VRF_DIRECTION_EGRESS = 1,
+};
+
 // ---------------------------------------------------------------------
 // Per-VRF stateless NPTv6 and the VIP-boundary substitution. Both are consulted
 // from two places: usid_ingress, inbound, after the strip and before the FIB
@@ -1158,6 +1195,24 @@ struct {
 	__type(value, struct vpc_attribution_value);
 } vpc_attribution_table SEC(".maps");
 
+// vrf_traffic_counters: see struct vrf_traffic_value. Keyed identically to
+// vrf_table (Block<<12|Argument) and sized identically, one row per VRF.
+//
+// Per CPU: the hot path increments its own CPU's copy with no atomic
+// operation and no cache line shared between CPUs, and userspace sums the
+// copies.
+//
+// The datapath only looks rows up, and a missing row counts nothing.
+// Userspace creates a row whenever it registers a vrf_table row, removes it
+// with that row, and on every GC pass creates any row a vrf_table row lacks
+// and removes any row without one.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__uint(max_entries, 8192); // sized identically to vrf_table: one row per VRF.
+	__type(key, __u64);
+	__type(value, struct vrf_traffic_value);
+} vrf_traffic_counters SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, __DROP_REASON_MAX);
@@ -1664,13 +1719,95 @@ static USID_ALWAYS_INLINE void record_value(__u32 slot, __u64 value)
 		*cell = value;
 }
 
+// vrf_direction_counter_for returns this CPU's counter for direction in
+// vrf_key's vrf_traffic_counters row, or 0 when the row does not exist.
+// noinline keeps its key copy off the callers' stack frames, which the
+// Packet-Too-Big call chain leaves little room in.
+static USID_NOINLINE struct vrf_direction_counter *vrf_direction_counter_for(__u64 vrf_key, __u32 direction)
+{
+	struct vrf_traffic_value *v = bpf_map_lookup_elem(&vrf_traffic_counters, &vrf_key);
+
+	if (!v)
+		return 0;
+	return direction == VRF_DIRECTION_EGRESS ? &v->egress : &v->ingress;
+}
+
+// count_vrf_forwarded counts one packet of bytes tenant bytes as forwarded in
+// direction for vrf_key. A plain increment: the counter is this CPU's own, and
+// a TC program runs to completion on its CPU.
+static USID_ALWAYS_INLINE void count_vrf_forwarded(__u64 vrf_key, __u32 direction, __u64 bytes)
+{
+	struct vrf_direction_counter *c = vrf_direction_counter_for(vrf_key, direction);
+
+	if (c) {
+		c->packets++;
+		c->bytes += bytes;
+	}
+}
+
+// count_attachment_forwarded is count_vrf_forwarded for the VRF of the
+// attachment whose host-side interface is ifindex, resolved through
+// ifindex_vrf_table. An unregistered ifindex counts nothing.
+static USID_NOINLINE void count_attachment_forwarded(__u32 ifindex, __u32 direction, __u64 bytes)
+{
+	struct ifindex_vrf_value *iv = bpf_map_lookup_elem(&ifindex_vrf_table, &ifindex);
+
+	if (iv)
+		count_vrf_forwarded((iv->block << 12) | iv->argument, direction, bytes);
+}
+
+// tenant_len is the length of the tenant packet in skb, its L3 header and
+// payload, for an skb carrying no outer header: everything after the Ethernet
+// header.
+static USID_ALWAYS_INLINE __u64 tenant_len(const struct __sk_buff *skb)
+{
+	return skb->len > sizeof(struct usid_ethhdr) ? skb->len - sizeof(struct usid_ethhdr) : 0;
+}
+
+// is_own_gateway reports whether the destination usid_egress copied into
+// service_fib_scratch's dest_addr, in family, is one of the IPAM gateway
+// addresses of the attachment whose host-side interface is ifindex. An IPv4
+// address occupies the first four bytes. An attachment with no
+// tenant_gw_table row has no gateway. It reads the destination itself rather
+// than taking a pointer to it, which keeps the verifier's cost for its
+// callers flat.
+static USID_NOINLINE int is_own_gateway(__u32 ifindex, __u32 family)
+{
+	__u32 scratch_key = 0;
+	struct service_fib_scratch_value *scratch = bpf_map_lookup_elem(&service_fib_scratch, &scratch_key);
+	struct tenant_gw_value *gw = bpf_map_lookup_elem(&tenant_gw_table, &ifindex);
+
+	if (!scratch || !gw)
+		return 0;
+
+	__u8 diff = 0;
+
+	if (family == USID_EGRESS_ROUTE_FAMILY_INET4) {
+#pragma unroll
+		for (int i = 0; i < 4; i++)
+			diff |= scratch->dest_addr[i] ^ gw->gw4[i];
+		return diff == 0;
+	}
+
+#pragma unroll
+	for (int i = 0; i < 16; i++)
+		diff |= scratch->dest_addr[i] ^ gw->gw6[i];
+	return diff == 0;
+}
+
 // count_claimed_drop is count_drop plus the per-entry dropped_packets bump, for
 // every drop after step 6's vrf_table match, that is, every drop of a packet
-// already claimed by a specific tenant.
-static USID_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct vrf_value *vrf)
+// already claimed by a specific tenant. It also counts the drop in direction
+// for vrf_key in vrf_traffic_counters.
+static USID_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct vrf_value *vrf, __u64 vrf_key, __u32 direction)
 {
 	count_drop(reason);
 	__sync_fetch_and_add(&vrf->dropped_packets, 1);
+
+	struct vrf_direction_counter *c = vrf_direction_counter_for(vrf_key, direction);
+
+	if (c)
+		c->dropped_packets++;
 }
 
 // read_be64 composes an 8-byte big-endian buffer into a host-native u64 byte by
@@ -2662,11 +2799,11 @@ int usid_ingress(struct __sk_buff *skb)
 		    tunnel->version != SERVICE_TUNNEL_VERSION || tunnel->reserved != 0 ||
 		    (tunnel->direction != SERVICE_TUNNEL_REQUEST && tunnel->direction != SERVICE_TUNNEL_REPLY) ||
 		    (tunnel->inner_nexthdr != USID_IPPROTO_IPIP && tunnel->inner_nexthdr != USID_IPPROTO_IPV6)) {
-			count_claimed_drop(DROP_REASON_UNEXPECTED_NEXTHDR, vrf);
+			count_claimed_drop(DROP_REASON_UNEXPECTED_NEXTHDR, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 			return TC_ACT_SHOT;
 		}
 		if (!service_policy_enabled()) {
-			count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
+			count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 			return TC_ACT_SHOT;
 		}
 		__builtin_memcpy(service_scratch->tunnel_grant_id, tunnel->grant_id, 16);
@@ -2675,7 +2812,7 @@ int usid_ingress(struct __sk_buff *skb)
 		service_scratch->tunnel_direction = tunnel->direction;
 	}
 	if (!service_tunnel && ip6->nexthdr != USID_IPPROTO_IPIP && ip6->nexthdr != USID_IPPROTO_IPV6) {
-		count_claimed_drop(DROP_REASON_UNEXPECTED_NEXTHDR, vrf);
+		count_claimed_drop(DROP_REASON_UNEXPECTED_NEXTHDR, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -2684,14 +2821,14 @@ int usid_ingress(struct __sk_buff *skb)
 	// after.
 	__u8 *inner_peek = (__u8 *) (ip6 + 1) + (service_tunnel ? sizeof(struct service_tunnel_header) : 0);
 	if ((void *) inner_peek + 1 > data_end) {
-		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
+		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
 	__u8 inner_version = (*inner_peek) >> 4;
 
 	if (inner_version != 4 && inner_version != 6) {
-		count_claimed_drop(DROP_REASON_UNKNOWN_INNER_VERSION, vrf);
+		count_claimed_drop(DROP_REASON_UNKNOWN_INNER_VERSION, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -2732,7 +2869,7 @@ int usid_ingress(struct __sk_buff *skb)
 
 	if (inner_version == 4) {
 		if (bpf_skb_change_proto(skb, __builtin_bswap16(USID_ETH_P_IP), 0)) {
-			count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf);
+			count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 			return TC_ACT_SHOT;
 		}
 		strip_len = (__s32) sizeof(struct usid_iphdr) + (service_tunnel ? (__s32) sizeof(struct service_tunnel_header) : 0);
@@ -2741,7 +2878,7 @@ int usid_ingress(struct __sk_buff *skb)
 
 	if (bpf_skb_adjust_room(skb, -strip_len, BPF_ADJ_ROOM_MAC, strip_flags | decap_flag) &&
 	    bpf_skb_adjust_room(skb, -strip_len, BPF_ADJ_ROOM_MAC, strip_flags)) {
-		count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf);
+		count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -2771,7 +2908,7 @@ int usid_ingress(struct __sk_buff *skb)
 	// removing the tag is part of the same carve step, and the only way it
 	// fails is the allocation the carve can equally fail on.
 	if (bpf_skb_vlan_pop(skb)) {
-		count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf);
+		count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -2787,7 +2924,7 @@ int usid_ingress(struct __sk_buff *skb)
 	// helpers' invalidation too, and before the NPTv6 and VIP rewrites, whose
 	// checksum updates are incremental and so independent of this one.
 	if (clamp_tcp_mss(skb, inner_version, 0)) {
-		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
+		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -2799,7 +2936,7 @@ int usid_ingress(struct __sk_buff *skb)
 	struct usid_ethhdr *new_eth = data;
 
 	if ((void *) (new_eth + 1) > data_end) {
-		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
+		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -2812,7 +2949,7 @@ int usid_ingress(struct __sk_buff *skb)
 		struct usid_ip6hdr *inner6 = (void *) inner;
 
 		if ((void *) (inner6 + 1) > data_end) {
-			count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
+			count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 			return TC_ACT_SHOT;
 		}
 
@@ -2858,7 +2995,7 @@ int usid_ingress(struct __sk_buff *skb)
 
 					if (apply_vip_xlat(skb, addr_off, port_off, csum_off, inner6->nexthdr,
 							    inner6->daddr, ports->dest, vv)) {
-						count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
+						count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 						return TC_ACT_SHOT;
 					}
 					// The store calls invalidate every previously derived
@@ -2870,7 +3007,7 @@ int usid_ingress(struct __sk_buff *skb)
 					new_eth = data;
 					inner6 = (void *) (new_eth + 1);
 					if ((void *) (inner6 + 1) > data_end) {
-						count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
+						count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 						return TC_ACT_SHOT;
 					}
 				}
@@ -2894,7 +3031,7 @@ int usid_ingress(struct __sk_buff *skb)
 		struct usid_iphdr *inner4 = (void *) inner;
 
 		if ((void *) (inner4 + 1) > data_end) {
-			count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
+			count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 			return TC_ACT_SHOT;
 		}
 
@@ -2940,16 +3077,16 @@ int usid_ingress(struct __sk_buff *skb)
 	// peer the way step 9 does, which works for a veth and a tap alike.
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS && fib_rc != BPF_FIB_LKUP_RET_NO_NEIGH) {
 		if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH)
-			count_claimed_drop(DROP_REASON_FIB_NO_NEIGH, vrf);
+			count_claimed_drop(DROP_REASON_FIB_NO_NEIGH, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		else if (fib_rc == BPF_FIB_LKUP_RET_UNREACHABLE || fib_rc == BPF_FIB_LKUP_RET_BLACKHOLE || fib_rc == BPF_FIB_LKUP_RET_PROHIBIT)
-			count_claimed_drop(DROP_REASON_FIB_UNREACHABLE, vrf);
+			count_claimed_drop(DROP_REASON_FIB_UNREACHABLE, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		else if (fib_rc == BPF_FIB_LKUP_RET_FRAG_NEEDED)
 			// No ICMPv6 Packet Too Big is generated here, unlike the static
 			// route path this replaces: an accepted PMTUD gap, recorded in
 			// the CNI architecture doc's known constraints.
-			count_claimed_drop(DROP_REASON_FIB_FRAG_NEEDED, vrf);
+			count_claimed_drop(DROP_REASON_FIB_FRAG_NEEDED, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		else
-			count_claimed_drop(DROP_REASON_FIB_LOOKUP_FAILED, vrf);
+			count_claimed_drop(DROP_REASON_FIB_LOOKUP_FAILED, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -2959,7 +3096,7 @@ int usid_ingress(struct __sk_buff *skb)
 	record_value(DROP_REASON_TRACE_ING_LAST_IFINDEX, (__u64) fib_params.ifindex);
 
 	if (fib_params.ifindex <= 0) {
-		count_claimed_drop(DROP_REASON_FIB_NO_IFINDEX, vrf);
+		count_claimed_drop(DROP_REASON_FIB_NO_IFINDEX, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -2967,7 +3104,7 @@ int usid_ingress(struct __sk_buff *skb)
 		int authorization = service_ingress_authorize(skb, new_eth->h_proto, fib_params.ifindex,
 							      service_scratch);
 		if (authorization < 0) {
-			count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
+			count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 			return TC_ACT_SHOT;
 		}
 		service_reverse_installed = authorization;
@@ -2988,11 +3125,13 @@ int usid_ingress(struct __sk_buff *skb)
 			nh.ipv4_nh = fib_params.ipv4_dst;
 		}
 		long neigh_rc = bpf_redirect_neigh(fib_params.ifindex, &nh, sizeof(nh), 0);
-		if (neigh_rc == TC_ACT_REDIRECT)
+		if (neigh_rc == TC_ACT_REDIRECT) {
+			count_vrf_forwarded(vrf_key, VRF_DIRECTION_INGRESS, tenant_len(skb));
 			return neigh_rc;
+		}
 		if (service_reverse_installed && service_scratch)
 			bpf_map_delete_elem(&service_reverse_table, &service_scratch->reverse);
-		count_claimed_drop(DROP_REASON_FIB_NO_NEIGH, vrf);
+		count_claimed_drop(DROP_REASON_FIB_NO_NEIGH, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -3025,11 +3164,18 @@ int usid_ingress(struct __sk_buff *skb)
 	if (redirect_rc != TC_ACT_REDIRECT) {
 		if (service_reverse_installed && service_scratch)
 			bpf_map_delete_elem(&service_reverse_table, &service_scratch->reverse);
-		count_claimed_drop(DROP_REASON_REDIRECT_FAILED, vrf);
+		count_claimed_drop(DROP_REASON_REDIRECT_FAILED, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 		return TC_ACT_SHOT;
 	}
 
 	count_drop(DROP_REASON_TRACE_ING_REDIRECT_OK); // TEMPORARY
+
+	// Inbound is counted here and on the cold-neighbor redirect above, once the
+	// packet is on its way to the attachment, and measured after the strip, so
+	// it is the tenant packet alone. vrf_value's own packets and bytes, bumped
+	// at step 6, count every claimed packet including the ones dropped since,
+	// and the whole tunneled frame.
+	count_vrf_forwarded(vrf_key, VRF_DIRECTION_INGRESS, tenant_len(skb));
 
 	return redirect_rc;
 }
@@ -3244,7 +3390,15 @@ static USID_NOINLINE long service_remote_encap(struct __sk_buff *skb,
 	eth->h_proto = __builtin_bswap16(USID_ETH_P_IPV6);
 	__builtin_memcpy(eth->h_dest, uplink->dmac, 6);
 	__builtin_memcpy(eth->h_source, uplink->smac, 6);
-	return bpf_redirect(uplink->link_ifindex, 0);
+
+	// Counted here rather than by the caller, which also sees TC_ACT_REDIRECT
+	// for a Packet Too Big sent back to the tenant instead of this packet.
+	long rc = bpf_redirect(uplink->link_ifindex, 0);
+
+	if (rc == TC_ACT_REDIRECT)
+		count_vrf_forwarded(vrf_key, VRF_DIRECTION_EGRESS,
+				    skb->len - sizeof(*eth) - sizeof(*outer) - sizeof(*tunnel));
+	return rc;
 }
 
 static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_value *s)
@@ -3360,6 +3514,18 @@ static USID_ALWAYS_INLINE int service_rewrite_address(struct __sk_buff *skb,
 		return -1;
 	__builtin_memcpy(current, replacement, 4);
 	return 0;
+}
+
+// count_service_local counts a service packet service_redirect delivered from
+// the attachment on from_ifindex straight to the one on to_ifindex: outbound
+// for the sender's VRF and inbound for the receiver's, which may belong to
+// different VPCs. No other program sees the packet on its way.
+static USID_ALWAYS_INLINE void count_service_local(const struct __sk_buff *skb, __u32 from_ifindex, __u32 to_ifindex)
+{
+	__u64 len = tenant_len(skb);
+
+	count_attachment_forwarded(from_ifindex, VRF_DIRECTION_EGRESS, len);
+	count_attachment_forwarded(to_ifindex, VRF_DIRECTION_INGRESS, len);
 }
 
 // service_path is noinline so its transient tuple-building scalars do not
@@ -3493,6 +3659,7 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 			count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
 			return TC_ACT_SHOT;
 		}
+		count_service_local(skb, ifindex, consumer_ifindex);
 		return rc;
 	}
 
@@ -3586,6 +3753,7 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 		count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
 		return TC_ACT_SHOT;
 	}
+	count_service_local(skb, ifindex, target_ifindex);
 	return rc;
 }
 
@@ -3932,9 +4100,9 @@ int usid_egress(struct __sk_buff *skb)
 					// the client silently discards it.
 					//
 					// No claimed-drop count on failure here, unlike the
-					// egress route redirect path below: vrf_table's value is
-					// not resolved yet at this point, and this path is
-					// expected essentially never to fire.
+					// egress route redirect path below: this path is
+					// expected essentially never to fire, and its drop
+					// reason is enough to find it.
 					// A DSR backend's SYN-ACK leaves here, and the
 					// client's segments then reach the backend
 					// encapsulated by the gateway. Clamping it is what
@@ -3969,6 +4137,7 @@ int usid_egress(struct __sk_buff *skb)
 							count_drop(DROP_REASON_PUBLIC_UPLINK_REDIRECT_FAILED);
 							return TC_ACT_SHOT;
 						}
+						count_vrf_forwarded(vrf_key, VRF_DIRECTION_EGRESS, tenant_len(skb));
 						return redirect_rc;
 					}
 					// public_uplink_table is not configured yet, so this node
@@ -4065,8 +4234,22 @@ int usid_egress(struct __sk_buff *skb)
 	// through the trie, not to be encapsulated toward. Defer to the kernel like
 	// a genuine miss, before touching node_src_addr_table or doing any encap
 	// work.
+	//
+	// Every pass-through prefix is a guest prefix or gateway address of an
+	// attachment in this same Linux VRF, and this node keeps one VRF, and one
+	// vrf_table row, per VPC. So a packet for anything but this attachment's
+	// own gateway is another attachment's on this node: it leaves the sender's
+	// VRF and arrives in the receiver's, which is the same row, and no other
+	// program sees it, usid_ingress included. It is counted here once in each
+	// direction, as handed to the kernel for delivery.
 	if (rv->link_ifindex == 0) {
 		count_drop(DROP_REASON_TRACE_PASSTHROUGH_ENTRY);
+		if (!is_own_gateway(ifindex, route_family)) {
+			__u64 len = tenant_len(skb);
+
+			count_vrf_forwarded(vrf_key, VRF_DIRECTION_EGRESS, len);
+			count_vrf_forwarded(vrf_key, VRF_DIRECTION_INGRESS, len);
+		}
 		return TC_ACT_UNSPEC;
 	}
 
@@ -4123,7 +4306,7 @@ int usid_egress(struct __sk_buff *skb)
 	// is wrong, so it is dropped rather than sent, and counted with the encap
 	// failure it is part of. mss_clamp_stats records which it was.
 	if (clamp_tcp_mss(skb, route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 6 : 4, 0)) {
-		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf, vrf_key, VRF_DIRECTION_EGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -4137,7 +4320,7 @@ int usid_egress(struct __sk_buff *skb)
 	if (pmtu == PMTU_SENT)
 		return TC_ACT_REDIRECT;
 	if (pmtu == PMTU_DROPPED) {
-		count_claimed_drop(DROP_REASON_FIB_FRAG_NEEDED, vrf);
+		count_claimed_drop(DROP_REASON_FIB_FRAG_NEEDED, vrf, vrf_key, VRF_DIRECTION_EGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -4173,7 +4356,7 @@ int usid_egress(struct __sk_buff *skb)
 
 	if (bpf_skb_adjust_room(skb, outer_len, BPF_ADJ_ROOM_MAC, USID_BPF_F_ADJ_ROOM_ENCAP_L3_IPV6) &&
 	    bpf_skb_adjust_room(skb, outer_len, BPF_ADJ_ROOM_MAC, 0)) {
-		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf, vrf_key, VRF_DIRECTION_EGRESS);
 		return TC_ACT_SHOT;
 	}
 	count_drop(DROP_REASON_TRACE_ADJUST_ROOM_OK);
@@ -4184,14 +4367,14 @@ int usid_egress(struct __sk_buff *skb)
 	struct usid_ethhdr *new_eth = data;
 
 	if ((void *) (new_eth + 1) > data_end) {
-		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf, vrf_key, VRF_DIRECTION_EGRESS);
 		return TC_ACT_SHOT;
 	}
 
 	struct usid_ip6hdr *outer = (void *) (new_eth + 1);
 
 	if ((void *) (outer + 1) > data_end) {
-		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf, vrf_key, VRF_DIRECTION_EGRESS);
 		return TC_ACT_SHOT;
 	}
 
@@ -4232,11 +4415,15 @@ int usid_egress(struct __sk_buff *skb)
 	long redirect_rc = bpf_redirect(rv->link_ifindex, 0);
 
 	if (redirect_rc != TC_ACT_REDIRECT) {
-		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_REDIRECT_FAILED, vrf);
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_REDIRECT_FAILED, vrf, vrf_key, VRF_DIRECTION_EGRESS);
 		return TC_ACT_SHOT;
 	}
 
 	count_drop(DROP_REASON_TRACE_REDIRECT_OK);
+	// From skb->len rather than inner_len, whose 16 bits cannot hold a BIG TCP
+	// GSO packet's length.
+	count_vrf_forwarded(vrf_key, VRF_DIRECTION_EGRESS,
+			    skb->len - sizeof(struct usid_ethhdr) - sizeof(struct usid_ip6hdr));
 	return redirect_rc;
 }
 

@@ -170,3 +170,60 @@ func TestKernelTable_FunctionTable_RealMap(t *testing.T) {
 		t.Errorf("Get after Unregister (real map): ok=%v err=%v, want ok=false", ok, err)
 	}
 }
+
+// TestKernelCounterTable_VRFTraffic_RealMap exercises VRFTrafficTable against
+// the kernel-loaded per-CPU vrf_traffic_counters through the registry: a row
+// created at registration, a repeat registration that keeps the counts the
+// datapath wrote on two CPUs, the per-CPU sum List reports, and removal at
+// unregistration.
+func TestKernelCounterTable_VRFTraffic_RealMap(t *testing.T) {
+	requireRoot(t)
+	objs := loadTestObjects(t)
+	reg := NewRegistryFromObjects(objs)
+	const argument = 0x0AB
+
+	if err := reg.VRF.Register(testBlock, argument, 7, EgressKindVeth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	key, err := uformat.NewVRFKey(testBlock, argument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpus, err := ebpf.PossibleCPU()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cpus < 2 {
+		t.Skip("needs two possible CPUs to show per-CPU summing")
+	}
+	perCPU := make([]prog.UsidVrfTrafficValue, cpus)
+	perCPU[0].Ingress = prog.UsidVrfDirectionCounter{Packets: 2, Bytes: 200}
+	perCPU[1].Ingress = prog.UsidVrfDirectionCounter{Packets: 3, Bytes: 300, DroppedPackets: 1}
+	perCPU[1].Egress = prog.UsidVrfDirectionCounter{Packets: 4, Bytes: 400}
+	if err := objs.VrfTrafficCounters.Put(uint64(key), perCPU); err != nil {
+		t.Fatalf("stand in for the datapath's counts: %v", err)
+	}
+
+	if err := reg.VRF.Register(testBlock, argument, 7, EgressKindVeth); err != nil {
+		t.Fatalf("re-Register: %v", err)
+	}
+	entries, err := reg.Traffic.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := VRFTrafficEntry{
+		VRFKey:  VRFKey{Block: testBlock, Argument: argument},
+		Ingress: VRFTrafficCounters{Packets: 5, Bytes: 500, DroppedPackets: 1},
+		Egress:  VRFTrafficCounters{Packets: 4, Bytes: 400},
+	}
+	if len(entries) != 1 || entries[0] != want {
+		t.Fatalf("List = %+v, want [%+v]", entries, want)
+	}
+
+	if err := reg.VRF.Unregister(testBlock, argument); err != nil {
+		t.Fatalf("Unregister: %v", err)
+	}
+	if entries, err := reg.Traffic.List(); err != nil || len(entries) != 0 {
+		t.Errorf("List after Unregister = %+v, %v; want no rows", entries, err)
+	}
+}

@@ -5,7 +5,10 @@
 package usidmap
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"path/filepath"
 
 	"github.com/cilium/ebpf"
@@ -25,16 +28,22 @@ type Registry struct {
 	// counter-schema-independent companion to VRF, keyed identically. See
 	// VPCAttributionTable's doc comment.
 	VPCAttribution *VPCAttributionTable
+
+	// Traffic is vrf_traffic_counters' read/write API, nil when the map is
+	// not pinned. VRF already keeps its rows in step with vrf_table's.
+	Traffic *VRFTrafficTable
 }
 
 // NewRegistryFromObjects builds a Registry backed by objs's kernel-loaded
 // maps.
 func NewRegistryFromObjects(objs *prog.UsidObjects) *Registry {
+	traffic := NewVRFTrafficTable(KernelCounterTable{Map: objs.VrfTrafficCounters})
 	return &Registry{
-		VRF:            NewVRFTable(KernelTable{Map: objs.VrfTable}),
+		VRF:            NewVRFTable(KernelTable{Map: objs.VrfTable}).WithTraffic(traffic),
 		Locator:        NewLocatorTable(KernelTable{Map: objs.LocatorTable}),
 		Function:       NewFunctionTable(KernelTable{Map: objs.FunctionTable}),
 		VPCAttribution: NewVPCAttributionTable(KernelTable{Map: objs.VpcAttributionTable}),
+		Traffic:        traffic,
 	}
 }
 
@@ -51,7 +60,8 @@ func (p pinnedMaps) Close() error {
 	return nil
 }
 
-// OpenPinnedRegistry opens the four control-plane maps from their pinned paths
+// OpenPinnedRegistry opens the four control-plane maps, and vrf_traffic_counters
+// when it is pinned, from their pinned paths
 // under pinDir and returns a Registry wrapping them, for a short-lived process
 // that did not itself load the datapath but needs to read and write its maps.
 // The returned closer must be closed when the caller is done; the maps stay
@@ -89,10 +99,25 @@ func OpenPinnedRegistry(pinDir string) (*Registry, pinnedMaps, error) {
 	}
 
 	closer := pinnedMaps{vrfMap, locatorMap, functionMap, vpcAttributionMap}
-	return &Registry{
+	registry := &Registry{
 		VRF:            NewVRFTable(KernelTable{Map: vrfMap}),
 		Locator:        NewLocatorTable(KernelTable{Map: locatorMap}),
 		Function:       NewFunctionTable(KernelTable{Map: functionMap}),
 		VPCAttribution: NewVPCAttributionTable(KernelTable{Map: vpcAttributionMap}),
-	}, closer, nil
+	}
+
+	// vrf_traffic_counters is optional: a datapath loaded by an older
+	// galactic-cni has not pinned it, and nothing that forwards depends on it,
+	// so no failure to open it fails the caller.
+	trafficMap, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapVrfTrafficCounters), nil)
+	switch {
+	case err == nil:
+		closer = append(closer, trafficMap)
+		registry.Traffic = NewVRFTrafficTable(KernelCounterTable{Map: trafficMap})
+		registry.VRF.WithTraffic(registry.Traffic)
+	case !errors.Is(err, os.ErrNotExist):
+		slog.Warn("usidmap: could not open the pinned per-VRF traffic counters; continuing without them",
+			"map", prog.UsidMapVrfTrafficCounters, "err", err)
+	}
+	return registry, closer, nil
 }

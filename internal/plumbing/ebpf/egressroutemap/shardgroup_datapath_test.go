@@ -520,3 +520,51 @@ func TestGroupDatapath_IPv4SourceHash(t *testing.T) {
 		}
 	}
 }
+
+// TestGroupDatapath_CountsVRFEgress checks tenant traffic placed on an egress
+// shard counts once per packet as the VRF's outbound traffic, at the tenant
+// packet's length rather than the encapsulated one.
+func TestGroupDatapath_CountsVRFEgress(t *testing.T) {
+	dp := loadDatapath(t)
+	a := shardSID(0x10)
+	reachable(t, a)
+	dp.apply(t, GroupPolicy{}, candidates(nil, a))
+
+	vrfKey, err := uformat.NewVRFKey(dpBlock, dpArgument)
+	if err != nil {
+		t.Fatalf("NewVRFKey: %v", err)
+	}
+	cpus, err := ebpf.PossibleCPU()
+	if err != nil {
+		t.Fatalf("PossibleCPU: %v", err)
+	}
+	if err := dp.objs.VrfTrafficCounters.Put(uint64(vrfKey), make([]prog.UsidVrfTrafficValue, cpus)); err != nil {
+		t.Fatalf("populate vrf_traffic_counters: %v", err)
+	}
+
+	const sent = 3
+	pkt := udp6(tenant(1), internet, 1000, 443)
+	for range sent {
+		if verdict, shard, _ := dp.send(t, pkt); verdict != tcActRedirect || shard != a {
+			t.Fatalf("verdict %d to %s, want a redirect to %s", verdict, shard, a)
+		}
+	}
+
+	var perCPU []prog.UsidVrfTrafficValue
+	if err := dp.objs.VrfTrafficCounters.Lookup(uint64(vrfKey), &perCPU); err != nil {
+		t.Fatalf("look up vrf_traffic_counters: %v", err)
+	}
+	var got prog.UsidVrfTrafficValue
+	for _, v := range perCPU {
+		got.Egress.Packets += v.Egress.Packets
+		got.Egress.Bytes += v.Egress.Bytes
+		got.Egress.DroppedPackets += v.Egress.DroppedPackets
+		got.Ingress.Packets += v.Ingress.Packets
+	}
+	want := prog.UsidVrfTrafficValue{Egress: prog.UsidVrfDirectionCounter{
+		Packets: sent, Bytes: sent * uint64(len(pkt)-ethLen),
+	}}
+	if got != want {
+		t.Errorf("vrf_traffic_counters = %+v, want %+v", got, want)
+	}
+}
