@@ -38,6 +38,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/radv"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -552,6 +553,11 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 		state.mssClamp = newMSSClampState(objs.MssClampTable, objs.EncapMtuTable)
 		state.mssClamp.reconcile()
 		state.egressGroup.counters = objs.EgressShardCounters
+		// Give every registered VRF its traffic counter row now, rather than
+		// at the first GC sweep, so counting starts with the first packet.
+		if err := usidmap.NewRegistryFromObjects(objs).VRF.SyncTraffic(); err != nil {
+			slog.Warn("Failed to create per-VRF traffic counter rows; the next GC sweep retries", "err", err)
+		}
 		if err := m.RegisterDatapathCollector(objs); err != nil {
 			slog.Warn("Failed to register eBPF datapath metrics collector", "err", err)
 		}

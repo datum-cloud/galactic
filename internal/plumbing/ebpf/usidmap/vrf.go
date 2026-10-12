@@ -7,6 +7,7 @@ package usidmap
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/cilium/ebpf"
 
@@ -57,6 +58,11 @@ type VRFEntry struct {
 type VRFTable struct {
 	table Table
 	clock func() uint64
+
+	// traffic is nil unless set by WithTraffic, in which case Register,
+	// Unregister and Reconcile keep vrf_traffic_counters' rows in step with
+	// this table's.
+	traffic *VRFTrafficTable
 }
 
 // NewVRFTable wraps table as a VRFTable. Production callers pass a kernel table
@@ -64,6 +70,14 @@ type VRFTable struct {
 // tests pass a fake.
 func NewVRFTable(table Table) *VRFTable {
 	return &VRFTable{table: table, clock: clockFn}
+}
+
+// WithTraffic makes t keep traffic's rows in step with its own: Register
+// creates (block, argument)'s row when absent, Unregister removes it, and
+// Reconcile brings every row into line with vrf_table. It returns t.
+func (t *VRFTable) WithTraffic(traffic *VRFTrafficTable) *VRFTable {
+	t.traffic = traffic
+	return t
 }
 
 // Generation returns a snapshot of this table's monotonic clock. A caller must
@@ -118,6 +132,13 @@ func (t *VRFTable) Register(block uint64, argument uint16, vrfTableID uint32, eg
 	if err := t.table.Put(uint64(key), value); err != nil {
 		return fmt.Errorf("usidmap: vrf_table: register block=%#x argument=%#x: %w", block, argument, err)
 	}
+	if t.traffic != nil {
+		if err := t.traffic.Ensure(block, argument); err != nil {
+			slog.Warn("usidmap: could not create this VRF's traffic counters; "+
+				"its per-direction metrics stay absent until the next GC pass creates them",
+				"block", block, "argument", argument, "err", err)
+		}
+	}
 	return nil
 }
 
@@ -130,11 +151,14 @@ func (t *VRFTable) Unregister(block uint64, argument uint16) error {
 	if err != nil {
 		return fmt.Errorf("usidmap: vrf_table: unregister block=%#x argument=%#x: %w", block, argument, err)
 	}
-	if err := t.table.Delete(uint64(key)); err != nil {
-		if errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil
-		}
+	if err := t.table.Delete(uint64(key)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("usidmap: vrf_table: unregister block=%#x argument=%#x: %w", block, argument, err)
+	}
+	if t.traffic != nil {
+		if err := t.traffic.Remove(block, argument); err != nil {
+			slog.Warn("usidmap: could not remove this VRF's traffic counters; the next GC pass removes them",
+				"block", block, "argument", argument, "err", err)
+		}
 	}
 	return nil
 }
@@ -210,6 +234,8 @@ func (t *VRFTable) List() ([]VRFEntry, error) {
 //
 // Every stale candidate is attempted even if deleting one fails, with the errors
 // joined; removed lists everything actually deleted regardless.
+//
+// It then calls SyncTraffic, whose error it joins to its own.
 func (t *VRFTable) Reconcile(live map[VRFKey]struct{}, cutoff uint64) (removed []VRFEntry, err error) {
 	entries, err := t.List()
 	if err != nil {
@@ -217,6 +243,11 @@ func (t *VRFTable) Reconcile(live map[VRFKey]struct{}, cutoff uint64) (removed [
 	}
 
 	var errs []error
+	defer func() {
+		if syncErr := t.SyncTraffic(); syncErr != nil {
+			err = errors.Join(err, fmt.Errorf("usidmap: vrf_table: reconcile: %w", syncErr))
+		}
+	}()
 	for _, e := range entries {
 		if _, ok := live[e.VRFKey]; ok {
 			continue // still has a live BGPVRFInstance per the CRD snapshot
@@ -234,4 +265,31 @@ func (t *VRFTable) Reconcile(live map[VRFKey]struct{}, cutoff uint64) (removed [
 		removed = append(removed, e)
 	}
 	return removed, errors.Join(errs...)
+}
+
+// SyncTraffic brings vrf_traffic_counters into line with vrf_table when
+// WithTraffic is set: it creates a zeroed row for every vrf_table row missing
+// one, which covers rows registered before that map existed or while it was
+// unavailable, and removes every row vrf_table has none for. Without
+// WithTraffic it does nothing.
+func (t *VRFTable) SyncTraffic() error {
+	if t.traffic == nil {
+		return nil
+	}
+	entries, err := t.List()
+	if err != nil {
+		return fmt.Errorf("usidmap: vrf_table: sync traffic counters: %w", err)
+	}
+	want := make(map[VRFKey]struct{}, len(entries))
+	for _, e := range entries {
+		want[e.VRFKey] = struct{}{}
+	}
+	stillWanted := func(k VRFKey) (bool, error) {
+		_, ok, err := t.Get(k.Block, k.Argument)
+		return ok, err
+	}
+	if _, _, err := t.traffic.Sync(want, stillWanted); err != nil {
+		return fmt.Errorf("usidmap: vrf_table: sync traffic counters: %w", err)
+	}
+	return nil
 }

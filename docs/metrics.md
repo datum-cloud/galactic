@@ -40,28 +40,71 @@ and tenant VRFs.
 
 ### Traffic
 
-| Metric                            | Type    | Labels                                                       | Meaning                                                                  |
-|-----------------------------------|---------|--------------------------------------------------------------|--------------------------------------------------------------------------|
-| `galactic_usid_vrf_packets_total` | counter | `block`, `argument`, `vrf_table_id`, `vpc`, `vpc_attachment` | Packets forwarded into a tenant VRF for one (uSID Block, Argument) entry |
-| `galactic_usid_vrf_bytes_total`   | counter | same                                                         | Bytes for the same entry                                                 |
+Each node keeps one VRF per VPC, so every series below is one VPC on one
+node, keyed by its uSID (Block, Argument). `vpc_attachment` names the
+attachment that registered the VRF last, not each attachment's own traffic.
 
-- Both reset when an entry is re-registered, not only on restart; `rate()`
-  copes with this.
+| Metric                                      | Type    | Labels                                                                    | Meaning                                                                         |
+|---------------------------------------------|---------|---------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| `galactic_usid_vrf_forwarded_packets_total` | counter | `block`, `argument`, `vrf_table_id`, `vpc`, `vpc_attachment`, `direction` | Packets forwarded into (`ingress`) or out of (`egress`) the VRF                 |
+| `galactic_usid_vrf_forwarded_bytes_total`   | counter | same                                                                      | Tenant bytes of those packets: the IP header and payload, in both directions    |
+| `galactic_usid_vrf_dropped_packets_total`   | counter | same                                                                      | Packets dropped after the datapath resolved them to the VRF, by direction       |
+| `galactic_usid_vrf_packets_total`           | counter | `block`, `argument`, `vrf_table_id`, `vpc`, `vpc_attachment`              | Inbound packets that matched the VRF, counted before any later drop             |
+| `galactic_usid_vrf_bytes_total`             | counter | same                                                                      | Bytes of those packets, measured as the whole tunneled frame with outer headers |
+
+What each `direction` counts:
+
+| `direction` | Counted when                                                                                                                                                                    |
+|-------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ingress`   | `usid_ingress` decapsulates a packet and redirects it to an attachment, or another attachment on the same node sends one to it                                                  |
+| `egress`    | a tenant packet is encapsulated toward another node or an egress shard, sent unencapsulated out the public uplink (a VIP reply), or delivered to another attachment on the node |
+
+- A packet counts once, when the datapath has committed to forwarding it.
+  Traffic the datapath hands to the kernel to route (no matching egress
+  route) and fail-open paths are not counted.
+- A packet too big for the fabric, answered with a Packet Too Big or
+  Fragmentation Needed, counts as neither forwarded nor dropped; see
+  `galactic_usid_pmtu_packets_total`.
+- Traffic between two attachments of one VPC on the same node counts once
+  as `egress` and once as `ingress` on that VPC's series, when it is handed
+  to the kernel for delivery, so the kernel can still drop it. Traffic to the
+  sender's own gateway address counts in neither; traffic to another
+  attachment's gateway address in the same VPC counts as delivered.
+- A private service route delivering to another attachment on the node
+  counts `egress` on the sender's VPC and `ingress` on the receiver's, which
+  may be a different VPC.
+- A GSO or GRO super-packet counts as one packet carrying all its bytes.
+- Drop reasons are in `galactic_usid_drops_total`, which has no VRF.
+  `galactic_usid_vrf_dropped_packets_total` has the VRF but no reason, and
+  covers drops in decapsulation, delivery, encapsulation and the PMTU check,
+  including inbound private service tunnels. Outbound private service route
+  drops (`service_route_*` from the sending attachment) and failed
+  public-uplink redirects appear only in `galactic_usid_drops_total`.
+- The two older series keep their meaning: inbound only, claimed before any
+  drop, and the full frame. Prefer the `forwarded` series for throughput.
+- Registering a VRF again never resets its counters. They reset when the
+  datapath reloads, or when the VRF's rows are removed and created again,
+  which `rate()` copes with.
 - `vpc` and `vpc_attachment` are empty when the VPC attribution map has no
   entry for that Argument. Treat `vpc=""` traffic as unattributed and watch
   for it.
-- Cardinality is one series per active Argument per node: at most 4095 per
-  Block.
+- Cardinality is one series per active Argument per node for the older pair,
+  at most 4095 per Block, and twice that for each `direction` metric.
 
 ```promql
-# Throughput per VPC, bits/s
-sum by (vpc) (rate(galactic_usid_vrf_bytes_total[5m])) * 8
+# Throughput per VPC and direction, bits/s
+sum by (vpc, direction) (rate(galactic_usid_vrf_forwarded_bytes_total[5m])) * 8
 
-# Top 10 attachments by packet rate
-topk(10, sum by (vpc, vpc_attachment) (rate(galactic_usid_vrf_packets_total[5m])))
+# Top 10 VPCs on a node by outbound packet rate
+topk(10, sum by (node, vpc) (rate(galactic_usid_vrf_forwarded_packets_total{direction="egress"}[5m])))
+
+# Share of a VPC's packets dropped after the datapath claimed them
+sum by (vpc, direction) (rate(galactic_usid_vrf_dropped_packets_total[5m]))
+  / (sum by (vpc, direction) (rate(galactic_usid_vrf_forwarded_packets_total[5m]))
+     + sum by (vpc, direction) (rate(galactic_usid_vrf_dropped_packets_total[5m])))
 
 # Traffic the datapath can't attribute to a VPC
-sum by (node) (rate(galactic_usid_vrf_bytes_total{vpc=""}[5m]))
+sum by (node) (rate(galactic_usid_vrf_forwarded_bytes_total{vpc=""}[5m]))
 ```
 
 ### Drops

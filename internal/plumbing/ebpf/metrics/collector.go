@@ -35,6 +35,10 @@ type Collector struct {
 	dropReasons    DropReasonsReader
 	vpcAttribution *usidmap.VPCAttributionTable
 
+	// vrfTraffic is nil unless set by WithVRFTraffic, in which case each VRF's
+	// per-direction forwarded and dropped counters are collected too.
+	vrfTraffic *usidmap.VRFTrafficTable
+
 	// mssClampStats and mssClampTable are nil unless set by WithMSSClamp, in
 	// which case the TCP MSS clamp's outcomes and limits are collected too.
 	mssClampStats DropReasonsReader
@@ -67,7 +71,15 @@ func NewCollectorFromObjects(objs *prog.UsidObjects) *Collector {
 		objs.DropReasons,
 		usidmap.NewVPCAttributionTable(usidmap.KernelTable{Map: objs.VpcAttributionTable}),
 	).WithMSSClamp(objs.MssClampStats, objs.MssClampTable).
-		WithPMTU(objs.PmtuStats, objs.EncapMtuTable)
+		WithPMTU(objs.PmtuStats, objs.EncapMtuTable).
+		WithVRFTraffic(usidmap.NewVRFTrafficTable(usidmap.KernelCounterTable{Map: objs.VrfTrafficCounters}))
+}
+
+// WithVRFTraffic adds vrf_traffic_counters to c, so each VRF's per-direction
+// forwarded and dropped counters are collected. It returns c.
+func (c *Collector) WithVRFTraffic(traffic *usidmap.VRFTrafficTable) *Collector {
+	c.vrfTraffic = traffic
+	return c
 }
 
 // WithMSSClamp adds the TCP MSS clamp's maps to c: stats, the per-CPU
@@ -89,6 +101,13 @@ func (c *Collector) WithPMTU(stats, table DropReasonsReader) *Collector {
 // metric below that carries one.
 const labelBlock = "block"
 
+// vrfLabels are the identity labels of every per-VRF series, and
+// vrfDirectionLabels adds the direction of travel.
+var (
+	vrfLabels          = []string{labelBlock, "argument", "vrf_table_id", "vpc", "vpc_attachment"}
+	vrfDirectionLabels = append(append([]string(nil), vrfLabels...), "direction")
+)
+
 // labelResult is the Prometheus label name for an outcome, shared by the MSS
 // clamp series here and the datapath event counters in events.go.
 const labelResult = "result"
@@ -97,12 +116,34 @@ var (
 	vrfPacketsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "vrf", "packets_total"),
 		"Packets forwarded through vrf_table for this (uSID Block, Argument) entry since it was last (re-)registered.",
-		[]string{labelBlock, "argument", "vrf_table_id", "vpc", "vpc_attachment"}, nil,
+		vrfLabels, nil,
 	)
 	vrfBytesDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "vrf", "bytes_total"),
 		"Bytes forwarded through vrf_table for this (uSID Block, Argument) entry since it was last (re-)registered.",
-		[]string{labelBlock, "argument", "vrf_table_id", "vpc", "vpc_attachment"}, nil,
+		vrfLabels, nil,
+	)
+	vrfForwardedPacketsDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "vrf", "forwarded_packets_total"),
+		"Packets forwarded into (direction=ingress) or out of (direction=egress) this VRF: decapsulated and "+
+			"delivered to an attachment, or encapsulated, sent out the public uplink, or delivered to another "+
+			"attachment on this node. Counted once the datapath has committed to forwarding the packet. A GSO or "+
+			"GRO super-packet counts once.",
+		vrfDirectionLabels, nil,
+	)
+	vrfForwardedBytesDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "vrf", "forwarded_bytes_total"),
+		"Bytes of the packets in galactic_usid_vrf_forwarded_packets_total, measured as the tenant packet "+
+			"alone: its IP header and payload, without the Ethernet header or any SRv6 outer header, in both "+
+			"directions.",
+		vrfDirectionLabels, nil,
+	)
+	vrfDroppedPacketsDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "vrf", "dropped_packets_total"),
+		"Packets usid_ingress or usid_egress dropped after resolving them to this VRF, by the direction they "+
+			"were travelling. Outbound private service route drops and failed public-uplink redirects are "+
+			"counted only in galactic_usid_drops_total, which has the reasons, without the VRF.",
+		vrfDirectionLabels, nil,
 	)
 	dropsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "drops_total"),
@@ -150,6 +191,9 @@ var (
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- vrfPacketsDesc
 	ch <- vrfBytesDesc
+	ch <- vrfForwardedPacketsDesc
+	ch <- vrfForwardedBytesDesc
+	ch <- vrfDroppedPacketsDesc
 	ch <- dropsDesc
 	ch <- blockArgumentsUsedDesc
 	ch <- blockArgumentUtilizationDesc
@@ -267,6 +311,8 @@ func (c *Collector) collectVRF(ch chan<- prometheus.Metric) {
 		}
 	}
 
+	traffic := c.listVRFTraffic(ch)
+
 	entries, err := c.vrf.List()
 	if err != nil {
 		ch <- prometheus.NewInvalidMetric(vrfPacketsDesc, fmt.Errorf("list vrf_table: %w", err))
@@ -282,6 +328,11 @@ func (c *Collector) collectVRF(ch chan<- prometheus.Metric) {
 			vrfPacketsDesc, prometheus.CounterValue, float64(e.Packets), block, argument, vrfTableID, vpc, vpcAttachment)
 		ch <- prometheus.MustNewConstMetric(
 			vrfBytesDesc, prometheus.CounterValue, float64(e.Bytes), block, argument, vrfTableID, vpc, vpcAttachment)
+		if t, ok := traffic[e.VRFKey]; ok {
+			labels := []string{block, argument, vrfTableID, vpc, vpcAttachment}
+			emitVRFDirection(ch, t.Ingress, append(labels, directionIngress))
+			emitVRFDirection(ch, t.Egress, append(labels, directionEgress))
+		}
 		perBlockUsed[e.Block]++
 	}
 
@@ -291,6 +342,42 @@ func (c *Collector) collectVRF(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(blockArgumentUtilizationDesc, prometheus.GaugeValue,
 			float64(used)/float64(uformat.ArgumentMax), label)
 	}
+}
+
+// direction label values for the per-direction VRF series.
+const (
+	directionIngress = "ingress"
+	directionEgress  = "egress"
+)
+
+// listVRFTraffic reads vrf_traffic_counters keyed by VRF, or returns nil when
+// the collector has none. A read failure is reported on ch and also returns
+// nil, so the per-VRF series that do not depend on it are still collected.
+func (c *Collector) listVRFTraffic(ch chan<- prometheus.Metric) map[usidmap.VRFKey]usidmap.VRFTrafficEntry {
+	if c.vrfTraffic == nil {
+		return nil
+	}
+	entries, err := c.vrfTraffic.List()
+	if err != nil {
+		ch <- prometheus.NewInvalidMetric(vrfForwardedPacketsDesc, fmt.Errorf("list vrf_traffic_counters: %w", err))
+		return nil
+	}
+	traffic := make(map[usidmap.VRFKey]usidmap.VRFTrafficEntry, len(entries))
+	for _, e := range entries {
+		traffic[e.VRFKey] = e
+	}
+	return traffic
+}
+
+// emitVRFDirection sends one direction's three per-VRF counters, labelled
+// with labels, the VRF's identity labels followed by the direction.
+func emitVRFDirection(ch chan<- prometheus.Metric, counters usidmap.VRFTrafficCounters, labels []string) {
+	ch <- prometheus.MustNewConstMetric(
+		vrfForwardedPacketsDesc, prometheus.CounterValue, float64(counters.Packets), labels...)
+	ch <- prometheus.MustNewConstMetric(
+		vrfForwardedBytesDesc, prometheus.CounterValue, float64(counters.Bytes), labels...)
+	ch <- prometheus.MustNewConstMetric(
+		vrfDroppedPacketsDesc, prometheus.CounterValue, float64(counters.DroppedPackets), labels...)
 }
 
 // vpcLabels re-encodes entry's VPC/VPCAttachment identifiers back to the
