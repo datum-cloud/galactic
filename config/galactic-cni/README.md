@@ -69,9 +69,20 @@ node running this manifest. The rationale for each capability:
 The kernel charges eBPF map memory to the memory cgroup of the process that
 creates the map. `credential-refresh` creates the uSID datapath's maps when a
 node has none pinned: a new node, or one upgraded from a build that lacks a
-map. Those maps take about 59Mi, most of it `service_reverse_table`. When the
-container's limit leaves too little room for them, the map create fails with
-`cannot allocate memory` and the pod crash-loops (#808).
+map. Those maps take about 35Mi when created (the root unit test measures it),
+most of it the preallocated `service_reverse_table`. When the container's limit
+leaves too little room for them, the map create fails with `cannot allocate
+memory` and the pod crash-loops (#808).
+
+The five service policy maps that only userspace writes
+(`service_route_table`, `service_access_table`, `service_deny_table`,
+`service_remote_grant_table` and `attachment_identity_table`) are not
+preallocated. Created empty, they cost only their bucket arrays, about 3.5Mi
+together. Their rows are still charged to this container's memory cgroup as
+they are written (by `galactic-router` for the four policy maps, by
+`galactic-cni` for `attachment_identity_table`), up to about 28Mi more if all
+five filled to `max_entries`. A row that doesn't fit fails that write, which
+its writer retries, rather than failing the container's start.
 
 `TestUsid_MapMemoryFitsGalacticCNILimit` in `internal/plumbing/ebpf/prog`
 loads the maps, sums the size the kernel reports for each, adds 40Mi for the
@@ -81,7 +92,9 @@ fails there, so raise the limit in the same change.
 
 The test reads that size from each map's fdinfo `memlock` line. It is the
 kernel's estimate of the map, not the memory cgroup's charge, and it grows
-slightly with CPU count. The 40Mi allowance doubles as margin for that gap.
+slightly with CPU count. For a map that isn't preallocated it counts only the
+rows present, so the test covers the cost of creating the maps, not of filling
+the policy maps. The 40Mi allowance doubles as margin for that gap.
 The end-to-end check is loading the datapath in a memory cgroup: with a 32M
 limit it fails at `service_reverse_table` with `cannot allocate memory`, and
 with 96M it loads.
