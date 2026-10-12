@@ -1033,8 +1033,19 @@ struct {
 
 // Node-local private-service routes are exact attachment/service matches. They
 // remain separate from fabric routes so policy never creates a Linux route.
+//
+// This map and the other policy maps below (attachment_identity_table,
+// service_access_table, service_deny_table, service_remote_grant_table) are
+// BPF_F_NO_PREALLOC. Only userspace writes them, and most nodes hold few or no
+// rows, so a preallocated map would charge its full size (about 28 MiB for the
+// five) to galactic-cni's memory cgroup, which creates it, whether or not any
+// policy exists (#808). Without preallocation an empty map costs only its
+// bucket array, and rows are charged as they are written. The datapath only
+// looks rows up, so it never allocates. service_reverse_table stays
+// preallocated: the datapath writes it, and the kernel requires it for an LRU.
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(max_entries, 32768);
 	__type(key, struct service_route_key);
 	__type(value, struct service_route_value);
@@ -1045,6 +1056,7 @@ struct {
 // the token before attaching the service classifier.
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(max_entries, 32768);
 	__type(key, __u32);
 	__type(value, __u64);
@@ -1052,6 +1064,7 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(max_entries, 65536);
 	__type(key, struct service_access_key);
 	__type(value, struct service_access_value);
@@ -1059,6 +1072,7 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(max_entries, 32768);
 	__type(key, struct service_deny_key);
 	__type(value, struct service_deny_value);
@@ -1078,6 +1092,7 @@ struct {
 // immediately even while an LRU row remains.
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(max_entries, 65536);
 	__type(key, struct service_remote_grant_key);
 	__type(value, struct service_remote_grant_value);
