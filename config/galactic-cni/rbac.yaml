@@ -12,6 +12,13 @@ rules:
       - bgpadvertisements
       - bgpvrfinstances
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # egressshards (read only): in hashed egress mode, galactic-cni run spreads
+  # tenant egress across every EgressShard in the cluster and watches them for
+  # membership and drain changes. See internal/installer/egressgroup.go.
+  - apiGroups: ["network.datumapis.com"]
+    resources:
+      - egressshards
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["k8s.cni.cncf.io"]
     resources:
       - network-attachment-definitions

@@ -6,6 +6,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"go.datum.net/galactic/internal/plumbing/dan"
 )
@@ -284,6 +285,51 @@ func TestParseNAT64Prefixes(t *testing.T) {
 				if got[i].String() != w {
 					t.Errorf("ParseNAT64Prefixes(%q)[%d] = %s, want %s", tt.raw, i, got[i], w)
 				}
+			}
+		})
+	}
+}
+
+func TestParseEgressGroupConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    EgressGroupConfig
+		wantErr bool
+	}{
+		{
+			name: "DefaultsToOrderedSourceWithPins",
+			want: EgressGroupConfig{
+				Mode: EgressModeOrdered, Hash: EgressHashSource, PinIdle: DefaultEgressPinIdle, MinActive: 1,
+			},
+		},
+		{
+			name: "HashedFlowWithoutPins",
+			env: map[string]string{
+				EnvCNIEgressMode: "hashed", EnvCNIEgressHash: "flow", EnvCNIEgressPinIdle: "0",
+				EnvCNIEgressPoolMinActive: "3",
+			},
+			want: EgressGroupConfig{Mode: EgressModeHashed, Hash: EgressHashFlow, PinIdle: 0, MinActive: 3},
+		},
+		{
+			name: "CustomPinIdle",
+			env:  map[string]string{EnvCNIEgressPinIdle: "45m"},
+			want: EgressGroupConfig{Mode: EgressModeOrdered, Hash: EgressHashSource, PinIdle: 45 * time.Minute, MinActive: 1},
+		},
+		{name: "UnknownModeFails", env: map[string]string{EnvCNIEgressMode: "anycast"}, wantErr: true},
+		{name: "UnknownHashFails", env: map[string]string{EnvCNIEgressHash: "5tuple"}, wantErr: true},
+		{name: "BadPinIdleFails", env: map[string]string{EnvCNIEgressPinIdle: "forever"}, wantErr: true},
+		{name: "SubSecondPinIdleFails", env: map[string]string{EnvCNIEgressPinIdle: "10ms"}, wantErr: true},
+		{name: "NegativeMinActiveFails", env: map[string]string{EnvCNIEgressPoolMinActive: "-1"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseEgressGroupConfig(func(k string) string { return tt.env[k] })
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseEgressGroupConfig() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ParseEgressGroupConfig() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
