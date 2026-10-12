@@ -844,8 +844,7 @@ func TestMapReplayPrunesExpiredAuthorizationAndPreservesStartupGate(t *testing.T
 }
 
 func TestPersistentDataplaneHasNoExpiry(t *testing.T) {
-	routes, access, grants := &recordingTable{}, &recordingTable{}, &recordingTable{}
-	programmer := testRouteProgrammer(routes, access, grants)
+	programmer, _, _, _ := leasedTestProgrammer()
 	intent := localTestIntent()
 	if err := programmer.Apply(intent); err != nil {
 		t.Fatal(err)
