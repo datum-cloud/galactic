@@ -46,3 +46,26 @@ func DropReasonTotals(reader DropReasonsReader) (map[uint32]uint64, error) {
 	}
 	return totals, nil
 }
+
+// TrafficReader narrows the nat_traffic map, a per-CPU array keyed by
+// natprog.TrafficSlot, to the one operation TrafficTotals needs.
+type TrafficReader interface {
+	Lookup(key, valueOut any) error
+}
+
+// TrafficTotals reads every nat_traffic slot and returns its packets and bytes
+// summed across CPUs, indexed by natprog.TrafficSlot.
+func TrafficTotals(reader TrafficReader) ([natprog.TrafficSlots]natprog.NatNatTrafficCounter, error) {
+	var totals [natprog.TrafficSlots]natprog.NatNatTrafficCounter
+	for slot := range natprog.TrafficSlots {
+		var perCPU []natprog.NatNatTrafficCounter
+		if err := reader.Lookup(slot, &perCPU); err != nil {
+			return totals, fmt.Errorf("natmap: nat_traffic: lookup[%d]: %w", slot, err)
+		}
+		for _, v := range perCPU {
+			totals[slot].Packets += v.Packets
+			totals[slot].Bytes += v.Bytes
+		}
+	}
+	return totals, nil
+}

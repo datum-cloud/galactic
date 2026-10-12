@@ -151,15 +151,22 @@ func TestPacketTooBig_ReplyTooBigForTheFabric(t *testing.T) {
 	masqPort := binary.BigEndian.Uint16(out[ethLen+ip6Len:])
 
 	small := buildUDPPacket(t, f.shardPub, f.peer, encappedDstPort, masqPort, []byte("small"))
-	if ret, _ := f.run(t, small); ret != xdpRedirect {
+	before := trafficSnapshot(t, f.objs)
+	ret, smallOut := f.run(t, small)
+	if ret != xdpRedirect {
 		t.Fatalf("small reply verdict = %d, want XDP_REDIRECT (%d) over the fabric link", ret, xdpRedirect)
 	}
+	assertTranslatedDelta(t, f.objs, before, TrafficFamilyNAT66, TrafficDirectionReturn, ret, smallOut)
 
+	// The Packet Too Big the shard sends in place of the big reply is its
+	// own message, not a translation.
 	big := buildUDPPacket(t, f.shardPub, f.peer, encappedDstPort, masqPort, make([]byte, bigPayload))
-	ret, out := f.run(t, big)
+	before = trafficSnapshot(t, f.objs)
+	ret, out = f.run(t, big)
 	if ret != xdpRedirect {
 		t.Fatalf("verdict = %d, want XDP_REDIRECT (%d): the Packet Too Big routed to its sender", ret, xdpRedirect)
 	}
+	assertNoTranslatedDelta(t, f.objs, before)
 	if got := sumPerCPU(t, f.objs.DropReasons, DropReasonNatFibFragNeeded); got != 1 {
 		t.Errorf("drop_reasons[fib_frag_needed] = %d, want 1 -- the reply is still dropped", got)
 	}

@@ -143,6 +143,10 @@ func runCmd(cfg *config.NATConfig) error {
 	if err != nil {
 		return fmt.Errorf("setup egress translation eBPF datapath: %w", err)
 	}
+	if err := ctrlmetrics.Registry.Register(
+		newShardStateCollector(datapath, cfg.DatapathEnabled, cfg.XDPAttach)); err != nil {
+		return fmt.Errorf("register egress shard state metrics: %w", err)
+	}
 	coverageEvents := make(chan event.GenericEvent, 1)
 	go followCoverage(ctx, datapath, healthSrv, coverageChanged, coverageEvents)
 

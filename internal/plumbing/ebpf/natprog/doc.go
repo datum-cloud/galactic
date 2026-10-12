@@ -86,4 +86,4 @@ const (
 // within their packed structs, so they are genuinely 2-byte aligned despite the
 // packed attribute.
 //
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -Wno-address-of-packed-member -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type conn_key -type conn_value -type shard_config Nat nat.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -Wno-address-of-packed-member -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type conn_key -type conn_value -type shard_config -type nat_traffic_counter Nat nat.c

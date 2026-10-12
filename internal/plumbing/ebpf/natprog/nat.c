@@ -590,6 +590,46 @@ struct {
 	__type(value, __u64);
 } drop_reasons SEC(".maps");
 
+// Translated traffic, by address family, direction and how the packet left.
+// The slot is family * 4 + direction * 2 + action, mirrored in Go by
+// natprog.TrafficSlot.
+enum nat_traffic_family {
+	NAT_TRAFFIC_NAT66 = 0,
+	NAT_TRAFFIC_NAT64 = 1,
+};
+
+enum nat_traffic_direction {
+	NAT_TRAFFIC_OUTBOUND = 0, // tenant to internet, decapsulated and translated
+	NAT_TRAFFIC_RETURN = 1,   // internet to tenant, translated and encapsulated
+};
+
+enum nat_traffic_action {
+	NAT_TRAFFIC_REDIRECT = 0, // left over another interface
+	NAT_TRAFFIC_TX = 1,       // left over the interface it arrived on
+};
+
+#define NAT_TRAFFIC_SLOTS 8
+
+// struct nat_traffic_counter is one slot's translated packets and bytes, per
+// CPU. bytes is the translated packet's IP header and payload, without the
+// Ethernet header or the SRv6 outer header a return packet carries, so the
+// two directions measure the same thing.
+struct nat_traffic_counter {
+	__u64 packets;
+	__u64 bytes;
+};
+
+// nat_traffic counts every packet a leg translated and queued for transmit.
+// Packets the shard generates itself (Packet Too Big, Fragmentation Needed,
+// echo replies) and packets it passes on unclaimed are not translations and
+// are not counted here.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, NAT_TRAFFIC_SLOTS);
+	__type(key, __u32);
+	__type(value, struct nat_traffic_counter);
+} nat_traffic SEC(".maps");
+
 // struct icmp_bucket is one CPU's token bucket, held as nanoseconds of credit
 // rather than whole tokens so a refill is an addition, with no division on the
 // packet path: each message costs NAT_ICMP_COST_NS, and credit accrues one
@@ -1143,6 +1183,30 @@ static NAT_ALWAYS_INLINE int leave_via(struct xdp_md *ctx, __u32 egress_ifindex)
 	return XDP_REDIRECT;
 }
 
+// leave_translated is leave_via for a packet a leg translated, counting it in
+// nat_traffic once it is queued for transmit: one per-CPU slot update, packets
+// and bytes together. A return packet carries the SRv6 outer header, which is
+// left out of its bytes.
+static NAT_ALWAYS_INLINE int leave_translated(struct xdp_md *ctx, __u32 egress_ifindex, __u32 family,
+					      __u32 direction)
+{
+	__u64 len = ctx->data_end - ctx->data;
+	__u64 headers = sizeof(struct nat_ethhdr) + (direction == NAT_TRAFFIC_RETURN ? NAT_IP6HDR_LEN : 0);
+	int rc = leave_via(ctx, egress_ifindex);
+
+	if (rc != XDP_TX && rc != XDP_REDIRECT)
+		return rc;
+
+	__u32 slot = family * 4 + direction * 2 + (rc == XDP_TX ? NAT_TRAFFIC_TX : NAT_TRAFFIC_REDIRECT);
+	struct nat_traffic_counter *c = bpf_map_lookup_elem(&nat_traffic, &slot);
+
+	if (c) {
+		c->packets += 1;
+		c->bytes += len > headers ? len - headers : 0;
+	}
+	return rc;
+}
+
 // push_outer_header uses the same mechanism as the other datapath programs'
 // function of the same name. Copied rather than shared, since each program
 // defines its own surrounding header structs.
@@ -1566,7 +1630,7 @@ static NAT_ALWAYS_INLINE int nat66_forward_leg(struct xdp_md *ctx, const int icm
 		return XDP_DROP;
 	}
 
-	return leave_via(ctx, egress_ifindex);
+	return leave_translated(ctx, egress_ifindex, NAT_TRAFFIC_NAT66, NAT_TRAFFIC_OUTBOUND);
 }
 
 SEC("xdp")
@@ -1753,7 +1817,7 @@ static NAT_ALWAYS_INLINE int send_frag_needed4(struct xdp_md *ctx, struct shard_
 // a translated ICMP error is never answered with another.
 static NAT_ALWAYS_INLINE int reencap_to_tenant(struct xdp_md *ctx, struct shard_config *cfg,
 						struct nat_ip6hdr *ip6, const __u8 usid[16],
-						const __be32 *quote)
+						const __be32 *quote, __u32 family)
 {
 	// Must include the inner IPv6 header's own 40 bytes, not just its payload.
 	// Passing the inner payload length alone undercounts the outer header's
@@ -1778,7 +1842,7 @@ static NAT_ALWAYS_INLINE int reencap_to_tenant(struct xdp_md *ctx, struct shard_
 		return XDP_DROP;
 	}
 
-	return leave_via(ctx, egress_ifindex);
+	return leave_translated(ctx, egress_ifindex, family, NAT_TRAFFIC_RETURN);
 }
 
 // nat66_return_leg un-SNATs a reply whose transport view the caller has already
@@ -1819,7 +1883,7 @@ static NAT_ALWAYS_INLINE int nat66_return_leg(struct xdp_md *ctx, struct shard_c
 	__builtin_memcpy(ip6->daddr, cv->backend_addr, 16);
 	*l4v->dport_ptr = cv->backend_port;
 
-	return reencap_to_tenant(ctx, cfg, ip6, cv->backend_usid, quote);
+	return reencap_to_tenant(ctx, cfg, ip6, cv->backend_usid, quote, NAT_TRAFFIC_NAT66);
 }
 
 // nat66_return: a reply from the IPv6 internet, addressed to this shard's own
@@ -1922,7 +1986,7 @@ static NAT_ALWAYS_INLINE int nat66_icmp_error(struct xdp_md *ctx, struct shard_c
 	__builtin_memcpy(quoted->saddr, cv->backend_addr, 16);
 	*q.masq_ptr = cv->backend_port;
 
-	return reencap_to_tenant(ctx, cfg, ip6, cv->backend_usid, 0);
+	return reencap_to_tenant(ctx, cfg, ip6, cv->backend_usid, 0, NAT_TRAFFIC_NAT66);
 }
 
 // echo_respond6 is echo_respond4 for shard_pub_addr6. Swapping the addresses
@@ -2256,7 +2320,7 @@ static NAT_ALWAYS_INLINE int nat64_forward_leg(struct xdp_md *ctx, const int icm
 		return XDP_DROP;
 	}
 
-	return leave_via(ctx, egress_ifindex);
+	return leave_translated(ctx, egress_ifindex, NAT_TRAFFIC_NAT64, NAT_TRAFFIC_OUTBOUND);
 }
 
 SEC("xdp")
@@ -2427,7 +2491,7 @@ static NAT_ALWAYS_INLINE int nat64_return_leg(struct xdp_md *ctx, struct shard_c
 		return XDP_DROP;
 	}
 
-	return leave_via(ctx, egress_ifindex);
+	return leave_translated(ctx, egress_ifindex, NAT_TRAFFIC_NAT64, NAT_TRAFFIC_RETURN);
 }
 
 // nat64_return: a TCP or UDP reply from the IPv4 internet, addressed to this
@@ -2823,7 +2887,7 @@ int nat64_icmp_error(struct xdp_md *ctx)
 	__builtin_memcpy(ip6->daddr, dst6, 16);
 	__builtin_memcpy((void *) (ip6 + 1), msg, sizeof(msg));
 
-	return reencap_to_tenant(ctx, cfg, ip6, usid, 0);
+	return reencap_to_tenant(ctx, cfg, ip6, usid, 0, NAT_TRAFFIC_NAT64);
 }
 
 // echo_respond4 answers an Echo Request addressed to shard_pub_addr4, when the
