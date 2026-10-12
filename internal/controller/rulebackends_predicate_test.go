@@ -53,7 +53,7 @@ func TestVPCAttachmentBackendChanged(t *testing.T) {
 			a.Labels["extra"] = "x"
 		}, true},
 		{"status.vpc changed", func(a *cloudv1alpha1.VPCAttachment) {
-			a.Status.VPC = "other-vpc"
+			a.Status.VPC = testOtherVPC
 		}, true},
 		{"status.node changed", func(a *cloudv1alpha1.VPCAttachment) {
 			a.Status.Node = testOtherNode

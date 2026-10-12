@@ -432,8 +432,8 @@ func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 	}{
 		{
 			name:         "all resolve",
-			attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")},
-			wantBackends: []string{testBackendAddr, "fd00:10::2"},
+			attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr2)},
+			wantBackends: []string{testBackendAddr, testBackendAddr2},
 		},
 		{
 			name:           "some unresolved",
@@ -587,7 +587,7 @@ func TestBuildDesiredRule_SameNodeBackendsGetTheirOwnSlot(t *testing.T) {
 		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
 		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
 	}
-	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")}
+	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr2)}
 
 	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), attachments, idx, nil)
 	if err != nil {
@@ -1004,6 +1004,25 @@ func TestNetworkGatewayReconciler_EmptyBackendAddressesWithdrawsRule(t *testing.
 	current := &bgpv1alpha1.NetworkRule{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(rule), current); err != nil {
 		t.Fatalf("get rule: %v", err)
+	}
+	allowed := []string{testBackendAddr}
+	current.Spec.BackendSelector = metav1.LabelSelector{}
+	current.Spec.BackendAddresses = &allowed
+	if err := c.Update(context.Background(), current); err != nil {
+		t.Fatalf("update rule with address-only backends: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile with address-only backends: %v", err)
+	}
+	if len(engine.lastDesired.Rules) != 1 {
+		t.Fatalf("address-only desired rules = %+v, want the rule", engine.lastDesired.Rules)
+	}
+	if err := c.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
+		t.Fatalf("get advertisement with address-only backends: %v", err)
+	}
+
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(rule), current); err != nil {
+		t.Fatalf("get rule before withdrawal: %v", err)
 	}
 	empty := []string{}
 	current.Spec.BackendAddresses = &empty
