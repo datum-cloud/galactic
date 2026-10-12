@@ -175,9 +175,9 @@ lives in `root.go`'s `runCmd`:
     NetworkRuleBinding, NodeDeparture, ServiceRoutePolicy (plain role only;
     a route reflector has no service route maps to program and skips it),
     and GC (the GC controller also starts a ticker goroutine that waits for
-    cache sync, then runs on `--gc-interval`, default 5m; NodeDeparture sweeps on the
-    same interval, and when `vip_xlat_table` opened in step 6, each GC tick
-    after the first pass also sweeps it).
+    cache sync, then runs on `--gc-interval`, default 5m; NodeDeparture
+    sweeps on the same interval, and when `vip_xlat_table` opened in step 6,
+    each GC tick after the first pass also sweeps it).
 10. `mgr.Start(ctx)` — blocks until the signal-handler context is cancelled.
 
 Apart from the ServiceRoutePolicy controller and the `vip_xlat_table` log
