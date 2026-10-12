@@ -120,6 +120,9 @@ func setupGatewayDatapath(
 	}
 	mode := modeDecision.Mode
 	slog.Info("Selected the XDP attach mode for this host", "mode", mode.String(), "reason", modeDecision.Reason)
+	for _, skipped := range modeDecision.Skipped {
+		slog.Warn("Left a NIC with no driver out of the XDP attach mode decision", "reason", skipped)
+	}
 
 	// Required for the FIB lookup in the datapath's header push to succeed
 	// on the interface the program actually runs on. The lookup uses the
@@ -171,7 +174,7 @@ func setupGatewayDatapath(
 		abandon = func() {
 			stopLeases()
 			<-leaseDone
-			if err := xdpattach.ClearDispatcherSlots(ctx, xdpdispatch.PinDir, mode, xdpdispatch.SlotGatewayLB,
+			if err := xdpattach.ClearDispatcherSlots(ctx, xdpdispatch.PinDir, xdpdispatch.SlotGatewayLB,
 				xdpdispatch.SlotGatewayReturn); err != nil {
 				slog.Warn("Cannot empty the edge gateway's dispatcher slots after a failed setup", "err", err)
 			}
@@ -382,9 +385,7 @@ func publicReturnOverlap(targets, returnTargets []string) []string {
 // logged, not returned: the leases lapse on their own within
 // xdpdispatch.LeaseTTL.
 func turnOffDatapath(ctx context.Context, pinDir string) {
-	// Emptying slots attaches nothing, so the mode the dispatcher is opened
-	// with makes no difference here.
-	if err := xdpattach.ClearDispatcherSlots(ctx, pinDir, xdpmode.Native, xdpdispatch.SlotGatewayLB,
+	if err := xdpattach.ClearDispatcherSlots(ctx, pinDir, xdpdispatch.SlotGatewayLB,
 		xdpdispatch.SlotGatewayReturn); err != nil {
 		slog.Error("Cannot empty the edge gateway's slots in the XDP dispatcher; "+
 			"they stop claiming packets once their leases lapse", "lease", xdpdispatch.LeaseTTL, "err", err)

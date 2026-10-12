@@ -274,3 +274,33 @@ func TestBackoff_DoublesUpToTheCap(t *testing.T) {
 		t.Error("a successful migration kept its backoff")
 	}
 }
+
+// TestOpenForSlots_LeavesTheHostModeAlone covers a datapath turned off on a
+// generic host: clearing its slots must not record a mode, or every running
+// datapath would stop migrating links, and it can never attach.
+func TestOpenForSlots_LeavesTheHostModeAlone(t *testing.T) {
+	dir := testPinDir(t)
+	ifindex := testVeth(t, "xdps")
+	generic := openDispatcherInMode(t, dir, xdpmode.Generic)
+
+	slots, err := OpenForSlots(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("OpenForSlots: %v", err)
+	}
+	t.Cleanup(func() { _ = slots.Close() })
+	if err := locked(t, slots).Clear(SlotNAT); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if _, err := locked(t, slots).EnsureLink(ifindex); err == nil {
+		t.Error("EnsureLink on a slots-only dispatcher: want an error")
+	}
+
+	recorded, ok, err := generic.recordedHostMode()
+	if err != nil || !ok || recorded != xdpmode.Generic {
+		t.Errorf("host mode after OpenForSlots = %s, %v, %v; want generic", recorded, ok, err)
+	}
+	ensureLink(t, generic, ifindex)
+	if got := kernelMode(t, ifindex); got != xdpmode.Generic {
+		t.Errorf("kernel reports %s mode, want generic", got)
+	}
+}

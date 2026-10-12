@@ -296,6 +296,9 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 	}
 	mode := modeDecision.Mode
 	slog.Info("Selected the XDP attach mode for this host", "mode", mode.String(), "reason", modeDecision.Reason)
+	for _, skipped := range modeDecision.Skipped {
+		slog.Warn("Left a NIC with no driver out of the XDP attach mode decision", "reason", skipped)
+	}
 
 	// Required for the FIB lookup in both the forward and return paths to
 	// succeed on the interface the program actually runs on. The lookup uses
@@ -611,9 +614,7 @@ func (disabledDatapath) Programmed() (controller.EgressShardIdentity, bool) {
 // shard that crash-looped instead would keep its advertisement up no longer
 // but would page for nothing.
 func turnOffDatapath(ctx context.Context, pinDir string) {
-	// Emptying a slot attaches nothing, so the mode the dispatcher is opened
-	// with makes no difference here.
-	if err := xdpattach.ClearDispatcherSlots(ctx, pinDir, xdpmode.Native, xdpdispatch.SlotNAT); err != nil {
+	if err := xdpattach.ClearDispatcherSlots(ctx, pinDir, xdpdispatch.SlotNAT); err != nil {
 		slog.Error("Cannot empty the egress translation slot in the XDP dispatcher; "+
 			"it stops claiming packets once its lease lapses", "lease", xdpdispatch.LeaseTTL, "err", err)
 	}

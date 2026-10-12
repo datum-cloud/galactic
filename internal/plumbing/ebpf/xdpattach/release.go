@@ -91,11 +91,13 @@ func ReleaseIdleDispatcher(ctx context.Context, pinDir string, mode xdpmode.Mode
 // at once rather than once the slots' leases lapse. Every other slot, and the
 // dispatcher itself, are left alone. It does nothing on a node that never ran
 // the dispatcher.
-func ClearDispatcherSlots(ctx context.Context, pinDir string, mode xdpmode.Mode, slots ...xdpdispatch.Slot) error {
+// It opens the dispatcher for slots only, so it never touches the host's
+// recorded XDP mode.
+func ClearDispatcherSlots(ctx context.Context, pinDir string, slots ...xdpdispatch.Slot) error {
 	if _, err := os.Stat(filepath.Join(pinDir, "links")); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	dispatcher, err := xdpdispatch.Open(ctx, pinDir, mode)
+	dispatcher, err := xdpdispatch.OpenForSlots(ctx, pinDir)
 	if err != nil {
 		return fmt.Errorf("xdpattach: open the node's XDP dispatcher: %w", err)
 	}

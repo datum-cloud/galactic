@@ -152,8 +152,11 @@ type Dispatcher struct {
 	// makes is attached in it, and a pinned link in the other mode is not
 	// counted as linked or covered until EnsureLink migrates it.
 	mode xdpmode.Mode
+	// attaching is false for a dispatcher from OpenForSlots, which attaches
+	// nothing and has no mode of its own.
+	attaching bool
 	// hostMode is the pinned record of the mode the most recently opened
-	// dispatcher on this host selected.
+	// attaching dispatcher on this host selected. Nil when not attaching.
 	hostMode *ebpf.Map
 
 	backoffMu sync.Mutex
@@ -179,6 +182,18 @@ type migrationRetry struct {
 // host must open the dispatcher with the same mode, which they do by selecting
 // it from the same host state.
 func Open(ctx context.Context, dir string, mode xdpmode.Mode) (*Dispatcher, error) {
+	return open(ctx, dir, mode, true)
+}
+
+// OpenForSlots opens the dispatch state like Open, for a caller that only
+// fills, clears or renews slots and never attaches, such as a datapath being
+// turned off. It records no host mode, so it never overrides the mode the
+// attaching datapaths on the host selected, and its EnsureLink refuses to run.
+func OpenForSlots(ctx context.Context, dir string) (*Dispatcher, error) {
+	return open(ctx, dir, xdpmode.Native, false)
+}
+
+func open(ctx context.Context, dir string, mode xdpmode.Mode, attaching bool) (*Dispatcher, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("xdpdispatch: remove memlock rlimit: %w", err)
 	}
@@ -217,12 +232,14 @@ func Open(ctx context.Context, dir string, mode xdpmode.Mode) (*Dispatcher, erro
 	// The pin, when adoptRoot makes one, keeps the program alive.
 	defer objs.XdpDispatch.Close() //nolint:errcheck // our own descriptor
 
-	hostMode, err := recordHostMode(dir, mode)
-	if err != nil {
-		_ = objs.DispatchMaps.Close()
-		return nil, err
+	d := &Dispatcher{dir: dir, maps: objs.DispatchMaps, mode: mode, attaching: attaching,
+		backoff: map[int]migrationRetry{}}
+	if attaching {
+		if d.hostMode, err = recordHostMode(dir, mode); err != nil {
+			_ = objs.DispatchMaps.Close()
+			return nil, err
+		}
 	}
-	d := &Dispatcher{dir: dir, maps: objs.DispatchMaps, mode: mode, hostMode: hostMode, backoff: map[int]migrationRetry{}}
 	if err := d.adoptRoot(objs.XdpDispatch); err != nil {
 		_ = d.Close()
 		return nil, err
@@ -501,6 +518,9 @@ func (l *Locked) Unlock() {
 // different one.
 func (l *Locked) EnsureLink(ifindex int) (bounced bool, err error) {
 	d := l.d
+	if !d.attaching {
+		return false, errors.New("xdpdispatch: EnsureLink on a dispatcher opened for slots only")
+	}
 	root, err := d.loadRoot()
 	if err != nil {
 		return false, err

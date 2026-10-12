@@ -173,12 +173,12 @@ func TestSelect_ReportsWhatItCannotDecideOn(t *testing.T) {
 			wantErr:  []string{"interface eno9 does not exist"},
 		},
 		{
-			name: "a physical NIC whose driver cannot be read",
+			name: "a target NIC whose driver cannot be read",
 			build: func(f *fakeSysfs) {
 				f.physical(testNIC1, "igb")
 				f.unbound(testNIC2)
 			},
-			required: []string{testNIC1},
+			required: []string{testNIC1, testNIC2},
 			wantErr:  []string{"read driver of eno2"},
 		},
 		{
@@ -187,7 +187,7 @@ func TestSelect_ReportsWhatItCannotDecideOn(t *testing.T) {
 				f.physical("ens1f0np0", "bnxt_en")
 				f.unbound(testNIC2)
 			},
-			required: []string{"bond9"},
+			required: []string{testNIC2, "bond9"},
 			wantErr:  []string{"read driver of eno2", "interface bond9 does not exist"},
 		},
 	}
@@ -247,5 +247,25 @@ func TestModeFlagsAndAttachMode(t *testing.T) {
 	}
 	if Native.String() != "native" || Generic.String() != "generic" {
 		t.Errorf("String() = %q, %q", Native, Generic)
+	}
+}
+
+// TestSelect_SkipsANonTargetNICWithNoDriver covers a NIC caught mid-unbind
+// that the datapath does not attach to: it carries no driver traffic, so it
+// is listed as skipped rather than failing startup, and the rest decide.
+func TestSelect_SkipsANonTargetNICWithNoDriver(t *testing.T) {
+	f := newFakeSysfs(t)
+	f.physical("ens1f0np0", "bnxt_en")
+	f.unbound(testNIC2)
+
+	got, err := Select("ens1f0np0")
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if got.Mode != Generic {
+		t.Errorf("Mode = %s, want generic", got.Mode)
+	}
+	if len(got.Skipped) != 1 || !strings.Contains(got.Skipped[0], "read driver of eno2") {
+		t.Errorf("Skipped = %v, want eno2 named", got.Skipped)
 	}
 }

@@ -64,7 +64,8 @@
 // root and every slot, lease and role row are untouched. A failed migration
 // attaches the root again in the mode it was in and returns the error, and the
 // interface's next try backs off. Open records its mode in a pinned host
-// record, and a process whose mode no longer matches it returns
+// record (OpenForSlots, for a caller that only fills or clears slots, does
+// not), and a process whose mode no longer matches it returns
 // ErrHostModeChanged instead of migrating, so two processes that disagree
 // never move a link back and forth.
 //

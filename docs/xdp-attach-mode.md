@@ -38,20 +38,23 @@ from #779.
   host never mixes native and generic redirect paths.
 - **A bnxt_en NIC anywhere selects generic for everything.** It doesn't have
   to be one of the datapath's own targets.
-- **Unknown state fails startup.** A physical NIC whose driver can't be read,
-  or a target interface that doesn't exist, stops the process at startup with
-  the reason in the error. Neither ever settles the mode by omission. This
-  applies to every physical NIC on the host, not only the datapath's targets.
-  A NIC caught mid-unbind or mid-hotplug crash-loops both pods until its
-  driver is bound or it is gone.
+- **Unknown state fails startup.** A target interface that doesn't exist, a
+  target NIC whose driver can't be read, or any NIC whose driver link exists
+  but can't be read, stops the process at startup with the reason in the
+  error. None of them ever settles the mode by omission.
+- **A NIC with no driver at all is skipped.** That happens while a driver
+  unbinds. If the NIC isn't one of the datapath's targets it carries no
+  driver traffic, so it is left out of the decision with a warning naming
+  it.
 - **The decision is logged.** Each process logs
   `Selected the XDP attach mode for this host` with `mode` and `reason`. The
   reason names the matching NICs.
 - **The mode is fixed for the life of the process.** A NIC hot-added later
   doesn't change it, so restart both pods after adding one.
 - **The latest decision is recorded on the host.** Each dispatch-mode process
-  records the mode it selected in a pinned record beside the dispatcher
-  (`/sys/fs/bpf/galactic-xdp/host_mode`). A process whose mode no longer
+  that attaches records the mode it selected in a pinned record beside the
+  dispatcher (`/sys/fs/bpf/galactic-xdp/host_mode`). A datapath being turned
+  off only clears its slots and records nothing. A process whose mode no longer
   matches the record doesn't move a link back. It logs the error, reports its
   interfaces uncovered, and stays not-ready until it is restarted. Two
   processes that disagree therefore never move one link back and forth.

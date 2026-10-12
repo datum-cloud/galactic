@@ -98,6 +98,9 @@ type Decision struct {
 	Drivers map[string]string
 	// Reason says, in a sentence for a log line, why Mode was chosen.
 	Reason string
+	// Skipped lists physical NICs left out because their driver link was
+	// gone, as while a driver unbinds, each with why. None is a target.
+	Skipped []string
 }
 
 // sysClassNet is where Select reads interfaces and their drivers from.
@@ -107,10 +110,13 @@ var sysClassNet = "/sys/class/net"
 
 // Select decides the host's attach mode from the drivers of its physical NICs
 // in sysfs. required lists the interfaces the caller is about to attach to;
-// one that does not exist fails the decision, as does a physical NIC whose
-// driver cannot be read, so neither ever settles a mode by omission. An
-// interface with no device link, such as a bond master, a veth or a VLAN, is
-// virtual and has no driver of its own to consider.
+// one that does not exist fails the decision, as does a required NIC whose
+// driver cannot be read, or any NIC whose driver link exists but cannot be
+// read, so none of them ever settles a mode by omission. A NIC that is not a
+// target and has no driver link at all, as while its driver unbinds, carries
+// no driver traffic; it is left out and listed in Skipped. An interface with
+// no device link, such as a bond master, a veth or a VLAN, is virtual and has
+// no driver of its own to consider.
 func Select(required ...string) (Decision, error) {
 	entries, err := os.ReadDir(sysClassNet)
 	if err != nil {
@@ -118,12 +124,17 @@ func Select(required ...string) (Decision, error) {
 	}
 	present := make(map[string]bool, len(entries))
 	drivers := map[string]string{}
-	var errs []error
+	var (
+		errs    []error
+		skipped []string
+	)
 	for _, e := range entries {
 		name := e.Name()
 		present[name] = true
 		driver, physical, err := interfaceDriver(name)
 		switch {
+		case err != nil && errors.Is(err, os.ErrNotExist) && !slices.Contains(required, name):
+			skipped = append(skipped, err.Error())
 		case err != nil:
 			errs = append(errs, err)
 		case physical:
@@ -138,7 +149,9 @@ func Select(required ...string) (Decision, error) {
 	if len(errs) > 0 {
 		return Decision{}, errors.Join(errs...)
 	}
-	return decide(drivers), nil
+	d := decide(drivers)
+	d.Skipped = skipped
+	return d, nil
 }
 
 // interfaceDriver returns name's driver and whether it is a physical NIC,
