@@ -65,8 +65,10 @@ type natDatapath struct {
 	// ones whose forwarding sysctls have been applied.
 	uplinks    []string
 	configured map[string]bool
-	// missing is the resolved uplinks the datapath does not cover.
-	missing []string
+	// missing is the resolved uplinks the datapath does not cover, and
+	// coverageUplinks the uplink set missing was computed against.
+	missing         []string
+	coverageUplinks []string
 	// nat64 is whether the programmed identity serves NAT64, which an uplink
 	// found later needs IPv4 forwarding for, as Program gives the rest.
 	nat64 bool
@@ -96,10 +98,20 @@ func (d *natDatapath) Uplinks() []string {
 	return slices.Clone(d.uplinks)
 }
 
-// setMissing records missing, reporting whether it changed.
-func (d *natDatapath) setMissing(missing []string) bool {
+// Coverage reports the uplinks the latest coverage pass checked and the ones
+// among them the datapath misses, read together so the two always agree.
+func (d *natDatapath) Coverage() (uplinks, missing []string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return slices.Clone(d.coverageUplinks), slices.Clone(d.missing)
+}
+
+// setCoverage records missing as the uplinks the datapath misses among
+// uplinks, reporting whether missing changed.
+func (d *natDatapath) setCoverage(uplinks, missing []string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.coverageUplinks = slices.Clone(uplinks)
 	if slices.Equal(d.missing, missing) {
 		return false
 	}
@@ -283,6 +295,7 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 		d.configured[iface] = true
 	}
 	d.uplinks = uplinks
+	d.coverageUplinks = uplinks
 
 	objs, err := natattach.Load(natattach.PinDir)
 	if err != nil {
@@ -491,7 +504,7 @@ func (d *natDatapath) watchUplinks(ctx context.Context, override []string, cover
 
 		missing := uncovered(uplinks, cover(ready))
 
-		if !d.setMissing(missing) {
+		if !d.setCoverage(uplinks, missing) {
 			return
 		}
 		switch {

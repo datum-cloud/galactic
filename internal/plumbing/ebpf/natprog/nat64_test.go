@@ -158,11 +158,13 @@ func TestNat64Forward_TranslatesIPv6ToIPv4(t *testing.T) {
 	pkt := buildEncappedUDPPacket(t, sidWithArgument(shardSID, 0x123), backendUSID,
 		backendAddr, destAddr, payload)
 
+	before := trafficSnapshot(t, objs)
 	ret, out, err := objs.NatIngress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
 	assertLeftFromDatapath(t, ret)
+	assertTranslatedDelta(t, objs, before, TrafficFamilyNAT64, TrafficDirectionOutbound, ret, out)
 
 	if got := binary.BigEndian.Uint16(out[12:14]); got != 0x0800 {
 		t.Fatalf("ethertype = %#04x, want 0x0800 -- an IPv4 packet behind an IPv6 EtherType is "+
@@ -263,10 +265,12 @@ func TestNat64Return_TranslatesIPv4BackAndReencapsulates(t *testing.T) {
 
 	replyPkt := buildIPv4UDPPacket(t, shardPub4, peer4, encappedDstPort, masqPort, []byte("reply"))
 
+	before := trafficSnapshot(t, objs)
 	ret, out, err := objs.NatIngress.Test(replyPkt)
 	if err != nil {
 		t.Fatalf("return program test-run: %v", err)
 	}
+	assertTranslatedDelta(t, objs, before, TrafficFamilyNAT64, TrafficDirectionReturn, ret, out)
 	// Same as the NAT66 return leg: push_outer_header's FIB lookup against a
 	// synthetic backend uSID cannot resolve on a test host, so the packet is
 	// fully translated and then dropped at the last step.

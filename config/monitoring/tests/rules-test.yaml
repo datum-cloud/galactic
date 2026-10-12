@@ -670,9 +670,8 @@ tests:
               summary: "galactic-nat metrics on dfw-worker2 cannot be scraped"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatmetricsdown"
               description: >-
-                Prometheus cannot reach galactic-nat's metrics port on dfw-worker2 (9182), so
-                GalacticNatSessionTableEvictingLive, GalacticNatPortExhausted and GalacticNatUplinkRxQueueStalled
-                cannot fire for it.
+                Prometheus cannot reach galactic-nat's metrics port on dfw-worker2 (9182), so no other
+                galactic-nat alert can fire for it.
 
   # Hashed egress, NAT66 class: the node's only shard becomes unreachable at
   # 5m. GalacticEgressPoolEmpty fires after 2m, BelowMinimum after 10m. The
@@ -1170,3 +1169,138 @@ tests:
                 The fabric-api sidecar on dfw-worker holds routes but has not been in sync with bgpd's
                 Loc-RIB for 15 minutes, so its AS-path and community searches are refused. bgpd's BMP session to
                 the sidecar (bmp targets fabric-api, 127.0.0.1:9348) is down or has not completed its initial table.
+
+  # Turned on and unprogrammed for 10m fires. A turned-off shard and a
+  # programmed one do not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_nat_datapath_enabled{job="galactic-nat",node="dfw-worker2"}'
+        values: "1x30"
+      - series: 'galactic_nat_programmed{job="galactic-nat",node="dfw-worker2"}'
+        values: "0x30"
+      - series: 'galactic_nat_datapath_enabled{job="galactic-nat",node="dfw-worker3"}'
+        values: "0x30"
+      - series: 'galactic_nat_programmed{job="galactic-nat",node="dfw-worker3"}'
+        values: "0x30"
+      - series: 'galactic_nat_datapath_enabled{job="galactic-nat",node="sjc-worker2"}'
+        values: "1x30"
+      - series: 'galactic_nat_programmed{job="galactic-nat",node="sjc-worker2"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GalacticNatNotProgrammed
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GalacticNatNotProgrammed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-nat
+              node: dfw-worker2
+            exp_annotations:
+              summary: "The egress shard on dfw-worker2 is running but not programmed"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatnotprogrammed"
+              description: >-
+                galactic-nat on dfw-worker2 has been turned on for 10 minutes without an EgressShard identity
+                to translate with, so it claims no packet. Check that an EgressShard targets the node and what its
+                status conditions say.
+
+  # One uplink uncovered for 10m fires; the covered one does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_nat_uplink_covered{job="galactic-nat",node="dfw-worker2",interface="eth1"}'
+        values: "1x30"
+      - series: 'galactic_nat_uplink_covered{job="galactic-nat",node="dfw-worker2",interface="eth2"}'
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GalacticNatUplinkUncovered
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: galactic-nat
+              node: dfw-worker2
+              interface: eth2
+            exp_annotations:
+              summary: "The egress shard on dfw-worker2 does not translate on uplink eth2"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkuncovered"
+              description: >-
+                galactic-nat on dfw-worker2 has not covered uplink eth2 for 10 minutes, so
+                packets arriving on it leave untranslated. The shard's log names why it cannot attach there.
+
+  # dfw-worker2 drops 2 packets a second against 100 translated, about 2%,
+  # and fires after 15m. sjc-worker2 drops half of a trickle, under the
+  # volume floor. iad-worker2 drops many unsolicited return packets, which are
+  # not tenant traffic, and fires nothing.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_nat_packets_total{job="galactic-nat",node="dfw-worker2",family="nat66",direction="outbound",action="redirect"}'
+        values: "0+3000x60"
+      - series: 'galactic_nat_drops_total{job="galactic-nat",node="dfw-worker2",reason="nat66_pat_exhausted"}'
+        values: "0+60x60"
+      - series: 'galactic_nat_packets_total{job="galactic-nat",node="sjc-worker2",family="nat66",direction="outbound",action="redirect"}'
+        values: "0+30x60"
+      - series: 'galactic_nat_drops_total{job="galactic-nat",node="sjc-worker2",reason="nat66_malformed_forward"}'
+        values: "0+30x60"
+      - series: 'galactic_nat_packets_total{job="galactic-nat",node="iad-worker2",family="nat66",direction="outbound",action="redirect"}'
+        values: "0+3000x60"
+      - series: 'galactic_nat_drops_total{job="galactic-nat",node="iad-worker2",reason="nat66_no_return_conn"}'
+        values: "0+3000x60"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GalacticNatForwardDropRatio
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: GalacticNatForwardDropRatio
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker2
+            exp_annotations:
+              summary: "The egress shard on dfw-worker2 drops 1.961% of its traffic"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatforwarddropratio"
+              description: >-
+                galactic-nat on dfw-worker2 has dropped 1.961% of the packets it
+                owned, tenant traffic and replies to it, for 15 minutes. galactic_nat_drops_total by reason shows
+                which check refuses them.
+
+  # Compute nodes send to dfw-worker2's shard SID throughout, but it translates
+  # nothing outbound, and fires after 10m. sjc-worker2's shard translates what
+  # it is sent.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_nat_info{job="galactic-nat",node="dfw-worker2",shard_sid="fc00:1:2::",nat64_prefix="",xdp_attach="dispatch",version="v1"}'
+        values: "1x50"
+      - series: 'galactic_nat_packets_total{job="galactic-nat",node="dfw-worker2",family="nat66",direction="outbound",action="redirect"}'
+        values: "0x50"
+      - series: 'galactic_cni_egress_shard_packets_total{job="galactic-cni",node="dfw-worker",shard_sid="fc00:1:2::",class="nat66"}'
+        values: "0+300x50"
+      - series: 'galactic_nat_info{job="galactic-nat",node="sjc-worker2",shard_sid="fc00:2:2::",nat64_prefix="",xdp_attach="dispatch",version="v1"}'
+        values: "1x50"
+      - series: 'galactic_nat_packets_total{job="galactic-nat",node="sjc-worker2",family="nat66",direction="outbound",action="redirect"}'
+        values: "0+300x50"
+      - series: 'galactic_cni_egress_shard_packets_total{job="galactic-cni",node="sjc-worker",shard_sid="fc00:2:2::",class="nat66"}'
+        values: "0+300x50"
+    alert_rule_test:
+      - eval_time: 22m
+        alertname: GalacticNatNotTranslating
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              node: dfw-worker2
+              shard_sid: "fc00:1:2::"
+            exp_annotations:
+              summary: "The egress shard on dfw-worker2 translates nothing while tenants send to it"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatnottranslating"
+              description: >-
+                Compute nodes have encapsulated tenant traffic toward fc00:1:2:: for 10 minutes, but the
+                shard on dfw-worker2 translated none of it outbound. Check galactic_nat_uplink_covered,
+                galactic_nat_datapath_attached and the shard's XDP attachment.

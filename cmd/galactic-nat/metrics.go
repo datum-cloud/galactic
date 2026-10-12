@@ -18,6 +18,13 @@ import (
 
 const metricsNamespace = "galactic_nat"
 
+// labelFamily is the label carrying an address family, familyNAT66 or
+// familyNAT64.
+const labelFamily = "family"
+
+// trafficLabels label the translated-traffic series.
+var trafficLabels = []string{labelFamily, "direction", "action"}
+
 // natCollector reads this shard's live map state at every scrape: drops by
 // reason, connection-table rows by address family, and live sessions by family
 // and protocol. It is a pull-based collector like the other datapaths',
@@ -27,6 +34,7 @@ type natCollector struct {
 	connTable      *natmap.ConnTable
 	connMaxEntries uint32
 	dropReasons    natmap.DropReasonsReader
+	traffic        natmap.TrafficReader
 
 	// now reads the clock the datapath stamps last_seen with. Nil means
 	// datapathNow.
@@ -51,6 +59,7 @@ func newNatCollector(objs *natprog.NatObjects) *natCollector {
 		connTable:      natmap.NewConnTable(natmap.KernelTable{Map: objs.NatConnTable}),
 		connMaxEntries: mapMaxEntries(objs.NatConnTable),
 		dropReasons:    objs.DropReasons,
+		traffic:        objs.NatTraffic,
 	}
 }
 
@@ -68,13 +77,13 @@ var (
 		"Rows in this shard's nat_conn_table, by address family, expired sessions included: "+
 			"a session holds two rows, and an expired one keeps them until the LRU evicts them or a "+
 			"new claim reuses its port. See galactic_nat_sessions for live sessions.",
-		[]string{"family"}, nil,
+		[]string{labelFamily}, nil,
 	)
 	sessionsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(metricsNamespace, "", "sessions"),
 		"Live sessions in this shard's nat_conn_table, by address family and protocol: sessions "+
 			"within their idle timeout, one per session. Expired sessions are not counted.",
-		[]string{"family", "proto"}, nil,
+		[]string{labelFamily, "proto"}, nil,
 	)
 	oldestRowAgeDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(metricsNamespace, "", "conn_table_oldest_row_age_seconds"),
@@ -90,6 +99,20 @@ var (
 		"Capacity of nat_conn_table in rows.",
 		nil, nil,
 	)
+	packetsDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "", "packets_total"),
+		"Packets this shard translated and queued for transmit, by address family, direction (outbound: tenant "+
+			"to internet, return: internet to tenant) and action (redirect: out another interface, tx: out the "+
+			"interface it arrived on). Packets the shard generates itself, such as Packet Too Big, and packets it "+
+			"passes on unclaimed are not counted.",
+		trafficLabels, nil,
+	)
+	bytesDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "", "bytes_total"),
+		"Bytes of the packets in galactic_nat_packets_total: the translated packet's IP header and payload, "+
+			"without the Ethernet header or the SRv6 outer header a return packet carries.",
+		trafficLabels, nil,
+	)
 	dropsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(metricsNamespace, "", "drops_total"),
 		"Packets dropped by this shard's datapath, by reason (drop_reasons map).",
@@ -104,6 +127,8 @@ func (c *natCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- oldestRowAgeDesc
 	ch <- connTableMaxEntriesDesc
 	ch <- dropsDesc
+	ch <- packetsDesc
+	ch <- bytesDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -111,6 +136,7 @@ func (c *natCollector) Collect(ch chan<- prometheus.Metric) {
 	c.collectConns(ch)
 	c.collectConnTableMaxEntries(ch)
 	c.collectDrops(ch)
+	c.collectTraffic(ch)
 }
 
 // Family label values, one per address family a shard translates.
@@ -198,7 +224,7 @@ func (c *natCollector) collectDrops(ch chan<- prometheus.Metric) {
 	}
 	totals, err := natmap.DropReasonTotals(c.dropReasons)
 	if err != nil {
-		ch <- prometheus.NewInvalidMetric(dropsDesc, fmt.Errorf("read drop_reasons: %w", err))
+		slog.Warn("cannot read drop_reasons; skipping drop metrics", "err", err)
 		return
 	}
 	for i, total := range totals {
@@ -207,5 +233,42 @@ func (c *natCollector) collectDrops(ch chan<- prometheus.Metric) {
 			name = fmt.Sprintf("unknown_%d", i)
 		}
 		ch <- prometheus.MustNewConstMetric(dropsDesc, prometheus.CounterValue, float64(total), name)
+	}
+}
+
+// collectTraffic reports every family, direction and action, zero included.
+func (c *natCollector) collectTraffic(ch chan<- prometheus.Metric) {
+	if c.traffic == nil {
+		return
+	}
+	// Skipped rather than reported as an invalid metric, which the metrics
+	// server turns into a failed scrape of every other series.
+	totals, err := natmap.TrafficTotals(c.traffic)
+	if err != nil {
+		slog.Warn("cannot read nat_traffic; skipping translated traffic metrics", "err", err)
+		return
+	}
+	families := []struct {
+		id    uint32
+		label string
+	}{{natprog.TrafficFamilyNAT66, familyNAT66}, {natprog.TrafficFamilyNAT64, familyNAT64}}
+	directions := []struct {
+		id    uint32
+		label string
+	}{{natprog.TrafficDirectionOutbound, "outbound"}, {natprog.TrafficDirectionReturn, "return"}}
+	actions := []struct {
+		id    uint32
+		label string
+	}{{natprog.TrafficActionRedirect, "redirect"}, {natprog.TrafficActionTX, "tx"}}
+	for _, f := range families {
+		for _, d := range directions {
+			for _, a := range actions {
+				t := totals[natprog.TrafficSlot(f.id, d.id, a.id)]
+				ch <- prometheus.MustNewConstMetric(packetsDesc, prometheus.CounterValue, float64(t.Packets),
+					f.label, d.label, a.label)
+				ch <- prometheus.MustNewConstMetric(bytesDesc, prometheus.CounterValue, float64(t.Bytes),
+					f.label, d.label, a.label)
+			}
+		}
 	}
 }

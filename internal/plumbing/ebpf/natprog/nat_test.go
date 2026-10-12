@@ -328,11 +328,13 @@ func TestNatIngress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	pkt := buildEncappedUDPPacket(t, netip.AddrFrom16(shardSIDWithArg), backendUSID,
 		backendAddr, destAddr, payload)
 
+	before := trafficSnapshot(t, objs)
 	ret, out, err := objs.NatIngress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
 	assertLeftFromDatapath(t, ret)
+	assertTranslatedDelta(t, objs, before, TrafficFamilyNAT66, TrafficDirectionOutbound, ret, out)
 
 	// The decapsulated frame must still carry a real link header. Widening the
 	// head past it and reclaiming 14 bytes exposes the old packet's bytes at
@@ -561,10 +563,12 @@ func TestNatIngress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 	// Now the reply: from destAddr:destPort, to shardPub:masqPort.
 	replyPkt := buildUDPPacket(t, shardPub, destAddr, destPort, masqPort, []byte("reply"))
 
+	before := trafficSnapshot(t, objs)
 	ret, out, err := objs.NatIngress.Test(replyPkt)
 	if err != nil {
 		t.Fatalf("return program test-run: %v", err)
 	}
+	assertTranslatedDelta(t, objs, before, TrafficFamilyNAT66, TrafficDirectionReturn, ret, out)
 	if ret != xdpDrop {
 		t.Fatalf("verdict = %d, want XDP_DROP (%d) (FIB lookup against a synthetic backend uSID must "+
 			"fail, not succeed, on this test host)", ret, xdpDrop)
