@@ -163,7 +163,9 @@ func TestNetworkRuleBindingReconciler_SameNodeBackendsGetOwnBindings(t *testing.
 
 func TestNetworkRuleBindingReconciler_RemovesFilteredBackend(t *testing.T) {
 	rule := newBindingTestRule()
-	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef, testBackendAddr, "fd00:10::2"))
+	otherVPC := newBackendAttachment("other-vpc", testBackendAddr)
+	otherVPC.Name = "other-vpc"
+	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef, testBackendAddr, "fd00:10::2"), otherVPC)
 	reconcileBindings(t, r)
 	if got := backendAddresses(listBindings(t, c)); strings.Join(got, ",") != testBackendAddr+",fd00:10::2" {
 		t.Fatalf("initial bindings = %v, want both backends", got)
@@ -171,6 +173,7 @@ func TestNetworkRuleBindingReconciler_RemovesFilteredBackend(t *testing.T) {
 
 	current := getBindingRule(t, c)
 	allowed := []string{"fd00:10::2"}
+	current.Spec.BackendSelector = metav1.LabelSelector{}
 	current.Spec.BackendAddresses = &allowed
 	if err := c.Update(context.Background(), current); err != nil {
 		t.Fatalf("update rule: %v", err)

@@ -124,7 +124,8 @@ func TestSelectRuleBackends_DropsConflictingBackends(t *testing.T) {
 func TestRuleCandidateBackends_BackendAddresses(t *testing.T) {
 	rule := newTestRule(testRuleName, testVPCRef, testVIP)
 	selected := newBackendAttachment(testVPCRef, "fd00:10::1", "fd00:10::2")
-	otherVPC := newBackendAttachment("other-vpc", "fd00:10::3")
+	otherVPC := newBackendAttachment("other-vpc", "fd00:10::2", "fd00:10::3")
+	otherVPC.Name = "other-vpc"
 	attachments := []*cloudv1alpha1.VPCAttachment{selected, otherVPC}
 
 	check := func(want ...string) {
@@ -135,6 +136,9 @@ func TestRuleCandidateBackends_BackendAddresses(t *testing.T) {
 		}
 		got := make([]string, 0, len(backends))
 		for _, b := range backends {
+			if b.attachment.Name == otherVPC.Name {
+				t.Errorf("selected backend %s from another VPC", b)
+			}
 			got = append(got, b.addr.String())
 		}
 		if !slices.Equal(got, want) {
@@ -145,12 +149,17 @@ func TestRuleCandidateBackends_BackendAddresses(t *testing.T) {
 	check("fd00:10::1", "fd00:10::2") // omitted: selector-only behavior
 	allowed := []string{"fd00:10::2", "fd00:10::3"}
 	rule.Spec.BackendAddresses = &allowed
-	check("fd00:10::2") // no cross-VPC selection
+	rule.Spec.BackendSelector = metav1.LabelSelector{}
+	check("fd00:10::2") // same address in another VPC still cannot be selected
 	allowed = []string{}
-	check() // explicit empty: no backends
+	check() // explicit empty with no selector: no backends
 	allowed = []string{"not-an-ip"}
 	if _, _, err := ruleCandidateBackends(rule, attachments); err == nil {
 		t.Error("invalid address: want an error")
+	}
+	rule.Spec.BackendAddresses = nil
+	if _, _, err := ruleCandidateBackends(rule, attachments); err == nil {
+		t.Error("empty selector without backendAddresses: want an error")
 	}
 }
 

@@ -1005,6 +1005,25 @@ func TestNetworkGatewayReconciler_EmptyBackendAddressesWithdrawsRule(t *testing.
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(rule), current); err != nil {
 		t.Fatalf("get rule: %v", err)
 	}
+	allowed := []string{testBackendAddr}
+	current.Spec.BackendSelector = metav1.LabelSelector{}
+	current.Spec.BackendAddresses = &allowed
+	if err := c.Update(context.Background(), current); err != nil {
+		t.Fatalf("update rule with address-only backends: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile with address-only backends: %v", err)
+	}
+	if len(engine.lastDesired.Rules) != 1 {
+		t.Fatalf("address-only desired rules = %+v, want the rule", engine.lastDesired.Rules)
+	}
+	if err := c.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
+		t.Fatalf("get advertisement with address-only backends: %v", err)
+	}
+
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(rule), current); err != nil {
+		t.Fatalf("get rule before withdrawal: %v", err)
+	}
 	empty := []string{}
 	current.Spec.BackendAddresses = &empty
 	if err := c.Update(context.Background(), current); err != nil {

@@ -174,8 +174,8 @@ func selectRuleBackends(
 	return sel, nil
 }
 
-// ruleCandidateBackends returns every backend rule's BackendSelector picks
-// from attachments, whatever other rules select, sorted by address, and the
+// ruleCandidateBackends returns every backend selected by the rule from
+// attachments, whatever other rules select, sorted by address, and the
 // selected attachments that are not backends yet, as "namespace/name: reason".
 // See selectRuleBackends for which attachments qualify.
 func ruleCandidateBackends(
@@ -384,12 +384,16 @@ func ruleTranslatedVIP(rule *bgpv1alpha1.NetworkRule) (netip.Addr, bool, error) 
 }
 
 // ruleBackendSelector converts rule's BackendSelector to a labels.Selector.
-// The CRD rejects an empty selector; this rejects one anyway, since an empty
-// selector would otherwise match every attachment in the VPC.
+// An empty selector matches all attachments only when BackendAddresses is
+// explicitly set; ruleCandidateBackends still requires each attachment's
+// authoritative status.vpc to equal the rule's VPCRef before address matching.
 func ruleBackendSelector(rule *bgpv1alpha1.NetworkRule) (labels.Selector, error) {
 	sel := rule.Spec.BackendSelector
 	if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
-		return nil, errors.New("backendSelector is empty")
+		if rule.Spec.BackendAddresses == nil {
+			return nil, errors.New("backendSelector is empty and backendAddresses is unset")
+		}
+		return labels.Everything(), nil
 	}
 	selector, err := metav1.LabelSelectorAsSelector(&sel)
 	if err != nil {
