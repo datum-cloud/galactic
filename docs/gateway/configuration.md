@@ -735,10 +735,11 @@ Deleting a rule removes its series. There is no `vpc_attachment` label,
 since a rule's backends can span many VPCAttachments.
 
 Confirm the eBPF program is actually attached to the node's public
-interface — `edgeattach.Attach` requests **native XDP driver mode only**
-(never generic/SKB mode), so a plain `ip -d link show dev <public-interface>`
-on the node itself should show an attached `xdp` program if this step
-succeeded; the pod-level checks above (healthy gRPC health status, nonzero
+interface. `edgeattach.Attach` requests the host's XDP mode, native unless a
+NIC on the host uses `bnxt_en` (see [XDP attach mode](../xdp-attach-mode.md)),
+so a plain `ip -d link show dev <public-interface>` on the node itself should
+show an attached `xdp` program, or `xdpgeneric` on a `bnxt_en` host, if this
+step succeeded; the pod-level checks above (healthy gRPC health status, nonzero
 metrics) are the primary signal and don't require node-level `ip`/`bpftool`
 access.
 

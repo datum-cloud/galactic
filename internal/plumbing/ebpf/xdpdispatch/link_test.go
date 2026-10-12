@@ -17,6 +17,8 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/vishvananda/netlink"
+
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 // testPinDir returns a fresh per-test pin directory under /sys/fs/bpf.
@@ -77,7 +79,7 @@ func attachedProgID(t *testing.T, ifindex int) uint32 {
 
 func openDispatcher(t *testing.T, dir string) *Dispatcher {
 	t.Helper()
-	d, err := Open(context.Background(), dir)
+	d, err := Open(context.Background(), dir, xdpmode.Native)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -183,7 +185,7 @@ func TestEnsureLink_SurvivesTheOwnerClosing(t *testing.T) {
 	dir := testPinDir(t)
 	ifindex := testVeth(t, "xdpa")
 
-	gateway, err := Open(context.Background(), dir)
+	gateway, err := Open(context.Background(), dir, xdpmode.Native)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -467,7 +469,7 @@ func TestOpen_RefusesAnotherABI(t *testing.T) {
 	if err := d.maps.DispatchMeta.Put(metaKeyABI, uint64(ABIVersion+1)); err != nil {
 		t.Fatalf("write ABI: %v", err)
 	}
-	if _, err := Open(context.Background(), dir); !errors.Is(err, ErrIncompatibleLayout) {
+	if _, err := Open(context.Background(), dir, xdpmode.Native); !errors.Is(err, ErrIncompatibleLayout) {
 		t.Errorf("Open over another ABI = %v, want ErrIncompatibleLayout", err)
 	}
 }
@@ -656,7 +658,7 @@ func TestOpen_UpgradeSkipsADefunctLink(t *testing.T) {
 		t.Fatalf("create stray entry: %v", err)
 	}
 
-	upgraded, err := Open(context.Background(), dir)
+	upgraded, err := Open(context.Background(), dir, xdpmode.Native)
 	if err != nil {
 		t.Fatalf("Open with a defunct link pinned: %v", err)
 	}

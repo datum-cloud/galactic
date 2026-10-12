@@ -149,8 +149,10 @@ galactic/
 │       │                     #   vip_table/vip_stats_table/drop_reasons live
 │       ├── edgepreflight/    # Startup kernel-capability check for this
 │       │                     #   datapath's own requirement list
-│       └── xdpattach/        # Bond-safe native XDP attach, shared with
-│                             #   natattach (support check + slave wait)
+│       ├── xdpattach/        # Bond-safe XDP attach, shared with
+│       │                     #   natattach (support check + slave wait)
+│       └── xdpmode/          # Per-host XDP attach mode (generic on
+│                             #   bnxt_en hosts, native otherwise)
 ├── config/
 │   ├── galactic-gateway/
 │   │   ├── serviceaccount.yaml  # Applied cluster-wide, idempotent
@@ -381,7 +383,7 @@ datapath ever pushed — found via live-kernel investigation, not
 
 ### Sharing the XDP hook (`xdpdispatch`)
 
-An interface takes one native XDP program, and `galactic-nat`'s egress shard
+An interface takes one XDP program, and `galactic-nat`'s egress shard
 can run on the same edge nodes, needing the same interfaces: tenant egress
 arrives on the compute-facing bond (`edge_return`'s) and its replies on the
 public uplink (`edge_lb`'s). Neither binary owns the hook. The node's shared
@@ -409,6 +411,12 @@ datapath runs from its own slot.
   refuses to start while another datapath's slot is live there.
   Attached directly, the programs hold their own empty copies of the
   dispatcher maps, so every unclaimed packet passes to the kernel.
+- The dispatcher attaches in the host's XDP mode (`xdpmode`, see
+  [docs/xdp-attach-mode.md](../xdp-attach-mode.md)): generic on a host with a
+  `bnxt_en` NIC (#673), native elsewhere. `Linked` and `Coverage` read the
+  mode back from the kernel, and `EnsureLink` migrates a pinned link left in
+  the other mode, under the dispatch lock and the bond guards, keeping every
+  map, slot, lease and role row.
 - `GALACTIC_GATEWAY_DATAPATH_ENABLED=false` loads nothing, empties the
   gateway's slots, and makes `NetworkGatewayReconciler` withdraw this
   node's VIP advertisements and report `DatapathDisabled`.
@@ -532,8 +540,9 @@ DaemonSet mounts the host's `/proc/sys/net` at `/host/proc/sys/net` and
 points `GALACTIC_GATEWAY_PROC_SYS_PATH` at `/host/proc/sys` so the write
 can succeed without `privileged`. It then loads `edgeprog.EdgedsrObjects`
 (`edgeattach.Load`), attaches it to every
-resolved target (`edgeattach.Attach` — native XDP driver mode only, no
-generic/SKB-mode fallback, one `link.Link` per target), and constructs a
+resolved target (`edgeattach.Attach`, in the host's XDP mode from
+`xdpmode.Select`, with no fallback to the other mode, one `link.Link` per
+target), and constructs a
 `gateway.KernelDatapath` over it, writing this node's SRv6 encap-source
 address into `encap_config_table` once at construction time.
 
@@ -676,10 +685,11 @@ pod on that node is not a supported configuration.
 | `internal/maglev` (`table.go`)                          | galactic-gateway | Pure-Go Maglev consistent-hash lookup table (`New`/`Lookup`/`Backends`) — one `*Table` built per ring; this binary's only importer today (`galactic-nat` has no analogous shard-placement ring — see Known Constraints)                                         | No                                   |
 | `internal/plumbing/ebpf/edgeprog`                       | galactic-gateway | Compiled XDP program (`edgedsr.c`, program `edge_lb`) + bpf2go-generated Go bindings (`EdgedsrObjects`)                                                                                                                                                         | No                                   |
 | `internal/plumbing/ebpf/edgemap`                        | galactic-gateway | `VIPTable`: `vip_table`/`vip_stats_table`/`vip_addr_table` read/write API, `Generation`/`Reconcile` crash-safety mechanism                                                                                                                                      | Yes (via `KernelTable`)              |
-| `internal/plumbing/ebpf/edgeattach`                     | galactic-gateway | Load + native-XDP-only attach of the compiled program to one interface                                                                                                                                                                                          | Yes (pinned maps, held link)         |
+| `internal/plumbing/ebpf/edgeattach`                     | galactic-gateway | Load + attach, in the host's XDP mode, of the compiled program to one interface                                                                                                                                                                                 | Yes (pinned maps, held link)         |
 | `internal/plumbing/ebpf/edgemetrics`                    | galactic-gateway | Pull-based `prometheus.Collector` reading `vip_table`/`vip_stats_table`/`drop_reasons` live at every scrape                                                                                                                                                     | No                                   |
 | `internal/plumbing/ebpf/edgepreflight`                  | galactic-gateway | Startup kernel-capability check (`BPF_PROG_TYPE_XDP`, `BPF_MAP_TYPE_HASH`, kernel BTF, `bpf_xdp_adjust_head`) — no partial pass, no degraded fallback                                                                                                           | No                                   |
-| `internal/plumbing/ebpf/xdpattach`                      | gateway, nat     | Native-XDP attach across a target list, shared with `natattach`: per-NIC support check before any attach, each bond slave waited back into its aggregate before the next                                                                                        | No                                   |
+| `internal/plumbing/ebpf/xdpattach`                      | gateway, nat     | XDP attach across a target list in one mode, read back from the kernel for coverage, shared with `natattach`: per-NIC native-support check before any native attach, each bond slave waited back into its aggregate before the next                             | No                                   |
+| `internal/plumbing/ebpf/xdpmode`                        | gateway, nat     | `Select`: the host's XDP attach mode from its NIC drivers in sysfs, generic when any NIC uses `bnxt_en` (#673), native otherwise; fails on a missing target or an unreadable driver                                                                             |                                      |
 
 ---
 
@@ -813,11 +823,14 @@ pod on that node is not a supported configuration.
   list is never mistaken for an orphan. `vip_table` state (not a kernel
   interface) is the only thing this design can leak on a crash — DSR keeps
   no flow/conntrack state at all to garbage-collect beyond that.
-- **Native XDP only, no generic-mode fallback.** `edgeattach.Attach` always
-  requests `link.XDPDriverMode` and errors rather than silently retrying in
-  `link.XDPGenericMode` (SKB mode) if the interface's driver doesn't
-  support it — accepting generic mode silently would defeat the reason
-  this design chose XDP over TC-BPF in the first place.
+- **One XDP mode per host, never a fallback.** Native (driver) mode is the
+  default, since it is why this design chose XDP over TC-BPF. A host with
+  any `bnxt_en` NIC runs every Galactic XDP attachment in generic (SKB) mode
+  instead, because native redirect on that driver stalls receive queues
+  (#673). `xdpmode.Select` decides once per process from sysfs, and every
+  attach requests that mode explicitly and errors rather than retrying in the
+  other. See [docs/xdp-attach-mode.md](../xdp-attach-mode.md) for the
+  performance cost and rollback.
 - **`galactic-router` carries no gateway-role code anymore.** Splitting the
   edge gateway out of `galactic-router` into its own binary means a crash
   in the XDP-loading, BPF/PERFMON-capable container never takes down the
