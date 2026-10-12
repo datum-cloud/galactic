@@ -190,3 +190,15 @@ func TestResolveBGPLocalAddress(t *testing.T) {
 		}
 	})
 }
+
+// TestServiceRouteControllerEnabled covers #834: a route reflector has no
+// service route maps, so it must not run the node-local controller.
+func TestServiceRouteControllerEnabled(t *testing.T) {
+	for _, reflector := range []bool{false, true} {
+		cfg := config.NewRouterConfig()
+		cfg.Reflector = reflector
+		if got, want := serviceRouteControllerEnabled(cfg), !reflector; got != want {
+			t.Errorf("serviceRouteControllerEnabled(reflector=%t) = %t, want %t", reflector, got, want)
+		}
+	}
+}

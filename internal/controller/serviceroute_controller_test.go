@@ -7,8 +7,11 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +35,7 @@ const (
 
 type retryRouteProgrammer struct {
 	initializeCalls    int
+	initializeErrs     []error
 	applyCalls         int
 	cleanupCalls       int
 	removeCalls        int
@@ -46,7 +50,12 @@ type retryRouteProgrammer struct {
 
 func (p *retryRouteProgrammer) Initialize() error {
 	p.initializeCalls++
-	return nil
+	if len(p.initializeErrs) == 0 {
+		return nil
+	}
+	err := p.initializeErrs[0]
+	p.initializeErrs = p.initializeErrs[1:]
+	return err
 }
 
 func (p *retryRouteProgrammer) Apply(intent serviceroute.RouteIntent) error {
@@ -422,5 +431,74 @@ func TestServiceRouteSIDResolverRejectsWrongRouterNode(t *testing.T) {
 	}
 	if _, err := reconciler.sidResolver(context.Background())(attachment); err == nil {
 		t.Fatal("resolve SID succeeded for a router targeting the wrong node")
+	}
+}
+
+// TestServiceRouteStartupSyncBacksOffWhileMapsMissing covers #834: a node
+// whose service route maps are not pinned must back off between startup sync
+// attempts instead of retrying every second.
+func TestServiceRouteStartupSyncBacksOffWhileMapsMissing(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := networkv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := cloudv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	missing := fmt.Errorf("serviceroutemap: open service_route_table: %w", fs.ErrNotExist)
+
+	tests := []struct {
+		name      string
+		failures  int
+		stopAfter int
+		wantWaits []time.Duration
+		wantInits int
+	}{
+		{
+			name:      "maps appear after three attempts",
+			failures:  3,
+			wantWaits: []time.Duration{time.Second, 2 * time.Second, 4 * time.Second},
+			wantInits: 4,
+		},
+		{
+			name:      "backoff caps and stops on cancellation",
+			failures:  20,
+			stopAfter: 9,
+			wantWaits: []time.Duration{
+				time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second,
+				32 * time.Second, time.Minute, time.Minute, time.Minute,
+			},
+			wantInits: 9,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			programmer := &retryRouteProgrammer{}
+			for range tt.failures {
+				programmer.initializeErrs = append(programmer.initializeErrs, missing)
+			}
+			var waits []time.Duration
+			now := time.Unix(0, 0)
+			reconciler := &ServiceRoutePolicyReconciler{
+				Client:     fake.NewClientBuilder().WithScheme(scheme).Build(),
+				NodeName:   testNAT66NodeB,
+				Programmer: programmer,
+				Now:        func() time.Time { return now },
+				startupRetryWait: func(_ context.Context, d time.Duration) bool {
+					waits = append(waits, d)
+					now = now.Add(d)
+					return tt.stopAfter == 0 || len(waits) < tt.stopAfter
+				},
+			}
+			if err := reconciler.runStartupSync(context.Background()); err != nil {
+				t.Fatalf("runStartupSync: %v", err)
+			}
+			if fmt.Sprint(waits) != fmt.Sprint(tt.wantWaits) {
+				t.Fatalf("retry waits = %v, want %v", waits, tt.wantWaits)
+			}
+			if programmer.initializeCalls != tt.wantInits {
+				t.Fatalf("Initialize calls = %d, want %d", programmer.initializeCalls, tt.wantInits)
+			}
+		})
 	}
 }

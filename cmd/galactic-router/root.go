@@ -153,10 +153,16 @@ func runCmd(cfg *config.RouterConfig) error {
 		vipXlatSweeper      *controller.VIPXlatSweeper
 	)
 	vipXlatTable, vipXlatCloser, vipXlatErr := vipxlatmap.OpenPinnedVipXlatTable(attach.PinDir)
-	if vipXlatErr != nil {
+	switch {
+	case vipXlatErr != nil && cfg.Reflector:
+		// A route reflector never runs galactic-cni, so the pin is never
+		// created there. That is expected, not an error.
+		ctrl.Log.Info("vip_xlat_table not available on this route reflector; tap-kind VIP bindings are not served here",
+			"error", vipXlatErr.Error())
+	case vipXlatErr != nil:
 		ctrl.Log.Error(vipXlatErr, "vip_xlat_table not available on this node; "+
 			"tap-kind ServiceVIPBinding objects will fail to bind until the eBPF uSID datapath is loaded")
-	} else {
+	default:
 		vipTranslationTable = vipXlatTable
 		vipXlatSweeper = &controller.VIPXlatSweeper{Client: mgr.GetClient(), NodeName: nodeName, Table: vipXlatTable}
 		defer vipXlatCloser.Close() //nolint:errcheck // best-effort close of our own fd at shutdown
@@ -261,10 +267,15 @@ func runCmd(cfg *config.RouterConfig) error {
 	// only this node's local eBPF state. Clear any pinned state left by a prior
 	// controller process before informer reconciliation starts. A missing map is
 	// tolerated because the datapath loader may start after galactic-router;
-	// the first Apply retries initialization.
-	if err := setupServiceRouteController(mgr, nodeName, cfg.GCNamespace, cfg.ServiceFrontendEnabled,
-		serviceRouteMetrics); err != nil {
-		return fmt.Errorf("setup ServiceRoutePolicy controller: %w", err)
+	// the first Apply retries initialization. Route reflectors skip it (see
+	// serviceRouteControllerEnabled).
+	if serviceRouteControllerEnabled(cfg) {
+		if err := setupServiceRouteController(mgr, nodeName, cfg.GCNamespace, cfg.ServiceFrontendEnabled,
+			serviceRouteMetrics); err != nil {
+			return fmt.Errorf("setup ServiceRoutePolicy controller: %w", err)
+		}
+	} else {
+		ctrl.Log.Info("route reflector mode: skipping the node-local ServiceRoutePolicy controller")
 	}
 
 	// Register GC controller for cleaning up orphaned BGP CRDs and VRFs.
@@ -376,6 +387,13 @@ func setupVIPBindingControllers(
 		return fmt.Errorf("setup node departure controller: %w", err)
 	}
 	return nil
+}
+
+// serviceRouteControllerEnabled reports whether this router programs
+// node-local service routes. Route reflectors have no CNI attach point and
+// therefore no service route maps.
+func serviceRouteControllerEnabled(cfg *config.RouterConfig) bool {
+	return !cfg.Reflector
 }
 
 func setupServiceRouteController(
