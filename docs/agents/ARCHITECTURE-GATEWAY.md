@@ -916,7 +916,7 @@ that tag into `config/galactic-gateway/base`.
 **Stable vs. frequently changed:**
 - Stable: `internal/maglev/table.go` (a settled, well-tested algorithm — Google's published Maglev construction), `internal/plumbing/ebpf/edgemap` (mirrors `usidmap`'s already-settled crash-safety pattern)
 - Active: `internal/gateway/quota.go`/`telemetry.go` (real but coarse — see Key Design Decisions; likely to grow richer enforcement)
-- Out of scope here, but related and evolving: `galactic-nat`'s sharded stateful egress translation tier (`cmd/galactic-nat`, a separate binary; unlike this gateway, it has no consistent-hash ring for shard selection today — `EgressDefaultRouteAdd` installs only the first resolvable shard SID, every other configured shard sitting as cold standby)
+- Out of scope here, but related and evolving: `galactic-nat`'s sharded stateful egress translation tier (`cmd/galactic-nat`, a separate binary). Its compute side has its own Maglev ring, built with the same `internal/maglev` package but never shared with this gateway's: in hashed egress mode `usid_egress` places each tenant address on one of the cluster's shards (see [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md#key-design-decisions)); in the default ordered mode every VRF uses the first resolvable shard SID and the rest stand by
 
 **Non-obvious patterns:**
 - `gatewayDatapathKeepAlive` (`cmd/galactic-gateway/gateway.go`) intentionally never calls `Close` on the loaded eBPF objects or the XDP `link.Link` — see that var's doc comment for the live incident this guards against (silent GC-triggered detach with every control-plane signal still looking healthy).
