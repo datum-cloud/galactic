@@ -630,6 +630,21 @@ struct {
 	__type(value, struct nat_traffic_counter);
 } nat_traffic SEC(".maps");
 
+// nat_claims counts every new session's masquerade port claim by how many
+// probes it took, per CPU: slot family * 24 + protocol * 8 + (probes - 1),
+// family 0 for NAT66 and 1 for NAT64, protocol 0 TCP, 1 UDP, 2 ICMP Echo.
+// Mirrored in Go by natprog.ClaimSlot. A claim that finds no port within
+// NAT_PAT_PROBE_LIMIT probes is a pat_exhausted drop instead, and a claim that
+// adopts a live session's port opens no new session, so neither is counted.
+#define NAT_CLAIM_SLOTS (2 * 3 * NAT_PAT_PROBE_LIMIT)
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, NAT_CLAIM_SLOTS);
+	__type(key, __u32);
+	__type(value, __u64);
+} nat_claims SEC(".maps");
+
 // struct icmp_bucket is one CPU's token bucket, held as nanoseconds of credit
 // rather than whole tokens so a refill is an addition, with no division on the
 // packet path: each message costs NAT_ICMP_COST_NS, and credit accrues one
@@ -1380,6 +1395,18 @@ static NAT_ALWAYS_INLINE void release_session(struct conn_key *rev_key, const st
 	bpf_map_delete_elem(&nat_conn_table, rev_key);
 }
 
+// count_claim records a new session's claim that took probes probes.
+static NAT_ALWAYS_INLINE void count_claim(const struct conn_key *rev_key, int probes)
+{
+	__u32 family = rev_key->family == NAT_FAMILY_V4 ? 1 : 0;
+	__u32 proto = rev_key->proto == NAT_IPPROTO_TCP ? 0 : rev_key->proto == NAT_IPPROTO_UDP ? 1 : 2;
+	__u32 slot = family * 3 * NAT_PAT_PROBE_LIMIT + proto * NAT_PAT_PROBE_LIMIT + (__u32) (probes - 1);
+	__u64 *count = bpf_map_lookup_elem(&nat_claims, &slot);
+
+	if (count)
+		*count += 1;
+}
+
 // claim_masquerade_port probes for a free (shard address, port) pair for a new
 // flow and installs the reverse row under it, returning the claimed port in
 // network order or 0 when every probe collided with a live session.
@@ -1409,8 +1436,10 @@ static NAT_ALWAYS_INLINE __be16 claim_masquerade_port(struct session_scratch *ss
 		rev_key->dport = port;
 		cv->shard_port = port;
 
-		if (bpf_map_update_elem(&nat_conn_table, rev_key, cv, BPF_NOEXIST) == 0)
+		if (bpf_map_update_elem(&nat_conn_table, rev_key, cv, BPF_NOEXIST) == 0) {
+			count_claim(rev_key, i + 1);
 			return port;
+		}
 
 		struct conn_value *held = bpf_map_lookup_elem(&nat_conn_table, rev_key);
 		if (!held)
@@ -1423,8 +1452,10 @@ static NAT_ALWAYS_INLINE __be16 claim_masquerade_port(struct session_scratch *ss
 			return port;
 		}
 		release_session(rev_key, held, &ss->victim);
-		if (bpf_map_update_elem(&nat_conn_table, rev_key, cv, BPF_NOEXIST) == 0)
+		if (bpf_map_update_elem(&nat_conn_table, rev_key, cv, BPF_NOEXIST) == 0) {
+			count_claim(rev_key, i + 1);
 			return port;
+		}
 	}
 	return 0;
 }

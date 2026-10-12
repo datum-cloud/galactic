@@ -69,3 +69,25 @@ func TrafficTotals(reader TrafficReader) ([natprog.TrafficSlots]natprog.NatNatTr
 	}
 	return totals, nil
 }
+
+// CounterReader narrows a per-CPU array of uint64 counters, such as
+// nat_claims, to the one operation its readers need.
+type CounterReader interface {
+	Lookup(key, valueOut any) error
+}
+
+// ClaimTotals reads every nat_claims slot and returns its count summed across
+// CPUs, indexed by natprog.ClaimSlot.
+func ClaimTotals(reader CounterReader) ([natprog.ClaimSlots]uint64, error) {
+	var totals [natprog.ClaimSlots]uint64
+	for slot := range natprog.ClaimSlots {
+		var perCPU []uint64
+		if err := reader.Lookup(slot, &perCPU); err != nil {
+			return totals, fmt.Errorf("natmap: nat_claims: lookup[%d]: %w", slot, err)
+		}
+		for _, v := range perCPU {
+			totals[slot] += v
+		}
+	}
+	return totals, nil
+}
