@@ -123,9 +123,9 @@ func TestSelectRuleBackends_DropsConflictingBackends(t *testing.T) {
 
 func TestRuleCandidateBackends_BackendAddresses(t *testing.T) {
 	rule := newTestRule(testRuleName, testVPCRef, testVIP)
-	selected := newBackendAttachment(testVPCRef, "fd00:10::1", "fd00:10::2")
-	otherVPC := newBackendAttachment("other-vpc", "fd00:10::2", "fd00:10::3")
-	otherVPC.Name = "other-vpc"
+	selected := newBackendAttachment(testVPCRef, testBackendAddr, testBackendAddr2)
+	otherVPC := newBackendAttachment(testOtherVPC, testBackendAddr2, "fd00:10::3")
+	otherVPC.Name = testOtherVPC
 	attachments := []*cloudv1alpha1.VPCAttachment{selected, otherVPC}
 
 	check := func(want ...string) {
@@ -146,11 +146,11 @@ func TestRuleCandidateBackends_BackendAddresses(t *testing.T) {
 		}
 	}
 
-	check("fd00:10::1", "fd00:10::2") // omitted: selector-only behavior
-	allowed := []string{"fd00:10::2", "fd00:10::3"}
+	check(testBackendAddr, testBackendAddr2) // omitted: selector-only behavior
+	allowed := []string{testBackendAddr2, "fd00:10::3"}
 	rule.Spec.BackendAddresses = &allowed
 	rule.Spec.BackendSelector = metav1.LabelSelector{}
-	check("fd00:10::2") // same address in another VPC still cannot be selected
+	check(testBackendAddr2) // same address in another VPC still cannot be selected
 	allowed = []string{}
 	check() // explicit empty with no selector: no backends
 	allowed = []string{"not-an-ip"}
@@ -293,7 +293,7 @@ func TestRuleBackendOwners(t *testing.T) {
 // backends and pending attachments the unfiltered list does.
 func TestAttachmentsByVPC_SelectSameBackends(t *testing.T) {
 	inBlue := newBackendAttachment("vpc-blue", "fd00:10::1")
-	alsoBlue := newBackendAttachment("vpc-blue", "fd00:10::2")
+	alsoBlue := newBackendAttachment("vpc-blue", testBackendAddr2)
 	alsoBlue.Name = "also-blue"
 	alsoBlue.Status.Node = ""
 	inGreen := newBackendAttachment("vpc-green", "fd00:20::1")

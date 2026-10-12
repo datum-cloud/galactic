@@ -432,8 +432,8 @@ func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 	}{
 		{
 			name:         "all resolve",
-			attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")},
-			wantBackends: []string{testBackendAddr, "fd00:10::2"},
+			attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr2)},
+			wantBackends: []string{testBackendAddr, testBackendAddr2},
 		},
 		{
 			name:           "some unresolved",
@@ -587,7 +587,7 @@ func TestBuildDesiredRule_SameNodeBackendsGetTheirOwnSlot(t *testing.T) {
 		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
 		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
 	}
-	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")}
+	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr2)}
 
 	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), attachments, idx, nil)
 	if err != nil {

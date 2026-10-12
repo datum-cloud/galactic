@@ -41,6 +41,8 @@ const (
 	// it to a real SRv6 uSID — required for buildDesiredRule to succeed
 	// (design plan decision #5; see usidresolver.go).
 	testBackendAddr       = "fd00:10::1"
+	testBackendAddr2      = "fd00:10::2"
+	testOtherVPC          = "other-vpc"
 	testBackendPrefix     = "fd00:10::/64"
 	testBackendRouterName = "backend-router"
 	testBackendLocator    = "2001:db8:ff01::/48"

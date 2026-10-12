@@ -151,36 +151,36 @@ func TestNetworkRuleBindingReconciler_WritesBindingForLocalBackend(t *testing.T)
 // per-backend slot lets the node program side by side.
 func TestNetworkRuleBindingReconciler_SameNodeBackendsGetOwnBindings(t *testing.T) {
 	rule := newBindingTestRule()
-	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef, testBackendAddr, "fd00:10::2"))
+	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef, testBackendAddr, testBackendAddr2))
 
 	reconcileBindings(t, r)
 
 	got := backendAddresses(listBindings(t, c))
-	if strings.Join(got, ",") != testBackendAddr+",fd00:10::2" {
-		t.Errorf("binding backends = %v, want both %s and fd00:10::2", got, testBackendAddr)
+	if strings.Join(got, ",") != testBackendAddr+","+testBackendAddr2 {
+		t.Errorf("binding backends = %v, want both %s and %s", got, testBackendAddr, testBackendAddr2)
 	}
 }
 
 func TestNetworkRuleBindingReconciler_RemovesFilteredBackend(t *testing.T) {
 	rule := newBindingTestRule()
-	otherVPC := newBackendAttachment("other-vpc", testBackendAddr)
-	otherVPC.Name = "other-vpc"
-	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef, testBackendAddr, "fd00:10::2"), otherVPC)
+	otherVPC := newBackendAttachment(testOtherVPC, testBackendAddr)
+	otherVPC.Name = testOtherVPC
+	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef, testBackendAddr, testBackendAddr2), otherVPC)
 	reconcileBindings(t, r)
-	if got := backendAddresses(listBindings(t, c)); strings.Join(got, ",") != testBackendAddr+",fd00:10::2" {
+	if got := backendAddresses(listBindings(t, c)); strings.Join(got, ",") != testBackendAddr+","+testBackendAddr2 {
 		t.Fatalf("initial bindings = %v, want both backends", got)
 	}
 
 	current := getBindingRule(t, c)
-	allowed := []string{"fd00:10::2"}
+	allowed := []string{testBackendAddr2}
 	current.Spec.BackendSelector = metav1.LabelSelector{}
 	current.Spec.BackendAddresses = &allowed
 	if err := c.Update(context.Background(), current); err != nil {
 		t.Fatalf("update rule: %v", err)
 	}
 	reconcileBindings(t, r)
-	if got := backendAddresses(listBindings(t, c)); strings.Join(got, ",") != "fd00:10::2" {
-		t.Errorf("bindings after removing an address = %v, want only fd00:10::2", got)
+	if got := backendAddresses(listBindings(t, c)); strings.Join(got, ",") != testBackendAddr2 {
+		t.Errorf("bindings after removing an address = %v, want only %s", got, testBackendAddr2)
 	}
 
 	current = getBindingRule(t, c)
@@ -556,7 +556,7 @@ func TestNetworkRuleBindingReconciler_InvalidRuleRemovesStaleCondition(t *testin
 // re-queues only the rules in its observed VPC.
 func TestVPCRuleRequests(t *testing.T) {
 	inVPC := newBindingTestRule()
-	otherVPC := newTestRule("rule-other", "other-vpc", testBindingVIP)
+	otherVPC := newTestRule("rule-other", testOtherVPC, testBindingVIP)
 	_, c := newBindingWriter(t, inVPC, otherVPC)
 
 	tests := []struct {
@@ -565,7 +565,7 @@ func TestVPCRuleRequests(t *testing.T) {
 		want []string
 	}{
 		{"rule's VPC", testVPCRef, []string{testRuleName}},
-		{"other VPC", "other-vpc", []string{"rule-other"}},
+		{"other VPC", testOtherVPC, []string{"rule-other"}},
 		{"VPC with no rules", "no-rules", nil},
 		{"no observed VPC", "", nil},
 	}
