@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/netip"
+	"strconv"
 
 	"github.com/cilium/ebpf"
 	"github.com/prometheus/client_golang/prometheus"
@@ -21,11 +22,14 @@ import (
 const metricsNamespace = "galactic_nat"
 
 // labelFamily is the label carrying an address family, familyNAT66 or
-// familyNAT64.
-const labelFamily = "family"
+// familyNAT64, and labelProto the one carrying a session protocol.
+const (
+	labelFamily = "family"
+	labelProto  = "proto"
+)
 
 // masqueradeLabels label the masquerade port series.
-var masqueradeLabels = []string{labelFamily, "address", "proto"}
+var masqueradeLabels = []string{labelFamily, "address", labelProto}
 
 // trafficLabels label the translated-traffic series.
 var trafficLabels = []string{labelFamily, "direction", "action"}
@@ -40,6 +44,7 @@ type natCollector struct {
 	connMaxEntries uint32
 	dropReasons    natmap.DropReasonsReader
 	traffic        natmap.TrafficReader
+	claims         natmap.CounterReader
 
 	// shardConfig names the masquerade addresses whose port usage is always
 	// reported, zero included. Nil reports only the addresses rows hold.
@@ -69,6 +74,7 @@ func newNatCollector(objs *natprog.NatObjects) *natCollector {
 		connMaxEntries: mapMaxEntries(objs.NatConnTable),
 		dropReasons:    objs.DropReasons,
 		traffic:        objs.NatTraffic,
+		claims:         objs.NatClaims,
 		shardConfig:    natmap.NewShardConfigTable(natmap.KernelTable{Map: objs.ShardConfigTable}),
 	}
 }
@@ -93,7 +99,7 @@ var (
 		prometheus.BuildFQName(metricsNamespace, "", "sessions"),
 		"Live sessions in this shard's nat_conn_table, by address family and protocol: sessions "+
 			"within their idle timeout, one per session. Expired sessions are not counted.",
-		[]string{labelFamily, "proto"}, nil,
+		[]string{labelFamily, labelProto}, nil,
 	)
 	oldestRowAgeDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(metricsNamespace, "", "conn_table_oldest_row_age_seconds"),
@@ -143,6 +149,19 @@ var (
 		"Masquerade ports (or ICMP Echo Identifiers) available toward each destination address and port.",
 		nil, nil,
 	)
+	sessionCreatesDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "", "session_creates_total"),
+		"New sessions this shard opened, each one a masquerade port (or ICMP Echo Identifier) it claimed, by "+
+			"address family and protocol. A claim that found no free port is a *_pat_exhausted drop instead.",
+		[]string{labelFamily, labelProto}, nil,
+	)
+	claimProbesDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "masquerade", "claim_probes_total"),
+		"New sessions' masquerade port claims by how many probes each took, 1 to 8. With a share u of a "+
+			"destination's ports held, a claim needs more than k probes with probability of roughly u^k, so the share of "+
+			"claims needing more than one probe estimates how full the busiest destinations are.",
+		[]string{labelFamily, labelProto, "probes"}, nil,
+	)
 	dropsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(metricsNamespace, "", "drops_total"),
 		"Packets dropped by this shard's datapath, by reason (drop_reasons map).",
@@ -162,6 +181,8 @@ func (c *natCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- portsInUseDesc
 	ch <- destinationPortsMaxDesc
 	ch <- portRangeDesc
+	ch <- sessionCreatesDesc
+	ch <- claimProbesDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -170,6 +191,7 @@ func (c *natCollector) Collect(ch chan<- prometheus.Metric) {
 	c.collectConnTableMaxEntries(ch)
 	c.collectDrops(ch)
 	c.collectTraffic(ch)
+	c.collectClaims(ch)
 }
 
 // Family label values, one per address family a shard translates.
@@ -338,6 +360,44 @@ func (c *natCollector) collectTraffic(ch chan<- prometheus.Metric) {
 				ch <- prometheus.MustNewConstMetric(bytesDesc, prometheus.CounterValue, float64(t.Bytes),
 					f.label, d.label, a.label)
 			}
+		}
+	}
+}
+
+// collectClaims reports new sessions by family and protocol, and their claims
+// by probe count, every combination zero included.
+func (c *natCollector) collectClaims(ch chan<- prometheus.Metric) {
+	if c.claims == nil {
+		return
+	}
+	totals, err := natmap.ClaimTotals(c.claims)
+	if err != nil {
+		slog.Warn("cannot read nat_claims; skipping session creation metrics", "err", err)
+		return
+	}
+	families := []struct {
+		id    uint32
+		label string
+	}{{natprog.TrafficFamilyNAT66, familyNAT66}, {natprog.TrafficFamilyNAT64, familyNAT64}}
+	protos := []struct {
+		id    uint32
+		label string
+	}{
+		{natprog.ClaimProtoTCP, natmap.SessionProtoTCP},
+		{natprog.ClaimProtoUDP, natmap.SessionProtoUDP},
+		{natprog.ClaimProtoICMP, natmap.SessionProtoICMP},
+	}
+	for _, f := range families {
+		for _, p := range protos {
+			var creates uint64
+			for probes := 1; probes <= natprog.PATProbeLimit; probes++ {
+				n := totals[natprog.ClaimSlot(f.id, p.id, probes)]
+				creates += n
+				ch <- prometheus.MustNewConstMetric(claimProbesDesc, prometheus.CounterValue, float64(n),
+					f.label, p.label, strconv.Itoa(probes))
+			}
+			ch <- prometheus.MustNewConstMetric(sessionCreatesDesc, prometheus.CounterValue, float64(creates),
+				f.label, p.label)
 		}
 	}
 }

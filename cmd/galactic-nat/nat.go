@@ -72,6 +72,10 @@ type natDatapath struct {
 	// nat64 is whether the programmed identity serves NAT64, which an uplink
 	// found later needs IPv4 forwarding for, as Program gives the rest.
 	nat64 bool
+
+	// resolveErrors counts watchUplinks' failed re-resolutions, which keep
+	// the previous coverage. Nil counts nothing.
+	resolveErrors prometheus.Counter
 }
 
 // Attached reports whether startup completed its load and attach pass. It is
@@ -361,6 +365,18 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 
 	registerUplinkQueueStats(metricsReg, d)
 
+	d.resolveErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricsNamespace,
+		Name:      "uplink_resolve_errors_total",
+		Help: "Times re-resolving this node's uplinks after a link or route change failed. The shard keeps " +
+			"its previous coverage, so a steady rise means uplinks that appeared since are not covered.",
+	})
+	if err := metricsReg.Register(d.resolveErrors); err != nil {
+		closeAll(xdpLinks)
+		_ = objs.Close()
+		return nil, fmt.Errorf("register uplink resolve error metric: %w", err)
+	}
+
 	natDatapathKeepAlive.objs = objs
 	natDatapathKeepAlive.set = set
 	natDatapathKeepAlive.dispatch = dispatcher
@@ -504,6 +520,9 @@ func (d *natDatapath) watchUplinks(ctx context.Context, override []string, cover
 		uplinks, err := natattach.ResolveUplinks(override)
 		if err != nil {
 			slog.Warn("Re-resolve uplink interfaces failed; keeping current coverage", "err", err)
+			if d.resolveErrors != nil {
+				d.resolveErrors.Inc()
+			}
 			return
 		}
 		ready := d.adoptUplinks(uplinks)

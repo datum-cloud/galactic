@@ -289,6 +289,9 @@ One `galactic-nat` pod per egress shard; every value is per shard.
 | `galactic_nat_masquerade_port_range`                   | gauge   | none                                                                      | Ports (or ICMP Echo Identifiers) available toward each destination: 28000                                                            |
 | `galactic_nat_dispatch_lease_renewals_total`           | counter | `slot`, `result` (`success`, `error`)                                     | Renewals of the shard's XDP dispatcher slot lease. Dispatch mode only                                                                |
 | `galactic_nat_dispatch_lease_expiry_timestamp_seconds` | gauge   | `slot`                                                                    | Unix time the lease, as last renewed, expires. Dispatch mode only                                                                    |
+| `galactic_nat_session_creates_total`                   | counter | `family`, `proto`                                                         | New sessions the shard opened, one masquerade port claim each                                                                        |
+| `galactic_nat_masquerade_claim_probes_total`           | counter | `family`, `proto`, `probes` (`1`..`8`)                                    | Those claims by how many probes each took. Rising multi-probe shares mean busy destinations are filling                              |
+| `galactic_nat_uplink_resolve_errors_total`             | counter | none                                                                      | Failed re-resolutions of the uplinks after a link or route change; the shard keeps its previous coverage                             |
 | `galactic_nat_uplink_rx_queue_packets_total`           | counter | `interface`, `driver`, `queue`                                            | Packets one NIC receive queue of an uplink received, from `ethtool -S`. Exported for `bnxt_en`, `ixgbe`, `ice`, `i40e`, `mlx5_core`  |
 | `galactic_nat_uplink_rx_queue_discards_total`          | counter | `interface`, `driver`, `queue`                                            | Packets one receive queue discarded before the datapath saw them. Reported only by drivers that count per queue: `bnxt_en` today     |
 | `galactic_nat_uplink_queue_driver_stat_total`          | counter | `interface`, `driver`, `queue`, `stat`                                    | One of a queue's other driver counters, under its `ethtool -S` name. `bnxt_en` only, see below                                       |
@@ -330,6 +333,25 @@ Caveats for the masquerade port series:
   still hold its ports.
 - Both are read from the session table walk at scrape time, like
   `galactic_nat_sessions`, so they are approximate on a churning table.
+
+Caveats for session creation:
+
+- `galactic_nat_session_creates_total` is the sum of
+  `galactic_nat_masquerade_claim_probes_total` over `probes`. A claim that
+  finds no port is a `*_pat_exhausted` drop, and a claim that adopts a live
+  session's lost port opens no new session; neither is counted.
+- With a share u of a destination's ports held, a claim needs more than k
+  probes with probability of roughly u^k (the probes walk consecutive ports,
+  and held ports cluster, so it is an estimate). The share of claims needing more than one
+  probe therefore estimates how full the destinations taking new flows are,
+  before `galactic_nat_masquerade_destination_ports_max` names the worst one
+  and long before `*_pat_exhausted` drops start.
+- Cardinality: 6 creates series and 48 probe series per shard.
+
+The `EgressShard` reconciler's controller-runtime metrics
+(`controller_runtime_reconcile_total{controller="egressshard"}`,
+`controller_runtime_reconcile_errors_total`, `workqueue_*`) are served on the
+same port, from the same registry.
 
 The dispatcher lease series are registered in dispatch mode only. The
 edge gateway exports the same pair as `galactic_edge_dispatch_lease_*` for
@@ -396,6 +418,10 @@ sum by (node) (rate(galactic_nat_drops_total{reason=~"nat(66|64)_pat_exhausted|n
 # Busiest destination per masquerade address, as a share of the range (GalacticNatPortsNearExhaustion)
 max by (node, family, address, proto) (galactic_nat_masquerade_destination_ports_max)
   / on (node) group_left () max by (node) (galactic_nat_masquerade_port_range)
+
+# Share of new sessions whose port claim needed more than one probe
+sum by (node, family) (rate(galactic_nat_masquerade_claim_probes_total{probes!="1"}[10m]))
+  / sum by (node, family) (rate(galactic_nat_session_creates_total[10m]))
 
 # Seconds left on the dispatcher lease, by the node's clock
 galactic_nat_dispatch_lease_expiry_timestamp_seconds - time()
