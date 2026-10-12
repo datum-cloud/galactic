@@ -371,7 +371,7 @@ func consumerMatchesVPC(policy *networkv1alpha1.ServiceRoutePolicy,
 }
 
 func setIntentAuthorization(policy *networkv1alpha1.ServiceRoutePolicy, intents []RouteIntent) {
-	if policy.Spec.Frontend == nil || policy.Spec.Authorization == nil {
+	if policy.Spec.Frontend == nil || policy.Spec.Authorization == nil || policy.Spec.Authorization.Persistent {
 		return
 	}
 	for i := range intents {

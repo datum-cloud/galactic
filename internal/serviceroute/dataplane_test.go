@@ -842,3 +842,18 @@ func TestMapReplayPrunesExpiredAuthorizationAndPreservesStartupGate(t *testing.T
 		})
 	}
 }
+
+func TestPersistentDataplaneHasNoExpiry(t *testing.T) {
+	routes, access, grants := &recordingTable{}, &recordingTable{}, &recordingTable{}
+	programmer := testRouteProgrammer(routes, access, grants)
+	intent := localTestIntent()
+	if err := programmer.Apply(intent); err != nil {
+		t.Fatal(err)
+	}
+	if expired := programmer.expiredDesiredKeys(time.Now().Add(24 * time.Hour)); len(expired) != 0 {
+		t.Fatalf("persistent intents expired: %v", expired)
+	}
+	if err := programmer.Remove(intent); err != nil {
+		t.Fatal(err)
+	}
+}

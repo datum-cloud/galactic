@@ -24,7 +24,7 @@ func (r *ServiceRoutePolicyReconciler) setNodeProgramming(
 	ctx context.Context, policy *networkv1alpha1.ServiceRoutePolicy, digest string, ready bool,
 ) error {
 	deadline := r.now().Add(serviceProgrammingAckDuration)
-	if policy.Spec.Authorization != nil && policy.Spec.Authorization.ValidUntil.Before(&metav1.Time{Time: deadline}) {
+	if policy.Spec.Authorization != nil && !policy.Spec.Authorization.Persistent && policy.Spec.Authorization.ValidUntil.Before(&metav1.Time{Time: deadline}) {
 		deadline = policy.Spec.Authorization.ValidUntil.Time
 	}
 	report := networkv1alpha1.ServiceRouteNodeStatus{
