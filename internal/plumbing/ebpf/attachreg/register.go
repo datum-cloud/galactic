@@ -386,10 +386,21 @@ func registerLocalEgressRoutesIn(
 //
 // No shard configured is not an error and installs nothing. A shard SID that
 // is invalid, or that has no reachable route yet, is an error.
+//
+// Where the installer runs the cluster's shards as groups (hashed mode), the
+// routes name the group serving each route's class instead of one shard, and
+// the static shard list is not read; see installVRFEgress.
 func installEgressRoutes(pinDir string, vrfTableID uint32, argument uint16, cfg EgressConfig) error {
-	tenantSIDs, err := tenantShardSIDs(cfg, argument)
-	if err != nil || len(tenantSIDs) == 0 {
+	groups, groupsCloser, err := openShardGroupsFn(pinDir)
+	if err != nil {
 		return err
+	}
+	defer func() { _ = groupsCloser.Close() }()
+
+	if groups == nil {
+		if tenantSIDs, err := tenantShardSIDs(cfg, argument); err != nil || len(tenantSIDs) == 0 {
+			return err
+		}
 	}
 	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
 	if err != nil {
@@ -397,7 +408,7 @@ func installEgressRoutes(pinDir string, vrfTableID uint32, argument uint16, cfg 
 	}
 	defer func() { _ = closer.Close() }()
 
-	_, err = installEgressRoutesIn(table, vrfTableID, tenantSIDs, cfg.NAT64Prefix, nil)
+	_, err = installVRFEgress(groups, table, vrfTableID, argument, cfg, nil)
 	return err
 }
 
@@ -431,6 +442,15 @@ func installEgressRoutesIn(
 	table *egressroutemap.EgressRouteTable, vrfTableID uint32, tenantSIDs []net.IP, nat64Raw string,
 	exists routeExistsFn,
 ) (int, error) {
+	return installEgressPrefixes(func(prefix *net.IPNet) error {
+		return egressPrefixRouteAddFn(table, vrfTableID, prefix, tenantSIDs)
+	}, nat64Raw, exists)
+}
+
+// installEgressPrefixes writes ::/0 and then each NAT64 prefix in nat64Raw
+// with write, skipping any prefix exists reports present, and returns how
+// many it wrote.
+func installEgressPrefixes(write func(prefix *net.IPNet) error, nat64Raw string, exists routeExistsFn) (int, error) {
 	written := 0
 	add := func(prefix *net.IPNet) error {
 		if exists != nil {
@@ -439,7 +459,7 @@ func installEgressRoutesIn(
 				return err
 			}
 		}
-		if err := egressPrefixRouteAddFn(table, vrfTableID, prefix, tenantSIDs); err != nil {
+		if err := write(prefix); err != nil {
 			return err
 		}
 		written++

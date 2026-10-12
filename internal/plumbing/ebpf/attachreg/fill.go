@@ -34,6 +34,9 @@ type Maps struct {
 	EgressRoute  *egressroutemap.EgressRouteTable
 	NodeSource   *egressroutemap.NodeSourceAddress
 	PublicUplink *egressroutemap.PublicUplink
+	// ShardGroups is nil on a datapath older than the shard group maps,
+	// which runs in ordered mode.
+	ShardGroups *egressroutemap.ShardGroupTable
 
 	// routePrefixes is egress_route_table's exact prefixes by VRF table,
 	// read on first use and updated with every route this Maps writes.
@@ -133,6 +136,15 @@ func OpenPinnedMaps(pinDir string) (*Maps, io.Closer, error) {
 		return fail(fmt.Errorf("open pinned public_uplink_table: %w", err))
 	}
 	m.PublicUplink, cs = uplink, append(cs, uplinkCloser)
+
+	groups, groupsCloser, err := egressroutemap.OpenPinnedShardGroupTable(pinDir)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return fail(fmt.Errorf("open pinned egress shard group: %w", err))
+	default:
+		m.ShardGroups, cs = groups, append(cs, groupsCloser)
+	}
 
 	return &m, cs, nil
 }
@@ -340,19 +352,10 @@ func (m *Maps) FillVRF(a Attachment, egress EgressConfig) (VRFRows, error) {
 		present[prefix.String()] = struct{}{}
 		return ok, nil
 	}
-	tenantSIDs, err := tenantShardSIDs(egress, a.Argument)
-	switch {
-	case err != nil:
+	n, err := m.fillShardRoutes(a, egress, routeExists)
+	written.ShardEgressRoutes += n
+	if err != nil {
 		errs = append(errs, err)
-	case len(tenantSIDs) > 0 && !m.shardsUnresolvable:
-		n, err := installEgressRoutesIn(m.EgressRoute, a.VRFTableID, tenantSIDs, egress.NAT64Prefix, routeExists)
-		written.ShardEgressRoutes += n
-		if errors.Is(err, srv6.ErrNoShardResolvable) {
-			m.shardsUnresolvable = true
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("install shard egress routes: %w", err))
-		}
 	}
 
 	local, err := registerLocalEgressRoutesIn(m.EgressRoute, a.VRFTableID, a.LocalPrefixes, routeExists)
@@ -385,6 +388,26 @@ func (m *Maps) FillVRF(a Attachment, egress EgressConfig) (VRFRows, error) {
 	}
 
 	return written, errors.Join(errs...)
+}
+
+// fillShardRoutes writes a's VRF's shard routes for FillVRF exactly as CNI ADD
+// would: see installVRFEgress.
+func (m *Maps) fillShardRoutes(a Attachment, egress EgressConfig, routeExists routeExistsFn) (int, error) {
+	if m.shardsUnresolvable {
+		return 0, nil
+	}
+	var groups shardGroupReader
+	if m.ShardGroups != nil {
+		groups = m.ShardGroups
+	}
+	n, err := installVRFEgress(groups, m.EgressRoute, a.VRFTableID, a.Argument, egress, routeExists)
+	if errors.Is(err, srv6.ErrNoShardResolvable) {
+		m.shardsUnresolvable = true
+	}
+	if err != nil {
+		return n, fmt.Errorf("install shard egress routes: %w", err)
+	}
+	return n, nil
 }
 
 // RemoveVRFRows removes rows FillVRF wrote for a, as written records them, for

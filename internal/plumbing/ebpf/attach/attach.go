@@ -250,8 +250,29 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 		err = fmt.Errorf("attach: pin usid_service_egress program: %w", pinErr)
 		return nil, err
 	}
+	removeObsoletePins(pinDir)
 
 	return &loaded, nil
+}
+
+// obsoletePins are pins of maps no compiled program declares any more, left
+// by an earlier build. egress_shard_group_table and egress_shard_table held
+// the egress shard groups as ordinary arrays updated in place, before
+// egress_shard_groups replaced them with snapshots swapped in whole; nothing
+// reads them, so they are only memory.
+var obsoletePins = []string{"egress_shard_group_table", "egress_shard_table"}
+
+// removeObsoletePins removes the obsoletePins under pinDir. A failure is
+// logged: the pin costs memory, not correctness.
+func removeObsoletePins(pinDir string) {
+	for _, name := range obsoletePins {
+		path := filepath.Join(pinDir, name)
+		if err := os.Remove(path); err == nil {
+			slog.Info("attach: removed obsolete eBPF map pin", "pin", path)
+		} else if !os.IsNotExist(err) {
+			slog.Warn("attach: could not remove obsolete eBPF map pin", "pin", path, "err", err)
+		}
+	}
 }
 
 // UsidEgressPinName is the bpffs filename usid_egress is pinned under, distinct

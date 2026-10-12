@@ -123,6 +123,18 @@ func sidTo16(sid net.IP) ([16]byte, error) {
 // given is a fake.
 var resolveLinkAndL2Fn = resolveLinkAndL2
 
+// OverrideResolverForTest replaces the next-hop resolver Register, Refresh and
+// the shard groups use, for tests in other packages that drive them against
+// fake maps, and returns a function restoring it. Never call it outside a
+// test.
+func OverrideResolverForTest(
+	fn func(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, err error),
+) (restore func()) {
+	prev := resolveLinkAndL2Fn
+	resolveLinkAndL2Fn = fn
+	return func() { resolveLinkAndL2Fn = prev }
+}
+
 // uplinkIndexesFn is an override point so tests can state which links count as
 // SRv6 uplinks without a host that has any. Production always leaves it at
 // attach.UplinkIndexes.
@@ -355,12 +367,7 @@ func (t *EgressRouteTable) Prefixes() (map[uint32]map[string]struct{}, error) {
 	)
 	iter := t.table.Iterate()
 	for iter.Next(&key, &value) {
-		ones := int(key.Prefixlen) - egressRouteKeyFixedBits
-		prefix := &net.IPNet{IP: net.IP(append([]byte(nil), key.Addr[:]...)), Mask: net.CIDRMask(ones, 128)}
-		if key.Family == egressRouteFamilyINET4 {
-			prefix = &net.IPNet{IP: net.IP(append([]byte(nil), key.Addr[:4]...)), Mask: net.CIDRMask(ones, 32)}
-		}
-		prefix.IP = prefix.IP.Mask(prefix.Mask)
+		prefix := keyPrefix(key)
 		if byTable[key.TableId] == nil {
 			byTable[key.TableId] = map[string]struct{}{}
 		}
@@ -522,6 +529,62 @@ type RefreshResult struct {
 	// them, counted separately from the pass-through entries that have nothing
 	// to resolve.
 	Skipped int
+	// Grouped is the shard-bound entries rewritten to the shard group
+	// sentinel, in hashed mode.
+	Grouped int
+	// Ungrouped is the shard group sentinels rewritten back to a single shard,
+	// in ordered mode.
+	Ungrouped int
+	// InGroup is the shard group sentinels left in place: in hashed mode
+	// because they already name their class's group, or because no group
+	// serves their class; in ordered mode because no configured shard
+	// resolves for them yet.
+	InGroup int
+	// GroupRoutes counts, by group ID, the sentinels egress_route_table holds
+	// once the sweep's writes are done: those left in place and those just
+	// written. Valid only when Refresh returns no error.
+	GroupRoutes map[uint32]int
+}
+
+// SentinelRoutes is the total of GroupRoutes: every route still naming a
+// shard group.
+func (r RefreshResult) SentinelRoutes() int {
+	n := 0
+	for _, c := range r.GroupRoutes {
+		n += c
+	}
+	return n
+}
+
+// RefreshOption adjusts one Refresh sweep.
+type RefreshOption func(*refreshConfig)
+
+type refreshConfig struct {
+	groupFor func(prefix *net.IPNet) (uint32, bool)
+}
+
+// WithShardGroups runs the sweep in hashed mode. groupFor names the group
+// serving a route's prefix, or reports false when no group serves it. An entry
+// bound to one of the sweep's shards whose prefix has a group is rewritten to
+// a sentinel naming that group, keeping its Argument; a sentinel naming
+// another group is moved to the right one; a sentinel whose prefix has no
+// group is left alone. Without it, the sweep runs in ordered mode and rewrites
+// every sentinel back to the first shard that resolves.
+func WithShardGroups(groupFor func(prefix *net.IPNet) (uint32, bool)) RefreshOption {
+	return func(c *refreshConfig) {
+		c.groupFor = groupFor
+	}
+}
+
+// keyPrefix returns the prefix an egress_route_table key covers.
+func keyPrefix(key prog.UsidEgressRouteKey) *net.IPNet {
+	ones := int(key.Prefixlen) - egressRouteKeyFixedBits
+	prefix := &net.IPNet{IP: net.IP(append([]byte(nil), key.Addr[:]...)), Mask: net.CIDRMask(ones, 128)}
+	if key.Family == egressRouteFamilyINET4 {
+		prefix = &net.IPNet{IP: net.IP(append([]byte(nil), key.Addr[:4]...)), Mask: net.CIDRMask(ones, 32)}
+	}
+	prefix.IP = prefix.IP.Mask(prefix.Mask)
+	return prefix
 }
 
 // Refresh re-resolves the encapsulating entries this caller's network namespace
@@ -579,8 +642,16 @@ type RefreshResult struct {
 // inert -- an entry keyed on a routing table no packet reaches any more, since
 // the VRF it belonged to is being torn down -- so it is not worth a
 // compare-and-swap the map API does not offer.
-func (t *EgressRouteTable) Refresh(foreignTableIDs map[uint32]struct{}, shardSIDs []net.IP) (RefreshResult, error) {
-	var result RefreshResult
+func (t *EgressRouteTable) Refresh(
+	foreignTableIDs map[uint32]struct{}, shardSIDs []net.IP, opts ...RefreshOption,
+) (RefreshResult, error) {
+	var (
+		result = RefreshResult{GroupRoutes: map[uint32]int{}}
+		cfg    refreshConfig
+	)
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 
 	shards := newShardSelector(shardSIDs)
 
@@ -602,11 +673,39 @@ func (t *EgressRouteTable) Refresh(foreignTableIDs map[uint32]struct{}, shardSID
 		}
 		if _, foreign := foreignTableIDs[key.TableId]; foreign {
 			result.Skipped++
+			if isGroupSentinel(value) {
+				// Not ours to move, but a group it names must not be retired
+				// under it.
+				groupID, _ := sentinelGroup(value)
+				result.InGroup++
+				result.GroupRoutes[groupID]++
+			}
 			continue // resolved in another network namespace; not ours to rewrite
+		}
+
+		if isGroupSentinel(value) {
+			update, ok := t.refreshSentinel(key, value, cfg, shards, &result)
+			if ok {
+				updates = append(updates, pending{key: key, value: update})
+			}
+			continue
 		}
 
 		sid := make(net.IP, 16)
 		copy(sid, value.Sid[:])
+
+		if cfg.groupFor != nil {
+			if fields, err := decodeSID(sid); err == nil && shards.isShard(fields) {
+				if groupID, ok := cfg.groupFor(keyPrefix(key)); ok {
+					updates = append(updates, pending{key: key, value: groupSentinel(groupID, fields.Argument)})
+					result.Grouped++
+					result.GroupRoutes[groupID]++
+					slog.Info("egressroutemap: refresh: egress route moved onto an egress shard group",
+						"table", key.TableId, "fromSid", sid, "group", groupID)
+					continue
+				}
+			}
+		}
 
 		target, next, err := shards.resolve(sid)
 		if err != nil {
@@ -652,6 +751,47 @@ func (t *EgressRouteTable) Refresh(foreignTableIDs map[uint32]struct{}, shardSID
 		result.Refreshed++
 	}
 	return result, nil
+}
+
+// refreshSentinel decides what one shard group sentinel becomes. In hashed
+// mode a sentinel naming the sweep's group stays, and one naming another
+// group is moved to it. In ordered mode it goes back to the first configured
+// shard that resolves, with the sentinel's Argument; when none resolves it is
+// counted unresolved and left alone, as any other entry would be.
+func (t *EgressRouteTable) refreshSentinel(
+	key prog.UsidEgressRouteKey, value prog.UsidEgressRouteValue, cfg refreshConfig, shards *shardSelector,
+	result *RefreshResult,
+) (prog.UsidEgressRouteValue, bool) {
+	groupID, argument := sentinelGroup(value)
+	if cfg.groupFor != nil {
+		target, ok := cfg.groupFor(keyPrefix(key))
+		if !ok || target == groupID {
+			result.InGroup++
+			result.GroupRoutes[groupID]++
+			return value, false
+		}
+		result.Grouped++
+		result.GroupRoutes[target]++
+		return groupSentinel(target, argument), true
+	}
+
+	target, next, err := shards.resolveArgument(argument)
+	if err != nil {
+		result.Unresolved++
+		result.InGroup++
+		result.GroupRoutes[groupID]++
+		slog.Warn("egressroutemap: refresh: leaving egress route on its shard group, no configured shard resolves",
+			"table", key.TableId, "group", groupID, "err", err)
+		return value, false
+	}
+	updated := prog.UsidEgressRouteValue{LinkIfindex: uint32(next.link)} //nolint:gosec // a kernel ifindex
+	copy(updated.Sid[:], target.To16())
+	copy(updated.Dmac[:], next.dmac)
+	copy(updated.Smac[:], next.smac)
+	result.Ungrouped++
+	slog.Info("egressroutemap: refresh: egress route moved off the egress shard group onto one shard",
+		"table", key.TableId, "group", groupID, "toSid", target, "toLink", next.link)
+	return updated, true
 }
 
 // nextHop is one resolveLinkAndL2Fn answer.
@@ -710,10 +850,15 @@ func (s *shardSelector) resolve(sid net.IP) (net.IP, nextHop, error) {
 		link, dmac, smac, err := resolveLinkAndL2Fn(sid)
 		return sid, nextHop{link: link, dmac: dmac, smac: smac}, err
 	}
+	return s.resolveArgument(fields.Argument)
+}
 
+// resolveArgument returns the first configured shard, in preference order,
+// that resolves, with argument written into its SID, and its next hop.
+func (s *shardSelector) resolveArgument(argument uint16) (net.IP, nextHop, error) {
 	var errs []error
 	for _, shard := range s.shards {
-		shard.Argument = fields.Argument
+		shard.Argument = argument
 		addr, err := uformat.Encode(shard)
 		if err != nil {
 			errs = append(errs, err)
