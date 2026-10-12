@@ -15,6 +15,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgepreflight"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 // Uplink names Set's and OnNetlinkChange's tests drive.
@@ -43,6 +44,12 @@ type setHost struct {
 	attached []string
 	failFor  map[string]bool
 	made     map[string]*fakeXDPLink
+	// modes is the attach mode the kernel reports for an interface. One
+	// with no entry reports whichever mode it is asked about, as a link
+	// attached at startup does.
+	modes map[string]xdpmode.Mode
+	// modesAsked records every mode attachFn was asked for, by interface.
+	modesAsked map[string]xdpmode.Mode
 }
 
 // newSetHost installs a fake host holding links, every one reporting native
@@ -50,10 +57,13 @@ type setHost struct {
 func newSetHost(t *testing.T, links ...netlink.Link) *setHost {
 	t.Helper()
 	restoreGateVars(t)
-	origList, origAttach := linkListFn, attachFn
-	t.Cleanup(func() { linkListFn, attachFn = origList, origAttach })
+	origList, origAttach, origMode := linkListFn, attachFn, attachedInModeFn
+	t.Cleanup(func() { linkListFn, attachFn, attachedInModeFn = origList, origAttach, origMode })
 
-	h := &setHost{links: map[string]netlink.Link{}, failFor: map[string]bool{}, made: map[string]*fakeXDPLink{}}
+	h := &setHost{
+		links: map[string]netlink.Link{}, failFor: map[string]bool{}, made: map[string]*fakeXDPLink{},
+		modes: map[string]xdpmode.Mode{}, modesAsked: map[string]xdpmode.Mode{},
+	}
 	for _, l := range links {
 		h.links[l.Attrs().Name] = l
 	}
@@ -80,10 +90,18 @@ func newSetHost(t *testing.T, links ...netlink.Link) *setHost {
 	}
 	edgepreflight.InterfaceXDPFn = func(string) (bool, error) { return true, nil }
 	sleepFn = func(time.Duration) {}
-	attachFn = func(_ *ebpf.Program, name string) (link.Link, error) {
+	attachedInModeFn = func(name string, mode xdpmode.Mode) (bool, error) {
+		if m, ok := h.modes[name]; ok {
+			return m == mode, nil
+		}
+		return true, nil
+	}
+	attachFn = func(_ *ebpf.Program, name string, mode xdpmode.Mode) (link.Link, error) {
+		h.modesAsked[name] = mode
 		if h.failFor[name] {
 			return nil, errors.New("attach refused")
 		}
+		h.modes[name] = mode
 		h.attached = append(h.attached, name)
 		l := &fakeXDPLink{name: name}
 		h.made[name] = l
@@ -106,7 +124,7 @@ func newTestSet(t *testing.T, names ...string) (*Set, []*fakeXDPLink) {
 		fakes[i] = &fakeXDPLink{name: name}
 		links[i] = fakes[i]
 	}
-	s, err := NewSet(new(ebpf.Program), names, links)
+	s, err := NewSet(new(ebpf.Program), names, links, xdpmode.Native)
 	if err != nil {
 		t.Fatalf("NewSet: %v", err)
 	}
@@ -247,9 +265,9 @@ func TestSet_AttachesNewlyEnslavedMemberNotYetCarryingTraffic(t *testing.T) {
 
 	// Comes up once attached: the bond takes it in on the first poll.
 	attach := attachFn
-	attachFn = func(p *ebpf.Program, name string) (link.Link, error) {
+	attachFn = func(p *ebpf.Program, name string, _ xdpmode.Mode) (link.Link, error) {
 		h.links[name] = slaveLink(name, netlink.BondLinkUp, lacpCarrying)
-		return attach(p, name)
+		return attach(p, name, xdpmode.Native)
 	}
 
 	if missing := s.Reconcile([]string{gateSlave}); len(missing) != 0 {
@@ -266,9 +284,9 @@ func TestSet_WaitsForEachMemberBeforeTheNext(t *testing.T) {
 
 	// The first member never rejoins after its attach.
 	attach := attachFn
-	attachFn = func(p *ebpf.Program, name string) (link.Link, error) {
+	attachFn = func(p *ebpf.Program, name string, _ xdpmode.Mode) (link.Link, error) {
 		h.links[name] = slaveLink(name, netlink.BondLinkUp, lacpSyncOnly)
-		return attach(p, name)
+		return attach(p, name, xdpmode.Native)
 	}
 	orig := BondReadyTimeout
 	BondReadyTimeout = 0
@@ -285,10 +303,10 @@ func TestSet_WaitsForEachMemberBeforeTheNext(t *testing.T) {
 }
 
 func TestNewSet_Validates(t *testing.T) {
-	if _, err := NewSet(nil, nil, nil); err == nil {
+	if _, err := NewSet(nil, nil, nil, xdpmode.Native); err == nil {
 		t.Error("NewSet(nil program): want an error")
 	}
-	if _, err := NewSet(new(ebpf.Program), []string{testUplink0}, nil); err == nil {
+	if _, err := NewSet(new(ebpf.Program), []string{testUplink0}, nil, xdpmode.Native); err == nil {
 		t.Error("NewSet with mismatched names and links: want an error")
 	}
 }

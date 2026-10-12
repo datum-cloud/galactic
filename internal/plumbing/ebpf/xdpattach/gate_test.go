@@ -15,6 +15,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgepreflight"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 // fakeSlaveLink is a netlink.Link carrying bond slave data, the view
@@ -226,7 +227,7 @@ func TestAttachSequentially_StopsAtTheFirstSlaveThatDoesNotComeBack(t *testing.T
 	t.Cleanup(func() { BondReadyTimeout = 45 * time.Second })
 
 	var attached []string
-	_, err := attachSequentially([]string{gateSlave, gateSlaveSib}, func(name string) (link.Link, error) {
+	_, err := attachSequentially([]string{gateSlave, gateSlaveSib}, xdpmode.Native, func(name string) (link.Link, error) {
 		attached = append(attached, name)
 		return nil, nil
 	})
@@ -244,7 +245,8 @@ func TestAttachSequentially_AttachesNothingWhenSupportIsMissing(t *testing.T) {
 	edgepreflight.InterfaceXDPFn = func(name string) (bool, error) { return name != gateSlaveNoXDP, nil }
 
 	var attached []string
-	_, err := attachSequentially([]string{gateSlave, gateSlaveNoXDP}, func(name string) (link.Link, error) {
+	names := []string{gateSlave, gateSlaveNoXDP}
+	_, err := attachSequentially(names, xdpmode.Native, func(name string) (link.Link, error) {
 		attached = append(attached, name)
 		return nil, nil
 	})

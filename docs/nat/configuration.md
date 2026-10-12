@@ -99,10 +99,13 @@ containerlab lab. Detection would attach there too.
 A bonding master can be named in place of its members. It is expanded to
 its slaves at startup and the program attached to each of them, never to
 the master itself, the same way `galactic-gateway` treats a bonded public
-interface. As with the gateway, every resolved interface is checked for
-native XDP support before any is touched, and the slaves are attached one
-at a time, each waited back into its LACP aggregate before the next, so a
-NIC whose driver drops carrier to attach a native XDP program bounces one
+interface. As with the gateway, the program is attached in the host's XDP
+mode, generic on a host with a `bnxt_en` NIC and native elsewhere (see
+[XDP attach mode](../xdp-attach-mode.md)). In native mode every resolved
+interface is checked for native XDP support before any is touched. In either
+mode the slaves are attached one at a time, each waited back into its LACP
+aggregate before the next, so a NIC whose driver drops carrier to attach an
+XDP program bounces one
 member of the bond at a time rather than all of them at once. A slave that
 does not rejoin within 45 seconds fails the shard's startup with the
 remaining slaves left untouched. Neither guard helps a bond with `miimon`
@@ -141,7 +144,7 @@ that still holds the hook directly, and reports those uplinks missing until
 the gateway joins the dispatcher.
 
 - **`direct`** (the binary's default) attaches `nat_ingress` to every
-  resolved uplink in native driver mode, as described above. The attachment
+  resolved uplink in the host's XDP mode, as described above. The attachment
   is not pinned, so it detaches when the process exits, and every restart
   bounces each uplink, once on the detach and again on the attach. On a
   node where an earlier `dispatch`-mode shard left the node's XDP
@@ -169,11 +172,17 @@ the gateway joins the dispatcher.
 
   Nothing in dispatch mode is all-or-nothing. An uplink the dispatcher cannot
   hold yet, because another XDP program is attached there, the driver has no
-  native XDP, or attaching would take a bond down, is reported missing and
+  native XDP in native mode, or attaching would take a bond down, is reported
+  missing and
   retried on the next link or route change. The first attach to each bond
   member, and the wait for it to rejoin its bond, run under a node-wide lock,
   so two datapaths sharing the dispatcher never bounce two members of one bond
   at once.
+
+  The dispatcher attaches in the host's XDP mode. A pinned link left in the
+  other mode, such as a native link on a host that now selects generic mode,
+  counts as uncovered until it is migrated, one bond member at a time under
+  the same lock, keeping every slot, lease and role.
 
   The dispatcher stays attached after the shard is removed from a node.
   `hack/xdp-dispatch-release.sh` detaches it. Run it before rolling back to

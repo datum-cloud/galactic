@@ -19,6 +19,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/bond"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 func requireRoot(t *testing.T) {
@@ -58,7 +59,7 @@ func TestLoad_PreflightBlocksLoad(t *testing.T) {
 // TestAttach_NilProgramIsError covers Attach's defensive nil-program
 // guard directly, without needing root.
 func TestAttach_NilProgramIsError(t *testing.T) {
-	if _, err := Attach(nil, []string{"eth0"}); err == nil {
+	if _, err := Attach(nil, []string{"eth0"}, xdpmode.Native); err == nil {
 		t.Error("Attach(nil program, ...) error = nil, want an error")
 	}
 }
@@ -66,7 +67,7 @@ func TestAttach_NilProgramIsError(t *testing.T) {
 // TestAttach_NoInterfacesIsError covers Attach's defensive empty-slice
 // guard directly, without needing root or a real program.
 func TestAttach_NoInterfacesIsError(t *testing.T) {
-	if _, err := Attach(&ebpf.Program{}, nil); err == nil {
+	if _, err := Attach(&ebpf.Program{}, nil, xdpmode.Native); err == nil {
 		t.Error("Attach(program, nil) error = nil, want an error")
 	}
 }
@@ -246,7 +247,7 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		links, err := Attach(objs.EdgeLb, []string{ifaceName})
+		links, err := Attach(objs.EdgeLb, []string{ifaceName}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("attach: %w", err)
 		}
@@ -280,7 +281,7 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		links, err := Attach(objs.EdgeLb, []string{ifaceName})
+		links, err := Attach(objs.EdgeLb, []string{ifaceName}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("re-attach after restart: %w", err)
 		}
@@ -363,7 +364,7 @@ func TestAttach_MultipleInterfacesRollsBackOnPartialFailure(t *testing.T) {
 		defer func() { _ = objs.Close() }()
 
 		// --- attach to both real interfaces: two links back. ---
-		links, err := Attach(objs.EdgeLb, []string{iface0Name, iface1Name})
+		links, err := Attach(objs.EdgeLb, []string{iface0Name, iface1Name}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("attach to both interfaces: %w", err)
 		}
@@ -377,7 +378,7 @@ func TestAttach_MultipleInterfacesRollsBackOnPartialFailure(t *testing.T) {
 		// --- attach again, this time with a second name that can never
 		// attach (it doesn't exist): the first interface's attach must be
 		// rolled back, not left dangling. ---
-		if _, err := Attach(objs.EdgeLb, []string{iface0Name, "does-not-exist"}); err == nil {
+		if _, err := Attach(objs.EdgeLb, []string{iface0Name, "does-not-exist"}, xdpmode.Native); err == nil {
 			return errors.New("Attach() with an unresolvable second interface error = nil, want an error")
 		}
 
@@ -385,7 +386,7 @@ func TestAttach_MultipleInterfacesRollsBackOnPartialFailure(t *testing.T) {
 		// fresh solo attach to it succeeds; if it leaked, this fails with
 		// the kernel refusing a second native XDP program on the same
 		// interface.
-		links, err = Attach(objs.EdgeLb, []string{iface0Name})
+		links, err = Attach(objs.EdgeLb, []string{iface0Name}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf(
 				"re-attach to %q after a rolled-back partial failure: %w "+
@@ -486,7 +487,7 @@ func TestResolveTargetsAndAttach_RealBondDevice(t *testing.T) {
 
 		// Attaching to the resolved slaves is exactly what this design
 		// exists to make work.
-		links, err := Attach(objs.EdgeLb, got)
+		links, err := Attach(objs.EdgeLb, got, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("attach to bond slaves %v: %w", got, err)
 		}

@@ -52,6 +52,22 @@
 // Every other call reads the root from its pin, so a process started before
 // the upgrade follows the newer root instead of moving links back.
 //
+// # Attach mode
+//
+// The root is attached in the host's XDP mode (internal/plumbing/ebpf/xdpmode),
+// which every datapath on the host selects from the same NIC drivers and
+// passes to Open. Linked and Coverage read the mode back from the kernel, so a
+// pinned link left in the other mode is neither linked nor covered. EnsureLink
+// migrates it by detaching the link and attaching the root again in the
+// selected mode, since a bpf_link cannot change mode and the kernel will not
+// hold a native and a generic program on one interface at once. The maps, the
+// root and every slot, lease and role row are untouched. A failed migration
+// attaches the root again in the mode it was in and returns the error, and the
+// interface's next try backs off. Open records its mode in a pinned host
+// record, and a process whose mode no longer matches it returns
+// ErrHostModeChanged instead of migrating, so two processes that disagree
+// never move a link back and forth.
+//
 // # Locking
 //
 // Two processes share the pinned state, so every call that changes the links

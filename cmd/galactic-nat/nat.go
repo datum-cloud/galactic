@@ -25,6 +25,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 	"go.datum.net/galactic/internal/plumbing/nicstats"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
@@ -285,6 +286,17 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 		return nil, err
 	}
 
+	// One attach mode for every XDP attachment on the host, shared with the
+	// edge gateway's (xdpmode). An uplink that does not exist, or a NIC whose
+	// driver cannot be read, fails startup rather than settling the mode
+	// without it.
+	modeDecision, err := xdpmode.Select(uplinks...)
+	if err != nil {
+		return nil, fmt.Errorf("select the XDP attach mode for this host: %w", err)
+	}
+	mode := modeDecision.Mode
+	slog.Info("Selected the XDP attach mode for this host", "mode", mode.String(), "reason", modeDecision.Reason)
+
 	// Required for the FIB lookup in both the forward and return paths to
 	// succeed on the interface the program actually runs on. The lookup uses
 	// the ingress interface, meaning whichever uplink the packet arrived on, so
@@ -334,22 +346,23 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 			_ = objs.Close()
 			return nil, fmt.Errorf("register dispatcher lease metrics: %w", err)
 		}
-		if dispatcher, dispatchSet, _, err = joinDispatcher(ctx, xdpdispatch.PinDir, objs.NatIngress, lease); err != nil {
+		if dispatcher, dispatchSet, _, err = joinDispatcher(ctx, xdpdispatch.PinDir, mode, objs.NatIngress,
+			lease); err != nil {
 			_ = objs.Close()
 			return nil, err
 		}
 		d.missing = dispatchSet.Reconcile(ctx, uplinks)
 	default:
-		if err := releaseIdleDispatcher(ctx, xdpdispatch.PinDir, uplinks); err != nil {
+		if err := releaseIdleDispatcher(ctx, xdpdispatch.PinDir, mode, uplinks); err != nil {
 			_ = objs.Close()
 			return nil, err
 		}
-		xdpLinks, err = natattach.Attach(objs.NatIngress, uplinks)
+		xdpLinks, err = natattach.Attach(objs.NatIngress, uplinks, mode)
 		if err != nil {
 			_ = objs.Close()
 			return nil, fmt.Errorf("attach egress translation datapath to uplink interfaces %v: %w", uplinks, err)
 		}
-		if set, err = xdpattach.NewSet(objs.NatIngress, uplinks, xdpLinks); err != nil {
+		if set, err = xdpattach.NewSet(objs.NatIngress, uplinks, xdpLinks, mode); err != nil {
 			closeAll(xdpLinks)
 			_ = objs.Close()
 			return nil, err
@@ -414,11 +427,14 @@ func registerUplinkQueueStats(metricsReg prometheus.Registerer, d *natDatapath) 
 // each renewal in lease, which may be nil. It
 // returns the set that keeps the dispatcher on the uplinks, and a channel
 // closed once the lease loop has stopped, which a caller waits on before
-// closing the dispatcher.
-func joinDispatcher(ctx context.Context, pinDir string, program *ebpf.Program, lease *xdpdispatch.LeaseMetrics) (
+// closing the dispatcher. mode is the host's XDP attach mode, which the
+// dispatcher attaches in and migrates its links to.
+func joinDispatcher(ctx context.Context, pinDir string, mode xdpmode.Mode, program *ebpf.Program,
+	lease *xdpdispatch.LeaseMetrics,
+) (
 	*xdpdispatch.Dispatcher, *xdpattach.DispatchSet, <-chan struct{}, error,
 ) {
-	dispatcher, err := xdpdispatch.Open(ctx, pinDir)
+	dispatcher, err := xdpdispatch.Open(ctx, pinDir, mode)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open the node's XDP dispatcher: %w", err)
 	}
@@ -449,15 +465,15 @@ func joinDispatcher(ctx context.Context, pinDir string, program *ebpf.Program, l
 				"the dispatcher skips the slot once it lapses", "err", err)
 		}))
 	}()
-	slog.Info("Egress translation datapath installed in the XDP dispatcher", "pinDir", pinDir)
+	slog.Info("Egress translation datapath installed in the XDP dispatcher", "pinDir", pinDir, "mode", mode.String())
 	return dispatcher, set, leaseDone, nil
 }
 
 // releaseIdleDispatcher detaches an idle XDP dispatcher from uplinks before a
 // direct attach (xdpattach.ReleaseIdleDispatcher), refusing while another
 // datapath's slot is live there.
-func releaseIdleDispatcher(ctx context.Context, pinDir string, uplinks []string) error {
-	if err := xdpattach.ReleaseIdleDispatcher(ctx, pinDir, uplinks, xdpdispatch.SlotNAT); err != nil {
+func releaseIdleDispatcher(ctx context.Context, pinDir string, mode xdpmode.Mode, uplinks []string) error {
+	if err := xdpattach.ReleaseIdleDispatcher(ctx, pinDir, mode, uplinks, xdpdispatch.SlotNAT); err != nil {
 		return fmt.Errorf("%w; set %s=%s", err, config.EnvNATXDPAttach, config.NATXDPAttachDispatch)
 	}
 	return nil
@@ -595,7 +611,9 @@ func (disabledDatapath) Programmed() (controller.EgressShardIdentity, bool) {
 // shard that crash-looped instead would keep its advertisement up no longer
 // but would page for nothing.
 func turnOffDatapath(ctx context.Context, pinDir string) {
-	if err := xdpattach.ClearDispatcherSlots(ctx, pinDir, xdpdispatch.SlotNAT); err != nil {
+	// Emptying a slot attaches nothing, so the mode the dispatcher is opened
+	// with makes no difference here.
+	if err := xdpattach.ClearDispatcherSlots(ctx, pinDir, xdpmode.Native, xdpdispatch.SlotNAT); err != nil {
 		slog.Error("Cannot empty the egress translation slot in the XDP dispatcher; "+
 			"it stops claiming packets once its lease lapses", "lease", xdpdispatch.LeaseTTL, "err", err)
 	}

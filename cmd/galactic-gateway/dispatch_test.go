@@ -19,6 +19,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/natattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 func requireRoot(t *testing.T) {
@@ -94,7 +95,7 @@ type gatewayProcess struct {
 func startGateway(t *testing.T, d pinDirs) gatewayProcess {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	objs, dispatcher, public, _, leaseDone, err := joinDispatcher(ctx, d.dispatch, d.edge, false, nil)
+	objs, dispatcher, public, _, leaseDone, err := joinDispatcher(ctx, d.dispatch, d.edge, xdpmode.Native, false, nil)
 	if err != nil {
 		cancel()
 		t.Fatalf("gateway joinDispatcher: %v", err)
@@ -126,7 +127,7 @@ func startShard(t *testing.T, d pinDirs, uplink string) func() error {
 	if err := natattach.PopulateProgArray(objs); err != nil {
 		t.Fatalf("populate nat_progs: %v", err)
 	}
-	dispatcher, err := xdpdispatch.Open(context.Background(), d.dispatch)
+	dispatcher, err := xdpdispatch.Open(context.Background(), d.dispatch, xdpmode.Native)
 	if err != nil {
 		t.Fatalf("shard open dispatcher: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestGatewayAndShardShareAnUplink(t *testing.T) {
 	shardCovered := startShard(t, d, uplink)
 	root := xdpProgID(t, uplink)
 
-	probe, err := xdpdispatch.Open(context.Background(), d.dispatch)
+	probe, err := xdpdispatch.Open(context.Background(), d.dispatch, xdpmode.Native)
 	if err != nil {
 		t.Fatalf("open dispatcher: %v", err)
 	}
@@ -202,7 +203,7 @@ func TestAttachDirect_RefusesAnUplinkTheShardRunsOn(t *testing.T) {
 	startShard(t, d, uplink)
 	root := xdpProgID(t, uplink)
 
-	_, _, _, err := attachDirect(context.Background(), d.dispatch, d.edge, []string{uplink}, nil)
+	_, _, _, err := attachDirect(context.Background(), d.dispatch, d.edge, xdpmode.Native, []string{uplink}, nil)
 	if !errors.Is(err, xdpattach.ErrDispatcherInUse) {
 		t.Fatalf("attachDirect over a live shard slot = %v, want ErrDispatcherInUse", err)
 	}
