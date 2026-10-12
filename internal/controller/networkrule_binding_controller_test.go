@@ -161,6 +161,37 @@ func TestNetworkRuleBindingReconciler_SameNodeBackendsGetOwnBindings(t *testing.
 	}
 }
 
+func TestNetworkRuleBindingReconciler_RemovesFilteredBackend(t *testing.T) {
+	rule := newBindingTestRule()
+	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef, testBackendAddr, "fd00:10::2"))
+	reconcileBindings(t, r)
+	if got := backendAddresses(listBindings(t, c)); strings.Join(got, ",") != testBackendAddr+",fd00:10::2" {
+		t.Fatalf("initial bindings = %v, want both backends", got)
+	}
+
+	current := getBindingRule(t, c)
+	allowed := []string{"fd00:10::2"}
+	current.Spec.BackendAddresses = &allowed
+	if err := c.Update(context.Background(), current); err != nil {
+		t.Fatalf("update rule: %v", err)
+	}
+	reconcileBindings(t, r)
+	if got := backendAddresses(listBindings(t, c)); strings.Join(got, ",") != "fd00:10::2" {
+		t.Errorf("bindings after removing an address = %v, want only fd00:10::2", got)
+	}
+
+	current = getBindingRule(t, c)
+	empty := []string{}
+	current.Spec.BackendAddresses = &empty
+	if err := c.Update(context.Background(), current); err != nil {
+		t.Fatalf("update rule with empty allowlist: %v", err)
+	}
+	reconcileBindings(t, r)
+	if got := listBindings(t, c); len(got) != 0 {
+		t.Errorf("bindings after empty allowlist = %d, want none", len(got))
+	}
+}
+
 // TestNetworkRuleBindingReconciler_OnlyThisNodesBackends covers a backend on
 // another node and one in another VPC carrying the selected label: neither
 // gets a binding here.

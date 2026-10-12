@@ -185,6 +185,17 @@ func ruleCandidateBackends(
 	if err != nil {
 		return nil, nil, err
 	}
+	var allowed map[netip.Addr]struct{}
+	if rule.Spec.BackendAddresses != nil {
+		allowed = make(map[netip.Addr]struct{}, len(*rule.Spec.BackendAddresses))
+		for _, raw := range *rule.Spec.BackendAddresses {
+			addr, parseErr := netip.ParseAddr(raw)
+			if parseErr != nil || !addr.Is6() || addr.Is4In6() {
+				return nil, nil, fmt.Errorf("invalid IPv6 backend address %q", raw)
+			}
+			allowed[addr] = struct{}{}
+		}
+	}
 	//nolint:gosec // BackendPort is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkRuleSpec.BackendPort)
 	port := uint16(rule.Spec.BackendPort)
 
@@ -204,6 +215,11 @@ func ruleCandidateBackends(
 		}
 		kind := attachmentEgressKind(attachment.Spec.Interface.Mode)
 		for _, addr := range addrs {
+			if allowed != nil {
+				if _, ok := allowed[addr]; !ok {
+					continue
+				}
+			}
 			backends = append(backends, ruleBackend{
 				attachment: key,
 				node:       attachment.Status.Node,

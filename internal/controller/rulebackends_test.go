@@ -121,6 +121,39 @@ func TestSelectRuleBackends_DropsConflictingBackends(t *testing.T) {
 	}
 }
 
+func TestRuleCandidateBackends_BackendAddresses(t *testing.T) {
+	rule := newTestRule(testRuleName, testVPCRef, testVIP)
+	selected := newBackendAttachment(testVPCRef, "fd00:10::1", "fd00:10::2")
+	otherVPC := newBackendAttachment("other-vpc", "fd00:10::3")
+	attachments := []*cloudv1alpha1.VPCAttachment{selected, otherVPC}
+
+	check := func(want ...string) {
+		t.Helper()
+		backends, _, err := ruleCandidateBackends(rule, attachments)
+		if err != nil {
+			t.Fatalf("ruleCandidateBackends: %v", err)
+		}
+		got := make([]string, 0, len(backends))
+		for _, b := range backends {
+			got = append(got, b.addr.String())
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("backends = %v, want %v", got, want)
+		}
+	}
+
+	check("fd00:10::1", "fd00:10::2") // omitted: selector-only behavior
+	allowed := []string{"fd00:10::2", "fd00:10::3"}
+	rule.Spec.BackendAddresses = &allowed
+	check("fd00:10::2") // no cross-VPC selection
+	allowed = []string{}
+	check() // explicit empty: no backends
+	allowed = []string{"not-an-ip"}
+	if _, _, err := ruleCandidateBackends(rule, attachments); err == nil {
+		t.Error("invalid address: want an error")
+	}
+}
+
 // newSharingRule returns a rule named name with the IPv6 VIP vip, created at
 // second created, selecting newBackendAttachment's attachments in testVPCRef.
 func newSharingRule(name, vip string, created int64) *bgpv1alpha1.NetworkRule {

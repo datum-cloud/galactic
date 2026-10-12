@@ -106,7 +106,17 @@ per-VPC gateway design to colocate with the workload's own VRF.
 | CRD              | Scope                                                                | Written by                                                                                                                                    | Purpose                                                                                                                                                                                                                                                                                  |
 | ---------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `NetworkGateway` | Namespaced, one per gateway node (`spec.targetRef.name` = node name) | Operator, once per gateway node (see [worked example](#worked-containerlab-example) below)                                                    | Node-scoped root object, mirroring `BGPRouter`'s pattern. Identifies which nodes participate in the anycast mesh and surfaces each node's engine health via `status.conditions`. Carries **no** self-address field — DSR rewrites nothing, so there is no translation source to publish. |
-| `NetworkRule`    | Namespaced, internal                                                 | The platform API that serves tenants, after it verifies the tenant owns `vpcRef` (galactic does not repeat the check — see Known Constraints) | Ingress load-balancing spec: `vpcRef` (opaque tenant identifier), `vipAddresses` (1–8, IPv4/IPv6), `protocol` (`tcp`/`udp`), `port`, `backendSelector` (the VPCAttachments in `vpcRef` that serve it), `backendPort`. Served by every `NetworkGateway` in the namespace identically.     |
+| `NetworkRule`    | Namespaced, internal                                                 | The platform API that serves tenants, after it verifies the tenant owns `vpcRef` (galactic does not repeat the check — see Known Constraints) | Ingress load-balancing spec: `vpcRef` (opaque tenant identifier), `vipAddresses` (1–8, IPv4/IPv6), `protocol` (`tcp`/`udp`), `port`, `backendSelector` (the VPCAttachments in `vpcRef` that serve it), optional `backendAddresses` filter, `backendPort`. Served by every `NetworkGateway` in the namespace identically.     |
+
+`backendAddresses` lets a control plane supply an explicit healthy IPv6
+backend set while retaining the VPC-scoped attachment selector as an ownership
+boundary. Omission keeps every selected address; an explicit empty list loads
+no backends and withdraws the rule. Both the gateway and backend nodes filter
+the same attachment addresses, so a removed address loses its ingress Maglev
+slot and its `ServiceVIPBinding`. This does not change the DSR restriction:
+one backend address, port and protocol can reply for only one IPv6 VIP. A
+consumer must also map its service endpoint to the corresponding
+`VPCAttachment` and its authoritative labels before writing a rule.
 
 Both are defined in `go.datum.net/network`'s `api/v1alpha1` package
 (`gateway_types.go`, `rule_types.go`) — the same external CRD module the

@@ -805,6 +805,11 @@ func buildDesiredRule(
 		case len(unresolved) > 0:
 			return gateway.DesiredRule{}, nil, fmt.Errorf("no selected attachment is a backend yet: %s",
 				cappedList(unresolved))
+		case rule.Spec.BackendAddresses != nil && len(*rule.Spec.BackendAddresses) == 0:
+			return gateway.DesiredRule{}, nil, fmt.Errorf("backendAddresses is empty")
+		case rule.Spec.BackendAddresses != nil:
+			return gateway.DesiredRule{}, nil, fmt.Errorf("backendAddresses match no selected VPCAttachment in VPC %s",
+				rule.Spec.VPCRef)
 		default:
 			return gateway.DesiredRule{}, nil, fmt.Errorf("backendSelector matches no VPCAttachment in VPC %s",
 				rule.Spec.VPCRef)

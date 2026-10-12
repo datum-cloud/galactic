@@ -980,6 +980,48 @@ func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsBuilding(t *testing.T) {
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionFalse, reasonInvalidRule)
 }
 
+func TestNetworkGatewayReconciler_EmptyBackendAddressesWithdrawsRule(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	acceptRule(rule)
+	c := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+			newBackendAttachment("vpc-1"), rule).
+		Build()
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(c, scheme, engine, testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := c.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
+		t.Fatalf("get initial advertisement: %v", err)
+	}
+
+	current := &bgpv1alpha1.NetworkRule{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(rule), current); err != nil {
+		t.Fatalf("get rule: %v", err)
+	}
+	empty := []string{}
+	current.Spec.BackendAddresses = &empty
+	if err := c.Update(context.Background(), current); err != nil {
+		t.Fatalf("update rule: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile with empty backendAddresses: %v", err)
+	}
+	if len(engine.lastDesired.Rules) != 0 {
+		t.Errorf("desired rules = %+v, want none", engine.lastDesired.Rules)
+	}
+	if err := c.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); !apierrors.IsNotFound(err) {
+		t.Errorf("advertisement after empty backendAddresses: err = %v, want NotFound", err)
+	}
+	assertRuleProgrammed(t, c, metav1.ConditionFalse, reasonInvalidRule)
+}
+
 // TestNetworkGatewayReconciler_ReturnsOrphanSweepFailure covers the third
 // swallowed error from #365. The sweep is crash recovery, so its failure
 // must be retried -- and the status write that precedes it still has to
