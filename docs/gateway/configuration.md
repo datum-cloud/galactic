@@ -711,7 +711,11 @@ Relevant series: `galactic_edge_rule_packets_total`,
 `galactic_edge_drops_total` (labeled
 by `reason`), and `galactic_edge_control_plane_drops_total` (rule
 applications rejected before ever reaching the datapath, e.g. quota
-denials). A rule with zero `rule_packets_total` and a client actually
+denials). In dispatch mode, `galactic_edge_dispatch_lease_renewals_total`
+(labeled by `slot` and `result`) and
+`galactic_edge_dispatch_lease_expiry_timestamp_seconds` (labeled by `slot`)
+show each XDP dispatcher slot's lease: the dispatcher skips a slot once its
+lease expires, so a slot whose renewals keep failing stops serving its VIPs. A rule with zero `rule_packets_total` and a client actually
 sending traffic points at an upstream problem (BGP not carrying the route,
 underlay reachability) rather than this node's own datapath; nonzero
 `dropped_packets_total` for a rule with `rule_backends` at `0` means the

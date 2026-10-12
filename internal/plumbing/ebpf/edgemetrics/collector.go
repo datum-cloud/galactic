@@ -15,7 +15,10 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
 )
 
-const namespace = "galactic_edge"
+// Namespace is the gateway's metric prefix, shared by every gateway series.
+const Namespace = "galactic_edge"
+
+const namespace = Namespace
 
 // DropReasonsReader narrows the drop-reason map, a per-CPU array keyed by
 // reason index, to the one operation Collector needs, so tests can substitute an

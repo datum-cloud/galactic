@@ -1304,3 +1304,90 @@ tests:
                 Compute nodes have encapsulated tenant traffic toward fc00:1:2:: for 10 minutes, but the
                 shard on dfw-worker2 translated none of it outbound. Check galactic_nat_uplink_covered,
                 galactic_nat_datapath_attached and the shard's XDP attachment.
+
+  # dfw-worker2's busiest destination holds 15400 of 28000 UDP ports (55%)
+  # for 10m and fires. sjc-worker2's holds 40% and does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_nat_masquerade_destination_ports_max{job="galactic-nat",node="dfw-worker2",family="nat66",address="2001:db8:9966::1",proto="udp"}'
+        values: "15400x30"
+      - series: 'galactic_nat_masquerade_port_range{job="galactic-nat",node="dfw-worker2"}'
+        values: "28000x30"
+      - series: 'galactic_nat_masquerade_destination_ports_max{job="galactic-nat",node="sjc-worker2",family="nat66",address="2001:db8:9967::1",proto="udp"}'
+        values: "11200x30"
+      - series: 'galactic_nat_masquerade_port_range{job="galactic-nat",node="sjc-worker2"}'
+        values: "28000x30"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GalacticNatPortsNearExhaustion
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker2
+              family: nat66
+              address: "2001:db8:9966::1"
+              proto: udp
+            exp_annotations:
+              summary: "Masquerade udp ports on 2001:db8:9966::1 are 55% used toward one destination"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatportsnearexhaustion"
+              description: >-
+                The egress shard on dfw-worker2 holds 55% of the udp
+                ports on 2001:db8:9966::1 toward a single destination for 10 minutes. New flows to that destination
+                start failing as this approaches 100%, with GalacticNatPortExhausted.
+
+  # dfw-worker2 renews every 10s until 5m, then every renewal fails, 3 errors
+  # per 30s. Expiring fires once no renewal has succeeded for 2m; failing
+  # fires after 5m of more than two errors per window. sjc-worker2 keeps
+  # renewing and has one transient error, which fires neither.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_nat_dispatch_lease_renewals_total{job="galactic-nat",node="dfw-worker2",slot="nat",result="error"}'
+        values: "0x10 0+3x20"
+      - series: 'galactic_nat_dispatch_lease_renewals_total{job="galactic-nat",node="dfw-worker2",slot="nat",result="success"}'
+        values: "0+3x10 30x20"
+      - series: 'galactic_nat_dispatch_lease_renewals_total{job="galactic-nat",node="sjc-worker2",slot="nat",result="error"}'
+        values: "0x10 1x20"
+      - series: 'galactic_nat_dispatch_lease_renewals_total{job="galactic-nat",node="sjc-worker2",slot="nat",result="success"}'
+        values: "0+3x30"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: GalacticNatDispatchLeaseExpiring
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GalacticNatDispatchLeaseExpiring
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: galactic-nat
+              node: dfw-worker2
+              slot: nat
+              result: success
+            exp_annotations:
+              summary: "The egress shard's XDP dispatcher lease on dfw-worker2 has lapsed or is about to"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatdispatchleaseexpiring"
+              description: >-
+                galactic-nat on dfw-worker2 has not renewed its nat slot lease for two minutes,
+                so the 120-second lease has lapsed or is about to. The dispatcher skips a lapsed slot, so the shard's
+                uplinks pass tenant traffic untranslated.
+      - eval_time: 12m
+        alertname: GalacticNatDispatchLeaseFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-nat
+              node: dfw-worker2
+              slot: nat
+              result: error
+            exp_annotations:
+              summary: "The egress shard on dfw-worker2 cannot renew its XDP dispatcher lease"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatdispatchleasefailing"
+              description: >-
+                galactic-nat on dfw-worker2 has failed to renew its nat slot's lease in the XDP
+                dispatcher more than twice in every 5-minute window for 5 minutes. Once the lease expires the
+                dispatcher skips the slot and tenant traffic leaves untranslated. The shard's log names the error.

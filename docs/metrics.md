@@ -269,25 +269,30 @@ sum by (controller) (rate(controller_runtime_reconcile_errors_total{job=~"galact
 
 One `galactic-nat` pod per egress shard; every value is per shard.
 
-| Metric                                           | Type    | Labels                                                                    | Meaning                                                                                                                              |
-|--------------------------------------------------|---------|---------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `galactic_nat_conns`                             | gauge   | `family` (`nat66`, `nat64`)                                               | Rows in the connection table, expired sessions included. A session holds two rows                                                    |
-| `galactic_nat_sessions`                          | gauge   | `family`, `proto` (`tcp`, `udp`, `icmp`)                                  | Live sessions: one per session within its idle timeout                                                                               |
-| `galactic_nat_conn_table_oldest_row_age_seconds` | gauge   | none                                                                      | Seconds since the least recently seen session, expired ones included, last translated a packet. Meaningful only on a near-full table |
-| `galactic_nat_conn_table_max_entries`            | gauge   | none                                                                      | Table capacity in rows, shared by both families                                                                                      |
-| `galactic_nat_drops_total`                       | counter | `reason`                                                                  | Packets dropped by the NAT datapath                                                                                                  |
-| `galactic_nat_packets_total`                     | counter | `family`, `direction` (`outbound`, `return`), `action` (`redirect`, `tx`) | Packets the shard translated and queued for transmit. Every combination is reported, zero included                                   |
-| `galactic_nat_bytes_total`                       | counter | same                                                                      | Bytes of those packets: the translated IP packet, without Ethernet or the SRv6 outer header                                          |
-| `galactic_nat_datapath_enabled`                  | gauge   | none                                                                      | 1 when the datapath is turned on by configuration, 0 when it is turned off                                                           |
-| `galactic_nat_datapath_attached`                 | gauge   | none                                                                      | 1 once the datapath has loaded and attached, 0 before that or while turned off                                                       |
-| `galactic_nat_programmed`                        | gauge   | none                                                                      | 1 while the datapath holds an EgressShard identity, 0 while it claims no packet                                                      |
-| `galactic_nat_uplink_covered`                    | gauge   | `interface`                                                               | 1 for each resolved uplink the datapath translates on, 0 for one it misses. Absent while turned off                                  |
-| `galactic_nat_family_enabled`                    | gauge   | `family`                                                                  | 1 when the programmed identity has a masquerade address for the family                                                               |
-| `galactic_nat_info`                              | gauge   | `shard_sid`, `nat64_prefix`, `xdp_attach`, `version`                      | Always 1. Empty `shard_sid` and `nat64_prefix` while unprogrammed; `xdp_attach="off"` while turned off                               |
-| `galactic_nat_uplink_rx_queue_packets_total`     | counter | `interface`, `driver`, `queue`                                            | Packets one NIC receive queue of an uplink received, from `ethtool -S`. Exported for `bnxt_en`, `ixgbe`, `ice`, `i40e`, `mlx5_core`  |
-| `galactic_nat_uplink_rx_queue_discards_total`    | counter | `interface`, `driver`, `queue`                                            | Packets one receive queue discarded before the datapath saw them. Reported only by drivers that count per queue: `bnxt_en` today     |
-| `galactic_nat_uplink_queue_driver_stat_total`    | counter | `interface`, `driver`, `queue`, `stat`                                    | One of a queue's other driver counters, under its `ethtool -S` name. `bnxt_en` only, see below                                       |
-| `galactic_nat_uplink_info`                       | gauge   | `interface`, `driver`, `driver_version`, `firmware_version`, `kernel`     | Always 1. Names each uplink's driver and NIC firmware versions and the node's kernel release                                         |
+| Metric                                                 | Type    | Labels                                                                    | Meaning                                                                                                                              |
+|--------------------------------------------------------|---------|---------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `galactic_nat_conns`                                   | gauge   | `family` (`nat66`, `nat64`)                                               | Rows in the connection table, expired sessions included. A session holds two rows                                                    |
+| `galactic_nat_sessions`                                | gauge   | `family`, `proto` (`tcp`, `udp`, `icmp`)                                  | Live sessions: one per session within its idle timeout                                                                               |
+| `galactic_nat_conn_table_oldest_row_age_seconds`       | gauge   | none                                                                      | Seconds since the least recently seen session, expired ones included, last translated a packet. Meaningful only on a near-full table |
+| `galactic_nat_conn_table_max_entries`                  | gauge   | none                                                                      | Table capacity in rows, shared by both families                                                                                      |
+| `galactic_nat_drops_total`                             | counter | `reason`                                                                  | Packets dropped by the NAT datapath                                                                                                  |
+| `galactic_nat_packets_total`                           | counter | `family`, `direction` (`outbound`, `return`), `action` (`redirect`, `tx`) | Packets the shard translated and queued for transmit. Every combination is reported, zero included                                   |
+| `galactic_nat_bytes_total`                             | counter | same                                                                      | Bytes of those packets: the translated IP packet, without Ethernet or the SRv6 outer header                                          |
+| `galactic_nat_datapath_enabled`                        | gauge   | none                                                                      | 1 when the datapath is turned on by configuration, 0 when it is turned off                                                           |
+| `galactic_nat_datapath_attached`                       | gauge   | none                                                                      | 1 once the datapath has loaded and attached, 0 before that or while turned off                                                       |
+| `galactic_nat_programmed`                              | gauge   | none                                                                      | 1 while the datapath holds an EgressShard identity, 0 while it claims no packet                                                      |
+| `galactic_nat_uplink_covered`                          | gauge   | `interface`                                                               | 1 for each resolved uplink the datapath translates on, 0 for one it misses. Absent while turned off                                  |
+| `galactic_nat_family_enabled`                          | gauge   | `family`                                                                  | 1 when the programmed identity has a masquerade address for the family                                                               |
+| `galactic_nat_info`                                    | gauge   | `shard_sid`, `nat64_prefix`, `xdp_attach`, `version`                      | Always 1. Empty `shard_sid` and `nat64_prefix` while unprogrammed; `xdp_attach="off"` while turned off                               |
+| `galactic_nat_masquerade_ports_in_use`                 | gauge   | `family`, `address`, `proto`                                              | Distinct masquerade ports live sessions hold on the address, toward any destination                                                  |
+| `galactic_nat_masquerade_destination_ports_max`        | gauge   | `family`, `address`, `proto`                                              | The most ports live sessions hold toward any single destination address and port. New flows to it fail as this nears the range       |
+| `galactic_nat_masquerade_port_range`                   | gauge   | none                                                                      | Ports (or ICMP Echo Identifiers) available toward each destination: 28000                                                            |
+| `galactic_nat_dispatch_lease_renewals_total`           | counter | `slot`, `result` (`success`, `error`)                                     | Renewals of the shard's XDP dispatcher slot lease. Dispatch mode only                                                                |
+| `galactic_nat_dispatch_lease_expiry_timestamp_seconds` | gauge   | `slot`                                                                    | Unix time the lease, as last renewed, expires. Dispatch mode only                                                                    |
+| `galactic_nat_uplink_rx_queue_packets_total`           | counter | `interface`, `driver`, `queue`                                            | Packets one NIC receive queue of an uplink received, from `ethtool -S`. Exported for `bnxt_en`, `ixgbe`, `ice`, `i40e`, `mlx5_core`  |
+| `galactic_nat_uplink_rx_queue_discards_total`          | counter | `interface`, `driver`, `queue`                                            | Packets one receive queue discarded before the datapath saw them. Reported only by drivers that count per queue: `bnxt_en` today     |
+| `galactic_nat_uplink_queue_driver_stat_total`          | counter | `interface`, `driver`, `queue`, `stat`                                    | One of a queue's other driver counters, under its `ethtool -S` name. `bnxt_en` only, see below                                       |
+| `galactic_nat_uplink_info`                             | gauge   | `interface`, `driver`, `driver_version`, `firmware_version`, `kernel`     | Always 1. Names each uplink's driver and NIC firmware versions and the node's kernel release                                         |
 
 Caveats for the translated traffic and state series:
 
@@ -307,6 +312,28 @@ Caveats for the translated traffic and state series:
   (`GalacticNatNotTranslating`).
 - Cardinality: 8 series each for packets and bytes, one `uplink_covered`
   series per uplink, and one `info` series per shard.
+
+Caveats for the masquerade port series:
+
+- A port is claimed per destination address and port, not per masquerade
+  address, so the same port can serve many destinations at once.
+  `galactic_nat_masquerade_ports_in_use` can sit near the range on a healthy
+  shard that talks to many destinations;
+  `galactic_nat_masquerade_destination_ports_max` is what predicts exhaustion.
+- A claim probes 8 of the range's ports, so a destination fails new flows well
+  before it is full: about 0.4% of new flows at half full, 17% at 80%
+  (`GalacticNatPortsNearExhaustion` warns at half full).
+- Every protocol of every address the programmed identity serves is reported,
+  zero included, except when the session clock cannot be read: then only the
+  range is reported, rather than zeros that would read as an idle shard. An
+  address a re-programmed identity replaced is reported while live sessions
+  still hold its ports.
+- Both are read from the session table walk at scrape time, like
+  `galactic_nat_sessions`, so they are approximate on a churning table.
+
+The dispatcher lease series are registered in dispatch mode only. The
+edge gateway exports the same pair as `galactic_edge_dispatch_lease_*` for
+its two slots; no shipped alert reads the gateway's yet.
 
 Caveats for the session table:
 
@@ -366,6 +393,16 @@ sum by (node) (rate(galactic_nat_drops_total{reason=~"nat(66|64)_pat_exhausted|n
   / (sum by (node) (rate(galactic_nat_drops_total{reason=~"nat(66|64)_pat_exhausted|nat(66|64)_malformed_forward|redirect_failed|no_egress_ifindex|adjust_head_failed"}[10m]))
      + sum by (node) (rate(galactic_nat_packets_total[10m])))
 
+# Busiest destination per masquerade address, as a share of the range (GalacticNatPortsNearExhaustion)
+max by (node, family, address, proto) (galactic_nat_masquerade_destination_ports_max)
+  / on (node) group_left () max by (node) (galactic_nat_masquerade_port_range)
+
+# Seconds left on the dispatcher lease, by the node's clock
+galactic_nat_dispatch_lease_expiry_timestamp_seconds - time()
+
+# No successful lease renewal in two minutes (GalacticNatDispatchLeaseExpiring)
+changes(galactic_nat_dispatch_lease_renewals_total{result="success"}[2m]) == 0
+
 # Shards turned on but not programmed, and uplinks not covered
 galactic_nat_datapath_enabled == 1 and on (node) galactic_nat_programmed == 0
 galactic_nat_uplink_covered == 0
@@ -408,4 +445,7 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticNatUplinkUncovered           | `galactic_nat_uplink_covered == 0`                                 | 10m | critical |
 | GalacticNatForwardDropRatio          | owned-traffic drops over 1% of translated, over 10 packets/s       | 15m | warning  |
 | GalacticNatNotTranslating            | compute nodes send to the shard's SID, it translates none outbound | 10m | critical |
+| GalacticNatPortsNearExhaustion       | busiest destination holds over half its port range                 | 10m | warning  |
+| GalacticNatDispatchLeaseFailing      | more than two lease renewal errors in every 5-minute window        | 5m  | warning  |
+| GalacticNatDispatchLeaseExpiring     | no successful lease renewal in 2 minutes                           | 0   | critical |
 | GalacticNatMetricsDown               | `galactic-nat` scrape down                                         | 5m  | warning  |

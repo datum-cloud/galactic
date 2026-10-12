@@ -94,7 +94,7 @@ func joinForTest(t *testing.T, dispatchDir string, program *ebpf.Program) (*xdpd
 ) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	d, set, leaseDone, err := joinDispatcher(ctx, dispatchDir, program)
+	d, set, leaseDone, err := joinDispatcher(ctx, dispatchDir, program, nil)
 	if err != nil {
 		cancel()
 		t.Fatalf("joinDispatcher: %v", err)

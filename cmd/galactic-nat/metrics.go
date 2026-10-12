@@ -7,6 +7,8 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"maps"
+	"net/netip"
 
 	"github.com/cilium/ebpf"
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,6 +24,9 @@ const metricsNamespace = "galactic_nat"
 // familyNAT64.
 const labelFamily = "family"
 
+// masqueradeLabels label the masquerade port series.
+var masqueradeLabels = []string{labelFamily, "address", "proto"}
+
 // trafficLabels label the translated-traffic series.
 var trafficLabels = []string{labelFamily, "direction", "action"}
 
@@ -35,6 +40,10 @@ type natCollector struct {
 	connMaxEntries uint32
 	dropReasons    natmap.DropReasonsReader
 	traffic        natmap.TrafficReader
+
+	// shardConfig names the masquerade addresses whose port usage is always
+	// reported, zero included. Nil reports only the addresses rows hold.
+	shardConfig *natmap.ShardConfigTable
 
 	// now reads the clock the datapath stamps last_seen with. Nil means
 	// datapathNow.
@@ -60,6 +69,7 @@ func newNatCollector(objs *natprog.NatObjects) *natCollector {
 		connMaxEntries: mapMaxEntries(objs.NatConnTable),
 		dropReasons:    objs.DropReasons,
 		traffic:        objs.NatTraffic,
+		shardConfig:    natmap.NewShardConfigTable(natmap.KernelTable{Map: objs.ShardConfigTable}),
 	}
 }
 
@@ -113,6 +123,26 @@ var (
 			"without the Ethernet header or the SRv6 outer header a return packet carries.",
 		trafficLabels, nil,
 	)
+	portsInUseDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "masquerade", "ports_in_use"),
+		"Distinct masquerade ports live sessions hold on this masquerade address and protocol, toward any "+
+			"destination. A port is claimed per destination address and port, so this can sit near "+
+			"galactic_nat_masquerade_port_range on a healthy shard; see "+
+			"galactic_nat_masquerade_destination_ports_max for exhaustion.",
+		masqueradeLabels, nil,
+	)
+	destinationPortsMaxDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "masquerade", "destination_ports_max"),
+		"The most masquerade ports live sessions hold toward any single destination address and port, on this "+
+			"masquerade address and protocol. New flows to that destination start failing as it approaches "+
+			"galactic_nat_masquerade_port_range.",
+		masqueradeLabels, nil,
+	)
+	portRangeDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "masquerade", "port_range"),
+		"Masquerade ports (or ICMP Echo Identifiers) available toward each destination address and port.",
+		nil, nil,
+	)
 	dropsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(metricsNamespace, "", "drops_total"),
 		"Packets dropped by this shard's datapath, by reason (drop_reasons map).",
@@ -129,6 +159,9 @@ func (c *natCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- dropsDesc
 	ch <- packetsDesc
 	ch <- bytesDesc
+	ch <- portsInUseDesc
+	ch <- destinationPortsMaxDesc
+	ch <- portRangeDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -173,6 +206,7 @@ func (c *natCollector) collectConns(ch chan<- prometheus.Metric) {
 	now, err := clock()
 	if err != nil {
 		slog.Warn("cannot read the session clock; skipping session table metrics", "err", err)
+		ch <- prometheus.MustNewConstMetric(portRangeDesc, prometheus.GaugeValue, float64(natprog.PATPortRange))
 		return
 	}
 	// A walk the datapath's own inserts and evictions disturbed still reports
@@ -208,6 +242,41 @@ func (c *natCollector) collectConns(ch chan<- prometheus.Metric) {
 
 	if counts.HasReverse {
 		ch <- prometheus.MustNewConstMetric(oldestRowAgeDesc, prometheus.GaugeValue, float64(counts.OldestAge))
+	}
+
+	c.collectPorts(ch, counts.Ports)
+}
+
+// collectPorts reports port usage for every masquerade address and protocol
+// the programmed identity serves, zero included, and for any other address
+// live rows still hold, such as one a re-programmed identity replaced.
+func (c *natCollector) collectPorts(ch chan<- prometheus.Metric, usage map[natmap.MasqueradeKey]natmap.PortUsage) {
+	ch <- prometheus.MustNewConstMetric(portRangeDesc, prometheus.GaugeValue, float64(natprog.PATPortRange))
+
+	all := map[natmap.MasqueradeKey]natmap.PortUsage{}
+	if c.shardConfig != nil {
+		if cfg, ok, err := c.shardConfig.Get(); err != nil {
+			slog.Debug("cannot read shard_config_table; reporting port usage only for held addresses", "err", err)
+		} else if ok {
+			for _, served := range []struct {
+				family uint8
+				addr   netip.Addr
+			}{{natprog.FamilyIPv6, cfg.ShardPubAddr6}, {natprog.FamilyIPv4, cfg.ShardPubAddr4}} {
+				if !served.addr.IsValid() {
+					continue
+				}
+				for _, proto := range []string{natmap.SessionProtoTCP, natmap.SessionProtoUDP, natmap.SessionProtoICMP} {
+					all[natmap.MasqueradeKey{Family: served.family, Address: served.addr, Proto: proto}] = natmap.PortUsage{}
+				}
+			}
+		}
+	}
+	maps.Copy(all, usage)
+	for key, u := range all {
+		labels := []string{familyLabel(key.Family), key.Address.String(), key.Proto}
+		ch <- prometheus.MustNewConstMetric(portsInUseDesc, prometheus.GaugeValue, float64(u.InUse), labels...)
+		ch <- prometheus.MustNewConstMetric(destinationPortsMaxDesc, prometheus.GaugeValue,
+			float64(u.MaxPerDestination), labels...)
 	}
 }
 
