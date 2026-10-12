@@ -55,9 +55,8 @@
       "groupSlug": "docker-images"
     },
     {
-      "description": "Automerge patch/minor Go dependency updates, excluding k8s core",
-      "matchManagers": ["gomod"],
-      "matchUpdateTypes": ["patch", "minor"],
+      "description": "Automerge non-major updates once CI passes, excluding k8s core",
+      "matchUpdateTypes": ["patch", "minor", "digest", "pin"],
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true,
