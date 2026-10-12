@@ -829,8 +829,8 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkRule) bool {
 //
 // IPv4 VIPs, plain or IPv4-mapped (isIPv4VIP), are left out because the
 // datapath cannot serve them: loading one would fail the whole rule, and
-// advertising one would draw traffic nothing answers. The rule's IPv6 VIPs serve without them, and a
-// rule with no other VIP fails with errNoServedVIP.
+// advertising one would draw traffic nothing answers. The rule's IPv6 VIPs
+// serve without them, and a rule with no other VIP fails with errNoServedVIP.
 func buildDesiredRule(
 	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
 	sidIndex *backendSIDIndex, owners backendOwners,
