@@ -82,6 +82,15 @@ func (f *fakeSysfs) virtual(name string) {
 	}
 }
 
+// file adds a regular file, the way the bonding driver adds bonding_masters
+// beside the interfaces.
+func (f *fakeSysfs) file(name string) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(sysClassNet, name), []byte("bond0 bond1\n"), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
 func TestSelect(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -97,6 +106,7 @@ func TestSelect(t *testing.T) {
 				f.physical(testNIC2, "ice")
 				f.virtual("lo")
 				f.virtual("bond0")
+				f.file("bonding_masters")
 			},
 			required: []string{testNIC1, testNIC2},
 			want:     Native,
@@ -107,6 +117,7 @@ func TestSelect(t *testing.T) {
 				f.physical("ens1f0np0", "bnxt_en")
 				f.physical("ens3f0np0", "bnxt_en")
 				f.virtual("bond1")
+				f.file("bonding_masters")
 			},
 			required:   []string{"ens1f0np0", "ens3f0np0"},
 			want:       Generic,
