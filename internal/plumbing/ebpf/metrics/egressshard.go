@@ -26,6 +26,7 @@ const (
 	poolStateActive      = "active"
 	poolStateDraining    = "draining"
 	poolStateUnreachable = "unreachable"
+	poolStateLocal       = "local"
 	poolStateIneligible  = "ineligible"
 )
 
@@ -53,8 +54,8 @@ var (
 		prometheus.BuildFQName(egressNamespace, "egress_pool", "members"),
 		"The cluster's egress shards as this node's group for each translation class sees them: active shards "+
 			"take new tenant addresses, draining ones serve only the tenants pinned to them, unreachable ones "+
-			"have no route from this node, and ineligible ones cannot translate the class (no address in its "+
-			"family, or another NAT64 prefix).",
+			"have no route from this node, local ones run on this node and take no tenant from it, and "+
+			"ineligible ones cannot translate the class (no address in its family, or another NAT64 prefix).",
 		[]string{labelClass, "state"}, nil,
 	)
 	egressPoolMinActiveDesc = prometheus.NewDesc(
@@ -136,11 +137,13 @@ func (c *EgressShardCollector) Collect(ch chan<- prometheus.Metric) {
 			continue
 		}
 		states := map[string]int{
-			poolStateActive: 0, poolStateDraining: 0, poolStateUnreachable: 0,
+			poolStateActive: 0, poolStateDraining: 0, poolStateUnreachable: 0, poolStateLocal: 0,
 			poolStateIneligible: status.Ineligible,
 		}
 		for _, member := range members {
 			switch {
+			case member.Local:
+				states[poolStateLocal]++
 			case !member.Alive:
 				states[poolStateUnreachable]++
 			case member.Draining:

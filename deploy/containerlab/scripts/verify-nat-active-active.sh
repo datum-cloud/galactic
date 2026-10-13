@@ -16,7 +16,9 @@
 #       write), galactic-cni allowed to watch EgressShards. A self-test then
 #       blackholes a fresh tenant address and checks the probe fails.
 #    1. Flow hash, pins off: one tenant's TCP and UDP flows use both shards,
-#       over NAT66 and NAT64; ICMP works through both families.
+#       over NAT66 and NAT64; ICMP works through both families. Each shard
+#       node reports its own shard local, not unreachable, the other shard
+#       active, and no tenant route on any group.
 #    2. Source hash, default pins: every flow from one tenant address, TCP,
 #       UDP and ICMP alike, leaves from one shard per family.
 #    3. galactic-cni restart: a download in progress survives it, and every
@@ -103,7 +105,11 @@ sid64() {
 # --- metrics ------------------------------------------------------------------
 
 metric() {
-  docker exec "${COMPUTE}" curl -s --max-time 4 "${CNI_METRICS}" | awk -v m="$1" '$1 == m {print $2}'
+  node_metric "${COMPUTE}" "$1"
+}
+
+node_metric() { # NODE NAME
+  docker exec "$1" curl -s --max-time 4 "${CNI_METRICS}" | awk -v m="$2" '$1 == m {print $2}'
 }
 
 metric_sum() {
@@ -464,6 +470,18 @@ log "--- 1. hashed, flow hash, pins off ---"
 set_mode hashed flow 0
 wait_metric "$(members nat66 active)" 2 120
 wait_metric "$(members "${NAT64_CLASS}" active)" 2 120
+for s in "${SHARDS[@]}"; do
+  n=${NODE[${s}]}
+  for class in nat66 "${NAT64_CLASS}"; do
+    for want in local=1 unreachable=0 active=1; do
+      got=$(node_metric "${n}" "$(members "${class}" "${want%=*}")")
+      [ "${got}" = "${want#*=}" ] || die "${n} reports ${class} ${want%=*} = ${got:-missing}, want ${want#*=}"
+    done
+    got=$(node_metric "${n}" "galactic_cni_egress_group_routes{class=\"${class}\"}")
+    [ "${got}" = 0 ] || die "${n} reports ${got:-no} ${class} routes on its group, want 0"
+  done
+done
+log "ok   each shard node sees its own shard as local, the other as active, and has no tenant route"
 for kind in tcp6 tcp4 udp6 udp4; do
   case "${kind}" in *6) allowed=("${V6[@]}") ;; *) allowed=("${V4[@]}") ;; esac
   expect "${kind}" "${FRESH_POD}" - 24 "${allowed[@]}"

@@ -51,6 +51,7 @@ const (
 
 	shardFlagAlive    uint32 = 1 << 0
 	shardFlagDraining uint32 = 1 << 1
+	shardFlagLocal    uint32 = 1 << 2
 
 	classKindNAT66 uint8 = 1
 	classKindNAT64 uint8 = 2
@@ -173,6 +174,12 @@ type ShardCandidate struct {
 	// Draining keeps the shard out of the Maglev table, so it takes no new
 	// tenant address, while its pins keep working.
 	Draining bool
+	// Local marks a shard running on this node. Its SID is not resolved:
+	// this node originates the shard's locator itself, so the SID has no
+	// route over an uplink and never will. A local shard is never alive and
+	// takes no tenant from this node, the same as in ordered mode, but it is
+	// reported as local rather than unreachable, since nothing is wrong.
+	Local bool
 }
 
 // ShardState reports one group member.
@@ -187,6 +194,8 @@ type ShardState struct {
 	Alive bool
 	// Draining echoes the candidate's Draining.
 	Draining bool
+	// Local echoes the candidate's Local.
+	Local bool
 	// Err is why the SID did not resolve, when it did not.
 	Err error
 	// Assigned reports that this Apply gave the shard its slot, so nothing
@@ -381,6 +390,7 @@ func (g *ShardGroupTable) Members(groupID uint32) ([]ShardState, error) {
 			Generation: s.Generation,
 			Alive:      s.Flags&shardFlagAlive != 0,
 			Draining:   s.Flags&shardFlagDraining != 0,
+			Local:      s.Flags&shardFlagLocal != 0,
 		})
 	}
 	return members, nil
@@ -415,7 +425,8 @@ func (a *allocator) take() uint32 {
 // result as one snapshot.
 //
 // Every candidate's SID is resolved to an uplink next hop here, as Register
-// does for a single shard, and only a shard that resolves is alive. The Maglev
+// does for a single shard, and only a shard that resolves is alive. A local
+// candidate is not resolved and is never alive. The Maglev
 // table spreads tenant addresses over the alive shards that are not draining.
 // Every node computes the same table from the same set, whatever slots the
 // shards occupy locally.
@@ -466,7 +477,7 @@ func (g *ShardGroupTable) Apply(groupID uint32, policy GroupPolicy, candidates [
 		if assigned {
 			member.Generation = alloc.take()
 		}
-		if hop.err == nil {
+		if !c.local && hop.err == nil {
 			member.Flags |= shardFlagAlive
 			member.LinkIfindex = uint32(hop.hop.link) //nolint:gosec // a kernel ifindex
 			copy(member.Dmac[:], hop.hop.dmac)
@@ -475,11 +486,14 @@ func (g *ShardGroupTable) Apply(groupID uint32, policy GroupPolicy, candidates [
 		if c.draining {
 			member.Flags |= shardFlagDraining
 		}
+		if c.local {
+			member.Flags |= shardFlagLocal
+		}
 		value.Shards[slot] = member
 
 		state := ShardState{
-			SID: c.sid, Slot: slot, Generation: member.Generation, Alive: hop.err == nil,
-			Draining: c.draining, Err: hop.err, Assigned: assigned,
+			SID: c.sid, Slot: slot, Generation: member.Generation, Alive: !c.local && hop.err == nil,
+			Draining: c.draining, Local: c.local, Err: hop.err, Assigned: assigned,
 		}
 		result.Shards = append(result.Shards, state)
 		if state.Active() {
@@ -531,7 +545,9 @@ func (g *ShardGroupTable) Close(groupID uint32) (bool, error) {
 	for _, s := range value.Shards {
 		if slotOccupied(s) {
 			candidates = append(candidates, ShardCandidate{
-				SID: net.IP(netip.AddrFrom16(s.Sid).AsSlice()), Draining: s.Flags&shardFlagDraining != 0,
+				SID:      net.IP(netip.AddrFrom16(s.Sid).AsSlice()),
+				Draining: s.Flags&shardFlagDraining != 0,
+				Local:    s.Flags&shardFlagLocal != 0,
 			})
 		}
 	}
@@ -577,22 +593,24 @@ func (g *ShardGroupTable) Disable(groupID uint32) (bool, error) {
 type candidate struct {
 	sid      netip.Addr
 	draining bool
+	local    bool
 }
 
 // canonicalCandidates reduces candidates to base SIDs, ordered by SID. A
-// shard listed twice is draining if either listing says so.
+// shard listed twice is draining, or local, if either listing says so.
 func canonicalCandidates(candidates []ShardCandidate) ([]candidate, error) {
-	bySID := map[netip.Addr]bool{}
+	bySID := map[netip.Addr]candidate{}
 	for _, c := range candidates {
 		base, err := BaseShardSID(c.SID)
 		if err != nil {
 			return nil, fmt.Errorf("egressroutemap: %w", err)
 		}
-		bySID[base] = bySID[base] || c.Draining
+		prev := bySID[base]
+		bySID[base] = candidate{sid: base, draining: prev.draining || c.Draining, local: prev.local || c.Local}
 	}
 	out := make([]candidate, 0, len(bySID))
-	for sid, draining := range bySID {
-		out = append(out, candidate{sid: sid, draining: draining})
+	for _, c := range bySID {
+		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].sid.Less(out[j].sid) })
 	return out, nil
@@ -630,10 +648,13 @@ func assignSlots(slots [MaxShardsPerGroup]prog.UsidEgressShardMember, wanted []c
 	return assignment
 }
 
-// resolveShards resolves every wanted shard's next hop.
+// resolveShards resolves every wanted shard's next hop, except a local one's.
 func resolveShards(wanted []candidate) map[netip.Addr]resolution {
 	out := make(map[netip.Addr]resolution, len(wanted))
 	for _, c := range wanted {
+		if c.local {
+			continue
+		}
 		link, dmac, smac, err := resolveLinkAndL2Fn(net.IP(c.sid.AsSlice()))
 		out[c.sid] = resolution{hop: nextHop{link: link, dmac: dmac, smac: smac}, err: err}
 	}

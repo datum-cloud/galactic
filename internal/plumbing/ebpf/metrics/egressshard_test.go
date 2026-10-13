@@ -45,10 +45,11 @@ func (p perCPUTable) Lookup(key, out any) error {
 func sidBytes(s string) [16]byte { return netip.MustParseAddr(s).As16() }
 
 func TestEgressShardCollector(t *testing.T) {
-	nat66 := prog.UsidEgressShardGroupValue{Flags: 1, Candidates: 3, Active: 1, ClassKind: 1}
+	nat66 := prog.UsidEgressShardGroupValue{Flags: 1, Candidates: 4, Active: 1, ClassKind: 1}
 	nat66.Shards[0] = prog.UsidEgressShardMember{Sid: sidBytes("2001:db8:ff09:10:e000::"), Flags: 1, Generation: 1}
 	nat66.Shards[1] = prog.UsidEgressShardMember{Sid: sidBytes("2001:db8:ff09:11:e000::"), Flags: 3, Generation: 2}
 	nat66.Shards[4] = prog.UsidEgressShardMember{Sid: sidBytes("2001:db8:ff09:12:e000::"), Flags: 0, Generation: 3}
+	nat66.Shards[5] = prog.UsidEgressShardMember{Sid: sidBytes("2001:db8:ff09:13:e000::"), Flags: 4, Generation: 4}
 	// A NAT64 class no shard can serve, being retired: it forwards but is
 	// not open.
 	nat64 := prog.UsidEgressShardGroupValue{Flags: 1 | 4, Ineligible: 3, ClassKind: 2,
@@ -75,6 +76,7 @@ func TestEgressShardCollector(t *testing.T) {
 		`galactic_cni_egress_pool_members{class="nat66",state="active"}`:                             1,
 		`galactic_cni_egress_pool_members{class="nat66",state="draining"}`:                           1,
 		`galactic_cni_egress_pool_members{class="nat66",state="unreachable"}`:                        1,
+		`galactic_cni_egress_pool_members{class="nat66",state="local"}`:                              1,
 		`galactic_cni_egress_pool_members{class="nat66",state="ineligible"}`:                         0,
 		`galactic_cni_egress_pool_members{` + nat64Class + `,state="active"}`:                        0,
 		`galactic_cni_egress_pool_members{` + nat64Class + `,state="ineligible"}`:                    3,

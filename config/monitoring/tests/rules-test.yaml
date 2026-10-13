@@ -674,13 +674,15 @@ tests:
                 galactic-nat alert can fire for it.
 
   # Hashed egress, NAT66 class: the node's only shard becomes unreachable at
-  # 5m. GalacticEgressPoolEmpty fires after 2m, BelowMinimum after 10m. The
-  # NAT64 class on another node is retired (enabled 0) with no member and no
-  # route left, and fires nothing.
+  # 5m while tenant routes name the group. GalacticEgressPoolEmpty fires
+  # after 2m, BelowMinimum after 10m. The NAT64 class on another node is
+  # retired (enabled 0) with no member and no route left, and fires nothing.
   - interval: 30s
     input_series:
       - series: 'galactic_cni_egress_pool_enabled{job="galactic-cni",node="dfw-worker",class="nat66"}'
         values: "1x40"
+      - series: 'galactic_cni_egress_group_routes{job="galactic-cni",node="dfw-worker",class="nat66"}'
+        values: "3x40"
       - series: 'galactic_cni_egress_pool_min_active{job="galactic-cni",node="dfw-worker"}'
         values: "1x40"
       - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat66",state="active"}'
@@ -717,8 +719,8 @@ tests:
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolempty"
               description: >-
                 No egress shard in dfw-worker's nat66 group has taken new tenants for 2
-                minutes while the group has shards or routes, so new nat66 egress from that node is
-                dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
+                minutes while routes on that node name the group, so new nat66 egress from that node
+                is dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
                 SID over an SRv6 uplink) or draining.
       - eval_time: 14m
         alertname: GalacticEgressPoolBelowMinimum
@@ -767,9 +769,53 @@ tests:
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolempty"
               description: >-
                 No egress shard in sjc-worker's nat66 group has taken new tenants for 2
-                minutes while the group has shards or routes, so new nat66 egress from that node is
-                dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
+                minutes while routes on that node name the group, so new nat66 egress from that node
+                is dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
                 SID over an SRv6 uplink) or draining.
+
+  # An edge node running the cluster's only shard: its own shard is local,
+  # never active, and no tenant route names the group. Nothing fires. A
+  # second edge node whose only other shard is unreachable but which has no
+  # tenant route fires nothing either: an empty pool with nothing to egress
+  # is no outage.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_cni_egress_pool_enabled{job="galactic-cni",node="dfw-edge",class="nat66"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_min_active{job="galactic-cni",node="dfw-edge"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-edge",class="nat66",state="active"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-edge",class="nat66",state="unreachable"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-edge",class="nat66",state="local"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-edge",class="nat66",state="ineligible"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_group_routes{job="galactic-cni",node="dfw-edge",class="nat66"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_pool_enabled{job="galactic-cni",node="iad-edge",class="nat66"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_min_active{job="galactic-cni",node="iad-edge"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="iad-edge",class="nat66",state="active"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="iad-edge",class="nat66",state="unreachable"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="iad-edge",class="nat66",state="local"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_group_routes{job="galactic-cni",node="iad-edge",class="nat66"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: GalacticEgressPoolEmpty
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: GalacticEgressPoolBelowMinimum
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: GalacticEgressClassUnserved
+        exp_alerts: []
 
   # A NAT64 class no shard can translate fires ClassUnserved after 15m, and
   # neither PoolEmpty nor BelowMinimum, which would both be the wrong story.

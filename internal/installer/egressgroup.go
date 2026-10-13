@@ -54,7 +54,9 @@ var egressGroupDebounce = 250 * time.Millisecond
 // In hashed mode there is one group per translation class: NAT66 for ::/0,
 // and one per NAT64 prefix. A class's members are the cluster's EgressShards
 // that can translate it, read from a watch, and a member is alive only while
-// its SID resolves to an uplink neighbor. Every VRF route bound to a shard is
+// its SID resolves to an uplink neighbor. A shard running on this node is a
+// local member instead: this node originates its locator, so its SID never
+// resolves over an uplink, and it is never alive here. Every VRF route bound to a shard is
 // moved onto its class's group, after which usid_egress picks a shard per
 // tenant address.
 //
@@ -68,6 +70,10 @@ type egressGroup struct {
 	staticSIDs []net.IP
 	pinDir     string
 	trigger    chan struct{}
+
+	// nodeName is this node's name, which marks the EgressShards running on
+	// it as local members. Empty marks none.
+	nodeName string
 
 	// classes are the translation classes this node's VRFs need, in group
 	// order: NAT66, then each configured NAT64 prefix.
@@ -353,7 +359,7 @@ func (g *egressGroup) applyClasses(
 		errs     []error
 	)
 	for i, class := range g.classes {
-		eligible, ineligible := egressShardCandidates(shards, class)
+		eligible, ineligible := egressShardCandidates(shards, class, g.nodeName)
 		g.reportIneligible(class, ineligible)
 		result, err := groups.Apply(uint32(i), g.policy(class, len(ineligible)), eligible) //nolint:gosec // < 4
 		if err != nil {
@@ -403,7 +409,10 @@ func (g *egressGroup) logApplied(class egressroutemap.TranslationClass, result e
 		return
 	}
 	for _, s := range result.Shards {
-		if s.Err != nil {
+		if s.Local {
+			slog.Info("Egress shard runs on this node; it takes no tenant from here",
+				"class", class.String(), "sid", s.SID, "slot", s.Slot)
+		} else if s.Err != nil {
 			slog.Warn("Egress shard unreachable; it takes no tenant until its SID resolves",
 				"class", class.String(), "sid", s.SID, "slot", s.Slot, "err", s.Err)
 		}
@@ -477,9 +486,10 @@ func (g *egressGroup) refresh(
 //
 // One with spec.drain set is draining. One being deleted is no candidate at
 // all: deletion withdraws its advertisement and clears its translation at
-// once, so it has nothing to drain with.
+// once, so it has nothing to drain with. One whose target is nodeName is
+// local.
 func egressShardCandidates(
-	shards []bgpv1alpha1.EgressShard, class egressroutemap.TranslationClass,
+	shards []bgpv1alpha1.EgressShard, class egressroutemap.TranslationClass, nodeName string,
 ) (eligible []egressroutemap.ShardCandidate, ineligible []string) {
 	for i := range shards {
 		shard := &shards[i]
@@ -498,9 +508,17 @@ func egressShardCandidates(
 			ineligible = append(ineligible, shard.Name)
 			continue
 		}
-		eligible = append(eligible, egressroutemap.ShardCandidate{SID: sid, Draining: shard.Spec.Drain})
+		eligible = append(eligible, egressroutemap.ShardCandidate{
+			SID: sid, Draining: shard.Spec.Drain, Local: targetsNode(shard.Spec.TargetRef, nodeName),
+		})
 	}
 	return eligible, ineligible
+}
+
+// targetsNode reports whether ref names nodeName, matched by name as the
+// shard's own controller does. An empty nodeName matches nothing.
+func targetsNode(ref bgpv1alpha1.TargetRef, nodeName string) bool {
+	return nodeName != "" && ref.Name == nodeName
 }
 
 // translates reports whether a shard with status can translate class.
