@@ -15,7 +15,6 @@ import (
 	"github.com/cilium/ebpf"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
-	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 // DispatchSet keeps one datapath's slot reachable on a set of interfaces
@@ -35,9 +34,6 @@ import (
 // set is often partial while routing converges).
 type DispatchSet struct {
 	backend dispatchBackend
-	// mode is the dispatcher's attach mode, which decides the pre-attach
-	// support check.
-	mode xdpmode.Mode
 
 	mu      sync.Mutex
 	missing []string
@@ -46,8 +42,7 @@ type DispatchSet struct {
 // dispatchBackend is what DispatchSet needs from the dispatcher, so its tests
 // can run without loading anything into the kernel.
 type dispatchBackend interface {
-	// linked reports whether the root already holds ifindex in the
-	// dispatcher's mode.
+	// linked reports whether the root already holds ifindex.
 	linked(ifindex int) (bool, error)
 	// ensure, under the dispatch lock, attaches the root to ifindex if it is
 	// not there and adds the datapath's role. It calls guard first, under the
@@ -72,21 +67,16 @@ func NewDispatchSet(d *xdpdispatch.Dispatcher, slot xdpdispatch.Slot,
 	if program == nil {
 		return nil, errors.New("xdpattach: program is nil")
 	}
-	return &DispatchSet{
-		backend: &kernelDispatch{d: d, slot: slot, role: role, program: program},
-		mode:    d.Mode(),
-	}, nil
+	return &DispatchSet{backend: &kernelDispatch{d: d, slot: slot, role: role, program: program}}, nil
 }
 
 // Reconcile brings every interface in desired under the dispatcher with this
 // datapath's role, and returns the ones its slot does not cover afterwards.
 //
 // The guards Set applies before an attach apply here too, and only when the
-// root is not on the interface in the dispatcher's mode yet, since nothing
-// else bounces it: in native mode a definite lack of native XDP support
-// leaves the interface missing, and in either mode so does a bond member whose
-// bounce would take the bond down. A root linked in the other mode is
-// migrated, which bounces the interface like a first attach. The guards, the
+// root is not on the interface yet, since nothing else bounces it: a
+// definite lack of native XDP support leaves the interface missing, and so
+// does a bond member whose bounce would take the bond down. The guards, the
 // attach, and the wait for a bounced bond member to rejoin its aggregate all
 // run under the dispatch lock, so no other process bounces a second member of
 // the same bond in between.
@@ -164,7 +154,7 @@ func (s *DispatchSet) Reconcile(ctx context.Context, desired []string) []string 
 
 // attachable applies the pre-attach guards to name.
 func (s *DispatchSet) attachable(name string) error {
-	if err := checkModeSupport([]string{name}, s.mode); err != nil {
+	if err := checkNativeXDPSupport([]string{name}); err != nil {
 		return err
 	}
 	isolates, err := bounceIsolatesBond(name)

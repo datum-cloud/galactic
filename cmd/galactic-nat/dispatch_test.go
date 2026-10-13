@@ -19,7 +19,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/natattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
-	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 // testPinDirs returns per-test bpffs directories for the dispatcher and the
@@ -95,7 +94,7 @@ func joinForTest(t *testing.T, dispatchDir string, program *ebpf.Program) (*xdpd
 ) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	d, set, leaseDone, err := joinDispatcher(ctx, dispatchDir, xdpmode.Native, program, nil)
+	d, set, leaseDone, err := joinDispatcher(ctx, dispatchDir, program, nil)
 	if err != nil {
 		cancel()
 		t.Fatalf("joinDispatcher: %v", err)
@@ -157,13 +156,13 @@ func TestReleaseIdleDispatcher_FreesTheUplinkForADirectAttach(t *testing.T) {
 		t.Fatalf("missing %v", missing)
 	}
 
-	if err := releaseIdleDispatcher(context.Background(), dispatchDir, xdpmode.Native, []string{uplink}); err != nil {
+	if err := releaseIdleDispatcher(context.Background(), dispatchDir, []string{uplink}); err != nil {
 		t.Fatalf("releaseIdleDispatcher: %v", err)
 	}
 	if got := xdpProgID(t, uplink); got != 0 {
 		t.Fatalf("uplink still runs program %d after release", got)
 	}
-	links, err := natattach.Attach(program, []string{uplink}, xdpmode.Native)
+	links, err := natattach.Attach(program, []string{uplink})
 	if err != nil {
 		t.Fatalf("direct attach after release: %v", err)
 	}
@@ -194,7 +193,7 @@ func TestReleaseIdleDispatcher_RefusesWhileAnotherSlotIsLive(t *testing.T) {
 	}
 	root := xdpProgID(t, uplink)
 
-	if err := releaseIdleDispatcher(context.Background(), dispatchDir, xdpmode.Native, []string{uplink}); err == nil {
+	if err := releaseIdleDispatcher(context.Background(), dispatchDir, []string{uplink}); err == nil {
 		t.Fatal("releaseIdleDispatcher succeeded with the gateway's slot live")
 	}
 	if got := xdpProgID(t, uplink); got != root {

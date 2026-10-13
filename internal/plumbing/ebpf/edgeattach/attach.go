@@ -21,7 +21,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/mappin"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
-	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 // linkByNameFn and linkListFn are override points, as elsewhere in this
@@ -167,24 +166,24 @@ func ResolveTargets(ifaceName string) ([]string, error) {
 }
 
 // Attach attaches program to the XDP hook of every interface in ifaceNames, in
-// mode (xdpmode.Select), returning the resulting link for each in the same order
+// native driver mode, returning the resulting link for each in the same order
 // for the caller to hold open and close on shutdown. Callers resolve ifaceNames
 // through ResolveTargets first, so this is usually a single interface and never
 // a bond master.
 //
-// The attach itself is xdpattach.Attach, which in native mode checks every
-// interface for native XDP support before touching any of them, and waits each bond slave back
+// The attach itself is xdpattach.Attach, which checks every interface for
+// native XDP support before touching any of them and waits each bond slave back
 // into its aggregate before attaching the next, so a bonded uplink never loses
 // every member at once. A failure partway through closes every link already
 // attached in this call.
-func Attach(program *ebpf.Program, ifaceNames []string, mode xdpmode.Mode) ([]link.Link, error) {
+func Attach(program *ebpf.Program, ifaceNames []string) ([]link.Link, error) {
 	if program == nil {
 		return nil, errors.New("edgeattach: program is nil")
 	}
 	if len(ifaceNames) == 0 {
 		return nil, errors.New("edgeattach: no interfaces to attach to")
 	}
-	links, err := xdpattach.Attach(program, ifaceNames, mode)
+	links, err := xdpattach.Attach(program, ifaceNames)
 	if err != nil {
 		return nil, fmt.Errorf("edgeattach: %w", err)
 	}

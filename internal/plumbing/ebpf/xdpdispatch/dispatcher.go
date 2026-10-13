@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -19,8 +18,6 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
-
-	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 // PinDir is the bpffs directory every datapath sharing the XDP hook pins its
@@ -92,14 +89,7 @@ var (
 	ErrRoleMissing  = errors.New("the interface does not carry the slot's role")
 	ErrSlotNotHeld  = errors.New("the slot does not hold this program")
 	ErrLeaseExpired = errors.New("the slot's lease has expired")
-	ErrModeMismatch = errors.New("the dispatcher link is attached in a different XDP mode than this host selects")
 )
-
-// ErrHostModeChanged means another process opened the dispatcher with a
-// different XDP mode since this one did, so this process's mode is stale and
-// it leaves the links alone rather than move them back. Restart it.
-var ErrHostModeChanged = errors.New("xdpdispatch: another process on this host selected a different XDP mode; " +
-	"restart this one so both agree")
 
 var (
 	errInvalidSlot = errors.New("xdpdispatch: slot out of range")
@@ -118,17 +108,6 @@ var (
 	linksDirName      = "links"
 	rootPinName       = "root"
 	rootStagedPinName = "root_next" // bpffs reserves names containing a dot
-	// hostModePinName is a one-entry array recording the XDP mode the most
-	// recently opened dispatcher selected, outside the versioned ABI
-	// directory since it is no part of the dispatch program's layout.
-	hostModePinName = "host_mode"
-)
-
-// Migration retries back off per interface, so an attach that keeps failing
-// does not bounce an uplink on every reconcile.
-const (
-	migrationBackoffMin = 30 * time.Second
-	migrationBackoffMax = 10 * time.Minute
 )
 
 // Override points for tests.
@@ -136,7 +115,6 @@ var (
 	linkByIndexFn  = netlink.LinkByIndex
 	attachXDPFn    = link.AttachXDP
 	monotonicNowFn = monotonicNow
-	wallNowFn      = time.Now
 )
 
 // Dispatcher is an open handle on a node's pinned dispatch state. Closing it
@@ -148,26 +126,6 @@ var (
 type Dispatcher struct {
 	dir  string
 	maps DispatchMaps
-	// mode is the XDP attach mode this host selected. A link this process
-	// makes is attached in it, and a pinned link in the other mode is not
-	// counted as linked or covered until EnsureLink migrates it.
-	mode xdpmode.Mode
-	// attaching is false for a dispatcher from OpenForSlots, which attaches
-	// nothing and has no mode of its own.
-	attaching bool
-	// hostMode is the pinned record of the mode the most recently opened
-	// attaching dispatcher on this host selected. Nil when not attaching.
-	hostMode *ebpf.Map
-
-	backoffMu sync.Mutex
-	// backoff holds, per ifindex, when a failed migration may next be tried
-	// and how long the following wait is.
-	backoff map[int]migrationRetry
-}
-
-type migrationRetry struct {
-	next  time.Time
-	delay time.Duration
 }
 
 // Open loads the dispatch state pinned under dir, creating it on first use,
@@ -177,23 +135,7 @@ type migrationRetry struct {
 //
 // Open takes the dispatch lock itself, waiting until ctx is done, so the
 // caller must not hold it.
-//
-// mode is the host's XDP attach mode (xdpmode.Select). Every datapath on a
-// host must open the dispatcher with the same mode, which they do by selecting
-// it from the same host state.
-func Open(ctx context.Context, dir string, mode xdpmode.Mode) (*Dispatcher, error) {
-	return open(ctx, dir, mode, true)
-}
-
-// OpenForSlots opens the dispatch state like Open, for a caller that only
-// fills, clears or renews slots and never attaches, such as a datapath being
-// turned off. It records no host mode, so it never overrides the mode the
-// attaching datapaths on the host selected, and its EnsureLink refuses to run.
-func OpenForSlots(ctx context.Context, dir string) (*Dispatcher, error) {
-	return open(ctx, dir, xdpmode.Native, false)
-}
-
-func open(ctx context.Context, dir string, mode xdpmode.Mode, attaching bool) (*Dispatcher, error) {
+func Open(ctx context.Context, dir string) (*Dispatcher, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("xdpdispatch: remove memlock rlimit: %w", err)
 	}
@@ -232,57 +174,12 @@ func open(ctx context.Context, dir string, mode xdpmode.Mode, attaching bool) (*
 	// The pin, when adoptRoot makes one, keeps the program alive.
 	defer objs.XdpDispatch.Close() //nolint:errcheck // our own descriptor
 
-	d := &Dispatcher{dir: dir, maps: objs.DispatchMaps, mode: mode, attaching: attaching,
-		backoff: map[int]migrationRetry{}}
-	if attaching {
-		if d.hostMode, err = recordHostMode(dir, mode); err != nil {
-			_ = objs.DispatchMaps.Close()
-			return nil, err
-		}
-	}
+	d := &Dispatcher{dir: dir, maps: objs.DispatchMaps}
 	if err := d.adoptRoot(objs.XdpDispatch); err != nil {
-		_ = d.Close()
+		_ = d.maps.Close()
 		return nil, err
 	}
 	return d, nil
-}
-
-// recordHostMode opens the pinned host mode record under dir, creating it on
-// first use, and records mode in it. The caller holds the dispatch lock. The
-// record holds the mode plus one, so an entry never written reads as none.
-func recordHostMode(dir string, mode xdpmode.Mode) (*ebpf.Map, error) {
-	path := filepath.Join(dir, hostModePinName)
-	m, err := ebpf.LoadPinnedMap(path, nil)
-	if errors.Is(err, os.ErrNotExist) {
-		m, err = ebpf.NewMap(&ebpf.MapSpec{Name: hostModePinName, Type: ebpf.Array, KeySize: 4, ValueSize: 4, MaxEntries: 1})
-		if err == nil {
-			if pinErr := m.Pin(path); pinErr != nil {
-				_ = m.Close()
-				return nil, fmt.Errorf("xdpdispatch: pin host mode record: %w", pinErr)
-			}
-		}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("xdpdispatch: open host mode record: %w", err)
-	}
-	if err := m.Put(uint32(0), uint32(mode)+1); err != nil {
-		_ = m.Close()
-		return nil, fmt.Errorf("xdpdispatch: record host mode: %w", err)
-	}
-	return m, nil
-}
-
-// recordedHostMode returns the mode the most recently opened dispatcher on
-// this host recorded, and false when none has.
-func (d *Dispatcher) recordedHostMode() (xdpmode.Mode, bool, error) {
-	var v uint32
-	if err := d.hostMode.Lookup(uint32(0), &v); err != nil {
-		return 0, false, fmt.Errorf("xdpdispatch: read host mode record: %w", err)
-	}
-	if v == 0 {
-		return 0, false, nil
-	}
-	return xdpmode.Mode(v - 1), true, nil
 }
 
 // adoptRoot pins ours as the node's root when the pinned root is older or
@@ -373,11 +270,7 @@ func (d *Dispatcher) updateLinks(root *ebpf.Program) error {
 
 // Close closes this process's descriptors. Pinned state is untouched.
 func (d *Dispatcher) Close() error {
-	var err error
-	if d.hostMode != nil {
-		err = d.hostMode.Close()
-	}
-	return errors.Join(err, d.maps.Close())
+	return d.maps.Close()
 }
 
 // Maps returns the pinned dispatch maps, for a datapath whose own programs
@@ -414,32 +307,13 @@ func (d *Dispatcher) RootID() (ebpf.ProgramID, error) {
 	return programID(root)
 }
 
-// Mode returns the XDP attach mode the dispatcher attaches and checks in.
-func (d *Dispatcher) Mode() xdpmode.Mode { return d.mode }
-
-// attachedMode returns the mode ifindex's XDP hook holds a program in, read
-// from the kernel, and false when it holds none or holds it some other way.
-func attachedMode(ifindex int) (xdpmode.Mode, bool, error) {
-	nl, err := linkByIndexFn(ifindex)
-	if err != nil {
-		return 0, false, fmt.Errorf("xdpdispatch: find interface %d: %w", ifindex, err)
-	}
-	xdp := nl.Attrs().Xdp
-	if xdp == nil || !xdp.Attached {
-		return 0, false, nil
-	}
-	mode, ok := xdpmode.FromAttachMode(xdp.AttachMode)
-	return mode, ok, nil
-}
-
 func (d *Dispatcher) linkPath(ifindex int) string {
 	return filepath.Join(d.dir, linksDirName, strconv.Itoa(ifindex))
 }
 
-// Pinned reports whether a live pinned dispatcher link holds ifindex, in
-// either mode. Release uses it, since a link in the other mode still holds the
-// interface's hook.
-func (d *Dispatcher) Pinned(ifindex int) (bool, error) {
+// Linked reports whether a live pinned dispatcher link holds ifindex, which
+// is when EnsureLink would neither attach nor bounce it.
+func (d *Dispatcher) Linked(ifindex int) (bool, error) {
 	pinned, err := link.LoadPinnedLink(d.linkPath(ifindex), nil)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -454,21 +328,6 @@ func (d *Dispatcher) Pinned(ifindex int) (bool, error) {
 	}
 	xdp := info.XDP()
 	return xdp != nil && int(xdp.Ifindex) == ifindex, nil
-}
-
-// Linked reports whether a live pinned dispatcher link holds ifindex in the
-// dispatcher's mode, which is when EnsureLink would neither attach nor bounce
-// it.
-func (d *Dispatcher) Linked(ifindex int) (bool, error) {
-	pinned, err := d.Pinned(ifindex)
-	if err != nil || !pinned {
-		return false, err
-	}
-	mode, ok, err := attachedMode(ifindex)
-	if err != nil {
-		return false, err
-	}
-	return ok && mode == d.mode, nil
 }
 
 // Locked is the dispatch lock, held. Every call that changes shared state
@@ -504,13 +363,11 @@ func (l *Locked) Unlock() {
 }
 
 // EnsureLink makes sure the pinned root is attached to ifindex through a
-// pinned link, in the dispatcher's mode. bounced reports whether this call
-// attached it, which on most drivers resets the interface; the caller then
-// waits for a bond member to rejoin. A link running an older root is moved to
-// the pinned one. A pinned link in the other mode is migrated (migrateLink),
-// which also bounces. A pinned link whose interface is gone is released and
-// replaced. An interface held by any other XDP program returns
-// ErrForeignProgram and is left alone.
+// pinned link. bounced reports whether this call attached it, which on most
+// drivers resets the interface; the caller then waits for a bond member to
+// rejoin. A link running an older root is moved to the pinned one. A pinned
+// link whose interface is gone is released and replaced. An interface held by
+// any other XDP program returns ErrForeignProgram and is left alone.
 //
 // A link is defunct when the kernel reports its interface index as 0, which it
 // does once the interface is unregistered. Interface indexes are not reused
@@ -518,9 +375,6 @@ func (l *Locked) Unlock() {
 // different one.
 func (l *Locked) EnsureLink(ifindex int) (bounced bool, err error) {
 	d := l.d
-	if !d.attaching {
-		return false, errors.New("xdpdispatch: EnsureLink on a dispatcher opened for slots only")
-	}
 	root, err := d.loadRoot()
 	if err != nil {
 		return false, err
@@ -544,23 +398,7 @@ func (l *Locked) EnsureLink(ifindex int) (bounced bool, err error) {
 					return false, fmt.Errorf("xdpdispatch: move ifindex %d to the pinned root: %w", ifindex, err)
 				}
 			}
-			mode, ok, err := attachedMode(ifindex)
-			if err != nil {
-				return false, err
-			}
-			if ok && mode == d.mode {
-				return false, nil
-			}
-			if !ok {
-				return false, fmt.Errorf("xdpdispatch: cannot read the XDP mode ifindex %d's pinned link is "+
-					"attached in, so it is not moved to %s mode", ifindex, d.mode)
-			}
-			if err := d.migrationAllowed(ifindex); err != nil {
-				return false, err
-			}
-			err = l.migrateLink(ifindex, pinned, root, mode)
-			d.recordMigration(ifindex, err)
-			return true, err
+			return false, nil
 		}
 		if err := pinned.Unpin(); err != nil {
 			return false, fmt.Errorf("xdpdispatch: unpin defunct link for ifindex %d: %w", ifindex, err)
@@ -578,97 +416,16 @@ func (l *Locked) EnsureLink(ifindex int) (bounced bool, err error) {
 			ErrForeignProgram, nl.Attrs().Name, ifindex, xdp.ProgId)
 	}
 
-	if err := attachPinned(root, ifindex, d.mode, path); err != nil {
-		return true, fmt.Errorf("xdpdispatch: %s: %w", nl.Attrs().Name, err)
-	}
-	return true, nil
-}
-
-// attachPinned attaches root to ifindex in mode and pins the link at path.
-func attachPinned(root *ebpf.Program, ifindex int, mode xdpmode.Mode, path string) error {
-	attached, err := attachXDPFn(link.XDPOptions{Program: root, Interface: ifindex, Flags: mode.AttachFlags()})
+	attached, err := attachXDPFn(link.XDPOptions{Program: root, Interface: ifindex, Flags: link.XDPDriverMode})
 	if err != nil {
-		return fmt.Errorf("attach dispatcher in %s mode: %w", mode, err)
+		return false, fmt.Errorf("xdpdispatch: attach dispatcher to %s in native/driver mode: %w",
+			nl.Attrs().Name, err)
 	}
 	defer attached.Close() //nolint:errcheck // our own descriptor; the pin keeps the link
 	if err := attached.Pin(path); err != nil {
-		return fmt.Errorf("pin link: %w", err)
+		return true, fmt.Errorf("xdpdispatch: pin link for %s: %w", nl.Attrs().Name, err)
 	}
-	return nil
-}
-
-// migrationAllowed refuses a migration when another process on the host has
-// since recorded a different mode, or while a failed migration of ifindex is
-// backing off. The first keeps two processes that disagree from moving one
-// link back and forth; the second keeps a failing attach from bouncing an
-// uplink on every reconcile.
-func (d *Dispatcher) migrationAllowed(ifindex int) error {
-	recorded, ok, err := d.recordedHostMode()
-	if err != nil {
-		return err
-	}
-	if ok && recorded != d.mode {
-		return fmt.Errorf("%w: this process selected %s mode, the host record says %s",
-			ErrHostModeChanged, d.mode, recorded)
-	}
-	d.backoffMu.Lock()
-	defer d.backoffMu.Unlock()
-	if r, ok := d.backoff[ifindex]; ok && wallNowFn().Before(r.next) {
-		return fmt.Errorf("xdpdispatch: moving ifindex %d to %s mode failed recently; retrying after %s",
-			ifindex, d.mode, r.next.Format(time.RFC3339))
-	}
-	return nil
-}
-
-// recordMigration clears ifindex's backoff after a migration that succeeded,
-// and doubles it, from migrationBackoffMin up to migrationBackoffMax, after
-// one that failed.
-func (d *Dispatcher) recordMigration(ifindex int, err error) {
-	d.backoffMu.Lock()
-	defer d.backoffMu.Unlock()
-	if err == nil {
-		delete(d.backoff, ifindex)
-		return
-	}
-	delay := migrationBackoffMin
-	if r, ok := d.backoff[ifindex]; ok {
-		delay = min(2*r.delay, migrationBackoffMax)
-	}
-	d.backoff[ifindex] = migrationRetry{next: wallNowFn().Add(delay), delay: delay}
-}
-
-// migrateLink moves ifindex's pinned link from the mode it is attached in to
-// the dispatcher's mode. A bpf_link keeps the mode it was created with, and
-// the kernel will not hold a native and a generic program on one interface at
-// once, so the link is detached and the root attached again: the interface
-// carries no program between the two steps, and the driver resets its rings
-// as for a first attach. Only the link changes. The maps, the root, every
-// slot, lease and role row stay as they are, so every datapath's slot runs
-// again the moment the new link is up.
-//
-// When the new attach fails, the root is attached again in from, the mode it
-// was in, so the interface keeps its traffic, and the failure is returned
-// either way. The link stays in the old mode, which Linked and Coverage keep
-// reporting, so a later reconcile retries once migrationAllowed lets it.
-func (l *Locked) migrateLink(ifindex int, pinned link.Link, root *ebpf.Program, from xdpmode.Mode) error {
-	d := l.d
-	path := d.linkPath(ifindex)
-	if err := pinned.Detach(); err != nil && !errors.Is(err, unix.ENOLINK) {
-		return fmt.Errorf("xdpdispatch: detach ifindex %d to move it to %s mode: %w", ifindex, d.mode, err)
-	}
-	if err := pinned.Unpin(); err != nil {
-		return fmt.Errorf("xdpdispatch: unpin ifindex %d to move it to %s mode: %w", ifindex, d.mode, err)
-	}
-	err := attachPinned(root, ifindex, d.mode, path)
-	if err == nil {
-		return nil
-	}
-	err = fmt.Errorf("xdpdispatch: move ifindex %d to %s mode: %w", ifindex, d.mode, err)
-	if restoreErr := attachPinned(root, ifindex, from, path); restoreErr != nil {
-		return fmt.Errorf("%w; restoring %s mode also failed, so the interface has no dispatcher: %w",
-			err, from, restoreErr)
-	}
-	return fmt.Errorf("%w; restored %s mode", err, from)
+	return true, nil
 }
 
 // Release detaches the root from ifindex and removes its pin and role row.
@@ -945,13 +702,6 @@ func (d *Dispatcher) Coverage(ifindex int, slot Slot, program *ebpf.Program) err
 	}
 	if info.Program != rootID {
 		return ErrNotRoot
-	}
-	mode, ok, err := attachedMode(ifindex)
-	if err != nil {
-		return err
-	}
-	if !ok || mode != d.mode {
-		return ErrModeMismatch
 	}
 
 	roles, err := d.Roles(ifindex)

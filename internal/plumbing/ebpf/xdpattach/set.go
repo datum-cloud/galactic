@@ -14,8 +14,6 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/vishvananda/netlink"
-
-	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 // linkListFn is an override point, matching linkByNameFn, so the bond sibling
@@ -25,10 +23,6 @@ var linkListFn = netlink.LinkList
 // attachFn is an override point so Set's tests can drive attachment without a
 // real program or a real NIC.
 var attachFn = attachOne
-
-// attachedInModeFn is an override point so Set's tests can report an attach
-// mode without a real XDP attachment.
-var attachedInModeFn = attachedInMode
 
 // attachedLink is one interface's XDP link, along with the ifindex it was
 // attached to. The ifindex is what tells a member replaced under the same name
@@ -52,7 +46,6 @@ type attachedLink struct {
 // A Set is safe for concurrent use.
 type Set struct {
 	program *ebpf.Program
-	mode    xdpmode.Mode
 
 	mu      sync.Mutex
 	links   map[string]attachedLink
@@ -60,16 +53,15 @@ type Set struct {
 }
 
 // NewSet returns a Set for program that already holds links, the result of an
-// Attach of names in mode at startup, in the same order. Every later attach
-// uses mode too.
-func NewSet(program *ebpf.Program, names []string, links []link.Link, mode xdpmode.Mode) (*Set, error) {
+// Attach of names at startup, in the same order.
+func NewSet(program *ebpf.Program, names []string, links []link.Link) (*Set, error) {
 	if program == nil {
 		return nil, errors.New("xdpattach: program is nil")
 	}
 	if len(names) != len(links) {
 		return nil, fmt.Errorf("xdpattach: %d interface names for %d links", len(names), len(links))
 	}
-	s := &Set{program: program, mode: mode, links: make(map[string]attachedLink, len(names))}
+	s := &Set{program: program, links: make(map[string]attachedLink, len(names))}
 	for i, name := range names {
 		// An index that cannot be read leaves 0, which no live interface
 		// has, so the next Reconcile re-reads it and releases the link if
@@ -108,10 +100,6 @@ func (s *Set) Reconcile(desired []string) []string {
 	blocked := false
 	for _, name := range desired {
 		if _, ok := s.links[name]; ok {
-			if err := s.checkHeldMode(name); err != nil {
-				slog.Warn("xdpattach: interface holds the XDP link in the wrong mode", "interface", name, "err", err)
-				missing = append(missing, name)
-			}
 			continue
 		}
 		if blocked {
@@ -146,36 +134,16 @@ func (s *Set) Missing() []string {
 	return slices.Clone(s.missing)
 }
 
-// Attached reports every interface currently holding the program in the
-// Set's mode, sorted. The mode is read back from the kernel, so an interface
-// whose hook holds the program some other way is not reported.
+// Attached reports every interface currently holding the program, sorted.
 func (s *Set) Attached() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	names := make([]string, 0, len(s.links))
 	for name := range s.links {
-		if s.checkHeldMode(name) == nil {
-			names = append(names, name)
-		}
+		names = append(names, name)
 	}
 	slices.Sort(names)
 	return names
-}
-
-// Mode returns the attach mode the Set attaches in.
-func (s *Set) Mode() xdpmode.Mode { return s.mode }
-
-// checkHeldMode returns an error unless name's hook holds an XDP program in
-// the Set's mode.
-func (s *Set) checkHeldMode(name string) error {
-	ok, err := attachedInModeFn(name, s.mode)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("xdpattach: %q does not hold an XDP program in %s mode", name, s.mode)
-	}
-	return nil
 }
 
 // releaseGone closes the link of every interface that no longer exists, or
@@ -206,7 +174,7 @@ func (s *Set) releaseGone() {
 // attachNew attaches the program to one interface not yet in the set, after
 // the checks that keep doing so from costing a bond its uplink.
 func (s *Set) attachNew(name string) error {
-	if err := checkModeSupport([]string{name}, s.mode); err != nil {
+	if err := checkNativeXDPSupport([]string{name}); err != nil {
 		return err
 	}
 	isolates, err := bounceIsolatesBond(name)
@@ -218,7 +186,7 @@ func (s *Set) attachNew(name string) error {
 			"attaching now would take the bond down", name)
 	}
 
-	xdpLink, err := attachFn(s.program, name, s.mode)
+	xdpLink, err := attachFn(s.program, name)
 	if err != nil {
 		return err
 	}
@@ -227,8 +195,7 @@ func (s *Set) attachNew(name string) error {
 		index = l.Attrs().Index
 	}
 	s.links[name] = attachedLink{link: xdpLink, index: index}
-	slog.Info("xdpattach: attached XDP program to interface found after startup", "interface", name,
-		"mode", s.mode.String())
+	slog.Info("xdpattach: attached XDP program to interface found after startup", "interface", name)
 	return nil
 }
 

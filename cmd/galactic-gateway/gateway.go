@@ -23,7 +23,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
-	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
@@ -110,20 +109,6 @@ func setupGatewayDatapath(
 			overlap, publicInterface)
 	}
 
-	// One attach mode for every XDP attachment on the host, the public and
-	// internal targets alike (xdpmode). A target that does not exist, or a
-	// NIC whose driver cannot be read, fails startup rather than settling the
-	// mode without it.
-	modeDecision, err := xdpmode.Select(append(slices.Clone(targets), returnTargets...)...)
-	if err != nil {
-		return nil, fmt.Errorf("select the XDP attach mode for this host: %w", err)
-	}
-	mode := modeDecision.Mode
-	slog.Info("Selected the XDP attach mode for this host", "mode", mode.String(), "reason", modeDecision.Reason)
-	for _, skipped := range modeDecision.Skipped {
-		slog.Warn("Left a NIC with no driver out of the XDP attach mode decision", "reason", skipped)
-	}
-
 	// Required for the FIB lookup in the datapath's header push to succeed
 	// on the interface the program actually runs on. The lookup uses the
 	// ingress interface, meaning whichever resolved target the packet
@@ -166,7 +151,7 @@ func setupGatewayDatapath(
 			return nil, fmt.Errorf("register dispatcher lease metrics: %w", err)
 		}
 		objs, dispatcher, publicSet, returnSet, leaseDone, err = joinDispatcher(leaseCtx, xdpdispatch.PinDir,
-			edgeattach.PinDir, mode, len(returnTargets) > 0, lease)
+			edgeattach.PinDir, len(returnTargets) > 0, lease)
 		if err != nil {
 			stopLeases()
 			return nil, err
@@ -180,7 +165,7 @@ func setupGatewayDatapath(
 			}
 		}
 	} else {
-		objs, publicSet, returnSet, err = attachDirect(ctx, xdpdispatch.PinDir, edgeattach.PinDir, mode, targets,
+		objs, publicSet, returnSet, err = attachDirect(ctx, xdpdispatch.PinDir, edgeattach.PinDir, targets,
 			returnTargets)
 	}
 	if err != nil {
@@ -239,14 +224,11 @@ func (s dispatchSet) reconcile(ctx context.Context, targets []string) []string {
 // them to the targets themselves, unpinned, after releasing an idle
 // dispatcher from those targets. A dispatcher still serving the egress shard
 // there is refused rather than taken: detaching it would cut egress.
-// Attachment is all-or-nothing, as it has always been in this mode, and every
-// attach is in mode.
-func attachDirect(ctx context.Context, dispatchDir, edgeDir string, mode xdpmode.Mode,
-	targets, returnTargets []string,
-) (
+// Attachment is all-or-nothing, as it has always been in this mode.
+func attachDirect(ctx context.Context, dispatchDir, edgeDir string, targets, returnTargets []string) (
 	*edgeprog.EdgedsrObjects, targetSet, targetSet, error,
 ) {
-	if err := xdpattach.ReleaseIdleDispatcher(ctx, dispatchDir, mode, append(slices.Clone(targets), returnTargets...),
+	if err := xdpattach.ReleaseIdleDispatcher(ctx, dispatchDir, append(slices.Clone(targets), returnTargets...),
 		xdpdispatch.SlotGatewayLB, xdpdispatch.SlotGatewayReturn); err != nil {
 		return nil, nil, nil, fmt.Errorf("%w; set %s=%s", err, config.EnvGatewayXDPAttach,
 			config.GatewayXDPAttachDispatch)
@@ -257,12 +239,12 @@ func attachDirect(ctx context.Context, dispatchDir, edgeDir string, mode xdpmode
 		return nil, nil, nil, fmt.Errorf("load edge gateway eBPF datapath: %w", err)
 	}
 
-	xdpLinks, err := edgeattach.Attach(objs.EdgeLb, targets, mode)
+	xdpLinks, err := edgeattach.Attach(objs.EdgeLb, targets)
 	if err != nil {
 		_ = objs.Close()
 		return nil, nil, nil, fmt.Errorf("attach edge gateway datapath to public interfaces %v: %w", targets, err)
 	}
-	publicSet, err := xdpattach.NewSet(objs.EdgeLb, targets, xdpLinks, mode)
+	publicSet, err := xdpattach.NewSet(objs.EdgeLb, targets, xdpLinks)
 	if err != nil {
 		closeAll(xdpLinks)
 		_ = objs.Close()
@@ -272,14 +254,14 @@ func attachDirect(ctx context.Context, dispatchDir, edgeDir string, mode xdpmode
 		return objs, directSet{publicSet}, nil, nil
 	}
 
-	returnLinks, err := edgeattach.Attach(objs.EdgeReturn, returnTargets, mode)
+	returnLinks, err := edgeattach.Attach(objs.EdgeReturn, returnTargets)
 	if err != nil {
 		closeAll(xdpLinks)
 		_ = objs.Close()
 		return nil, nil, nil, fmt.Errorf("attach edge gateway return datapath to internal interfaces %v: %w",
 			returnTargets, err)
 	}
-	returnSet, err := xdpattach.NewSet(objs.EdgeReturn, returnTargets, returnLinks, mode)
+	returnSet, err := xdpattach.NewSet(objs.EdgeReturn, returnTargets, returnLinks)
 	if err != nil {
 		closeAll(append(xdpLinks, returnLinks...))
 		_ = objs.Close()
@@ -295,14 +277,13 @@ func attachDirect(ctx context.Context, dispatchDir, edgeDir string, mode xdpmode
 // without the role on any interface it never runs. Nothing is attached here;
 // the returned sets put the dispatcher on the targets and read coverage back.
 // The returned channel closes once both lease loops have stopped, which a
-// caller waits on before closing the dispatcher. mode is the host's XDP attach
-// mode, which the dispatcher attaches in and migrates its links to.
-func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, mode xdpmode.Mode, withReturn bool,
+// caller waits on before closing the dispatcher.
+func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, withReturn bool,
 	lease *xdpdispatch.LeaseMetrics,
 ) (
 	*edgeprog.EdgedsrObjects, *xdpdispatch.Dispatcher, targetSet, targetSet, <-chan struct{}, error,
 ) {
-	dispatcher, err := xdpdispatch.Open(ctx, dispatchDir, mode)
+	dispatcher, err := xdpdispatch.Open(ctx, dispatchDir)
 	if err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("open the node's XDP dispatcher: %w", err)
 	}
@@ -363,7 +344,7 @@ func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, mode xdpmo
 		leases.Wait()
 		close(leaseDone)
 	}()
-	slog.Info("Edge gateway datapath installed in the XDP dispatcher", "pinDir", dispatchDir, "mode", mode.String())
+	slog.Info("Edge gateway datapath installed in the XDP dispatcher", "pinDir", dispatchDir)
 	return objs, dispatcher, dispatchSet{public}, ret, leaseDone, nil
 }
 

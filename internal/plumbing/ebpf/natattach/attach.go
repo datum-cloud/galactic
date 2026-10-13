@@ -19,7 +19,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/mappin"
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
-	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 // linkByNameFn and linkListFn are override points, as elsewhere in this
@@ -181,23 +180,22 @@ func ResolveTargets(ifaceNames []string) ([]string, error) {
 // An empty list is rejected rather than treated as "attach nothing", which
 // would produce exactly that silence across the whole node.
 //
-// The attach itself is xdpattach.Attach, shared with the edge gateway, in mode
-// (xdpmode.Select): in native mode every interface is checked for native XDP
-// support before any is touched, and in either mode each
+// The attach itself is xdpattach.Attach, shared with the edge gateway: every
+// interface is checked for native XDP support before any is touched, and each
 // bond slave is waited back into its aggregate before the next is attached, so
 // a bonded uplink never loses every member at once.
 //
 // Attachment is all-or-nothing: a failure partway through closes every link
 // already attached in this call, so a shard that cannot claim every uplink it
 // was given fails to start rather than running with a hole in its coverage.
-func Attach(program *ebpf.Program, ifaceNames []string, mode xdpmode.Mode) ([]link.Link, error) {
+func Attach(program *ebpf.Program, ifaceNames []string) ([]link.Link, error) {
 	if program == nil {
 		return nil, errors.New("natattach: program is nil")
 	}
 	if len(ifaceNames) == 0 {
 		return nil, errors.New("natattach: no interfaces to attach to")
 	}
-	links, err := xdpattach.Attach(program, ifaceNames, mode)
+	links, err := xdpattach.Attach(program, ifaceNames)
 	if err != nil {
 		return nil, fmt.Errorf("natattach: %w", err)
 	}
