@@ -116,7 +116,8 @@ var sysClassNet = "/sys/class/net"
 // target and has no driver link at all, as while its driver unbinds, carries
 // no driver traffic; it is left out and listed in Skipped. An interface with
 // no device link, such as a bond master, a veth or a VLAN, is virtual and has
-// no driver of its own to consider.
+// no driver of its own to consider. A regular file, such as the bonding
+// driver's bonding_masters, is not an interface.
 func Select(required ...string) (Decision, error) {
 	entries, err := os.ReadDir(sysClassNet)
 	if err != nil {
@@ -129,6 +130,9 @@ func Select(required ...string) (Decision, error) {
 		skipped []string
 	)
 	for _, e := range entries {
+		if e.Type().IsRegular() {
+			continue
+		}
 		name := e.Name()
 		present[name] = true
 		driver, physical, err := interfaceDriver(name)
