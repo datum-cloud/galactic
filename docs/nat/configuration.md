@@ -648,7 +648,7 @@ route as a redirect to a nonexistent interface and drops the traffic.
 | `galactic_cni_egress_shard_watch_synced`                   | 1 once the `EgressShard` watch has listed the cluster.                                                                               |
 | `galactic_cni_egress_group_routes{class}`                  | Routes naming each class's group after the last successful sweep. Must be 0 before rolling back to an older release.                 |
 | `galactic_cni_egress_sweep_errors_total{stage}`            | Sweep failures: `apply`, `refresh`, `watch`, `close`, `disable`.                                                                     |
-| `galactic_cni_egress_pool_members{class,state}`            | Each class's shards: `active`, `draining`, `unreachable`, and `ineligible` (cannot translate the class).                             |
+| `galactic_cni_egress_pool_members{class,state}`            | Each class's shards: `active`, `draining`, `unreachable`, `local` (runs on this node), and `ineligible` (cannot translate it).       |
 | `galactic_cni_egress_pool_enabled{class}`                  | 1 while the class's group takes new routes; 0 while it is being retired.                                                             |
 | `galactic_cni_egress_pool_min_active`                      | `GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE`.                                                                                               |
 | `galactic_cni_egress_shard_packets_total{shard_sid,class}` | Tenant packets this node sent to each shard for each class, since the shard took its slot. `..._bytes_total` is the same in bytes.   |
@@ -656,7 +656,18 @@ route as a redirect to a nonexistent interface and drops the traffic.
 
 A node that never published a group exports no `pool_*` series. That is not
 a healthy empty pool: read it together with `galactic_cni_egress_mode` and
-`galactic_cni_egress_shard_watch_synced`. `config/monitoring/` alerts on these
+`galactic_cni_egress_shard_watch_synced`.
+
+A shard whose `spec.targetRef` names the node itself is `local` on that node.
+The node originates the shard's locator, so the SID never resolves over an
+uplink there, and it takes no tenant from that node. Hashed mode does not
+resolve a local shard's SID at all. Ordered mode, which tries each SID in the
+list, fails to resolve it and moves on, so neither mode sends that node's
+traffic to its own shard. An edge node running the cluster's only shard
+therefore has no active member. It also has no tenant, so
+`GalacticEgressPoolEmpty` and `GalacticEgressPoolBelowMinimum` fire only on a
+node with routes on the group (`galactic_cni_egress_group_routes` above 0):
+an empty pool on a node with nothing to egress is no outage. `config/monitoring/` alerts on these
 (`GalacticEgressPoolEmpty`, `GalacticEgressPoolBelowMinimum`,
 `GalacticEgressClassUnserved`, `GalacticEgressShardGroupDropping`,
 `GalacticEgressShardWatchNotSynced`, `GalacticEgressSweepFailing`,

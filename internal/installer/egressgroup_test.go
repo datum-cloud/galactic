@@ -122,7 +122,7 @@ func TestEgressShardCandidates(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.class.String(), func(t *testing.T) {
-			eligible, ineligible := egressShardCandidates(shards, tt.class)
+			eligible, ineligible := egressShardCandidates(shards, tt.class, "")
 			if got := candidateNames(t, eligible); !reflect.DeepEqual(got, tt.eligible) {
 				t.Errorf("eligible = %v, want %v", got, tt.eligible)
 			}
@@ -130,6 +130,42 @@ func TestEgressShardCandidates(t *testing.T) {
 				t.Errorf("ineligible = %v, want %v", ineligible, tt.ineligible)
 			}
 		})
+	}
+}
+
+const (
+	// nodeKind is the TargetRef kind an EgressShard targets.
+	nodeKind = "Node"
+	// shardNode is the node the tests' own shard runs on.
+	shardNode = "edge-a"
+)
+
+// TestEgressShardCandidates_Local checks that only the shard targeting this
+// node is local, and that no node name marks none.
+func TestEgressShardCandidates_Local(t *testing.T) {
+	here, there := dual("here", 0x10), dual("there", 0x11)
+	here.Spec.TargetRef = bgpv1alpha1.TargetRef{Kind: nodeKind, Name: shardNode}
+	there.Spec.TargetRef = bgpv1alpha1.TargetRef{Kind: nodeKind, Name: "edge-b"}
+	shards := []bgpv1alpha1.EgressShard{here, there}
+
+	local := func(nodeName string) map[string]bool {
+		eligible, _ := egressShardCandidates(shards, egressroutemap.NAT66Class, nodeName)
+		out := map[string]bool{}
+		for _, c := range eligible {
+			out[c.SID.String()] = c.Local
+		}
+		return out
+	}
+	want := map[string]bool{shardSIDFor(0x10): true, shardSIDFor(0x11): false}
+	if got := local(shardNode); !reflect.DeepEqual(got, want) {
+		t.Errorf("on edge-a: local = %v, want %v", got, want)
+	}
+	none := map[string]bool{shardSIDFor(0x10): false, shardSIDFor(0x11): false}
+	if got := local("compute-a"); !reflect.DeepEqual(got, none) {
+		t.Errorf("on a node with no shard: local = %v, want %v", got, none)
+	}
+	if got := local(""); !reflect.DeepEqual(got, none) {
+		t.Errorf("with no node name: local = %v, want %v", got, none)
 	}
 }
 
@@ -531,5 +567,49 @@ func TestSweepHashed_UnsyncedOrFailingWatch(t *testing.T) {
 	}
 	if after := status(t, f.groups, 0); after != before {
 		t.Errorf("a failing watch changed the group: %+v -> %+v", before, after)
+	}
+}
+
+// TestSweepHashed_ShardNode checks a node that runs an egress shard: its own
+// shard is a local member, not an unreachable one, while a remote shard whose
+// SID does not resolve is still unreachable. Neither is alive, so neither
+// takes a tenant from this node.
+func TestSweepHashed_ShardNode(t *testing.T) {
+	f := newFixture(t, testHashed, nil, nil)
+	f.g.nodeName = shardNode
+	here, remote := dual("here", 0x10), dual("remote", 0x11)
+	here.Spec.TargetRef = bgpv1alpha1.TargetRef{Kind: nodeKind, Name: shardNode}
+	remote.Spec.TargetRef = bgpv1alpha1.TargetRef{Kind: nodeKind, Name: "edge-b"}
+	f.g.shards = &fakeLister{shards: []bgpv1alpha1.EgressShard{here, remote}, synced: true}
+
+	resolved := map[string]bool{}
+	restore := egressroutemap.OverrideResolverForTest(func(sid net.IP) (int, net.HardwareAddr, net.HardwareAddr, error) {
+		resolved[sid.String()] = true
+		return 0, nil, nil, errInjected
+	})
+	t.Cleanup(restore)
+
+	if err := f.sweep(t); err != nil {
+		t.Fatal(err)
+	}
+	if resolved[staticSIDFor(0x10)] {
+		t.Error("the local shard's SID was resolved; it has no route over an uplink to find")
+	}
+	members, err := f.groups.Members(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]egressroutemap.ShardState{}
+	for _, m := range members {
+		got[m.SID.String()] = m
+	}
+	if m := got[staticSIDFor(0x10)]; !m.Local || m.Alive {
+		t.Errorf("own shard = %+v, want local and not alive", m)
+	}
+	if m := got[staticSIDFor(0x11)]; m.Local || m.Alive {
+		t.Errorf("unresolvable remote shard = %+v, want unreachable (neither local nor alive)", m)
+	}
+	if s := status(t, f.groups, 0); s.Candidates != 2 || s.Active != 0 {
+		t.Errorf("group = %+v, want two candidates and none active", s)
 	}
 }

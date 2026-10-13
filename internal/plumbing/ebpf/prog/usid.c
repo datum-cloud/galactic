@@ -720,8 +720,12 @@ struct egress_route_value {
 //
 // DRAINING means the shard takes no new tenant addresses: it is absent from the
 // Maglev table but keeps serving the pins it already holds.
+//
+// LOCAL means the shard runs on this node. The control plane sets it for the
+// metrics alone and never sets ALIVE with it, so the datapath ignores it.
 #define USID_EGRESS_SHARD_ALIVE (1u << 0)
 #define USID_EGRESS_SHARD_DRAINING (1u << 1)
+#define USID_EGRESS_SHARD_LOCAL (1u << 2)
 
 // struct egress_shard_member is one group member, with the link and L2
 // addresses resolved ahead of time for the same reason egress_route_value

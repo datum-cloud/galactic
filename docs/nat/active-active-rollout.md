@@ -60,6 +60,9 @@ are deployed by infra.
       count for every class, `ineligible` is what you expect, and
       `galactic_cni_egress_sweep_errors_total` does not move. Missing pool
       series on a node are a failure, not an idle pool.
+- [ ] On every edge node that runs a shard: its own shard reads `local`,
+      not `unreachable`; every other shard reads `active`; and
+      `galactic_cni_egress_group_routes` is 0 for every class.
 
 ## 3. Prove it
 

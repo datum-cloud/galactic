@@ -585,6 +585,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	}
 	state.egressGroup = newEgressGroup(egressCfg, loadEgressShardSIDs(hostConf.EgressShardSIDs), nat64, attach.PinDir)
 	state.egressGroup.ctl = m.Egress
+	state.egressGroup.nodeName = hostConf.NodeName
 	if state.objs != nil {
 		state.egressGroup.counters = state.objs.EgressShardCounters
 	}

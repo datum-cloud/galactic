@@ -300,6 +300,56 @@ func TestApplyExcludesDrainingAndUnreachableFromTheTable(t *testing.T) {
 	}
 }
 
+// TestApplyLocalShardIsNeitherResolvedNorAlive checks a shard running on this
+// node: Apply never resolves its SID, flags it local and not alive, reports
+// no error for it, keeps it out of the Maglev table, and Close and Members
+// keep the flag.
+func TestApplyLocalShardIsNeitherResolvedNorAlive(t *testing.T) {
+	store := newFakeGroupStore()
+	g := NewShardGroupTable(store)
+	local, remote := shardSID(0x10), shardSID(0x11)
+	reachable(t, local, remote)
+	prev := resolveLinkAndL2Fn
+	resolveLinkAndL2Fn = func(sid net.IP) (int, net.HardwareAddr, net.HardwareAddr, error) {
+		if addr, _ := netip.AddrFromSlice(sid); addr.Unmap() == local {
+			t.Errorf("Apply resolved the local shard's SID %s", sid)
+		}
+		return prev(sid)
+	}
+
+	in := []ShardCandidate{{SID: net.IP(local.AsSlice()), Local: true}, {SID: net.IP(remote.AsSlice())}}
+	result := applyOK(t, g, GroupPolicy{}, in)
+	if s := slotOf(t, result, local); s.Alive || !s.Local || s.Err != nil || s.Active() {
+		t.Errorf("local shard state %+v, want local, not alive, no error", s)
+	}
+	if result.Active() != 1 {
+		t.Errorf("active = %d, want only the remote shard", result.Active())
+	}
+	v := published(t, store)
+	if f := v.Shards[slotOf(t, result, local).Slot].Flags; f != shardFlagLocal {
+		t.Errorf("local shard flags %#x, want local only", f)
+	}
+	remoteSlot := uint8(slotOf(t, result, remote).Slot) //nolint:gosec // < 32
+	for i, slot := range v.Maglev {
+		if slot != remoteSlot {
+			t.Fatalf("Maglev slot %d = %d, want every slot on the remote shard (slot %d)", i, slot, remoteSlot)
+		}
+	}
+
+	if _, err := g.Close(NAT66ShardGroup); err != nil {
+		t.Fatal(err)
+	}
+	members, err := g.Members(NAT66ShardGroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range members {
+		if (m.SID == local) != m.Local {
+			t.Errorf("member after Close %+v: local = %v, want %v", m, m.Local, m.SID == local)
+		}
+	}
+}
+
 // TestApplyWithNoActiveShardEmptiesTheTable checks that a group whose shards
 // are all unreachable stays enabled with every slot empty, which the datapath
 // drops on.

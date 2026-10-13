@@ -520,19 +520,18 @@ spec:
     # rather than read missing pool series as a healthy pool.
     - name: galactic-cni-egress
       rules:
-        # A class's group has shards, or routes still name it, but no shard
-        # takes tenants: every candidate is unreachable from this node or
-        # draining, or the cluster has none left. Every tenant of that class
-        # on the node without a live pin has no egress.
+        # Routes on this node name a class's group, but no shard takes
+        # tenants: every candidate is unreachable from this node or draining,
+        # or the cluster has none left. Every tenant of that class on the
+        # node without a live pin has no egress. A node with no route on the
+        # group has nothing to egress, so an empty pool there is no outage:
+        # an edge node running a shard sees its own shard as local, never
+        # active, and has no tenant.
         - alert: GalacticEgressPoolEmpty
           expr: |
             sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="active"}) == 0
             and on (node, class)
-            (
-              sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"draining|unreachable"}) > 0
-              or
-              sum by (node, class) (galactic_cni_egress_group_routes{job="galactic-cni"}) > 0
-            )
+            sum by (node, class) (galactic_cni_egress_group_routes{job="galactic-cni"}) > 0
           for: 2m
           labels:
             severity: critical
@@ -543,12 +542,15 @@ spec:
             runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolempty"
             description: >-
               No egress shard in {{ $labels.node }}'s {{ $labels.class }} group has taken new tenants for 2
-              minutes while the group has shards or routes, so new {{ $labels.class }} egress from that node is
-              dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
+              minutes while routes on that node name the group, so new {{ $labels.class }} egress from that node
+              is dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
               SID over an SRv6 uplink) or draining.
         # Fewer shards take tenants than the operator said the class should
-        # have. A class with no eligible shard at all is
-        # GalacticEgressClassUnserved instead.
+        # have, on a node with routes on the group. A class with no eligible
+        # shard at all is GalacticEgressClassUnserved instead. A node with no
+        # route on the group is left out for the same reason as in
+        # GalacticEgressPoolEmpty: an edge node running a shard counts one
+        # shard fewer than the rest of the cluster, its own.
         - alert: GalacticEgressPoolBelowMinimum
           expr: |
             sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="active"})
@@ -557,6 +559,8 @@ spec:
             sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|draining|unreachable"}) > 0
             and on (node, class)
             max by (node, class) (galactic_cni_egress_pool_enabled{job="galactic-cni"}) == 1
+            and on (node, class)
+            sum by (node, class) (galactic_cni_egress_group_routes{job="galactic-cni"}) > 0
           for: 10m
           labels:
             severity: warning
@@ -576,7 +580,7 @@ spec:
         # for the class, so its traffic has no egress.
         - alert: GalacticEgressClassUnserved
           expr: |
-            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|draining|unreachable"}) == 0
+            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|draining|unreachable|local"}) == 0
             and on (node, class)
             sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="ineligible"}) > 0
           for: 15m
