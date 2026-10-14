@@ -617,6 +617,33 @@ never visible to a packet, so no pin can hold it. The counter is 32 bits and
 skips 0; wrapping takes four billion slot assignments, far longer than any
 pin lives.
 
+### Changing the NAT64 prefix list
+
+A group keeps the class it was first published for, so a class keeps its
+group across edits to `GALACTIC_CNI_NAT64_PREFIX` and across restarts. The
+pinned group map is the record of which group serves which class; nothing
+depends on the order of the list.
+
+- **Reordering** the list changes nothing.
+- **Adding** a prefix gives it a group that has never been used, or a retired
+  one that no route names any more.
+- **Removing** a prefix retires its group. Within one sweep of `galactic-cni`
+  restarting, the group is marked closing, so no CNI ADD names it again, and
+  every VRF's route toward the removed prefix is deleted. That leaves the
+  VRF exactly as an attachment made under the new list: traffic to the old
+  prefix follows `::/0`. The next sweep that finds no route naming the group
+  disables it, and only then can another prefix take it.
+- **Replacing** a prefix when all three NAT64 groups are in use takes two
+  sweeps: the new prefix gets a group once the old one is disabled, and has
+  no group, so no route, until then.
+
+A route the ingress sidecar owns is never deleted by `galactic-cni`, so a
+group it still names stays retired but enabled, serving its old class, and a
+new prefix waits for it. A route that names a group published for a
+different class, which only an earlier release could leave behind, is moved
+to its own class's group, even an empty one, which drops rather than
+translate the wrong class.
+
 ### Turning it on and off
 
 Follow [active-active-rollout.md](active-active-rollout.md). In short: install

@@ -586,3 +586,24 @@ func TestGroupSnapshotSpecMatchesTheCompiledInnerMap(t *testing.T) {
 		t.Errorf("compiled inner map %+v, GroupSnapshotSpec %+v", inner, GroupSnapshotSpec)
 	}
 }
+
+// TestFindClassPrefersTheOpenGroup checks that while a duplicate of a class is
+// being retired, CNI ADD is given the group still open for it.
+func TestFindClassPrefersTheOpenGroup(t *testing.T) {
+	g := NewShardGroupTable(newFakeGroupStore())
+	class := NAT64Class(nsp)
+	for _, id := range []uint32{1, 2} {
+		if _, err := g.Apply(id, GroupPolicy{Class: class}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if id, _, found, err := g.FindClass(class); err != nil || !found || id != 1 {
+		t.Fatalf("FindClass with two open groups = %d, %t, %v; want the lowest, 1", id, found, err)
+	}
+	if _, err := g.Apply(1, GroupPolicy{Class: class, Closing: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if id, status, found, err := g.FindClass(class); err != nil || !found || id != 2 || !status.Open() {
+		t.Errorf("FindClass with group 1 closing = %d, %+v, %t, %v; want the open group 2", id, status, found, err)
+	}
+}

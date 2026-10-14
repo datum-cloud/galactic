@@ -6,6 +6,7 @@ package installer
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
@@ -612,4 +613,247 @@ func TestSweepHashed_ShardNode(t *testing.T) {
 	if s := status(t, f.groups, 0); s.Candidates != 2 || s.Active != 0 {
 		t.Errorf("group = %+v, want two candidates and none active", s)
 	}
+}
+
+var (
+	testP2 = netip.MustParsePrefix("2001:db8:65::/96")
+	testP3 = netip.MustParsePrefix("2001:db8:66::/96")
+	testP4 = netip.MustParsePrefix("2001:db8:67::/96")
+
+	nat64P2 = egressroutemap.NAT64Class(testP2)
+	nat64P3 = egressroutemap.NAT64Class(testP3)
+	nat64P4 = egressroutemap.NAT64Class(testP4)
+)
+
+// classShards is one NAT66-only shard plus one NAT64-only shard per prefix in
+// all, so every class has exactly its own member.
+func classShards(all ...netip.Prefix) []bgpv1alpha1.EgressShard {
+	shards := make([]bgpv1alpha1.EgressShard, 0, 1+len(all))
+	shards = append(shards, shardObject("nat66", shardSIDFor(0x20), "2001:db8:9966::1", "", "", true, true))
+	for i, p := range all {
+		nodeID := uint16(0x30 + i) //nolint:gosec // test
+		shards = append(shards, shardObject(p.String(), shardSIDFor(nodeID), "", "192.0.2.1", p.String(), true, true))
+	}
+	return shards
+}
+
+// restart replaces the fixture's sweep with a fresh process configured for
+// nat64, over the same pinned maps.
+func (f *fixture) restart(nat64 []netip.Prefix, shards []bgpv1alpha1.EgressShard) {
+	f.g = newEgressGroup(testHashed, nil, nat64, "")
+	f.g.shards = &fakeLister{shards: shards, synced: true}
+}
+
+// settle sweeps until a sweep queues no further one.
+func (f *fixture) settle(t *testing.T) {
+	t.Helper()
+	for range 5 {
+		if err := f.sweep(t); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.g.trigger) == 0 {
+			return
+		}
+		<-f.g.trigger
+	}
+	t.Fatal("sweeps kept queueing more sweeps")
+}
+
+// attach writes vrf's routes as CNI ADD does: one sentinel per class, naming
+// the group FindClass gives for it.
+func (f *fixture) attach(t *testing.T, vrf uint32, nat64 []netip.Prefix) {
+	t.Helper()
+	prefixes := make([]*net.IPNet, 0, 1+len(nat64))
+	prefixes = append(prefixes, egressroutemap.DefaultPrefix)
+	for _, p := range nat64 {
+		prefixes = append(prefixes, &net.IPNet{IP: net.IP(p.Addr().AsSlice()), Mask: net.CIDRMask(96, 128)})
+	}
+	for _, prefix := range prefixes {
+		class, _ := egressroutemap.ClassForRoute(prefix)
+		id, s, found, err := f.groups.FindClass(class)
+		if err != nil || !found || !s.Open() {
+			t.Fatalf("FindClass(%s) = %d, %+v, %t, %v; want an open group", class, id, s, found, err)
+		}
+		if err := f.routes.RegisterGroup(vrf, prefix, id, uint16(0x100+vrf)); err != nil { //nolint:gosec // test
+			t.Fatal(err)
+		}
+	}
+}
+
+// routeClasses maps every sentinel's own class to the class of the group it
+// names, failing on any sentinel naming a group published for another class.
+// The test prefixes differ in their address bits, so a key's address is
+// enough to tell its class.
+func (f *fixture) routeClasses(t *testing.T) map[egressroutemap.TranslationClass]int {
+	t.Helper()
+	got := map[egressroutemap.TranslationClass]int{}
+	for key, value := range f.raw.values {
+		if value.LinkIfindex != 0xFFFFFFFF {
+			continue
+		}
+		class := egressroutemap.NAT66Class
+		if key.Addr != [16]byte{} {
+			class = egressroutemap.NAT64Class(netip.PrefixFrom(netip.AddrFrom16(key.Addr), 96))
+		}
+		id := binary.NativeEndian.Uint32(value.Sid[0:4])
+		if s := status(t, f.groups, id); !s.Present || s.Class != class {
+			t.Errorf("VRF %d's %s route names group %d, published for %s", key.TableId, class, id, s.Class)
+		}
+		got[class]++
+	}
+	return got
+}
+
+// enabledClasses maps each enabled group's class to its ID, failing on a class
+// two enabled groups share.
+func (f *fixture) enabledClasses(t *testing.T) map[egressroutemap.TranslationClass]uint32 {
+	t.Helper()
+	got := map[egressroutemap.TranslationClass]uint32{}
+	for id := range uint32(egressroutemap.MaxShardGroups) {
+		s := status(t, f.groups, id)
+		if !s.Enabled {
+			continue
+		}
+		if prev, dup := got[s.Class]; dup {
+			t.Errorf("groups %d and %d both serve %s", prev, id, s.Class)
+		}
+		got[s.Class] = id
+	}
+	return got
+}
+
+// TestSweepHashed_ClassListChanges covers R05: editing the NAT64 prefix list
+// never leaves a route on a group serving another class. A class keeps its
+// group across removal, reorder and restart; a removed class's routes are
+// deleted and its group retired; and a retired group's ID goes to a new class
+// only once nothing names it.
+func TestSweepHashed_ClassListChanges(t *testing.T) {
+	all := classShards(testNSP, testP2, testP3, testP4)
+	start := func(t *testing.T, nat64 []netip.Prefix) *fixture {
+		t.Helper()
+		f := newFixture(t, testHashed, nil, nat64)
+		f.restart(nat64, all)
+		f.settle(t)
+		f.attach(t, 1, nat64)
+		f.attach(t, 2, nat64)
+		return f
+	}
+
+	t.Run("Removal", func(t *testing.T) {
+		f := start(t, []netip.Prefix{testNSP, testP2})
+		before := f.enabledClasses(t)
+		f.restart([]netip.Prefix{testP2}, all)
+		if err := f.sweep(t); err != nil {
+			t.Fatal(err)
+		}
+		routes := f.routeClasses(t)
+		if routes[nat64NSP] != 0 || routes[nat64P2] != 2 {
+			t.Errorf("routes by class after removal = %v, want the NSP's gone and P2's kept", routes)
+		}
+		if s := status(t, f.groups, before[nat64NSP]); !s.Closing {
+			t.Errorf("removed class's group = %+v, want it closing", s)
+		}
+		f.settle(t)
+		after := f.enabledClasses(t)
+		if _, ok := after[nat64NSP]; ok || after[nat64P2] != before[nat64P2] {
+			t.Errorf("enabled groups = %v, want P2 on its old group %d and the NSP retired", after,
+				before[nat64P2])
+		}
+	})
+
+	t.Run("Reorder", func(t *testing.T) {
+		f := start(t, []netip.Prefix{testNSP, testP2, testP3})
+		before := f.enabledClasses(t)
+		f.restart([]netip.Prefix{testP3, testNSP, testP2}, all)
+		f.settle(t)
+		if after := f.enabledClasses(t); !reflect.DeepEqual(after, before) {
+			t.Errorf("groups after reorder = %v, want unchanged %v", after, before)
+		}
+		if routes := f.routeClasses(t); len(routes) != 4 {
+			t.Errorf("routes by class = %v, want all four classes kept", routes)
+		}
+	})
+
+	t.Run("ReplacementWithAFreeGroup", func(t *testing.T) {
+		f := start(t, []netip.Prefix{testNSP, testP2})
+		before := f.enabledClasses(t)
+		f.restart([]netip.Prefix{testNSP, testP3}, all)
+		f.settle(t)
+		after := f.enabledClasses(t)
+		p2, p3 := before[nat64P2], after[nat64P3]
+		if p3 == p2 || after[nat64NSP] != before[nat64NSP] {
+			t.Errorf("groups %v -> %v: P3 must not take P2's group while a free one exists", before, after)
+		}
+		if routes := f.routeClasses(t); routes[nat64P2] != 0 {
+			t.Errorf("routes by class = %v, want P2's removed", routes)
+		}
+		f.attach(t, 3, []netip.Prefix{testNSP, testP3})
+		f.routeClasses(t)
+	})
+
+	t.Run("ReplacementReusesARetiredGroup", func(t *testing.T) {
+		full := []netip.Prefix{testNSP, testP2, testP3}
+		f := start(t, full)
+		before := f.enabledClasses(t)
+		f.restart([]netip.Prefix{testNSP, testP2, testP4}, all)
+		if err := f.sweep(t); err != nil {
+			t.Fatal(err)
+		}
+		if s := status(t, f.groups, before[nat64P3]); s.Class != nat64P3 {
+			t.Errorf("P3's group was handed on in the sweep that retired it: %+v", s)
+		}
+		f.routeClasses(t)
+		f.settle(t)
+		after := f.enabledClasses(t)
+		if after[nat64P4] != before[nat64P3] {
+			t.Errorf("groups %v -> %v: want P4 on P3's retired group once no route names it", before, after)
+		}
+		f.attach(t, 3, []netip.Prefix{testNSP, testP2, testP4})
+		if routes := f.routeClasses(t); routes[nat64P3] != 0 ||
+			routes[nat64P4] != 1 {
+			t.Errorf("routes by class = %v, want no P3 route and VRF 3's P4 route", routes)
+		}
+	})
+
+	t.Run("RetiredGroupHeldByAForeignRoute", func(t *testing.T) {
+		f := start(t, []netip.Prefix{testNSP, testP2, testP3})
+		before := f.enabledClasses(t)
+		p3 := before[nat64P3]
+		p3Net := &net.IPNet{IP: net.IP(testP3.Addr().AsSlice()), Mask: net.CIDRMask(96, 128)}
+		if err := f.routes.RegisterGroup(9, p3Net, p3, 0x199); err != nil {
+			t.Fatal(err)
+		}
+		f.restart([]netip.Prefix{testNSP, testP2, testP4}, all)
+		for range 3 {
+			if err := f.g.sweepWith(context.Background(), f.routes, f.groups, map[uint32]struct{}{9: {}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if s := status(t, f.groups, p3); !s.Enabled || s.Class != nat64P3 {
+			t.Errorf("P3's group = %+v, want it kept for P3 while a foreign route names it", s)
+		}
+		if _, ok := f.enabledClasses(t)[nat64P4]; ok {
+			t.Error("P4 was given a group while every group is held")
+		}
+		f.routeClasses(t)
+	})
+
+	t.Run("UpgradeFromPositionalGroups", func(t *testing.T) {
+		// What the positional layout left after the NSP was removed from
+		// [NAT66, NSP, P2]: group 1 republished for P2 under the NSP's routes,
+		// and group 2 a duplicate P2 group with P2's routes.
+		f := start(t, []netip.Prefix{testNSP, testP2})
+		eligible, _ := egressShardCandidates(all, nat64P2, "")
+		if _, err := f.groups.Apply(1, f.g.policy(nat64P2, 0), eligible); err != nil {
+			t.Fatal(err)
+		}
+		f.restart([]netip.Prefix{testP2}, all)
+		f.settle(t)
+		if routes := f.routeClasses(t); routes[nat64NSP] != 0 || routes[nat64P2] != 2 {
+			t.Errorf("routes by class = %v, want the NSP's removed and P2's kept", routes)
+		}
+		if got := f.enabledClasses(t); got[nat64P2] != 1 || len(got) != 2 {
+			t.Errorf("enabled groups = %v, want NAT66 and one P2 group, the lowest", got)
+		}
+	})
 }
