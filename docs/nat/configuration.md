@@ -509,10 +509,13 @@ hashed mode with more than three NAT64 prefixes in
   `translatesWellKnownPrefix`. A NAT66-only shard therefore never receives
   NAT64 traffic, and a shard translating another NAT64 prefix never receives
   this one's. A shard that is ready but cannot serve a class is counted as
-  `ineligible` for it and logged. A class no shard can serve gets no route,
-  as an empty shard list gives none, and `GalacticEgressClassUnserved`
-  fires. A cluster whose shards all serve one family is a legitimate
-  single-family deployment.
+  `ineligible` for it and logged. When no shard can serve NAT66, `::/0`
+  gets no route, as an empty shard list gives none. When no shard can serve
+  a configured NAT64 prefix, its route still names its own empty group, so
+  its packets are dropped and counted as `group_empty` instead of matching
+  `::/0` and reaching a NAT66 shard. Either way
+  `GalacticEgressClassUnserved` fires. A cluster whose shards all serve one
+  family is a legitimate single-family deployment.
 - **The pool is the cluster.** One metro is one cluster, so a class's pool is
   every eligible `EgressShard` in `galactic-cni`'s namespace. A shard is a
   candidate once its status carries a `shardSID` and both `Programmed` and
