@@ -114,17 +114,32 @@ func TestInstallVRFEgress_EachRouteGoesToItsClassGroup(t *testing.T) {
 	}
 }
 
+// lpmGroup returns the group of the longest installed prefix containing dst,
+// as the datapath's egress route lookup would pick it.
+func lpmGroup(calls map[string]groupCall, dst string) (uint32, bool) {
+	addr := netip.MustParseAddr(dst)
+	best, group, found := -1, uint32(0), false
+	for p, c := range calls {
+		prefix := netip.MustParsePrefix(p)
+		if prefix.Contains(addr) && prefix.Bits() > best {
+			best, group, found = prefix.Bits(), c.group, true
+		}
+	}
+	return group, found
+}
+
 // TestInstallVRFEgress_SingleFamilyDeployments checks a cluster whose shards
 // serve one family only, and one whose shards translate a different NAT64
-// prefix: a route goes only to a group that can translate it, and a route no
-// group can serve is not installed rather than pointed at shards that would
-// drop it.
+// prefix. NAT66 with no eligible shard gets no route. A configured NAT64
+// prefix with no eligible shard names its own empty group, so a packet toward
+// it never selects the NAT66 group through ::/0.
 func TestInstallVRFEgress_SingleFamilyDeployments(t *testing.T) {
 	cfg := EgressConfig{NAT64Prefix: testNAT64Prefix}
+	const nat64Dst, internetDst = "64:ff9b::c000:201", "2001:db8:ffff::1"
 	tests := []struct {
 		name   string
 		groups map[uint32]egressroutemap.GroupStatus
-		want   []string
+		want   map[string]uint32
 		absent []string
 	}{
 		{
@@ -133,7 +148,7 @@ func TestInstallVRFEgress_SingleFamilyDeployments(t *testing.T) {
 				0: openStatus(egressroutemap.NAT66Class, 2, 2),
 				1: openStatus(testNAT64Class, 0, 0), // every shard ineligible
 			},
-			want: []string{defaultPrefix}, absent: []string{testNAT64Prefix},
+			want: map[string]uint32{defaultPrefix: 0, testNAT64Prefix: 1},
 		},
 		{
 			name: "NAT64Only",
@@ -141,7 +156,7 @@ func TestInstallVRFEgress_SingleFamilyDeployments(t *testing.T) {
 				0: openStatus(egressroutemap.NAT66Class, 0, 0),
 				1: openStatus(testNAT64Class, 2, 2),
 			},
-			want: []string{testNAT64Prefix}, absent: []string{defaultPrefix},
+			want: map[string]uint32{testNAT64Prefix: 1}, absent: []string{defaultPrefix},
 		},
 		{
 			name: "DualCapable",
@@ -149,15 +164,16 @@ func TestInstallVRFEgress_SingleFamilyDeployments(t *testing.T) {
 				0: openStatus(egressroutemap.NAT66Class, 2, 2),
 				1: openStatus(testNAT64Class, 2, 2),
 			},
-			want: []string{defaultPrefix, testNAT64Prefix},
+			want: map[string]uint32{defaultPrefix: 0, testNAT64Prefix: 1},
 		},
 		{
 			name: "MismatchedPrefix",
 			groups: map[uint32]egressroutemap.GroupStatus{
 				0: openStatus(egressroutemap.NAT66Class, 1, 1),
-				1: openStatus(egressroutemap.NAT64Class(netip.MustParsePrefix("2001:db8:65::/96")), 1, 1),
+				1: openStatus(testNAT64Class, 0, 0),
+				2: openStatus(egressroutemap.NAT64Class(netip.MustParsePrefix("2001:db8:65::/96")), 1, 1),
 			},
-			want: []string{defaultPrefix}, absent: []string{testNAT64Prefix},
+			want: map[string]uint32{defaultPrefix: 0, testNAT64Prefix: 1},
 		},
 	}
 	for _, tt := range tests {
@@ -166,9 +182,9 @@ func TestInstallVRFEgress_SingleFamilyDeployments(t *testing.T) {
 			if _, err := installVRFEgress(&fakeGroups{groups: tt.groups}, nil, 7, 0x21, cfg, nil); err != nil {
 				t.Fatal(err)
 			}
-			for _, p := range tt.want {
-				if _, ok := (*calls)[p]; !ok {
-					t.Errorf("no route installed for %s", p)
+			for p, group := range tt.want {
+				if c, ok := (*calls)[p]; !ok || c.group != group {
+					t.Errorf("route for %s = %+v (installed %v), want group %d", p, c, ok, group)
 				}
 			}
 			for _, p := range tt.absent {
@@ -176,7 +192,57 @@ func TestInstallVRFEgress_SingleFamilyDeployments(t *testing.T) {
 					t.Errorf("route for %s installed toward group %d, which cannot translate it", p, c.group)
 				}
 			}
+			if group, ok := lpmGroup(*calls, nat64Dst); ok && group != 1 {
+				t.Errorf("a packet to %s selects group %d, want only the NAT64 group 1", nat64Dst, group)
+			}
+			if group, ok := lpmGroup(*calls, internetDst); ok && group != 0 {
+				t.Errorf("a packet to %s selects group %d, want only the NAT66 group 0", internetDst, group)
+			}
 		})
+	}
+}
+
+// TestInstallVRFEgress_UnpublishedNAT64ClassFails checks a configured NAT64
+// prefix with no open group fails the ADD before any route is written, so
+// ::/0 is not left to catch it.
+func TestInstallVRFEgress_UnpublishedNAT64ClassFails(t *testing.T) {
+	calls := recordGroupAdds(t)
+	closing := openStatus(testNAT64Class, 1, 1)
+	closing.Closing = true
+	for name, groups := range map[string]map[uint32]egressroutemap.GroupStatus{
+		"Missing": {0: openStatus(egressroutemap.NAT66Class, 1, 1)},
+		"Closing": {0: openStatus(egressroutemap.NAT66Class, 1, 1), 1: closing},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clear(*calls)
+			_, err := installVRFEgress(&fakeGroups{groups: groups}, nil, 7, 0x21,
+				EgressConfig{NAT64Prefix: testNAT64Prefix}, nil)
+			if !errors.Is(err, errClassGroupNotOpen) {
+				t.Errorf("installVRFEgress = %v, want errClassGroupNotOpen", err)
+			}
+			if len(*calls) != 0 {
+				t.Errorf("group routes written: %v, want none", *calls)
+			}
+		})
+	}
+}
+
+// TestInstallVRFEgress_UnpublishedNAT64ClassAsGroupsClose checks an ADD that
+// finds a NAT64 class unpublished because every group closed meanwhile falls
+// back to ordered mode rather than failing.
+func TestInstallVRFEgress_UnpublishedNAT64ClassAsGroupsClose(t *testing.T) {
+	ordered := recordRouteAdds(t, nil)
+	recordGroupAdds(t)
+	groups := &fakeGroups{
+		groups:    map[uint32]egressroutemap.GroupStatus{0: openStatus(egressroutemap.NAT66Class, 1, 1)},
+		openCalls: []bool{true, false},
+	}
+	if _, err := installVRFEgress(groups, nil, 7, 0x21,
+		EgressConfig{ShardSIDs: testShardSID, NAT64Prefix: testNAT64Prefix}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*ordered) != 2 {
+		t.Errorf("ordered routes = %+v, want ::/0 and the NAT64 prefix", *ordered)
 	}
 }
 

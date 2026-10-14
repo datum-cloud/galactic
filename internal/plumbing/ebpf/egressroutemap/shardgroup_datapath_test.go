@@ -465,6 +465,37 @@ func TestGroupDatapath_EmptyOrDisabledGroupDrops(t *testing.T) {
 	}
 }
 
+// TestGroupDatapath_EmptyNAT64GroupBeatsDefaultRoute checks that a NAT64
+// prefix's route to its empty group wins the lookup over ::/0, so a packet
+// toward that prefix drops rather than reach a NAT66 shard.
+func TestGroupDatapath_EmptyNAT64GroupBeatsDefaultRoute(t *testing.T) {
+	dp := loadDatapath(t)
+	a := shardSID(0x10)
+	reachable(t, a)
+	dp.apply(t, GroupPolicy{}, candidates(nil, a))
+
+	nat64 := netip.MustParsePrefix("64:ff9b::/96")
+	const nat64Group = NAT66ShardGroup + 1
+	if _, err := dp.groups.Apply(nat64Group, GroupPolicy{Class: NAT64Class(nat64)}, nil); err != nil {
+		t.Fatalf("Apply(empty NAT64 group): %v", err)
+	}
+	pkt := udp6(tenant(1), netip.MustParseAddr("64:ff9b::c000:201"), 1, 1)
+	if verdict, shard, _ := dp.send(t, pkt); verdict != tcActRedirect || shard != a {
+		t.Fatalf("without the NAT64 route: verdict %d toward %s, want ::/0 to redirect to %s", verdict, shard, a)
+	}
+
+	route := &net.IPNet{IP: nat64.Addr().AsSlice(), Mask: net.CIDRMask(nat64.Bits(), 128)}
+	if err := dp.routes.RegisterGroup(dpTableID, route, nat64Group, dpArgument); err != nil {
+		t.Fatalf("RegisterGroup(%s): %v", nat64, err)
+	}
+	if verdict, _, _ := dp.send(t, pkt); verdict != tcActShot {
+		t.Errorf("toward the NAT64 prefix: verdict %d, want TC_ACT_SHOT from its empty group", verdict)
+	}
+	if verdict, _, _ := dp.send(t, udp6(tenant(1), internet, 1, 1)); verdict != tcActRedirect {
+		t.Errorf("toward the internet: verdict %d, want redirect through ::/0", verdict)
+	}
+}
+
 // TestGroupDatapath_FlowHashSpreadsOneAddress checks Phase 4's flow mode: one
 // tenant address reaches more than one shard, every packet of one flow
 // reaches one, and IPv4 fragments of one datagram stay together.

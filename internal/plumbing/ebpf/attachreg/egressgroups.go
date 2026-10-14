@@ -62,9 +62,10 @@ func egressPrefixes(nat64Raw string) ([]*net.IPNet, error) {
 // skips routes already present.
 //
 // In hashed mode each route names the group serving its translation class:
-// NAT66 for ::/0, the matching NAT64 prefix for the others. A class no group
-// serves, or whose group has no eligible shard, gets no route, as an empty
-// static list gives none. A class whose shards are all unreachable or
+// NAT66 for ::/0, the matching NAT64 prefix for the others. NAT66 with no
+// group, or no eligible shard, gets no route, as an empty static list gives
+// none. A NAT64 prefix with no eligible shard names its empty group instead,
+// so ::/0 cannot catch it. A class whose shards are all unreachable or
 // draining fails the ADD, as an ordered list with no resolvable shard does.
 //
 // Once the routes are written the groups are read again. galactic-cni marks
@@ -89,15 +90,15 @@ func installVRFEgress(
 	}
 
 	n, err := installGroupRoutesIn(groups, table, vrfTableID, argument, cfg.NAT64Prefix, exists)
-	if err != nil {
+	if err != nil && !errors.Is(err, errClassGroupNotOpen) {
 		return n, err
 	}
-	stillOpen, err := groups.AnyOpen()
-	if err != nil {
-		return n, fmt.Errorf("re-read egress shard groups: %w", err)
+	stillOpen, rerr := groups.AnyOpen()
+	if rerr != nil {
+		return n, fmt.Errorf("re-read egress shard groups: %w", rerr)
 	}
 	if stillOpen {
-		return n, nil
+		return n, err
 	}
 	slog.Info("egress shard groups closed while installing this VRF's routes; installing them in ordered mode",
 		"vrfTable", vrfTableID)
@@ -121,10 +122,26 @@ func installOrderedEgress(
 	return installEgressRoutesIn(table, vrfTableID, tenantSIDs, cfg.NAT64Prefix, exists)
 }
 
+// errClassGroupNotOpen reports a configured NAT64 prefix whose class has no
+// open group while hashed mode is in force.
+var errClassGroupNotOpen = errors.New("no open egress shard group for this NAT64 prefix's class")
+
+// groupRoute is one sentinel installGroupRoutesIn will write.
+type groupRoute struct {
+	prefix  *net.IPNet
+	class   egressroutemap.TranslationClass
+	groupID uint32
+}
+
 // installGroupRoutesIn writes, for each of the VRF's egress prefixes, a
 // sentinel naming the open group that serves the prefix's class, carrying
 // argument. Nothing is resolved here: the group's shards carry their own next
 // hops.
+//
+// A NAT64 prefix is never left to ::/0. One whose group has no candidate gets
+// a sentinel naming that empty group, which drops its packets, and one with no
+// open group fails the install. Every route is checked before any is written,
+// and NAT64 routes are written before ::/0.
 func installGroupRoutesIn(
 	groups shardGroupReader, table *egressroutemap.EgressRouteTable, vrfTableID uint32, argument uint16,
 	nat64Raw string, exists routeExistsFn,
@@ -133,12 +150,12 @@ func installGroupRoutesIn(
 	if err != nil {
 		return 0, err
 	}
-	written := 0
+	var nat64, nat66 []groupRoute
 	for _, prefix := range prefixes {
 		if exists != nil {
 			found, err := exists(prefix)
 			if err != nil {
-				return written, err
+				return 0, err
 			}
 			if found {
 				continue
@@ -150,19 +167,33 @@ func installGroupRoutesIn(
 		}
 		groupID, status, found, err := groups.FindClass(class)
 		if err != nil {
-			return written, fmt.Errorf("find the %s egress shard group: %w", class, err)
+			return 0, fmt.Errorf("find the %s egress shard group: %w", class, err)
 		}
-		if !found || !status.Open() || status.Candidates == 0 {
+		switch {
+		case (!found || !status.Open()) && class.NAT64:
+			return 0, fmt.Errorf("%w: %s", errClassGroupNotOpen, prefix)
+		case !found || !status.Open() || (status.Candidates == 0 && !class.NAT64):
 			slog.Warn("no egress shard in the cluster translates this route's class; installing no route for it",
 				"vrfTable", vrfTableID, "prefix", prefix, "class", class.String())
 			continue
-		}
-		if status.Active == 0 {
-			return written, fmt.Errorf("%w yet for %s: the %s egress shard group has %d candidates and none is "+
+		case status.Candidates == 0:
+			slog.Warn("no egress shard in the cluster translates this NAT64 prefix; its route drops",
+				"vrfTable", vrfTableID, "prefix", prefix, "class", class.String(), "group", groupID)
+		case status.Active == 0:
+			return 0, fmt.Errorf("%w yet for %s: the %s egress shard group has %d candidates and none is "+
 				"reachable and accepting", srv6.ErrNoShardResolvable, prefix, class, status.Candidates)
 		}
-		if err := egressGroupRouteAddFn(table, vrfTableID, prefix, groupID, argument); err != nil {
-			return written, fmt.Errorf("install %s group route for %s: %w", class, prefix, err)
+		route := groupRoute{prefix: prefix, class: class, groupID: groupID}
+		if class.NAT64 {
+			nat64 = append(nat64, route)
+		} else {
+			nat66 = append(nat66, route)
+		}
+	}
+	written := 0
+	for _, r := range append(nat64, nat66...) {
+		if err := egressGroupRouteAddFn(table, vrfTableID, r.prefix, r.groupID, argument); err != nil {
+			return written, fmt.Errorf("install %s group route for %s: %w", r.class, r.prefix, err)
 		}
 		written++
 	}
