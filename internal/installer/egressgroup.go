@@ -356,7 +356,11 @@ func (g *egressGroup) sweepHashed(
 
 	// Each route goes to its class's group only while that group is open and
 	// has a candidate. Until then a route keeps the shard ordered mode gave
-	// it, rather than be moved onto a group with nothing to send it to.
+	// it, rather than be moved onto a group with nothing to send it to. A
+	// route already on a group stays there even when no class has a
+	// candidate: the static list is not checked for readiness or
+	// translation, so falling back to it would send the class's traffic to a
+	// shard the watch turned away.
 	enforced := egressroutemap.ClassLayout{
 		Configured: map[egressroutemap.TranslationClass]bool{},
 		Assigned:   map[egressroutemap.TranslationClass]uint32{},
@@ -387,11 +391,8 @@ func (g *egressGroup) sweepHashed(
 		id, ok := byClass[class]
 		return id, ok
 	}
-	opts := []egressroutemap.RefreshOption{egressroutemap.WithClassLayout(enforced)}
-	if len(byClass) > 0 {
-		opts = append(opts, egressroutemap.WithShardGroups(groupFor))
-	}
-	result, err := g.refresh(table, foreignTableIDs, recognized, enforced.Published, opts...)
+	result, err := g.refresh(table, foreignTableIDs, recognized, enforced.Published,
+		egressroutemap.WithClassLayout(enforced), egressroutemap.WithShardGroups(groupFor))
 	if err != nil {
 		return errors.Join(firstErr, err)
 	}

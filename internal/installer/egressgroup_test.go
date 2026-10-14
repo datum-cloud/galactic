@@ -8,16 +8,19 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"maps"
 	"net"
 	"net/netip"
 	"reflect"
 	"testing"
 
 	"github.com/cilium/ebpf"
+	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
@@ -856,4 +859,89 @@ func TestSweepHashed_ClassListChanges(t *testing.T) {
 			t.Errorf("enabled groups = %v, want NAT66 and one P2 group, the lowest", got)
 		}
 	})
+}
+
+// TestSweepHashed_EmptyMembershipKeepsRoutesOnGroups checks that when no
+// shard can serve any class, hashed mode keeps every route on its class's
+// group, where the datapath drops it as group_empty, rather than falling
+// back to the static shard list, which is not checked for readiness or
+// translation. The routes stay counted against their groups.
+func TestSweepHashed_EmptyMembershipKeepsRoutesOnGroups(t *testing.T) {
+	cases := map[string]func(*fakeLister){
+		"NoShards": func(l *fakeLister) { l.shards = nil },
+		"NoneEligible": func(l *fakeLister) {
+			l.shards[0].Status.Conditions[0].Status = metav1.ConditionFalse
+		},
+	}
+	for name, empty := range cases {
+		t.Run(name, func(t *testing.T) {
+			static := shardSIDFor(0x10)
+			f := newFixture(t, testHashed, []string{static}, []netip.Prefix{testNSP})
+			reg := prometheus.NewRegistry()
+			f.g.ctl = metrics.NewEgressControl(reg)
+			lister := &fakeLister{shards: []bgpv1alpha1.EgressShard{dual("dual", 0x10)}, synced: true}
+			f.g.shards = lister
+
+			base, _ := egressroutemap.BaseShardSID(net.ParseIP(static))
+			for vrf := uint32(1); vrf <= 3; vrf++ {
+				sid := base.As16()
+				sid[9] = byte(0x20 + vrf)
+				if err := f.routes.Register(vrf, egressroutemap.DefaultPrefix, net.IP(sid[:])); err != nil {
+					t.Fatal(err)
+				}
+				if vrf == 1 {
+					if err := f.routes.Register(vrf, testNSPNet, net.IP(sid[:])); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := f.sweep(t); err != nil {
+				t.Fatal(err)
+			}
+			if f.sentinels() != 4 {
+				t.Fatalf("%d routes on groups after the first sweep, want 4", f.sentinels())
+			}
+			before := maps.Clone(f.raw.values)
+
+			empty(lister)
+			if err := f.sweep(t); err != nil {
+				t.Fatal(err)
+			}
+			if !maps.Equal(f.raw.values, before) {
+				t.Errorf("routes changed with no shard to serve them; %d of 4 still on a group", f.sentinels())
+			}
+			for id := range uint32(2) {
+				if s := status(t, f.groups, id); !s.Open() || s.Candidates != 0 {
+					t.Errorf("group %d = %+v, want open with no candidate", id, s)
+				}
+			}
+			want := map[string]float64{egressroutemap.NAT66Class.String(): 3, nat64NSP.String(): 1}
+			if got := groupRoutes(t, reg); !maps.Equal(got, want) {
+				t.Errorf("group_routes = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// groupRoutes reads galactic_cni_egress_group_routes from reg, by class.
+func groupRoutes(t *testing.T, reg *prometheus.Registry) map[string]float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, mf := range families {
+		if mf.GetName() != "galactic_cni_egress_group_routes" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "class" {
+					got[l.GetValue()] = m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return got
 }
