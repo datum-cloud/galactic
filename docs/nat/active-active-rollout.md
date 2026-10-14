@@ -121,3 +121,9 @@ containerlab topology and is the reference for what to check.
 - [ ] Only now, if needed, roll back the `galactic-cni` image to a release
       without hashed mode. Rolling back earlier blackholes every VRF whose
       route still names a group.
+- [ ] If `GALACTIC_CNI_NAT64_PREFIX` was edited while hashed mode was on,
+      return to ordered mode, as above, before rolling the image back to a
+      release that numbers the groups by their position in that list. Such a
+      release republishes each group for whichever class now holds its
+      position, which can send a route's traffic to shards serving another
+      prefix.

@@ -52,13 +52,15 @@ var egressGroupDebounce = 250 * time.Millisecond
 // groups disabled. A failed scan or write leaves the groups forwarding.
 //
 // In hashed mode there is one group per translation class: NAT66 for ::/0,
-// and one per NAT64 prefix. A class's members are the cluster's EgressShards
-// that can translate it, read from a watch, and a member is alive only while
-// its SID resolves to an uplink neighbor. A shard running on this node is a
-// local member instead: this node originates its locator, so its SID never
-// resolves over an uplink, and it is never alive here. Every VRF route bound to a shard is
-// moved onto its class's group, after which usid_egress picks a shard per
-// tenant address.
+// and one per NAT64 prefix. A group keeps the class it was first published
+// with, so a class keeps its group ID across edits to the NAT64 prefix list
+// and across restarts; see layoutGroups. A class's members are the cluster's
+// EgressShards that can translate it, read from a watch, and a member is
+// alive only while its SID resolves to an uplink neighbor. A shard running on
+// this node is a local member instead: this node originates its locator, so
+// its SID never resolves over an uplink, and it is never alive here. Every VRF
+// route bound to a shard is moved onto its class's group, after which
+// usid_egress picks a shard per tenant address.
 //
 // All of it runs on one goroutine, started by run, and is triggered by kick:
 // on the egress route ticker, on any EgressShard change, and on any route or
@@ -75,9 +77,15 @@ type egressGroup struct {
 	// it as local members. Empty marks none.
 	nodeName string
 
-	// classes are the translation classes this node's VRFs need, in group
-	// order: NAT66, then each configured NAT64 prefix.
+	// classes are the translation classes this node's VRFs need: NAT66, then
+	// each configured NAT64 prefix.
 	classes []egressroutemap.TranslationClass
+
+	// refs counts, by group ID, the routes naming each group as of the last
+	// complete scan this process made. Nil until one has completed. A
+	// disabled group is handed to another class only once refs shows no
+	// route names it.
+	refs map[uint32]int
 
 	// shards lists the cluster's EgressShards. Nil in ordered mode, and in
 	// hashed mode until the watch has started.
@@ -223,7 +231,7 @@ func (g *egressGroup) sweepWith(
 	foreignTableIDs map[uint32]struct{},
 ) error {
 	if groups == nil {
-		_, err := g.refresh(table, foreignTableIDs, g.staticSIDs)
+		_, err := g.refresh(table, foreignTableIDs, g.staticSIDs, nil)
 		return err
 	}
 	if g.cfg.Mode == config.EgressModeHashed {
@@ -248,11 +256,15 @@ func (g *egressGroup) sweepOrdered(
 ) error {
 	var enabled []uint32
 	closed := true
+	classOf := map[uint32]egressroutemap.TranslationClass{}
 	for id := range uint32(egressroutemap.MaxShardGroups) {
 		status, err := groups.Status(id)
 		if err != nil {
 			g.ctl.SweepError("close")
 			return fmt.Errorf("read egress shard group %d: %w", id, err)
+		}
+		if status.Present {
+			classOf[id] = status.Class
 		}
 		if !status.Enabled {
 			continue
@@ -265,7 +277,7 @@ func (g *egressGroup) sweepOrdered(
 		}
 	}
 
-	result, err := g.refresh(table, foreignTableIDs, g.staticSIDs)
+	result, err := g.refresh(table, foreignTableIDs, g.staticSIDs, classOf)
 	if err != nil {
 		return err
 	}
@@ -292,42 +304,79 @@ func (g *egressGroup) sweepOrdered(
 // every VRF route onto its class's group. Until the watch has listed the
 // cluster once, each group keeps whatever it last held: an empty answer then
 // means "not known yet", and applying it would drop the cluster's egress.
+//
+// A group no configured class owns is retired: it is marked closing, its
+// routes are deleted when their class is no longer configured or moved to
+// their class's group when it is a duplicate, and it is disabled by a later
+// sweep that finds no route naming it. Only then can another class take its
+// ID.
 func (g *egressGroup) sweepHashed(
 	ctx context.Context, table *egressroutemap.EgressRouteTable, groups *egressroutemap.ShardGroupTable,
 	foreignTableIDs map[uint32]struct{},
 ) error {
+	before, err := groupStatuses(groups)
+	if err != nil {
+		g.ctl.SweepError("apply")
+		return err
+	}
+
 	recognized := append([]net.IP(nil), g.staticSIDs...)
-	var firstErr error
+	var (
+		firstErr error
+		shards   []bgpv1alpha1.EgressShard
+		synced   bool
+	)
 	if g.shards == nil {
 		g.ctl.SetWatchSynced(false)
 	} else {
-		shards, synced, err := g.shards.ListEgressShards(ctx)
+		var err error
+		shards, synced, err = g.shards.ListEgressShards(ctx)
 		g.ctl.SetWatchSynced(synced && err == nil)
-		switch {
-		case err != nil:
+		if err != nil {
 			g.ctl.SweepError("watch")
 			slog.Error("Failed to list EgressShards; the egress shard groups keep their members", "err", err)
 			firstErr = err
-		case synced:
-			sids, err := g.applyClasses(groups, shards)
-			recognized = append(recognized, sids...)
-			if err != nil {
-				firstErr = err
-			}
+			synced = false
 		}
+	}
+
+	refsKnown := g.refs != nil
+	layout := g.layoutGroups(before, synced)
+	if synced {
+		sids, err := g.applyClasses(groups, shards, layout.assigned)
+		recognized = append(recognized, sids...)
+		firstErr = errors.Join(firstErr, err)
+	}
+	closing, newlyClosed := g.retireGroups(groups, before, layout.retired, shards, synced)
+
+	after, err := groupStatuses(groups)
+	if err != nil {
+		return errors.Join(firstErr, err)
 	}
 
 	// Each route goes to its class's group only while that group is open and
 	// has a candidate. Until then a route keeps the shard ordered mode gave
 	// it, rather than be moved onto a group with nothing to send it to.
-	byClass := map[string]uint32{}
-	for id := range uint32(egressroutemap.MaxShardGroups) {
-		status, err := groups.Status(id)
-		if err != nil {
-			return errors.Join(firstErr, err)
+	enforced := egressroutemap.ClassLayout{
+		Configured: map[egressroutemap.TranslationClass]bool{},
+		Assigned:   map[egressroutemap.TranslationClass]uint32{},
+		Published:  map[uint32]egressroutemap.TranslationClass{},
+	}
+	for id, status := range after {
+		if status.Present {
+			enforced.Published[uint32(id)] = status.Class //nolint:gosec // < 4
 		}
-		if status.Open() && status.Candidates > 0 {
-			byClass[status.Class.String()] = id
+	}
+	byClass := map[egressroutemap.TranslationClass]uint32{}
+	for _, class := range g.classes {
+		enforced.Configured[class] = true
+		id, ok := layout.assigned[class]
+		if !ok || !after[id].Present {
+			continue
+		}
+		enforced.Assigned[class] = id
+		if after[id].Open() && after[id].Candidates > 0 {
+			byClass[class] = id
 		}
 	}
 	groupFor := func(prefix *net.IPNet) (uint32, bool) {
@@ -335,44 +384,159 @@ func (g *egressGroup) sweepHashed(
 		if !ok {
 			return 0, false
 		}
-		id, ok := byClass[class.String()]
+		id, ok := byClass[class]
 		return id, ok
 	}
-	var opts []egressroutemap.RefreshOption
+	opts := []egressroutemap.RefreshOption{egressroutemap.WithClassLayout(enforced)}
 	if len(byClass) > 0 {
 		opts = append(opts, egressroutemap.WithShardGroups(groupFor))
 	}
-	if _, err := g.refresh(table, foreignTableIDs, recognized, opts...); err != nil {
+	result, err := g.refresh(table, foreignTableIDs, recognized, enforced.Published, opts...)
+	if err != nil {
 		return errors.Join(firstErr, err)
 	}
+
+	disabled := false
+	for _, id := range closing {
+		// A group closed by this sweep waits for the next: an ADD that read
+		// it open may still be writing a route naming it.
+		if !before[id].Closing || result.GroupRoutes[id] > 0 {
+			continue
+		}
+		changed, err := groups.Disable(id)
+		if err != nil {
+			g.ctl.SweepError("disable")
+			firstErr = errors.Join(firstErr, fmt.Errorf("disable retired egress shard group %d: %w", id, err))
+			continue
+		}
+		if changed {
+			disabled = true
+			slog.Info("Retired egress shard group disabled: no route names it", "group", id,
+				"class", before[id].Class.String())
+		}
+	}
+	if newlyClosed || (layout.unassigned > 0 && (disabled || !refsKnown)) {
+		g.kick()
+	}
 	return firstErr
+}
+
+// groupStatuses reads every shard group's published state.
+func groupStatuses(
+	groups *egressroutemap.ShardGroupTable,
+) ([egressroutemap.MaxShardGroups]egressroutemap.GroupStatus, error) {
+	var statuses [egressroutemap.MaxShardGroups]egressroutemap.GroupStatus
+	for id := range uint32(egressroutemap.MaxShardGroups) {
+		status, err := groups.Status(id)
+		if err != nil {
+			return statuses, fmt.Errorf("read egress shard group %d: %w", id, err)
+		}
+		statuses[id] = status
+	}
+	return statuses, nil
+}
+
+// groupLayout is one sweep's assignment of translation classes to groups.
+type groupLayout struct {
+	// assigned is the group each configured class owns.
+	assigned map[egressroutemap.TranslationClass]uint32
+	// retired is every enabled group no configured class owns.
+	retired []uint32
+	// unassigned counts the configured classes left without a group.
+	unassigned int
+}
+
+// layoutGroups gives each configured class a group. A class keeps the
+// lowest-numbered group published for it, enabled or not, which is the one
+// FindClass gives CNI ADD while duplicates are still open; that persists the
+// assignment in the pinned map itself, across restarts. When allocate is set,
+// a class with no group takes the lowest ID that has never been published, or
+// one that is disabled, belongs to no configured class, and the last complete
+// scan found no route naming. Every other enabled group is retired.
+func (g *egressGroup) layoutGroups(
+	statuses [egressroutemap.MaxShardGroups]egressroutemap.GroupStatus, allocate bool,
+) groupLayout {
+	configured := map[egressroutemap.TranslationClass]bool{}
+	for _, class := range g.classes {
+		configured[class] = true
+	}
+	layout := groupLayout{assigned: map[egressroutemap.TranslationClass]uint32{}}
+	taken := map[uint32]bool{}
+	for _, class := range g.classes {
+		for id, status := range statuses {
+			if status.Present && status.Class == class {
+				layout.assigned[class] = uint32(id) //nolint:gosec // < 4
+				taken[uint32(id)] = true            //nolint:gosec // < 4
+				break
+			}
+		}
+	}
+	free := func(id uint32) bool {
+		status := statuses[id]
+		if taken[id] {
+			return false
+		}
+		if !status.Present {
+			return true
+		}
+		if status.Enabled || configured[status.Class] || g.refs == nil {
+			return false
+		}
+		return g.refs[id] == 0
+	}
+	for _, class := range g.classes {
+		if _, ok := layout.assigned[class]; ok {
+			continue
+		}
+		assigned := false
+		for id := range uint32(egressroutemap.MaxShardGroups) {
+			if allocate && free(id) {
+				layout.assigned[class] = id
+				taken[id] = true
+				assigned = true
+				break
+			}
+		}
+		if !assigned {
+			layout.unassigned++
+		}
+	}
+	for id, status := range statuses {
+		if status.Enabled && !taken[uint32(id)] { //nolint:gosec // < 4
+			layout.retired = append(layout.retired, uint32(id)) //nolint:gosec // < 4
+		}
+	}
+	return layout
 }
 
 // applyClasses publishes each class's group from the cluster's shards and
 // returns every candidate's SID.
 func (g *egressGroup) applyClasses(
 	groups *egressroutemap.ShardGroupTable, shards []bgpv1alpha1.EgressShard,
+	assigned map[egressroutemap.TranslationClass]uint32,
 ) ([]net.IP, error) {
 	var (
 		sids     []net.IP
 		locators []netip.Prefix
 		errs     []error
 	)
-	for i, class := range g.classes {
+	for _, class := range g.classes {
+		id, ok := assigned[class]
+		if !ok {
+			g.ctl.SweepError("apply")
+			slog.Error("No egress shard group is free for this class until a retired one has no route left",
+				"class", class.String())
+			continue
+		}
 		eligible, ineligible := egressShardCandidates(shards, class, g.nodeName)
 		g.reportIneligible(class, ineligible)
-		result, err := groups.Apply(uint32(i), g.policy(class, len(ineligible)), eligible) //nolint:gosec // < 4
+		result, err := g.applyGroup(groups, id, g.policy(class, len(ineligible)), eligible)
 		if err != nil {
-			g.ctl.SweepError("apply")
-			slog.Error("Failed to publish an egress shard group", "class", class.String(), "err", err)
 			errs = append(errs, err)
 			continue
 		}
 		for _, s := range result.Shards {
 			locators = append(locators, netip.PrefixFrom(s.SID, 64).Masked())
-			if s.Assigned {
-				g.resetCounter(uint32(i), s.Slot) //nolint:gosec // < 4
-			}
 		}
 		for _, c := range eligible {
 			sids = append(sids, c.SID)
@@ -381,6 +545,60 @@ func (g *egressGroup) applyClasses(
 	}
 	g.locators.Store(&locators)
 	return sids, errors.Join(errs...)
+}
+
+// applyGroup publishes one group and resets the counters of every slot it
+// handed to a new shard.
+func (g *egressGroup) applyGroup(
+	groups *egressroutemap.ShardGroupTable, id uint32, policy egressroutemap.GroupPolicy,
+	eligible []egressroutemap.ShardCandidate,
+) (egressroutemap.GroupResult, error) {
+	result, err := groups.Apply(id, policy, eligible)
+	if err != nil {
+		g.ctl.SweepError("apply")
+		slog.Error("Failed to publish an egress shard group", "group", id, "class", policy.Class.String(),
+			"err", err)
+		return result, err
+	}
+	for _, s := range result.Shards {
+		if s.Assigned {
+			g.resetCounter(id, s.Slot)
+		}
+	}
+	return result, nil
+}
+
+// retireGroups marks each retired group closing, so no CNI ADD names it
+// again, and returns the ones that are. With a synced watch a retired group's
+// members are rebuilt for its own class, so the routes it still forwards for
+// never use a shard that has left the cluster. newlyClosed reports that one
+// was open before this sweep.
+func (g *egressGroup) retireGroups(
+	groups *egressroutemap.ShardGroupTable, statuses [egressroutemap.MaxShardGroups]egressroutemap.GroupStatus,
+	retired []uint32, shards []bgpv1alpha1.EgressShard, synced bool,
+) (closing []uint32, newlyClosed bool) {
+	for _, id := range retired {
+		class := statuses[id].Class
+		if synced {
+			eligible, ineligible := egressShardCandidates(shards, class, g.nodeName)
+			policy := g.policy(class, len(ineligible))
+			policy.Closing = true
+			if _, err := g.applyGroup(groups, id, policy, eligible); err != nil {
+				continue
+			}
+		} else if ok, err := groups.Close(id); err != nil || !ok {
+			g.ctl.SweepError("close")
+			slog.Error("Failed to mark a retired egress shard group closing", "group", id, "err", err)
+			continue
+		}
+		closing = append(closing, id)
+		if !statuses[id].Closing {
+			newlyClosed = true
+			slog.Info("Egress shard group retired: no configured class owns it", "group", id,
+				"class", class.String())
+		}
+	}
+	return closing, newlyClosed
 }
 
 // reportIneligible logs the shards that cannot serve class, once per change.
@@ -440,12 +658,12 @@ func (g *egressGroup) resetCounter(group uint32, slot int) {
 }
 
 // refresh runs one Refresh pass, logs anything it did, and records how many
-// routes still name each class's group. Refresh's error is returned, never
+// routes still name each group, by the class classOf says it serves. Refresh's error is returned, never
 // swallowed: a caller deciding whether a group can be retired must know the
 // scan was complete.
 func (g *egressGroup) refresh(
 	table *egressroutemap.EgressRouteTable, foreignTableIDs map[uint32]struct{}, shardSIDs []net.IP,
-	opts ...egressroutemap.RefreshOption,
+	classOf map[uint32]egressroutemap.TranslationClass, opts ...egressroutemap.RefreshOption,
 ) (egressroutemap.RefreshResult, error) {
 	result, err := table.Refresh(foreignTableIDs, shardSIDs, opts...)
 	if err != nil {
@@ -454,15 +672,21 @@ func (g *egressGroup) refresh(
 			"scanned", result.Scanned, "refreshed", result.Refreshed)
 		return result, err
 	}
-	if result.Refreshed > 0 || result.Unresolved > 0 {
+	g.refs = result.GroupRoutes
+	if result.Refreshed > 0 || result.Unresolved > 0 || result.Removed > 0 {
 		slog.Info("egress_route_table refresh sweep complete",
 			"scanned", result.Scanned, "refreshed", result.Refreshed, "reselected", result.Reselected,
 			"grouped", result.Grouped, "ungrouped", result.Ungrouped, "inGroup", result.InGroup,
-			"unresolved", result.Unresolved, "skipped", result.Skipped)
+			"unresolved", result.Unresolved, "removed", result.Removed, "skipped", result.Skipped)
 	}
 	byClass := map[string]int{}
-	for i, class := range g.classes {
-		byClass[class.String()] = result.GroupRoutes[uint32(i)] //nolint:gosec // < 4
+	for _, class := range g.classes {
+		byClass[class.String()] = 0
+	}
+	for id, n := range result.GroupRoutes {
+		if class, ok := classOf[id]; ok {
+			byClass[class.String()] += n
+		}
 	}
 	g.ctl.SetGroupRoutes(byClass)
 	return result, nil

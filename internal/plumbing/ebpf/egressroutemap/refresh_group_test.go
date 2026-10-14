@@ -229,3 +229,61 @@ func TestRefreshCountsForeignSentinels(t *testing.T) {
 		t.Errorf("Refresh = %+v, %v; want the foreign sentinel skipped and counted", result, err)
 	}
 }
+
+// TestRefreshClassLayout covers R05 at its source: a sentinel whose route's
+// class is no longer configured is deleted, one naming a group published for
+// another class moves to its own class's group even when that group has no
+// candidate, and a foreign sentinel is never touched but still counted.
+func TestRefreshClassLayout(t *testing.T) {
+	stubResolveLinkAndL2(t)
+	tbl := NewEgressRouteTable(newFakeTable())
+	wkp := &net.IPNet{IP: net.IP(WellKnownPrefix.Addr().AsSlice()), Mask: net.CIDRMask(96, 128)}
+	for _, r := range []struct {
+		table  uint32
+		prefix *net.IPNet
+		group  uint32
+	}{
+		{1, DefaultPrefix, 0}, // in place
+		{1, wkp, 1},           // class retired
+		{2, nspNet(), 1},      // group 1 now serves another class
+		{9, wkp, 1},           // foreign, class retired
+	} {
+		if err := tbl.RegisterGroup(r.table, r.prefix, r.group, 0x100+uint16(r.table)); err != nil { //nolint:gosec // test
+			t.Fatal(err)
+		}
+	}
+	layout := ClassLayout{
+		Configured: map[TranslationClass]bool{NAT66Class: true, NAT64Class(nsp): true},
+		Assigned:   map[TranslationClass]uint32{NAT66Class: 0, NAT64Class(nsp): 2},
+		Published: map[uint32]TranslationClass{
+			0: NAT66Class, 1: NAT64Class(WellKnownPrefix), 2: NAT64Class(nsp),
+		},
+	}
+	// The NSP's group has no candidate, so WithShardGroups offers it nothing.
+	nat66Only := func(prefix *net.IPNet) (uint32, bool) {
+		class, ok := ClassForRoute(prefix)
+		return 0, ok && class == NAT66Class
+	}
+
+	result, err := tbl.Refresh(map[uint32]struct{}{9: {}}, nil, WithClassLayout(layout), WithShardGroups(nat66Only))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Removed != 1 || result.Grouped != 1 || result.GroupRoutes[0] != 1 || result.GroupRoutes[1] != 1 ||
+		result.GroupRoutes[2] != 1 {
+		t.Errorf("result = %+v, want one removed, one moved to group 2, and the foreign route on group 1", result)
+	}
+	key, _ := buildKey(1, wkp)
+	if _, err := lookupRaw(tbl, key); err == nil {
+		t.Error("the retired class's route survived the sweep")
+	}
+	key, _ = buildKey(2, nspNet())
+	value, _ := lookupRaw(tbl, key)
+	if g, a := sentinelGroup(value); !isGroupSentinel(value) || g != 2 || a != 0x102 {
+		t.Errorf("NSP route = group %d arg %#x, want group 2 arg 0x102", g, a)
+	}
+	key, _ = buildKey(9, wkp)
+	if value, err := lookupRaw(tbl, key); err != nil || !isGroupSentinel(value) {
+		t.Errorf("foreign route = %+v, %v; want it left alone", value, err)
+	}
+}

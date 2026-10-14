@@ -21,8 +21,9 @@ import (
 // The shard group layout, mirroring usid.c's USID_EGRESS_* constants. bpf2go
 // generates no symbol for a #define, so each value is named once here.
 const (
-	// NAT66ShardGroup is the group serving the ::/0 route. NAT64 prefixes
-	// take the groups after it, in the order they are configured.
+	// NAT66ShardGroup is the group a node with no published group gives the
+	// ::/0 route. Every group keeps its class once published, so a group ID
+	// is a class's identity and not a position in the configured list.
 	NAT66ShardGroup uint32 = 0
 
 	// MaxShardGroups is how many groups egress_shard_groups holds: NAT66 and
@@ -344,18 +345,31 @@ func (g *ShardGroupTable) Status(groupID uint32) (GroupStatus, error) {
 	}, nil
 }
 
-// FindClass returns the group whose published class is class.
+// FindClass returns the group whose published class is class: the open one
+// when there is one, since a retired group of the same class is closing, and
+// otherwise the lowest-numbered.
 func (g *ShardGroupTable) FindClass(class TranslationClass) (uint32, GroupStatus, bool, error) {
+	var (
+		foundID     uint32
+		foundStatus GroupStatus
+		found       bool
+	)
 	for id := range uint32(MaxShardGroups) {
 		status, err := g.Status(id)
 		if err != nil {
 			return 0, GroupStatus{}, false, err
 		}
-		if status.Present && status.Class == class {
+		if !status.Present || status.Class != class {
+			continue
+		}
+		if status.Open() {
 			return id, status, true, nil
 		}
+		if !found {
+			foundID, foundStatus, found = id, status, true
+		}
 	}
-	return 0, GroupStatus{}, false, nil
+	return foundID, foundStatus, found, nil
 }
 
 // AnyOpen reports whether any group may take new routes: hashed mode is in
