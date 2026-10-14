@@ -31,7 +31,7 @@ const testBindingVIP = "2001:db8:100::32"
 // newBindingTestRule returns an accepted rule with one IPv6 and one IPv4 VIP,
 // selecting newBackendAttachment's attachments in testVPCRef.
 func newBindingTestRule() *bgpv1alpha1.NetworkRule {
-	rule := newTestRule(testRuleName, testVPCRef, testBindingVIP, testVIP)
+	rule := newTestRule(testRuleName, testVPCRef, testBindingVIP, testVIP4)
 	rule.UID = "rule-uid"
 	acceptRule(rule)
 	return rule

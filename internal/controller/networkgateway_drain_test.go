@@ -125,8 +125,8 @@ func TestNetworkGatewayReconciler_DrainsDeletedRuleUntilWithdrawn(t *testing.T) 
 	reconcile("live")
 	assertLoaded("live", true)
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdvV4), adv); err != nil {
-		t.Fatalf("live: get BGPAdvertisement %s: %v", testRuleAdvV4, err)
+	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdv), adv); err != nil {
+		t.Fatalf("live: get BGPAdvertisement %s: %v", testRuleAdv, err)
 	}
 
 	// The finalizer holds the object, so this only sets its deletion
@@ -184,8 +184,8 @@ func TestNetworkGatewayReconciler_DrainsDeletedRuleUntilWithdrawn(t *testing.T) 
 	if res.RequeueAfter != 0 {
 		t.Errorf("delay over: RequeueAfter = %s, want 0", res.RequeueAfter)
 	}
-	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdvV4), adv); !apierrors.IsNotFound(err) {
-		t.Errorf("BGPAdvertisement %s after drain: err = %v, want NotFound", testRuleAdvV4, err)
+	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdv), adv); !apierrors.IsNotFound(err) {
+		t.Errorf("BGPAdvertisement %s after drain: err = %v, want NotFound", testRuleAdv, err)
 	}
 }
 
