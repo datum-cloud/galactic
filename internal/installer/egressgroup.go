@@ -631,6 +631,9 @@ func (g *egressGroup) logApplied(class egressroutemap.TranslationClass, result e
 		if s.Local {
 			slog.Info("Egress shard runs on this node; it takes no tenant from here",
 				"class", class.String(), "sid", s.SID, "slot", s.Slot)
+		} else if s.Held {
+			slog.Info("NAT64 standby egress shard held out while a sibling serves this class",
+				"class", class.String(), "sid", s.SID, "slot", s.Slot)
 		} else if s.Err != nil {
 			slog.Warn("Egress shard unreachable; it takes no tenant until its SID resolves",
 				"class", class.String(), "sid", s.SID, "slot", s.Slot, "err", s.Err)
@@ -712,7 +715,10 @@ func (g *egressGroup) refresh(
 // One with spec.drain set is draining. One being deleted is no candidate at
 // all: deletion withdraws its advertisement and clears its translation at
 // once, so it has nothing to drain with. One whose target is nodeName is
-// local.
+// local. For a NAT64 class, one with spec.nat64Standby set is a standby, which
+// the group holds out of the class while a sibling without it is alive; see
+// egressroutemap.ShardGroupTable.Apply. NAT66 ignores the flag, since every
+// shard's IPv6 address is attracted to its own node.
 func egressShardCandidates(
 	shards []bgpv1alpha1.EgressShard, class egressroutemap.TranslationClass, nodeName string,
 ) (eligible []egressroutemap.ShardCandidate, ineligible []string) {
@@ -735,6 +741,7 @@ func egressShardCandidates(
 		}
 		eligible = append(eligible, egressroutemap.ShardCandidate{
 			SID: sid, Draining: shard.Spec.Drain, Local: targetsNode(shard.Spec.TargetRef, nodeName),
+			Standby: class.NAT64 && shard.Spec.NAT64Standby,
 		})
 	}
 	return eligible, ineligible

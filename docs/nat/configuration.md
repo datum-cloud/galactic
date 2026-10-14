@@ -521,6 +521,21 @@ hashed mode with more than three NAT64 prefixes in
   candidate once its status carries a `shardSID` and both `Programmed` and
   `Ready` are `True`, and it is not being deleted.
   `GALACTIC_CNI_EGRESS_SHARD_SIDS` is not used for placement in hashed mode.
+- **A NAT64 standby serves NAT64 only when no primary can.** A site whose
+  shards share one IPv4 unicast prefix announces it from every edge, with
+  the standby's announcement prepended, so replies to the standby's
+  `shardAddressIPv4` arrive at the primary's node, which holds no session
+  for them and drops them. Mark that shard `spec.nat64Standby: true`. In
+  every NAT64 class, a standby is held out of the group while any shard
+  without the flag resolves, draining or not, and its pins stop being
+  honoured, so tenants pinned to it during a failover move back to the
+  primary on their next packet. Once no such shard resolves, the standby
+  takes the class. A standby's NAT66 placement is unchanged, since each
+  shard's IPv6 address is advertised from its own node. A held standby is
+  counted as `standby`, and `GalacticEgressPoolBelowMinimum` counts it
+  toward the pool minimum, since it takes over without anyone acting. A
+  primary running on this node is local and never resolves, so on the
+  primary's own node the standby still takes NAT64 tenants.
 - **A shard counts only while it is reachable.** A dead node's `EgressShard`
   status goes stale, but its BGP session drops and the route to its SID is
   withdrawn. A candidate takes tenants only while its SID resolves to a
@@ -672,17 +687,17 @@ route as a redirect to a nonexistent interface and drops the traffic.
 
 ### Observability
 
-| Metric                                                     | Meaning                                                                                                                              |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `galactic_cni_egress_mode{mode}`                           | 1 for the configured mode. Always present, so a node configured for hashed mode that never published a group still says so.          |
-| `galactic_cni_egress_shard_watch_synced`                   | 1 once the `EgressShard` watch has listed the cluster.                                                                               |
-| `galactic_cni_egress_group_routes{class}`                  | Routes naming each class's group after the last successful sweep. Must be 0 before rolling back to an older release.                 |
-| `galactic_cni_egress_sweep_errors_total{stage}`            | Sweep failures: `apply`, `refresh`, `watch`, `close`, `disable`.                                                                     |
-| `galactic_cni_egress_pool_members{class,state}`            | Each class's shards: `active`, `draining`, `unreachable`, `local` (runs on this node), and `ineligible` (cannot translate it).       |
-| `galactic_cni_egress_pool_enabled{class}`                  | 1 while the class's group takes new routes; 0 while it is being retired.                                                             |
-| `galactic_cni_egress_pool_min_active`                      | `GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE`.                                                                                               |
-| `galactic_cni_egress_shard_packets_total{shard_sid,class}` | Tenant packets this node sent to each shard for each class, since the shard took its slot. `..._bytes_total` is the same in bytes.   |
-| `galactic_cni_egress_shard_selections_total{result}`       | How each packet was placed: `maglev`, `pin_hit`, `pin_stale` (re-placed), or dropped as `group_empty`, `shard_dead`, `parse_failed`. |
+| Metric                                                     | Meaning                                                                                                                                                                                               |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_cni_egress_mode{mode}`                           | 1 for the configured mode. Always present, so a node configured for hashed mode that never published a group still says so.                                                                           |
+| `galactic_cni_egress_shard_watch_synced`                   | 1 once the `EgressShard` watch has listed the cluster.                                                                                                                                                |
+| `galactic_cni_egress_group_routes{class}`                  | Routes naming each class's group after the last successful sweep. Must be 0 before rolling back to an older release.                                                                                  |
+| `galactic_cni_egress_sweep_errors_total{stage}`            | Sweep failures: `apply`, `refresh`, `watch`, `close`, `disable`.                                                                                                                                      |
+| `galactic_cni_egress_pool_members{class,state}`            | Each class's shards: `active`, `draining`, `unreachable`, `local` (runs on this node), `standby` (a NAT64 standby held out while a primary serves the class), and `ineligible` (cannot translate it). |
+| `galactic_cni_egress_pool_enabled{class}`                  | 1 while the class's group takes new routes; 0 while it is being retired.                                                                                                                              |
+| `galactic_cni_egress_pool_min_active`                      | `GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE`.                                                                                                                                                                |
+| `galactic_cni_egress_shard_packets_total{shard_sid,class}` | Tenant packets this node sent to each shard for each class, since the shard took its slot. `..._bytes_total` is the same in bytes.                                                                    |
+| `galactic_cni_egress_shard_selections_total{result}`       | How each packet was placed: `maglev`, `pin_hit`, `pin_stale` (re-placed), or dropped as `group_empty`, `shard_dead`, `parse_failed`.                                                                  |
 
 A node that never published a group exports no `pool_*` series. That is not
 a healthy empty pool: read it together with `galactic_cni_egress_mode` and

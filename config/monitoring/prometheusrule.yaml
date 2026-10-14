@@ -546,17 +546,20 @@ spec:
               is dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
               SID over an SRv6 uplink) or draining.
         # Fewer shards take tenants than the operator said the class should
-        # have, on a node with routes on the group. A class with no eligible
-        # shard at all is GalacticEgressClassUnserved instead. A node with no
-        # route on the group is left out for the same reason as in
-        # GalacticEgressPoolEmpty: an edge node running a shard counts one
-        # shard fewer than the rest of the cluster, its own.
+        # have, on a node with routes on the group. A NAT64 standby held out
+        # of the class while a primary serves it counts toward the minimum:
+        # it takes the class over as soon as no primary resolves, so a site
+        # with one primary and one standby still has its redundancy. A class
+        # with no eligible shard at all is GalacticEgressClassUnserved
+        # instead. A node with no route on the group is left out for the same
+        # reason as in GalacticEgressPoolEmpty: an edge node running a shard
+        # counts one shard fewer than the rest of the cluster, its own.
         - alert: GalacticEgressPoolBelowMinimum
           expr: |
-            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="active"})
+            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|standby"})
               < on (node) group_left max by (node) (galactic_cni_egress_pool_min_active{job="galactic-cni"})
             and on (node, class)
-            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|draining|unreachable"}) > 0
+            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|standby|draining|unreachable"}) > 0
             and on (node, class)
             max by (node, class) (galactic_cni_egress_pool_enabled{job="galactic-cni"}) == 1
             and on (node, class)
@@ -570,7 +573,7 @@ spec:
             summary: "{{ $labels.node }} has fewer active {{ $labels.class }} egress shards than the pool minimum"
             runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolbelowminimum"
             description: >-
-              {{ $labels.node }} has had {{ $value }} active {{ $labels.class }} egress shards for 10
+              {{ $labels.node }} has had {{ $value }} active or standby {{ $labels.class }} egress shards for 10
               minutes, below the GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE the cluster is configured for. The remaining
               shards carry the metro's whole egress load for that class. galactic_cni_egress_pool_members shows
               which shards are draining or unreachable.
@@ -580,7 +583,7 @@ spec:
         # for the class, so its traffic has no egress.
         - alert: GalacticEgressClassUnserved
           expr: |
-            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|draining|unreachable|local"}) == 0
+            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|standby|draining|unreachable|local"}) == 0
             and on (node, class)
             sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="ineligible"}) > 0
           for: 15m

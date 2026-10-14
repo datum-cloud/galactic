@@ -723,9 +723,16 @@ struct egress_route_value {
 //
 // LOCAL means the shard runs on this node. The control plane sets it for the
 // metrics alone and never sets ALIVE with it, so the datapath ignores it.
+//
+// STANDBY marks a NAT64 standby shard, and HELD one the control plane is
+// keeping out of the class because a sibling without STANDBY is alive. Both
+// are for the metrics alone: the control plane never sets ALIVE with HELD, so
+// a held shard is absent from the Maglev table and its pins are stale.
 #define USID_EGRESS_SHARD_ALIVE (1u << 0)
 #define USID_EGRESS_SHARD_DRAINING (1u << 1)
 #define USID_EGRESS_SHARD_LOCAL (1u << 2)
+#define USID_EGRESS_SHARD_STANDBY (1u << 3)
+#define USID_EGRESS_SHARD_HELD (1u << 4)
 
 // struct egress_shard_member is one group member, with the link and L2
 // addresses resolved ahead of time for the same reason egress_route_value

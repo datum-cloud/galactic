@@ -124,7 +124,8 @@ const (
 
 	// EnvCNIEgressPoolMinActive is the fewest active egress shards the cluster
 	// is expected to have. It is exported as a metric for the pool alert to
-	// compare against, and does not change forwarding. Default 1.
+	// compare against, and does not change forwarding. A NAT64 standby held
+	// out of a class counts toward it there. Default 1.
 	EnvCNIEgressPoolMinActive = "GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE"
 )
 

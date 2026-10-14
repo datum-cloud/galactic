@@ -738,7 +738,52 @@ tests:
               summary: "dfw-worker has fewer active nat66 egress shards than the pool minimum"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolbelowminimum"
               description: >-
-                dfw-worker has had 0 active nat66 egress shards for 10
+                dfw-worker has had 0 active or standby nat66 egress shards for 10
+                minutes, below the GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE the cluster is configured for. The remaining
+                shards carry the metro's whole egress load for that class. galactic_cni_egress_pool_members shows
+                which shards are draining or unreachable.
+
+  # A NAT64 class with one primary and one held standby meets a pool
+  # minimum of 2 and fires nothing. When the standby stops resolving at 5m
+  # the class has no failover left, and BelowMinimum fires after 10m.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_cni_egress_pool_enabled{job="galactic-cni",node="dfw-worker",class="nat64:64:ff9b::/96"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_group_routes{job="galactic-cni",node="dfw-worker",class="nat64:64:ff9b::/96"}'
+        values: "3x40"
+      - series: 'galactic_cni_egress_pool_min_active{job="galactic-cni",node="dfw-worker"}'
+        values: "2x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat64:64:ff9b::/96",state="active"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat64:64:ff9b::/96",state="standby"}'
+        values: "1x10 0x30"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat64:64:ff9b::/96",state="unreachable"}'
+        values: "0x10 1x30"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GalacticEgressPoolBelowMinimum
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GalacticEgressPoolEmpty
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: GalacticEgressPoolBelowMinimum
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: GalacticEgressPoolBelowMinimum
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker
+              class: nat64:64:ff9b::/96
+            exp_annotations:
+              summary: "dfw-worker has fewer active nat64:64:ff9b::/96 egress shards than the pool minimum"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolbelowminimum"
+              description: >-
+                dfw-worker has had 1 active or standby nat64:64:ff9b::/96 egress shards for 10
                 minutes, below the GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE the cluster is configured for. The remaining
                 shards carry the metro's whole egress load for that class. galactic_cni_egress_pool_members shows
                 which shards are draining or unreachable.

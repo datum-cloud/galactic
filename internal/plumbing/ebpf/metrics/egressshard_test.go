@@ -54,7 +54,12 @@ func TestEgressShardCollector(t *testing.T) {
 	// not open.
 	nat64 := prog.UsidEgressShardGroupValue{Flags: 1 | 4, Ineligible: 3, ClassKind: 2,
 		ClassPrefix: sidBytes("2001:db8:64::")}
-	store := snapshotStore{0: nat66, 1: nat64, 2: {ClassKind: 2}}
+	// A NAT64 class its primary serves, with the standby held out.
+	wkp := prog.UsidEgressShardGroupValue{Flags: 1, Candidates: 2, Active: 1, ClassKind: 2,
+		ClassPrefix: sidBytes("64:ff9b::")}
+	wkp.Shards[0] = prog.UsidEgressShardMember{Sid: sidBytes("2001:db8:ff09:20:e000::"), Flags: 1, Generation: 5}
+	wkp.Shards[1] = prog.UsidEgressShardMember{Sid: sidBytes("2001:db8:ff09:21:e000::"), Flags: 8 | 16, Generation: 6}
+	store := snapshotStore{0: nat66, 1: nat64, 2: {ClassKind: 2}, 3: wkp}
 	counters := perCPUTable{
 		uint32(0): []prog.UsidEgressShardCounter{{Packets: 3, Bytes: 300}, {Packets: 4, Bytes: 400}},
 	}
@@ -69,6 +74,7 @@ func TestEgressShardCollector(t *testing.T) {
 		got[m.name] = m.value
 	}
 	const nat64Class = `class="nat64:2001:db8:64::/96"`
+	const wkpClass = `class="nat64:64:ff9b::/96"`
 	want := map[string]float64{
 		`galactic_cni_egress_pool_min_active`:                                                        2,
 		`galactic_cni_egress_pool_enabled{class="nat66"}`:                                            1,
@@ -78,6 +84,10 @@ func TestEgressShardCollector(t *testing.T) {
 		`galactic_cni_egress_pool_members{class="nat66",state="unreachable"}`:                        1,
 		`galactic_cni_egress_pool_members{class="nat66",state="local"}`:                              1,
 		`galactic_cni_egress_pool_members{class="nat66",state="ineligible"}`:                         0,
+		`galactic_cni_egress_pool_members{class="nat66",state="standby"}`:                            0,
+		`galactic_cni_egress_pool_members{` + wkpClass + `,state="active"}`:                          1,
+		`galactic_cni_egress_pool_members{` + wkpClass + `,state="standby"}`:                         1,
+		`galactic_cni_egress_pool_members{` + wkpClass + `,state="unreachable"}`:                     0,
 		`galactic_cni_egress_pool_members{` + nat64Class + `,state="active"}`:                        0,
 		`galactic_cni_egress_pool_members{` + nat64Class + `,state="ineligible"}`:                    3,
 		`galactic_cni_egress_shard_packets_total{class="nat66",shard_sid="2001:db8:ff09:10:e000::"}`: 7,

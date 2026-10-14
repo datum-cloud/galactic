@@ -945,3 +945,148 @@ func groupRoutes(t *testing.T, reg *prometheus.Registry) map[string]float64 {
 	}
 	return got
 }
+
+// TestEgressShardCandidates_NAT64Standby checks that spec.nat64Standby marks a
+// shard a standby for every NAT64 class it translates and for no NAT66 one.
+func TestEgressShardCandidates_NAT64Standby(t *testing.T) {
+	primary, standby := dual("primary", 0x10), dual("standby", 0x11)
+	primary.Status.TranslatesWellKnownPrefix = true
+	standby.Status.TranslatesWellKnownPrefix = true
+	standby.Spec.NAT64Standby = true
+	shards := []bgpv1alpha1.EgressShard{primary, standby}
+
+	for _, tt := range []struct {
+		class egressroutemap.TranslationClass
+		want  map[string]bool
+	}{
+		{class: egressroutemap.NAT66Class, want: map[string]bool{shardSIDFor(0x10): false, shardSIDFor(0x11): false}},
+		{class: nat64NSP, want: map[string]bool{shardSIDFor(0x10): false, shardSIDFor(0x11): true}},
+		{class: nat64WKP, want: map[string]bool{shardSIDFor(0x10): false, shardSIDFor(0x11): true}},
+	} {
+		t.Run(tt.class.String(), func(t *testing.T) {
+			eligible, _ := egressShardCandidates(shards, tt.class, "")
+			got := map[string]bool{}
+			for _, c := range eligible {
+				got[c.SID.String()] = c.Standby
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("standby = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// The pool states poolStates reports, as galactic_cni_egress_pool_members
+// names them.
+const (
+	poolActive      = "active"
+	poolStandby     = "standby"
+	poolUnreachable = "unreachable"
+)
+
+// poolStates is each class group's members by base SID, as the pool metric
+// would classify them.
+func poolStates(t *testing.T, f *fixture) map[egressroutemap.TranslationClass]map[string]string {
+	t.Helper()
+	out := map[egressroutemap.TranslationClass]map[string]string{}
+	for id := range uint32(egressroutemap.MaxShardGroups) {
+		s := status(t, f.groups, id)
+		if !s.Present {
+			continue
+		}
+		members, err := f.groups.Members(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		states := map[string]string{}
+		for _, m := range members {
+			switch {
+			case m.Held:
+				states[m.SID.String()] = poolStandby
+			case !m.Alive:
+				states[m.SID.String()] = poolUnreachable
+			default:
+				states[m.SID.String()] = poolActive
+			}
+		}
+		out[s.Class] = states
+	}
+	return out
+}
+
+// TestSweepHashed_NAT64Standby checks the sweep end to end: a NAT64 standby is
+// held out of every NAT64 class while a primary resolves, serves it when none
+// does, and is unaffected in NAT66; with no standby flags nothing changes.
+func TestSweepHashed_NAT64Standby(t *testing.T) {
+	primary, standby, other := staticSIDFor(0x10), staticSIDFor(0x11), staticSIDFor(0x12)
+	flagged := func(name string, nodeID uint16, isStandby bool) bgpv1alpha1.EgressShard {
+		s := dual(name, nodeID)
+		s.Spec.NAT64Standby = isStandby
+		return s
+	}
+	tests := []struct {
+		name      string
+		shards    []bgpv1alpha1.EgressShard
+		reachable []string
+		nat66     map[string]string
+		nat64     map[string]string
+	}{
+		{
+			name:      "both up",
+			shards:    []bgpv1alpha1.EgressShard{flagged("primary", 0x10, false), flagged(poolStandby, 0x11, true)},
+			reachable: []string{primary, standby},
+			nat66:     map[string]string{primary: poolActive, standby: poolActive},
+			nat64:     map[string]string{primary: poolActive, standby: poolStandby},
+		},
+		{
+			name:      "primary unreachable",
+			shards:    []bgpv1alpha1.EgressShard{flagged("primary", 0x10, false), flagged(poolStandby, 0x11, true)},
+			reachable: []string{standby},
+			nat66:     map[string]string{primary: poolUnreachable, standby: poolActive},
+			nat64:     map[string]string{primary: poolUnreachable, standby: poolActive},
+		},
+		{
+			name:      "only the standby exists",
+			shards:    []bgpv1alpha1.EgressShard{flagged(poolStandby, 0x11, true)},
+			reachable: []string{standby},
+			nat66:     map[string]string{standby: poolActive},
+			nat64:     map[string]string{standby: poolActive},
+		},
+		{
+			name:      "no standby flags",
+			shards:    []bgpv1alpha1.EgressShard{flagged("primary", 0x10, false), flagged("other", 0x12, false)},
+			reachable: []string{primary, other},
+			nat66:     map[string]string{primary: poolActive, other: poolActive},
+			nat64:     map[string]string{primary: poolActive, other: poolActive},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t, testHashed, nil, []netip.Prefix{testNSP})
+			f.g.shards = &fakeLister{shards: tt.shards, synced: true}
+			up := map[string]bool{}
+			for _, s := range tt.reachable {
+				up[s] = true
+			}
+			t.Cleanup(egressroutemap.OverrideResolverForTest(
+				func(sid net.IP) (int, net.HardwareAddr, net.HardwareAddr, error) {
+					base, _ := egressroutemap.BaseShardSID(sid)
+					if !up[base.String()] {
+						return 0, nil, nil, errInjected
+					}
+					return 7, net.HardwareAddr{2, 0, 0, 0, 0, 1}, net.HardwareAddr{2, 0, 0, 0, 0, 2}, nil
+				}))
+
+			if err := f.sweep(t); err != nil {
+				t.Fatal(err)
+			}
+			got := poolStates(t, f)
+			if !reflect.DeepEqual(got[egressroutemap.NAT66Class], tt.nat66) {
+				t.Errorf("NAT66 members = %v, want %v", got[egressroutemap.NAT66Class], tt.nat66)
+			}
+			if !reflect.DeepEqual(got[nat64NSP], tt.nat64) {
+				t.Errorf("NAT64 members = %v, want %v", got[nat64NSP], tt.nat64)
+			}
+		})
+	}
+}

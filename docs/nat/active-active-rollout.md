@@ -57,7 +57,8 @@ are deployed by infra.
 - [ ] On every compute node: `galactic_cni_egress_mode{mode="hashed"}` is 1,
       `galactic_cni_egress_shard_watch_synced` is 1,
       `galactic_cni_egress_pool_members{state="active"}` equals the shard
-      count for every class, `ineligible` is what you expect, and
+      count for every class (for a NAT64 class, less the shards marked
+      `spec.nat64Standby`, which count as `standby` instead), `ineligible` is what you expect, and
       `galactic_cni_egress_sweep_errors_total` does not move. Missing pool
       series on a node are a failure, not an idle pool.
 - [ ] On every edge node that runs a shard: its own shard reads `local`,
