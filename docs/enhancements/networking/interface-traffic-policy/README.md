@@ -103,7 +103,7 @@ These come from the product brief and are not open to redesign here.
 | A path is misclassified and a narrow Allow matches the wrong traffic                      | Classification uses only trusted forwarding state. Any lookup that cannot finish is `classification_error`, which denies at the first rule naming a path that the packet otherwise matches.               |
 | A packet reaches a workload by a path that skips the check                                | The [packet path audit](#packet-path-audit) names the check for every delivery mechanism, and the integration tests send traffic down each one.                                                           |
 | Counter rows are reused while a packet still counts into them                             | Rows are freed only after the outer-map update returns, which the kernel guarantees waits for every program that could hold the old snapshot (see [Publication and lifetime](#publication-and-lifetime)). |
-| Verifier cost and stack depth of the evaluation                                           | Evaluation is a separately verified global function using `bpf_loop`, so its cost does not grow with the rule count, and a test bounds every program's combined stack depth.                              |
+| Verifier cost and stack depth of the evaluation                                           | Evaluation is a separately verified global function that walks the snapshot with `bpf_for_each_map_elem`, so its cost does not grow with the rule count; the existing verifier budget test covers it.     |
 | Dropping every fragment breaks workloads that rely on them, such as large UDP DNS answers | `audit` mode counts would-be fragment drops per interface before a site enforces, and the user guide calls the change out.                                                                                |
 
 ## Design details
@@ -399,30 +399,31 @@ even where the VIP path falls through to the route logic.
 
 **Every exit of the egress programs:**
 
-| Exit                                                                             | Today                            | With policy                                                                                                      |
-| -------------------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `bpf_skb_pull_data` fails                                                        | `UNSPEC` to the kernel           | `parse_error` drop                                                                                               |
-| Not IPv4, IPv6 or ARP                                                            | `UNSPEC`                         | Link drop                                                                                                        |
-| ARP                                                                              | `UNSPEC`                         | Link-operation allowlist, otherwise link drop                                                                    |
-| `ifindex_vrf_table`, `vrf_table` or scratch miss                                 | `UNSPEC`                         | `policy_unavailable` drop when the tenant row is also missing; otherwise evaluate as Private and return `UNSPEC` |
-| Short IPv4 or IPv6 header                                                        | `UNSPEC`                         | `parse_error` drop                                                                                               |
-| VIP source rewrite and redirect to the uplink                                    | Forwarded                        | Evaluate as PublicService first                                                                                  |
-| VIP rewrite with no uplink configured                                            | Falls through to the route logic | Evaluated once, at the route exit, with the route's class                                                        |
-| Multicast or link-local destination                                              | `UNSPEC`                         | Evaluate as Private                                                                                              |
-| Neighbor discovery (133 to 137)                                                  | `UNSPEC`                         | Link-operation allowlist; otherwise evaluate as Private                                                          |
-| Route miss                                                                       | `UNSPEC`                         | Evaluate as Private                                                                                              |
-| Local pass-through route                                                         | `UNSPEC`                         | Evaluate as Private                                                                                              |
-| No node source address configured                                                | `UNSPEC`                         | Evaluate with the route's class, then `UNSPEC`                                                                   |
-| Group sentinel, member resolved                                                  | Encapsulated                     | Evaluate as PublicNAT                                                                                            |
-| Group sentinel, resolution failed                                                | Drop                             | Drop, counted under its existing reason; no policy outcome                                                       |
-| Remote route                                                                     | Encapsulated                     | Evaluate with the route's class                                                                                  |
-| `usid_service_egress` parse failure or non-IP                                    | `UNSPEC` to `usid_egress`        | Handled by `usid_egress`                                                                                         |
-| `usid_service_egress` non-TCP/UDP, or a service-route miss without a deny marker | `UNSPEC` to `usid_egress`        | Handled by `usid_egress`                                                                                         |
-| Service request or reply, local or remote                                        | Rewritten and redirected         | Evaluate as Private before the rewrite                                                                           |
-| Service deny marker or service policy denial                                     | Drop                             | Unchanged; the service policy's own drop, counted by it                                                          |
+| Exit                                                                             | Today                            | With policy                                                                                                                                                                       |
+| -------------------------------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bpf_skb_pull_data` fails                                                        | `UNSPEC` to the kernel           | Evaluate as Private: the capture reads with `bpf_skb_load_bytes`, which needs no pull, so a packet it cannot parse is a `parse_error` drop and one it can is decided by the rules |
+| Not IPv4, IPv6 or ARP                                                            | `UNSPEC`                         | Link drop                                                                                                                                                                         |
+| ARP                                                                              | `UNSPEC`                         | Link-operation allowlist, otherwise link drop                                                                                                                                     |
+| `ifindex_vrf_table`, `vrf_table` or scratch miss                                 | `UNSPEC`                         | `policy_unavailable` drop when the tenant row is also missing; otherwise evaluate as Private and return `UNSPEC`                                                                  |
+| Short IPv4 or IPv6 header                                                        | `UNSPEC`                         | `parse_error` drop                                                                                                                                                                |
+| VIP source rewrite and redirect to the uplink                                    | Forwarded                        | Evaluate as PublicService first                                                                                                                                                   |
+| VIP rewrite with no uplink configured                                            | Falls through to the route logic | Evaluated once, at the route exit, with the route's class                                                                                                                         |
+| Multicast or link-local destination                                              | `UNSPEC`                         | Evaluate as Private                                                                                                                                                               |
+| Neighbor discovery (133 to 137)                                                  | `UNSPEC`                         | Link-operation allowlist; otherwise evaluate as Private                                                                                                                           |
+| Route miss                                                                       | `UNSPEC`                         | Evaluate as Private                                                                                                                                                               |
+| Local pass-through route                                                         | `UNSPEC`                         | Evaluate as Private                                                                                                                                                               |
+| No node source address configured                                                | `UNSPEC`                         | Evaluate with the route's class, then `UNSPEC`                                                                                                                                    |
+| Group sentinel                                                                   | Resolved, then encapsulated      | Evaluate as PublicNAT before the group is resolved, so a denied packet moves no pin                                                                                               |
+| Group sentinel, resolution failed after an Allow                                 | Drop                             | Drop, counted under its existing reason after the Allow's rule hit, like any later forwarding failure                                                                             |
+| Remote route                                                                     | Encapsulated                     | Evaluate with the route's class                                                                                                                                                   |
+| `usid_service_egress` parse failure or non-IP                                    | `UNSPEC` to `usid_egress`        | Handled by `usid_egress`                                                                                                                                                          |
+| `usid_service_egress` non-TCP/UDP, or a service-route miss without a deny marker | `UNSPEC` to `usid_egress`        | Handled by `usid_egress`                                                                                                                                                          |
+| Service request or reply, local or remote                                        | Rewritten and redirected         | Evaluate as Private before the rewrite                                                                                                                                            |
+| Service deny marker or service policy denial                                     | Drop                             | Unchanged; the service policy's own drop, counted by it                                                                                                                           |
 
-A packet that service policy or a group failure drops before the traffic
-policy runs has no traffic-policy outcome. That is deliberate: it is a
+A packet that service policy drops has no traffic-policy outcome: the
+private service checks run first, and traffic policy decides only a request or
+reply they authorized, on the tuple captured before any rewrite. That is a
 different policy's decision, already counted under its own reason.
 
 **Workload ingress:**
@@ -515,19 +516,27 @@ Every map is new, so no existing pinned map changes layout.
 | Map                        | Type                 | Key, value                                                               | Writer                                                       |
 | -------------------------- | -------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------ |
 | `tp_iface_table`           | HASH                 | ifindex, `{policy_token, kind, state}`                                   | CNI ADD and DEL, the sidecar installer, repair               |
+| `tp_iface_addr_table`      | HASH                 | `{ifindex, family, address}`, nothing                                    | CNI ADD and DEL, for the link-operation source checks        |
 | `tp_binding_table`         | HASH_OF_MAPS         | `{ifindex, direction}`, inner snapshot                                   | galactic-router                                              |
-| inner snapshot             | ARRAY, 257 entries   | 0: header `{policy_token, counter_base, flags}`; 1-256: compiled entries | galactic-router, before insertion                            |
+| inner snapshot             | ARRAY, 257 entries   | 0: header `{policy_token, counter_base, count}`; 1-256: compiled entries | galactic-router, before insertion                            |
 | `tp_nat_locator_table`     | HASH                 | shard Block and Node, nothing                                            | Installer                                                    |
-| `tp_rule_counters`         | PERCPU_ARRAY, 65,536 | counter ID, `{packets, bytes}`                                           | Datapath                                                     |
+| `tp_rule_counters`         | PERCPU_ARRAY, 16,384 | counter ID, `{packets, bytes}`                                           | Datapath                                                     |
 | `tp_fallback_counters`     | PERCPU_HASH          | `{ifindex, policy_token, direction, reason}`, `{packets, bytes}`         | Rows created by CNI ADD; datapath updates existing rows only |
 | `tp_unattributed_counters` | PERCPU_ARRAY         | `{direction, reason}`, `{packets, bytes}`                                | Datapath                                                     |
-| `tp_accounting_errors`     | PERCPU_ARRAY         | `{direction, action, reason}`, count                                     | Datapath                                                     |
+| `tp_accounting_errors`     | PERCPU_ARRAY         | `{direction, action}`, count; the one reason is a missing rule counter   | Datapath                                                     |
+| `tp_link_drops`            | PERCPU_ARRAY         | direction, `{packets, bytes}`                                            | Datapath                                                     |
 | `tp_state`                 | ARRAY(1)             | enforcement mode, NAT locator synced flag                                | Installer                                                    |
 
-A compiled entry is 56 bytes: action, logical rule index, match flags, family,
-protocol, path, ICMP type and code, source and destination prefixes with
-lengths, and one source and one destination port range. Evaluation walks the
-entries with `bpf_loop` and stops at the first match. The logical rule index
+A compiled entry is 88 bytes: action, logical rule index, match flags, family,
+protocol, path, ICMP type and code, one source and one destination port range,
+and the source and destination prefixes each with its mask. The masks are
+computed in user space so matching is a branch-free masked compare: compared
+bit length by bit length, the verifier explored every length and the
+evaluation alone cost about 13,000 instructions; with masks the whole of
+`usid_egress` verifies in about 12,500, against 9,700 before the policy hooks
+and a budget of 20,000. Evaluation walks the snapshot with
+`bpf_for_each_map_elem` (5.13), which iterates the inner array in index order
+and stops at the first match. The logical rule index
 plus the snapshot's `counter_base` gives the counter row, so every entry a
 rule expands to adds to that rule's one row.
 
@@ -540,10 +549,12 @@ rewrites, never inherits a previous interface's snapshot, while a program
 upgrade leaves every binding valid.
 
 **Stack.** `usid_egress` is already close to the 512-byte stack limit, which
-is why `send_too_big` and `clamp_tcp_mss` are global functions. `tp_evaluate`
-is a global function too, keeps its tuple in a per-CPU scratch map rather than
-on the stack, and PR 5 adds a test that fails when the combined frame depth
-of any program exceeds the limit with margin.
+is why `send_too_big` and `clamp_tcp_mss` are global functions. `tp_capture`
+and `tp_decide` are global functions too, and keep the packet tuple and the
+walk's state in a per-CPU scratch map rather than on the stack. The kernel
+refuses to load any program whose deepest call chain passes 512 bytes, and
+every kernel test loads the full datapath, so a change that crosses it fails
+in CI.
 
 ### Publication and lifetime
 
@@ -735,11 +746,11 @@ ends the old series by design.
 
 ### Kernel requirements
 
-The design needs `HASH_OF_MAPS`, `bpf_loop` (5.17), the tc egress hook, the
+The design needs `HASH_OF_MAPS`, `bpf_for_each_map_elem` (5.13), the tc egress hook, the
 synchronous map-in-map wait (4.20), and the 6.8 fix to inner-map freeing.
 Production and staging run Talos v1.13.10, whose kernel line is 6.18.
 
-The CNI preflight gains probes for `HASH_OF_MAPS` and `bpf_loop`. The inner-map
+The CNI preflight gains probes for `HASH_OF_MAPS` and `bpf_for_each_map_elem`. The inner-map
 fix cannot be probed, so the preflight also requires kernel 6.8 or later. That
 check is deliberately conservative: it rejects a distribution kernel that
 backported the fix, and an operator can override it with
@@ -755,8 +766,8 @@ Default deny is a deliberate behavior change. The enforcement mode in
 `tp_state` is `off`, `audit` or `enforce`, set per node by
 `GALACTIC_CNI_TRAFFIC_POLICY` and defaulting to `off` until the final change.
 
-- `off` changes nothing. Maps and programs are loaded, but `tp_evaluate`
-  returns immediately.
+- `off` changes nothing. Maps and programs are loaded, but `tp_capture` and
+  `tp_decide` return immediately.
 - `audit` evaluates and counts every packet but forwards as before. Operators
   use the counters to find interfaces whose traffic would be denied.
 - `enforce` drops.
@@ -774,16 +785,16 @@ compatibility allowance, and `enforce` is the only mode the steady state uses.
 Each PR builds and passes `task ci` against its declared base. Until the last
 PR, enforcement stays `off` and nothing changes for any packet.
 
-| # | PR                                                                                                                                                               | Depends on | Delivers                                     | Still inactive                             |
-| - | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | -------------------------------------------- | ------------------------------------------ |
-| 1 | This design                                                                                                                                                      | none       | Decisions, audit, lifetime argument, plan    | Everything                                 |
-| 2 | `api/v1alpha1` TrafficPolicy and TrafficPolicyBinding, generated CRDs and API docs, CEL validation, envtest                                                      | 1          | The schema                                   | Nothing reads it                           |
-| 3 | `galactic-controller --role=cell`: webhook, default provisioning, binding resolution status, manifests and RBAC                                                  | 2          | Admission and status                         | Datapath                                   |
-| 4 | `internal/trafficpolicy`: Go evaluator and compiler with bounds                                                                                                  | 2          | Semantics oracle and entry layout            | Datapath                                   |
-| 5 | BPF: maps, parser, `tp_evaluate`, classification maps and writers, publication package with retirement                                                           | 4          | Evaluation in tests against the Go evaluator | Mode `off` everywhere                      |
-| 6 | Enforcement hooks, `tp_deliver`, ingress mark, link-down activation, CHECK and repair, preflight                                                                 | 5          | Every path in the audit is checked           | Mode `off` by default                      |
-| 7 | galactic-router TrafficPolicyReconciler, node status, collector and metrics, `policy show` and `explain`                                                         | 3, 6       | Live updates and observability               | Mode `off` by default                      |
-| 8 | Lab: containerlab policies for every fixture, positive and negative checks for each path, docs and rollout guide; the mode defaults to `enforce` in the lab only | 7          | End-to-end validation                        | Production stays `off` until infra opts in |
+| # | PR                                                                                                                                                               | Depends on | Delivers                                            | Still inactive                             |
+| - | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | --------------------------------------------------- | ------------------------------------------ |
+| 1 | This design                                                                                                                                                      | none       | Decisions, audit, lifetime argument, plan           | Everything                                 |
+| 2 | `api/v1alpha1` TrafficPolicy and TrafficPolicyBinding, generated CRDs and API docs, CEL validation, envtest                                                      | 1          | The schema                                          | Nothing reads it                           |
+| 3 | `galactic-controller --role=cell`: webhook, default provisioning, binding resolution status, manifests and RBAC                                                  | 2          | Admission and status                                | Datapath                                   |
+| 4 | `internal/trafficpolicy`: Go evaluator and compiler with bounds                                                                                                  | 2          | Semantics oracle and entry layout                   | Datapath                                   |
+| 5 | BPF: maps, parser, `tp_capture` and `tp_decide`, egress classification, the checks at every egress exit, the publication package and counter allocator           | 4          | Egress enforcement, tested against the Go evaluator | Mode `off` by default; ingress unchecked   |
+| 6 | Ingress: the check in `usid_ingress`, `tp_deliver`, the ingress mark, link-down activation, CHECK and repair, preflight                                          | 5          | Every path in the audit is checked                  | Mode `off` by default                      |
+| 7 | galactic-router TrafficPolicyReconciler, node status, collector and metrics, `policy show` and `explain`                                                         | 3, 6       | Live updates and observability                      | Mode `off` by default                      |
+| 8 | Lab: containerlab policies for every fixture, positive and negative checks for each path, docs and rollout guide; the mode defaults to `enforce` in the lab only | 7          | End-to-end validation                               | Production stays `off` until infra opts in |
 
 ### Requirement checklist
 
