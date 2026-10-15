@@ -1,0 +1,376 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: trafficpolicies.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    categories:
+      - galactic
+    kind: TrafficPolicy
+    listKind: TrafficPolicyList
+    plural: trafficpolicies
+    shortNames:
+      - tpol
+    singular: trafficpolicy
+  scope: Namespaced
+  versions:
+    - additionalPrinterColumns:
+        - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+          name: Accepted
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |-
+            TrafficPolicy is an ordered list of Allow and Deny rules that a
+            TrafficPolicyBinding applies to one direction of one VPC interface.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: |-
+                TrafficPolicySpec is an ordered rule list. The first matching rule decides
+                a packet, and a packet no rule matches is denied.
+              properties:
+                rules:
+                  description: Rules are evaluated in order.
+                  items:
+                    description: TrafficRule is one ordered rule of a TrafficPolicy.
+                    properties:
+                      action:
+                        description: Action is what happens to a packet this rule matches first.
+                        enum:
+                          - Allow
+                          - Deny
+                        type: string
+                      match:
+                        description: Match selects packets. Omitted, the rule matches every packet.
+                        nullable: true
+                        properties:
+                          destinationCIDRs:
+                            description: |-
+                              DestinationCIDRs are destination prefixes. A prefix must have no host
+                              bits set. Mutually exclusive with DestinationIPs.
+                            items:
+                              maxLength: 43
+                              type: string
+                              x-kubernetes-validations:
+                                - message: must be a prefix with no host bits set
+                                  rule: isCIDR(self) && cidr(self).ip() == cidr(self).masked().ip()
+                            maxItems: 64
+                            minItems: 1
+                            nullable: true
+                            type: array
+                            x-kubernetes-list-type: set
+                          destinationIPs:
+                            description: |-
+                              DestinationIPs are exact destination addresses, IPv4 or IPv6. Mutually
+                              exclusive with DestinationCIDRs.
+                            items:
+                              maxLength: 39
+                              type: string
+                              x-kubernetes-validations:
+                                - message: must be an IPv4 or IPv6 address
+                                  rule: isIP(self)
+                            maxItems: 64
+                            minItems: 1
+                            nullable: true
+                            type: array
+                            x-kubernetes-list-type: set
+                          destinationPorts:
+                            description: |-
+                              DestinationPorts are destination port ranges. They require protocol TCP
+                              or UDP, and ranges must not overlap.
+                            items:
+                              description: |-
+                                PortRange is an inclusive range of transport ports. A single port has equal
+                                endpoints. Port 0 is representable so a rule can match it.
+                              properties:
+                                end:
+                                  description: End is the last port in the range.
+                                  format: int32
+                                  maximum: 65535
+                                  minimum: 0
+                                  type: integer
+                                start:
+                                  description: Start is the first port in the range.
+                                  format: int32
+                                  maximum: 65535
+                                  minimum: 0
+                                  type: integer
+                              required:
+                                - end
+                                - start
+                              type: object
+                              x-kubernetes-validations:
+                                - message: start must not exceed end
+                                  rule: self.start <= self.end
+                            maxItems: 16
+                            minItems: 1
+                            nullable: true
+                            type: array
+                            x-kubernetes-list-type: atomic
+                            x-kubernetes-validations:
+                              - message: port ranges must not overlap
+                                rule: self.all(a, self.exists_one(o, o == a)) && self.all(a, self.all(b, a == b || a.end < b.start || b.end < a.start))
+                          icmp:
+                            description: |-
+                              ICMP matches a message type and code. It requires protocol ICMP or
+                              ICMPv6.
+                            nullable: true
+                            properties:
+                              code:
+                                description: Code is the message code. Omitted, any code matches.
+                                format: int32
+                                maximum: 255
+                                minimum: 0
+                                nullable: true
+                                type: integer
+                              type:
+                                description: Type is the ICMP or ICMPv6 message type.
+                                format: int32
+                                maximum: 255
+                                minimum: 0
+                                type: integer
+                            required:
+                              - type
+                            type: object
+                          ipFamily:
+                            description: |-
+                              IPFamily restricts the rule to one address family. Omitted, both match,
+                              and a packet can only match list entries of its own family.
+                            enum:
+                              - IPv4
+                              - IPv6
+                            nullable: true
+                            type: string
+                          path:
+                            description: |-
+                              Path is the forwarding path. Omitted, any path in the bound direction
+                              matches.
+                            enum:
+                              - Private
+                              - PublicNAT
+                              - PublicService
+                            nullable: true
+                            type: string
+                          protocol:
+                            description: |-
+                              Protocol is the IP protocol. Omitted, any protocol matches, and the rule
+                              cannot carry ports or ICMP fields.
+                            enum:
+                              - TCP
+                              - UDP
+                              - ICMP
+                              - ICMPv6
+                            nullable: true
+                            type: string
+                          sourceCIDRs:
+                            description: |-
+                              SourceCIDRs are source prefixes. A prefix must have no host bits set.
+                              Mutually exclusive with SourceIPs.
+                            items:
+                              maxLength: 43
+                              type: string
+                              x-kubernetes-validations:
+                                - message: must be a prefix with no host bits set
+                                  rule: isCIDR(self) && cidr(self).ip() == cidr(self).masked().ip()
+                            maxItems: 64
+                            minItems: 1
+                            nullable: true
+                            type: array
+                            x-kubernetes-list-type: set
+                          sourceIPs:
+                            description: |-
+                              SourceIPs are exact source addresses, IPv4 or IPv6. IPv4-mapped IPv6
+                              literals and zone identifiers are rejected. Mutually exclusive with
+                              SourceCIDRs.
+                            items:
+                              maxLength: 39
+                              type: string
+                              x-kubernetes-validations:
+                                - message: must be an IPv4 or IPv6 address
+                                  rule: isIP(self)
+                            maxItems: 64
+                            minItems: 1
+                            nullable: true
+                            type: array
+                            x-kubernetes-list-type: set
+                          sourcePorts:
+                            description: |-
+                              SourcePorts are source port ranges. They require protocol TCP or UDP,
+                              and ranges must not overlap.
+                            items:
+                              description: |-
+                                PortRange is an inclusive range of transport ports. A single port has equal
+                                endpoints. Port 0 is representable so a rule can match it.
+                              properties:
+                                end:
+                                  description: End is the last port in the range.
+                                  format: int32
+                                  maximum: 65535
+                                  minimum: 0
+                                  type: integer
+                                start:
+                                  description: Start is the first port in the range.
+                                  format: int32
+                                  maximum: 65535
+                                  minimum: 0
+                                  type: integer
+                              required:
+                                - end
+                                - start
+                              type: object
+                              x-kubernetes-validations:
+                                - message: start must not exceed end
+                                  rule: self.start <= self.end
+                            maxItems: 16
+                            minItems: 1
+                            nullable: true
+                            type: array
+                            x-kubernetes-list-type: atomic
+                            x-kubernetes-validations:
+                              - message: port ranges must not overlap
+                                rule: self.all(a, self.exists_one(o, o == a)) && self.all(a, self.all(b, a == b || a.end < b.start || b.end < a.start))
+                        type: object
+                        x-kubernetes-validations:
+                          - message: sourceIPs and sourceCIDRs are mutually exclusive
+                            rule: '!(has(self.sourceIPs) && has(self.sourceCIDRs))'
+                          - message: destinationIPs and destinationCIDRs are mutually exclusive
+                            rule: '!(has(self.destinationIPs) && has(self.destinationCIDRs))'
+                          - message: ports require protocol TCP or UDP
+                            rule: '!(has(self.sourcePorts) || has(self.destinationPorts)) || (has(self.protocol) && (self.protocol == ''TCP'' || self.protocol == ''UDP''))'
+                          - message: icmp requires protocol ICMP or ICMPv6
+                            rule: '!has(self.icmp) || (has(self.protocol) && (self.protocol == ''ICMP'' || self.protocol == ''ICMPv6''))'
+                          - message: protocol ICMP requires ipFamily IPv4
+                            rule: '!has(self.protocol) || self.protocol != ''ICMP'' || !has(self.ipFamily) || self.ipFamily == ''IPv4'''
+                          - message: protocol ICMPv6 requires ipFamily IPv6
+                            rule: '!has(self.protocol) || self.protocol != ''ICMPv6'' || !has(self.ipFamily) || self.ipFamily == ''IPv6'''
+                          - message: every sourceIPs entry must match the rule's address family
+                            rule: '!has(self.sourceIPs) || ((!has(self.ipFamily) || self.sourceIPs.all(a, ip(a).family() == (self.ipFamily == ''IPv4'' ? 4 : 6))) && (!has(self.protocol) || self.protocol != ''ICMP'' || self.sourceIPs.all(a, ip(a).family() == 4)) && (!has(self.protocol) || self.protocol != ''ICMPv6'' || self.sourceIPs.all(a, ip(a).family() == 6)))'
+                          - message: every destinationIPs entry must match the rule's address family
+                            rule: '!has(self.destinationIPs) || ((!has(self.ipFamily) || self.destinationIPs.all(a, ip(a).family() == (self.ipFamily == ''IPv4'' ? 4 : 6))) && (!has(self.protocol) || self.protocol != ''ICMP'' || self.destinationIPs.all(a, ip(a).family() == 4)) && (!has(self.protocol) || self.protocol != ''ICMPv6'' || self.destinationIPs.all(a, ip(a).family() == 6)))'
+                          - message: every sourceCIDRs entry must match the rule's address family
+                            rule: '!has(self.sourceCIDRs) || ((!has(self.ipFamily) || self.sourceCIDRs.all(c, cidr(c).ip().family() == (self.ipFamily == ''IPv4'' ? 4 : 6))) && (!has(self.protocol) || self.protocol != ''ICMP'' || self.sourceCIDRs.all(c, cidr(c).ip().family() == 4)) && (!has(self.protocol) || self.protocol != ''ICMPv6'' || self.sourceCIDRs.all(c, cidr(c).ip().family() == 6)))'
+                          - message: every destinationCIDRs entry must match the rule's address family
+                            rule: '!has(self.destinationCIDRs) || ((!has(self.ipFamily) || self.destinationCIDRs.all(c, cidr(c).ip().family() == (self.ipFamily == ''IPv4'' ? 4 : 6))) && (!has(self.protocol) || self.protocol != ''ICMP'' || self.destinationCIDRs.all(c, cidr(c).ip().family() == 4)) && (!has(self.protocol) || self.protocol != ''ICMPv6'' || self.destinationCIDRs.all(c, cidr(c).ip().family() == 6)))'
+                      name:
+                        description: |-
+                          Name identifies the rule in status and metrics. It is unique within the
+                          policy. Renaming a rule starts a new counter series.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                      - action
+                      - name
+                    type: object
+                  maxItems: 64
+                  minItems: 1
+                  type: array
+                  x-kubernetes-list-type: atomic
+                  x-kubernetes-validations:
+                    - message: rule names must be unique
+                      rule: self.all(r, self.exists_one(o, o.name == r.name))
+              required:
+                - rules
+              type: object
+            status:
+              description: TrafficPolicyStatus reports whether the policy is valid and compiles.
+              properties:
+                conditions:
+                  description: |-
+                    Conditions include Accepted, false when the policy fails validation or
+                    exceeds the compiled entry limit.
+                  items:
+                    description: Condition contains details for one aspect of the current state of this API Resource.
+                    properties:
+                      lastTransitionTime:
+                        description: |-
+                          lastTransitionTime is the last time the condition transitioned from one status to another.
+                          This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                        format: date-time
+                        type: string
+                      message:
+                        description: |-
+                          message is a human readable message indicating details about the transition.
+                          This may be an empty string.
+                        maxLength: 32768
+                        type: string
+                      observedGeneration:
+                        description: |-
+                          observedGeneration represents the .metadata.generation that the condition was set based upon.
+                          For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                          with respect to the current state of the instance.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      reason:
+                        description: |-
+                          reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                          Producers of specific condition types may define expected values and meanings for this field,
+                          and whether the values are considered a guaranteed API.
+                          The value should be a CamelCase string.
+                          This field may not be empty.
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                        type: string
+                      status:
+                        description: status of the condition, one of True, False, Unknown.
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                        type: string
+                      type:
+                        description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                        maxLength: 316
+                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                        type: string
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    type: object
+                  maxItems: 8
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
+                observedGeneration:
+                  description: ObservedGeneration is the generation the conditions describe.
+                  format: int64
+                  type: integer
+              type: object
+          required:
+            - spec
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}

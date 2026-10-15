@@ -1,0 +1,10 @@
+processor:
+  ignoreTypes:
+    - ".*List$"
+
+render:
+  kubernetes: {}
+  markdown:
+    mediaWidth: 80
+    anchorLink: true
+    tableHideEmpty: true

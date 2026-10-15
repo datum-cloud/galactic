@@ -77,6 +77,14 @@ jobs:
         # its bpf2go output regenerated first.
         uses: ./.github/actions/install-ebpf-deps
 
+      - name: Install envtest binaries
+        # The CRD schema tests (api/v1alpha1, internal/fabric/api/v1alpha1)
+        # need a real kube-apiserver and etcd, and skip without them.
+        run: |
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.24 use 1.35.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          test -x "$assets/kube-apiserver"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
+
       - name: Run unit tests
         run: task test:unit
 
