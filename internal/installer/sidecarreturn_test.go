@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -518,7 +519,7 @@ func TestSidecarGatewayEndpoints_CarriesEntryPoint(t *testing.T) {
 func TestEnsureSidecarReturnPath_NoAdvertisementsIsQuiet(t *testing.T) {
 	c := newAdvClient(t)
 	if err := ensureSidecarReturnPath(
-		context.Background(), c, testNamespace, testSidecarNode); err != nil {
+		context.Background(), c, testNamespace, testSidecarNode, nil, time.Now); err != nil {
 		t.Errorf("ensureSidecarReturnPath() error = %v, want nil", err)
 	}
 }
