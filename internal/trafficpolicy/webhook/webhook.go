@@ -85,7 +85,7 @@ func (v *PolicyValidator) validateWrite(req admission.Request) admission.Respons
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf("decode TrafficPolicy: %w", err))
 	}
 	if policy.Name == galacticv1alpha1.DefaultPolicyName {
-		if req.UserInfo.Username != v.ControllerUsername {
+		if req.UserInfo.Username != v.ControllerUsername && !isUnmanagedUpdate(req, &policy) {
 			return admission.Denied(fmt.Sprintf("%q is reserved for the built-in default policy, which only "+
 				"galactic-controller writes; reference it, or omit the reference to get the same default",
 				galacticv1alpha1.DefaultPolicyName))
@@ -137,6 +137,22 @@ func (v *PolicyValidator) validateDelete(ctx context.Context, req admission.Requ
 	}
 	return admission.Denied(fmt.Sprintf("%q is managed by galactic-controller and is deleted with its namespace",
 		galacticv1alpha1.DefaultPolicyName))
+}
+
+// isUnmanagedUpdate reports whether req updates an object holding the
+// reserved name that the controller does not own and that stays unowned.
+// Such an object predates the webhook; its owner may still edit it, for
+// example to remove a finalizer before deleting it. It resolves to a deny
+// whatever its spec says, so the edit grants nothing.
+func isUnmanagedUpdate(req admission.Request, policy *galacticv1alpha1.TrafficPolicy) bool {
+	if req.Operation != admissionv1.Update || policy.Labels[ManagedByLabel] == ManagedByValue {
+		return false
+	}
+	var old galacticv1alpha1.TrafficPolicy
+	if err := json.Unmarshal(req.OldObject.Raw, &old); err != nil {
+		return false
+	}
+	return old.Labels[ManagedByLabel] != ManagedByValue
 }
 
 // DefaultSpec is the spec of the reserved default policy.

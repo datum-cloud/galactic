@@ -133,3 +133,28 @@ func TestHandleReservedDelete(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleUnmanagedReservedUpdate lets the owner of a conflicting object
+// that predates the webhook edit it, but never turn it into the managed one.
+func TestHandleUnmanagedReservedUpdate(t *testing.T) {
+	v := &PolicyValidator{ControllerUsername: controller}
+	unmanaged := policyJSON(galacticv1alpha1.DefaultPolicyName, `[{"name":"deny-all","action":"Deny"}]`)
+	labeled := `{"apiVersion":"galactic.datumapis.com/v1alpha1","kind":"TrafficPolicy",` +
+		`"metadata":{"name":"default-deny-all","namespace":"tenant-a",` +
+		`"labels":{"galactic.datumapis.com/managed-by":"galactic-controller"}},` +
+		`"spec":{"rules":[{"name":"deny-all","action":"Deny"}]}}`
+	update := func(oldObj, newObj string) admission.Response {
+		r := request(admissionv1.Update, tenant, galacticv1alpha1.DefaultPolicyName, newObj)
+		r.OldObject = runtime.RawExtension{Raw: []byte(oldObj)}
+		return v.Handle(context.Background(), r)
+	}
+	if resp := update(unmanaged, unmanaged); !resp.Allowed {
+		t.Errorf("owner edit of an unmanaged object denied: %v", resp.Result)
+	}
+	if resp := update(unmanaged, labeled); resp.Allowed {
+		t.Error("tenant adopted the reserved name by adding the managed-by label")
+	}
+	if resp := update(labeled, labeled); resp.Allowed {
+		t.Error("tenant updated the controller's default policy")
+	}
+}

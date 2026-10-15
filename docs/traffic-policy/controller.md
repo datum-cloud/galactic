@@ -24,7 +24,8 @@ the API reference is [docs/api/galactic.md](../api/galactic.md).
   never adopted or overwritten: it gets an `Accepted=False` condition with
   reason `ReservedNameConflict` and a `ProvisioningConflict` event, and
   explicit references to it resolve to nothing. Its owner clears the
-  conflict by deleting it, after which the controller provisions its own.
+  conflict by deleting it, after which the controller provisions its own;
+  until then they can still edit it, but not label it as the controller's.
 - **Policy status.** Every TrafficPolicy gets an `Accepted` condition: true
   with the compiled entry count and any unreachable or shadowed rules, or
   false with the validation errors.
@@ -52,7 +53,9 @@ the API reference is [docs/api/galactic.md](../api/galactic.md).
 
 Apply, in order:
 
-1. the `galactic.datumapis.com` CRDs, `kubectl apply -k config/crd`;
+1. the `galactic.datumapis.com` CRDs, `kubectl apply -k config/crd`, and the
+   cloud operator's `VPCAttachment` CRD, which edge cells already carry: the
+   controller watches it and does not become ready without it;
 2. cert-manager, if the cell does not have it;
 3. the ServiceAccount and RBAC, `kubectl apply -k config/galactic-controller`;
 4. the controller, `kubectl apply -k config/galactic-controller/base`, which
