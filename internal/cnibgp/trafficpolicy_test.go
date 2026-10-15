@@ -135,3 +135,28 @@ func TestActivateTrafficPolicyModeChangedSinceMaster(t *testing.T) {
 		t.Error("a link quarantined while policy was on stayed down after it turned off")
 	}
 }
+
+// TestActivateTrafficPolicyKeepsTheToken checks a repeated ADD on a live
+// interface keeps its policy token, so its published bindings stay valid.
+func TestActivateTrafficPolicyKeepsTheToken(t *testing.T) {
+	pinDir, host, maps := activationFixture(t, tpmap.State{Mode: tpmap.ModeEnforce, Capable: true}, true)
+	link, _ := netlink.LinkByName(host)
+	ifindex := uint32(link.Attrs().Index)
+	tokenOf := func() uint64 {
+		var row prog.UsidTpIfaceValue
+		if err := maps.Interfaces.Lookup(ifindex, &row); err != nil {
+			t.Fatal(err)
+		}
+		return row.PolicyToken
+	}
+	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	first := tokenOf()
+	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := tokenOf(); got != first {
+		t.Errorf("token = %#x after a repeated ADD, want %#x kept", got, first)
+	}
+}

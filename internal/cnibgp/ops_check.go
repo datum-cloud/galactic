@@ -248,7 +248,11 @@ func checkEgressKind(pinDir, vpc, vpcAttachment, ifaceType string) error {
 // programs. A missing program is a failed CHECK: the interface is no longer
 // covered.
 func checkTrafficPolicy(pinDir, vpc, vpcAttachment string) error {
-	if !tpmap.Active(pinDir) {
+	active, err := tpmap.Active(pinDir)
+	if err != nil {
+		return fmt.Errorf("read the traffic policy mode: %w", err)
+	}
+	if !active {
 		return nil
 	}
 	hostIfindex, err := attachreg.HostInterfaceIndex(vpc, vpcAttachment)

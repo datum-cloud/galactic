@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
 
 	"github.com/cilium/ebpf"
@@ -16,6 +17,7 @@ import (
 
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
@@ -38,18 +40,19 @@ var errNoEnforcement = errors.New("traffic policy is on but this node cannot enf
 func activateTrafficPolicy(pinDir, vpc, vpcAttachment string, registered bool, ipamResult *cniipam.IPAMResult) error {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	if !registered {
-		if tpmap.Active(pinDir) {
-			return errors.Join(quarantineLink(hostName),
+		active, err := tpmap.Active(pinDir)
+		if active || err != nil {
+			return errors.Join(quarantineLink(hostName), err,
 				fmt.Errorf("%w: the node has no SRv6 locator, so nothing is attached", errNoEnforcement))
 		}
 		return ensureLinkUp(hostName)
 	}
 	maps, err := tpmap.OpenPinned(pinDir)
 	if err != nil {
-		if tpmap.Active(pinDir) {
-			return fmt.Errorf("open traffic policy maps: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return ensureLinkUp(hostName) // an older datapath: nothing to activate
 		}
-		return ensureLinkUp(hostName) // an older datapath: nothing to activate
+		return errors.Join(quarantineLink(hostName), fmt.Errorf("open traffic policy maps: %w", err))
 	}
 	defer maps.Close()
 	state, err := maps.GetState()
@@ -75,9 +78,19 @@ func activateTrafficPolicy(pinDir, vpc, vpcAttachment string, registered bool, i
 		return fmt.Errorf("find host interface %q: %w", hostName, err)
 	}
 	ifindex := uint32(link.Attrs().Index) //nolint:gosec // a kernel ifindex
-	token, err := tpmap.NewPolicyToken()
-	if err != nil {
-		return err
+	// An ADD repeated on a live interface, such as a tap repair, keeps its
+	// token, so its published bindings stay valid. A new interface has no
+	// row: DEL removes it, galactic-cni removes any whose interface is gone,
+	// and the kernel does not reuse an ifindex right away.
+	var row prog.UsidTpIfaceValue
+	token := uint64(0)
+	if err := maps.Interfaces.Lookup(ifindex, &row); err == nil && row.Kind == tpmap.KindTenant {
+		token = row.PolicyToken
+	}
+	if token == 0 {
+		if token, err = tpmap.NewPolicyToken(); err != nil {
+			return err
+		}
 	}
 	if err := maps.PutInterface(ifindex, token, tpmap.KindTenant); err != nil {
 		return err

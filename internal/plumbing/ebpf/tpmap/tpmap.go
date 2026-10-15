@@ -392,18 +392,22 @@ func prefixWords(p netip.Prefix) (addr, mask [2]uint64) {
 
 // Active reports whether the node pinned under pinDir enforces or audits
 // traffic policy. A node whose policy maps are not pinned, such as one still
-// running an older datapath, is not.
-func Active(pinDir string) bool {
+// running an older datapath, is not. Any other failure to read the mode is
+// returned, and callers fail closed on it.
+func Active(pinDir string) (bool, error) {
 	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapTpState), nil)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		return true, fmt.Errorf("open pinned tp_state: %w", err)
 	}
 	defer m.Close() //nolint:errcheck // read-only handle
 	var v prog.UsidTpStateValue
 	if err := m.Lookup(uint32(0), &v); err != nil {
-		return false
+		return true, fmt.Errorf("read tp_state: %w", err)
 	}
-	return v.Mode != ModeOff
+	return v.Mode != ModeOff, nil
 }
 
 // RemovePinnedInterface is RemoveInterface on the maps pinned under pinDir. A

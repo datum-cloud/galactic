@@ -98,8 +98,12 @@ type AddResult struct {
 
 // HostQuarantined reports whether a new interface's host side must be left
 // down for galactic-bgp to bring up, which is the case while the node
-// enforces or audits traffic policy. A test override point.
-var HostQuarantined = func() bool { return tpmap.Active(attach.PinDir) }
+// enforces or audits traffic policy, and when the mode cannot be read. A
+// test override point.
+var HostQuarantined = func() bool {
+	active, err := tpmap.Active(attach.PinDir)
+	return active || err != nil
+}
 
 // Add creates this attachment's veth pair, enslaves the host end to the VPC's
 // VRF, and records ownerID -- the CNI container ID of the container this pair
