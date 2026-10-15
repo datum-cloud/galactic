@@ -97,13 +97,14 @@ These come from the product brief and are not open to redesign here.
 
 ### Risks and mitigations
 
-| Risk                                                                 | Mitigation                                                                                                                                                                                |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Default deny breaks every running workload on rollout                | Enforcement is off per node until an explicit enable, and operators bind policies first (see [Rollout](#rollout)).                                                                        |
-| A path is misclassified and a narrow Allow matches the wrong traffic | Classification uses only trusted forwarding state. Any lookup that cannot finish is `classification_error`, which denies at the first rule that names a path.                             |
-| A packet reaches a workload by a path that skips the check           | The [packet path audit](#packet-path-audit) names the check for every delivery mechanism, and the integration tests send traffic down each one.                                           |
-| Snapshot or counter memory is reused while a packet still holds it   | Reuse waits for the kernel to free the old inner map, which happens only after every program that could hold it has finished (see [Publication and lifetime](#publication-and-lifetime)). |
-| Verifier cost of the evaluation loop                                 | Evaluation is a separately verified global function using `bpf_loop`, so its cost does not grow with the rule count.                                                                      |
+| Risk                                                                                      | Mitigation                                                                                                                                                                                                |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Default deny breaks every running workload on rollout                                     | Enforcement is off per node until an explicit enable, and operators bind policies first (see [Rollout](#rollout)).                                                                                        |
+| A path is misclassified and a narrow Allow matches the wrong traffic                      | Classification uses only trusted forwarding state. Any lookup that cannot finish is `classification_error`, which denies at the first rule that names a path.                                             |
+| A packet reaches a workload by a path that skips the check                                | The [packet path audit](#packet-path-audit) names the check for every delivery mechanism, and the integration tests send traffic down each one.                                                           |
+| Counter rows are reused while a packet still counts into them                             | Rows are freed only after the outer-map update returns, which the kernel guarantees waits for every program that could hold the old snapshot (see [Publication and lifetime](#publication-and-lifetime)). |
+| Verifier cost and stack depth of the evaluation                                           | Evaluation is a separately verified global function using `bpf_loop`, so its cost does not grow with the rule count, and a test bounds every program's combined stack depth.                              |
+| Dropping every fragment breaks workloads that rely on them, such as large UDP DNS answers | `audit` mode counts would-be fragment drops per interface before a site enforces, and the user guide calls the change out.                                                                                |
 
 ## Design details
 
@@ -178,10 +179,10 @@ status:
       egress: {policyUID: 91fa..., policyGeneration: 2, appliedAt: ...}
 ```
 
-- The binding's name must equal the VPCAttachment's name, enforced by CEL. That
-  makes "one binding per interface" a property of naming rather than a
-  conflict to detect, so there is exactly one effective policy per interface
-  and direction.
+- The binding has no attachment field: it applies to the VPCAttachment with
+  its namespace and name. That makes "one binding per interface" a property
+  of naming rather than a conflict to detect, so there is exactly one
+  effective policy per interface and direction.
 - Omitting a reference selects the built-in default for that direction only.
   Removing a reference restores the default for that direction only.
 - A binding for an attachment that does not exist yet is accepted and waits.
@@ -217,9 +218,11 @@ status:
   requires IPv4 while ICMPv6 requires IPv6. With no family set, a list may mix
   families, and a packet can only match entries of its own family. A rule never
   matches one side as IPv4 and the other as IPv6.
-- An IPv4-mapped IPv6 literal stays IPv6. It is never unmapped into an IPv4
+- An IPv4-mapped IPv6 literal (`::ffff:192.0.2.1`) is rejected, as the
+  Kubernetes IP validation library does. It is never unmapped into an IPv4
   match.
-- IPv6 literals are canonicalized (RFC 5952) before duplicate checks. Zone
+- IPv6 literals are canonicalized (RFC 5952) before the webhook's duplicate
+  check. Zone
   identifiers, hostnames, `host:port` and prefix notation in an IP list are
   rejected.
 - Absent means wildcard. An empty list and an explicit `null` are rejected.
@@ -314,25 +317,31 @@ interface's host link down (quarantine) and reports the failure.
 | Path          | Egress (workload sends)                                                        | Ingress (workload receives)                                                          |
 | ------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | Private       | Private VPC routing, same-node delivery, private services, kernel VRF fallback | Ordinary decapsulation, private service tunnel (next header 253), same-node delivery |
-| PublicNAT     | A shard group sentinel, or an ordered route whose SID is a NAT shard's         | Decapsulated packet whose outer source is a NAT shard's SID                          |
+| PublicNAT     | A shard group sentinel, or a route whose SID is a NAT shard's                  | Decapsulated packet whose outer source is a NAT shard's SID                          |
 | PublicService | Source VIP translation toward the public uplink (DSR reply)                    | Gateway delivery (nonzero uSID slot) or inbound VIP translation                      |
 
 Classification uses forwarding state only, never whether an address looks
 public.
 
-- **Egress.** A new LPM map, `tp_route_class_table`, mirrors
-  `egress_route_table`'s key and holds the route's class. Every writer of an
-  egress route writes its class first and removes it last. A route with no
-  class row, or a group sentinel whose group cannot be resolved, is
-  `classification_error`. The existing route value is not enlarged, so the
-  pinned route map keeps its layout.
+- **Egress.** The class comes from the same `egress_route_table` value the
+  forwarding decision uses, in the same lookup, so a route rewritten in place
+  can never be seen with a stale class:
+  - a group sentinel (`link_ifindex == 0xFFFFFFFF`) is PublicNAT;
+  - a route whose SID's top 64 bits are in `tp_nat_locator_table` is
+    PublicNAT;
+  - a local pass-through entry and every other route are Private.
+
+  `tp_nat_locator_table` has one writer, the installer. It holds the locator of
+  every configured shard SID (`GALACTIC_CNI_EGRESS_SHARD_SIDS`) and every
+  EgressShard it has ever seen. Entries are only ever added while the agent
+  runs, because the EgressShard controller already keeps shard locators
+  disjoint from every BGPRouter locator, so a retained entry can never
+  reclassify private traffic. A restart rebuilds the set before setting the
+  synced flag in `tp_state`. Until the flag is set, an encapsulating egress
+  route is `classification_error`.
 - **Ingress, NAT.** The outer source of a NAT shard's reply is the shard's
-  SID. The EgressShard controller already guarantees that a shard's Block and
-  Node-ID are disjoint from every BGPRouter locator, so the top 64 bits of the
-  outer source identify a shard. `tp_nat_locator_table` holds every
-  EgressShard's locator, published by the installer from the EgressShard
-  informer it already runs. Until that informer has synced, an encapsulated
-  ingress packet is `classification_error`.
+  SID, so the same table classifies it. Until the flag is set, an
+  encapsulated ingress packet is `classification_error`.
 - **Trust.** Sender authenticity rests on the existing fabric trust model:
   `usid_ingress` already accepts any packet addressed to a local locator from
   the fabric uplink. A tenant cannot choose the outer header, because every
@@ -347,7 +356,19 @@ public.
 
 ### Packet path audit
 
-Hooks on a tenant interface, with `P` the configured filter priority:
+**Interfaces.** `tp_iface_table` holds a row for every interface a Galactic
+program can deliver to or is attached to, with a kind:
+
+- `tenant`: a VPCAttachment interface. Policy applies.
+- `infra`: the ingress sidecar's synthetic veth peers. They belong to the
+  platform, carry no tenant identity, and are never evaluated; traffic they
+  pass on to a tenant interface is checked at that interface.
+
+A program that finds no row for an interface it is attached to, or that
+`usid_ingress` is about to deliver to, denies as `policy_unavailable`
+(unattributed). Missing state is never read as "unmanaged".
+
+**Hooks on a tenant interface**, with `P` the configured filter priority:
 
 | Hook                                  | Program               | Role                                                                     |
 | ------------------------------------- | --------------------- | ------------------------------------------------------------------------ |
@@ -356,20 +377,43 @@ Hooks on a tenant interface, with `P` the configured filter priority:
 | Host-side tc egress, priority P (new) | `tp_deliver`          | Workload ingress for packets the kernel or a non-peer redirect transmits |
 | Fabric uplink tc ingress              | `usid_ingress`        | Decapsulation and delivery                                               |
 
-The egress check is a call to one global function, `tp_evaluate`, placed on
-every exit that forwards workload data, with the class that exit implies.
+**Egress tuple.** The packet's addresses, protocol and ports are captured
+once, at the top of the first program that sees the packet and before any
+NPTv6 or VIP rewrite, so `sourceIPs` and `sourceCIDRs` always see the
+workload's own address. The check itself runs at the exit, where the class is
+known, using that captured tuple. It runs before `send_too_big`, so a denied
+packet never produces a Packet Too Big quoting it, and exactly once per packet
+even where the VIP path falls through to the route logic.
 
-| Mechanism                                                        | Where it is enforced                                                        | Path          |
-| ---------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------- |
-| Remote private encapsulation                                     | `usid_egress`, before `bpf_skb_adjust_room`                                 | Private       |
-| NAT66 and NAT64, ordered and hashed                              | `usid_egress`, after the route and group are resolved, before encapsulation | PublicNAT     |
-| VIP source translation to the public uplink                      | `usid_egress`, before the rewrite                                           | PublicService |
-| Local pass-through route (same-node delivery and the kernel VRF) | `usid_egress`, before returning to the kernel                               | Private       |
-| Route miss, multicast, link-local, missing source configuration  | `usid_egress`, before returning to the kernel                               | Private       |
-| Private service request or reply, local or remote                | `usid_service_egress`, before the rewrite                                   | Private       |
-| Packet Too Big that `usid_egress` sends back to the workload     | `tp_deliver`, as workload ingress                                           | Private       |
+**Every exit of the egress programs:**
 
-The ingress check sits on the receiving side:
+| Exit                                                                             | Today                            | With policy                                                                                                      |
+| -------------------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `bpf_skb_pull_data` fails                                                        | `UNSPEC` to the kernel           | `parse_error` drop                                                                                               |
+| Not IPv4, IPv6 or ARP                                                            | `UNSPEC`                         | Link drop                                                                                                        |
+| ARP                                                                              | `UNSPEC`                         | Link-operation allowlist, otherwise link drop                                                                    |
+| `ifindex_vrf_table`, `vrf_table` or scratch miss                                 | `UNSPEC`                         | `policy_unavailable` drop when the tenant row is also missing; otherwise evaluate as Private and return `UNSPEC` |
+| Short IPv4 or IPv6 header                                                        | `UNSPEC`                         | `parse_error` drop                                                                                               |
+| VIP source rewrite and redirect to the uplink                                    | Forwarded                        | Evaluate as PublicService first                                                                                  |
+| VIP rewrite with no uplink configured                                            | Falls through to the route logic | Evaluated once, at the route exit, with the route's class                                                        |
+| Multicast or link-local destination                                              | `UNSPEC`                         | Evaluate as Private                                                                                              |
+| Neighbor discovery (133 to 137)                                                  | `UNSPEC`                         | Link-operation allowlist; otherwise evaluate as Private                                                          |
+| Route miss                                                                       | `UNSPEC`                         | Evaluate as Private                                                                                              |
+| Local pass-through route                                                         | `UNSPEC`                         | Evaluate as Private                                                                                              |
+| No node source address configured                                                | `UNSPEC`                         | Evaluate with the route's class, then `UNSPEC`                                                                   |
+| Group sentinel, member resolved                                                  | Encapsulated                     | Evaluate as PublicNAT                                                                                            |
+| Group sentinel, resolution failed                                                | Drop                             | Drop, counted under its existing reason; no policy outcome                                                       |
+| Remote route                                                                     | Encapsulated                     | Evaluate with the route's class                                                                                  |
+| `usid_service_egress` parse failure or non-IP                                    | `UNSPEC` to `usid_egress`        | Handled by `usid_egress`                                                                                         |
+| `usid_service_egress` non-TCP/UDP, or a service-route miss without a deny marker | `UNSPEC` to `usid_egress`        | Handled by `usid_egress`                                                                                         |
+| Service request or reply, local or remote                                        | Rewritten and redirected         | Evaluate as Private before the rewrite                                                                           |
+| Service deny marker or service policy denial                                     | Drop                             | Unchanged; the service policy's own drop, counted by it                                                          |
+
+A packet that service policy or a group failure drops before the traffic
+policy runs has no traffic-policy outcome. That is deliberate: it is a
+different policy's decision, already counted under its own reason.
+
+**Workload ingress:**
 
 | Mechanism                                                                                 | Where it is enforced                                                      | Path                  |
 | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | --------------------- |
@@ -377,22 +421,24 @@ The ingress check sits on the receiving side:
 | Remote delivery to a tap by `bpf_redirect`, or to a cold neighbor by `bpf_redirect_neigh` | `usid_ingress`, as above, which then marks the packet evaluated           | From the outer header |
 | Same-node delivery through the kernel VRF                                                 | `tp_deliver` on the receiver's host interface                             | Private               |
 | Local private service delivery by `bpf_redirect_neigh`                                    | `tp_deliver`                                                              | Private               |
-| Ingress sidecar delivery to a managed interface                                           | `tp_deliver`                                                              | Private               |
+| Packet Too Big that `usid_egress` sends back to the workload                              | `tp_deliver`                                                              | Private               |
+| Host-generated traffic, such as kernel ICMP errors                                        | `tp_deliver`                                                              | Private               |
+| Delivery from the ingress sidecar                                                         | `tp_deliver`                                                              | Private               |
 
 - `bpf_redirect_peer` moves the packet into the peer namespace without running
   the host device's tc egress, so `usid_ingress` must check before the
   redirect. Plain `bpf_redirect` and `bpf_redirect_neigh` transmit through the
   host device, so `tp_deliver` would see the same packet again.
 - To check it once, `usid_ingress` sets a reserved mark value on the packets it
-  has evaluated and sends by those helpers. `tp_deliver` skips a packet that
-  carries exactly that value and clears it. A packet from a workload cannot
-  carry it: crossing a veth's namespace boundary clears the mark, and a tap
-  delivers with mark 0. The value is configurable
-  (`GALACTIC_CNI_POLICY_MARK`), in case another host component uses the
-  default.
-- An unmanaged host interface never has `tp_deliver` attached, and
-  `usid_egress` is only attached to managed interfaces. A managed interface
-  with no identity row is therefore denied rather than treated as unmanaged.
+  has evaluated and sends by those two helpers. `tp_deliver` skips a packet
+  that carries exactly that value and clears it. A workload cannot set it: a
+  normal veth transmit between namespaces clears the mark, and a tap delivers
+  with mark 0. A host component that uses the same mark value would collide,
+  so the value is configurable (`GALACTIC_CNI_POLICY_MARK`) and the rollout
+  guide has operators check it against the node's netfilter and routing
+  rules.
+- Kubelet probes reach a pod through its primary network, not a Galactic
+  interface, so they never meet `tp_deliver`.
 - Deny is a real `TC_ACT_SHOT` before any fallback. A missing route is never
   used to mean deny.
 
@@ -413,45 +459,58 @@ Bounds and allowlists:
   more than the buffer. Options are skipped without interpretation; they never
   move or hide the transport header.
 - IPv6: payload length no more than the buffer. Extension headers on the
-  allowlist are Hop-by-Hop (0), Routing (43) and Destination Options (60), at
-  most 4 of them and 256 bytes in total. Fragment (44), AH (51), Mobility
-  (135), HIP (139), Shim6 (140) and the experimental values are `parse_error`.
-  ESP (50) and No Next Header (59) end the chain as a protocol with no ports.
+  allowlist are Hop-by-Hop (0), Destination Options (60), and Routing (43)
+  only with segments left 0, at most 4 of them and 256 bytes in total. A
+  Routing header with segments left could be re-forwarded to a destination
+  other than the one evaluated, so it is `parse_error`. Fragment (44), AH
+  (51), Mobility (135), HIP (139), Shim6 (140) and the experimental values are
+  `parse_error`. ESP (50) and No Next Header (59) end the chain as a protocol
+  with no ports.
 - TCP and UDP need the whole fixed header inside the IP packet. ICMP and
   ICMPv6 need their first 4 bytes.
 - Ethernet padding after the IP total length is excluded from the byte count.
+
+Dropping every fragment is a behavior change: today fragments are forwarded
+(the service path only drops them by marker). It is listed under
+[Risks and mitigations](#risks-and-mitigations). In `audit` mode a fragment
+is counted as a `parse_error` that would have been dropped, and forwarded.
 
 ### Link operation exceptions
 
 Only these frames bypass the rules, and only after validation.
 
-| Frame                                                                                | Direction | Checks                                                                                                                                 |
-| ------------------------------------------------------------------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| ARP request or reply                                                                 | Both      | Ethernet/IPv4, hardware length 6, protocol length 4; on egress, the sender address is one of the interface's IPv4 addresses or 0.0.0.0 |
-| Router Solicitation (133), Neighbor Solicitation (135), Neighbor Advertisement (136) | Egress    | Hop limit 255, code 0, valid length; source is link-local, one of the interface's addresses, or unspecified for DAD                    |
-| Router Advertisement (134), Neighbor Solicitation, Neighbor Advertisement            | Ingress   | Hop limit 255, code 0, valid length                                                                                                    |
+| Frame                                                                                | Direction | Checks                                                                                                                                                                                                                          |
+| ------------------------------------------------------------------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ARP request or reply                                                                 | Both      | Ethernet/IPv4, hardware length 6, protocol length 4; on egress, the sender address is one of the interface's IPv4 addresses or 0.0.0.0, and the target is the interface's gateway address or the sender itself (gratuitous ARP) |
+| Router Solicitation (133), Neighbor Solicitation (135), Neighbor Advertisement (136) | Egress    | Hop limit 255, code 0, valid length; source is link-local, one of the interface's addresses, or unspecified for DAD; destination is link-local unicast, in `ff02::/16`, or the interface's gateway address                      |
+| Router Advertisement (134), Neighbor Solicitation, Neighbor Advertisement            | Ingress   | Hop limit 255, code 0, valid length; source is link-local, or unspecified for DAD                                                                                                                                               |
 
-Everything else is ordinary tenant traffic: DHCP, DNS, other ICMP, multicast
-and link-local data. Under default deny that includes Packet Too Big and other
-ICMP errors, so a policy that allows TCP should usually allow ICMPv6 type 2
-(and ICMP type 3 code 4 for IPv4) toward the workload. The user guide says so.
+The destination check stops a workload from using a neighbor discovery type to
+reach another tenant's routable address past its own egress policy. A message
+the kernel forwarded has a hop limit below 255, so it fails the ingress check
+and is evaluated as ordinary traffic.
+
+Everything else is ordinary tenant traffic: DNS, other ICMP, multicast and
+link-local data. Galactic does not serve DHCP, so there is nothing to except.
+Under default deny that includes Packet Too Big and other ICMP errors, so a
+policy that allows TCP should usually allow ICMPv6 type 2 (and ICMP type 3
+code 4 for IPv4) toward the workload. The user guide says so.
 
 ### BPF maps
 
 Every map is new, so no existing pinned map changes layout.
 
-| Map                        | Type                 | Key, value                                                                       | Writer                                                       |
-| -------------------------- | -------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `tp_iface_table`           | HASH                 | ifindex, `{token, state}`                                                        | CNI ADD and DEL, repair                                      |
-| `tp_binding_table`         | HASH_OF_MAPS         | `{ifindex, direction}`, inner snapshot                                           | galactic-router                                              |
-| inner snapshot             | ARRAY, 257 entries   | 0: header `{token, counter_base, fallback_base, flags}`; 1-256: compiled entries | galactic-router, before insertion                            |
-| `tp_route_class_table`     | LPM_TRIE             | `egress_route_table`'s key, class                                                | Every egress route writer                                    |
-| `tp_nat_locator_table`     | HASH                 | shard Block and Node, nothing                                                    | Installer                                                    |
-| `tp_rule_counters`         | PERCPU_ARRAY, 65,536 | counter ID, `{packets, bytes}`                                                   | Datapath                                                     |
-| `tp_fallback_counters`     | PERCPU_HASH          | `{ifindex, token, direction, reason}`, `{packets, bytes}`                        | Rows created by CNI ADD; datapath updates existing rows only |
-| `tp_unattributed_counters` | PERCPU_ARRAY         | `{direction, reason}`, `{packets, bytes}`                                        | Datapath                                                     |
-| `tp_accounting_errors`     | PERCPU_ARRAY         | `{direction, action}`, count                                                     | Datapath                                                     |
-| `tp_state`                 | ARRAY(1)             | enforcement mode, NAT locator sync flag                                          | Installer                                                    |
+| Map                        | Type                 | Key, value                                                               | Writer                                                       |
+| -------------------------- | -------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| `tp_iface_table`           | HASH                 | ifindex, `{policy_token, kind, state}`                                   | CNI ADD and DEL, the sidecar installer, repair               |
+| `tp_binding_table`         | HASH_OF_MAPS         | `{ifindex, direction}`, inner snapshot                                   | galactic-router                                              |
+| inner snapshot             | ARRAY, 257 entries   | 0: header `{policy_token, counter_base, flags}`; 1-256: compiled entries | galactic-router, before insertion                            |
+| `tp_nat_locator_table`     | HASH                 | shard Block and Node, nothing                                            | Installer                                                    |
+| `tp_rule_counters`         | PERCPU_ARRAY, 65,536 | counter ID, `{packets, bytes}`                                           | Datapath                                                     |
+| `tp_fallback_counters`     | PERCPU_HASH          | `{ifindex, policy_token, direction, reason}`, `{packets, bytes}`         | Rows created by CNI ADD; datapath updates existing rows only |
+| `tp_unattributed_counters` | PERCPU_ARRAY         | `{direction, reason}`, `{packets, bytes}`                                | Datapath                                                     |
+| `tp_accounting_errors`     | PERCPU_ARRAY         | `{direction, action, reason}`, count                                     | Datapath                                                     |
+| `tp_state`                 | ARRAY(1)             | enforcement mode, NAT locator synced flag                                | Installer                                                    |
 
 A compiled entry is 72 bytes: action, logical rule index, match flags, family,
 protocol, path, ICMP type and code, source and destination prefixes with
@@ -460,10 +519,19 @@ entries with `bpf_loop` and stops at the first match. The logical rule index
 plus the snapshot's `counter_base` gives the counter row, so every entry a
 rule expands to adds to that rule's one row.
 
-The header's `token` must equal `tp_iface_table[ifindex].token`, which CNI
-ADD sets from the interface incarnation token that `attachment_identity_table`
-already rotates. A recycled ifindex has a new token, so it never inherits a
-previous interface's snapshot.
+**Policy token.** CNI ADD writes a random 64-bit `policy_token` into
+`tp_iface_table` when it creates the interface, and nothing else changes it.
+That is deliberately not the existing `attachment_identity_table` token,
+which also rotates whenever programs are replaced. A snapshot header's token
+must equal the interface row's token, so a recycled ifindex, whose row CNI ADD
+rewrites, never inherits a previous interface's snapshot, while a program
+upgrade leaves every binding valid.
+
+**Stack.** `usid_egress` is already close to the 512-byte stack limit, which
+is why `send_too_big` and `clamp_tcp_mss` are global functions. `tp_evaluate`
+is a global function too, keeps its tuple in a per-CPU scratch map rather than
+on the stack, and PR 5 adds a test that fails when the combined frame depth
+of any program exceeds the limit with margin.
 
 ### Publication and lifetime
 
@@ -478,86 +546,110 @@ The two directions are separate keys, so neither update can overwrite the
 other.
 
 **Holding a snapshot.** An evaluation does one lookup in the outer map and
-uses the returned inner map for the rest of the run. tc programs run inside an
-RCU read-side critical section, and the kernel frees a replaced inner map only
-after an RCU grace period. Since Linux 6.8 ("bpf: Defer the free of inner map
-when necessary") it also waits for a tasks-trace grace period. So a packet
-evaluates against exactly one complete snapshot, old or new, and the old one
-lives until every evaluation that could hold it has finished.
+uses the returned inner map for the rest of the run. tc programs are
+non-sleepable and run inside an RCU read-side critical section, so a packet
+evaluates against exactly one complete snapshot, old or new.
 
-**Retiring a snapshot and its counters.**
+**When the old snapshot is no longer in use.** An update or delete of a
+map-in-map entry from user space calls `synchronize_rcu()` before the
+syscall returns (`maybe_wait_bpf_programs()` in `kernel/bpf/syscall.c`, there
+since Linux 4.20). The kernel added that wait precisely so user space would
+know that every non-sleepable program that could have looked up the old inner
+map has finished. So when the outer-map update returns, no program holds the
+old snapshot or can write the counter rows only it referenced.
 
-1. After the switch, the agent closes its own descriptor for the old inner
-   map. It remembers the map ID and the counter rows that only the old
-   snapshot referenced.
-2. It retires those rows only once the kernel reports the map ID gone
-   (`BPF_MAP_GET_FD_BY_ID` returns `ENOENT`). The kernel frees the map only
-   after the grace periods above, so no program can still be counting into
-   those rows.
-3. Only then does it free the counter IDs for reuse.
+**Retiring counters.** After the update returns, the agent frees the counter
+IDs that only the old snapshot referenced. A user-space reference count or a
+timer is never the evidence; the synchronous wait is. Releasing the old inner
+map's memory is the kernel's business: since Linux 6.8 ("bpf: Defer the free
+of inner map when necessary") it is freed only after the grace periods that
+also cover sleepable programs, which closed a use-after-free in older
+kernels. The publication tests race updates against packets and check that
+no packet is ever counted in a row after its ID is freed.
 
-A user-space reference count or a timer alone is not used. Counter rows have
-their own allocator, and their lifetime is proved separately by this rule
-rather than assumed from the outer map.
-
-**Bound.** A counter ID is freed only by that rule, never by a timer. If
-retiring snapshots pile up beyond 4 per binding (a kernel that never frees
-them, or a leaked descriptor), further updates to that binding fail as an
-installation failure, keep the last good snapshot, and are reported. Live
+**Failure.** If the outer-map update fails, the old snapshot stays bound and
+its counters stay live; the new inner map is closed and its rows freed. Live
 storage is never reused.
 
 **Restart.** The outer map and the counter arrays are pinned. A restarted
 agent rebuilds its allocator from the inner maps still referenced by the
-outer map, and treats every counter row they do not reference as retirable.
+outer map, and treats every counter row they do not reference as free.
 
 **Counter continuity.** Within one interface lifetime, a rule's counter row is
 keyed by its name and action. A new snapshot that keeps both reuses the row,
 whatever its match or position. Renaming the rule or changing its action
 starts a new row. Unbinding, removing a rule or changing its action ends the
-interval at publication. Returning later starts a new row at zero, and a
-retiring row is never revived. When an old and a new interval share labels,
-only the new one is exported.
+interval at publication. Returning later starts a new row at zero; a freed
+row is zeroed before reuse and never revived with old counts.
 
 ### Lifecycle activation and continuity
 
-CNI ADD (both `galactic-veth` and `galactic-tap`):
+The CNI chain is `galactic-veth` or `galactic-tap` (the master plugin, which
+creates the interface and today brings both ends up), then `galactic-bgp`
+(which registers the datapath and attaches `usid_service_egress` and
+`usid_egress` through `attachreg.RegisterDatapath`). Activation follows that
+order when the enforcement mode is `audit` or `enforce`:
 
-1. Create the interface with its host side down. Down is the quarantine: no
-   data crosses a down link, whether or not any program is attached.
-2. Write the `tp_iface_table` row (state `pending`) and the fallback counter
-   rows.
-3. Attach `usid_service_egress`, `usid_egress` and `tp_deliver`, then read
-   the filters back to verify them.
-4. Set the host side up. With state `pending` and no binding row, every packet
-   is denied as `policy_unavailable` until galactic-router publishes the
-   built-in default or the bound policy.
-5. Report success.
+1. **Master plugin.** Create the interface, bring the workload side up, and
+   leave the host side down. Down keeps the workload's sent traffic, and any
+   delivery that transmits through the host device, from moving.
+2. **`galactic-bgp`.** Write the `tp_iface_table` row (kind `tenant`, state
+   `pending`, a new `policy_token`) and the fallback counter rows; register
+   the datapath; attach `tp_deliver`; read every filter back to verify it.
+3. **`galactic-bgp`.** Set the host side up and report success. With state
+   `pending` and no binding row, every packet in both directions is denied as
+   `policy_unavailable` until galactic-router publishes the built-in default
+   or the bound policy.
 
-Any failure in steps 2 to 4 leaves the link down, rolls back only state
-belonging to this interface lifetime, and fails the ADD.
+A failure in step 2 or 3 leaves the host side down, rolls back only state
+belonging to this interface lifetime, and fails the ADD. If the node has no
+SRv6 locator, `RegisterDatapath` registers nothing today and succeeds; with
+enforcement on, `galactic-bgp` fails the ADD instead, since nothing would
+enforce policy. The tap plugin's repair path, which brings a down tap back
+up, first checks that the interface's `tp_iface_table` row is active and its
+filters are present.
+
+A down host link does not stop `bpf_redirect_peer` delivery, which only
+checks the peer. Ingress to a veth is denied by the check inside
+`usid_ingress`, which needs the binding row; a missing row denies there. So
+there are two independent controls, used together:
+
+- **Missing map rows** are handled by the programs that are present, which
+  deny in both directions.
+- **A missing tenant-interface program** is handled by the link being down:
+  repair in `galactic-cni run` sets the host side down before reattaching,
+  and up only after verification. `usid_ingress` lives on the uplink, not the
+  tenant interface, so it is unaffected.
 
 Other operations:
 
 - **CNI CHECK** reads the filters back as well as the map rows. A missing
   filter fails the check.
-- **Repair** in `galactic-cni run` runs on start and on interface events. If
-  it finds a managed interface with a missing filter it sets the link down
-  before reattaching, and it never sets the link up again until verification
-  passes.
 - **Program upgrades** replace each filter in place with the same priority
   and handle. `cls_bpf` swaps the program pointer atomically, so there is no
-  moment without a program. An upgrade never detaches first.
+  moment without a program. An upgrade never detaches first, and it never
+  changes a `policy_token`, so bindings stay valid.
 - **Agent crash.** tc filters, pinned maps and a down link all survive a
   crash. A restarted agent verifies identity, filters and map compatibility
   before setting any link up.
 - **Map loss.** If a policy map has to be recreated because its shape
   changed, the loader removes the old pin only after every managed link has
-  been set down. Repair restores state, then sets the links up.
+  been set down and every binding is gone. Repair restores state, then sets
+  the links up.
+- **Last resort.** If the agent cannot publish an invalidation, it deletes the
+  outer-map row, which denies both directions; if that also fails it sets the
+  host link down, which stops egress and every non-peer delivery, and reports
+  the interface as quarantined. A node whose map operations fail entirely
+  cannot deny peer-redirect ingress; that is reported, not hidden.
 
-A missing map row is handled by the present program, which denies. A missing
-program is handled by the link being down. Continuity covers agent crashes,
-loader and upgrade failures, and controlled map or program replacement. A
-privileged user removing every filter by hand is outside this guarantee.
+Continuity covers agent crashes, loader and upgrade failures, and controlled
+map or program replacement. A privileged user removing filters or maps by hand
+is outside this guarantee.
+
+In mode `off` none of these lifecycle changes apply: links come up as they do
+today, CHECK ignores the new filter, and repair never sets a link down. The
+`tp_iface_table` rows and filters are still written, so switching a node to
+`audit` or `enforce` needs no interface recreation.
 
 Revocation applies to every packet evaluated after publication in that
 direction, including packets of existing flows. NAT sessions, shard pins,
@@ -580,7 +672,7 @@ TrafficPolicyReconciler:
 
 - watches TrafficPolicy, TrafficPolicyBinding and VPCAttachment;
 - maps each attachment whose `status.node` is this node to its host ifindex
-  and identity token;
+  and `policy_token`;
 - compiles each direction, publishes and retires snapshots as above;
 - reports the applied identity and generation in `status.nodes`.
 
@@ -621,18 +713,29 @@ has a PodMonitor:
 - A missing counter row keeps the verdict and increments
   `accounting_errors_total{reason="missing_rule_counter"}`.
 
+**Cardinality.** A node exports, per tenant interface, one series pair per
+installed rule per direction plus four fallback pairs per direction. A node
+with 100 interfaces whose policies average 8 rules exports about
+100 × 2 × (8 + 4) × 2 = 4,800 series. The limits (64 rules, 256 entries) cap
+the worst case at 100 × 2 × 68 × 2 = 27,200, which PR 7 states as the
+supported budget. `policy_uid` changes only on rebind or recreation, which
+ends the old series by design.
+
 ### Kernel requirements
 
-The design needs `HASH_OF_MAPS`, `LPM_TRIE`, `bpf_loop` (5.17), the tc egress
-hook and the 6.8 fix to inner-map freeing. Production and staging run Talos
-v1.13.10, whose kernel is 6.18.
+The design needs `HASH_OF_MAPS`, `bpf_loop` (5.17), the tc egress hook, the
+synchronous map-in-map wait (4.20), and the 6.8 fix to inner-map freeing.
+Production and staging run Talos v1.13.10, whose kernel line is 6.18.
 
-The CNI preflight gains probes for `HASH_OF_MAPS`, `bpf_loop` and the
-kernel version, which stands in for the 6.8 fix because that fix cannot be
-probed directly. A node that fails them reports a capability error and refuses
-new managed interfaces when enforcement is enabled. It never falls back to
-forwarding without enforcement. This raises the minimum kernel for enforcement
-to 6.8, which the pull requests call out.
+The CNI preflight gains probes for `HASH_OF_MAPS` and `bpf_loop`. The inner-map
+fix cannot be probed, so the preflight also requires kernel 6.8 or later. That
+check is deliberately conservative: it rejects a distribution kernel that
+backported the fix, and an operator can override it with
+`GALACTIC_CNI_TRAFFIC_POLICY_KERNEL_CHECK=false` after confirming the
+backport. A node that fails them reports a capability error and, when the mode
+is `audit` or `enforce`, refuses new managed interfaces. It never falls back to
+forwarding without enforcement. This raises the minimum kernel for
+enforcement to 6.8, which the pull requests call out.
 
 ## Rollout
 
