@@ -15,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"go.datum.net/galactic/internal/crdnames"
@@ -63,12 +64,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // SetupWithManager registers the controller against mgr, watching every
 // EndpointSlice cluster-wide, since these land in each pod's own namespace
 // rather than one fixed namespace, and filtering to those carrying the tenant
-// label.
+// label (see tenantLabelPredicate).
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Client = mgr.GetClient()
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&discoveryv1.EndpointSlice{}, builder.WithPredicates(predicate.NewPredicateFuncs(hasTenantLabel))).
+		For(&discoveryv1.EndpointSlice{}, builder.WithPredicates(tenantLabelPredicate())).
 		Complete(r)
+}
+
+// tenantLabelPredicate passes an event for a slice carrying the tenant label,
+// and an update when either the old or the new version carries it, so a slice
+// losing the label is reconciled, found no longer selected, and its route torn
+// down after the usual grace period.
+func tenantLabelPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool { return hasTenantLabel(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return hasTenantLabel(e.ObjectOld) || hasTenantLabel(e.ObjectNew)
+		},
+		DeleteFunc:  func(e event.DeleteEvent) bool { return hasTenantLabel(e.Object) },
+		GenericFunc: func(e event.GenericEvent) bool { return hasTenantLabel(e.Object) },
+	}
 }
 
 func hasTenantLabel(obj client.Object) bool {
