@@ -1,0 +1,26 @@
+# A self-signed issuer is enough: only the API server trusts this
+# certificate, and cert-manager's CA injector puts the CA into the webhook
+# configuration.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: galactic-controller-selfsigned
+  namespace: galactic-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: galactic-controller-webhook
+  namespace: galactic-system
+spec:
+  secretName: galactic-controller-webhook-tls
+  privateKey:
+    rotationPolicy: Always
+  dnsNames:
+    - galactic-controller-webhook.galactic-system.svc
+    - galactic-controller-webhook.galactic-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: galactic-controller-selfsigned

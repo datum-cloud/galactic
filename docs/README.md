@@ -57,6 +57,11 @@ data flow, module reference, known constraints):
   that gates AS-path and community searches: method, how to run it
   (`task test:fabric-api-load`), and the results for direct FRR scans versus the
   BMP-fed search index.
+- [traffic-policy/controller.md](traffic-policy/controller.md) —
+  `galactic-controller --role=cell`: the TrafficPolicy webhook, the reserved
+  default policy, binding resolution status, flags and install order.
+- [api/galactic.md](api/galactic.md) — the generated `galactic.datumapis.com`
+  API reference (TrafficPolicy, TrafficPolicyBinding).
 - [cni/README.md](cni/README.md) — entry point for the `galactic-cni` docs
   subtree; from there:
   - [cni/environment-variables.md](cni/environment-variables.md) — every

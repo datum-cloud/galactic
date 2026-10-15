@@ -1,0 +1,30 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: galactic-controller
+  annotations:
+    cert-manager.io/inject-ca-from: galactic-system/galactic-controller-webhook
+webhooks:
+  - name: trafficpolicies.galactic.datumapis.com
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    # Fail closed: an explicit null or an over-limit policy must never be
+    # admitted because the webhook was down.
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: galactic-controller-webhook
+        namespace: galactic-system
+        path: /validate-galactic-datumapis-com-v1alpha1-trafficpolicy
+    # Only the reserved default policy needs a decision on DELETE. Sending
+    # every delete would let a webhook outage stall namespace teardown.
+    matchConditions:
+      - name: reserved-name-deletes-only
+        expression: request.operation != 'DELETE' || oldObject.metadata.name == 'default-deny-all'
+    rules:
+      - apiGroups: [galactic.datumapis.com]
+        apiVersions: [v1alpha1]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [trafficpolicies]
+        scope: Namespaced

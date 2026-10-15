@@ -1,0 +1,69 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: galactic-controller
+rules:
+  # TrafficPolicy: validated by the webhook, its Accepted status written
+  # here, and the reserved default-deny-all created in each tenant namespace.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [trafficpolicies]
+    verbs: [get, list, watch, create, patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [trafficpolicies/status, trafficpolicybindings/status]
+    verbs: [get, patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [trafficpolicybindings]
+    verbs: [get, list, watch]
+  # Which namespaces hold an interface, so the default policy is provisioned
+  # only where it can be referenced.
+  - apiGroups: [cloud.datumapis.com]
+    resources: [vpcattachments]
+    verbs: [get, list, watch]
+  # The webhook allows the namespace controller to delete default-deny-all
+  # while its namespace is being torn down.
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+  # events.k8s.io for the provisioning-conflict events; core events for the
+  # leader election records controller-runtime writes.
+  - apiGroups: [events.k8s.io, ""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: galactic-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: galactic-controller
+subjects:
+  - kind: ServiceAccount
+    name: galactic-controller
+    namespace: galactic-system
+---
+# Leader election, in the controller's own namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: galactic-controller-leader-election
+  namespace: galactic-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: galactic-controller-leader-election
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: galactic-controller-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: galactic-controller
+    namespace: galactic-system
