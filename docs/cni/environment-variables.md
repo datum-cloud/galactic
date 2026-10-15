@@ -284,6 +284,41 @@ only.
 
 **Type:** non-negative integer · **Default:** `1`
 
+## `GALACTIC_CNI_TRAFFIC_POLICY`
+
+The node's interface traffic policy mode. `off` loads the policy programs but
+decides nothing, so the datapath forwards as before. `audit` decides and
+counts every packet against its interface's policy but forwards as before.
+`enforce` drops what policy denies. In `audit` and `enforce` a new interface's
+host side stays down until `galactic-bgp` has attached and verified every
+enforcement program, and CNI ADD fails if the kernel failed the traffic policy
+preflight or the node has no SRv6 locator. Read by `galactic-cni run`, which
+writes it where the datapath and the CNI plugins read it. See the
+[design](../enhancements/networking/interface-traffic-policy/README.md#rollout).
+
+**Type:** `off`, `audit` or `enforce` · **Default:** `off`
+
+## `GALACTIC_CNI_POLICY_MARK`
+
+The skb mark `usid_ingress` sets on a packet whose ingress policy it already
+decided and delivers through the host interface (a tap, or a neighbor not yet
+resolved), so `tp_deliver` passes it without deciding it twice. It must not
+collide with a mark another component on the node uses, such as the primary
+CNI's or kube-proxy's; check the node's netfilter and routing rules before
+changing it. `0` disables it, which counts such packets twice. Read by
+`galactic-cni run` only.
+
+**Type:** integer, decimal or `0x` hex · **Default:** `0x0de10000`
+
+## `GALACTIC_CNI_TRAFFIC_POLICY_KERNEL_CHECK`
+
+`false` skips the traffic policy preflight's kernel version check, which
+otherwise requires Linux 6.8 or later for the deferred freeing of replaced
+inner maps that snapshot publication relies on. Set it only for an older
+distribution kernel that carries that fix. Read by `galactic-cni run` only.
+
+**Type:** boolean · **Default:** `true`
+
 ## `GALACTIC_CNI_DAN_DIR`
 
 Directory the tap master plugin writes a sandbox's Directly Attachable

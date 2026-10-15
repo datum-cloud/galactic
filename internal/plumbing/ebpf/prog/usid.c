@@ -1883,6 +1883,16 @@ static USID_NOINLINE int is_own_gateway(__u32 ifindex, __u32 family)
 struct tp_state_value {
 	__u32 mode;
 	__u32 nat_locators_synced;
+	// mark is the bit pattern usid_ingress sets on a packet it has decided
+	// and sends by bpf_redirect or bpf_redirect_neigh, both of which pass the
+	// receiver's tc egress, so tp_deliver does not decide it again. Only
+	// these bits are set and cleared; the rest of the mark is left alone.
+	// Zero disables it.
+	__u32 mark;
+	// capable is set by galactic-cni when the kernel passed the traffic
+	// policy preflight. CNI ADD refuses a managed interface while the mode
+	// is on and this is clear.
+	__u32 capable;
 };
 
 // struct tp_iface_value marks an interface Galactic manages. policy_token is
@@ -2177,11 +2187,12 @@ static USID_ALWAYS_INLINE int tp_ndp_link_op(struct tp_scratch_value *s, __u8 ho
 
 	if (payload < min)
 		return 0;
-	if (dir == TP_DIR_INGRESS) {
-		if (t != TP_ICMPV6_RA && t != TP_ICMPV6_NS && t != TP_ICMPV6_NA)
-			return 0;
-		return tp_is_link_local6(s->src) || (t == TP_ICMPV6_NS && tp_is_zero(s->src, 16));
-	}
+	// Toward the workload, a hop limit of 255 already proves the message was
+	// sent on the link and not forwarded (RFC 4861 7.1.1). Its source is not
+	// checked: the host answers a solicitation for the gateway from the
+	// gateway's own address, which is not link-local.
+	if (dir == TP_DIR_INGRESS)
+		return t == TP_ICMPV6_RA || t == TP_ICMPV6_NS || t == TP_ICMPV6_NA;
 	if (t != TP_ICMPV6_RS && t != TP_ICMPV6_NS && t != TP_ICMPV6_NA)
 		return 0;
 	if (!tp_is_link_local6(s->src) && !(t == TP_ICMPV6_NS && tp_is_zero(s->src, 16)) &&
@@ -2252,7 +2263,7 @@ static USID_ALWAYS_INLINE __u8 tp_capture_ip4(struct __sk_buff *skb, struct tp_s
 }
 
 static USID_ALWAYS_INLINE __u8 tp_capture_ip6(struct __sk_buff *skb, struct tp_scratch_value *s, __u32 dir,
-					      __u32 ifindex, __u32 frame_l3)
+					      __u32 ifindex, __u32 frame_l3, __u32 tunneled)
 {
 	struct usid_ip6hdr ip6;
 
@@ -2318,7 +2329,9 @@ static USID_ALWAYS_INLINE __u8 tp_capture_ip6(struct __sk_buff *skb, struct tp_s
 
 	// Only a bare neighbor discovery message is a link operation, the same
 	// shape usid_egress's own neighbor discovery bail recognizes.
-	if (st == TP_CAPTURE_OK && !ext_seen && tp_ndp_link_op(s, ip6.hop_limit, ip_end - off, dir, ifindex))
+	// A packet decapsulated from the fabric came from another node, however
+	// its hop limit reads, so it is never a link operation.
+	if (st == TP_CAPTURE_OK && !tunneled && !ext_seen && tp_ndp_link_op(s, ip6.hop_limit, ip_end - off, dir, ifindex))
 		return TP_CAPTURE_LINK_OP;
 	return st;
 }
@@ -2327,7 +2340,7 @@ static USID_ALWAYS_INLINE __u8 tp_capture_ip6(struct __sk_buff *skb, struct tp_s
 // tp_decide. Called at the top of a program, before any rewrite, so egress
 // rules see the workload's own addresses. It reads with bpf_skb_load_bytes,
 // so it works on a nonlinear skb and leaves no packet pointer to invalidate.
-__attribute__((noinline)) int tp_capture(struct __sk_buff *skb, __u32 dir, __u32 ifindex)
+__attribute__((noinline)) int tp_capture(struct __sk_buff *skb, __u32 dir, __u32 ifindex, __u32 tunneled)
 {
 	__u32 key = 0;
 	struct tp_scratch_value *s = bpf_map_lookup_elem(&tp_scratch, &key);
@@ -2354,7 +2367,7 @@ __attribute__((noinline)) int tp_capture(struct __sk_buff *skb, __u32 dir, __u32
 	else if (proto == __builtin_bswap16(USID_ETH_P_IP))
 		s->status = tp_capture_ip4(skb, s, frame_l3);
 	else if (proto == __builtin_bswap16(USID_ETH_P_IPV6))
-		s->status = tp_capture_ip6(skb, s, dir, ifindex, frame_l3);
+		s->status = tp_capture_ip6(skb, s, dir, ifindex, frame_l3, tunneled);
 	else {
 		s->bytes = frame_l3;
 		s->status = TP_CAPTURE_LINK_DROP;
@@ -2555,6 +2568,39 @@ static USID_ALWAYS_INLINE __u32 tp_route_path(const struct egress_route_value *r
 
 	__builtin_memcpy(&locator, rv->sid, sizeof(locator));
 	return bpf_map_lookup_elem(&tp_nat_locator_table, &locator) ? TP_PATH_PUBLIC_NAT : TP_PATH_PRIVATE;
+}
+
+// tp_ingress_path classifies a decapsulated packet by its outer header, read
+// before the strip: a private service tunnel is Private, a gateway delivery
+// (a nonzero backend slot) PublicService, and a packet whose outer source is a
+// NAT shard's SID PublicNAT. Before the NAT locators have synced it is
+// unknown.
+static USID_ALWAYS_INLINE __u32 tp_ingress_path(const __u8 *outer_saddr, __u8 service_tunnel, __u16 backend_slot)
+{
+	__u32 key = 0;
+	struct tp_state_value *st = bpf_map_lookup_elem(&tp_state, &key);
+
+	if (!st || st->mode == TP_MODE_OFF)
+		return TP_PATH_PRIVATE; // unused: tp_decide does nothing while off
+	if (service_tunnel)
+		return TP_PATH_PRIVATE;
+	if (backend_slot != 0)
+		return TP_PATH_PUBLIC_SERVICE;
+	if (!st->nat_locators_synced)
+		return TP_PATH_UNKNOWN;
+	__u64 locator;
+
+	__builtin_memcpy(&locator, outer_saddr, sizeof(locator));
+	return bpf_map_lookup_elem(&tp_nat_locator_table, &locator) ? TP_PATH_PUBLIC_NAT : TP_PATH_PRIVATE;
+}
+
+// tp_ingress_mark is the mark tp_deliver skips, or zero.
+static USID_ALWAYS_INLINE __u32 tp_ingress_mark(void)
+{
+	__u32 key = 0;
+	struct tp_state_value *st = bpf_map_lookup_elem(&tp_state, &key);
+
+	return st && st->mode != TP_MODE_OFF ? st->mark : 0;
 }
 
 // count_claimed_drop is count_drop plus the per-entry dropped_packets bump, for
@@ -3552,6 +3598,9 @@ int usid_ingress(struct __sk_buff *skb)
 	// by the bounds check above.
 	__u8 service_tunnel = ip6->nexthdr == USID_IPPROTO_SERVICE;
 	__u8 service_reverse_installed = 0;
+	// The forwarding path for the receiver's traffic policy, read from the
+	// outer header before the strip below removes it.
+	__u32 tp_path = tp_ingress_path(ip6->saddr, service_tunnel, backend_slot);
 	__u32 service_scratch_key = 0;
 	struct service_fib_scratch_value *service_scratch = 0;
 	if (service_tunnel) {
@@ -3872,6 +3921,19 @@ int usid_ingress(struct __sk_buff *skb)
 		service_reverse_installed = authorization;
 	}
 
+	// The receiving workload's ingress traffic policy, decided on the packet
+	// as it will be delivered, after decapsulation and translation, and
+	// before any of the three delivery helpers below. bpf_redirect_peer skips
+	// the receiver's tc egress, so this is its only check; the other two pass
+	// it, so the packet is marked decided for tp_deliver.
+	tp_capture(skb, TP_DIR_INGRESS, fib_params.ifindex, 1);
+	if (tp_decide(fib_params.ifindex, TP_DIR_INGRESS, tp_path)) {
+		if (service_reverse_installed && service_scratch)
+			bpf_map_delete_elem(&service_reverse_table, &service_scratch->reverse);
+		return TC_ACT_SHOT;
+	}
+	__u32 tp_mark = tp_ingress_mark();
+
 	// Authorization above must run before cold-neighbor handling. Otherwise a
 	// forged or revoked service tunnel can bypass its grant/route checks simply
 	// by targeting an attachment whose neighbor entry is not warm.
@@ -3886,6 +3948,7 @@ int usid_ingress(struct __sk_buff *skb)
 			nh.nh_family = USID_AF_INET;
 			nh.ipv4_nh = fib_params.ipv4_dst;
 		}
+		skb->mark |= tp_mark;
 		long neigh_rc = bpf_redirect_neigh(fib_params.ifindex, &nh, sizeof(nh), 0);
 		if (neigh_rc == TC_ACT_REDIRECT) {
 			count_vrf_forwarded(vrf_key, VRF_DIRECTION_INGRESS, tenant_len(skb));
@@ -3920,8 +3983,10 @@ int usid_ingress(struct __sk_buff *skb)
 
 	if (egress_kind && *egress_kind == EGRESS_KIND_VETH)
 		redirect_rc = bpf_redirect_peer(egress_ifindex, 0);
-	else
+	else {
+		skb->mark |= tp_mark;
 		redirect_rc = bpf_redirect(egress_ifindex, 0);
+	}
 
 	if (redirect_rc != TC_ACT_REDIRECT) {
 		if (service_reverse_installed && service_scratch)
@@ -4766,7 +4831,7 @@ int usid_egress(struct __sk_buff *skb)
 	// Capture before any rewrite, so egress rules see the workload's own
 	// addresses. Every exit that hands the packet on is gated by tp_decide
 	// with the path that exit implies; in mode off both are no-ops.
-	tp_capture(skb, TP_DIR_EGRESS, skb->ifindex);
+	tp_capture(skb, TP_DIR_EGRESS, skb->ifindex, 0);
 
 	if (bpf_skb_pull_data(skb, 0)) {
 		count_drop(DROP_REASON_TRACE_PULL_DATA_FAILED);
@@ -5232,6 +5297,25 @@ int usid_egress(struct __sk_buff *skb)
 	return redirect_rc;
 }
 
+// tp_deliver is a managed interface's ingress traffic policy check for
+// everything the host transmits to it: same-node delivery through the kernel
+// VRF, local private service delivery, a Packet Too Big usid_egress sends
+// back, host-generated traffic, and the ingress sidecar. Attached at the
+// host-side interface's tc egress. A packet usid_ingress already decided
+// carries its mark and is passed once, with the mark cleared.
+SEC("tc")
+int tp_deliver(struct __sk_buff *skb)
+{
+	__u32 mark = tp_ingress_mark();
+
+	if (mark && (skb->mark & mark) == mark) {
+		skb->mark &= ~mark;
+		return TC_ACT_UNSPEC;
+	}
+	tp_capture(skb, TP_DIR_INGRESS, skb->ifindex, 0);
+	return tp_decide(skb->ifindex, TP_DIR_INGRESS, TP_PATH_PRIVATE) ? TC_ACT_SHOT : TC_ACT_UNSPEC;
+}
+
 SEC("tc")
 int usid_service_egress(struct __sk_buff *skb)
 {
@@ -5249,7 +5333,7 @@ int usid_service_egress(struct __sk_buff *skb)
 	    h_proto != __builtin_bswap16(USID_ETH_P_IP))
 		goto legacy;
 
-	tp_capture(skb, TP_DIR_EGRESS, skb->ifindex);
+	tp_capture(skb, TP_DIR_EGRESS, skb->ifindex, 0);
 	long service_rc = service_path(skb, h_proto, skb->ifindex);
 	if (service_rc != TC_ACT_UNSPEC)
 		return service_rc;

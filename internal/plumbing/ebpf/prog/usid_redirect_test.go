@@ -61,6 +61,7 @@ type redirectLab struct {
 	tapFd      int
 
 	vethIfindex uint32
+	vethPeerMAC net.HardwareAddr
 	// vethHostCapture sees frames transmitted on the host-side end, which only
 	// plain bpf_redirect produces. vethPeerCapture sees frames arriving on the
 	// peer inside its own namespace, which both helpers produce.
@@ -144,6 +145,7 @@ func newRedirectLab(t *testing.T) *redirectLab {
 	}
 
 	addHostRoute(t, tapLink, tapInnerDst, tapGuestMAC)
+	lab.vethPeerMAC = peer.Attrs().HardwareAddr
 	addHostRoute(t, vethHost, vethInnerDst, peer.Attrs().HardwareAddr)
 	attachIngress(t, uplink, lab.objs.UsidIngress)
 

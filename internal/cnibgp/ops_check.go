@@ -27,8 +27,11 @@ import (
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
@@ -200,6 +203,9 @@ func checkEBPFEntry(pluginConf *PluginConf, argument uint16, bgp bgpConfig, ifac
 		if err := checkEgressKind(ebpfPinDir, pluginConf.VPC, pluginConf.VPCAttachment, ifaceType); err != nil {
 			errs = append(errs, err)
 		}
+		if err := checkTrafficPolicy(ebpfPinDir, pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	return errors.Join(errs...)
@@ -235,6 +241,30 @@ func checkEgressKind(pinDir, vpc, vpcAttachment, ifaceType string) error {
 			hostIfindex, got, want, ifaceType)
 	}
 	return nil
+}
+
+// checkTrafficPolicy verifies, while the node enforces or audits traffic
+// policy, that the interface still has its policy row and both tc hooks'
+// programs. A missing program is a failed CHECK: the interface is no longer
+// covered.
+func checkTrafficPolicy(pinDir, vpc, vpcAttachment string) error {
+	if !tpmap.Active(pinDir) {
+		return nil
+	}
+	hostIfindex, err := attachreg.HostInterfaceIndex(vpc, vpcAttachment)
+	if err != nil {
+		return fmt.Errorf("resolve host interface ifindex for the traffic policy check: %w", err)
+	}
+	maps, err := tpmap.OpenPinned(pinDir)
+	if err != nil {
+		return fmt.Errorf("open traffic policy maps: %w", err)
+	}
+	defer maps.Close()
+	var iface prog.UsidTpIfaceValue
+	if err := maps.Interfaces.Lookup(hostIfindex, &iface); err != nil {
+		return fmt.Errorf("traffic policy row for host ifindex %d: %w", hostIfindex, err)
+	}
+	return verifyEnforcement(intf.GenerateInterfaceNameHost(vpc, vpcAttachment))
 }
 
 // checkEndpointSlice verifies the per-pod EndpointSlice the ADD path published

@@ -36,6 +36,7 @@ RUN go mod download
 
 # Copy the go source
 COPY cmd/ cmd/
+COPY api/ api/
 COPY internal/ internal/
 
 # galactic-router transitively imports both internal/plumbing/ebpf/prog

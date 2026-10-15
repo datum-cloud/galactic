@@ -16,10 +16,13 @@
 package tpmap
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
+	"path/filepath"
 
 	"github.com/cilium/ebpf"
 
@@ -100,17 +103,135 @@ func FromObjects(objs *prog.UsidObjects) *Maps {
 	}
 }
 
-// SetState sets the enforcement mode and whether the NAT locators are
-// complete.
-func (m *Maps) SetState(mode uint32, natLocatorsSynced bool) error {
-	v := prog.UsidTpStateValue{Mode: mode}
-	if natLocatorsSynced {
+// State is tp_state: the node's enforcement mode and what the datapath needs
+// to apply it.
+type State struct {
+	Mode uint32
+	// NATLocatorsSynced reports that tp_nat_locator_table holds every shard
+	// locator; until then an encapsulated packet's path is unknown.
+	NATLocatorsSynced bool
+	// Mark is the skb mark usid_ingress sets on a packet tp_deliver must not
+	// decide again. Zero disables it.
+	Mark uint32
+	// Capable reports that the kernel passed the traffic policy preflight.
+	Capable bool
+}
+
+// SetState writes tp_state.
+func (m *Maps) SetState(st State) error {
+	v := prog.UsidTpStateValue{Mode: st.Mode, Mark: st.Mark}
+	if st.NATLocatorsSynced {
 		v.NatLocatorsSynced = 1
+	}
+	if st.Capable {
+		v.Capable = 1
 	}
 	if err := m.State.Put(uint32(0), v); err != nil {
 		return fmt.Errorf("write tp_state: %w", err)
 	}
 	return nil
+}
+
+// GetState reads tp_state.
+func (m *Maps) GetState() (State, error) {
+	var v prog.UsidTpStateValue
+	if err := m.State.Lookup(uint32(0), &v); err != nil {
+		return State{}, fmt.Errorf("read tp_state: %w", err)
+	}
+	return State{Mode: v.Mode, NATLocatorsSynced: v.NatLocatorsSynced != 0, Mark: v.Mark, Capable: v.Capable != 0}, nil
+}
+
+// OpenPinned opens the traffic policy maps pinned under pinDir, as a CNI
+// plugin does; Close releases them.
+func OpenPinned(pinDir string) (*Maps, error) {
+	m := &Maps{}
+	for _, p := range []struct {
+		name string
+		dst  **ebpf.Map
+	}{
+		{prog.UsidMapTpState, &m.State},
+		{prog.UsidMapTpIfaceTable, &m.Interfaces},
+		{prog.UsidMapTpIfaceAddrTable, &m.InterfaceAddrs},
+		{prog.UsidMapTpBindingTable, &m.Bindings},
+		{prog.UsidMapTpNatLocatorTable, &m.NATLocators},
+		{prog.UsidMapTpRuleCounters, &m.RuleCounters},
+		{prog.UsidMapTpFallbackCounters, &m.FallbackCounters},
+	} {
+		mp, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, p.name), nil)
+		if err != nil {
+			m.Close()
+			return nil, fmt.Errorf("open pinned %s: %w", p.name, err)
+		}
+		*p.dst = mp
+	}
+	return m, nil
+}
+
+// Close releases maps opened by OpenPinned.
+func (m *Maps) Close() {
+	for _, mp := range []*ebpf.Map{m.State, m.Interfaces, m.InterfaceAddrs, m.Bindings, m.NATLocators,
+		m.RuleCounters, m.FallbackCounters} {
+		if mp != nil {
+			_ = mp.Close()
+		}
+	}
+}
+
+// NewPolicyToken is a random policy token for a new interface lifetime.
+func NewPolicyToken() (uint64, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0, fmt.Errorf("read random policy token: %w", err)
+	}
+	return binary.NativeEndian.Uint64(b[:]) | 1, nil // never zero
+}
+
+// RemoveInterface removes everything ifindex's lifetime owns in the policy
+// maps: both bindings, its interface row, its addresses and its fallback
+// rows. Rows already gone are not an error.
+func (m *Maps) RemoveInterface(ifindex uint32) error {
+	var errs []error
+	for _, dir := range []uint32{DirIngress, DirEgress} {
+		if err := m.Invalidate(ifindex, dir); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	var iface prog.UsidTpIfaceValue
+	if err := m.Interfaces.Lookup(ifindex, &iface); err == nil {
+		for _, dir := range []uint32{DirIngress, DirEgress} {
+			for reason := range uint8(reasonCount) {
+				err := m.FallbackCounters.Delete(FallbackKey(ifindex, iface.PolicyToken, dir, reason))
+				if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+					errs = append(errs, fmt.Errorf("delete fallback counters: %w", err))
+				}
+			}
+		}
+		if err := m.Interfaces.Delete(ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, fmt.Errorf("delete tp_iface_table[%d]: %w", ifindex, err))
+		}
+	} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
+		errs = append(errs, fmt.Errorf("read tp_iface_table[%d]: %w", ifindex, err))
+	}
+	var (
+		key   prog.UsidTpIfaceAddrKey
+		value uint8
+		stale []prog.UsidTpIfaceAddrKey
+	)
+	it := m.InterfaceAddrs.Iterate()
+	for it.Next(&key, &value) {
+		if key.Ifindex == ifindex {
+			stale = append(stale, key)
+		}
+	}
+	if err := it.Err(); err != nil {
+		errs = append(errs, fmt.Errorf("iterate tp_iface_addr_table: %w", err))
+	}
+	for _, k := range stale {
+		if err := m.InterfaceAddrs.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, fmt.Errorf("delete interface address: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // PutInterface marks ifindex as an interface Galactic manages, with its
@@ -267,4 +388,53 @@ func prefixWords(p netip.Prefix) (addr, mask [2]uint64) {
 	}
 	return [2]uint64{binary.NativeEndian.Uint64(a[:8]), binary.NativeEndian.Uint64(a[8:])},
 		[2]uint64{binary.NativeEndian.Uint64(m[:8]), binary.NativeEndian.Uint64(m[8:])}
+}
+
+// Active reports whether the node pinned under pinDir enforces or audits
+// traffic policy. A node whose policy maps are not pinned, such as one still
+// running an older datapath, is not.
+func Active(pinDir string) bool {
+	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapTpState), nil)
+	if err != nil {
+		return false
+	}
+	defer m.Close() //nolint:errcheck // read-only handle
+	var v prog.UsidTpStateValue
+	if err := m.Lookup(uint32(0), &v); err != nil {
+		return false
+	}
+	return v.Mode != ModeOff
+}
+
+// RemovePinnedInterface is RemoveInterface on the maps pinned under pinDir. A
+// node without them has nothing to remove.
+func RemovePinnedInterface(pinDir string, ifindex uint32) error {
+	m, err := OpenPinned(pinDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer m.Close()
+	return m.RemoveInterface(ifindex)
+}
+
+// PutPinnedInfra marks ifindex, under pinDir, as a platform interface the
+// datapath delivers through but never evaluates, such as an ingress sidecar's
+// veth peer. Traffic it passes on to a tenant interface is checked there. A
+// node without the policy maps has nothing to record.
+func PutPinnedInfra(pinDir string, ifindex uint32) error {
+	m, err := OpenPinned(pinDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer m.Close()
+	if err := m.Interfaces.Put(ifindex, prog.UsidTpIfaceValue{Kind: KindInfra}); err != nil {
+		return fmt.Errorf("write tp_iface_table[%d]: %w", ifindex, err)
+	}
+	return nil
 }

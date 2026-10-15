@@ -28,6 +28,7 @@ COPY --from=network / /network
 RUN go mod download
 
 COPY cmd/ cmd/
+COPY api/ api/
 COPY internal/ internal/
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \

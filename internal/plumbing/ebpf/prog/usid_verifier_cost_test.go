@@ -24,7 +24,12 @@ import (
 //
 // Raising it is fine when a change genuinely needs the room. Measure first:
 // this test logs each program's cost.
-const verifierCostBudget = 20000
+//
+// Interface traffic policy raised it from 20,000 to 24,000. Each program that
+// calls tp_capture and tp_decide verifies both global functions once, about
+// 2,900 instructions whatever the rule count: usid_ingress went from 18,255 to
+// about 21,100 and usid_egress from 9,701 to about 12,500 (clang 21).
+const verifierCostBudget = 24000
 
 var processedInsns = regexp.MustCompile(`processed (\d+) insns`)
 

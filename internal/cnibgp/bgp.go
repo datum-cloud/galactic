@@ -461,6 +461,9 @@ func publishBGPState(
 		if registered {
 			registerTenantGateway(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, ipamResult)
 		}
+		if err := activateTrafficPolicy(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, registered, ipamResult); err != nil {
+			return fmt.Errorf("activate traffic policy: %w", err)
+		}
 
 		adv := &bgpv1alpha1.BGPAdvertisement{
 			ObjectMeta: metav1.ObjectMeta{

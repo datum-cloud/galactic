@@ -36,6 +36,7 @@ RUN go mod download
 
 # Copy the go source
 COPY cmd/ cmd/
+COPY api/ api/
 COPY internal/ internal/
 
 # galactic-nat's build graph reaches all four of this module's eBPF

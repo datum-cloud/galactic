@@ -37,6 +37,7 @@ RUN go mod download
 
 # Copy the go source
 COPY cmd/ cmd/
+COPY api/ api/
 COPY internal/ internal/
 
 # Install the eBPF build toolchain and regenerate

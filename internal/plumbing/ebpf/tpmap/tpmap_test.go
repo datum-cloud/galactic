@@ -79,7 +79,7 @@ func newFixture(t *testing.T, mode uint32) *fixture {
 		t.Fatal(err)
 	}
 	f := &fixture{objs: &objs, maps: FromObjects(&objs)}
-	if err := f.maps.SetState(mode, true); err != nil {
+	if err := f.maps.SetState(State{Mode: mode, NATLocatorsSynced: true, Capable: true}); err != nil {
 		t.Fatal(err)
 	}
 	return f
@@ -416,7 +416,7 @@ func TestPathClassification(t *testing.T) {
 	if got := f.run(t, packet(tcp("2001:db8::1", "2001:db8:bb::1", 1, 2))); got != tcActShot {
 		t.Errorf("to a peer: verdict = %d, want denied", got)
 	}
-	if err := f.maps.SetState(ModeEnforce, false); err != nil {
+	if err := f.maps.SetState(State{Mode: ModeEnforce, Capable: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.run(t, packet(tcp("2001:db8::1", "2001:db8:aa::1", 1, 2))); got != tcActShot {
@@ -667,4 +667,53 @@ func TestExtensionHeaders(t *testing.T) {
 	if got := f.run(t, esp); got != tcActShot {
 		t.Errorf("esp: verdict = %d, want denied: no rule names it", got)
 	}
+}
+
+// TestRemoveInterface checks interface removal takes everything the
+// lifetime owned, so churn cannot fill the fallback counters.
+func TestRemoveInterface(t *testing.T) {
+	f := newFixture(t, ModeEnforce)
+	f.iface(t)
+	f.publish(t, `[{"name":"all","action":"Allow"}]`, 0)
+	if err := f.maps.PutInterfaceAddr(ifindex, netip.MustParseAddr("192.0.2.10")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.maps.RemoveInterface(ifindex); err != nil {
+		t.Fatal(err)
+	}
+	var iface prog.UsidTpIfaceValue
+	if err := f.objs.TpIfaceTable.Lookup(ifindex, &iface); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Errorf("interface row: err = %v, want removed", err)
+	}
+	var per []prog.UsidTpCounter
+	err := f.objs.TpFallbackCounters.Lookup(FallbackKey(ifindex, token, DirEgress, ReasonNoMatch), &per)
+	if !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Errorf("fallback row: err = %v, want removed", err)
+	}
+	if n := countKeys(t, f.objs.TpIfaceAddrTable); n != 0 {
+		t.Errorf("%d interface addresses left", n)
+	}
+	if got := f.run(t, packet(tcp("2001:db8::1", "2001:db8::2", 1, 2))); got != tcActShot {
+		t.Errorf("after removal: verdict = %d, want denied", got)
+	}
+	if err := f.maps.RemoveInterface(ifindex); err != nil {
+		t.Errorf("second removal: %v", err)
+	}
+}
+
+func countKeys(t *testing.T, m *ebpf.Map) int {
+	t.Helper()
+	var (
+		k  prog.UsidTpIfaceAddrKey
+		v  uint8
+		n  int
+		it = m.Iterate()
+	)
+	for it.Next(&k, &v) {
+		n++
+	}
+	if err := it.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

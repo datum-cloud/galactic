@@ -57,7 +57,7 @@ func reattachEgressLocked(serviceProgram, legacyProgram *ebpf.Program, identityM
 		// CNI ADD attaches usid_egress only to a veth or a tap, so nothing
 		// else needs a filter dump.
 		switch link.Type() {
-		case "veth", "tuntap":
+		case linkTypeVeth, linkTypeTuntap:
 		default:
 			continue
 		}
@@ -159,3 +159,110 @@ func linkGone(err error) bool {
 // listLinksFn indirects netlink.LinkList so a test can confine ReattachEgress
 // to its own namespace's links.
 var listLinksFn = netlink.LinkList
+
+// ReattachDeliver attaches tp_deliver to the tc egress of every interface
+// carrying the managed egress chain, replacing any filter there in place, and
+// returns how many it attached. Every link is attempted, and failures are
+// joined and returned together.
+func ReattachDeliver(program *ebpf.Program) (int, error) {
+	links, err := listLinksFn()
+	if err != nil {
+		return 0, fmt.Errorf("attach: list links: %w", err)
+	}
+	attached := 0
+	var errs []error
+	for _, link := range links {
+		switch link.Type() {
+		case linkTypeVeth, linkTypeTuntap:
+		default:
+			continue
+		}
+		managed, err := hasManagedEgressChain(link)
+		if err != nil {
+			if !linkGone(err) {
+				errs = append(errs, fmt.Errorf("interface %q: %w", link.Attrs().Name, err))
+			}
+			continue
+		}
+		if !managed {
+			continue
+		}
+		if err := AttachDeliver(program, link.Attrs().Name); err != nil {
+			if !linkGone(err) {
+				errs = append(errs, fmt.Errorf("interface %q: %w", link.Attrs().Name, err))
+			}
+			continue
+		}
+		attached++
+	}
+	return attached, errors.Join(errs...)
+}
+
+func hasManagedEgressChain(link netlink.Link) (bool, error) {
+	filters, err := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
+	if err != nil {
+		return false, fmt.Errorf("list ingress filters: %w", err)
+	}
+	for _, f := range filters {
+		if bpf, ok := f.(*netlink.BpfFilter); ok && isManagedEgressFilter(bpf.Name) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// HasEgressChain reports whether ifaceName's tc ingress carries both the
+// service and the egress program.
+func HasEgressChain(ifaceName string) (bool, error) {
+	link, err := netlink.LinkByName(ifaceName)
+	if err != nil {
+		return false, fmt.Errorf("find link %q: %w", ifaceName, err)
+	}
+	filters, err := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
+	if err != nil {
+		return false, fmt.Errorf("list ingress filters on %q: %w", ifaceName, err)
+	}
+	var service, egress bool
+	for _, f := range filters {
+		if bpf, ok := f.(*netlink.BpfFilter); ok {
+			service = service || bpf.Name == serviceEgressFilterName
+			egress = egress || bpf.Name == egressFilterName
+		}
+	}
+	return service && egress, nil
+}
+
+// ManagedInterfaces returns every veth and tap carrying the managed egress
+// chain: the interfaces Galactic attached a workload or the ingress sidecar
+// through.
+func ManagedInterfaces() ([]netlink.Link, error) {
+	links, err := listLinksFn()
+	if err != nil {
+		return nil, fmt.Errorf("attach: list links: %w", err)
+	}
+	var out []netlink.Link
+	for _, link := range links {
+		switch link.Type() {
+		case linkTypeVeth, linkTypeTuntap:
+		default:
+			continue
+		}
+		managed, err := hasManagedEgressChain(link)
+		if err != nil {
+			if linkGone(err) {
+				continue
+			}
+			return nil, fmt.Errorf("interface %q: %w", link.Attrs().Name, err)
+		}
+		if managed {
+			out = append(out, link)
+		}
+	}
+	return out, nil
+}
+
+// netlink's link types for the two kinds of managed interface.
+const (
+	linkTypeVeth   = "veth"
+	linkTypeTuntap = "tuntap"
+)

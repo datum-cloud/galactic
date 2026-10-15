@@ -128,6 +128,14 @@ func Start(pinDir string) (objs *prog.UsidObjects, ifaces []string, err error) {
 	} else if replaced > 0 {
 		slog.Info("attach: moved existing attachments onto the new service egress chain", "replaced", replaced)
 	}
+	// Every managed interface also carries tp_deliver, replaced in place so an
+	// upgrade never leaves its tc egress without the traffic policy check.
+	// Readiness-fatal like the chain above: a node that cannot attach it
+	// cannot enforce ingress policy.
+	if n, err := ReattachDeliver(objs.TpDeliver); err != nil {
+		_ = objs.Close()
+		return nil, nil, fmt.Errorf("attach: attach tp_deliver (attached %d): %w", n, err)
+	}
 
 	return objs, ifaces, nil
 }
@@ -250,6 +258,15 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 		err = fmt.Errorf("attach: pin usid_service_egress program: %w", pinErr)
 		return nil, err
 	}
+	deliverPinPath := filepath.Join(pinDir, TpDeliverPinName)
+	if rmErr := os.Remove(deliverPinPath); rmErr != nil && !os.IsNotExist(rmErr) {
+		err = fmt.Errorf("attach: remove stale tp_deliver pin: %w", rmErr)
+		return nil, err
+	}
+	if pinErr := loaded.TpDeliver.Pin(deliverPinPath); pinErr != nil {
+		err = fmt.Errorf("attach: pin tp_deliver program: %w", pinErr)
+		return nil, err
+	}
 	removeObsoletePins(pinDir)
 
 	return &loaded, nil
@@ -282,6 +299,44 @@ const UsidEgressPinName = "usid_egress_prog"
 // UsidServiceEgressPinName is the bpffs filename for the private-service
 // classifier that runs immediately before usid_egress in the TC chain.
 const UsidServiceEgressPinName = "usid_service_egress_prog"
+
+// TpDeliverPinName is the bpffs filename tp_deliver is pinned under: the
+// interface traffic policy's ingress check for what the host transmits to a
+// managed interface, attached at its tc egress.
+const TpDeliverPinName = "tp_deliver_prog"
+
+// tpDeliverFilterName names tp_deliver's filter on a managed interface's tc
+// egress.
+const tpDeliverFilterName = "galactic_tp_deliver"
+
+// AttachDeliver attaches tp_deliver to ifaceName's tc egress, replacing a
+// filter already there in place, so an upgrade never leaves the hook empty.
+func AttachDeliver(program *ebpf.Program, ifaceName string) error {
+	if program == nil {
+		return errors.New("attach: tp_deliver program is nil")
+	}
+	return withInterfaceLock(ifaceName, func() error {
+		return attachOne(program, ifaceName, tpDeliverFilterName, netlink.HANDLE_MIN_EGRESS)
+	})
+}
+
+// HasDeliver reports whether ifaceName's tc egress carries tp_deliver.
+func HasDeliver(ifaceName string) (bool, error) {
+	link, err := netlink.LinkByName(ifaceName)
+	if err != nil {
+		return false, fmt.Errorf("find link %q: %w", ifaceName, err)
+	}
+	filters, err := netlink.FilterList(link, netlink.HANDLE_MIN_EGRESS)
+	if err != nil {
+		return false, fmt.Errorf("list tc egress filters on %q: %w", ifaceName, err)
+	}
+	for _, f := range filters {
+		if bf, ok := f.(*netlink.BpfFilter); ok && bf.Name == tpDeliverFilterName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // Attach attaches program to the ingress hook of each named interface, through a
 // clsact qdisc and a direct-action BPF filter, creating the qdisc if it does not

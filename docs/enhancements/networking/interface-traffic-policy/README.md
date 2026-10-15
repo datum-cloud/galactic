@@ -492,11 +492,11 @@ is counted as a `parse_error` that would have been dropped, and forwarded.
 
 Only these frames bypass the rules, and only after validation.
 
-| Frame                                                                                | Direction | Checks                                                                                                                                                                                                                          |
-| ------------------------------------------------------------------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ARP request or reply                                                                 | Both      | Ethernet/IPv4, hardware length 6, protocol length 4; on egress, the sender address is one of the interface's IPv4 addresses or 0.0.0.0, and the target is the interface's gateway address or the sender itself (gratuitous ARP) |
-| Router Solicitation (133), Neighbor Solicitation (135), Neighbor Advertisement (136) | Egress    | Hop limit 255, code 0, valid length; source is link-local, one of the interface's addresses, or unspecified for DAD; destination is link-local unicast, in `ff02::/16`, or the interface's gateway address                      |
-| Router Advertisement (134), Neighbor Solicitation, Neighbor Advertisement            | Ingress   | Hop limit 255, code 0, valid length; source is link-local, or unspecified for DAD                                                                                                                                               |
+| Frame                                                                                | Direction | Checks                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ARP request or reply                                                                 | Both      | Ethernet/IPv4, hardware length 6, protocol length 4; on egress, the sender address is one of the interface's IPv4 addresses or 0.0.0.0, and the target is the gateway, the sender itself (gratuitous ARP) or one of the interface's addresses (an RFC 5227 probe) |
+| Router Solicitation (133), Neighbor Solicitation (135), Neighbor Advertisement (136) | Egress    | Hop limit 255, code 0, valid length, no extension headers; source is link-local, one of the interface's addresses, or unspecified for DAD; destination is link-local unicast, in `ff02::/16`, or the interface's gateway address                                  |
+| Router Advertisement (134), Neighbor Solicitation, Neighbor Advertisement            | Ingress   | Hop limit 255, code 0, valid length, no extension headers. The source is not checked: a hop limit of 255 already proves the message came from the link, and the host answers for the gateway from the gateway's own address                                       |
 
 The destination check stops a workload from using a neighbor discovery type to
 reach another tenant's routable address past its own egress policy. A message
@@ -729,7 +729,9 @@ has a PodMonitor:
 - The collector resolves labels from the snapshot metadata galactic-router
   writes beside each pinned binding, never from packet fields.
 - Each evaluation produces exactly one outcome: a winning rule's hit and bytes,
-  or one fallback pair.
+  or one fallback pair. The one exception is a packet captured while the mode
+  was off and decided just after it turned on, at most one per CPU at the
+  switch, which is forwarded and not counted.
 - Bytes are the tenant IP packet at the evaluation point, without Ethernet or
   outer SRv6. A GSO skb counts once at its buffer length.
 - A malformed packet whose IP boundary cannot be found adds zero bytes.
@@ -773,7 +775,12 @@ Default deny is a deliberate behavior change. The enforcement mode in
 - `enforce` drops.
 
 Operators move a site to `enforce` only after every running interface has
-explicit bindings for the traffic it needs. Steady-state interfaces default to
+explicit bindings for the traffic it needs. An interface created before the
+release that adds the ingress side gets its policy row from `galactic-cni`
+at startup, with a fresh token, so its bindings apply; its assigned addresses
+are not known there, so until the workload is recreated its ARP and its
+neighbor discovery from a global address are ordinary traffic rather than
+link operations. Recreate such workloads before enforcing. Steady-state interfaces default to
 deny in every mode except `off`. There is no legacy allow and no generated
 reverse rule. `audit` is a measurement mode for migration, not a
 compatibility allowance, and `enforce` is the only mode the steady state uses.
