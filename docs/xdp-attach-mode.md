@@ -156,9 +156,10 @@ On a `bnxt_en` edge node after the release reaches it:
    through the gateway, all pass. Use `task verify:nat-egress` and
    `task verify:gateway-ingress` in the lab, and the same checks against
    staging.
-5. Over at least a day of normal traffic, `GalacticNatUplinkRxQueueStalled`
-   doesn't fire, per-queue receive counters keep rising on every queue, and
-   NIC queue discards stay at zero.
+5. Over at least a day of normal traffic, neither
+   `GalacticNatUplinkRxQueueStalled` nor `GalacticNatUplinkRxQueueLossy`
+   fires, per-queue receive counters keep rising on every queue, and NIC
+   queue discards stay at zero.
 
 A node that already runs the dispatcher in generic mode, as the staging lab's
 edge node did by hand before this change, needs no migration and sees no

@@ -278,22 +278,42 @@ spec:
               ({{ $labels.reason }}) in every 10-minute window for 15 minutes, about {{ $value | humanize }} in the last
               one. Each drop is a connection a tenant failed to open. Many flows to one destination address and
               port fill its ports first.
-        # One NIC receive queue dropping a steady share of its traffic while
-        # most of the interface's queues do not (#673). The NIC drops these
-        # before the XDP datapath sees them, so galactic_nat_drops_total stays
-        # flat. Every flow hashed to the queue keeps failing on retry, and a
-        # BGP session on it expires its hold timer. Three conditions, all for
-        # 10 minutes: the queue drops over 1% of its packets while no more than
-        # half of the interface's queues drop that much (a burst spreads across
-        # queues, and a single-queue uplink is all of its own queues so it
-        # cannot fire), and the queue either delivers over 10 packets a second
-        # (so a handful of drops on an idle queue does not count) or delivers
-        # none while discarding. That second case is a queue that has stopped
-        # entirely, which is unambiguous at any rate; the floor alone measures
-        # delivered packets, which a dead queue has none of. Idle queues count
-        # as queues of the interface. Only drivers that count discards per
-        # queue report them, bnxt_en among them.
+        # One NIC receive queue that has stopped delivering while it still
+        # discards (#673). The NIC drops these before the XDP datapath sees
+        # them, so galactic_nat_drops_total stays flat. Every flow hashed to
+        # the queue fails on every retry, and a BGP session on it expires its
+        # hold timer. A burst never empties a queue entirely, so this is
+        # unambiguous at any rate and however many of the interface's queues
+        # share it. Only drivers that count discards per queue report them,
+        # bnxt_en among them.
         - alert: GalacticNatUplinkRxQueueStalled
+          expr: |
+            rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m]) > 0
+            and
+            rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) == 0
+          for: 10m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Receive queue {{ $labels.queue }} of {{ $labels.interface }} on {{ $labels.node }} has stopped delivering"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuestalled"
+            description: >-
+              Queue {{ $labels.queue }} of uplink {{ $labels.interface }} ({{ $labels.driver }}) has delivered nothing
+              for 10 minutes while discarding about {{ $value | humanize }} packets a second. Flows hashed to that
+              queue fail on every retry. Bouncing the interface clears it, once its bond partner is confirmed up.
+        # One NIC receive queue dropping a steady share of its traffic while it
+        # still delivers and most of the interface's queues do not. One heavy
+        # flow overrunning a ring looks the same for a few minutes and clears
+        # by itself, so the conditions must hold for 30 minutes: the queue
+        # drops over 1% of its packets while no more than half of the
+        # interface's queues drop that much (a burst spreads across queues, and
+        # a single-queue uplink is all of its own queues so it cannot fire),
+        # and delivers over 10 packets a second (so a handful of drops on an
+        # idle queue does not count). Idle queues count as queues of the
+        # interface.
+        - alert: GalacticNatUplinkRxQueueLossy
           expr: |
             (
               rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m])
@@ -319,28 +339,20 @@ spec:
               )
             )
             and
-            (
-              rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) > 10
-              or
-              (
-                rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) == 0
-                and
-                rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m]) > 0
-              )
-            )
-          for: 10m
+            rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) > 10
+          for: 30m
           labels:
-            severity: critical
+            severity: warning
             service: galactic
             team: connect
           annotations:
-            summary: "Receive queue {{ $labels.queue }} of {{ $labels.interface }} on {{ $labels.node }} is dropping packets"
-            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuestalled"
+            summary: "Receive queue {{ $labels.queue }} of {{ $labels.interface }} on {{ $labels.node }} is losing packets"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuelossy"
             description: >-
               Queue {{ $labels.queue }} of uplink {{ $labels.interface }} ({{ $labels.driver }}) has discarded
-              {{ $value | humanizePercentage }} of its packets for 10 minutes while no more than half of the
-              interface's queues have. Flows hashed to that queue fail on every retry. Bouncing the interface clears it,
-              once its bond partner is confirmed up.
+              {{ $value | humanizePercentage }} of its packets for 30 minutes while no more than half of the
+              interface's queues have. Flows hashed to that queue are retrying. GalacticNatUplinkRxQueueStalled
+              fires if it stops delivering entirely.
         # A shard that is turned on but holds no EgressShard identity claims no
         # packet: tenants routed to it get no egress. Ten minutes covers a
         # restart and the first reconcile.

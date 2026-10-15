@@ -466,7 +466,8 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticRouterMetricsDown            | `galactic-router` or `galactic-router-rr` scrape down              | 5m  | warning  |
 | GalacticNatSessionTableEvictingLive  | table over 90% full, oldest row under 7440 s                       | 15m | warning  |
 | GalacticNatPortExhausted             | `*_pat_exhausted` drops in every 10-minute window                  | 15m | warning  |
-| GalacticNatUplinkRxQueueStalled      | one uplink rx queue discards >1%, most siblings do not             | 10m | critical |
+| GalacticNatUplinkRxQueueStalled      | one uplink rx queue delivers nothing while discarding              | 10m | critical |
+| GalacticNatUplinkRxQueueLossy        | one uplink rx queue discards >1%, most siblings do not             | 30m | warning  |
 | GalacticNatNotProgrammed             | turned on, no EgressShard identity                                 | 10m | warning  |
 | GalacticNatUplinkUncovered           | `galactic_nat_uplink_covered == 0`                                 | 10m | critical |
 | GalacticNatForwardDropRatio          | owned-traffic drops over 1% of translated, over 10 packets/s       | 15m | warning  |
