@@ -411,6 +411,50 @@ address type. Parsing reads only the first endpoint's first address.
 galactic_ingress_sidecar_endpoint_slices{state=~"invalid|waiting_sid"} > 0
 ```
 
+### Datapath checks
+
+Every sweep reads the shared eBPF datapath's generation and, when it has not
+changed, reads this sidecar's rows back from the two registration maps
+(`vrf_table`, `ifindex_vrf_table`). A changed generation, missing rows, or a
+pass that left something unapplied makes it reapply every tracked VRF and
+route. These checks do not cover every route, the TC attachment, the
+gateway's local route or the host return path, so `ok` here is not full
+datapath health.
+
+| Metric                                                                     | Type    | Labels             | Meaning                                                                                                                                   |
+| -------------------------------------------------------------------------- | ------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_ingress_sidecar_datapath_checks_total`                           | counter | `check`, `result`  | Completed checks: `generation` (`ok`, `error`) and `registration_rows` (`ok`, `missing`, `error`)                                         |
+| `galactic_ingress_sidecar_datapath_check_status`                           | gauge   | `check`, `status`  | 1 for each check's latest status, 0 for its others: `unknown` (not read yet, or an `ok` not re-read this sweep), `ok`, `missing`, `error` |
+| `galactic_ingress_sidecar_datapath_check_last_completed_timestamp_seconds` | gauge   | `check`            | Unix time each check last completed, whatever its result; 0 before the first                                                              |
+| `galactic_ingress_sidecar_datapath_reapply_total`                          | counter | `reason`, `result` | Reapply passes by `reason` (`generation_changed`, `rows_missing`, `retry`) and `result` (`success` when every reapply succeeded, `error`) |
+| `galactic_ingress_sidecar_datapath_reapply_pending`                        | gauge   | none               | 1 while a pass left something unapplied, until a later one succeeds                                                                       |
+
+- A failed read is `error`, not `ok`: the state is unknown. Repair stays
+  conservative and does not reapply on a failed read; the next successful
+  read decides.
+- The rows are read only while the generation is unchanged and no retry is
+  due, and only when there is a VRF to read back. On any other sweep, and
+  after a reapply rewrote them, a last `ok` becomes `unknown`; a `missing` or
+  `error` stays until a read replaces it, so a problem never turns into an
+  unverified healthy result. Its timestamp shows when the rows were last read.
+- A pass's reason is `generation_changed` whenever the generation moved, even
+  if a retry was also due; otherwise `rows_missing` when this sweep found rows
+  gone, otherwise `retry`. `reapply_total` keeps counting every pass, of any
+  reason. These add 22 fixed series per sidecar.
+
+```promql
+# A check that failed or found rows missing
+galactic_ingress_sidecar_datapath_check_status{status=~"missing|error"} == 1
+
+# A check that completed before but not in the last three sweeps (15s at the
+# default 5s sweep interval)
+(galactic_ingress_sidecar_datapath_check_last_completed_timestamp_seconds > 0)
+  and (time() - galactic_ingress_sidecar_datapath_check_last_completed_timestamp_seconds > 15)
+
+# Reapply churn by reason
+sum by (namespace, pod, reason) (increase(galactic_ingress_sidecar_datapath_reapply_total[10m]))
+```
+
 ## Edge load balancer — `galactic_edge_*`
 
 `galactic-gateway`'s XDP DSR load balancer on gateway-role edge nodes.

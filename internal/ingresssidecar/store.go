@@ -95,6 +95,9 @@ type Store struct {
 	// and the reconciler's, kept here so both reach it without taking s.mu.
 	inputs atomic.Pointer[InputMetrics]
 
+	// datapath is nil unless SetDatapathMetrics was called.
+	datapath *DatapathMetrics
+
 	// generation is the backend's DatapathGeneration as of the last time every
 	// tracked VRF and route was known to be written against it, or empty
 	// before the first successful read. reapplyPending is set when a reapply
@@ -213,6 +216,14 @@ func (s *Store) inputMetrics() *InputMetrics {
 	return s.inputs.Load()
 }
 
+// SetDatapathMetrics has this Store report each sweep's datapath checks and
+// reapply passes to m. Call it once, before the first Sweep.
+func (s *Store) SetDatapathMetrics(m *DatapathMetrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.datapath = m
+}
+
 // SetGatewayPublisher enables this Store to publish and withdraw a return-path
 // BGPAdvertisement for each VPC it manages a VRF for. Without one, a backend's
 // reply traffic has no SRv6 route back to this node.
@@ -306,6 +317,7 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 	// Read before the first write rather than after it: a reload landing
 	// between the two then shows up on the next Sweep as a changed generation
 	// instead of being mistaken for the one those writes went into.
+	// A baseline, not a check: Sweep's own read reports a failure.
 	if s.generation == "" {
 		if gen, gerr := s.backend.DatapathGeneration(); gerr == nil {
 			s.generation = gen
@@ -596,19 +608,40 @@ func (s *Store) PruneForeignDatapath() (int, error) {
 //
 // A failed generation read is not acted on: it means the datapath is not
 // loaded at all, which nothing here can repair, and the next successful read
-// after it is loaded again will differ and trigger the reapply.
+// after it is loaded again will differ and trigger the reapply. It is still
+// reported, as an error rather than as a healthy check.
+//
+// A pass's reason is generation_changed whenever the generation moved, even
+// when a retry was also due; rows_missing when this check found rows gone;
+// otherwise retry.
+//
+// The registration rows are read only while the generation is unchanged and
+// no retry is due. On every other sweep, and after a reapply rewrote them, a
+// last ok becomes unknown rather than standing for rows nobody read back.
 func (s *Store) checkDatapathLocked() {
+	defer func() { s.datapath.reapplyPending(s.reapplyPending) }()
 	gen, err := s.backend.DatapathGeneration()
 	if err != nil {
+		s.datapath.checked(CheckGeneration, CheckError)
+		s.datapath.rowsNotChecked()
 		slog.Debug("ingresssidecar: read eBPF datapath generation", "err", err)
 		return
 	}
-	if gen == s.generation && !s.reapplyPending {
+	s.datapath.checked(CheckGeneration, CheckOK)
+	reason := ReapplyRetry
+	switch {
+	case gen != s.generation:
+		reason = ReapplyGenerationChanged
+		s.datapath.rowsNotChecked()
+	case s.reapplyPending:
+		s.datapath.rowsNotChecked()
+	default:
 		if s.rowsPresentLocked() {
 			return
 		}
 		slog.Warn("ingresssidecar: this sidecar's rows are missing from the shared eBPF maps, reapplying")
 		s.reapplyPending = true
+		reason = ReapplyRowsMissing
 	}
 	if s.generation == "" && !s.anyInstalledLocked() {
 		s.generation = gen // nothing written yet, so nothing to reapply
@@ -621,13 +654,16 @@ func (s *Store) checkDatapathLocked() {
 		s.metrics.Reapplies.Inc()
 	}
 	s.generation = gen
-	s.reapplyPending = !s.reapplyLocked()
+	ok := s.reapplyLocked()
+	s.reapplyPending = !ok
+	s.datapath.reapplied(reason, ok)
+	s.datapath.rowsNotChecked() // rewritten, not read back yet
 }
 
 // rowsPresentLocked reports whether the shared eBPF maps still hold the rows of
 // every VRF reapplyLocked would reapply. A failed read counts as present, for
-// the same reason a failed generation read is not acted on. Callers must hold
-// s.mu.
+// the same reason a failed generation read is not acted on, but is reported
+// as an error. Callers must hold s.mu.
 func (s *Store) rowsPresentLocked() bool {
 	var tableIDs []uint32
 	for _, v := range s.vrfs {
@@ -635,10 +671,20 @@ func (s *Store) rowsPresentLocked() bool {
 			tableIDs = append(tableIDs, v.tableID)
 		}
 	}
+	if len(tableIDs) == 0 {
+		s.datapath.rowsNotChecked() // nothing to read back
+		return true
+	}
 	present, err := s.backend.DatapathRowsPresent(tableIDs)
-	if err != nil {
+	switch {
+	case err != nil:
+		s.datapath.checked(CheckRegistrationRows, CheckError)
 		slog.Debug("ingresssidecar: read back eBPF map rows", "err", err)
 		return true
+	case !present:
+		s.datapath.checked(CheckRegistrationRows, CheckMissing)
+	default:
+		s.datapath.checked(CheckRegistrationRows, CheckOK)
 	}
 	return present
 }
