@@ -1,0 +1,7 @@
+# ns10's traffic policy: the private-nat set (../../policies/README.md), bound to
+# every attachment ns10 has, in both directions. A binding is named after
+# its VPCAttachment, which scripts/publish-attachments.sh creates.
+namespace: ns10
+resources:
+  - ../../policies/private-nat
+  - bindings.yaml

@@ -23,6 +23,7 @@ tasks:
       - "build:galactic-cni"
       - "build:galactic-nat"
       - "build:galactic-gateway"
+      - "build:galactic-controller"
       - "build:remote-host"
 
   "build:node":
@@ -72,6 +73,11 @@ tasks:
     cmds:
       - docker build --network=host --build-context network=../../../network -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
 
+  "build:galactic-controller":
+    desc: Build the galactic-controller image (traffic policy's cell role)
+    cmds:
+      - docker build --network=host --build-context network=../../../network -t galactic-controller:latest -f ../../containers/galactic-controller/Dockerfile ../..
+
   "build:remote-host":
     desc: Build the off-fabric remote host image (nginx)
     cmds:
@@ -95,6 +101,10 @@ tasks:
       # mounts a csi-driver volume, and without the driver the pod (FRR
       # included) cannot start.
       - task: "deploy:cert-manager"
+      # After cert-manager, which issues its webhook's certificate, and
+      # before deploy:galactic-router, whose traffic policy reconciler
+      # watches the CRDs it installs.
+      - task: "deploy:traffic-policy"
       - task: "deploy:fabric"
       - task: "deploy:bmp-collector"
       - task: "deploy:galactic-router"
@@ -263,6 +273,8 @@ tasks:
         load galactic-cni:latest {{.CNI_NODES}}
         load galactic-nat:latest {{.NAT_NODES}}
         load galactic-gateway:latest {{.GATEWAY_NODES}}
+        # The cell controller schedules on any untainted worker.
+        load galactic-controller:latest {{.FABRIC_NODES}}
 
   "deploy:system":
     desc: Install CRDs, namespace, and RBAC
@@ -301,6 +313,11 @@ tasks:
     desc: Install the FRR fabric DaemonSet
     cmds:
       - ./scripts/deploy-fabric.sh
+
+  "deploy:traffic-policy":
+    desc: Install the traffic policy CRDs and galactic-controller in every cluster
+    cmds:
+      - ./scripts/deploy-traffic-policy.sh
 
   "deploy:cert-manager":
     desc: Install cert-manager and its csi-driver (fabric-api certificates)
@@ -345,33 +362,44 @@ tasks:
   "deploy:ns10":
     desc: Deploy ns10 test VPC (IPv6-only, fd20 ULA)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns10 dfw sjc iad
       - ./scripts/deploy-ns.sh ns10 dfw sjc iad
+      - ./scripts/publish-attachments.sh ns10 dfw sjc iad
 
   "deploy:ns20":
     desc: Deploy ns20 test VPC (dual-stack)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns20 dfw sjc iad
       - ./scripts/deploy-ns.sh ns20 dfw sjc iad
+      - ./scripts/publish-attachments.sh ns20 dfw sjc iad
 
   "deploy:ns30":
     desc: Deploy ns30 test VPC (dfw only, 2 pods)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns30 dfw
       - ./scripts/deploy-ns.sh ns30 dfw
+      - ./scripts/publish-attachments.sh ns30 dfw
 
   "deploy:ns40":
     desc: Deploy ns40 test VPC (iad only, 2 pods)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns40 iad
       - ./scripts/deploy-ns.sh ns40 iad
+      - ./scripts/publish-attachments.sh ns40 iad
 
   "deploy:ns60":
     desc: Deploy ns60 test VPC (two VIP backends per site, on one node)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns60 dfw sjc iad
       - ./scripts/deploy-ns.sh ns60 dfw sjc iad
-      - ./scripts/publish-ns60-attachments.sh dfw sjc iad
+      - ./scripts/publish-attachments.sh ns60 dfw sjc iad
 
   "deploy:ns71":
     desc: Deploy ns71 test VPCs (overlapping ULA on one node, same-node collision fixture)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns71 sjc
       - ./scripts/deploy-ns.sh ns71 sjc
+      - ./scripts/publish-attachments.sh ns71 sjc
 
   verify:
     desc: Run all verification checks
@@ -400,6 +428,9 @@ tasks:
       - task: "verify:nat64-non-global"
       - task: "verify:nat-active-active"
       - task: "verify:scenarios"
+      # Last: it briefly rebinds and edits tenant policies, and restores
+      # them before it returns.
+      - task: "verify:traffic-policy"
 
   # First, because every check after it rides these bonds: a member that
   # never joined its aggregate leaves everything else passing over the
@@ -1104,6 +1135,13 @@ tasks:
       - task: "verify:ns20"
       - task: "verify:ns30"
       - task: "verify:ns40"
+
+  # Not idempotent while it runs: it edits ns60's dfw policy and unbinds
+  # ns30/private-b's ingress for a moment, and restores both on exit.
+  "verify:traffic-policy":
+    desc: Verify every tenant binding is installed and each path forwards what it grants and drops what it does not
+    cmds:
+      - ./scripts/verify-traffic-policy.sh
 
   "verify:ns10":
     desc: Verify ns10 ping (IPv6-only, 3-site mesh)

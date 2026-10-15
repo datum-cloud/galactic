@@ -17,6 +17,12 @@ for the full per-binary ADD sequence). The `galactic-router` controller then
 advertises each pod's EVPN route to the route reflector, distributing
 reachability across sites.
 
+The lab enforces interface traffic policy, so each tenant also binds every
+attachment to a policy set in both directions (`resources/tenants/<ns>/policy/`,
+see `resources/tenants/policies/README.md`), and `deploy:nsNN` publishes each
+attachment's status after its pods start (`scripts/publish-attachments.sh`). A
+pod's interface forwards nothing until then.
+
 They differ only in scope and addressing:
 
 | VPC    | Sites                   | Address families             | VRF interface | Notes                                                                                                                                                                                                                                                                            |

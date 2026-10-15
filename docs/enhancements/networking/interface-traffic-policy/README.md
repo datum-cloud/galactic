@@ -777,7 +777,9 @@ enforcement to 6.8, which the pull requests call out.
 
 Default deny is a deliberate behavior change. The enforcement mode in
 `tp_state` is `off`, `audit` or `enforce`, set per node by
-`GALACTIC_CNI_TRAFFIC_POLICY` and defaulting to `off` until the final change.
+`GALACTIC_CNI_TRAFFIC_POLICY`. It defaults to `off`; only the containerlab lab
+enforces by default. [docs/traffic-policy/rollout.md](../../../traffic-policy/rollout.md)
+is the operator's step-by-step guide.
 
 - `off` changes nothing. Maps and programs are loaded, but `tp_capture` and
   `tp_decide` return immediately.

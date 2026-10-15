@@ -60,6 +60,9 @@ data flow, module reference, known constraints):
 - [traffic-policy/controller.md](traffic-policy/controller.md) —
   `galactic-controller --role=cell`: the TrafficPolicy webhook, the reserved
   default policy, binding resolution status, flags and install order.
+- [traffic-policy/rollout.md](traffic-policy/rollout.md) — turning traffic
+  policy on in a cell: install order, writing grants, auditing with the
+  counters before enforcing, and backing out.
 - [traffic-policy/node.md](traffic-policy/node.md) — galactic-router's node
   side: enabling it, what each binding applies, per-node status, the
   `galactic_cni_traffic_policy_*` metrics and the `policy explain` and

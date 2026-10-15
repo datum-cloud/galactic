@@ -1,0 +1,47 @@
+# Tenants that talk privately across the fabric and egress through the NAT
+# shards: ns10 and ns20 (cross-site pings, NAT66/NAT64 egress, MSS clamping,
+# path MTU errors from the node), ns30 (two attachments on dfw's compute
+# node, which verify:nat-active-active spreads across dfw's shards with the
+# rest) and ns71 (the NAT collision fixture).
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: lab-egress
+spec:
+  rules:
+    - name: allow-private
+      action: Allow
+      match:
+        path: Private
+    - name: allow-nat
+      action: Allow
+      match:
+        path: PublicNAT
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: lab-ingress
+spec:
+  rules:
+    # verify:traffic-policy's negative check on the Private path: a TCP
+    # listener on port 9 is never reached, while the same listener on another
+    # port is.
+    - name: deny-discard
+      action: Deny
+      match:
+        path: Private
+        protocol: TCP
+        destinationPorts:
+          - start: 9
+            end: 9
+    # Also what the node itself sends the workload, such as a Packet Too Big
+    # (verify:pmtu).
+    - name: allow-private
+      action: Allow
+      match:
+        path: Private
+    - name: allow-nat-returns
+      action: Allow
+      match:
+        path: PublicNAT
