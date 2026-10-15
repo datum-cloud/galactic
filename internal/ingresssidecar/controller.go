@@ -91,10 +91,19 @@ var (
 // running Inventory without the seed would reopen the race SeedFromAPI closes.
 // A slice that fails to apply does not, since the store still records it as
 // desired and the sweep both retries it and keeps cleaning up everything else.
-func RunStartup(ctx context.Context, reader client.Reader, store *Store, interval time.Duration) {
+//
+// metrics, which may be nil, reports each stage's progress and the sweep's.
+func RunStartup(ctx context.Context, reader client.Reader, store *Store, interval time.Duration,
+	metrics *LifecycleMetrics,
+) {
 	delay := seedRetryInitial
 	for {
+		metrics.setStage(StageSeed, StatusRunning)
 		err := SeedFromAPI(ctx, reader, store)
+		if ctx.Err() != nil {
+			return // shutting down: an interrupted attempt is not a result
+		}
+		metrics.attempt(StageSeed, err)
 		if err == nil {
 			break
 		}
@@ -106,15 +115,33 @@ func RunStartup(ctx context.Context, reader client.Reader, store *Store, interva
 		}
 		delay = min(2*delay, seedRetryMax)
 	}
-	if err := store.Inventory(ctx, time.Now()); err != nil {
-		slog.Error("ingresssidecar: startup inventory", "error", err)
-	} else if err := store.PruneForeignDatapath(); err != nil {
-		// Not retried: the rows it leaves only hold map slots until the next
-		// sidecar pod's startup prune, or until the host's installer judges
-		// every sidecar on this node gone.
-		slog.Error("ingresssidecar: startup prune", "error", err)
+
+	metrics.setStage(StageInventory, StatusRunning)
+	err := store.Inventory(ctx, time.Now())
+	if ctx.Err() != nil {
+		return
 	}
-	RunSweeper(ctx, store, interval)
+	metrics.attempt(StageInventory, err)
+	if err != nil {
+		slog.Error("ingresssidecar: startup inventory", "error", err)
+		metrics.setStage(StagePrune, StatusSkipped)
+	} else {
+		metrics.setStage(StagePrune, StatusRunning)
+		removed, err := store.PruneForeignDatapath()
+		metrics.pruned(removed)
+		if ctx.Err() != nil {
+			return
+		}
+		metrics.attempt(StagePrune, err)
+		if err != nil {
+			// Not retried: the rows it leaves only hold map slots until the
+			// next sidecar pod's startup prune, or until the host's installer
+			// judges every sidecar on this node gone.
+			slog.Error("ingresssidecar: startup prune", "error", err)
+		}
+	}
+	metrics.startupComplete()
+	RunSweeper(ctx, store, interval, metrics)
 }
 
 // RunSweeper blocks, sweeping the store on a fixed interval until ctx is done.
@@ -123,8 +150,8 @@ func RunStartup(ctx context.Context, reader client.Reader, store *Store, interva
 // over many routes, not one watched object's transition.
 //
 // Callers must not start it until the API seed and the store's inventory pass
-// have both run.
-func RunSweeper(ctx context.Context, store *Store, interval time.Duration) {
+// have both run. metrics, which may be nil, records each completed sweep.
+func RunSweeper(ctx context.Context, store *Store, interval time.Duration, metrics *LifecycleMetrics) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -132,7 +159,9 @@ func RunSweeper(ctx context.Context, store *Store, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			start := metrics.sweepStart()
 			store.Sweep(ctx, time.Now())
+			metrics.sweepDone(start)
 		}
 	}
 }

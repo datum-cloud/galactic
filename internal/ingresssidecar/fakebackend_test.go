@@ -42,6 +42,11 @@ type fakeBackend struct {
 	// failPrune, if set, is the error it returns.
 	pruned    []map[uint32]struct{}
 	failPrune error
+	// pruneRemoved is how many rows PruneDatapath reports removing, even when
+	// failPrune is set, as a prune failing part way through does.
+	pruneRemoved int
+	// failListVRFs fails Inventory's first step.
+	failListVRFs error
 
 	// rowsMissing, if set, is the set of VRF tables whose rows
 	// DatapathRowsPresent reports absent, standing in for another writer
@@ -120,6 +125,9 @@ func (f *fakeBackend) RemoveRoute(prefix *net.IPNet, tableID uint32) error {
 func (f *fakeBackend) ListVRFs() ([]VRFInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failListVRFs != nil {
+		return nil, f.failListVRFs
+	}
 	infos := make([]VRFInfo, 0, len(f.vrfs))
 	for vpc, id := range f.vrfs {
 		infos = append(infos, VRFInfo{VPC: vpc, TableID: id})
@@ -151,7 +159,7 @@ func (f *fakeBackend) PruneDatapath(keepTableIDs map[uint32]struct{}) (int, erro
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "PruneDatapath")
 	f.pruned = append(f.pruned, keepTableIDs)
-	return 0, f.failPrune
+	return f.pruneRemoved, f.failPrune
 }
 
 func (f *fakeBackend) DatapathRowsPresent(tableIDs []uint32) (bool, error) {

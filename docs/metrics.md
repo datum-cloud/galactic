@@ -256,17 +256,48 @@ time() - galactic_cni_egress_last_successful_sweep_timestamp_seconds
 ## VPC ingress — `galactic_ingress_sidecar_*`
 
 `galactic-vrf` installs per-VPC VRF devices and per-pod seg6 egress routes on
-ingress nodes.
+ingress nodes. It runs in the ingress proxy's pod, so each sidecar exports its
+own copy of these.
 
-| Metric                                                | Type      | Labels | Meaning                                                                                    |
-|-------------------------------------------------------|-----------|--------|--------------------------------------------------------------------------------------------|
-| `galactic_ingress_sidecar_vrf_active`                 | gauge     | none   | VRF devices installed                                                                      |
-| `galactic_ingress_sidecar_route_active`               | gauge     | none   | seg6 egress routes installed                                                               |
-| `galactic_ingress_sidecar_vrf_teardown_pending`       | gauge     | none   | VRFs past their last pod, waiting out the teardown grace period                            |
-| `galactic_ingress_sidecar_route_teardown_pending`     | gauge     | none   | Routes whose EndpointSlice is gone, waiting out the teardown grace period                  |
-| `galactic_ingress_sidecar_reconcile_errors_total`     | counter   | `kind` | `ensure_vrf`, `ensure_route`, `remove_vrf`, `remove_route`, `reapply_vrf`, `reapply_route` |
-| `galactic_ingress_sidecar_reconcile_duration_seconds` | histogram | none   | Duration of each desired-state apply (default buckets)                                     |
-| `galactic_ingress_sidecar_reapply_total`              | counter   | none   | Full reapplies after the shared eBPF datapath reloaded                                     |
+| Metric                                                | Type      | Labels | Meaning                                                                                                                                              |
+| ----------------------------------------------------- | --------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_ingress_sidecar_vrf_active`                 | gauge     | none   | VRF devices the store tracks as installed, including those draining. Store state, not a kernel check                                                 |
+| `galactic_ingress_sidecar_route_active`               | gauge     | none   | Installed route claims, one per EndpointSlice, including draining ones. Claims sharing a prefix share one kernel route                               |
+| `galactic_ingress_sidecar_vrf_teardown_pending`       | gauge     | none   | VRFs past their last route at the last sweep: within their grace period, or whose removal failed                                                     |
+| `galactic_ingress_sidecar_route_teardown_pending`     | gauge     | none   | Route claims whose EndpointSlice is gone at the last sweep: within their grace period, or whose removal failed                                       |
+| `galactic_ingress_sidecar_reconcile_errors_total`     | counter   | `kind` | Backend errors: `ensure_vrf`, `ensure_route`, `remove_vrf`, `remove_route`, `reapply_vrf`, `reapply_route`, `prune_datapath`. No attempt denominator |
+| `galactic_ingress_sidecar_reconcile_duration_seconds` | histogram | none   | Each desired-state update, including waiting for the store's lock (default buckets). Not sweeps                                                      |
+| `galactic_ingress_sidecar_reapply_total`              | counter   | none   | Reapply passes: after a datapath reload, after this sidecar's rows went missing, and retries of a failed pass. Not unique reloads                    |
+
+`route_active` does not measure an apply backlog: a route stays counted as
+installed while a later update to it is still unapplied.
+
+### Startup and sweep
+
+A sidecar serves `/metrics` from the moment it starts, before its startup has
+finished and whether or not its sweep is still running, so `up` and the
+gauges above cannot tell a working sidecar from a stuck one. Startup runs
+three stages in order: list the selected EndpointSlices and apply them
+(`seed`, retried until the list succeeds), adopt existing host state
+(`inventory`), and remove an earlier pod's rows from the shared eBPF maps
+(`prune`, skipped after a failed inventory). Neither inventory nor prune is
+retried, and the sweep starts either way.
+
+| Metric                                                            | Type      | Labels            | Meaning                                                                                                                                                     |
+| ----------------------------------------------------------------- | --------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_ingress_sidecar_startup_stage_status`                   | gauge     | `stage`, `status` | 1 for each stage's current status, 0 for its others. `stage`: `seed`, `inventory`, `prune`. `status`: `pending`, `running`, `complete`, `failed`, `skipped` |
+| `galactic_ingress_sidecar_startup_attempts_total`                 | counter   | `stage`, `result` | Completed stage attempts, `result` `success` or `error`. Only the seed is retried                                                                           |
+| `galactic_ingress_sidecar_startup_complete`                       | gauge     | none              | 1 once the seed succeeded, inventory and prune were handled, and the sweep started. A failed inventory or prune still reports 1                             |
+| `galactic_ingress_sidecar_sweep_last_completed_timestamp_seconds` | gauge     | none              | Unix time the last sweep finished, whatever its operations' results; 0 before the first                                                                     |
+| `galactic_ingress_sidecar_sweep_duration_seconds`                 | histogram | none              | Each sweep, including waiting for the store's lock (1ms to 120s). One overrunning its interval absorbs the ticks it missed                                  |
+| `galactic_ingress_sidecar_sweep_interval_seconds`                 | gauge     | none              | Configured time between sweeps                                                                                                                              |
+| `galactic_ingress_sidecar_teardown_grace_seconds`                 | gauge     | none              | Configured grace period, applied to a route and then, in turn, to its VRF                                                                                   |
+| `galactic_ingress_sidecar_pruned_rows_total`                      | counter   | none              | Shared eBPF map rows the startup prune removed, including any removed before it failed                                                                      |
+
+`startup_complete` is the startup procedure, not readiness: it says nothing
+about whether routes are installed or traffic flows, and a degraded start
+stays visible in `startup_stage_status`. These add 43 series per sidecar,
+fixed: no label carries a VPC, route or error.
 
 ```promql
 sum by (node, kind) (rate(galactic_ingress_sidecar_reconcile_errors_total[10m])) > 0
@@ -274,6 +305,27 @@ histogram_quantile(0.99, sum by (le, node) (rate(galactic_ingress_sidecar_reconc
 
 # Teardown backlog that never drains
 min_over_time(galactic_ingress_sidecar_vrf_teardown_pending[1h]) > 0
+
+# Startup still not complete two minutes after the sidecar process started.
+# instance and job pick the sidecar's own process, not another container's.
+galactic_ingress_sidecar_startup_complete == 0
+  and on (instance, job) (time() - process_start_time_seconds > 120)
+
+# A stage that ended badly: the inventory failed, or the prune failed or was skipped
+galactic_ingress_sidecar_startup_stage_status{status=~"failed|skipped"} == 1
+
+# Sweep stalled: the last sweep finished more than three intervals ago.
+(galactic_ingress_sidecar_sweep_last_completed_timestamp_seconds > 0)
+  and (time() - galactic_ingress_sidecar_sweep_last_completed_timestamp_seconds
+    > 3 * galactic_ingress_sidecar_sweep_interval_seconds)
+
+# Never swept: startup completed but no sweep has finished. The first sweep is
+# due one interval after startup, so alert with a "for" well beyond three
+# intervals.
+galactic_ingress_sidecar_startup_complete == 1
+  and galactic_ingress_sidecar_sweep_last_completed_timestamp_seconds == 0
+
+histogram_quantile(0.99, sum by (le, namespace, pod) (rate(galactic_ingress_sidecar_sweep_duration_seconds_bucket[10m])))
 ```
 
 ## Edge load balancer — `galactic_edge_*`

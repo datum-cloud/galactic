@@ -54,6 +54,9 @@ func SeedFromAPI(ctx context.Context, reader client.Reader, store *Store) error 
 	}
 
 	for i := range list.Items {
+		if err := ctx.Err(); err != nil {
+			return err // interrupted part way: not a completed seed
+		}
 		slice := &list.Items[i]
 		desired, err := BuildDesiredRoute(slice)
 		if err != nil {
