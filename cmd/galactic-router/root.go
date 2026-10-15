@@ -27,6 +27,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/hash"
@@ -38,6 +39,7 @@ import (
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/gobgp"
 	"go.datum.net/galactic/internal/serviceroute"
+	tpnode "go.datum.net/galactic/internal/trafficpolicy/node"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -83,6 +85,7 @@ func runCmd(cfg *config.RouterConfig) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(cloudv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(galacticv1alpha1.AddToScheme(scheme))
 
 	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
@@ -131,7 +134,7 @@ func runCmd(cfg *config.RouterConfig) error {
 	}()
 
 	// Pre-flight RBAC check.
-	checkWatchPermissions(mgr)
+	checkWatchPermissions(mgr, cfg.TrafficPolicy)
 
 	// Open this node's own vip_xlat_table handle for the ServiceVIPBinding
 	// reconciler's tap branch. The datapath program is loaded and attached
@@ -278,6 +281,12 @@ func runCmd(cfg *config.RouterConfig) error {
 		ctrl.Log.Info("route reflector mode: skipping the node-local ServiceRoutePolicy controller")
 	}
 
+	if cfg.TrafficPolicy {
+		if err := setupTrafficPolicyController(mgr, nodeName); err != nil {
+			return err
+		}
+	}
+
 	// Register GC controller for cleaning up orphaned BGP CRDs and VRFs.
 	gcRec := &controller.GCReconciler{
 		Client:    mgr.GetClient(),
@@ -389,6 +398,19 @@ func setupVIPBindingControllers(
 	return nil
 }
 
+// setupTrafficPolicyController registers the node's traffic policy
+// reconciler and exports its counters on the manager's metrics endpoint.
+func setupTrafficPolicyController(mgr ctrl.Manager, nodeName string) error {
+	rec := &tpnode.Reconciler{Client: mgr.GetClient(), NodeName: nodeName, PinDir: attach.PinDir}
+	if err := rec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup traffic policy controller: %w", err)
+	}
+	if err := ctrlmetrics.Registry.Register(rec); err != nil {
+		return fmt.Errorf("register traffic policy metrics: %w", err)
+	}
+	return nil
+}
+
 // serviceRouteControllerEnabled reports whether this router programs
 // node-local service routes. Route reflectors have no CNI attach point and
 // therefore no service route maps.
@@ -465,6 +487,8 @@ func newRootCommand() *cobra.Command {
 		"Cleanup interval")
 	cmd.Flags().Bool("service-frontend-enabled", false,
 		"Enable consumer-facing private-service address translation")
+	cmd.Flags().Bool("traffic-policy", false,
+		"Enforce TrafficPolicy on this node's tenant interfaces; needs the galactic.datumapis.com CRDs")
 	cmd.Flags().String("bmp-stations", "",
 		"Comma-separated BMP collectors to stream to, each host:port; empty disables BMP")
 	cmd.Flags().String("bmp-policy", config.DefaultRouterBMPPolicy,
@@ -474,6 +498,6 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 
-	cmd.AddCommand(newVIPCommand())
+	cmd.AddCommand(newVIPCommand(), newPolicyCommand())
 	return cmd
 }

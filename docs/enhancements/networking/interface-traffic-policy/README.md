@@ -699,23 +699,33 @@ TrafficPolicyReconciler:
 - compiles each direction, publishes and retires snapshots as above;
 - reports the applied identity and generation in `status.nodes`.
 
-It reconciles on start, after every informer resync, and on a periodic sweep
-that also removes outer-map rows for interfaces that no longer exist. It writes
-no status on VPCAttachment.
+It reconciles on start, on every watch event, and every five minutes. After a
+restart it adopts each snapshot whose token, policy UID and generation still
+match, so counters continue; one no attachment claims within a resync is
+unbound and its rows freed. galactic-cni removes the outer-map rows of
+interfaces that no longer exist. It writes no status on VPCAttachment. It runs
+only when `GALACTIC_ROUTER_TRAFFIC_POLICY` is set, because it watches CRDs a
+cluster may not have installed.
 
 A diagnostic command, `galactic-router policy show <namespace>/<attachment>`,
-prints both bindings, the applied generations, the compiled entries and each
-rule's counters. `galactic-router policy explain` evaluates a packet tuple,
-direction and path against a policy file or a live binding using the Go
-evaluator, and never touches live counters.
+prints both bindings, this node's status entry, the bound snapshots and each
+rule's counters. `galactic-router policy explain` evaluates a packet tuple and
+path against a policy file or a live policy with both the Go evaluator and the
+compiled entries, fails if they disagree, and never touches live counters.
 
 ### Metrics
 
-Exported from galactic-cni's existing `:9180/metrics` endpoint, which already
-has a PodMonitor:
+Exported from galactic-router's existing `:9179/metrics` endpoint, which
+already has a PodMonitor. galactic-router allocates every counter row and
+knows which rule, policy and interface it belongs to, so it is the one
+process that can label a row without a second lookup table. The
+`galactic_cni_` prefix names the datapath the counters belong to, not the
+process that serves them. A row the collector cannot read is left out, not
+reported as zero, and counted in the `galactic_cni_traffic_policy_counter_read_errors`
+gauge.
 
-| Metric                                                 | Labels                                                                                            |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| Metric                                                    | Labels                                                                                            |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `galactic_cni_traffic_policy_rule_hits_total`          | namespace, vpc, attachment, interface, interface_uid, direction, policy, policy_uid, rule, action |
 | `galactic_cni_traffic_policy_rule_bytes_total`         | the same                                                                                          |
 | `galactic_cni_traffic_policy_fallback_packets_total`   | namespace, vpc, attachment, interface, interface_uid, direction, reason                           |
@@ -726,8 +736,9 @@ has a PodMonitor:
 - `reason` on the fallback metrics is one of `no_match`,
   `policy_unavailable`, `parse_error` or `classification_error`.
 - `interface_uid` is the VPCAttachment UID.
-- The collector resolves labels from the snapshot metadata galactic-router
-  writes beside each pinned binding, never from packet fields.
+- The collector labels each row from what galactic-router installed, never
+  from packet fields. After a restart, a row counts on in the kernel and is
+  exported again once its interface is reconciled and its snapshot adopted.
 - Each evaluation produces exactly one outcome: a winning rule's hit and bytes,
   or one fallback pair. The one exception is a packet captured while the mode
   was off and decided just after it turned on, at most one per CPU at the

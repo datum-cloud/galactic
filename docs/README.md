@@ -60,6 +60,10 @@ data flow, module reference, known constraints):
 - [traffic-policy/controller.md](traffic-policy/controller.md) —
   `galactic-controller --role=cell`: the TrafficPolicy webhook, the reserved
   default policy, binding resolution status, flags and install order.
+- [traffic-policy/node.md](traffic-policy/node.md) — galactic-router's node
+  side: enabling it, what each binding applies, per-node status, the
+  `galactic_cni_traffic_policy_*` metrics and the `policy explain` and
+  `policy show` diagnostics.
 - [api/galactic.md](api/galactic.md) — the generated `galactic.datumapis.com`
   API reference (TrafficPolicy, TrafficPolicyBinding).
 - [cni/README.md](cni/README.md) — entry point for the `galactic-cni` docs

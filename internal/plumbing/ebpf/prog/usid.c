@@ -1943,12 +1943,17 @@ struct tp_entry {
 	__u64 dst_mask[2];
 };
 
-// struct tp_header is slot 0 of a snapshot, the same size as an entry.
+// struct tp_header is slot 0 of a snapshot, the same size as an entry. The
+// datapath reads only the token, counter_base and count; generation and
+// policy_uid record which policy the snapshot was compiled from, so a
+// restarted galactic-router can adopt it and its counter rows.
 struct tp_header {
 	__u64 policy_token;
 	__u32 counter_base;
 	__u32 count;
-	__u8 pad[72];
+	__u64 generation;
+	__u8 policy_uid[16];
+	__u8 pad[48];
 };
 
 union tp_slot {
