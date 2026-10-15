@@ -481,14 +481,14 @@ triggered it.
   finds an address something else provisioned, so VRFs waiting in
   `awaiting_address` and `resolve{result="not_provisioned"}` counting up on
   every attempt are expected there.
-- A VRF whose advertisement was withdrawn for teardown, whose removal then
-  failed, and whose VPC came back still reads `published` with nothing
-  published, until the publication-retry fix lands (it clears the flag on
-  withdrawal and republishes).
+- A withdrawal does not clear a VRF's published state. A VRF withdrawn
+  for teardown that then survives, because its removal failed, and whose
+  VPC comes back reads `published` with nothing published, and nothing
+  republishes it.
 - A VRF waits from when it is first counted unpublished, through retries,
   until it is published or starts draining. A failed withdrawal is counted
   and teardown carries on; garbage collection removes the advertisement it
-  leaves. These add 12 fixed series per sidecar.
+  leaves. These add 13 fixed series per sidecar.
 
 ```promql
 # Gateway publication pending for more than a minute, only where the sidecar
