@@ -455,6 +455,54 @@ galactic_ingress_sidecar_datapath_check_status{status=~"missing|error"} == 1
 sum by (namespace, pod, reason) (increase(galactic_ingress_sidecar_datapath_reapply_total[10m]))
 ```
 
+### Return-path gateway
+
+With a node name configured, the sidecar publishes one return-path gateway
+advertisement per VPC, so a backend's replies have a route back to this
+node: it resolves the VPC's gateway address, then writes a
+`BGPAdvertisement`. Either step can fail without failing the route that
+triggered it.
+
+| Metric                                                              | Type    | Labels                | Meaning                                                                                          |
+| ------------------------------------------------------------------- | ------- | --------------------- | ------------------------------------------------------------------------------------------------ |
+| `galactic_ingress_sidecar_gateway_publication_enabled`              | gauge   | none                  | 1 when the sidecar publishes return-path advertisements                                          |
+| `galactic_ingress_sidecar_gateway_address_assignment_enabled`       | gauge   | none                  | 1 when the sidecar assigns each VPC's gateway address from its own gateway prefix                |
+| `galactic_ingress_sidecar_gateway_vrfs`                             | gauge   | `state`               | Installed, non-draining VRFs by `state`: `awaiting_address`, `awaiting_publication`, `published` |
+| `galactic_ingress_sidecar_gateway_oldest_pending_timestamp_seconds` | gauge   | none                  | Unix time the longest-unpublished VRF started waiting; 0 when none waits                         |
+| `galactic_ingress_sidecar_gateway_operations_total`                 | counter | `operation`, `result` | `resolve` (`success`, `error`, `not_provisioned`), `publish` and `withdraw` (`success`, `error`) |
+
+- `published` is local publication only: the advertisement was written.
+  It does not show the route reached any BGP peer, or that the
+  advertisement still exists; nothing re-checks it after publication.
+- With publication disabled every `gateway_vrfs` series is 0, so check
+  `gateway_publication_enabled` before reading 0 as healthy. Disabled,
+  idle (enabled with no VRFs), waiting and published are all distinct.
+- With publication enabled but address assignment off, the sidecar only
+  finds an address something else provisioned, so VRFs waiting in
+  `awaiting_address` and `resolve{result="not_provisioned"}` counting up on
+  every attempt are expected there.
+- A VRF whose advertisement was withdrawn for teardown, whose removal then
+  failed, and whose VPC came back still reads `published` with nothing
+  published, until the publication-retry fix lands (it clears the flag on
+  withdrawal and republishes).
+- A VRF waits from when it is first counted unpublished, through retries,
+  until it is published or starts draining. A failed withdrawal is counted
+  and teardown carries on; garbage collection removes the advertisement it
+  leaves. These add 12 fixed series per sidecar.
+
+```promql
+# Gateway publication pending for more than a minute, only where the sidecar
+# both publishes and assigns the address itself
+(time() - galactic_ingress_sidecar_gateway_oldest_pending_timestamp_seconds > 60)
+  and (galactic_ingress_sidecar_gateway_oldest_pending_timestamp_seconds > 0)
+  and on (namespace, pod) (galactic_ingress_sidecar_gateway_publication_enabled == 1)
+  and on (namespace, pod) (galactic_ingress_sidecar_gateway_address_assignment_enabled == 1)
+
+# Resolve and publish failures, as opposed to waiting for an address
+sum by (namespace, pod, operation) (
+  rate(galactic_ingress_sidecar_gateway_operations_total{result="error"}[10m]))
+```
+
 ## Edge load balancer — `galactic_edge_*`
 
 `galactic-gateway`'s XDP DSR load balancer on gateway-role edge nodes.

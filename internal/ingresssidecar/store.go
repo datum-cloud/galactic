@@ -57,6 +57,11 @@ type vrfState struct {
 	// or publish failure retries on the next SetDesired rather than being
 	// abandoned for the VRF's remaining lifetime.
 	gatewayPublished bool
+	// gatewayState is where this VRF's publication stands (GatewayAwaiting*,
+	// GatewayPublished), and gatewayWaitingSince when it last started waiting
+	// while counted. Both are bookkeeping for GatewayMetrics only.
+	gatewayState        string
+	gatewayWaitingSince time.Time
 }
 
 // Store is the in-process desired-versus-applied reconciler for this sidecar's
@@ -77,6 +82,16 @@ type Store struct {
 	// SetGatewayPublisher for what enabling them does.
 	gatewayPublisher GatewayPublisher
 	gatewayResolver  GatewayAddressResolver
+
+	// gatewayMetrics is nil unless SetGatewayMetrics was called.
+	// gatewayCounts holds each counted VRF's state, kept in step at every
+	// change, and gatewayOldest the longest wait, rescanned over the VRFs
+	// (one per VPC) only when the VRF holding it stops waiting
+	// (gatewayOldestDirty).
+	gatewayMetrics     *GatewayMetrics
+	gatewayCounts      map[string]int
+	gatewayOldest      time.Time
+	gatewayOldestDirty bool
 
 	routes map[string]*routeState
 	vrfs   map[string]*vrfState
@@ -239,6 +254,88 @@ func (s *Store) SetGatewayPublisher(publisher GatewayPublisher, resolver Gateway
 	s.gatewayResolver = resolver
 }
 
+// SetGatewayMetrics has this Store report gateway publication state and
+// operations to m, counting the VRFs it already tracks. Call it after
+// SetGatewayPublisher.
+func (s *Store) SetGatewayMetrics(m *GatewayMetrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gatewayMetrics = m
+	s.gatewayCounts = map[string]int{}
+	s.gatewayOldest, s.gatewayOldestDirty = time.Time{}, false
+	for _, v := range s.vrfs {
+		v.gatewayWaitingSince = time.Time{}
+		s.gatewayChangedLocked(v, "")
+	}
+	s.publishGatewayStateLocked()
+}
+
+// gatewayCounted is the state a VRF contributes to gateway_vrfs: none while
+// publication is disabled, before the VRF is installed, or while it drains.
+func (s *Store) gatewayCounted(v *vrfState) string {
+	if s.gatewayPublisher == nil || s.gatewayResolver == nil || !v.installed || !v.absentSince.IsZero() {
+		return ""
+	}
+	if v.gatewayPublished {
+		return GatewayPublished
+	}
+	if v.gatewayState == "" {
+		return GatewayAwaitingAddress
+	}
+	return v.gatewayState
+}
+
+// gatewayChangedLocked updates the gateway counts after v changed from
+// contributing before. Callers must hold s.mu.
+func (s *Store) gatewayChangedLocked(v *vrfState, before string) {
+	if s.gatewayMetrics == nil {
+		return
+	}
+	after := s.gatewayCounted(v)
+	if before == after {
+		return
+	}
+	if before != "" {
+		s.gatewayCounts[before]--
+	}
+	if after != "" {
+		s.gatewayCounts[after]++
+	}
+	waitedBefore := before != "" && before != GatewayPublished
+	waitsAfter := after != "" && after != GatewayPublished
+	switch {
+	case waitsAfter && !waitedBefore:
+		v.gatewayWaitingSince = s.gatewayMetrics.clock()
+		if s.gatewayOldest.IsZero() || v.gatewayWaitingSince.Before(s.gatewayOldest) {
+			s.gatewayOldest = v.gatewayWaitingSince
+		}
+	case waitedBefore && !waitsAfter:
+		if v.gatewayWaitingSince.Equal(s.gatewayOldest) {
+			s.gatewayOldestDirty = true
+		}
+		v.gatewayWaitingSince = time.Time{}
+	}
+	s.publishGatewayStateLocked()
+}
+
+// publishGatewayStateLocked publishes the gateway counts and the oldest wait.
+// Callers must hold s.mu.
+func (s *Store) publishGatewayStateLocked() {
+	if s.gatewayMetrics == nil {
+		return
+	}
+	if s.gatewayOldestDirty {
+		s.gatewayOldest, s.gatewayOldestDirty = time.Time{}, false
+		for _, v := range s.vrfs {
+			if !v.gatewayWaitingSince.IsZero() &&
+				(s.gatewayOldest.IsZero() || v.gatewayWaitingSince.Before(s.gatewayOldest)) {
+				s.gatewayOldest = v.gatewayWaitingSince
+			}
+		}
+	}
+	s.gatewayMetrics.publish(s.gatewayCounts, s.gatewayOldest)
+}
+
 // publishGateway attempts to publish vpc's return-path advertisement once, the
 // first time its VRF is created. Called with s.mu held.
 //
@@ -252,19 +349,28 @@ func (s *Store) publishGateway(ctx context.Context, vpc string, v *vrfState) {
 	if s.gatewayPublisher == nil || s.gatewayResolver == nil || v.gatewayPublished {
 		return
 	}
+	before := s.gatewayCounted(v)
+	defer func() { s.gatewayChangedLocked(v, before) }()
 	addr, err := s.gatewayResolver.ResolveGatewayAddress(vpc)
 	if err != nil {
+		v.gatewayState = GatewayAwaitingAddress
 		if errors.Is(err, ErrGatewayAddressNotProvisioned) {
+			s.gatewayMetrics.operation(GatewayOpResolve, GatewayNotProvisioned)
 			slog.Debug("ingresssidecar: no gateway address provisioned yet, will retry", "vpc", vpc, "err", err)
 		} else {
+			s.gatewayMetrics.operation(GatewayOpResolve, GatewayError)
 			slog.Warn("ingresssidecar: resolve gateway address", "vpc", vpc, "err", err)
 		}
 		return
 	}
+	s.gatewayMetrics.operation(GatewayOpResolve, GatewaySuccess)
+	v.gatewayState = GatewayAwaitingPublication
 	if err := s.gatewayPublisher.PublishGateway(ctx, vpc, addr); err != nil {
+		s.gatewayMetrics.operation(GatewayOpPublish, GatewayError)
 		slog.Warn("ingresssidecar: publish gateway advertisement", "vpc", vpc, "err", err)
 		return
 	}
+	s.gatewayMetrics.operation(GatewayOpPublish, GatewaySuccess)
 	v.gatewayPublished = true
 }
 
@@ -279,8 +385,11 @@ func (s *Store) withdrawGateway(ctx context.Context, vpc string, v *vrfState) {
 		return
 	}
 	if err := s.gatewayPublisher.WithdrawGateway(ctx, vpc); err != nil {
+		s.gatewayMetrics.operation(GatewayOpWithdraw, GatewayError)
 		slog.Warn("ingresssidecar: withdraw gateway advertisement", "vpc", vpc, "err", err)
+		return
 	}
+	s.gatewayMetrics.operation(GatewayOpWithdraw, GatewaySuccess)
 }
 
 // SetDesired updates the desired state for the route identified by key, an
@@ -349,7 +458,9 @@ func (s *Store) applyLocked(ctx context.Context, r *routeState) error {
 		v = &vrfState{}
 		s.vrfs[r.vpc] = v
 	}
+	before := s.gatewayCounted(v)
 	v.absentSince = time.Time{} // this VPC has a live pod again
+	s.gatewayChangedLocked(v, before)
 
 	if !v.installed {
 		tableID, verr := s.backend.EnsureVRF(r.vpc)
@@ -358,8 +469,10 @@ func (s *Store) applyLocked(ctx context.Context, r *routeState) error {
 			s.countError("ensure_vrf")
 			return fmt.Errorf("ensure VRF for vpc %s: %w", r.vpc, verr)
 		}
+		beforeInstall := s.gatewayCounted(v)
 		v.installed = true
 		v.tableID = tableID
+		s.gatewayChangedLocked(v, beforeInstall)
 		s.vrfActiveDelta(1)
 	}
 	s.publishGateway(ctx, r.vpc, v)
@@ -459,11 +572,15 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 
 	for vpc, v := range s.vrfs {
 		if _, live := liveVPCs[vpc]; live {
+			before := s.gatewayCounted(v)
 			v.absentSince = time.Time{}
+			s.gatewayChangedLocked(v, before)
 			continue
 		}
 		if v.absentSince.IsZero() {
+			before := s.gatewayCounted(v)
 			v.absentSince = now
+			s.gatewayChangedLocked(v, before)
 			pendingVRFs++
 			continue
 		}

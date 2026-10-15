@@ -126,6 +126,10 @@ func runCmd(cfg *config.VRFConfig) error {
 			"return-path gateway advertisement publishing is disabled", config.EnvVRFNodeName)
 	}
 
+	gateway := ingresssidecar.NewGatewayMetrics(cfg.NodeName != "", cfg.NodeName != "" && cfg.GatewayPrefix != "")
+	gateway.MustRegister(ctrlmetrics.Registry)
+	store.SetGatewayMetrics(gateway)
+
 	if err := (&ingresssidecar.Reconciler{Store: store}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup EndpointSlice controller: %w", err)
 	}
