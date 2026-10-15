@@ -7,6 +7,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
 )
 
 const (
@@ -217,5 +219,29 @@ func TestGatewayConfigProcSysPath(t *testing.T) {
 	t.Setenv(EnvGatewayProcSysPath, testHostProcSys)
 	if got := NewGatewayConfig().ProcSysPath; got != testHostProcSys {
 		t.Errorf("ProcSysPath = %q with %s set, want %s", got, EnvGatewayProcSysPath, testHostProcSys)
+	}
+}
+
+// TestGatewayConfigIPv4VIPs covers the IPv4 VIP switch: off by default, on
+// from the environment, and on from the flag over the environment.
+func TestGatewayConfigIPv4VIPs(t *testing.T) {
+	if NewGatewayConfig().IPv4VIPs {
+		t.Error("IPv4VIPs = true by default, want false")
+	}
+	t.Setenv(EnvGatewayIPv4VIPs, "true")
+	if !NewGatewayConfig().IPv4VIPs {
+		t.Error("IPv4VIPs = false with the env set to true")
+	}
+
+	t.Setenv(EnvGatewayIPv4VIPs, "false")
+	cfg := NewGatewayConfig()
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.Bool("gateway-ipv4-vips", false, "")
+	if err := flags.Parse([]string{"--gateway-ipv4-vips=true"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BindFlags(flags)
+	if !cfg.IPv4VIPs {
+		t.Error("IPv4VIPs = false with the flag set to true over the env")
 	}
 }

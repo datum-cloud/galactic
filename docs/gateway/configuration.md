@@ -159,6 +159,7 @@ flags, or a combination of both (CLI flags take precedence), with the
 | Internal interfaces | `GALACTIC_GATEWAY_INTERNAL_INTERFACES` | `--gateway-internal-interfaces` | —           | No            |
 | XDP attach mode     | `GALACTIC_GATEWAY_XDP_ATTACH`          | `--gateway-xdp-attach`          | `dispatch`  | No            |
 | Datapath enabled    | `GALACTIC_GATEWAY_DATAPATH_ENABLED`    | `--gateway-datapath-enabled`    | `true`      | No            |
+| IPv4 VIPs           | `GALACTIC_GATEWAY_IPV4_VIPS`           | `--gateway-ipv4-vips`           | `false`     | No            |
 | Procfs sysctl root  | `GALACTIC_GATEWAY_PROC_SYS_PATH`       | `--gateway-proc-sys-path`       | `/proc/sys` | No            |
 | Metrics port        | `GALACTIC_GATEWAY_METRICS_PORT`        | `--metrics-port`                | `8081`      | No            |
 | gRPC health port    | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`    | `--grpc-health-port`            | `5181`      | No            |
@@ -171,6 +172,16 @@ attaches the programs themselves, unpinned, so they detach when the process
 exits. It first detaches an idle dispatcher from its interfaces, and refuses
 to start while another datapath's slot is live there. See
 [Sharing the XDP hook](../agents/ARCHITECTURE-GATEWAY.md#sharing-the-xdp-hook-xdpdispatch).
+
+`GALACTIC_GATEWAY_IPV4_VIPS=true` loads a rule's IPv4 VIPs into the datapath
+beside its IPv6 ones, and turns on IPv4 forwarding on every public and
+internal interface for the datapath's FIB lookups. That includes the
+host-wide `net.ipv4.ip_forward`, so the node routes IPv4 between all of its
+interfaces while the switch is on. The node still advertises
+no IPv4 VIP: backend nodes cannot answer for one until backend-side
+translation and a readiness gate land (#705), so the switch is for testing
+the datapath, with a route pinned by hand, until then. Leave it off in
+production.
 
 `GALACTIC_GATEWAY_DATAPATH_ENABLED=false` keeps the process up and its pod
 ready but loads nothing, empties the gateway's dispatcher slots, and
@@ -482,10 +493,12 @@ source back to a single VIP, so a backend cannot answer for a second one. A
 rule with two fails to load on the gateways and reports `InvalidRule` on its
 backend nodes.
 
-IPv4 VIPs are not served yet (#705). The gateways leave them out of the
-datapath and never advertise them, withdraw any `-v4` advertisement an
-earlier release made, and report `<gateway-node>/IPv4Served=False` with
-reason `Unsupported` on the rule. The rule's IPv6 VIP keeps serving. A rule
+IPv4 VIPs are not served yet (#705). The gateways never advertise them and
+withdraw any `-v4` advertisement an earlier release made. By default they
+also leave them out of the datapath and report
+`<gateway-node>/IPv4Served=False` with reason `Unsupported` on the rule. A
+gateway with `GALACTIC_GATEWAY_IPV4_VIPS=true` loads them and reports reason
+`NotAdvertised` instead. The rule's IPv6 VIP keeps serving. A rule
 whose every VIP is IPv4 is not loaded, and its `<gateway-node>/Programmed`
 condition reports `NoServedVIP`. The backend nodes translate IPv6 VIPs only
 and write no binding for an IPv4 VIP.
@@ -717,7 +730,10 @@ Relevant series: `galactic_edge_rule_packets_total`,
 `galactic_edge_return_packets_total`, `galactic_edge_return_bytes_total` and
 `galactic_edge_return_dropped_packets_total` (labeled by `vip`/`vpc`),
 `galactic_edge_drops_total` (labeled
-by `reason`), and `galactic_edge_control_plane_drops_total` (rule
+by `reason`; `ipv4_fragment` counts IPv4 fragments addressed to a VIP, which
+are dropped because a later fragment has no ports to pick a backend by;
+the drop applies to any TCP or UDP port on a VIP address, and it is not
+counted in a VIP's own dropped packets because the port is unknown), and `galactic_edge_control_plane_drops_total` (rule
 applications rejected before ever reaching the datapath, e.g. quota
 denials). In dispatch mode, `galactic_edge_dispatch_lease_renewals_total`
 (labeled by `slot` and `result`) and

@@ -144,31 +144,54 @@ func (t *VIPTable) Generation() uint64 {
 	return t.clock()
 }
 
-func toWireKey(key VIPKey) (edgeprog.EdgedsrVipKey, error) {
-	if !key.VIP.Is6() || key.VIP.Is4In6() {
-		return edgeprog.EdgedsrVipKey{}, fmt.Errorf("VIP %s is not a native IPv6 address (phase 1 is IPv6-only)", key.VIP)
+// toWireAddr returns addr as the datapath keys it: an IPv6 address as is, and
+// an IPv4 address in its IPv4-mapped form (::ffff:a.b.c.d), which is what
+// edgedsr.c builds from an IPv4 header. An IPv4-mapped IPv6 address is refused,
+// so no IPv6 row can ever take an IPv4 row's key.
+func toWireAddr(addr netip.Addr) ([16]byte, error) {
+	switch {
+	case addr.Is4():
+		return addr.As16(), nil
+	case addr.Is6() && !addr.Is4In6():
+		return addr.As16(), nil
+	default:
+		return [16]byte{}, fmt.Errorf("%s is neither an IPv4 nor a native IPv6 address", addr)
 	}
-	return edgeprog.EdgedsrVipKey{Proto: key.Proto, Port: beU16(key.VPort), Vip: key.VIP.As16()}, nil
+}
+
+// fromWireAddr reverses toWireAddr: an IPv4-mapped key reads back as the IPv4
+// address it was written for.
+func fromWireAddr(raw [16]byte) netip.Addr {
+	return netip.AddrFrom16(raw).Unmap()
+}
+
+func toWireKey(key VIPKey) (edgeprog.EdgedsrVipKey, error) {
+	vip, err := toWireAddr(key.VIP)
+	if err != nil {
+		return edgeprog.EdgedsrVipKey{}, fmt.Errorf("VIP: %w", err)
+	}
+	return edgeprog.EdgedsrVipKey{Proto: key.Proto, Port: beU16(key.VPort), Vip: vip}, nil
 }
 
 func toWireAddrKey(vip netip.Addr) (edgeprog.EdgedsrVipAddrKey, error) {
-	if !vip.Is6() || vip.Is4In6() {
-		return edgeprog.EdgedsrVipAddrKey{}, fmt.Errorf(
-			"VIP %s is not a native IPv6 address (phase 1 is IPv6-only)", vip)
+	raw, err := toWireAddr(vip)
+	if err != nil {
+		return edgeprog.EdgedsrVipAddrKey{}, fmt.Errorf("VIP: %w", err)
 	}
-	return edgeprog.EdgedsrVipAddrKey{Vip: vip.As16()}, nil
+	return edgeprog.EdgedsrVipAddrKey{Vip: raw}, nil
 }
 
 func toWireBackends(backends []Backend) ([MaxBackends]edgeprog.EdgedsrBackend, error) {
 	var out [MaxBackends]edgeprog.EdgedsrBackend
 	for i, b := range backends {
-		if !b.Addr.Is6() || b.Addr.Is4In6() {
-			return out, fmt.Errorf("backend %d address %s is not a native IPv6 address (phase 1 is IPv6-only)", i, b.Addr)
+		addr, err := toWireAddr(b.Addr)
+		if err != nil {
+			return out, fmt.Errorf("backend %d address: %w", i, err)
 		}
 		if !b.USID.Is6() || b.USID.Is4In6() {
 			return out, fmt.Errorf("backend %d uSID %s is not a native IPv6 address", i, b.USID)
 		}
-		out[i] = edgeprog.EdgedsrBackend{Addr: b.Addr.As16(), Port: beU16(b.Port), Usid: b.USID.As16()}
+		out[i] = edgeprog.EdgedsrBackend{Addr: addr, Port: beU16(b.Port), Usid: b.USID.As16()}
 	}
 	return out, nil
 }
@@ -251,7 +274,7 @@ func (t *VIPTable) releaseAddr(vip netip.Addr) error {
 	)
 	it := t.table.Iterate()
 	for it.Next(&rawKey, &value) {
-		if netip.AddrFrom16(rawKey.Vip) == vip {
+		if fromWireAddr(rawKey.Vip) == vip {
 			return nil // still in use by another rule, port, or protocol
 		}
 	}
@@ -312,7 +335,7 @@ func (t *VIPTable) ListReturn() ([]ReturnEntry, error) {
 			return nil, fmt.Errorf("edgemap: vip_addr_table: list: read vip_return_stats_table row: %w", err)
 		}
 		entries = append(entries, ReturnEntry{
-			VIP:            netip.AddrFrom16(rawKey.Vip),
+			VIP:            fromWireAddr(rawKey.Vip),
 			Generation:     value.Generation,
 			Packets:        stats.Packets,
 			Bytes:          stats.Bytes,
@@ -342,7 +365,7 @@ func fromWireValue(key VIPKey, value edgeprog.EdgedsrVipValue, stats edgeprog.Ed
 	for i := range backends {
 		wb := value.Backends[i]
 		backends[i] = Backend{
-			Addr: netip.AddrFrom16(wb.Addr),
+			Addr: fromWireAddr(wb.Addr),
 			Port: beU16(wb.Port),
 			USID: netip.AddrFrom16(wb.Usid),
 		}
@@ -391,7 +414,7 @@ func (t *VIPTable) List() ([]VIPEntry, error) {
 	)
 	it := t.table.Iterate()
 	for it.Next(&rawKey, &value) {
-		key := VIPKey{Proto: rawKey.Proto, VPort: beU16(rawKey.Port), VIP: netip.AddrFrom16(rawKey.Vip)}
+		key := VIPKey{Proto: rawKey.Proto, VPort: beU16(rawKey.Port), VIP: fromWireAddr(rawKey.Vip)}
 		stats, err := t.lookupStats(rawKey)
 		if err != nil {
 			return nil, fmt.Errorf("edgemap: vip_table: list: read vip_stats_table row for %+v: %w", key, err)
