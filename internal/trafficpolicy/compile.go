@@ -56,11 +56,13 @@ type Entry struct {
 	DestPorts   PortRange
 }
 
-// EntryCount is how many entries p compiles to.
+// EntryCount is how many entries p compiles to. It counts rather than
+// expands, so validating a policy far over the limit costs no more than
+// validating one inside it.
 func (p Policy) EntryCount() int {
 	n := 0
-	for i, r := range p.Rules {
-		n += len(expandRule(uint16(i), r))
+	for _, r := range p.Rules {
+		n += ruleEntryCount(&r.Match)
 	}
 	return n
 }
@@ -71,11 +73,67 @@ func (p Policy) EntryCount() int {
 func (p Policy) Unreachable() []int {
 	var out []int
 	for i, r := range p.Rules {
-		if len(expandRule(uint16(i), r)) == 0 {
+		if ruleEntryCount(&r.Match) == 0 {
 			out = append(out, i)
 		}
 	}
 	return out
+}
+
+// ruleEntryCount is len(expandRule(m)), computed without expanding: the
+// address pairs whose families agree with each other and with the rule's
+// own family, times the port alternatives.
+func ruleEntryCount(m *Match) int {
+	fixed, hasFixed := ruleFamily(m)
+	if fixed == 0 && hasFixed {
+		return 0
+	}
+	count := func(ps []netip.Prefix) (v4, v6 int) {
+		for _, p := range ps {
+			if p.Addr().Is4() {
+				v4++
+			} else {
+				v6++
+			}
+		}
+		return v4, v6
+	}
+	s4, s6 := count(m.Source)
+	d4, d6 := count(m.Destination)
+	if hasFixed {
+		if fixed == FamilyIPv4 {
+			s6, d6 = 0, 0
+		} else {
+			s4, d4 = 0, 0
+		}
+	}
+	var pairs int
+	switch {
+	case len(m.Source) > 0 && len(m.Destination) > 0:
+		pairs = s4*d4 + s6*d6
+	case len(m.Source) > 0:
+		pairs = s4 + s6
+	case len(m.Destination) > 0:
+		pairs = d4 + d6
+	default:
+		pairs = 1
+	}
+	return pairs * max(1, len(m.SourcePorts)) * max(1, len(m.DestPorts))
+}
+
+// ruleFamily is the family m's ipFamily and protocol fix, if either does. A
+// contradiction between them is reported as family 0 with ok true.
+func ruleFamily(m *Match) (Family, bool) {
+	pf, hasPF := protoFamily(m.Proto)
+	switch {
+	case m.Family != nil && hasPF && *m.Family != pf:
+		return 0, true
+	case m.Family != nil:
+		return *m.Family, true
+	case hasPF:
+		return pf, true
+	}
+	return 0, false
 }
 
 // addressPair is one source and destination combination; an invalid prefix
@@ -111,13 +169,13 @@ func Compile(p Policy) ([]Entry, error) {
 	if len(p.Rules) > galacticv1alpha1.MaxRules {
 		return nil, fmt.Errorf("policy has %d rules, more than the limit of %d", len(p.Rules), galacticv1alpha1.MaxRules)
 	}
-	var out []Entry
+	if n := p.EntryCount(); n > galacticv1alpha1.MaxCompiledEntries {
+		return nil, fmt.Errorf("policy compiles to %d entries, more than the limit of %d",
+			n, galacticv1alpha1.MaxCompiledEntries)
+	}
+	out := make([]Entry, 0, p.EntryCount())
 	for i, r := range p.Rules {
 		out = append(out, expandRule(uint16(i), r)...)
-		if len(out) > galacticv1alpha1.MaxCompiledEntries {
-			return nil, fmt.Errorf("policy compiles to %d entries, more than the limit of %d",
-				p.EntryCount(), galacticv1alpha1.MaxCompiledEntries)
-		}
 	}
 	return out, nil
 }
@@ -128,7 +186,7 @@ func Compile(p Policy) ([]Entry, error) {
 // source and destination pair of different families: no packet could match
 // it, so Evaluate never would either.
 func expandRule(index uint16, r Rule) []Entry {
-	if f, ok := protoFamily(r.Match.Proto); ok && r.Match.Family != nil && *r.Match.Family != f {
+	if f, ok := ruleFamily(&r.Match); ok && f == 0 {
 		return nil // ICMPv6 under ipFamily IPv4, or ICMP under IPv6
 	}
 	base := baseEntry(index, r)

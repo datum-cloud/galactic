@@ -145,7 +145,12 @@ func TestCompileAgreesWithEvaluate(t *testing.T) {
 			t.Fatalf("Compile: %v", err)
 		}
 		if len(entries) != p.EntryCount() {
-			t.Fatalf("Compile produced %d entries, EntryCount says %d", len(entries), p.EntryCount())
+			t.Fatalf("policy %+v: Compile produced %d entries, EntryCount says %d", p, len(entries), p.EntryCount())
+		}
+		for i, r := range p.Rules {
+			if got, want := ruleEntryCount(&r.Match), len(expandRule(uint16(i), r)); got != want {
+				t.Fatalf("rule %+v: counted %d entries, expanded %d", r, got, want)
+			}
 		}
 		assertRuleOrder(t, entries)
 		for range 50 {
@@ -299,5 +304,31 @@ func TestUnreachable(t *testing.T) {
 		{"name":"deny-all","action":"Deny"}]`)
 	if got := p.Unreachable(); len(got) != 1 || got[0] != 0 {
 		t.Errorf("Unreachable = %v, want [0]", got)
+	}
+}
+
+// TestEntryCountDoesNotExpand checks that counting a policy far over the
+// limit allocates nothing proportional to its size, since admission counts
+// every policy a client sends.
+func TestEntryCountDoesNotExpand(t *testing.T) {
+	src, dst := make([]netip.Prefix, 0, 64), make([]netip.Prefix, 0, 64)
+	for i := range 64 {
+		src = append(src, netip.PrefixFrom(netip.AddrFrom4([4]byte{10, 0, 0, byte(i)}), 32))
+		dst = append(dst, netip.PrefixFrom(netip.AddrFrom4([4]byte{10, 1, 0, byte(i)}), 32))
+	}
+	ports := make([]PortRange, 0, 16)
+	for i := range 16 {
+		ports = append(ports, PortRange{uint16(i * 10), uint16(i*10 + 1)})
+	}
+	tcp := ProtoTCP
+	r := Rule{Name: "huge", Match: Match{Proto: &tcp, Source: src, Destination: dst, SourcePorts: ports, DestPorts: ports}}
+	p := Policy{Rules: []Rule{r, r}}
+	allocs := testing.AllocsPerRun(10, func() {
+		if n := p.EntryCount(); n != 2*64*64*16*16 {
+			t.Fatalf("EntryCount = %d", n)
+		}
+	})
+	if allocs > 0 {
+		t.Errorf("EntryCount allocated %v times, want 0", allocs)
 	}
 }
