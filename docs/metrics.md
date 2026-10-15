@@ -502,6 +502,42 @@ sum by (namespace, pod, operation) (
   rate(galactic_ingress_sidecar_gateway_operations_total{result="error"}[10m]))
 ```
 
+### Node source address
+
+`node_src_addr_table` holds this node's SRv6 source address, which
+`usid_egress` stamps on every packet it encapsulates. Until it holds one,
+encapsulation fails open and nothing is counted. While any VRF is installed,
+each sweep reads the table, writes the address resolved from this node's
+`BGPRouter` when the table is unset or holds another, and reads the write
+back.
+
+| Metric                                                                        | Type    | Labels   | Meaning                                                                                 |
+| ----------------------------------------------------------------------------- | ------- | -------- | --------------------------------------------------------------------------------------- |
+| `galactic_ingress_sidecar_node_source_address_status`                         | gauge   | `status` | 1 for the last check's result: `unknown`, `unconfigured`, `ok`, `unresolved` or `error` |
+| `galactic_ingress_sidecar_node_source_address_last_checked_timestamp_seconds` | gauge   | none     | Unix time of the last sweep that checked the table; 0 before the first                  |
+| `galactic_ingress_sidecar_node_source_address_repairs_total`                  | counter | none     | Sweeps that found the table unset or holding another address and wrote this node's      |
+
+- `unknown` means no VRF has been installed since the sidecar started, so
+  nothing has checked. Sweeps check only while a VRF is installed, so after
+  the last one is removed the status and timestamp keep their last values;
+  alert on the timestamp's age only where VRFs are installed.
+- `unconfigured` means the sidecar has no node name, so it cannot resolve the
+  address. `unresolved` means this node's `BGPRouter` has no SRv6 locator and
+  node ID yet, and the table was left as it was.
+- `error` covers a failed read or write, and a write that did not read back.
+  The status and timestamp are read from one snapshot.
+- The repair count includes a sweep that sets the address after a restart,
+  when it could not be resolved as the VRF was created. A count that keeps
+  rising means something keeps changing the table: a datapath reload,
+  another writer, or galactic-cni writing an address that disagrees with this
+  node's `BGPRouter` as the sidecar reads it. These add 7 fixed series per
+  sidecar.
+
+```promql
+# Encapsulation failing open: the source address is not set
+max_over_time(galactic_ingress_sidecar_node_source_address_status{status=~"unresolved|error"}[10m]) == 1
+```
+
 ## Edge load balancer — `galactic_edge_*`
 
 `galactic-gateway`'s XDP DSR load balancer on gateway-role edge nodes.

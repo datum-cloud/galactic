@@ -55,6 +55,15 @@ type fakeBackend struct {
 	// logged in calls, since Store makes them on every Sweep.
 	rowsMissing  map[uint32]bool
 	failRowsRead error
+
+	// nodeSource is what EnsureNodeSourceAddress finds in the table, and
+	// nodeSourceWant what it writes. failNodeSource, if set, is the error it
+	// returns instead. nodeSourceChecks counts calls; they are not logged in
+	// calls, since Store makes them on every Sweep.
+	nodeSource       string
+	nodeSourceWant   string
+	failNodeSource   error
+	nodeSourceChecks int
 }
 
 type routeRecord struct {
@@ -212,4 +221,18 @@ func (f *fakeBackend) seedRoute(vpc string, tableID uint32, prefix *net.IPNet, s
 	}
 	key := fmt.Sprintf("%d/%s", tableID, prefix)
 	f.routes[key] = routeRecord{prefix: prefix, sid: sid}
+}
+
+func (f *fakeBackend) EnsureNodeSourceAddress() (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nodeSourceChecks++
+	if f.failNodeSource != nil {
+		return false, f.failNodeSource
+	}
+	if f.nodeSource == f.nodeSourceWant {
+		return false, nil
+	}
+	f.nodeSource = f.nodeSourceWant
+	return true, nil
 }
