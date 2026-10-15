@@ -85,3 +85,6 @@ above for that.
 - [enhancements/networking/latency-aware-routing/README.md](enhancements/networking/latency-aware-routing/README.md)
   — latency-aware SRv6 path selection as a tenant-facing routing policy.
   `status: provisional`, `stage: alpha`.
+- [enhancements/networking/interface-traffic-policy/README.md](enhancements/networking/interface-traffic-policy/README.md)
+  — per-interface ingress and egress traffic policy, deny by default and
+  enforced in the CNI datapath. `status: provisional`, `stage: alpha`.
