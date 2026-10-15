@@ -100,7 +100,7 @@ These come from the product brief and are not open to redesign here.
 | Risk                                                                                      | Mitigation                                                                                                                                                                                                |
 | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Default deny breaks every running workload on rollout                                     | Enforcement is off per node until an explicit enable, and operators bind policies first (see [Rollout](#rollout)).                                                                                        |
-| A path is misclassified and a narrow Allow matches the wrong traffic                      | Classification uses only trusted forwarding state. Any lookup that cannot finish is `classification_error`, which denies at the first rule that names a path.                                             |
+| A path is misclassified and a narrow Allow matches the wrong traffic                      | Classification uses only trusted forwarding state. Any lookup that cannot finish is `classification_error`, which denies at the first rule naming a path that the packet otherwise matches.               |
 | A packet reaches a workload by a path that skips the check                                | The [packet path audit](#packet-path-audit) names the check for every delivery mechanism, and the integration tests send traffic down each one.                                                           |
 | Counter rows are reused while a packet still counts into them                             | Rows are freed only after the outer-map update returns, which the kernel guarantees waits for every program that could hold the old snapshot (see [Publication and lifetime](#publication-and-lifetime)). |
 | Verifier cost and stack depth of the evaluation                                           | Evaluation is a separately verified global function using `bpf_loop`, so its cost does not grow with the rule count, and a test bounds every program's combined stack depth.                              |
@@ -158,7 +158,7 @@ spec:
 apiVersion: galactic.datumapis.com/v1alpha1
 kind: TrafficPolicyBinding
 metadata:
-  name: web-0-eth0          # must equal the VPCAttachment's name
+  name: web-0-eth0          # the VPCAttachment's name
   namespace: tenant-a
 spec:
   ingressPolicyRef:
@@ -175,8 +175,14 @@ status:
     conditions: [...]
   nodes:
     - node: dfw-compute-3
-      ingress: {policyUID: 6d1c..., policyGeneration: 4, appliedAt: ...}
-      egress: {policyUID: 91fa..., policyGeneration: 2, appliedAt: ...}
+      ingress:
+        policy: {name: private-web-ingress, uid: 6d1c..., generation: 4}
+        state: Applied               # Applied, Pending or Failed
+        observedGeneration: 3        # the binding generation applied
+        lastTransitionTime: ...
+      egress:
+        policy: {name: public-web-egress, uid: 91fa..., generation: 2}
+        state: Applied
 ```
 
 - The binding has no attachment field: it applies to the VPCAttachment with
@@ -256,11 +262,15 @@ treats `null`:
 
 So every optional match field, and `match` itself, is declared
 `nullable: true`, and a fail-closed validating webhook (`failurePolicy: Fail`)
-rejects a `null` at any of them by inspecting the admitted object. Everything
-CRD validation can express (enums, bounds, list types, mutual exclusion,
-family consistency, the binding name rule) stays in the schema as well, so it
-holds even for clients that bypass the webhook's checks. While the webhook is
-down, writes fail rather than admit a null.
+rejects a `null` at any of them by inspecting the admitted object. The enum
+fields (`path`, `ipFamily`, `protocol`) need no webhook check: the schema's
+enum already rejects a null there. Everything CRD validation can express
+(enums, bounds, list types, mutual exclusion, family consistency) stays in the
+schema as well, so it holds even for clients that bypass the webhook's checks.
+While the webhook is down, writes fail rather than admit a null.
+
+The CEL IP and CIDR functions the schema uses need Kubernetes 1.31 or later;
+the schema is tested on 1.33 and 1.35, and edge clusters run 1.35.
 
 The webhook also parses every address and prefix again, since the schema only
 checks strings, and enforces the reserved default name (next section).
@@ -350,7 +360,9 @@ public.
   Nothing a tenant controls (inner addresses, ports, marks or its own SRH)
   selects a class.
 - **Errors.** A rule with no `path` is evaluated normally when classification
-  failed. The first rule that names a path ends evaluation with a
+  failed, and so is a rule with a `path` whose other fields do not match,
+  since it could not decide the packet on any path. The first rule with a
+  `path` whose other fields all match ends evaluation with a
   `classification_error` deny, so a failed lookup can never skip an earlier
   rule and reach a broader Allow.
 
@@ -512,7 +524,7 @@ Every map is new, so no existing pinned map changes layout.
 | `tp_accounting_errors`     | PERCPU_ARRAY         | `{direction, action, reason}`, count                                     | Datapath                                                     |
 | `tp_state`                 | ARRAY(1)             | enforcement mode, NAT locator synced flag                                | Installer                                                    |
 
-A compiled entry is 72 bytes: action, logical rule index, match flags, family,
+A compiled entry is 56 bytes: action, logical rule index, match flags, family,
 protocol, path, ICMP type and code, source and destination prefixes with
 lengths, and one source and one destination port range. Evaluation walks the
 entries with `bpf_loop` and stops at the first match. The logical rule index
