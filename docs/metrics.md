@@ -376,6 +376,41 @@ sum by (namespace, pod, operation) (rate(galactic_ingress_sidecar_operations_tot
   / sum by (namespace, pod, operation) (rate(galactic_ingress_sidecar_operations_total[5m]))
 ```
 
+### EndpointSlice inputs
+
+The selected EndpointSlices a sidecar reads, whether or not they have a
+route. A selected slice carries the tenant label. It is `ready` once it parses
+into a route, `waiting_sid` while its node's SID annotation has not appeared
+(normal for a freshly published slice), and `invalid` when it cannot be
+parsed, for a malformed tenant identifier, SID or address, or a non-IPv6
+address type. Parsing reads only the first endpoint's first address.
+
+| Metric                                                      | Type    | Labels             | Meaning                                                                                                    |
+| ----------------------------------------------------------- | ------- | ------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `galactic_ingress_sidecar_endpoint_slices`                  | gauge   | `state`            | Selected slices by `state`: `ready`, `waiting_sid`, `invalid`                                              |
+| `galactic_ingress_sidecar_endpoint_slice_evaluations_total` | counter | `source`, `result` | Evaluations by `source` (`seed`, `watch`) and `result` (`ready`, `waiting_sid`, `invalid`, `not_selected`) |
+
+- A slice that turns `invalid` keeps any route it had: the sidecar keeps the
+  last good desired state rather than tearing the route down. A successful
+  reconcile therefore does not mean the slice was usable.
+- The startup seed and the watch evaluate slices concurrently. Once the watch
+  has seen a slice during a seed, the seed's result for it counts as an
+  evaluation but does not set its state, so a list taken earlier can neither
+  overwrite a newer update nor bring back a deleted slice.
+- The state is eventually consistent: a watch observation read from a
+  lagging cache can briefly hold older data than the seed's list, until the
+  slice's next event.
+- One entry per selected slice is kept, removed when the reconciler finds the
+  slice deleted or without the tenant label. The watch currently drops an
+  update that only removes the label, so a deselected slice keeps its last
+  state here, and its route, until it is deleted or the sidecar restarts.
+  These add 11 fixed series per sidecar.
+
+```promql
+# Slices that cannot be parsed, and slices still waiting for their SID
+galactic_ingress_sidecar_endpoint_slices{state=~"invalid|waiting_sid"} > 0
+```
+
 ## Edge load balancer — `galactic_edge_*`
 
 `galactic-gateway`'s XDP DSR load balancer on gateway-role edge nodes.

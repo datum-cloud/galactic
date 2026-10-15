@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -89,6 +90,10 @@ type Store struct {
 	desiredClaims int
 	pendingClaims int
 	pendingQueue  []pendingEntry
+
+	// inputs holds nil unless SetInputMetrics was called. It is the seed's
+	// and the reconciler's, kept here so both reach it without taking s.mu.
+	inputs atomic.Pointer[InputMetrics]
 
 	// generation is the backend's DatapathGeneration as of the last time every
 	// tracked VRF and route was known to be written against it, or empty
@@ -195,6 +200,17 @@ func boolDelta(was, is bool) int {
 		return -1
 	}
 	return 0
+}
+
+// SetInputMetrics has the startup seed and the EndpointSlice reconciler
+// report each slice's input state to m. Call it once, before either runs.
+func (s *Store) SetInputMetrics(m *InputMetrics) {
+	s.inputs.Store(m)
+}
+
+// inputMetrics returns what SetInputMetrics set.
+func (s *Store) inputMetrics() *InputMetrics {
+	return s.inputs.Load()
 }
 
 // SetGatewayPublisher enables this Store to publish and withdraw a return-path
