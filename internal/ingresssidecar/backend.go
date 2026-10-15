@@ -11,9 +11,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
-
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
@@ -37,8 +34,10 @@ type Backend interface {
 	// ListVRFs returns every per-VPC VRF device present on the host, resolved
 	// back to its owning VPC, for the startup inventory.
 	ListVRFs() ([]VRFInfo, error)
-	// ListRoutes returns every seg6-encapsulated route currently installed
-	// in tableID — the route half of the same startup-inventory step.
+	// ListRoutes returns the egress routes this pod installed in tableID,
+	// the route half of the same startup-inventory step. A route's SID is
+	// nil when its egress_route_table entry is gone. See listRoutes for how
+	// a route is known to be this pod's.
 	ListRoutes(tableID uint32) ([]RouteInfo, error)
 	// DatapathGeneration returns an opaque value that changes whenever the
 	// shared eBPF datapath this sidecar writes into is reloaded out from under
@@ -188,25 +187,5 @@ func (kernelBackend) ListVRFs() ([]VRFInfo, error) {
 }
 
 func (kernelBackend) ListRoutes(tableID uint32) ([]RouteInfo, error) {
-	var infos []RouteInfo
-	// Two passes, not AF_UNSPEC, matching internal/plumbing/vrf.FlushTable's
-	// own approach to listing everything in one table across both families.
-	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		routes, err := netlink.RouteListFiltered(
-			family,
-			&netlink.Route{Table: int(tableID)},
-			netlink.RT_FILTER_TABLE,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("list routes in table %d: %w", tableID, err)
-		}
-		for _, route := range routes {
-			enc, ok := route.Encap.(*netlink.SEG6Encap)
-			if !ok || len(enc.Segments) == 0 || route.Dst == nil {
-				continue // not one of this sidecar's seg6 egress routes
-			}
-			infos = append(infos, RouteInfo{Prefix: route.Dst, SID: enc.Segments[0]})
-		}
-	}
-	return infos, nil
+	return listRoutes(tableID)
 }

@@ -127,6 +127,11 @@ next EndpointSlice change.
 While any VRF is installed, each sweep also reads `node_src_addr_table` and
 restores this node's source address when it is unset or wrong, since only a
 new VRF otherwise writes it.
+A restarted sidecar container finds the routes its pod already installed by
+their redirect routes in the pod's own main table, which no other pod can
+write, and reads each one's SID from `egress_route_table`. An entry in that
+map with no redirect route in the pod may belong to an overlapping sibling
+pod, so the sidecar logs it and leaves it in place.
 
 `galactic-router`'s own reconciler independently derives the *same* SID value
 from the same inputs (`srv6.ComputeSID`, `internal/plumbing/srv6/usid.go`,
