@@ -1,0 +1,31 @@
+# Tenants that only talk privately: ns40 (two attachments on one node).
+# Nothing here grants PublicNAT, so its egress through a NAT shard is denied.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: lab-egress
+spec:
+  rules:
+    - name: allow-private
+      action: Allow
+      match:
+        path: Private
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: lab-ingress
+spec:
+  rules:
+    - name: deny-discard
+      action: Deny
+      match:
+        path: Private
+        protocol: TCP
+        destinationPorts:
+          - start: 9
+            end: 9
+    - name: allow-private
+      action: Allow
+      match:
+        path: Private

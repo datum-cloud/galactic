@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/sidecarmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -338,6 +340,11 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	if err := ifindexTable.Register(uint32(peerLink.Attrs().Index), ingressSidecarBlock, argument); err != nil {
 		return fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
 	}
+	// The peer is the platform's, not a tenant interface: traffic policy never
+	// evaluates it, and checks what it passes on at the tenant interface.
+	if err := tpmap.PutPinnedInfra(ebpfPinDir, uint32(peerLink.Attrs().Index)); err != nil {
+		return fmt.Errorf("mark veth peer as infrastructure for traffic policy: %w", err)
+	}
 
 	serviceProgram, err := ebpf.LoadPinnedProgram(filepath.Join(ebpfPinDir, attach.UsidServiceEgressPinName), nil)
 	if err != nil {
@@ -353,6 +360,20 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 
 	if err := attach.AttachEgress(serviceProgram, program, peerLink.Attrs().Name); err != nil {
 		return fmt.Errorf("attach usid_egress to VRF %d's veth peer %q: %w", tableID, peerLink.Attrs().Name, err)
+	}
+	// tp_deliver passes everything on an infra interface, but clears the
+	// mark usid_ingress sets on what it delivers here, so the mark cannot
+	// travel on with the packet and make a later check skip it.
+	deliver, err := ebpf.LoadPinnedProgram(filepath.Join(ebpfPinDir, attach.TpDeliverPinName), nil)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // an older datapath without tp_deliver
+		}
+		return fmt.Errorf("load pinned tp_deliver program: %w", err)
+	}
+	defer func() { _ = deliver.Close() }()
+	if err := attach.AttachDeliver(deliver, peerLink.Attrs().Name); err != nil {
+		return fmt.Errorf("attach tp_deliver to VRF %d's veth peer %q: %w", tableID, peerLink.Attrs().Name, err)
 	}
 	return nil
 }
@@ -430,6 +451,9 @@ func removeEgressDatapath(tableID uint32) error {
 				errs = append(errs, fmt.Errorf("unregister eBPF ifindex_vrf_table entry: %w", err))
 			}
 			_ = closer.Close()
+		}
+		if err := tpmap.RemovePinnedInterface(ebpfPinDir, uint32(peerLink.Attrs().Index)); err != nil {
+			errs = append(errs, fmt.Errorf("remove traffic policy row: %w", err))
 		}
 		if err := netlink.LinkDel(peerLink); err != nil {
 			errs = append(errs, fmt.Errorf("delete veth pair %q/%q: %w", inner, peer, err))

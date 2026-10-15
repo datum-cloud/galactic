@@ -1804,6 +1804,810 @@ static USID_NOINLINE int is_own_gateway(__u32 ifindex, __u32 family)
 	return diff == 0;
 }
 
+// ---------------------------------------------------------------------
+// Interface traffic policy. See
+// docs/enhancements/networking/interface-traffic-policy for the design.
+//
+// Each managed interface has an ingress and an egress binding, each pointing
+// at an immutable compiled snapshot: an inner array whose slot 0 is a header
+// and whose slots 1..count are entries, walked in order until the first
+// match. galactic-router publishes a snapshot by inserting a new inner map
+// with one outer-map update, so a packet evaluates against one whole
+// snapshot, old or new.
+//
+// tp_capture parses the packet once, at the top of a program and before any
+// rewrite, into tp_scratch; tp_decide evaluates that capture at the exit the
+// packet is about to take, with the forwarding path that exit implies. In
+// mode off both return at once and nothing else changes.
+// ---------------------------------------------------------------------
+
+#define TP_MODE_OFF 0
+#define TP_MODE_AUDIT 1
+#define TP_MODE_ENFORCE 2
+
+#define TP_DIR_INGRESS 0
+#define TP_DIR_EGRESS 1
+
+#define TP_PATH_UNKNOWN 0
+#define TP_PATH_PRIVATE 1
+#define TP_PATH_PUBLIC_NAT 2
+#define TP_PATH_PUBLIC_SERVICE 3
+
+#define TP_KIND_TENANT 1
+#define TP_KIND_INFRA 2
+
+// Fallback reasons, the metric's fixed reason enum.
+#define TP_REASON_NO_MATCH 0
+#define TP_REASON_POLICY_UNAVAILABLE 1
+#define TP_REASON_PARSE_ERROR 2
+#define TP_REASON_CLASSIFICATION_ERROR 3
+#define TP_REASON_COUNT 4
+
+#define TP_ACCOUNTING_MISSING_RULE_COUNTER 0
+
+// Capture outcomes.
+#define TP_CAPTURE_SKIPPED 0 // mode off: nothing captured
+#define TP_CAPTURE_OK 1 // a well-formed IP packet the rules decide
+#define TP_CAPTURE_PARSE_ERROR 2
+#define TP_CAPTURE_LINK_OP 3 // validated ARP or neighbor discovery, outside the rules
+#define TP_CAPTURE_LINK_DROP 4 // any other non-IP frame, or invalid ARP
+
+// Compiled entry flags, the same bits as trafficpolicy.EntryFlag.
+#define TP_F_ALLOW (1u << 0)
+#define TP_F_PATH (1u << 1)
+#define TP_F_FAMILY (1u << 2)
+#define TP_F_PROTO (1u << 3)
+#define TP_F_SOURCE (1u << 4)
+#define TP_F_DEST (1u << 5)
+#define TP_F_SPORT (1u << 6)
+#define TP_F_DPORT (1u << 7)
+#define TP_F_ICMP_TYPE (1u << 8)
+#define TP_F_ICMP_CODE (1u << 9)
+
+#define TP_MAX_ENTRIES 256
+#define TP_RULE_COUNTER_ROWS 16384
+#define TP_IPV6_MAX_EXT_HEADERS 4
+#define TP_IPV6_MAX_EXT_BYTES 256
+#define TP_ETH_P_ARP 0x0806
+
+#define TP_ICMPV6_RS 133
+#define TP_ICMPV6_RA 134
+#define TP_ICMPV6_NS 135
+#define TP_ICMPV6_NA 136
+#define TP_IPPROTO_ESP 50
+#define TP_IPPROTO_NONE 59
+#define TP_IPPROTO_ICMP 1
+
+// struct tp_state_value is tp_state's one slot: the enforcement mode and
+// whether tp_nat_locator_table holds every shard locator yet.
+struct tp_state_value {
+	__u32 mode;
+	__u32 nat_locators_synced;
+	// mark is the bit pattern usid_ingress sets on a packet it has decided
+	// and sends by bpf_redirect or bpf_redirect_neigh, both of which pass the
+	// receiver's tc egress, so tp_deliver does not decide it again. Only
+	// these bits are set and cleared; the rest of the mark is left alone.
+	// Zero disables it.
+	__u32 mark;
+	// capable is set by galactic-cni when the kernel passed the traffic
+	// policy preflight. CNI ADD refuses a managed interface while the mode
+	// is on and this is clear.
+	__u32 capable;
+};
+
+// struct tp_iface_value marks an interface Galactic manages. policy_token is
+// random per interface lifetime, written at CNI ADD and never changed after,
+// so a recycled ifindex never matches an old snapshot's header.
+struct tp_iface_value {
+	__u64 policy_token;
+	__u32 kind;
+	__u32 state;
+};
+
+// struct tp_iface_addr_key is one address an interface was assigned, for the
+// link-operation source checks. An IPv4 address occupies the first 4 bytes.
+struct tp_iface_addr_key {
+	__u32 ifindex;
+	__u8 family;
+	__u8 pad[3];
+	__u8 addr[16];
+};
+
+struct tp_binding_key {
+	__u32 ifindex;
+	__u32 direction;
+};
+
+// struct tp_entry is one compiled entry. Ports are host order, addresses
+// network order, an IPv4 address in the first 4 bytes. Each prefix carries
+// its mask, computed in user space, so matching is a branch-free masked
+// compare rather than one the verifier has to explore bit length by bit
+// length.
+struct tp_entry {
+	__u16 flags;
+	__u16 rule;
+	__u8 path;
+	__u8 family;
+	__u8 proto;
+	__u8 icmp_type;
+	__u8 icmp_code;
+	__u8 pad[3];
+	__u16 sport_lo;
+	__u16 sport_hi;
+	__u16 dport_lo;
+	__u16 dport_hi;
+	__u8 pad2[4];
+	__u64 src[2];
+	__u64 src_mask[2];
+	__u64 dst[2];
+	__u64 dst_mask[2];
+};
+
+// struct tp_header is slot 0 of a snapshot, the same size as an entry. The
+// datapath reads only the token, counter_base and count; generation and
+// policy_uid record which policy the snapshot was compiled from, so a
+// restarted galactic-router can adopt it and its counter rows.
+struct tp_header {
+	__u64 policy_token;
+	__u32 counter_base;
+	__u32 count;
+	__u64 generation;
+	__u8 policy_uid[16];
+	__u8 pad[48];
+};
+
+union tp_slot {
+	struct tp_entry entry;
+	struct tp_header header;
+};
+
+struct tp_counter {
+	__u64 packets;
+	__u64 bytes;
+};
+
+struct tp_fallback_key {
+	__u32 ifindex;
+	__u8 direction;
+	__u8 reason;
+	__u8 pad[2];
+	__u64 policy_token;
+};
+
+// struct tp_scratch_value is one packet's capture and the evaluation state
+// tp_decide and its callback share. Per-CPU, and written and read within one
+// program run.
+struct tp_scratch_value {
+	__u8 status;
+	__u8 family;
+	__u8 proto;
+	__u8 has_ports;
+	__u8 icmp_type;
+	__u8 icmp_code;
+	__u8 path;
+	__u8 result;
+	__u16 sport;
+	__u16 dport;
+	__u32 count;
+	__u32 rule;
+	__u32 allow;
+	__u64 bytes;
+	__u8 src[16];
+	__u8 dst[16];
+};
+
+#define TP_RESULT_NONE 0
+#define TP_RESULT_MATCH 1
+#define TP_RESULT_CLASSIFICATION_ERROR 2
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct tp_state_value);
+} tp_state SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u32); // host-side ifindex
+	__type(value, struct tp_iface_value);
+} tp_iface_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 65536);
+	__type(key, struct tp_iface_addr_key);
+	__type(value, __u8);
+} tp_iface_addr_table SEC(".maps");
+
+struct tp_snapshot_inner {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, TP_MAX_ENTRIES + 1);
+	__type(key, __u32);
+	__type(value, union tp_slot);
+};
+
+// tp_snapshot_template is never read or written; like
+// egress_shard_group_template, it makes the compiler emit the full BTF of the
+// inner value type.
+struct tp_snapshot_inner tp_snapshot_template SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
+	__uint(max_entries, 32768);
+	__type(key, struct tp_binding_key);
+	__array(values, struct tp_snapshot_inner);
+} tp_binding_table SEC(".maps");
+
+// tp_nat_locator_table holds the top 64 bits (Block and Node) of every NAT
+// shard SID. The EgressShard controller keeps those disjoint from every
+// BGPRouter locator, so a route or an outer source whose locator is here is
+// a NAT shard's.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, __u64);
+	__type(value, __u8);
+} tp_nat_locator_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, TP_RULE_COUNTER_ROWS);
+	__type(key, __u32);
+	__type(value, struct tp_counter);
+} tp_rule_counters SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC); // rows exist only for live interfaces
+	__uint(max_entries, 65536);
+	__type(key, struct tp_fallback_key);
+	__type(value, struct tp_counter);
+} tp_fallback_counters SEC(".maps");
+
+// tp_unattributed_counters: [direction * TP_REASON_COUNT + reason], for
+// policy drops whose interface or fallback row cannot be resolved.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 2 * TP_REASON_COUNT);
+	__type(key, __u32);
+	__type(value, struct tp_counter);
+} tp_unattributed_counters SEC(".maps");
+
+// tp_accounting_errors: [direction * 2 + allow], a verdict whose rule
+// counter row was missing.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 4);
+	__type(key, __u32);
+	__type(value, __u64);
+} tp_accounting_errors SEC(".maps");
+
+// tp_link_drops: [direction], non-IP frames and invalid ARP dropped outside
+// the IP rules.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 2);
+	__type(key, __u32);
+	__type(value, struct tp_counter);
+} tp_link_drops SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct tp_scratch_value);
+} tp_scratch SEC(".maps");
+
+static long (*bpf_for_each_map_elem)(void *map, void *callback_fn, void *callback_ctx, __u64 flags) =
+	(void *) BPF_FUNC_for_each_map_elem;
+
+static USID_ALWAYS_INLINE __u32 tp_mode(void)
+{
+	__u32 key = 0;
+	struct tp_state_value *st = bpf_map_lookup_elem(&tp_state, &key);
+
+	return st ? st->mode : TP_MODE_OFF;
+}
+
+static USID_ALWAYS_INLINE void tp_add(struct tp_counter *c, __u64 bytes)
+{
+	c->packets += 1;
+	c->bytes += bytes;
+}
+
+// tp_iface_has_addr reports whether addr (family 4 or 6) is one of ifindex's
+// assigned addresses.
+static USID_ALWAYS_INLINE int tp_iface_has_addr(__u32 ifindex, __u8 family, const __u8 *addr)
+{
+	struct tp_iface_addr_key k;
+
+	__builtin_memset(&k, 0, sizeof(k));
+	k.ifindex = ifindex;
+	k.family = family;
+	__builtin_memcpy(k.addr, addr, family == 4 ? 4 : 16);
+	return bpf_map_lookup_elem(&tp_iface_addr_table, &k) != 0;
+}
+
+static USID_ALWAYS_INLINE int tp_is_zero(const __u8 *a, int n)
+{
+	__u8 acc = 0;
+
+	for (int i = 0; i < 16; i++)
+		if (i < n)
+			acc |= a[i];
+	return acc == 0;
+}
+
+static USID_ALWAYS_INLINE int tp_is_link_local6(const __u8 *a)
+{
+	return a[0] == 0xFE && (a[1] & 0xC0) == 0x80;
+}
+
+// tp_capture_arp validates an ARP frame for the link-operation exception.
+static USID_ALWAYS_INLINE __u8 tp_capture_arp(struct __sk_buff *skb, __u32 dir, __u32 ifindex)
+{
+	__u8 arp[28];
+
+	if (bpf_skb_load_bytes(skb, USID_L3_OFFSET, arp, sizeof(arp)))
+		return TP_CAPTURE_LINK_DROP;
+	// hardware Ethernet, protocol IPv4, lengths 6 and 4, request or reply
+	if (arp[0] != 0 || arp[1] != 1 || arp[2] != 0x08 || arp[3] != 0x00 || arp[4] != 6 || arp[5] != 4 ||
+	    arp[6] != 0 || (arp[7] != 1 && arp[7] != 2))
+		return TP_CAPTURE_LINK_DROP;
+	if (dir == TP_DIR_INGRESS)
+		return TP_CAPTURE_LINK_OP;
+
+	const __u8 *sender = &arp[14];
+	const __u8 *target = &arp[24];
+
+	if (!tp_is_zero(sender, 4) && !tp_iface_has_addr(ifindex, 4, sender))
+		return TP_CAPTURE_LINK_DROP;
+	struct tenant_gw_value *gw = bpf_map_lookup_elem(&tenant_gw_table, &ifindex);
+	__u8 to_gw = 0, to_self = 0;
+
+	for (int i = 0; i < 4; i++) {
+		to_gw |= gw ? (target[i] ^ gw->gw4[i]) : 1;
+		to_self |= target[i] ^ sender[i];
+	}
+	// The gateway, the sender itself (gratuitous ARP), or one of the
+	// interface's own addresses (an RFC 5227 probe from 0.0.0.0).
+	if (to_gw == 0 || to_self == 0 || tp_iface_has_addr(ifindex, 4, target))
+		return TP_CAPTURE_LINK_OP;
+	return TP_CAPTURE_LINK_DROP;
+}
+
+// tp_ndp_link_op reports whether a validated IPv6 packet is a neighbor
+// discovery message on the link-operation allowlist for dir. A message the
+// kernel forwarded has a hop limit below 255 and is ordinary traffic.
+static USID_ALWAYS_INLINE int tp_ndp_link_op(struct tp_scratch_value *s, __u8 hop_limit, __u32 payload, __u32 dir,
+					     __u32 ifindex)
+{
+	if (s->proto != USID_IPPROTO_ICMPV6 || hop_limit != 255 || s->icmp_code != 0)
+		return 0;
+	__u8 t = s->icmp_type;
+	__u32 min = t == TP_ICMPV6_RS ? 8 : t == TP_ICMPV6_RA ? 16 : 24;
+
+	if (payload < min)
+		return 0;
+	// Toward the workload, a hop limit of 255 already proves the message was
+	// sent on the link and not forwarded (RFC 4861 7.1.1). Its source is not
+	// checked: the host answers a solicitation for the gateway from the
+	// gateway's own address, which is not link-local.
+	if (dir == TP_DIR_INGRESS)
+		return t == TP_ICMPV6_RA || t == TP_ICMPV6_NS || t == TP_ICMPV6_NA;
+	if (t != TP_ICMPV6_RS && t != TP_ICMPV6_NS && t != TP_ICMPV6_NA)
+		return 0;
+	if (!tp_is_link_local6(s->src) && !(t == TP_ICMPV6_NS && tp_is_zero(s->src, 16)) &&
+	    !tp_iface_has_addr(ifindex, 6, s->src))
+		return 0;
+	if (tp_is_link_local6(s->dst) || (s->dst[0] == 0xFF && s->dst[1] == 0x02))
+		return 1;
+	struct tenant_gw_value *gw = bpf_map_lookup_elem(&tenant_gw_table, &ifindex);
+	__u8 diff = 0;
+
+	if (!gw)
+		return 0;
+	for (int i = 0; i < 16; i++)
+		diff |= s->dst[i] ^ gw->gw6[i];
+	return diff == 0;
+}
+
+// tp_capture_l4 reads the transport fields at off, which must lie inside an
+// IP packet of ip_end bytes from the start of the frame.
+static USID_ALWAYS_INLINE __u8 tp_capture_l4(struct __sk_buff *skb, struct tp_scratch_value *s, __u32 off,
+					     __u32 ip_end)
+{
+	if (s->proto == USID_IPPROTO_TCP || s->proto == USID_IPPROTO_UDP) {
+		__u32 need = s->proto == USID_IPPROTO_TCP ? USID_TCP_MIN_HDR_LEN : USID_UDP_HDR_LEN;
+		struct usid_l4ports ports;
+
+		if (off + need > ip_end || bpf_skb_load_bytes(skb, off, &ports, sizeof(ports)))
+			return TP_CAPTURE_PARSE_ERROR;
+		s->has_ports = 1;
+		s->sport = __builtin_bswap16(ports.source);
+		s->dport = __builtin_bswap16(ports.dest);
+	} else if (s->proto == TP_IPPROTO_ICMP || s->proto == USID_IPPROTO_ICMPV6) {
+		__u8 tc[2];
+
+		if (off + 4 > ip_end || bpf_skb_load_bytes(skb, off, tc, sizeof(tc)))
+			return TP_CAPTURE_PARSE_ERROR;
+		s->icmp_type = tc[0];
+		s->icmp_code = tc[1];
+	}
+	return TP_CAPTURE_OK;
+}
+
+static USID_ALWAYS_INLINE __u8 tp_capture_ip4(struct __sk_buff *skb, struct tp_scratch_value *s, __u32 frame_l3)
+{
+	struct usid_iphdr ip4;
+
+	if (bpf_skb_load_bytes(skb, USID_L3_OFFSET, &ip4, sizeof(ip4)))
+		return TP_CAPTURE_PARSE_ERROR;
+	__u32 hlen = (__u32) (ip4.ver_ihl & 0x0F) << 2;
+	__u32 tot = __builtin_bswap16(ip4.tot_len);
+
+	if ((ip4.ver_ihl >> 4) != 4 || hlen < USID_IPV4_MIN_HDR_LEN)
+		return TP_CAPTURE_PARSE_ERROR;
+	// A GSO super-packet may carry a total length of 0 (BIG TCP); its
+	// observable length is the buffer.
+	if (tot == 0 && skb->gso_segs > 1)
+		tot = frame_l3;
+	if (tot < hlen || tot > frame_l3)
+		return TP_CAPTURE_PARSE_ERROR;
+	s->bytes = tot;
+	if (__builtin_bswap16(ip4.frag_off) & (USID_IPV4_MORE_FRAGMENTS | USID_IPV4_FRAG_OFFSET_MASK))
+		return TP_CAPTURE_PARSE_ERROR;
+	s->family = 4;
+	s->proto = ip4.protocol;
+	__builtin_memcpy(s->src, ip4.saddr, 4);
+	__builtin_memcpy(s->dst, ip4.daddr, 4);
+	return tp_capture_l4(skb, s, USID_L3_OFFSET + hlen, USID_L3_OFFSET + tot);
+}
+
+static USID_ALWAYS_INLINE __u8 tp_capture_ip6(struct __sk_buff *skb, struct tp_scratch_value *s, __u32 dir,
+					      __u32 ifindex, __u32 frame_l3, __u32 tunneled)
+{
+	struct usid_ip6hdr ip6;
+
+	if (bpf_skb_load_bytes(skb, USID_L3_OFFSET, &ip6, sizeof(ip6)))
+		return TP_CAPTURE_PARSE_ERROR;
+	__u32 payload = __builtin_bswap16(ip6.payload_len);
+
+	if ((ip6.vtc_flow[0] >> 4) != 6)
+		return TP_CAPTURE_PARSE_ERROR;
+	if (payload == 0 && skb->gso_segs > 1 && frame_l3 > sizeof(ip6))
+		payload = frame_l3 - sizeof(ip6);
+	if (sizeof(ip6) + payload > frame_l3)
+		return TP_CAPTURE_PARSE_ERROR;
+	s->bytes = sizeof(ip6) + payload;
+	s->family = 6;
+	__builtin_memcpy(s->src, ip6.saddr, 16);
+	__builtin_memcpy(s->dst, ip6.daddr, 16);
+
+	__u32 ip_end = USID_L3_OFFSET + sizeof(ip6) + payload;
+	__u32 off = USID_L3_OFFSET + sizeof(ip6);
+	__u8 next = ip6.nexthdr;
+
+	int ext_seen = 0;
+
+	for (int i = 0; i < TP_IPV6_MAX_EXT_HEADERS; i++) {
+		if (next != USID_IPPROTO_HOPOPTS && next != USID_IPPROTO_DSTOPTS && next != USID_IPPROTO_ROUTING)
+			break;
+		if (next == USID_IPPROTO_HOPOPTS && i != 0)
+			return TP_CAPTURE_PARSE_ERROR;
+		__u8 ext[4];
+
+		if (off + 8 > ip_end || bpf_skb_load_bytes(skb, off, ext, sizeof(ext)))
+			return TP_CAPTURE_PARSE_ERROR;
+		// A Routing header with segments left would send the packet on to a
+		// destination other than the one evaluated.
+		if (next == USID_IPPROTO_ROUTING && ext[3] != 0)
+			return TP_CAPTURE_PARSE_ERROR;
+		off += ((__u32) ext[1] + 1) * 8;
+		next = ext[0];
+		ext_seen = 1;
+		if (off - USID_L3_OFFSET - sizeof(ip6) > TP_IPV6_MAX_EXT_BYTES)
+			return TP_CAPTURE_PARSE_ERROR;
+	}
+	switch (next) {
+	case USID_IPPROTO_HOPOPTS:
+	case USID_IPPROTO_DSTOPTS:
+	case USID_IPPROTO_ROUTING: // more than the bound
+	case USID_IPPROTO_FRAGMENT:
+	case USID_IPPROTO_AH:
+	case 135: // Mobility
+	case 139: // HIP
+	case 140: // Shim6
+	case 253: // experimental
+	case 254:
+		return TP_CAPTURE_PARSE_ERROR;
+	}
+	if (off > ip_end)
+		return TP_CAPTURE_PARSE_ERROR;
+	s->proto = next;
+	if (next == TP_IPPROTO_ESP || next == TP_IPPROTO_NONE)
+		return TP_CAPTURE_OK;
+	__u8 st = tp_capture_l4(skb, s, off, ip_end);
+
+	// Only a bare neighbor discovery message is a link operation, the same
+	// shape usid_egress's own neighbor discovery bail recognizes.
+	// A packet decapsulated from the fabric came from another node, however
+	// its hop limit reads, so it is never a link operation.
+	if (st == TP_CAPTURE_OK && !tunneled && !ext_seen && tp_ndp_link_op(s, ip6.hop_limit, ip_end - off, dir, ifindex))
+		return TP_CAPTURE_LINK_OP;
+	return st;
+}
+
+// tp_capture parses skb's tenant packet into tp_scratch for a later
+// tp_decide. Called at the top of a program, before any rewrite, so egress
+// rules see the workload's own addresses. It reads with bpf_skb_load_bytes,
+// so it works on a nonlinear skb and leaves no packet pointer to invalidate.
+__attribute__((noinline)) int tp_capture(struct __sk_buff *skb, __u32 dir, __u32 ifindex, __u32 tunneled)
+{
+	__u32 key = 0;
+	struct tp_scratch_value *s = bpf_map_lookup_elem(&tp_scratch, &key);
+
+	if (!s)
+		return 0;
+	if (tp_mode() == TP_MODE_OFF) {
+		s->status = TP_CAPTURE_SKIPPED;
+		return 0;
+	}
+	__builtin_memset(s, 0, sizeof(*s));
+
+	__u32 frame_l3 = skb->len > USID_L3_OFFSET ? skb->len - USID_L3_OFFSET : 0;
+	__be16 proto;
+
+	if (bpf_skb_load_bytes(skb, 12, &proto, sizeof(proto))) {
+		s->status = TP_CAPTURE_LINK_DROP;
+		return 0;
+	}
+	if (proto == __builtin_bswap16(TP_ETH_P_ARP)) {
+		s->bytes = frame_l3;
+		s->status = tp_capture_arp(skb, dir, ifindex);
+	}
+	else if (proto == __builtin_bswap16(USID_ETH_P_IP))
+		s->status = tp_capture_ip4(skb, s, frame_l3);
+	else if (proto == __builtin_bswap16(USID_ETH_P_IPV6))
+		s->status = tp_capture_ip6(skb, s, dir, ifindex, frame_l3, tunneled);
+	else {
+		s->bytes = frame_l3;
+		s->status = TP_CAPTURE_LINK_DROP;
+	}
+	return 0;
+}
+
+static USID_ALWAYS_INLINE int tp_prefix_match(const __u64 *rule, const __u64 *mask, const __u8 *addr)
+{
+	__u64 a[2];
+
+	__builtin_memcpy(a, addr, sizeof(a));
+	return (((rule[0] ^ a[0]) & mask[0]) | ((rule[1] ^ a[1]) & mask[1])) == 0;
+}
+
+// tp_match_entry is the callback bpf_for_each_map_elem calls for each slot
+// of a snapshot, in index order. It returns 1 to stop the walk.
+static long tp_match_entry(void *map, __u32 *key, union tp_slot *slot, void *ctx)
+{
+	__u32 idx = *key;
+	__u32 sk = 0;
+	struct tp_scratch_value *s = bpf_map_lookup_elem(&tp_scratch, &sk);
+
+	if (!s)
+		return 1;
+	if (idx == 0)
+		return 0; // the header
+	if (idx > s->count)
+		return 1;
+	struct tp_entry *e = &slot->entry;
+	__u16 f = e->flags;
+
+	if ((f & TP_F_FAMILY) && e->family != s->family)
+		return 0;
+	if ((f & TP_F_PROTO) && e->proto != s->proto)
+		return 0;
+	if ((f & TP_F_SOURCE) && !tp_prefix_match(e->src, e->src_mask, s->src))
+		return 0;
+	if ((f & TP_F_DEST) && !tp_prefix_match(e->dst, e->dst_mask, s->dst))
+		return 0;
+	if ((f & TP_F_SPORT) && (!s->has_ports || s->sport < e->sport_lo || s->sport > e->sport_hi))
+		return 0;
+	if ((f & TP_F_DPORT) && (!s->has_ports || s->dport < e->dport_lo || s->dport > e->dport_hi))
+		return 0;
+	if ((f & TP_F_ICMP_TYPE) && e->icmp_type != s->icmp_type)
+		return 0;
+	if ((f & TP_F_ICMP_CODE) && e->icmp_code != s->icmp_code)
+		return 0;
+	if (f & TP_F_PATH) {
+		if (s->path == TP_PATH_UNKNOWN) {
+			s->result = TP_RESULT_CLASSIFICATION_ERROR;
+			return 1;
+		}
+		if (e->path != s->path)
+			return 0;
+	}
+	s->result = TP_RESULT_MATCH;
+	s->rule = e->rule;
+	s->allow = (f & TP_F_ALLOW) != 0;
+	return 1;
+}
+
+static USID_ALWAYS_INLINE void tp_count_unattributed(__u32 dir, __u32 reason, __u64 bytes)
+{
+	__u32 k = dir * TP_REASON_COUNT + reason;
+	struct tp_counter *c = bpf_map_lookup_elem(&tp_unattributed_counters, &k);
+
+	if (c)
+		tp_add(c, bytes);
+}
+
+static USID_ALWAYS_INLINE void tp_count_fallback(__u32 ifindex, __u64 token, __u32 dir, __u32 reason,
+						 __u64 bytes)
+{
+	struct tp_fallback_key k;
+
+	__builtin_memset(&k, 0, sizeof(k));
+	k.ifindex = ifindex;
+	k.direction = (__u8) dir;
+	k.reason = (__u8) reason;
+	k.policy_token = token;
+	struct tp_counter *c = bpf_map_lookup_elem(&tp_fallback_counters, &k);
+
+	if (c)
+		tp_add(c, bytes);
+	else
+		tp_count_unattributed(dir, reason, bytes);
+}
+
+// tp_decide is the policy verdict for the packet tp_capture last parsed,
+// leaving through ifindex in dir on path. It returns 1 when the packet must
+// be dropped, which only mode enforce ever asks for; mode audit counts the
+// same outcome and forwards. Exactly one outcome is counted per call.
+__attribute__((noinline)) int tp_decide(__u32 ifindex, __u32 dir, __u32 path)
+{
+	__u32 mode = tp_mode();
+
+	if (mode == TP_MODE_OFF || dir > TP_DIR_EGRESS)
+		return 0;
+	int enforce = mode == TP_MODE_ENFORCE;
+	__u32 sk = 0;
+	struct tp_scratch_value *s = bpf_map_lookup_elem(&tp_scratch, &sk);
+
+	if (!s)
+		return enforce;
+	__u64 bytes = s->bytes;
+	struct tp_iface_value *iface = bpf_map_lookup_elem(&tp_iface_table, &ifindex);
+
+	if (!iface) {
+		tp_count_unattributed(dir, TP_REASON_POLICY_UNAVAILABLE, bytes);
+		return enforce;
+	}
+	if (iface->kind == TP_KIND_INFRA)
+		return 0;
+	__u64 token = iface->policy_token;
+
+	switch (s->status) {
+	case TP_CAPTURE_LINK_OP:
+	case TP_CAPTURE_SKIPPED: // captured while the mode was off
+		return 0;
+	case TP_CAPTURE_LINK_DROP: {
+		struct tp_counter *c = bpf_map_lookup_elem(&tp_link_drops, &dir);
+
+		if (c)
+			tp_add(c, bytes);
+		return enforce;
+	}
+	case TP_CAPTURE_OK:
+		break;
+	default:
+		tp_count_fallback(ifindex, token, dir, TP_REASON_PARSE_ERROR, bytes);
+		return enforce;
+	}
+
+	struct tp_binding_key bk = {.ifindex = ifindex, .direction = dir};
+	void *snapshot = bpf_map_lookup_elem(&tp_binding_table, &bk);
+
+	if (!snapshot) {
+		tp_count_fallback(ifindex, token, dir, TP_REASON_POLICY_UNAVAILABLE, bytes);
+		return enforce;
+	}
+	__u32 zero = 0;
+	union tp_slot *head = bpf_map_lookup_elem(snapshot, &zero);
+
+	if (!head || head->header.policy_token != token) {
+		tp_count_fallback(ifindex, token, dir, TP_REASON_POLICY_UNAVAILABLE, bytes);
+		return enforce;
+	}
+	__u32 counter_base = head->header.counter_base;
+
+	s->count = head->header.count;
+	s->path = (__u8) path;
+	s->result = TP_RESULT_NONE;
+	bpf_for_each_map_elem(snapshot, tp_match_entry, 0, 0);
+
+	if (s->result == TP_RESULT_CLASSIFICATION_ERROR) {
+		tp_count_fallback(ifindex, token, dir, TP_REASON_CLASSIFICATION_ERROR, bytes);
+		return enforce;
+	}
+	if (s->result != TP_RESULT_MATCH) {
+		tp_count_fallback(ifindex, token, dir, TP_REASON_NO_MATCH, bytes);
+		return enforce;
+	}
+	__u32 allow = s->allow;
+	__u32 row = counter_base + s->rule;
+	struct tp_counter *c = bpf_map_lookup_elem(&tp_rule_counters, &row);
+
+	if (c) {
+		tp_add(c, bytes);
+	} else {
+		__u32 ek = dir * 2 + allow;
+		__u64 *err = bpf_map_lookup_elem(&tp_accounting_errors, &ek);
+
+		if (err)
+			*err += 1;
+	}
+	return enforce && !allow;
+}
+
+// tp_route_path classifies an egress route: a shard group sentinel, or a
+// route whose SID's locator is a NAT shard's, is PublicNAT; anything else is
+// Private. An encapsulating route before the NAT locators have synced is
+// unknown, since it could be either.
+static USID_ALWAYS_INLINE __u32 tp_route_path(const struct egress_route_value *rv)
+{
+	if (rv->link_ifindex == USID_EGRESS_GROUP_SENTINEL)
+		return TP_PATH_PUBLIC_NAT;
+	if (rv->link_ifindex == 0)
+		return TP_PATH_PRIVATE;
+	__u32 key = 0;
+	struct tp_state_value *st = bpf_map_lookup_elem(&tp_state, &key);
+
+	if (!st || st->mode == TP_MODE_OFF)
+		return TP_PATH_PRIVATE; // unused: tp_decide does nothing while off
+	if (!st->nat_locators_synced)
+		return TP_PATH_UNKNOWN;
+	__u64 locator;
+
+	__builtin_memcpy(&locator, rv->sid, sizeof(locator));
+	return bpf_map_lookup_elem(&tp_nat_locator_table, &locator) ? TP_PATH_PUBLIC_NAT : TP_PATH_PRIVATE;
+}
+
+// tp_ingress_path classifies a decapsulated packet by its outer header, read
+// before the strip: a private service tunnel is Private, a gateway delivery
+// (a nonzero backend slot) PublicService, and a packet whose outer source is a
+// NAT shard's SID PublicNAT. Before the NAT locators have synced it is
+// unknown.
+static USID_ALWAYS_INLINE __u32 tp_ingress_path(const __u8 *outer_saddr, __u8 service_tunnel, __u16 backend_slot)
+{
+	__u32 key = 0;
+	struct tp_state_value *st = bpf_map_lookup_elem(&tp_state, &key);
+
+	if (!st || st->mode == TP_MODE_OFF)
+		return TP_PATH_PRIVATE; // unused: tp_decide does nothing while off
+	if (service_tunnel)
+		return TP_PATH_PRIVATE;
+	if (backend_slot != 0)
+		return TP_PATH_PUBLIC_SERVICE;
+	if (!st->nat_locators_synced)
+		return TP_PATH_UNKNOWN;
+	__u64 locator;
+
+	__builtin_memcpy(&locator, outer_saddr, sizeof(locator));
+	return bpf_map_lookup_elem(&tp_nat_locator_table, &locator) ? TP_PATH_PUBLIC_NAT : TP_PATH_PRIVATE;
+}
+
+// tp_ingress_mark is the mark tp_deliver skips, or zero.
+static USID_ALWAYS_INLINE __u32 tp_ingress_mark(void)
+{
+	__u32 key = 0;
+	struct tp_state_value *st = bpf_map_lookup_elem(&tp_state, &key);
+
+	return st && st->mode != TP_MODE_OFF ? st->mark : 0;
+}
+
 // count_claimed_drop is count_drop plus the per-entry dropped_packets bump, for
 // every drop after step 6's vrf_table match, that is, every drop of a packet
 // already claimed by a specific tenant. It also counts the drop in direction
@@ -2799,6 +3603,9 @@ int usid_ingress(struct __sk_buff *skb)
 	// by the bounds check above.
 	__u8 service_tunnel = ip6->nexthdr == USID_IPPROTO_SERVICE;
 	__u8 service_reverse_installed = 0;
+	// The forwarding path for the receiver's traffic policy, read from the
+	// outer header before the strip below removes it.
+	__u32 tp_path = tp_ingress_path(ip6->saddr, service_tunnel, backend_slot);
 	__u32 service_scratch_key = 0;
 	struct service_fib_scratch_value *service_scratch = 0;
 	if (service_tunnel) {
@@ -3119,6 +3926,19 @@ int usid_ingress(struct __sk_buff *skb)
 		service_reverse_installed = authorization;
 	}
 
+	// The receiving workload's ingress traffic policy, decided on the packet
+	// as it will be delivered, after decapsulation and translation, and
+	// before any of the three delivery helpers below. bpf_redirect_peer skips
+	// the receiver's tc egress, so this is its only check; the other two pass
+	// it, so the packet is marked decided for tp_deliver.
+	tp_capture(skb, TP_DIR_INGRESS, fib_params.ifindex, 1);
+	if (tp_decide(fib_params.ifindex, TP_DIR_INGRESS, tp_path)) {
+		if (service_reverse_installed && service_scratch)
+			bpf_map_delete_elem(&service_reverse_table, &service_scratch->reverse);
+		return TC_ACT_SHOT;
+	}
+	__u32 tp_mark = tp_ingress_mark();
+
 	// Authorization above must run before cold-neighbor handling. Otherwise a
 	// forged or revoked service tunnel can bypass its grant/route checks simply
 	// by targeting an attachment whose neighbor entry is not warm.
@@ -3133,6 +3953,7 @@ int usid_ingress(struct __sk_buff *skb)
 			nh.nh_family = USID_AF_INET;
 			nh.ipv4_nh = fib_params.ipv4_dst;
 		}
+		skb->mark |= tp_mark;
 		long neigh_rc = bpf_redirect_neigh(fib_params.ifindex, &nh, sizeof(nh), 0);
 		if (neigh_rc == TC_ACT_REDIRECT) {
 			count_vrf_forwarded(vrf_key, VRF_DIRECTION_INGRESS, tenant_len(skb));
@@ -3167,8 +3988,10 @@ int usid_ingress(struct __sk_buff *skb)
 
 	if (egress_kind && *egress_kind == EGRESS_KIND_VETH)
 		redirect_rc = bpf_redirect_peer(egress_ifindex, 0);
-	else
+	else {
+		skb->mark |= tp_mark;
 		redirect_rc = bpf_redirect(egress_ifindex, 0);
+	}
 
 	if (redirect_rc != TC_ACT_REDIRECT) {
 		if (service_reverse_installed && service_scratch)
@@ -3621,6 +4444,12 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 				count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 				return TC_ACT_SHOT;
 			}
+			// A reply the service policy authorized; the workload's egress
+			// traffic policy decides it too, on the tuple captured before
+			// any rewrite. A reply the service policy dropped above has no
+			// traffic policy outcome.
+			if (tp_decide(ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+				return TC_ACT_SHOT;
 			if (service_rewrite_address(skb, s, 1, reverse->frontend_addr)) {
 				count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
 				return TC_ACT_SHOT;
@@ -3662,6 +4491,8 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 			return TC_ACT_SHOT;
 		}
+		if (tp_decide(ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+			return TC_ACT_SHOT;
 		reverse->last_seen_ns = now;
 		long rc = service_redirect(skb, s, consumer_ifindex);
 		if (rc != TC_ACT_REDIRECT) {
@@ -3722,6 +4553,8 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	}
 	__u8 frontend_addr[16];
 	__builtin_memcpy(frontend_addr, s->dest_addr, 16);
+	if (tp_decide(ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+		return TC_ACT_SHOT;
 	if (service_rewrite_address(skb, s, 0, route->backend_addr)) {
 		count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
 		return TC_ACT_SHOT;
@@ -4000,8 +4833,15 @@ int usid_egress(struct __sk_buff *skb)
 {
 	count_drop(DROP_REASON_TRACE_ENTRY);
 
+	// Capture before any rewrite, so egress rules see the workload's own
+	// addresses. Every exit that hands the packet on is gated by tp_decide
+	// with the path that exit implies; in mode off both are no-ops.
+	tp_capture(skb, TP_DIR_EGRESS, skb->ifindex, 0);
+
 	if (bpf_skb_pull_data(skb, 0)) {
 		count_drop(DROP_REASON_TRACE_PULL_DATA_FAILED);
+		if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+			return TC_ACT_SHOT;
 		return TC_ACT_UNSPEC;
 	}
 
@@ -4012,6 +4852,8 @@ int usid_egress(struct __sk_buff *skb)
 
 	if ((void *) (eth + 1) > data_end) {
 		count_drop(DROP_REASON_TRACE_ETH_BOUNDS_FAILED);
+		if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+			return TC_ACT_SHOT;
 		return TC_ACT_UNSPEC;
 	}
 
@@ -4024,6 +4866,8 @@ int usid_egress(struct __sk_buff *skb)
 
 	if (h_proto != __builtin_bswap16(USID_ETH_P_IPV6) && h_proto != __builtin_bswap16(USID_ETH_P_IP)) {
 		count_drop(DROP_REASON_TRACE_ETHERTYPE_MISMATCH);
+		if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+			return TC_ACT_SHOT;
 		return TC_ACT_UNSPEC;
 	}
 
@@ -4032,6 +4876,8 @@ int usid_egress(struct __sk_buff *skb)
 
 	if (!iv) {
 		count_drop(DROP_REASON_TRACE_IFINDEX_MISS);
+		if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+			return TC_ACT_SHOT;
 		return TC_ACT_UNSPEC; // no attachment registered on this ifindex at all
 	}
 	count_drop(DROP_REASON_TRACE_IFINDEX_HIT);
@@ -4039,13 +4885,15 @@ int usid_egress(struct __sk_buff *skb)
 	struct vrf_value *vrf = bpf_map_lookup_elem(&vrf_table, &vrf_key);
 	if (!vrf) {
 		count_drop(DROP_REASON_TRACE_MISS_VRF);
+		if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+			return TC_ACT_SHOT;
 		return TC_ACT_UNSPEC;
 	}
 	__u32 scratch_key = 0;
 	struct service_fib_scratch_value *egress_scratch =
 		bpf_map_lookup_elem(&service_fib_scratch, &scratch_key);
 	if (!egress_scratch)
-		return TC_ACT_UNSPEC;
+		return tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE) ? TC_ACT_SHOT : TC_ACT_UNSPEC;
 
 	__u8 route_family;
 	__builtin_memset(egress_scratch->dest_addr, 0, sizeof(egress_scratch->dest_addr));
@@ -4054,7 +4902,7 @@ int usid_egress(struct __sk_buff *skb)
 		struct usid_ip6hdr *ip6 = (void *) (eth + 1);
 
 		if ((void *) (ip6 + 1) > data_end)
-			return TC_ACT_UNSPEC;
+			return tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE) ? TC_ACT_SHOT : TC_ACT_UNSPEC;
 
 		// The VIP lookup runs before NPTv6, keyed on the backend's own source
 		// address, the one its binding registered. A VIP hit replaces the source
@@ -4140,6 +4988,9 @@ int usid_egress(struct __sk_buff *skb)
 						__builtin_memcpy(eth->h_dest, pu->dmac, sizeof(eth->h_dest));
 						__builtin_memcpy(eth->h_source, pu->smac, sizeof(eth->h_source));
 
+						if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PUBLIC_SERVICE))
+							return TC_ACT_SHOT;
+
 						long redirect_rc = bpf_redirect(pu->link_ifindex, 0);
 
 						if (redirect_rc != TC_ACT_REDIRECT) {
@@ -4181,6 +5032,8 @@ int usid_egress(struct __sk_buff *skb)
 		// does.
 		if (ip6->daddr[0] == 0xFF || (ip6->daddr[0] == 0xFE && (ip6->daddr[1] & 0xC0) == 0x80)) {
 			count_drop(DROP_REASON_TRACE_MULTICAST_LL_BAIL);
+			if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+				return TC_ACT_SHOT;
 			return TC_ACT_UNSPEC;
 		}
 
@@ -4206,6 +5059,8 @@ int usid_egress(struct __sk_buff *skb)
 			if ((void *) (icmp6 + 1) <= data_end &&
 			    icmp6->type >= USID_ICMPV6_TYPE_RS && icmp6->type <= USID_ICMPV6_TYPE_REDIRECT) {
 				count_drop(DROP_REASON_TRACE_NDP_BAIL);
+				if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+					return TC_ACT_SHOT;
 				return TC_ACT_UNSPEC;
 			}
 		}
@@ -4216,7 +5071,7 @@ int usid_egress(struct __sk_buff *skb)
 		struct usid_iphdr *ip4 = (void *) (eth + 1);
 
 		if ((void *) (ip4 + 1) > data_end)
-			return TC_ACT_UNSPEC;
+			return tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE) ? TC_ACT_SHOT : TC_ACT_UNSPEC;
 
 		route_family = USID_EGRESS_ROUTE_FAMILY_INET4;
 		__builtin_memcpy(egress_scratch->dest_addr, ip4->daddr, sizeof(ip4->daddr));
@@ -4236,6 +5091,8 @@ int usid_egress(struct __sk_buff *skb)
 
 	if (!rv) {
 		count_drop(DROP_REASON_TRACE_MISS_ROUTE);
+		if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+			return TC_ACT_SHOT;
 		return TC_ACT_UNSPEC; // no configured route for this destination -- defer to the kernel (still-installed netlink route during migration, or genuinely none)
 	}
 
@@ -4259,6 +5116,8 @@ int usid_egress(struct __sk_buff *skb)
 			count_vrf_forwarded(vrf_key, VRF_DIRECTION_EGRESS, len);
 			count_vrf_forwarded(vrf_key, VRF_DIRECTION_INGRESS, len);
 		}
+		if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+			return TC_ACT_SHOT;
 		return TC_ACT_UNSPEC;
 	}
 
@@ -4271,8 +5130,10 @@ int usid_egress(struct __sk_buff *skb)
 	__u32 src_key = 0;
 	__u8 *src = bpf_map_lookup_elem(&node_src_addr_table, &src_key);
 
+	__u32 route_path = tp_route_path(rv);
+
 	if (!src)
-		return TC_ACT_UNSPEC; // array map, so this is unreachable in practice -- kept as a defensive null check anyway
+		return tp_decide(skb->ifindex, TP_DIR_EGRESS, route_path) ? TC_ACT_SHOT : TC_ACT_UNSPEC; // array map, so this is unreachable in practice -- kept as a defensive null check anyway
 
 	__u8 src_or = 0;
 
@@ -4281,7 +5142,12 @@ int usid_egress(struct __sk_buff *skb)
 		src_or |= src[i];
 
 	if (src_or == 0)
-		return TC_ACT_UNSPEC; // this node's own source SID isn't registered yet -- fail open rather than encapsulate with an all-zero source
+		return tp_decide(skb->ifindex, TP_DIR_EGRESS, route_path) ? TC_ACT_SHOT : TC_ACT_UNSPEC; // this node's own source SID isn't registered yet -- fail open rather than encapsulate with an all-zero source
+
+	// The packet is about to be encapsulated, toward a shard group or a
+	// single SID. Decide before the group moves a pin or the MSS is clamped.
+	if (tp_decide(skb->ifindex, TP_DIR_EGRESS, route_path))
+		return TC_ACT_SHOT;
 
 	// A shard group sentinel: pick this packet's shard and carry on from the
 	// route resolve_egress_group built, exactly as from an ordinary entry.
@@ -4436,6 +5302,25 @@ int usid_egress(struct __sk_buff *skb)
 	return redirect_rc;
 }
 
+// tp_deliver is a managed interface's ingress traffic policy check for
+// everything the host transmits to it: same-node delivery through the kernel
+// VRF, local private service delivery, a Packet Too Big usid_egress sends
+// back, host-generated traffic, and the ingress sidecar. Attached at the
+// host-side interface's tc egress. A packet usid_ingress already decided
+// carries its mark and is passed once, with the mark cleared.
+SEC("tc")
+int tp_deliver(struct __sk_buff *skb)
+{
+	__u32 mark = tp_ingress_mark();
+
+	if (mark && (skb->mark & mark) == mark) {
+		skb->mark &= ~mark;
+		return TC_ACT_UNSPEC;
+	}
+	tp_capture(skb, TP_DIR_INGRESS, skb->ifindex, 0);
+	return tp_decide(skb->ifindex, TP_DIR_INGRESS, TP_PATH_PRIVATE) ? TC_ACT_SHOT : TC_ACT_UNSPEC;
+}
+
 SEC("tc")
 int usid_service_egress(struct __sk_buff *skb)
 {
@@ -4453,6 +5338,7 @@ int usid_service_egress(struct __sk_buff *skb)
 	    h_proto != __builtin_bswap16(USID_ETH_P_IP))
 		goto legacy;
 
+	tp_capture(skb, TP_DIR_EGRESS, skb->ifindex, 0);
 	long service_rc = service_path(skb, h_proto, skb->ifindex);
 	if (service_rc != TC_ACT_UNSPEC)
 		return service_rc;

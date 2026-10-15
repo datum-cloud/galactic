@@ -1,0 +1,25 @@
+# ns60's VIP backends: they receive the gateways' public service traffic and
+# answer it, and nothing else (verify:gateway-ingress). verify:traffic-policy
+# inserts a temporary deny ahead of allow-service to prove a denial on this
+# path, then restores this policy.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: lab-egress
+spec:
+  rules:
+    - name: allow-service-replies
+      action: Allow
+      match:
+        path: PublicService
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: lab-ingress
+spec:
+  rules:
+    - name: allow-service
+      action: Allow
+      match:
+        path: PublicService

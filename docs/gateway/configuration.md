@@ -522,7 +522,7 @@ attachment whose `status.vpc` is set but whose `status.node` is not stays
 pending with `status.node not set by datum-cloud/cloud`. A rule whose
 attachments are all pending or unselected does not load. The containerlab lab
 runs none of these controllers, so
-`deploy/containerlab/scripts/publish-ns60-attachments.sh` patches
+`deploy/containerlab/scripts/publish-attachments.sh` patches
 `status.vpc` and `status.node` in by hand.
 
 Every accepted, non-deleting `NetworkRule` in the namespace is served by

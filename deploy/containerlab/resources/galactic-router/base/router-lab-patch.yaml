@@ -9,3 +9,11 @@ spec:
         - name: galactic-router
           image: galactic-router:latest
           imagePullPolicy: Never
+          env:
+            # The lab enforces interface traffic policy
+            # (resources/galactic-cni/shared/), so every router publishes
+            # its node's bindings. deploy:traffic-policy installs the CRDs
+            # this watches first. Only this plain role: the reflector has
+            # no tenant interfaces and refuses it.
+            - name: GALACTIC_ROUTER_TRAFFIC_POLICY
+              value: "true"

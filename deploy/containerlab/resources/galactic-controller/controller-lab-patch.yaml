@@ -1,0 +1,29 @@
+# The lab's control-plane node cannot reach pod addresses on the workers over
+# Cilium's tunnel, so the kube-apiserver could never call a pod-network
+# webhook; it reaches a worker's own address over the Kind network, as
+# cert-manager's webhook does (scripts/deploy-cert-manager.sh). The webhook
+# fails closed, so an unreachable one would refuse every TrafficPolicy.
+#
+# On the host network the ports must not collide with anything else on a
+# worker: cert-manager's webhook holds 10260, and galactic-gateway serves its
+# metrics on 8081, the base's health port. One replica: iad has a single
+# untainted worker, where a second host-network replica could never bind. For
+# the same reason a rolling update could never place its surge pod, which
+# needs the ports the old one holds, so the pod is recreated instead.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: galactic-controller
+  namespace: galactic-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  template:
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: controller
+          image: galactic-controller:latest
+          imagePullPolicy: Never

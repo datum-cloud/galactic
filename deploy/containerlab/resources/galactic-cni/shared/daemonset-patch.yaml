@@ -26,6 +26,13 @@ spec:
           image: galactic-cni:latest
           imagePullPolicy: Never
           env:
+            # The lab enforces interface traffic policy, though production
+            # defaults to off: every tenant interface denies until
+            # galactic-router publishes its bindings, and each tenant's
+            # fixtures grant what the lab's checks send
+            # (resources/tenants/policies/, verify:traffic-policy).
+            - name: GALACTIC_CNI_TRAFFIC_POLICY
+              value: enforce
             # Fabric uplink the eBPF hook attaches to
             - name: GALACTIC_CNI_EBPF_INTERFACES
               value: bond0

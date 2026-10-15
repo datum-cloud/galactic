@@ -36,6 +36,7 @@ RUN go mod download
 
 # Copy the go source
 COPY cmd/ cmd/
+COPY api/ api/
 COPY internal/ internal/
 
 # galactic-gateway transitively imports both internal/plumbing/ebpf/edgeprog

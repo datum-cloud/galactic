@@ -131,9 +131,12 @@ members() { echo "galactic_cni_egress_pool_members{class=\"$1\",state=\"$2\"}"; 
 
 # --- tenants --------------------------------------------------------------------
 
-# Tenant pods on the compute node, as ns/pod.
+# Tenant pods on the compute node, as ns/pod. ns60's VIP backends are left
+# out: the lab enforces traffic policy, and their egress grants only the
+# PublicService path (resources/tenants/policies/public-service/), so they
+# cannot egress through a shard at all.
 mapfile -t TENANTS < <(kc get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.nodeName}{"\n"}{end}' |
-  awk -v n="${COMPUTE}" '$2 == n && $1 ~ /^ns[0-9]+\// {print $1}')
+  awk -v n="${COMPUTE}" '$2 == n && $1 ~ /^ns[0-9]+\// && $1 !~ /^ns60\// {print $1}')
 [ "${#TENANTS[@]}" -ge 3 ] || die "need at least 3 tenant pods on ${COMPUTE}, found ${#TENANTS[@]}"
 FRESH_POD=$(kc -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
 FRESH_POD="ns10/${FRESH_POD}"

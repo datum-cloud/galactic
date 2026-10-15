@@ -27,6 +27,7 @@ func testCmd(t *testing.T) *cobra.Command {
 	cmd.Flags().IntP("metrics-port", "", config.DefaultRouterMetricsPort, "Metrics listen port")
 	cmd.Flags().IntP("grpc-health-port", "", config.DefaultRouterGRPCHealthPort, "gRPC health check port")
 	cmd.Flags().StringP("gc-namespace", "", config.DefaultRouterGCNamespace, "Namespace for orphaned CRD cleanup")
+	cmd.Flags().Bool("traffic-policy", false, "Enforce TrafficPolicy")
 	cmd.Flags().DurationP("gc-interval", "", config.DefaultRouterGCInterval, "Cleanup interval")
 	return cmd
 }

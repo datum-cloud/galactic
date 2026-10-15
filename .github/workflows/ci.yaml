@@ -77,6 +77,14 @@ jobs:
         # its bpf2go output regenerated first.
         uses: ./.github/actions/install-ebpf-deps
 
+      - name: Install envtest binaries
+        # The CRD schema tests (api/v1alpha1, internal/fabric/api/v1alpha1)
+        # need a real kube-apiserver and etcd, and skip without them.
+        run: |
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.24 use 1.35.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          test -x "$assets/kube-apiserver"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
+
       - name: Run unit tests
         run: task test:unit
 
@@ -155,6 +163,14 @@ jobs:
         # root's PATH, which -E's preserved PATH (asserted explicitly via
         # `env "PATH=$PATH"`) already covers.
         uses: ./.github/actions/install-ebpf-deps
+
+      - name: Install envtest binaries
+        # The traffic policy node reconciler's test needs a real API server
+        # as well as root, and skips without one.
+        run: |
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.24 use 1.35.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          test -x "$assets/kube-apiserver"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
 
       - name: Run root-gated unit tests as root
         # sudo's secure_path policy overrides -E's preserved PATH for

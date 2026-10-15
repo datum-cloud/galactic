@@ -1,0 +1,8 @@
+# The galactic.datumapis.com CRDs. Not part of the root kustomization: nothing
+# reads them until the traffic policy controllers ship, and infra owns the
+# CRDs it installs in each cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - galactic.datumapis.com_trafficpolicies.yaml
+  - galactic.datumapis.com_trafficpolicybindings.yaml

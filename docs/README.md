@@ -57,6 +57,18 @@ data flow, module reference, known constraints):
   that gates AS-path and community searches: method, how to run it
   (`task test:fabric-api-load`), and the results for direct FRR scans versus the
   BMP-fed search index.
+- [traffic-policy/controller.md](traffic-policy/controller.md) —
+  `galactic-controller --role=cell`: the TrafficPolicy webhook, the reserved
+  default policy, binding resolution status, flags and install order.
+- [traffic-policy/rollout.md](traffic-policy/rollout.md) — turning traffic
+  policy on in a cell: install order, writing grants, auditing with the
+  counters before enforcing, and backing out.
+- [traffic-policy/node.md](traffic-policy/node.md) — galactic-router's node
+  side: enabling it, what each binding applies, per-node status, the
+  `galactic_cni_traffic_policy_*` metrics and the `policy explain` and
+  `policy show` diagnostics.
+- [api/galactic.md](api/galactic.md) — the generated `galactic.datumapis.com`
+  API reference (TrafficPolicy, TrafficPolicyBinding).
 - [cni/README.md](cni/README.md) — entry point for the `galactic-cni` docs
   subtree; from there:
   - [cni/environment-variables.md](cni/environment-variables.md) — every
@@ -85,3 +97,6 @@ above for that.
 - [enhancements/networking/latency-aware-routing/README.md](enhancements/networking/latency-aware-routing/README.md)
   — latency-aware SRv6 path selection as a tenant-facing routing policy.
   `status: provisional`, `stage: alpha`.
+- [enhancements/networking/interface-traffic-policy/README.md](enhancements/networking/interface-traffic-policy/README.md)
+  — per-interface ingress and egress traffic policy, deny by default and
+  enforced in the CNI datapath. `status: provisional`, `stage: alpha`.

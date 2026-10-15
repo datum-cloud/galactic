@@ -24,6 +24,11 @@ linters:
     - unconvert
     - unparam
     - unused
+  exclusions:
+    rules:
+      # A kubebuilder marker is one line by definition and cannot be wrapped.
+      - linters: [lll]
+        source: '^\s*// \+kubebuilder:'
   settings:
     gocyclo:
       min-complexity: 30

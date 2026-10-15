@@ -514,6 +514,10 @@ type ebpfDatapathState struct {
 	// sidecarReap carries the ingress sidecar reaper's state from one sidecar
 	// return sweep to the next. Nil leaves reaping off.
 	sidecarReap *sidecarReaper
+
+	// trafficPolicy owns the node's traffic policy mode and NAT locators. Nil
+	// when the datapath is a test fake.
+	trafficPolicy *trafficPolicyState
 }
 
 // startEBPFDatapath loads and attaches the eBPF datapath and returns the state
@@ -527,6 +531,10 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	egressCfg, err := config.ParseEgressGroupConfig(os.Getenv)
 	if err != nil {
 		return ebpfDatapathState{}, nil, fmt.Errorf("egress shard configuration: %w", err)
+	}
+	policyCfg, err := config.ParseTrafficPolicyConfig(os.Getenv)
+	if err != nil {
+		return ebpfDatapathState{}, nil, fmt.Errorf("traffic policy configuration: %w", err)
 	}
 
 	attach.SetHooks(m.Events.Hooks())
@@ -550,6 +558,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	// wiring below inert.
 	if objs, ok := datapath.(*prog.UsidObjects); ok {
 		state.objs = objs
+		state.trafficPolicy = startTrafficPolicy(objs, policyCfg)
 		state.mssClamp = newMSSClampState(objs.MssClampTable, objs.EncapMtuTable)
 		state.mssClamp.reconcile()
 		state.egressGroup.counters = objs.EgressShardCounters
@@ -585,6 +594,14 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	}
 	state.egressGroup = newEgressGroup(egressCfg, loadEgressShardSIDs(hostConf.EgressShardSIDs), nat64, attach.PinDir)
 	state.egressGroup.ctl = m.Egress
+	// Ordered mode routes only to the configured shards, so their locators
+	// are the complete set. Hashed mode adds the cluster's EgressShards once
+	// its watch has listed them.
+	if egressCfg.Mode == config.EgressModeHashed {
+		state.egressGroup.natLocators = state.trafficPolicy.setNATLocators
+	} else {
+		state.trafficPolicy.setNATLocators(state.egressGroup.staticSIDs)
+	}
 	state.egressGroup.nodeName = hostConf.NodeName
 	if state.objs != nil {
 		state.egressGroup.counters = state.objs.EgressShardCounters

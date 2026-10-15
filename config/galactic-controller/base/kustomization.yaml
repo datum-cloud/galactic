@@ -1,0 +1,17 @@
+# The cell role: a two-replica Deployment (one leader runs the reconcilers;
+# every replica serves the webhook), its webhook Service and serving
+# certificate, and the fail-closed ValidatingWebhookConfiguration.
+#
+# Needs, applied first: the galactic.datumapis.com CRDs (config/crd), the
+# cloud.datumapis.com VPCAttachment CRD (the controller watches it, and does
+# not become ready without it, which with a fail-closed webhook blocks every
+# TrafficPolicy write), cert-manager, and ../ (ServiceAccount and RBAC).
+resources:
+  - deployment.yaml
+  - service.yaml
+  - pdb.yaml
+  - certificate.yaml
+  - webhook.yaml
+images:
+  - name: ghcr.io/datum-cloud/galactic-controller
+    newTag: latest

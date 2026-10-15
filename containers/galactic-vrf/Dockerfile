@@ -27,6 +27,7 @@ COPY go.sum go.sum
 RUN go mod download
 
 COPY cmd/ cmd/
+COPY api/ api/
 COPY internal/ internal/
 
 # galactic-vrf reaches internal/plumbing/ebpf/prog transitively (via
