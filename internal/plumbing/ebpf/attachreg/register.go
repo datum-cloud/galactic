@@ -161,7 +161,9 @@ func RegisterDatapath(pinDir string, r Registration) (registered bool, err error
 		slog.Warn("ADD: could not decode VPC/VPCAttachment for byte-accounting attribution; "+
 			"vrf_table counters for this entry will report unattributed until the next ADD/DEL",
 			"vpc", r.VPC, "vpcAttachment", r.VPCAttachment, "err", err)
-	} else if err := registry.VPCAttribution.Register(block, r.Argument, vpcNum, vpcAttachmentNum); err != nil {
+	} else if err := registry.VPCAttribution.Register(
+		block, r.Argument, vpcNum, vpcAttachmentNum, intf.GenerateInterfaceNameVRF(r.VPC),
+	); err != nil {
 		slog.Warn("ADD: could not register eBPF vpc_attribution_table entry; "+
 			"vrf_table counters for this entry will report unattributed until the next ADD/DEL",
 			"vpc", r.VPC, "vpcAttachment", r.VPCAttachment, "err", err)

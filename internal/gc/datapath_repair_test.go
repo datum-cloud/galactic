@@ -26,6 +26,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -439,9 +440,10 @@ func checkAttachmentRows(t *testing.T, m *attachreg.Maps, block uint64, w wantAt
 	}
 	wantVPC, wantAtt, _ := attachreg.DecodeVPCIdentifiers(w.vpc, w.att)
 	attr, ok, err := m.Registry.VPCAttribution.Get(block, w.arg)
-	if err != nil || !ok || attr.VPC != wantVPC || attr.VPCAttachment != wantAtt {
-		t.Errorf("vpc_attribution_table[%#x] = %+v ok %v err %v, want VPC %d attachment %d",
-			w.arg, attr, ok, err, wantVPC, wantAtt)
+	wantVRF := intf.GenerateInterfaceNameVRF(w.vpc)
+	if err != nil || !ok || attr.VPC != wantVPC || attr.VPCAttachment != wantAtt || attr.VRFInterface != wantVRF {
+		t.Errorf("vpc_attribution_table[%#x] = %+v ok %v err %v, want VPC %d attachment %d VRF interface %s",
+			w.arg, attr, ok, err, wantVPC, wantAtt, wantVRF)
 	}
 	ifEntry, ok, err := m.IfindexVRF.Get(w.ifindex)
 	if err != nil || !ok || ifEntry.Block != block || ifEntry.Argument != w.arg {
@@ -798,7 +800,7 @@ func TestRepairAttachmentDatapath_ExistingRowsUntouched(t *testing.T) {
 	if err := m.Registry.VRF.Register(block, 0x21, 0xF021, usidmap.EgressKindVeth); err != nil {
 		t.Fatalf("seed vrf_table: %v", err)
 	}
-	if err := m.Registry.VPCAttribution.Register(block, 0x21, 1, 2); err != nil {
+	if err := m.Registry.VPCAttribution.Register(block, 0x21, 1, 2, "G00000001V"); err != nil {
 		t.Fatalf("seed vpc_attribution_table: %v", err)
 	}
 	if err := m.IfindexVRF.Register(11, block, 0x22); err != nil {

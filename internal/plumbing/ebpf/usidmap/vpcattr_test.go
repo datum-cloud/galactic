@@ -9,6 +9,10 @@ import (
 	"testing"
 )
 
+// testVRFInterface is a VRF device name of the length
+// intf.GenerateInterfaceNameVRF produces.
+const testVRFInterface = "G0000002tgV"
+
 func newTestVPCAttributionTable(clock func() uint64) (*VPCAttributionTable, *fakeTable) {
 	ft := newFakeTable()
 	return &VPCAttributionTable{table: ft, clock: clock}, ft
@@ -17,7 +21,7 @@ func newTestVPCAttributionTable(clock func() uint64) (*VPCAttributionTable, *fak
 func TestVPCAttributionTable_RegisterAndGet(t *testing.T) {
 	vt, _ := newTestVPCAttributionTable(constClock(7))
 
-	if err := vt.Register(testBlock, 0x123, 0xC0FFEE, 0x42); err != nil {
+	if err := vt.Register(testBlock, 0x123, 0xC0FFEE, 0x42, testVRFInterface); err != nil {
 		t.Fatalf("Register: unexpected error: %v", err)
 	}
 
@@ -32,10 +36,25 @@ func TestVPCAttributionTable_RegisterAndGet(t *testing.T) {
 		VRFKey:        VRFKey{Block: testBlock, Argument: 0x123},
 		VPC:           0xC0FFEE,
 		VPCAttachment: 0x42,
+		VRFInterface:  testVRFInterface,
 		Generation:    7,
 	}
 	if entry != want {
 		t.Errorf("Get = %+v, want %+v", entry, want)
+	}
+}
+
+// TestVPCAttributionTable_RegisterRejectsLongVRFInterface covers a name that
+// does not fit IFNAMSIZ with its terminating NUL, which the kernel would never
+// have accepted as an interface name either.
+func TestVPCAttributionTable_RegisterRejectsLongVRFInterface(t *testing.T) {
+	vt, ft := newTestVPCAttributionTable(constClock(1))
+
+	if err := vt.Register(testBlock, 0x123, 0xC0FFEE, 0x42, "G0123456789abcdV"); err == nil {
+		t.Errorf("Register(16-byte VRF interface) = nil error, want rejection")
+	}
+	if ft.len() != 0 {
+		t.Errorf("Register(16-byte VRF interface) wrote %d entries, want 0", ft.len())
 	}
 }
 
@@ -54,7 +73,7 @@ func TestVPCAttributionTable_GetMissingEntry(t *testing.T) {
 func TestVPCAttributionTable_RegisterRejectsReservedArgumentZero(t *testing.T) {
 	vt, ft := newTestVPCAttributionTable(constClock(1))
 
-	if err := vt.Register(testBlock, 0x000, 0xC0FFEE, 0x42); err == nil {
+	if err := vt.Register(testBlock, 0x000, 0xC0FFEE, 0x42, testVRFInterface); err == nil {
 		t.Errorf("Register(argument=0x000) = nil error, want rejection, matching VRFTable's own reserved-Argument rule")
 	}
 	if ft.len() != 0 {
@@ -71,12 +90,12 @@ func TestVPCAttributionTable_RegisterRejectsReservedArgumentZero(t *testing.T) {
 func TestVPCAttributionTable_RegisterOverwritesOnReRegister(t *testing.T) {
 	vt, _ := newTestVPCAttributionTable(constClock(1))
 
-	if err := vt.Register(testBlock, 0x123, 0x1111, 0x01); err != nil {
+	if err := vt.Register(testBlock, 0x123, 0x1111, 0x01, testVRFInterface); err != nil {
 		t.Fatalf("first Register: unexpected error: %v", err)
 	}
 
 	vt.clock = constClock(99)
-	if err := vt.Register(testBlock, 0x123, 0x2222, 0x02); err != nil {
+	if err := vt.Register(testBlock, 0x123, 0x2222, 0x02, testVRFInterface); err != nil {
 		t.Fatalf("second Register: unexpected error: %v", err)
 	}
 
@@ -92,7 +111,7 @@ func TestVPCAttributionTable_RegisterOverwritesOnReRegister(t *testing.T) {
 func TestVPCAttributionTable_Unregister(t *testing.T) {
 	vt, ft := newTestVPCAttributionTable(constClock(1))
 
-	if err := vt.Register(testBlock, 0x123, 0xC0FFEE, 0x42); err != nil {
+	if err := vt.Register(testBlock, 0x123, 0xC0FFEE, 0x42, testVRFInterface); err != nil {
 		t.Fatalf("Register: unexpected error: %v", err)
 	}
 	if err := vt.Unregister(testBlock, 0x123); err != nil {
@@ -117,10 +136,10 @@ func TestVPCAttributionTable_UnregisterAbsentIsNotError(t *testing.T) {
 func TestVPCAttributionTable_List(t *testing.T) {
 	vt, _ := newTestVPCAttributionTable(constClock(1))
 
-	if err := vt.Register(testBlock, 0x001, 0x1111, 0x01); err != nil {
+	if err := vt.Register(testBlock, 0x001, 0x1111, 0x01, testVRFInterface); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if err := vt.Register(testBlock, 0x002, 0x2222, 0x02); err != nil {
+	if err := vt.Register(testBlock, 0x002, 0x2222, 0x02, testVRFInterface); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -162,7 +181,7 @@ func TestVPCAttributionTable_Generation(t *testing.T) {
 func TestVPCAttributionTable_Reconcile_RemovesStaleEntry(t *testing.T) {
 	vt, _ := newTestVPCAttributionTable(constClock(10))
 
-	if err := vt.Register(testBlock, 0x100, 0x1111, 0x01); err != nil {
+	if err := vt.Register(testBlock, 0x100, 0x1111, 0x01, testVRFInterface); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -181,7 +200,7 @@ func TestVPCAttributionTable_Reconcile_RemovesStaleEntry(t *testing.T) {
 func TestVPCAttributionTable_Reconcile_KeepsLiveEntry(t *testing.T) {
 	vt, _ := newTestVPCAttributionTable(constClock(10))
 
-	if err := vt.Register(testBlock, 0x100, 0x1111, 0x01); err != nil {
+	if err := vt.Register(testBlock, 0x100, 0x1111, 0x01, testVRFInterface); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -198,13 +217,13 @@ func TestVPCAttributionTable_Reconcile_KeepsLiveEntry(t *testing.T) {
 func TestVPCAttributionTable_Reconcile_RegistrationMidSweepSurvives(t *testing.T) {
 	vt, _ := newTestVPCAttributionTable(constClock(10))
 
-	if err := vt.Register(testBlock, 0x100, 0x1111, 0x01); err != nil {
+	if err := vt.Register(testBlock, 0x100, 0x1111, 0x01, testVRFInterface); err != nil {
 		t.Fatalf("Register(stale): unexpected error: %v", err)
 	}
 
 	const cutoff = 20
 	vt.clock = constClock(30)
-	if err := vt.Register(testBlock, 0x200, 0x2222, 0x02); err != nil {
+	if err := vt.Register(testBlock, 0x200, 0x2222, 0x02, testVRFInterface); err != nil {
 		t.Fatalf("Register(mid-sweep): unexpected error: %v", err)
 	}
 
@@ -226,10 +245,10 @@ func TestVPCAttributionTable_Reconcile_RegistrationMidSweepSurvives(t *testing.T
 func TestVPCAttributionTable_Reconcile_ContinuesPastDeleteFailure(t *testing.T) {
 	vt, ft := newTestVPCAttributionTable(constClock(10))
 
-	if err := vt.Register(testBlock, 0x100, 0x1111, 0x01); err != nil {
+	if err := vt.Register(testBlock, 0x100, 0x1111, 0x01, testVRFInterface); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if err := vt.Register(testBlock, 0x200, 0x2222, 0x02); err != nil {
+	if err := vt.Register(testBlock, 0x200, 0x2222, 0x02, testVRFInterface); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 

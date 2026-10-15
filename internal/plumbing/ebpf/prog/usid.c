@@ -423,10 +423,15 @@ struct vrf_value {
 // only by userspace at registration time, compared against a Reconcile
 // sweep's cutoff to tell "existed before this sweep" from "registered
 // after".
+//
+// vrf_interface is the name of the VPC's VRF device on this node, NUL
+// padded to IFNAMSIZ (16), so a map dump and the per-VRF metrics name the
+// kernel interface the counters belong to.
 struct vpc_attribution_value {
 	__u64 vpc;
 	__u32 vpc_attachment;
 	__u64 generation;
+	__u8 vrf_interface[16];
 };
 
 // struct vrf_direction_counter is one direction's traffic for one VRF.

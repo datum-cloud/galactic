@@ -43,14 +43,16 @@ and tenant VRFs.
 Each node keeps one VRF per VPC, so every series below is one VPC on one
 node, keyed by its uSID (Block, Argument). `vpc_attachment` names the
 attachment that registered the VRF last, not each attachment's own traffic.
+`vrf_interface` is the name of the VPC's VRF device on the node, as
+`ip link` shows it.
 
-| Metric                                      | Type    | Labels                                                                    | Meaning                                                                         |
-|---------------------------------------------|---------|---------------------------------------------------------------------------|---------------------------------------------------------------------------------|
-| `galactic_usid_vrf_forwarded_packets_total` | counter | `block`, `argument`, `vrf_table_id`, `vpc`, `vpc_attachment`, `direction` | Packets forwarded into (`ingress`) or out of (`egress`) the VRF                 |
-| `galactic_usid_vrf_forwarded_bytes_total`   | counter | same                                                                      | Tenant bytes of those packets: the IP header and payload, in both directions    |
-| `galactic_usid_vrf_dropped_packets_total`   | counter | same                                                                      | Packets dropped after the datapath resolved them to the VRF, by direction       |
-| `galactic_usid_vrf_packets_total`           | counter | `block`, `argument`, `vrf_table_id`, `vpc`, `vpc_attachment`              | Inbound packets that matched the VRF, counted before any later drop             |
-| `galactic_usid_vrf_bytes_total`             | counter | same                                                                      | Bytes of those packets, measured as the whole tunneled frame with outer headers |
+| Metric                                      | Type    | Labels                                                                                     | Meaning                                                                         |
+|---------------------------------------------|---------|--------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| `galactic_usid_vrf_forwarded_packets_total` | counter | `block`, `argument`, `vrf_table_id`, `vpc`, `vpc_attachment`, `vrf_interface`, `direction` | Packets forwarded into (`ingress`) or out of (`egress`) the VRF                 |
+| `galactic_usid_vrf_forwarded_bytes_total`   | counter | same                                                                                       | Tenant bytes of those packets: the IP header and payload, in both directions    |
+| `galactic_usid_vrf_dropped_packets_total`   | counter | same                                                                                       | Packets dropped after the datapath resolved them to the VRF, by direction       |
+| `galactic_usid_vrf_packets_total`           | counter | `block`, `argument`, `vrf_table_id`, `vpc`, `vpc_attachment`, `vrf_interface`              | Inbound packets that matched the VRF, counted before any later drop             |
+| `galactic_usid_vrf_bytes_total`             | counter | same                                                                                       | Bytes of those packets, measured as the whole tunneled frame with outer headers |
 
 What each `direction` counts:
 
@@ -85,9 +87,9 @@ What each `direction` counts:
 - Registering a VRF again never resets its counters. They reset when the
   datapath reloads, or when the VRF's rows are removed and created again,
   which `rate()` copes with.
-- `vpc` and `vpc_attachment` are empty when the VPC attribution map has no
-  entry for that Argument. Treat `vpc=""` traffic as unattributed and watch
-  for it.
+- `vpc`, `vpc_attachment` and `vrf_interface` are empty when the VPC
+  attribution map has no entry for that Argument. Treat `vpc=""` traffic as
+  unattributed and watch for it.
 - Cardinality is one series per active Argument per node for the older pair,
   at most 4095 per Block, and twice that for each `direction` metric.
 
