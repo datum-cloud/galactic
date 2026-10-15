@@ -1,9 +1,10 @@
 # Metrics Reference
 
-Every Prometheus metric galactic exports for VPC traffic, routing and NAT,
-with the label values each one can carry and PromQL to start dashboards and
-monitors from. Names, labels and value sets come from the collectors
-themselves; when this page and the code disagree, the code wins.
+Every Prometheus metric galactic exports for VPC traffic, egress, ingress
+load balancing, routing and NAT, with the label values each one can carry
+and PromQL to start dashboards and monitors from. Names, labels and value
+sets come from the collectors themselves; when this page and the code
+disagree, the code wins.
 
 ## Where the metrics come from
 
@@ -11,28 +12,37 @@ Every DaemonSet under `config/` runs `hostNetwork: true`, so its port is
 bound on the node itself. `galactic-vrf` runs as a sidecar in the ingress
 proxy's pod instead, which has its own network namespace, so it shares
 the 9182 default with `galactic-nat` without clashing, even on the edge
-nodes that run both.
+nodes that run both. `galactic-controller` and the fabric-api gateway are
+Deployments, scraped per pod.
 
 | Area                   | Component                                                 | Metric prefix                           | Port           | `job` from `config/monitoring/`          |
 | ---------------------- | --------------------------------------------------------- | --------------------------------------- | -------------- | ---------------------------------------- |
-| VPC dataplane          | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_usid_*`                       | 9180           | none shipped                             |
+| VPC dataplane          | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_usid_*`                       | 9180           | `galactic-cni`                           |
+| Tenant egress pool     | `galactic-cni`                                            | `galactic_cni_egress_*`                 | 9180           | `galactic-cni`                           |
 | VPC ingress            | `galactic-vrf`                                            | `galactic_ingress_sidecar_*`            | 9182 (default) | none shipped                             |
+| Edge load balancer     | `galactic-gateway`                                        | `galactic_edge_*`, controller-runtime   | 8081           | none shipped                             |
 | Tenant routing (GoBGP) | `galactic-router`, `galactic-router-rr`                   | `galactic_router_*`, controller-runtime | 9179           | `galactic-router` / `galactic-router-rr` |
+| Private service routes | `galactic-router` (plain mode only)                       | `galactic_service_route_*`              | 9179           | `galactic-router`                        |
 | Traffic policy         | `galactic-router` with `GALACTIC_ROUTER_TRAFFIC_POLICY`   | `galactic_cni_traffic_policy_*`         | 9179           | `galactic-router`                        |
+| Traffic policy webhook | `galactic-controller`                                     | controller-runtime only                 | 9184           | none shipped                             |
 | Underlay routing (FRR) | `fabric-router` `frr-exporter` sidecar                    | `frr_*`                                 | 9342           | `fabric-router`                          |
 | Underlay config        | `fabric-router` `fabric-config-agent`                     | `fabric_router_*`                       | 9343           | `fabric-config-agent`                    |
+| Fabric looking glass   | `fabric-api` node sidecar                                 | `fabric_api_node_*`, `fabric_api_*`     | 9345           | `fabric-api-node`                        |
+| Fabric looking glass   | `fabric-api` cell gateway                                 | `fabric_api_gateway_*`, `fabric_api_*`  | 9347           | `fabric-api-gateway`                     |
 | NAT66 / NAT64          | `galactic-nat` (one per egress shard)                     | `galactic_nat_*`                        | 9182           | `galactic-nat`                           |
 
-`config/monitoring/` ships PodMonitors for `galactic-router`,
-`fabric-router` and `galactic-nat` only. Scraping `galactic-cni` or
-`galactic-vrf` needs a scrape object of your own. Copy the shipped
-PodMonitors' relabeling of `__meta_kubernetes_pod_node_name` into `node`:
-every galactic metric is per node, and `node` is the label you group and
-alert by.
+`config/monitoring/` ships PodMonitors for `galactic-cni`,
+`galactic-router`, `fabric-router` (including the opt-in fabric-api
+sidecar), the fabric-api gateway and `galactic-nat`. Scraping
+`galactic-vrf`, `galactic-gateway` or `galactic-controller` needs a scrape
+object of your own. Copy the shipped PodMonitors' relabeling of
+`__meta_kubernetes_pod_node_name` into `node`: every galactic metric is per
+node, and `node` is the label you group and alert by.
 
-The eBPF-backed metrics (`galactic_usid_*`, `galactic_nat_*`) are read from
-BPF maps at scrape time, and a pod restart that reloads the program resets
-them. Always use `rate()` / `increase()`, never raw counter values.
+The eBPF-backed metrics (`galactic_usid_*`, `galactic_cni_egress_shard_*`,
+`galactic_edge_*`, `galactic_nat_*`) are read from BPF maps at scrape time,
+and a pod restart that reloads the program resets them. Always use
+`rate()` / `increase()`, never raw counter values.
 
 ## VPC dataplane — `galactic_usid_*`
 
@@ -112,9 +122,10 @@ sum by (node) (rate(galactic_usid_vrf_forwarded_bytes_total{vpc=""}[5m]))
 
 ### Drops
 
-`galactic_usid_drops_total{reason}` (counter) counts packets dropped by
-`usid_ingress`. Every named reason is always emitted, at zero when unused,
-plus `unknown_<n>` for an index the binary has no name for.
+`galactic_usid_drops_total{reason}` (counter) counts packets the uSID
+datapath dropped, inbound and outbound. Every named reason is always
+emitted, at zero when unused, plus `unknown_<n>` for an index the binary
+has no name for.
 
 | Reason group     | Values                                                                                                                         | Usually means                                                                                   |
 |------------------|--------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
@@ -122,6 +133,7 @@ plus `unknown_<n>` for an index the binary has no name for.
 | Malformed        | `malformed_inner`, `unknown_inner_version`, `unexpected_nexthdr`, `unsupported_behavior`, `strip_failed`                       | Bad or unsupported packets; a sustained rate is a bug                                           |
 | FIB / forwarding | `fib_lookup_failed`, `fib_no_neigh`, `fib_unreachable`, `fib_frag_needed`, `redirect_failed`                                   | Kernel route or neighbor missing for the inner destination                                      |
 | Egress           | `egress_route_encap_failed`, `egress_route_fib_lookup_failed`, `egress_route_redirect_failed`, `public_uplink_redirect_failed` | Tenant traffic leaving the node couldn't be encapsulated or sent                                |
+| Service routes   | `service_route_denied`, `service_route_redirect_failed`                                                                        | A private service route refused the sender, or its redirect to the target failed                |
 
 ```promql
 sum by (node, reason) (rate(galactic_usid_drops_total[5m])) > 0
@@ -187,6 +199,60 @@ increase(galactic_usid_datapath_attach_events_total{result="failure"}[15m]) > 0
 sum by (node, interface) (increase(galactic_usid_datapath_attach_events_total{action="attach"}[1h])) > 5
 ```
 
+## Tenant egress pool — `galactic_cni_egress_*`
+
+How each compute node spreads tenant egress across the cluster's
+`EgressShard`s. With `GALACTIC_CNI_EGRESS_MODE=hashed`, `usid_egress` keeps
+one shard group per translation class: `nat66`, and `nat64:<prefix>` for
+each NAT64 prefix. See
+[nat/configuration.md](nat/configuration.md#active-active-egress).
+
+The pool series come from the maps, so a node with no group publishes
+none. The control-loop series (`mode`, `shard_watch_synced`,
+`group_routes`, the sweep pair) are always exported, so a node told to run
+hashed mode that never published a group still shows it.
+
+| Metric                                                        | Type    | Labels                                                                        | Meaning                                                                                           |
+| ------------------------------------------------------------- | ------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `galactic_cni_egress_shard_packets_total`                     | counter | `shard_sid`, `class`                                                          | Tenant packets this node encapsulated toward each shard, since the shard took its slot            |
+| `galactic_cni_egress_shard_bytes_total`                       | counter | `shard_sid`, `class`                                                          | Tenant bytes of those packets                                                                     |
+| `galactic_cni_egress_shard_selections_total`                  | counter | `result`                                                                      | How `usid_egress` placed each packet whose route names a shard group                              |
+| `galactic_cni_egress_pool_members`                            | gauge   | `class`, `state` (`active`, `draining`, `unreachable`, `local`, `ineligible`) | The class's shards as this node's group sees them                                                 |
+| `galactic_cni_egress_pool_min_active`                         | gauge   | none                                                                          | `GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE`, the fewest active shards each class should have            |
+| `galactic_cni_egress_pool_enabled`                            | gauge   | `class`                                                                       | 1 while the class's group takes new routes; a group being retired still forwards but reads 0      |
+| `galactic_cni_egress_mode`                                    | gauge   | `mode` (`ordered`, `hashed`)                                                  | 1 for the configured mode, 0 for the other                                                        |
+| `galactic_cni_egress_shard_watch_synced`                      | gauge   | none                                                                          | 1 once the `EgressShard` watch has listed the cluster                                             |
+| `galactic_cni_egress_group_routes`                            | gauge   | `class`                                                                       | `egress_route_table` entries naming a shard group. Must be 0 before rolling back past hashed mode |
+| `galactic_cni_egress_sweep_errors_total`                      | counter | `stage` (`apply`, `refresh`, `watch`, `close`, `disable`)                     | Egress route sweep failures, by step                                                              |
+| `galactic_cni_egress_last_successful_sweep_timestamp_seconds` | gauge   | none                                                                          | Unix time of the last sweep that finished without an error                                        |
+
+`galactic_cni_egress_shard_selections_total` result values:
+
+- **Forwarded:** `pin_hit` (the tenant address's pin still names a live
+  shard), `maglev` (placed by the Maglev table).
+- **Re-placed:** `pin_stale` (the pin named a shard that left the group).
+- **Dropped:** `group_empty`, `shard_dead`, `parse_failed`.
+
+`state` values: `active` shards take new tenant addresses; `draining` ones
+(`spec.drain`) serve only the tenants already pinned to them; `unreachable`
+ones have no route from this node; `local` ones run on this node and take
+no tenant from it; `ineligible` ones cannot translate the class (no
+masquerade address in its family, or another NAT64 prefix).
+
+```promql
+# Active shards per class, per node
+sum by (node, class) (galactic_cni_egress_pool_members{state="active"})
+
+# Egress bytes/s each shard receives from the cluster's compute nodes
+sum by (shard_sid, class) (rate(galactic_cni_egress_shard_bytes_total[5m])) * 8
+
+# Packets dropped on the way to a shard group (GalacticEgressShardGroupDropping)
+sum by (node, result) (increase(galactic_cni_egress_shard_selections_total{result=~"group_empty|shard_dead|parse_failed"}[5m])) > 0
+
+# Seconds since the last clean sweep
+time() - galactic_cni_egress_last_successful_sweep_timestamp_seconds
+```
+
 ## VPC ingress — `galactic_ingress_sidecar_*`
 
 `galactic-vrf` installs per-VPC VRF devices and per-pod seg6 egress routes on
@@ -208,6 +274,60 @@ histogram_quantile(0.99, sum by (le, node) (rate(galactic_ingress_sidecar_reconc
 
 # Teardown backlog that never drains
 min_over_time(galactic_ingress_sidecar_vrf_teardown_pending[1h]) > 0
+```
+
+## Edge load balancer — `galactic_edge_*`
+
+`galactic-gateway`'s XDP DSR load balancer on gateway-role edge nodes.
+Every gateway node serves every VIP identically (anycast), so the same
+series appear on each one. Direct server return keeps no per-flow state,
+so there is no connection table to report. See
+[ARCHITECTURE-GATEWAY.md](agents/ARCHITECTURE-GATEWAY.md).
+
+| Metric                                                  | Type    | Labels                              | Meaning                                                                                              |
+| ------------------------------------------------------- | ------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `galactic_edge_rule_packets_total`                      | counter | `proto`, `port`, `vip`, `vpc`       | Packets that matched the VIP, port and protocol, whatever happened to them next                      |
+| `galactic_edge_rule_bytes_total`                        | counter | same                                | Bytes of those packets                                                                               |
+| `galactic_edge_rule_dropped_packets_total`              | counter | same                                | Matched packets the datapath then dropped, such as for no backends. A subset of `rule_packets_total` |
+| `galactic_edge_rule_backends`                           | gauge   | same                                | Backends registered for the VIP                                                                      |
+| `galactic_edge_rule_seconds_since_last_packet`          | gauge   | same                                | Seconds since a packet last matched the VIP. Absent until the first one                              |
+| `galactic_edge_return_packets_total`                    | counter | `vip`, `vpc`                        | Replies sourced from the VIP that this node forwarded past the kernel (`edge_return`)                |
+| `galactic_edge_return_bytes_total`                      | counter | same                                | Bytes of those replies                                                                               |
+| `galactic_edge_return_dropped_packets_total`            | counter | same                                | Replies sourced from the VIP that the datapath dropped. A subset of `return_packets_total`           |
+| `galactic_edge_drops_total`                             | counter | `reason`                            | Packets `edge_lb` and `edge_return` dropped, by reason                                               |
+| `galactic_edge_control_plane_drops_total`               | counter | `rule`, `reason` (`quota_exceeded`) | Rule applications refused before they reached the datapath                                           |
+| `galactic_edge_dispatch_lease_renewals_total`           | counter | `slot`, `result`                    | Renewals of the gateway's XDP dispatcher slot leases. Dispatch mode only                             |
+| `galactic_edge_dispatch_lease_expiry_timestamp_seconds` | gauge   | `slot`                              | Unix time each lease, as last renewed, expires. Dispatch mode only                                   |
+
+- `proto` is `tcp`, `udp`, or the protocol number for anything else.
+- `vpc` is empty until the process has applied a rule that owns the VIP,
+  as after a restart before the first reconcile. A VIP address used by
+  rules of more than one VPC has an empty `vpc` on its return series, since
+  the return counters can't be split between them.
+- The per-VIP counters survive re-registration, such as a reconcile that
+  only changes the backend list. The return series read zero, not absent,
+  on a node with no compute tier behind it.
+- `galactic_edge_drops_total` reasons: `empty_backend_list`,
+  `no_encap_config`, `fib_no_neigh`, `fib_unreachable`, `fib_frag_needed`,
+  `fib_lookup_failed`, `adjust_head_failed`, `no_egress_ifindex`,
+  `redirect_failed`, `return_hop_limit`, `icmp_rate_limited`, plus
+  `unknown_<n>` for an index the binary has no name for.
+
+The port also serves controller-runtime's metrics for the
+`NetworkGateway`/`NetworkRule` reconcilers.
+
+```promql
+# Requests per second per VIP and port
+sum by (vpc, vip, port, proto) (rate(galactic_edge_rule_packets_total[5m]))
+
+# VIPs with no backends
+max by (vip, port, proto) (galactic_edge_rule_backends) == 0
+
+# Drops by reason
+sum by (node, reason) (rate(galactic_edge_drops_total[5m])) > 0
+
+# Rules refused by quota
+sum by (node, rule) (increase(galactic_edge_control_plane_drops_total[1h])) > 0
 ```
 
 ## Traffic policy — `galactic_cni_traffic_policy_*`
@@ -338,6 +458,27 @@ metrics. GoBGP session state is not a metric: read it from `BGPPeer` status
 ```promql
 sum by (node, kind) (galactic_router_route_install_failing) > 0
 sum by (controller) (rate(controller_runtime_reconcile_errors_total{job=~"galactic-router.*"}[10m]))
+```
+
+### Private service routes — `galactic_service_route_*`
+
+The node-local `ServiceRoutePolicy` controller in plain-mode
+`galactic-router`, which programs attachment-scoped eBPF service paths.
+The route reflector doesn't run it. Resource names are kept in logs, not
+labels, so the series stay bounded.
+
+| Metric                                              | Type      | Labels                                                         | Meaning                                                   |
+| --------------------------------------------------- | --------- | -------------------------------------------------------------- | --------------------------------------------------------- |
+| `galactic_service_route_reconciliations_total`      | counter   | `result` (`success`, `error`)                                  | `ServiceRoutePolicy` reconciliations                      |
+| `galactic_service_route_reconcile_duration_seconds` | histogram | none                                                           | Time per reconcile (default buckets)                      |
+| `galactic_service_route_route_operations_total`     | counter   | `operation` (`apply`, `remove`), `result` (`success`, `error`) | Datapath writes and removals                              |
+| `galactic_service_route_programmed_routes`          | gauge     | none                                                           | Attachment-scoped service paths the controller now tracks |
+
+Datapath drops on these paths are the `service_route_*` reasons of
+`galactic_usid_drops_total`.
+
+```promql
+sum by (node, operation) (rate(galactic_service_route_route_operations_total{result="error"}[10m])) > 0
 ```
 
 ## NAT66 / NAT64 — `galactic_nat_*`
@@ -518,11 +659,22 @@ sum by (node, interface, queue) (
 )
 ```
 
+## Fabric looking glass — `fabric_api_*`
+
+The opt-in fabric-api exports `fabric_api_node_*` from each node sidecar
+(9345) and `fabric_api_gateway_*` from each cell gateway (9347). Both
+export `fabric_api_credentials_loaded` and
+`fabric_api_certificate_expiry_timestamp_seconds` for their mTLS identity.
+Its full metric list, with labels and meanings, lives with the rest of
+its operator reference in
+[fabric-api/configuration.md](fabric-api/configuration.md).
+
 ## Shipped alerts
 
 `config/monitoring/prometheusrule.yaml` (the `galactic-bgp` PrometheusRule,
 unit-tested with `task test:alerts`) covers routing, the NAT session table
-and ports, the egress shards' state, drop ratio and uplinks. Every alert
+and ports, the egress shards' state, drop ratio and uplinks, the compute
+nodes' egress shard groups, and the fabric-api looking glass. Every alert
 carries `service: galactic`, `team: connect` and a `runbook_url`.
 
 | Alert                                | Fires when                                                         | For | Severity |
@@ -551,3 +703,19 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticNatDispatchLeaseFailing      | more than two lease renewal errors in every 5-minute window        | 5m  | warning  |
 | GalacticNatDispatchLeaseExpiring     | no successful lease renewal in 2 minutes                           | 0   | critical |
 | GalacticNatMetricsDown               | `galactic-nat` scrape down                                         | 5m  | warning  |
+| GalacticEgressPoolEmpty              | no active shard for a class while routes on the node name it       | 2m  | critical |
+| GalacticEgressPoolBelowMinimum       | fewer active shards than `galactic_cni_egress_pool_min_active`     | 10m | warning  |
+| GalacticEgressClassUnserved          | every shard ineligible for a class                                 | 15m | warning  |
+| GalacticEgressShardGroupDropping     | `group_empty`, `shard_dead` or `parse_failed` in every 5m window   | 10m | warning  |
+| GalacticEgressShardWatchNotSynced    | hashed mode, `EgressShard` watch never listed                      | 10m | warning  |
+| GalacticEgressSweepFailing           | sweep errors in every 10-minute window                             | 15m | warning  |
+| GalacticCNIMetricsDown               | `galactic-cni` scrape down                                         | 5m  | warning  |
+| FabricAPIExecutionStalled            | gateway has executions in flight, finished none in 10m             | 10m | warning  |
+| FabricAPINodeDiagnosticsUnavailable  | `fabric_api_node_diagnostics_available == 0`                       | 15m | warning  |
+| FabricAPINodeUnreachable             | over half of 5+ node calls in 30m unreachable or timed out         | 15m | warning  |
+| FabricAPIResultsOversized            | 10+ `ResponseTooLarge` requests on a node in an hour               | 15m | warning  |
+| FabricAPICleanupBacklog              | over 50 expired `FabricQuery` objects left                         | 1h  | warning  |
+| FabricAPICertificateRenewalFailing   | mTLS certificate expires in under 4 hours                          | 15m | warning  |
+| FabricAPICredentialsMissing          | `fabric_api_credentials_loaded == 0`                               | 15m | warning  |
+| FabricAPISearchIndexUnsynced         | search index holds routes but is not synced with bgpd              | 15m | warning  |
+| FabricAPIMetricsDown                 | `fabric-api-node` or `fabric-api-gateway` scrape down              | 10m | warning  |
