@@ -461,6 +461,16 @@ func withNetNSExistsFn(t *testing.T, fn func(string) bool) {
 	t.Cleanup(func() { netNSExistsFn = orig })
 }
 
+// withoutDatapath points ebpfPinDir at an empty directory, as on a node
+// whose datapath was never loaded, so an unprivileged test neither reads
+// the host's real pinned maps nor is refused by their permissions.
+func withoutDatapath(t *testing.T) {
+	t.Helper()
+	orig := ebpfPinDir
+	ebpfPinDir = t.TempDir()
+	t.Cleanup(func() { ebpfPinDir = orig })
+}
+
 // withTempPinDir points the package-level ebpfPinDir var (see cnibgp.go's
 // doc comment) at a throwaway bpffs directory for the duration of the test,
 // loading the eBPF datapath's pinned maps into it first (simulating the run
@@ -562,6 +572,7 @@ func TestPruneDeadContainerAnnotationsIgnoresUnrelatedAnnotations(t *testing.T) 
 // netns now gone — must succeed, and must not leave two annotations with the
 // same CIDR value in spec.Prefixes.
 func TestPublishBGPStateReplacedPodDoesNotDuplicatePrefix(t *testing.T) {
+	withoutDatapath(t)
 	const (
 		nodeName  = "node1"
 		namespace = "default"
@@ -614,6 +625,7 @@ func TestPublishBGPStateReplacedPodDoesNotDuplicatePrefix(t *testing.T) {
 // BGPAdvertisement — so its empty spec.Prefixes reads as intentional, not as
 // addressing that silently failed to arrive (#342).
 func TestPublishBGPStateNilIPAMMarksNoAddressing(t *testing.T) {
+	withoutDatapath(t)
 	const (
 		nodeName  = "node1"
 		namespace = "default"
@@ -649,6 +661,7 @@ func TestPublishBGPStateNilIPAMMarksNoAddressing(t *testing.T) {
 // covering an attachment whose config changes, or a retried ADD that now
 // resolves an allocation after a previous attempt ran without one.
 func TestPublishBGPStateIPAMClearsNoAddressing(t *testing.T) {
+	withoutDatapath(t)
 	const (
 		nodeName  = "node1"
 		namespace = "default"
@@ -695,6 +708,7 @@ func TestPublishBGPStateIPAMClearsNoAddressing(t *testing.T) {
 // case, so this test needs no root privileges (registerEBPFDatapath itself
 // never opens a pinned eBPF map here).
 func TestPublishBGPStateSIDNotComputedWhenSRv6Unconfigured(t *testing.T) {
+	withoutDatapath(t)
 	const (
 		nodeName  = "node1"
 		namespace = "default"
@@ -779,6 +793,7 @@ func TestPublishBGPStateComputesSIDWhenSRv6Configured(t *testing.T) {
 // BGPAdvertisement still backing a live sibling's route on an unrelated
 // later failure.
 func TestPublishBGPStateAdvertisementCreatedGatedOnCreate(t *testing.T) {
+	withoutDatapath(t)
 	const (
 		nodeName  = "node1"
 		namespace = "default"

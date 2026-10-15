@@ -27,6 +27,8 @@ const (
 	tpKindTenant  = 1
 	tpFlagAllow   = 1 << 0
 	tpFlagPath    = 1 << 1
+	tpFlagFamily  = 1 << 2
+	tpFamilyIPv4  = 4
 	tpPathNAT     = 2
 	tpTestMark    = 0x0de10000
 	tpTestToken   = 0x5eed
@@ -132,8 +134,11 @@ func TestUsidIngress_TrafficPolicyDecidesOnceOnTap(t *testing.T) {
 	}
 	attachEgress(t, tap, lab.objs.TpDeliver)
 
-	lab.tpPublish(t, lab.tapIfindex, UsidTpEntry{Flags: tpFlagAllow})
-	lab.assertTapDelivers(t, "tap, allow-all")
+	// The rule allows IPv4 only: the host's own IPv6 traffic on the tap,
+	// such as router solicitations and MLD reports, is a real tp_deliver
+	// evaluation and would otherwise count on the same row as the frame.
+	lab.tpPublish(t, lab.tapIfindex, UsidTpEntry{Flags: tpFlagAllow | tpFlagFamily, Family: tpFamilyIPv4})
+	lab.assertTapDelivers(t, "tap, allow IPv4")
 	if n := lab.tpHits(t, lab.tapIfindex); n != 1 {
 		t.Errorf("hits = %d, want 1: tp_deliver must skip a packet usid_ingress decided", n)
 	}

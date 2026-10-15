@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -716,4 +717,21 @@ func countKeys(t *testing.T, m *ebpf.Map) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// TestActiveFailsClosed: only a missing tp_state pin means traffic policy is
+// off; a pin that exists but cannot be read means it may be on. A regular
+// file stands in for an unreadable pin, which fails the same way for any
+// user.
+func TestActiveFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	if active, err := Active(dir); active || err != nil {
+		t.Fatalf("no pin: Active = %v, %v; want off", active, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, prog.UsidMapTpState), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := Active(dir); !active || err == nil {
+		t.Fatalf("unreadable pin: Active = %v, %v; want on with an error", active, err)
+	}
 }
