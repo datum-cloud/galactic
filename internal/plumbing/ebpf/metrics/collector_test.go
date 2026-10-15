@@ -136,18 +136,32 @@ func TestCollector_VRFPacketsAndBytes(t *testing.T) {
 
 // putVPCAttribution writes a raw vpc_attribution_table entry directly into
 // fake, matching putVRFEntry's own bypass-Register shape above.
+// The VRF interface is the name intf.GenerateInterfaceNameVRF gives vpc.
 func putVPCAttribution(t *testing.T, fake *fakeTable, block uint64, argument uint16, vpc uint64, vpcAttachment uint32) {
 	t.Helper()
 	key, err := uformat.NewVRFKey(block, argument)
 	if err != nil {
 		t.Fatalf("uformat.NewVRFKey: %v", err)
 	}
-	if err := fake.Put(uint64(key), prog.UsidVpcAttributionValue{
+	value := prog.UsidVpcAttributionValue{
 		Vpc:           vpc,
 		VpcAttachment: vpcAttachment,
-	}); err != nil {
+	}
+	copy(value.VrfInterface[:], vrfInterfaceFor(t, vpc))
+	if err := fake.Put(uint64(key), value); err != nil {
 		t.Fatalf("fake.Put: %v", err)
 	}
+}
+
+// vrfInterfaceFor returns the VRF device name of the VPC with numeric
+// identifier vpc.
+func vrfInterfaceFor(t *testing.T, vpc uint64) string {
+	t.Helper()
+	encoded, err := intf.HexToBase62(strconv.FormatUint(vpc, 16))
+	if err != nil {
+		t.Fatalf("HexToBase62: %v", err)
+	}
+	return intf.GenerateInterfaceNameVRF(encoded)
 }
 
 func TestCollector_VPCAttribution(t *testing.T) {
@@ -197,6 +211,9 @@ func TestCollector_VPCAttribution(t *testing.T) {
 			if got := labelValue(m, "vpc_attachment"); got != wantVPCAttachment1 {
 				t.Errorf("argument=1: vpc_attachment label = %q, want %q", got, wantVPCAttachment1)
 			}
+			if got, want := labelValue(m, "vrf_interface"), vrfInterfaceFor(t, vpc1); got != want {
+				t.Errorf("argument=1: vrf_interface label = %q, want %q", got, want)
+			}
 			sawAttributed++
 		case labelValue(m, labelBlock) == formatBlock(testBlock2) && labelValue(m, "argument") == "2":
 			if got := labelValue(m, "vpc"); got != "" {
@@ -204,6 +221,9 @@ func TestCollector_VPCAttribution(t *testing.T) {
 			}
 			if got := labelValue(m, "vpc_attachment"); got != "" {
 				t.Errorf("argument=2: vpc_attachment label = %q, want empty (no attribution row for this block)", got)
+			}
+			if got := labelValue(m, "vrf_interface"); got != "" {
+				t.Errorf("argument=2: vrf_interface label = %q, want empty (no attribution row for this block)", got)
 			}
 			sawUnattributed++
 		}

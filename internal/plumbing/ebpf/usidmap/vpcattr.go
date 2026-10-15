@@ -5,6 +5,7 @@
 package usidmap
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
@@ -28,6 +29,9 @@ type VPCAttributionEntry struct {
 	// VPCAttachment; see docs/cni/conflist-reference.md).
 	VPC           uint64
 	VPCAttachment uint32
+
+	// VRFInterface is the name of the VPC's VRF device on this node.
+	VRFInterface string
 
 	// Generation is this table's monotonic-clock reading when this entry was
 	// last written by Register. See VRFTable's own doc comment for how
@@ -59,10 +63,12 @@ func (t *VPCAttributionTable) Generation() uint64 {
 }
 
 // Register writes, or overwrites, the vpc_attribution_table entry for
-// (block, argument), mapping it to (vpc, vpcAttachment) and stamping it with
-// this table's current generation. Callers register this alongside
-// registry.VRF.Register, keyed identically.
-func (t *VPCAttributionTable) Register(block uint64, argument uint16, vpc uint64, vpcAttachment uint32) error {
+// (block, argument), mapping it to (vpc, vpcAttachment) and the VPC's VRF
+// device vrfInterface, and stamping it with this table's current generation.
+// Callers register this alongside registry.VRF.Register, keyed identically.
+func (t *VPCAttributionTable) Register(
+	block uint64, argument uint16, vpc uint64, vpcAttachment uint32, vrfInterface string,
+) error {
 	if err := uformat.ValidateArgument(argument); err != nil {
 		return fmt.Errorf("usidmap: vpc_attribution_table: register block=%#x argument=%#x: %w", block, argument, err)
 	}
@@ -76,6 +82,11 @@ func (t *VPCAttributionTable) Register(block uint64, argument uint16, vpc uint64
 		VpcAttachment: vpcAttachment,
 		Generation:    t.clock(),
 	}
+	if len(vrfInterface) >= len(value.VrfInterface) {
+		return fmt.Errorf("usidmap: vpc_attribution_table: register block=%#x argument=%#x: "+
+			"VRF interface name %q is longer than %d bytes", block, argument, vrfInterface, len(value.VrfInterface)-1)
+	}
+	copy(value.VrfInterface[:], vrfInterface)
 	if err := t.table.Put(uint64(key), value); err != nil {
 		return fmt.Errorf("usidmap: vpc_attribution_table: register block=%#x argument=%#x: %w", block, argument, err)
 	}
@@ -120,6 +131,7 @@ func (t *VPCAttributionTable) Get(block uint64, argument uint16) (VPCAttribution
 		VRFKey:        VRFKey{Block: block, Argument: argument},
 		VPC:           value.Vpc,
 		VPCAttachment: value.VpcAttachment,
+		VRFInterface:  interfaceName(value.VrfInterface),
 		Generation:    value.Generation,
 	}, true, nil
 }
@@ -140,6 +152,7 @@ func (t *VPCAttributionTable) List() ([]VPCAttributionEntry, error) {
 			},
 			VPC:           value.Vpc,
 			VPCAttachment: value.VpcAttachment,
+			VRFInterface:  interfaceName(value.VrfInterface),
 			Generation:    value.Generation,
 		})
 	}
@@ -178,4 +191,13 @@ func (t *VPCAttributionTable) Reconcile(
 		removed = append(removed, e)
 	}
 	return removed, errors.Join(errs...)
+}
+
+// interfaceName returns the NUL-padded interface name in raw as a string.
+func interfaceName(raw [16]uint8) string {
+	n := bytes.IndexByte(raw[:], 0)
+	if n < 0 {
+		n = len(raw)
+	}
+	return string(raw[:n])
 }

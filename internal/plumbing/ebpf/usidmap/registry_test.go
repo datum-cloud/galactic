@@ -73,7 +73,7 @@ func TestOpenPinnedRegistry_RoundTrip(t *testing.T) {
 		t.Fatalf("Function.Register via opened handle: %v", err)
 	}
 
-	if err := reg.VPCAttribution.Register(testBlock, 0x001, 0xC0FFEE, 0x42); err != nil {
+	if err := reg.VPCAttribution.Register(testBlock, 0x001, 0xC0FFEE, 0x42, testVRFInterface); err != nil {
 		t.Fatalf("VPCAttribution.Register via opened handle: %v", err)
 	}
 	loaderSideVPCAttribution := NewVPCAttributionTable(KernelTable{Map: objs.VpcAttributionTable})
@@ -84,8 +84,9 @@ func TestOpenPinnedRegistry_RoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("entry registered via the opened VPCAttribution handle is not visible via the loader-side handle")
 	}
-	if attrEntry.VPC != 0xC0FFEE || attrEntry.VPCAttachment != 0x42 {
-		t.Errorf("VPCAttribution entry = %+v, want VPC=0xC0FFEE VPCAttachment=0x42", attrEntry)
+	if attrEntry.VPC != 0xC0FFEE || attrEntry.VPCAttachment != 0x42 || attrEntry.VRFInterface != testVRFInterface {
+		t.Errorf("VPCAttribution entry = %+v, want VPC=0xC0FFEE VPCAttachment=0x42 VRFInterface=%s",
+			attrEntry, testVRFInterface)
 	}
 }
 
