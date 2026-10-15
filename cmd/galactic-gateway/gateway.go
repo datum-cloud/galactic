@@ -85,7 +85,7 @@ var gatewayDatapathKeepAlive struct {
 // objects are loaded, reading the maps live at every scrape.
 func setupGatewayDatapath(
 	ctx context.Context, publicInterface string, internalInterfaces []string, srv6Address, attachMode string,
-	metricsReg prometheus.Registerer, coverage *datapathCoverage,
+	ipv4VIPs bool, metricsReg prometheus.Registerer, coverage *datapathCoverage,
 ) (gateway.Datapath, error) {
 	encapSrc, err := netip.ParseAddr(srv6Address)
 	if err != nil {
@@ -145,6 +145,18 @@ func setupGatewayDatapath(
 	for _, target := range returnTargets {
 		if err := sysctl.ConfigureFIBLookupUplinkSysctls(target); err != nil {
 			return nil, fmt.Errorf("configure IPv6 forwarding on internal interface %q: %w", target, err)
+		}
+	}
+
+	// An IPv4 reply edge_return forwards, and the Fragmentation Needed edge_lb
+	// sends an IPv4 client, take an IPv4 FIB lookup, which the kernel refuses
+	// on an interface without IPv4 forwarding. Only a node serving IPv4 VIPs
+	// needs it, so only that node changes it.
+	if ipv4VIPs {
+		for _, target := range append(slices.Clone(targets), returnTargets...) {
+			if err := sysctl.ConfigureFIBLookupUplinkSysctlsIPv4(target); err != nil {
+				return nil, fmt.Errorf("configure IPv4 forwarding on interface %q: %w", target, err)
+			}
 		}
 	}
 
