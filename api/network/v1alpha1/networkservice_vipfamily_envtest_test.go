@@ -36,7 +36,7 @@ func TestNetworkServiceVIPFamilyAdmission(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("set KUBEBUILDER_ASSETS for isolated API admission tests")
 	}
-	data, err := os.ReadFile(filepath.Join("..", "..", "config", "crd", "galactic.datumapis.com_networkservices.yaml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", "galactic.datumapis.com_networkservices.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

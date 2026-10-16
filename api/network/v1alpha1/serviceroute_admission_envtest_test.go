@@ -28,7 +28,7 @@ func TestTranslatedAPIAdmission(t *testing.T) {
 	}
 	apiRoot := os.Getenv("GALACTIC_TEST_NETWORK_API")
 	if apiRoot == "" {
-		apiRoot = "../.."
+		apiRoot = "../../.."
 	}
 	crds := make([]*apiextensionsv1.CustomResourceDefinition, 0, 2)
 	for _, name := range []string{

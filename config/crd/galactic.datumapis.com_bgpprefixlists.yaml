@@ -89,6 +89,7 @@ spec:
                       type: integer
                     prefix:
                       description: Prefix is the IPv4 or IPv6 CIDR to match against.
+                      maxLength: 43
                       minLength: 1
                       type: string
                       x-kubernetes-validations:
@@ -114,11 +115,8 @@ spec:
             - entries
             type: object
             x-kubernetes-validations:
-            - message: all entries must have a valid CIDR prefix
-              rule: self.all(e, isCIDR(e.prefix))
             - message: all entries must be the same address family (IPv4 or IPv6)
-              rule: 'self.size() > 0 ? self.all(e, e.prefix.contains('':'') == self[0].prefix.contains('':''))
-                : true'
+              rule: self.entries.all(e, e.prefix.contains(':') == self.entries[0].prefix.contains(':'))
           status:
             description: BGPPrefixListStatus defines the observed state of BGPPrefixList.
             properties:

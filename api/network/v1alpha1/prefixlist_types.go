@@ -18,6 +18,7 @@ type BGPPrefixListEntry struct {
 	// Prefix is the IPv4 or IPv6 CIDR to match against.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=43
 	// +kubebuilder:validation:XValidation:rule="isCIDR(self)",message="prefix must be a valid IPv4 or IPv6 CIDR"
 	Prefix string `json:"prefix"`
 
@@ -61,8 +62,7 @@ type BGPPrefixList struct {
 
 // BGPPrefixListSpec defines the desired state of BGPPrefixList.
 //
-// +kubebuilder:validation:XValidation:rule="self.all(e, isCIDR(e.prefix))",message="all entries must have a valid CIDR prefix"
-// +kubebuilder:validation:XValidation:rule="self.size() > 0 ? self.all(e, e.prefix.contains(':') == self[0].prefix.contains(':')) : true",message="all entries must be the same address family (IPv4 or IPv6)"
+// +kubebuilder:validation:XValidation:rule="self.entries.all(e, e.prefix.contains(':') == self.entries[0].prefix.contains(':'))",message="all entries must be the same address family (IPv4 or IPv6)"
 type BGPPrefixListSpec struct {
 	// Entries is the ordered list of prefix-match entries.
 	// +kubebuilder:validation:MinItems=1
