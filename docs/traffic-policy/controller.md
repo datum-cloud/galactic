@@ -53,14 +53,13 @@ the API reference is [docs/api/galactic.md](../api/galactic.md).
 
 Apply, in order:
 
-1. the `galactic.datumapis.com` CRDs, `kubectl apply -k config/crd`, and the
-   cloud operator's `VPCAttachment` CRD, which edge cells already carry: the
-   controller watches it and does not become ready without it;
+1. the `galactic.datumapis.com` CRDs, `kubectl apply -k config/crd`, including the `VPCAttachment` CRD; the controller watches it and
+   does not become ready without it;
 2. cert-manager, if the cell does not have it;
 3. the ServiceAccount and RBAC, `kubectl apply -k config/galactic-controller`;
 4. the controller, `kubectl apply -k config/galactic-controller/base`, which
    includes the self-signed serving certificate and the
-   ValidatingWebhookConfiguration.
+   ValidatingWebhookConfiguration and pod MutatingWebhookConfiguration.
 
 The webhook fails closed, so install it only with the Deployment it points
 at. With no replica serving, every TrafficPolicy write is refused; the

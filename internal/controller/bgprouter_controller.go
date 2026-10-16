@@ -22,11 +22,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/model"
 	"go.datum.net/galactic/internal/plumbing/nptv6"
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // annotationConfigHash is the annotation key used to persist the last-applied

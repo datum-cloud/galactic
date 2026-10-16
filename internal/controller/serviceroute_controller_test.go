@@ -18,11 +18,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/serviceroute"
-	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -271,7 +271,7 @@ func TestServiceRouteStartupPermanentApplyFailureDoesNotRetryFinalizedGlobalSync
 			Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName, UID: "endpoint-uid",
 		},
 		Spec: networkv1alpha1.ServiceEndpointSpec{
-			Address: "10.0.0.53", Protocol: networkv1alpha1.NetworkRuleProtocolUDP, Port: 53,
+			Address: "10.0.0.53", Protocol: networkv1alpha1.NetworkServiceProtocolUDP, Port: 53,
 			DeliveryMode:       networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal,
 			AttachmentSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"producer": "yes"}},
 		},

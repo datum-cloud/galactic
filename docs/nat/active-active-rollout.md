@@ -25,7 +25,7 @@ are deployed by infra.
       pruning the field.
 - [ ] `galactic-cni`'s ClusterRole grants `get`, `list` and `watch` on
       `egressshards`:
-      `kubectl auth can-i watch egressshards.network.datumapis.com -n galactic-system --as=system:serviceaccount:galactic-system:galactic-cni`
+      `kubectl auth can-i watch egressshards.galactic.datumapis.com -n galactic-system --as=system:serviceaccount:galactic-system:galactic-cni`
       answers `yes`.
 - [ ] Every shard is `Ready` and `Programmed`, and has its own SID locator,
       its own `shardAddressIPv6` and, for NAT64, its own `shardAddressIPv4`.

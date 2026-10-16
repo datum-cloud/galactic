@@ -133,7 +133,7 @@ nodes, plus `galactic-nat`, the egress shard, and `galactic-gateway`, the VIP lo
 can restart without detaching the other. Each site has its own VIP `/64`
 (`2001:db8:6060:1::/64` for dfw, `:2::` for sjc, `:3::` for iad), originated only by that
 site's edge nodes and served by two `ns60` backends on the site's compute node, which the
-site's `NetworkRule`s select by label through their `VPCAttachment`s.
+site's `NetworkService`s select by label through their `VPCAttachment`s.
 Compute nodes run no shard: each egresses through its own site's edge shards only. The
 reflector runs neither `galactic-cni` nor a shard — its
 `galactic=control` label is mutually exclusive with the `galactic=router` value that pulls
@@ -417,7 +417,7 @@ deploy/containerlab/
 │   ├── bmp-collector/iad/       # the lab's one BMP collector, on the reflector's host network
 │   ├── galactic-nat/            # egress shards per site, one per edge node (dfw has two)
 │   ├── galactic-gateway/        # one gateway overlay per edge node, plus each site's
-│   │                            #   ns60 NetworkRules (backends picked by selector)
+│   │                            #   ns60 NetworkServices (backends picked by selector)
 │   ├── galactic-controller/     # traffic policy's cell controller, on the host network
 │   └── tenants/                 # test VPCs — one shared base/ (Namespace + netshoot
 │       ├── base/                 # Deployment), each tenant patching its namespace and
@@ -514,7 +514,7 @@ task deploy
 | `verify:fabric-metrics`     | Scrape every fabric-router's frr-exporter; fail on a failed collector or a session not Established                                   |
 | `verify:bmp`                | Check the route reflector and every fabric-router stream to the BMP collector, and that it agrees with each on every session's state |
 | `verify:underlay`           | Ping every underlay loopback from tr1 over both IPv4 and IPv6                                                                        |
-| `verify:gateway`            | Check every NetworkGateway is Ready, every NetworkRule Accepted, every generated ServiceVIPBinding Bound                             |
+| `verify:gateway`            | Check every NetworkGateway is Ready, every NetworkService Accepted, every generated ServiceVIPBinding Bound                             |
 | `verify:gateway-ingress`    | TCP and UDP from the off-fabric host to each site's VIP, through every gateway node in turn                                          |
 | `verify:gateway-restart`    | Restart dfw-worker2's gateway and shard in turn while the other carries traffic (#710)                                               |
 | `verify:gateway-detach`     | Turn dfw-worker2's gateway datapath off: the ingress check must fail, then pass (not in `verify`)                                    |

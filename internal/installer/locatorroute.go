@@ -16,8 +16,8 @@ import (
 	"golang.org/x/sys/unix"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // ensureLocatorLocalRoute installs a local route for this node's uSID locator

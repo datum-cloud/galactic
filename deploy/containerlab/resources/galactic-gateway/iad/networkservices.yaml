@@ -1,6 +1,6 @@
 # ns60's port 80 over TCP, served by every ns60 backend its selector picks in iad.
-apiVersion: network.datumapis.com/v1alpha1
-kind: NetworkRule
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
 metadata:
   name: ns60-tcp
   namespace: galactic-system
@@ -16,8 +16,8 @@ spec:
   backendPort: 80
 ---
 # ns60's port 80 over UDP, served by every ns60 backend its selector picks in iad.
-apiVersion: network.datumapis.com/v1alpha1
-kind: NetworkRule
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
 metadata:
   name: ns60-udp
   namespace: galactic-system

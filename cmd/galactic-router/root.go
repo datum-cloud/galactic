@@ -26,7 +26,8 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
@@ -40,7 +41,6 @@ import (
 	"go.datum.net/galactic/internal/runtime/gobgp"
 	"go.datum.net/galactic/internal/serviceroute"
 	tpnode "go.datum.net/galactic/internal/trafficpolicy/node"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -259,7 +259,7 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("setup Node controller: %w", err)
 	}
 
-	// Register the ServiceVIPBinding controller and the NetworkRule binding
+	// Register the ServiceVIPBinding controller and the NetworkService binding
 	// writer that generates its bindings.
 	if err := setupVIPBindingControllers(mgr, nodeName, vipTranslationTable, cfg.GCInterval); err != nil {
 		return err
@@ -364,8 +364,8 @@ func runGCTicker(
 }
 
 // setupVIPBindingControllers registers the two halves of this node's DSR
-// backend side: NetworkRuleBindingReconciler, which writes a ServiceVIPBinding
-// for every NetworkRule backend whose VPCAttachment is on this node, and
+// backend side: NetworkServiceBindingReconciler, which writes a ServiceVIPBinding
+// for every NetworkService backend whose VPCAttachment is on this node, and
 // ServiceVIPBindingReconciler, which programs vip_xlat_table from those
 // bindings. It also registers NodeDepartureReconciler, which every sweepInterval
 // and on every Node deletion clears the conditions and bindings of nodes that
@@ -381,12 +381,12 @@ func setupVIPBindingControllers(
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup ServiceVIPBinding controller: %w", err)
 	}
-	if err := (&controller.NetworkRuleBindingReconciler{
+	if err := (&controller.NetworkServiceBindingReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		NodeName: nodeName,
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup NetworkRule binding controller: %w", err)
+		return fmt.Errorf("setup NetworkService binding controller: %w", err)
 	}
 	if err := (&controller.NodeDepartureReconciler{
 		Client:    mgr.GetClient(),

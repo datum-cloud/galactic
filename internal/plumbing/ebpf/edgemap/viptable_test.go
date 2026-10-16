@@ -273,7 +273,7 @@ func TestVIPTable_ReconcileRemovesStaleNotLive(t *testing.T) {
 	// The cutoff snapshot is taken strictly after both entries were
 	// written (generation 100 < cutoff 150), matching the real ordering
 	// contract: capture Generation() immediately before listing the live
-	// NetworkRule CRDs, i.e. after whatever already-registered state
+	// NetworkService CRDs, i.e. after whatever already-registered state
 	// exists, not before it.
 	fakeClock = 150
 	cutoff := vt.Generation()

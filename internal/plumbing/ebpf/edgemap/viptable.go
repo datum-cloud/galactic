@@ -405,7 +405,7 @@ func (t *VIPTable) List() ([]VIPEntry, error) {
 }
 
 // Reconcile brings vip_table into agreement with live, the caller's current set
-// of keys backed by a live NetworkRule, removing every entry whose key is absent
+// of keys backed by a live NetworkService, removing every entry whose key is absent
 // from live except one whose generation is at or above cutoff, which was written
 // after the caller's snapshot and could race a fresh Register.
 func (t *VIPTable) Reconcile(live map[VIPKey]struct{}, cutoff uint64) (removed []VIPEntry, err error) {

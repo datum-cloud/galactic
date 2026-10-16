@@ -21,7 +21,7 @@ interface bond1
 !
 
 # This site's ingress VIP prefix (resources/galactic-gateway/dfw/), the
-# /64 every VIP in dfw's NetworkRules sits in. A VIP's own reachability is
+# /64 every VIP in dfw's NetworkServices sits in. A VIP's own reachability is
 # carried as an EVPN Type 5 path inside galactic-router's iBGP mesh, which the
 # plain-IPv6-unicast transit never sees, so without this the off-fabric host
 # (remote-host on tr4) has no route to any VIP at all.

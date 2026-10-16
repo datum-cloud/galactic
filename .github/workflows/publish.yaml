@@ -171,4 +171,5 @@ jobs:
         - { path: config/fabric-api/base, name: ghcr.io/datum-cloud/fabric-api, tag: "${{ needs.publish-fabric-api-image.outputs.tag }}" }
         # config/galactic-controller/base is opt-in too, for the same reason.
         - { path: config/galactic-controller/base, name: ghcr.io/datum-cloud/galactic-controller, tag: "${{ needs.publish-galactic-controller-image.outputs.tag }}" }
+        - { path: config/galactic-controller/fabric, name: ghcr.io/datum-cloud/galactic-controller, tag: "${{ needs.publish-galactic-controller-image.outputs.tag }}" }
     secrets: inherit

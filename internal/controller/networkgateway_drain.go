@@ -12,7 +12,7 @@ import (
 )
 
 // ruleDrainDelay is how long a gateway node keeps serving a deleted
-// NetworkRule after the last of its BGPAdvertisements is gone. Deleting the
+// NetworkService after the last of its BGPAdvertisements is gone. Deleting the
 // object only starts the withdrawal: each router still has to send it and
 // every peer has to act on it. Until then traffic keeps arriving for the VIP,
 // and a node that already dropped the rule from its datapath would blackhole
@@ -21,7 +21,7 @@ const ruleDrainDelay = 5 * time.Second
 
 // ruleDrainTracker remembers what this node put in the engine's desired state
 // on its last pass, so a rule that is deleted can stay loaded for
-// ruleDrainDelay after its advertisements are gone, even once the NetworkRule
+// ruleDrainDelay after its advertisements are gone, even once the NetworkService
 // object itself has disappeared from the list.
 //
 // It holds memory only. After a process restart it knows nothing, and a
@@ -56,7 +56,7 @@ func (t *ruleDrainTracker) lastLoaded(key string) (gateway.DesiredRule, bool) {
 }
 
 // settle completes desired for one pass in namespace and records it for the
-// next. live holds the key of every listed NetworkRule that is not being
+// next. live holds the key of every listed NetworkService that is not being
 // deleted.
 //
 // A rule in last that is in neither desired nor live was deleted and its

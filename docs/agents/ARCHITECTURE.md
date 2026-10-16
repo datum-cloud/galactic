@@ -14,7 +14,7 @@ their own architecture document:
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md)               | The CNI attach chain — `galactic-cni` (installer), `galactic-veth`, `galactic-tap`, `galactic-ipam`, `galactic-bgp`, `galactic-route` |
 | [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)         | The BGP/EVPN control plane — `galactic-router`                                                                                        |
-| [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)       | The edge XDP DSR load balancer — `galactic-gateway`, `NetworkGateway`/`NetworkRule`                                                   |
+| [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)       | The edge XDP DSR load balancer — `galactic-gateway`, `NetworkGateway`/`NetworkService`                                                   |
 | [ARCHITECTURE-FABRIC-API.md](ARCHITECTURE-FABRIC-API.md) | The fabric looking glass — `fabric-api` (`node` sidecar, cell `gateway`, `janitor`), `FabricQuery`                                    |
 
 The fourth, `galactic-nat` (sharded stateful egress translation, `EgressShard`),

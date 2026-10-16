@@ -26,6 +26,13 @@ linters:
     - unused
   exclusions:
     rules:
+      # Preserve imported upstream API/controller test fixtures as written.
+      - path: '^(api/network/v1alpha1|internal/cloud)/.*_test\.go$'
+        linters: [goconst, lll]
+      # The imported sources use descriptive schema and error text that must
+      # remain stable across the consolidation.
+      - path: '^(api/network/v1alpha1|internal/cloud)/.*\.go$'
+        linters: [lll]
       # A kubebuilder marker is one line by definition and cannot be wrapped.
       - linters: [lll]
         source: '^\s*// \+kubebuilder:'

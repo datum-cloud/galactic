@@ -25,13 +25,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/gateway"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// networkRuleFinalizer orders teardown on NetworkRule deletion: BGP-route
+// networkRuleFinalizer orders teardown on NetworkService deletion: BGP-route
 // withdrawal must complete before NAT state is released. See reconcileDelete.
-const networkRuleFinalizer = "galactic.datum.net/networkrule-teardown"
+const networkRuleFinalizer = "galactic.datum.net/networkservice-teardown"
 
 // networkRuleLabel is set to the rule's name on every BGPAdvertisement it owns,
 // one per gateway node per non-empty VIP address family, so teardown can find
@@ -81,7 +81,7 @@ func gatewayNodeLabelValue(nodeName string) string {
 	return prefix + "-" + suffix
 }
 
-// NetworkRuleReconciler owns the per-object NetworkRule lifecycle that
+// NetworkServiceReconciler owns the per-object NetworkService lifecycle that
 // NetworkGatewayReconciler's aggregate, list-driven loop is the wrong place
 // for: setting the Accepted condition once gateway nodes exist, and the
 // finalizer-guarded teardown ordering on deletion.
@@ -95,7 +95,7 @@ func gatewayNodeLabelValue(nodeName string) string {
 // Both jobs are safe to run from every gateway node's process without leader
 // election, none existing anywhere in this codebase, because they are
 // idempotent.
-type NetworkRuleReconciler struct {
+type NetworkServiceReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	NodeName string
@@ -110,17 +110,17 @@ type NetworkRuleReconciler struct {
 // again after it found an advertisement its cache had missed.
 const staleAdvertisementRequeue = time.Second
 
-// Reconcile reconciles one NetworkRule's finalizer and Accepted condition.
+// Reconcile reconciles one NetworkService's finalizer and Accepted condition.
 // Engine convergence and advertisement wiring for accepted rules happen in
-// NetworkGatewayReconciler, which watches NetworkRule and re-lists on every
+// NetworkGatewayReconciler, which watches NetworkService and re-lists on every
 // change, so this reconciler never touches the gateway engine.
-func (r *NetworkRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	rule := &bgpv1alpha1.NetworkRule{}
+func (r *NetworkServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	rule := &bgpv1alpha1.NetworkService{}
 	if err := r.Get(ctx, req.NamespacedName, rule); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("get NetworkRule %s: %w", req.NamespacedName, err)
+		return ctrl.Result{}, fmt.Errorf("get NetworkService %s: %w", req.NamespacedName, err)
 	}
 
 	isGateway, err := isGatewayNode(ctx, r.Client, rule.Namespace, r.NodeName)
@@ -139,12 +139,12 @@ func (r *NetworkRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		patchBase := rule.DeepCopy()
 		controllerutil.AddFinalizer(rule, networkRuleFinalizer)
 		if err := r.Patch(ctx, rule, client.MergeFrom(patchBase)); err != nil {
-			return ctrl.Result{}, fmt.Errorf("add finalizer to NetworkRule %s: %w", req.NamespacedName, err)
+			return ctrl.Result{}, fmt.Errorf("add finalizer to NetworkService %s: %w", req.NamespacedName, err)
 		}
 	}
 
 	if err := r.updateAcceptedCondition(ctx, rule); err != nil {
-		return ctrl.Result{}, fmt.Errorf("update Accepted condition for NetworkRule %s: %w", req.NamespacedName, err)
+		return ctrl.Result{}, fmt.Errorf("update Accepted condition for NetworkService %s: %w", req.NamespacedName, err)
 	}
 
 	return ctrl.Result{}, nil
@@ -154,12 +154,14 @@ func (r *NetworkRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // for this namespace.
 //
 // Accepted means only that: a gateway node is registered to serve the rule. It
-// is not an ownership check. NetworkRule is internal, written by the platform
+// is not an ownership check. NetworkService is internal, written by the platform
 // API that serves tenants, which verifies the tenant owns the VPC before it
 // writes the rule; who may write it here is decided by RBAC on its namespace.
 // NetworkGatewayReconciler programs only accepted rules, and nothing else sets
 // the condition.
-func (r *NetworkRuleReconciler) updateAcceptedCondition(ctx context.Context, rule *bgpv1alpha1.NetworkRule) error {
+func (r *NetworkServiceReconciler) updateAcceptedCondition(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService,
+) error {
 	nodes, err := gatewayNodeNames(ctx, r.Client, rule.Namespace)
 	if err != nil {
 		return err
@@ -197,7 +199,7 @@ func (r *NetworkRuleReconciler) updateAcceptedCondition(ctx context.Context, rul
 	return r.Status().Update(ctx, ruleCopy)
 }
 
-// reconcileDelete orders teardown on NetworkRule deletion:
+// reconcileDelete orders teardown on NetworkService deletion:
 //
 //  1. Withdraw the BGP routes, by deleting this rule's BGPAdvertisements,
 //     before touching NAT state. Removing that state while the route is still
@@ -224,8 +226,8 @@ func (r *NetworkRuleReconciler) updateAcceptedCondition(ctx context.Context, rul
 // deletes it itself once its cache drops the rule (sweepOrphanedAdvertisements),
 // and the advertisement's owner reference to the rule lets Kubernetes garbage
 // collection delete it as a last resort.
-func (r *NetworkRuleReconciler) reconcileDelete(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule,
+func (r *NetworkServiceReconciler) reconcileDelete(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -254,17 +256,17 @@ func (r *NetworkRuleReconciler) reconcileDelete(
 	// the implementation behind it here is a no-op. Real per-tenant quota
 	// release is deferred.
 	if err := (gateway.NoopQuotaEnforcer{}).Release(ctx, rule.Namespace+"/"+rule.Name); err != nil {
-		return ctrl.Result{}, fmt.Errorf("release NAT/conntrack state for NetworkRule %s/%s: %w",
+		return ctrl.Result{}, fmt.Errorf("release NAT/conntrack state for NetworkService %s/%s: %w",
 			rule.Namespace, rule.Name, err)
 	}
 
-	logger.Info("NetworkRule BGP route withdrawn; each gateway node drops it from vip_table after its drain delay",
+	logger.Info("NetworkService BGP route withdrawn; each gateway node drops it from vip_table after its drain delay",
 		"networkRule", rule.Name)
 
 	patchBase := rule.DeepCopy()
 	controllerutil.RemoveFinalizer(rule, networkRuleFinalizer)
 	if err := r.Patch(ctx, rule, client.MergeFrom(patchBase)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("remove finalizer from NetworkRule %s/%s: %w", rule.Namespace, rule.Name, err)
+		return ctrl.Result{}, fmt.Errorf("remove finalizer from NetworkService %s/%s: %w", rule.Namespace, rule.Name, err)
 	}
 	return ctrl.Result{}, nil
 }
@@ -273,14 +275,14 @@ func (r *NetworkRuleReconciler) reconcileDelete(
 // deletes each one through c that is not already being deleted. It returns how
 // many it deleted.
 func deleteRuleAdvertisements(
-	ctx context.Context, reader client.Reader, c client.Client, rule *bgpv1alpha1.NetworkRule,
+	ctx context.Context, reader client.Reader, c client.Client, rule *bgpv1alpha1.NetworkService,
 ) (int, error) {
 	advList := &bgpv1alpha1.BGPAdvertisementList{}
 	if err := reader.List(ctx, advList,
 		client.InNamespace(rule.Namespace),
 		client.MatchingLabels{networkRuleLabel: rule.Name},
 	); err != nil {
-		return 0, fmt.Errorf("list BGPAdvertisements for NetworkRule %s/%s teardown: %w",
+		return 0, fmt.Errorf("list BGPAdvertisements for NetworkService %s/%s teardown: %w",
 			rule.Namespace, rule.Name, err)
 	}
 	deleted := 0
@@ -303,24 +305,24 @@ func deleteRuleAdvertisements(
 // SetupWithManager registers the reconciler with the manager.
 //
 // The NetworkGateway watch is the mirror of NetworkGatewayReconciler's
-// NetworkRule watch: this reconciler's work depends on the namespace's
+// NetworkService watch: this reconciler's work depends on the namespace's
 // gateway-node pool, so a rule must be re-examined whenever that pool changes
 // rather than waiting on its own periodic resync.
-func (r *NetworkRuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *NetworkServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&bgpv1alpha1.NetworkRule{}).
+		For(&bgpv1alpha1.NetworkService{}).
 		Watches(&bgpv1alpha1.NetworkGateway{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return gatewayToRuleRequests(ctx, r.Client, obj)
 			}),
 		).
-		Named("networkrule").
+		Named("networkservice").
 		Complete(r)
 }
 
-// gatewayToRuleRequests maps a NetworkGateway change to every NetworkRule in
+// gatewayToRuleRequests maps a NetworkGateway change to every NetworkService in
 // its namespace, the inverse of ruleToGatewayRequests and a deliberate
-// broadcast for the same reason: a NetworkRule carries no gateway reference,
+// broadcast for the same reason: a NetworkService carries no gateway reference,
 // and its Accepted condition depends on the whole gateway-node pool. Without
 // it, a rule created before any gateway node registered stays unaccepted, and
 // so excluded from every node's rule gathering, until the informer's periodic
@@ -332,9 +334,9 @@ func gatewayToRuleRequests(ctx context.Context, c client.Client, obj client.Obje
 	}
 	logger := log.FromContext(ctx)
 
-	ruleList := &bgpv1alpha1.NetworkRuleList{}
+	ruleList := &bgpv1alpha1.NetworkServiceList{}
 	if err := c.List(ctx, ruleList, client.InNamespace(gw.Namespace)); err != nil {
-		logger.Error(err, "list NetworkRules for NetworkGateway change", "networkGateway", gw.Name)
+		logger.Error(err, "list NetworkServices for NetworkGateway change", "networkGateway", gw.Name)
 		return nil
 	}
 	reqs := make([]ctrlreconcile.Request, 0, len(ruleList.Items))

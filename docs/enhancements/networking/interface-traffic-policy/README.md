@@ -110,15 +110,13 @@ These come from the product brief and are not open to redesign here.
 
 ### API ownership
 
-Existing networking kinds live in `network.datumapis.com` (the network
-repository) and `cloud.datumapis.com` (the cloud repository). Both repositories
-are being folded into Galactic under `galactic.datumapis.com/v1alpha1`, with
-every kind in `api/v1alpha1` of the Galactic module. New kinds therefore start
-there. Adding them to the network module would deepen a dependency that is
-being removed, and would need a companion release for every change.
+The cloud and network API types now live in `api/cloud/v1alpha1` and
+`api/network/v1alpha1` of the Galactic module. All of these types use
+`galactic.datumapis.com/v1alpha1`. TrafficPolicy and TrafficPolicyBinding
+remain in `api/v1alpha1` under the same group.
 
-VPC and VPCAttachment are owned by the cloud operator, which writes both the
-spec and the status of every VPCAttachment. Galactic does not write either.
+VPC and VPCAttachment are owned by the Galactic cell controller, which writes both the
+spec and the status of every VPCAttachment. The node controller does not write either.
 Bindings are therefore a separate Galactic kind rather than new fields on
 VPCAttachment.
 

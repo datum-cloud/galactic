@@ -36,47 +36,37 @@ tasks:
     # No --build-arg FRR_VERSION: the lab builds the FRR version the
     # Dockerfile pins, the same one the published image ships to production.
     cmds:
-      - docker build --network=host --build-context network=../../../network -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
+      - docker build --network=host -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
 
   "build:fabric-api":
     desc: Build the fabric-api image (node sidecar, cell gateway, janitor)
     cmds:
-      - docker build --network=host --build-context network=../../../network -t fabric-api:latest -f ../../containers/fabric-api/Dockerfile ../..
+      - docker build --network=host -t fabric-api:latest -f ../../containers/fabric-api/Dockerfile ../..
 
-  # --build-context network=../../../network satisfies go.mod's local
-  # `replace go.datum.net/network => ../network` (see that line's own
-  # comment) inside each Dockerfile's "network" build stage -- see
-  # containers/galactic-{router,cni,nat,gateway}/Dockerfile's own comment on
-  # that stage for the full mechanism. ../../../network is this Taskfile's
-  # own cwd (deploy/containerlab) relative to the network repo checked out
-  # as galactic's sibling; harmless to pass even once that replace
-  # directive is eventually removed, since the Dockerfile's "network"
-  # stage is unused by go.mod at that point regardless of what's passed
-  # here.
   "build:galactic-router":
     desc: Build the galactic-router container image
     cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
+      - docker build --network=host -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
 
   "build:galactic-cni":
     desc: Build the galactic-cni installer image
     cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
+      - docker build --network=host -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
 
   "build:galactic-nat":
     desc: Build the galactic-nat egress datapath image
     cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-nat:latest -f ../../containers/galactic-nat/Dockerfile ../..
+      - docker build --network=host -t galactic-nat:latest -f ../../containers/galactic-nat/Dockerfile ../..
 
   "build:galactic-gateway":
     desc: Build the galactic-gateway edge load balancer image
     cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
+      - docker build --network=host -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
 
   "build:galactic-controller":
     desc: Build the galactic-controller image (traffic policy's cell role)
     cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-controller:latest -f ../../containers/galactic-controller/Dockerfile ../..
+      - docker build --network=host -t galactic-controller:latest -f ../../containers/galactic-controller/Dockerfile ../..
 
   "build:remote-host":
     desc: Build the off-fabric remote host image (nginx)
@@ -110,7 +100,7 @@ tasks:
       - task: "deploy:galactic-router"
       - task: "deploy:galactic-nat"
       - task: "deploy:scenarios"
-      # After the scenarios: the gateway's NetworkRules select ns60's
+      # After the scenarios: the gateway's NetworkServices select ns60's
       # backends, which deploy:scenarios creates.
       - task: "deploy:galactic-gateway"
       - task: "deploy:fabric-api"
@@ -549,7 +539,7 @@ tasks:
         for site in dfw sjc iad; do
           cp=${site}-control-plane
           echo "--- ${site} ---"
-          docker exec ${cp} kubectl -n galactic-system get networkgateways,networkrules,servicevipbindings
+          docker exec ${cp} kubectl -n galactic-system get networkgateways,networkservices,servicevipbindings
           # Ready: the engine loaded every rule and advertised it. Accepted:
           # the rule found a gateway. Bound: the backend's node rewrites the
           # VIP for it. Each backend's node writes one binding per rule per
@@ -562,7 +552,7 @@ tasks:
             echo "FAIL ${site}: ${bindings} generated ServiceVIPBindings, want 4" >&2
             rc=1
           fi
-          for check in "networkgateway Ready --all" "networkrule Accepted --all" "servicevipbinding Bound -l=${generated}"; do
+          for check in "networkgateway Ready --all" "networkservice Accepted --all" "servicevipbinding Bound -l=${generated}"; do
             set -- ${check}
             if ! docker exec ${cp} kubectl -n galactic-system wait $1 $3 \
                 --for=condition=$2 --timeout=10s >/dev/null; then

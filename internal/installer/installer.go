@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/hostconf"
@@ -40,7 +41,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/radv"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // ebpfHealthCheckInterval controls how often Run polls attach.Health once the

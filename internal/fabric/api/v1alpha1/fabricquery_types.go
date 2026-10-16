@@ -12,9 +12,9 @@ import (
 // requests without reading their specs.
 const (
 	// LabelRequestID carries spec.requestID.
-	LabelRequestID = "network.datumapis.com/fabric-request-id"
+	LabelRequestID = "galactic.datumapis.com/fabric-request-id"
 	// LabelExpiresAt carries spec.expiresAt as Unix seconds.
-	LabelExpiresAt = "network.datumapis.com/fabric-expires-at"
+	LabelExpiresAt = "galactic.datumapis.com/fabric-expires-at"
 )
 
 // Condition types. Their truth values and reasons are part of the contract.

@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,7 +30,7 @@ import (
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/yaml"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/trafficpolicy/cell"
 )
@@ -50,15 +49,6 @@ type env struct {
 	done       chan error
 }
 
-func moduleDir(t *testing.T, module string) string {
-	t.Helper()
-	out, err := exec.CommandContext(context.Background(), "go", "list", "-m", "-f", "{{.Dir}}", module).Output()
-	if err != nil {
-		t.Fatalf("locate module %s: %v", module, err)
-	}
-	return strings.TrimSpace(string(out))
-}
-
 func startEnv(t *testing.T) *env {
 	t.Helper()
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
@@ -70,7 +60,6 @@ func startEnv(t *testing.T) *env {
 	te := &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "config", "crd"),
-			filepath.Join(moduleDir(t, "go.datum.net/cloud"), "config", "crd"),
 		},
 		ErrorIfCRDPathMissing: true,
 		WebhookInstallOptions: envtest.WebhookInstallOptions{

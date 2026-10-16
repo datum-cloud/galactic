@@ -10,7 +10,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 )
 
 // VPCAttachmentIndex indexes Cloud API attachments by their observed node.

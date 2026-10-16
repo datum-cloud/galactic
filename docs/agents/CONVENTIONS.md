@@ -41,7 +41,7 @@ Use three groups, separated by blank lines:
 then `go.datum.net`-prefixed packages, then everything else (see `.golangci.yaml`).
 Alias imports use a short, descriptive name — typically the API group + version
 for generated clients (`metav1`, `corev1`, `bgpv1alpha1` for
-`go.datum.net/network/api/v1alpha1`, `apierrors`, `clientgoscheme`,
+`go.datum.net/galactic/api/network/v1alpha1`, `apierrors`, `clientgoscheme`,
 `utilruntime`) or a package-role name to disambiguate collisions
 (`vrfpkg`, `galacticruntime`).
 

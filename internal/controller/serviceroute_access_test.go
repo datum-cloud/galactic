@@ -14,8 +14,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
-	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 const (
@@ -191,7 +191,7 @@ func pscFixture(t *testing.T) (
 		},
 		Spec: networkv1alpha1.ServiceEndpointSpec{
 			Address:      "fd70::10",
-			Protocol:     networkv1alpha1.NetworkRuleProtocolUDP,
+			Protocol:     networkv1alpha1.NetworkServiceProtocolUDP,
 			Port:         53,
 			DeliveryMode: networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal,
 			AttachmentSelector: &metav1.LabelSelector{

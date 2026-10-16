@@ -1,0 +1,28 @@
+# Only the lease and events are local. The federation hub credential needs
+# hub-rbac.yaml bound on the hub by the deployment operator.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: galactic-controller-fabric
+  namespace: fabric-identity-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: galactic-controller-fabric
+  namespace: fabric-identity-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: galactic-controller-fabric
+subjects:
+  - kind: ServiceAccount
+    name: galactic-controller-fabric
+    namespace: fabric-identity-system

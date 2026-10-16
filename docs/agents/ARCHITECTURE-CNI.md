@@ -45,9 +45,9 @@ same `ghcr.io/datum-cloud/galactic-cni` image — see
 [Repository Layout](#repository-layout) and
 [Module / Package Reference](#module--package-reference) below.
 
-VPC and VPCAttachment CRDs are owned by a separate companion operator
-(`go.datum.net/cloud`). Galactic receives pre-populated identifiers through the
-CNI config and acts on them.
+VPC and VPCAttachment CRDs are defined in `api/cloud/v1alpha1` and
+reconciled by `galactic-controller --role=cell`. The CNI receives their
+pre-populated identifiers and acts on them.
 
 ### SRv6 SID encoding
 
@@ -492,7 +492,7 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 
 | Dependency                               | Version               | Purpose                                                                                                                                                                                                                                                    |
 | ---------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `go.datum.net/network`                   | bumped frequently     | BGP CRD API types (`BGPAdvertisement`, `BGPVRFInstance`) — `galactic-bgp` writes these via a bare `sigs.k8s.io/controller-runtime/pkg/client.Client`, no manager/reconciler                                                                                |
+| `api/network/v1alpha1` (local) | in-tree | Galactic BGP, gateway, egress, and service API types |
 | `sigs.k8s.io/controller-runtime`         | v0.24.1               | `pkg/client` only for `galactic-bgp`/`galactic-cni`'s installer (CRD CRUD, node lookup) — neither runs a manager or reconciler; that usage lives entirely in `galactic-router`/`galactic-gateway`, see the other two architecture docs                     |
 | `github.com/spf13/cobra`                 | v1.10.2               | CLI command/flag handling for every binary                                                                                                                                                                                                                 |
 | `github.com/containernetworking/cni`     | v1.3.1                | CNI plugin spec, skel, invoke                                                                                                                                                                                                                              |

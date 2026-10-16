@@ -3,7 +3,7 @@ kind: ClusterRole
 metadata:
   name: galactic-router
 rules:
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgprouters
       - bgppeers
@@ -15,38 +15,38 @@ rules:
   # base resource: galactic-cni already owns creating/updating both
   # (config/galactic-cni/rbac.yaml) via galactic-bgp, and this binary's own
   # reconcilers only read them and write their /status subresource (see
-  # the rule below). NetworkGatewayReconciler/NetworkRuleReconciler need
+  # the rule below). NetworkGatewayReconciler/NetworkServiceReconciler need
   # create/update/patch on bgpadvertisements, but that's galactic-gateway's
   # ClusterRole (config/galactic-gateway/rbac.yaml), not this one.
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgpadvertisements
       - bgpvrfinstances
     verbs: ["get", "list", "watch", "delete"]
   # servicevipbindings needs full CRUD on the base resource:
-  # NetworkRuleBindingReconciler creates, updates and deletes this node's
+  # NetworkServiceBindingReconciler creates, updates and deletes this node's
   # generated bindings, and ServiceVIPBindingReconciler adds and removes its
   # own teardown finalizer with a Patch on the object itself, not just its
   # /status subresource. NodeDepartureReconciler deletes a departed node's
   # generated bindings and patches the finalizer off every binding that
   # targets it.
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - servicevipbindings
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # NetworkRuleBindingReconciler reads every NetworkRule to find the backends
+  # NetworkServiceBindingReconciler reads every NetworkService to find the backends
   # on this node, and writes its per-node BackendsBound condition to rule
   # status. It never writes the rule itself.
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
-      - networkrules
+      - networkservices
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - serviceendpoints
       - serviceroutepolicies
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgprouters/status
       - bgppeers/status
@@ -54,10 +54,10 @@ rules:
       - bgppolicies/status
       - bgpvrfinstances/status
       - servicevipbindings/status
-      - networkrules/status
+      - networkservices/status
       - serviceroutepolicies/status
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["cloud.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - vpcs
       - vpcattachments

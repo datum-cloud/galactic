@@ -11,13 +11,13 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// backendSIDIndex resolves a NetworkRule backend's address to the SRv6 uSID of
+// backendSIDIndex resolves a NetworkService backend's address to the SRv6 uSID of
 // the worker node it is reachable through, by listing BGPAdvertisement,
 // BGPRouter, and BGPVRFInstance CRDs and matching by prefix containment, then
 // confirming tenant ownership of the match before trusting it.
