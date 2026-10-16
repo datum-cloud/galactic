@@ -77,6 +77,12 @@ func TestPublishToInterfaceReprogramsNSOAttachmentGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	iface := &networkingv1alpha.NetworkInterface{ObjectMeta: metav1.ObjectMeta{Name: "nic", Namespace: "tenant"}}
+	iface.Spec.ClaimRef = &networkingv1alpha.NetworkInterfaceClaimRef{Name: "claim"}
+	claim := &networkingv1alpha.NetworkInterfaceClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "tenant"}}
+	claim.Status.Conditions = []metav1.Condition{
+		{Type: networkingv1alpha.NetworkInterfaceClaimProgrammed, Status: metav1.ConditionTrue, Reason: "OldGroupProgrammed", LastTransitionTime: metav1.Now()},
+		{Type: networkingv1alpha.NetworkInterfaceClaimReady, Status: metav1.ConditionTrue, Reason: "OldGroupReady", LastTransitionTime: metav1.Now()},
+	}
 	iface.Status.AttachmentRef = &networkingv1alpha.NetworkInterfaceAttachmentRef{
 		APIGroup: "cloud.datumapis.com", Kind: "VPCAttachment", Name: "nic",
 	}
@@ -84,7 +90,7 @@ func TestPublishToInterfaceReprogramsNSOAttachmentGroup(t *testing.T) {
 		Type:   networkingv1alpha.NetworkInterfaceProgrammed,
 		Status: metav1.ConditionTrue, Reason: "OldGroupProgrammed", LastTransitionTime: metav1.Now(),
 	}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(iface).WithObjects(iface).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(iface, claim).WithObjects(iface, claim).Build()
 	r := &NetworkInterfaceReconciler{Client: cl}
 	attachment := &cloudv1alpha1.VPCAttachment{ObjectMeta: metav1.ObjectMeta{Name: "nic", Namespace: "tenant"}}
 	vpc := &cloudv1alpha1.VPC{}
@@ -102,6 +108,16 @@ func TestPublishToInterfaceReprogramsNSOAttachmentGroup(t *testing.T) {
 	condition := apimeta.FindStatusCondition(got.Status.Conditions, networkingv1alpha.NetworkInterfaceProgrammed)
 	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != "APIGroupMigration" {
 		t.Fatalf("Programmed condition = %#v, want Unknown/APIGroupMigration", condition)
+	}
+	var gotClaim networkingv1alpha.NetworkInterfaceClaim
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(claim), &gotClaim); err != nil {
+		t.Fatal(err)
+	}
+	for _, conditionType := range []string{networkingv1alpha.NetworkInterfaceClaimProgrammed, networkingv1alpha.NetworkInterfaceClaimReady} {
+		condition := apimeta.FindStatusCondition(gotClaim.Status.Conditions, conditionType)
+		if condition == nil || condition.Status != metav1.ConditionUnknown {
+			t.Fatalf("claim %s condition = %#v, want Unknown during migration", conditionType, condition)
+		}
 	}
 }
 

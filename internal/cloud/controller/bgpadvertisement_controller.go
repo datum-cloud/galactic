@@ -26,7 +26,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -114,6 +119,13 @@ func (r *BGPAdvertisementReconciler) projectOntoInterface(
 	if err := r.Get(ctx, key, &networkInterface); err != nil {
 		return client.IgnoreNotFound(err)
 	}
+	// An advertisement from the new group cannot certify an interface that
+	// still points at the former attachment API.
+	if networkInterface.Status.AttachmentRef == nil ||
+		networkInterface.Status.AttachmentRef.APIGroup != cloudv1alpha1.GroupVersion.Group ||
+		networkInterface.Status.AttachmentRef.Name != attachment.Name {
+		return nil
+	}
 
 	interfaceProgrammed := programmed
 	interfaceProgrammed.Type = networkingv1alpha.NetworkInterfaceProgrammed
@@ -122,7 +134,48 @@ func (r *BGPAdvertisementReconciler) projectOntoInterface(
 	if err := r.Status().Update(ctx, &networkInterface); err != nil {
 		return fmt.Errorf("update network interface %s status: %w", key, err)
 	}
+	if networkInterface.Spec.ClaimRef == nil {
+		return nil
+	}
+	claimKey := types.NamespacedName{Namespace: networkInterface.Namespace, Name: networkInterface.Spec.ClaimRef.Name}
+	var claim networkingv1alpha.NetworkInterfaceClaim
+	if err := r.Get(ctx, claimKey, &claim); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	claimProgrammed := programmed
+	claimProgrammed.Type = networkingv1alpha.NetworkInterfaceClaimProgrammed
+	claimProgrammed.ObservedGeneration = claim.Generation
+	meta.SetStatusCondition(&claim.Status.Conditions, claimProgrammed)
+	if programmed.Status != metav1.ConditionTrue {
+		meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+			Type: networkingv1alpha.NetworkInterfaceClaimReady, Status: programmed.Status,
+			Reason: "NotProgrammed", Message: programmed.Message, ObservedGeneration: claim.Generation,
+		})
+	}
+	if err := r.Status().Update(ctx, &claim); err != nil {
+		return fmt.Errorf("update network interface claim %s status: %w", claimKey, err)
+	}
 	return nil
+}
+
+// advertisementForInterface replays an existing advertisement when an
+// interface switches to the Galactic API group after the data plane reported.
+func (r *BGPAdvertisementReconciler) advertisementForInterface(ctx context.Context, obj client.Object) []reconcile.Request {
+	iface, ok := obj.(*networkingv1alpha.NetworkInterface)
+	if !ok || iface.Status.AttachmentRef == nil ||
+		iface.Status.AttachmentRef.APIGroup != cloudv1alpha1.GroupVersion.Group {
+		return nil
+	}
+	var attachment cloudv1alpha1.VPCAttachment
+	key := types.NamespacedName{Namespace: iface.Namespace, Name: iface.Status.AttachmentRef.Name}
+	if err := r.Get(ctx, key, &attachment); err != nil ||
+		attachment.Status.VPC == "" || attachment.Status.VPCAttachment == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Namespace: iface.Namespace,
+		Name:      galactic.AdvertisementName(attachment.Status.VPC, attachment.Status.VPCAttachment),
+	}}}
 }
 
 // nodeForRouter resolves the node a BGPRouter executes on.
@@ -162,6 +215,18 @@ func programmedCondition(advertisement *bgpv1alpha1.BGPAdvertisement) metav1.Con
 func (r *BGPAdvertisementReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.BGPAdvertisement{}).
+		Watches(&networkingv1alpha.NetworkInterface{},
+			handler.EnqueueRequestsFromMapFunc(r.advertisementForInterface),
+			builder.WithPredicates(predicate.Funcs{
+				UpdateFunc: func(e event.UpdateEvent) bool {
+					oldIface, oldOK := e.ObjectOld.(*networkingv1alpha.NetworkInterface)
+					newIface, newOK := e.ObjectNew.(*networkingv1alpha.NetworkInterface)
+					return oldOK && newOK && oldIface.Status.AttachmentRef != nil &&
+						newIface.Status.AttachmentRef != nil &&
+						oldIface.Status.AttachmentRef.APIGroup != newIface.Status.AttachmentRef.APIGroup &&
+						newIface.Status.AttachmentRef.APIGroup == cloudv1alpha1.GroupVersion.Group
+				},
+			})).
 		Named("bgpadvertisement").
 		Complete(r)
 }

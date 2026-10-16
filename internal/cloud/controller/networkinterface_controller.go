@@ -49,6 +49,7 @@ const (
 	legacyLabelVPC           = "cloud.datumapis.com/vpc"
 	legacyLabelVPCAttachment = "cloud.datumapis.com/vpc-attachment"
 	legacyAttachmentKind     = "VPCAttachment"
+	reasonAPIGroupMigration  = "APIGroupMigration"
 
 	// AnnotationHostInterface records the host device this attachment will get,
 	// on the NAD, at the moment the NAD is written. The name is derived from the
@@ -374,7 +375,7 @@ func (r *NetworkInterfaceReconciler) publishToInterface(
 		meta.SetStatusCondition(&networkInterface.Status.Conditions, metav1.Condition{
 			Type:               networkingv1alpha.NetworkInterfaceProgrammed,
 			Status:             metav1.ConditionUnknown,
-			Reason:             "APIGroupMigration",
+			Reason:             reasonAPIGroupMigration,
 			Message:            "waiting for the Galactic attachment to be programmed",
 			ObservedGeneration: networkInterface.Generation,
 		})
@@ -417,6 +418,24 @@ func (r *NetworkInterfaceReconciler) markPrepared(
 	claimCondition := condition
 	claimCondition.ObservedGeneration = claim.Generation
 	meta.SetStatusCondition(&claim.Status.Conditions, claimCondition)
+	// A claim can have Programmed and Ready from the old attachment even after
+	// its interface points at Galactic. Invalidate both until the new group's
+	// advertisement reports that the replacement attachment is carrying traffic.
+	if programmed := meta.FindStatusCondition(networkInterface.Status.Conditions,
+		networkingv1alpha.NetworkInterfaceProgrammed); programmed != nil &&
+		programmed.Status == metav1.ConditionUnknown && programmed.Reason == reasonAPIGroupMigration {
+		claimProgrammed := *programmed
+		claimProgrammed.Type = networkingv1alpha.NetworkInterfaceClaimProgrammed
+		claimProgrammed.ObservedGeneration = claim.Generation
+		meta.SetStatusCondition(&claim.Status.Conditions, claimProgrammed)
+		meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               networkingv1alpha.NetworkInterfaceClaimReady,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "NotProgrammed",
+			Message:            "waiting for the Galactic attachment to be programmed",
+			ObservedGeneration: claim.Generation,
+		})
+	}
 	if err := r.Status().Update(ctx, &claim); err != nil {
 		return fmt.Errorf("update network interface claim %s status: %w", key, err)
 	}
