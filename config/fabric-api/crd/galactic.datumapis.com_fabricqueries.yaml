@@ -3,10 +3,10 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.18.0
-  name: fabricqueries.network.datumapis.com
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: fabricqueries.galactic.datumapis.com
 spec:
-  group: network.datumapis.com
+  group: galactic.datumapis.com
   names:
     kind: FabricQuery
     listKind: FabricQueryList

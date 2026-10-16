@@ -16,8 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/model"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const testEmitterPeerAddr = "2607:ed40:1fb::2"

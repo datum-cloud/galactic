@@ -28,25 +28,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// bindingNodeLabel is set on every ServiceVIPBinding NetworkRuleBindingReconciler
+// bindingNodeLabel is set on every ServiceVIPBinding NetworkServiceBindingReconciler
 // writes, to gatewayNodeLabelValue of the node it was written for, so each
 // node lists only its own bindings.
 const bindingNodeLabel = "galactic.datum.net/binding-node"
 
 // bindingManagedByLabel and bindingManagedByValue mark a ServiceVIPBinding as
-// generated. NetworkRuleBindingReconciler deletes only bindings carrying them,
+// generated. NetworkServiceBindingReconciler deletes only bindings carrying them,
 // so it never removes one it did not write.
 const (
 	bindingManagedByLabel = "app.kubernetes.io/managed-by"
 	bindingManagedByValue = "galactic-router"
 )
 
-// conditionTypeBackendsBound is the per-node NetworkRule condition, as
+// conditionTypeBackendsBound is the per-node NetworkService condition, as
 // "<node>/BackendsBound", recording whether every binding node needs for the
 // rule exists and reports Bound. Reasons are the reasonBindings* constants.
 const conditionTypeBackendsBound = "BackendsBound"
@@ -74,8 +74,8 @@ const (
 	reasonBindingsClaimed = "BackendsClaimed"
 )
 
-// NetworkRuleBindingReconciler writes, on its own node, the ServiceVIPBindings
-// that a NetworkRule's backends need: one per IPv6 VIP per backend whose
+// NetworkServiceBindingReconciler writes, on its own node, the ServiceVIPBindings
+// that a NetworkService's backends need: one per IPv6 VIP per backend whose
 // VPCAttachment reports this node. It runs in galactic-router on every node.
 //
 // It is the only writer of generated bindings, and each node writes only its
@@ -103,21 +103,21 @@ const (
 // The rule's "<node>/BackendsBound" condition summarizes this node's bindings,
 // so a rule that is Programmed on the gateways but cannot reach a backend on
 // some node says so on the rule itself.
-type NetworkRuleBindingReconciler struct {
+type NetworkServiceBindingReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	NodeName string
 }
 
-// Reconcile converges this node's generated bindings for one NetworkRule.
-func (r *NetworkRuleBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	rule := &bgpv1alpha1.NetworkRule{}
+// Reconcile converges this node's generated bindings for one NetworkService.
+func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	rule := &bgpv1alpha1.NetworkService{}
 	if err := r.Get(ctx, req.NamespacedName, rule); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Owner references garbage-collect the rule's bindings.
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("get NetworkRule %s: %w", req.NamespacedName, err)
+		return ctrl.Result{}, fmt.Errorf("get NetworkService %s: %w", req.NamespacedName, err)
 	}
 	if !rule.DeletionTimestamp.IsZero() {
 		// The gateways keep serving a deleting rule until its routes are
@@ -140,9 +140,9 @@ func (r *NetworkRuleBindingReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	rules := &bgpv1alpha1.NetworkRuleList{}
+	rules := &bgpv1alpha1.NetworkServiceList{}
 	if err := r.List(ctx, rules, client.InNamespace(rule.Namespace)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("list NetworkRules in %s: %w", rule.Namespace, err)
+		return ctrl.Result{}, fmt.Errorf("list NetworkServices in %s: %w", rule.Namespace, err)
 	}
 	owners := ruleBackendOwners(rules.Items, attachments)
 	desired, claimed, buildErr := r.desiredBindings(rule, attachments, owners)
@@ -180,8 +180,8 @@ func (r *NetworkRuleBindingReconciler) Reconcile(ctx context.Context, req ctrl.R
 // another rule. It also returns the backends on this node it left out for that
 // reason. The datapath translates IPv6 only, so a rule with no IPv6 VIP needs
 // none, and ruleTranslatedVIP refuses a rule with more than one.
-func (r *NetworkRuleBindingReconciler) desiredBindings(
-	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
+func (r *NetworkServiceBindingReconciler) desiredBindings(
+	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
 ) ([]*bgpv1alpha1.ServiceVIPBinding, []claimedBackend, error) {
 	vip, ok, err := ruleTranslatedVIP(rule)
 	if err != nil || !ok {
@@ -208,8 +208,8 @@ func (r *NetworkRuleBindingReconciler) desiredBindings(
 }
 
 // newBinding builds the binding for one VIP and one backend on this node.
-func (r *NetworkRuleBindingReconciler) newBinding(
-	rule *bgpv1alpha1.NetworkRule, vip netip.Addr, b ruleBackend,
+func (r *NetworkServiceBindingReconciler) newBinding(
+	rule *bgpv1alpha1.NetworkService, vip netip.Addr, b ruleBackend,
 ) *bgpv1alpha1.ServiceVIPBinding {
 	return &bgpv1alpha1.ServiceVIPBinding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -237,8 +237,8 @@ func (r *NetworkRuleBindingReconciler) newBinding(
 
 // applyBindings creates or updates every binding in desired and deletes this
 // node's other generated bindings for rule.
-func (r *NetworkRuleBindingReconciler) applyBindings(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired []*bgpv1alpha1.ServiceVIPBinding,
+func (r *NetworkServiceBindingReconciler) applyBindings(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, desired []*bgpv1alpha1.ServiceVIPBinding,
 ) error {
 	keep := make(map[string]bool, len(desired))
 	var errs []error
@@ -281,8 +281,8 @@ func (r *NetworkRuleBindingReconciler) applyBindings(
 }
 
 // nodeBindings lists the generated bindings this node wrote for rule.
-func (r *NetworkRuleBindingReconciler) nodeBindings(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule,
+func (r *NetworkServiceBindingReconciler) nodeBindings(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService,
 ) ([]bgpv1alpha1.ServiceVIPBinding, error) {
 	list := &bgpv1alpha1.ServiceVIPBindingList{}
 	if err := r.List(ctx, list,
@@ -293,7 +293,7 @@ func (r *NetworkRuleBindingReconciler) nodeBindings(
 			bindingManagedByLabel: bindingManagedByValue,
 		},
 	); err != nil {
-		return nil, fmt.Errorf("list ServiceVIPBindings for NetworkRule %s: %w", rule.Name, err)
+		return nil, fmt.Errorf("list ServiceVIPBindings for NetworkService %s: %w", rule.Name, err)
 	}
 	return list.Items, nil
 }
@@ -309,8 +309,8 @@ func (r *NetworkRuleBindingReconciler) nodeBindings(
 // other node stays silent. The gateways already report the error on the
 // rule, and a condition from every router node would cost a status write per
 // node per edit, each conflicting with the others.
-func (r *NetworkRuleBindingReconciler) publishCondition(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired []*bgpv1alpha1.ServiceVIPBinding,
+func (r *NetworkServiceBindingReconciler) publishCondition(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, desired []*bgpv1alpha1.ServiceVIPBinding,
 	claimed []claimedBackend, buildErr error, served bool,
 ) error {
 	condType := backendsBoundConditionType(r.NodeName)
@@ -370,8 +370,8 @@ func (r *NetworkRuleBindingReconciler) publishCondition(
 
 // unboundBindings returns "vip -> backend: reason" for every desired binding
 // that is not Bound yet, reading each one's current status.
-func (r *NetworkRuleBindingReconciler) unboundBindings(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired []*bgpv1alpha1.ServiceVIPBinding,
+func (r *NetworkServiceBindingReconciler) unboundBindings(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, desired []*bgpv1alpha1.ServiceVIPBinding,
 ) ([]string, error) {
 	existing, err := r.nodeBindings(ctx, rule)
 	if err != nil {
@@ -405,14 +405,14 @@ func (r *NetworkRuleBindingReconciler) unboundBindings(
 
 // updateRuleCondition applies mutate to rule's current conditions and writes
 // them only if mutate reports a change. Every status write fans out to every
-// reconciler watching NetworkRules, so an unconditional write would never
+// reconciler watching NetworkServices, so an unconditional write would never
 // settle.
-func (r *NetworkRuleBindingReconciler) updateRuleCondition(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, mutate func(*[]metav1.Condition) bool,
+func (r *NetworkServiceBindingReconciler) updateRuleCondition(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, mutate func(*[]metav1.Condition) bool,
 ) error {
 	key := client.ObjectKeyFromObject(rule)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current := &bgpv1alpha1.NetworkRule{}
+		current := &bgpv1alpha1.NetworkService{}
 		if err := r.Get(ctx, key, current); err != nil {
 			return err
 		}
@@ -425,7 +425,7 @@ func (r *NetworkRuleBindingReconciler) updateRuleCondition(
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("update %s condition on NetworkRule %s: %w", conditionTypeBackendsBound, key, err)
+		return fmt.Errorf("update %s condition on NetworkService %s: %w", conditionTypeBackendsBound, key, err)
 	}
 	return nil
 }
@@ -437,17 +437,17 @@ func backendsBoundConditionType(node string) string {
 	return node + "/" + conditionTypeBackendsBound
 }
 
-// SetupWithManager registers the NetworkRuleBindingReconciler with the manager.
-func (r *NetworkRuleBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
+// SetupWithManager registers the NetworkServiceBindingReconciler with the manager.
+func (r *NetworkServiceBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// A rule's bindings depend on its spec and on whether it is
 		// Accepted. Other status writes, including this reconciler's own
 		// conditions and the gateways' Programmed conditions, change neither.
-		For(&bgpv1alpha1.NetworkRule{}, builder.WithPredicates(ruleBindingInputsChanged())).
+		For(&bgpv1alpha1.NetworkService{}, builder.WithPredicates(ruleBindingInputsChanged())).
 		// Rules in one namespace compete for backends, so a rule appearing,
 		// going, or changing its spec can give another rule a backend or take
 		// one away. Every rule in its namespace is re-queued.
-		Watches(&bgpv1alpha1.NetworkRule{}, handler.EnqueueRequestsFromMapFunc(
+		Watches(&bgpv1alpha1.NetworkService{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return namespaceRuleRequests(ctx, r.Client, obj.GetNamespace())
 			}),
@@ -475,18 +475,18 @@ func (r *NetworkRuleBindingReconciler) SetupWithManager(mgr ctrl.Manager) error 
 				return r.bindingRuleRequests(obj)
 			}),
 		).
-		Named("networkrule-binding").
+		Named("networkservice-binding").
 		Complete(r)
 }
 
-// ruleBindingInputsChanged passes NetworkRule events that can change the
+// ruleBindingInputsChanged passes NetworkService events that can change the
 // bindings it needs: a create or delete, a spec change, or a change to its
 // Accepted condition.
 func ruleBindingInputsChanged() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			oldRule, okOld := e.ObjectOld.(*bgpv1alpha1.NetworkRule)
-			newRule, okNew := e.ObjectNew.(*bgpv1alpha1.NetworkRule)
+			oldRule, okOld := e.ObjectOld.(*bgpv1alpha1.NetworkService)
+			newRule, okNew := e.ObjectNew.(*bgpv1alpha1.NetworkService)
 			if !okOld || !okNew {
 				return true
 			}
@@ -499,7 +499,7 @@ func ruleBindingInputsChanged() predicate.Predicate {
 	}
 }
 
-// vpcRuleRequests returns a reconcile request for every NetworkRule whose VPC
+// vpcRuleRequests returns a reconcile request for every NetworkService whose VPC
 // is obj's observed VPC, the only rules whose backends obj can be. An
 // attachment with no observed VPC is no rule's candidate and maps to nothing.
 func vpcRuleRequests(ctx context.Context, c client.Client, obj client.Object) []ctrlreconcile.Request {
@@ -507,9 +507,9 @@ func vpcRuleRequests(ctx context.Context, c client.Client, obj client.Object) []
 	if !ok || attachment.Status.VPC == "" {
 		return nil
 	}
-	list := &bgpv1alpha1.NetworkRuleList{}
+	list := &bgpv1alpha1.NetworkServiceList{}
 	if err := c.List(ctx, list); err != nil {
-		log.FromContext(ctx).Error(err, "list NetworkRules for VPCAttachment change")
+		log.FromContext(ctx).Error(err, "list NetworkServices for VPCAttachment change")
 		return nil
 	}
 	var reqs []ctrlreconcile.Request
@@ -522,12 +522,12 @@ func vpcRuleRequests(ctx context.Context, c client.Client, obj client.Object) []
 	return reqs
 }
 
-// namespaceRuleRequests returns a reconcile request for every NetworkRule in
+// namespaceRuleRequests returns a reconcile request for every NetworkService in
 // namespace.
 func namespaceRuleRequests(ctx context.Context, c client.Client, namespace string) []ctrlreconcile.Request {
-	list := &bgpv1alpha1.NetworkRuleList{}
+	list := &bgpv1alpha1.NetworkServiceList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		log.FromContext(ctx).Error(err, "list NetworkRules for NetworkRule change", "namespace", namespace)
+		log.FromContext(ctx).Error(err, "list NetworkServices for NetworkService change", "namespace", namespace)
 		return nil
 	}
 	reqs := make([]ctrlreconcile.Request, 0, len(list.Items))
@@ -539,7 +539,7 @@ func namespaceRuleRequests(ctx context.Context, c client.Client, namespace strin
 
 // bindingRuleRequests maps a generated binding written for this node to its
 // rule. Other nodes' bindings and hand-written ones map to nothing.
-func (r *NetworkRuleBindingReconciler) bindingRuleRequests(obj client.Object) []ctrlreconcile.Request {
+func (r *NetworkServiceBindingReconciler) bindingRuleRequests(obj client.Object) []ctrlreconcile.Request {
 	labels := obj.GetLabels()
 	if labels[bindingManagedByLabel] != bindingManagedByValue ||
 		labels[bindingNodeLabel] != gatewayNodeLabelValue(r.NodeName) {

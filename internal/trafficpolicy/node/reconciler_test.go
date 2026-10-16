@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -35,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
@@ -163,15 +162,6 @@ type fixture struct {
 	token   uint64
 }
 
-func moduleDir(t *testing.T, module string) string {
-	t.Helper()
-	out, err := exec.CommandContext(context.Background(), "go", "list", "-m", "-f", "{{.Dir}}", module).Output()
-	if err != nil {
-		t.Fatalf("locate module %s: %v", module, err)
-	}
-	return strings.TrimSpace(string(out))
-}
-
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	requireRoot(t)
@@ -190,7 +180,6 @@ func newFixture(t *testing.T) *fixture {
 	te := &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "..", "config", "crd"),
-			filepath.Join(moduleDir(t, "go.datum.net/cloud"), "config", "crd"),
 		},
 		ErrorIfCRDPathMissing: true,
 	}

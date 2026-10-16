@@ -1,6 +1,6 @@
 # One shard per edge node: dfw has two. Compute
 # lists dfw-worker2's first (resources/galactic-cni/dfw/).
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: EgressShard
 metadata:
   name: dfw-worker2-egress
@@ -21,7 +21,7 @@ spec:
   shardAddressIPv4: "192.0.2.1"
   nat64Prefix: "2001:db8:64::/96"
 ---
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: EgressShard
 metadata:
   name: dfw-worker3-egress

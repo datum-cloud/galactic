@@ -30,12 +30,12 @@ import (
 	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	cloudapi "go.datum.net/cloud/api/v1alpha1"
+	cloudapi "go.datum.net/galactic/api/cloud/v1alpha1"
+	networkapi "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/serviceroute"
 	"go.datum.net/galactic/tests/psc/internal/traffic"
-	networkapi "go.datum.net/network/api/v1alpha1"
 )
 
 type fixtureConfig struct {

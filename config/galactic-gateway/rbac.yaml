@@ -1,13 +1,13 @@
 # The edge XDP DSR load-balancer control plane's own RBAC. This ClusterRole
-# covers only what NetworkGatewayReconciler/NetworkRuleReconciler
+# covers only what NetworkGatewayReconciler/NetworkServiceReconciler
 # (internal/controller/networkgateway_controller.go,
-# internal/controller/networkrule_controller.go) actually touch.
+# internal/controller/networkservice_controller.go) actually touch.
 #
 # bgprouters (get/list/watch) is included even though neither reconciler
 # imports internal/runtime or internal/reconcile (this binary needs no
 # BGP client of its own): internal/controller/usidresolver.go's
 # buildBackendSIDIndex lists BGPRouter CRDs directly
-# (alongside BGPAdvertisement) to resolve a NetworkRule backend's SRv6
+# (alongside BGPAdvertisement) to resolve a NetworkService backend's SRv6
 # uSID. "No BGP client" and "no BGPRouter read access needed" are
 # different claims — only the first is true. cmd/galactic-gateway's
 # resolveEncapSource also lists BGPRouters cluster-wide at startup, to derive
@@ -24,26 +24,26 @@ kind: ClusterRole
 metadata:
   name: galactic-gateway
 rules:
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - networkgateways
-      - networkrules
+      - networkservices
     verbs: ["get", "list", "watch", "update", "patch"]
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - networkgateways/status
-      - networkrules/status
+      - networkservices/status
     verbs: ["get", "update", "patch"]
   # Full CRUD: NetworkGatewayReconciler creates one BGPAdvertisement per VIP
-  # address family per NetworkRule it serves plus one for its own
-  # SRv6Address, and NetworkRuleReconciler deletes them on rule teardown
+  # address family per NetworkService it serves plus one for its own
+  # SRv6Address, and NetworkServiceReconciler deletes them on rule teardown
   # (internal/controller/networkgateway_controller.go,
-  # internal/controller/networkrule_controller.go).
-  - apiGroups: ["network.datumapis.com"]
+  # internal/controller/networkservice_controller.go).
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgpadvertisements
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgprouters
     verbs: ["get", "list", "watch"]
@@ -58,15 +58,15 @@ rules:
   # BGPVRFInstance -- found live as the manager never finishing
   # WaitForCacheSync (no controller ever started reconciling, silently,
   # behind a "bgpvrfinstances ... is forbidden" reflector error loop).
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgpvrfinstances
     verbs: ["get", "list", "watch"]
-  # A NetworkRule's backends are the VPCAttachments its backendSelector
+  # A NetworkService's backends are the VPCAttachments its backendSelector
   # picks, read cluster-wide since they live in tenant namespaces, and
   # watched so a backend appearing, moving node or changing address
   # reconverges the rule.
-  - apiGroups: ["cloud.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - vpcattachments
     verbs: ["get", "list", "watch"]

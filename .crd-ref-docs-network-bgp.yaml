@@ -1,0 +1,22 @@
+processor:
+  docPaths: []
+  ignoreTypes:
+    - ".*List$"
+    - "NetworkGateway"
+    - "NetworkGatewaySpec"
+    - "NetworkGatewayStatus"
+    - "NetworkService"
+    - "NetworkServiceProtocol"
+    - "NetworkServiceSpec"
+    - "NetworkServiceStatus"
+    - "NetworkEgressPolicy"
+    - "NetworkEgressPolicySpec"
+    - "NetworkEgressPolicyStatus"
+  ignoreFields: []
+
+render:
+  kubernetes: {}
+  markdown:
+    mediaWidth: 80
+    anchorLink: true
+    tableHideEmpty: true

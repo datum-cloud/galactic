@@ -20,8 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -41,7 +41,7 @@ func newTestServiceVIPBinding(
 			VPCRef:         testVPCRef,
 			VIPAddress:     testVIPBindingVIPAddr,
 			Port:           8080,
-			Protocol:       bgpv1alpha1.NetworkRuleProtocolTCP,
+			Protocol:       bgpv1alpha1.NetworkServiceProtocolTCP,
 			BackendAddress: testVIPBindingBackendAddr,
 			BackendPort:    30080,
 			EgressKind:     egressKind,

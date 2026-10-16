@@ -5,9 +5,6 @@
 # each node's own frr.conf from its fabric-router.<nodename> ConfigMap.
 ARG FRR_VERSION=10.7.1
 
-# "network" is an empty stage by default -- see
-# containers/galactic-router/Dockerfile's own comment on this stage.
-FROM scratch AS network
 
 # Build fabric-config-agent. It imports no eBPF packages, so unlike the other
 # Go images this needs no clang or go generate step.
@@ -24,7 +21,6 @@ ARG GIT_URL=https://github.com/datum-cloud/galactic
 WORKDIR /workspace
 COPY go.mod go.mod
 COPY go.sum go.sum
-COPY --from=network / /network
 RUN go mod download
 
 COPY cmd/ cmd/

@@ -18,13 +18,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // Shared fixture identifiers for internal/controller's NetworkGateway/
-// NetworkRule tests (this file, networkgateway_controller_test.go, and
+// NetworkService tests (this file, networkgateway_controller_test.go, and
 // usidresolver_test.go).
 const (
 	testNamespace  = "ns"
@@ -88,13 +88,13 @@ func newTestGateway(node string) *bgpv1alpha1.NetworkGateway {
 	}
 }
 
-func newTestRule(name, vpcRef string, vips ...string) *bgpv1alpha1.NetworkRule {
-	return &bgpv1alpha1.NetworkRule{
+func newTestRule(name, vpcRef string, vips ...string) *bgpv1alpha1.NetworkService {
+	return &bgpv1alpha1.NetworkService{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name},
-		Spec: bgpv1alpha1.NetworkRuleSpec{
+		Spec: bgpv1alpha1.NetworkServiceSpec{
 			VPCRef:       vpcRef,
 			VIPAddresses: vips,
-			Protocol:     bgpv1alpha1.NetworkRuleProtocolTCP,
+			Protocol:     bgpv1alpha1.NetworkServiceProtocolTCP,
 			Port:         443,
 			BackendSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{testBackendLabel: testBackendLabelValue},
@@ -203,7 +203,7 @@ func testRuleKey(name string) types.NamespacedName {
 	return types.NamespacedName{Namespace: testNamespace, Name: name}
 }
 
-func TestNetworkRuleReconciler_SetsFinalizerAndAccepted(t *testing.T) {
+func TestNetworkServiceReconciler_SetsFinalizerAndAccepted(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
 	gwB := newTestGateway(testNodeGWB)
@@ -211,18 +211,18 @@ func TestNetworkRuleReconciler_SetsFinalizerAndAccepted(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, gwB, rule).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkServiceReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
 
-	got := &bgpv1alpha1.NetworkRule{}
+	got := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(context.Background(), req.NamespacedName, got); err != nil {
 		t.Fatalf("get rule: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestNetworkRuleReconciler_SetsFinalizerAndAccepted(t *testing.T) {
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("second Reconcile: unexpected error: %v", err)
 	}
-	got2 := &bgpv1alpha1.NetworkRule{}
+	got2 := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(context.Background(), req.NamespacedName, got2); err != nil {
 		t.Fatalf("get rule after second reconcile: %v", err)
 	}
@@ -252,11 +252,11 @@ func TestNetworkRuleReconciler_SetsFinalizerAndAccepted(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleReconciler_AcceptedFollowsSpecGeneration covers a spec edit to
+// TestNetworkServiceReconciler_AcceptedFollowsSpecGeneration covers a spec edit to
 // an accepted rule: Accepted stays True but records the new generation, so
 // anything waiting on Accepted for the current spec, kubectl wait among them,
 // does not see a stale condition.
-func TestNetworkRuleReconciler_AcceptedFollowsSpecGeneration(t *testing.T) {
+func TestNetworkServiceReconciler_AcceptedFollowsSpecGeneration(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 	rule.Generation = 2
@@ -268,17 +268,17 @@ func TestNetworkRuleReconciler_AcceptedFollowsSpecGeneration(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), rule).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkServiceReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
 
-	got := &bgpv1alpha1.NetworkRule{}
+	got := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(context.Background(), req.NamespacedName, got); err != nil {
 		t.Fatalf("get rule: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestNetworkRuleReconciler_AcceptedFollowsSpecGeneration(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes
+// TestNetworkServiceReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes
 // covers the converse of the above directly against updateAcceptedCondition:
 // with no NetworkGateway registered in the namespace, Accepted must be
 // False, not merely absent, so NetworkGatewayReconciler's
@@ -303,22 +303,22 @@ func TestNetworkRuleReconciler_AcceptedFollowsSpecGeneration(t *testing.T) {
 // is exercised directly, the way it would be reached by a genuine
 // list-changed-between-calls race rather than through the reconciler's
 // normal entrypoint.
-func TestNetworkRuleReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes(t *testing.T) {
+func TestNetworkServiceReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}).
 		WithObjects(rule).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkServiceReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	if err := r.updateAcceptedCondition(context.Background(), rule); err != nil {
 		t.Fatalf("updateAcceptedCondition: unexpected error: %v", err)
 	}
 
-	got := &bgpv1alpha1.NetworkRule{}
+	got := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleName), got); err != nil {
 		t.Fatalf("get rule: %v", err)
 	}
@@ -331,32 +331,32 @@ func TestNetworkRuleReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes(t
 	}
 }
 
-// TestNetworkRuleReconciler_GatewayAppearanceRequeuesParkedRule covers the
+// TestNetworkServiceReconciler_GatewayAppearanceRequeuesParkedRule covers the
 // full recovery path for a rule created before any gateway node registered:
 // it parks at Accepted=False, and the NetworkGateway watch's mapper
 // (gatewayToRuleRequests) enqueues it as soon as a gateway registers, at
 // which point the ordinary reconcile flips it to Accepted=True. Without that
 // watch the rule waits for the informer's periodic resync (#367).
-func TestNetworkRuleReconciler_GatewayAppearanceRequeuesParkedRule(t *testing.T) {
+func TestNetworkServiceReconciler_GatewayAppearanceRequeuesParkedRule(t *testing.T) {
 	ctx := context.Background()
 	scheme := newRuleTestScheme(t)
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}).
 		WithObjects(rule).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkServiceReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 
 	// No NetworkGateway exists yet, so this is the zero-nodes branch (see
-	// TestNetworkRuleReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes
+	// TestNetworkServiceReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes
 	// for why it is reached directly rather than through Reconcile).
 	if err := r.updateAcceptedCondition(ctx, rule); err != nil {
 		t.Fatalf("updateAcceptedCondition: unexpected error: %v", err)
 	}
-	parked := &bgpv1alpha1.NetworkRule{}
+	parked := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(ctx, testRuleKey(testRuleName), parked); err != nil {
 		t.Fatalf("get rule: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestNetworkRuleReconciler_GatewayAppearanceRequeuesParkedRule(t *testing.T)
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: want}); err != nil {
 		t.Fatalf("Reconcile after gateway registration: unexpected error: %v", err)
 	}
-	got := &bgpv1alpha1.NetworkRule{}
+	got := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(ctx, want, got); err != nil {
 		t.Fatalf("get rule after requeue: %v", err)
 	}
@@ -399,25 +399,27 @@ func TestNetworkRuleReconciler_GatewayAppearanceRequeuesParkedRule(t *testing.T)
 	}
 }
 
-func TestNetworkRuleReconciler_NoOpOnNonGatewayNode(t *testing.T) {
+func TestNetworkServiceReconciler_NoOpOnNonGatewayNode(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, rule).
 		Build()
 
 	// compute-node-1 is not a registered NetworkGateway target.
-	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testComputeNodeName}
+	r := &NetworkServiceReconciler{
+		Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testComputeNodeName,
+	}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
 
-	got := &bgpv1alpha1.NetworkRule{}
+	got := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(context.Background(), req.NamespacedName, got); err != nil {
 		t.Fatalf("get rule: %v", err)
 	}
@@ -429,7 +431,7 @@ func TestNetworkRuleReconciler_NoOpOnNonGatewayNode(t *testing.T) {
 	}
 }
 
-func TestNetworkRuleReconciler_TeardownOrder_WithdrawsBGPBeforeRemovingFinalizer(t *testing.T) {
+func TestNetworkServiceReconciler_TeardownOrder_WithdrawsBGPBeforeRemovingFinalizer(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
@@ -452,11 +454,11 @@ func TestNetworkRuleReconciler_TeardownOrder_WithdrawsBGPBeforeRemovingFinalizer
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, rule, adv).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkServiceReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
@@ -466,25 +468,25 @@ func TestNetworkRuleReconciler_TeardownOrder_WithdrawsBGPBeforeRemovingFinalizer
 	gotAdv := &bgpv1alpha1.BGPAdvertisement{}
 	err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdv), gotAdv)
 	if err == nil {
-		t.Fatal("BGPAdvertisement was not withdrawn on NetworkRule deletion")
+		t.Fatal("BGPAdvertisement was not withdrawn on NetworkService deletion")
 	}
 
-	// The NetworkRule itself should now be gone (finalizer removed and no
+	// The NetworkService itself should now be gone (finalizer removed and no
 	// other finalizers/owners keeping it around in the fake client).
-	gotRule := &bgpv1alpha1.NetworkRule{}
+	gotRule := &bgpv1alpha1.NetworkService{}
 	err = fakeClient.Get(context.Background(), req.NamespacedName, gotRule)
 	if err == nil {
-		t.Fatal("NetworkRule was not removed after finalizer teardown completed")
+		t.Fatal("NetworkService was not removed after finalizer teardown completed")
 	}
 }
 
-// TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementForDepartedNode is
+// TestNetworkServiceReconciler_TeardownWithdrawsAdvertisementForDepartedNode is
 // the regression test for issue #367: an advertisement created for a node
 // that has since left the namespace (no corresponding NetworkGateway object
 // exists any more) must still be withdrawn on rule teardown. Discovery by
 // networkRuleLabel doesn't depend on the namespace's current gateway-node
 // membership the way reconstructing the name from gatewayNodeNames did.
-func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementForDepartedNode(t *testing.T) {
+func TestNetworkServiceReconciler_TeardownWithdrawsAdvertisementForDepartedNode(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	// Only gw-a is registered now; the advertisement below was created for
 	// gw-b, which has since left.
@@ -510,11 +512,11 @@ func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementForDepartedNode(t *
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, rule, adv).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkServiceReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
@@ -523,14 +525,14 @@ func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementForDepartedNode(t *
 	gotAdv := &bgpv1alpha1.BGPAdvertisement{}
 	err := fakeClient.Get(context.Background(), testRuleKey(departedNodeAdvName), gotAdv)
 	if err == nil {
-		t.Fatal("BGPAdvertisement for a departed node was not withdrawn on NetworkRule deletion")
+		t.Fatal("BGPAdvertisement for a departed node was not withdrawn on NetworkService deletion")
 	}
 }
 
-// TestNetworkRuleReconciler_TeardownIgnoresAdvertisementForDifferentRule
+// TestNetworkServiceReconciler_TeardownIgnoresAdvertisementForDifferentRule
 // guards against a label selector broad enough to sweep up another rule's
 // advertisement in the same namespace.
-func TestNetworkRuleReconciler_TeardownIgnoresAdvertisementForDifferentRule(t *testing.T) {
+func TestNetworkServiceReconciler_TeardownIgnoresAdvertisementForDifferentRule(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
@@ -555,11 +557,11 @@ func TestNetworkRuleReconciler_TeardownIgnoresAdvertisementForDifferentRule(t *t
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, rule, otherAdv).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkServiceReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
@@ -571,7 +573,7 @@ func TestNetworkRuleReconciler_TeardownIgnoresAdvertisementForDifferentRule(t *t
 	}
 }
 
-func TestNetworkRuleReconciler_TeardownIsIdempotentWhenAdvertisementAlreadyGone(t *testing.T) {
+func TestNetworkServiceReconciler_TeardownIsIdempotentWhenAdvertisementAlreadyGone(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
@@ -581,11 +583,11 @@ func TestNetworkRuleReconciler_TeardownIsIdempotentWhenAdvertisementAlreadyGone(
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, rule).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkServiceReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error when no BGPAdvertisement exists: %v", err)
@@ -607,7 +609,7 @@ func (c staleListClient) List(ctx context.Context, list client.ObjectList, opts 
 		if c.hideAdvertisements {
 			return nil
 		}
-	case *bgpv1alpha1.NetworkRuleList:
+	case *bgpv1alpha1.NetworkServiceList:
 		if c.hideRules {
 			return nil
 		}
@@ -615,11 +617,11 @@ func (c staleListClient) List(ctx context.Context, list client.ObjectList, opts 
 	return c.Client.List(ctx, list, opts...)
 }
 
-// TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementMissingFromCache is
+// TestNetworkServiceReconciler_TeardownWithdrawsAdvertisementMissingFromCache is
 // the regression test for #763: an advertisement another gateway node created
 // after this node's cache was last updated must be found through APIReader
 // and withdrawn, and the finalizer kept until a pass finds none.
-func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementMissingFromCache(t *testing.T) {
+func TestNetworkServiceReconciler_TeardownWithdrawsAdvertisementMissingFromCache(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 	rule.Finalizers = []string{networkRuleFinalizer}
@@ -629,11 +631,11 @@ func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementMissingFromCache(t 
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), rule, adv).
 		Build()
 
-	r := &NetworkRuleReconciler{
+	r := &NetworkServiceReconciler{
 		Client:    staleListClient{Client: fakeClient, hideAdvertisements: true},
 		APIReader: fakeClient,
 		Scheme:    scheme,
@@ -649,9 +651,9 @@ func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementMissingFromCache(t 
 	if err := fakeClient.Get(ctx, testRuleKey(adv.Name), &bgpv1alpha1.BGPAdvertisement{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("BGPAdvertisement %s still exists (err=%v), want withdrawn", adv.Name, err)
 	}
-	gotRule := &bgpv1alpha1.NetworkRule{}
+	gotRule := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(ctx, req.NamespacedName, gotRule); err != nil {
-		t.Fatalf("NetworkRule removed on the pass that found a missed advertisement: %v", err)
+		t.Fatalf("NetworkService removed on the pass that found a missed advertisement: %v", err)
 	}
 	if !controllerutil.ContainsFinalizer(gotRule, networkRuleFinalizer) {
 		t.Fatal("finalizer removed on the pass that found a missed advertisement")
@@ -663,7 +665,7 @@ func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementMissingFromCache(t 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("second Reconcile: unexpected error: %v", err)
 	}
-	if err := fakeClient.Get(ctx, req.NamespacedName, &bgpv1alpha1.NetworkRule{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("NetworkRule still exists after a pass found no advertisements (err=%v)", err)
+	if err := fakeClient.Get(ctx, req.NamespacedName, &bgpv1alpha1.NetworkService{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("NetworkService still exists after a pass found no advertisements (err=%v)", err)
 	}
 }

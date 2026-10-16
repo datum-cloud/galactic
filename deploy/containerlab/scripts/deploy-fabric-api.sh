@@ -20,7 +20,7 @@ for site in dfw iad sjc; do
   # The CRD is the lab's copy until the kind ships in the network
   # repository; infra owns it in production.
   k apply --server-side -f "${CONFIG_DIR}/fabric-api/crd/"
-  k wait --for condition=established --timeout=60s crd/fabricqueries.network.datumapis.com
+  k wait --for condition=established --timeout=60s crd/fabricqueries.galactic.datumapis.com
   k apply -k "${CONFIG_DIR}/fabric-api/"
   sed "s/CELL_NAME/${site}/g" "${RESOURCES_DIR}/fabric-api/pki/pki.yaml" | k apply -f -
   k -n galactic-system wait --for condition=Ready --timeout=120s certificate/fabric-api-ca certificate/fabric-api-operator

@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/config"
@@ -35,7 +36,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -1034,7 +1034,7 @@ func TestIsTransientError(t *testing.T) {
 		{"validation error is not transient", apierrors.NewBadRequest("bad request"), false},
 		{
 			"not found error is not transient",
-			apierrors.NewNotFound(schema.GroupResource{Group: "network.datumapis.com", Resource: "bgpadvertisements"}, "test"),
+			apierrors.NewNotFound(schema.GroupResource{Group: "galactic.datumapis.com", Resource: "bgpadvertisements"}, "test"),
 			false,
 		},
 		{"503 service unavailable is transient", apierrors.NewServiceUnavailable("service unavailable"), true},

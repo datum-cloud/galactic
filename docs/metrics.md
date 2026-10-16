@@ -314,7 +314,7 @@ so there is no connection table to report. See
   `unknown_<n>` for an index the binary has no name for.
 
 The port also serves controller-runtime's metrics for the
-`NetworkGateway`/`NetworkRule` reconcilers.
+`NetworkGateway`/`NetworkService` reconcilers.
 
 ```promql
 # Requests per second per VIP and port

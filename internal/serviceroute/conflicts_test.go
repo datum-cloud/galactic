@@ -9,7 +9,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
+	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 func TestTranslatedConflictScopePreservesDistinctAttachments(t *testing.T) {

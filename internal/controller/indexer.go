@@ -12,8 +12,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 // Field index names used across controllers.

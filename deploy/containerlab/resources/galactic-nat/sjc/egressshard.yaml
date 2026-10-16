@@ -1,4 +1,4 @@
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: EgressShard
 metadata:
   name: sjc-worker2-egress

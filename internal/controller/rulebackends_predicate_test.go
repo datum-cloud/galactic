@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 )
 
 func TestVPCAttachmentBackendChanged(t *testing.T) {

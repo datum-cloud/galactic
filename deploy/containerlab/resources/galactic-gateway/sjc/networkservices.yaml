@@ -1,13 +1,13 @@
-# ns60's port 80 over TCP, served by every ns60 backend its selector picks in dfw.
-apiVersion: network.datumapis.com/v1alpha1
-kind: NetworkRule
+# ns60's port 80 over TCP, served by every ns60 backend its selector picks in sjc.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
 metadata:
   name: ns60-tcp
   namespace: galactic-system
 spec:
   vpcRef: "60"
   vipAddresses:
-    - 2001:db8:6060:1::1
+    - 2001:db8:6060:2::1
   protocol: tcp
   port: 80
   backendSelector:
@@ -15,16 +15,16 @@ spec:
       app: backend
   backendPort: 80
 ---
-# ns60's port 80 over UDP, served by every ns60 backend its selector picks in dfw.
-apiVersion: network.datumapis.com/v1alpha1
-kind: NetworkRule
+# ns60's port 80 over UDP, served by every ns60 backend its selector picks in sjc.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
 metadata:
   name: ns60-udp
   namespace: galactic-system
 spec:
   vpcRef: "60"
   vipAddresses:
-    - 2001:db8:6060:1::1
+    - 2001:db8:6060:2::1
   protocol: udp
   port: 80
   backendSelector:

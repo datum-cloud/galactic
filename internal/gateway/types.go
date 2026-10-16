@@ -30,13 +30,13 @@ func (b DesiredBackend) Key() string {
 	return fmt.Sprintf("%s:%d", b.Address, b.Port)
 }
 
-// DesiredRule is the engine's representation of one NetworkRule, assembled by
+// DesiredRule is the engine's representation of one NetworkService, assembled by
 // the reconcilers from the CRD. There is no tunnel identifier or VRF table here,
 // this engine having no VRF dependency, and no placement field either, every
 // gateway node serving every rule identically under anycast.
 type DesiredRule struct {
 	// Key uniquely identifies the rule (namespace/name of the source
-	// NetworkRule), used as the map key in Engine's convergence pass.
+	// NetworkService), used as the map key in Engine's convergence pass.
 	Key string
 
 	// VPCRef is the tenant's opaque VPC identifier, used to count rules against
@@ -48,7 +48,7 @@ type DesiredRule struct {
 	VIPAddresses []netip.Addr
 
 	// Protocol is "tcp" or "udp", matching
-	// network.datumapis.com/v1alpha1's NetworkRuleProtocol enum values.
+	// galactic.datumapis.com/v1alpha1's NetworkServiceProtocol enum values.
 	Protocol string
 	Port     uint16
 	Backends []DesiredBackend

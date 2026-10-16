@@ -12,8 +12,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
-	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 const (
@@ -52,7 +52,7 @@ func testPolicyAndEndpoint(mode networkv1alpha1.ServiceEndpointDeliveryMode) (
 	endpoint := &networkv1alpha1.ServiceEndpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: "dns", Namespace: "platform", UID: "endpoint-uid"},
 		Spec: networkv1alpha1.ServiceEndpointSpec{
-			Address: "fd00::53", Protocol: networkv1alpha1.NetworkRuleProtocolUDP, Port: 53, DeliveryMode: mode,
+			Address: "fd00::53", Protocol: networkv1alpha1.NetworkServiceProtocolUDP, Port: 53, DeliveryMode: mode,
 			AttachmentSelector: &metav1.LabelSelector{MatchLabels: testLabels(testProducerLabel, "yes")},
 		},
 	}
@@ -248,7 +248,7 @@ func TestCompileUsesEndpointPortByDefault(t *testing.T) {
 	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal)
 	policy.Spec.ProtocolPorts = nil
 	endpoint.Spec.Address = "192.0.2.10"
-	endpoint.Spec.Protocol = networkv1alpha1.NetworkRuleProtocolTCP
+	endpoint.Spec.Protocol = networkv1alpha1.NetworkServiceProtocolTCP
 	consumer := readyAttachment(
 		"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
 	)
@@ -261,7 +261,7 @@ func TestCompileUsesEndpointPortByDefault(t *testing.T) {
 		t.Fatalf("Compile: %v", err)
 	}
 	if len(got) != 1 || len(got[0].Ports) != 1 || got[0].Ports[0].Port != 53 ||
-		got[0].Ports[0].Protocol != networkv1alpha1.NetworkRuleProtocolTCP {
+		got[0].Ports[0].Protocol != networkv1alpha1.NetworkServiceProtocolTCP {
 		t.Fatalf("ports = %+v", got[0].Ports)
 	}
 }

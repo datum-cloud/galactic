@@ -22,9 +22,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	cloudapi "go.datum.net/cloud/api/v1alpha1"
+	cloudapi "go.datum.net/galactic/api/cloud/v1alpha1"
+	networkapi "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
-	networkapi "go.datum.net/network/api/v1alpha1"
 )
 
 type labState struct {

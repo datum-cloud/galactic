@@ -1,5 +1,5 @@
 # Reflector-side session toward sjc-worker2 (sjc edge)
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: BGPPeer
 metadata:
   name: galactic-router-sjc-worker2

@@ -4,7 +4,7 @@
 #
 # Every galactic NetworkAttachmentDefinition in the namespace is one
 # attachment, named after the NAD. One the tenant's own manifests do not
-# define (only ns60's do, for the labels its NetworkRules select by) is
+# define (only ns60's do, for the labels its NetworkServices select by) is
 # created from the NAD's vpc. Each one's status then gets what its pod
 # reports once scheduled:
 #
@@ -15,7 +15,7 @@
 #     (internal/plumbing/intf), which galactic-router's traffic policy
 #     reconciler binds the attachment's policies to.
 #
-# ns60's NetworkRules wait on node to select a backend; every tenant
+# ns60's NetworkServices wait on node to select a backend; every tenant
 # interface waits on hostInterface, since the lab enforces traffic policy and
 # an interface with no published bindings denies everything.
 #
@@ -47,7 +47,7 @@ for site in "$@"; do
 
     if ! docker exec "${cp}" kubectl get vpcattachment -n "${NS}" "${nad}" >/dev/null 2>&1; then
       docker exec -i "${cp}" kubectl apply -f - >/dev/null <<EOF
-apiVersion: cloud.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: VPCAttachment
 metadata:
   name: ${nad}

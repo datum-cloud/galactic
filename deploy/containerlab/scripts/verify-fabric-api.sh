@@ -277,7 +277,7 @@ for site in dfw iad sjc; do
   for spec in "${name}:${site}" "${name}-elsewhere:not-${site}"; do
     obj=${spec%%:*} cluster=${spec##*:}
     k apply -f - >/dev/null <<EOF
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: FabricQuery
 metadata:
   name: ${obj}

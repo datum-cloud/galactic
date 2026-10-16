@@ -4,7 +4,7 @@
 
 // Command galactic-gateway is the edge XDP gateway control plane. It loads and
 // attaches the edge eBPF program to a gateway node's underlay-facing uplink and
-// drives it through the NetworkGateway and NetworkRule reconcilers.
+// drives it through the NetworkGateway and NetworkService reconcilers.
 //
 // It is a separate binary from galactic-router so that a crash on either side,
 // tenant BGP or the gateway engine holding the XDP attachment, no longer takes
@@ -23,16 +23,16 @@ import (
 )
 
 const (
-	networkAPIGroup   = "network.datumapis.com"
+	networkAPIGroup   = "galactic.datumapis.com"
 	networkAPIVersion = "v1alpha1"
 
 	resourceNetworkGateways   = "networkgateways"
-	resourceNetworkRules      = "networkrules"
+	resourceNetworkServices   = "networkservices"
 	resourceBGPAdvertisements = "bgpadvertisements"
 	resourceBGPRouters        = "bgprouters"
 	resourceBGPVRFInstances   = "bgpvrfinstances"
 
-	cloudAPIGroup          = "cloud.datumapis.com"
+	cloudAPIGroup          = "galactic.datumapis.com"
 	cloudAPIVersion        = "v1alpha1"
 	resourceVPCAttachments = "vpcattachments"
 )
@@ -70,7 +70,7 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 		resource string
 	}{
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceNetworkGateways},
-		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceNetworkRules},
+		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceNetworkServices},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPAdvertisements},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPRouters},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPVRFInstances},

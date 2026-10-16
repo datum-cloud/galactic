@@ -448,14 +448,14 @@ if [ "${V6[${SHARDS[0]}]}" = "${V6[${SHARDS[1]}]}" ] || [ "${V4[${SHARDS[0]}]}" 
   [ "$(sid64 "${SHARDS[0]}")" = "$(sid64 "${SHARDS[1]}")" ]; then
   die "the shards share a SID locator or masquerade address"
 fi
-schema=$(kc get crd egressshards.network.datumapis.com \
+schema=$(kc get crd egressshards.galactic.datumapis.com \
   -o jsonpath='{.spec.versions[?(@.name=="v1alpha1")].schema.openAPIV3Schema.properties.spec.properties.drain.type}')
 [ "${schema}" = boolean ] || die "the EgressShard CRD has no spec.drain; install the network CRD that adds it"
 set_drain "${SHARDS[1]}" true
 [ "$(kc -n galactic-system get egressshard "${SHARDS[1]}" -o jsonpath='{.spec.drain}')" = true ] ||
   die "spec.drain does not persist: the API server pruned it"
 set_drain "${SHARDS[1]}" "${SAVED_DRAIN[${SHARDS[1]}]}"
-[ "$(kc auth can-i watch egressshards.network.datumapis.com -n galactic-system \
+[ "$(kc auth can-i watch egressshards.galactic.datumapis.com -n galactic-system \
   --as=system:serviceaccount:galactic-system:galactic-cni)" = yes ] || die "galactic-cni may not watch EgressShards"
 log "ok   shards distinct and routed back, spec.drain persists, galactic-cni may watch EgressShards"
 

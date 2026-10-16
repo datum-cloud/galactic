@@ -20,12 +20,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// ruleBackend is one backend a NetworkRule's BackendSelector picks: one IPv6
+// ruleBackend is one backend a NetworkService's BackendSelector picks: one IPv6
 // interface address of one selected VPCAttachment, on the rule's BackendPort.
 //
 // galactic-gateway load-balances to it and galactic-router on node writes its
@@ -46,7 +46,7 @@ func (b ruleBackend) String() string {
 }
 
 // listVPCAttachments lists the VPCAttachments opts select, cluster-wide.
-// Attachments live in tenant namespaces while NetworkRules live in
+// Attachments live in tenant namespaces while NetworkServices live in
 // galactic-system, so the list is never namespaced; selectRuleBackends scopes
 // it to one rule's VPC.
 //
@@ -97,7 +97,7 @@ func vpcAttachmentBackendChanged() predicate.Predicate {
 	}
 }
 
-// ruleSelection is what selectRuleBackends picks for one NetworkRule.
+// ruleSelection is what selectRuleBackends picks for one NetworkService.
 type ruleSelection struct {
 	// backends are the rule's backends, sorted by address.
 	backends []ruleBackend
@@ -119,7 +119,7 @@ type claimedBackend struct {
 
 // String returns the backend and its owner, the form status messages use.
 func (c claimedBackend) String() string {
-	return fmt.Sprintf("%s: backend %s is served by NetworkRule %s", c.attachment, c.ruleBackend, c.owner)
+	return fmt.Sprintf("%s: backend %s is served by NetworkService %s", c.attachment, c.ruleBackend, c.owner)
 }
 
 // listVPCAttachmentsInVPC lists the VPCAttachments whose observed VPC is vpc,
@@ -156,7 +156,7 @@ func groupAttachmentsByVPC(attachments []*cloudv1alpha1.VPCAttachment) map[strin
 //
 // An invalid selector is a spec error and fails the rule.
 func selectRuleBackends(
-	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
+	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
 ) (ruleSelection, error) {
 	candidates, pending, err := ruleCandidateBackends(rule, attachments)
 	if err != nil {
@@ -179,13 +179,13 @@ func selectRuleBackends(
 // selected attachments that are not backends yet, as "namespace/name: reason".
 // See selectRuleBackends for which attachments qualify.
 func ruleCandidateBackends(
-	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
+	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
 ) (backends []ruleBackend, pending []string, err error) {
 	selector, err := ruleBackendSelector(rule)
 	if err != nil {
 		return nil, nil, err
 	}
-	//nolint:gosec // BackendPort is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkRuleSpec.BackendPort)
+	//nolint:gosec // BackendPort is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkServiceSpec.BackendPort)
 	port := uint16(rule.Spec.BackendPort)
 
 	for _, attachment := range attachments {
@@ -237,11 +237,11 @@ type backendClaim struct {
 	vpc      string
 	addr     netip.Addr
 	port     uint16
-	protocol bgpv1alpha1.NetworkRuleProtocol
+	protocol bgpv1alpha1.NetworkServiceProtocol
 }
 
 // backendClaimFor returns the claim backend b of rule makes.
-func backendClaimFor(rule *bgpv1alpha1.NetworkRule, b ruleBackend) backendClaim {
+func backendClaimFor(rule *bgpv1alpha1.NetworkService, b ruleBackend) backendClaim {
 	return backendClaim{vpc: rule.Spec.VPCRef, addr: b.addr, port: b.port, protocol: rule.Spec.Protocol}
 }
 
@@ -256,9 +256,9 @@ type backendOwners map[backendClaim]types.NamespacedName
 // it has exactly one IPv6 VIP and a valid selector. A rule being deleted keeps
 // its claims, since its bindings, and their rows, last until it is gone.
 func ruleBackendOwners(
-	rules []bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
+	rules []bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
 ) backendOwners {
-	ordered := make([]*bgpv1alpha1.NetworkRule, 0, len(rules))
+	ordered := make([]*bgpv1alpha1.NetworkService, 0, len(rules))
 	for i := range rules {
 		ordered = append(ordered, &rules[i])
 	}
@@ -285,7 +285,7 @@ func ruleBackendOwners(
 
 // ruleOlder reports whether a was created before b, breaking a tie on
 // creation time, which has one-second resolution, by namespace and name.
-func ruleOlder(a, b *bgpv1alpha1.NetworkRule) bool {
+func ruleOlder(a, b *bgpv1alpha1.NetworkService) bool {
 	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
 		return a.CreationTimestamp.Before(&b.CreationTimestamp)
 	}
@@ -342,7 +342,7 @@ func dropConflictingBackends(backends []ruleBackend) (kept []ruleBackend, reject
 // VIP's flows would be lost. For the same reason a backend serves only one
 // rule on a given backendPort (ruleBackendOwners). IPv4 VIPs are not
 // translated (#705).
-func ruleTranslatedVIP(rule *bgpv1alpha1.NetworkRule) (netip.Addr, bool, error) {
+func ruleTranslatedVIP(rule *bgpv1alpha1.NetworkService) (netip.Addr, bool, error) {
 	var found []netip.Addr
 	for _, v := range rule.Spec.VIPAddresses {
 		vip, err := netip.ParseAddr(v)
@@ -370,7 +370,7 @@ func ruleTranslatedVIP(rule *bgpv1alpha1.NetworkRule) (netip.Addr, bool, error) 
 // ruleBackendSelector converts rule's BackendSelector to a labels.Selector.
 // The CRD rejects an empty selector; this rejects one anyway, since an empty
 // selector would otherwise match every attachment in the VPC.
-func ruleBackendSelector(rule *bgpv1alpha1.NetworkRule) (labels.Selector, error) {
+func ruleBackendSelector(rule *bgpv1alpha1.NetworkService) (labels.Selector, error) {
 	sel := rule.Spec.BackendSelector
 	if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
 		return nil, errors.New("backendSelector is empty")

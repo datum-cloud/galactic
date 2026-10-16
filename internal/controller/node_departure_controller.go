@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 // defaultNodeDepartureInterval is how often NodeDepartureReconciler sweeps
@@ -48,7 +48,7 @@ var nodeDepartureRequest = ctrl.Request{NamespacedName: types.NamespacedName{Nam
 // there is nothing left to tear down.
 //
 // It runs on every router and every pass is idempotent: each sweep removes
-// the departed nodes' BackendsBound conditions from every NetworkRule,
+// the departed nodes' BackendsBound conditions from every NetworkService,
 // deletes their generated bindings and removes the teardown finalizer from
 // every binding targeting them, hand-written ones included. Writes retry on
 // conflict and treat NotFound as done, so routers sweeping at once converge.
@@ -67,7 +67,7 @@ type NodeDepartureReconciler struct {
 	Interval time.Duration
 }
 
-// Reconcile sweeps every NetworkRule and ServiceVIPBinding for state left by
+// Reconcile sweeps every NetworkService and ServiceVIPBinding for state left by
 // departed nodes. It returns the joined errors of any cleanup that failed, so
 // the sweep is retried, and otherwise requeues after Interval.
 func (r *NodeDepartureReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result, error) {
@@ -76,9 +76,9 @@ func (r *NodeDepartureReconciler) Reconcile(ctx context.Context, _ ctrl.Request)
 		interval = defaultNodeDepartureInterval
 	}
 
-	rules := &bgpv1alpha1.NetworkRuleList{}
+	rules := &bgpv1alpha1.NetworkServiceList{}
 	if err := r.List(ctx, rules); err != nil {
-		return ctrl.Result{}, fmt.Errorf("list NetworkRules: %w", err)
+		return ctrl.Result{}, fmt.Errorf("list NetworkServices: %w", err)
 	}
 	bindings := &bgpv1alpha1.ServiceVIPBindingList{}
 	if err := r.List(ctx, bindings); err != nil {
@@ -120,7 +120,7 @@ func (r *NodeDepartureReconciler) Reconcile(ctx context.Context, _ ctrl.Request)
 // node missing from the cached Node list counts only once APIReader reports
 // it NotFound.
 func (r *NodeDepartureReconciler) departedNodes(
-	ctx context.Context, rules []bgpv1alpha1.NetworkRule, bindings []bgpv1alpha1.ServiceVIPBinding,
+	ctx context.Context, rules []bgpv1alpha1.NetworkService, bindings []bgpv1alpha1.ServiceVIPBinding,
 ) (map[string]bool, error) {
 	nodes := &corev1.NodeList{}
 	if err := r.List(ctx, nodes); err != nil {
@@ -162,14 +162,14 @@ func (r *NodeDepartureReconciler) departedNodes(
 // from rule, writing its status only if one was present. A rule deleted in
 // the meantime counts as done.
 func (r *NodeDepartureReconciler) clearRuleConditions(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, departed map[string]bool,
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, departed map[string]bool,
 ) error {
 	if !hasDepartedCondition(rule.Status.Conditions, departed) {
 		return nil
 	}
 	key := client.ObjectKeyFromObject(rule)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current := &bgpv1alpha1.NetworkRule{}
+		current := &bgpv1alpha1.NetworkService{}
 		if err := r.Get(ctx, key, current); err != nil {
 			return err
 		}
@@ -185,13 +185,13 @@ func (r *NodeDepartureReconciler) clearRuleConditions(
 		return r.Status().Update(ctx, current)
 	})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("clear departed nodes' %s conditions on NetworkRule %s: %w",
+		return fmt.Errorf("clear departed nodes' %s conditions on NetworkService %s: %w",
 			conditionTypeBackendsBound, key, err)
 	}
 	return nil
 }
 
-// releaseBinding deletes binding if NetworkRuleBindingReconciler generated it,
+// releaseBinding deletes binding if NetworkServiceBindingReconciler generated it,
 // then removes its teardown finalizer, which only the departed node it targets
 // would otherwise remove. A binding already gone counts as done.
 func (r *NodeDepartureReconciler) releaseBinding(ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding) error {

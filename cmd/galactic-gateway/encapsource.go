@@ -14,9 +14,9 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // Backoff bounds for waiting on this node's BGPRouter at startup.

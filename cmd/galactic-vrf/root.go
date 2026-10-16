@@ -20,10 +20,10 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/ingresssidecar"
 	"go.datum.net/galactic/internal/metadata"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (

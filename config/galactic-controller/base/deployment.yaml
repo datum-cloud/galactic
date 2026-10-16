@@ -39,6 +39,8 @@ spec:
           image: ghcr.io/datum-cloud/galactic-controller:latest
           args:
             - --role=cell
+            # Override in Hypervisor and HypervisorDeclared cells.
+            - --attachment-mode=Netns
           env:
             - name: POD_NAMESPACE
               valueFrom:

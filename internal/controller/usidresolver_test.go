@@ -12,9 +12,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // testVPCRef is the tenant identity used by the single-VPC fixtures below.
@@ -80,7 +80,7 @@ func TestBackendSIDIndex_NoMatchingPrefixIsError(t *testing.T) {
 }
 
 // TestBackendSIDIndex_ExcludesAdvertisementsWithoutVRFIDOrFunction verifies
-// that an advertisement with no SRv6 VRFID/Function (e.g. a NetworkRule VIP
+// that an advertisement with no SRv6 VRFID/Function (e.g. a NetworkService VIP
 // advertisement -- see NetworkGatewayReconciler.applyBGPAdvertisements)
 // is excluded from matching even if its prefix would otherwise contain the
 // address, since it carries no SRv6 decap behavior of its own.

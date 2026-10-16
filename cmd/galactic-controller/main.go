@@ -18,25 +18,34 @@ import (
 	"syscall"
 
 	"github.com/go-logr/logr"
+	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	computev1alpha "go.datum.net/compute/api/v1alpha"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	cloudcontroller "go.datum.net/galactic/internal/cloud/controller"
+	"go.datum.net/galactic/internal/cloud/galactic"
+	cloudwebhook "go.datum.net/galactic/internal/cloud/webhook"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/trafficpolicy/cell"
 	"go.datum.net/galactic/internal/trafficpolicy/webhook"
+	networkingv1alpha "go.datum.net/network-services-operator/api/v1alpha"
 )
 
-// RoleCell is the only role so far: the controllers that run once per edge
-// cell.
-const RoleCell = "cell"
+const (
+	RoleCell   = "cell"
+	RoleFabric = "fabric"
+)
 
 type options struct {
 	role               string
@@ -47,6 +56,12 @@ type options struct {
 	webhookCertDir     string
 	leaderElect        bool
 	controllerUsername string
+	attachmentMode     string
+	identityClass      string
+	identityNamespace  string
+	platformProject    string
+	ipamKubeconfig     string
+	hubKubeconfig      string
 }
 
 func main() {
@@ -59,7 +74,7 @@ func newRootCommand() *cobra.Command {
 	o := &options{}
 	cmd := &cobra.Command{
 		Use:          "galactic-controller",
-		Short:        "Run Galactic's cluster-scoped controllers",
+		Short:        "Run Galactic's cell or fabric controllers",
 		Version:      metadata.Version,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -67,7 +82,7 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&o.role, "role", "", "Controllers to run; only \"cell\" exists so far (required)")
+	f.StringVar(&o.role, "role", "", "Controllers to run: cell or fabric (required)")
 	f.StringVar(&o.namespace, "namespace", envOr("POD_NAMESPACE", "galactic-system"),
 		"Namespace of this pod and its leader election lease (env POD_NAMESPACE)")
 	f.StringVar(&o.metricsAddress, "metrics-bind-address", ":9184", "Address serving /metrics")
@@ -79,12 +94,26 @@ func newRootCommand() *cobra.Command {
 	f.StringVar(&o.controllerUsername, "controller-username", "",
 		"Authenticated username this controller runs as, the only one allowed to write the reserved "+
 			"default policy (default system:serviceaccount:<namespace>:galactic-controller)")
+	f.StringVar(&o.attachmentMode, "attachment-mode", "",
+		"Required for cell controllers: Netns, Hypervisor or HypervisorDeclared")
+	f.StringVar(&o.identityClass, "identity-class", "", "Fabric role: IPClass for globally unique fabric identities")
+	f.StringVar(&o.identityNamespace, "identity-namespace", "default", "Fabric role: namespace for platform IP claims")
+	f.StringVar(&o.platformProject, "platform-project", "", "Fabric role: platform project for IPAM")
+	f.StringVar(&o.ipamKubeconfig, "ipam-kubeconfig", "", "Fabric role: IPAM cluster kubeconfig")
+	f.StringVar(&o.hubKubeconfig, "hub-kubeconfig", "", "Fabric role: federation hub kubeconfig")
 	return cmd
 }
 
 func run(parent context.Context, o *options) error {
+	if o.role == RoleFabric {
+		return runFabric(parent, o)
+	}
 	if o.role != RoleCell {
-		return fmt.Errorf("--role must be %q, got %q", RoleCell, o.role)
+		return fmt.Errorf("--role must be %q or %q, got %q", RoleCell, RoleFabric, o.role)
+	}
+	mode, err := parseAttachmentMode(o.attachmentMode)
+	if err != nil {
+		return err
 	}
 	if o.controllerUsername == "" {
 		o.controllerUsername = "system:serviceaccount:" + o.namespace + ":galactic-controller"
@@ -100,6 +129,10 @@ func run(parent context.Context, o *options) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(galacticv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(cloudv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(networkv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(networkingv1alpha.AddToScheme(scheme))
+	utilruntime.Must(nadv1.AddToScheme(scheme))
+	utilruntime.Must(computev1alpha.AddToScheme(scheme))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                        scheme,
@@ -119,6 +152,9 @@ func run(parent context.Context, o *options) error {
 	if err := Setup(mgr, o.controllerUsername); err != nil {
 		return err
 	}
+	if err := SetupCloud(mgr, mode); err != nil {
+		return err
+	}
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return err
 	}
@@ -127,6 +163,61 @@ func run(parent context.Context, o *options) error {
 	}
 	slog.Info("starting galactic-controller", "role", o.role, "version", metadata.Version)
 	return mgr.Start(ctx)
+}
+
+func parseAttachmentMode(value string) (cloudv1alpha1.VPCAttachmentInterfaceMode, error) {
+	switch mode := cloudv1alpha1.VPCAttachmentInterfaceMode(value); mode {
+	case cloudv1alpha1.VPCAttachmentInterfaceModeNetns,
+		cloudv1alpha1.VPCAttachmentInterfaceModeHypervisor,
+		cloudv1alpha1.VPCAttachmentInterfaceModeHypervisorDeclared:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("--attachment-mode must be Netns, Hypervisor or HypervisorDeclared, got %q", value)
+	}
+}
+
+// SetupCloud registers the cloud cell controllers on the same manager and lease.
+func SetupCloud(mgr ctrl.Manager, mode cloudv1alpha1.VPCAttachmentInterfaceMode) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &cloudv1alpha1.VPCAttachment{},
+		cloudcontroller.IndexVPCAttachmentIdentity, func(obj client.Object) []string {
+			attachment, ok := obj.(*cloudv1alpha1.VPCAttachment)
+			if !ok || attachment.Status.VPC == "" || attachment.Status.VPCAttachment == "" {
+				return nil
+			}
+			identity := galactic.AdvertisementName(attachment.Status.VPC, attachment.Status.VPCAttachment)
+			if identity == "" {
+				return nil
+			}
+			return []string{identity}
+		}); err != nil {
+		return fmt.Errorf("index VPC attachment identity: %w", err)
+	}
+	for name, setup := range map[string]func() error{
+		"NetworkContext": func() error {
+			reconciler := &cloudcontroller.NetworkContextReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
+			return reconciler.SetupWithManager(mgr)
+		},
+		"Subnet": func() error {
+			reconciler := &cloudcontroller.SubnetReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
+			return reconciler.SetupWithManager(mgr)
+		},
+		"NetworkInterface": func() error {
+			reconciler := &cloudcontroller.NetworkInterfaceReconciler{
+				Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(), AttachmentMode: mode,
+			}
+			return reconciler.SetupWithManager(mgr)
+		},
+		"BGPAdvertisement": func() error {
+			reconciler := &cloudcontroller.BGPAdvertisementReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
+			return reconciler.SetupWithManager(mgr)
+		},
+	} {
+		if err := setup(); err != nil {
+			return fmt.Errorf("set up %s controller: %w", name, err)
+		}
+	}
+	(&cloudwebhook.PodInterfaceInjector{Client: mgr.GetClient()}).SetupWithManager(mgr)
+	return nil
 }
 
 // Setup registers the cell role's webhook and reconcilers with mgr.

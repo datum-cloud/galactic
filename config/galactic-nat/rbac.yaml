@@ -24,19 +24,19 @@ kind: ClusterRole
 metadata:
   name: galactic-nat
 rules:
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - egressshards
     verbs: ["get", "list", "watch", "update", "patch"]
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - egressshards/status
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgpadvertisements
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgprouters
     verbs: ["get", "list", "watch"]

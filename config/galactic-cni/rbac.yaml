@@ -3,11 +3,11 @@ kind: ClusterRole
 metadata:
   name: galactic-cni
 rules:
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgprouters
     verbs: ["get", "list"]
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgpadvertisements
       - bgpvrfinstances
@@ -15,7 +15,7 @@ rules:
   # egressshards (read only): in hashed egress mode, galactic-cni run spreads
   # tenant egress across every EgressShard in the cluster and watches them for
   # membership and drain changes. See internal/installer/egressgroup.go.
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - egressshards
     verbs: ["get", "list", "watch"]

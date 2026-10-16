@@ -1,8 +1,3 @@
-# "network" is an empty stage by default; see containers/galactic-gateway's
-# Dockerfile for how it satisfies a local `replace go.datum.net/network =>
-# ../network` directive during cross-repo development.
-FROM scratch AS network
-
 # Build the galactic-controller binary
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
@@ -17,7 +12,6 @@ ARG GIT_URL=https://github.com/datum-cloud/galactic
 WORKDIR /workspace
 COPY go.mod go.mod
 COPY go.sum go.sum
-COPY --from=network / /network
 RUN go mod download
 
 # galactic-controller imports no eBPF package, so unlike the node-side

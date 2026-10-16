@@ -1,16 +1,3 @@
-# "network" is an empty stage by default -- overridden with a real
-# go.datum.net/network checkout via `docker build --build-context
-# network=<path-to-network-repo> ...` whenever go.mod carries a local
-# `replace go.datum.net/network => ../network` directive (this repo's own
-# convention for developing against unpublished network CRD changes before
-# they're tagged -- see go.mod's own comment on that line). Copied to
-# /network below, exactly matching what that relative replace path resolves
-# to from /workspace/go.mod inside this build. Harmless when no such
-# replace directive exists and no override is passed: go.mod then has
-# nothing under /network to resolve, so an empty directory there is never
-# read.
-FROM scratch AS network
-
 # Build the galactic-gateway binary
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
@@ -26,10 +13,6 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
-# Local cross-repo development: satisfies go.mod's `replace
-# go.datum.net/network => ../network`, when present -- see the "network"
-# stage's own comment above for where this comes from.
-COPY --from=network / /network
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
@@ -47,13 +30,13 @@ COPY internal/ internal/
 # doc.go), so both must be regenerated here, same as
 # containers/galactic-router/Dockerfile now does too.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      clang llvm linux-libc-dev \
+      clang-19 llvm-19 linux-libc-dev \
     && rm -rf /var/lib/apt/lists/*
-RUN go generate ./internal/plumbing/ebpf/prog/...
-RUN go generate ./internal/plumbing/ebpf/edgeprog/...
+RUN PATH=/usr/lib/llvm-19/bin:$PATH BPF2GO_CC=clang-19 go generate ./internal/plumbing/ebpf/prog/...
+RUN PATH=/usr/lib/llvm-19/bin:$PATH BPF2GO_CC=clang-19 go generate ./internal/plumbing/ebpf/edgeprog/...
 # internal/plumbing/ebpf/xdpattach, which this binary attaches through,
 # links the shared XDP dispatcher's bindings too.
-RUN go generate ./internal/plumbing/ebpf/xdpdispatch/...
+RUN PATH=/usr/lib/llvm-19/bin:$PATH BPF2GO_CC=clang-19 go generate ./internal/plumbing/ebpf/xdpdispatch/...
 
 # Build galactic-gateway
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \

@@ -1,0 +1,12 @@
+processor:
+  docPaths: []
+  ignoreTypes:
+    - ".*List$"
+  ignoreFields: []
+
+render:
+  kubernetes: {}
+  markdown:
+    mediaWidth: 80
+    anchorLink: true
+    tableHideEmpty: true

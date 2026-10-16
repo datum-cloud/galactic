@@ -85,22 +85,8 @@ case "$COMMAND" in
       docker exec "$node" sh -c 'mkdir -p /sys/fs/bpf && (mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf)'
     done
 
-    echo "--- Installing BGP CRDs (datum-cloud/network)"
-    # Extract the datum-cloud/network git ref from go.mod (a release tag, or a
-    # pseudo-version's commit suffix after the last hyphen), same approach as
-    # deploy/containerlab/scripts/deploy-system.sh. $1 must match the
-    # require line's module path exactly, not just a substring, so an
-    # unrelated line can't corrupt NETWORK_SHA.
-    NETWORK_SHA=$(awk '$1 == "go.datum.net/network" {print $2}' go.mod | sed 's/.*-//')
-    NETWORK_CRD_URL="https://raw.githubusercontent.com/datum-cloud/network/${NETWORK_SHA}/config/crd"
-    for crd in \
-      network.datumapis.com_bgpadvertisements.yaml \
-      network.datumapis.com_bgppeers.yaml \
-      network.datumapis.com_bgppolicies.yaml \
-      network.datumapis.com_bgprouters.yaml \
-      network.datumapis.com_bgpvrfinstances.yaml; do
-      curl -sL "${NETWORK_CRD_URL}/${crd}" | kubectl apply -f -
-    done
+    echo "--- Installing Galactic CRDs"
+    kubectl apply -k config/crd
 
     echo "--- Applying galactic-system namespace and CNI RBAC"
     kubectl apply -k config/galactic-system
@@ -115,7 +101,7 @@ case "$COMMAND" in
     # tap mode too.
     E2E_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
     cat <<EOF | kubectl apply -f -
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: BGPRouter
 metadata:
   name: e2e-node-router
@@ -134,21 +120,7 @@ spec:
 EOF
 
     echo "--- Building image: $IMG"
-    # --build-context network=../network satisfies go.mod's local `replace
-    # go.datum.net/network => ../network` (see that line's own comment)
-    # inside the Dockerfile's "network" build stage -- see
-    # containers/galactic-cni/Dockerfile's own comment on that stage for
-    # the full mechanism. Only passed when ../network actually exists:
-    # docker eagerly stats every --build-context path before looking at
-    # the Dockerfile at all, so passing it unconditionally broke CI's
-    # single-repo checkout (no sibling ../network there) even with no
-    # replace directive active -- it's the *Dockerfile* stage that's
-    # harmless to leave unused, not this flag.
-    BUILD_ARGS=()
-    if [ -d ../network ]; then
-      BUILD_ARGS+=(--build-context "network=../network")
-    fi
-    docker build "${BUILD_ARGS[@]}" -t "$IMG" -f containers/galactic-cni/Dockerfile .
+    docker build -t "$IMG" -f containers/galactic-cni/Dockerfile .
 
     echo "--- Loading image into cluster"
     kind load docker-image "$IMG" --name "$CLUSTER_NAME"

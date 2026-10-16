@@ -19,9 +19,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // testBindingVIP is the IPv6 VIP the binding writer's rules use: the backend
@@ -30,29 +30,31 @@ const testBindingVIP = "2001:db8:100::32"
 
 // newBindingTestRule returns an accepted rule with one IPv6 and one IPv4 VIP,
 // selecting newBackendAttachment's attachments in testVPCRef.
-func newBindingTestRule() *bgpv1alpha1.NetworkRule {
+func newBindingTestRule() *bgpv1alpha1.NetworkService {
 	rule := newTestRule(testRuleName, testVPCRef, testBindingVIP, testVIP4)
 	rule.UID = "rule-uid"
 	acceptRule(rule)
 	return rule
 }
 
-// newBindingWriter returns a NetworkRuleBindingReconciler for
+// newBindingWriter returns a NetworkServiceBindingReconciler for
 // testComputeNodeName over a fake client holding objs, with the
 // VPCAttachmentByVPC index galactic-router's cache registers.
-func newBindingWriter(t *testing.T, objs ...client.Object) (*NetworkRuleBindingReconciler, client.Client) {
+func newBindingWriter(t *testing.T, objs ...client.Object) (*NetworkServiceBindingReconciler, client.Client) {
 	t.Helper()
 	scheme := newRuleTestScheme(t)
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithIndex(&cloudv1alpha1.VPCAttachment{}, VPCAttachmentByVPC, vpcAttachmentVPC).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}, &bgpv1alpha1.ServiceVIPBinding{}, &cloudv1alpha1.VPCAttachment{}).
+		WithStatusSubresource(
+			&bgpv1alpha1.NetworkService{}, &bgpv1alpha1.ServiceVIPBinding{}, &cloudv1alpha1.VPCAttachment{},
+		).
 		WithObjects(objs...).
 		Build()
-	return &NetworkRuleBindingReconciler{Client: c, Scheme: scheme, NodeName: testComputeNodeName}, c
+	return &NetworkServiceBindingReconciler{Client: c, Scheme: scheme, NodeName: testComputeNodeName}, c
 }
 
-func reconcileBindings(t *testing.T, r *NetworkRuleBindingReconciler) {
+func reconcileBindings(t *testing.T, r *NetworkServiceBindingReconciler) {
 	t.Helper()
 	req := ctrl.Request{NamespacedName: client.ObjectKey{Namespace: testNamespace, Name: testRuleName}}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
@@ -95,20 +97,20 @@ func markBindingBound(t *testing.T, c client.Client, binding bgpv1alpha1.Service
 	}
 }
 
-func getBindingRule(t *testing.T, c client.Client) *bgpv1alpha1.NetworkRule {
+func getBindingRule(t *testing.T, c client.Client) *bgpv1alpha1.NetworkService {
 	t.Helper()
-	rule := &bgpv1alpha1.NetworkRule{}
+	rule := &bgpv1alpha1.NetworkService{}
 	key := client.ObjectKey{Namespace: testNamespace, Name: testRuleName}
 	if err := c.Get(context.Background(), key, rule); err != nil {
-		t.Fatalf("get NetworkRule: %v", err)
+		t.Fatalf("get NetworkService: %v", err)
 	}
 	return rule
 }
 
-// TestNetworkRuleBindingReconciler_WritesBindingForLocalBackend is #799's
-// regression test: applying only a NetworkRule produces a working binding on
+// TestNetworkServiceBindingReconciler_WritesBindingForLocalBackend is #799's
+// regression test: applying only a NetworkService produces a working binding on
 // the backend's node, with nothing written by hand.
-func TestNetworkRuleBindingReconciler_WritesBindingForLocalBackend(t *testing.T) {
+func TestNetworkServiceBindingReconciler_WritesBindingForLocalBackend(t *testing.T) {
 	rule := newBindingTestRule()
 	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef))
 
@@ -124,7 +126,7 @@ func TestNetworkRuleBindingReconciler_WritesBindingForLocalBackend(t *testing.T)
 		VPCRef:         testVPCRef,
 		VIPAddress:     testBindingVIP,
 		Port:           443,
-		Protocol:       bgpv1alpha1.NetworkRuleProtocolTCP,
+		Protocol:       bgpv1alpha1.NetworkServiceProtocolTCP,
 		BackendAddress: testBackendAddr,
 		BackendPort:    testBackendPort,
 		EgressKind:     bgpv1alpha1.ServiceVIPBindingEgressKindVeth,
@@ -141,15 +143,15 @@ func TestNetworkRuleBindingReconciler_WritesBindingForLocalBackend(t *testing.T)
 		t.Errorf("binding labels = %v, want managed-by, rule and node labels", b.Labels)
 	}
 	owners := b.OwnerReferences
-	if len(owners) != 1 || owners[0].Kind != "NetworkRule" || owners[0].Name != testRuleName {
-		t.Errorf("binding owner references = %+v, want the NetworkRule", b.OwnerReferences)
+	if len(owners) != 1 || owners[0].Kind != "NetworkService" || owners[0].Name != testRuleName {
+		t.Errorf("binding owner references = %+v, want the NetworkService", b.OwnerReferences)
 	}
 }
 
-// TestNetworkRuleBindingReconciler_SameNodeBackendsGetOwnBindings covers two
+// TestNetworkServiceBindingReconciler_SameNodeBackendsGetOwnBindings covers two
 // backends of one VIP on one node: each gets its own binding, which the
 // per-backend slot lets the node program side by side.
-func TestNetworkRuleBindingReconciler_SameNodeBackendsGetOwnBindings(t *testing.T) {
+func TestNetworkServiceBindingReconciler_SameNodeBackendsGetOwnBindings(t *testing.T) {
 	rule := newBindingTestRule()
 	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef, testBackendAddr, "fd00:10::2"))
 
@@ -161,10 +163,10 @@ func TestNetworkRuleBindingReconciler_SameNodeBackendsGetOwnBindings(t *testing.
 	}
 }
 
-// TestNetworkRuleBindingReconciler_OnlyThisNodesBackends covers a backend on
+// TestNetworkServiceBindingReconciler_OnlyThisNodesBackends covers a backend on
 // another node and one in another VPC carrying the selected label: neither
 // gets a binding here.
-func TestNetworkRuleBindingReconciler_OnlyThisNodesBackends(t *testing.T) {
+func TestNetworkServiceBindingReconciler_OnlyThisNodesBackends(t *testing.T) {
 	rule := newBindingTestRule()
 	elsewhere := newBackendAttachment(testVPCRef, "fd00:10::7")
 	elsewhere.Name = "elsewhere"
@@ -179,11 +181,11 @@ func TestNetworkRuleBindingReconciler_OnlyThisNodesBackends(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleBindingReconciler_FollowsBackend covers a backend moving to
+// TestNetworkServiceBindingReconciler_FollowsBackend covers a backend moving to
 // another node, changing address, leaving the selector, and moving to another
 // VPC: each time the stale binding goes and, where the backend is still local,
 // a new one comes.
-func TestNetworkRuleBindingReconciler_FollowsBackend(t *testing.T) {
+func TestNetworkServiceBindingReconciler_FollowsBackend(t *testing.T) {
 	tests := []struct {
 		name   string
 		change func(*cloudv1alpha1.VPCAttachment)
@@ -245,10 +247,10 @@ func TestNetworkRuleBindingReconciler_FollowsBackend(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleBindingReconciler_WaitsForObservedVPC covers an attachment
+// TestNetworkServiceBindingReconciler_WaitsForObservedVPC covers an attachment
 // whose VPC is not observed yet: it is in no VPC's index entry, so it gets no
 // binding until its status names the rule's VPC.
-func TestNetworkRuleBindingReconciler_WaitsForObservedVPC(t *testing.T) {
+func TestNetworkServiceBindingReconciler_WaitsForObservedVPC(t *testing.T) {
 	attachment := newBackendAttachment(testVPCRef)
 	attachment.Status.VPC = ""
 	r, c := newBindingWriter(t, newBindingTestRule(), attachment)
@@ -273,11 +275,11 @@ func TestNetworkRuleBindingReconciler_WaitsForObservedVPC(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleBindingReconciler_KeepsBindingsWhileUnaccepted covers a rule
+// TestNetworkServiceBindingReconciler_KeepsBindingsWhileUnaccepted covers a rule
 // that loses Accepted, as it does whenever the namespace briefly has no
 // NetworkGateway: its bindings stay, so the backend nodes keep their
 // vip_xlat_table rows for when the gateways come back.
-func TestNetworkRuleBindingReconciler_KeepsBindingsWhileUnaccepted(t *testing.T) {
+func TestNetworkServiceBindingReconciler_KeepsBindingsWhileUnaccepted(t *testing.T) {
 	rule := newBindingTestRule()
 	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef))
 	reconcileBindings(t, r)
@@ -296,9 +298,9 @@ func TestNetworkRuleBindingReconciler_KeepsBindingsWhileUnaccepted(t *testing.T)
 	}
 }
 
-// TestNetworkRuleBindingReconciler_NeverAcceptedRuleHasNoBindings covers a
+// TestNetworkServiceBindingReconciler_NeverAcceptedRuleHasNoBindings covers a
 // rule the gateways have not accepted yet: nothing is written for it.
-func TestNetworkRuleBindingReconciler_NeverAcceptedRuleHasNoBindings(t *testing.T) {
+func TestNetworkServiceBindingReconciler_NeverAcceptedRuleHasNoBindings(t *testing.T) {
 	rule := newBindingTestRule()
 	rule.Status.Conditions = nil
 	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef))
@@ -310,10 +312,10 @@ func TestNetworkRuleBindingReconciler_NeverAcceptedRuleHasNoBindings(t *testing.
 	}
 }
 
-// TestNetworkRuleBindingReconciler_LeavesOtherBindingsAlone covers bindings
+// TestNetworkServiceBindingReconciler_LeavesOtherBindingsAlone covers bindings
 // this node did not write: one written by hand, and one another node
 // generated for the same rule. Neither is deleted.
-func TestNetworkRuleBindingReconciler_LeavesOtherBindingsAlone(t *testing.T) {
+func TestNetworkServiceBindingReconciler_LeavesOtherBindingsAlone(t *testing.T) {
 	rule := newBindingTestRule()
 	handWritten := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindVeth, testComputeNodeName)
 	handWritten.Labels = map[string]string{networkRuleLabel: testRuleName}
@@ -337,9 +339,9 @@ func TestNetworkRuleBindingReconciler_LeavesOtherBindingsAlone(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleBindingReconciler_TapBackend covers a VM backend: its
+// TestNetworkServiceBindingReconciler_TapBackend covers a VM backend: its
 // attachment's Hypervisor mode selects the tap mechanism.
-func TestNetworkRuleBindingReconciler_TapBackend(t *testing.T) {
+func TestNetworkServiceBindingReconciler_TapBackend(t *testing.T) {
 	attachment := newBackendAttachment(testVPCRef)
 	attachment.Spec.Interface.Mode = cloudv1alpha1.VPCAttachmentInterfaceModeHypervisor
 	r, c := newBindingWriter(t, newBindingTestRule(), attachment)
@@ -352,10 +354,10 @@ func TestNetworkRuleBindingReconciler_TapBackend(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleBindingReconciler_BackendsBoundCondition covers the rule's
+// TestNetworkServiceBindingReconciler_BackendsBoundCondition covers the rule's
 // per-node summary: False naming each binding not yet Bound, then True once
 // every binding reports Bound for its current generation.
-func TestNetworkRuleBindingReconciler_BackendsBoundCondition(t *testing.T) {
+func TestNetworkServiceBindingReconciler_BackendsBoundCondition(t *testing.T) {
 	r, c := newBindingWriter(t, newBindingTestRule(), newBackendAttachment(testVPCRef))
 	condType := backendsBoundConditionType(testComputeNodeName)
 
@@ -381,7 +383,7 @@ func TestNetworkRuleBindingReconciler_BackendsBoundCondition(t *testing.T) {
 // binding writer, each with the text its InvalidRule message must contain.
 var invalidRuleEdits = []struct {
 	name    string
-	edit    func(*bgpv1alpha1.NetworkRule)
+	edit    func(*bgpv1alpha1.NetworkService)
 	message string
 }{
 	{
@@ -389,14 +391,14 @@ var invalidRuleEdits = []struct {
 		// with two IPv6 VIPs gets no bindings rather than one per VIP of
 		// which all but one could only report Conflict.
 		name: "second IPv6 VIP",
-		edit: func(rule *bgpv1alpha1.NetworkRule) {
+		edit: func(rule *bgpv1alpha1.NetworkService) {
 			rule.Spec.VIPAddresses = append(rule.Spec.VIPAddresses, "2001:db8:100::33")
 		},
 		message: "2 IPv6 VIPs",
 	},
 	{
 		name: "invalid selector",
-		edit: func(rule *bgpv1alpha1.NetworkRule) {
+		edit: func(rule *bgpv1alpha1.NetworkService) {
 			rule.Spec.BackendSelector = metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
 				{Key: testBackendLabel, Operator: "Bogus"},
 			}}
@@ -405,12 +407,12 @@ var invalidRuleEdits = []struct {
 	},
 }
 
-// TestNetworkRuleBindingReconciler_InvalidRuleOnServingNode covers a rule
+// TestNetworkServiceBindingReconciler_InvalidRuleOnServingNode covers a rule
 // made invalid while this node holds bindings for it: the bindings, and with
 // them the node's vip_xlat_table rows, stay untouched while the node reports
 // InvalidRule on every pass, and reverting the edit returns the rule to Bound
 // on the same bindings.
-func TestNetworkRuleBindingReconciler_InvalidRuleOnServingNode(t *testing.T) {
+func TestNetworkServiceBindingReconciler_InvalidRuleOnServingNode(t *testing.T) {
 	for _, tt := range invalidRuleEdits {
 		t.Run(tt.name, func(t *testing.T) {
 			r, c := newBindingWriter(t, newBindingTestRule(), newBackendAttachment(testVPCRef))
@@ -468,11 +470,11 @@ func TestNetworkRuleBindingReconciler_InvalidRuleOnServingNode(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleBindingReconciler_InvalidRuleOnIdleNode covers an invalid
+// TestNetworkServiceBindingReconciler_InvalidRuleOnIdleNode covers an invalid
 // rule on a node that holds no bindings for it and reports no condition: the
 // gateways report the error, so this node writes no status at all, rather
 // than every router node in the cell writing its own copy.
-func TestNetworkRuleBindingReconciler_InvalidRuleOnIdleNode(t *testing.T) {
+func TestNetworkServiceBindingReconciler_InvalidRuleOnIdleNode(t *testing.T) {
 	for _, tt := range invalidRuleEdits {
 		t.Run(tt.name, func(t *testing.T) {
 			rule := newBindingTestRule()
@@ -494,11 +496,11 @@ func TestNetworkRuleBindingReconciler_InvalidRuleOnIdleNode(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleBindingReconciler_InvalidRuleRemovesStaleCondition covers an
+// TestNetworkServiceBindingReconciler_InvalidRuleRemovesStaleCondition covers an
 // invalid rule on a node that holds no bindings for it but still carries a
 // condition from when it did: the node no longer serves the rule, so the
 // condition goes.
-func TestNetworkRuleBindingReconciler_InvalidRuleRemovesStaleCondition(t *testing.T) {
+func TestNetworkServiceBindingReconciler_InvalidRuleRemovesStaleCondition(t *testing.T) {
 	for _, tt := range invalidRuleEdits {
 		t.Run(tt.name, func(t *testing.T) {
 			rule := newBindingTestRule()
@@ -551,10 +553,10 @@ func TestVPCRuleRequests(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleBindingReconciler_BindingRuleRequests covers the watch
+// TestNetworkServiceBindingReconciler_BindingRuleRequests covers the watch
 // mapping: only this node's generated bindings requeue their rule.
-func TestNetworkRuleBindingReconciler_BindingRuleRequests(t *testing.T) {
-	r := &NetworkRuleBindingReconciler{NodeName: testComputeNodeName}
+func TestNetworkServiceBindingReconciler_BindingRuleRequests(t *testing.T) {
+	r := &NetworkServiceBindingReconciler{NodeName: testComputeNodeName}
 	mine := &bgpv1alpha1.ServiceVIPBinding{ObjectMeta: metav1.ObjectMeta{
 		Namespace: testNamespace,
 		Labels: map[string]string{
@@ -586,7 +588,7 @@ const (
 )
 
 // reconcileRule reconciles this node's bindings for the rule named name.
-func reconcileRule(t *testing.T, r *NetworkRuleBindingReconciler, name string) {
+func reconcileRule(t *testing.T, r *NetworkServiceBindingReconciler, name string) {
 	t.Helper()
 	req := ctrl.Request{NamespacedName: client.ObjectKey{Namespace: testNamespace, Name: name}}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
@@ -597,7 +599,7 @@ func reconcileRule(t *testing.T, r *NetworkRuleBindingReconciler, name string) {
 // newSharingBindingRule returns an accepted rule named name with the IPv6 VIP
 // vip, created at second created and using backendPort, selecting
 // newBackendAttachment's attachments in testVPCRef.
-func newSharingBindingRule(name, vip string, created int64, backendPort int32) *bgpv1alpha1.NetworkRule {
+func newSharingBindingRule(name, vip string, created int64, backendPort int32) *bgpv1alpha1.NetworkService {
 	rule := newTestRule(name, testVPCRef, vip)
 	rule.UID = types.UID(name + "-uid")
 	rule.CreationTimestamp = metav1.NewTime(time.Unix(created, 0))
@@ -606,12 +608,12 @@ func newSharingBindingRule(name, vip string, created int64, backendPort int32) *
 	return rule
 }
 
-// TestNetworkRuleBindingReconciler_SharedBackendServesOldestRule covers two
+// TestNetworkServiceBindingReconciler_SharedBackendServesOldestRule covers two
 // rules selecting one backend on one backend port: the node can translate the
 // backend's replies back to only one VIP, so only the older rule gets a
 // binding, and the newer one reports the backend as served by the older rule
 // rather than writing a binding that could only report Conflict.
-func TestNetworkRuleBindingReconciler_SharedBackendServesOldestRule(t *testing.T) {
+func TestNetworkServiceBindingReconciler_SharedBackendServesOldestRule(t *testing.T) {
 	tests := []struct {
 		name             string
 		newerBackendPort int32
@@ -644,7 +646,7 @@ func TestNetworkRuleBindingReconciler_SharedBackendServesOldestRule(t *testing.T
 				t.Errorf("rule newer bindings = %d, want %d", byRule[testNewerRule], wantNewer)
 			}
 
-			current := &bgpv1alpha1.NetworkRule{}
+			current := &bgpv1alpha1.NetworkService{}
 			key := client.ObjectKey{Namespace: testNamespace, Name: testNewerRule}
 			if err := c.Get(context.Background(), key, current); err != nil {
 				t.Fatalf("get rule newer: %v", err)
@@ -657,18 +659,18 @@ func TestNetworkRuleBindingReconciler_SharedBackendServesOldestRule(t *testing.T
 				return
 			}
 			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonBindingsClaimed ||
-				!strings.Contains(cond.Message, "served by NetworkRule "+testNamespace+"/"+testOlderRule) {
-				t.Errorf("rule newer BackendsBound = %+v, want False/%s naming NetworkRule %s/older",
+				!strings.Contains(cond.Message, "served by NetworkService "+testNamespace+"/"+testOlderRule) {
+				t.Errorf("rule newer BackendsBound = %+v, want False/%s naming NetworkService %s/older",
 					cond, reasonBindingsClaimed, testNamespace)
 			}
 		})
 	}
 }
 
-// TestNetworkRuleBindingReconciler_TakesOverBackendFromDeletedRule covers the
+// TestNetworkServiceBindingReconciler_TakesOverBackendFromDeletedRule covers the
 // older rule going away: the newer rule's next reconcile, which the rule watch
 // triggers for every rule in the namespace, writes its binding.
-func TestNetworkRuleBindingReconciler_TakesOverBackendFromDeletedRule(t *testing.T) {
+func TestNetworkServiceBindingReconciler_TakesOverBackendFromDeletedRule(t *testing.T) {
 	older := newSharingBindingRule(testOlderRule, testBindingVIP, 100, testBackendPort)
 	newer := newSharingBindingRule(testNewerRule, "2001:db8:100::33", 200, testBackendPort)
 	r, c := newBindingWriter(t, newer, older, newBackendAttachment(testVPCRef))
