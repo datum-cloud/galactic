@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	computev1alpha "go.datum.net/compute/api/v1alpha"
-	"go.datum.net/galactic/internal/cloud/controller"
+	"go.datum.net/galactic/internal/cloud/galactic"
 )
 
 const (
@@ -148,7 +148,7 @@ func (i *PodInterfaceInjector) resolveNetworks(
 				"no attachment definition prepared for NetworkInterface %s: %v", key, err))
 			return nil, nil, &response
 		}
-		if _, ours := nad.Labels[controller.LabelVPCAttachment]; !ours {
+		if _, ours := nad.Labels[galactic.LabelVPCAttachment]; !ours {
 			response := admission.Denied(fmt.Sprintf(
 				"attachment definition %s carries no attachment identifier", key))
 			return nil, nil, &response

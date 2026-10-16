@@ -52,7 +52,7 @@ func TestAdvertisementReprogramsGalacticInterfaceAndClaim(t *testing.T) {
 	}
 	claim := &networkingv1alpha.NetworkInterfaceClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "tenant"}}
 	meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
-		Type: networkingv1alpha.NetworkInterfaceClaimProgrammed, Status: metav1.ConditionUnknown, Reason: reasonAPIGroupMigration,
+		Type: networkingv1alpha.NetworkInterfaceClaimProgrammed, Status: metav1.ConditionUnknown, Reason: "APIGroupMigration",
 	})
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(iface, claim, attachment).
 		WithObjects(iface, claim, attachment).Build()
