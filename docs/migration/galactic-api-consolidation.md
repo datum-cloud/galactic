@@ -1,13 +1,14 @@
 # Consolidating the cloud and network APIs
 
 This change moves the `cloud` and `network` main-branch API types and the cloud
-controllers into Galactic. The served API group for VPC, BGP, gateway, traffic
+API types into Galactic. The served API group for VPC, BGP, gateway, traffic
 policy, and FabricQuery resources is `galactic.datumapis.com/v1alpha1`.
 `NetworkRule` is now `NetworkService`, matching the network main branch.
 
 The source revisions are cloud `55c38b5`, network `5a51626`, and Galactic
-`c1769cb`. The cloud cell reconcilers run in `galactic-controller --role=cell`
-with the traffic-policy reconcilers. The central fabric identity reconciler
+`c1769cb`. The VPC, subnet status, and attachment reconcilers run in the NSO
+cell manager with `galactic.enabled: true` and the cell's `attachmentMode`.
+The Galactic cell role retains BGP status projection and traffic policy. The central fabric identity reconciler
 runs in the same binary with `--role=fabric` and a separate deployment because
 its hub and IPAM credentials do not belong in each cell.
 
@@ -22,7 +23,8 @@ its hub and IPAM credentials do not belong in each cell.
    Apply `config/fabric-api/crd/galactic.datumapis.com_fabricqueries.yaml`
    wherever FabricQuery is served. Install the `galactic-controller` cell
    RBAC, webhook certificate, and both webhook configurations before routing
-   requests to the new controller.
+   requests to the new controllers. Upgrade NSO's cell manager with Galactic
+   reconciliation disabled until the old cell writer is stopped.
 3. Deploy `config/galactic-controller/fabric` centrally, with a hub credential
    bound to `config/galactic-controller/fabric/hub-rbac.yaml` on the hub and an
    IPAM credential for the platform project. Confirm the new
@@ -35,10 +37,10 @@ its hub and IPAM credentials do not belong in each cell.
    `NetworkRule` becomes `NetworkService`. Copy specs and selected labels and
    annotations, not Kubernetes UIDs, resource versions, or status. The old
    objects do not become visible to the new controllers automatically.
-5. Stop the old cloud cell controller before starting the new cell role, so
-   only one controller writes each NetworkAttachmentDefinition and NSO
-   `NetworkInterface` status. Start `galactic-controller --role=cell` with the
-   correct `--attachment-mode` for the cell. It reuses the legacy NAD's VPC and
+5. Stop the old cloud cell controller before enabling Galactic reconciliation
+   in NSO's cell manager, so only one controller writes each
+   NetworkAttachmentDefinition and NSO `NetworkInterface` status. Configure
+   the correct `galactic.attachmentMode` for the cell. NSO reuses the legacy NAD's VPC and
    attachment IDs, transfers its owner reference to the new attachment, and
    updates `NetworkInterface.status.attachmentRef.apiGroup` to
    `galactic.datumapis.com`. On group change it sets `Programmed=Unknown` until
@@ -50,11 +52,11 @@ its hub and IPAM credentials do not belong in each cell.
    the Galactic attachment group and `Programmed=True`, and check gateway
    and BGP node status before retiring old CRDs and controllers.
 
-NSO's `NetworkInterfaceAttachmentRef.APIGroup` is a free-form string written
-by the provider. NSO preserves that field and the provider-owned `Programmed`
-condition across reconcile, release, and rebind. Its regression test now
-covers the change from the old cloud group to the Galactic group; no NSO
-controller code change is required for that reference transition.
+NSO writes `NetworkInterfaceAttachmentRef.APIGroup` as
+`galactic.datumapis.com` when its cell reconciler creates a new attachment.
+The tenant-facing NSO CRDs remain in `networking.datumapis.com`. Galactic's
+BGP reconciler projects data-plane programming status to the Galactic
+attachment and NSO interface and claim.
 
 The old group's VPC finalizers require the old controller to finish deletion,
 or an operator-reviewed cleanup after the old objects are no longer serving.

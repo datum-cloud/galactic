@@ -56,7 +56,6 @@ type options struct {
 	webhookCertDir     string
 	leaderElect        bool
 	controllerUsername string
-	attachmentMode     string
 	identityClass      string
 	identityNamespace  string
 	platformProject    string
@@ -94,8 +93,6 @@ func newRootCommand() *cobra.Command {
 	f.StringVar(&o.controllerUsername, "controller-username", "",
 		"Authenticated username this controller runs as, the only one allowed to write the reserved "+
 			"default policy (default system:serviceaccount:<namespace>:galactic-controller)")
-	f.StringVar(&o.attachmentMode, "attachment-mode", "",
-		"Required for cell controllers: Netns, Hypervisor or HypervisorDeclared")
 	f.StringVar(&o.identityClass, "identity-class", "", "Fabric role: IPClass for globally unique fabric identities")
 	f.StringVar(&o.identityNamespace, "identity-namespace", "default", "Fabric role: namespace for platform IP claims")
 	f.StringVar(&o.platformProject, "platform-project", "", "Fabric role: platform project for IPAM")
@@ -110,10 +107,6 @@ func run(parent context.Context, o *options) error {
 	}
 	if o.role != RoleCell {
 		return fmt.Errorf("--role must be %q or %q, got %q", RoleCell, RoleFabric, o.role)
-	}
-	mode, err := parseAttachmentMode(o.attachmentMode)
-	if err != nil {
-		return err
 	}
 	if o.controllerUsername == "" {
 		o.controllerUsername = "system:serviceaccount:" + o.namespace + ":galactic-controller"
@@ -152,7 +145,7 @@ func run(parent context.Context, o *options) error {
 	if err := Setup(mgr, o.controllerUsername); err != nil {
 		return err
 	}
-	if err := SetupCloud(mgr, mode); err != nil {
+	if err := SetupCloud(mgr); err != nil {
 		return err
 	}
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -165,19 +158,8 @@ func run(parent context.Context, o *options) error {
 	return mgr.Start(ctx)
 }
 
-func parseAttachmentMode(value string) (cloudv1alpha1.VPCAttachmentInterfaceMode, error) {
-	switch mode := cloudv1alpha1.VPCAttachmentInterfaceMode(value); mode {
-	case cloudv1alpha1.VPCAttachmentInterfaceModeNetns,
-		cloudv1alpha1.VPCAttachmentInterfaceModeHypervisor,
-		cloudv1alpha1.VPCAttachmentInterfaceModeHypervisorDeclared:
-		return mode, nil
-	default:
-		return "", fmt.Errorf("--attachment-mode must be Netns, Hypervisor or HypervisorDeclared, got %q", value)
-	}
-}
-
-// SetupCloud registers the cloud cell controllers on the same manager and lease.
-func SetupCloud(mgr ctrl.Manager, mode cloudv1alpha1.VPCAttachmentInterfaceMode) error {
+// SetupCloud registers the Galactic data-plane status controller.
+func SetupCloud(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &cloudv1alpha1.VPCAttachment{},
 		cloudcontroller.IndexVPCAttachmentIdentity, func(obj client.Object) []string {
 			attachment, ok := obj.(*cloudv1alpha1.VPCAttachment)
@@ -193,20 +175,6 @@ func SetupCloud(mgr ctrl.Manager, mode cloudv1alpha1.VPCAttachmentInterfaceMode)
 		return fmt.Errorf("index VPC attachment identity: %w", err)
 	}
 	for name, setup := range map[string]func() error{
-		"NetworkContext": func() error {
-			reconciler := &cloudcontroller.NetworkContextReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
-			return reconciler.SetupWithManager(mgr)
-		},
-		"Subnet": func() error {
-			reconciler := &cloudcontroller.SubnetReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
-			return reconciler.SetupWithManager(mgr)
-		},
-		"NetworkInterface": func() error {
-			reconciler := &cloudcontroller.NetworkInterfaceReconciler{
-				Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(), AttachmentMode: mode,
-			}
-			return reconciler.SetupWithManager(mgr)
-		},
 		"BGPAdvertisement": func() error {
 			reconciler := &cloudcontroller.BGPAdvertisementReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
 			return reconciler.SetupWithManager(mgr)

@@ -30,6 +30,8 @@ import (
 )
 
 const (
+	LabelVPCAttachment = "galactic.datumapis.com/vpc-attachment"
+
 	// CNIVersion is the only conflist version galactic-bgp reconstructs a
 	// prevResult from; "1.1.0" also works, anything older fails every ADD.
 	CNIVersion = "1.0.0"
