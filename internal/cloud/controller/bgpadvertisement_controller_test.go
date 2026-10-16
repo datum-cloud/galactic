@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/cloud/galactic"
 	networkingv1alpha "go.datum.net/network-services-operator/api/v1alpha"
 )
@@ -38,13 +39,20 @@ func TestAdvertisementReprogramsGalacticInterfaceAndClaim(t *testing.T) {
 	if err := cloudv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := bgpv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	if err := networkingv1alpha.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	attachment := &cloudv1alpha1.VPCAttachment{ObjectMeta: metav1.ObjectMeta{Name: "nic", Namespace: "tenant"}}
 	attachment.Spec.InterfaceRef = &cloudv1alpha1.NetworkInterfaceRef{Name: "nic"}
-	attachment.Status.VPC = "vpc-1"
-	attachment.Status.VPCAttachment = "attachment-1"
+	attachment.Status.VPC = "1n"
+	attachment.Status.VPCAttachment = "bQy"
+	identity := galactic.AdvertisementName(attachment.Status.VPC, attachment.Status.VPCAttachment)
+	first := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Name: identity + "-node-a", Namespace: "galactic-system"}}
+	second := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Name: identity + "-node-b", Namespace: "galactic-system"}}
+	unrelated := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Name: "11-22-node-c", Namespace: "galactic-system"}}
 	iface := &networkingv1alpha.NetworkInterface{ObjectMeta: metav1.ObjectMeta{Name: "nic", Namespace: "tenant"}}
 	iface.Spec.ClaimRef = &networkingv1alpha.NetworkInterfaceClaimRef{Name: "claim"}
 	iface.Status.AttachmentRef = &networkingv1alpha.NetworkInterfaceAttachmentRef{
@@ -55,7 +63,8 @@ func TestAdvertisementReprogramsGalacticInterfaceAndClaim(t *testing.T) {
 		Type: networkingv1alpha.NetworkInterfaceClaimProgrammed, Status: metav1.ConditionUnknown, Reason: "APIGroupMigration",
 	})
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(iface, claim, attachment).
-		WithObjects(iface, claim, attachment).Build()
+		WithIndex(&bgpv1alpha1.BGPAdvertisement{}, IndexBGPAdvertisementIdentity, BGPAdvertisementIdentity).
+		WithObjects(iface, claim, attachment, first, second, unrelated).Build()
 	r := &BGPAdvertisementReconciler{Client: cl}
 	programmed := metav1.Condition{Type: cloudv1alpha1.ConditionTypeProgrammed, Status: metav1.ConditionTrue, Reason: "Advertised"}
 	legacy := iface.DeepCopy()
@@ -78,7 +87,8 @@ func TestAdvertisementReprogramsGalacticInterfaceAndClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests := r.advertisementForInterface(ctx, iface)
-	if len(requests) != 1 || requests[0].Name != galactic.AdvertisementName("vpc-1", "attachment-1") {
+	if len(requests) != 2 || requests[0].Namespace != "galactic-system" || requests[0].Name != first.Name ||
+		requests[1].Namespace != "galactic-system" || requests[1].Name != second.Name {
 		t.Fatalf("advertisement replay requests = %#v", requests)
 	}
 	if err := r.projectOntoInterface(ctx, attachment, programmed); err != nil {

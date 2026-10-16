@@ -160,6 +160,10 @@ func run(parent context.Context, o *options) error {
 
 // SetupCloud registers the Galactic data-plane status controller.
 func SetupCloud(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &networkv1alpha1.BGPAdvertisement{},
+		cloudcontroller.IndexBGPAdvertisementIdentity, cloudcontroller.BGPAdvertisementIdentity); err != nil {
+		return fmt.Errorf("index BGP advertisement identity: %w", err)
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &cloudv1alpha1.VPCAttachment{},
 		cloudcontroller.IndexVPCAttachmentIdentity, func(obj client.Object) []string {
 			attachment, ok := obj.(*cloudv1alpha1.VPCAttachment)
