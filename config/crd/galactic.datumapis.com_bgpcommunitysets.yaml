@@ -64,6 +64,7 @@ spec:
                   no-advertise, blackhole).
                   Large: ASN:NN:NN.
                 items:
+                  maxLength: 32
                   type: string
                 maxItems: 256
                 minItems: 1

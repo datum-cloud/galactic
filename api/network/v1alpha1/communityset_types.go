@@ -52,6 +52,7 @@ type BGPCommunitySetSpec struct {
 	// Large: ASN:NN:NN.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=32
 	Entries []string `json:"entries"`
 }
 
