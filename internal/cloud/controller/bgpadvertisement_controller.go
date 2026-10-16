@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -41,7 +43,10 @@ import (
 
 // IndexVPCAttachmentIdentity indexes a VPCAttachment by the "<vpc>-<attachment>"
 // pair galactic names its BGPAdvertisement after.
-const IndexVPCAttachmentIdentity = "status.identity"
+const (
+	IndexVPCAttachmentIdentity    = "status.identity"
+	IndexBGPAdvertisementIdentity = "metadata.identity"
+)
 
 // BGPAdvertisementReconciler projects what the data plane published onto the
 // Datum API. galactic-router sets Advertised from live GoBGP runtime state, so
@@ -172,10 +177,42 @@ func (r *BGPAdvertisementReconciler) advertisementForInterface(ctx context.Conte
 		attachment.Status.VPC == "" || attachment.Status.VPCAttachment == "" {
 		return nil
 	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{
-		Namespace: iface.Namespace,
-		Name:      galactic.AdvertisementName(attachment.Status.VPC, attachment.Status.VPCAttachment),
-	}}}
+	identity := galactic.AdvertisementName(attachment.Status.VPC, attachment.Status.VPCAttachment)
+	if identity == "" {
+		return nil
+	}
+	var advertisements bgpv1alpha1.BGPAdvertisementList
+	if err := r.List(ctx, &advertisements, client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
+		log.FromContext(ctx).Error(err, "list advertisements for migrated interface", "interface", key)
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(advertisements.Items))
+	for i := range advertisements.Items {
+		advertisement := &advertisements.Items[i]
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: advertisement.Namespace,
+			Name:      advertisement.Name,
+		}})
+	}
+	return requests
+}
+
+// BGPAdvertisementIdentity returns the attachment identity shared by every
+// node-qualified advertisement for that attachment.
+func BGPAdvertisementIdentity(obj client.Object) []string {
+	advertisement, ok := obj.(*bgpv1alpha1.BGPAdvertisement)
+	if !ok {
+		return nil
+	}
+	vpc, attachment, ok := galactic.SplitAdvertisementName(advertisement.Name)
+	if !ok {
+		return nil
+	}
+	identity := galactic.AdvertisementName(vpc, attachment)
+	if identity == "" || !strings.HasPrefix(advertisement.Name, identity+"-") {
+		return nil
+	}
+	return []string{identity}
 }
 
 // nodeForRouter resolves the node a BGPRouter executes on.
