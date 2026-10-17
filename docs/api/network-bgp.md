@@ -2051,7 +2051,7 @@ _Appears in:_
 | `targetDependencyDigest` _string_ | TargetDependencyDigest is the recovery target's digest. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
 | `revokedPrefixes` _string array_ | RevokedPrefixes are prefixes no recovery target may originate. They<br />can be added, never removed. |  | MaxItems: 64 <br />items:MaxLength: 43 <br /> |
 | `revokedCredentials` _[FabricObjectIdentity](#fabricobjectidentity) array_ | RevokedCredentials are Secrets no recovery target may use. They can<br />be added, never removed. |  | MaxItems: 32 <br /> |
-| `retired` _boolean_ | Retired means the router is decommissioned; no revision may be<br />restored. It cannot be cleared. |  |  |
+| `retired` _boolean_ | Retired means the router is decommissioned; no revision may be<br />restored. It is set with the router's last promotion, which usually<br />withdraws everything. Since a retired router is never promoted again<br />and recovery changes only with a promotion, it cannot be cleared. |  |  |
 
 
 #### FabricReleaseAuthorization

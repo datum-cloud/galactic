@@ -161,6 +161,11 @@ func TestDeploymentAdmission(t *testing.T) {
 			d.Spec.Target.NodeUID = "new-node"
 			d.Spec.Fence = fence("some-node")
 		}, wantErr: "after its current node is fenced"},
+		{name: "node replaced with a promotion", mutate: func(d *D) {
+			d.Spec.Target.NodeUID = "new-node"
+			d.Spec.Fence = fence("node-uid")
+			promote(d, 1, digestA)
+		}, wantErr: "separate updates"},
 		{name: "node replaced after a fence", mutate: func(d *D) {
 			d.Spec.Target.NodeUID = "new-node"
 			d.Spec.Fence = fence("node-uid")
@@ -224,6 +229,37 @@ func TestDeploymentAdmission(t *testing.T) {
 				promote(d, 2, digestB)
 				d.Spec.Recovery.RevokedPrefixes = append(d.Spec.Recovery.RevokedPrefixes, "198.51.100.0/24")
 			}},
+			{name: "digest changed within an epoch", mutate: func(d *D) {
+				d.Spec.ActivationDependencyDigest = digestB
+			}, wantErr: "activationDependencyDigest changes only with a new epoch"},
+			{name: "required peer that is no address", mutate: func(d *D) {
+				promote(d, 2, digestB)
+				d.Spec.Activation.RequiredPeers = []string{"upstream-1"}
+			}, wantErr: "required peers are IP addresses"},
+			{name: "required static route that is no prefix", mutate: func(d *D) {
+				promote(d, 2, digestB)
+				d.Spec.Activation.RequiredStaticRoutes = []string{"192.0.2.1"}
+			}, wantErr: "required static routes are prefixes"},
+			{name: "recovery to the active revision", mutate: func(d *D) {
+				promote(d, 2, digestB)
+				d.Spec.Recovery.TargetRevisionRef = &networkv1alpha1.LocalObjectRef{Name: d.Spec.ActiveRevisionRef.Name}
+				d.Spec.Recovery.TargetDependencyDigest = digestB
+			}, wantErr: "not the revision it recovers from"},
+			{name: "recovery target not named for its digest", mutate: func(d *D) {
+				promote(d, 2, digestB)
+				d.Spec.Recovery.TargetRevisionRef = &networkv1alpha1.LocalObjectRef{Name: "r-1"}
+				d.Spec.Recovery.TargetDependencyDigest = digestA
+			}, wantErr: "name carries its digest"},
+			{name: "recovery to the previous revision", mutate: func(d *D) {
+				previous := d.Spec.ActiveRevisionRef.Name
+				promote(d, 2, digestB)
+				d.Spec.Recovery.TargetRevisionRef = &networkv1alpha1.LocalObjectRef{Name: previous}
+				d.Spec.Recovery.TargetDependencyDigest = digestA
+			}},
+			{name: "retired with its last promotion", mutate: func(d *D) {
+				promote(d, 2, digestB)
+				d.Spec.Recovery.Retired = true
+			}},
 			{name: "recovery target without a digest", mutate: func(d *D) {
 				promote(d, 2, digestB)
 				d.Spec.Recovery.TargetRevisionRef = &networkv1alpha1.LocalObjectRef{Name: "r-1"}
@@ -262,8 +298,10 @@ func TestDeploymentAdmission(t *testing.T) {
 		if err := c.Update(ctx, d); err != nil {
 			t.Fatalf("retire: %v", err)
 		}
+		cleared := d.DeepCopy()
+		cleared.Spec.Recovery.Retired = false
+		checkAdmission(t, c.Update(ctx, cleared), "recovery changes only with a new epoch")
 		promote(d, 2, digestB)
-		d.Spec.Recovery = &networkv1alpha1.FabricRecovery{Retired: true}
 		checkAdmission(t, c.Update(ctx, d), "a retired router is not promoted")
 	})
 
@@ -388,11 +426,11 @@ func TestReleaseAuthorizationAdmission(t *testing.T) {
 			{"cancel a started release",
 				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseStarted, StartedAt: &started},
 				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseCancelled, StartedAt: &started},
-				"only a pending release can be cancelled"},
+				"moves only forward"},
 			{"reopen a completed release",
 				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseCompleted, StartedAt: &started},
 				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseStarted, StartedAt: &started},
-				"does not change phase"},
+				"moves only forward"},
 			{"conditions before a phase", networkv1alpha1.FabricReleaseAuthorizationStatus{},
 				networkv1alpha1.FabricReleaseAuthorizationStatus{Conditions: []metav1.Condition{{
 					Type: "Accepted", Status: metav1.ConditionTrue, Reason: "Accepted", LastTransitionTime: started,
@@ -400,7 +438,27 @@ func TestReleaseAuthorizationAdmission(t *testing.T) {
 			{"complete a failed release",
 				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseFailed, StartedAt: &started},
 				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseCompleted, StartedAt: &started},
-				"does not change phase"},
+				"moves only forward"},
+			{"restart a started release",
+				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseStarted, StartedAt: &started},
+				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhasePending, StartedAt: &started},
+				"moves only forward"},
+			{"clear the phase",
+				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseStarted, StartedAt: &started},
+				networkv1alpha1.FabricReleaseAuthorizationStatus{StartedAt: &started},
+				"moves only forward"},
+			{"complete without starting",
+				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhasePending},
+				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseCompleted, StartedAt: &started},
+				"moves only forward"},
+			{"unknown back to pending",
+				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseUnknown, StartedAt: &started},
+				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhasePending, StartedAt: &started},
+				"moves only forward"},
+			{"unknown resolved to completed",
+				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseUnknown, StartedAt: &started},
+				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseCompleted, StartedAt: &started},
+				""},
 			{"verify recovery of a failed release",
 				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseFailed, StartedAt: &started},
 				networkv1alpha1.FabricReleaseAuthorizationStatus{Phase: networkv1alpha1.FabricReleasePhaseFailed, StartedAt: &started, RecoveryVerified: true},
@@ -449,5 +507,37 @@ func TestReleaseOutstanding(t *testing.T) {
 		if got := s.Outstanding(); got != tc.want {
 			t.Errorf("phase %q verified %v: outstanding = %v, want %v", tc.phase, tc.verified, got, tc.want)
 		}
+	}
+}
+
+func TestRolloutPolicyAdmission(t *testing.T) {
+	c := startActivationAPI(t)
+	ctx := context.Background()
+	type P = networkv1alpha1.FabricRolloutPolicy
+	for _, tc := range []struct {
+		name    string
+		setup   func(*P)
+		wantErr string
+	}{
+		{name: "defaults"},
+		{name: "optional and maintenance peers", setup: func(p *P) {
+			p.Spec.OptionalPeers = []networkv1alpha1.LocalObjectRef{{Name: "upstream-1"}}
+			p.Spec.MaintenancePeers = []networkv1alpha1.LocalObjectRef{{Name: "upstream-2"}}
+		}},
+		{name: "peer both optional and in maintenance", setup: func(p *P) {
+			p.Spec.OptionalPeers = []networkv1alpha1.LocalObjectRef{{Name: "upstream-1"}}
+			p.Spec.MaintenancePeers = []networkv1alpha1.LocalObjectRef{{Name: "upstream-1"}}
+		}, wantErr: "optional or in maintenance, not both"},
+		{name: "failure domain label that is no label key", setup: func(p *P) {
+			p.Spec.FailureDomainLabel = "not a label"
+		}, wantErr: "spec.failureDomainLabel"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &P{ObjectMeta: metav1.ObjectMeta{Namespace: "fabric", Name: strings.ReplaceAll(tc.name, " ", "-")}}
+			if tc.setup != nil {
+				tc.setup(p)
+			}
+			checkAdmission(t, c.Create(ctx, p), tc.wantErr)
+		})
 	}
 }
