@@ -478,3 +478,33 @@ func TestResumeAddsLaterRevocations(t *testing.T) {
 		t.Fatalf("resume with a later revocation = %+v, want Degraded by it", res)
 	}
 }
+
+// TestResumeNeedsBoundIdentity: a state directory that lost its identity
+// resumes nothing.
+func TestResumeNeedsBoundIdentity(t *testing.T) {
+	r1, r2, _ := revisions(t)
+	dir := t.TempDir()
+	frr := &fakeFRR{}
+	a := newActivator(t, dir, frr, nil)
+	committed(t, a, r1)
+	a.Fault = func(p string) error {
+		if p == FaultAfterAccepted {
+			return errCrash
+		}
+		return nil
+	}
+	req := Request{Activation: activationOf(r2, 2), Revision: r2}
+	if _, err := a.Activate(context.Background(), req); !errors.Is(err, errCrash) {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "identity.json")); err != nil {
+		t.Fatal(err)
+	}
+	reloads := frr.reloads
+	if _, err := a.Resume(context.Background(), req); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("Resume without an identity = %v, want ErrIdentityMismatch", err)
+	}
+	if frr.reloads != reloads {
+		t.Error("Resume reached FRR without an identity")
+	}
+}
