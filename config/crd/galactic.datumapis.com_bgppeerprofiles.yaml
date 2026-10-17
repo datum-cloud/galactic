@@ -177,8 +177,10 @@ spec:
                       - evpn
                       type: string
                     sendCommunity:
-                      description: SendCommunity selects which community attributes
-                        are sent to the peer.
+                      description: |-
+                        SendCommunity restricts the community attributes sent to the peer to
+                        the named ones. Unset sends every community attribute, the pinned
+                        FRR's default.
                       enum:
                       - standard
                       - extended

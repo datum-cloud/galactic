@@ -145,11 +145,6 @@ type FRRRouterParametersSpec struct {
 	// +optional
 	LogFile *FRRLogFile `json:"logFile,omitempty"`
 
-	// IPv6Forwarding sets zebra's ipv6 forwarding flag. The kernel sysctl
-	// remains host configuration.
-	// +optional
-	IPv6Forwarding bool `json:"ipv6Forwarding,omitempty"`
-
 	// LogNeighborChanges logs BGP session state changes.
 	// +optional
 	LogNeighborChanges bool `json:"logNeighborChanges,omitempty"`

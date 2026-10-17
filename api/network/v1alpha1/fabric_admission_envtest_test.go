@@ -355,8 +355,8 @@ func TestFabricRoutingAdmission(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "fabric-v1"},
 			Spec: networkv1alpha1.FRRRouterParametersSpec{
 				DefaultsProfile: networkv1alpha1.FRRDefaultsTraditional, HostnameSuffix: "-fabric",
-				LogFile:        &networkv1alpha1.FRRLogFile{Path: "/var/log/frr/frr.log", Level: "informational"},
-				IPv6Forwarding: true, LogNeighborChanges: true,
+				LogFile:            &networkv1alpha1.FRRLogFile{Path: "/var/log/frr/frr.log", Level: "informational"},
+				LogNeighborChanges: true,
 				BMPTargets: []networkv1alpha1.BMPTarget{{
 					Name: "fabric-api",
 					Connect: networkv1alpha1.BMPConnect{

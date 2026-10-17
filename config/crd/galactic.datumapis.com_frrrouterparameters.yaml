@@ -181,11 +181,6 @@ spec:
                   IPv4UnicastDefault activates IPv4 unicast for every neighbor by
                   default. False renders `no bgp default ipv4-unicast`.
                 type: boolean
-              ipv6Forwarding:
-                description: |-
-                  IPv6Forwarding sets zebra's ipv6 forwarding flag. The kernel sysctl
-                  remains host configuration.
-                type: boolean
               logFile:
                 description: LogFile is FRR's log file. Unset renders no log file
                   line.

@@ -528,7 +528,7 @@ _Appears in:_
 | `safi` _[SAFI](#safi)_ | SAFI is the subsequent address family indicator. |  | Enum: [unicast evpn] <br /> |
 | `softReconfigurationInbound` _boolean_ | SoftReconfigurationInbound keeps a copy of the routes received from<br />the peer, so an import policy change applies without a refresh. |  |  |
 | `prefixLimit` _[BGPPrefixLimit](#bgpprefixlimit)_ | PrefixLimit bounds the prefixes the peer may send in this family. |  |  |
-| `sendCommunity` _[SendCommunityType](#sendcommunitytype)_ | SendCommunity selects which community attributes are sent to the peer. |  | Enum: [standard extended large both] <br /> |
+| `sendCommunity` _[SendCommunityType](#sendcommunitytype)_ | SendCommunity restricts the community attributes sent to the peer to<br />the named ones. Unset sends every community attribute, the pinned<br />FRR's default. |  | Enum: [standard extended large both] <br /> |
 | `allowASIn` _integer_ | AllowASIn accepts routes whose AS path holds the local ASN up to this<br />many times. |  | Maximum: 10 <br />Minimum: 1 <br /> |
 | `importPolicyRef` _[LocalObjectRef](#localobjectref)_ | ImportPolicyRef names the BGPPolicy applied to routes received from<br />the peer in this family. |  |  |
 | `exportPolicyRef` _[LocalObjectRef](#localobjectref)_ | ExportPolicyRef names the BGPPolicy applied to routes sent to the peer<br />in this family. A fabric peer family must resolve one: there is no<br />implicit export-everything default. |  |  |
@@ -1807,7 +1807,6 @@ _Appears in:_
 | `defaultsProfile` _[FRRDefaultsProfile](#frrdefaultsprofile)_ | DefaultsProfile is the `frr defaults` profile. Changing a router's<br />profile restarts bgpd. |  | Enum: [traditional datacenter] <br /> |
 | `hostnameSuffix` _string_ | HostnameSuffix is appended to the bound Node's name to form the<br />router hostname. |  | MaxLength: 63 <br />Pattern: `^[A-Za-z0-9.-]*$` <br /> |
 | `logFile` _[FRRLogFile](#frrlogfile)_ | LogFile is FRR's log file. Unset renders no log file line. |  |  |
-| `ipv6Forwarding` _boolean_ | IPv6Forwarding sets zebra's ipv6 forwarding flag. The kernel sysctl<br />remains host configuration. |  |  |
 | `logNeighborChanges` _boolean_ | LogNeighborChanges logs BGP session state changes. |  |  |
 | `ipv4UnicastDefault` _boolean_ | IPv4UnicastDefault activates IPv4 unicast for every neighbor by<br />default. False renders `no bgp default ipv4-unicast`. |  |  |
 | `allowMartianNexthop` _boolean_ | AllowMartianNexthop accepts next hops FRR otherwise treats as<br />martian. |  |  |
@@ -2168,7 +2167,7 @@ _Appears in:_
 | `standard` | SendCommunityTypeStandard sends only standard communities (ASN:NN).<br /> |
 | `extended` | SendCommunityTypeExtended sends only extended communities (Type:Length:Value).<br /> |
 | `large` | SendCommunityTypeLarge sends only large communities (ASN:NN:NN).<br /> |
-| `both` | SendCommunityTypeBoth is FRR's `send-community both`. Which community<br />attributes a receiver actually gets is tested on the pinned FRR build,<br />not inferred from the keyword.<br /> |
+| `both` | SendCommunityTypeBoth sends standard and extended communities, not<br />large ones.<br /> |
 
 
 #### ServiceEndpoint

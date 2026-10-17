@@ -136,7 +136,9 @@ type BGPPeerFamilySettings struct {
 	// +optional
 	PrefixLimit *BGPPrefixLimit `json:"prefixLimit,omitempty"`
 
-	// SendCommunity selects which community attributes are sent to the peer.
+	// SendCommunity restricts the community attributes sent to the peer to
+	// the named ones. Unset sends every community attribute, the pinned
+	// FRR's default.
 	// +optional
 	SendCommunity *SendCommunityType `json:"sendCommunity,omitempty"`
 

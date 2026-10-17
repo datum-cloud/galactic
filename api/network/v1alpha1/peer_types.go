@@ -35,9 +35,8 @@ const (
 	// SendCommunityTypeLarge sends only large communities (ASN:NN:NN).
 	SendCommunityTypeLarge SendCommunityType = "large"
 
-	// SendCommunityTypeBoth is FRR's `send-community both`. Which community
-	// attributes a receiver actually gets is tested on the pinned FRR build,
-	// not inferred from the keyword.
+	// SendCommunityTypeBoth sends standard and extended communities, not
+	// large ones.
 	SendCommunityTypeBoth SendCommunityType = "both"
 )
 
