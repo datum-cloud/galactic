@@ -829,3 +829,17 @@ func TestDeploymentAgentResolvesIdentityLater(t *testing.T) {
 		t.Errorf("gate %s after resolving", src)
 	}
 }
+
+// TestDeploymentAgentConfigMapStagesNothing: a node on its ConfigMap
+// neither dry-runs the candidate nor reports one.
+func TestDeploymentAgentConfigMapStagesNothing(t *testing.T) {
+	d := deployment(networkv1alpha1.FabricConfigSourceConfigMap)
+	h := newHarness(t, d)
+	h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
+		d.Spec.CandidateRevisionRef = &networkv1alpha1.LocalObjectRef{Name: h.revs[1].Name}
+	})
+	got := h.sync()
+	if got.Status.Staged != nil || condition(got, networkv1alpha1.FabricConditionStaged) != nil {
+		t.Errorf("a ConfigMap node staged: %+v", got.Status.Staged)
+	}
+}

@@ -68,7 +68,7 @@ type Reconciler struct {
 }
 
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=bgprouters,verbs=get;list;watch
-// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=bgprouters/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=bgprouters/status,verbs=patch
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=bgprouterclasses;frrrouterparameters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=bgppeers;bgppeerprofiles;bgppolicies;bgpprefixlists;bgpcommunitysets;bgpadvertisements;bgpstaticroutes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricrouterrevisions,verbs=get;list;watch;create;delete

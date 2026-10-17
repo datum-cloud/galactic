@@ -20,7 +20,7 @@ rules:
     verbs: [get, list]
   - apiGroups: [galactic.datumapis.com]
     resources: [fabricrouterdeployments/status]
-    verbs: [get, update, patch]
+    verbs: [patch]
   - apiGroups: [galactic.datumapis.com]
     resources: [fabricrouterrevisions, fabricreleaseauthorizations]
     verbs: [get]

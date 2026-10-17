@@ -37,6 +37,15 @@ A node's `FabricRouterDeployment` has `spec.source`:
 One lock file in the pod, `/run/frr/fabric-agent.lock`, serializes every writer, so
 the two paths never touch FRR at the same time.
 
+Only `Shadow` and `CRD` dry-run the candidate. A node on its ConfigMap never
+runs `frr-reload.py --test` for a candidate, even though the rollout manager
+names one on every deployment.
+
+Every fabric-router pod shares one ServiceAccount, so an admission policy, not
+RBAC, keeps a node from reporting for another: the agent may write only the
+status of the deployment targeting the Node its token is bound to, by name and
+UID.
+
 ### Enrolling a node
 
 1. Move the deployment to `Shadow`, and watch `status.staged` and the `Staged`

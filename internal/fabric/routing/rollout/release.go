@@ -76,10 +76,9 @@ type ReleaseReconciler struct {
 	Now func() time.Time
 }
 
-// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricreleaseauthorizations,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricreleaseauthorizations/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricreleaseauthorizations,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricreleaseauthorizations/status,verbs=update
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricrolloutpolicies,verbs=get;list;watch
-// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricreleaseauthorizations/finalizers,verbs=update
 
 func (r *ReleaseReconciler) reader() client.Reader {
 	if r.APIReader != nil {

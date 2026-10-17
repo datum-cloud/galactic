@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -27,6 +28,8 @@ import (
 	"go.datum.net/galactic/internal/fabricconfig/activation"
 )
 
+const deploymentsCRD = "fabricrouterdeployments"
+
 // TestAgentWithShippedRBAC runs the deployment agent as the fabric-router
 // ServiceAccount, bound only to config/fabric-router's RBAC and the
 // activation Component's, through an activation and its status write, so
@@ -36,7 +39,7 @@ func TestAgentWithShippedRBAC(t *testing.T) {
 		t.Skip("set KUBEBUILDER_ASSETS for the RBAC envtest")
 	}
 	root := filepath.Join("..", "..")
-	names := []string{"fabricrouterdeployments", "fabricrouterrevisions", "fabricreleaseauthorizations"}
+	names := []string{deploymentsCRD, "fabricrouterrevisions", "fabricreleaseauthorizations"}
 	crds := make([]*apiextensionsv1.CustomResourceDefinition, 0, len(names))
 	for _, name := range names {
 		data, err := os.ReadFile(filepath.Join(root, "config", "crd", "galactic.datumapis.com_"+name+".yaml"))
@@ -79,6 +82,7 @@ func TestAgentWithShippedRBAC(t *testing.T) {
 		filepath.Join("config", "fabric-router", "serviceaccount.yaml"),
 		filepath.Join("config", "fabric-router", "rbac.yaml"),
 		filepath.Join("config", "fabric-router", "components", "activation", "rbac.yaml"),
+		filepath.Join("config", "fabric-router", "components", "activation", "status-policy.yaml"),
 	} {
 		applyManifest(t, admin, filepath.Join(root, file))
 	}
@@ -115,16 +119,28 @@ func TestAgentWithShippedRBAC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The agent, as the fabric-router ServiceAccount.
-	asAgent := rest.CopyConfig(cfg)
-	asAgent.Impersonate = rest.ImpersonationConfig{
-		UserName: "system:serviceaccount:" + depNamespace + ":fabric-router",
-		Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:" + depNamespace, "system:authenticated"},
+	// A pod on another Node may not write this deployment's status. The
+	// policy takes effect once the API server has loaded it.
+	refused := func(c client.Client) bool {
+		d := &networkv1alpha1.FabricRouterDeployment{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(dep), d); err != nil {
+			t.Fatal(err)
+		}
+		before := d.DeepCopy()
+		d.Status.AgentVersion = "spoofed"
+		err := c.Status().Patch(ctx, d, client.MergeFrom(before))
+		return err != nil && strings.Contains(err.Error(), "its own Node")
 	}
-	agentClient, err := client.New(asAgent, client.Options{Scheme: scheme})
-	if err != nil {
-		t.Fatal(err)
+	eventually(t, "the status policy to refuse another Node's write", func() bool {
+		return refused(agentAs(t, cfg, scheme, "edge-b", "other-node-uid"))
+	})
+	// A replacement Node reusing the name is another Node.
+	if !refused(agentAs(t, cfg, scheme, depNode, "replaced-node-uid")) {
+		t.Error("a pod on a replacement Node with the same name wrote the status")
 	}
+
+	// The agent, as the fabric-router ServiceAccount on its own Node.
+	agentClient := agentAs(t, cfg, scheme, depNode, string(node.UID))
 	// Its identity reads: its Node and the cluster's ID.
 	if err := agentClient.Get(ctx, types.NamespacedName{Name: depNode}, &corev1.Node{}); err != nil {
 		t.Fatalf("read its Node: %v", err)
@@ -159,6 +175,39 @@ func TestAgentWithShippedRBAC(t *testing.T) {
 	if got.Status.AppliedEpoch != 1 || got.Status.AppliedRevision != rev.Name {
 		t.Errorf("status after sync: applied epoch %d revision %q", got.Status.AppliedEpoch, got.Status.AppliedRevision)
 	}
+}
+
+// agentAs is a client for the fabric-router ServiceAccount whose token is
+// bound to a pod on the named Node.
+func agentAs(t *testing.T, cfg *rest.Config, scheme *runtime.Scheme, nodeName, nodeUID string) client.Client {
+	t.Helper()
+	as := rest.CopyConfig(cfg)
+	as.Impersonate = rest.ImpersonationConfig{
+		UserName: "system:serviceaccount:" + depNamespace + ":fabric-router",
+		Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:" + depNamespace, "system:authenticated"},
+		Extra: map[string][]string{
+			"authentication.kubernetes.io/node-name": {nodeName},
+			"authentication.kubernetes.io/node-uid":  {nodeUID},
+		},
+	}
+	c, err := client.New(as, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// eventually polls cond for up to 20 seconds.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 func applyManifest(t *testing.T, c client.Client, path string) {

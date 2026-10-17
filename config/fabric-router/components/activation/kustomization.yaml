@@ -23,7 +23,9 @@
 #     on a host without it stays in ContainerCreating and FRR does not
 #     start;
 #   - RBAC to read the node's deployment, its revisions, release
-#     authorizations, to write the deployment's status,
+#     authorizations, to write the deployment's status (and a
+#     ValidatingAdmissionPolicy limiting that write to the deployment
+#     targeting the pod's own Node),
 #     and to read its own Node and the kube-system namespace UID (the
 #     cluster's identity).
 #
@@ -39,6 +41,7 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 resources:
   - rbac.yaml
+  - status-policy.yaml
 patches:
   - path: daemonset-patch.yaml
     target:

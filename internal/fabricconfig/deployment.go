@@ -184,7 +184,13 @@ func (d *DeploymentAgent) Sync(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, d.writeStatus(ctx, dep, status))
 	}
-	d.stage(ctx, dep, status)
+	if JournalSource(journal) == networkv1alpha1.FabricConfigSourceConfigMap {
+		// A node on its ConfigMap stages nothing: Shadow is where an
+		// operator asks for the candidate to be validated and diffed.
+		d.unstage(status)
+	} else {
+		d.stage(ctx, dep, status)
+	}
 	switch {
 	case JournalSource(journal) == networkv1alpha1.FabricConfigSourceCRD && dep.Spec.ActivationEpoch > 0:
 		d.activate(ctx, dep, status)
@@ -310,14 +316,19 @@ func (d *DeploymentAgent) checkHandoff(ctx context.Context, dep *networkv1alpha1
 	return nil
 }
 
+// unstage clears what an earlier stage reported.
+func (d *DeploymentAgent) unstage(status *networkv1alpha1.FabricRouterDeploymentStatus) {
+	status.Staged = nil
+	d.staged = ""
+	meta.RemoveStatusCondition(&status.Conditions, networkv1alpha1.FabricConditionStaged)
+}
+
 // stage validates the candidate revision without applying it.
 func (d *DeploymentAgent) stage(ctx context.Context, dep *networkv1alpha1.FabricRouterDeployment,
 	status *networkv1alpha1.FabricRouterDeploymentStatus) {
 	ref := dep.Spec.CandidateRevisionRef
 	if ref == nil {
-		status.Staged = nil
-		d.staged = ""
-		meta.RemoveStatusCondition(&status.Conditions, networkv1alpha1.FabricConditionStaged)
+		d.unstage(status)
 		return
 	}
 	if ref.Name == d.staged && status.Staged != nil && status.Staged.Revision == ref.Name {
