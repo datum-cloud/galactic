@@ -393,7 +393,12 @@ func (d *DeploymentAgent) activate(ctx context.Context, dep *networkv1alpha1.Fab
 		// Authorization gates the first acceptance; a redelivery resumes
 		// what was already authorized.
 		if err := d.authorized(ctx, dep); err != nil {
-			accepted(metav1.ConditionFalse, reasonNotAuthorized, err.Error())
+			// The rollout manager stops waiting on a refused promotion.
+			reason := reasonNotAuthorized
+			if errors.Is(err, errRefused) {
+				reason = networkv1alpha1.FabricReasonPromotionRefused
+			}
+			accepted(metav1.ConditionFalse, reason, err.Error())
 			return
 		}
 	}
@@ -494,18 +499,28 @@ func (d *DeploymentAgent) persist(ctx context.Context, dep *networkv1alpha1.Fabr
 func (d *DeploymentAgent) authorized(ctx context.Context, dep *networkv1alpha1.FabricRouterDeployment) error {
 	ref := dep.Spec.AuthorizationRef
 	if ref == nil {
-		return errors.New("the promotion names no release authorization")
+		return fmt.Errorf("%w: the promotion names no release authorization", errRefused)
 	}
 	var auth networkv1alpha1.FabricReleaseAuthorization
 	if err := d.Client.Get(ctx, types.NamespacedName{Namespace: dep.Namespace, Name: ref.Name}, &auth); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: release authorization %s is gone", errRefused, ref.Name)
+		}
 		return fmt.Errorf("read release authorization %s: %w", ref.Name, err)
 	}
 	if string(auth.UID) != ref.UID {
-		return fmt.Errorf("release authorization %s is UID %s, the promotion names %s", ref.Name, auth.UID, ref.UID)
+		return fmt.Errorf("%w: release authorization %s is UID %s, the promotion names %s", errRefused, ref.Name,
+			auth.UID, ref.UID)
 	}
-	if auth.Status.Phase != networkv1alpha1.FabricReleasePhaseStarted {
-		// Only a started release activates; a pending, failed, unknown or
-		// finished one may still block others but authorizes nothing new.
+	switch auth.Status.Phase {
+	case networkv1alpha1.FabricReleasePhaseStarted:
+	case networkv1alpha1.FabricReleasePhaseCompleted, networkv1alpha1.FabricReleasePhaseFailed,
+		networkv1alpha1.FabricReleasePhaseCancelled:
+		// A release never starts again once it ends.
+		return fmt.Errorf("%w: release authorization %s is %s", errRefused, ref.Name, auth.Status.Phase)
+	default:
+		// Only a started release activates; a pending or unknown one
+		// authorizes nothing yet.
 		return fmt.Errorf("release authorization %s is %q, not Started", ref.Name, auth.Status.Phase)
 	}
 	for _, t := range auth.Spec.Deployments {
@@ -515,9 +530,13 @@ func (d *DeploymentAgent) authorized(ctx context.Context, dep *networkv1alpha1.F
 			return nil
 		}
 	}
-	return fmt.Errorf("release authorization %s does not cover %s at digest %s on this deployment",
-		ref.Name, dep.Spec.ActiveRevisionRef.Name, dep.Spec.ActivationDependencyDigest)
+	return fmt.Errorf("%w: release authorization %s does not cover %s at digest %s on this deployment",
+		errRefused, ref.Name, dep.Spec.ActiveRevisionRef.Name, dep.Spec.ActivationDependencyDigest)
 }
+
+// errRefused is a promotion no release authorization will ever allow, as
+// authorizations are immutable and a finished release never restarts.
+var errRefused = errors.New("refused")
 
 // request assembles an activation request from the deployment.
 func (d *DeploymentAgent) request(ctx context.Context, dep *networkv1alpha1.FabricRouterDeployment,

@@ -40,6 +40,10 @@ const (
 	FabricReasonRecoveryTargetUsed = "RecoveryTargetUsed"
 	FabricReasonRecoveryConflict   = "RecoveryConflict"
 	FabricReasonCommitted          = "Committed"
+	// FabricReasonPromotionRefused is an Accepted condition for a promotion
+	// the agent never accepted and never will: its release authorization
+	// is gone, finished, or does not cover the promotion.
+	FabricReasonPromotionRefused = "PromotionRefused"
 )
 
 // FabricRouterDeployment is the single activation point of one fabric

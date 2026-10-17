@@ -226,6 +226,48 @@ func TestFailedReleaseOperatorConfirmation(t *testing.T) {
 	}
 }
 
+// TestReleasePromotesOverRefusedEpoch: a router promoted by a release that
+// failed before its agent accepted the promotion is refused by the agent,
+// and a later release promotes it rather than waiting on it forever.
+func TestReleasePromotesOverRefusedEpoch(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a", "a2": "a"}, widePolicy()...)
+	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1", "a2")
+	f.reconcile(relName)
+	f.report("a1", networkv1alpha1.FabricStageApplyFailed, false)
+	if a := f.reconcile(relName); a.Status.Phase != networkv1alpha1.FabricReleasePhaseFailed {
+		t.Fatalf("rel phase %s", a.Status.Phase)
+	}
+	d := f.deployment("a2")
+	if d.Spec.ActivationEpoch != 1 {
+		t.Fatal("rel did not promote a2")
+	}
+	hb := metav1.Now()
+	d.Status.HeartbeatTime = &hb
+	d.Status.Conditions = []metav1.Condition{{
+		Type: networkv1alpha1.FabricConditionAccepted, Status: metav1.ConditionFalse,
+		Reason: networkv1alpha1.FabricReasonPromotionRefused, ObservedGeneration: d.Generation,
+		LastTransitionTime: hb,
+	}}
+	if err := f.c.Status().Update(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	a := &networkv1alpha1.FabricReleaseAuthorization{}
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: relName}, a); err != nil {
+		t.Fatal(err)
+	}
+	a.Annotations = map[string]string{RecoveryVerifiedAnnotation: "oncall"}
+	if err := f.c.Update(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(relName)
+	f.release("rel2", networkv1alpha1.FabricReleaseTypeRelease, 2, "a2")
+	f.reconcile("rel2")
+	if d := f.deployment("a2"); d.Spec.ActivationEpoch != 2 || d.Spec.AuthorizationRef.Name != "rel2" {
+		t.Errorf("a2 at epoch %d under %s; rel2 waited on a refused promotion", d.Spec.ActivationEpoch,
+			d.Spec.AuthorizationRef.Name)
+	}
+}
+
 func TestHeartbeatTimeoutFloor(t *testing.T) {
 	p := effectivePolicy(&networkv1alpha1.FabricRolloutPolicy{Spec: networkv1alpha1.FabricRolloutPolicySpec{
 		HeartbeatTimeoutSeconds: 5,
@@ -314,6 +356,36 @@ func TestReleaseRechecksBeforePromoting(t *testing.T) {
 	if got := f.deployment("a1"); got.Spec.AuthorizationRef.Name != "other" || got.Spec.ActivationEpoch != 1 {
 		t.Errorf("a1 at epoch %d under %s; promoted over another release's epoch", got.Spec.ActivationEpoch,
 			got.Spec.AuthorizationRef.Name)
+	}
+}
+
+// A promotion its agent refused for good, under a release that ended
+// before the agent accepted it, never activates and holds no slot.
+func TestBusyUntilRefused(t *testing.T) {
+	r1 := revisionWith("r-aaaaaaaaaa", digestA, nil)
+	d := committedDeployment(2, r1)
+	d.Status.AppliedEpoch = 1
+	d.Generation = 3
+	refusal := metav1.Condition{
+		Type: networkv1alpha1.FabricConditionAccepted, Status: metav1.ConditionFalse,
+		Reason: networkv1alpha1.FabricReasonPromotionRefused, ObservedGeneration: 2,
+	}
+	d.Status.Conditions = []metav1.Condition{refusal}
+	if !busy(d) {
+		t.Error("a refusal reported for an earlier generation released a promoted router")
+	}
+	d.Status.Conditions[0].ObservedGeneration = 3
+	if busy(d) {
+		t.Error("a router whose agent refused its promotion still counts as busy")
+	}
+	d.Status.Conditions[0].Reason = "NotAuthorized"
+	if !busy(d) {
+		t.Error("a refusal that may yet clear released a promoted router")
+	}
+	d.Status.Conditions[0].Reason = networkv1alpha1.FabricReasonPromotionRefused
+	d.Status.Epochs = []networkv1alpha1.FabricEpochStatus{{Epoch: 2, Stage: networkv1alpha1.FabricStageAccepted}}
+	if !busy(d) {
+		t.Error("a router activating its epoch counts as free")
 	}
 }
 

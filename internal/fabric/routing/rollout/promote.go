@@ -14,6 +14,7 @@ import (
 	"slices"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -146,9 +147,9 @@ func promote(d *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.Fab
 
 // busy reports whether a deployment's current epoch, under any release,
 // is still activating: promoted, and neither committed nor finished
-// failing.
+// failing, nor refused by its agent.
 func busy(d *networkv1alpha1.FabricRouterDeployment) bool {
-	if d.Spec.ActivationEpoch == 0 || committed(d) {
+	if d.Spec.ActivationEpoch == 0 || committed(d) || refused(d) {
 		return false
 	}
 	for _, e := range d.Status.Epochs {
@@ -165,6 +166,21 @@ func busy(d *networkv1alpha1.FabricRouterDeployment) bool {
 		}
 	}
 	return true
+}
+
+// refused reports whether the agent refused the current promotion for
+// good, before accepting it: its release ended or never covered it. The
+// agent accepts nothing without reporting it, so a refusal reported for
+// this generation, with no outcome for its epoch, means nothing activates.
+func refused(d *networkv1alpha1.FabricRouterDeployment) bool {
+	for _, e := range d.Status.Epochs {
+		if e.Epoch == d.Spec.ActivationEpoch {
+			return false
+		}
+	}
+	c := meta.FindStatusCondition(d.Status.Conditions, networkv1alpha1.FabricConditionAccepted)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == networkv1alpha1.FabricReasonPromotionRefused &&
+		c.ObservedGeneration == d.Generation
 }
 
 // degradedFinal reports whether the agent found no eligible recovery for

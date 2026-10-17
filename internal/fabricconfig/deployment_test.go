@@ -415,8 +415,10 @@ func TestDeploymentAgentRefusesUnauthorized(t *testing.T) {
 			}
 			h.update(func(d *networkv1alpha1.FabricRouterDeployment) { promote(d, 1, h.revs[0]) })
 			got := h.sync()
-			if c := condition(got,
-				networkv1alpha1.FabricConditionAccepted); c == nil || c.Reason != reasonNotAuthorized {
+			// None of these can ever be authorized, so each is refused for
+			// good and the rollout manager stops waiting on it.
+			if c := condition(got, networkv1alpha1.FabricConditionAccepted); c == nil ||
+				c.Reason != networkv1alpha1.FabricReasonPromotionRefused {
 				t.Fatalf("Accepted = %+v", c)
 			}
 			if h.frr.reloads != 0 || len(h.agent.Activator.Journal().Records()) > 1 {
@@ -749,10 +751,11 @@ func TestDeploymentAgentReassertsAfterReturn(t *testing.T) {
 }
 
 func TestDeploymentAgentRefusesUnstartedRelease(t *testing.T) {
-	for _, phase := range []networkv1alpha1.FabricReleasePhase{
-		networkv1alpha1.FabricReleasePhasePending,
-		networkv1alpha1.FabricReleasePhaseFailed,
-		networkv1alpha1.FabricReleasePhaseUnknown,
+	// A pending or unknown release may still start; a failed one never will.
+	for phase, reason := range map[networkv1alpha1.FabricReleasePhase]string{
+		networkv1alpha1.FabricReleasePhasePending: reasonNotAuthorized,
+		networkv1alpha1.FabricReleasePhaseFailed:  networkv1alpha1.FabricReasonPromotionRefused,
+		networkv1alpha1.FabricReleasePhaseUnknown: reasonNotAuthorized,
 	} {
 		t.Run(string(phase), func(t *testing.T) {
 			h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
@@ -763,8 +766,8 @@ func TestDeploymentAgentRefusesUnstartedRelease(t *testing.T) {
 			}
 			h.update(func(d *networkv1alpha1.FabricRouterDeployment) { promote(d, 1, h.revs[0]) })
 			got := h.sync()
-			if c := condition(got, networkv1alpha1.FabricConditionAccepted); c == nil || c.Reason != reasonNotAuthorized {
-				t.Fatalf("Accepted = %+v", c)
+			if c := condition(got, networkv1alpha1.FabricConditionAccepted); c == nil || c.Reason != reason {
+				t.Fatalf("Accepted = %+v, want reason %s", c, reason)
 			}
 			if h.frr.reloads != 0 {
 				t.Error("a release that is not Started activated")
