@@ -14,6 +14,7 @@ Package v1alpha1 contains API Schema definitions for the galactic.datumapis.com/
 - [BGPPeer](#bgppeer)
 - [BGPPolicy](#bgppolicy)
 - [BGPRouter](#bgprouter)
+- [BGPRouterClass](#bgprouterclass)
 - [BGPVRFInstance](#bgpvrfinstance)
 - [EgressShard](#egressshard)
 - [ServiceEndpoint](#serviceendpoint)
@@ -782,6 +783,82 @@ BGPPeer, BGPAdvertisement, and BGPPolicy resources.
 | `status` _[BGPRouterStatus](#bgprouterstatus)_ |  |  |  |
 
 
+#### BGPRouterClass
+
+
+
+BGPRouterClass names the implementation that owns the BGPRouters
+referencing it, the way a GatewayClass or StorageClass does. Selecting a
+class is what lets several routing implementations coexist on one node:
+each acts only on routers of its own classes.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `BGPRouterClass` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[BGPRouterClassSpec](#bgprouterclassspec)_ |  |  |  |
+| `status` _[BGPRouterClassStatus](#bgprouterclassstatus)_ |  |  |  |
+
+
+#### BGPRouterClassParametersRef
+
+
+
+BGPRouterClassParametersRef references a cluster-scoped parameters object.
+
+
+
+_Appears in:_
+- [BGPRouterClassSpec](#bgprouterclassspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `group` _string_ | Group is the API group of the parameters object. |  | MaxLength: 253 <br /> |
+| `kind` _string_ | Kind is the kind of the parameters object. |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+| `name` _string_ | Name is the name of the parameters object. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+
+
+#### BGPRouterClassSpec
+
+
+
+BGPRouterClassSpec defines the implementation behind a BGPRouterClass.
+
+
+
+_Appears in:_
+- [BGPRouterClass](#bgprouterclass)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `controllerName` _string_ | ControllerName identifies the controller that owns routers of this<br />class, as a domain-prefixed path. Immutable. |  | MaxLength: 253 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9.]*[a-z0-9])?/[A-Za-z0-9][-A-Za-z0-9_./]*$` <br />Required: \{\} <br /> |
+| `parametersRef` _[BGPRouterClassParametersRef](#bgprouterclassparametersref)_ | ParametersRef references the implementation's parameters for routers<br />of this class, such as FRRRouterParameters. Immutable: a parameter<br />change is a new parameters object referenced by a new class. |  |  |
+
+
+#### BGPRouterClassStatus
+
+
+
+BGPRouterClassStatus is the observed state of a BGPRouterClass, written by
+its controller.
+
+
+
+_Appears in:_
+- [BGPRouterClass](#bgprouterclass)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
+
+
 #### BGPRouterPeerSummary
 
 
@@ -830,6 +907,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `routerClassName` _string_ | RouterClassName names the BGPRouterClass whose controller owns this<br />router. A router without one is owned by the Galactic EVPN<br />implementation (galactic-router and its related controllers). A<br />router naming a class is ignored by every component except that<br />class's controller, and by every component when the class does not<br />exist. Immutable. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `plane` _[BGPRoutingPlane](#bgproutingplane)_ | Plane is the routing plane this router belongs to. Unset means the<br />tenant EVPN overlay. Underlay requires a routerClassName. Immutable. |  | Enum: [Underlay Overlay] <br /> |
 | `targetRef` _[TargetRef](#targetref)_ | TargetRef identifies the Node this router executes on. |  | Required: \{\} <br /> |
 | `localASN` _integer_ | LocalASN is the BGP Autonomous System Number for this router.<br />Must be a valid 2-byte or 4-byte ASN per RFC 6793. |  | Minimum: 1 <br />Required: \{\} <br /> |
 | `routerID` _string_ | RouterID is a unique 32-bit identifier expressed in IPv4 dotted-decimal notation.<br />In an IPv6-only underlay this is a logical identifier only. |  | Format: ipv4 <br />Required: \{\} <br /> |
@@ -856,6 +935,24 @@ _Appears in:_
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `peers` _[BGPRouterPeerSummary](#bgprouterpeersummary)_ | Peers summarizes peer session counts. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
+
+
+#### BGPRoutingPlane
+
+_Underlying type:_ _string_
+
+BGPRoutingPlane names which routing plane a BGPRouter belongs to.
+
+_Validation:_
+- Enum: [Underlay Overlay]
+
+_Appears in:_
+- [BGPRouterSpec](#bgprouterspec)
+
+| Field | Description |
+| --- | --- |
+| `Underlay` | BGPRoutingPlaneUnderlay is the fabric underlay that carries the<br />overlay's sessions and SRv6 locators between nodes.<br /> |
+| `Overlay` | BGPRoutingPlaneOverlay is the tenant EVPN overlay.<br /> |
 
 
 #### BGPVRFInstance

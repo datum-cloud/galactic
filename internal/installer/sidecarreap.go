@@ -189,11 +189,16 @@ func ingressAdvertisements(
 		return nil, fmt.Errorf("list BGPAdvertisements in namespace %s: %w", namespace, err)
 	}
 
+	routerNames, err := galacticRouterNamesForNode(ctx, k8s, namespace, nodeName)
+	if err != nil {
+		return nil, err
+	}
+
 	segment := crdnames.IngressAdvertisementSegment()
 	var out []ingressAdvertisement
 	for i := range list.Items {
 		a := &list.Items[i]
-		if a.Spec.RouterRef.Name != nodeName || !isIngressAdvertisementName(a.Name, nodeName, segment) {
+		if _, mine := routerNames[a.Spec.RouterRef.Name]; !mine || !isIngressAdvertisementName(a.Name, nodeName, segment) {
 			continue
 		}
 		out = append(out, ingressAdvertisement{

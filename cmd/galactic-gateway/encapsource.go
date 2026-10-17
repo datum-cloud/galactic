@@ -101,8 +101,9 @@ func resolveEncapSource(ctx context.Context, reader client.Reader, nodeName, con
 }
 
 // encapSourceFromRouters derives this node's locator address from every
-// BGPRouter whose target is the Node nodeName (an empty kind counts as Node)
-// and that carries a locator and node ID. It returns noRouterYetError when
+// Galactic-owned BGPRouter (one with no routerClassName) whose target is the
+// Node nodeName (an empty kind counts as Node) and that carries a locator and
+// node ID. It returns noRouterYetError when
 // there is none, and listRoutersError when the list fails.
 func encapSourceFromRouters(ctx context.Context, reader client.Reader, nodeName string) (netip.Addr, error) {
 	list := &bgpv1alpha1.BGPRouterList{}
@@ -116,7 +117,7 @@ func encapSourceFromRouters(ctx context.Context, reader client.Reader, nodeName 
 	)
 	for i := range list.Items {
 		router := &list.Items[i]
-		if router.Spec.TargetRef.Name != nodeName {
+		if router.Spec.TargetRef.Name != nodeName || !bgpv1alpha1.IsLegacyOwned(router) {
 			continue
 		}
 		if kind := router.Spec.TargetRef.Kind; kind != "" && kind != "Node" {

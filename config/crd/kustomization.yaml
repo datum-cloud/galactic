@@ -6,6 +6,7 @@ resources:
   - galactic.datumapis.com_bgppeers.yaml
   - galactic.datumapis.com_bgppolicies.yaml
   - galactic.datumapis.com_bgpprefixlists.yaml
+  - galactic.datumapis.com_bgprouterclasses.yaml
   - galactic.datumapis.com_bgprouters.yaml
   - galactic.datumapis.com_bgpvrfinstances.yaml
   - galactic.datumapis.com_egressshards.yaml
