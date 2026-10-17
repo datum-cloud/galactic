@@ -47,7 +47,6 @@ const (
 	reasonActivating       = "Activating"
 	reasonStaged           = "Staged"
 	reasonRejected         = "Rejected"
-	reasonWaiting          = "WaitingForPromotion"
 	reasonPersistFailed    = "PersistFailed"
 	reasonReassertFailed   = "ReassertFailed"
 )
@@ -194,11 +193,17 @@ func (d *DeploymentAgent) Sync(ctx context.Context) error {
 	} else {
 		d.stage(ctx, dep, status)
 	}
+	if JournalSource(journal) != networkv1alpha1.FabricConfigSourceCRD {
+		// Degraded describes an activation; off CRD the node runs its
+		// ConfigMap, and status.epochs keeps what happened.
+		meta.RemoveStatusCondition(&status.Conditions, networkv1alpha1.FabricConditionDegraded)
+	}
 	switch {
 	case JournalSource(journal) == networkv1alpha1.FabricConfigSourceCRD && dep.Spec.ActivationEpoch > 0:
 		d.activate(ctx, dep, status)
 	case !pending:
-		setCondition(status, dep, networkv1alpha1.FabricConditionAccepted, metav1.ConditionFalse, reasonWaiting,
+		setCondition(status, dep, networkv1alpha1.FabricConditionAccepted, metav1.ConditionFalse,
+			networkv1alpha1.FabricReasonWaitingForPromotion,
 			"no active revision on the CRD source")
 	}
 	d.report(status, dep)
@@ -722,7 +727,8 @@ func (d *DeploymentAgent) report(status *networkv1alpha1.FabricRouterDeploymentS
 			networkv1alpha1.FabricReasonCommitted,
 			"the active revision is committed")
 	} else {
-		setCondition(status, dep, networkv1alpha1.FabricConditionReady, metav1.ConditionFalse, reasonWaiting,
+		setCondition(status, dep, networkv1alpha1.FabricConditionReady, metav1.ConditionFalse,
+			networkv1alpha1.FabricReasonWaitingForPromotion,
 			"the active revision is not committed")
 	}
 }

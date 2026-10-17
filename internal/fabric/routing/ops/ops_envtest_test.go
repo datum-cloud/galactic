@@ -331,3 +331,20 @@ func TestRebindAndMove(t *testing.T) {
 		t.Errorf("fleet status %q, %v", out.String(), err)
 	}
 }
+
+// TestAttention: only conditions an operator acts on are flagged; a router
+// with nothing promoted to it is as it should be.
+func TestAttention(t *testing.T) {
+	d := &networkv1alpha1.FabricRouterDeployment{}
+	d.Status.Conditions = []metav1.Condition{{Type: networkv1alpha1.FabricConditionAccepted, Status: "False",
+		Reason: networkv1alpha1.FabricReasonWaitingForPromotion}}
+	if got := attention(d); got != "-" {
+		t.Errorf("attention = %q for a router waiting for a promotion", got)
+	}
+	d.Status.Conditions[0].Reason = networkv1alpha1.FabricReasonPromotionRefused
+	d.Status.Conditions = append(d.Status.Conditions, metav1.Condition{Type: networkv1alpha1.FabricConditionDegraded,
+		Status: "True", Reason: networkv1alpha1.FabricReasonNoEligibleRecovery})
+	if got := attention(d); got != "Degraded:NoEligibleRecovery,NotAccepted:PromotionRefused" {
+		t.Errorf("attention = %q", got)
+	}
+}

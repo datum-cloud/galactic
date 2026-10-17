@@ -469,6 +469,16 @@ func TestDeploymentAgentHandoff(t *testing.T) {
 		})
 	}
 
+	// An activation that failed on CRD no longer describes the node once
+	// it runs its ConfigMap.
+	d := h.get()
+	meta.SetStatusCondition(&d.Status.Conditions, metav1.Condition{
+		Type: networkv1alpha1.FabricConditionDegraded, Status: metav1.ConditionTrue,
+		Reason: networkv1alpha1.FabricReasonNoEligibleRecovery, ObservedGeneration: d.Generation,
+	})
+	if err := h.client.Status().Update(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
 	h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
 		d.Spec.SourceHandoff = &networkv1alpha1.FabricSourceHandoff{
 			ConfigMap:       networkv1alpha1.FabricObjectIdentity{Name: cm.Name, UID: cmUID},
@@ -481,6 +491,9 @@ func TestDeploymentAgentHandoff(t *testing.T) {
 	}
 	if got.Status.EffectiveSource != networkv1alpha1.FabricConfigSourceConfigMap {
 		t.Errorf("effective source %s", got.Status.EffectiveSource)
+	}
+	if c := condition(got, networkv1alpha1.FabricConditionDegraded); c != nil {
+		t.Errorf("Degraded = %+v on the ConfigMap source", c)
 	}
 }
 

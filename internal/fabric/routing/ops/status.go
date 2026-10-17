@@ -77,8 +77,9 @@ func attention(d *networkv1alpha1.FabricRouterDeployment) string {
 			out = append(out, t+":"+c.Reason)
 		}
 	}
-	if c := meta.FindStatusCondition(d.Status.Conditions,
-		networkv1alpha1.FabricConditionAccepted); c != nil && c.Status == "False" {
+	// A deployment with nothing promoted to it is as it should be.
+	if c := meta.FindStatusCondition(d.Status.Conditions, networkv1alpha1.FabricConditionAccepted); c != nil &&
+		c.Status == "False" && c.Reason != networkv1alpha1.FabricReasonWaitingForPromotion {
 		out = append(out, "NotAccepted:"+c.Reason)
 	}
 	if len(out) == 0 {

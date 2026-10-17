@@ -40,6 +40,10 @@ const (
 	FabricReasonRecoveryTargetUsed = "RecoveryTargetUsed"
 	FabricReasonRecoveryConflict   = "RecoveryConflict"
 	FabricReasonCommitted          = "Committed"
+	// FabricReasonWaitingForPromotion is an Accepted condition for a
+	// deployment with nothing to activate: off the CRD source, or with no
+	// revision promoted yet.
+	FabricReasonWaitingForPromotion = "WaitingForPromotion"
 	// FabricReasonPromotionRefused is an Accepted condition for a promotion
 	// the agent never accepted and never will: its release authorization
 	// is gone, finished, or does not cover the promotion.
