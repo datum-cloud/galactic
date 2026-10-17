@@ -168,6 +168,26 @@ func (a *Agent) installBoot(ctx context.Context, boot func(context.Context) (str
 	return nil
 }
 
+// ConfigMapConfig resolves the node's frr.conf from its ConfigMap, for a
+// node that starts from the ConfigMap through InitFrom.
+func (a *Agent) ConfigMapConfig(ctx context.Context) (config, reason string, err error) {
+	perNode, err := a.get(ctx, ConfigMapName(a.NodeName))
+	if err != nil {
+		return "", "", err
+	}
+	var legacy *corev1.ConfigMap
+	if perNode == nil && a.LegacyConfigMap != "" {
+		if legacy, err = a.get(ctx, a.LegacyConfigMap); err != nil {
+			return "", "", err
+		}
+	}
+	src, err := a.resolve(perNode, legacy)
+	if err != nil {
+		return "", "", err
+	}
+	return src.Files[KeyFRRConf], "nothing activated yet; starting from ConfigMap " + src.ConfigMap.Name, nil
+}
+
 // initOnce makes a single attempt to fetch, validate and install the node's
 // configuration.
 func (a *Agent) initOnce(ctx context.Context) error {
@@ -292,6 +312,10 @@ func (a *Agent) convergeLocked(ctx context.Context, perNode, legacy *corev1.Conf
 		fresh, err := a.get(ctx, ConfigMapName(a.NodeName))
 		if err != nil {
 			return err
+		}
+		if uid := a.Gate.Handoff(); uid != "" && (fresh == nil || string(fresh.UID) != uid) {
+			// Not the ConfigMap the handoff named: apply nothing.
+			return fmt.Errorf("ConfigMap %s is not the one the handoff named, UID %s", ConfigMapName(a.NodeName), uid)
 		}
 		perNode = fresh
 		a.gateVersion = version

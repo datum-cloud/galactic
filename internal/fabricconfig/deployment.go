@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -60,6 +62,8 @@ type DeploymentAgent struct {
 	// directory is bound to them.
 	NodeUID   string
 	ClusterID string
+	// MachineID is the host's machine ID.
+	MachineID string
 
 	Activator *activation.Activator
 	// BGP reads session and route state for the health check.
@@ -89,6 +93,12 @@ type DeploymentAgent struct {
 	staged string
 	// written is the status last written, to skip unchanged writes.
 	written *networkv1alpha1.FabricRouterDeploymentStatus
+	// inSync is whether FRR was last seen running the checkpoint.
+	inSync bool
+	// Resolve, when NodeUID is not known yet, reads this node's identity
+	// from the API and binds the state directory to it, setting NodeUID,
+	// ClusterID and IdentityErr.
+	Resolve func(ctx context.Context) error
 }
 
 // heartbeatInterval is how often an otherwise unchanged status is written.
@@ -133,6 +143,16 @@ func (d *DeploymentAgent) Run(ctx context.Context) {
 // CRD, and writes status.
 func (d *DeploymentAgent) Sync(ctx context.Context) error {
 	journal := d.Activator.Journal()
+	d.inSync = false
+	if d.NodeUID == "" {
+		d.Gate.Set(JournalSource(journal))
+		if d.Resolve == nil {
+			return errors.New("this node's identity is unknown")
+		}
+		if err := d.Resolve(ctx); err != nil {
+			return fmt.Errorf("resolve this node's identity: %w", err)
+		}
+	}
 	dep, err := d.find(ctx)
 	if err != nil {
 		return err
@@ -255,6 +275,9 @@ func (d *DeploymentAgent) settleSourceLocked(ctx context.Context, dep *networkv1
 	if err := journal.SetSource(string(want)); err != nil {
 		return false, err
 	}
+	if current == networkv1alpha1.FabricConfigSourceCRD && want != networkv1alpha1.FabricConfigSourceCRD {
+		d.Gate.SetHandoff(dep.Spec.SourceHandoff.ConfigMap.UID)
+	}
 	d.Gate.Set(want)
 	status.EffectiveSource = want
 	return false, nil
@@ -333,11 +356,10 @@ func (d *DeploymentAgent) activate(ctx context.Context, dep *networkv1alpha1.Fab
 	journal := d.Activator.Journal()
 	if rec, ok := journal.LastForEpoch(act.DeploymentUID, act.Epoch); ok && rec.Activation == act &&
 		(rec.Type == activation.RecordCommitted || rec.Type == activation.RecordRecovered) {
-		// Finished; retry a persist that failed.
-		if c := meta.FindStatusCondition(status.Conditions, networkv1alpha1.FabricConditionDegraded); c != nil &&
-			c.Reason == reasonPersistFailed {
-			d.persist(ctx, dep, status)
-		}
+		// Finished. FRR must still run the checkpoint, and frr.conf hold
+		// it: a return to CRD, a change made outside the agent or a crash
+		// before the last persist leaves them behind.
+		d.reassert(ctx, dep, status)
 		return
 	}
 	if _, ok := journal.Accepted(act.DeploymentUID, act.Epoch); !ok {
@@ -368,16 +390,35 @@ func (d *DeploymentAgent) activate(ctx context.Context, dep *networkv1alpha1.Fab
 		accepted(metav1.ConditionFalse, activationReason(err), err.Error())
 		return
 	case res.Outcome == activation.OutcomeCommitted:
+		d.inSync = true
 		msg := fmt.Sprintf("%s committed at epoch %d", act.Revision, act.Epoch)
 		accepted(metav1.ConditionTrue, networkv1alpha1.FabricReasonCommitted, msg)
 		degraded(metav1.ConditionFalse, networkv1alpha1.FabricReasonCommitted, msg)
 	case res.Outcome == activation.OutcomeRecovered:
+		d.inSync = true
 		accepted(metav1.ConditionFalse, networkv1alpha1.FabricReasonFailedEpoch,
 			fmt.Sprintf("epoch %d failed and was recovered", act.Epoch))
 		degraded(metav1.ConditionTrue, "Recovered", res.Detail)
 	default:
 		accepted(metav1.ConditionFalse, networkv1alpha1.FabricReasonFailedEpoch, fmt.Sprintf("epoch %d failed", act.Epoch))
 		degraded(metav1.ConditionTrue, networkv1alpha1.FabricReasonNoEligibleRecovery, res.Detail)
+		return
+	}
+	d.persist(ctx, dep, status)
+}
+
+// reassert brings FRR and frr.conf back to the checkpoint.
+func (d *DeploymentAgent) reassert(ctx context.Context, dep *networkv1alpha1.FabricRouterDeployment,
+	status *networkv1alpha1.FabricRouterDeploymentStatus) {
+	var timeout time.Duration
+	if s := dep.Spec.Activation; s != nil {
+		timeout = time.Duration(s.ApplyTimeoutSeconds) * time.Second
+	}
+	ok, err := d.Activator.Reassert(ctx, timeout)
+	d.inSync = ok
+	if err != nil {
+		setCondition(status, dep, networkv1alpha1.FabricConditionDegraded, metav1.ConditionTrue, "ReassertFailed",
+			"FRR does not run the committed checkpoint and could not be brought back to it: "+err.Error())
 		return
 	}
 	d.persist(ctx, dep, status)
@@ -393,6 +434,9 @@ func (d *DeploymentAgent) persist(ctx context.Context, dep *networkv1alpha1.Fabr
 		cp, err := activation.ReadCheckpoint(d.Activator.Dir)
 		if err != nil {
 			return err
+		}
+		if current, err := os.ReadFile(filepath.Join(d.ConfigDir, KeyFRRConf)); err == nil && string(current) == cp.Config {
+			return nil
 		}
 		return writeFile(d.ConfigDir, KeyFRRConf, cp.Config)
 	})
@@ -424,8 +468,10 @@ func (d *DeploymentAgent) authorized(ctx context.Context, dep *networkv1alpha1.F
 	if string(auth.UID) != ref.UID {
 		return fmt.Errorf("release authorization %s is UID %s, the promotion names %s", ref.Name, auth.UID, ref.UID)
 	}
-	if !auth.Status.Outstanding() {
-		return fmt.Errorf("release authorization %s is %s", ref.Name, auth.Status.Phase)
+	if auth.Status.Phase != networkv1alpha1.FabricReleasePhaseStarted {
+		// Only a started release activates; a pending, failed, unknown or
+		// finished one may still block others but authorizes nothing new.
+		return fmt.Errorf("release authorization %s is %q, not Started", ref.Name, auth.Status.Phase)
 	}
 	for _, t := range auth.Spec.Deployments {
 		if t.Deployment == dep.Name && t.DeploymentUID == string(dep.UID) &&
@@ -616,7 +662,8 @@ func (d *DeploymentAgent) report(status *networkv1alpha1.FabricRouterDeploymentS
 		status.RequiresAPI = cp.RequiresAPI
 	}
 	if status.EffectiveSource == networkv1alpha1.FabricConfigSourceCRD && dep.Spec.ActivationEpoch > 0 &&
-		status.AppliedEpoch == dep.Spec.ActivationEpoch && status.AppliedRevision == dep.Spec.ActiveRevisionRef.Name {
+		status.AppliedEpoch == dep.Spec.ActivationEpoch && status.AppliedRevision == dep.Spec.ActiveRevisionRef.Name &&
+		d.inSync {
 		setCondition(status, dep, networkv1alpha1.FabricConditionReady, metav1.ConditionTrue,
 			networkv1alpha1.FabricReasonCommitted,
 			"the active revision is committed")
@@ -753,16 +800,26 @@ func installedPrefixes(out []byte) ([]netip.Prefix, error) {
 	return installed, nil
 }
 
+// ErrNotActivated means the node never accepted an activation and holds no
+// checkpoint, so although its journal records the CRD source it has nothing
+// of its own to start from: it starts from its ConfigMap.
+var ErrNotActivated = errors.New("no activation accepted yet")
+
 // BootConfig chooses the configuration a node on the CRD source starts FRR
-// with: the checkpoint when boot may restore it, otherwise the active
-// revision, verified and authorized, read from the API. It returns the
-// configuration and why it was chosen, or an error when neither is
-// available yet.
+// with: the checkpoint when boot may restore it offline; with the API, the
+// checkpoint again when the deployment is bound to the journal and nothing
+// since forbids it; otherwise the active revision, verified, authorized
+// and allowed by the journal. It returns ErrNotActivated for a node with
+// nothing activated yet, and an error when nothing may start yet.
 func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (config, reason string, err error) {
+	if !d.Activator.Activated() {
+		return "", "", ErrNotActivated
+	}
 	if d.IdentityErr != nil {
 		return "", "", d.IdentityErr
 	}
-	decision := d.Activator.Boot(activation.Identity{MachineID: machineID, NodeUID: d.NodeUID, ClusterID: d.ClusterID})
+	id := activation.Identity{MachineID: machineID, NodeUID: d.NodeUID, ClusterID: d.ClusterID}
+	decision := d.Activator.Boot(id)
 	if decision.Apply != "" {
 		return decision.Apply, decision.Reason, nil
 	}
@@ -770,8 +827,16 @@ func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (con
 	if err != nil {
 		return "", "", fmt.Errorf("%s; %w", decision.Reason, err)
 	}
-	if dep == nil || dep.Spec.ActivationEpoch == 0 {
-		return "", "", fmt.Errorf("%s; node %s has no deployment with an active revision", decision.Reason, d.NodeName)
+	if dep == nil {
+		return "", "", fmt.Errorf("%s; node %s has no deployment", decision.Reason, d.NodeName)
+	}
+	if d.Activator.Journal().BoundDeployment() == string(dep.UID) {
+		if online := d.Activator.BootOnline(id); online.Apply != "" {
+			return online.Apply, online.Reason + " with the API", nil
+		}
+	}
+	if dep.Spec.ActivationEpoch == 0 {
+		return "", "", fmt.Errorf("%s; node %s has no active revision", decision.Reason, d.NodeName)
 	}
 	if err := d.authorized(ctx, dep); err != nil {
 		if _, accepted := d.Activator.Journal().Accepted(string(dep.UID), dep.Spec.ActivationEpoch); !accepted {
@@ -786,14 +851,13 @@ func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (con
 	if err != nil {
 		return "", "", err
 	}
-	rev := req.Revision
-	if err := d.Activator.StartAllowed(act, rev, req.Credentials); err != nil {
+	if err := d.Activator.StartAllowed(act, req.Revision, req.Credentials); err != nil {
 		return "", "", fmt.Errorf("%s; %w", decision.Reason, err)
 	}
-	res, err := revision.Verify(rev)
+	res, err := revision.Verify(req.Revision)
 	if err != nil {
 		return "", "", err
 	}
 	return res.Config, fmt.Sprintf("%s; starting from active revision %s at epoch %d",
-		decision.Reason, rev.Name, dep.Spec.ActivationEpoch), nil
+		decision.Reason, req.Revision.Name, dep.Spec.ActivationEpoch), nil
 }

@@ -86,6 +86,7 @@ type fakeRouter struct {
 	running   string
 	reloads   int
 	peerState string
+	reloadErr error
 }
 
 func (f *fakeRouter) Check(_ context.Context, path string) error {
@@ -116,6 +117,9 @@ func (f *fakeRouter) Reload(_ context.Context, path string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reloads++
+	if f.reloadErr != nil {
+		return f.reloadErr
+	}
 	f.running = string(data)
 	return nil
 }
@@ -504,7 +508,18 @@ func TestBootConfig(t *testing.T) {
 	}
 	h.update(func(d *networkv1alpha1.FabricRouterDeployment) { promote(d, 1, h.revs[0]) })
 
-	// Before any commit: the active revision from the API.
+	// Enrolled on CRD with nothing accepted: the ConfigMap.
+	if _, _, err := h.agent.BootConfig(context.Background(), depMachine); !errors.Is(err, ErrNotActivated) {
+		t.Fatalf("BootConfig before any acceptance = %v, want ErrNotActivated", err)
+	}
+
+	// Accepted but not committed: the active revision from the API.
+	act := activation.Activation{ClusterID: depCluster, NodeUID: depNodeUID, DeploymentUID: depUID, Epoch: 1,
+		Revision: h.revs[0].Name, DependencyHash: h.revs[0].Spec.ActivationDependencyDigest}
+	rec := activation.Record{Type: activation.RecordAccepted, Activation: act}
+	if _, err := h.agent.Activator.Journal().Append(rec); err != nil {
+		t.Fatal(err)
+	}
 	conf, reason, err := h.agent.BootConfig(context.Background(), depMachine)
 	if err != nil || conf != rendered(t, h.revs[0]) || !strings.Contains(reason, "active revision") {
 		t.Fatalf("BootConfig before a commit = %q, %v", reason, err)
@@ -549,7 +564,10 @@ func TestBootConfigHonoursJournal(t *testing.T) {
 			}
 		}, "already failed"},
 		{"another deployment", func(h *harness) { journalAccept(h, "old-uid", 4, nil) }, "bound to deployment"},
-		{"another node", func(h *harness) { h.agent.IdentityErr = activation.ErrIdentityMismatch }, "another node"},
+		{"another node", func(h *harness) {
+			journalAccept(h, depUID, 0, nil)
+			h.agent.IdentityErr = activation.ErrIdentityMismatch
+		}, "another node"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
@@ -639,5 +657,153 @@ func TestBootConfigRefusesAnotherRevisionInEpoch(t *testing.T) {
 	h.update(func(d *networkv1alpha1.FabricRouterDeployment) { promote(d, 1, h.revs[1]) })
 	if _, _, err := h.agent.BootConfig(context.Background(), depMachine); !errors.Is(err, activation.ErrStale) {
 		t.Fatalf("BootConfig = %v, want ErrStale", err)
+	}
+}
+
+// TestDeploymentAgentReassertsAfterReturn: a node that leaves CRD for its
+// ConfigMap and returns at the same epoch runs the committed revision
+// again, and is Ready only then.
+func TestDeploymentAgentReassertsAfterReturn(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: depNamespace, Name: ConfigMapName(depNode), UID: cmUID},
+		Data:       map[string]string{KeyFRRConf: "frr defaults traditional\n"},
+	}
+	h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD), cm)
+	if err := h.client.Create(context.Background(), release(h.revs[0])); err != nil {
+		t.Fatal(err)
+	}
+	h.update(func(d *networkv1alpha1.FabricRouterDeployment) { promote(d, 1, h.revs[0]) })
+	h.sync()
+
+	// Handed back, and the ConfigMap path reapplies its ConfigMap.
+	var current corev1.ConfigMap
+	if err := h.client.Get(context.Background(), client.ObjectKeyFromObject(cm), &current); err != nil {
+		t.Fatal(err)
+	}
+	h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
+		d.Spec.Source = networkv1alpha1.FabricConfigSourceConfigMap
+		d.Spec.SourceHandoff = &networkv1alpha1.FabricSourceHandoff{
+			ConfigMap: networkv1alpha1.FabricObjectIdentity{Name: cm.Name, UID: cmUID}, ResourceVersion: current.ResourceVersion,
+		}
+	})
+	h.sync()
+	if h.agent.Gate.Handoff() != cmUID {
+		t.Errorf("handoff UID %q", h.agent.Gate.Handoff())
+	}
+	h.frr.mu.Lock()
+	h.frr.running = cm.Data[KeyFRRConf]
+	h.frr.mu.Unlock()
+	if err := os.WriteFile(filepath.Join(h.agent.ConfigDir, KeyFRRConf), []byte(cm.Data[KeyFRRConf]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Back to CRD at the same epoch.
+	h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
+		d.Spec.Source = networkv1alpha1.FabricConfigSourceCRD
+		d.Spec.SourceHandoff = nil
+	})
+	got := h.sync()
+	if h.frr.get() != rendered(t, h.revs[0]) {
+		t.Error("the committed revision was not reasserted")
+	}
+	persisted, err := os.ReadFile(filepath.Join(h.agent.ConfigDir, KeyFRRConf))
+	if err != nil || string(persisted) != rendered(t, h.revs[0]) {
+		t.Errorf("frr.conf not repaired: %v", err)
+	}
+	if c := condition(got, networkv1alpha1.FabricConditionReady); c == nil || c.Status != metav1.ConditionTrue {
+		t.Errorf("Ready = %+v", c)
+	}
+}
+
+func TestDeploymentAgentRefusesUnstartedRelease(t *testing.T) {
+	for _, phase := range []networkv1alpha1.FabricReleasePhase{
+		networkv1alpha1.FabricReleasePhasePending,
+		networkv1alpha1.FabricReleasePhaseFailed,
+		networkv1alpha1.FabricReleasePhaseUnknown,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
+			a := release(h.revs[0])
+			a.Status.Phase = phase
+			if err := h.client.Create(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			h.update(func(d *networkv1alpha1.FabricRouterDeployment) { promote(d, 1, h.revs[0]) })
+			got := h.sync()
+			if c := condition(got, networkv1alpha1.FabricConditionAccepted); c == nil || c.Reason != reasonNotAuthorized {
+				t.Fatalf("Accepted = %+v", c)
+			}
+			if h.frr.reloads != 0 {
+				t.Error("a release that is not Started activated")
+			}
+		})
+	}
+}
+
+// TestBootConfigOnlineAfterExpiry: with the API reachable and the
+// deployment bound, an expired boot authorization does not stop the
+// checkpoint from starting, as after a failed epoch.
+func TestBootConfigOnlineAfterExpiry(t *testing.T) {
+	h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
+	if err := h.client.Create(context.Background(), release(h.revs[0])); err != nil {
+		t.Fatal(err)
+	}
+	h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
+		promote(d, 1, h.revs[0])
+		d.Spec.Activation.OfflineBootSeconds = 0
+	})
+	h.sync()
+	conf, reason, err := h.agent.BootConfig(context.Background(), depMachine)
+	if err != nil || conf != rendered(t, h.revs[0]) || !strings.Contains(reason, "with the API") {
+		t.Fatalf("BootConfig = %q, %v", reason, err)
+	}
+}
+
+// TestDeploymentAgentNotReadyWhenDrifted: FRR drifting from the committed
+// revision, and failing to come back, is Degraded and not Ready.
+func TestDeploymentAgentNotReadyWhenDrifted(t *testing.T) {
+	h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
+	if err := h.client.Create(context.Background(), release(h.revs[0])); err != nil {
+		t.Fatal(err)
+	}
+	h.update(func(d *networkv1alpha1.FabricRouterDeployment) { promote(d, 1, h.revs[0]) })
+	h.sync()
+	h.frr.mu.Lock()
+	h.frr.running = rendered(t, h.revs[1])
+	h.frr.reloadErr = errors.New("bgpd refused the change")
+	h.frr.mu.Unlock()
+	got := h.sync()
+	if c := condition(got, networkv1alpha1.FabricConditionReady); c == nil || c.Status != metav1.ConditionFalse {
+		t.Errorf("Ready = %+v, want False", c)
+	}
+	if c := condition(got, networkv1alpha1.FabricConditionDegraded); c == nil || c.Reason != "ReassertFailed" {
+		t.Errorf("Degraded = %+v", c)
+	}
+}
+
+// TestDeploymentAgentResolvesIdentityLater: started without the API, the
+// agent keeps the journal's source and resolves its identity on a later
+// sync.
+func TestDeploymentAgentResolvesIdentityLater(t *testing.T) {
+	h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceShadow))
+	h.agent.NodeUID, h.agent.ClusterID = "", ""
+	down := true
+	h.agent.Resolve = func(context.Context) error {
+		if down {
+			return errors.New("connection refused")
+		}
+		h.agent.NodeUID, h.agent.ClusterID = depNodeUID, depCluster
+		return nil
+	}
+	if err := h.agent.Sync(context.Background()); err == nil {
+		t.Fatal("synced without an identity")
+	}
+	if src, _ := h.agent.Gate.Get(); src != networkv1alpha1.FabricConfigSourceConfigMap {
+		t.Errorf("gate %s without an identity", src)
+	}
+	down = false
+	h.sync()
+	if src, _ := h.agent.Gate.Get(); src != networkv1alpha1.FabricConfigSourceShadow {
+		t.Errorf("gate %s after resolving", src)
 	}
 }

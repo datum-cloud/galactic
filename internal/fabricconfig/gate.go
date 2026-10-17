@@ -18,6 +18,8 @@ type SourceGate struct {
 	source  networkv1alpha1.FabricConfigSource
 	version int64
 	changed chan struct{}
+	// handoff is the ConfigMap UID the last handoff from CRD named.
+	handoff string
 }
 
 // NewSourceGate starts at source.
@@ -48,6 +50,24 @@ func (g *SourceGate) Set(source networkv1alpha1.FabricConfigSource) {
 	case g.changed <- struct{}{}:
 	default:
 	}
+}
+
+// SetHandoff records the ConfigMap UID a handoff from CRD names; the
+// ConfigMap agent applies only that ConfigMap after the handoff.
+func (g *SourceGate) SetHandoff(uid string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.handoff = uid
+}
+
+// Handoff returns the ConfigMap UID the last handoff named, empty for none.
+func (g *SourceGate) Handoff() string {
+	if g == nil {
+		return ""
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.handoff
 }
 
 // Changed delivers a value after each change; nil for a nil gate.

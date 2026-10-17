@@ -726,6 +726,50 @@ func (a *Activator) Resume(ctx context.Context, req Request) (Result, error) {
 	return Result{}, fmt.Errorf("cannot resume from a %s record", rec.Type)
 }
 
+// Activated reports whether the node ever accepted an activation or holds a
+// checkpoint. Before that, the CRD source has nothing of its own to run.
+func (a *Activator) Activated() bool {
+	if a.journal == nil {
+		return true
+	}
+	for _, rec := range a.journal.Records() {
+		if rec.Type == RecordAccepted {
+			return true
+		}
+	}
+	_, err := ReadCheckpoint(a.Dir)
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// Reassert reloads the checkpoint when FRR runs anything else, as after a
+// return to the CRD source or a change made outside the agent. It reports
+// whether FRR runs the checkpoint afterwards.
+func (a *Activator) Reassert(ctx context.Context, timeout time.Duration) (bool, error) {
+	cp, err := ReadCheckpoint(a.Dir)
+	if err != nil {
+		return false, err
+	}
+	diff, err := a.runningDiff(ctx, cp.Config)
+	if err != nil {
+		return false, err
+	}
+	if len(diff) == 0 {
+		return true, nil
+	}
+	path := filepath.Join(a.Dir, "reassert.conf")
+	if err := writeAtomic(path, []byte(cp.Config)); err != nil {
+		return false, err
+	}
+	if err := a.FRR.Check(ctx, path); err != nil {
+		return false, err
+	}
+	if err := a.reload(ctx, path, timeout); err != nil {
+		return false, err
+	}
+	diff, err = a.runningDiff(ctx, cp.Config)
+	return err == nil && len(diff) == 0, err
+}
+
 // runningIsCheckpoint reports whether FRR runs the last committed
 // configuration.
 func (a *Activator) runningIsCheckpoint(ctx context.Context) bool {
@@ -779,7 +823,15 @@ type BootDecision struct {
 // revoked credential.
 //
 // id is what the agent knows of itself; without the API only MachineID.
-func (a *Activator) Boot(id Identity) BootDecision {
+func (a *Activator) Boot(id Identity) BootDecision { return a.boot(id, false) }
+
+// BootOnline is Boot for an agent that reached the API and found this
+// node's deployment bound to the journal: the boot authorization's lifetime
+// and the clock bound only how long a checkpoint is trusted without the
+// API, so they are not checked. Every other check is.
+func (a *Activator) BootOnline(id Identity) BootDecision { return a.boot(id, true) }
+
+func (a *Activator) boot(id Identity, online bool) BootDecision {
 	if a.journal == nil {
 		return BootDecision{Reason: "Bootstrapping: the journal is unreadable"}
 	}
@@ -803,9 +855,9 @@ func (a *Activator) Boot(id Identity) BootDecision {
 		return BootDecision{Reason: "Bootstrapping: the checkpoint is from another compiler or FRR version"}
 	case cp.RequiresAPI:
 		return BootDecision{Reason: "Bootstrapping: the checkpoint needs credentials from the API"}
-	case now.Before(a.journal.LatestTime()):
+	case !online && now.Before(a.journal.LatestTime()):
 		return BootDecision{Reason: "Bootstrapping: the clock is behind the journal"}
-	case !now.Before(cp.BootAuthorizedUntil):
+	case !online && !now.Before(cp.BootAuthorizedUntil):
 		return BootDecision{Reason: "Bootstrapping: boot authorization expired at " + cp.BootAuthorizedUntil.String()}
 	}
 	if rec, ok := a.journal.LatestRecovery(); ok {

@@ -193,3 +193,22 @@ func TestConvergeRechecksGateUnderLock(t *testing.T) {
 		t.Error("converge reloaded FRR after the source moved to CRD")
 	}
 }
+
+// TestConvergeAppliesOnlyHandedOffConfigMap: after a handoff the ConfigMap
+// path applies only the ConfigMap the handoff named.
+func TestConvergeAppliesOnlyHandedOffConfigMap(t *testing.T) {
+	cm := configMap(ConfigMapName(testNode), map[string]string{KeyFRRConf: "v1"})
+	a, frr, _ := newTestAgent(t, cm)
+	if err := a.loadApplied(); err != nil {
+		t.Fatal(err)
+	}
+	a.Gate = NewSourceGate(networkv1alpha1.FabricConfigSourceCRD)
+	a.Gate.SetHandoff("recreated-uid")
+	a.Gate.Set(networkv1alpha1.FabricConfigSourceConfigMap)
+	if err := a.converge(context.Background(), cm, nil); err == nil {
+		t.Fatal("applied a ConfigMap the handoff did not name")
+	}
+	if len(frr.reloads) != 0 {
+		t.Error("reloaded FRR")
+	}
+}

@@ -113,8 +113,7 @@ func newRootCommand() *cobra.Command {
 	pf.StringVar(&opts.legacyConfigMap, "legacy-configmap", fabricconfig.DefaultLegacyConfigMap,
 		"Shared ConfigMap consulted for a frr.conf.<node> key when the node has no ConfigMap of its own; empty disables")
 	pf.StringVar(&opts.configDir, "config-dir", "/etc/frr", "FRR configuration directory")
-	pf.StringVar(&opts.defaultsDir, "defaults-dir", "/etc/frr-defaults",
-		"Directory holding the image's default FRR files")
+	pf.StringVar(&opts.defaultsDir, "defaults-dir", "/etc/frr-defaults", "Directory holding the image's default FRR files")
 	pf.StringVar(&opts.vtysh, "vtysh", "/usr/bin/vtysh", "Path to vtysh")
 	pf.StringVar(&opts.reloader, "frr-reload", "/usr/lib/frr/frr-reload.py", "Path to frr-reload.py")
 	pf.BoolVar(&opts.activation, "activation", false,
@@ -210,33 +209,45 @@ func run(parent context.Context, opts *options, fn func(*fabricconfig.Agent, con
 }
 
 // initNode installs the node's configuration: from the activation state
-// when the node is on the CRD source, otherwise from its ConfigMap.
+// when the node is on the CRD source, otherwise from its ConfigMap. Only a
+// node on CRD needs its machine ID and identity, so a fault in either never
+// stops a ConfigMap node from starting.
 func initNode(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
 	if !opts.activation {
 		return a.Init(ctx)
 	}
-	d, err := newDeploymentAgent(ctx, opts, false)
+	d, err := newDeploymentAgent(ctx, opts)
 	if err != nil {
+		// A corrupt journal leaves the source unknown; starting from the
+		// ConfigMap could leave CRD without a handoff, so nothing starts
+		// until an operator repairs or removes the state.
 		return err
 	}
 	if fabricconfig.JournalSource(d.Activator.Journal()) != networkv1alpha1.FabricConfigSourceCRD {
 		return a.Init(ctx)
 	}
-	machineID, err := activation.ReadMachineID(opts.machineIDFile)
-	if err != nil {
-		return err
-	}
 	return a.InitFrom(ctx, func(ctx context.Context) (string, string, error) {
-		return d.BootConfig(ctx, machineID)
+		if d.NodeUID == "" && d.Resolve != nil {
+			if err := d.Resolve(ctx); err != nil {
+				slog.Warn("could not read this node's identity; trying the checkpoint offline", "error", err)
+			}
+		}
+		conf, reason, err := d.BootConfig(ctx, d.MachineID)
+		if errors.Is(err, fabricconfig.ErrNotActivated) {
+			// Enrolled on CRD before anything was activated: the ConfigMap
+			// is all there is to run.
+			return a.ConfigMapConfig(ctx)
+		}
+		return conf, reason, err
 	})
 }
 
 // newDeploymentAgent opens the activation state and builds the deployment
-// agent. Without the API, as at an offline boot, the node and cluster stay
-// unknown and only the machine ID binds the state. State bound to another
-// Node, cluster or machine is kept and the agent activates nothing.
-func newDeploymentAgent(ctx context.Context, opts *options,
-	requireAPI bool) (*fabricconfig.DeploymentAgent, error) {
+// agent. It reads the node's identity from the API once; when that fails,
+// as at an offline boot, the agent resolves it later. A missing machine ID
+// or state bound to another Node, cluster or machine is kept as
+// IdentityErr: the state is left untouched and nothing is activated.
+func newDeploymentAgent(ctx context.Context, opts *options) (*fabricconfig.DeploymentAgent, error) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return nil, err
@@ -248,43 +259,51 @@ func newDeploymentAgent(ctx context.Context, opts *options,
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
-	machineID, err := activation.ReadMachineID(opts.machineIDFile)
-	if err != nil {
+	frr := fabricconfig.ExecFRR{Vtysh: opts.vtysh, Reloader: opts.reloader, ConfigDir: opts.configDir}
+	if err := os.MkdirAll(opts.stateDir, 0o700); err != nil {
 		return nil, err
 	}
-	lookup, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	nodeUID, clusterID, err := identity(lookup, c, opts.nodeName)
-	if err != nil {
-		if requireAPI {
-			return nil, err
-		}
-		slog.Warn("could not read this node's identity from the API; continuing with the machine ID only", "error", err)
-	}
-	var identityErr error
-	if nodeUID != "" {
-		id := activation.Identity{NodeUID: nodeUID, MachineID: machineID, ClusterID: clusterID}
-		if _, err := activation.BindIdentity(opts.stateDir, id); errors.Is(err, activation.ErrIdentityMismatch) {
-			// Fail closed: the state's journal, epoch marks and checkpoint
-			// are kept, and nothing is activated until an operator removes
-			// the state directory on the host.
-			identityErr = err
-			slog.Error("activation state belongs to another Node, cluster or machine; activating nothing",
-				"error", err, "stateDir", opts.stateDir)
-		} else if err != nil {
-			return nil, err
-		}
-	}
-	frr := fabricconfig.ExecFRR{Vtysh: opts.vtysh, Reloader: opts.reloader, ConfigDir: opts.configDir}
 	act := &activation.Activator{Dir: opts.stateDir, FRR: frr, Lock: fabricconfig.FileLock{Path: opts.writerLock}}
 	if err := act.Open(); err != nil {
 		return nil, err
 	}
-	return &fabricconfig.DeploymentAgent{
-		Client: c, Namespace: opts.namespace, NodeName: opts.nodeName, NodeUID: nodeUID, ClusterID: clusterID,
+	d := &fabricconfig.DeploymentAgent{
+		Client: c, Namespace: opts.namespace, NodeName: opts.nodeName,
 		Activator: act, BGP: frr, ConfigDir: opts.configDir, Version: metadata.Version,
-		Lock: fabricconfig.FileLock{Path: opts.writerLock}, IdentityErr: identityErr,
-	}, nil
+		Lock: fabricconfig.FileLock{Path: opts.writerLock},
+	}
+	d.MachineID, err = activation.ReadMachineID(opts.machineIDFile)
+	if err != nil {
+		d.IdentityErr = fmt.Errorf("%w: %w", activation.ErrIdentityMismatch, err)
+	}
+	d.Resolve = func(ctx context.Context) error {
+		lookup, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		nodeUID, clusterID, err := identity(lookup, c, opts.nodeName)
+		if err != nil {
+			return err
+		}
+		d.NodeUID, d.ClusterID = nodeUID, clusterID
+		if d.IdentityErr != nil {
+			return nil
+		}
+		id := activation.Identity{NodeUID: nodeUID, MachineID: d.MachineID, ClusterID: clusterID}
+		if _, err := activation.BindIdentity(opts.stateDir, id); errors.Is(err, activation.ErrIdentityMismatch) {
+			// Fail closed: the journal, epoch marks and checkpoint are
+			// kept, and nothing is activated until an operator removes
+			// the state directory on the host.
+			d.IdentityErr = err
+			slog.Error("activation state belongs to another Node, cluster or machine; activating nothing",
+				"error", err, "stateDir", opts.stateDir)
+		} else if err != nil {
+			return err
+		}
+		return nil
+	}
+	if err := d.Resolve(ctx); err != nil {
+		slog.Warn("could not read this node's identity from the API; resolving it later", "error", err)
+	}
+	return d, nil
 }
 
 // identity reads the Node's UID and the cluster's ID, the kube-system
@@ -315,13 +334,17 @@ func watchWithGuard(ctx context.Context, a *fabricconfig.Agent, opts *options) e
 		Lock:       a.Lock,
 	}
 	if opts.activation {
-		d, err := newDeploymentAgent(ctx, opts, true)
+		d, err := newDeploymentAgent(ctx, opts)
 		if err != nil {
-			return err
+			// The source is unknown: hold the ConfigMap path off FRR, as on
+			// CRD, while the guard keeps running.
+			slog.Error("could not open the activation state; no configuration will be applied", "error", err)
+			a.Gate = fabricconfig.NewSourceGate(networkv1alpha1.FabricConfigSourceCRD)
+		} else {
+			gate := fabricconfig.NewSourceGate(fabricconfig.JournalSource(d.Activator.Journal()))
+			a.Gate, d.Gate = gate, gate
+			go d.Run(ctx)
 		}
-		gate := fabricconfig.NewSourceGate(fabricconfig.JournalSource(d.Activator.Journal()))
-		a.Gate, d.Gate = gate, gate
-		go d.Run(ctx)
 	}
 
 	if opts.metricsBindAddress != "" {
