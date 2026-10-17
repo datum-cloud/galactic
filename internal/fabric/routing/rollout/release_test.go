@@ -16,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
@@ -30,6 +31,13 @@ type fakeFleet struct {
 }
 
 func newFakeFleet(t *testing.T, zones map[string]string, extra ...client.Object) *fakeFleet {
+	t.Helper()
+	return newFakeFleetWith(t, zones, nil, extra...)
+}
+
+// newFakeFleetWith is newFakeFleet with intercepted client calls.
+func newFakeFleetWith(t *testing.T, zones map[string]string, funcs *interceptor.Funcs,
+	extra ...client.Object) *fakeFleet {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -54,7 +62,11 @@ func newFakeFleet(t *testing.T, zones map[string]string, extra ...client.Object)
 			})
 	}
 	objs = append(objs, extra...)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
+	b := fake.NewClientBuilder()
+	if funcs != nil {
+		b = b.WithInterceptorFuncs(*funcs)
+	}
+	c := b.WithScheme(scheme).WithObjects(objs...).
 		WithStatusSubresource(&networkv1alpha1.FabricReleaseAuthorization{},
 			&networkv1alpha1.FabricRouterDeployment{}).Build()
 	return &fakeFleet{t: t, c: c, r: &ReleaseReconciler{Client: c}, rev: rev}
@@ -201,7 +213,7 @@ func TestFailedReleaseOperatorConfirmation(t *testing.T) {
 		t.Fatal("a release whose router cannot recover stopped blocking by itself")
 	}
 	a := &networkv1alpha1.FabricReleaseAuthorization{}
-	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: "rel"}, a); err != nil {
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: relName}, a); err != nil {
 		t.Fatal(err)
 	}
 	a.Annotations = map[string]string{RecoveryVerifiedAnnotation: "oncall"}
@@ -241,5 +253,184 @@ func TestStateOfRollback(t *testing.T) {
 	sameName := networkv1alpha1.FabricReleaseTarget{Revision: r2.Name, ActivationDependencyDigest: digestA}
 	if got := stateOf(d, auth, sameName, time.Minute, time.Now()); got != targetWaiting {
 		t.Errorf("the running revision under another digest: state %d, want waiting", got)
+	}
+}
+
+// widePolicy lets two routers of one failure domain activate at once.
+func widePolicy() []client.Object {
+	return []client.Object{
+		&networkv1alpha1.FabricRolloutPolicy{
+			ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: "wide"},
+			Spec:       networkv1alpha1.FabricRolloutPolicySpec{MaxUnavailable: 2},
+		},
+		&networkv1alpha1.BGPRouter{
+			ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: testRouter},
+			Spec: networkv1alpha1.BGPRouterSpec{
+				FRR: &networkv1alpha1.BGPRouterFRR{RolloutPolicyRef: &networkv1alpha1.LocalObjectRef{Name: "wide"}},
+			},
+		},
+	}
+}
+
+// TestReleaseRechecksBeforePromoting: a deployment read as idle that
+// another release promoted since is not promoted over.
+func TestReleaseRechecksBeforePromoting(t *testing.T) {
+	gets := 0
+	funcs := &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+		opts ...client.GetOption) error {
+		if err := c.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		if d, ok := obj.(*networkv1alpha1.FabricRouterDeployment); ok && key.Name == "a1" {
+			gets++
+			if gets == 1 {
+				// The first read predates the other release's promotion.
+				d.Spec.ActivationEpoch, d.Spec.ActiveRevisionRef, d.Spec.AuthorizationRef = 0, nil, nil
+				d.Spec.ActivationDependencyDigest, d.Spec.Activation, d.Status = "", nil,
+					networkv1alpha1.FabricRouterDeploymentStatus{}
+			}
+		}
+		return nil
+	}}
+	f := newFakeFleetWith(t, map[string]string{"a1": "a"}, funcs, widePolicy()...)
+	d := f.deployment("a1")
+	gets = 0
+	d.Spec.ActivationEpoch = 1
+	d.Spec.ActiveRevisionRef = &networkv1alpha1.LocalObjectRef{Name: "other-revision"}
+	d.Spec.ActivationDependencyDigest = digestB
+	d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: "other", UID: "other-uid"}
+	if err := f.c.Update(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	f.release("rel", networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
+	key := types.NamespacedName{Namespace: testNS, Name: relName}
+	for range 2 {
+		gets = 0
+		if _, err := f.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gets = 2
+	if got := f.deployment("a1"); got.Spec.AuthorizationRef.Name != "other" || got.Spec.ActivationEpoch != 1 {
+		t.Errorf("a1 at epoch %d under %s; promoted over another release's epoch", got.Spec.ActivationEpoch,
+			got.Spec.AuthorizationRef.Name)
+	}
+}
+
+func TestBusyWhileRecovering(t *testing.T) {
+	r1 := revisionWith("r-aaaaaaaaaa", digestA, nil)
+	d := committedDeployment(2, r1)
+	d.Status.AppliedEpoch = 1
+	d.Generation = 3
+	d.Status.Epochs = []networkv1alpha1.FabricEpochStatus{{Epoch: 2, Stage: networkv1alpha1.FabricStageApplyFailed}}
+	if !busy(d) {
+		t.Error("a router recovering from a failed apply counts as free")
+	}
+	d.Status.Conditions = []metav1.Condition{{
+		Type: networkv1alpha1.FabricConditionDegraded, Status: metav1.ConditionTrue,
+		Reason: networkv1alpha1.FabricReasonNoEligibleRecovery, ObservedGeneration: 3,
+	}}
+	if busy(d) {
+		t.Error("a router with nothing to recover to still counts as busy")
+	}
+	d.Status.Epochs[0].Stage = networkv1alpha1.FabricStageRecovered
+	d.Status.Conditions = nil
+	if busy(d) {
+		t.Error("a recovered router counts as busy")
+	}
+}
+
+func TestReleaseRefusesRetired(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a"})
+	d := f.deployment("a1")
+	d.Spec.Recovery = &networkv1alpha1.FabricRecovery{Retired: true}
+	if err := f.c.Update(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	f.release("rel", networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
+	a := f.reconcile("rel")
+	c := meta.FindStatusCondition(a.Status.Conditions, ConditionProgressing)
+	if a.Status.Phase != networkv1alpha1.FabricReleasePhaseCancelled || c == nil || c.Reason != reasonInvalidTarget {
+		t.Fatalf("phase %s condition %+v", a.Status.Phase, c)
+	}
+}
+
+// TestDeletingReleaseStopsPromoting: a started release being deleted keeps
+// its finalizer and tracks what it promoted, but promotes nothing more.
+func TestDeletingReleaseStopsPromoting(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a", "a2": "a"})
+	f.release("rel", networkv1alpha1.FabricReleaseTypeRelease, 1, "a1", "a2")
+	f.reconcile("rel")
+	first := "a1"
+	if f.deployment("a1").Spec.ActivationEpoch == 0 {
+		first = "a2"
+	}
+	f.report(first, networkv1alpha1.FabricStageCommitted, true)
+	a := &networkv1alpha1.FabricReleaseAuthorization{}
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: relName}, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Delete(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	a = f.reconcile("rel")
+	if f.deployment("a1").Spec.ActivationEpoch+f.deployment("a2").Spec.ActivationEpoch != 1 {
+		t.Error("a release being deleted promoted another router")
+	}
+	if len(a.Finalizers) == 0 {
+		t.Error("a started release lost its finalizer while being deleted")
+	}
+}
+
+// TestReleaseLeavesSupersededTargets: a target a later release moved on
+// is left alone and counts toward completion.
+func TestReleaseLeavesSupersededTargets(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a", "a2": "a"})
+	f.release("rel", networkv1alpha1.FabricReleaseTypeRelease, 1, "a1", "a2")
+	f.reconcile("rel")
+	first, second := "a1", "a2"
+	if f.deployment("a1").Spec.ActivationEpoch == 0 {
+		first, second = "a2", "a1"
+	}
+	f.report(first, networkv1alpha1.FabricStageCommitted, true)
+
+	// A later emergency withdrawal takes the other router first.
+	f.release("ew", networkv1alpha1.FabricReleaseTypeEmergencyWithdrawal, 2, second)
+	ew := &networkv1alpha1.FabricReleaseAuthorization{}
+	key := types.NamespacedName{Namespace: testNS, Name: "ew"}
+	if err := f.c.Get(context.Background(), key, ew); err != nil {
+		t.Fatal(err)
+	}
+	ew.Spec.Deployments[0].Revision, ew.Spec.Deployments[0].ActivationDependencyDigest = f.rev.Name, digestA
+	f.reconcile("ew")
+	if f.deployment(second).Spec.AuthorizationRef == nil || f.deployment(second).Spec.AuthorizationRef.Name != "ew" {
+		t.Fatalf("ew did not promote %s", second)
+	}
+	f.report(second, networkv1alpha1.FabricStageAccepted, false)
+	epoch := f.deployment(second).Spec.ActivationEpoch
+
+	a := f.reconcile("rel")
+	if got := f.deployment(second); got.Spec.ActivationEpoch != epoch || got.Spec.AuthorizationRef.Name != "ew" {
+		t.Errorf("rel rewound %s from ew's epoch %d to %d", second, epoch, got.Spec.ActivationEpoch)
+	}
+	if a.Status.Phase != networkv1alpha1.FabricReleasePhaseCompleted {
+		t.Errorf("rel phase %s with one router committed and one superseded", a.Status.Phase)
+	}
+}
+
+// TestReleaseNeverPromotesOverAnotherEpoch: even with room under the
+// domain limit, a deployment still activating another release's epoch is
+// not promoted.
+func TestReleaseNeverPromotesOverAnotherEpoch(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a"}, widePolicy()...)
+	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
+	f.reconcile(relName)
+	f.report("a1", networkv1alpha1.FabricStageAccepted, false)
+	f.release("ew", networkv1alpha1.FabricReleaseTypeEmergencyWithdrawal, 2, "a1")
+	f.reconcile("ew")
+	d := f.deployment("a1")
+	if d.Spec.ActivationEpoch != 1 || d.Spec.AuthorizationRef.Name != relName {
+		t.Errorf("a1 at epoch %d under %s; ew promoted over rel's epoch in flight",
+			d.Spec.ActivationEpoch, d.Spec.AuthorizationRef.Name)
 	}
 }

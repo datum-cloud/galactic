@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/fabric/routing/controller"
 )
 
 // RecoveryVerifiedAnnotation marks a failed release's recovery verified,
@@ -50,6 +51,7 @@ const (
 	reasonAllCommitted      = "AllCommitted"
 	reasonRecoveryPending   = "RecoveryPending"
 	reasonRecoveryVerified  = "RecoveryVerified"
+	reasonDeleting          = "Deleting"
 )
 
 // progressInterval is how often a release in progress is looked at again
@@ -235,6 +237,8 @@ func (r *ReleaseReconciler) target(ctx context.Context, auth *networkv1alpha1.Fa
 		return nil, nil, targetError{fmt.Sprintf("deployment %s is on the %s source, not CRD", dep.Name, dep.Spec.Source)}
 	case dep.Spec.Suspended:
 		return nil, nil, targetError{"deployment " + dep.Name + " is suspended"}
+	case dep.Spec.Recovery != nil && dep.Spec.Recovery.Retired:
+		return nil, nil, targetError{"deployment " + dep.Name + " is retired"}
 	case rev.Spec.ActivationDependencyDigest != t.ActivationDependencyDigest:
 		return nil, nil, targetError{fmt.Sprintf("revision %s has digest %s, the release names %s",
 			rev.Name, rev.Spec.ActivationDependencyDigest, t.ActivationDependencyDigest)}
@@ -253,84 +257,131 @@ func (r *ReleaseReconciler) target(ctx context.Context, auth *networkv1alpha1.Fa
 }
 
 // routerLabel names a revision's router; the revision controller sets it.
-const routerLabel = "galactic.datumapis.com/router"
+const routerLabel = controller.RouterLabel
 
 // progress promotes waiting targets within the policy's concurrency and
 // records the release's outcome.
 func (r *ReleaseReconciler) progress(ctx context.Context,
 	auth *networkv1alpha1.FabricReleaseAuthorization) (ctrl.Result, error) {
-	now := r.now()
-	type entry struct {
-		target networkv1alpha1.FabricReleaseTarget
-		dep    *networkv1alpha1.FabricRouterDeployment
-		policy networkv1alpha1.FabricRolloutPolicySpec
-		domain string
-		state  targetState
+	sum, err := r.survey(ctx, auth)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	var entries []entry
-	inFlight := map[string]int{}
-	var failed, silent []string
-	committedCount := 0
+	committedCount := sum.committed
+	switch {
+	case len(sum.failed) > 0:
+		r.finish(auth, networkv1alpha1.FabricReleasePhaseFailed, reasonTargetFailed,
+			"failed: "+strings.Join(sum.failed, ", ")+"; no further routers are promoted")
+		r.event(auth, corev1.EventTypeWarning, ReasonReleaseFailed, "release %s failed on %s",
+			auth.Spec.FleetReleaseID, strings.Join(sum.failed, ", "))
+		return ctrl.Result{RequeueAfter: progressInterval}, nil
+	case committedCount+len(sum.superseded) == len(auth.Spec.Deployments):
+		msg := "every router committed"
+		if len(sum.superseded) > 0 {
+			msg = fmt.Sprintf("%d routers committed; superseded: %s", committedCount, strings.Join(sum.superseded, ", "))
+		}
+		r.finish(auth, networkv1alpha1.FabricReleasePhaseCompleted, reasonAllCommitted, msg)
+		r.event(auth, corev1.EventTypeNormal, ReasonReleaseCompleted, "release %s completed", auth.Spec.FleetReleaseID)
+		return ctrl.Result{}, nil
+	case len(sum.silent) > 0:
+		// The outcome is unknown, not failed: the routers may be fine.
+		auth.Status.Phase = networkv1alpha1.FabricReleasePhaseUnknown
+		r.condition(auth, metav1.ConditionUnknown, reasonTargetSilent,
+			"no report from "+strings.Join(sum.silent, ", ")+"; no further routers are promoted until they report")
+		return ctrl.Result{RequeueAfter: progressInterval}, nil
+	}
+	auth.Status.Phase = networkv1alpha1.FabricReleasePhaseStarted
+	if !auth.DeletionTimestamp.IsZero() {
+		// Being deleted: finish tracking what was promoted, promote no more.
+		r.condition(auth, metav1.ConditionFalse, reasonDeleting,
+			fmt.Sprintf("being deleted; %d of %d routers committed, no further routers are promoted",
+				committedCount, len(auth.Spec.Deployments)))
+		return ctrl.Result{RequeueAfter: progressInterval}, nil
+	}
+	if done, err := r.promoteWaiting(ctx, auth, sum.entries); err != nil || done {
+		return ctrl.Result{RequeueAfter: progressInterval}, err
+	}
+	r.condition(auth, metav1.ConditionTrue, reasonPromoting,
+		fmt.Sprintf("%d of %d routers committed", committedCount, len(auth.Spec.Deployments)))
+	return ctrl.Result{RequeueAfter: progressInterval}, nil
+}
+
+// releaseEntry is one release target as last read.
+type releaseEntry struct {
+	target networkv1alpha1.FabricReleaseTarget
+	policy networkv1alpha1.FabricRolloutPolicySpec
+	domain string
+	state  targetState
+}
+
+// releaseSurvey is where a release's targets stand.
+type releaseSurvey struct {
+	entries                    []releaseEntry
+	failed, silent, superseded []string
+	committed                  int
+}
+
+// survey reads every target's state.
+func (r *ReleaseReconciler) survey(ctx context.Context,
+	auth *networkv1alpha1.FabricReleaseAuthorization) (releaseSurvey, error) {
+	now := r.now()
+	var sum releaseSurvey
 	for _, t := range auth.Spec.Deployments {
 		dep := &networkv1alpha1.FabricRouterDeployment{}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Deployment}, dep); err != nil {
 			if apierrors.IsNotFound(err) {
-				failed = append(failed, t.Deployment+": deployment deleted")
+				sum.failed = append(sum.failed, t.Deployment+": deployment deleted")
 				continue
 			}
-			return ctrl.Result{}, err
+			return sum, err
 		}
 		policy, err := r.policy(ctx, dep)
 		if err != nil {
-			return ctrl.Result{}, err
+			return sum, err
 		}
 		domain, err := r.domain(ctx, dep, policy.FailureDomainLabel)
 		if err != nil {
-			return ctrl.Result{}, err
+			return sum, err
 		}
 		state := stateOf(dep, auth, t, time.Duration(policy.HeartbeatTimeoutSeconds)*time.Second, now)
+		if state == targetWaiting || state == targetBlocked {
+			later, err := r.supersededBy(ctx, auth, dep)
+			if err != nil {
+				return sum, err
+			}
+			if later != "" {
+				state = targetSuperseded
+				sum.superseded = append(sum.superseded, t.Deployment+" by "+later)
+			}
+		}
 		switch state {
 		case targetSilent:
-			silent = append(silent, t.Deployment)
+			sum.silent = append(sum.silent, t.Deployment)
 		case targetFailed:
-			failed = append(failed, t.Deployment)
+			sum.failed = append(sum.failed, t.Deployment)
 		case targetCommitted:
-			committedCount++
+			sum.committed++
 		}
-		entries = append(entries, entry{target: t, dep: dep, policy: policy, domain: domain, state: state})
+		sum.entries = append(sum.entries, releaseEntry{target: t, policy: policy, domain: domain, state: state})
 	}
+	return sum, nil
+}
 
-	switch {
-	case len(failed) > 0:
-		r.finish(auth, networkv1alpha1.FabricReleasePhaseFailed, reasonTargetFailed,
-			"failed: "+strings.Join(failed, ", ")+"; no further routers are promoted")
-		r.event(auth, corev1.EventTypeWarning, ReasonReleaseFailed, "release %s failed on %s",
-			auth.Spec.FleetReleaseID, strings.Join(failed, ", "))
-		return ctrl.Result{RequeueAfter: progressInterval}, nil
-	case committedCount == len(auth.Spec.Deployments):
-		r.finish(auth, networkv1alpha1.FabricReleasePhaseCompleted, reasonAllCommitted, "every router committed")
-		r.event(auth, corev1.EventTypeNormal, ReasonReleaseCompleted, "release %s completed", auth.Spec.FleetReleaseID)
-		return ctrl.Result{}, nil
-	case len(silent) > 0:
-		// The outcome is unknown, not failed: the routers may be fine.
-		auth.Status.Phase = networkv1alpha1.FabricReleasePhaseUnknown
-		r.condition(auth, metav1.ConditionUnknown, reasonTargetSilent,
-			"no report from "+strings.Join(silent, ", ")+"; no further routers are promoted until they report")
-		return ctrl.Result{RequeueAfter: progressInterval}, nil
-	}
-	auth.Status.Phase = networkv1alpha1.FabricReleasePhaseStarted
-
-	// Count every deployment still activating, under any release, so an
-	// emergency withdrawal running beside this release shares the limit.
+// inFlight counts every deployment still activating, under any release,
+// per failure domain of each label the release's policies use, so an
+// emergency withdrawal running beside a release shares the limit.
+func (r *ReleaseReconciler) inFlight(ctx context.Context, namespace string,
+	entries []releaseEntry) (map[string]int, error) {
 	labels := map[string]bool{}
 	for _, e := range entries {
 		labels[e.policy.FailureDomainLabel] = true
 	}
 	all := &networkv1alpha1.FabricRouterDeploymentList{}
 	// From the API server: the cache may not show a promotion just made.
-	if err := r.reader().List(ctx, all, client.InNamespace(auth.Namespace)); err != nil {
-		return ctrl.Result{}, err
+	if err := r.reader().List(ctx, all, client.InNamespace(namespace)); err != nil {
+		return nil, err
 	}
+	out := map[string]int{}
 	for i := range all.Items {
 		if !busy(&all.Items[i]) {
 			continue
@@ -338,42 +389,48 @@ func (r *ReleaseReconciler) progress(ctx context.Context,
 		for label := range labels {
 			domain, err := r.domain(ctx, &all.Items[i], label)
 			if err != nil {
-				return ctrl.Result{}, err
+				return nil, err
 			}
-			inFlight[domain]++
+			out[domain]++
 		}
 	}
+	return out, nil
+}
 
-	promoted := 0
+// promoteWaiting promotes waiting targets within their domains' limits. It
+// reports done when it failed the release on a target that cannot be
+// promoted.
+func (r *ReleaseReconciler) promoteWaiting(ctx context.Context, auth *networkv1alpha1.FabricReleaseAuthorization,
+	entries []releaseEntry) (done bool, err error) {
+	inFlight, err := r.inFlight(ctx, auth.Namespace, entries)
+	if err != nil {
+		return false, err
+	}
 	for _, e := range entries {
 		if e.state != targetWaiting || inFlight[e.domain] >= int(e.policy.MaxUnavailable) {
 			continue
 		}
 		dep, rev, err := r.target(ctx, auth, e.target)
-		if err == nil && busy(dep) {
+		var bad targetError
+		switch {
+		case errors.As(err, &bad):
+			r.finish(auth, networkv1alpha1.FabricReleasePhaseFailed, reasonInvalidTarget, err.Error())
+			return true, nil
+		case err != nil:
+			return false, err
+		case busy(dep):
 			// Promoted under another release since it was read.
 			continue
 		}
-		if err != nil {
-			var bad targetError
-			if errors.As(err, &bad) {
-				r.finish(auth, networkv1alpha1.FabricReleasePhaseFailed, reasonInvalidTarget, err.Error())
-				return ctrl.Result{RequeueAfter: progressInterval}, nil
-			}
-			return ctrl.Result{}, err
-		}
 		dep.Spec = promote(dep, rev, auth, activationSettings(e.policy, rev))
 		if err := r.Update(ctx, dep); err != nil {
-			return ctrl.Result{}, err
+			return false, err
 		}
 		inFlight[e.domain]++
-		promoted++
 		r.event(auth, corev1.EventTypeNormal, ReasonPromoted, "promoted %s to %s at epoch %d",
 			dep.Name, rev.Name, dep.Spec.ActivationEpoch)
 	}
-	r.condition(auth, metav1.ConditionTrue, reasonPromoting,
-		fmt.Sprintf("%d of %d routers committed", committedCount, len(auth.Spec.Deployments)))
-	return ctrl.Result{RequeueAfter: progressInterval}, nil
+	return false, nil
 }
 
 // verifyRecovery marks a failed release recovered once nothing it promoted
@@ -419,6 +476,33 @@ func (r *ReleaseReconciler) verifyRecovery(ctx context.Context,
 	r.condition(auth, metav1.ConditionFalse, reasonRecoveryVerified,
 		"every failed router is back on its recovery target")
 	return ctrl.Result{}, nil
+}
+
+// supersededBy names the release that moved dep on after auth started,
+// or returns empty: one that started later, or has a higher fleet
+// sequence. Such a deployment is left alone, so an older release never
+// rewinds a newer one.
+func (r *ReleaseReconciler) supersededBy(ctx context.Context, auth *networkv1alpha1.FabricReleaseAuthorization,
+	dep *networkv1alpha1.FabricRouterDeployment) (string, error) {
+	ref := dep.Spec.AuthorizationRef
+	if ref == nil || ref.UID == string(auth.UID) {
+		return "", nil
+	}
+	other := &networkv1alpha1.FabricReleaseAuthorization{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: ref.Name}, other)
+	if apierrors.IsNotFound(err) || (err == nil && string(other.UID) != ref.UID) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	later := other.Spec.FleetSequence > auth.Spec.FleetSequence ||
+		(other.Status.StartedAt != nil && auth.Status.StartedAt != nil &&
+			other.Status.StartedAt.After(auth.Status.StartedAt.Time))
+	if later {
+		return other.Name, nil
+	}
+	return "", nil
 }
 
 // policy is the effective rollout policy of a deployment's router.

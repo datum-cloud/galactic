@@ -14,6 +14,8 @@ import (
 	"slices"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
@@ -151,12 +153,27 @@ func busy(d *networkv1alpha1.FabricRouterDeployment) bool {
 			continue
 		}
 		switch e.Stage {
-		case networkv1alpha1.FabricStageApplyFailed, networkv1alpha1.FabricStageRecovered,
-			networkv1alpha1.FabricStageDegraded:
+		case networkv1alpha1.FabricStageRecovered, networkv1alpha1.FabricStageDegraded:
 			return false
+		case networkv1alpha1.FabricStageApplyFailed:
+			// Recovery follows a failed apply; it is over only when the
+			// agent found nothing to recover to.
+			return !degradedFinal(d)
 		}
 	}
 	return true
+}
+
+// degradedFinal reports whether the agent found no eligible recovery for
+// the active epoch, so its failure is final.
+func degradedFinal(d *networkv1alpha1.FabricRouterDeployment) bool {
+	for _, c := range d.Status.Conditions {
+		if c.Type == networkv1alpha1.FabricConditionDegraded && c.Status == metav1.ConditionTrue &&
+			c.Reason == networkv1alpha1.FabricReasonNoEligibleRecovery && c.ObservedGeneration == d.Generation {
+			return true
+		}
+	}
+	return false
 }
 
 // runs reports whether a deployment already runs target, committed.
@@ -217,6 +234,9 @@ const (
 	// targetBlocked is not promoted because the deployment is still
 	// activating another release's epoch.
 	targetBlocked
+	// targetSuperseded was moved on by a later release; this release
+	// leaves it alone.
+	targetSuperseded
 )
 
 // stateOf reads a target's state from its deployment.
