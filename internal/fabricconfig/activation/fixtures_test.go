@@ -187,6 +187,11 @@ func (c *clock) set(t time.Time) {
 
 var errCrash = errors.New("crash")
 
+func withActivation(act Activation, edit func(*Activation)) Activation {
+	edit(&act)
+	return act
+}
+
 func testIdentity() Identity {
 	return Identity{NodeUID: testNode, MachineID: testMachine, ClusterID: testCluster}
 }

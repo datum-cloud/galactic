@@ -90,12 +90,12 @@ func TestAdmit(t *testing.T) {
 		{"redelivery of the accepted epoch", activationOf(r1, 1), true, nil},
 		{"older epoch", activationOf(r2, 0), false, ErrStale},
 		{"same epoch, another revision", activationOf(r3, 1), false, ErrStale},
-		{"same epoch, another cluster", func() Activation {
-			x := activationOf(r1,
-				1)
-			x.ClusterID = "c2"
-			return x
-		}(), false, ErrStale},
+		{"another cluster", withActivation(activationOf(r2, 2), func(x *Activation) { x.ClusterID = otherID }),
+			false, ErrIdentityMismatch},
+		{"for another Node", withActivation(activationOf(r2, 2), func(x *Activation) { x.NodeUID = otherID }),
+			false, ErrIdentityMismatch},
+		{"no deployment", withActivation(activationOf(r2, 2), func(x *Activation) { x.DeploymentUID = "" }),
+			false, ErrIdentityMismatch},
 		{"recreated deployment", other, false, ErrRecoveryConflict},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -311,6 +311,9 @@ func TestEligible(t *testing.T) {
 		{"revoked covering prefix",
 			func() Recovery { x := recoveryTo(r1); x.RevokedPrefixes = []string{"192.0.2.0/23"}; return x }(),
 			r1, nil, originatesRevoked + " " + testPrefix},
+		{"revoked prefix inside an originated one",
+			func() Recovery { x := recoveryTo(r1); x.RevokedPrefixes = []string{"192.0.2.0/25"}; return x }(),
+			r1, nil, ""},
 		{"unrelated revocation",
 			func() Recovery { x := recoveryTo(r1); x.RevokedPrefixes = []string{"10.0.0.0/8"}; return x }(),
 			r1, nil, ""},

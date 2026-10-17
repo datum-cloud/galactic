@@ -253,6 +253,9 @@ type Request struct {
 // Admit applies the replay rules: a new epoch above the deployment's mark,
 // or a redelivery of the exact activation already accepted.
 func (a *Activator) Admit(act Activation) (redelivery bool, err error) {
+	if err := a.checkIdentity(act); err != nil {
+		return false, err
+	}
 	if bound := a.journal.BoundDeployment(); bound != "" && bound != act.DeploymentUID {
 		return false, fmt.Errorf("%w: journal bound to deployment %s, asked for %s",
 			ErrRecoveryConflict, bound, act.DeploymentUID)
@@ -274,14 +277,44 @@ func (a *Activator) Admit(act Activation) (redelivery bool, err error) {
 	return true, nil
 }
 
+// checkIdentity refuses an activation with an empty identity field, or for
+// another Node or cluster than the state directory is bound to.
+func (a *Activator) checkIdentity(act Activation) error {
+	if act.DeploymentUID == "" || act.NodeUID == "" || act.ClusterID == "" {
+		return fmt.Errorf("%w: activation names no deployment, Node or cluster", ErrIdentityMismatch)
+	}
+	id, err := readIdentity(a.Dir)
+	if err != nil {
+		return err
+	}
+	if act.NodeUID != id.NodeUID || act.ClusterID != id.ClusterID {
+		return fmt.Errorf("%w: activation for Node %s in cluster %s, bound to Node %s in cluster %s",
+			ErrIdentityMismatch, act.NodeUID, act.ClusterID, id.NodeUID, id.ClusterID)
+	}
+	return nil
+}
+
+// checkRevision refuses a revision that is not the one act promotes.
+func checkRevision(req Request) error {
+	act := req.Activation
+	if req.Revision == nil || req.Revision.Spec.ActivationDependencyDigest != act.DependencyHash ||
+		req.Revision.Name != act.Revision {
+		return fmt.Errorf("%w: %s", ErrDigestMismatch, act.Revision)
+	}
+	return nil
+}
+
 // Activate runs one activation through its journaled stages.
 func (a *Activator) Activate(ctx context.Context, req Request) (Result, error) {
 	act := req.Activation
-	if req.Revision.Spec.ActivationDependencyDigest != act.DependencyHash || req.Revision.Name != act.Revision {
-		return Result{}, fmt.Errorf("%w: %s/%s", ErrDigestMismatch, req.Revision.Name,
-			req.Revision.Spec.ActivationDependencyDigest)
+	if err := checkRevision(req); err != nil {
+		return Result{}, err
 	}
 	redelivery, err := a.Admit(act)
+	if errors.Is(err, ErrFailedEpoch) && a.journal.NeedsRecovery(act.DeploymentUID, act.Epoch) {
+		// The epoch failed and a crash stopped its recovery: finish it.
+		return a.Resume(ctx, req)
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -499,6 +532,26 @@ func Eligible(rec Recovery, rev *networkv1alpha1.FabricRouterRevision, credentia
 	return nil
 }
 
+// mergeRecovery keeps the journaled target and adds any revocation or
+// retirement asked for since.
+func mergeRecovery(journaled, asked Recovery) Recovery {
+	out := journaled
+	out.RevokedPrefixes = union(journaled.RevokedPrefixes, asked.RevokedPrefixes)
+	out.RevokedCredentials = union(journaled.RevokedCredentials, asked.RevokedCredentials)
+	out.Retired = journaled.Retired || asked.Retired
+	return out
+}
+
+func union(a, b []string) []string {
+	out := slices.Clone(a)
+	for _, s := range b {
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // originations lists the prefixes a revision originates.
 func originations(rev *networkv1alpha1.FabricRouterRevision) []string {
 	var out []string
@@ -557,14 +610,26 @@ func revokedOrigination(rec Recovery, originated []string) string {
 // last journal record for its epoch.
 func (a *Activator) Resume(ctx context.Context, req Request) (Result, error) {
 	act := req.Activation
+	if err := checkRevision(req); err != nil {
+		return Result{}, err
+	}
+	if err := a.checkIdentity(act); err != nil {
+		return Result{}, err
+	}
 	rec, ok := a.journal.LastForEpoch(act.DeploymentUID, act.Epoch)
 	if !ok {
 		return Result{}, fmt.Errorf("epoch %d of deployment %s was never accepted", act.Epoch, act.DeploymentUID)
 	}
-	// Recovery is fixed with the epoch: resume with what was journaled, not
-	// with what the caller now asks.
+	if high, _ := a.journal.HighWater(act.DeploymentUID); act.Epoch != high {
+		return Result{}, fmt.Errorf("%w: epoch %d below accepted %d", ErrStale, act.Epoch, high)
+	}
+	if rec.Activation != act {
+		return Result{}, fmt.Errorf("%w: epoch %d was accepted for %s", ErrStale, act.Epoch, rec.describe())
+	}
+	// The recovery target is fixed with the epoch; revocations only grow,
+	// so those journaled and those asked for now both apply.
 	if accepted, ok := a.journal.Accepted(act.DeploymentUID, act.Epoch); ok && accepted.Recovery != nil {
-		req.Recovery = *accepted.Recovery
+		req.Recovery = mergeRecovery(*accepted.Recovery, req.Recovery)
 	}
 	rendered, path, err := a.render(req.Revision, "active.conf")
 	if err != nil {

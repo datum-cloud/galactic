@@ -99,16 +99,18 @@ func TestCrashDuringRecovery(t *testing.T) {
 	reloads := frr.reloads
 
 	restarted := newActivator(t, dir, frr, nil)
-	res, err := restarted.Activate(context.Background(), req)
-	if !errors.Is(err, ErrFailedEpoch) {
-		t.Fatalf("redelivery of a failed epoch = %+v, %v; want ErrFailedEpoch", res, err)
+	if !restarted.Journal().NeedsRecovery(testDeployment, 2) {
+		t.Fatal("the unfinished recovery is not reported")
 	}
-	res, err = restarted.Resume(context.Background(), req)
+	res, err := restarted.Activate(context.Background(), req)
 	if err != nil || res.Outcome != OutcomeRecovered {
-		t.Fatalf("resume = %+v, %v", res, err)
+		t.Fatalf("redelivery of an unrecovered failed epoch = %+v, %v; want Recovered", res, err)
 	}
 	if frr.reloads != reloads+1 || frr.get() != rendered(t, r1) {
-		t.Error("resume did not restore the recovery target, once")
+		t.Error("redelivery did not restore the recovery target, once")
+	}
+	if _, err := restarted.Activate(context.Background(), req); !errors.Is(err, ErrFailedEpoch) {
+		t.Errorf("redelivery after recovery = %v, want ErrFailedEpoch", err)
 	}
 }
 
@@ -395,5 +397,84 @@ func TestResumeUsesJournaledRecovery(t *testing.T) {
 	}
 	if res.Outcome != OutcomeDegraded || !strings.Contains(res.Detail, "originates revoked") {
 		t.Fatalf("resume with a looser recovery = %+v, want Degraded by the journaled revocation", res)
+	}
+}
+
+// TestResumeRefusesSuperseded: Resume applies the same replay rules as
+// Activate, so it cannot roll the checkpoint back to an older epoch or run
+// another revision under a journaled epoch.
+func TestResumeRefusesSuperseded(t *testing.T) {
+	r1, r2, r3 := revisions(t)
+	dir := t.TempDir()
+	a := newActivator(t, dir, &fakeFRR{}, nil)
+	committed(t, a, r1)
+	if res, err := a.Activate(context.Background(), Request{Activation: activationOf(r2, 2), Revision: r2}); err != nil ||
+		res.Outcome != OutcomeCommitted {
+		t.Fatalf("epoch 2 = %+v, %v", res, err)
+	}
+	old := Request{Activation: activationOf(r1, 1), Revision: r1}
+	if _, err := a.Resume(context.Background(), old); !errors.Is(err, ErrStale) {
+		t.Errorf("Resume of a superseded epoch = %v, want ErrStale", err)
+	}
+	other := Request{Activation: activationOf(r3, 2), Revision: r3}
+	if _, err := a.Resume(context.Background(), other); !errors.Is(err, ErrStale) {
+		t.Errorf("Resume of another revision under epoch 2 = %v, want ErrStale", err)
+	}
+	mismatched := Request{Activation: activationOf(r2, 2), Revision: r3}
+	if _, err := a.Resume(context.Background(), mismatched); !errors.Is(err, ErrDigestMismatch) {
+		t.Errorf("Resume with a revision other than the activation's = %v, want ErrDigestMismatch", err)
+	}
+	if cp, err := ReadCheckpoint(dir); err != nil || cp.Activation != activationOf(r2, 2) {
+		t.Errorf("checkpoint = %s, %v; want epoch 2", cp.Activation.Revision, err)
+	}
+}
+
+// TestActivateNeedsBoundIdentity: nothing is applied before the state
+// directory is bound to this Node and cluster.
+func TestActivateNeedsBoundIdentity(t *testing.T) {
+	r1, _, _ := revisions(t)
+	frr := &fakeFRR{}
+	a := &Activator{Dir: t.TempDir(), FRR: frr}
+	if err := a.Open(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := a.Activate(context.Background(), Request{Activation: activationOf(r1, 1), Revision: r1})
+	if !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("Activate without an identity = %v, want ErrIdentityMismatch", err)
+	}
+	if frr.reloads != 0 || len(a.Journal().Records()) != 0 {
+		t.Error("an unbound activation reached FRR or the journal")
+	}
+}
+
+// TestResumeAddsLaterRevocations: a revocation asked for after the epoch
+// was accepted still binds its recovery.
+func TestResumeAddsLaterRevocations(t *testing.T) {
+	r1, r2, _ := revisions(t)
+	dir := t.TempDir()
+	frr := &fakeFRR{}
+	a := newActivator(t, dir, frr, nil)
+	committed(t, a, r1)
+	a.Fault = func(p string) error {
+		if p == FaultAfterReload {
+			return errCrash
+		}
+		return nil
+	}
+	req := Request{Activation: activationOf(r2, 2), Revision: r2, Recovery: recoveryTo(r1), RecoveryRevision: r1,
+		Settings: Settings{BootLifetime: time.Hour}}
+	if _, err := a.Activate(context.Background(), req); !errors.Is(err, errCrash) {
+		t.Fatal(err)
+	}
+	restarted := newActivator(t, dir, frr, nil)
+	restarted.Health = func(context.Context, string) error { return errors.New("peer down") }
+	later := req
+	later.Recovery.RevokedPrefixes = []string{testPrefix}
+	res, err := restarted.Activate(context.Background(), later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Outcome != OutcomeDegraded || !strings.Contains(res.Detail, originatesRevoked) {
+		t.Fatalf("resume with a later revocation = %+v, want Degraded by it", res)
 	}
 }

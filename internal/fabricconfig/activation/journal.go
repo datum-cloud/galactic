@@ -116,12 +116,14 @@ func OpenJournal(path string, now func() time.Time) (*Journal, error) {
 		if len(line) == 0 {
 			continue
 		}
-		last := i == len(lines)-1 || (i == len(lines)-2 && complete)
+		// Only an unterminated final line can be a torn write; a complete
+		// line that fails its checksum was damaged after it was written.
+		torn := i == len(lines)-1 && !complete
 		rec, err := decode(line)
 		if err != nil {
-			if last {
-				// A torn final write: the stage it records never
-				// completed, so drop it and rewrite the file without it.
+			if torn {
+				// The stage it records never completed, so drop it and
+				// rewrite the file without it.
 				if err := j.rewrite(); err != nil {
 					return nil, err
 				}
@@ -202,13 +204,17 @@ func (j *Journal) Append(rec Record) (Record, error) {
 		_ = f.Close()
 		return Record{}, err
 	}
+	// The record is durable in the file from here, so memory follows it
+	// even if what remains fails; a failure then stops further appends.
+	j.records = append(j.records, rec)
 	if err := f.Close(); err != nil {
+		j.broken = fmt.Errorf("journal close failed after a durable append: %w", err)
 		return Record{}, err
 	}
 	if err := syncDir(filepath.Dir(j.path)); err != nil {
+		j.broken = fmt.Errorf("journal directory sync failed after a durable append: %w", err)
 		return Record{}, err
 	}
-	j.records = append(j.records, rec)
 	return rec, nil
 }
 
@@ -288,6 +294,13 @@ func (j *Journal) Accepted(deploymentUID string, epoch int64) (Record, bool) {
 		}
 	}
 	return Record{}, false
+}
+
+// NeedsRecovery reports whether an epoch failed and its recovery never
+// finished: its last record is ApplyFailed.
+func (j *Journal) NeedsRecovery(deploymentUID string, epoch int64) bool {
+	rec, ok := j.LastForEpoch(deploymentUID, epoch)
+	return ok && rec.Type == RecordApplyFailed
 }
 
 // LatestRecovery is the recovery journaled with the newest accepted

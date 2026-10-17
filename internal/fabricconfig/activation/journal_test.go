@@ -64,9 +64,12 @@ func TestJournalTornTail(t *testing.T) {
 		{"partial last line", func(l []string) string {
 			return l[0] + "\n" + l[1] + "\n" + l[2][:len(l[2])/2]
 		}, 2, false},
-		{"last line with a bad checksum", func(l []string) string {
-			return l[0] + "\n" + l[1] + "\n" + "00000000" + l[2][8:] + "\n"
+		{"unterminated last line with a bad checksum", func(l []string) string {
+			return l[0] + "\n" + l[1] + "\n" + "00000000" + l[2][8:]
 		}, 2, false},
+		{"complete last line with a bad checksum", func(l []string) string {
+			return l[0] + "\n" + l[1] + "\n" + "00000000" + l[2][8:] + "\n"
+		}, 0, true},
 		{"last line without its newline", func(l []string) string {
 			return l[0] + "\n" + l[1] + "\n" + l[2]
 		}, 3, false},
