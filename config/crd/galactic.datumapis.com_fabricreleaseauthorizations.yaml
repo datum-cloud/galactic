@@ -1,0 +1,320 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: fabricreleaseauthorizations.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    kind: FabricReleaseAuthorization
+    listKind: FabricReleaseAuthorizationList
+    plural: fabricreleaseauthorizations
+    shortNames:
+    - frauth
+    singular: fabricreleaseauthorization
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.type
+      name: TYPE
+      type: string
+    - jsonPath: .spec.fleetReleaseID
+      name: RELEASE
+      type: string
+    - jsonPath: .spec.fleetSequence
+      name: SEQUENCE
+      type: integer
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FabricReleaseAuthorization permits the rollout manager to promote named
+          revisions in this cell, as part of one fleet release. Its spec is
+          immutable. Within a routing domain at most one authorization is
+          outstanding at a time, and fleet sequences only rise: the controller
+          enforces that within a cell, keeping an outstanding authorization with a
+          finalizer, and the fleet release tool across cells.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: FabricReleaseAuthorizationSpec is what a release permits.
+            properties:
+              deployments:
+                description: |-
+                  Deployments lists each deployment, revision and digest the release
+                  may activate.
+                items:
+                  description: FabricReleaseTarget is one deployment a release may
+                    activate.
+                  properties:
+                    activationDependencyDigest:
+                      description: ActivationDependencyDigest is that revision's digest.
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                    deployment:
+                      description: Deployment is the FabricRouterDeployment's name.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    deploymentUID:
+                      description: DeploymentUID is its UID, so a recreated deployment
+                        is not covered.
+                      maxLength: 36
+                      minLength: 1
+                      type: string
+                    revision:
+                      description: Revision is the FabricRouterRevision to activate.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - activationDependencyDigest
+                  - deployment
+                  - deploymentUID
+                  - revision
+                  type: object
+                maxItems: 256
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - deployment
+                x-kubernetes-list-type: map
+              failureDomains:
+                description: FailureDomains are the failure domains the release touches.
+                items:
+                  maxLength: 63
+                  type: string
+                maxItems: 64
+                type: array
+                x-kubernetes-list-type: set
+              fleetReleaseID:
+                description: FleetReleaseID identifies the release across cells.
+                maxLength: 63
+                minLength: 1
+                type: string
+              fleetSequence:
+                description: FleetSequence orders releases in the routing domain.
+                format: int64
+                minimum: 1
+                type: integer
+              inputManifest:
+                description: |-
+                  InputManifest pins the inputs of a release that changes several
+                  mutable objects; a candidate whose inputs differ is not promoted.
+                items:
+                  description: FabricRevisionInput is one source object of a revision.
+                  properties:
+                    digest:
+                      description: |-
+                        Digest is the SHA-256, in hex, of the object's spec in canonical
+                        JSON.
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                    generation:
+                      description: Generation is the object's metadata.generation
+                        when it was read.
+                      format: int64
+                      type: integer
+                    kind:
+                      description: Kind is the object's kind.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    name:
+                      description: Name is the object's name.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    uid:
+                      description: UID is the object's UID.
+                      maxLength: 36
+                      type: string
+                  required:
+                  - digest
+                  - generation
+                  - kind
+                  - name
+                  - uid
+                  type: object
+                maxItems: 4096
+                type: array
+                x-kubernetes-list-type: atomic
+              routingDomain:
+                description: RoutingDomain is the fabric the release belongs to.
+                maxLength: 63
+                minLength: 1
+                type: string
+              startDeadline:
+                description: |-
+                  StartDeadline is the last time the release may start. Passing it
+                  stops a start; it never ends a release whose outcome is unknown.
+                format: date-time
+                type: string
+              type:
+                description: Type is Release or EmergencyWithdrawal.
+                enum:
+                - Release
+                - EmergencyWithdrawal
+                type: string
+              withdrawnPrefixes:
+                description: |-
+                  WithdrawnPrefixes are the originations an EmergencyWithdrawal
+                  removes; its revisions may change nothing else.
+                items:
+                  maxLength: 43
+                  type: string
+                maxItems: 256
+                type: array
+                x-kubernetes-list-type: set
+                x-kubernetes-validations:
+                - message: withdrawn prefixes are prefixes
+                  rule: self.all(p, isCIDR(p))
+            required:
+            - deployments
+            - fleetReleaseID
+            - fleetSequence
+            - routingDomain
+            - type
+            type: object
+            x-kubernetes-validations:
+            - message: a release authorization is immutable
+              rule: self == oldSelf
+            - message: an emergency withdrawal names the prefixes it withdraws, and
+                only it does
+              rule: (self.type == 'EmergencyWithdrawal') == (has(self.withdrawnPrefixes)
+                && size(self.withdrawnPrefixes) > 0)
+          status:
+            description: FabricReleaseAuthorizationStatus is a release's progress.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              finishedAt:
+                format: date-time
+                type: string
+              phase:
+                description: |-
+                  Phase is the release's progress. A release is outstanding while
+                  Pending, Started or Unknown.
+                enum:
+                - Pending
+                - Started
+                - Completed
+                - Failed
+                - Cancelled
+                - Unknown
+                type: string
+              recoveryVerified:
+                description: |-
+                  RecoveryVerified is set on a Failed release once every touched
+                  router is confirmed back on its recovery target.
+                type: boolean
+              startedAt:
+                format: date-time
+                type: string
+            type: object
+            x-kubernetes-validations:
+            - message: a started release records when it started
+              rule: '!has(self.phase) || !(self.phase in [''Started'', ''Completed'',
+                ''Failed'']) || has(self.startedAt)'
+            - message: only a failed release verifies recovery
+              rule: '!has(self.recoveryVerified) || !self.recoveryVerified || (has(self.phase)
+                && self.phase == ''Failed'')'
+            - message: verified recovery stays verified
+              rule: '!has(oldSelf.recoveryVerified) || !oldSelf.recoveryVerified ||
+                (has(self.recoveryVerified) && self.recoveryVerified)'
+            - message: 'a release moves only forward: Pending to Started or Cancelled,
+                Started to Completed, Failed or Unknown, Unknown to a known phase'
+              rule: '!has(oldSelf.phase) ? (!has(self.phase) || self.phase in [''Pending'',
+                ''Started'']) : (has(self.phase) && (self.phase == oldSelf.phase ||
+                (oldSelf.phase == ''Pending'' && self.phase in [''Started'', ''Cancelled''])
+                || (oldSelf.phase == ''Started'' && self.phase in [''Completed'',
+                ''Failed'', ''Unknown'']) || (oldSelf.phase == ''Unknown'' && self.phase
+                in [''Started'', ''Completed'', ''Failed''])))'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -171,6 +171,11 @@ func init() {
 
 // BGPRouterFRR holds FRR settings for one router.
 type BGPRouterFRR struct {
+	// RolloutPolicyRef names the FabricRolloutPolicy the rollout manager
+	// applies to this router. Unset uses the policy defaults.
+	// +optional
+	RolloutPolicyRef *LocalObjectRef `json:"rolloutPolicyRef,omitempty"`
+
 	// Retain lists definitions rendered on this router even when no peer
 	// or advertisement references them, so a migrated router's first
 	// configuration matches the one it replaces. Retained definitions never
