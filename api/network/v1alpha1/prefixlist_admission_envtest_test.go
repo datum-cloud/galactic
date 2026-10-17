@@ -78,6 +78,9 @@ func TestBGPPrefixListAdmission(t *testing.T) {
 		{"ipv6 exact", []networkv1alpha1.BGPPrefixListEntry{entry(5, "2607:ed40:10::/44", nil, nil)}, true},
 		{"ipv4 le 32", []networkv1alpha1.BGPPrefixListEntry{
 			entry(5, "10.0.0.0/8", ptr.To[int32](16), ptr.To[int32](32))}, true},
+		// FRR 10.7.1 accepts bounds equal to the prefix length.
+		{"ge equal to prefix", []networkv1alpha1.BGPPrefixListEntry{entry(5, "10.0.0.0/8", ptr.To[int32](8), nil)}, true},
+		{"le equal to prefix", []networkv1alpha1.BGPPrefixListEntry{entry(5, "10.0.0.0/8", nil, ptr.To[int32](8))}, true},
 		{"sequence 1", []networkv1alpha1.BGPPrefixListEntry{entry(1, "0.0.0.0/0", nil, nil)}, true},
 		{"sequence 4294967295", []networkv1alpha1.BGPPrefixListEntry{entry(4294967295, "0.0.0.0/0", nil, nil)}, true},
 		{"ipv4 ge 33", []networkv1alpha1.BGPPrefixListEntry{entry(5, "10.0.0.0/8", ptr.To[int32](33), nil)}, false},
