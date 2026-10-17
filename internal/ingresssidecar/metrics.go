@@ -28,39 +28,45 @@ func NewMetrics() *Metrics {
 		VRFActive: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "vrf_active",
-			Help:      "Number of per-VPC VRF devices this sidecar currently has installed.",
+			Help: "Per-VPC VRF devices this sidecar tracks as installed, including those draining " +
+				"through their teardown grace period. Store state, not a check of the kernel.",
 		}),
 		RouteActive: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "route_active",
-			Help:      "Number of per-pod seg6 egress routes this sidecar currently has installed.",
+			Help: "Installed route claims, one per EndpointSlice, including those draining. Claims sharing " +
+				"a prefix share one kernel route, so this can exceed the routes installed.",
 		}),
 		VRFPending: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "vrf_teardown_pending",
-			Help:      "Number of VRF devices past their last live pod, waiting out their teardown grace period.",
+			Help: "VRF devices past their last route as of the last sweep: those within their grace period " +
+				"and those whose removal failed.",
 		}),
 		RoutePending: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "route_teardown_pending",
-			Help:      "Number of routes whose EndpointSlice disappeared, waiting out their teardown grace period.",
+			Help: "Route claims whose EndpointSlice is gone as of the last sweep: those within their grace " +
+				"period and those whose removal failed.",
 		}),
 		ReconcileErrs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "reconcile_errors_total",
-			Help: "Reconcile errors, by kind " +
-				"(ensure_vrf, ensure_route, remove_vrf, remove_route, reapply_vrf, reapply_route).",
+			Help: "Backend errors, by kind (ensure_vrf, ensure_route, remove_vrf, remove_route, " +
+				"reapply_vrf, reapply_route, prune_datapath).",
 		}, []string{"kind"}),
 		ReconcileTime: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Name:      "reconcile_duration_seconds",
-			Help:      "Time taken by each Store.SetDesired call.",
-			Buckets:   prometheus.DefBuckets,
+			Help: "Time each desired-state update took to apply, including waiting for the store's lock. " +
+				"Does not cover sweeps.",
+			Buckets: prometheus.DefBuckets,
 		}),
 		Reapplies: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "reapply_total",
-			Help:      "Times every tracked VRF and route was reapplied after the shared eBPF datapath was reloaded.",
+			Help: "Reapply passes over every tracked VRF and route: after the shared eBPF datapath was " +
+				"reloaded, after this sidecar's rows went missing from it, and retries of a pass that failed.",
 		}),
 	}
 }
