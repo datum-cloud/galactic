@@ -328,8 +328,12 @@ func TestBusyWhileRecovering(t *testing.T) {
 	}
 	d.Status.Conditions = []metav1.Condition{{
 		Type: networkv1alpha1.FabricConditionDegraded, Status: metav1.ConditionTrue,
-		Reason: networkv1alpha1.FabricReasonNoEligibleRecovery, ObservedGeneration: 3,
+		Reason: networkv1alpha1.FabricReasonNoEligibleRecovery, ObservedGeneration: 2,
 	}}
+	if !busy(d) {
+		t.Error("a Degraded condition from an earlier generation released a recovering router")
+	}
+	d.Status.Conditions[0].ObservedGeneration = 3
 	if busy(d) {
 		t.Error("a router with nothing to recover to still counts as busy")
 	}
