@@ -187,6 +187,19 @@ spec:
                         - name
                         x-kubernetes-list-type: map
                     type: object
+                  rolloutPolicyRef:
+                    description: |-
+                      RolloutPolicyRef names the FabricRolloutPolicy the rollout manager
+                      applies to this router. Unset uses the policy defaults.
+                    properties:
+                      name:
+                        description: Name is the referenced object's name.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                 type: object
               listenPort:
                 description: |-

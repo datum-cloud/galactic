@@ -1,0 +1,703 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: fabricrouterdeployments.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    kind: FabricRouterDeployment
+    listKind: FabricRouterDeploymentList
+    plural: fabricrouterdeployments
+    shortNames:
+    - frdep
+    singular: fabricrouterdeployment
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.target.nodeName
+      name: NODE
+      type: string
+    - jsonPath: .spec.source
+      name: SOURCE
+      type: string
+    - jsonPath: .spec.activeRevisionRef.name
+      name: ACTIVE
+      type: string
+    - jsonPath: .spec.activationEpoch
+      name: EPOCH
+      type: integer
+    - jsonPath: .status.appliedRevision
+      name: APPLIED
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FabricRouterDeployment is the single activation point of one fabric
+          router: the revision a node agent stages and the revision it runs. The
+          rollout manager writes its spec and promotes a revision by raising the
+          activation epoch together with the active revision, its digest, the
+          release it is promoted under, the activation settings and the recovery
+          authorization, in one update; the node agent writes its status. It is
+          named after the router, and created at epoch zero.
+
+          Admission checks the shape of a promotion, not that its authorization
+          exists and covers this deployment, revision and digest: the rollout
+          manager checks that before writing, and the node agent again before
+          applying.
+
+          The agent binds its journal to the deployment's UID. Deleting and
+          recreating a deployment does not reset its epochs: the agent refuses the
+          new UID with RecoveryConflict until spec.rebind names the old one.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              FabricRouterDeploymentSpec is what the rollout manager asks of a node.
+
+              Rules that hold on every write:
+              Transition rules:
+            properties:
+              activation:
+                description: |-
+                  Activation holds the settings the agent applies the active epoch
+                  with, copied from the router's rollout policy at promotion so the
+                  agent needs nothing else.
+                properties:
+                  applyTimeoutSeconds:
+                    description: ApplyTimeoutSeconds bounds one reload.
+                    format: int32
+                    maximum: 900
+                    minimum: 5
+                    type: integer
+                  offlineBootSeconds:
+                    description: |-
+                      OfflineBootSeconds is how long the committed configuration may be
+                      restored at boot without the API.
+                    format: int64
+                    maximum: 7776000
+                    minimum: 0
+                    type: integer
+                  requiredPeers:
+                    description: |-
+                      RequiredPeers are the peer addresses that must reach Established
+                      for the activation to count as healthy.
+                    items:
+                      maxLength: 45
+                      type: string
+                    maxItems: 128
+                    type: array
+                    x-kubernetes-list-type: set
+                    x-kubernetes-validations:
+                    - message: required peers are IP addresses
+                      rule: self.all(a, isIP(a))
+                  requiredStaticRoutes:
+                    description: RequiredStaticRoutes are the prefixes that must be
+                      in the FIB.
+                    items:
+                      maxLength: 43
+                      type: string
+                    maxItems: 128
+                    type: array
+                    x-kubernetes-list-type: set
+                    x-kubernetes-validations:
+                    - message: required static routes are prefixes
+                      rule: self.all(p, isCIDR(p))
+                  stabilizationSeconds:
+                    description: |-
+                      StabilizationSeconds is how long an applied revision must stay
+                      healthy before the agent commits it.
+                    format: int32
+                    maximum: 3600
+                    minimum: 0
+                    type: integer
+                required:
+                - applyTimeoutSeconds
+                - offlineBootSeconds
+                - stabilizationSeconds
+                type: object
+              activationDependencyDigest:
+                description: |-
+                  ActivationDependencyDigest is the active revision's digest, so an
+                  agent never applies a revision that differs from the one promoted.
+                pattern: ^[0-9a-f]{64}$
+                type: string
+              activationEpoch:
+                description: |-
+                  ActivationEpoch numbers promotions. It rises by one with each new
+                  active revision, and a retry of the same revision is a new epoch.
+                format: int64
+                maximum: 9007199254740991
+                minimum: 0
+                type: integer
+              activeRevisionRef:
+                description: |-
+                  ActiveRevisionRef is the revision the agent applies at
+                  activationEpoch.
+                properties:
+                  name:
+                    description: Name is the referenced object's name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              authorizationRef:
+                description: |-
+                  AuthorizationRef is the FabricReleaseAuthorization the active epoch
+                  was promoted under.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    maxLength: 36
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+              candidateRevisionRef:
+                description: |-
+                  CandidateRevisionRef is the revision the agent stages and validates
+                  without applying.
+                properties:
+                  name:
+                    description: Name is the referenced object's name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              fence:
+                description: |-
+                  Fence records that the router's previous node was cut off from the
+                  fabric, which moving the router to another node requires.
+                properties:
+                  fencedAt:
+                    description: FencedAt is when.
+                    format: date-time
+                    type: string
+                  fencedBy:
+                    description: FencedBy is who confirmed it.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  method:
+                    description: Method is how it was fenced, such as a switch port
+                      shutdown.
+                    maxLength: 256
+                    minLength: 1
+                    type: string
+                  nodeUID:
+                    description: NodeUID is the fenced node.
+                    maxLength: 36
+                    minLength: 1
+                    type: string
+                required:
+                - fencedAt
+                - fencedBy
+                - method
+                - nodeUID
+                type: object
+              rebind:
+                description: |-
+                  Rebind lets the agent accept this deployment although its journal is
+                  bound to another deployment UID, after an operator confirmed that
+                  deployment is gone for good.
+                properties:
+                  approvedAt:
+                    description: ApprovedAt is when.
+                    format: date-time
+                    type: string
+                  approvedBy:
+                    description: ApprovedBy is who confirmed the old deployment is
+                      gone.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  fromDeploymentUID:
+                    description: |-
+                      FromDeploymentUID is the deployment UID the agent's journal is bound
+                      to; the agent rebinds only when it matches.
+                    maxLength: 36
+                    minLength: 1
+                    type: string
+                required:
+                - approvedAt
+                - approvedBy
+                - fromDeploymentUID
+                type: object
+              recovery:
+                description: |-
+                  Recovery is what the agent may restore, and what it must never
+                  restore, if this activation fails. It changes only with the epoch.
+                properties:
+                  retired:
+                    description: |-
+                      Retired means the router is decommissioned; no revision may be
+                      restored. It cannot be cleared.
+                    type: boolean
+                  revokedCredentials:
+                    description: |-
+                      RevokedCredentials are Secrets no recovery target may use. They can
+                      be added, never removed.
+                    items:
+                      description: FabricObjectIdentity names an object by name and
+                        UID.
+                      properties:
+                        name:
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        uid:
+                          maxLength: 36
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - uid
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - uid
+                    x-kubernetes-list-type: map
+                  revokedPrefixes:
+                    description: |-
+                      RevokedPrefixes are prefixes no recovery target may originate. They
+                      can be added, never removed.
+                    items:
+                      maxLength: 43
+                      type: string
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-type: set
+                    x-kubernetes-validations:
+                    - message: revoked prefixes are prefixes
+                      rule: self.all(p, isCIDR(p))
+                  targetDependencyDigest:
+                    description: TargetDependencyDigest is the recovery target's digest.
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
+                  targetRevisionRef:
+                    description: |-
+                      TargetRevisionRef is the revision the agent restores on a confirmed
+                      failure of this activation. Unset means no rollback: the agent
+                      reports NoEligibleRecovery.
+                    properties:
+                      name:
+                        description: Name is the referenced object's name.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: a recovery target names its digest
+                  rule: has(self.targetRevisionRef) == has(self.targetDependencyDigest)
+              routerRef:
+                description: RouterRef is the BGPRouter this deployment activates.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    maxLength: 36
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+              source:
+                default: ConfigMap
+                description: |-
+                  Source is the writer of the node's FRR configuration. Once a node is
+                  on CRD it returns only to ConfigMap, with sourceHandoff.
+                enum:
+                - ConfigMap
+                - Shadow
+                - CRD
+                type: string
+              sourceHandoff:
+                description: |-
+                  SourceHandoff names the ConfigMap version the agent verifies before
+                  handing the node back from CRD to ConfigMap.
+                properties:
+                  configMap:
+                    description: ConfigMap is the node's per-node ConfigMap, by name
+                      and UID.
+                    properties:
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      uid:
+                        maxLength: 36
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - uid
+                    type: object
+                  resourceVersion:
+                    description: ResourceVersion is the ConfigMap version the agent
+                      may apply.
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                required:
+                - configMap
+                - resourceVersion
+                type: object
+              suspended:
+                description: Suspended stops promotion; the agent keeps running what
+                  it has.
+                type: boolean
+              target:
+                description: Target is the Node the router runs on, by name and UID.
+                properties:
+                  nodeName:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  nodeUID:
+                    maxLength: 36
+                    minLength: 1
+                    type: string
+                required:
+                - nodeName
+                - nodeUID
+                type: object
+            required:
+            - activationEpoch
+            - routerRef
+            - source
+            - target
+            type: object
+            x-kubernetes-validations:
+            - message: the active revision and its digest are set together
+              rule: has(self.activeRevisionRef) == has(self.activationDependencyDigest)
+            - message: an epoch above zero names the active revision, its authorization
+                and its activation settings; epoch zero has no active revision
+              rule: 'self.activationEpoch == 0 ? !has(self.activeRevisionRef) : (has(self.activeRevisionRef)
+                && has(self.authorizationRef) && has(self.activation))'
+            - message: the active revision's name carries its digest
+              rule: '!has(self.activeRevisionRef) || !has(self.activationDependencyDigest)
+                || self.activeRevisionRef.name.endsWith(''-'' + self.activationDependencyDigest.substring(0,
+                10))'
+            - message: sourceHandoff applies only to the ConfigMap source
+              rule: '!has(self.sourceHandoff) || self.source == ''ConfigMap'''
+            - message: the fence names the node the router left, not its target
+              rule: '!has(self.fence) || self.fence.nodeUID != self.target.nodeUID'
+            - message: a deployment is created at epoch zero
+              optionalOldSelf: true
+              rule: oldSelf.hasValue() || self.activationEpoch == 0
+            - message: routerRef is immutable
+              rule: self.routerRef == oldSelf.routerRef
+            - message: the router moves to another node only after its current node
+                is fenced
+              rule: self.target == oldSelf.target || (has(self.fence) && self.fence.nodeUID
+                == oldSelf.target.nodeUID)
+            - message: activationEpoch rises by one per promotion
+              rule: self.activationEpoch == oldSelf.activationEpoch || self.activationEpoch
+                == oldSelf.activationEpoch + 1
+            - message: activeRevisionRef changes only with a new epoch
+              rule: 'self.activationEpoch != oldSelf.activationEpoch || (has(self.activeRevisionRef)
+                ? (has(oldSelf.activeRevisionRef) && self.activeRevisionRef == oldSelf.activeRevisionRef)
+                : !has(oldSelf.activeRevisionRef))'
+            - message: activationDependencyDigest changes only with a new epoch
+              rule: 'self.activationEpoch != oldSelf.activationEpoch || (has(self.activationDependencyDigest)
+                ? (has(oldSelf.activationDependencyDigest) && self.activationDependencyDigest
+                == oldSelf.activationDependencyDigest) : !has(oldSelf.activationDependencyDigest))'
+            - message: authorizationRef changes only with a new epoch
+              rule: 'self.activationEpoch != oldSelf.activationEpoch || (has(self.authorizationRef)
+                ? (has(oldSelf.authorizationRef) && self.authorizationRef == oldSelf.authorizationRef)
+                : !has(oldSelf.authorizationRef))'
+            - message: activation changes only with a new epoch
+              rule: 'self.activationEpoch != oldSelf.activationEpoch || (has(self.activation)
+                ? (has(oldSelf.activation) && self.activation == oldSelf.activation)
+                : !has(oldSelf.activation))'
+            - message: recovery changes only with a new epoch
+              rule: 'self.activationEpoch != oldSelf.activationEpoch || (has(self.recovery)
+                ? (has(oldSelf.recovery) && self.recovery == oldSelf.recovery) : !has(oldSelf.recovery))'
+            - message: a promotion needs a deployment already on the CRD source and
+                unsuspended
+              rule: self.activationEpoch == oldSelf.activationEpoch || (oldSelf.source
+                == 'CRD' && self.source == 'CRD' && !(has(self.suspended) && self.suspended))
+            - message: a retired router is not promoted
+              rule: self.activationEpoch == oldSelf.activationEpoch || !has(oldSelf.recovery)
+                || !has(oldSelf.recovery.retired) || !oldSelf.recovery.retired
+            - message: a node leaves the CRD source only for its ConfigMap, naming
+                the ConfigMap version
+              rule: oldSelf.source != 'CRD' || self.source == 'CRD' || (self.source
+                == 'ConfigMap' && has(self.sourceHandoff))
+            - message: revoked prefixes stay revoked
+              rule: '!has(oldSelf.recovery) || !has(oldSelf.recovery.revokedPrefixes)
+                || (has(self.recovery) && has(self.recovery.revokedPrefixes) && oldSelf.recovery.revokedPrefixes.all(p,
+                p in self.recovery.revokedPrefixes))'
+            - message: revoked credentials stay revoked
+              rule: '!has(oldSelf.recovery) || !has(oldSelf.recovery.revokedCredentials)
+                || (has(self.recovery) && has(self.recovery.revokedCredentials) &&
+                oldSelf.recovery.revokedCredentials.all(c, self.recovery.revokedCredentials.exists(n,
+                n.uid == c.uid)))'
+            - message: a retired router stays retired
+              rule: '!has(oldSelf.recovery) || !has(oldSelf.recovery.retired) || !oldSelf.recovery.retired
+                || (has(self.recovery) && has(self.recovery.retired) && self.recovery.retired)'
+          status:
+            description: FabricRouterDeploymentStatus is what the node agent observed.
+            properties:
+              agentVersion:
+                description: AgentVersion is the reporting agent's build.
+                maxLength: 64
+                type: string
+              appliedDigest:
+                pattern: ^([0-9a-f]{64})?$
+                type: string
+              appliedEpoch:
+                description: |-
+                  AppliedEpoch, AppliedRevision and AppliedDigest are the last
+                  activation the agent committed.
+                format: int64
+                type: integer
+              appliedRevision:
+                maxLength: 253
+                type: string
+              bootAuthorizedUntil:
+                description: |-
+                  BootAuthorizedUntil is when the committed configuration stops being
+                  restorable at boot without the API.
+                format: date-time
+                type: string
+              boundDeploymentUID:
+                description: |-
+                  BoundDeploymentUID is the deployment UID the agent's journal is bound
+                  to; a different UID here than the object's own is a RecoveryConflict.
+                maxLength: 36
+                type: string
+              clusterID:
+                description: ClusterID is the cluster the agent's state is bound to.
+                maxLength: 36
+                type: string
+              conditions:
+                description: |-
+                  Conditions are Accepted, Staged, Programmed, Ready, Degraded,
+                  RecoveryConflict and Bootstrapping.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              effectiveSource:
+                description: EffectiveSource is the writer the agent is actually honouring.
+                enum:
+                - ConfigMap
+                - Shadow
+                - CRD
+                type: string
+              epochs:
+                description: |-
+                  Epochs reports the journal's last stage for the most recent epochs,
+                  newest first, so the rollout manager knows a failed epoch is spent.
+                items:
+                  description: FabricEpochStatus is one epoch's journaled outcome.
+                  properties:
+                    detail:
+                      description: Detail explains a failure.
+                      maxLength: 1024
+                      type: string
+                    epoch:
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    recoveryTarget:
+                      description: RecoveryTarget is the recovery target journaled
+                        with the epoch.
+                      maxLength: 253
+                      type: string
+                    revision:
+                      maxLength: 253
+                      type: string
+                    revokedPrefixes:
+                      description: RevokedPrefixes counts the revoked prefixes journaled
+                        with it.
+                      format: int32
+                      type: integer
+                    stage:
+                      description: FabricActivationStage is the last journaled stage
+                        of an epoch.
+                      enum:
+                      - Accepted
+                      - Applied
+                      - ApplyFailed
+                      - Committed
+                      - Recovered
+                      - Degraded
+                      type: string
+                  required:
+                  - epoch
+                  - revision
+                  - stage
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - epoch
+                x-kubernetes-list-type: map
+              heartbeatTime:
+                description: HeartbeatTime is the agent's last report.
+                format: date-time
+                type: string
+              journalHighWater:
+                description: |-
+                  JournalHighWater is the highest epoch the agent's journal accepted
+                  for this deployment UID.
+                format: int64
+                type: integer
+              observedGeneration:
+                description: ObservedGeneration is the spec generation the agent acted
+                  on.
+                format: int64
+                type: integer
+              requiresAPI:
+                description: |-
+                  RequiresAPI means the committed configuration has sessions that need
+                  credentials from the API and are not restored offline.
+                type: boolean
+              staged:
+                description: Staged reports the candidate the agent validated without
+                  applying.
+                properties:
+                  class:
+                    description: Class classifies what applying it would disturb.
+                    enum:
+                    - NoChange
+                    - NonDisruptive
+                    - SessionReset
+                    - RestartRequired
+                    type: string
+                  diff:
+                    description: Diff is the reload's change list, truncated.
+                    maxLength: 8192
+                    type: string
+                  digest:
+                    description: Digest is its activation dependency digest.
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
+                  linesAdded:
+                    description: LinesAdded and LinesRemoved count the reload's changes.
+                    format: int32
+                    type: integer
+                  linesRemoved:
+                    format: int32
+                    type: integer
+                  revision:
+                    description: Revision is the candidate's name.
+                    maxLength: 253
+                    type: string
+                  validatedAt:
+                    description: ValidatedAt is when the agent validated it.
+                    format: date-time
+                    type: string
+                required:
+                - class
+                - digest
+                - linesAdded
+                - linesRemoved
+                - revision
+                - validatedAt
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: a deployment is named after its router
+          rule: self.metadata.name == self.spec.routerRef.name
+    served: true
+    storage: true
+    subresources:
+      status: {}

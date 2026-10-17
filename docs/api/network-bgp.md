@@ -20,6 +20,9 @@ Package v1alpha1 contains API Schema definitions for the galactic.datumapis.com/
 - [BGPVRFInstance](#bgpvrfinstance)
 - [EgressShard](#egressshard)
 - [FRRRouterParameters](#frrrouterparameters)
+- [FabricReleaseAuthorization](#fabricreleaseauthorization)
+- [FabricRolloutPolicy](#fabricrolloutpolicy)
+- [FabricRouterDeployment](#fabricrouterdeployment)
 - [FabricRouterRevision](#fabricrouterrevision)
 - [ServiceEndpoint](#serviceendpoint)
 - [ServiceRoutePolicy](#serviceroutepolicy)
@@ -1110,6 +1113,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `rolloutPolicyRef` _[LocalObjectRef](#localobjectref)_ | RolloutPolicyRef names the FabricRolloutPolicy the rollout manager<br />applies to this router. Unset uses the policy defaults. |  |  |
 | `retain` _[BGPRouterFRRRetain](#bgprouterfrrretain)_ | Retain lists definitions rendered on this router even when no peer<br />or advertisement references them, so a migrated router's first<br />configuration matches the one it replaces. Retained definitions never<br />create sessions or advertisements. |  |  |
 
 
@@ -1852,6 +1856,333 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
 
 
+#### FabricActivationSettings
+
+
+
+FabricActivationSettings are the rollout policy's settings for one
+epoch, resolved by the rollout manager.
+
+
+
+_Appears in:_
+- [FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `stabilizationSeconds` _integer_ | StabilizationSeconds is how long an applied revision must stay<br />healthy before the agent commits it. |  | Maximum: 3600 <br />Minimum: 0 <br /> |
+| `applyTimeoutSeconds` _integer_ | ApplyTimeoutSeconds bounds one reload. |  | Maximum: 900 <br />Minimum: 5 <br /> |
+| `offlineBootSeconds` _integer_ | OfflineBootSeconds is how long the committed configuration may be<br />restored at boot without the API. |  | Maximum: 7.776e+06 <br />Minimum: 0 <br /> |
+| `requiredPeers` _string array_ | RequiredPeers are the peer addresses that must reach Established<br />for the activation to count as healthy. |  | MaxItems: 128 <br />items:MaxLength: 45 <br /> |
+| `requiredStaticRoutes` _string array_ | RequiredStaticRoutes are the prefixes that must be in the FIB. |  | MaxItems: 128 <br />items:MaxLength: 43 <br /> |
+
+
+#### FabricActivationStage
+
+_Underlying type:_ _string_
+
+FabricActivationStage is the last journaled stage of an epoch.
+
+_Validation:_
+- Enum: [Accepted Applied ApplyFailed Committed Recovered Degraded]
+
+_Appears in:_
+- [FabricEpochStatus](#fabricepochstatus)
+
+| Field | Description |
+| --- | --- |
+| `Accepted` |  |
+| `Applied` |  |
+| `ApplyFailed` |  |
+| `Committed` |  |
+| `Recovered` |  |
+| `Degraded` |  |
+
+
+#### FabricChangeClass
+
+_Underlying type:_ _string_
+
+FabricChangeClass classifies what applying a candidate would disturb.
+
+_Validation:_
+- Enum: [NoChange NonDisruptive SessionReset RestartRequired]
+
+_Appears in:_
+- [FabricStagedRevision](#fabricstagedrevision)
+
+| Field | Description |
+| --- | --- |
+| `NoChange` |  |
+| `NonDisruptive` |  |
+| `SessionReset` |  |
+| `RestartRequired` |  |
+
+
+#### FabricConfigSource
+
+_Underlying type:_ _string_
+
+FabricConfigSource names which writer owns a node's FRR configuration.
+
+_Validation:_
+- Enum: [ConfigMap Shadow CRD]
+
+_Appears in:_
+- [FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)
+- [FabricRouterDeploymentStatus](#fabricrouterdeploymentstatus)
+
+| Field | Description |
+| --- | --- |
+| `ConfigMap` | FabricConfigSourceConfigMap applies the node's rendered ConfigMap.<br /> |
+| `Shadow` | FabricConfigSourceShadow applies the ConfigMap and stages the typed<br />revision beside it, reporting the difference without writing it.<br /> |
+| `CRD` | FabricConfigSourceCRD applies the active FabricRouterRevision.<br /> |
+
+
+#### FabricEpochStatus
+
+
+
+FabricEpochStatus is one epoch's journaled outcome.
+
+
+
+_Appears in:_
+- [FabricRouterDeploymentStatus](#fabricrouterdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `epoch` _integer_ |  |  | Minimum: 1 <br /> |
+| `revision` _string_ |  |  | MaxLength: 253 <br /> |
+| `stage` _[FabricActivationStage](#fabricactivationstage)_ |  |  | Enum: [Accepted Applied ApplyFailed Committed Recovered Degraded] <br /> |
+| `recoveryTarget` _string_ | RecoveryTarget is the recovery target journaled with the epoch. |  | MaxLength: 253 <br /> |
+| `revokedPrefixes` _integer_ | RevokedPrefixes counts the revoked prefixes journaled with it. |  |  |
+| `detail` _string_ | Detail explains a failure. |  | MaxLength: 1024 <br /> |
+
+
+#### FabricFence
+
+
+
+FabricFence records that a node was cut off from the fabric.
+
+
+
+_Appears in:_
+- [FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `nodeUID` _string_ | NodeUID is the fenced node. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
+| `method` _string_ | Method is how it was fenced, such as a switch port shutdown. |  | MaxLength: 256 <br />MinLength: 1 <br /> |
+| `fencedBy` _string_ | FencedBy is who confirmed it. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `fencedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | FencedAt is when. |  |  |
+
+
+#### FabricNodeIdentity
+
+
+
+FabricNodeIdentity names a Node by name and UID.
+
+
+
+_Appears in:_
+- [FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `nodeName` _string_ |  |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `nodeUID` _string_ |  |  | MaxLength: 36 <br />MinLength: 1 <br /> |
+
+
+#### FabricObjectIdentity
+
+
+
+FabricObjectIdentity names an object by name and UID.
+
+
+
+_Appears in:_
+- [FabricRecovery](#fabricrecovery)
+- [FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)
+- [FabricSourceHandoff](#fabricsourcehandoff)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ |  |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `uid` _string_ |  |  | MaxLength: 36 <br />MinLength: 1 <br /> |
+
+
+#### FabricRebind
+
+
+
+FabricRebind approves accepting this deployment over a journal bound to
+another deployment UID.
+
+
+
+_Appears in:_
+- [FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `fromDeploymentUID` _string_ | FromDeploymentUID is the deployment UID the agent's journal is bound<br />to; the agent rebinds only when it matches. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
+| `approvedBy` _string_ | ApprovedBy is who confirmed the old deployment is gone. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `approvedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ApprovedAt is when. |  |  |
+
+
+#### FabricRecovery
+
+
+
+FabricRecovery is what a failed activation may fall back to.
+
+
+
+_Appears in:_
+- [FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `targetRevisionRef` _[LocalObjectRef](#localobjectref)_ | TargetRevisionRef is the revision the agent restores on a confirmed<br />failure of this activation. Unset means no rollback: the agent<br />reports NoEligibleRecovery. |  |  |
+| `targetDependencyDigest` _string_ | TargetDependencyDigest is the recovery target's digest. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
+| `revokedPrefixes` _string array_ | RevokedPrefixes are prefixes no recovery target may originate. They<br />can be added, never removed. |  | MaxItems: 64 <br />items:MaxLength: 43 <br /> |
+| `revokedCredentials` _[FabricObjectIdentity](#fabricobjectidentity) array_ | RevokedCredentials are Secrets no recovery target may use. They can<br />be added, never removed. |  | MaxItems: 32 <br /> |
+| `retired` _boolean_ | Retired means the router is decommissioned; no revision may be<br />restored. It cannot be cleared. |  |  |
+
+
+#### FabricReleaseAuthorization
+
+
+
+FabricReleaseAuthorization permits the rollout manager to promote named
+revisions in this cell, as part of one fleet release. Its spec is
+immutable. Within a routing domain at most one authorization is
+outstanding at a time, and fleet sequences only rise: the controller
+enforces that within a cell, keeping an outstanding authorization with a
+finalizer, and the fleet release tool across cells.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `FabricReleaseAuthorization` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[FabricReleaseAuthorizationSpec](#fabricreleaseauthorizationspec)_ |  |  | Required: \{\} <br /> |
+| `status` _[FabricReleaseAuthorizationStatus](#fabricreleaseauthorizationstatus)_ |  |  |  |
+
+
+#### FabricReleaseAuthorizationSpec
+
+
+
+FabricReleaseAuthorizationSpec is what a release permits.
+
+
+
+_Appears in:_
+- [FabricReleaseAuthorization](#fabricreleaseauthorization)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[FabricReleaseType](#fabricreleasetype)_ | Type is Release or EmergencyWithdrawal. |  | Enum: [Release EmergencyWithdrawal] <br /> |
+| `routingDomain` _string_ | RoutingDomain is the fabric the release belongs to. |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+| `fleetReleaseID` _string_ | FleetReleaseID identifies the release across cells. |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+| `fleetSequence` _integer_ | FleetSequence orders releases in the routing domain. |  | Minimum: 1 <br /> |
+| `deployments` _[FabricReleaseTarget](#fabricreleasetarget) array_ | Deployments lists each deployment, revision and digest the release<br />may activate. |  | MaxItems: 256 <br />MinItems: 1 <br /> |
+| `withdrawnPrefixes` _string array_ | WithdrawnPrefixes are the originations an EmergencyWithdrawal<br />removes; its revisions may change nothing else. |  | MaxItems: 256 <br />items:MaxLength: 43 <br /> |
+| `failureDomains` _string array_ | FailureDomains are the failure domains the release touches. |  | MaxItems: 64 <br />items:MaxLength: 63 <br /> |
+| `inputManifest` _[FabricRevisionInput](#fabricrevisioninput) array_ | InputManifest pins the inputs of a release that changes several<br />mutable objects; a candidate whose inputs differ is not promoted. |  | MaxItems: 4096 <br /> |
+| `startDeadline` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | StartDeadline is the last time the release may start. Passing it<br />stops a start; it never ends a release whose outcome is unknown. |  |  |
+
+
+#### FabricReleaseAuthorizationStatus
+
+
+
+FabricReleaseAuthorizationStatus is a release's progress.
+
+
+
+_Appears in:_
+- [FabricReleaseAuthorization](#fabricreleaseauthorization)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[FabricReleasePhase](#fabricreleasephase)_ | Phase is the release's progress. A release is outstanding while<br />Pending, Started or Unknown. |  | Enum: [Pending Started Completed Failed Cancelled Unknown] <br /> |
+| `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ |  |  |  |
+| `finishedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ |  |  |  |
+| `recoveryVerified` _boolean_ | RecoveryVerified is set on a Failed release once every touched<br />router is confirmed back on its recovery target. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ |  |  |  |
+
+
+#### FabricReleasePhase
+
+_Underlying type:_ _string_
+
+FabricReleasePhase is a release's progress.
+
+_Validation:_
+- Enum: [Pending Started Completed Failed Cancelled Unknown]
+
+_Appears in:_
+- [FabricReleaseAuthorizationStatus](#fabricreleaseauthorizationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` |  |
+| `Started` |  |
+| `Completed` |  |
+| `Failed` |  |
+| `Cancelled` |  |
+| `Unknown` |  |
+
+
+#### FabricReleaseTarget
+
+
+
+FabricReleaseTarget is one deployment a release may activate.
+
+
+
+_Appears in:_
+- [FabricReleaseAuthorizationSpec](#fabricreleaseauthorizationspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `deployment` _string_ | Deployment is the FabricRouterDeployment's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `deploymentUID` _string_ | DeploymentUID is its UID, so a recreated deployment is not covered. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
+| `revision` _string_ | Revision is the FabricRouterRevision to activate. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `activationDependencyDigest` _string_ | ActivationDependencyDigest is that revision's digest. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
+
+
+#### FabricReleaseType
+
+_Underlying type:_ _string_
+
+FabricReleaseType is what a release authorizes.
+
+_Validation:_
+- Enum: [Release EmergencyWithdrawal]
+
+_Appears in:_
+- [FabricReleaseAuthorizationSpec](#fabricreleaseauthorizationspec)
+
+| Field | Description |
+| --- | --- |
+| `Release` | FabricReleaseTypeRelease authorizes ordinary promotions.<br /> |
+| `EmergencyWithdrawal` | FabricReleaseTypeEmergencyWithdrawal authorizes only revisions that<br />withdraw the named originations, and may be issued while a release<br />is outstanding.<br /> |
+
+
 #### FabricRevisionCompiler
 
 
@@ -1878,6 +2209,7 @@ FabricRevisionInput is one source object of a revision.
 
 
 _Appears in:_
+- [FabricReleaseAuthorizationSpec](#fabricreleaseauthorizationspec)
 - [FabricRouterRevisionSpec](#fabricrouterrevisionspec)
 
 | Field | Description | Default | Validation |
@@ -1906,6 +2238,53 @@ _Appears in:_
 | `uid` _string_ | UID is the FRRRouterParameters UID. |  | MaxLength: 36 <br /> |
 
 
+#### FabricRolloutPolicy
+
+
+
+FabricRolloutPolicy sets how the rollout manager promotes and observes
+the routers that reference it.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `FabricRolloutPolicy` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[FabricRolloutPolicySpec](#fabricrolloutpolicyspec)_ |  |  | Required: \{\} <br /> |
+
+
+#### FabricRolloutPolicySpec
+
+
+
+FabricRolloutPolicySpec are the rollout settings. The rollout manager
+copies the ones the agent needs into each promotion's activation
+settings.
+
+
+
+_Appears in:_
+- [FabricRolloutPolicy](#fabricrolloutpolicy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `maxUnavailable` _integer_ | MaxUnavailable is how many routers of one failure domain, within one<br />cell, may be activating at once. | 1 | Minimum: 1 <br /> |
+| `failureDomainLabel` _string_ | FailureDomainLabel is the Node label that groups routers. | topology.kubernetes.io/zone | MaxLength: 317 <br />Pattern: `^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$` <br /> |
+| `stabilizationSeconds` _integer_ | StabilizationSeconds is how long an applied revision must stay<br />healthy before the agent commits it. | 60 | Maximum: 3600 <br />Minimum: 0 <br /> |
+| `applyTimeoutSeconds` _integer_ | ApplyTimeoutSeconds bounds one reload. | 60 | Maximum: 900 <br />Minimum: 5 <br /> |
+| `heartbeatTimeoutSeconds` _integer_ | HeartbeatTimeoutSeconds is how long an agent's silence leaves its<br />router healthy before readiness becomes Unknown. | 60 | Maximum: 3600 <br />Minimum: 10 <br /> |
+| `offlineBootSeconds` _integer_ | OfflineBootSeconds is how long a committed checkpoint may be applied<br />at boot without the API. | 604800 | Maximum: 7.776e+06 <br />Minimum: 0 <br /> |
+| `optionalPeers` _[LocalObjectRef](#localobjectref) array_ | OptionalPeers names BGPPeers, in the policy's namespace, that need not<br />reach Established for a router to be healthy. |  | MaxItems: 256 <br /> |
+| `maintenancePeers` _[LocalObjectRef](#localobjectref) array_ | MaintenancePeers names BGPPeers, in the policy's namespace, that are<br />administratively down and excluded from health. |  | MaxItems: 256 <br /> |
+| `minWitnesses` _integer_ | MinWitnesses is how many other routers must see a router's<br />originations before a promotion counts as healthy. | 1 | Minimum: 1 <br /> |
+
+
 #### FabricRouterConfiguration
 
 
@@ -1924,6 +2303,104 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `router` _[BGPRouterSpec](#bgprouterspec)_ |  |  |  |
 | `parameters` _[FRRRouterParametersSpec](#frrrouterparametersspec)_ |  |  |  |
+
+
+#### FabricRouterDeployment
+
+
+
+FabricRouterDeployment is the single activation point of one fabric
+router: the revision a node agent stages and the revision it runs. The
+rollout manager writes its spec and promotes a revision by raising the
+activation epoch together with the active revision, its digest, the
+release it is promoted under, the activation settings and the recovery
+authorization, in one update; the node agent writes its status. It is
+named after the router, and created at epoch zero.
+
+Admission checks the shape of a promotion, not that its authorization
+exists and covers this deployment, revision and digest: the rollout
+manager checks that before writing, and the node agent again before
+applying.
+
+The agent binds its journal to the deployment's UID. Deleting and
+recreating a deployment does not reset its epochs: the agent refuses the
+new UID with RecoveryConflict until spec.rebind names the old one.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `FabricRouterDeployment` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)_ |  |  | Required: \{\} <br /> |
+| `status` _[FabricRouterDeploymentStatus](#fabricrouterdeploymentstatus)_ |  |  |  |
+
+
+#### FabricRouterDeploymentSpec
+
+
+
+FabricRouterDeploymentSpec is what the rollout manager asks of a node.
+
+Rules that hold on every write:
+Transition rules:
+
+
+
+_Appears in:_
+- [FabricRouterDeployment](#fabricrouterdeployment)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `routerRef` _[FabricObjectIdentity](#fabricobjectidentity)_ | RouterRef is the BGPRouter this deployment activates. |  |  |
+| `target` _[FabricNodeIdentity](#fabricnodeidentity)_ | Target is the Node the router runs on, by name and UID. |  |  |
+| `source` _[FabricConfigSource](#fabricconfigsource)_ | Source is the writer of the node's FRR configuration. Once a node is<br />on CRD it returns only to ConfigMap, with sourceHandoff. | ConfigMap | Enum: [ConfigMap Shadow CRD] <br /> |
+| `sourceHandoff` _[FabricSourceHandoff](#fabricsourcehandoff)_ | SourceHandoff names the ConfigMap version the agent verifies before<br />handing the node back from CRD to ConfigMap. |  |  |
+| `candidateRevisionRef` _[LocalObjectRef](#localobjectref)_ | CandidateRevisionRef is the revision the agent stages and validates<br />without applying. |  |  |
+| `activeRevisionRef` _[LocalObjectRef](#localobjectref)_ | ActiveRevisionRef is the revision the agent applies at<br />activationEpoch. |  |  |
+| `activationEpoch` _integer_ | ActivationEpoch numbers promotions. It rises by one with each new<br />active revision, and a retry of the same revision is a new epoch. |  | Maximum: 9.007199254740991e+15 <br />Minimum: 0 <br /> |
+| `activationDependencyDigest` _string_ | ActivationDependencyDigest is the active revision's digest, so an<br />agent never applies a revision that differs from the one promoted. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
+| `authorizationRef` _[FabricObjectIdentity](#fabricobjectidentity)_ | AuthorizationRef is the FabricReleaseAuthorization the active epoch<br />was promoted under. |  |  |
+| `activation` _[FabricActivationSettings](#fabricactivationsettings)_ | Activation holds the settings the agent applies the active epoch<br />with, copied from the router's rollout policy at promotion so the<br />agent needs nothing else. |  |  |
+| `recovery` _[FabricRecovery](#fabricrecovery)_ | Recovery is what the agent may restore, and what it must never<br />restore, if this activation fails. It changes only with the epoch. |  |  |
+| `fence` _[FabricFence](#fabricfence)_ | Fence records that the router's previous node was cut off from the<br />fabric, which moving the router to another node requires. |  |  |
+| `rebind` _[FabricRebind](#fabricrebind)_ | Rebind lets the agent accept this deployment although its journal is<br />bound to another deployment UID, after an operator confirmed that<br />deployment is gone for good. |  |  |
+| `suspended` _boolean_ | Suspended stops promotion; the agent keeps running what it has. |  |  |
+
+
+#### FabricRouterDeploymentStatus
+
+
+
+FabricRouterDeploymentStatus is what the node agent observed.
+
+
+
+_Appears in:_
+- [FabricRouterDeployment](#fabricrouterdeployment)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the spec generation the agent acted on. |  |  |
+| `effectiveSource` _[FabricConfigSource](#fabricconfigsource)_ | EffectiveSource is the writer the agent is actually honouring. |  | Enum: [ConfigMap Shadow CRD] <br /> |
+| `boundDeploymentUID` _string_ | BoundDeploymentUID is the deployment UID the agent's journal is bound<br />to; a different UID here than the object's own is a RecoveryConflict. |  | MaxLength: 36 <br /> |
+| `clusterID` _string_ | ClusterID is the cluster the agent's state is bound to. |  | MaxLength: 36 <br /> |
+| `staged` _[FabricStagedRevision](#fabricstagedrevision)_ | Staged reports the candidate the agent validated without applying. |  |  |
+| `appliedEpoch` _integer_ | AppliedEpoch, AppliedRevision and AppliedDigest are the last<br />activation the agent committed. |  |  |
+| `appliedRevision` _string_ |  |  | MaxLength: 253 <br /> |
+| `appliedDigest` _string_ |  |  | Pattern: `^([0-9a-f]\{64\})?$` <br /> |
+| `journalHighWater` _integer_ | JournalHighWater is the highest epoch the agent's journal accepted<br />for this deployment UID. |  |  |
+| `epochs` _[FabricEpochStatus](#fabricepochstatus) array_ | Epochs reports the journal's last stage for the most recent epochs,<br />newest first, so the rollout manager knows a failed epoch is spent. |  | MaxItems: 16 <br /> |
+| `bootAuthorizedUntil` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | BootAuthorizedUntil is when the committed configuration stops being<br />restorable at boot without the API. |  |  |
+| `requiresAPI` _boolean_ | RequiresAPI means the committed configuration has sessions that need<br />credentials from the API and are not restored offline. |  |  |
+| `heartbeatTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | HeartbeatTime is the agent's last report. |  |  |
+| `agentVersion` _string_ | AgentVersion is the reporting agent's build. |  | MaxLength: 64 <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Accepted, Staged, Programmed, Ready, Degraded,<br />RecoveryConflict and Bootstrapping. |  |  |
 
 
 #### FabricRouterRevision
@@ -1998,6 +2475,45 @@ _Appears in:_
 | `nodeUID` _string_ | NodeUID is the Node's UID. Empty when the Node was not found. |  | MaxLength: 36 <br /> |
 
 
+#### FabricSourceHandoff
+
+
+
+FabricSourceHandoff names the ConfigMap version a node returns to.
+
+
+
+_Appears in:_
+- [FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `configMap` _[FabricObjectIdentity](#fabricobjectidentity)_ | ConfigMap is the node's per-node ConfigMap, by name and UID. |  |  |
+| `resourceVersion` _string_ | ResourceVersion is the ConfigMap version the agent may apply. |  | MaxLength: 64 <br />MinLength: 1 <br /> |
+
+
+#### FabricStagedRevision
+
+
+
+FabricStagedRevision is a validated, unapplied candidate.
+
+
+
+_Appears in:_
+- [FabricRouterDeploymentStatus](#fabricrouterdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `revision` _string_ | Revision is the candidate's name. |  | MaxLength: 253 <br /> |
+| `digest` _string_ | Digest is its activation dependency digest. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
+| `class` _[FabricChangeClass](#fabricchangeclass)_ | Class classifies what applying it would disturb. |  | Enum: [NoChange NonDisruptive SessionReset RestartRequired] <br /> |
+| `linesAdded` _integer_ | LinesAdded and LinesRemoved count the reload's changes. |  |  |
+| `linesRemoved` _integer_ |  |  |  |
+| `diff` _string_ | Diff is the reload's change list, truncated. |  | MaxLength: 8192 <br /> |
+| `validatedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ValidatedAt is when the agent validated it. |  |  |
+
+
 #### LargeCommunityAction
 
 
@@ -2029,7 +2545,11 @@ _Appears in:_
 - [BGPPeerSpec](#bgppeerspec)
 - [BGPPolicyMatch](#bgppolicymatch)
 - [BGPPolicySetActions](#bgppolicysetactions)
+- [BGPRouterFRR](#bgprouterfrr)
 - [BGPRouterFRRRetain](#bgprouterfrrretain)
+- [FabricRecovery](#fabricrecovery)
+- [FabricRolloutPolicySpec](#fabricrolloutpolicyspec)
+- [FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
