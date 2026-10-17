@@ -378,7 +378,7 @@ func TestCompileRetainedInterfacePolicy(t *testing.T) {
 func TestCompileCanonicalForms(t *testing.T) {
 	in := baseline()
 	in.Policies["originate"].Spec.Terms[0].Set.StandardCommunities.Values = []string{
-		"7979:2030", "no-export", "7979:989", "0:6939",
+		"64496:2030", "no-export", "64496:989", "0:64511",
 	}
 	in.Policies["originate"].Spec.Terms[0].Set.LargeCommunities = &networkv1alpha1.LargeCommunityAction{
 		Operation: networkv1alpha1.CommunityOperationAdd, Values: []string{"64500:2:1", "64500:1:9", "100:1:1"},
@@ -392,7 +392,7 @@ func TestCompileCanonicalForms(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		" set community 0:6939 7979:989 7979:2030 no-export",
+		" set community 0:64511 64496:989 64496:2030 no-export",
 		" set large-community 100:1:1 64500:1:9 64500:2:1 additive",
 		" set as-path prepend 64500 64500",
 		"bgp community-list standard internal seq 5 permit 64500:310",

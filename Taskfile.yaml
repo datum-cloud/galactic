@@ -228,8 +228,8 @@ tasks:
   test:fabric-parity:
     desc: Compile every fabric frr.conf back through the typed API and diff it with the pinned FRR's frr-reload
     # Needs Docker, so it is not part of ci. The synthetic fixtures always
-    # run; set FABRIC_PARITY_DIR to a <cluster>/<node>.conf tree (infra's
-    # rendered fabric-router configs) to check real routers too.
+    # run; set FABRIC_PARITY_DIR to a <cluster>/<node>.conf tree of rendered
+    # fabric-router configs to check real routers too.
     cmds:
       - go test -count=1 -tags frr -run 'TestImportCompileParity' ./internal/fabric/routing/
 

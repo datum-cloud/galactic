@@ -58,6 +58,12 @@ func TestImportRefusesUnknownConstructs(t *testing.T) {
 		{"prefix list without sequence", "ip prefix-list X permit 0.0.0.0/0\n", hostnameLine},
 		{"network without route-map", "  network 2001:db8::/32\n", "  neighbor 2001:db8::1 activate\n"},
 		{"static route with distance", "ipv6 route 2001:db8::/32 Null0 250\n", hostnameLine},
+		{
+			"repeated description",
+			" neighbor 2001:db8::1 description first\n neighbor 2001:db8::1 description second\n",
+			" neighbor 2001:db8::1 remote-as 64496\n",
+		},
+		{"repeated family setting", "  neighbor 2001:db8::1 route-map OUT out\n", "  neighbor 2001:db8::1 activate\n"},
 		{"evpn family", " address-family l2vpn evpn\n exit-address-family\n", " bgp router-id 192.0.2.1\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,8 +90,8 @@ func TestImportRefusesHostnameForAnotherNode(t *testing.T) {
 
 func TestObjectName(t *testing.T) {
 	for in, want := range map[string]string{
-		"V6-HOSTING-AS7979-OUT": "v6-hosting-as7979-out",
-		"DATUM_LARGE__X":        "datum-large-x",
+		"V6-UPSTREAM-AS64496-OUT": "v6-upstream-as64496-out",
+		"SITE_LARGE__X":           "site-large-x",
 	} {
 		if got := objectName(in); got != want {
 			t.Errorf("objectName(%q) = %q, want %q", in, got, want)

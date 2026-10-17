@@ -109,6 +109,10 @@ type parser struct {
 	// community attributes `no ... send-community` turns off, by who|afi.
 	activated map[string]bool
 	withheld  map[string]map[string]bool
+
+	// settings is every neighbor setting seen, as who|verb or
+	// who|afi|verb.
+	settings map[string]bool
 }
 
 func newParser(opts Options) *parser {
@@ -123,6 +127,7 @@ func newParser(opts Options) *parser {
 		order:         map[string][]string{},
 		activated:     map[string]bool{},
 		withheld:      map[string]map[string]bool{},
+		settings:      map[string]bool{},
 	}
 }
 
@@ -309,6 +314,9 @@ func (p *parser) neighborSession(f []string, line string) error {
 		return nil
 	}
 
+	if err := p.once(who + "|" + verb); err != nil {
+		return err
+	}
 	var transport **networkv1alpha1.BGPPeerTransport
 	var asn **int64
 	var pe *networkv1alpha1.BGPPeer
@@ -449,6 +457,13 @@ func (p *parser) neighborFamily(f []string) error {
 	}
 
 	key := who + "|" + string(p.family.AFI)
+	setting := key + "|" + verb
+	if verb == kwRouteMap && len(f) == 5 {
+		setting += "|" + f[4]
+	}
+	if err := p.once(setting); err != nil {
+		return err
+	}
 	switch {
 	case verb == "activate" && len(f) == 3:
 		if pe != nil {
@@ -829,6 +844,16 @@ func (p *parser) prepend(asns []string) (*networkv1alpha1.AsPathSet, error) {
 		ap.ASN = &asn
 	}
 	return ap, nil
+}
+
+// once refuses a neighbor setting given twice: FRR keeps the last value,
+// and importing it would silently drop the first.
+func (p *parser) once(setting string) error {
+	if p.settings[setting] {
+		return errors.New("the same neighbor setting appears twice")
+	}
+	p.settings[setting] = true
+	return nil
 }
 
 // applyWithheld turns `no neighbor X send-community <type>` lines into the

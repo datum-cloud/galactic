@@ -3,7 +3,7 @@
 
 // Package bundle reads and writes a set of fabric routing objects as a
 // multi-document YAML stream, and assembles one router's compiler input from
-// it. It lets the compiler run offline against files: infra's rendered
+// it. It lets the compiler run offline against files: rendered
 // objects, a preview before applying, or the importer's output.
 package bundle
 

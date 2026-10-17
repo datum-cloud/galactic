@@ -20,7 +20,7 @@ import (
 
 // parityEnv names a directory of real rendered configurations, laid out as
 // <cluster>/<node>.conf. This repository is public, so production files are
-// never checked in; infra's CI sets the variable to its rendered files.
+// never checked in; the CI that holds them sets the variable.
 const parityEnv = "FABRIC_PARITY_DIR"
 
 // fabricClass names the class and parameters every imported router uses.

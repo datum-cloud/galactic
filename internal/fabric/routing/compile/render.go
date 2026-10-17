@@ -15,7 +15,7 @@ import (
 )
 
 // render writes the configuration. Within each FRR context the lines follow
-// the order infra's legacy renderer used, so a diff against a legacy file
+// the order the previous renderer used, so a diff against a legacy file
 // reads naturally; FRR itself treats the contexts as unordered.
 func (c *compiler) render() string {
 	w := &writer{}
