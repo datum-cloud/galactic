@@ -51,6 +51,9 @@ const (
  ConfigMap, and applies later changes to it without restarting FRR.
 
  Find more information at: https://www.datum.net/docs`
+
+	// apiTimeout bounds each request the deployment agent makes.
+	apiTimeout = 10 * time.Second
 )
 
 // options holds the flags shared by every subcommand.
@@ -227,12 +230,16 @@ func initNode(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
 	if fabricconfig.JournalSource(d.Activator.Journal()) != networkv1alpha1.FabricConfigSourceCRD {
 		return a.Init(ctx)
 	}
+	// newDeploymentAgent just tried to read the identity; a retry tries
+	// again, in case the API came back.
+	retry := false
 	return a.InitFrom(ctx, func(ctx context.Context) (string, string, error) {
-		if d.NodeUID == "" && d.Resolve != nil {
+		if retry && d.NodeUID == "" && d.Resolve != nil {
 			if err := d.Resolve(ctx); err != nil {
 				slog.Warn("could not read this node's identity; trying the checkpoint offline", "error", err)
 			}
 		}
+		retry = true
 		conf, reason, err := d.BootConfig(ctx, d.MachineID)
 		if errors.Is(err, fabricconfig.ErrNotActivated) {
 			// Enrolled on CRD before anything was activated: the ConfigMap
@@ -256,7 +263,12 @@ func newDeploymentAgent(ctx context.Context, opts *options) (*fabricconfig.Deplo
 	if err := networkv1alpha1.AddToScheme(scheme); err != nil {
 		return nil, err
 	}
-	c, err := ctrlclient.New(opts.restCfg, ctrlclient.Options{Scheme: scheme})
+	// Every request is bounded, API discovery included, which ignores the
+	// request's context: a node booting without the API waits this long
+	// before it restores its checkpoint.
+	cfg := rest.CopyConfig(opts.restCfg)
+	cfg.Timeout = apiTimeout
+	c, err := ctrlclient.New(cfg, ctrlclient.Options{Scheme: scheme})
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
@@ -278,7 +290,7 @@ func newDeploymentAgent(ctx context.Context, opts *options) (*fabricconfig.Deplo
 		d.IdentityErr = fmt.Errorf("%w: %w", activation.ErrIdentityMismatch, err)
 	}
 	d.Resolve = func(ctx context.Context) error {
-		lookup, cancel := context.WithTimeout(ctx, 10*time.Second)
+		lookup, cancel := context.WithTimeout(ctx, apiTimeout)
 		defer cancel()
 		nodeUID, clusterID, err := identity(lookup, c, opts.nodeName)
 		if err != nil {
