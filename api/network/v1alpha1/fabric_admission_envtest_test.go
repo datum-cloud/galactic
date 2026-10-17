@@ -166,6 +166,13 @@ func TestFabricRoutingAdmission(t *testing.T) {
 			{"ipv6 evpn family", profile(4, v6(func(f *networkv1alpha1.BGPPeerFamilySettings) {
 				f.SAFI = networkv1alpha1.SAFIEVPN
 			})), "IPv6 only supports unicast SAFI"},
+			{"next-hop-self force", profile(5, v6(func(f *networkv1alpha1.BGPPeerFamilySettings) {
+				f.NextHopMode = ptr.To(networkv1alpha1.BGPNextHopSelfForce)
+				f.RouteReflectorClient = ptr.To(true)
+			})), ""},
+			{"unknown next-hop mode", profile(6, v6(func(f *networkv1alpha1.BGPPeerFamilySettings) {
+				f.NextHopMode = ptr.To(networkv1alpha1.BGPNextHopMode("SelfAll"))
+			})), "nextHopMode"},
 			{"peer with families", peer(0, []networkv1alpha1.AddressFamily{ipv6}, nil), ""},
 			{"peer with profile only", peer(1, nil, &networkv1alpha1.LocalObjectRef{Name: "pp-0"}), ""},
 			{"peer with neither", peer(2, nil, nil), "addressFamilies is required unless peerProfileRef"},
@@ -235,6 +242,15 @@ func TestFabricRoutingAdmission(t *testing.T) {
 				tm.Match.Any = true
 				tm.Match.PrefixListRef = &networkv1alpha1.LocalObjectRef{Name: "x"}
 			})), "set references and interface must be unset"},
+			{"set source", policy(11, false, false, term(func(tm *networkv1alpha1.BGPPolicyTerm) {
+				tm.Set = &networkv1alpha1.BGPPolicySetActions{Source: ptr.To("2001:db8::1")}
+			})), ""},
+			{"set source not an address", policy(12, false, false, term(func(tm *networkv1alpha1.BGPPolicyTerm) {
+				tm.Set = &networkv1alpha1.BGPPolicySetActions{Source: ptr.To("lo")}
+			})), "source must be a valid IP address"},
+			{"router-bound with a source", policy(13, true, false, term(func(tm *networkv1alpha1.BGPPolicyTerm) {
+				tm.Set = &networkv1alpha1.BGPPolicySetActions{Source: ptr.To("192.0.2.1")}
+			})), "cannot use frr, set references"},
 			{"invalid frr name", &networkv1alpha1.BGPPolicy{ObjectMeta: meta("pol", 8), Spec: networkv1alpha1.BGPPolicySpec{
 				FRR:   &networkv1alpha1.BGPPolicyFRR{RouteMapName: ptr.To[networkv1alpha1.FRRObjectName]("bad name")},
 				Terms: []networkv1alpha1.BGPPolicyTerm{term(func(*networkv1alpha1.BGPPolicyTerm) {})},
@@ -259,6 +275,11 @@ func TestFabricRoutingAdmission(t *testing.T) {
 				RouterRef: r1, AddressFamily: ipv6, PolicyRef: &networkv1alpha1.AdvertisementPolicyRef{Name: "originate"},
 			}}, "at least one of prefixes, redistribute, originateFrom, or aggregation must be specified"},
 			{"network statements", adv(3, networkv1alpha1.AFIIPv6, nil, "2001:db8:10c::/64"), ""},
+			{"network statements without a policy", func() client.Object {
+				a := adv(6, networkv1alpha1.AFIIPv6, nil, "2001:db8:10c::/64").(*networkv1alpha1.BGPAdvertisement)
+				a.Spec.PolicyRef = nil
+				return a
+			}(), ""},
 		})
 	})
 
@@ -356,12 +377,16 @@ func TestFabricRoutingAdmission(t *testing.T) {
 			Spec: networkv1alpha1.FRRRouterParametersSpec{
 				DefaultsProfile: networkv1alpha1.FRRDefaultsTraditional, HostnameSuffix: "-fabric",
 				LogFile:            &networkv1alpha1.FRRLogFile{Path: "/var/log/frr/frr.log", Level: "informational"},
+				LogSyslog:          ptr.To[networkv1alpha1.FRRLogLevel]("informational"),
 				LogNeighborChanges: true,
+				EBGPRequiresPolicy: ptr.To(false),
 				BMPTargets: []networkv1alpha1.BMPTarget{{
 					Name: "fabric-api",
 					Connect: networkv1alpha1.BMPConnect{
 						Address: "127.0.0.1", Port: 9348, MinRetryMilliseconds: ptr.To[int32](1000), MaxRetryMilliseconds: ptr.To[int32](10000),
+						SourceInterface: ptr.To("lo"),
 					},
+					StatsIntervalMilliseconds: ptr.To[int32](60000),
 					Monitors: []networkv1alpha1.BMPMonitor{
 						{AFI: networkv1alpha1.AFIIPv4, SAFI: networkv1alpha1.SAFIUnicast, Mode: networkv1alpha1.BMPMonitorLocRIB},
 						{AFI: networkv1alpha1.AFIIPv6, SAFI: networkv1alpha1.SAFIUnicast, Mode: networkv1alpha1.BMPMonitorLocRIB},
@@ -408,6 +433,21 @@ func TestFabricRoutingAdmission(t *testing.T) {
 			}), "minRetryMilliseconds must not exceed maxRetryMilliseconds"},
 			{"collector not an address", bmpParams("bad-address", networkv1alpha1.BMPConnect{Address: "collector", Port: 9348}),
 				"address must be a valid IP address"},
+			{"source interface not a name", bmpParams("bad-source", networkv1alpha1.BMPConnect{
+				Address: "127.0.0.1", Port: 9348, SourceInterface: ptr.To("lo exit"),
+			}), "sourceInterface"},
+			{"stats interval below the minimum", func() client.Object {
+				p := bmpParams("bad-stats", networkv1alpha1.BMPConnect{Address: "127.0.0.1", Port: 9348}).(*networkv1alpha1.FRRRouterParameters)
+				p.Spec.BMPTargets[0].StatsIntervalMilliseconds = ptr.To[int32](50)
+				return p
+			}(), "statsIntervalMilliseconds"},
+			{"unknown syslog level", &networkv1alpha1.FRRRouterParameters{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-syslog"},
+				Spec: networkv1alpha1.FRRRouterParametersSpec{
+					DefaultsProfile: networkv1alpha1.FRRDefaultsTraditional,
+					LogSyslog:       ptr.To[networkv1alpha1.FRRLogLevel]("verbose"),
+				},
+			}, "logSyslog"},
 		})
 		params.Spec.LogNeighborChanges = false
 		err := c.Update(context.Background(), params)

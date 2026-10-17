@@ -39,6 +39,15 @@ func (c *compiler) renderGlobal(w *writer) {
 	p := c.in.Parameters.Spec
 	w.line("frr defaults %s", p.DefaultsProfile)
 	w.line("hostname %s%s", c.in.Router.Spec.TargetRef.Name, p.HostnameSuffix)
+	if p.LogSyslog != nil {
+		// FRR displays syslog before the log file, and leaves out the
+		// level when it is the default.
+		if *p.LogSyslog == networkv1alpha1.FRRLogLevelDebugging {
+			w.line("log syslog")
+		} else {
+			w.line("log syslog %s", *p.LogSyslog)
+		}
+	}
 	if p.LogFile != nil {
 		w.line("log file %s %s", p.LogFile.Path, p.LogFile.Level)
 	}
@@ -69,6 +78,9 @@ func (c *compiler) renderRouterBGP(w *writer) {
 	w.line(" bgp router-id %s", r.RouterID)
 	if p.LogNeighborChanges {
 		w.line(" bgp log-neighbor-changes")
+	}
+	if p.EBGPRequiresPolicy != nil && !*p.EBGPRequiresPolicy {
+		w.line(" no bgp ebgp-requires-policy")
 	}
 	if !p.IPv4UnicastDefault {
 		w.line(" no bgp default ipv4-unicast")
@@ -185,9 +197,12 @@ func (c *compiler) renderAddressFamily(w *writer, f family, peers []networkv1alp
 		if a.Spec.AddressFamily.AFI != f.afi || a.Spec.AddressFamily.SAFI != f.safi {
 			continue
 		}
-		routeMap := policyName(c.policies[a.Spec.PolicyRef.Name])
+		routeMap := ""
+		if a.Spec.PolicyRef != nil {
+			routeMap = " route-map " + policyName(c.policies[a.Spec.PolicyRef.Name])
+		}
 		for _, p := range a.Spec.Prefixes {
-			w.line("  network %s route-map %s", canonicalPrefix(string(p)), routeMap)
+			w.line("  network %s%s", canonicalPrefix(string(p)), routeMap)
 		}
 		if agg := a.Spec.Aggregation; agg != nil {
 			opts := ""
@@ -197,10 +212,10 @@ func (c *compiler) renderAddressFamily(w *writer, f family, peers []networkv1alp
 			if agg.ASSet {
 				opts += " as-set"
 			}
-			w.line("  aggregate-address %s%s route-map %s", canonicalPrefix(agg.Prefix), opts, routeMap)
+			w.line("  aggregate-address %s%s%s", canonicalPrefix(agg.Prefix), opts, routeMap)
 		}
 		for _, src := range a.Spec.Redistribute {
-			w.line("  redistribute %s route-map %s", src, routeMap)
+			w.line("  redistribute %s%s", src, routeMap)
 		}
 	}
 
@@ -292,8 +307,13 @@ func (c *compiler) renderFamilySettings(
 	if fs.ExportPolicyRef != nil {
 		w.line("  neighbor %s route-map %s out", who, policyName(c.policies[fs.ExportPolicyRef.Name]))
 	}
-	if fs.NextHopMode != nil && *fs.NextHopMode == networkv1alpha1.BGPNextHopSelf {
-		w.line("  neighbor %s next-hop-self", who)
+	if fs.NextHopMode != nil {
+		switch *fs.NextHopMode {
+		case networkv1alpha1.BGPNextHopSelf:
+			w.line("  neighbor %s next-hop-self", who)
+		case networkv1alpha1.BGPNextHopSelfForce:
+			w.line("  neighbor %s next-hop-self force", who)
+		}
 	}
 	if fs.RouteReflectorClient != nil && *fs.RouteReflectorClient {
 		w.line("  neighbor %s route-reflector-client", who)
@@ -305,12 +325,19 @@ func (c *compiler) renderFamilySettings(
 
 func renderBMPTarget(w *writer, t networkv1alpha1.BMPTarget) {
 	w.line(" bmp targets %s", t.Name)
+	if t.StatsIntervalMilliseconds != nil {
+		// FRR displays the interval first in the block.
+		w.line("  bmp stats interval %d", *t.StatsIntervalMilliseconds)
+	}
 	connect := fmt.Sprintf("  bmp connect %s port %d", t.Connect.Address, t.Connect.Port)
 	if t.Connect.MinRetryMilliseconds != nil {
 		connect += fmt.Sprintf(" min-retry %d", *t.Connect.MinRetryMilliseconds)
 	}
 	if t.Connect.MaxRetryMilliseconds != nil {
 		connect += fmt.Sprintf(" max-retry %d", *t.Connect.MaxRetryMilliseconds)
+	}
+	if t.Connect.SourceInterface != nil {
+		connect += " source-interface " + *t.Connect.SourceInterface
 	}
 	w.line("%s", connect)
 	modes := map[networkv1alpha1.BMPMonitorMode]string{
@@ -427,6 +454,9 @@ func (c *compiler) renderTerm(w *writer, routeMap string, t networkv1alpha1.BGPP
 		if s.LocalPreference != nil {
 			w.line(" set local-preference %d", *s.LocalPreference)
 		}
+		if s.Source != nil {
+			w.line(" set src %s", canonicalAddr(*s.Source))
+		}
 	}
 	w.line("exit")
 	w.line("!")
@@ -447,6 +477,15 @@ func canonicalPrefix(s string) string {
 		return s
 	}
 	return p.Masked().String()
+}
+
+// canonicalAddr writes an address the way FRR displays it.
+func canonicalAddr(s string) string {
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return s
+	}
+	return a.String()
 }
 
 func isIPv4Prefix(s string) bool {

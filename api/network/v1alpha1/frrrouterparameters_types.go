@@ -22,6 +22,9 @@ const (
 // +kubebuilder:validation:Enum=emergencies;alerts;critical;errors;warnings;notifications;informational;debugging
 type FRRLogLevel string
 
+// FRRLogLevelDebugging is FRR's lowest log level and its default.
+const FRRLogLevelDebugging FRRLogLevel = "debugging"
+
 // FRRLogFile is FRR's `log file` setting.
 type FRRLogFile struct {
 	// Path is the log file's absolute path in the router container.
@@ -87,6 +90,14 @@ type BMPConnect struct {
 	// +kubebuilder:validation:Minimum=100
 	// +kubebuilder:validation:Maximum=86400000
 	MaxRetryMilliseconds *int32 `json:"maxRetryMilliseconds,omitempty"`
+
+	// SourceInterface is the local interface whose address the session is
+	// sourced from. Unset lets the kernel choose the source address.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.@-]+$`
+	SourceInterface *string `json:"sourceInterface,omitempty"`
 }
 
 // BMPTarget is one `bmp targets` block.
@@ -96,6 +107,13 @@ type BMPTarget struct {
 
 	// Connect is the collector this target streams to.
 	Connect BMPConnect `json:"connect"`
+
+	// StatsIntervalMilliseconds is how often the target sends BMP
+	// statistics reports. Unset sends none.
+	// +optional
+	// +kubebuilder:validation:Minimum=100
+	// +kubebuilder:validation:Maximum=86400000
+	StatsIntervalMilliseconds *int32 `json:"statsIntervalMilliseconds,omitempty"`
 
 	// Monitors lists the RIBs streamed.
 	// +kubebuilder:validation:MinItems=1
@@ -145,6 +163,11 @@ type FRRRouterParametersSpec struct {
 	// +optional
 	LogFile *FRRLogFile `json:"logFile,omitempty"`
 
+	// LogSyslog is the lowest level FRR sends to syslog. Unset renders no
+	// log syslog line.
+	// +optional
+	LogSyslog *FRRLogLevel `json:"logSyslog,omitempty"`
+
 	// LogNeighborChanges logs BGP session state changes.
 	// +optional
 	LogNeighborChanges bool `json:"logNeighborChanges,omitempty"`
@@ -158,6 +181,16 @@ type FRRRouterParametersSpec struct {
 	// martian.
 	// +optional
 	AllowMartianNexthop bool `json:"allowMartianNexthop,omitempty"`
+
+	// EBGPRequiresPolicy is FRR's RFC 8212 behavior: an eBGP session with
+	// no policy in a direction exchanges no routes in it. Unset or true
+	// keeps FRR's default, which is on; false renders
+	// `no bgp ebgp-requires-policy`. False also lets the routers' peer
+	// families leave exportPolicyRef unset, which exports every route the
+	// router selects to that peer; any other class refuses a peer family
+	// with no export policy.
+	// +optional
+	EBGPRequiresPolicy *bool `json:"ebgpRequiresPolicy,omitempty"`
 
 	// BMPTargets lists the BMP collectors every router of the class streams
 	// to. The router image must load bgpd's BMP module.

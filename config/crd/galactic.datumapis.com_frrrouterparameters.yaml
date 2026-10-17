@@ -94,6 +94,14 @@ spec:
                           maximum: 65535
                           minimum: 1
                           type: integer
+                        sourceInterface:
+                          description: |-
+                            SourceInterface is the local interface whose address the session is
+                            sourced from. Unset lets the kernel choose the source address.
+                          maxLength: 15
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9_.@-]+$
+                          type: string
                       required:
                       - address
                       - port
@@ -151,6 +159,14 @@ spec:
                       minLength: 1
                       pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
                       type: string
+                    statsIntervalMilliseconds:
+                      description: |-
+                        StatsIntervalMilliseconds is how often the target sends BMP
+                        statistics reports. Unset sends none.
+                      format: int32
+                      maximum: 86400000
+                      minimum: 100
+                      type: integer
                   required:
                   - connect
                   - monitors
@@ -169,6 +185,16 @@ spec:
                 - traditional
                 - datacenter
                 type: string
+              ebgpRequiresPolicy:
+                description: |-
+                  EBGPRequiresPolicy is FRR's RFC 8212 behavior: an eBGP session with
+                  no policy in a direction exchanges no routes in it. Unset or true
+                  keeps FRR's default, which is on; false renders
+                  `no bgp ebgp-requires-policy`. False also lets the routers' peer
+                  families leave exportPolicyRef unset, which exports every route the
+                  router selects to that peer; any other class refuses a peer family
+                  with no export policy.
+                type: boolean
               hostnameSuffix:
                 description: |-
                   HostnameSuffix is appended to the bound Node's name to form the
@@ -211,6 +237,20 @@ spec:
               logNeighborChanges:
                 description: LogNeighborChanges logs BGP session state changes.
                 type: boolean
+              logSyslog:
+                description: |-
+                  LogSyslog is the lowest level FRR sends to syslog. Unset renders no
+                  log syslog line.
+                enum:
+                - emergencies
+                - alerts
+                - critical
+                - errors
+                - warnings
+                - notifications
+                - informational
+                - debugging
+                type: string
             required:
             - defaultsProfile
             type: object

@@ -24,6 +24,7 @@ const (
 	fieldSpec            = "spec"
 	fieldExportPolicy    = "exportPolicyRef"
 	internalCommunity    = "64500:310"
+	locatorBlock         = "2001:db8:100::/48"
 )
 
 // baseline is a small valid router: one profile, one grouped peer, one
@@ -89,7 +90,7 @@ func baseline() Input {
 			ObjectMeta: om("locator"),
 			Spec: networkv1alpha1.BGPPrefixListSpec{Entries: []networkv1alpha1.BGPPrefixListEntry{{
 				Sequence: 5, Action: networkv1alpha1.BGPPolicyActionPermit,
-				Prefix: "2001:db8:100::/48", GE: ptr.To[int32](49),
+				Prefix: locatorBlock, GE: ptr.To[int32](49),
 			}}},
 		}},
 		CommunitySets: map[string]*networkv1alpha1.BGPCommunitySet{"internal": {
@@ -213,7 +214,7 @@ func TestCompileRefuses(t *testing.T) {
 		{"profile ASN mismatch", func(in *Input) { in.Peers[0].Spec.PeerASN = 64497 }, ReasonInvalid, "spec.peerASN"},
 		{"no export policy", func(in *Input) {
 			in.Profiles["upstream"].Spec.AddressFamilies[0].ExportPolicyRef = nil
-		}, ReasonInvalid, "spec.familySettings"},
+		}, ReasonInvalid, fieldFamilySettings},
 		{"missing policy", func(in *Input) { delete(in.Policies, "export") }, ReasonUnresolvedRef, fieldExportPolicy},
 		{"missing prefix list", func(in *Input) {
 			delete(in.PrefixLists, "locator")
@@ -233,9 +234,37 @@ func TestCompileRefuses(t *testing.T) {
 		{"as-path replace", func(in *Input) {
 			in.Policies["originate"].Spec.Terms[0].Set.AsPath = &networkv1alpha1.AsPathSet{Replace: []int64{64500}}
 		}, ReasonUnsupportedField, "spec.terms.set.asPath"},
-		{"advertisement without policy", func(in *Input) {
+		{"redistribution without policy", func(in *Input) {
+			in.Advertisements[0].Spec.Prefixes = nil
+			in.Advertisements[0].Spec.Redistribute = []networkv1alpha1.RedistributeSource{
+				networkv1alpha1.RedistributeSourceConnected,
+			}
 			in.Advertisements[0].Spec.PolicyRef = nil
 		}, ReasonInvalid, "spec.policyRef"},
+		{"no export policy with ebgp-requires-policy on", func(in *Input) {
+			in.Parameters.Spec.EBGPRequiresPolicy = ptr.To(true)
+			in.Profiles["upstream"].Spec.AddressFamilies[0].ExportPolicyRef = nil
+		}, ReasonInvalid, fieldFamilySettings},
+		{"source outside the peer family", func(in *Input) {
+			in.Policies["export"].Spec.Terms[0].Set = &networkv1alpha1.BGPPolicySetActions{Source: ptr.To("192.0.2.1")}
+		}, ReasonInvalid, fieldExportPolicy},
+		{"source outside the advertisement family", func(in *Input) {
+			in.Policies["originate"].Spec.Terms[0].Set.Source = ptr.To("192.0.2.1")
+		}, ReasonInvalid, "spec.policyRef"},
+		{"source not an address", func(in *Input) {
+			in.Policies["originate"].Spec.Terms[0].Set.Source = ptr.To("lo")
+		}, ReasonInvalid, "spec.terms.set.source"},
+		{"space in a BMP source interface", func(in *Input) {
+			in.Parameters.Spec.BMPTargets = []networkv1alpha1.BMPTarget{{
+				Name: "collector",
+				Connect: networkv1alpha1.BMPConnect{
+					Address: "2001:db8::8", Port: 5000, SourceInterface: ptr.To("lo\n exit"),
+				},
+			}}
+		}, ReasonInvalid, "spec.bmpTargets.connect.sourceInterface"},
+		{"space in a syslog level", func(in *Input) {
+			in.Parameters.Spec.LogSyslog = ptr.To(networkv1alpha1.FRRLogLevel("errors\nip forwarding"))
+		}, ReasonInvalid, "spec.logSyslog"},
 		{"advertisement communities", func(in *Input) {
 			in.Advertisements[0].Spec.Communities = []networkv1alpha1.Community{"64500:1"}
 		}, ReasonUnsupportedField, "spec.communities"},
@@ -309,7 +338,7 @@ func TestCompileRefuses(t *testing.T) {
 			in.Peers[0].Spec.FamilySettings[0].NextHopMode = ptr.To(networkv1alpha1.BGPNextHopUnchanged)
 		}, ReasonUnsupportedField, "nextHopMode"},
 		{"aggregation beside prefixes", func(in *Input) {
-			in.Advertisements[0].Spec.Aggregation = &networkv1alpha1.BGPAggregation{Prefix: "2001:db8:100::/48"}
+			in.Advertisements[0].Spec.Aggregation = &networkv1alpha1.BGPAggregation{Prefix: locatorBlock}
 		}, ReasonInvalid, fieldSpec},
 		{"empty advertisement", func(in *Input) { in.Advertisements[0].Spec.Prefixes = nil }, ReasonInvalid, fieldSpec},
 		{"duplicate term sequence", func(in *Input) {
@@ -435,5 +464,87 @@ func TestCompileIgnoresInputOrder(t *testing.T) {
 	}
 	if first.Digest != again.Digest {
 		t.Errorf("reordering the input changed the configuration:\n%s\n---\n%s", first.Config, again.Config)
+	}
+}
+
+// TestCompileLabConstructs: the optional constructs the lab uses render as
+// the pinned FRR displays them.
+func TestCompileLabConstructs(t *testing.T) {
+	in := baseline()
+	p := &in.Parameters.Spec
+	p.LogFile = &networkv1alpha1.FRRLogFile{Path: "/var/log/frr/frr.log", Level: "informational"}
+	p.LogSyslog = ptr.To(networkv1alpha1.FRRLogLevel("errors"))
+	p.EBGPRequiresPolicy = ptr.To(false)
+	p.BMPTargets = []networkv1alpha1.BMPTarget{{
+		Name: "collector",
+		Connect: networkv1alpha1.BMPConnect{
+			Address: "2001:db8::8", Port: 5000, MinRetryMilliseconds: ptr.To[int32](1000),
+			MaxRetryMilliseconds: ptr.To[int32](30000), SourceInterface: ptr.To("lo"),
+		},
+		StatsIntervalMilliseconds: ptr.To[int32](60000),
+		Monitors: []networkv1alpha1.BMPMonitor{{
+			AFI: networkv1alpha1.AFIIPv6, SAFI: networkv1alpha1.SAFIUnicast, Mode: networkv1alpha1.BMPMonitorLocRIB,
+		}},
+	}}
+	// With the requirement off, a family may export with no policy.
+	in.Profiles["upstream"].Spec.AddressFamilies[0].ExportPolicyRef = nil
+	in.Profiles["upstream"].Spec.AddressFamilies[0].NextHopMode = ptr.To(networkv1alpha1.BGPNextHopSelfForce)
+	in.Profiles["upstream"].Spec.AddressFamilies[0].ImportPolicyRef = ref("set-src")
+	in.Policies["set-src"] = policy("set-src", networkv1alpha1.BGPPolicyTerm{
+		Sequence: 10, Action: networkv1alpha1.BGPPolicyActionPermit,
+		Set: &networkv1alpha1.BGPPolicySetActions{Source: ptr.To("2001:db8:0:0::1")},
+	})
+	in.Advertisements[0].Spec.PolicyRef = nil
+	agg := baselineAdvertisement()
+	agg.Name = "node-a-aggregate"
+	agg.Spec.Prefixes, agg.Spec.PolicyRef = nil, nil
+	agg.Spec.Aggregation = &networkv1alpha1.BGPAggregation{Prefix: locatorBlock, SummaryOnly: true}
+	in.Advertisements = append(in.Advertisements, agg)
+	res, err := Compile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"hostname node-a-fabric\nlog syslog errors\nlog file /var/log/frr/frr.log informational\n",
+		" bgp router-id 192.0.2.1\n no bgp ebgp-requires-policy\n no bgp default ipv4-unicast\n",
+		"  network 2001:db8:100::/64\n",
+		"  aggregate-address 2001:db8:100::/48 summary-only\n",
+		"  neighbor upstream route-map set-src in\n  neighbor upstream next-hop-self force\n",
+		"route-map set-src permit 10\n set src 2001:db8::1\nexit\n",
+		" bmp targets collector\n  bmp stats interval 60000\n" +
+			"  bmp connect 2001:db8::8 port 5000 min-retry 1000 max-retry 30000 source-interface lo\n",
+	} {
+		if !strings.Contains(res.Config, want) {
+			t.Errorf("config lacks %q:\n%s", want, res.Config)
+		}
+	}
+	if strings.Contains(res.Config, "route-map export") || strings.Contains(res.Config, " out\n") {
+		t.Errorf("a family with no export policy rendered one:\n%s", res.Config)
+	}
+}
+
+// TestCompileOptionalDefaults: each optional construct at its FRR default
+// renders what FRR displays for it, which is nothing or the short form.
+func TestCompileOptionalDefaults(t *testing.T) {
+	base, err := Compile(baseline())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := baseline()
+	in.Parameters.Spec.EBGPRequiresPolicy = ptr.To(true)
+	res, err := Compile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Config != base.Config {
+		t.Errorf("ebgpRequiresPolicy true changed the configuration:\n%s", res.Config)
+	}
+	in = baseline()
+	in.Parameters.Spec.LogSyslog = ptr.To(networkv1alpha1.FRRLogLevelDebugging)
+	if res, err = Compile(in); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Config, "\nlog syslog\n") {
+		t.Errorf("the default syslog level is not left out:\n%s", res.Config)
 	}
 }

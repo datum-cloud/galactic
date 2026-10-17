@@ -92,7 +92,7 @@ type BGPPrefixLimit struct {
 
 // BGPNextHopMode controls the next hop a peer family advertises.
 //
-// +kubebuilder:validation:Enum=Unchanged;Self
+// +kubebuilder:validation:Enum=Unchanged;Self;SelfForce
 type BGPNextHopMode string
 
 const (
@@ -100,6 +100,9 @@ const (
 	BGPNextHopUnchanged BGPNextHopMode = "Unchanged"
 	// BGPNextHopSelf rewrites the next hop to the local session address.
 	BGPNextHopSelf BGPNextHopMode = "Self"
+	// BGPNextHopSelfForce rewrites the next hop to the local session
+	// address on reflected routes too, which Self leaves unchanged.
+	BGPNextHopSelfForce BGPNextHopMode = "SelfForce"
 )
 
 // FRRPeerFamilySettings holds FRR-specific peer family settings with no

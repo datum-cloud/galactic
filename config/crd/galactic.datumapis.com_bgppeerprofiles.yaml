@@ -122,6 +122,7 @@ spec:
                       enum:
                       - Unchanged
                       - Self
+                      - SelfForce
                       type: string
                     prefixLimit:
                       description: PrefixLimit bounds the prefixes the peer may send

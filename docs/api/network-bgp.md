@@ -418,7 +418,7 @@ _Underlying type:_ _string_
 BGPNextHopMode controls the next hop a peer family advertises.
 
 _Validation:_
-- Enum: [Unchanged Self]
+- Enum: [Unchanged Self SelfForce]
 
 _Appears in:_
 - [BGPPeerFamilySettings](#bgppeerfamilysettings)
@@ -427,6 +427,7 @@ _Appears in:_
 | --- | --- |
 | `Unchanged` | BGPNextHopUnchanged keeps the implementation's default next hop.<br /> |
 | `Self` | BGPNextHopSelf rewrites the next hop to the local session address.<br /> |
+| `SelfForce` | BGPNextHopSelfForce rewrites the next hop to the local session<br />address on reflected routes too, which Self leaves unchanged.<br /> |
 
 
 #### BGPOrigin
@@ -536,7 +537,7 @@ _Appears in:_
 | `allowASIn` _integer_ | AllowASIn accepts routes whose AS path holds the local ASN up to this<br />many times. |  | Maximum: 10 <br />Minimum: 1 <br /> |
 | `importPolicyRef` _[LocalObjectRef](#localobjectref)_ | ImportPolicyRef names the BGPPolicy applied to routes received from<br />the peer in this family. |  |  |
 | `exportPolicyRef` _[LocalObjectRef](#localobjectref)_ | ExportPolicyRef names the BGPPolicy applied to routes sent to the peer<br />in this family. A fabric peer family must resolve one: there is no<br />implicit export-everything default. |  |  |
-| `nextHopMode` _[BGPNextHopMode](#bgpnexthopmode)_ | NextHopMode controls the advertised next hop. |  | Enum: [Unchanged Self] <br /> |
+| `nextHopMode` _[BGPNextHopMode](#bgpnexthopmode)_ | NextHopMode controls the advertised next hop. |  | Enum: [Unchanged Self SelfForce] <br /> |
 | `routeReflectorClient` _boolean_ | RouteReflectorClient treats the peer as a route-reflector client in<br />this family. |  |  |
 | `frr` _[FRRPeerFamilySettings](#frrpeerfamilysettings)_ | FRR holds FRR-specific settings. |  |  |
 
@@ -871,6 +872,7 @@ _Appears in:_
 | `deleteCommunitySetRef` _[LocalObjectRef](#localobjectref)_ | DeleteCommunitySetRef removes the standard communities the named<br />BGPCommunitySet permits. |  |  |
 | `deleteLargeCommunitySetRef` _[LocalObjectRef](#localobjectref)_ | DeleteLargeCommunitySetRef removes the large communities the named<br />BGPCommunitySet permits. |  |  |
 | `color` _integer_ | Color sets the SRv6 policy color for path selection. |  | Minimum: 0 <br /> |
+| `source` _string_ | Source is the preferred source address of the routes the policy<br />installs in the kernel. It must be in the address family of every<br />peer family or advertisement the policy is attached to. Honored by<br />the fabric router implementation only. |  | MaxLength: 45 <br /> |
 
 
 #### BGPPolicySpec
@@ -1408,6 +1410,7 @@ _Appears in:_
 | `port` _integer_ | Port is the collector's TCP port. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 | `minRetryMilliseconds` _integer_ | MinRetryMilliseconds is the shortest reconnect backoff. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
 | `maxRetryMilliseconds` _integer_ | MaxRetryMilliseconds is the longest reconnect backoff. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
+| `sourceInterface` _string_ | SourceInterface is the local interface whose address the session is<br />sourced from. Unset lets the kernel choose the source address. |  | MaxLength: 15 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9_.@-]+$` <br /> |
 
 
 #### BMPMonitor
@@ -1462,6 +1465,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _[FRRObjectName](#frrobjectname)_ | Name is the target's FRR name. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9][A-Za-z0-9_.-]*$` <br /> |
 | `connect` _[BMPConnect](#bmpconnect)_ | Connect is the collector this target streams to. |  |  |
+| `statsIntervalMilliseconds` _integer_ | StatsIntervalMilliseconds is how often the target sends BMP<br />statistics reports. Unset sends none. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
 | `monitors` _[BMPMonitor](#bmpmonitor) array_ | Monitors lists the RIBs streamed. |  | MaxItems: 6 <br />MinItems: 1 <br /> |
 
 
@@ -1733,7 +1737,11 @@ _Validation:_
 
 _Appears in:_
 - [FRRLogFile](#frrlogfile)
+- [FRRRouterParametersSpec](#frrrouterparametersspec)
 
+| Field | Description |
+| --- | --- |
+| `debugging` |  |
 
 
 #### FRRNameOverride
@@ -1833,9 +1841,11 @@ _Appears in:_
 | `defaultsProfile` _[FRRDefaultsProfile](#frrdefaultsprofile)_ | DefaultsProfile is the `frr defaults` profile. Changing a router's<br />profile restarts bgpd. |  | Enum: [traditional datacenter] <br /> |
 | `hostnameSuffix` _string_ | HostnameSuffix is appended to the bound Node's name to form the<br />router hostname. |  | MaxLength: 63 <br />Pattern: `^[A-Za-z0-9.-]*$` <br /> |
 | `logFile` _[FRRLogFile](#frrlogfile)_ | LogFile is FRR's log file. Unset renders no log file line. |  |  |
+| `logSyslog` _[FRRLogLevel](#frrloglevel)_ | LogSyslog is the lowest level FRR sends to syslog. Unset renders no<br />log syslog line. |  | Enum: [emergencies alerts critical errors warnings notifications informational debugging] <br /> |
 | `logNeighborChanges` _boolean_ | LogNeighborChanges logs BGP session state changes. |  |  |
 | `ipv4UnicastDefault` _boolean_ | IPv4UnicastDefault activates IPv4 unicast for every neighbor by<br />default. False renders `no bgp default ipv4-unicast`. |  |  |
 | `allowMartianNexthop` _boolean_ | AllowMartianNexthop accepts next hops FRR otherwise treats as<br />martian. |  |  |
+| `ebgpRequiresPolicy` _boolean_ | EBGPRequiresPolicy is FRR's RFC 8212 behavior: an eBGP session with<br />no policy in a direction exchanges no routes in it. Unset or true<br />keeps FRR's default, which is on; false renders<br />`no bgp ebgp-requires-policy`. False also lets the routers' peer<br />families leave exportPolicyRef unset, which exports every route the<br />router selects to that peer; any other class refuses a peer family<br />with no export policy. |  |  |
 | `bmpTargets` _[BMPTarget](#bmptarget) array_ | BMPTargets lists the BMP collectors every router of the class streams<br />to. The router image must load bgpd's BMP module. |  | MaxItems: 4 <br /> |
 
 

@@ -573,6 +573,17 @@ spec:
                           - egp
                           - incomplete
                           type: string
+                        source:
+                          description: |-
+                            Source is the preferred source address of the routes the policy
+                            installs in the kernel. It must be in the address family of every
+                            peer family or advertisement the policy is attached to. Honored by
+                            the fabric router implementation only.
+                          maxLength: 45
+                          type: string
+                          x-kubernetes-validations:
+                          - message: source must be a valid IP address
+                            rule: isIP(self)
                         standardCommunities:
                           description: |-
                             StandardCommunities adds to or replaces the route's standard
@@ -631,13 +642,14 @@ spec:
             - message: a policy bound by routerRef or routerSelector must set direction
               rule: (!has(self.routerRef) && !has(self.routerSelector)) || has(self.direction)
             - message: a policy bound by routerRef or routerSelector cannot use frr,
-                set references, interface matches or community actions; the Galactic
-                EVPN router does not implement them
+                set references, interface matches, community actions or a source;
+                the Galactic EVPN router does not implement them
               rule: (!has(self.routerRef) && !has(self.routerSelector)) || (!has(self.frr)
                 && self.terms.all(t, !has(t.match.prefixListRef) && !has(t.match.communitySetRef)
                 && !has(t.match.largeCommunitySetRef) && !has(t.match.interface) &&
                 (!has(t.set) || (!has(t.set.standardCommunities) && !has(t.set.largeCommunities)
-                && !has(t.set.deleteCommunitySetRef) && !has(t.set.deleteLargeCommunitySetRef)))))
+                && !has(t.set.deleteCommunitySetRef) && !has(t.set.deleteLargeCommunitySetRef)
+                && !has(t.set.source)))))
           status:
             description: BGPPolicyStatus defines the observed state of BGPPolicy.
             properties:

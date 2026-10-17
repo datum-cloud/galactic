@@ -5,14 +5,15 @@
 // text. It splits a configuration into the contexts FRR's own reload tool
 // works with (a top-level line, a router bgp block, each address family and
 // BMP target inside it, each route-map entry) and ignores what FRR ignores:
-// comments, blank lines, indentation, the order of contexts and of lines
+// comments (lines starting with ! or #), blank lines, indentation, the order of contexts and of lines
 // within one, and leading zeros or host bits in prefixes.
 //
 // It also applies the pinned FRR's display rules, so a legacy file compares
 // equal to the configuration FRR shows after loading it: community-list
 // entries are numbered 5, 10, 15, ...; set community values are sorted;
-// `ipv6 forwarding`, enabling `send-community` lines and the `frr version`
-// banner are dropped. The Docker-backed parity test checks those rules
+// `log syslog debugging` reads as `log syslog`; `ip forwarding`,
+// `ipv6 forwarding`, `bgp ebgp-requires-policy`, enabling `send-community`
+// lines and the `frr version` banner are dropped. The Docker-backed parity test checks those rules
 // against the real build.
 //
 // It is the fast, Docker-free half of the parity check, not a replacement
@@ -42,7 +43,7 @@ func Normalize(text string) Config {
 	for sc.Scan() {
 		raw := sc.Text()
 		line := canonicalLine(raw)
-		if line == "" || strings.HasPrefix(line, "!") || hidden(line) {
+		if line == "" || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "#") || hidden(line) {
 			continue
 		}
 		line = numberCommunityList(line, listSeq)
@@ -141,6 +142,10 @@ func canonicalLine(raw string) string {
 	if f[0] == "description" {
 		return trimmed
 	}
+	if len(f) == 3 && f[0] == "log" && f[1] == "syslog" && f[2] == "debugging" {
+		// The default level, which FRR leaves out.
+		return "log syslog"
+	}
 	if len(f) > 3 && f[0] == "neighbor" && f[2] == "description" {
 		return strings.Join(f[:3], " ") + " " + strings.TrimSpace(strings.SplitN(trimmed, " description ", 2)[1])
 	}
@@ -168,7 +173,10 @@ func canonicalLine(raw string) string {
 func hidden(line string) bool {
 	f := strings.Fields(line)
 	switch {
-	case line == "ipv6 forwarding", strings.HasPrefix(line, "frr version "):
+	case line == "ip forwarding", line == "ipv6 forwarding", strings.HasPrefix(line, "frr version "):
+		return true
+	case line == "bgp ebgp-requires-policy":
+		// On by default in the traditional profile.
 		return true
 	case len(f) >= 3 && len(f) <= 4 && f[0] == "neighbor" && f[2] == "send-community":
 		return true

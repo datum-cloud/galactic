@@ -10,6 +10,10 @@ import (
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
+// fieldFamilySettings is the peer and profile field the family checks
+// report on.
+const fieldFamilySettings = "spec.familySettings"
+
 // policyUse is where a policy is attached, which decides what it may match.
 type policyUse int
 
@@ -116,9 +120,15 @@ func (c *compiler) validateParameters() {
 		c.token(obj, "spec.logFile.path", p.LogFile.Path)
 		c.token(obj, "spec.logFile.level", string(p.LogFile.Level))
 	}
+	if p.LogSyslog != nil {
+		c.token(obj, "spec.logSyslog", string(*p.LogSyslog))
+	}
 	for _, t := range p.BMPTargets {
 		c.token(obj, "spec.bmpTargets.name", string(t.Name))
 		c.token(obj, "spec.bmpTargets.connect.address", t.Connect.Address)
+		if t.Connect.SourceInterface != nil {
+			c.token(obj, "spec.bmpTargets.connect.sourceInterface", *t.Connect.SourceInterface)
+		}
 	}
 }
 
@@ -182,14 +192,17 @@ func (c *compiler) validatePeer(p *networkv1alpha1.BGPPeer) {
 				f.afi, f.safi)
 		}
 		eff := effectiveFamily(p, profile, f)
-		if eff.ExportPolicyRef == nil {
-			c.problems.add(ReasonInvalid, fobj, "spec.familySettings",
-				"%s %s has no export policy; an implicit export-everything default is not allowed", f.afi, f.safi)
-		} else {
+		switch {
+		case eff.ExportPolicyRef != nil:
 			c.usePolicy(fobj, "exportPolicyRef", eff.ExportPolicyRef.Name, usePeer)
+			c.checkPolicySource(fobj, "exportPolicyRef", eff.ExportPolicyRef.Name, f.afi)
+		case !c.unfilteredExport():
+			c.problems.add(ReasonInvalid, fobj, fieldFamilySettings,
+				"%s %s has no export policy; an implicit export-everything default is not allowed", f.afi, f.safi)
 		}
 		if eff.ImportPolicyRef != nil {
 			c.usePolicy(fobj, "importPolicyRef", eff.ImportPolicyRef.Name, usePeer)
+			c.checkPolicySource(fobj, "importPolicyRef", eff.ImportPolicyRef.Name, f.afi)
 		}
 	}
 	if profile != nil && len(s.AddressFamilies) > 0 {
@@ -216,7 +229,7 @@ func (c *compiler) validatePeer(p *networkv1alpha1.BGPPeer) {
 	for _, fs := range s.FamilySettings {
 		f := family{fs.AFI, fs.SAFI}
 		if !containsFamilyKey(peerFamilies(p, profile), f) {
-			c.problems.add(ReasonInvalid, obj, "spec.familySettings", "%s %s is not one of the peer's families",
+			c.problems.add(ReasonInvalid, obj, fieldFamilySettings, "%s %s is not one of the peer's families",
 				f.afi, f.safi)
 		}
 	}
@@ -229,7 +242,7 @@ func (c *compiler) validatePeer(p *networkv1alpha1.BGPPeer) {
 // policy, prefix limit, allowas-in, weight, and turning soft
 // reconfiguration on may differ.
 func (c *compiler) checkOverrides(obj string, own, group *networkv1alpha1.BGPPeerFamilySettings) {
-	field := "spec.familySettings"
+	field := fieldFamilySettings
 	differs := func(a, b any) bool { return !reflect.DeepEqual(a, b) }
 	var g networkv1alpha1.BGPPeerFamilySettings
 	if group != nil {
@@ -322,9 +335,11 @@ func (c *compiler) validateProfile(profile *networkv1alpha1.BGPPeerProfile) {
 		}
 		if fs.ImportPolicyRef != nil {
 			c.usePolicy(obj, "importPolicyRef", fs.ImportPolicyRef.Name, usePeer)
+			c.checkPolicySource(obj, "importPolicyRef", fs.ImportPolicyRef.Name, fs.AFI)
 		}
 		if fs.ExportPolicyRef != nil {
 			c.usePolicy(obj, "exportPolicyRef", fs.ExportPolicyRef.Name, usePeer)
+			c.checkPolicySource(obj, "exportPolicyRef", fs.ExportPolicyRef.Name, fs.AFI)
 		}
 	}
 }
@@ -353,8 +368,8 @@ func (c *compiler) validateAdvertisement(a *networkv1alpha1.BGPAdvertisement) {
 		c.problems.add(ReasonInvalid, obj, "spec.addressFamily", "%s %s is not one of the router's families",
 			f.afi, f.safi)
 	}
-	if s.PolicyRef == nil {
-		c.problems.add(ReasonInvalid, obj, "spec.policyRef", "a fabric advertisement needs a policy")
+	if s.PolicyRef == nil && len(s.Redistribute) > 0 {
+		c.problems.add(ReasonInvalid, obj, "spec.policyRef", "a fabric redistribution needs a policy")
 		return
 	}
 	kinds := 0
@@ -370,11 +385,14 @@ func (c *compiler) validateAdvertisement(a *networkv1alpha1.BGPAdvertisement) {
 		c.problems.add(ReasonInvalid, obj, "spec",
 			"prefixes, redistribute and aggregation share one policy; split them into separate advertisements")
 	}
-	use := useOrigination
-	if len(s.Redistribute) > 0 {
-		use = useRedistribution
+	if s.PolicyRef != nil {
+		use := useOrigination
+		if len(s.Redistribute) > 0 {
+			use = useRedistribution
+		}
+		c.usePolicy(obj, "spec.policyRef", s.PolicyRef.Name, use)
+		c.checkPolicySource(obj, "spec.policyRef", s.PolicyRef.Name, f.afi)
 	}
-	c.usePolicy(obj, "spec.policyRef", s.PolicyRef.Name, use)
 	for _, p := range s.Prefixes {
 		c.checkPrefixFamily(obj, "spec.prefixes", string(p), f.afi)
 	}
@@ -405,6 +423,34 @@ func (c *compiler) validateStaticRoute(sr *networkv1alpha1.BGPStaticRoute) {
 		addr, err := netip.ParseAddr(ptrString(sr.Spec.NextHop))
 		if err != nil || addr.Is4() != (sr.Spec.AddressFamily == networkv1alpha1.AFIIPv4) {
 			c.problems.add(ReasonInvalid, obj, "spec.nextHop", "must be an address in %s", sr.Spec.AddressFamily)
+		}
+	}
+}
+
+// unfilteredExport reports whether the class lets a peer family export
+// without a policy: only one that turns FRR's eBGP policy requirement off.
+func (c *compiler) unfilteredExport() bool {
+	p := c.in.Parameters.Spec
+	return p.EBGPRequiresPolicy != nil && !*p.EBGPRequiresPolicy
+}
+
+// checkPolicySource refuses a policy whose terms set a source address
+// outside afi, the family it is attached in. A missing policy is left to
+// usePolicy to report.
+func (c *compiler) checkPolicySource(obj, field, name string, afi networkv1alpha1.AFI) {
+	policy, ok := c.in.Policies[name]
+	if !ok {
+		return
+	}
+	for _, t := range policy.Spec.Terms {
+		if t.Set == nil || t.Set.Source == nil {
+			continue
+		}
+		addr, err := netip.ParseAddr(*t.Set.Source)
+		if err == nil && addr.Is4() != (afi == networkv1alpha1.AFIIPv4) {
+			c.problems.add(ReasonInvalid, obj, field, "policy %s sets source %s, which is not in %s",
+				name, *t.Set.Source, afi)
+			return
 		}
 	}
 }
@@ -517,6 +563,11 @@ func (c *compiler) checkTermValues(obj string, t networkv1alpha1.BGPPolicyTerm) 
 	}
 	if t.Set == nil {
 		return
+	}
+	if t.Set.Source != nil {
+		if _, err := netip.ParseAddr(*t.Set.Source); err != nil {
+			c.problems.add(ReasonInvalid, obj, "spec.terms.set.source", "%q is not an address", *t.Set.Source)
+		}
 	}
 	if t.Set.StandardCommunities != nil {
 		for _, v := range t.Set.StandardCommunities.Values {

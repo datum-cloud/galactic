@@ -53,7 +53,7 @@ type BGPPolicy struct {
 // +kubebuilder:validation:XValidation:rule="self.terms.all(t1, self.terms.filter(t2, t2.sequence == t1.sequence).size() == 1)",message="Term sequence numbers must be unique"
 // +kubebuilder:validation:XValidation:rule="!has(self.routerRef) || !has(self.routerSelector)",message="At most one of routerRef or routerSelector may be set"
 // +kubebuilder:validation:XValidation:rule="(!has(self.routerRef) && !has(self.routerSelector)) || has(self.direction)",message="a policy bound by routerRef or routerSelector must set direction"
-// +kubebuilder:validation:XValidation:rule="(!has(self.routerRef) && !has(self.routerSelector)) || (!has(self.frr) && self.terms.all(t, !has(t.match.prefixListRef) && !has(t.match.communitySetRef) && !has(t.match.largeCommunitySetRef) && !has(t.match.interface) && (!has(t.set) || (!has(t.set.standardCommunities) && !has(t.set.largeCommunities) && !has(t.set.deleteCommunitySetRef) && !has(t.set.deleteLargeCommunitySetRef)))))",message="a policy bound by routerRef or routerSelector cannot use frr, set references, interface matches or community actions; the Galactic EVPN router does not implement them"
+// +kubebuilder:validation:XValidation:rule="(!has(self.routerRef) && !has(self.routerSelector)) || (!has(self.frr) && self.terms.all(t, !has(t.match.prefixListRef) && !has(t.match.communitySetRef) && !has(t.match.largeCommunitySetRef) && !has(t.match.interface) && (!has(t.set) || (!has(t.set.standardCommunities) && !has(t.set.largeCommunities) && !has(t.set.deleteCommunitySetRef) && !has(t.set.deleteLargeCommunitySetRef) && !has(t.set.source)))))",message="a policy bound by routerRef or routerSelector cannot use frr, set references, interface matches, community actions or a source; the Galactic EVPN router does not implement them"
 type BGPPolicySpec struct {
 	RouterTarget `json:",inline"`
 
@@ -318,6 +318,15 @@ type BGPPolicySetActions struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Color *int32 `json:"color,omitempty"`
+
+	// Source is the preferred source address of the routes the policy
+	// installs in the kernel. It must be in the address family of every
+	// peer family or advertisement the policy is attached to. Honored by
+	// the fabric router implementation only.
+	// +optional
+	// +kubebuilder:validation:MaxLength=45
+	// +kubebuilder:validation:XValidation:rule="isIP(self)",message="source must be a valid IP address"
+	Source *string `json:"source,omitempty"`
 }
 
 // BGPOrigin is the BGP origin attribute per RFC 4271.

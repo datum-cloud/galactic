@@ -47,6 +47,22 @@ frr defaults traditional
 	}
 }
 
+// TestNormalizeAppliesDisplayRules: lines the pinned FRR hides or shortens
+// compare equal to what it displays.
+func TestNormalizeAppliesDisplayRules(t *testing.T) {
+	written := "# hash comment\nip forwarding\nlog syslog debugging\n" + strings.Replace(config,
+		" neighbor PG peer-group\n", " # indented hash comment\n bgp ebgp-requires-policy\n neighbor PG peer-group\n", 1)
+	displayed := "log syslog\n" + config
+	if diff := Diff(Normalize(written), Normalize(displayed)); len(diff) > 0 {
+		t.Errorf("display rules not applied:\n%s", strings.Join(diff, "\n"))
+	}
+	turnedOff := strings.Replace(config, " neighbor PG peer-group\n",
+		" no bgp ebgp-requires-policy\n neighbor PG peer-group\n", 1)
+	if diff := Diff(Normalize(config), Normalize(turnedOff)); len(diff) == 0 {
+		t.Error("turning ebgp-requires-policy off compares equal")
+	}
+}
+
 // TestNormalizeKeepsContexts: the same line in a different context, or a
 // changed line, is a difference.
 func TestNormalizeKeepsContexts(t *testing.T) {

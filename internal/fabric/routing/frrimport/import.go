@@ -141,7 +141,8 @@ func (p *parser) meta(name string) metav1.ObjectMeta {
 
 func (p *parser) line(raw string) error {
 	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" || strings.HasPrefix(trimmed, "!") {
+	// FRR reads a line starting with ! or # as a comment, wherever it is.
+	if trimmed == "" || strings.HasPrefix(trimmed, "!") || strings.HasPrefix(trimmed, "#") {
 		return nil
 	}
 	f := strings.Fields(trimmed)
@@ -153,7 +154,12 @@ func (p *parser) line(raw string) error {
 			p.ctx = ctxTop
 			return nil
 		}
-		return p.routeMapLine(f, trimmed)
+		if indented {
+			return p.routeMapLine(f, trimmed)
+		}
+		// An unindented line closes the entry, as FRR's parser falls back
+		// to the top level for a command the entry does not know.
+		p.ctx = ctxTop
 	case ctxBMP:
 		if trimmed == kwExit {
 			p.ctx = ctxBGP
@@ -185,9 +191,9 @@ func (p *parser) topLine(f []string, line string) error {
 		p.params.DefaultsProfile = networkv1alpha1.FRRDefaultsProfile(f[2])
 	case len(f) == 2 && f[0] == "hostname":
 		p.hostname = f[1]
-	case len(f) == 4 && f[0] == "log" && f[1] == "file":
-		p.params.LogFile = &networkv1alpha1.FRRLogFile{Path: f[2], Level: networkv1alpha1.FRRLogLevel(f[3])}
-	case line == "ipv6 forwarding":
+	case len(f) >= 2 && f[0] == "log":
+		return p.logLine(f)
+	case line == "ip forwarding" || line == "ipv6 forwarding":
 		// Zebra's command writes the kernel sysctl, which is host
 		// configuration, and FRR never displays it while forwarding is on.
 	case (f[0] == "ip" || f[0] == "ipv6") && len(f) >= 2 && f[1] == "route":
@@ -200,6 +206,24 @@ func (p *parser) topLine(f []string, line string) error {
 		return p.routerBGP(f[2])
 	case len(f) == 4 && f[0] == "route-map":
 		return p.routeMapHeader(f)
+	default:
+		return errUnsupported
+	}
+	return nil
+}
+
+// logLine handles a top-level `log file` or `log syslog` line.
+func (p *parser) logLine(f []string) error {
+	switch {
+	case len(f) == 4 && f[1] == "file":
+		p.params.LogFile = &networkv1alpha1.FRRLogFile{Path: f[2], Level: networkv1alpha1.FRRLogLevel(f[3])}
+	case len(f) <= 3 && f[1] == "syslog":
+		// FRR leaves the default level out of `log syslog`.
+		level := networkv1alpha1.FRRLogLevelDebugging
+		if len(f) == 3 {
+			level = networkv1alpha1.FRRLogLevel(f[2])
+		}
+		p.params.LogSyslog = &level
 	default:
 		return errUnsupported
 	}
@@ -253,6 +277,10 @@ func (p *parser) bgpLine(f []string, line string) error {
 		p.params.LogNeighborChanges = true
 	case line == "no bgp default ipv4-unicast":
 		p.sawIPv4D = true
+	case line == "no bgp ebgp-requires-policy":
+		p.params.EBGPRequiresPolicy = ptr.To(false)
+	case line == "bgp ebgp-requires-policy":
+		p.params.EBGPRequiresPolicy = ptr.To(true)
 	case line == "bgp allow-martian-nexthop":
 		p.params.AllowMartianNexthop = true
 	case len(f) == 3 && f[0] == "address-family":
@@ -381,9 +409,16 @@ func (p *parser) addressFamilyLine(f []string) error {
 	case len(f) == 4 && f[0] == "network" && f[2] == kwRouteMap:
 		a := p.advertisement("network", f[3], "")
 		a.Spec.Prefixes = append(a.Spec.Prefixes, networkv1alpha1.Prefix(f[1]))
-	case len(f) >= 4 && f[0] == "aggregate-address" && f[len(f)-2] == kwRouteMap:
+	case len(f) == 2 && f[0] == "network":
+		a := p.advertisement("network", "", "")
+		a.Spec.Prefixes = append(a.Spec.Prefixes, networkv1alpha1.Prefix(f[1]))
+	case len(f) >= 2 && f[0] == "aggregate-address":
+		routeMap, opts := "", f[2:]
+		if len(f) >= 4 && f[len(f)-2] == kwRouteMap {
+			routeMap, opts = f[len(f)-1], f[2:len(f)-2]
+		}
 		agg := &networkv1alpha1.BGPAggregation{Prefix: f[1]}
-		for _, opt := range f[2 : len(f)-2] {
+		for _, opt := range opts {
 			switch opt {
 			case "summary-only":
 				agg.SummaryOnly = true
@@ -393,7 +428,7 @@ func (p *parser) addressFamilyLine(f []string) error {
 				return errUnsupported
 			}
 		}
-		p.advertisement("aggregate", f[len(f)-1], f[1]).Spec.Aggregation = agg
+		p.advertisement("aggregate", routeMap, f[1]).Spec.Aggregation = agg
 	case len(f) == 4 && f[0] == "redistribute" && f[2] == kwRouteMap:
 		src := networkv1alpha1.RedistributeSource(f[1])
 		if !slices.Contains([]networkv1alpha1.RedistributeSource{
@@ -419,7 +454,8 @@ func (p *parser) addressFamilyLine(f []string) error {
 }
 
 // advertisement returns the advertisement for kind and route-map in the
-// current family; each aggregate gets its own.
+// current family; each aggregate gets its own. An empty routeMap is a
+// statement with no route-map, whose advertisement has no policy.
 func (p *parser) advertisement(kind, routeMap, aggregate string) *networkv1alpha1.BGPAdvertisement {
 	key := strings.Join([]string{string(p.family.AFI), kind, routeMap, aggregate}, "|")
 	if a, ok := p.advs[key]; ok {
@@ -434,8 +470,10 @@ func (p *parser) advertisement(kind, routeMap, aggregate string) *networkv1alpha
 		Spec: networkv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     networkv1alpha1.RouterRef{Name: p.opts.NodeName},
 			AddressFamily: p.family,
-			PolicyRef:     &networkv1alpha1.AdvertisementPolicyRef{Name: objectName(routeMap)},
 		},
+	}
+	if routeMap != "" {
+		a.Spec.PolicyRef = &networkv1alpha1.AdvertisementPolicyRef{Name: objectName(routeMap)}
 	}
 	p.advs[key] = a
 	p.remember("adv", key)
@@ -513,6 +551,8 @@ func familySetting(fs *networkv1alpha1.BGPPeerFamilySettings, verb string, args 
 		}
 	case verb == "next-hop-self" && len(args) == 0:
 		fs.NextHopMode = ptr.To(networkv1alpha1.BGPNextHopSelf)
+	case verb == "next-hop-self" && len(args) == 1 && args[0] == "force":
+		fs.NextHopMode = ptr.To(networkv1alpha1.BGPNextHopSelfForce)
 	case verb == "route-reflector-client" && len(args) == 0:
 		fs.RouteReflectorClient = ptr.To(true)
 	case verb == "weight" && len(args) == 1:
@@ -578,6 +618,11 @@ func (p *parser) bmpLine(f []string) error {
 		p.bmp.Connect = networkv1alpha1.BMPConnect{Address: f[2], Port: int32(port)}
 		rest := f[5:]
 		for len(rest) >= 2 {
+			if rest[0] == "source-interface" {
+				p.bmp.Connect.SourceInterface = ptr.To(rest[1])
+				rest = rest[2:]
+				continue
+			}
 			ms, err := strconv.ParseInt(rest[1], 10, 32)
 			if err != nil {
 				return err
@@ -595,6 +640,12 @@ func (p *parser) bmpLine(f []string) error {
 		if len(rest) != 0 {
 			return errUnsupported
 		}
+	case len(f) == 4 && f[0] == kwBMP && f[1] == "stats" && f[2] == "interval":
+		ms, err := strconv.ParseInt(f[3], 10, 32)
+		if err != nil {
+			return err
+		}
+		p.bmp.StatsIntervalMilliseconds = ptr.To(int32(ms))
 	case len(f) == 5 && f[0] == kwBMP && f[1] == "monitor":
 		modes := map[string]networkv1alpha1.BMPMonitorMode{
 			"loc-rib": networkv1alpha1.BMPMonitorLocRIB, "pre-policy": networkv1alpha1.BMPMonitorPrePolicy,
@@ -786,6 +837,7 @@ func (p *parser) setLine(s *networkv1alpha1.BGPPolicySetActions, f []string) err
 			"large-comm-list":  s.DeleteLargeCommunitySetRef != nil,
 			"as-path":          s.AsPath != nil,
 			"local-preference": s.LocalPreference != nil,
+			"src":              s.Source != nil,
 		}[f[0]]
 		if repeated {
 			return errors.New("a second set of the same kind is not implemented")
@@ -821,6 +873,11 @@ func (p *parser) setLine(s *networkv1alpha1.BGPPolicySetActions, f []string) err
 			return err
 		}
 		s.LocalPreference = ptr.To(int32(n))
+	case len(f) == 2 && f[0] == "src":
+		if _, err := netip.ParseAddr(f[1]); err != nil {
+			return err
+		}
+		s.Source = ptr.To(f[1])
 	default:
 		return errUnsupported
 	}
@@ -1052,7 +1109,9 @@ func retained(o *Objects) *networkv1alpha1.BGPRouterFRRRetain {
 		}
 	}
 	for _, a := range o.Advertisements {
-		usedPolicies[a.Spec.PolicyRef.Name] = true
+		if a.Spec.PolicyRef != nil {
+			usedPolicies[a.Spec.PolicyRef.Name] = true
+		}
 	}
 
 	r := &networkv1alpha1.BGPRouterFRRRetain{}
