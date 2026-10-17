@@ -110,13 +110,14 @@ func TestFabricRoutingAdmission(t *testing.T) {
 			}}
 		}
 		runAdmission(t, c, []admissionCase{
-			{"ipv6 discard", route(0, networkv1alpha1.AFIIPv6, "2607:ed40:10c::/64", networkv1alpha1.BGPStaticRouteDiscard, nil), ""},
+			{"ipv6 discard", route(0, networkv1alpha1.AFIIPv6, "2001:db8:10c::/64", networkv1alpha1.BGPStaticRouteDiscard, nil), ""},
 			{"ipv4 discard", route(1, networkv1alpha1.AFIIPv4, "192.0.2.0/24", networkv1alpha1.BGPStaticRouteDiscard, nil), ""},
 			{"ipv4 next hop", route(2, networkv1alpha1.AFIIPv4, "192.0.2.0/24", networkv1alpha1.BGPStaticRouteNextHop, ptr.To("198.51.100.1")), ""},
-			{"family mismatch", route(3, networkv1alpha1.AFIIPv4, "2607:ed40::/32", networkv1alpha1.BGPStaticRouteDiscard, nil), "destination must be in addressFamily"},
+			{"family mismatch", route(3, networkv1alpha1.AFIIPv4, "2001:db8::/32", networkv1alpha1.BGPStaticRouteDiscard, nil), "destination must be in addressFamily"},
 			{"next hop family mismatch", route(4, networkv1alpha1.AFIIPv4, "192.0.2.0/24", networkv1alpha1.BGPStaticRouteNextHop, ptr.To("2001:db8::1")), "nextHop must be in addressFamily"},
 			{"next hop missing", route(5, networkv1alpha1.AFIIPv4, "192.0.2.0/24", networkv1alpha1.BGPStaticRouteNextHop, nil), "nextHop is required"},
 			{"discard with next hop", route(6, networkv1alpha1.AFIIPv4, "192.0.2.0/24", networkv1alpha1.BGPStaticRouteDiscard, ptr.To("198.51.100.1")), "nextHop is required"},
+			{"destination not a prefix", route(8, networkv1alpha1.AFIIPv4, "192.0.2.300/24", networkv1alpha1.BGPStaticRouteDiscard, nil), "destination must be a valid CIDR"},
 			{"evpn family", route(7, networkv1alpha1.AFIL2VPN, "192.0.2.0/24", networkv1alpha1.BGPStaticRouteDiscard, nil), "addressFamily must be ipv4 or ipv6"},
 		})
 	})
@@ -220,6 +221,11 @@ func TestFabricRoutingAdmission(t *testing.T) {
 			{"multi-line description", policy(5, false, false, term(func(tm *networkv1alpha1.BGPPolicyTerm) {
 				tm.Description = "one\ntwo"
 			})), "spec.terms[0].description"},
+			{"invalid large community", policy(10, false, false, term(func(tm *networkv1alpha1.BGPPolicyTerm) {
+				tm.Set = &networkv1alpha1.BGPPolicySetActions{LargeCommunities: &networkv1alpha1.LargeCommunityAction{
+					Operation: networkv1alpha1.CommunityOperationAdd, Values: []string{"33438:1"},
+				}}
+			})), "each value must be ASN:NN:NN"},
 			{"invalid standard community", policy(6, false, false, term(func(tm *networkv1alpha1.BGPPolicyTerm) {
 				tm.Set = &networkv1alpha1.BGPPolicySetActions{StandardCommunities: &networkv1alpha1.StandardCommunityAction{
 					Operation: networkv1alpha1.CommunityOperationAdd, Values: []string{"33438:1:2"},
@@ -245,10 +251,14 @@ func TestFabricRoutingAdmission(t *testing.T) {
 			}}
 		}
 		runAdmission(t, c, []admissionCase{
-			{"ipv6 aggregate", adv(0, networkv1alpha1.AFIIPv6, &networkv1alpha1.BGPAggregation{Prefix: "2607:ed40:10c::/48"}), ""},
-			{"aggregate family mismatch", adv(1, networkv1alpha1.AFIIPv4, &networkv1alpha1.BGPAggregation{Prefix: "2607:ed40:10c::/48"}), "aggregation prefix must be in"},
-			{"aggregate with prefixes", adv(2, networkv1alpha1.AFIIPv6, &networkv1alpha1.BGPAggregation{Prefix: "2607:ed40:10c::/48"}, "2607:ed40:10c::/64"), "aggregation cannot be combined"},
-			{"network statements", adv(3, networkv1alpha1.AFIIPv6, nil, "2607:ed40:10c::/64"), ""},
+			{"ipv6 aggregate", adv(0, networkv1alpha1.AFIIPv6, &networkv1alpha1.BGPAggregation{Prefix: "2001:db8:10c::/48"}), ""},
+			{"aggregate family mismatch", adv(1, networkv1alpha1.AFIIPv4, &networkv1alpha1.BGPAggregation{Prefix: "2001:db8:10c::/48"}), "aggregation prefix must be in"},
+			{"aggregate with prefixes", adv(2, networkv1alpha1.AFIIPv6, &networkv1alpha1.BGPAggregation{Prefix: "2001:db8:10c::/48"}, "2001:db8:10c::/64"), "aggregation cannot be combined"},
+			{"aggregate not a prefix", adv(4, networkv1alpha1.AFIIPv6, &networkv1alpha1.BGPAggregation{Prefix: "2001:db8::/129"}), "prefix must be a valid CIDR"},
+			{"nothing to advertise", &networkv1alpha1.BGPAdvertisement{ObjectMeta: meta("adv", 5), Spec: networkv1alpha1.BGPAdvertisementSpec{
+				RouterRef: r1, AddressFamily: ipv6, PolicyRef: &networkv1alpha1.AdvertisementPolicyRef{Name: "originate"},
+			}}, "at least one of prefixes, redistribute, originateFrom, or aggregation must be specified"},
+			{"network statements", adv(3, networkv1alpha1.AFIIPv6, nil, "2001:db8:10c::/64"), ""},
 		})
 	})
 
@@ -380,9 +390,29 @@ func TestFabricRoutingAdmission(t *testing.T) {
 				},
 			}, "BMP monitors cover ipv4 or ipv6 unicast"},
 		})
+		bmpParams := func(name string, connect networkv1alpha1.BMPConnect) client.Object {
+			return &networkv1alpha1.FRRRouterParameters{
+				ObjectMeta: metav1.ObjectMeta{Name: name},
+				Spec: networkv1alpha1.FRRRouterParametersSpec{
+					DefaultsProfile: networkv1alpha1.FRRDefaultsTraditional,
+					BMPTargets: []networkv1alpha1.BMPTarget{{
+						Name: "x", Connect: connect,
+						Monitors: []networkv1alpha1.BMPMonitor{{AFI: networkv1alpha1.AFIIPv6, SAFI: networkv1alpha1.SAFIUnicast, Mode: networkv1alpha1.BMPMonitorLocRIB}},
+					}},
+				},
+			}
+		}
+		runAdmission(t, c, []admissionCase{
+			{"retry bounds reversed", bmpParams("bad-retry", networkv1alpha1.BMPConnect{
+				Address: "127.0.0.1", Port: 9348, MinRetryMilliseconds: ptr.To[int32](10000), MaxRetryMilliseconds: ptr.To[int32](1000),
+			}), "minRetryMilliseconds must not exceed maxRetryMilliseconds"},
+			{"collector not an address", bmpParams("bad-address", networkv1alpha1.BMPConnect{Address: "collector", Port: 9348}),
+				"address must be a valid IP address"},
+		})
 		params.Spec.LogNeighborChanges = false
-		if err := c.Update(context.Background(), params); err == nil {
-			t.Error("admitted a change to FRRRouterParameters spec")
+		err := c.Update(context.Background(), params)
+		if err == nil || !strings.Contains(err.Error(), "spec is immutable") {
+			t.Errorf("FRRRouterParameters spec change: %v, want the immutability refusal", err)
 		}
 	})
 }
