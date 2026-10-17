@@ -284,6 +284,25 @@ func TestDeploymentAgentWithoutDeployment(t *testing.T) {
 	}
 }
 
+// A candidate is staged against what FRR runs, so it is staged again once
+// FRR runs something else, such as its configuration loading after a pod
+// restart or the node's ConfigMap changing.
+func TestDeploymentAgentShadowRestagesWhenRunningChanges(t *testing.T) {
+	d := deployment(networkv1alpha1.FabricConfigSourceShadow)
+	h := newHarness(t, d)
+	h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
+		d.Spec.CandidateRevisionRef = &networkv1alpha1.LocalObjectRef{Name: h.revs[1].Name}
+	})
+	if got := h.sync(); got.Status.Staged == nil || got.Status.Staged.Class == networkv1alpha1.FabricChangeNone {
+		t.Fatalf("staged against an empty FRR = %+v", got.Status.Staged)
+	}
+	h.frr.running = rendered(t, h.revs[1])
+	got := h.sync()
+	if got.Status.Staged == nil || got.Status.Staged.Class != networkv1alpha1.FabricChangeNone {
+		t.Fatalf("staged once FRR runs the candidate = %+v", got.Status.Staged)
+	}
+}
+
 func TestDeploymentAgentShadowStages(t *testing.T) {
 	d := deployment(networkv1alpha1.FabricConfigSourceShadow)
 	h := newHarness(t, d)

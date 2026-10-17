@@ -6,6 +6,8 @@ package fabricconfig
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,8 +91,9 @@ type DeploymentAgent struct {
 	// Now reads the clock; nil is time.Now.
 	Now func() time.Time
 
-	// staged is the candidate last staged, by revision name, so an
-	// unchanged candidate is not restaged every sync.
+	// staged is the candidate last staged and the running configuration it
+	// was staged against, so an unchanged candidate is not restaged every
+	// sync, and is restaged once FRR runs something else.
 	staged string
 	// written is the status last written, to skip unchanged writes.
 	written *networkv1alpha1.FabricRouterDeploymentStatus
@@ -331,7 +334,12 @@ func (d *DeploymentAgent) stage(ctx context.Context, dep *networkv1alpha1.Fabric
 		d.unstage(status)
 		return
 	}
-	if ref.Name == d.staged && status.Staged != nil && status.Staged.Revision == ref.Name {
+	key := ref.Name
+	if running, err := d.Activator.FRR.Running(ctx); err == nil {
+		sum := sha256.Sum256([]byte(running))
+		key += "@" + hex.EncodeToString(sum[:])
+	}
+	if key == d.staged && status.Staged != nil && status.Staged.Revision == ref.Name {
 		return
 	}
 	rev, err := d.revision(ctx, ref.Name)
@@ -356,7 +364,7 @@ func (d *DeploymentAgent) stage(ctx context.Context, dep *networkv1alpha1.Fabric
 		LinesRemoved: int32(len(staged.Removed)), //nolint:gosec // bounded by the revision cap
 		Diff:         diff, ValidatedAt: metav1.NewTime(d.now()),
 	}
-	d.staged = rev.Name
+	d.staged = key
 	setCondition(status, dep, networkv1alpha1.FabricConditionStaged, metav1.ConditionTrue, reasonStaged,
 		fmt.Sprintf("%s validated: %s, %d lines added, %d removed", rev.Name, staged.Class, len(staged.Added),
 			len(staged.Removed)))
