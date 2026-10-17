@@ -128,7 +128,7 @@ func TestRunStartupSweepsAfterFailedSeed(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunStartup(ctx, c, store, 5*time.Millisecond)
+		RunStartup(ctx, c, store, 5*time.Millisecond, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -167,7 +167,7 @@ func TestRunStartupPrunesAfterInventory(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunStartup(ctx, c, store, time.Hour)
+		RunStartup(ctx, c, store, time.Hour, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()

@@ -67,6 +67,8 @@ func runCmd(cfg *config.VRFConfig) error {
 
 	metrics := ingresssidecar.NewMetrics()
 	metrics.MustRegister(ctrlmetrics.Registry)
+	lifecycle := ingresssidecar.NewLifecycleMetrics(cfg.SweepInterval, cfg.TeardownGracePeriod)
+	lifecycle.MustRegister(ctrlmetrics.Registry)
 
 	backend := ingresssidecar.NewKernelBackend()
 	store := ingresssidecar.NewStore(backend, cfg.TeardownGracePeriod, metrics)
@@ -129,7 +131,7 @@ func runCmd(cfg *config.VRFConfig) error {
 	// controller's own reconciles have drained the workqueue that list
 	// fed, so on a busy node at boot the two race. Seeding uses the
 	// manager's uncached reader, which depends on neither.
-	go ingresssidecar.RunStartup(ctx, mgr.GetAPIReader(), store, cfg.SweepInterval)
+	go ingresssidecar.RunStartup(ctx, mgr.GetAPIReader(), store, cfg.SweepInterval, lifecycle)
 
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)

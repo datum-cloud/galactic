@@ -402,7 +402,10 @@ func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 // tracked, so a row it does not account for belongs to a pod that is gone. It
 // holds the store's lock throughout, so a VRF SetDesired creates concurrently
 // is either already tracked or registers its rows after the prune.
-func (s *Store) PruneForeignDatapath() error {
+//
+// It returns how many rows it removed, which a failure part way through can
+// leave above zero.
+func (s *Store) PruneForeignDatapath() (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -419,9 +422,9 @@ func (s *Store) PruneForeignDatapath() error {
 	}
 	if err != nil {
 		s.countError("prune_datapath")
-		return fmt.Errorf("prune an earlier sidecar pod's eBPF map rows: %w", err)
+		return removed, fmt.Errorf("prune an earlier sidecar pod's eBPF map rows: %w", err)
 	}
-	return nil
+	return removed, nil
 }
 
 // checkDatapathLocked reapplies every live VRF and route when the backend's
