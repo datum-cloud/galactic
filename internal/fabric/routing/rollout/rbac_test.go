@@ -61,6 +61,10 @@ func TestControllerRBACCoversEveryCall(t *testing.T) {
 		"coordination.k8s.io", testNS, "leases")...)
 
 	denied := []rbaccheck.Access{
+		{Verb: rbaccheck.Update, Group: g, Resource: "fabricreleaseauthorizations", Namespace: testNS},
+		{Verb: rbaccheck.Patch, Group: g, Resource: "fabricreleaseauthorizations/status", Namespace: testNS},
+		{Verb: rbaccheck.Get, Group: g, Resource: "bgprouters/status", Namespace: testNS},
+		{Verb: rbaccheck.Update, Group: g, Resource: "bgprouters/status", Namespace: testNS},
 		{Verb: rbaccheck.Get, Resource: "secrets", Namespace: testNS},
 		{Verb: rbaccheck.Update, Group: g, Resource: "fabricrouterrevisions", Namespace: testNS},
 		{Verb: rbaccheck.Delete, Group: g, Resource: deploymentsResource, Namespace: testNS},

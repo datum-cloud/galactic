@@ -53,6 +53,8 @@ func TestAgentRBACCoversEveryCall(t *testing.T) {
 		rbaccheck.Access{Verb: rbaccheck.Get, Resource: "namespaces", Name: metav1.NamespaceSystem})
 
 	denied := []rbaccheck.Access{
+		{Verb: rbaccheck.Update, Group: g, Resource: deploymentsResource + "/status", Namespace: depNamespace},
+		{Verb: rbaccheck.Get, Group: g, Resource: deploymentsResource + "/status", Namespace: depNamespace},
 		{Verb: rbaccheck.Get, Resource: "secrets", Namespace: depNamespace},
 		{Verb: rbaccheck.List, Resource: "secrets", Namespace: depNamespace},
 		{Verb: rbaccheck.Update, Group: g, Resource: deploymentsResource, Namespace: depNamespace},

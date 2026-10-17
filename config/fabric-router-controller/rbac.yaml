@@ -2,9 +2,9 @@
 # FabricRouterRevisions and, with --rollout, gives each router a
 # FabricRouterDeployment and runs FabricReleaseAuthorizations. Every rule
 # here matches a kubebuilder:rbac marker in internal/fabric/routing, and
-# every verb is one the code uses; TestControllerRBACCoversEveryCall checks
-# them against the API server. It never reads Secrets: revisions name credentials, the node
-# agent resolves them.
+# every verb is one the code uses; TestControllerRBACCoversEveryCall
+# checks them against the API server. It never reads Secrets: revisions
+# name credentials, the node agent resolves them.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
