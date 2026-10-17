@@ -51,7 +51,7 @@ _Appears in:_
 
 #### ASPathFilter
 
-_Underlying type:_ _[struct{Pattern string "json:\"pattern\""; MatchType ASPathMatchType "json:\"matchType,omitempty\""}](#struct{pattern-string-"json:\"pattern\"";-matchtype-aspathmatchtype-"json:\"matchtype,omitempty\""})_
+
 
 ASPathFilter matches BGP routes by AS path using a regex pattern.
 
@@ -60,8 +60,28 @@ ASPathFilter matches BGP routes by AS path using a regex pattern.
 _Appears in:_
 - [BGPPolicyMatch](#bgppolicymatch)
 
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pattern` _string_ | Pattern is a regular expression matched against the AS path.<br />The AS path is represented as a space-separated string of ASNs. |  | MaxLength: 256 <br />MinLength: 1 <br /> |
+| `matchType` _[ASPathMatchType](#aspathmatchtype)_ | MatchType determines whether the pattern must match the full path<br />or can match a substring. Default: "contains". | contains | Enum: [full contains] <br /> |
 
 
+#### ASPathMatchType
+
+_Underlying type:_ _string_
+
+ASPathMatchType determines how an AS path filter pattern is applied.
+
+_Validation:_
+- Enum: [full contains]
+
+_Appears in:_
+- [ASPathFilter](#aspathfilter)
+
+| Field | Description |
+| --- | --- |
+| `full` | ASPathMatchFull requires the pattern to match the entire AS path.<br /> |
+| `contains` | ASPathMatchContains requires the pattern to match a substring of the AS path.<br /> |
 
 
 #### AddressClaimRef
@@ -185,6 +205,22 @@ _Appears in:_
 | `name` _string_ | Name is the name of the BGPPolicy within the same namespace. |  | MinLength: 1 <br /> |
 
 
+#### AsPathSet
+
+
+
+AsPathSet defines AS path manipulation operations.
+
+
+
+_Appears in:_
+- [BGPPolicySetActions](#bgppolicysetactions)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `prepend` _integer_ | Prepend adds an ASN to the AS path N times. |  | Maximum: 10 <br />Minimum: 1 <br /> |
+| `asn` _integer_ | ASN is the AS number to prepend (used when prepend is set).<br />Defaults to the local ASN if not specified. |  | Maximum: 4.294967295e+09 <br />Minimum: 1 <br /> |
+| `replace` _integer array_ | Replace replaces the entire AS path with the given list.<br />Mutually exclusive with prepend. |  | MaxItems: 32 <br /> |
 
 
 #### BGPAdvertisement
@@ -222,7 +258,6 @@ At least one of prefixes, redistribute, or originateFrom must be specified.
 
 _Appears in:_
 - [BGPAdvertisement](#bgpadvertisement)
-- [FabricNamedAdvertisement](#fabricnamedadvertisement)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -311,7 +346,6 @@ BGPCommunitySetSpec defines the desired state of BGPCommunitySet.
 
 _Appears in:_
 - [BGPCommunitySet](#bgpcommunityset)
-- [FabricNamedCommunitySet](#fabricnamedcommunityset)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -392,6 +426,23 @@ _Appears in:_
 | `Self` | BGPNextHopSelf rewrites the next hop to the local session address.<br /> |
 
 
+#### BGPOrigin
+
+_Underlying type:_ _string_
+
+BGPOrigin is the BGP origin attribute per RFC 4271.
+
+_Validation:_
+- Enum: [igp egp incomplete]
+
+_Appears in:_
+- [BGPPolicySetActions](#bgppolicysetactions)
+
+| Field | Description |
+| --- | --- |
+| `igp` | BGPOriginIGP indicates the route was learned via an IGP.<br /> |
+| `egp` | BGPOriginEGP indicates the route was learned via the EGP protocol.<br /> |
+| `incomplete` | BGPOriginIncomplete indicates the route origin is unknown.<br /> |
 
 
 #### BGPPeer
@@ -559,7 +610,6 @@ BGPPeerProfileSpec defines a peer profile's settings.
 
 _Appears in:_
 - [BGPPeerProfile](#bgppeerprofile)
-- [FabricNamedPeerProfile](#fabricnamedpeerprofile)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -596,7 +646,6 @@ BGPPeerSpec defines the desired state of BGPPeer.
 
 _Appears in:_
 - [BGPPeer](#bgppeer)
-- [FabricNamedPeer](#fabricnamedpeer)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -831,7 +880,6 @@ BGPPolicySpec defines the desired route policy state.
 
 _Appears in:_
 - [BGPPolicy](#bgppolicy)
-- [FabricNamedPolicy](#fabricnamedpolicy)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1252,7 +1300,6 @@ BGPStaticRouteSpec defines one static route.
 
 _Appears in:_
 - [BGPStaticRoute](#bgpstaticroute)
-- [FabricNamedStaticRoute](#fabricnamedstaticroute)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1448,6 +1495,21 @@ _Appears in:_
 | `Replace` | CommunityOperationReplace replaces the route's communities with values.<br /> |
 
 
+#### CommunitySet
+
+
+
+CommunitySet defines community add and remove operations.
+
+
+
+_Appears in:_
+- [BGPPolicySetActions](#bgppolicysetactions)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `add` _string array_ | Add is a list of communities to attach. |  | MaxItems: 32 <br />items:MaxLength: 24 <br /> |
+| `remove` _string array_ | Remove is a list of communities to strip. |  | MaxItems: 32 <br />items:MaxLength: 24 <br /> |
 
 
 #### EVPNRouteType
@@ -1604,6 +1666,21 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource,<br />including Programmed (see ConditionTypeProgrammed). |  |  |
 
 
+#### ExtendedCommunitySet
+
+
+
+ExtendedCommunitySet defines extended community add and remove operations.
+
+
+
+_Appears in:_
+- [BGPPolicySetActions](#bgppolicysetactions)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `add` _string array_ | Add is a list of extended communities to attach. |  | MaxItems: 32 <br />items:MaxLength: 64 <br /> |
+| `remove` _string array_ | Remove is a list of extended communities to strip. |  | MaxItems: 32 <br />items:MaxLength: 64 <br /> |
 
 
 #### FRRDefaultsProfile
@@ -1775,108 +1852,6 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
 
 
-#### FabricNamedAdvertisement
-
-
-
-FabricNamedAdvertisement is an advertisement's name and spec.
-
-
-
-_Appears in:_
-- [FabricRouterConfiguration](#fabricrouterconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ |  |  |  |
-| `spec` _[BGPAdvertisementSpec](#bgpadvertisementspec)_ |  |  |  |
-
-
-#### FabricNamedCommunitySet
-
-
-
-FabricNamedCommunitySet is a community set's name and spec.
-
-
-
-_Appears in:_
-- [FabricRouterConfiguration](#fabricrouterconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ |  |  |  |
-| `spec` _[BGPCommunitySetSpec](#bgpcommunitysetspec)_ |  |  |  |
-
-
-#### FabricNamedPeer
-
-
-
-FabricNamedPeer is a peer's name and spec.
-
-
-
-_Appears in:_
-- [FabricRouterConfiguration](#fabricrouterconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ |  |  |  |
-| `spec` _[BGPPeerSpec](#bgppeerspec)_ |  |  |  |
-
-
-#### FabricNamedPeerProfile
-
-
-
-FabricNamedPeerProfile is a peer profile's name and spec.
-
-
-
-_Appears in:_
-- [FabricRouterConfiguration](#fabricrouterconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ |  |  |  |
-| `spec` _[BGPPeerProfileSpec](#bgppeerprofilespec)_ |  |  |  |
-
-
-#### FabricNamedPolicy
-
-
-
-FabricNamedPolicy is a policy's name and spec.
-
-
-
-_Appears in:_
-- [FabricRouterConfiguration](#fabricrouterconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ |  |  |  |
-| `spec` _[BGPPolicySpec](#bgppolicyspec)_ |  |  |  |
-
-
-#### FabricNamedStaticRoute
-
-
-
-FabricNamedStaticRoute is a static route's name and spec.
-
-
-
-_Appears in:_
-- [FabricRouterConfiguration](#fabricrouterconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ |  |  |  |
-| `spec` _[BGPStaticRouteSpec](#bgpstaticroutespec)_ |  |  |  |
-
-
 #### FabricRevisionCompiler
 
 
@@ -1949,12 +1924,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `router` _[BGPRouterSpec](#bgprouterspec)_ |  |  |  |
 | `parameters` _[FRRRouterParametersSpec](#frrrouterparametersspec)_ |  |  |  |
-| `peers` _[FabricNamedPeer](#fabricnamedpeer) array_ |  |  |  |
-| `profiles` _[FabricNamedPeerProfile](#fabricnamedpeerprofile) array_ |  |  |  |
-| `policies` _[FabricNamedPolicy](#fabricnamedpolicy) array_ |  |  |  |
-| `communitySets` _[FabricNamedCommunitySet](#fabricnamedcommunityset) array_ |  |  |  |
-| `advertisements` _[FabricNamedAdvertisement](#fabricnamedadvertisement) array_ |  |  |  |
-| `staticRoutes` _[FabricNamedStaticRoute](#fabricnamedstaticroute) array_ |  |  |  |
 
 
 #### FabricRouterRevision
@@ -2029,6 +1998,21 @@ _Appears in:_
 | `nodeUID` _string_ | NodeUID is the Node's UID. Empty when the Node was not found. |  | MaxLength: 36 <br /> |
 
 
+#### LargeCommunityAction
+
+
+
+LargeCommunityAction sets large communities on a route.
+
+
+
+_Appears in:_
+- [BGPPolicySetActions](#bgppolicysetactions)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `operation` _[CommunityOperation](#communityoperation)_ | Operation is Add or Replace. |  | Enum: [Add Replace] <br /> |
+| `values` _string array_ | Values are ASN:NN:NN large communities. |  | MaxItems: 32 <br />MinItems: 1 <br />items:MaxLength: 32 <br /> |
 
 
 #### LocalObjectRef
@@ -2108,6 +2092,21 @@ _Appears in:_
 | `publicPrefix` _string_ | PublicPrefix is the externally-routable IPv6 prefix ULAPrefix<br />translates to/from, same prefix length as ULAPrefix. |  | Required: \{\} <br /> |
 
 
+#### NextHopSet
+
+
+
+NextHopSet defines next-hop attribute overrides.
+
+
+
+_Appears in:_
+- [BGPPolicySetActions](#bgppolicysetactions)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `self` _boolean_ | Self sets the next-hop to the local router's BGP peer address. |  |  |
+| `address` _string_ | Address sets the next-hop to a specific IP address.<br />Mutually exclusive with self. |  | MaxLength: 45 <br /> |
 
 
 #### OriginType
@@ -2694,6 +2693,21 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource,<br />including Bound (set True once internal/plumbing/vip.Verify or the<br />equivalent tap-translation-table check confirms the backend is<br />actually reachable on VIPAddress, not merely that the bind/table-write<br />call itself returned nil). |  |  |
 
 
+#### StandardCommunityAction
+
+
+
+StandardCommunityAction sets standard communities on a route.
+
+
+
+_Appears in:_
+- [BGPPolicySetActions](#bgppolicysetactions)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `operation` _[CommunityOperation](#communityoperation)_ | Operation is Add or Replace. |  | Enum: [Add Replace] <br /> |
+| `values` _string array_ | Values are ASN:NN communities or FRR's well-known names. A<br />BGPCommunitySet matches fewer well-known names than an action can set. |  | MaxItems: 32 <br />MinItems: 1 <br />items:MaxLength: 21 <br /> |
 
 
 #### TargetRef
