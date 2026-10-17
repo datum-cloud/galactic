@@ -20,6 +20,11 @@ fabric-router-controller: resolve -> compile -> FabricRouterRevision
 fabric-config-agent: stage -> journal -> frr-reload -> observe -> checkpoint
 ```
 
+The infra side, a typed-resource output mode for infra's
+`galactic-template` that replaces its per-node `frr.conf` rendering, ships
+as companion infra pull requests under the same plan; until those merge,
+the generator contract here is a proposal to infra.
+
 These documents are the contract for work in progress. Where they name a
 kind, field, command or package that does not exist yet, they describe the
 target that the implementing change adds.
