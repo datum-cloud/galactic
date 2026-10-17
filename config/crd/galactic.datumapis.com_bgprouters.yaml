@@ -120,6 +120,25 @@ spec:
                 maximum: 57343
                 minimum: 1
                 type: integer
+              plane:
+                description: |-
+                  Plane is the routing plane this router belongs to. Unset means the
+                  tenant EVPN overlay. Underlay requires a routerClassName. Immutable.
+                enum:
+                - Underlay
+                - Overlay
+                type: string
+              routerClassName:
+                description: |-
+                  RouterClassName names the BGPRouterClass whose controller owns this
+                  router. A router without one is owned by the Galactic EVPN
+                  implementation (galactic-router and its related controllers). A
+                  router naming a class is ignored by every component except that
+                  class's controller, and by every component when the class does not
+                  exist. Immutable.
+                maxLength: 253
+                minLength: 1
+                type: string
               routerID:
                 description: |-
                   RouterID is a unique 32-bit identifier expressed in IPv4 dotted-decimal notation.
@@ -158,6 +177,15 @@ spec:
             - routerID
             - targetRef
             type: object
+            x-kubernetes-validations:
+            - message: routerClassName is immutable
+              rule: has(self.routerClassName) == has(oldSelf.routerClassName) && (!has(self.routerClassName)
+                || self.routerClassName == oldSelf.routerClassName)
+            - message: plane is immutable
+              rule: has(self.plane) == has(oldSelf.plane) && (!has(self.plane) ||
+                self.plane == oldSelf.plane)
+            - message: an Underlay router must name a routerClassName
+              rule: '!has(self.plane) || self.plane != ''Underlay'' || has(self.routerClassName)'
           status:
             description: BGPRouterStatus defines the observed state of a BGPRouter.
             properties:

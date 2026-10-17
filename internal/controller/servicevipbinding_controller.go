@@ -743,12 +743,23 @@ func resolveVIPBindingVRF(idx *backendSIDIndex, nodeName, vpcRef string) (vipBin
 	if vpcRef == "" {
 		return vipBindingVRF{}, errors.New("binding has no vpcRef")
 	}
+	// idx.routers holds only Galactic-owned routers. Ranging over a map
+	// picks in random order, so more than one on the node is an error
+	// rather than a coin toss between two locators.
 	var router *bgpv1alpha1.BGPRouter
 	for _, rt := range idx.routers {
-		if rt.Spec.TargetRef.Name == nodeName {
-			router = rt
-			break
+		if rt.Spec.TargetRef.Name != nodeName {
+			continue
 		}
+		if router != nil {
+			first, second := router.Name, rt.Name
+			if second < first {
+				first, second = second, first
+			}
+			return vipBindingVRF{}, fmt.Errorf("ambiguous BGP config: BGPRouters %s and %s both target node %q",
+				first, second, nodeName)
+		}
+		router = rt
 	}
 	if router == nil {
 		return vipBindingVRF{}, fmt.Errorf("no BGPRouter targets node %q", nodeName)
@@ -875,7 +886,7 @@ func (r *ServiceVIPBindingReconciler) advertisementRequests(
 		}
 		return nil
 	}
-	if router.Spec.TargetRef.Name != r.NodeName {
+	if router.Spec.TargetRef.Name != r.NodeName || !bgpv1alpha1.IsLegacyOwned(router) {
 		return nil
 	}
 	list := &bgpv1alpha1.ServiceVIPBindingList{}

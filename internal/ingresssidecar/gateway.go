@@ -141,7 +141,7 @@ func (p *k8sGatewayPublisher) lookupBGPRouter(ctx context.Context) (gatewayBGPCo
 		return gatewayBGPConfig{}, fmt.Errorf("list BGPRouters in namespace %s: %w", p.namespace, err)
 	}
 	var matches []bgpv1alpha1.BGPRouter
-	for _, r := range routerList.Items {
+	for _, r := range bgpv1alpha1.LegacyOwnedRouters(routerList.Items) {
 		if r.Spec.TargetRef.Name == p.nodeName {
 			matches = append(matches, r)
 		}

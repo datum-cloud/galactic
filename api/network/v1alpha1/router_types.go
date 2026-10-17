@@ -34,8 +34,42 @@ type BGPRouter struct {
 	Status BGPRouterStatus `json:"status,omitempty"`
 }
 
+// BGPRoutingPlane names which routing plane a BGPRouter belongs to.
+//
+// +kubebuilder:validation:Enum=Underlay;Overlay
+type BGPRoutingPlane string
+
+const (
+	// BGPRoutingPlaneUnderlay is the fabric underlay that carries the
+	// overlay's sessions and SRv6 locators between nodes.
+	BGPRoutingPlaneUnderlay BGPRoutingPlane = "Underlay"
+
+	// BGPRoutingPlaneOverlay is the tenant EVPN overlay.
+	BGPRoutingPlaneOverlay BGPRoutingPlane = "Overlay"
+)
+
 // BGPRouterSpec defines the desired state of a BGPRouter.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.routerClassName) == has(oldSelf.routerClassName) && (!has(self.routerClassName) || self.routerClassName == oldSelf.routerClassName)",message="routerClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.plane) == has(oldSelf.plane) && (!has(self.plane) || self.plane == oldSelf.plane)",message="plane is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(self.plane) || self.plane != 'Underlay' || has(self.routerClassName)",message="an Underlay router must name a routerClassName"
 type BGPRouterSpec struct {
+	// RouterClassName names the BGPRouterClass whose controller owns this
+	// router. A router without one is owned by the Galactic EVPN
+	// implementation (galactic-router and its related controllers). A
+	// router naming a class is ignored by every component except that
+	// class's controller, and by every component when the class does not
+	// exist. Immutable.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	RouterClassName *string `json:"routerClassName,omitempty"`
+
+	// Plane is the routing plane this router belongs to. Unset means the
+	// tenant EVPN overlay. Underlay requires a routerClassName. Immutable.
+	// +optional
+	Plane *BGPRoutingPlane `json:"plane,omitempty"`
+
 	// TargetRef identifies the Node this router executes on.
 	// +kubebuilder:validation:Required
 	TargetRef TargetRef `json:"targetRef"`

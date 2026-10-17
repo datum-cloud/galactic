@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -286,8 +287,13 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("list NetworkServices for NetworkGateway %s: %w", req.NamespacedName, err)
 	}
 
+	// An ambiguous router only blocks advertisement wiring; the datapath
+	// below is still programmed, as it is when no router exists yet.
 	routerName, err := r.routerNameForNode(ctx, gw.Namespace)
-	if err != nil {
+	switch {
+	case errors.Is(err, errAmbiguousRouter):
+		logger.Error(err, "skipping BGPAdvertisement wiring", "node", r.NodeName)
+	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("resolve BGPRouter for node %s: %w", r.NodeName, err)
 	}
 
@@ -323,7 +329,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	if routerName == "" {
+	if routerName == "" && err == nil {
 		logger.Info("no BGPRouter targets this node; skipping BGPAdvertisement wiring", "node", r.NodeName)
 	}
 
@@ -908,17 +914,25 @@ func buildDesiredRule(
 	}, unresolved, nil
 }
 
-// routerNameForNode returns the name of the BGPRouter whose targetRef.name
-// matches this node, or "" if none exists yet. A method wrapper around the
+// routerNameForNode returns the name of this node's Galactic-owned
+// BGPRouter, or "" if none exists yet. A method wrapper around the
 // package-level function of the same name.
 func (r *NetworkGatewayReconciler) routerNameForNode(ctx context.Context, namespace string) (string, error) {
 	return routerNameForNode(ctx, r.Client, namespace, r.NodeName)
 }
 
-// routerNameForNode returns the name of the BGPRouter whose targetRef.name
-// matches nodeName, or "" if none exists yet. A free function so
-// EgressShardReconciler can resolve the same "which BGPRouter is mine" lookup
-// without duplicating it or reaching into another reconciler's method set.
+// errAmbiguousRouter reports more than one Galactic-owned BGPRouter on a
+// node.
+var errAmbiguousRouter = errors.New("ambiguous BGP config")
+
+// routerNameForNode returns the name of the Galactic-owned BGPRouter whose
+// targetRef.name matches nodeName, or "" if none exists yet. Routers that
+// name a routerClassName belong to another implementation (the fabric
+// underlay) and are skipped. More than one Galactic-owned router on the node
+// is an error rather than an arbitrary pick, since the caller attaches
+// advertisements to the result. A free function so EgressShardReconciler can
+// resolve the same "which BGPRouter is mine" lookup without duplicating it or
+// reaching into another reconciler's method set.
 func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName string) (string, error) {
 	list := &bgpv1alpha1.BGPRouterList{}
 	if err := c.List(ctx, list,
@@ -927,10 +941,21 @@ func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName
 	); err != nil {
 		return "", fmt.Errorf("list BGPRouters for node %s: %w", nodeName, err)
 	}
-	if len(list.Items) == 0 {
+	owned := bgpv1alpha1.LegacyOwnedRouters(list.Items)
+	switch len(owned) {
+	case 0:
 		return "", nil
+	case 1:
+		return owned[0].Name, nil
+	default:
+		names := make([]string, 0, len(owned))
+		for _, rt := range owned {
+			names = append(names, rt.Name)
+		}
+		sort.Strings(names)
+		return "", fmt.Errorf("%w: node %s has %d BGPRouters (%s)",
+			errAmbiguousRouter, nodeName, len(owned), strings.Join(names, ", "))
 	}
-	return list.Items[0].Name, nil
 }
 
 // applyBGPAdvertisements reconciles the BGPAdvertisements for a single rule,

@@ -49,12 +49,14 @@ func New(c client.Client, nodeName, localAddress string) *Reconciler {
 
 // BuildDesiredRouter assembles the full desired router from BGP CRDs for the
 // given BGPRouter. It returns nil with a nil error when the router targets
-// another node and should be silently skipped.
+// another node, or names a routerClassName, and should be silently skipped.
 func (r *Reconciler) BuildDesiredRouter(
 	ctx context.Context, router *bgpv1alpha1.BGPRouter,
 ) (*model.DesiredRouter, error) {
-	// Node check: skip routers that don't target this node.
-	if router.Spec.TargetRef.Name != r.nodeName {
+	// Node and owner check: skip routers that don't target this node, and
+	// routers naming a routerClassName, which belong to another
+	// implementation (the fabric underlay) even on this node.
+	if router.Spec.TargetRef.Name != r.nodeName || !bgpv1alpha1.IsLegacyOwned(router) {
 		return nil, nil
 	}
 

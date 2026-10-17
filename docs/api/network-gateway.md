@@ -65,6 +65,8 @@ _Appears in:_
 | `name` _string_ | Name is the name of the claim. The addressing service derives it from<br />the thing being addressed, so it is stable across a shard's lifetime and<br />is what a replacement finds again. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
+
+
 #### EgressShard
 
 
