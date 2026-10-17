@@ -346,6 +346,24 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              fabric:
+                description: |-
+                  Fabric is the fabric router controller's view of a classed router.
+                  Unset on routers the Galactic EVPN implementation owns.
+                properties:
+                  activationDependencyDigest:
+                    description: ActivationDependencyDigest is that revision's digest.
+                    type: string
+                  latestRevision:
+                    description: |-
+                      LatestRevision is the newest FabricRouterRevision compiled for the
+                      router's current inputs.
+                    type: string
+                  renderedDigest:
+                    description: RenderedDigest is the SHA-256 of the frr.conf that
+                      revision renders.
+                    type: string
+                type: object
               observedGeneration:
                 description: ObservedGeneration is the .metadata.generation this status
                   was computed from.

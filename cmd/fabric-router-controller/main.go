@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Command fabric-router-controller compiles fabric routers' typed BGP
-// resources into FRR configuration. This build carries the offline
-// subcommands: import turns a rendered frr.conf into typed resources,
-// preview compiles resources into the frr.conf a router would run, and diff
-// compares that with a configuration FRR runs today. None of them contact a
-// cluster.
+// resources into FRR configuration. run is the in-cluster controller that
+// turns every fabric-class router into immutable FabricRouterRevisions. The
+// offline subcommands contact no cluster: import turns a rendered frr.conf
+// into typed resources, preview compiles resources into the frr.conf a
+// router would run, and diff compares that with a configuration FRR runs
+// today.
 package main
 
 import (
@@ -17,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	"go.datum.net/galactic/internal/fabric/routing/bundle"
 	"go.datum.net/galactic/internal/fabric/routing/compile"
@@ -28,7 +30,7 @@ import (
 const appName = "fabric-router-controller"
 
 func main() {
-	if err := newRootCommand().Execute(); err != nil {
+	if err := newRootCommand().ExecuteContext(ctrl.SetupSignalHandler()); err != nil {
 		os.Exit(1)
 	}
 }
@@ -47,7 +49,7 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
-	cmd.AddCommand(newImportCommand(), newPreviewCommand(), newDiffCommand())
+	cmd.AddCommand(newImportCommand(), newPreviewCommand(), newDiffCommand(), newRunCommand())
 	return cmd
 }
 

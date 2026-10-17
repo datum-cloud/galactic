@@ -141,6 +141,11 @@ type BGPRouterStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Fabric is the fabric router controller's view of a classed router.
+	// Unset on routers the Galactic EVPN implementation owns.
+	// +optional
+	Fabric *BGPRouterFabricStatus `json:"fabric,omitempty"`
 }
 
 // BGPRouterPeerSummary summarizes BGP peer session counts.
@@ -203,4 +208,20 @@ type BGPRouterFRRRetain struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=64
 	PeerProfileRefs []LocalObjectRef `json:"peerProfileRefs,omitempty"`
+}
+
+// BGPRouterFabricStatus is the fabric router controller's view of a router.
+type BGPRouterFabricStatus struct {
+	// LatestRevision is the newest FabricRouterRevision compiled for the
+	// router's current inputs.
+	// +optional
+	LatestRevision string `json:"latestRevision,omitempty"`
+
+	// ActivationDependencyDigest is that revision's digest.
+	// +optional
+	ActivationDependencyDigest string `json:"activationDependencyDigest,omitempty"`
+
+	// RenderedDigest is the SHA-256 of the frr.conf that revision renders.
+	// +optional
+	RenderedDigest string `json:"renderedDigest,omitempty"`
 }

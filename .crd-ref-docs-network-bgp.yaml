@@ -2,6 +2,9 @@ processor:
   docPaths: []
   ignoreTypes:
     - ".*List$"
+    # The revision's configuration lists every BGP spec by name; walking
+    # those wrappers first would hide the policy types from their sections.
+    - "FabricNamed.*"
     - "NetworkGateway"
     - "NetworkGatewaySpec"
     - "NetworkGatewayStatus"

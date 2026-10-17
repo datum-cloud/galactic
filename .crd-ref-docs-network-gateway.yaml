@@ -41,6 +41,7 @@ processor:
     - "BGPStaticRoute.*"
     - "BMP.*"
     - "FRR.*"
+    - "Fabric.*"
     - "BGPRouterSpec"
     - "BGPRouterStatus"
     - "BGPRouterPeerSummary"

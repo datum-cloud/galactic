@@ -20,6 +20,7 @@ Package v1alpha1 contains API Schema definitions for the galactic.datumapis.com/
 - [BGPVRFInstance](#bgpvrfinstance)
 - [EgressShard](#egressshard)
 - [FRRRouterParameters](#frrrouterparameters)
+- [FabricRouterRevision](#fabricrouterrevision)
 - [ServiceEndpoint](#serviceendpoint)
 - [ServiceRoutePolicy](#serviceroutepolicy)
 - [ServiceVIPBinding](#servicevipbinding)
@@ -1131,6 +1132,24 @@ _Appears in:_
 | `peerProfileRefs` _[LocalObjectRef](#localobjectref) array_ | PeerProfileRefs names BGPPeerProfiles. |  | MaxItems: 64 <br /> |
 
 
+#### BGPRouterFabricStatus
+
+
+
+BGPRouterFabricStatus is the fabric router controller's view of a router.
+
+
+
+_Appears in:_
+- [BGPRouterStatus](#bgprouterstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `latestRevision` _string_ | LatestRevision is the newest FabricRouterRevision compiled for the<br />router's current inputs. |  |  |
+| `activationDependencyDigest` _string_ | ActivationDependencyDigest is that revision's digest. |  |  |
+| `renderedDigest` _string_ | RenderedDigest is the SHA-256 of the frr.conf that revision renders. |  |  |
+
+
 #### BGPRouterPeerSummary
 
 
@@ -1176,6 +1195,7 @@ BGPRouterSpec defines the desired state of a BGPRouter.
 
 _Appears in:_
 - [BGPRouter](#bgprouter)
+- [FabricRouterConfiguration](#fabricrouterconfiguration)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1208,6 +1228,7 @@ _Appears in:_
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `peers` _[BGPRouterPeerSummary](#bgprouterpeersummary)_ | Peers summarizes peer session counts. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
+| `fabric` _[BGPRouterFabricStatus](#bgprouterfabricstatus)_ | Fabric is the fabric router controller's view of a classed router.<br />Unset on routers the Galactic EVPN implementation owns. |  |  |
 
 
 #### BGPRoutingPlane
@@ -1801,6 +1822,7 @@ FRRRouterParametersSpec defines FRR implementation settings.
 
 _Appears in:_
 - [FRRRouterParameters](#frrrouterparameters)
+- [FabricRouterConfiguration](#fabricrouterconfiguration)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1828,6 +1850,152 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
+
+
+#### FabricRevisionCompiler
+
+
+
+FabricRevisionCompiler identifies the compiler and FRR build.
+
+
+
+_Appears in:_
+- [FabricRouterRevisionSpec](#fabricrouterrevisionspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `semanticsVersion` _string_ | SemanticsVersion is the compiler's semantics version; a change that<br />alters rendered output for the same input bumps it. |  | MaxLength: 32 <br />MinLength: 1 <br /> |
+| `frrVersion` _string_ | FRRVersion is the FRR build the configuration targets. |  | MaxLength: 32 <br />MinLength: 1 <br /> |
+
+
+#### FabricRevisionInput
+
+
+
+FabricRevisionInput is one source object of a revision.
+
+
+
+_Appears in:_
+- [FabricRouterRevisionSpec](#fabricrouterrevisionspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `kind` _string_ | Kind is the object's kind. |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+| `name` _string_ | Name is the object's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `uid` _string_ | UID is the object's UID. |  | MaxLength: 36 <br /> |
+| `generation` _integer_ | Generation is the object's metadata.generation when it was read. |  |  |
+| `digest` _string_ | Digest is the SHA-256, in hex, of the object's spec in canonical<br />JSON. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
+
+
+#### FabricRevisionParameters
+
+
+
+FabricRevisionParameters identifies the parameters a revision used.
+
+
+
+_Appears in:_
+- [FabricRouterRevisionSpec](#fabricrouterrevisionspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the FRRRouterParameters name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `uid` _string_ | UID is the FRRRouterParameters UID. |  | MaxLength: 36 <br /> |
+
+
+#### FabricRouterConfiguration
+
+
+
+FabricRouterConfiguration is the resolved typed configuration of one
+fabric router: the router and parameters specs, and the specs of every
+peer, profile, policy, list, set, advertisement and static route it
+renders, each list ordered by name.
+
+
+
+_Appears in:_
+- [FabricRouterRevisionSpec](#fabricrouterrevisionspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `router` _[BGPRouterSpec](#bgprouterspec)_ |  |  |  |
+| `parameters` _[FRRRouterParametersSpec](#frrrouterparametersspec)_ |  |  |  |
+
+
+#### FabricRouterRevision
+
+
+
+FabricRouterRevision is one immutable, fully resolved configuration for
+one fabric router: the typed specs of every object the router's
+configuration depends on, captured at one moment, with the identities and
+digests that make an activation reproducible. It carries no Secret
+material and no rendered FRR text; the node agent compiles the
+configuration with the same compiler that produced the digests.
+
+The fabric router controller creates revisions and never updates them.
+Its name is the router's name and the first ten hex digits of the
+activation dependency digest, so identical inputs map to one object.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `FabricRouterRevision` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[FabricRouterRevisionSpec](#fabricrouterrevisionspec)_ |  |  | Required: \{\} <br /> |
+
+
+#### FabricRouterRevisionSpec
+
+
+
+FabricRouterRevisionSpec is a revision's content. It is immutable.
+
+
+
+_Appears in:_
+- [FabricRouterRevision](#fabricrouterrevision)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `target` _[FabricRouterTarget](#fabricroutertarget)_ | Target is the router and Node this revision configures. |  |  |
+| `parameters` _[FabricRevisionParameters](#fabricrevisionparameters)_ | Parameters identifies the FRRRouterParameters the configuration<br />used. |  |  |
+| `compiler` _[FabricRevisionCompiler](#fabricrevisioncompiler)_ | Compiler identifies the compiler semantics and the FRR build the<br />configuration targets. |  |  |
+| `configuration` _[FabricRouterConfiguration](#fabricrouterconfiguration)_ | Configuration is the resolved typed configuration. It is validated<br />by the controller that writes it rather than by this schema, which<br />would otherwise repeat every source kind's rules. |  | Schemaless: \{\} <br />Type: object <br /> |
+| `inputs` _[FabricRevisionInput](#fabricrevisioninput) array_ | Inputs lists every object the configuration was resolved from. |  | MaxItems: 4096 <br /> |
+| `semanticsDigest` _string_ | SemanticsDigest is the SHA-256, in hex, of the configuration in<br />canonical JSON. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
+| `activationDependencyDigest` _string_ | ActivationDependencyDigest is the SHA-256, in hex, over the target<br />identity, the semantics digest, the parameters identity and the<br />compiler and FRR versions. Two revisions with the same digest<br />activate identically. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
+| `renderedDigest` _string_ | RenderedDigest is the SHA-256, in hex, of the frr.conf the compiler<br />renders from the configuration, so an agent can check that its own<br />compile matches. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
+
+
+#### FabricRouterTarget
+
+
+
+FabricRouterTarget is the router and Node a revision configures, by name
+and UID, so a recreated router or a replaced Node never inherits one.
+
+
+
+_Appears in:_
+- [FabricRouterRevisionSpec](#fabricrouterrevisionspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `routerName` _string_ | RouterName is the BGPRouter's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `routerUID` _string_ | RouterUID is the BGPRouter's UID. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
+| `nodeName` _string_ | NodeName is the Node the router runs on. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `nodeUID` _string_ | NodeUID is the Node's UID. Empty when the Node was not found. |  | MaxLength: 36 <br /> |
 
 
 #### LargeCommunityAction

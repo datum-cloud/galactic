@@ -12,12 +12,31 @@ import (
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
+// SemanticsVersion identifies the compiler's output rules. Bump it with any
+// change that renders the same input differently.
+const SemanticsVersion = "1"
+
+// FRRVersion is the FRR build the compiler targets; a test keeps it equal
+// to the build the fabric-router image pins.
+const FRRVersion = "10.7.1"
+
 // Result is a compiled router configuration.
 type Result struct {
 	// Config is the complete frr.conf text.
 	Config string
 	// Digest is the hex SHA-256 of Config.
 	Digest string
+	// Rendered names, sorted, the definitions the configuration renders:
+	// referenced ones and retained ones.
+	Rendered Rendered
+}
+
+// Rendered names the definitions a compile rendered, by kind.
+type Rendered struct {
+	Profiles      []string
+	Policies      []string
+	PrefixLists   []string
+	CommunitySets []string
 }
 
 // Compile resolves in and renders the router's FRR configuration. It returns
@@ -31,7 +50,16 @@ func Compile(in Input) (Result, error) {
 	}
 	config := c.render()
 	sum := sha256.Sum256([]byte(config))
-	return Result{Config: config, Digest: hex.EncodeToString(sum[:])}, nil
+	return Result{
+		Config: config,
+		Digest: hex.EncodeToString(sum[:]),
+		Rendered: Rendered{
+			Profiles:      sortedKeys(c.profiles),
+			Policies:      sortedKeys(c.policies),
+			PrefixLists:   sortedKeys(c.prefixLists),
+			CommunitySets: sortedKeys(c.communitySets),
+		},
+	}, nil
 }
 
 // compiler holds one compile's resolved state.
