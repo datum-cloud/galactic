@@ -1408,7 +1408,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `address` _string_ | Address is the collector's IP address. |  | MaxLength: 45 <br /> |
 | `port` _integer_ | Port is the collector's TCP port. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
-| `minRetryMilliseconds` _integer_ | MinRetryMilliseconds is the shortest reconnect backoff. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
+| `minRetryMilliseconds` _integer_ | MinRetryMilliseconds is the shortest reconnect backoff. FRR's bmp<br />connect command takes both backoffs or neither parses. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
 | `maxRetryMilliseconds` _integer_ | MaxRetryMilliseconds is the longest reconnect backoff. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
 | `sourceInterface` _string_ | SourceInterface is the local interface whose address the session is<br />sourced from. Unset lets the kernel choose the source address. |  | MaxLength: 15 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9_.@-]+$` <br /> |
 

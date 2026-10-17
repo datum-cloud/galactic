@@ -82,8 +82,9 @@ spec:
                           minimum: 100
                           type: integer
                         minRetryMilliseconds:
-                          description: MinRetryMilliseconds is the shortest reconnect
-                            backoff.
+                          description: |-
+                            MinRetryMilliseconds is the shortest reconnect backoff. FRR's bmp
+                            connect command takes both backoffs or neither parses.
                           format: int32
                           maximum: 86400000
                           minimum: 100
@@ -110,6 +111,9 @@ spec:
                       - message: minRetryMilliseconds must not exceed maxRetryMilliseconds
                         rule: '!has(self.minRetryMilliseconds) || !has(self.maxRetryMilliseconds)
                           || self.minRetryMilliseconds <= self.maxRetryMilliseconds'
+                      - message: FRR needs both minRetryMilliseconds and maxRetryMilliseconds
+                          on bmp connect
+                        rule: has(self.minRetryMilliseconds) && has(self.maxRetryMilliseconds)
                     monitors:
                       description: Monitors lists the RIBs streamed.
                       items:

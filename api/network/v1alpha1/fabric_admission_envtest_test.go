@@ -431,6 +431,8 @@ func TestFabricRoutingAdmission(t *testing.T) {
 			{"retry bounds reversed", bmpParams("bad-retry", networkv1alpha1.BMPConnect{
 				Address: "127.0.0.1", Port: 9348, MinRetryMilliseconds: ptr.To[int32](10000), MaxRetryMilliseconds: ptr.To[int32](1000),
 			}), "minRetryMilliseconds must not exceed maxRetryMilliseconds"},
+			{"retry bounds missing", bmpParams("no-retry", networkv1alpha1.BMPConnect{Address: "127.0.0.1", Port: 9348}),
+				"needs both minRetryMilliseconds and maxRetryMilliseconds"},
 			{"collector not an address", bmpParams("bad-address", networkv1alpha1.BMPConnect{Address: "collector", Port: 9348}),
 				"address must be a valid IP address"},
 			{"source interface not a name", bmpParams("bad-source", networkv1alpha1.BMPConnect{

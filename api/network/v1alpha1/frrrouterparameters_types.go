@@ -68,6 +68,7 @@ type BMPMonitor struct {
 // BMPConnect is where FRR opens a BMP session.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.minRetryMilliseconds) || !has(self.maxRetryMilliseconds) || self.minRetryMilliseconds <= self.maxRetryMilliseconds",message="minRetryMilliseconds must not exceed maxRetryMilliseconds"
+// +kubebuilder:validation:XValidation:rule="has(self.minRetryMilliseconds) && has(self.maxRetryMilliseconds)",message="FRR needs both minRetryMilliseconds and maxRetryMilliseconds on bmp connect"
 type BMPConnect struct {
 	// Address is the collector's IP address.
 	// +kubebuilder:validation:MaxLength=45
@@ -79,7 +80,8 @@ type BMPConnect struct {
 	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port"`
 
-	// MinRetryMilliseconds is the shortest reconnect backoff.
+	// MinRetryMilliseconds is the shortest reconnect backoff. FRR's bmp
+	// connect command takes both backoffs or neither parses.
 	// +optional
 	// +kubebuilder:validation:Minimum=100
 	// +kubebuilder:validation:Maximum=86400000
