@@ -1,0 +1,5 @@
+lo 10.255.255.3/32
+lo fc00:0:3::1/128
+bond0 alias sjc-worker2-facing (site edge node) -- LACP bond of eth1 + eth2
+bond0 10.1.20.2/24
+bond0 2001:db8:1:20::2/64

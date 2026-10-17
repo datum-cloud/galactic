@@ -1,0 +1,11 @@
+lo 10.255.255.5/32
+lo fc00:0:9::1/128
+bond0 alias tr3-facing (transit uplink) -- LACP bond of eth1 + eth4
+bond0 10.1.32.2/24
+bond0 2001:db8:1:32::2/64
+bond1 alias iad-worker-facing (compute) -- LACP bond of eth2 + eth5
+bond1 10.1.30.1/24
+bond1 2001:db8:1:30::1/64
+eth3 alias iad-worker3-facing (route reflector)
+eth3 10.1.31.1/24
+eth3 2001:db8:1:31::1/64

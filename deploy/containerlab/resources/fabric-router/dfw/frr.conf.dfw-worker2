@@ -1,24 +1,6 @@
 frr defaults traditional
-hostname dfw-fabric-edge1
+hostname dfw-worker2-fabric
 log syslog informational
-
-interface lo
- ip address 10.255.255.6/32
- # /128. This is the address galactic-router's outbound EVPN session to the
- # route reflector sources from, auto-detected from lo via
- # GALACTIC_ROUTER_BGP_LOCAL_ADDRESS.
- ipv6 address fc00:0:a::1/128
-!
-interface bond0
- description tr1-facing (transit uplink) -- LACP bond of eth1 + eth3
- ip address 10.1.11.2/24
- ipv6 address 2001:db8:1:11::2/64
-!
-interface bond1
- description dfw-worker-facing (compute) -- LACP bond of eth2 + eth4
- ip address 10.1.10.1/24
- ipv6 address 2001:db8:1:10::1/64
-!
 
 # This site's ingress VIP prefix (resources/galactic-gateway/dfw/), the
 # /64 every VIP in dfw's NetworkServices sits in. A VIP's own reachability is

@@ -1,0 +1,5 @@
+lo 10.255.255.1/32
+lo fc00:0:4::1/128
+bond0 alias iad-worker2-facing (site edge node) -- LACP bond of eth1 + eth2
+bond0 10.1.30.2/24
+bond0 2001:db8:1:30::2/64

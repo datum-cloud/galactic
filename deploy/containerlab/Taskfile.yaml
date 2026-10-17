@@ -95,6 +95,7 @@ tasks:
       # before deploy:galactic-router, whose traffic policy reconciler
       # watches the CRDs it installs.
       - task: "deploy:traffic-policy"
+      - task: "deploy:node-addresses"
       - task: "deploy:fabric"
       - task: "deploy:bmp-collector"
       - task: "deploy:galactic-router"
@@ -298,6 +299,11 @@ tasks:
     desc: Apply host sysctls for this dual-stack lab
     cmds:
       - sudo ./scripts/host-setup.sh
+
+  "deploy:node-addresses":
+    desc: Address the fabric router nodes' interfaces, outside FRR
+    cmds:
+      - ./scripts/deploy-node-addresses.sh
 
   "deploy:fabric":
     desc: Install the FRR fabric DaemonSet
