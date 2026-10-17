@@ -289,12 +289,9 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// An ambiguous router only blocks advertisement wiring; the datapath
 	// below is still programmed, as it is when no router exists yet.
-	routerName, err := r.routerNameForNode(ctx, gw.Namespace)
-	switch {
-	case errors.Is(err, errAmbiguousRouter):
-		logger.Error(err, "skipping BGPAdvertisement wiring", "node", r.NodeName)
-	case err != nil:
-		return ctrl.Result{}, fmt.Errorf("resolve BGPRouter for node %s: %w", r.NodeName, err)
+	routerName, routerErr := r.routerNameForNode(ctx, gw.Namespace)
+	if routerErr != nil && !errors.Is(routerErr, errAmbiguousRouter) {
+		return ctrl.Result{}, fmt.Errorf("resolve BGPRouter for node %s: %w", r.NodeName, routerErr)
 	}
 
 	sidIndex, err := buildBackendSIDIndex(ctx, r.Client, gw.Namespace)
@@ -329,7 +326,10 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	if routerName == "" && err == nil {
+	switch {
+	case routerErr != nil:
+		logger.Error(routerErr, "skipping BGPAdvertisement wiring", "node", r.NodeName)
+	case routerName == "":
 		logger.Info("no BGPRouter targets this node; skipping BGPAdvertisement wiring", "node", r.NodeName)
 	}
 
