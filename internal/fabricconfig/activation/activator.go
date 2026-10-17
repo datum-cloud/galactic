@@ -186,7 +186,18 @@ func (a *Activator) Stage(ctx context.Context, rev *networkv1alpha1.FabricRouter
 	if err != nil {
 		return Staged{}, err
 	}
+	added, removed = withoutHostname(added), withoutHostname(removed)
 	return Staged{Class: Classify(added, removed), Added: added, Removed: removed, Rendered: rendered}, nil
+}
+
+// withoutHostname drops hostname changes. FRR keeps running under the
+// host's name whatever its configuration's hostname says, so a reload
+// reports the hostname as changed every time and never changes it.
+func withoutHostname(changes []string) []string {
+	return slices.DeleteFunc(changes, func(c string) bool {
+		f := strings.Fields(strings.TrimPrefix(strings.TrimSpace(c), "no "))
+		return len(f) > 0 && f[0] == "hostname"
+	})
 }
 
 // Classify sorts a reload's changes by what they disturb. A change is a

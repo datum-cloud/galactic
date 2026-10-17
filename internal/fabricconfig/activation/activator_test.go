@@ -6,6 +6,7 @@ package activation
 import (
 	"context"
 	"errors"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -352,6 +353,25 @@ func TestStage(t *testing.T) {
 	}
 	if frr.get() != before || len(a.Journal().Records()) != 3 {
 		t.Error("staging changed FRR or the journal")
+	}
+}
+
+// FRR runs under the host's name, so the hostname it reports never
+// matches the configuration's and no reload changes it.
+func TestStageIgnoresHostname(t *testing.T) {
+	r1, _, _ := revisions(t)
+	frr := &fakeFRR{}
+	a := newActivator(t, t.TempDir(), frr, nil)
+	committed(t, a, r1)
+	frr.mu.Lock()
+	frr.running = regexp.MustCompile(`(?m)^hostname .*$`).ReplaceAllString(frr.running, "hostname node-a")
+	frr.mu.Unlock()
+	staged, err := a.Stage(context.Background(), r1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staged.Class != networkv1alpha1.FabricChangeNone || len(staged.Added)+len(staged.Removed) != 0 {
+		t.Errorf("staged = %+v, want no change", staged)
 	}
 }
 
