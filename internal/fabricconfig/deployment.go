@@ -47,6 +47,7 @@ const (
 	reasonRejected         = "Rejected"
 	reasonWaiting          = "WaitingForPromotion"
 	reasonPersistFailed    = "PersistFailed"
+	reasonReassertFailed   = "ReassertFailed"
 )
 
 // DeploymentAgent activates the node's FabricRouterDeployment through an
@@ -272,12 +273,19 @@ func (d *DeploymentAgent) settleSourceLocked(ctx context.Context, dep *networkv1
 			return true, nil
 		}
 	}
-	if err := journal.SetSource(string(want)); err != nil {
+	// The ConfigMap a handoff named stays pinned, across restarts, until
+	// the node returns to CRD.
+	handoff := journal.Handoff()
+	switch {
+	case want == networkv1alpha1.FabricConfigSourceCRD:
+		handoff = ""
+	case current == networkv1alpha1.FabricConfigSourceCRD:
+		handoff = dep.Spec.SourceHandoff.ConfigMap.UID
+	}
+	if err := journal.SetSourceHandoff(string(want), handoff); err != nil {
 		return false, err
 	}
-	if current == networkv1alpha1.FabricConfigSourceCRD && want != networkv1alpha1.FabricConfigSourceCRD {
-		d.Gate.SetHandoff(dep.Spec.SourceHandoff.ConfigMap.UID)
-	}
+	d.Gate.SetHandoff(journal.Handoff())
 	d.Gate.Set(want)
 	status.EffectiveSource = want
 	return false, nil
@@ -416,10 +424,18 @@ func (d *DeploymentAgent) reassert(ctx context.Context, dep *networkv1alpha1.Fab
 	}
 	ok, err := d.Activator.Reassert(ctx, timeout)
 	d.inSync = ok
-	if err != nil {
-		setCondition(status, dep, networkv1alpha1.FabricConditionDegraded, metav1.ConditionTrue, "ReassertFailed",
-			"FRR does not run the committed checkpoint and could not be brought back to it: "+err.Error())
+	if err != nil || !ok {
+		msg := "FRR does not run the committed checkpoint and could not be brought back to it"
+		if err != nil {
+			msg += ": " + err.Error()
+		}
+		setCondition(status, dep, networkv1alpha1.FabricConditionDegraded, metav1.ConditionTrue, reasonReassertFailed, msg)
 		return
+	}
+	if c := meta.FindStatusCondition(status.Conditions, networkv1alpha1.FabricConditionDegraded); c != nil &&
+		c.Reason == reasonReassertFailed {
+		setCondition(status, dep, networkv1alpha1.FabricConditionDegraded, metav1.ConditionFalse,
+			networkv1alpha1.FabricReasonCommitted, "FRR runs the committed checkpoint")
 	}
 	d.persist(ctx, dep, status)
 }

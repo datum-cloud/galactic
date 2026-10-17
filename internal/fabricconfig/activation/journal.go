@@ -72,6 +72,9 @@ type Record struct {
 	Recovery     *Recovery `json:"recovery,omitempty"`
 	// Source is the configuration source a Source record switches to.
 	Source string `json:"source,omitempty"`
+	// Handoff is the ConfigMap UID a Source record handing back from CRD
+	// names.
+	Handoff string `json:"handoff,omitempty"`
 	// Detail explains a failure.
 	Detail string `json:"detail,omitempty"`
 }
@@ -364,11 +367,28 @@ func (j *Journal) Rebind(from, to string) error {
 
 // SetSource journals a change of configuration source.
 func (j *Journal) SetSource(source string) error {
+	return j.SetSourceHandoff(source, "")
+}
+
+// SetSourceHandoff journals a change of configuration source together with
+// the ConfigMap UID a handoff from CRD names.
+func (j *Journal) SetSourceHandoff(source, handoff string) error {
 	if j.Source() == source {
 		return nil
 	}
-	_, err := j.Append(Record{Type: RecordSource, Source: source})
+	_, err := j.Append(Record{Type: RecordSource, Source: source, Handoff: handoff})
 	return err
+}
+
+// Handoff is the ConfigMap UID the last Source record named, empty when it
+// named none.
+func (j *Journal) Handoff() string {
+	for i := len(j.records) - 1; i >= 0; i-- {
+		if j.records[i].Type == RecordSource {
+			return j.records[i].Handoff
+		}
+	}
+	return ""
 }
 
 // BoundDeployment is the deployment UID the journal last accepted for, or

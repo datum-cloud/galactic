@@ -342,6 +342,7 @@ func watchWithGuard(ctx context.Context, a *fabricconfig.Agent, opts *options) e
 			a.Gate = fabricconfig.NewSourceGate(networkv1alpha1.FabricConfigSourceCRD)
 		} else {
 			gate := fabricconfig.NewSourceGate(fabricconfig.JournalSource(d.Activator.Journal()))
+			gate.SetHandoff(d.Activator.Journal().Handoff())
 			a.Gate, d.Gate = gate, gate
 			go d.Run(ctx)
 		}

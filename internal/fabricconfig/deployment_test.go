@@ -687,8 +687,17 @@ func TestDeploymentAgentReassertsAfterReturn(t *testing.T) {
 		}
 	})
 	h.sync()
-	if h.agent.Gate.Handoff() != cmUID {
-		t.Errorf("handoff UID %q", h.agent.Gate.Handoff())
+	if h.agent.Gate.Handoff() != cmUID || h.agent.Activator.Journal().Handoff() != cmUID {
+		t.Errorf("handoff UID %q in the gate, %q in the journal",
+			h.agent.Gate.Handoff(), h.agent.Activator.Journal().Handoff())
+	}
+	// A restarted sidecar pins the same ConfigMap.
+	reopened := &activation.Activator{Dir: h.dir}
+	if err := reopened.Open(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Journal().Handoff() != cmUID {
+		t.Errorf("handoff UID %q after a restart", reopened.Journal().Handoff())
 	}
 	h.frr.mu.Lock()
 	h.frr.running = cm.Data[KeyFRRConf]
@@ -776,8 +785,20 @@ func TestDeploymentAgentNotReadyWhenDrifted(t *testing.T) {
 	if c := condition(got, networkv1alpha1.FabricConditionReady); c == nil || c.Status != metav1.ConditionFalse {
 		t.Errorf("Ready = %+v, want False", c)
 	}
-	if c := condition(got, networkv1alpha1.FabricConditionDegraded); c == nil || c.Reason != "ReassertFailed" {
+	if c := condition(got, networkv1alpha1.FabricConditionDegraded); c == nil || c.Reason != reasonReassertFailed {
 		t.Errorf("Degraded = %+v", c)
+	}
+
+	// Once FRR can be brought back, both conditions clear.
+	h.frr.mu.Lock()
+	h.frr.reloadErr = nil
+	h.frr.mu.Unlock()
+	got = h.sync()
+	if c := condition(got, networkv1alpha1.FabricConditionDegraded); c == nil || c.Status != metav1.ConditionFalse {
+		t.Errorf("Degraded after recovery = %+v", c)
+	}
+	if c := condition(got, networkv1alpha1.FabricConditionReady); c == nil || c.Status != metav1.ConditionTrue {
+		t.Errorf("Ready after recovery = %+v", c)
 	}
 }
 
