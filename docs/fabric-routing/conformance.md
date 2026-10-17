@@ -155,9 +155,12 @@ a peer family or an advertisement that references it. The existing
 `direction`, `prefixList`, `communityMatch`, `asPathFilter`,
 `evpnRouteType`, `vni`, `macAddress`, `ipPrefix`, `localPreference` and
 `med` match fields and the `communities`, `extCommunities`, `origin`,
-`nextHop`, `metric` and `color` set fields are rejected on fabric routers;
-the GoBGP EVPN runtime does not consume BGPPolicy today (see
-`ownership-inventory.md`).
+`nextHop`, `metric` and `color` set fields are rejected on fabric routers.
+The GoBGP EVPN runtime reads only `any`, `addressFamilies`, community
+add/remove and local preference from policies bound to a classless router
+by `routerRef` or `routerSelector` (see `ownership-inventory.md`), so a
+router-bound policy keeps a required `direction` and may not use the
+fabric-only fields.
 
 A missing or deleted referenced set, list or policy is an unresolved
 dependency: the router's revision stays pending with `ResolvedRefs=False`
