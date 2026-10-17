@@ -51,13 +51,23 @@ type BGPPolicy struct {
 // BGPPolicySpec defines the desired route policy state.
 //
 // +kubebuilder:validation:XValidation:rule="self.terms.all(t1, self.terms.filter(t2, t2.sequence == t1.sequence).size() == 1)",message="Term sequence numbers must be unique"
+// +kubebuilder:validation:XValidation:rule="!has(self.routerRef) || !has(self.routerSelector)",message="At most one of routerRef or routerSelector may be set"
+// +kubebuilder:validation:XValidation:rule="(!has(self.routerRef) && !has(self.routerSelector)) || has(self.direction)",message="a policy bound by routerRef or routerSelector must set direction"
+// +kubebuilder:validation:XValidation:rule="(!has(self.routerRef) && !has(self.routerSelector)) || (!has(self.frr) && self.terms.all(t, !has(t.match.prefixListRef) && !has(t.match.communitySetRef) && !has(t.match.largeCommunitySetRef) && !has(t.match.interface) && (!has(t.set) || (!has(t.set.standardCommunities) && !has(t.set.largeCommunities) && !has(t.set.deleteCommunitySetRef) && !has(t.set.deleteLargeCommunitySetRef)))))",message="a policy bound by routerRef or routerSelector cannot use frr, set references, interface matches or community actions; the Galactic EVPN router does not implement them"
 type BGPPolicySpec struct {
 	RouterTarget `json:",inline"`
 
-	// Direction is the policy direction: import or export.
-	// +kubebuilder:validation:Required
+	// Direction is the policy direction: import or export. Required when
+	// the policy binds to routers through routerRef or routerSelector. A
+	// policy without either is a reusable definition whose direction comes
+	// from the peer family or advertisement that references it.
+	// +optional
 	// +kubebuilder:validation:Enum=import;export
-	Direction BGPPolicyDirection `json:"direction"`
+	Direction BGPPolicyDirection `json:"direction,omitempty"`
+
+	// FRR holds FRR rendering settings.
+	// +optional
+	FRR *BGPPolicyFRR `json:"frr,omitempty"`
 
 	// Terms is the ordered list of policy statements.
 	// Evaluated from lowest to highest sequence number.
@@ -70,6 +80,12 @@ type BGPPolicySpec struct {
 //
 // +kubebuilder:validation:XValidation:rule="self.action == 'deny' ? !has(self.set) : true",message="set actions are not permitted on deny terms"
 type BGPPolicyTerm struct {
+	// Description is a free-text note rendered with the term.
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^[^\r\n]*$`
+	Description string `json:"description,omitempty"`
+
 	// Sequence is the evaluation order. Lower values are evaluated first.
 	// Must be unique within the policy.
 	// +kubebuilder:validation:Minimum=1
@@ -101,6 +117,7 @@ type BGPPolicyTerm struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.any) || !self.any || !has(self.localPreference) || self.localPreference == 0",message="localPreference must be unset when any is true"
 // +kubebuilder:validation:XValidation:rule="!has(self.any) || !self.any || !has(self.med) || self.med == 0",message="med must be unset when any is true"
 // +kubebuilder:validation:XValidation:rule="!has(self.any) || !self.any || !has(self.addressFamilies) || self.addressFamilies.size() == 0",message="addressFamilies must be empty when any is true"
+// +kubebuilder:validation:XValidation:rule="!has(self.any) || !self.any || (!has(self.prefixListRef) && !has(self.communitySetRef) && !has(self.largeCommunitySetRef) && !has(self.interface))",message="set references and interface must be unset when any is true"
 type BGPPolicyMatch struct {
 	// Any matches all routes. When true, all other match fields are ignored.
 	// +optional
@@ -162,6 +179,29 @@ type BGPPolicyMatch struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	LocalPreference *int32 `json:"localPreference,omitempty"`
+
+	// PrefixListRef matches routes whose prefix the named BGPPrefixList
+	// permits.
+	// +optional
+	PrefixListRef *LocalObjectRef `json:"prefixListRef,omitempty"`
+
+	// CommunitySetRef matches routes carrying a community the named
+	// standard BGPCommunitySet permits.
+	// +optional
+	CommunitySetRef *LocalObjectRef `json:"communitySetRef,omitempty"`
+
+	// LargeCommunitySetRef matches routes carrying a large community the
+	// named large BGPCommunitySet permits.
+	// +optional
+	LargeCommunitySetRef *LocalObjectRef `json:"largeCommunitySetRef,omitempty"`
+
+	// Interface matches routes whose interface is the named one. Meaningful
+	// only in a policy attached to a redistribution.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.@-]+$`
+	Interface *string `json:"interface,omitempty"`
 
 	// MED matches routes by Multi-Exit Discriminator value.
 	// +optional
@@ -254,6 +294,26 @@ type BGPPolicySetActions struct {
 	// +kubebuilder:validation:Minimum=0
 	Metric *int32 `json:"metric,omitempty"`
 
+	// StandardCommunities adds to or replaces the route's standard
+	// communities.
+	// +optional
+	StandardCommunities *StandardCommunityAction `json:"standardCommunities,omitempty"`
+
+	// LargeCommunities adds to or replaces the route's large communities,
+	// independently of StandardCommunities.
+	// +optional
+	LargeCommunities *LargeCommunityAction `json:"largeCommunities,omitempty"`
+
+	// DeleteCommunitySetRef removes the standard communities the named
+	// BGPCommunitySet permits.
+	// +optional
+	DeleteCommunitySetRef *LocalObjectRef `json:"deleteCommunitySetRef,omitempty"`
+
+	// DeleteLargeCommunitySetRef removes the large communities the named
+	// BGPCommunitySet permits.
+	// +optional
+	DeleteLargeCommunitySetRef *LocalObjectRef `json:"deleteLargeCommunitySetRef,omitempty"`
+
 	// Color sets the SRv6 policy color for path selection.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
@@ -289,6 +349,8 @@ type AsPathSet struct {
 	// ASN is the AS number to prepend (used when prepend is set).
 	// Defaults to the local ASN if not specified.
 	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
 	ASN *int64 `json:"asn,omitempty"`
 
 	// Replace replaces the entire AS path with the given list.
@@ -343,6 +405,56 @@ type ExtendedCommunitySet struct {
 	// +kubebuilder:validation:items:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="self.all(c, c.matches('^[0-9a-fA-F:.]+$'))",message="each extCommunity entry must contain only valid characters (digits, letters, colons, dots)"
 	Remove []string `json:"remove,omitempty"`
+}
+
+// BGPPolicyFRR holds FRR rendering settings for a policy.
+type BGPPolicyFRR struct {
+	// RouteMapName is the FRR route-map name. When unset the policy's
+	// metadata.name is used.
+	// +optional
+	RouteMapName *FRRObjectName `json:"routeMapName,omitempty"`
+}
+
+// CommunityOperation is how a community action combines with the route's
+// existing communities.
+//
+// +kubebuilder:validation:Enum=Add;Replace
+type CommunityOperation string
+
+const (
+	// CommunityOperationAdd keeps the route's communities and adds values.
+	CommunityOperationAdd CommunityOperation = "Add"
+	// CommunityOperationReplace replaces the route's communities with values.
+	CommunityOperationReplace CommunityOperation = "Replace"
+)
+
+// StandardCommunityAction sets standard communities on a route.
+type StandardCommunityAction struct {
+	// Operation is Add or Replace.
+	Operation CommunityOperation `json:"operation"`
+
+	// Values are ASN:NN communities or FRR's well-known names. A
+	// BGPCommunitySet matches fewer well-known names than an action can set.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	// +listType=set
+	// +kubebuilder:validation:items:MaxLength=21
+	// +kubebuilder:validation:XValidation:rule="self.all(c, (c.matches('^[0-9]{1,5}:[0-9]{1,5}$') && int(c.split(':')[0]) <= 65535 && int(c.split(':')[1]) <= 65535) || c in ['graceful-shutdown', 'no-export', 'no-advertise', 'blackhole', 'local-AS', 'internet', 'no-llgr', 'llgr-stale', 'accept-own'])",message="each value must be ASN:NN or a well-known community name"
+	Values []string `json:"values"`
+}
+
+// LargeCommunityAction sets large communities on a route.
+type LargeCommunityAction struct {
+	// Operation is Add or Replace.
+	Operation CommunityOperation `json:"operation"`
+
+	// Values are ASN:NN:NN large communities.
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=32
+	// +kubebuilder:validation:XValidation:rule="self.all(c, c.matches('^[0-9]{1,10}:[0-9]{1,10}:[0-9]{1,10}$'))",message="each value must be ASN:NN:NN"
+	Values []string `json:"values"`
 }
 
 // BGPPolicyStatus defines the observed state of BGPPolicy.

@@ -55,11 +55,27 @@ spec:
             description: BGPPolicySpec defines the desired route policy state.
             properties:
               direction:
-                description: 'Direction is the policy direction: import or export.'
+                description: |-
+                  Direction is the policy direction: import or export. Required when
+                  the policy binds to routers through routerRef or routerSelector. A
+                  policy without either is a reusable definition whose direction comes
+                  from the peer family or advertisement that references it.
                 enum:
                 - import
                 - export
                 type: string
+              frr:
+                description: FRR holds FRR rendering settings.
+                properties:
+                  routeMapName:
+                    description: |-
+                      RouteMapName is the FRR route-map name. When unset the policy's
+                      metadata.name is used.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                    type: string
+                type: object
               routerRef:
                 description: |-
                   RouterRef targets a single BGPRouter by name.
@@ -128,6 +144,12 @@ spec:
                       enum:
                       - permit
                       - deny
+                      type: string
+                    description:
+                      description: Description is a free-text note rendered with the
+                        term.
+                      maxLength: 255
+                      pattern: ^[^\r\n]*$
                       type: string
                     match:
                       description: Match defines the conditions under which this term
@@ -214,6 +236,19 @@ spec:
                               IP:NN format
                             rule: self.all(c, c.matches('^[0-9]{1,10}:[0-9]{1,10}$')
                               || c.matches('^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}:[0-9]{1,10}$'))
+                        communitySetRef:
+                          description: |-
+                            CommunitySetRef matches routes carrying a community the named
+                            standard BGPCommunitySet permits.
+                          properties:
+                            name:
+                              description: Name is the referenced object's name.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
                         evpnRouteType:
                           description: |-
                             EVPNRouteType matches specific EVPN route types.
@@ -230,6 +265,14 @@ spec:
                             type: string
                           maxItems: 5
                           type: array
+                        interface:
+                          description: |-
+                            Interface matches routes whose interface is the named one. Meaningful
+                            only in a policy attached to a redistribution.
+                          maxLength: 15
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9_.@-]+$
+                          type: string
                         ipPrefix:
                           description: IPPrefix matches routes by exact IP prefix
                             (CIDR notation).
@@ -238,6 +281,19 @@ spec:
                           x-kubernetes-validations:
                           - message: ipPrefix must be a valid IPv4 or IPv6 CIDR
                             rule: isCIDR(self)
+                        largeCommunitySetRef:
+                          description: |-
+                            LargeCommunitySetRef matches routes carrying a large community the
+                            named large BGPCommunitySet permits.
+                          properties:
+                            name:
+                              description: Name is the referenced object's name.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
                         localPreference:
                           description: LocalPreference matches routes by BGP LOCAL_PREF
                             value.
@@ -269,6 +325,19 @@ spec:
                           - message: each prefixList entry must be a valid IPv4 or
                               IPv6 CIDR
                             rule: self.all(p, isCIDR(p))
+                        prefixListRef:
+                          description: |-
+                            PrefixListRef matches routes whose prefix the named BGPPrefixList
+                            permits.
+                          properties:
+                            name:
+                              description: Name is the referenced object's name.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
                         vni:
                           description: |-
                             VNI matches routes by VNI (VXLAN Network Identifier).
@@ -309,6 +378,11 @@ spec:
                       - message: addressFamilies must be empty when any is true
                         rule: '!has(self.any) || !self.any || !has(self.addressFamilies)
                           || self.addressFamilies.size() == 0'
+                      - message: set references and interface must be unset when any
+                          is true
+                        rule: '!has(self.any) || !self.any || (!has(self.prefixListRef)
+                          && !has(self.communitySetRef) && !has(self.largeCommunitySetRef)
+                          && !has(self.interface))'
                     sequence:
                       description: |-
                         Sequence is the evaluation order. Lower values are evaluated first.
@@ -331,6 +405,8 @@ spec:
                                 ASN is the AS number to prepend (used when prepend is set).
                                 Defaults to the local ASN if not specified.
                               format: int64
+                              maximum: 4294967295
+                              minimum: 1
                               type: integer
                             prepend:
                               description: Prepend adds an ASN to the AS path N times.
@@ -375,6 +451,32 @@ spec:
                               maxItems: 32
                               type: array
                           type: object
+                        deleteCommunitySetRef:
+                          description: |-
+                            DeleteCommunitySetRef removes the standard communities the named
+                            BGPCommunitySet permits.
+                          properties:
+                            name:
+                              description: Name is the referenced object's name.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        deleteLargeCommunitySetRef:
+                          description: |-
+                            DeleteLargeCommunitySetRef removes the large communities the named
+                            BGPCommunitySet permits.
+                          properties:
+                            name:
+                              description: Name is the referenced object's name.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
                         extCommunities:
                           description: |-
                             ExtCommunities defines extended community add/remove operations.
@@ -405,6 +507,33 @@ spec:
                               - message: each extCommunity entry must contain only
                                   valid characters (digits, letters, colons, dots)
                                 rule: self.all(c, c.matches('^[0-9a-fA-F:.]+$'))
+                          type: object
+                        largeCommunities:
+                          description: |-
+                            LargeCommunities adds to or replaces the route's large communities,
+                            independently of StandardCommunities.
+                          properties:
+                            operation:
+                              description: Operation is Add or Replace.
+                              enum:
+                              - Add
+                              - Replace
+                              type: string
+                            values:
+                              description: Values are ASN:NN:NN large communities.
+                              items:
+                                maxLength: 32
+                                type: string
+                              maxItems: 32
+                              minItems: 1
+                              type: array
+                              x-kubernetes-list-type: set
+                              x-kubernetes-validations:
+                              - message: each value must be ASN:NN:NN
+                                rule: self.all(c, c.matches('^[0-9]{1,10}:[0-9]{1,10}:[0-9]{1,10}$'))
+                          required:
+                          - operation
+                          - values
                           type: object
                         localPreference:
                           description: |-
@@ -444,6 +573,40 @@ spec:
                           - egp
                           - incomplete
                           type: string
+                        standardCommunities:
+                          description: |-
+                            StandardCommunities adds to or replaces the route's standard
+                            communities.
+                          properties:
+                            operation:
+                              description: Operation is Add or Replace.
+                              enum:
+                              - Add
+                              - Replace
+                              type: string
+                            values:
+                              description: |-
+                                Values are ASN:NN communities or FRR's well-known names. A
+                                BGPCommunitySet matches fewer well-known names than an action can set.
+                              items:
+                                maxLength: 21
+                                type: string
+                              maxItems: 32
+                              minItems: 1
+                              type: array
+                              x-kubernetes-list-type: set
+                              x-kubernetes-validations:
+                              - message: each value must be ASN:NN or a well-known
+                                  community name
+                                rule: self.all(c, (c.matches('^[0-9]{1,5}:[0-9]{1,5}$')
+                                  && int(c.split(':')[0]) <= 65535 && int(c.split(':')[1])
+                                  <= 65535) || c in ['graceful-shutdown', 'no-export',
+                                  'no-advertise', 'blackhole', 'local-AS', 'internet',
+                                  'no-llgr', 'llgr-stale', 'accept-own'])
+                          required:
+                          - operation
+                          - values
+                          type: object
                       type: object
                   required:
                   - action
@@ -457,15 +620,24 @@ spec:
                 minItems: 1
                 type: array
             required:
-            - direction
             - terms
             type: object
             x-kubernetes-validations:
             - message: Term sequence numbers must be unique
               rule: self.terms.all(t1, self.terms.filter(t2, t2.sequence == t1.sequence).size()
                 == 1)
-            - message: Exactly one of routerRef or routerSelector must be set
-              rule: has(self.routerRef) != has(self.routerSelector)
+            - message: At most one of routerRef or routerSelector may be set
+              rule: '!has(self.routerRef) || !has(self.routerSelector)'
+            - message: a policy bound by routerRef or routerSelector must set direction
+              rule: (!has(self.routerRef) && !has(self.routerSelector)) || has(self.direction)
+            - message: a policy bound by routerRef or routerSelector cannot use frr,
+                set references, interface matches or community actions; the Galactic
+                EVPN router does not implement them
+              rule: (!has(self.routerRef) && !has(self.routerSelector)) || (!has(self.frr)
+                && self.terms.all(t, !has(t.match.prefixListRef) && !has(t.match.communitySetRef)
+                && !has(t.match.largeCommunitySetRef) && !has(t.match.interface) &&
+                (!has(t.set) || (!has(t.set.standardCommunities) && !has(t.set.largeCommunities)
+                && !has(t.set.deleteCommunitySetRef) && !has(t.set.deleteLargeCommunitySetRef)))))
           status:
             description: BGPPolicyStatus defines the observed state of BGPPolicy.
             properties:

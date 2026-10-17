@@ -87,6 +87,33 @@ spec:
                   rule: 'self.afi == ''ipv6'' ? self.safi == ''unicast'' : true'
                 - message: L2VPN only supports evpn SAFI
                   rule: 'self.afi == ''l2vpn'' ? self.safi == ''evpn'' : true'
+              aggregation:
+                description: |-
+                  Aggregation originates an aggregate of contributing routes already in
+                  the BGP table. It never installs a discard route; pair it with a
+                  BGPStaticRoute where one is wanted. Honored by the fabric router
+                  implementation only.
+                properties:
+                  asSet:
+                    description: ASSet carries the contributors' AS numbers in an
+                      AS_SET.
+                    type: boolean
+                  prefix:
+                    description: Prefix is the aggregate in CIDR notation.
+                    maxLength: 43
+                    minLength: 1
+                    type: string
+                    x-kubernetes-validations:
+                    - message: prefix must be a valid CIDR
+                      rule: isCIDR(self)
+                  summaryOnly:
+                    description: |-
+                      SummaryOnly suppresses the contributing routes, advertising only the
+                      aggregate.
+                    type: boolean
+                required:
+                - prefix
+                type: object
               communities:
                 description: |-
                   Communities is the default list of BGP communities to attach to all advertised prefixes.
@@ -210,10 +237,21 @@ spec:
             - routerRef
             type: object
             x-kubernetes-validations:
-            - message: at least one of prefixes, redistribute, or originateFrom must
-                be specified
+            - message: at least one of prefixes, redistribute, originateFrom, or aggregation
+                must be specified
               rule: (has(self.prefixes) && self.prefixes.size() > 0) || (has(self.redistribute)
-                && self.redistribute.size() > 0) || has(self.originateFrom)
+                && self.redistribute.size() > 0) || has(self.originateFrom) || has(self.aggregation)
+            - message: aggregation cannot be combined with prefixes, redistribute,
+                or originateFrom
+              rule: '!has(self.aggregation) || ((!has(self.prefixes) || self.prefixes.size()
+                == 0) && (!has(self.redistribute) || self.redistribute.size() == 0)
+                && !has(self.originateFrom))'
+            - message: aggregation prefix must be in the advertisement's unicast address
+                family
+              rule: '!has(self.aggregation) || !isCIDR(self.aggregation.prefix) ||
+                (self.addressFamily.afi == ''ipv4'' && cidr(self.aggregation.prefix).ip().family()
+                == 4) || (self.addressFamily.afi == ''ipv6'' && cidr(self.aggregation.prefix).ip().family()
+                == 6)'
           status:
             description: BGPAdvertisementStatus defines the observed state of BGPAdvertisement.
             properties:

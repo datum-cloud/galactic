@@ -95,6 +95,99 @@ spec:
                     rule: 'self.afi == ''l2vpn'' ? self.safi == ''evpn'' : true'
                 minItems: 1
                 type: array
+              frr:
+                description: FRR holds settings for routers whose class is implemented
+                  with FRR.
+                properties:
+                  retain:
+                    description: |-
+                      Retain lists definitions rendered on this router even when no peer
+                      or advertisement references them, so a migrated router's first
+                      configuration matches the one it replaces. Retained definitions never
+                      create sessions or advertisements.
+                    properties:
+                      communitySetRefs:
+                        description: CommunitySetRefs names BGPCommunitySets.
+                        items:
+                          description: |-
+                            LocalObjectRef references an object of the kind the field names, in the
+                            referrer's namespace.
+                          properties:
+                            name:
+                              description: Name is the referenced object's name.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 512
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      peerProfileRefs:
+                        description: PeerProfileRefs names BGPPeerProfiles.
+                        items:
+                          description: |-
+                            LocalObjectRef references an object of the kind the field names, in the
+                            referrer's namespace.
+                          properties:
+                            name:
+                              description: Name is the referenced object's name.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      policyRefs:
+                        description: PolicyRefs names BGPPolicies.
+                        items:
+                          description: |-
+                            LocalObjectRef references an object of the kind the field names, in the
+                            referrer's namespace.
+                          properties:
+                            name:
+                              description: Name is the referenced object's name.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 256
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      prefixListRefs:
+                        description: PrefixListRefs names BGPPrefixLists.
+                        items:
+                          description: |-
+                            LocalObjectRef references an object of the kind the field names, in the
+                            referrer's namespace.
+                          properties:
+                            name:
+                              description: Name is the referenced object's name.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 256
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                    type: object
+                type: object
               listenPort:
                 description: |-
                   ListenPort is the TCP port this router listens on for incoming BGP
@@ -108,6 +201,7 @@ spec:
                   LocalASN is the BGP Autonomous System Number for this router.
                   Must be a valid 2-byte or 4-byte ASN per RFC 6793.
                 format: int64
+                maximum: 4294967295
                 minimum: 1
                 type: integer
               nodeID:
@@ -186,6 +280,8 @@ spec:
                 self.plane == oldSelf.plane)
             - message: an Underlay router must name a routerClassName
               rule: '!has(self.plane) || self.plane != ''Underlay'' || has(self.routerClassName)'
+            - message: frr settings apply only to a router that names a routerClassName
+              rule: '!has(self.frr) || has(self.routerClassName)'
           status:
             description: BGPRouterStatus defines the observed state of a BGPRouter.
             properties:
