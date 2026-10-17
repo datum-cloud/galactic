@@ -801,14 +801,16 @@ func (a *Activator) runningDiff(ctx context.Context, rendered string) ([]string,
 }
 
 // normalizeRunning drops the lines FRR adds to or omits from a displayed
-// configuration that carry no routing meaning: the hostname, which a
-// container may report as its own, and the version banner.
+// configuration that carry no routing meaning: the hostname, which FRR
+// reports as the host's, the banner, vtysh's own integrated-config setting
+// and the closing end.
 func normalizeRunning(text string) frrtext.Config {
 	var keep []string
 	for _, line := range strings.Split(text, "\n") {
 		t := strings.TrimSpace(line)
 		if strings.HasPrefix(t, "hostname ") || strings.HasPrefix(t, "Building configuration") ||
-			strings.HasPrefix(t, "Current configuration") {
+			strings.HasPrefix(t, "Current configuration") || t == "service integrated-vtysh-config" ||
+			(t == "end" && line == t) {
 			continue
 		}
 		keep = append(keep, line)

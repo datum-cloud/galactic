@@ -125,7 +125,11 @@ func (f *fakeRouter) Reload(_ context.Context, path string) error {
 	return nil
 }
 
-func (f *fakeRouter) Running(context.Context) (string, error) { return f.get(), nil }
+// Running wraps the configuration as vtysh displays it.
+func (f *fakeRouter) Running(context.Context) (string, error) {
+	return "Building configuration...\n\nCurrent configuration:\n!\nfrr version 10.7.1\n" +
+		"service integrated-vtysh-config\n" + f.get() + "!\nend\n", nil
+}
 
 func (f *fakeRouter) get() string {
 	f.mu.Lock()

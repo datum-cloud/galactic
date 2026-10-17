@@ -149,10 +149,13 @@ func (f *fakeFRR) Reload(ctx context.Context, path string) error {
 	return nil
 }
 
+// Running wraps the configuration as vtysh displays it: a banner, the
+// version and vtysh's own setting before it, and an end line after.
 func (f *fakeFRR) Running(context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.running, nil
+	return "Building configuration...\n\nCurrent configuration:\n!\nfrr version 10.7.1\n" +
+		"service integrated-vtysh-config\n" + f.running + "!\nend\n", nil
 }
 
 func (f *fakeFRR) set(running string) {
