@@ -7,6 +7,10 @@ resources:
 # certificate issuance.
 components:
   - fabric/components/fabric-api
+  # Each fabric-config-agent acts on its node's FabricRouterDeployment, so
+  # verify:fabric-routing can move a node to the typed API. A node without
+  # one, or with one on the ConfigMap source, keeps applying its ConfigMap.
+  - fabric/components/activation
 patches:
   - path: fabric-lab-patch.yaml
     target:

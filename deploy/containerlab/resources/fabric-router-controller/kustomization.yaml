@@ -1,0 +1,18 @@
+# The lab's fabric-router-controller: config/fabric-router-controller/base,
+# copied into base/ at deploy time (scripts/deploy-fabric-routing.sh), with
+# the rollout manager on and the locally built image.
+resources:
+  - base
+components:
+  - rollout
+patches:
+  - target:
+      kind: Deployment
+      name: fabric-router-controller
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: fabric-router-controller:latest
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
