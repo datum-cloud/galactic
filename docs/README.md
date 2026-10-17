@@ -20,6 +20,9 @@ data flow, module reference, known constraints):
 - [agents/ARCHITECTURE-FABRIC-API.md](agents/ARCHITECTURE-FABRIC-API.md) — the
   fabric looking glass (`fabric-api`: the `fabric-router` sidecar, the cell
   gateway, `FabricQuery` execution, mTLS identities).
+- [fabric-routing/README.md](fabric-routing/README.md) — the typed routing
+  API for the FRR underlay: conformance matrix, activation and recovery
+  contracts, consumer isolation, and the FRR-K8s evaluation.
 - [agents/ARCHITECTURE.md](agents/ARCHITECTURE.md) — superseded by the first
   three documents above; kept only as a redirect for old links.
 - [agents/CONVENTIONS.md](agents/CONVENTIONS.md) — Go naming, error
