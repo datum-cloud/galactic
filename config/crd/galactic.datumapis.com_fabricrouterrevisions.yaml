@@ -1,0 +1,225 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: fabricrouterrevisions.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    kind: FabricRouterRevision
+    listKind: FabricRouterRevisionList
+    plural: fabricrouterrevisions
+    shortNames:
+    - frrev
+    singular: fabricrouterrevision
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.target.routerName
+      name: ROUTER
+      type: string
+    - jsonPath: .spec.target.nodeName
+      name: NODE
+      type: string
+    - jsonPath: .spec.activationDependencyDigest
+      name: DIGEST
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FabricRouterRevision is one immutable, fully resolved configuration for
+          one fabric router: the typed specs of every object the router's
+          configuration depends on, captured at one moment, with the identities and
+          digests that make an activation reproducible. It carries no Secret
+          material and no rendered FRR text; the node agent compiles the
+          configuration with the same compiler that produced the digests.
+
+          The fabric router controller creates revisions and never updates them.
+          Its name is the router's name and the first ten hex digits of the
+          activation dependency digest, so identical inputs map to one object.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: FabricRouterRevisionSpec is a revision's content. It is immutable.
+            properties:
+              activationDependencyDigest:
+                description: |-
+                  ActivationDependencyDigest is the SHA-256, in hex, over the target
+                  identity, the semantics digest, the parameters identity and the
+                  compiler and FRR versions. Two revisions with the same digest
+                  activate identically.
+                pattern: ^[0-9a-f]{64}$
+                type: string
+              compiler:
+                description: |-
+                  Compiler identifies the compiler semantics and the FRR build the
+                  configuration targets.
+                properties:
+                  frrVersion:
+                    description: FRRVersion is the FRR build the configuration targets.
+                    maxLength: 32
+                    minLength: 1
+                    type: string
+                  semanticsVersion:
+                    description: |-
+                      SemanticsVersion is the compiler's semantics version; a change that
+                      alters rendered output for the same input bumps it.
+                    maxLength: 32
+                    minLength: 1
+                    type: string
+                required:
+                - frrVersion
+                - semanticsVersion
+                type: object
+              configuration:
+                description: |-
+                  Configuration is the resolved typed configuration. It is validated
+                  by the controller that writes it rather than by this schema, which
+                  would otherwise repeat every source kind's rules.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              inputs:
+                description: Inputs lists every object the configuration was resolved
+                  from.
+                items:
+                  description: FabricRevisionInput is one source object of a revision.
+                  properties:
+                    digest:
+                      description: |-
+                        Digest is the SHA-256, in hex, of the object's spec in canonical
+                        JSON.
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                    generation:
+                      description: Generation is the object's metadata.generation
+                        when it was read.
+                      format: int64
+                      type: integer
+                    kind:
+                      description: Kind is the object's kind.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    name:
+                      description: Name is the object's name.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    uid:
+                      description: UID is the object's UID.
+                      maxLength: 36
+                      type: string
+                  required:
+                  - digest
+                  - generation
+                  - kind
+                  - name
+                  - uid
+                  type: object
+                maxItems: 4096
+                type: array
+                x-kubernetes-list-type: atomic
+              parameters:
+                description: |-
+                  Parameters identifies the FRRRouterParameters the configuration
+                  used.
+                properties:
+                  name:
+                    description: Name is the FRRRouterParameters name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID is the FRRRouterParameters UID.
+                    maxLength: 36
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+              renderedDigest:
+                description: |-
+                  RenderedDigest is the SHA-256, in hex, of the frr.conf the compiler
+                  renders from the configuration, so an agent can check that its own
+                  compile matches.
+                pattern: ^[0-9a-f]{64}$
+                type: string
+              semanticsDigest:
+                description: |-
+                  SemanticsDigest is the SHA-256, in hex, of the configuration in
+                  canonical JSON.
+                pattern: ^[0-9a-f]{64}$
+                type: string
+              target:
+                description: Target is the router and Node this revision configures.
+                properties:
+                  nodeName:
+                    description: NodeName is the Node the router runs on.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  nodeUID:
+                    description: NodeUID is the Node's UID. Empty when the Node was
+                      not found.
+                    maxLength: 36
+                    type: string
+                  routerName:
+                    description: RouterName is the BGPRouter's name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  routerUID:
+                    description: RouterUID is the BGPRouter's UID.
+                    maxLength: 36
+                    minLength: 1
+                    type: string
+                required:
+                - nodeName
+                - routerName
+                - routerUID
+                type: object
+            required:
+            - activationDependencyDigest
+            - compiler
+            - configuration
+            - inputs
+            - parameters
+            - renderedDigest
+            - semanticsDigest
+            - target
+            type: object
+            x-kubernetes-validations:
+            - message: a revision is immutable; a new configuration is a new revision
+              rule: self.target == oldSelf.target && self.parameters == oldSelf.parameters
+                && self.compiler == oldSelf.compiler && self.inputs == oldSelf.inputs
+                && self.semanticsDigest == oldSelf.semanticsDigest && self.activationDependencyDigest
+                == oldSelf.activationDependencyDigest && self.renderedDigest == oldSelf.renderedDigest
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}
