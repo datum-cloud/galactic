@@ -30,6 +30,17 @@ type routeState struct {
 	// moment a nil desired value is first observed, and cleared again if the
 	// route is reactivated before Sweep tears it down.
 	absentSince time.Time
+	// pendingSince is when this route last became desired and apply-pending,
+	// or the zero Time while it is not both. A retry or a newer update of a
+	// route already pending keeps it: the claim has been unapplied since then.
+	pendingSince time.Time
+}
+
+// claim reports whether r counts as a desired route claim, and as one whose
+// latest update is not applied yet.
+func (r *routeState) claim() (desired, pending bool) {
+	desired = r.absentSince.IsZero()
+	return desired, desired && r.pending
 }
 
 // vrfState tracks one VPC's VRF device lifecycle, keyed by vpc.
@@ -69,6 +80,16 @@ type Store struct {
 	routes map[string]*routeState
 	vrfs   map[string]*vrfState
 
+	// convergence is nil unless SetConvergenceMetrics was called. The claim
+	// counts are kept in step with routes at every change, and pendingQueue
+	// holds each claim in the order it became pending, so publishing them
+	// never scans every route.
+	convergence   *ConvergenceMetrics
+	clock         func() time.Time
+	desiredClaims int
+	pendingClaims int
+	pendingQueue  []pendingEntry
+
 	// generation is the backend's DatapathGeneration as of the last time every
 	// tracked VRF and route was known to be written against it, or empty
 	// before the first successful read. reapplyPending is set when a reapply
@@ -88,7 +109,92 @@ func NewStore(backend Backend, grace time.Duration, metrics *Metrics) *Store {
 		metrics: metrics,
 		routes:  make(map[string]*routeState),
 		vrfs:    make(map[string]*vrfState),
+		clock:   time.Now,
 	}
+}
+
+// SetConvergenceMetrics has this Store report its desired and apply-pending
+// claims, overdue teardown and backend operations to m. Call it once, before
+// the first SetDesired.
+func (s *Store) SetConvergenceMetrics(m *ConvergenceMetrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.convergence = m
+	s.publishClaimsLocked()
+}
+
+// pendingEntry records that r became pending at since. It is stale once r
+// has applied, stopped being desired, or become pending again later.
+type pendingEntry struct {
+	r     *routeState
+	since time.Time
+}
+
+func (e pendingEntry) live() bool {
+	_, pending := e.r.claim()
+	return pending && e.r.pendingSince.Equal(e.since)
+}
+
+// claimChangedLocked updates the claim counts and pending starts after r
+// changed from a claim that was wasDesired and wasPending. Callers must hold
+// s.mu.
+func (s *Store) claimChangedLocked(r *routeState, wasDesired, wasPending bool) {
+	desired, pending := r.claim()
+	s.desiredClaims += boolDelta(wasDesired, desired)
+	s.pendingClaims += boolDelta(wasPending, pending)
+	switch {
+	case pending && !wasPending:
+		r.pendingSince = s.clock()
+		s.pendingQueue = append(s.pendingQueue, pendingEntry{r: r, since: r.pendingSince})
+	case !pending && wasPending:
+		r.pendingSince = time.Time{} // its queue entry is now stale
+	}
+}
+
+// oldestPendingLocked returns when the longest-pending claim became pending,
+// or the zero Time when none is pending. Stale entries are dropped from the
+// front as they surface, and the queue is compacted once they outnumber the
+// live ones, so the cost is constant per claim transition however the
+// backlog drains. Callers must hold s.mu.
+func (s *Store) oldestPendingLocked() time.Time {
+	if s.pendingClaims == 0 {
+		s.pendingQueue = s.pendingQueue[:0]
+		return time.Time{}
+	}
+	if len(s.pendingQueue) > 2*s.pendingClaims+64 {
+		live := s.pendingQueue[:0]
+		for _, e := range s.pendingQueue {
+			if e.live() {
+				live = append(live, e)
+			}
+		}
+		clear(s.pendingQueue[len(live):])
+		s.pendingQueue = live
+	}
+	for len(s.pendingQueue) > 0 && !s.pendingQueue[0].live() {
+		s.pendingQueue[0] = pendingEntry{}
+		s.pendingQueue = s.pendingQueue[1:]
+	}
+	if len(s.pendingQueue) == 0 {
+		return time.Time{}
+	}
+	return s.pendingQueue[0].since
+}
+
+// publishClaimsLocked publishes the claim counts and the oldest pending
+// start. Callers must hold s.mu.
+func (s *Store) publishClaimsLocked() {
+	s.convergence.claims(s.desiredClaims, s.pendingClaims, s.oldestPendingLocked())
+}
+
+func boolDelta(was, is bool) int {
+	switch {
+	case is && !was:
+		return 1
+	case was && !is:
+		return -1
+	}
+	return 0
 }
 
 // SetGatewayPublisher enables this Store to publish and withdraw a return-path
@@ -170,10 +276,13 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.publishClaimsLocked()
 
 	if desired == nil {
 		if r, ok := s.routes[key]; ok && r.absentSince.IsZero() {
+			wasDesired, wasPending := r.claim()
 			r.absentSince = time.Now()
+			s.claimChangedLocked(r, wasDesired, wasPending)
 		}
 		return nil
 	}
@@ -187,8 +296,11 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 		}
 	}
 
+	var wasDesired, wasPending bool
 	r, ok := s.routes[key]
-	if !ok {
+	if ok {
+		wasDesired, wasPending = r.claim()
+	} else {
 		r = &routeState{}
 		s.routes[key] = r
 	}
@@ -197,6 +309,7 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 	r.sid = desired.SID
 	r.absentSince = time.Time{} // (re)activated -- cancel any pending teardown
 	r.pending = true
+	s.claimChangedLocked(r, wasDesired, wasPending)
 	return s.applyLocked(ctx, r)
 }
 
@@ -212,6 +325,7 @@ func (s *Store) applyLocked(ctx context.Context, r *routeState) error {
 
 	if !v.installed {
 		tableID, verr := s.backend.EnsureVRF(r.vpc)
+		s.convergence.operation(OpEnsureVRF, verr)
 		if verr != nil {
 			s.countError("ensure_vrf")
 			return fmt.Errorf("ensure VRF for vpc %s: %w", r.vpc, verr)
@@ -222,12 +336,16 @@ func (s *Store) applyLocked(ctx context.Context, r *routeState) error {
 	}
 	s.publishGateway(ctx, r.vpc, v)
 
-	if rerr := s.backend.EnsureRoute(r.prefix, r.sid, v.tableID); rerr != nil {
+	rerr := s.backend.EnsureRoute(r.prefix, r.sid, v.tableID)
+	s.convergence.operation(OpEnsureRoute, rerr)
+	if rerr != nil {
 		s.countError("ensure_route")
 		return fmt.Errorf("ensure route for %s: %w", r.prefix, rerr)
 	}
 
+	wasDesired, wasPending := r.claim()
 	r.pending = false
+	s.claimChangedLocked(r, wasDesired, wasPending)
 	if !r.installed {
 		r.installed = true
 		s.routeActiveDelta(1)
@@ -270,8 +388,10 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 
 	s.checkDatapathLocked()
 	s.retryPendingLocked(ctx)
+	defer s.publishClaimsLocked()
 
 	pendingRoutes, pendingVRFs := 0, 0
+	overdueRoutes, overdueVRFs := 0, 0
 
 	liveVPCs := make(map[string]struct{}, len(s.vrfs))
 	for key, r := range s.routes {
@@ -296,11 +416,12 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 			v, ok := s.vrfs[r.vpc]
 			if !ok {
 				slog.Error("ingresssidecar: sweep found route with no tracked VRF", "key", key, "vpc", r.vpc)
-			} else if err := s.backend.RemoveRoute(r.prefix, v.tableID); err != nil {
+			} else if err := s.removeRouteLocked(r, v.tableID); err != nil {
 				s.countError("remove_route")
 				slog.Error("ingresssidecar: remove route", "key", key, "vpc", r.vpc, "error", err)
 				liveVPCs[r.vpc] = struct{}{} // keep the VPC alive; retry next sweep
 				pendingRoutes++
+				overdueRoutes++
 				continue
 			}
 			s.routeActiveDelta(-1)
@@ -324,10 +445,13 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 		}
 		if v.installed {
 			s.withdrawGateway(ctx, vpc, v)
-			if err := s.backend.RemoveVRF(vpc); err != nil {
+			err := s.backend.RemoveVRF(vpc)
+			s.convergence.operation(OpRemoveVRF, err)
+			if err != nil {
 				s.countError("remove_vrf")
 				slog.Error("ingresssidecar: remove VRF", "vpc", vpc, "error", err)
 				pendingVRFs++
+				overdueVRFs++
 				continue
 			}
 			s.vrfActiveDelta(-1)
@@ -339,6 +463,15 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 		s.metrics.RoutePending.Set(float64(pendingRoutes))
 		s.metrics.VRFPending.Set(float64(pendingVRFs))
 	}
+	s.convergence.overdueTeardown(overdueRoutes, overdueVRFs)
+}
+
+// removeRouteLocked removes r's kernel state from tableID, recording the
+// operation. Callers must hold s.mu.
+func (s *Store) removeRouteLocked(r *routeState, tableID uint32) error {
+	err := s.backend.RemoveRoute(r.prefix, tableID)
+	s.convergence.operation(OpRemoveRoute, err)
+	return err
 }
 
 // Inventory seeds Store with every managed VRF device, and its installed
@@ -507,6 +640,7 @@ func (s *Store) reapplyLocked() bool {
 			continue
 		}
 		tableID, err := s.backend.EnsureVRF(vpc)
+		s.convergence.operation(OpReapplyVRF, err)
 		if err != nil {
 			s.countError("reapply_vrf")
 			slog.Error("ingresssidecar: reapply VRF", "vpc", vpc, "error", err)
@@ -533,7 +667,9 @@ func (s *Store) reapplyLocked() bool {
 			slog.Error("ingresssidecar: reapply found route with no tracked VRF", "key", key, "vpc", r.vpc)
 			continue
 		}
-		if err := s.backend.EnsureRoute(r.prefix, r.sid, v.tableID); err != nil {
+		err := s.backend.EnsureRoute(r.prefix, r.sid, v.tableID)
+		s.convergence.operation(OpReapplyRoute, err)
+		if err != nil {
 			s.countError("reapply_route")
 			slog.Error("ingresssidecar: reapply route", "key", key, "vpc", r.vpc, "error", err)
 			ok = false

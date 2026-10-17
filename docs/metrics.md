@@ -328,6 +328,54 @@ galactic_ingress_sidecar_startup_complete == 1
 histogram_quantile(0.99, sum by (le, namespace, pod) (rate(galactic_ingress_sidecar_sweep_duration_seconds_bucket[10m])))
 ```
 
+### Convergence
+
+How far a sidecar's host state is from what its EndpointSlices ask for. A
+claim is one selected, ready EndpointSlice's route; claims sharing a prefix
+share one kernel route.
+
+| Metric                                                                  | Type    | Labels                | Meaning                                                                                                                                        |
+| ----------------------------------------------------------------------- | ------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_ingress_sidecar_route_claims_desired`                         | gauge   | none                  | Claims the sidecar wants installed, including any whose install failed                                                                         |
+| `galactic_ingress_sidecar_route_claims_apply_pending`                   | gauge   | none                  | Desired claims whose latest update is not applied, whether or not an earlier version of the route is installed                                 |
+| `galactic_ingress_sidecar_route_apply_oldest_pending_timestamp_seconds` | gauge   | none                  | Unix time the longest-pending claim stopped being applied; 0 when none is pending                                                              |
+| `galactic_ingress_sidecar_teardown_overdue`                             | gauge   | `resource`            | Routes or VRFs (`route`, `vrf`) whose own grace period ran out but whose removal has not completed, as of the last sweep                       |
+| `galactic_ingress_sidecar_operations_total`                             | counter | `operation`, `result` | Completed backend operations: `ensure_vrf`, `ensure_route`, `remove_vrf`, `remove_route`, `reapply_vrf`, `reapply_route`; `success` or `error` |
+
+- A claim's pending age starts when it first fails to apply after being
+  applied or created, and survives failed retries and newer updates of the
+  same claim: the route has been unapplied since then. It clears when the
+  claim applies or stops being desired; a claim reactivated during its grace
+  period starts a new age.
+- The claim counts and the oldest pending time are exact after every update
+  and sweep, at a constant cost per update however large the backlog.
+- `teardown_overdue` counts only removals that failed after their own grace
+  period. Draining within the grace period is normal and shows only in the
+  `*_teardown_pending` gauges. A route's and then its VRF's grace periods run
+  one after the other. It is set at each sweep, so a claim reactivated after a
+  failed removal still counts until the next one: alert on it with a `for`
+  of at least one sweep interval.
+- A reapply that fails after a datapath reload leaves the claim applied as
+  far as these gauges know; it shows in
+  `operations_total{operation=~"reapply_.*",result="error"}`.
+- `operations_total{result="error"}` counts the same failures as
+  `reconcile_errors_total` for those six kinds, each failure once. Never add
+  the two. `reconcile_errors_total` alone also counts `prune_datapath`.
+- These add 17 fixed series per sidecar.
+
+```promql
+# Apply backlog: how long the oldest claim has been unapplied. 0 means none.
+time() - galactic_ingress_sidecar_route_apply_oldest_pending_timestamp_seconds
+  and galactic_ingress_sidecar_route_apply_oldest_pending_timestamp_seconds > 0
+
+# Teardown stuck past its grace period
+galactic_ingress_sidecar_teardown_overdue > 0
+
+# Backend error ratio by operation; absent, not zero, when nothing ran
+sum by (namespace, pod, operation) (rate(galactic_ingress_sidecar_operations_total{result="error"}[5m]))
+  / sum by (namespace, pod, operation) (rate(galactic_ingress_sidecar_operations_total[5m]))
+```
+
 ## Edge load balancer — `galactic_edge_*`
 
 `galactic-gateway`'s XDP DSR load balancer on gateway-role edge nodes.
