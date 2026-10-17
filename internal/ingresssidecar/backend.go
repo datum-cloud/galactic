@@ -55,6 +55,12 @@ type Backend interface {
 	// remove them without reloading the datapath, which DatapathGeneration
 	// does not see.
 	DatapathRowsPresent(tableIDs []uint32) (bool, error)
+	// EnsureNodeSourceAddress makes the node's shared node_src_addr_table
+	// hold this node's own SRv6 source address, writing it only when the
+	// table holds nothing or another address, and reports whether it wrote.
+	// A reloaded datapath starts with the table empty, and every VRF's
+	// encapsulation fails open until it is set again.
+	EnsureNodeSourceAddress() (wrote bool, err error)
 }
 
 // VRFInfo describes one kernel VRF device discovered by Backend.ListVRFs.
@@ -135,6 +141,10 @@ func (kernelBackend) RemoveRoute(prefix *net.IPNet, tableID uint32) error {
 		return fmt.Errorf("remove seg6 route for %s: %w", prefix, err)
 	}
 	return nil
+}
+
+func (kernelBackend) EnsureNodeSourceAddress() (bool, error) {
+	return ensureNodeSourceAddress()
 }
 
 func (kernelBackend) DatapathGeneration() (string, error) {

@@ -137,6 +137,12 @@ type Store struct {
 	// the generation has not moved again.
 	generation     string
 	reapplyPending bool
+
+	// nodeSourceMetrics is nil unless SetNodeSourceMetrics configured it.
+	nodeSourceMetrics *NodeSourceMetrics
+	// nodeSourceStatus is the last node source check's status, so a repeated
+	// failure is logged once.
+	nodeSourceStatus string
 }
 
 // NewStore returns a Store that converges against backend, delaying teardown of
@@ -692,6 +698,7 @@ func (s *Store) sweepLocked(ctx context.Context, now time.Time) {
 	s.checkDatapathLocked()
 	s.retryPendingLocked(ctx)
 	defer s.publishClaimsLocked()
+	s.checkNodeSourceLocked(now)
 
 	pendingRoutes, pendingVRFs := 0, 0
 	overdueRoutes, overdueVRFs := 0, 0

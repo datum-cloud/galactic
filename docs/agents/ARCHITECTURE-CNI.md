@@ -124,6 +124,9 @@ when any are missing, the same reapply a datapath reload triggers.
 A sidecar also retries a failed gateway publication on each sweep, at most
 four VPCs a sweep, so a publish that failed once does not wait for the VPC's
 next EndpointSlice change.
+While any VRF is installed, each sweep also reads `node_src_addr_table` and
+restores this node's source address when it is unset or wrong, since only a
+new VRF otherwise writes it.
 
 `galactic-router`'s own reconciler independently derives the *same* SID value
 from the same inputs (`srv6.ComputeSID`, `internal/plumbing/srv6/usid.go`,
