@@ -116,8 +116,9 @@ func newRootCommand() *cobra.Command {
 	pf.StringVar(&opts.defaultsDir, "defaults-dir", "/etc/frr-defaults", "Directory holding the image's default FRR files")
 	pf.StringVar(&opts.vtysh, "vtysh", "/usr/bin/vtysh", "Path to vtysh")
 	pf.StringVar(&opts.reloader, "frr-reload", "/usr/lib/frr/frr-reload.py", "Path to frr-reload.py")
-	pf.BoolVar(&opts.activation, "activation", false,
-		"Act on this node's FabricRouterDeployment: its source mode, candidate and active revisions")
+	pf.BoolVar(&opts.activation, "activation", os.Getenv("FABRIC_ACTIVATION") == "true",
+		"Act on this node's FabricRouterDeployment: its source mode, candidate and active revisions "+
+			"(env FABRIC_ACTIVATION=true)")
 	pf.StringVar(&opts.stateDir, "state-dir", "/var/lib/fabric-router/agent",
 		"Host directory holding the activation journal, identity and checkpoint")
 	pf.StringVar(&opts.machineIDFile, "machine-id-file", "/etc/machine-id", "The host's machine ID file")

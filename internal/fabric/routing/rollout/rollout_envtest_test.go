@@ -13,9 +13,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
@@ -41,6 +44,15 @@ const (
 // against a real API server holding the stack's CRDs, so every write the
 // rollout manager makes passes the CRDs' admission rules.
 func startRollout(t *testing.T) client.Client {
+	t.Helper()
+	return startRolloutAs(t, false)
+}
+
+// startRolloutAs is startRollout; with shippedRBAC the controllers run as
+// the fabric-router-controller ServiceAccount, bound only to the RBAC in
+// config/fabric-router-controller, so a rule the code needs and the
+// manifest lacks fails the test.
+func startRolloutAs(t *testing.T, shippedRBAC bool) client.Client {
 	t.Helper()
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("set KUBEBUILDER_ASSETS for the rollout envtest")
@@ -73,8 +85,12 @@ func startRollout(t *testing.T) client.Client {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = networkv1alpha1.AddToScheme(scheme)
+	mgrCfg := cfg
+	if shippedRBAC {
+		mgrCfg = asControllerServiceAccount(t, cfg)
+	}
 	skip := true
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+	mgr, err := ctrl.NewManager(mgrCfg, ctrl.Options{
 		Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"},
 		// Each test starts its own manager in this process.
 		Controller: ctrlconfig.Controller{SkipNameValidation: &skip},
@@ -165,11 +181,50 @@ func seed(t *testing.T, c client.Client) string {
 	}
 	objs = append(objs, o.Router)
 	for _, x := range objs {
-		if err := c.Create(context.Background(), x); err != nil {
+		if err := c.Create(context.Background(), x); err != nil && !apierrors.IsAlreadyExists(err) {
 			t.Fatalf("create %T %s: %v", x, x.GetName(), err)
 		}
 	}
 	return o.Peers[0].Name
+}
+
+// asControllerServiceAccount applies config/fabric-router-controller's
+// ServiceAccount and RBAC and returns cfg impersonating that account.
+func asControllerServiceAccount(t *testing.T, cfg *rest.Config) *rest.Config {
+	t.Helper()
+	admin, err := client.New(cfg, client.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := admin.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join("..", "..", "..", "..", "config", "fabric-router-controller")
+	for _, file := range []string{"serviceaccount.yaml", "rbac.yaml"} {
+		data, err := os.ReadFile(filepath.Join(dir, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, doc := range strings.Split(string(data), "\n---\n") {
+			obj := &unstructured.Unstructured{}
+			if err := yaml.Unmarshal([]byte(doc), &obj.Object); err != nil {
+				t.Fatal(err)
+			}
+			if len(obj.Object) == 0 {
+				continue
+			}
+			if err := admin.Create(ctx, obj); err != nil {
+				t.Fatalf("apply %s %s: %v", obj.GetKind(), obj.GetName(), err)
+			}
+		}
+	}
+	impersonated := rest.CopyConfig(cfg)
+	impersonated.Impersonate = rest.ImpersonationConfig{
+		UserName: "system:serviceaccount:" + testNS + ":fabric-router-controller",
+		Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:" + testNS, "system:authenticated"},
+	}
+	return impersonated
 }
 
 func eventually(t *testing.T, what string, cond func() bool) {
@@ -262,7 +317,16 @@ func report(t *testing.T, c client.Client, stage networkv1alpha1.FabricActivatio
 // TestRolloutEndToEnd drives one router through a refused release, a
 // committed one, a failed one and its recovery, playing the node agent.
 func TestRolloutEndToEnd(t *testing.T) {
-	c := startRollout(t)
+	rolloutEndToEnd(t, startRollout(t))
+}
+
+// TestRolloutWithShippedRBAC runs the same lifecycle with the controllers
+// limited to the RBAC the manifests ship.
+func TestRolloutWithShippedRBAC(t *testing.T) {
+	rolloutEndToEnd(t, startRolloutAs(t, true))
+}
+
+func rolloutEndToEnd(t *testing.T, c client.Client) {
 	peer := seed(t, c)
 	ctx := context.Background()
 

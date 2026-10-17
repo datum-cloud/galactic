@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fabric-router-controller
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: fabric-router-controller
+spec:
+  # Two replicas behind a leader election lease: only the leader
+  # reconciles, the other takes over within the lease duration. Nothing
+  # serves requests, so a gap between leaders delays work and loses none.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fabric-router-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fabric-router-controller
+    spec:
+      serviceAccountName: fabric-router-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: fabric-router-controller
+      containers:
+        - name: controller
+          # ":latest" is a placeholder: CI stamps a real version tag when it
+          # publishes the galactic-kustomize bundle.
+          image: ghcr.io/datum-cloud/fabric-router-controller:latest
+          args:
+            - run
+            - --metrics-bind-address=:9185
+            - --health-probe-bind-address=:8081
+          ports:
+            - name: metrics
+              containerPort: 9185
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]

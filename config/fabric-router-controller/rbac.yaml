@@ -1,0 +1,97 @@
+# fabric-router-controller compiles fabric-class BGPRouters into
+# FabricRouterRevisions and, with --rollout, gives each router a
+# FabricRouterDeployment and runs FabricReleaseAuthorizations. Every rule
+# here matches a kubebuilder:rbac marker in internal/fabric/routing; keep
+# them in step. It never reads Secrets: revisions name credentials, the node
+# agent resolves them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fabric-router-controller
+rules:
+  # Everything a router's configuration reads, watched so a change to any
+  # of them compiles the routers it affects again.
+  - apiGroups: [galactic.datumapis.com]
+    resources:
+      - bgprouters
+      - bgprouterclasses
+      - frrrouterparameters
+      - bgppeers
+      - bgppeerprofiles
+      - bgppolicies
+      - bgpprefixlists
+      - bgpcommunitysets
+      - bgpadvertisements
+      - bgpstaticroutes
+      - fabricrolloutpolicies
+    verbs: [get, list, watch]
+  # Accepted and ResolvedRefs, and status.fabric's latest revision.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [bgprouters/status]
+    verbs: [get, update, patch]
+  # A deployment is owned by its router with blockOwnerDeletion, which needs
+  # update on the owner's finalizers where owner-reference enforcement is on.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [bgprouters/finalizers, fabricreleaseauthorizations/finalizers]
+    verbs: [update]
+  # Revisions are created and pruned, never updated: they are immutable.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabricrouterrevisions]
+    verbs: [get, list, watch, create, delete]
+  # Deployments are created and promoted; their status is the node agent's.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabricrouterdeployments]
+    verbs: [get, list, watch, create, update, patch]
+  # Release authorizations: their finalizer and their status.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabricreleaseauthorizations]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabricreleaseauthorizations/status]
+    verbs: [get, update, patch]
+  # A revision binds to its Node's UID; a release's failure domain is a Node
+  # label.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  - apiGroups: ["", events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fabric-router-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fabric-router-controller
+subjects:
+  - kind: ServiceAccount
+    name: fabric-router-controller
+    namespace: galactic-system
+---
+# Leader election, in the controller's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fabric-router-controller-leader-election
+  namespace: galactic-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fabric-router-controller-leader-election
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fabric-router-controller-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: fabric-router-controller
+    namespace: galactic-system

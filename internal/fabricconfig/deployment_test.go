@@ -40,6 +40,7 @@ const (
 	depUID       = "deployment-uid"
 	authUID      = "release-uid"
 	cmUID        = "cm-uid"
+	testVersion  = "test"
 )
 
 // fixtureRevision imports the routing package's edge fixture, with edit
@@ -192,7 +193,7 @@ func newHarness(t *testing.T, objs ...client.Object) *harness {
 	return &harness{t: t, client: c, frr: frr, dir: dir, revs: revs, agent: &DeploymentAgent{
 		Client: c, Namespace: depNamespace, NodeName: depNode, NodeUID: depNodeUID, ClusterID: depCluster,
 		Activator: act, BGP: frr, Gate: NewSourceGate(networkv1alpha1.FabricConfigSourceConfigMap),
-		ConfigDir: configDir, Version: "test",
+		ConfigDir: configDir, Version: testVersion,
 	}}
 }
 
@@ -637,7 +638,7 @@ func TestDeploymentAgentStatusWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.agent.written = nil
-	if got := h.sync(); got.Status.AgentVersion != "test" {
+	if got := h.sync(); got.Status.AgentVersion != testVersion {
 		t.Errorf("agent version %q after a concurrent write", got.Status.AgentVersion)
 	}
 }
