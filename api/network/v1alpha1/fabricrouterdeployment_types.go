@@ -86,6 +86,7 @@ type FabricRouterDeployment struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.activeRevisionRef) || !has(self.activationDependencyDigest) || self.activeRevisionRef.name.endsWith('-' + self.activationDependencyDigest.substring(0, 10))",message="the active revision's name carries its digest"
 // +kubebuilder:validation:XValidation:rule="!has(self.sourceHandoff) || self.source == 'ConfigMap'",message="sourceHandoff applies only to the ConfigMap source"
 // +kubebuilder:validation:XValidation:rule="!has(self.fence) || self.fence.nodeUID != self.target.nodeUID",message="the fence names the node the router left, not its target"
+// +kubebuilder:validation:XValidation:rule="!has(self.recovery) || !has(self.recovery.targetRevisionRef) || !has(self.activeRevisionRef) || self.recovery.targetRevisionRef.name != self.activeRevisionRef.name",message="the recovery target is not the revision it recovers from"
 // Transition rules:
 // +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || self.activationEpoch == 0",message="a deployment is created at epoch zero",optionalOldSelf=true
 // +kubebuilder:validation:XValidation:rule="self.routerRef == oldSelf.routerRef",message="routerRef is immutable"
@@ -97,11 +98,11 @@ type FabricRouterDeployment struct {
 // +kubebuilder:validation:XValidation:rule="self.activationEpoch != oldSelf.activationEpoch || (has(self.activation) ? (has(oldSelf.activation) && self.activation == oldSelf.activation) : !has(oldSelf.activation))",message="activation changes only with a new epoch"
 // +kubebuilder:validation:XValidation:rule="self.activationEpoch != oldSelf.activationEpoch || (has(self.recovery) ? (has(oldSelf.recovery) && self.recovery == oldSelf.recovery) : !has(oldSelf.recovery))",message="recovery changes only with a new epoch"
 // +kubebuilder:validation:XValidation:rule="self.activationEpoch == oldSelf.activationEpoch || (oldSelf.source == 'CRD' && self.source == 'CRD' && !(has(self.suspended) && self.suspended))",message="a promotion needs a deployment already on the CRD source and unsuspended"
-// +kubebuilder:validation:XValidation:rule="self.activationEpoch == oldSelf.activationEpoch || !has(oldSelf.recovery) || !has(oldSelf.recovery.retired) || !oldSelf.recovery.retired",message="a retired router is not promoted"
+// +kubebuilder:validation:XValidation:rule="self.activationEpoch == oldSelf.activationEpoch || !has(oldSelf.recovery) || !has(oldSelf.recovery.retired) || !oldSelf.recovery.retired",message="a retired router is not promoted after its retiring epoch"
+// +kubebuilder:validation:XValidation:rule="self.target == oldSelf.target || self.activationEpoch == oldSelf.activationEpoch",message="a move to another node and a promotion are separate updates"
 // +kubebuilder:validation:XValidation:rule="oldSelf.source != 'CRD' || self.source == 'CRD' || (self.source == 'ConfigMap' && has(self.sourceHandoff))",message="a node leaves the CRD source only for its ConfigMap, naming the ConfigMap version"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.recovery) || !has(oldSelf.recovery.revokedPrefixes) || (has(self.recovery) && has(self.recovery.revokedPrefixes) && oldSelf.recovery.revokedPrefixes.all(p, p in self.recovery.revokedPrefixes))",message="revoked prefixes stay revoked"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.recovery) || !has(oldSelf.recovery.revokedCredentials) || (has(self.recovery) && has(self.recovery.revokedCredentials) && oldSelf.recovery.revokedCredentials.all(c, self.recovery.revokedCredentials.exists(n, n.uid == c.uid)))",message="revoked credentials stay revoked"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.recovery) || !has(oldSelf.recovery.retired) || !oldSelf.recovery.retired || (has(self.recovery) && has(self.recovery.retired) && self.recovery.retired)",message="a retired router stays retired"
 type FabricRouterDeploymentSpec struct {
 	// RouterRef is the BGPRouter this deployment activates.
 	RouterRef FabricObjectIdentity `json:"routerRef"`
@@ -244,6 +245,7 @@ type FabricActivationSettings struct {
 // FabricRecovery is what a failed activation may fall back to.
 //
 // +kubebuilder:validation:XValidation:rule="has(self.targetRevisionRef) == has(self.targetDependencyDigest)",message="a recovery target names its digest"
+// +kubebuilder:validation:XValidation:rule="!has(self.targetRevisionRef) || !has(self.targetDependencyDigest) || self.targetRevisionRef.name.endsWith('-' + self.targetDependencyDigest.substring(0, 10))",message="the recovery target's name carries its digest"
 type FabricRecovery struct {
 	// TargetRevisionRef is the revision the agent restores on a confirmed
 	// failure of this activation. Unset means no rollback: the agent
@@ -274,7 +276,9 @@ type FabricRecovery struct {
 	RevokedCredentials []FabricObjectIdentity `json:"revokedCredentials,omitempty"`
 
 	// Retired means the router is decommissioned; no revision may be
-	// restored. It cannot be cleared.
+	// restored. It is set with the router's last promotion, which usually
+	// withdraws everything. Since a retired router is never promoted again
+	// and recovery changes only with a promotion, it cannot be cleared.
 	// +optional
 	Retired bool `json:"retired,omitempty"`
 }

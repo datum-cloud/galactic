@@ -300,15 +300,17 @@ spec:
             - message: only a failed release verifies recovery
               rule: '!has(self.recoveryVerified) || !self.recoveryVerified || (has(self.phase)
                 && self.phase == ''Failed'')'
-            - message: a completed, cancelled or failed release does not change phase
-              rule: '!has(oldSelf.phase) || !(oldSelf.phase in [''Completed'', ''Cancelled'',
-                ''Failed'']) || (has(self.phase) && self.phase == oldSelf.phase)'
             - message: verified recovery stays verified
               rule: '!has(oldSelf.recoveryVerified) || !oldSelf.recoveryVerified ||
                 (has(self.recoveryVerified) && self.recoveryVerified)'
-            - message: only a pending release can be cancelled
-              rule: '!has(self.phase) || self.phase != ''Cancelled'' || !has(oldSelf.phase)
-                || oldSelf.phase in [''Pending'', ''Cancelled'']'
+            - message: 'a release moves only forward: Pending to Started or Cancelled,
+                Started to Completed, Failed or Unknown, Unknown to a known phase'
+              rule: '!has(oldSelf.phase) ? (!has(self.phase) || self.phase in [''Pending'',
+                ''Started'']) : (has(self.phase) && (self.phase == oldSelf.phase ||
+                (oldSelf.phase == ''Pending'' && self.phase in [''Started'', ''Cancelled''])
+                || (oldSelf.phase == ''Started'' && self.phase in [''Completed'',
+                ''Failed'', ''Unknown'']) || (oldSelf.phase == ''Unknown'' && self.phase
+                in [''Started'', ''Completed'', ''Failed''])))'
         required:
         - spec
         type: object

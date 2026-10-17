@@ -139,9 +139,8 @@ type FabricReleaseTarget struct {
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.phase) || !(self.phase in ['Started', 'Completed', 'Failed']) || has(self.startedAt)",message="a started release records when it started"
 // +kubebuilder:validation:XValidation:rule="!has(self.recoveryVerified) || !self.recoveryVerified || (has(self.phase) && self.phase == 'Failed')",message="only a failed release verifies recovery"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.phase) || !(oldSelf.phase in ['Completed', 'Cancelled', 'Failed']) || (has(self.phase) && self.phase == oldSelf.phase)",message="a completed, cancelled or failed release does not change phase"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.recoveryVerified) || !oldSelf.recoveryVerified || (has(self.recoveryVerified) && self.recoveryVerified)",message="verified recovery stays verified"
-// +kubebuilder:validation:XValidation:rule="!has(self.phase) || self.phase != 'Cancelled' || !has(oldSelf.phase) || oldSelf.phase in ['Pending', 'Cancelled']",message="only a pending release can be cancelled"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.phase) ? (!has(self.phase) || self.phase in ['Pending', 'Started']) : (has(self.phase) && (self.phase == oldSelf.phase || (oldSelf.phase == 'Pending' && self.phase in ['Started', 'Cancelled']) || (oldSelf.phase == 'Started' && self.phase in ['Completed', 'Failed', 'Unknown']) || (oldSelf.phase == 'Unknown' && self.phase in ['Started', 'Completed', 'Failed'])))",message="a release moves only forward: Pending to Started or Cancelled, Started to Completed, Failed or Unknown, Unknown to a known phase"
 type FabricReleaseAuthorizationStatus struct {
 	// Phase is the release's progress. A release is outstanding while
 	// Pending, Started or Unknown.
