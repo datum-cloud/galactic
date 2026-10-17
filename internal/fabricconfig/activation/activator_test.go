@@ -370,6 +370,10 @@ func TestClassify(t *testing.T) {
 			networkv1alpha1.FabricChangeNonDisruptive},
 		{[]string{"router bgp 64500 :: neighbor UPSTREAM ebgp-multihop 3"}, nil,
 			networkv1alpha1.FabricChangeSessionReset},
+		{nil, []string{"router bgp 64500 :: address-family ipv4 unicast :: no network 192.0.2.0/24"},
+			networkv1alpha1.FabricChangeNonDisruptive},
+		{nil, []string{"router bgp 64500 :: no neighbor UPSTREAM remote-as 64496"},
+			networkv1alpha1.FabricChangeSessionReset},
 		{[]string{"frr defaults datacenter"}, nil, networkv1alpha1.FabricChangeRestartRequired},
 	} {
 		if got := Classify(tc.added, tc.removed); got != tc.want {

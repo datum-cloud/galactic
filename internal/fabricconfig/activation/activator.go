@@ -190,7 +190,7 @@ func (a *Activator) Stage(ctx context.Context, rev *networkv1alpha1.FabricRouter
 }
 
 // Classify sorts a reload's changes by what they disturb. A change is a
-// line, or "<context> :: <line>" as frrtext.Diff reports it.
+// line, or a line under its contexts, "<context> :: ... :: <line>".
 func Classify(added, removed []string) networkv1alpha1.FabricChangeClass {
 	if len(added) == 0 && len(removed) == 0 {
 		return networkv1alpha1.FabricChangeNone
@@ -198,8 +198,8 @@ func Classify(added, removed []string) networkv1alpha1.FabricChangeClass {
 	class := networkv1alpha1.FabricChangeNonDisruptive
 	for _, change := range append(append([]string(nil), added...), removed...) {
 		line := change
-		if _, inner, ok := strings.Cut(change, " :: "); ok {
-			line = inner
+		if i := strings.LastIndex(change, " :: "); i >= 0 {
+			line = change[i+len(" :: "):]
 		}
 		f := strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "no "))
 		switch {
@@ -532,6 +532,55 @@ func Eligible(rec Recovery, rev *networkv1alpha1.FabricRouterRevision, credentia
 	return nil
 }
 
+// StartAllowed reports why a node may not start FRR from rev, the active
+// revision of act read from the API, when no checkpoint may be restored:
+// the state directory belongs to another Node or cluster, the journal is
+// bound to another deployment, the epoch is behind the journal or already
+// failed, or the newest journaled recovery retired the router or revokes a
+// prefix rev originates or a credential it uses. credentials maps the Secret
+// names rev uses to their current UIDs.
+func (a *Activator) StartAllowed(act Activation, rev *networkv1alpha1.FabricRouterRevision,
+	credentials map[string]string) error {
+	if a.journal == nil {
+		return fmt.Errorf("%w: the journal is unreadable", ErrRecoveryConflict)
+	}
+	if err := checkRevision(Request{Activation: act, Revision: rev}); err != nil {
+		return err
+	}
+	if err := a.checkIdentity(act); err != nil {
+		return err
+	}
+	if bound := a.journal.BoundDeployment(); bound != "" && bound != act.DeploymentUID {
+		return fmt.Errorf("%w: journal bound to deployment %s", ErrRecoveryConflict, bound)
+	}
+	if high, ok := a.journal.HighWater(act.DeploymentUID); ok && act.Epoch < high {
+		return fmt.Errorf("%w: epoch %d below accepted %d", ErrStale, act.Epoch, high)
+	}
+	if a.journal.Failed(act.DeploymentUID, act.Epoch) {
+		return fmt.Errorf("%w: epoch %d", ErrFailedEpoch, act.Epoch)
+	}
+	if rec, ok := a.journal.LastForEpoch(act.DeploymentUID, act.Epoch); ok && rec.Activation != act {
+		return fmt.Errorf("%w: epoch %d was accepted for %s", ErrStale, act.Epoch, rec.describe())
+	}
+	rec, ok := a.journal.LatestRecovery()
+	if !ok {
+		return nil
+	}
+	if rec.Retired {
+		return fmt.Errorf("%w: the router is retired", ErrNoEligibleRecovery)
+	}
+	if p := revokedOrigination(rec, originations(rev)); p != "" {
+		return fmt.Errorf("%s originates revoked %s", rev.Name, p)
+	}
+	for _, name := range credentialNames(rev) {
+		uid, ok := credentials[name]
+		if !ok || slices.Contains(rec.RevokedCredentials, uid) {
+			return fmt.Errorf("%s uses credential %s, which is revoked or cannot be resolved", rev.Name, name)
+		}
+	}
+	return nil
+}
+
 // mergeRecovery keeps the journaled target and adds any revocation or
 // retirement asked for since.
 func mergeRecovery(journaled, asked Recovery) Recovery {
@@ -677,6 +726,50 @@ func (a *Activator) Resume(ctx context.Context, req Request) (Result, error) {
 	return Result{}, fmt.Errorf("cannot resume from a %s record", rec.Type)
 }
 
+// Activated reports whether the node ever accepted an activation or holds a
+// checkpoint. Before that, the CRD source has nothing of its own to run.
+func (a *Activator) Activated() bool {
+	if a.journal == nil {
+		return true
+	}
+	for _, rec := range a.journal.Records() {
+		if rec.Type == RecordAccepted {
+			return true
+		}
+	}
+	_, err := ReadCheckpoint(a.Dir)
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// Reassert reloads the checkpoint when FRR runs anything else, as after a
+// return to the CRD source or a change made outside the agent. It reports
+// whether FRR runs the checkpoint afterwards.
+func (a *Activator) Reassert(ctx context.Context, timeout time.Duration) (bool, error) {
+	cp, err := ReadCheckpoint(a.Dir)
+	if err != nil {
+		return false, err
+	}
+	diff, err := a.runningDiff(ctx, cp.Config)
+	if err != nil {
+		return false, err
+	}
+	if len(diff) == 0 {
+		return true, nil
+	}
+	path := filepath.Join(a.Dir, "reassert.conf")
+	if err := writeAtomic(path, []byte(cp.Config)); err != nil {
+		return false, err
+	}
+	if err := a.FRR.Check(ctx, path); err != nil {
+		return false, err
+	}
+	if err := a.reload(ctx, path, timeout); err != nil {
+		return false, err
+	}
+	diff, err = a.runningDiff(ctx, cp.Config)
+	return err == nil && len(diff) == 0, err
+}
+
 // runningIsCheckpoint reports whether FRR runs the last committed
 // configuration.
 func (a *Activator) runningIsCheckpoint(ctx context.Context) bool {
@@ -730,7 +823,15 @@ type BootDecision struct {
 // revoked credential.
 //
 // id is what the agent knows of itself; without the API only MachineID.
-func (a *Activator) Boot(id Identity) BootDecision {
+func (a *Activator) Boot(id Identity) BootDecision { return a.boot(id, false) }
+
+// BootOnline is Boot for an agent that reached the API and found this
+// node's deployment bound to the journal: the boot authorization's lifetime
+// and the clock bound only how long a checkpoint is trusted without the
+// API, so they are not checked. Every other check is.
+func (a *Activator) BootOnline(id Identity) BootDecision { return a.boot(id, true) }
+
+func (a *Activator) boot(id Identity, online bool) BootDecision {
 	if a.journal == nil {
 		return BootDecision{Reason: "Bootstrapping: the journal is unreadable"}
 	}
@@ -754,9 +855,9 @@ func (a *Activator) Boot(id Identity) BootDecision {
 		return BootDecision{Reason: "Bootstrapping: the checkpoint is from another compiler or FRR version"}
 	case cp.RequiresAPI:
 		return BootDecision{Reason: "Bootstrapping: the checkpoint needs credentials from the API"}
-	case now.Before(a.journal.LatestTime()):
+	case !online && now.Before(a.journal.LatestTime()):
 		return BootDecision{Reason: "Bootstrapping: the clock is behind the journal"}
-	case !now.Before(cp.BootAuthorizedUntil):
+	case !online && !now.Before(cp.BootAuthorizedUntil):
 		return BootDecision{Reason: "Bootstrapping: boot authorization expired at " + cp.BootAuthorizedUntil.String()}
 	}
 	if rec, ok := a.journal.LatestRecovery(); ok {

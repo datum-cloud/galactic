@@ -706,6 +706,8 @@ spec:
         x-kubernetes-validations:
         - message: a deployment is named after its router
           rule: self.metadata.name == self.spec.routerRef.name
+    selectableFields:
+    - jsonPath: .spec.target.nodeName
     served: true
     storage: true
     subresources:

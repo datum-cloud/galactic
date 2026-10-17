@@ -62,6 +62,7 @@ const (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=frdep
+// +kubebuilder:selectablefield:JSONPath=`.spec.target.nodeName`
 // +kubebuilder:printcolumn:name="NODE",type="string",JSONPath=".spec.target.nodeName"
 // +kubebuilder:printcolumn:name="SOURCE",type="string",JSONPath=".spec.source"
 // +kubebuilder:printcolumn:name="ACTIVE",type="string",JSONPath=".spec.activeRevisionRef.name"

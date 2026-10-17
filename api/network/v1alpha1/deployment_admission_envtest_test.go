@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -539,5 +540,27 @@ func TestRolloutPolicyAdmission(t *testing.T) {
 			}
 			checkAdmission(t, c.Create(ctx, p), tc.wantErr)
 		})
+	}
+}
+
+// TestDeploymentSelectableByNode: the node agent lists only its own node's
+// deployment with a spec.target.nodeName field selector.
+func TestDeploymentSelectableByNode(t *testing.T) {
+	c := startActivationAPI(t)
+	ctx := context.Background()
+	for _, node := range []string{"node-a", "node-b"} {
+		d := newDeployment("router-" + node)
+		d.Spec.Target = networkv1alpha1.FabricNodeIdentity{NodeName: node, NodeUID: node + "-uid"}
+		if err := c.Create(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var list networkv1alpha1.FabricRouterDeploymentList
+	if err := c.List(ctx, &list, client.InNamespace("fabric"),
+		client.MatchingFieldsSelector{Selector: fields.OneTermEqualSelector("spec.target.nodeName", "node-b")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Name != "router-node-b" {
+		t.Fatalf("listed %d deployments for node-b", len(list.Items))
 	}
 }
