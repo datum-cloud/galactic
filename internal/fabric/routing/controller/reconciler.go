@@ -239,25 +239,59 @@ func listByName[L client.ObjectList, T any, PT interface {
 	return out, nil
 }
 
-// routerIDHolder names an older router of the same class in the namespace
-// that already uses this router's ID, if there is one. The older router
-// keeps the ID, so a newcomer never takes a running router offline.
+// routerIDHolder names another router of the same class in the namespace
+// that holds this router's ID, if there is one. A router holds an ID when
+// its latest revision runs with it; between two routers that both or
+// neither run it, the older one holds it. A newcomer, or a router edited to
+// take a running router's ID, therefore never takes that router offline.
 func (r *Reconciler) routerIDHolder(ctx context.Context, router *networkv1alpha1.BGPRouter) (string, error) {
 	routers := &networkv1alpha1.BGPRouterList{}
 	if err := r.List(ctx, routers, client.InNamespace(router.Namespace)); err != nil {
 		return "", err
 	}
+	id := router.Spec.RouterID
+	mine, err := r.runningID(ctx, router)
+	if err != nil {
+		return "", err
+	}
 	for i := range routers.Items {
 		other := &routers.Items[i]
-		if other.Name == router.Name || other.Spec.RouterID != router.Spec.RouterID ||
-			other.Spec.RouterClassName == nil || *other.Spec.RouterClassName != *router.Spec.RouterClassName {
+		if other.Name == router.Name || other.Spec.RouterClassName == nil ||
+			*other.Spec.RouterClassName != *router.Spec.RouterClassName {
 			continue
 		}
-		if older(other, router) {
+		theirs, err := r.runningID(ctx, other)
+		if err != nil {
+			return "", err
+		}
+		otherRuns, iRun := theirs == id, mine == id
+		switch {
+		case otherRuns && !iRun:
+			return other.Name, nil
+		case other.Spec.RouterID != id && !otherRuns:
+			// No conflict: the other router neither wants nor runs the ID.
+		case otherRuns == iRun && older(other, router):
 			return other.Name, nil
 		}
 	}
 	return "", nil
+}
+
+// runningID is the router ID of the router's latest revision, or empty when
+// it has none.
+func (r *Reconciler) runningID(ctx context.Context, router *networkv1alpha1.BGPRouter) (string, error) {
+	if router.Status.Fabric == nil || router.Status.Fabric.LatestRevision == "" {
+		return "", nil
+	}
+	rev := &networkv1alpha1.FabricRouterRevision{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: router.Namespace, Name: router.Status.Fabric.LatestRevision}, rev)
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return rev.Spec.Configuration.Router.RouterID, nil
 }
 
 func older(a, b *networkv1alpha1.BGPRouter) bool {
@@ -342,7 +376,10 @@ func (e *revisionInvalidError) Error() string {
 func (e *revisionInvalidError) Unwrap() error { return e.err }
 
 // ensureRevision creates rev if it does not exist. An existing revision of
-// the same name must carry the same three digests.
+// the same name must carry the same three digests. It cannot differ unless
+// the compiler's output changed without a semantics version bump, which the
+// golden digest test exists to prevent; the router then reports
+// RevisionInvalid until the stale revision is deleted.
 func (r *Reconciler) ensureRevision(
 	ctx context.Context, router *networkv1alpha1.BGPRouter, rev *networkv1alpha1.FabricRouterRevision,
 ) error {

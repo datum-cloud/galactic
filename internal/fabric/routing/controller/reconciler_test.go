@@ -248,6 +248,11 @@ func (s *suite) aStoredRevisionCannotChange(t *testing.T) {
 	if err := c.Update(ctx, changed); err == nil || !strings.Contains(err.Error(), "a revision is immutable") {
 		t.Errorf("revision update: %v, want the immutability refusal", err)
 	}
+	changed = s.rev.DeepCopy()
+	changed.Spec.Configuration.Router.RouterID = "192.0.2.250"
+	if err := c.Update(ctx, changed); err == nil || !strings.Contains(err.Error(), "a revision is immutable") {
+		t.Errorf("configuration update: %v, want the immutability refusal", err)
+	}
 }
 
 // aPolicyChangeMakesANewRevision: a policy change makes a new revision.
@@ -379,8 +384,43 @@ func (s *suite) aRouterIDStaysWithTheRouterThatHadItFirst(t *testing.T) {
 		t.Error("the newcomer changed the incumbent's revision")
 	}
 
+	// The older router taking the newer one's running ID is refused, and
+	// the newer one keeps running.
+	running := router(t, c, testNode).Spec.RouterID
 	twin = router(t, c, "edge-b")
 	twin.Spec.RouterID = "192.0.2.111"
+	if err := c.Update(ctx, twin); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the newcomer accepted on its own ID", func() bool {
+		r := router(t, c, "edge-b")
+		accepted := meta.IsStatusConditionTrue(r.Status.Conditions, networkv1alpha1.ConditionTypeAccepted)
+		return r.Status.Fabric != nil && accepted
+	})
+	incumbent = router(t, c, testNode)
+	incumbent.Spec.RouterID = "192.0.2.111"
+	if err := c.Update(ctx, incumbent); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the older router refused the running ID", func() bool {
+		cond := meta.FindStatusCondition(router(t, c, testNode).Status.Conditions, networkv1alpha1.ConditionTypeAccepted)
+		return cond != nil && cond.Reason == reasonDuplicateID
+	})
+	newer := router(t, c, "edge-b").Status.Conditions
+	cond := meta.FindStatusCondition(newer, networkv1alpha1.ConditionTypeAccepted)
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("the router running the ID lost it: %+v", cond)
+	}
+	incumbent = router(t, c, testNode)
+	incumbent.Spec.RouterID = running
+	if err := c.Update(ctx, incumbent); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the older router accepted on its own ID again", func() bool {
+		return meta.IsStatusConditionTrue(router(t, c, testNode).Status.Conditions, networkv1alpha1.ConditionTypeAccepted)
+	})
+	twin = router(t, c, "edge-b")
+	twin.Spec.RouterID = "192.0.2.113"
 	if err := c.Update(ctx, twin); err != nil {
 		t.Fatal(err)
 	}

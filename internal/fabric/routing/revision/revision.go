@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -97,7 +98,9 @@ func Build(in compile.Input, nodeUID string) (*networkv1alpha1.FabricRouterRevis
 func Name(router, dependencyDigest string) string {
 	const suffix = 11 // "-" and ten digits
 	if len(router) > 253-suffix {
-		router = router[:253-suffix]
+		// An object name ends in an alphanumeric, so a cut never leaves a
+		// trailing separator before the digest.
+		router = strings.TrimRight(router[:253-suffix], "-.")
 	}
 	return router + "-" + dependencyDigest[:10]
 }

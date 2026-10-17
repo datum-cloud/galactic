@@ -17,7 +17,7 @@ import (
 const SemanticsVersion = "1"
 
 // FRRVersion is the FRR build the compiler targets; a test keeps it equal
-// to containers/fabric-router/Dockerfile.
+// to the build the fabric-router image pins.
 const FRRVersion = "10.7.1"
 
 // Result is a compiled router configuration.

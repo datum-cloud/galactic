@@ -213,10 +213,11 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: a revision is immutable; a new configuration is a new revision
-              rule: self.target == oldSelf.target && self.parameters == oldSelf.parameters
-                && self.compiler == oldSelf.compiler && self.inputs == oldSelf.inputs
-                && self.semanticsDigest == oldSelf.semanticsDigest && self.activationDependencyDigest
-                == oldSelf.activationDependencyDigest && self.renderedDigest == oldSelf.renderedDigest
+              rule: self.target == oldSelf.target && self.configuration == oldSelf.configuration
+                && self.parameters == oldSelf.parameters && self.compiler == oldSelf.compiler
+                && self.inputs == oldSelf.inputs && self.semanticsDigest == oldSelf.semanticsDigest
+                && self.activationDependencyDigest == oldSelf.activationDependencyDigest
+                && self.renderedDigest == oldSelf.renderedDigest
         required:
         - spec
         type: object

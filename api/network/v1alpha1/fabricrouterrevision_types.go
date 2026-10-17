@@ -36,7 +36,7 @@ type FabricRouterRevision struct {
 
 // FabricRouterRevisionSpec is a revision's content. It is immutable.
 //
-// +kubebuilder:validation:XValidation:rule="self.target == oldSelf.target && self.parameters == oldSelf.parameters && self.compiler == oldSelf.compiler && self.inputs == oldSelf.inputs && self.semanticsDigest == oldSelf.semanticsDigest && self.activationDependencyDigest == oldSelf.activationDependencyDigest && self.renderedDigest == oldSelf.renderedDigest",message="a revision is immutable; a new configuration is a new revision"
+// +kubebuilder:validation:XValidation:rule="self.target == oldSelf.target && self.configuration == oldSelf.configuration && self.parameters == oldSelf.parameters && self.compiler == oldSelf.compiler && self.inputs == oldSelf.inputs && self.semanticsDigest == oldSelf.semanticsDigest && self.activationDependencyDigest == oldSelf.activationDependencyDigest && self.renderedDigest == oldSelf.renderedDigest",message="a revision is immutable; a new configuration is a new revision"
 type FabricRouterRevisionSpec struct {
 	// Target is the router and Node this revision configures.
 	Target FabricRouterTarget `json:"target"`

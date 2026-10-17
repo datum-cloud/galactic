@@ -252,3 +252,11 @@ func TestVerifyRefusesOtherCompiler(t *testing.T) {
 		t.Errorf("Verify = %v, want ErrIncompatible", err)
 	}
 }
+
+func TestNameStaysValid(t *testing.T) {
+	long := strings.Repeat("a", 241) + ".b"
+	name := Name(long, strings.Repeat("f", 64))
+	if len(name) > 253 || strings.Contains(name, ".-") || strings.Contains(name, "--") {
+		t.Errorf("Name = %q (%d characters)", name, len(name))
+	}
+}
