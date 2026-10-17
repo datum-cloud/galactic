@@ -26,9 +26,10 @@ commit.
 - `spec.plane: Underlay` requires a class (CEL). Neither the listen port
   (179 underlay, 2179 EVPN) nor a name pattern is an ownership signal.
 
-`api/network/v1alpha1.IsLegacyOwned(router, classNames)` implements the
-rule; every consumer below calls it or the advertisement form
-`RouterOwnsLegacy`.
+The class-isolation change adds `api/network/v1alpha1.IsLegacyOwned(router,
+classNames)` to implement the rule, and changes every consumer below to call
+it. The **Change** columns describe that change; none of it exists before
+it.
 
 ## Router discovery
 
@@ -36,7 +37,7 @@ rule; every consumer below calls it or the advertisement form
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `routerNameForNode` (`internal/controller/networkgateway_controller.go:922`), shared by gateway VIP advertisement and NAT `applyShardAdvertisement` (`egressshard_controller.go:538`) | first item from the `targetRef.name` index                 | filter to legacy-owned, then error on more than one match; the caller reports the ambiguity instead of attaching to an arbitrary router |
 | `encapSourceFromRouters` (`cmd/galactic-gateway/encapsource.go:107`)                                                                                                                  | all namespaces, checks kind, errors on differing addresses | filter to legacy-owned before the address check                                                                                         |
-| `buildBackendSIDIndex` / `resolveUSID` (`internal/controller/usidresolver.go:55,105`)                                                                                                 | every router by name                                       | index only legacy-owned routers; an advertisement on a fabric router never yields a backend SID                                         |
+| `buildBackendSIDIndex` / `resolveUSID` (`internal/controller/usidresolver.go:55,111`)                                                                                                 | every router by name                                       | index only legacy-owned routers; an advertisement on a fabric router never yields a backend SID                                         |
 | `resolveVIPBindingVRF` (`servicevipbinding_controller.go:742`)                                                                                                                        | ranges over a Go map; random pick on duplicates            | legacy-owned only, and an error on more than one router for the node                                                                    |
 | `ServiceRoutePolicyReconciler.sidResolver` (`serviceroute_controller.go:532`)                                                                                                         | VRF instance → router → target check                       | reject a router that is not legacy-owned                                                                                                |
 | `advertisementRequests` (`servicevipbinding_controller.go:862`)                                                                                                                       | router target equals this node                             | also require legacy ownership                                                                                                           |
@@ -48,6 +49,8 @@ rule; every consumer below calls it or the advertisement form
 | `routersForNode` / `routerNamesForNode` (`internal/gc/gc.go:97,115`), `nodeSRv6Identity` (`datapath_repair.go:282`)                                                                   | every match                                                | legacy-owned only, so GC and repair never touch fabric objects                                                                          |
 | `nodeForRouter` (`internal/cloud/controller/bgpadvertisement_controller.go:219`)                                                                                                      | router by name                                             | see cell projection                                                                                                                     |
 | `sidecarGatewayEndpoints` (`internal/installer/sidecarreturn.go:353`), `sidecarreap.go:196`                                                                                           | compare `routerRef.name` to the node name                  | resolve the router and compare its target, legacy-owned only                                                                            |
+| `nodeToRouterRequests` (`internal/controller/node_controller.go:48`), `enqueueRoutersForTarget` (`routing.go:21`), `secretToRouterRequests` (`secret_controller.go:43`)               | enqueue every matching router                              | unchanged; the enqueued router is ignored by the `BGPRouterReconciler` guard below                                                      |
+| `deleteRuleAdvertisements` (`networkservice_controller.go:277`)                                                                                                                       | lists advertisements by rule label                         | unchanged; fabric advertisements never carry the gateway's labels                                                                       |
 
 ## Reconciliation and status
 

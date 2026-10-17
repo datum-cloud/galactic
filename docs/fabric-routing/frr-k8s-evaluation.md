@@ -1,8 +1,8 @@
 # FRR-K8s as the fabric backend: evaluation
 
-The plan asked whether FRR-K8s could replace the existing FRR reload
-adapter. It cannot, for the current underlay. The existing adapter stays
-the implementation baseline.
+The plan asked whether FRR-K8s could replace the existing FRR reload path.
+It cannot, for the current underlay. The existing path stays the
+implementation baseline.
 
 Evaluated: FRR-K8s `v0.0.27` (`metallb/frr-k8s` at `d5dee8c`), API
 `frrk8s.metallb.io/v1beta1` `FRRConfiguration`
@@ -51,7 +51,9 @@ use.
 
 ## Result
 
-Keep FRR with the existing `fabric-config-agent` reload path, behind the
+Keep FRR with the existing `fabric-config-agent` reload path. Its current
+`Check`/`Reload`/`Neighbors`/`Routes`/`ResetNeighbor` interface
+(`internal/fabricconfig/frr.go`) becomes the new
 `Validate`/`Plan`/`Apply`/`Observe`/`Recover` adapter. Re-evaluate FRR-K8s
 when it supports ordered policy terms, aggregation, filtered
 redistribution and stable object names; the conformance matrix is the

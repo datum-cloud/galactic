@@ -20,6 +20,10 @@ fabric-router-controller: resolve -> compile -> FabricRouterRevision
 fabric-config-agent: stage -> journal -> frr-reload -> observe -> checkpoint
 ```
 
+These documents are the contract for work in progress. Where they name a
+kind, field, command or package that does not exist yet, they describe the
+target that the implementing change adds.
+
 | Document                                         | Contents                                                                                                                                                         |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [conformance.md](conformance.md)                 | Every FRR construct in the 19 rendered configurations and the typed field that produces it                                                                       |
@@ -29,26 +33,45 @@ fabric-config-agent: stage -> journal -> frr-reload -> observe -> checkpoint
 
 ## Resources
 
-| Kind                         | Scope                   | Written by                             | Status                                                                                                                                                  |
-| ---------------------------- | ----------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BGPRouterClass`             | Cluster                 | platform admins                        | new                                                                                                                                                     |
-| `FRRRouterParameters`        | Cluster, immutable spec | platform admins                        | new                                                                                                                                                     |
-| `BGPRouter`                  | Namespace               | operators (Git)                        | extended: `routerClassName`, `plane`, `lifecycle`, `frr.retain`                                                                                         |
-| `BGPPeerProfile`             | Namespace               | network operators                      | new                                                                                                                                                     |
-| `BGPPeer`                    | Namespace               | operators, topology controller         | extended: `peerProfileRef`, `transport`, `familySettings`                                                                                               |
-| `BGPPolicy`                  | Namespace               | network policy owners                  | extended: optional target and direction, `defaultAction`, term `description`, set references, interface match, community operations, `frr.routeMapName` |
-| `BGPPrefixList`              | Namespace               | network policy owners                  | fixed: family-aware `ge`/`le` to 128, `int64` sequence; `frr.name`                                                                                      |
-| `BGPCommunitySet`            | Namespace               | network policy owners                  | `frr.name`                                                                                                                                              |
-| `BGPStaticRoute`             | Namespace               | network operators                      | new                                                                                                                                                     |
-| `BGPAdvertisement`           | Namespace               | operators, authorized controllers      | extended: `aggregation`                                                                                                                                 |
-| `FabricRouterRevision`       | Namespace, immutable    | compiler                               | new                                                                                                                                                     |
-| `FabricRouterDeployment`     | Namespace               | rollout manager (spec), agent (status) | new                                                                                                                                                     |
-| `FabricReleaseAuthorization` | Namespace               | fleet release tool                     | new                                                                                                                                                     |
-| `FabricRolloutPolicy`        | Namespace               | network operators                      | new                                                                                                                                                     |
-| `FabricTopology`             | Namespace               | network operators                      | new, milestone 7                                                                                                                                        |
+| Kind                         | Scope                   | Written by                             | Status                                                                                                                                                   |
+| ---------------------------- | ----------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BGPRouterClass`             | Cluster                 | platform admins                        | new                                                                                                                                                      |
+| `FRRRouterParameters`        | Cluster, immutable spec | platform admins                        | new                                                                                                                                                      |
+| `BGPRouter`                  | Namespace               | operators (Git)                        | to extend: `routerClassName`, `plane`, `lifecycle`, `frr.retain`                                                                                         |
+| `BGPPeerProfile`             | Namespace               | network operators                      | new                                                                                                                                                      |
+| `BGPPeer`                    | Namespace               | operators, topology controller         | to extend: `peerProfileRef`, `transport`, `familySettings`                                                                                               |
+| `BGPPolicy`                  | Namespace               | network policy owners                  | to extend: optional target and direction, `defaultAction`, term `description`, set references, interface match, community operations, `frr.routeMapName` |
+| `BGPPrefixList`              | Namespace               | network policy owners                  | to fix: family-aware `ge`/`le` to 128, `int64` sequence; to extend: `frr.name`                                                                           |
+| `BGPCommunitySet`            | Namespace               | network policy owners                  | to extend: `frr.name`                                                                                                                                    |
+| `BGPStaticRoute`             | Namespace               | network operators                      | new                                                                                                                                                      |
+| `BGPAdvertisement`           | Namespace               | operators, authorized controllers      | to extend: `aggregation`                                                                                                                                 |
+| `FabricRouterRevision`       | Namespace, immutable    | compiler                               | new                                                                                                                                                      |
+| `FabricRouterDeployment`     | Namespace               | rollout manager (spec), agent (status) | new                                                                                                                                                      |
+| `FabricReleaseAuthorization` | Namespace               | fleet release tool                     | new                                                                                                                                                      |
+| `FabricRolloutPolicy`        | Namespace               | network operators                      | new                                                                                                                                                      |
+| `FabricTopology`             | Namespace               | network operators                      | new, milestone 7                                                                                                                                         |
 
 Everything lives in `galactic-system` initially. The compiler enforces one
 fabric router per Node and one listener per Node across namespaces.
+
+`BGPRouter.spec.lifecycle` is `Active` (default), `Draining` (the compiler
+adds graceful-shutdown to every export and suppresses new origination, and
+the rollout manager waits for alternative paths) or `Decommissioning`
+(sessions and origination are withdrawn, then the agent removes owned
+routes and acknowledges; a finalizer holds the router until it does).
+
+## Milestones
+
+| Milestone | Scope                                                                           |
+| --------- | ------------------------------------------------------------------------------- |
+| 0         | This contract set                                                               |
+| 1         | API extensions and fixes, class isolation of every consumer                     |
+| 2         | Compiler, revisions, preview and semantic diff, shadow mode, 19-router parity   |
+| 3         | Agent activation, journal, checkpoint, recovery, rollout, fleet release, health |
+| 4         | Staging cutover (operator-run)                                                  |
+| 5         | Production cutover (operator-run)                                               |
+| 6         | ConfigMap removal                                                               |
+| 7         | Topology generation, inventory/IPAM and service integration                     |
 
 ## Decisions
 
@@ -81,11 +104,14 @@ These close the plan's "decisions to close before implementation".
 8. **Emergency withdrawal and health.** Restricted revisions through the
    same writer; observers via `FabricQuery` from other routers; missing
    evidence pauses, confirmed failure recovers.
-9. **Entry point.** `cmd/fabric-router-controller` (subcommands `run`,
-   `preview`, `diff`, `release`, `withdraw`, `rebind`, `suspend`,
-   `handoff`), packages under `internal/fabric/routing/`, its own
-   ServiceAccount and lease. `galactic-controller --role=fabric` is
-   unchanged.
+9. **Entry point.** `cmd/fabric-router-controller`, packages under
+   `internal/fabric/routing/`, its own ServiceAccount and lease.
+   `galactic-controller --role=fabric` is unchanged. Subcommands: `run`
+   (controller), `preview` and `diff` (offline compile and semantic/FRR
+   diff), `release` (fleet authorization), `withdraw` (emergency
+   withdrawal), `rebind` (resolve a recovery conflict), `suspend` and
+   `resume` (audited reconciliation suspension), `handoff` (per-node source
+   ownership).
 
 ## External gates
 

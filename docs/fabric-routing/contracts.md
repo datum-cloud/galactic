@@ -36,6 +36,12 @@ immutable by CEL). It carries:
 - `credentials`: each referenced Secret's name, UID and a version digest
   (SHA-256 of the key's value, never the value).
 - `semanticsDigest`: SHA-256 over `configuration` in canonical JSON.
+
+A revision's serialized size is capped at 512 KiB, well under etcd's
+object limit; the largest router today renders about 530 FRR lines. A
+router whose revision would exceed the cap is rejected with
+`Accepted=False`, reason `RevisionTooLarge`, and stays on its current
+revision.
 - `activationDependencyDigest`: SHA-256 over target identity,
   `semanticsDigest`, parameters identity, compiler/FRR versions and
   credential version digests. A credential rotation changes this digest
@@ -93,9 +99,13 @@ revision name, activation dependency digest). Cluster ID is the
 3. Journal: append `Accepted` with the activation tuple, the previous
    last-known-good, and the recovery target and revocations the
    deployment carries. Fsync.
-4. Apply: `frr-reload.py --reload` under the existing single-writer lock
-   (also taken by the IPv4-mapped next-hop reset), bounded by
-   `--apply-timeout` (default 60s). Append `Applied` or `ApplyFailed`.
+4. Apply: `frr-reload.py --reload` under a new single-writer lock,
+   bounded by `--apply-timeout` (default 60s). Append `Applied` or
+   `ApplyFailed`. Today nothing serializes the reload with the IPv4-mapped
+   next-hop reset (`internal/fabricconfig/nexthop.go` calls vtysh
+   directly), so this work adds the lock: an in-process mutex plus an
+   `flock` on `/run/frr/fabric-agent.lock`, taken by reload, neighbor
+   reset, recovery and maintenance actions.
 5. Observe: compare `show running-config` (normalized by the same
    `frr-reload.py` parser) with the rendered file; check required static
    routes are in the FIB and required sessions reach Established; collect
@@ -214,8 +224,9 @@ contributors (an aggregate whose last contributor is withdrawn is
 reported) and adds the prefixes to `revokedPrefixes`. The revision goes
 through a normal epoch and the agent's journal. It does not need the
 unrelated missing references that block ordinary compilation, and it
-requires an `EmergencyWithdrawal` authorization instead of a fleet
-release.
+requires a `FabricReleaseAuthorization` of `type: EmergencyWithdrawal`
+instead of `Release`. The controller accepts one while a release is
+outstanding, since it exists to repair one.
 
 ## Fleet release authorization
 
