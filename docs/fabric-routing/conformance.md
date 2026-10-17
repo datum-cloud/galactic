@@ -118,11 +118,11 @@ an activation dependency (see `contracts.md`).
 
 ## Advertisements
 
-| FRR construct (count)                     | Typed source                                                                                 | Notes / reject                                                                                                                                                                                                                                                                                  |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `network P route-map R` (55 v6, 24 v4)    | `BGPAdvertisement{addressFamily, prefixes[], policyRef}`                                     | One statement per prefix, all with the advertisement's policy. Prefixes are canonicalized (`2607:ed40:010c::/48` renders `2607:ed40:10c::/48`, which FRR's own parser produces from either spelling). The route must exist in the RIB, normally from a `BGPStaticRoute` or a connected address. |
-| `aggregate-address P route-map R` (30)    | `BGPAdvertisement.spec.aggregation.{prefix, summaryOnly: false, asSet: false}` + `policyRef` | FRR aggregates only from contributors already in the BGP table, so `aggregation` never creates a discard route. `summaryOnly`/`asSet` render `summary-only`/`as-set`. Mutually exclusive with `prefixes` and `redistribute` on one advertisement.                                               |
-| `redistribute connected route-map R` (29) | `BGPAdvertisement.spec.redistribute: [connected]` + `policyRef`                              | `static` and `kernel` render the same way. A redistribution without a policy is rejected for fabric routers.                                                                                                                                                                                    |
+| FRR construct (count)                     | Typed source                                                                                 | Notes / reject                                                                                                                                                                                                                                                                                |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `network P route-map R` (55 v6, 24 v4)    | `BGPAdvertisement{addressFamily, prefixes[], policyRef}`                                     | One statement per prefix, all with the advertisement's policy. Prefixes are canonicalized (`2001:db8:010c::/48` renders `2001:db8:10c::/48`, which FRR's own parser produces from either spelling). The route must exist in the RIB, normally from a `BGPStaticRoute` or a connected address. |
+| `aggregate-address P route-map R` (30)    | `BGPAdvertisement.spec.aggregation.{prefix, summaryOnly: false, asSet: false}` + `policyRef` | FRR aggregates only from contributors already in the BGP table, so `aggregation` never creates a discard route. `summaryOnly`/`asSet` render `summary-only`/`as-set`. Mutually exclusive with `prefixes` and `redistribute` on one advertisement.                                             |
+| `redistribute connected route-map R` (29) | `BGPAdvertisement.spec.redistribute: [connected]` + `policyRef`                              | `static` and `kernel` render the same way. A redistribution without a policy is rejected for fabric routers.                                                                                                                                                                                  |
 
 Rejected on fabric-class advertisements: `originateFrom`, `communities`,
 `localPreference`, `vrfID`, `function` (EVPN/tenant fields), and a missing
@@ -187,9 +187,13 @@ non-default instances, and EVPN address families on fabric routers.
 
 ## Fixtures
 
-The compiler change adds `internal/fabric/routing/testdata/` with the 19
-rendered configurations and the typed resources infra's generator emits for
-them. A unit test compiles each router and compares FRR's normalized form;
-an integration test (build tag `frr`, needs Docker) runs the pinned
-`frr-reload.py --test --input` against each rendered file and fails on any
-delta.
+This repository is public and infra is private, so the rendered production
+configurations never enter it. The compiler change adds
+`internal/fabric/routing/testdata/` with synthetic configurations, in
+documentation address ranges, that exercise every construct in this matrix.
+An importer turns a rendered `frr.conf` into the typed resources, and a unit
+test imports, compiles and compares each synthetic file in FRR's normalized
+form. The same test reads every `*.conf` under `FABRIC_PARITY_DIR` when that
+variable is set; infra's CI points it at the 19 rendered files. An
+integration test (build tag `frr`, needs Docker) runs the pinned
+`frr-reload.py --test --input` against each file and fails on any delta.
