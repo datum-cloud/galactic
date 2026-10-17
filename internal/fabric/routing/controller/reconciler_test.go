@@ -216,6 +216,8 @@ func TestControllerCompilesRevisions(t *testing.T) {
 
 	t.Run("a policy change makes a new revision", s.aPolicyChangeMakesANewRevision)
 
+	t.Run("a revision a deployment uses is never pruned", s.aRevisionADeploymentUsesIsNeverPruned)
+
 	t.Run("only the newest revisions are kept", s.onlyTheNewestRevisionsAreKept)
 
 	t.Run("a missing reference keeps the last revision", s.aMissingReferenceKeepsTheLastRevision)
@@ -271,6 +273,52 @@ func (s *suite) aPolicyChangeMakesANewRevision(t *testing.T) {
 	old := &networkv1alpha1.FabricRouterRevision{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: s.first}, old); err != nil {
 		t.Errorf("the previous revision was not kept: %v", err)
+	}
+}
+
+// aRevisionADeploymentUsesIsNeverPruned: a revision a deployment names
+// survives more than KeepRevisions newer ones.
+func (s *suite) aRevisionADeploymentUsesIsNeverPruned(t *testing.T) {
+	c := s.c
+	ctx := context.Background()
+	r := router(t, c, testNode)
+	node := &corev1.Node{}
+	if err := c.Get(ctx, client.ObjectKey{Name: testNode}, node); err != nil {
+		t.Fatal(err)
+	}
+	dep := &networkv1alpha1.FabricRouterDeployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: testNode},
+		Spec: networkv1alpha1.FabricRouterDeploymentSpec{
+			RouterRef:            networkv1alpha1.FabricObjectIdentity{Name: testNode, UID: string(r.UID)},
+			Target:               networkv1alpha1.FabricNodeIdentity{NodeName: testNode, NodeUID: string(node.UID)},
+			Source:               networkv1alpha1.FabricConfigSourceConfigMap,
+			CandidateRevisionRef: &networkv1alpha1.LocalObjectRef{Name: s.first},
+		},
+	}
+	if err := c.Create(ctx, dep); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Delete(ctx, dep) })
+	for i := range KeepRevisions + 1 {
+		pol := &networkv1alpha1.BGPPolicy{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: originatePolicy}, pol); err != nil {
+			t.Fatal(err)
+		}
+		before := latest(c)
+		pol.Spec.Terms[0].Description = "in use " + strconv.Itoa(i)
+		if err := c.Update(ctx, pol); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "a new revision", func() bool { return latest(c) != before })
+	}
+	revs := &networkv1alpha1.FabricRouterRevisionList{}
+	eventually(t, "pruning", func() bool {
+		_ = c.List(ctx, revs, client.InNamespace(testNS), client.MatchingLabels{RouterLabel: testNode})
+		return len(revs.Items) <= KeepRevisions+1
+	})
+	kept := &networkv1alpha1.FabricRouterRevision{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: s.first}, kept); err != nil {
+		t.Errorf("the revision a deployment names was pruned: %v", err)
 	}
 }
 

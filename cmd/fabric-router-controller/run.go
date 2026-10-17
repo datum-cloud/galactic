@@ -17,6 +17,7 @@ import (
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/fabric/routing/controller"
+	"go.datum.net/galactic/internal/fabric/routing/rollout"
 )
 
 // leaderElectionID is the lease the controller's replicas share.
@@ -29,11 +30,17 @@ func newRunCommand() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Compile every fabric-class BGPRouter into FabricRouterRevisions",
+		Short: "Compile fabric routers into revisions and roll them out",
 		Long: `Watches the BGPRouters whose class names this controller and every object
 their configuration reads, and creates an immutable FabricRouterRevision
 for each router's current inputs. It reports Accepted and ResolvedRefs on
-the router and keeps its newest revisions. It never writes FRR.`,
+the router and keeps its newest revisions and every revision a deployment
+uses.
+
+It also gives each compiled router a FabricRouterDeployment, keeps its
+candidate on the newest revision, and runs FabricReleaseAuthorizations:
+one release per routing domain at a time, promoting within each router's
+FabricRolloutPolicy. It never writes FRR; the node agents do.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctrl.SetLogger(zap.New())
@@ -54,6 +61,15 @@ the router and keeps its newest revisions. It never writes FRR.`,
 			}
 			if err := (&controller.Reconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("set up revision controller: %w", err)
+			}
+			recorder := mgr.GetEventRecorder("fabric-router-controller")
+			if err := (&rollout.DeploymentReconciler{Client: mgr.GetClient(),
+				Recorder: recorder}).SetupWithManager(mgr); err != nil {
+				return fmt.Errorf("set up deployment controller: %w", err)
+			}
+			if err := (&rollout.ReleaseReconciler{Client: mgr.GetClient(),
+				Recorder: recorder}).SetupWithManager(mgr); err != nil {
+				return fmt.Errorf("set up release controller: %w", err)
 			}
 			if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 				return err

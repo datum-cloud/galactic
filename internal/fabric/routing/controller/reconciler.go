@@ -72,6 +72,7 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=bgprouterclasses;frrrouterparameters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=bgppeers;bgppeerprofiles;bgppolicies;bgpprefixlists;bgpcommunitysets;bgpadvertisements;bgpstaticroutes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricrouterrevisions,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricrouterdeployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -415,10 +416,8 @@ func (r *Reconciler) ensureRevision(
 // controls, never the latest, ordered by the creation sequence the
 // controller records.
 //
-// TODO(fabric-routing): once FabricRouterDeployment exists, also keep each
-// node's active, candidate and recovery-target revisions and apply the
-// 30-day age rule; until then a node agent must not activate a revision
-// older than the newest KeepRevisions.
+// A revision a FabricRouterDeployment names as its active, candidate or
+// recovery target is always kept, so a node can resume or recover to it.
 func (r *Reconciler) prune(ctx context.Context, router *networkv1alpha1.BGPRouter, latest string) error {
 	revs := &networkv1alpha1.FabricRouterRevisionList{}
 	if err := r.List(ctx, revs, client.InNamespace(router.Namespace),
@@ -431,10 +430,14 @@ func (r *Reconciler) prune(ctx context.Context, router *networkv1alpha1.BGPRoute
 			items = append(items, rev)
 		}
 	}
+	inUse, err := r.deployed(ctx, router)
+	if err != nil {
+		return err
+	}
 	sort.SliceStable(items, func(i, j int) bool { return sequence(&items[i]) > sequence(&items[j]) })
 	kept := 0
 	for i := range items {
-		if items[i].Name == latest {
+		if items[i].Name == latest || inUse[items[i].Name] {
 			continue
 		}
 		if kept < KeepRevisions-1 {
@@ -446,6 +449,29 @@ func (r *Reconciler) prune(ctx context.Context, router *networkv1alpha1.BGPRoute
 		}
 	}
 	return nil
+}
+
+// deployed names the revisions the router's deployments refer to.
+func (r *Reconciler) deployed(ctx context.Context, router *networkv1alpha1.BGPRouter) (map[string]bool, error) {
+	deps := &networkv1alpha1.FabricRouterDeploymentList{}
+	if err := r.List(ctx, deps, client.InNamespace(router.Namespace)); err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, d := range deps.Items {
+		if d.Spec.RouterRef.Name != router.Name {
+			continue
+		}
+		for _, ref := range []*networkv1alpha1.LocalObjectRef{d.Spec.ActiveRevisionRef, d.Spec.CandidateRevisionRef} {
+			if ref != nil {
+				out[ref.Name] = true
+			}
+		}
+		if rec := d.Spec.Recovery; rec != nil && rec.TargetRevisionRef != nil {
+			out[rec.TargetRevisionRef.Name] = true
+		}
+	}
+	return out, nil
 }
 
 // sequence is a revision's creation order: the controller's annotation, or
