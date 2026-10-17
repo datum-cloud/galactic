@@ -802,15 +802,22 @@ func (a *Activator) runningDiff(ctx context.Context, rendered string) ([]string,
 
 // normalizeRunning drops the lines FRR adds to or omits from a displayed
 // configuration that carry no routing meaning: the hostname, which FRR
-// reports as the host's, the banner, vtysh's own integrated-config setting
-// and the closing end.
+// reports as the host's, the banner, vtysh's own integrated-config setting,
+// the closing end, and an empty block for each VRF device on the host,
+// which zebra shows whether or not any configuration names it.
 func normalizeRunning(text string) frrtext.Config {
 	var keep []string
-	for _, line := range strings.Split(text, "\n") {
+	lines := strings.Split(text, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
 		t := strings.TrimSpace(line)
 		if strings.HasPrefix(t, "hostname ") || strings.HasPrefix(t, "Building configuration") ||
 			strings.HasPrefix(t, "Current configuration") || t == "service integrated-vtysh-config" ||
 			(t == "end" && line == t) {
+			continue
+		}
+		if strings.HasPrefix(line, "vrf ") && i+1 < len(lines) && strings.TrimSpace(lines[i+1]) == "exit-vrf" {
+			i++
 			continue
 		}
 		keep = append(keep, line)

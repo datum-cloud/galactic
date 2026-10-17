@@ -125,10 +125,11 @@ func (f *fakeRouter) Reload(_ context.Context, path string) error {
 	return nil
 }
 
-// Running wraps the configuration as vtysh displays it.
+// Running wraps the configuration as vtysh displays it, with an empty
+// block for a VRF device on the host.
 func (f *fakeRouter) Running(context.Context) (string, error) {
 	return "Building configuration...\n\nCurrent configuration:\n!\nfrr version 10.7.1\n" +
-		"service integrated-vtysh-config\n" + f.get() + "!\nend\n", nil
+		"service integrated-vtysh-config\n" + f.get() + "!\nvrf G000000010V\nexit-vrf\n!\nend\n", nil
 }
 
 func (f *fakeRouter) get() string {
