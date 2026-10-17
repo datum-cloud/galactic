@@ -411,5 +411,3 @@ _Appears in:_
 | `sourcePorts` _[PortRange](#portrange) array_ | SourcePorts are source port ranges. They require protocol TCP or UDP,<br />and ranges must not overlap. |  | MaxItems: 16 <br />MinItems: 1 <br /> |
 | `destinationPorts` _[PortRange](#portrange) array_ | DestinationPorts are destination port ranges. They require protocol TCP<br />or UDP, and ranges must not overlap. |  | MaxItems: 16 <br />MinItems: 1 <br /> |
 | `icmp` _[ICMPMatch](#icmpmatch)_ | ICMP matches a message type and code. It requires protocol ICMP or<br />ICMPv6. |  |  |
-
-

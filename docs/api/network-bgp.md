@@ -323,7 +323,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `type` _[BGPCommunitySetType](#bgpcommunitysettype)_ | Type is the community format for all entries in this set. |  | Enum: [standard large] <br />Required: \{\} <br /> |
-| `entries` _string array_ | Entries is the list of community values.<br />Standard: ASN:NN, IP:NN, or well-known names (graceful-shutdown, no-export,<br />no-advertise, blackhole).<br />Large: ASN:NN:NN. |  | MaxItems: 256 <br />MinItems: 1 <br /> |
+| `entries` _string array_ | Entries is the list of community values.<br />Standard: ASN:NN, IP:NN, or well-known names (graceful-shutdown, no-export,<br />no-advertise, blackhole).<br />Large: ASN:NN:NN. |  | MaxItems: 256 <br />MinItems: 1 <br />items:MaxLength: 32 <br /> |
 
 
 #### BGPCommunitySetStatus
@@ -734,6 +734,12 @@ _Appears in:_
 BGPPrefixListEntry defines a single entry in a named BGP prefix-list.
 Entries are evaluated in ascending sequence order.
 
+GE and LE bound the matched prefix length. Both are limited by the
+entry's family (32 for IPv4, 128 for IPv6), GE may not be shorter than
+the prefix's own length, and LE may not be shorter than GE (or the
+prefix's length when GE is unset): FRR's own rule, mask length <= ge <= le.
+A malformed prefix is reported by the prefix field's rule alone.
+
 
 
 _Appears in:_
@@ -741,11 +747,11 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sequence` _integer_ | Sequence is the evaluation order for this entry. Entries with lower<br />sequence numbers are evaluated first. Must be unique within the list. |  | Maximum: 4.294967295e+09 <br />Minimum: 5 <br /> |
+| `sequence` _integer_ | Sequence is the evaluation order for this entry. Entries with lower<br />sequence numbers are evaluated first. Must be unique within the list.<br />The range is FRR's: 1 to 4294967295. |  | Maximum: 4.294967295e+09 <br />Minimum: 1 <br /> |
 | `action` _[BGPPolicyAction](#bgppolicyaction)_ | Action is the disposition when a route's prefix matches this entry. |  | Enum: [permit deny] <br />Required: \{\} <br /> |
-| `prefix` _string_ | Prefix is the IPv4 or IPv6 CIDR to match against. |  | MinLength: 1 <br />Required: \{\} <br /> |
-| `ge` _integer_ | GE is the minimum prefix-length to match (greater-than-or-equal).<br />For example, "10.0.0.0/8 ge 16" matches 10.0.0.0/16 through 10.0.0.0/32.<br />When unset, the prefix-length of Prefix is the lower bound. |  | Maximum: 32 <br />Minimum: 0 <br /> |
-| `le` _integer_ | LE is the maximum prefix-length to match (less-than-or-equal).<br />For example, "10.0.0.0/8 le 24" matches 10.0.0.0/8 through 10.0.0.0/24.<br />When unset, the prefix-length of Prefix is the upper bound. |  | Maximum: 32 <br />Minimum: 0 <br /> |
+| `prefix` _string_ | Prefix is the IPv4 or IPv6 CIDR to match against. |  | MaxLength: 43 <br />MinLength: 1 <br />Required: \{\} <br /> |
+| `ge` _integer_ | GE is the minimum prefix-length to match (greater-than-or-equal).<br />For example, "10.0.0.0/8 ge 16" matches lengths /16 through /32, and<br />"2607:ed40:8003::/48 ge 49" lengths /49 through /128.<br />When unset, the prefix-length of Prefix is the lower bound. |  | Maximum: 128 <br />Minimum: 0 <br /> |
+| `le` _integer_ | LE is the maximum prefix-length to match (less-than-or-equal).<br />For example, "10.0.0.0/8 le 24" matches 10.0.0.0/8 through 10.0.0.0/24.<br />When unset, the prefix-length of Prefix is the upper bound, unless GE<br />is set, in which case the family's maximum length is. |  | Maximum: 128 <br />Minimum: 0 <br /> |
 
 
 
