@@ -50,6 +50,7 @@ func newRootCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	cmd.AddCommand(newImportCommand(), newPreviewCommand(), newDiffCommand(), newRunCommand())
+	cmd.AddCommand(newOpsCommands()...)
 	return cmd
 }
 

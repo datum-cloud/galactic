@@ -2163,6 +2163,7 @@ _Appears in:_
 | `deploymentUID` _string_ | DeploymentUID is its UID, so a recreated deployment is not covered. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
 | `revision` _string_ | Revision is the FabricRouterRevision to activate. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
 | `activationDependencyDigest` _string_ | ActivationDependencyDigest is that revision's digest. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
+| `retire` _boolean_ | Retire decommissions the router with this promotion: its revision<br />is the last it runs, nothing is restored over it and no later<br />release promotes it. |  |  |
 
 
 #### FabricReleaseType

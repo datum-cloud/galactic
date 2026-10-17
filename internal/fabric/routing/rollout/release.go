@@ -421,7 +421,7 @@ func (r *ReleaseReconciler) promoteWaiting(ctx context.Context, auth *networkv1a
 			// Promoted under another release since it was read.
 			continue
 		}
-		dep.Spec = promote(dep, rev, auth, activationSettings(e.policy, rev))
+		dep.Spec = promote(dep, rev, auth, e.target, activationSettings(e.policy, rev))
 		if err := r.Update(ctx, dep); err != nil {
 			return false, err
 		}

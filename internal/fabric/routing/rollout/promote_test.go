@@ -85,7 +85,7 @@ func TestPromote(t *testing.T) {
 
 	d := committedDeployment(3, r1)
 	d.Spec.Recovery = &networkv1alpha1.FabricRecovery{RevokedPrefixes: []string{prefixB}}
-	spec := promote(d, r2, auth, &networkv1alpha1.FabricActivationSettings{})
+	spec := promote(d, r2, auth, networkv1alpha1.FabricReleaseTarget{}, &networkv1alpha1.FabricActivationSettings{})
 	if spec.ActivationEpoch != 4 || spec.ActiveRevisionRef.Name != r2.Name || spec.ActivationDependencyDigest != digestB ||
 		spec.AuthorizationRef.UID != relUID {
 		t.Fatalf("promoted = %+v", spec)
@@ -104,7 +104,8 @@ func TestPromote(t *testing.T) {
 	uncommitted.Spec.Recovery = &networkv1alpha1.FabricRecovery{
 		TargetRevisionRef: &networkv1alpha1.LocalObjectRef{Name: "r-older"}, TargetDependencyDigest: digestB,
 	}
-	if got := promote(uncommitted, r2, auth, nil).Recovery.TargetRevisionRef.Name; got != "r-older" {
+	if got := promote(uncommitted, r2, auth, networkv1alpha1.FabricReleaseTarget{},
+		nil).Recovery.TargetRevisionRef.Name; got != "r-older" {
 		t.Errorf("recovery target %s for an uncommitted epoch", got)
 	}
 
@@ -112,9 +113,12 @@ func TestPromote(t *testing.T) {
 	ew := auth.DeepCopy()
 	ew.Spec.Type = networkv1alpha1.FabricReleaseTypeEmergencyWithdrawal
 	ew.Spec.WithdrawnPrefixes = []string{prefixA, prefixB}
-	got := promote(d, r2, ew, nil).Recovery.RevokedPrefixes
+	got := promote(d, r2, ew, networkv1alpha1.FabricReleaseTarget{}, nil).Recovery.RevokedPrefixes
 	if !slices.Equal(got, []string{prefixB, prefixA}) {
 		t.Errorf("revoked after withdrawal %v", got)
+	}
+	if r := promote(d, r2, auth, networkv1alpha1.FabricReleaseTarget{Retire: true}, nil).Recovery; !r.Retired {
+		t.Error("a retiring promotion did not retire the router")
 	}
 }
 

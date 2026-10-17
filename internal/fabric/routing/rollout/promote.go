@@ -110,7 +110,7 @@ func committed(d *networkv1alpha1.FabricRouterDeployment) bool {
 // the recovery d already had). Revocations carry over; an emergency
 // withdrawal adds the prefixes it withdraws.
 func promote(d *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.FabricRouterRevision,
-	auth *networkv1alpha1.FabricReleaseAuthorization,
+	auth *networkv1alpha1.FabricReleaseAuthorization, target networkv1alpha1.FabricReleaseTarget,
 	settings *networkv1alpha1.FabricActivationSettings) networkv1alpha1.FabricRouterDeploymentSpec {
 	spec := *d.Spec.DeepCopy()
 	recovery := &networkv1alpha1.FabricRecovery{}
@@ -131,6 +131,9 @@ func promote(d *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.Fab
 				recovery.RevokedPrefixes = append(recovery.RevokedPrefixes, p)
 			}
 		}
+	}
+	if target.Retire {
+		recovery.Retired = true
 	}
 	spec.ActivationEpoch = d.Spec.ActivationEpoch + 1
 	spec.ActiveRevisionRef = &networkv1alpha1.LocalObjectRef{Name: rev.Name}

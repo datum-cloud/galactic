@@ -133,6 +133,11 @@ type FabricReleaseTarget struct {
 	// ActivationDependencyDigest is that revision's digest.
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
 	ActivationDependencyDigest string `json:"activationDependencyDigest"`
+	// Retire decommissions the router with this promotion: its revision
+	// is the last it runs, nothing is restored over it and no later
+	// release promotes it.
+	// +optional
+	Retire bool `json:"retire,omitempty"`
 }
 
 // FabricReleaseAuthorizationStatus is a release's progress.

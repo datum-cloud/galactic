@@ -86,6 +86,12 @@ spec:
                       maxLength: 36
                       minLength: 1
                       type: string
+                    retire:
+                      description: |-
+                        Retire decommissions the router with this promotion: its revision
+                        is the last it runs, nothing is restored over it and no later
+                        release promotes it.
+                      type: boolean
                     revision:
                       description: Revision is the FabricRouterRevision to activate.
                       maxLength: 253

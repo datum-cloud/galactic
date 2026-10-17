@@ -24,6 +24,28 @@ roll it out like a routing change, one canary node first. Without the rollout
 manager no deployment exists. Without node activation, a deployment changes
 nothing on the node.
 
+## Commands
+
+`fabric-router-controller` carries the operator workflows. Each writes only the
+API objects the rollout manager and node agents act on, through the API, so the
+CRDs' admission rules hold every write to the activation contract. None writes
+FRR or a node's status. They use the current kubeconfig; `-n` sets the
+namespace, `galactic-system` by default.
+
+| Command                                                     | What it does                                                                                                                          |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                                                    | One line per router: node, source, epoch, active and applied revision, waiting candidate, conditions that need attention, last report |
+| `source DEPLOYMENT Shadow\|CRD\|ConfigMap`                  | Moves a node's source. Leaving CRD names the node's ConfigMap, as it is now, in the handoff the agent checks                          |
+| `release create NAME --domain D --sequence N [DEPLOYMENT…]` | Authorizes promoting the named deployments, or every changed one on CRD, to their candidates. `--dry-run` prints it first             |
+| `release create … --withdraw PREFIX`                        | The same as an emergency withdrawal of those prefixes, which no later release or recovery restores                                    |
+| `release create … --retire`                                 | Decommissions the routers with this last promotion                                                                                    |
+| `release status NAME`                                       | The release's phase and where each router stands                                                                                      |
+| `release confirm-recovery NAME --by WHO`                    | Releases a failed release's routing domain once an operator confirmed its routers are safe                                            |
+| `suspend DEPLOYMENT`, `resume DEPLOYMENT`                   | Stops and allows promotion; the router keeps running what it runs                                                                     |
+| `rebind DEPLOYMENT --from-uid UID --by WHO`                 | Lets a recreated or restored deployment take over its node's journal                                                                  |
+| `move DEPLOYMENT NODE --fenced-by WHO --method HOW`         | Retargets a router once the node it leaves is fenced                                                                                  |
+| `import`, `preview`, `diff`                                 | Turn a rendered `frr.conf` into typed resources, show what resources compile to, and compare that with a running configuration        |
+
 ## Configuration sources
 
 A node's `FabricRouterDeployment` has `spec.source`:
