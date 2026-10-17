@@ -42,6 +42,10 @@ type BGPCommunitySet struct {
 // +kubebuilder:validation:XValidation:rule="self.type == 'standard' ? self.entries.all(e, e.matches('^[0-9]{1,10}:[0-9]{1,10}$') || e.matches('^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}:[0-9]{1,10}$') || e == 'graceful-shutdown' || e == 'no-export' || e == 'no-advertise' || e == 'blackhole') : true",message="standard entries must be ASN:NN, IP:NN, or a well-known name"
 // +kubebuilder:validation:XValidation:rule="self.type == 'large' ? self.entries.all(e, e.matches('^[0-9]{1,10}:[0-9]{1,10}:[0-9]{1,10}$')) : true",message="large entries must be ASN:NN:NN"
 type BGPCommunitySetSpec struct {
+	// FRR holds FRR rendering settings.
+	// +optional
+	FRR *FRRNameOverride `json:"frr,omitempty"`
+
 	// Type is the community format for all entries in this set.
 	// +kubebuilder:validation:Required
 	Type BGPCommunitySetType `json:"type"`

@@ -35,7 +35,9 @@ const (
 	// SendCommunityTypeLarge sends only large communities (ASN:NN:NN).
 	SendCommunityTypeLarge SendCommunityType = "large"
 
-	// SendCommunityTypeBoth sends both standard and extended communities.
+	// SendCommunityTypeBoth is FRR's `send-community both`. Which community
+	// attributes a receiver actually gets is tested on the pinned FRR build,
+	// not inferred from the keyword.
 	SendCommunityTypeBoth SendCommunityType = "both"
 )
 
@@ -130,12 +132,17 @@ type BGPPeer struct {
 }
 
 // BGPPeerSpec defines the desired state of BGPPeer.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.routerRef) != has(self.routerSelector)",message="Exactly one of routerRef or routerSelector must be set"
+// +kubebuilder:validation:XValidation:rule="!has(self.addressFamilies) || !has(self.familySettings) || self.familySettings.all(f, self.addressFamilies.exists(a, a.afi == f.afi && a.safi == f.safi))",message="every familySettings entry must be one of addressFamilies"
+// +kubebuilder:validation:XValidation:rule="has(self.addressFamilies) || has(self.peerProfileRef)",message="addressFamilies is required unless peerProfileRef supplies them"
 type BGPPeerSpec struct {
 	RouterTarget `json:",inline"`
 
 	// PeerASN is the remote AS number.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
 	PeerASN int64 `json:"peerASN"`
 
 	// Address is the remote peer's IPv4 or IPv6 address.
@@ -153,6 +160,8 @@ type BGPPeerSpec struct {
 
 	// Description is a human-readable label for this peer (e.g., "spine-1").
 	// +optional
+	// +kubebuilder:validation:MaxLength=80
+	// +kubebuilder:validation:Pattern=`^[^\r\n]*$`
 	Description string `json:"description,omitempty"`
 
 	// AuthSecretRef references a Secret in the same namespace containing the
@@ -161,8 +170,34 @@ type BGPPeerSpec struct {
 	AuthSecretRef *LocalSecretRef `json:"authSecretRef,omitempty"`
 
 	// AddressFamilies defines the address families negotiated on this session.
+	// Required unless peerProfileRef is set; a peer with a profile and no
+	// list activates the profile's families, and a list must then be a
+	// subset of them.
+	// +optional
 	// +kubebuilder:validation:MinItems=1
-	AddressFamilies []AddressFamily `json:"addressFamilies"`
+	// +kubebuilder:validation:MaxItems=8
+	AddressFamilies []AddressFamily `json:"addressFamilies,omitempty"`
+
+	// PeerProfileRef names the BGPPeerProfile whose settings this peer
+	// uses. Honored by the fabric router implementation only; the Galactic
+	// EVPN router rejects a peer that sets it.
+	// +optional
+	PeerProfileRef *LocalObjectRef `json:"peerProfileRef,omitempty"`
+
+	// Transport overrides the profile's transport settings field by field.
+	// Honored by the fabric router implementation only.
+	// +optional
+	Transport *BGPPeerTransport `json:"transport,omitempty"`
+
+	// FamilySettings holds per-family settings. A field set here overrides
+	// the same field in the profile's family. Honored by the fabric router
+	// implementation only.
+	// +optional
+	// +listType=map
+	// +listMapKey=afi
+	// +listMapKey=safi
+	// +kubebuilder:validation:MaxItems=8
+	FamilySettings []BGPPeerFamilySettings `json:"familySettings,omitempty"`
 
 	// HoldTime is the BGP hold timer. Must be 0 (disabled) or >= 3s.
 	// Defaults to 90s if unset.
@@ -228,6 +263,8 @@ type BGPPeerSpec struct {
 	// source for the BGP TCP session. Useful when the local router has
 	// multiple addresses or when pinning to a specific loopback.
 	// +optional
+	// +kubebuilder:validation:MaxLength=45
+	// +kubebuilder:validation:XValidation:rule="isIP(self) || self.matches('^[A-Za-z0-9_.@-]{1,15}$')",message="updateSource must be an IP address or an interface name"
 	UpdateSource *string `json:"updateSource,omitempty"`
 
 	// SendCommunity controls which BGP community attributes are propagated

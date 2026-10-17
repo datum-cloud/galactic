@@ -90,7 +90,9 @@ type BGPAdvertisement struct {
 // BGPAdvertisementSpec defines the desired advertisement state.
 // At least one of prefixes, redistribute, or originateFrom must be specified.
 //
-// +kubebuilder:validation:XValidation:rule="(has(self.prefixes) && self.prefixes.size() > 0) || (has(self.redistribute) && self.redistribute.size() > 0) || has(self.originateFrom)",message="at least one of prefixes, redistribute, or originateFrom must be specified"
+// +kubebuilder:validation:XValidation:rule="(has(self.prefixes) && self.prefixes.size() > 0) || (has(self.redistribute) && self.redistribute.size() > 0) || has(self.originateFrom) || has(self.aggregation)",message="at least one of prefixes, redistribute, originateFrom, or aggregation must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.aggregation) || ((!has(self.prefixes) || self.prefixes.size() == 0) && (!has(self.redistribute) || self.redistribute.size() == 0) && !has(self.originateFrom))",message="aggregation cannot be combined with prefixes, redistribute, or originateFrom"
+// +kubebuilder:validation:XValidation:rule="!has(self.aggregation) || !isCIDR(self.aggregation.prefix) || (self.addressFamily.afi == 'ipv4' && cidr(self.aggregation.prefix).ip().family() == 4) || (self.addressFamily.afi == 'ipv6' && cidr(self.aggregation.prefix).ip().family() == 6)",message="aggregation prefix must be in the advertisement's unicast address family"
 type BGPAdvertisementSpec struct {
 	// RouterRef targets a single BGPRouter by name.
 	// +kubebuilder:validation:Required
@@ -120,6 +122,13 @@ type BGPAdvertisementSpec struct {
 	// At least one of Prefixes, Redistribute, or OriginateFrom must be specified.
 	// +optional
 	OriginateFrom *AdvertisementOriginateFrom `json:"originateFrom,omitempty"`
+
+	// Aggregation originates an aggregate of contributing routes already in
+	// the BGP table. It never installs a discard route; pair it with a
+	// BGPStaticRoute where one is wanted. Honored by the fabric router
+	// implementation only.
+	// +optional
+	Aggregation *BGPAggregation `json:"aggregation,omitempty"`
 
 	// PolicyRef references a BGPPolicy to apply as a conditional filter before advertisement.
 	// Only routes that match the policy are originated.
@@ -152,6 +161,24 @@ type BGPAdvertisementSpec struct {
 	// advertisement originates a compressed uSID. Required when VRFID is set.
 	// +optional
 	Function *SRv6Function `json:"function,omitempty"`
+}
+
+// BGPAggregation is one aggregate route.
+type BGPAggregation struct {
+	// Prefix is the aggregate in CIDR notation.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=43
+	// +kubebuilder:validation:XValidation:rule="isCIDR(self)",message="prefix must be a valid CIDR"
+	Prefix string `json:"prefix"`
+
+	// SummaryOnly suppresses the contributing routes, advertising only the
+	// aggregate.
+	// +optional
+	SummaryOnly bool `json:"summaryOnly,omitempty"`
+
+	// ASSet carries the contributors' AS numbers in an AS_SET.
+	// +optional
+	ASSet bool `json:"asSet,omitempty"`
 }
 
 // BGPAdvertisementStatus defines the observed state of BGPAdvertisement.

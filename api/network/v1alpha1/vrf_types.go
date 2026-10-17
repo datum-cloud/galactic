@@ -21,6 +21,8 @@ type BGPVRFInstance struct {
 }
 
 // BGPVRFInstanceSpec defines the desired VRF configuration.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.routerRef) != has(self.routerSelector)",message="Exactly one of routerRef or routerSelector must be set"
 type BGPVRFInstanceSpec struct {
 	RouterTarget `json:",inline"`
 

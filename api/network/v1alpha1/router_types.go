@@ -53,6 +53,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="has(self.routerClassName) == has(oldSelf.routerClassName) && (!has(self.routerClassName) || self.routerClassName == oldSelf.routerClassName)",message="routerClassName is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.plane) == has(oldSelf.plane) && (!has(self.plane) || self.plane == oldSelf.plane)",message="plane is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.plane) || self.plane != 'Underlay' || has(self.routerClassName)",message="an Underlay router must name a routerClassName"
+// +kubebuilder:validation:XValidation:rule="!has(self.frr) || has(self.routerClassName)",message="frr settings apply only to a router that names a routerClassName"
 type BGPRouterSpec struct {
 	// RouterClassName names the BGPRouterClass whose controller owns this
 	// router. A router without one is owned by the Galactic EVPN
@@ -70,6 +71,10 @@ type BGPRouterSpec struct {
 	// +optional
 	Plane *BGPRoutingPlane `json:"plane,omitempty"`
 
+	// FRR holds settings for routers whose class is implemented with FRR.
+	// +optional
+	FRR *BGPRouterFRR `json:"frr,omitempty"`
+
 	// TargetRef identifies the Node this router executes on.
 	// +kubebuilder:validation:Required
 	TargetRef TargetRef `json:"targetRef"`
@@ -78,6 +83,7 @@ type BGPRouterSpec struct {
 	// Must be a valid 2-byte or 4-byte ASN per RFC 6793.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
 	LocalASN int64 `json:"localASN"`
 
 	// RouterID is a unique 32-bit identifier expressed in IPv4 dotted-decimal notation.
@@ -156,4 +162,45 @@ type BGPRouterList struct {
 
 func init() {
 	SchemeBuilder.Register(&BGPRouter{}, &BGPRouterList{})
+}
+
+// BGPRouterFRR holds FRR settings for one router.
+type BGPRouterFRR struct {
+	// Retain lists definitions rendered on this router even when no peer
+	// or advertisement references them, so a migrated router's first
+	// configuration matches the one it replaces. Retained definitions never
+	// create sessions or advertisements.
+	// +optional
+	Retain *BGPRouterFRRRetain `json:"retain,omitempty"`
+}
+
+// BGPRouterFRRRetain names definitions to render while unreferenced.
+type BGPRouterFRRRetain struct {
+	// PolicyRefs names BGPPolicies.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=256
+	PolicyRefs []LocalObjectRef `json:"policyRefs,omitempty"`
+
+	// PrefixListRefs names BGPPrefixLists.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=256
+	PrefixListRefs []LocalObjectRef `json:"prefixListRefs,omitempty"`
+
+	// CommunitySetRefs names BGPCommunitySets.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=512
+	CommunitySetRefs []LocalObjectRef `json:"communitySetRefs,omitempty"`
+
+	// PeerProfileRefs names BGPPeerProfiles.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	PeerProfileRefs []LocalObjectRef `json:"peerProfileRefs,omitempty"`
 }

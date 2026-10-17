@@ -78,6 +78,10 @@ type BGPPrefixList struct {
 //
 // +kubebuilder:validation:XValidation:rule="self.entries.all(e, e.prefix.contains(':') == self.entries[0].prefix.contains(':'))",message="all entries must be the same address family (IPv4 or IPv6)"
 type BGPPrefixListSpec struct {
+	// FRR holds FRR rendering settings.
+	// +optional
+	FRR *FRRNameOverride `json:"frr,omitempty"`
+
 	// Entries is the ordered list of prefix-match entries, keyed by sequence.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=1024

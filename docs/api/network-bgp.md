@@ -12,11 +12,14 @@ Package v1alpha1 contains API Schema definitions for the galactic.datumapis.com/
 - [BGPAdvertisement](#bgpadvertisement)
 - [BGPCommunitySet](#bgpcommunityset)
 - [BGPPeer](#bgppeer)
+- [BGPPeerProfile](#bgppeerprofile)
 - [BGPPolicy](#bgppolicy)
 - [BGPRouter](#bgprouter)
 - [BGPRouterClass](#bgprouterclass)
+- [BGPStaticRoute](#bgpstaticroute)
 - [BGPVRFInstance](#bgpvrfinstance)
 - [EgressShard](#egressshard)
+- [FRRRouterParameters](#frrrouterparameters)
 - [ServiceEndpoint](#serviceendpoint)
 - [ServiceRoutePolicy](#serviceroutepolicy)
 - [ServiceVIPBinding](#servicevipbinding)
@@ -34,6 +37,9 @@ _Validation:_
 
 _Appears in:_
 - [AddressFamily](#addressfamily)
+- [BGPPeerFamilySettings](#bgppeerfamilysettings)
+- [BGPStaticRouteSpec](#bgpstaticroutespec)
+- [BMPMonitor](#bmpmonitor)
 
 | Field | Description |
 | --- | --- |
@@ -212,7 +218,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `prepend` _integer_ | Prepend adds an ASN to the AS path N times. |  | Maximum: 10 <br />Minimum: 1 <br /> |
-| `asn` _integer_ | ASN is the AS number to prepend (used when prepend is set).<br />Defaults to the local ASN if not specified. |  |  |
+| `asn` _integer_ | ASN is the AS number to prepend (used when prepend is set).<br />Defaults to the local ASN if not specified. |  | Maximum: 4.294967295e+09 <br />Minimum: 1 <br /> |
 | `replace` _integer array_ | Replace replaces the entire AS path with the given list.<br />Mutually exclusive with prepend. |  | MaxItems: 32 <br /> |
 
 
@@ -259,6 +265,7 @@ _Appears in:_
 | `prefixes` _[Prefix](#prefix) array_ | Prefixes is the list of CIDR prefixes to advertise.<br />At least one of Prefixes, Redistribute, or OriginateFrom must be specified. |  | MaxItems: 256 <br />MaxLength: 64 <br /> |
 | `redistribute` _[RedistributeSource](#redistributesource) array_ | Redistribute defines routing table sources to redistribute into BGP.<br />Routes matching the source type are originated without requiring explicit CIDR entries.<br />At least one of Prefixes, Redistribute, or OriginateFrom must be specified. |  | Enum: [static connected kernel] <br />MaxItems: 3 <br /> |
 | `originateFrom` _[AdvertisementOriginateFrom](#advertisementoriginatefrom)_ | OriginateFrom defines how routes are sourced from a local interface or kernel table.<br />When set, routes are originated from the specified source in addition to any static Prefixes.<br />At least one of Prefixes, Redistribute, or OriginateFrom must be specified. |  |  |
+| `aggregation` _[BGPAggregation](#bgpaggregation)_ | Aggregation originates an aggregate of contributing routes already in<br />the BGP table. It never installs a discard route; pair it with a<br />BGPStaticRoute where one is wanted. Honored by the fabric router<br />implementation only. |  |  |
 | `policyRef` _[AdvertisementPolicyRef](#advertisementpolicyref)_ | PolicyRef references a BGPPolicy to apply as a conditional filter before advertisement.<br />Only routes that match the policy are originated. |  |  |
 | `communities` _[Community](#community) array_ | Communities is the default list of BGP communities to attach to all advertised prefixes.<br />Per-prefix communities in Prefixes[n].communities replace this value for individual prefixes. |  | MaxItems: 64 <br />MaxLength: 32 <br /> |
 | `localPreference` _integer_ | LocalPreference sets the default BGP LOCAL_PREF attribute for all advertised prefixes.<br />Per-prefix localPreference in Prefixes[n].localPreference overrides this value.<br />Only meaningful for iBGP sessions. |  | Minimum: 0 <br /> |
@@ -282,6 +289,24 @@ _Appears in:_
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `advertisedPrefixes` _integer_ | AdvertisedPrefixes is the count of prefixes currently being originated. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
+
+
+#### BGPAggregation
+
+
+
+BGPAggregation is one aggregate route.
+
+
+
+_Appears in:_
+- [BGPAdvertisementSpec](#bgpadvertisementspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `prefix` _string_ | Prefix is the aggregate in CIDR notation. |  | MaxLength: 43 <br />MinLength: 1 <br /> |
+| `summaryOnly` _boolean_ | SummaryOnly suppresses the contributing routes, advertising only the<br />aggregate. |  |  |
+| `asSet` _boolean_ | ASSet carries the contributors' AS numbers in an AS_SET. |  |  |
 
 
 #### BGPCommunitySet
@@ -323,6 +348,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `frr` _[FRRNameOverride](#frrnameoverride)_ | FRR holds FRR rendering settings. |  |  |
 | `type` _[BGPCommunitySetType](#bgpcommunitysettype)_ | Type is the community format for all entries in this set. |  | Enum: [standard large] <br />Required: \{\} <br /> |
 | `entries` _string array_ | Entries is the list of community values.<br />Standard: ASN:NN, IP:NN, or well-known names (graceful-shutdown, no-export,<br />no-advertise, blackhole).<br />Large: ASN:NN:NN. |  | MaxItems: 256 <br />MinItems: 1 <br />items:MaxLength: 32 <br /> |
 
@@ -379,6 +405,24 @@ _Appears in:_
 | `limit` _integer_ | Limit is the maximum number of routes accepted from this peer. |  | Minimum: 1 <br /> |
 | `thresholdPercent` _integer_ | ThresholdPercent is the percentage threshold at which a warning is<br />logged (e.g., 75 means warn at 75% of Limit). Range: 1-100. |  | Maximum: 100 <br />Minimum: 1 <br /> |
 | `shutdownAction` _[MaxPrefixShutdownAction](#maxprefixshutdownaction)_ | ShutdownAction is the action taken when the Limit is exceeded. |  | Enum: [warning-only restart shutdown] <br />Required: \{\} <br /> |
+
+
+#### BGPNextHopMode
+
+_Underlying type:_ _string_
+
+BGPNextHopMode controls the next hop a peer family advertises.
+
+_Validation:_
+- Enum: [Unchanged Self]
+
+_Appears in:_
+- [BGPPeerFamilySettings](#bgppeerfamilysettings)
+
+| Field | Description |
+| --- | --- |
+| `Unchanged` | BGPNextHopUnchanged keeps the implementation's default next hop.<br /> |
+| `Self` | BGPNextHopSelf rewrites the next hop to the local session address.<br /> |
 
 
 #### BGPOrigin
@@ -464,6 +508,35 @@ _Appears in:_
 | `multiHop` _boolean_ | MultiHop enables BFD for eBGP multi-hop sessions (RFC 5883).<br />Must be true when ebgpMultiHop is true. |  |  |
 
 
+#### BGPPeerFamilySettings
+
+
+
+BGPPeerFamilySettings holds one address family's session settings for a
+peer or a peer profile. Every field is optional: on a peer, an unset field
+falls through to the profile's setting for the same family.
+
+
+
+_Appears in:_
+- [BGPPeerProfileSpec](#bgppeerprofilespec)
+- [BGPPeerSpec](#bgppeerspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `afi` _[AFI](#afi)_ | AFI is the address family indicator. |  | Enum: [ipv4 ipv6 l2vpn] <br /> |
+| `safi` _[SAFI](#safi)_ | SAFI is the subsequent address family indicator. |  | Enum: [unicast evpn] <br /> |
+| `softReconfigurationInbound` _boolean_ | SoftReconfigurationInbound keeps a copy of the routes received from<br />the peer, so an import policy change applies without a refresh. |  |  |
+| `prefixLimit` _[BGPPrefixLimit](#bgpprefixlimit)_ | PrefixLimit bounds the prefixes the peer may send in this family. |  |  |
+| `sendCommunity` _[SendCommunityType](#sendcommunitytype)_ | SendCommunity selects which community attributes are sent to the peer. |  | Enum: [standard extended large both] <br /> |
+| `allowASIn` _integer_ | AllowASIn accepts routes whose AS path holds the local ASN up to this<br />many times. |  | Maximum: 10 <br />Minimum: 1 <br /> |
+| `importPolicyRef` _[LocalObjectRef](#localobjectref)_ | ImportPolicyRef names the BGPPolicy applied to routes received from<br />the peer in this family. |  |  |
+| `exportPolicyRef` _[LocalObjectRef](#localobjectref)_ | ExportPolicyRef names the BGPPolicy applied to routes sent to the peer<br />in this family. A fabric peer family must resolve one: there is no<br />implicit export-everything default. |  |  |
+| `nextHopMode` _[BGPNextHopMode](#bgpnexthopmode)_ | NextHopMode controls the advertised next hop. |  | Enum: [Unchanged Self] <br /> |
+| `routeReflectorClient` _boolean_ | RouteReflectorClient treats the peer as a route-reflector client in<br />this family. |  |  |
+| `frr` _[FRRPeerFamilySettings](#frrpeerfamilysettings)_ | FRR holds FRR-specific settings. |  |  |
+
+
 #### BGPPeerGracefulRestart
 
 
@@ -485,6 +558,83 @@ _Appears in:_
 | `restartTime` _integer_ | RestartTime is the maximum time (in seconds) the peer expects the<br />local system to complete a graceful restart. Range: 1-1200.<br />Default: 120 seconds. |  | Maximum: 1200 <br />Minimum: 1 <br /> |
 
 
+#### BGPPeerProfile
+
+
+
+BGPPeerProfile is a reusable set of session settings that BGPPeers
+reference with spec.peerProfileRef. The FRR implementation renders a
+profile as one peer group and each referencing peer as a member. There
+is no profile inheritance: a peer's own transport and family settings
+override the profile field by field.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `BGPPeerProfile` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[BGPPeerProfileSpec](#bgppeerprofilespec)_ |  |  | Required: \{\} <br /> |
+| `status` _[BGPPeerProfileStatus](#bgppeerprofilestatus)_ |  |  |  |
+
+
+#### BGPPeerProfileFRR
+
+
+
+BGPPeerProfileFRR holds FRR rendering settings for a peer profile.
+
+
+
+_Appears in:_
+- [BGPPeerProfileSpec](#bgppeerprofilespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `peerGroupName` _[FRRObjectName](#frrobjectname)_ | PeerGroupName is the FRR peer group name. When unset the profile's<br />metadata.name is used. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9][A-Za-z0-9_.-]*$` <br /> |
+
+
+#### BGPPeerProfileSpec
+
+
+
+BGPPeerProfileSpec defines a peer profile's settings.
+
+
+
+_Appears in:_
+- [BGPPeerProfile](#bgppeerprofile)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `frr` _[BGPPeerProfileFRR](#bgppeerprofilefrr)_ | FRR holds FRR rendering settings. |  |  |
+| `peerASN` _integer_ | PeerASN, when set, is the remote ASN of every member. A member whose<br />own peerASN differs is rejected. |  | Maximum: 4.294967295e+09 <br />Minimum: 1 <br /> |
+| `transport` _[BGPPeerTransport](#bgppeertransport)_ | Transport holds session transport settings. |  |  |
+| `addressFamilies` _[BGPPeerFamilySettings](#bgppeerfamilysettings) array_ | AddressFamilies lists the families a member activates, with their<br />settings. |  | MaxItems: 8 <br /> |
+
+
+#### BGPPeerProfileStatus
+
+
+
+BGPPeerProfileStatus defines the observed state of BGPPeerProfile.
+
+
+
+_Appears in:_
+- [BGPPeerProfile](#bgppeerprofile)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
+
+
 #### BGPPeerSpec
 
 
@@ -500,12 +650,15 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `routerRef` _[RouterRef](#routerref)_ | RouterRef targets a single BGPRouter by name.<br />Mutually exclusive with routerSelector. |  |  |
 | `routerSelector` _[RouterSelector](#routerselector)_ | RouterSelector targets one or more BGPRouters by label.<br />Mutually exclusive with routerRef. |  |  |
-| `peerASN` _integer_ | PeerASN is the remote AS number. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `peerASN` _integer_ | PeerASN is the remote AS number. |  | Maximum: 4.294967295e+09 <br />Minimum: 1 <br />Required: \{\} <br /> |
 | `address` _string_ | Address is the remote peer's IPv4 or IPv6 address. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `remotePort` _integer_ | RemotePort is the TCP port used to establish the BGP session with<br />this peer. Defaults to 179 (the IANA-assigned BGP port) if unset. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
-| `description` _string_ | Description is a human-readable label for this peer (e.g., "spine-1"). |  |  |
+| `description` _string_ | Description is a human-readable label for this peer (e.g., "spine-1"). |  | MaxLength: 80 <br />Pattern: `^[^\r\n]*$` <br /> |
 | `authSecretRef` _[LocalSecretRef](#localsecretref)_ | AuthSecretRef references a Secret in the same namespace containing the<br />MD5 TCP authentication password under the key "password". |  |  |
-| `addressFamilies` _[AddressFamily](#addressfamily) array_ | AddressFamilies defines the address families negotiated on this session. |  | MinItems: 1 <br /> |
+| `addressFamilies` _[AddressFamily](#addressfamily) array_ | AddressFamilies defines the address families negotiated on this session.<br />Required unless peerProfileRef is set; a peer with a profile and no<br />list activates the profile's families, and a list must then be a<br />subset of them. |  | MaxItems: 8 <br />MinItems: 1 <br /> |
+| `peerProfileRef` _[LocalObjectRef](#localobjectref)_ | PeerProfileRef names the BGPPeerProfile whose settings this peer<br />uses. Honored by the fabric router implementation only; the Galactic<br />EVPN router rejects a peer that sets it. |  |  |
+| `transport` _[BGPPeerTransport](#bgppeertransport)_ | Transport overrides the profile's transport settings field by field.<br />Honored by the fabric router implementation only. |  |  |
+| `familySettings` _[BGPPeerFamilySettings](#bgppeerfamilysettings) array_ | FamilySettings holds per-family settings. A field set here overrides<br />the same field in the profile's family. Honored by the fabric router<br />implementation only. |  | MaxItems: 8 <br /> |
 | `holdTime` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#duration-v1-meta)_ | HoldTime is the BGP hold timer. Must be 0 (disabled) or >= 3s.<br />Defaults to 90s if unset. |  |  |
 | `keepaliveTime` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#duration-v1-meta)_ | KeepaliveTime is the BGP keepalive interval. Must be <= HoldTime / 3.<br />Defaults to 30s if unset. Maximum is 30s; the controller enforces<br />the keepalive <= holdTime / 3 constraint with an Accepted=False condition. |  |  |
 | `ebgpMultiHop` _boolean_ | EbgpMultiHop enables eBGP multihop when the peer is not directly connected.<br />When true, the TTL for BGP packets is set to 64 (vs. 1 for direct). |  |  |
@@ -516,7 +669,7 @@ _Appears in:_
 | `routeMapOut` _string_ | RouteMapOut is the name of a BGPPolicy term set applied to routes<br />advertised to this peer (export direction). The name must match<br />a BGPPolicy resource in the same namespace. |  |  |
 | `nextHopSelf` _boolean_ | NextHopSelf controls next-hop behavior for iBGP sessions.<br />When true, the local router's IP is used as next-hop for all<br />advertised routes. Common in EVPN iBGP peering. |  |  |
 | `removePrivateAS` _integer_ | RemovePrivateAS strips private AS numbers (64512-65535, 4200000000-4294967294)<br />from the AS path on eBGP export. If set to a non-zero value, private ASNs<br />are replaced with the specified value before export. |  | Minimum: 0 <br /> |
-| `updateSource` _string_ | UpdateSource is the local IP address or interface name used as the<br />source for the BGP TCP session. Useful when the local router has<br />multiple addresses or when pinning to a specific loopback. |  |  |
+| `updateSource` _string_ | UpdateSource is the local IP address or interface name used as the<br />source for the BGP TCP session. Useful when the local router has<br />multiple addresses or when pinning to a specific loopback. |  | MaxLength: 45 <br /> |
 | `sendCommunity` _[SendCommunityType](#sendcommunitytype)_ | SendCommunity controls which BGP community attributes are propagated<br />to this peer. When unset, communities are not sent. |  | Enum: [standard extended large both] <br /> |
 | `allowASIn` _integer_ | AllowASIn allows routes that contain the local ASN in the AS_PATH<br />to be accepted from this peer. The value specifies the maximum number<br />of times the local ASN may appear. Range: 1-10. |  | Maximum: 10 <br />Minimum: 1 <br /> |
 | `maximumPrefix` _[BGPMaximumPrefix](#bgpmaximumprefix)_ | MaximumPrefix defines the maximum number of routes accepted from this<br />peer before triggering a shutdown action. |  |  |
@@ -562,6 +715,25 @@ _Appears in:_
 | `sessionState` _[BGPPeerState](#bgppeerstate)_ | SessionState is the current BGP FSM state of this session. |  |  |
 | `lastEstablishedTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | LastEstablishedTime is the timestamp of the most recent Established transition. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
+
+
+#### BGPPeerTransport
+
+
+
+BGPPeerTransport holds session transport settings shared by a peer and its
+profile. A field set on a BGPPeer overrides the same field on its profile.
+
+
+
+_Appears in:_
+- [BGPPeerProfileSpec](#bgppeerprofilespec)
+- [BGPPeerSpec](#bgppeerspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `ebgpMultihopTTL` _integer_ | EBGPMultihopTTL allows an eBGP session over up to this many hops.<br />Unset renders no multihop line. |  | Maximum: 255 <br />Minimum: 1 <br /> |
+| `advertisementIntervalSeconds` _integer_ | AdvertisementIntervalSeconds is the minimum interval between UPDATE<br />messages. Unset leaves the implementation's default. |  | Maximum: 600 <br />Minimum: 0 <br /> |
 
 
 #### BGPPolicy
@@ -624,6 +796,22 @@ _Appears in:_
 | `export` | BGPPolicyDirectionExport applies the policy to routes advertised to peers.<br /> |
 
 
+#### BGPPolicyFRR
+
+
+
+BGPPolicyFRR holds FRR rendering settings for a policy.
+
+
+
+_Appears in:_
+- [BGPPolicySpec](#bgppolicyspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `routeMapName` _[FRRObjectName](#frrobjectname)_ | RouteMapName is the FRR route-map name. When unset the policy's<br />metadata.name is used. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9][A-Za-z0-9_.-]*$` <br /> |
+
+
 #### BGPPolicyMatch
 
 
@@ -647,6 +835,10 @@ _Appears in:_
 | `macAddress` _string_ | MACAddress matches MAC-IP routes (EVPN Type-2) by MAC address.<br />Format: colon-separated hex bytes (e.g., "aa:bb:cc:dd:ee:ff"). |  | Pattern: `^([0-9a-fA-F]\{2\}:)\{5\}[0-9a-fA-F]\{2\}$` <br /> |
 | `ipPrefix` _string_ | IPPrefix matches routes by exact IP prefix (CIDR notation). |  | MaxLength: 43 <br /> |
 | `localPreference` _integer_ | LocalPreference matches routes by BGP LOCAL_PREF value. |  | Minimum: 0 <br /> |
+| `prefixListRef` _[LocalObjectRef](#localobjectref)_ | PrefixListRef matches routes whose prefix the named BGPPrefixList<br />permits. |  |  |
+| `communitySetRef` _[LocalObjectRef](#localobjectref)_ | CommunitySetRef matches routes carrying a community the named<br />standard BGPCommunitySet permits. |  |  |
+| `largeCommunitySetRef` _[LocalObjectRef](#localobjectref)_ | LargeCommunitySetRef matches routes carrying a large community the<br />named large BGPCommunitySet permits. |  |  |
+| `interface` _string_ | Interface matches routes whose interface is the named one. Meaningful<br />only in a policy attached to a redistribution. |  | MaxLength: 15 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9_.@-]+$` <br /> |
 | `med` _integer_ | MED matches routes by Multi-Exit Discriminator value. |  | Minimum: 0 <br /> |
 
 
@@ -670,6 +862,10 @@ _Appears in:_
 | `nextHop` _[NextHopSet](#nexthopset)_ | NextHop overrides the next-hop attribute. |  |  |
 | `extCommunities` _[ExtendedCommunitySet](#extendedcommunityset)_ | ExtCommunities defines extended community add/remove operations.<br />Each entry must be in a valid extended community format (ASN:NN, IP:NN,<br />or type-specific like "rt:65000:100"). |  |  |
 | `metric` _integer_ | Metric sets the MED (Multi-Exit Discriminator) attribute. |  | Minimum: 0 <br /> |
+| `standardCommunities` _[StandardCommunityAction](#standardcommunityaction)_ | StandardCommunities adds to or replaces the route's standard<br />communities. |  |  |
+| `largeCommunities` _[LargeCommunityAction](#largecommunityaction)_ | LargeCommunities adds to or replaces the route's large communities,<br />independently of StandardCommunities. |  |  |
+| `deleteCommunitySetRef` _[LocalObjectRef](#localobjectref)_ | DeleteCommunitySetRef removes the standard communities the named<br />BGPCommunitySet permits. |  |  |
+| `deleteLargeCommunitySetRef` _[LocalObjectRef](#localobjectref)_ | DeleteLargeCommunitySetRef removes the large communities the named<br />BGPCommunitySet permits. |  |  |
 | `color` _integer_ | Color sets the SRv6 policy color for path selection. |  | Minimum: 0 <br /> |
 
 
@@ -688,7 +884,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `routerRef` _[RouterRef](#routerref)_ | RouterRef targets a single BGPRouter by name.<br />Mutually exclusive with routerSelector. |  |  |
 | `routerSelector` _[RouterSelector](#routerselector)_ | RouterSelector targets one or more BGPRouters by label.<br />Mutually exclusive with routerRef. |  |  |
-| `direction` _[BGPPolicyDirection](#bgppolicydirection)_ | Direction is the policy direction: import or export. |  | Enum: [import export] <br />Required: \{\} <br /> |
+| `direction` _[BGPPolicyDirection](#bgppolicydirection)_ | Direction is the policy direction: import or export. Required when<br />the policy binds to routers through routerRef or routerSelector. A<br />policy without either is a reusable definition whose direction comes<br />from the peer family or advertisement that references it. |  | Enum: [import export] <br /> |
+| `frr` _[BGPPolicyFRR](#bgppolicyfrr)_ | FRR holds FRR rendering settings. |  |  |
 | `terms` _[BGPPolicyTerm](#bgppolicyterm) array_ | Terms is the ordered list of policy statements.<br />Evaluated from lowest to highest sequence number. |  | MaxItems: 32 <br />MinItems: 1 <br /> |
 
 
@@ -722,10 +919,50 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `description` _string_ | Description is a free-text note rendered with the term. |  | MaxLength: 255 <br />Pattern: `^[^\r\n]*$` <br /> |
 | `sequence` _integer_ | Sequence is the evaluation order. Lower values are evaluated first.<br />Must be unique within the policy. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 | `match` _[BGPPolicyMatch](#bgppolicymatch)_ | Match defines the conditions under which this term fires. |  |  |
 | `action` _[BGPPolicyAction](#bgppolicyaction)_ | Action is the disposition when this term matches. |  | Enum: [permit deny] <br /> |
 | `set` _[BGPPolicySetActions](#bgppolicysetactions)_ | Set defines mutations applied when action is "permit".<br />Must not be set when action is "deny". |  |  |
+
+
+#### BGPPrefixLimit
+
+
+
+BGPPrefixLimit bounds the prefixes a peer may send in one family.
+
+
+
+_Appears in:_
+- [BGPPeerFamilySettings](#bgppeerfamilysettings)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `maximum` _integer_ | Maximum is the number of prefixes accepted before the action applies. |  | Maximum: 4.294967295e+09 <br />Minimum: 1 <br /> |
+| `warningThresholdPercent` _integer_ | WarningThresholdPercent logs a warning once received prefixes reach<br />this share of maximum. |  | Maximum: 100 <br />Minimum: 1 <br /> |
+| `action` _[BGPPrefixLimitAction](#bgpprefixlimitaction)_ | Action is what happens once maximum is exceeded. |  | Enum: [WarnOnly Restart Shutdown] <br /> |
+| `restartMinutes` _integer_ | RestartMinutes is the delay before a Restart action re-establishes<br />the session. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+
+
+#### BGPPrefixLimitAction
+
+_Underlying type:_ _string_
+
+BGPPrefixLimitAction is what a session does once a family's received
+prefixes exceed the limit.
+
+_Validation:_
+- Enum: [WarnOnly Restart Shutdown]
+
+_Appears in:_
+- [BGPPrefixLimit](#bgpprefixlimit)
+
+| Field | Description |
+| --- | --- |
+| `WarnOnly` | BGPPrefixLimitWarnOnly logs and keeps the session up.<br /> |
+| `Restart` | BGPPrefixLimitRestart shuts the session down and restarts it after<br />restartMinutes.<br /> |
+| `Shutdown` | BGPPrefixLimitShutdown shuts the session down until it is cleared.<br /> |
 
 
 #### BGPPrefixListEntry
@@ -859,6 +1096,41 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
 
 
+#### BGPRouterFRR
+
+
+
+BGPRouterFRR holds FRR settings for one router.
+
+
+
+_Appears in:_
+- [BGPRouterSpec](#bgprouterspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `retain` _[BGPRouterFRRRetain](#bgprouterfrrretain)_ | Retain lists definitions rendered on this router even when no peer<br />or advertisement references them, so a migrated router's first<br />configuration matches the one it replaces. Retained definitions never<br />create sessions or advertisements. |  |  |
+
+
+#### BGPRouterFRRRetain
+
+
+
+BGPRouterFRRRetain names definitions to render while unreferenced.
+
+
+
+_Appears in:_
+- [BGPRouterFRR](#bgprouterfrr)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `policyRefs` _[LocalObjectRef](#localobjectref) array_ | PolicyRefs names BGPPolicies. |  | MaxItems: 256 <br /> |
+| `prefixListRefs` _[LocalObjectRef](#localobjectref) array_ | PrefixListRefs names BGPPrefixLists. |  | MaxItems: 256 <br /> |
+| `communitySetRefs` _[LocalObjectRef](#localobjectref) array_ | CommunitySetRefs names BGPCommunitySets. |  | MaxItems: 512 <br /> |
+| `peerProfileRefs` _[LocalObjectRef](#localobjectref) array_ | PeerProfileRefs names BGPPeerProfiles. |  | MaxItems: 64 <br /> |
+
+
 #### BGPRouterPeerSummary
 
 
@@ -909,8 +1181,9 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `routerClassName` _string_ | RouterClassName names the BGPRouterClass whose controller owns this<br />router. A router without one is owned by the Galactic EVPN<br />implementation (galactic-router and its related controllers). A<br />router naming a class is ignored by every component except that<br />class's controller, and by every component when the class does not<br />exist. Immutable. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
 | `plane` _[BGPRoutingPlane](#bgproutingplane)_ | Plane is the routing plane this router belongs to. Unset means the<br />tenant EVPN overlay. Underlay requires a routerClassName. Immutable. |  | Enum: [Underlay Overlay] <br /> |
+| `frr` _[BGPRouterFRR](#bgprouterfrr)_ | FRR holds settings for routers whose class is implemented with FRR. |  |  |
 | `targetRef` _[TargetRef](#targetref)_ | TargetRef identifies the Node this router executes on. |  | Required: \{\} <br /> |
-| `localASN` _integer_ | LocalASN is the BGP Autonomous System Number for this router.<br />Must be a valid 2-byte or 4-byte ASN per RFC 6793. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `localASN` _integer_ | LocalASN is the BGP Autonomous System Number for this router.<br />Must be a valid 2-byte or 4-byte ASN per RFC 6793. |  | Maximum: 4.294967295e+09 <br />Minimum: 1 <br />Required: \{\} <br /> |
 | `routerID` _string_ | RouterID is a unique 32-bit identifier expressed in IPv4 dotted-decimal notation.<br />In an IPv6-only underlay this is a logical identifier only. |  | Format: ipv4 <br />Required: \{\} <br /> |
 | `addressFamilies` _[AddressFamily](#addressfamily) array_ | AddressFamilies defines the address families this router activates. |  | MinItems: 1 <br /> |
 | `srv6Locator` _string_ | SRv6Locator is the SRv6 locator block this router owns, expressed as an<br />IPv6 CIDR (e.g. "2001:db8:ff01::/48"). Individual SRv6 endpoint SIDs are<br />host addresses within this block. |  |  |
@@ -953,6 +1226,84 @@ _Appears in:_
 | --- | --- |
 | `Underlay` | BGPRoutingPlaneUnderlay is the fabric underlay that carries the<br />overlay's sessions and SRv6 locators between nodes.<br /> |
 | `Overlay` | BGPRoutingPlaneOverlay is the tenant EVPN overlay.<br /> |
+
+
+#### BGPStaticRoute
+
+
+
+BGPStaticRoute installs one static route in a router's default routing
+instance. Installing a route never advertises it: advertisement is a
+separate BGPAdvertisement, and an aggregate never creates a discard route.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `BGPStaticRoute` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[BGPStaticRouteSpec](#bgpstaticroutespec)_ |  |  | Required: \{\} <br /> |
+| `status` _[BGPStaticRouteStatus](#bgpstaticroutestatus)_ |  |  |  |
+
+
+#### BGPStaticRouteAction
+
+_Underlying type:_ _string_
+
+BGPStaticRouteAction is what a static route does with matching traffic.
+
+_Validation:_
+- Enum: [Discard NextHop]
+
+_Appears in:_
+- [BGPStaticRouteSpec](#bgpstaticroutespec)
+
+| Field | Description |
+| --- | --- |
+| `Discard` | BGPStaticRouteDiscard drops matching traffic (FRR's Null0).<br /> |
+| `NextHop` | BGPStaticRouteNextHop forwards matching traffic to nextHop.<br /> |
+
+
+#### BGPStaticRouteSpec
+
+
+
+BGPStaticRouteSpec defines one static route.
+
+
+
+_Appears in:_
+- [BGPStaticRoute](#bgpstaticroute)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `routerRef` _[RouterRef](#routerref)_ | RouterRef names the BGPRouter whose routing instance holds the route. |  |  |
+| `addressFamily` _[AFI](#afi)_ | AddressFamily is the route's family: ipv4 or ipv6. |  | Enum: [ipv4 ipv6 l2vpn] <br /> |
+| `destination` _string_ | Destination is the route's prefix in CIDR notation. |  | MaxLength: 43 <br />MinLength: 1 <br /> |
+| `action` _[BGPStaticRouteAction](#bgpstaticrouteaction)_ | Action is what the route does with matching traffic. |  | Enum: [Discard NextHop] <br /> |
+| `nextHop` _string_ | NextHop is the gateway address for action NextHop. |  | MaxLength: 45 <br /> |
+
+
+#### BGPStaticRouteStatus
+
+
+
+BGPStaticRouteStatus defines the observed state of BGPStaticRoute.
+
+
+
+_Appears in:_
+- [BGPStaticRoute](#bgpstaticroute)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
 
 
 #### BGPVRFInstance
@@ -1015,6 +1366,80 @@ _Appears in:_
 | `routers` _[RouterStatus](#routerstatus) array_ | Routers holds per-router reconciliation status. |  |  |
 
 
+#### BMPConnect
+
+
+
+BMPConnect is where FRR opens a BMP session.
+
+
+
+_Appears in:_
+- [BMPTarget](#bmptarget)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `address` _string_ | Address is the collector's IP address. |  | MaxLength: 45 <br /> |
+| `port` _integer_ | Port is the collector's TCP port. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `minRetryMilliseconds` _integer_ | MinRetryMilliseconds is the shortest reconnect backoff. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
+| `maxRetryMilliseconds` _integer_ | MaxRetryMilliseconds is the longest reconnect backoff. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
+
+
+#### BMPMonitor
+
+
+
+BMPMonitor streams one family's RIB to a BMP target.
+
+
+
+_Appears in:_
+- [BMPTarget](#bmptarget)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `afi` _[AFI](#afi)_ | AFI is the address family indicator. |  | Enum: [ipv4 ipv6 l2vpn] <br /> |
+| `safi` _[SAFI](#safi)_ | SAFI is the subsequent address family indicator. |  | Enum: [unicast evpn] <br /> |
+| `mode` _[BMPMonitorMode](#bmpmonitormode)_ | Mode selects the RIB. |  | Enum: [LocRIB PrePolicy PostPolicy] <br /> |
+
+
+#### BMPMonitorMode
+
+_Underlying type:_ _string_
+
+BMPMonitorMode selects which RIB a BMP target streams.
+
+_Validation:_
+- Enum: [LocRIB PrePolicy PostPolicy]
+
+_Appears in:_
+- [BMPMonitor](#bmpmonitor)
+
+| Field | Description |
+| --- | --- |
+| `LocRIB` | BMPMonitorLocRIB streams the selected routes (`loc-rib`).<br /> |
+| `PrePolicy` | BMPMonitorPrePolicy streams Adj-RIB-In before import policy.<br /> |
+| `PostPolicy` | BMPMonitorPostPolicy streams Adj-RIB-In after import policy.<br /> |
+
+
+#### BMPTarget
+
+
+
+BMPTarget is one `bmp targets` block.
+
+
+
+_Appears in:_
+- [FRRRouterParametersSpec](#frrrouterparametersspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _[FRRObjectName](#frrobjectname)_ | Name is the target's FRR name. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9][A-Za-z0-9_.-]*$` <br /> |
+| `connect` _[BMPConnect](#bmpconnect)_ | Connect is the collector this target streams to. |  |  |
+| `monitors` _[BMPMonitor](#bmpmonitor) array_ | Monitors lists the RIBs streamed. |  | MaxItems: 6 <br />MinItems: 1 <br /> |
+
+
 #### Community
 
 _Underlying type:_ _string_
@@ -1027,6 +1452,26 @@ _Validation:_
 _Appears in:_
 - [BGPAdvertisementSpec](#bgpadvertisementspec)
 
+
+
+#### CommunityOperation
+
+_Underlying type:_ _string_
+
+CommunityOperation is how a community action combines with the route's
+existing communities.
+
+_Validation:_
+- Enum: [Add Replace]
+
+_Appears in:_
+- [LargeCommunityAction](#largecommunityaction)
+- [StandardCommunityAction](#standardcommunityaction)
+
+| Field | Description |
+| --- | --- |
+| `Add` | CommunityOperationAdd keeps the route's communities and adds values.<br /> |
+| `Replace` | CommunityOperationReplace replaces the route's communities with values.<br /> |
 
 
 #### CommunitySet
@@ -1217,6 +1662,213 @@ _Appears in:_
 | `remove` _string array_ | Remove is a list of extended communities to strip. |  | MaxItems: 32 <br />items:MaxLength: 64 <br /> |
 
 
+#### FRRDefaultsProfile
+
+_Underlying type:_ _string_
+
+FRRDefaultsProfile is FRR's `frr defaults` profile.
+
+_Validation:_
+- Enum: [traditional datacenter]
+
+_Appears in:_
+- [FRRRouterParametersSpec](#frrrouterparametersspec)
+
+| Field | Description |
+| --- | --- |
+| `traditional` | FRRDefaultsTraditional is FRR's traditional defaults profile.<br /> |
+| `datacenter` | FRRDefaultsDatacenter is FRR's datacenter defaults profile.<br /> |
+
+
+#### FRRLogFile
+
+
+
+FRRLogFile is FRR's `log file` setting.
+
+
+
+_Appears in:_
+- [FRRRouterParametersSpec](#frrrouterparametersspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `path` _string_ | Path is the log file's absolute path in the router container. |  | MaxLength: 255 <br />MinLength: 2 <br />Pattern: `^/[^\s]*$` <br /> |
+| `level` _[FRRLogLevel](#frrloglevel)_ | Level is the lowest level written. |  | Enum: [emergencies alerts critical errors warnings notifications informational debugging] <br /> |
+
+
+#### FRRLogLevel
+
+_Underlying type:_ _string_
+
+FRRLogLevel is an FRR syslog level.
+
+_Validation:_
+- Enum: [emergencies alerts critical errors warnings notifications informational debugging]
+
+_Appears in:_
+- [FRRLogFile](#frrlogfile)
+
+
+
+#### FRRNameOverride
+
+
+
+FRRNameOverride sets the name an object renders under in FRR. When unset
+the object's metadata.name is used.
+
+
+
+_Appears in:_
+- [BGPCommunitySetSpec](#bgpcommunitysetspec)
+- [BGPPrefixListSpec](#bgpprefixlistspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _[FRRObjectName](#frrobjectname)_ | Name is the FRR object name. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9][A-Za-z0-9_.-]*$` <br /> |
+
+
+#### FRRObjectName
+
+_Underlying type:_ _string_
+
+FRRObjectName is the name an object renders under in FRR: a route-map,
+prefix-list, community-list or peer group. The fleet's legacy names are
+letters, digits, '-' and '_'; '.' is also accepted.
+
+_Validation:_
+- MaxLength: 63
+- MinLength: 1
+- Pattern: `^[A-Za-z0-9][A-Za-z0-9_.-]*$`
+
+_Appears in:_
+- [BGPPeerProfileFRR](#bgppeerprofilefrr)
+- [BGPPolicyFRR](#bgppolicyfrr)
+- [BMPTarget](#bmptarget)
+- [FRRNameOverride](#frrnameoverride)
+
+
+
+#### FRRPeerFamilySettings
+
+
+
+FRRPeerFamilySettings holds FRR-specific peer family settings with no
+implementation-neutral equivalent.
+
+
+
+_Appears in:_
+- [BGPPeerFamilySettings](#bgppeerfamilysettings)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `weight` _integer_ | Weight is FRR's local, non-propagated path preference for routes<br />learned from the peer. It is not LOCAL_PREF. |  | Maximum: 65535 <br />Minimum: 0 <br /> |
+
+
+#### FRRRouterParameters
+
+
+
+FRRRouterParameters holds the FRR implementation settings a
+BGPRouterClass applies to every router of the class: daemon-wide lines
+that are not routing intent. Its spec is immutable, so a revision's
+parameters stay reproducible; a new parameter set is a new object.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `FRRRouterParameters` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[FRRRouterParametersSpec](#frrrouterparametersspec)_ |  |  | Required: \{\} <br /> |
+| `status` _[FRRRouterParametersStatus](#frrrouterparametersstatus)_ |  |  |  |
+
+
+#### FRRRouterParametersSpec
+
+
+
+FRRRouterParametersSpec defines FRR implementation settings.
+
+
+
+_Appears in:_
+- [FRRRouterParameters](#frrrouterparameters)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `defaultsProfile` _[FRRDefaultsProfile](#frrdefaultsprofile)_ | DefaultsProfile is the `frr defaults` profile. Changing a router's<br />profile restarts bgpd. |  | Enum: [traditional datacenter] <br /> |
+| `hostnameSuffix` _string_ | HostnameSuffix is appended to the bound Node's name to form the<br />router hostname. |  | MaxLength: 63 <br />Pattern: `^[A-Za-z0-9.-]*$` <br /> |
+| `logFile` _[FRRLogFile](#frrlogfile)_ | LogFile is FRR's log file. Unset renders no log file line. |  |  |
+| `ipv6Forwarding` _boolean_ | IPv6Forwarding sets zebra's ipv6 forwarding flag. The kernel sysctl<br />remains host configuration. |  |  |
+| `logNeighborChanges` _boolean_ | LogNeighborChanges logs BGP session state changes. |  |  |
+| `ipv4UnicastDefault` _boolean_ | IPv4UnicastDefault activates IPv4 unicast for every neighbor by<br />default. False renders `no bgp default ipv4-unicast`. |  |  |
+| `allowMartianNexthop` _boolean_ | AllowMartianNexthop accepts next hops FRR otherwise treats as<br />martian. |  |  |
+| `bmpTargets` _[BMPTarget](#bmptarget) array_ | BMPTargets lists the BMP collectors every router of the class streams<br />to. The router image must load bgpd's BMP module. |  | MaxItems: 4 <br /> |
+
+
+#### FRRRouterParametersStatus
+
+
+
+FRRRouterParametersStatus defines the observed state of FRRRouterParameters.
+
+
+
+_Appears in:_
+- [FRRRouterParameters](#frrrouterparameters)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
+
+
+#### LargeCommunityAction
+
+
+
+LargeCommunityAction sets large communities on a route.
+
+
+
+_Appears in:_
+- [BGPPolicySetActions](#bgppolicysetactions)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `operation` _[CommunityOperation](#communityoperation)_ | Operation is Add or Replace. |  | Enum: [Add Replace] <br /> |
+| `values` _string array_ | Values are ASN:NN:NN large communities. |  | MaxItems: 32 <br />MinItems: 1 <br />items:MaxLength: 32 <br /> |
+
+
+#### LocalObjectRef
+
+
+
+LocalObjectRef references an object of the kind the field names, in the
+referrer's namespace.
+
+
+
+_Appears in:_
+- [BGPPeerFamilySettings](#bgppeerfamilysettings)
+- [BGPPeerSpec](#bgppeerspec)
+- [BGPPolicyMatch](#bgppolicymatch)
+- [BGPPolicySetActions](#bgppolicysetactions)
+- [BGPRouterFRRRetain](#bgprouterfrrretain)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the referenced object's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+
+
 #### LocalSecretRef
 
 
@@ -1388,6 +2040,7 @@ _Appears in:_
 - [BGPAdvertisementSpec](#bgpadvertisementspec)
 - [BGPPeerSpec](#bgppeerspec)
 - [BGPPolicySpec](#bgppolicyspec)
+- [BGPStaticRouteSpec](#bgpstaticroutespec)
 - [BGPVRFInstanceSpec](#bgpvrfinstancespec)
 - [RouterTarget](#routertarget)
 
@@ -1439,7 +2092,9 @@ _Appears in:_
 
 
 RouterTarget is embedded by resources that bind to one or more BGPRouters.
-Exactly one of routerRef or routerSelector must be set.
+Each embedding spec states how many of routerRef and routerSelector it
+requires: BGPPeer and BGPVRFInstance need exactly one, and BGPPolicy at
+most one, since an unbound policy is a reusable definition.
 
 
 
@@ -1465,6 +2120,8 @@ _Validation:_
 
 _Appears in:_
 - [AddressFamily](#addressfamily)
+- [BGPPeerFamilySettings](#bgppeerfamilysettings)
+- [BMPMonitor](#bmpmonitor)
 
 | Field | Description |
 | --- | --- |
@@ -1503,6 +2160,7 @@ _Validation:_
 - Enum: [standard extended large both]
 
 _Appears in:_
+- [BGPPeerFamilySettings](#bgppeerfamilysettings)
 - [BGPPeerSpec](#bgppeerspec)
 
 | Field | Description |
@@ -1510,7 +2168,7 @@ _Appears in:_
 | `standard` | SendCommunityTypeStandard sends only standard communities (ASN:NN).<br /> |
 | `extended` | SendCommunityTypeExtended sends only extended communities (Type:Length:Value).<br /> |
 | `large` | SendCommunityTypeLarge sends only large communities (ASN:NN:NN).<br /> |
-| `both` | SendCommunityTypeBoth sends both standard and extended communities.<br /> |
+| `both` | SendCommunityTypeBoth is FRR's `send-community both`. Which community<br />attributes a receiver actually gets is tested on the pinned FRR build,<br />not inferred from the keyword.<br /> |
 
 
 #### ServiceEndpoint
@@ -1866,6 +2524,23 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource,<br />including Bound (set True once internal/plumbing/vip.Verify or the<br />equivalent tap-translation-table check confirms the backend is<br />actually reachable on VIPAddress, not merely that the bind/table-write<br />call itself returned nil). |  |  |
+
+
+#### StandardCommunityAction
+
+
+
+StandardCommunityAction sets standard communities on a route.
+
+
+
+_Appears in:_
+- [BGPPolicySetActions](#bgppolicysetactions)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `operation` _[CommunityOperation](#communityoperation)_ | Operation is Add or Replace. |  | Enum: [Add Replace] <br /> |
+| `values` _string array_ | Values are ASN:NN communities or FRR's well-known names. A<br />BGPCommunitySet matches fewer well-known names than an action can set. |  | MaxItems: 32 <br />MinItems: 1 <br />items:MaxLength: 21 <br /> |
 
 
 #### TargetRef
