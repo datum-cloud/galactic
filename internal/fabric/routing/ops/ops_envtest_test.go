@@ -24,6 +24,7 @@ import (
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/fabric/routing/bundle"
+	"go.datum.net/galactic/internal/fabric/routing/controller"
 	"go.datum.net/galactic/internal/fabric/routing/frrimport"
 	"go.datum.net/galactic/internal/fabric/routing/revision"
 )
@@ -105,6 +106,8 @@ func buildRevision(t *testing.T, node *corev1.Node, edit func(string) string) *n
 		t.Fatal(err)
 	}
 	rev.Namespace = ns
+	// As the revision controller labels every revision it builds.
+	rev.Labels = map[string]string{controller.RouterLabel: node.Name}
 	return rev
 }
 
@@ -248,6 +251,9 @@ func TestReleaseWorkflows(t *testing.T) {
 	if err := ConfirmRecovery(ctx, c, ns, "rel-1", "oncall"); err != nil {
 		t.Fatal(err)
 	}
+	if err := ConfirmRecovery(ctx, c, ns, "rel-1", "someone-else"); err == nil {
+		t.Error("a second confirmation replaced who confirmed first")
+	}
 	got := &networkv1alpha1.FabricReleaseAuthorization{}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(auth),
 		got); err != nil || got.Annotations[RecoveryVerifiedAnnotation] != "oncall" {
@@ -258,6 +264,44 @@ func TestReleaseWorkflows(t *testing.T) {
 	if err := ReleaseStatus(ctx, c, ns, "rel-1", &out); err != nil || !strings.Contains(out.String(), nodeA) ||
 		!strings.Contains(out.String(), "Failed") {
 		t.Errorf("release status %q, %v", out.String(), err)
+	}
+}
+
+// TestReleaseRefusesWhatRolloutWould: a target the rollout manager would
+// fail the release on is an error when named and left out otherwise, and
+// retirement never applies to the whole fleet.
+func TestReleaseRefusesWhatRolloutWould(t *testing.T) {
+	c := startAPI(t)
+	ctx := context.Background()
+	fleet(t, c, networkv1alpha1.FabricConfigSourceCRD, nodeA, nodeB)
+	now := time.Now()
+
+	if _, err := BuildRelease(ctx, c, ReleaseSpec{Namespace: ns, Name: "retire-all", RoutingDomain: domain,
+		FleetSequence: 1, Retire: true}, now); err == nil {
+		t.Error("retired every changed router without naming one")
+	}
+
+	// edge-b's candidate was compiled for edge-a.
+	d := &networkv1alpha1.FabricRouterDeployment{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: nodeB}, d); err != nil {
+		t.Fatal(err)
+	}
+	d.Spec.CandidateRevisionRef = &networkv1alpha1.LocalObjectRef{Name: revisions[nodeA].Name}
+	if err := c.Update(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := BuildRelease(ctx, c, ReleaseSpec{Namespace: ns, Name: "rel-1", RoutingDomain: domain,
+		FleetSequence: 1}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(auth.Spec.Deployments) != 1 || auth.Spec.Deployments[0].Deployment != nodeA {
+		t.Errorf("release targets %+v, want edge-a only", auth.Spec.Deployments)
+	}
+	if _, err := BuildRelease(ctx, c, ReleaseSpec{Namespace: ns, Name: "rel-2", RoutingDomain: domain,
+		FleetSequence: 1, Deployments: []string{nodeB}}, now); err == nil ||
+		!strings.Contains(err.Error(), "compiled for router") {
+		t.Errorf("naming a deployment the rollout manager would refuse: %v", err)
 	}
 }
 
@@ -289,6 +333,23 @@ func TestSourceWorkflows(t *testing.T) {
 	h := d.Spec.SourceHandoff
 	if h == nil || h.ConfigMap.UID != string(cm.UID) || h.ResourceVersion != cm.ResourceVersion {
 		t.Errorf("handoff %+v", d.Spec.SourceHandoff)
+	}
+
+	// The ConfigMap changes before the agent hands the node back: running
+	// the move again names it as it is now.
+	d.Status.EffectiveSource = networkv1alpha1.FabricConfigSourceCRD
+	if err := c.Status().Update(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	cm.Data = map[string]string{"frr.conf": "frr defaults traditional\n"}
+	if err := c.Update(ctx, cm); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetSource(ctx, c, ns, nodeA, networkv1alpha1.FabricConfigSourceConfigMap); err != nil {
+		t.Fatalf("refreshing the handoff: %v", err)
+	}
+	if h := edgeA(t, c).Spec.SourceHandoff; h == nil || h.ResourceVersion != cm.ResourceVersion {
+		t.Errorf("handoff %+v, want the ConfigMap at version %s", h, cm.ResourceVersion)
 	}
 }
 

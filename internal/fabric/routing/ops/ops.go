@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -22,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/fabric/routing/rollout"
 )
 
 // RecoveryVerifiedAnnotation is the rollout manager's annotation an
@@ -44,7 +46,8 @@ type ReleaseSpec struct {
 	// Withdraw makes the release an emergency withdrawal of these
 	// prefixes.
 	Withdraw []string
-	// Retire decommissions every named router with this promotion.
+	// Retire decommissions every named router with this promotion, for
+	// good. It needs Deployments.
 	Retire bool
 	// StartWithin bounds when the release may start; zero leaves it open.
 	StartWithin time.Duration
@@ -59,6 +62,10 @@ var ErrNothingToRelease = errors.New("no deployment has a candidate to release")
 // revision that exists.
 func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 	now time.Time) (*networkv1alpha1.FabricReleaseAuthorization, error) {
+	if spec.Retire && len(spec.Deployments) == 0 {
+		// Retirement cannot be undone, so it never applies to the fleet.
+		return nil, errors.New("name the deployments to retire")
+	}
 	deps, err := deploymentsFor(ctx, c, spec.Namespace, spec.Deployments)
 	if err != nil {
 		return nil, err
@@ -89,18 +96,7 @@ func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 	explicit := len(spec.Deployments) > 0
 	for i := range deps {
 		d := &deps[i]
-		switch {
-		case d.Spec.Source != networkv1alpha1.FabricConfigSourceCRD:
-			if explicit {
-				return nil, fmt.Errorf("deployment %s is on the %s source; move it to CRD first", d.Name, d.Spec.Source)
-			}
-			continue
-		case d.Spec.Suspended:
-			if explicit {
-				return nil, fmt.Errorf("deployment %s is suspended; resume it first", d.Name)
-			}
-			continue
-		case d.Spec.CandidateRevisionRef == nil:
+		if d.Spec.CandidateRevisionRef == nil {
 			if explicit {
 				return nil, fmt.Errorf("deployment %s has no candidate revision", d.Name)
 			}
@@ -116,11 +112,20 @@ func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 		if runs && !explicit {
 			continue
 		}
-		auth.Spec.Deployments = append(auth.Spec.Deployments, networkv1alpha1.FabricReleaseTarget{
+		target := networkv1alpha1.FabricReleaseTarget{
 			Deployment: d.Name, DeploymentUID: string(d.UID),
 			Revision: rev.Name, ActivationDependencyDigest: rev.Spec.ActivationDependencyDigest,
 			Retire: spec.Retire,
-		})
+		}
+		// The rollout manager fails a release on any target it cannot
+		// promote, so refuse here what it would refuse there.
+		if err := rollout.CheckTarget(d, rev, target); err != nil {
+			if explicit {
+				return nil, err
+			}
+			continue
+		}
+		auth.Spec.Deployments = append(auth.Spec.Deployments, target)
 	}
 	if len(auth.Spec.Deployments) == 0 {
 		return nil, ErrNothingToRelease
@@ -136,7 +141,7 @@ func deploymentsFor(ctx context.Context, c client.Client, namespace string,
 			return nil, err
 		}
 		slices.SortFunc(list.Items, func(a, b networkv1alpha1.FabricRouterDeployment) int {
-			return compare(a.Name, b.Name)
+			return strings.Compare(a.Name, b.Name)
 		})
 		return list.Items, nil
 	}
@@ -149,16 +154,6 @@ func deploymentsFor(ctx context.Context, c client.Client, namespace string,
 		out = append(out, d)
 	}
 	return out, nil
-}
-
-func compare(a, b string) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
 }
 
 // ConfirmRecovery marks a failed release's recovery verified by an
@@ -174,6 +169,9 @@ func ConfirmRecovery(ctx context.Context, c client.Client, namespace, name, by s
 	if auth.Status.Phase != networkv1alpha1.FabricReleasePhaseFailed {
 		return fmt.Errorf("release %s is %q; only a failed release needs its recovery confirmed", name,
 			auth.Status.Phase)
+	}
+	if prev := auth.Annotations[RecoveryVerifiedAnnotation]; prev != "" {
+		return fmt.Errorf("release %s's recovery was already confirmed by %s", name, prev)
 	}
 	return patch(ctx, c, auth, func() {
 		if auth.Annotations == nil {
@@ -191,14 +189,19 @@ func SetSource(ctx context.Context, c client.Client, namespace, name string,
 	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, d); err != nil {
 		return err
 	}
-	if d.Spec.Source == source {
+	// A handoff the agent has not completed names the ConfigMap as it was
+	// when it was asked for; running the move again names it as it is now,
+	// in case it changed since.
+	pending := d.Spec.Source == networkv1alpha1.FabricConfigSourceConfigMap &&
+		d.Status.EffectiveSource == networkv1alpha1.FabricConfigSourceCRD
+	if d.Spec.Source == source && !pending {
 		return nil
 	}
 	var handoff *networkv1alpha1.FabricSourceHandoff
 	switch {
 	case d.Spec.Source == networkv1alpha1.FabricConfigSourceCRD && source == networkv1alpha1.FabricConfigSourceShadow:
 		return errors.New("a node leaves CRD only for its ConfigMap")
-	case d.Spec.Source == networkv1alpha1.FabricConfigSourceCRD:
+	case d.Spec.Source == networkv1alpha1.FabricConfigSourceCRD || pending && source == d.Spec.Source:
 		cm := &corev1.ConfigMap{}
 		cmName := "fabric-router." + d.Spec.Target.NodeName
 		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: cmName}, cm); err != nil {
@@ -252,6 +255,10 @@ func Move(ctx context.Context, c client.Client, namespace, name, toNode, method,
 	d := &networkv1alpha1.FabricRouterDeployment{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, d); err != nil {
 		return err
+	}
+	if rollout.Busy(d) {
+		return fmt.Errorf("deployment %s is activating epoch %d; move it once that finishes", name,
+			d.Spec.ActivationEpoch)
 	}
 	node := &metav1.PartialObjectMetadata{}
 	node.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Node"))

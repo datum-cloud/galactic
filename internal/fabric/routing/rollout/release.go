@@ -228,31 +228,43 @@ func (r *ReleaseReconciler) target(ctx context.Context, auth *networkv1alpha1.Fa
 		}
 		return nil, nil, err
 	}
+	if err := CheckTarget(dep, rev, t); err != nil {
+		return nil, nil, err
+	}
+	return dep, rev, nil
+}
+
+// CheckTarget reports why dep cannot be promoted to rev under target t:
+// another deployment UID, a source other than CRD, suspended, retired, a
+// digest the release does not name, a revision compiled for another
+// router, or an originated prefix an emergency withdrawal revoked.
+func CheckTarget(dep *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.FabricRouterRevision,
+	t networkv1alpha1.FabricReleaseTarget) error {
 	switch {
 	case string(dep.UID) != t.DeploymentUID:
-		return nil, nil, targetError{fmt.Sprintf("deployment %s is UID %s, the release names %s", dep.Name, dep.UID,
+		return targetError{fmt.Sprintf("deployment %s is UID %s, the release names %s", dep.Name, dep.UID,
 			t.DeploymentUID)}
 	case dep.Spec.Source != networkv1alpha1.FabricConfigSourceCRD:
-		return nil, nil, targetError{fmt.Sprintf("deployment %s is on the %s source, not CRD", dep.Name, dep.Spec.Source)}
+		return targetError{fmt.Sprintf("deployment %s is on the %s source, not CRD", dep.Name, dep.Spec.Source)}
 	case dep.Spec.Suspended:
-		return nil, nil, targetError{"deployment " + dep.Name + " is suspended"}
+		return targetError{"deployment " + dep.Name + " is suspended"}
 	case dep.Spec.Recovery != nil && dep.Spec.Recovery.Retired:
-		return nil, nil, targetError{"deployment " + dep.Name + " is retired"}
+		return targetError{"deployment " + dep.Name + " is retired"}
 	case rev.Spec.ActivationDependencyDigest != t.ActivationDependencyDigest:
-		return nil, nil, targetError{fmt.Sprintf("revision %s has digest %s, the release names %s",
+		return targetError{fmt.Sprintf("revision %s has digest %s, the release names %s",
 			rev.Name, rev.Spec.ActivationDependencyDigest, t.ActivationDependencyDigest)}
 	case rev.Labels[routerLabel] != dep.Spec.RouterRef.Name:
-		return nil, nil, targetError{fmt.Sprintf("revision %s was compiled for router %q, not %s",
+		return targetError{fmt.Sprintf("revision %s was compiled for router %q, not %s",
 			rev.Name, rev.Labels[routerLabel], dep.Spec.RouterRef.Name)}
 	}
 	if dep.Spec.Recovery != nil {
 		if p := revokedOrigination(dep.Spec.Recovery.RevokedPrefixes, rev); p != "" {
 			// An emergency withdrawal revoked it; no release brings it back.
-			return nil, nil, targetError{fmt.Sprintf("revision %s originates %s, revoked on deployment %s",
+			return targetError{fmt.Sprintf("revision %s originates %s, revoked on deployment %s",
 				rev.Name, p, dep.Name)}
 		}
 	}
-	return dep, rev, nil
+	return nil
 }
 
 // routerLabel names a revision's router; the revision controller sets it.
