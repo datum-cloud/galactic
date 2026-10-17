@@ -105,6 +105,9 @@ type NextHopGuard struct {
 	Pod *corev1.Pod
 	// NodeName names the node in event notes.
 	NodeName string
+	// Lock is the node's FRR writer lock, held for each reset. Nil means no
+	// other writer exists.
+	Lock Locker
 
 	// Interval is the time between checks. Zero selects 30s.
 	Interval time.Duration
@@ -219,7 +222,7 @@ func (g *NextHopGuard) checkNeighbors(ctx context.Context) error {
 		note := fmt.Sprintf("session %s -> %s on node %s announced IPv4-mapped next hop %s; resetting it",
 			n.HostLocal, n.Peer, g.NodeName, n.NexthopGlobal)
 		slog.Warn(note, "reason", ReasonMappedNextHopReset)
-		if err := g.BGP.ResetNeighbor(ctx, n.Peer); err != nil {
+		if err := withLock(ctx, g.Lock, func() error { return g.BGP.ResetNeighbor(ctx, n.Peer) }); err != nil {
 			slog.Error("could not reset BGP session", "peer", n.Peer, "error", err)
 			continue
 		}

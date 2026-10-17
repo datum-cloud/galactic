@@ -85,3 +85,70 @@ func output(ctx context.Context, name string, args ...string) ([]byte, error) {
 	}
 	return stdout.Bytes(), nil
 }
+
+// Changes runs frr-reload.py in test mode and returns the lines a reload to
+// path would add and remove. A line under a context is reported as
+// "<context> :: <line>".
+func (e ExecFRR) Changes(ctx context.Context, path string) (added, removed []string, err error) {
+	out, err := output(ctx, e.Reloader, "--test", "--stdout", "--confdir", e.ConfigDir, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	added, removed = parseReloadTest(string(out))
+	return added, removed, nil
+}
+
+// Running returns the running configuration.
+func (e ExecFRR) Running(ctx context.Context) (string, error) {
+	out, err := output(ctx, e.Vtysh, "-c", "show running-config")
+	return string(out), err
+}
+
+// parseReloadTest reads frr-reload.py --test output: a "Lines To Delete"
+// and a "Lines To Add" section, each a list of commands nested by
+// indentation and closed with exit lines. A change is a command with no
+// nested command under it, reported under its enclosing contexts as
+// "<context> :: ... :: <line>".
+func parseReloadTest(out string) (added, removed []string) {
+	type entry struct {
+		indent int
+		text   string
+	}
+	var sections [2][]entry
+	current := -1
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "Lines To Delete":
+			current = 0
+			continue
+		case trimmed == "Lines To Add":
+			current = 1
+			continue
+		case current < 0 || trimmed == "" || strings.Trim(trimmed, "=") == "" || strings.HasPrefix(trimmed, "exit"):
+			continue
+		}
+		sections[current] = append(sections[current], entry{indent: len(line) - len(strings.TrimLeft(line, " ")),
+			text: trimmed})
+	}
+	leaves := func(entries []entry) []string {
+		var out []string
+		var stack []entry
+		for i, e := range entries {
+			for len(stack) > 0 && stack[len(stack)-1].indent >= e.indent {
+				stack = stack[:len(stack)-1]
+			}
+			if i+1 < len(entries) && entries[i+1].indent > e.indent {
+				stack = append(stack, e)
+				continue
+			}
+			parts := make([]string, 0, len(stack)+1)
+			for _, c := range stack {
+				parts = append(parts, c.text)
+			}
+			out = append(out, strings.Join(append(parts, e.text), " :: "))
+		}
+		return out
+	}
+	return leaves(sections[1]), leaves(sections[0])
+}

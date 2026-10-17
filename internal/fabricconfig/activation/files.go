@@ -83,6 +83,9 @@ func BindIdentity(dir string, want Identity) (Identity, error) {
 	if want.MachineID == "" {
 		return Identity{}, fmt.Errorf("%w: no machine ID", ErrIdentityMismatch)
 	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return Identity{}, err
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		if want.NodeUID == "" || want.ClusterID == "" {
