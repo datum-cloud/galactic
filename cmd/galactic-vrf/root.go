@@ -75,6 +75,9 @@ func runCmd(cfg *config.VRFConfig) error {
 	convergence := ingresssidecar.NewConvergenceMetrics()
 	convergence.MustRegister(ctrlmetrics.Registry)
 	store.SetConvergenceMetrics(convergence)
+	inputs := ingresssidecar.NewInputMetrics()
+	inputs.MustRegister(ctrlmetrics.Registry)
+	store.SetInputMetrics(inputs)
 
 	// Return-path gateway advertisement is opt-in on the node name alone,
 	// and leaving it unset is fully inert. The cached client is fine here:

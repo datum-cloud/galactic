@@ -30,10 +30,12 @@ type Reconciler struct {
 
 // Reconcile implements reconcile.Reconciler.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	inputs := r.Store.inputMetrics()
 	slice := &discoveryv1.EndpointSlice{}
 	err := r.Get(ctx, req.NamespacedName, slice)
 	switch {
 	case apierrors.IsNotFound(err):
+		inputs.forget(req.String())
 		if serr := r.Store.SetDesired(ctx, req.String(), nil); serr != nil {
 			return ctrl.Result{}, fmt.Errorf("mark EndpointSlice %s absent: %w", req.NamespacedName, serr)
 		}
@@ -42,7 +44,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("get EndpointSlice %s: %w", req.NamespacedName, err)
 	}
 
-	desired, err := BuildDesiredRoute(slice)
+	state, desired, err := classifySlice(slice)
+	inputs.observeWatch(req.String(), state)
 	if err != nil {
 		// Selected but malformed in a way retrying cannot fix: a bad annotation
 		// will not parse differently next time. Log through the returned
