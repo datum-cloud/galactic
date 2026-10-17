@@ -14,8 +14,8 @@ import (
 )
 
 // IsSelected reports whether slice carries the tenant label this sidecar watches
-// EndpointSlices through. Used both as the controller's watch predicate and by
-// BuildDesiredRoute.
+// EndpointSlices through, the same test the controller's watch predicate
+// applies (tenantLabelPredicate). Used by BuildDesiredRoute.
 func IsSelected(slice *discoveryv1.EndpointSlice) bool {
 	if slice == nil {
 		return false
