@@ -10,9 +10,18 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+)
+
+// gatewayRetriesPerSweep bounds how many VPCs one sweep retries publishing a
+// gateway advertisement for, and gatewayRetryTimeout each attempt, so a slow
+// API delays a sweep by a bounded amount. Variables so tests can shorten them.
+var (
+	gatewayRetriesPerSweep = 4
+	gatewayRetryTimeout    = 10 * time.Second
 )
 
 // routeState tracks one pod's route lifecycle, keyed by its EndpointSlice's
@@ -52,10 +61,10 @@ type vrfState struct {
 	// this VPC, whether installed or itself within its grace period. Only once
 	// every such route is gone does this VPC's teardown clock start.
 	absentSince time.Time
-	// gatewayPublished is true once this VPC's return-path advertisement has
-	// been published. Set at most once per VRF lifetime, so a transient resolve
-	// or publish failure retries on the next SetDesired rather than being
-	// abandoned for the VRF's remaining lifetime.
+	// gatewayPublished is true while this VPC's return-path advertisement is
+	// published, from a successful publish until a successful withdrawal. A
+	// failed resolve or publish is retried on the next SetDesired and by
+	// every Sweep (retryGateways) until it succeeds.
 	gatewayPublished bool
 	// gatewayState is where this VRF's publication stands (GatewayAwaiting*,
 	// GatewayPublished), and gatewayWaitingSince when it last started waiting
@@ -82,6 +91,14 @@ type Store struct {
 	// SetGatewayPublisher for what enabling them does.
 	gatewayPublisher GatewayPublisher
 	gatewayResolver  GatewayAddressResolver
+	// gatewayCursor rotates where retryGateways starts, so a VPC that keeps
+	// failing cannot starve the others of retries.
+	gatewayCursor int
+	// gatewayInFlight holds the VPCs retryGateways is publishing or
+	// withdrawing for outside the lock. publishGateway skips them, so no
+	// other publish for the VPC interleaves with that call; a VRF it skips
+	// is retried by a later Sweep.
+	gatewayInFlight map[string]struct{}
 
 	// gatewayMetrics is nil unless SetGatewayMetrics was called.
 	// gatewayCounts holds each counted VRF's state, kept in step at every
@@ -127,12 +144,13 @@ type Store struct {
 // as tests commonly pass.
 func NewStore(backend Backend, grace time.Duration, metrics *Metrics) *Store {
 	return &Store{
-		backend: backend,
-		grace:   grace,
-		metrics: metrics,
-		routes:  make(map[string]*routeState),
-		vrfs:    make(map[string]*vrfState),
-		clock:   time.Now,
+		backend:         backend,
+		grace:           grace,
+		metrics:         metrics,
+		routes:          make(map[string]*routeState),
+		vrfs:            make(map[string]*vrfState),
+		gatewayInFlight: make(map[string]struct{}),
+		clock:           time.Now,
 	}
 }
 
@@ -336,17 +354,18 @@ func (s *Store) publishGatewayStateLocked() {
 	s.gatewayMetrics.publish(s.gatewayCounts, s.gatewayOldest)
 }
 
-// publishGateway attempts to publish vpc's return-path advertisement once, the
-// first time its VRF is created. Called with s.mu held.
+// publishGateway attempts to publish vpc's return-path advertisement once,
+// from SetDesired, while its VRF has none. Called with s.mu held. It skips a
+// VPC retryGateways is calling the API for.
 //
 // A resolve failure because nothing has provisioned a gateway address yet is
-// logged at debug and left for the next SetDesired to retry, not treated as a
-// reconcile error. Any other error is logged at warn and likewise retried,
-// rather than failing the route reconcile that triggered it: a missing return
-// path degrades this VPC's ingress traffic, and withholding the forward-path
-// route as well would not improve it.
+// logged at debug and left for the next SetDesired or Sweep to retry, not
+// treated as a reconcile error. Any other error is logged at warn and likewise
+// retried, rather than failing the route reconcile that triggered it: a
+// missing return path degrades this VPC's ingress traffic, and withholding the
+// forward-path route as well would not improve it.
 func (s *Store) publishGateway(ctx context.Context, vpc string, v *vrfState) {
-	if s.gatewayPublisher == nil || s.gatewayResolver == nil || v.gatewayPublished {
+	if s.gatewayPublisher == nil || s.gatewayResolver == nil || v.gatewayPublished || s.inFlightLocked(vpc) {
 		return
 	}
 	before := s.gatewayCounted(v)
@@ -390,6 +409,140 @@ func (s *Store) withdrawGateway(ctx context.Context, vpc string, v *vrfState) {
 		return
 	}
 	s.gatewayMetrics.operation(GatewayOpWithdraw, GatewaySuccess)
+	// Withdrawn: if removing the VRF then fails and the VPC comes back, it is
+	// published again.
+	v.gatewayPublished = false
+}
+
+// retryGateways publishes the gateway advertisement of up to
+// gatewayRetriesPerSweep desired VRFs whose publication has not succeeded,
+// so a failed publish recovers without waiting for another EndpointSlice
+// update. One attempt per VPC, however many routes it has, starting where the
+// last sweep stopped.
+//
+// The API calls run without s.mu, each bounded by gatewayRetryTimeout and
+// cancelled with ctx, while the VPC is marked in flight. A successful publish
+// belongs to whichever VRF tracks the VPC when it completes, the one it was
+// made for or a replacement; the advertisement depends only on the VPC, and
+// teardown withdraws it as usual. With no VRF left for the VPC it is
+// withdrawn again before the VPC stops being in flight.
+//
+// Sweep has one caller, the sweeper goroutine, so no VRF is removed while
+// these calls run today; crediting a replacement and withdrawing for a removed
+// VRF keep the result right if that changes. A SetDesired for a VPC in flight
+// does not publish it, so if the retry then fails the VPC waits for the next
+// Sweep. The attempts can lengthen a sweep by up to gatewayRetriesPerSweep
+// times gatewayRetryTimeout, which delays the next sweep's teardown, not this
+// one's: teardown runs first.
+func (s *Store) retryGateways(ctx context.Context) {
+	s.mu.Lock()
+	publisher, resolver := s.gatewayPublisher, s.gatewayResolver
+	m := s.gatewayMetrics
+	if publisher == nil || resolver == nil {
+		s.mu.Unlock()
+		return
+	}
+	var pending []string
+	for vpc, v := range s.vrfs {
+		if v.installed && v.absentSince.IsZero() && !v.gatewayPublished && !s.inFlightLocked(vpc) {
+			pending = append(pending, vpc)
+		}
+	}
+	sort.Strings(pending)
+	n := min(len(pending), gatewayRetriesPerSweep)
+	vpcs := make([]string, 0, n)
+	for i := range n {
+		vpc := pending[(s.gatewayCursor+i)%len(pending)]
+		s.gatewayInFlight[vpc] = struct{}{}
+		vpcs = append(vpcs, vpc)
+	}
+	s.gatewayCursor += n
+	s.mu.Unlock()
+
+	for _, vpc := range vpcs {
+		s.retryGateway(ctx, m, publisher, resolver, vpc)
+	}
+}
+
+// retryGateway makes one retryGateways attempt for vpc, which the caller
+// marked in flight, records it to m, and clears the mark.
+func (s *Store) retryGateway(
+	ctx context.Context, m *GatewayMetrics, publisher GatewayPublisher, resolver GatewayAddressResolver, vpc string,
+) {
+	// Clear the mark however this returns, a panic included, or the VPC
+	// would never be published again.
+	defer func() {
+		s.mu.Lock()
+		delete(s.gatewayInFlight, vpc)
+		s.mu.Unlock()
+	}()
+	if ctx.Err() != nil {
+		return // shutting down
+	}
+	state, err := publishOnce(ctx, m, publisher, resolver, vpc)
+	s.mu.Lock()
+	v := s.vrfs[vpc]
+	if v != nil {
+		before := s.gatewayCounted(v)
+		if err == nil {
+			v.gatewayPublished = true
+		} else {
+			v.gatewayState = state
+		}
+		s.gatewayChangedLocked(v, before)
+	}
+	s.mu.Unlock()
+
+	switch {
+	case err == nil && v == nil:
+		wctx, cancel := context.WithTimeout(ctx, gatewayRetryTimeout)
+		defer cancel()
+		if werr := publisher.WithdrawGateway(wctx, vpc); werr != nil {
+			m.operation(GatewayOpWithdraw, GatewayError)
+			slog.Warn("ingresssidecar: withdraw a gateway advertisement published for a removed VRF",
+				"vpc", vpc, "err", werr)
+			return
+		}
+		m.operation(GatewayOpWithdraw, GatewaySuccess)
+	case ctx.Err() != nil:
+		// Shutting down: the next sidecar retries.
+	case errors.Is(err, ErrGatewayAddressNotProvisioned):
+		slog.Debug("ingresssidecar: no gateway address provisioned yet, will retry", "vpc", vpc, "err", err)
+	case err != nil:
+		slog.Warn("ingresssidecar: retry gateway advertisement", "vpc", vpc, "err", err)
+	}
+}
+
+// inFlightLocked reports whether retryGateways is calling the API for vpc.
+func (s *Store) inFlightLocked(vpc string) bool {
+	_, ok := s.gatewayInFlight[vpc]
+	return ok
+}
+
+// publishOnce resolves vpc's gateway address and publishes it, within
+// gatewayRetryTimeout, recording each step to m. On failure it returns the
+// state the VPC is left waiting in.
+func publishOnce(
+	ctx context.Context, m *GatewayMetrics, publisher GatewayPublisher, resolver GatewayAddressResolver, vpc string,
+) (string, error) {
+	addr, err := resolver.ResolveGatewayAddress(vpc)
+	if err != nil {
+		if errors.Is(err, ErrGatewayAddressNotProvisioned) {
+			m.operation(GatewayOpResolve, GatewayNotProvisioned)
+		} else {
+			m.operation(GatewayOpResolve, GatewayError)
+		}
+		return GatewayAwaitingAddress, err
+	}
+	m.operation(GatewayOpResolve, GatewaySuccess)
+	pctx, cancel := context.WithTimeout(ctx, gatewayRetryTimeout)
+	defer cancel()
+	if err := publisher.PublishGateway(pctx, vpc, addr); err != nil {
+		m.operation(GatewayOpPublish, GatewayError)
+		return GatewayAwaitingPublication, err
+	}
+	m.operation(GatewayOpPublish, GatewaySuccess)
+	return GatewayPublished, nil
 }
 
 // SetDesired updates the desired state for the route identified by key, an
@@ -521,9 +674,18 @@ func (s *Store) retryPendingLocked(ctx context.Context) {
 // has been reloaded since they were written; see checkDatapathLocked. It then
 // retries every desired route an earlier SetDesired failed to apply.
 //
+// Sweep then retries the gateway advertisements still unpublished; see
+// retryGateways.
+//
 // Call this periodically, never reactively: VRF teardown is an aggregate
 // condition over many routes, not one watched object's transition.
 func (s *Store) Sweep(ctx context.Context, now time.Time) {
+	s.sweepLocked(ctx, now)
+	s.retryGateways(ctx)
+}
+
+// sweepLocked is Sweep's work under s.mu.
+func (s *Store) sweepLocked(ctx context.Context, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

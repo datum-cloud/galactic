@@ -121,6 +121,9 @@ pods overlap on a node, and the installer when a replacement pod fails to
 publish for two sweeps. So every sidecar reads its own `vrf_table` and
 `ifindex_vrf_table` rows back on each sweep and reapplies its VRFs and routes
 when any are missing, the same reapply a datapath reload triggers.
+A sidecar also retries a failed gateway publication on each sweep, at most
+four VPCs a sweep, so a publish that failed once does not wait for the VPC's
+next EndpointSlice change.
 
 `galactic-router`'s own reconciler independently derives the *same* SID value
 from the same inputs (`srv6.ComputeSID`, `internal/plumbing/srv6/usid.go`,

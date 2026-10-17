@@ -481,10 +481,9 @@ triggered it.
   finds an address something else provisioned, so VRFs waiting in
   `awaiting_address` and `resolve{result="not_provisioned"}` counting up on
   every attempt are expected there.
-- A withdrawal does not clear a VRF's published state. A VRF withdrawn
-  for teardown that then survives, because its removal failed, and whose
-  VPC comes back reads `published` with nothing published, and nothing
-  republishes it.
+- A successful withdrawal clears a VRF's published state, so a VRF
+  withdrawn for teardown that then survives, because its removal failed,
+  and whose VPC comes back is published again, like any VRF waiting.
 - A VRF waits from when it is first counted unpublished, through retries,
   until it is published or starts draining. A failed withdrawal is counted
   and teardown carries on; garbage collection removes the advertisement it
