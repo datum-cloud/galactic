@@ -515,6 +515,9 @@ type ebpfDatapathState struct {
 	// return sweep to the next. Nil leaves reaping off.
 	sidecarReap *sidecarReaper
 
+	// sidecarReturn records each sidecar return sweep. Nil records nothing.
+	sidecarReturn *metrics.SidecarReturn
+
 	// trafficPolicy owns the node's traffic policy mode and NAT locators. Nil
 	// when the datapath is a test fake.
 	trafficPolicy *trafficPolicyState
@@ -550,6 +553,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 		egressGroup: newEgressGroup(egressCfg, nil, nil, attach.PinDir),
 	}
 	state.egressGroup.ctl = m.Egress
+	state.sidecarReturn = m.SidecarReturn
 	m.Egress.SetMode(string(egressCfg.Mode), string(config.EgressModeOrdered), string(config.EgressModeHashed))
 	watcher.OnChange(rewriteEBPFInterfaces)
 
@@ -594,6 +598,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	}
 	state.egressGroup = newEgressGroup(egressCfg, loadEgressShardSIDs(hostConf.EgressShardSIDs), nat64, attach.PinDir)
 	state.egressGroup.ctl = m.Egress
+	state.sidecarReturn = m.SidecarReturn
 	// Ordered mode routes only to the configured shards, so their locators
 	// are the complete set. Hashed mode adds the cluster's EgressShards once
 	// its watch has listed them.
