@@ -269,7 +269,12 @@ With the ConfigMap path retired, handing the node back is refused, so:
      --dry-run` prints one to start from) naming only the deployment, with its
      `spec.recovery.targetRevisionRef` revision and that revision's digest, and
      once the node commits it, `release create` naming the deployment promotes
-     its candidate, the revision it ran before, again. A deployment with no
+     its candidate, the revision it ran before, again. Each release needs
+     `--domain` and a `--sequence` above every earlier release in the domain,
+     and is refused for a retired router or a revision that originates a
+     revoked prefix. A release does not check revoked credentials; a node
+     refuses to start a revision that uses one, so check its Secret
+     references first. A deployment with no
      recovery target has committed only one revision; a change to its
      router's resources compiles a new candidate to promote instead.
 
