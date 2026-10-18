@@ -18,7 +18,7 @@ the agent reading ConfigMaps at all.
 | Revision compiler     | `config/fabric-router-controller` and its `base/`     | `fabric-router-controller run` compiles every fabric-class `BGPRouter` into immutable revisions and reports the result on the router. It writes no FRR.                                                                                    |
 | Rollout manager       | `config/fabric-router-controller/components/rollout`  | Adds `--rollout`: one `FabricRouterDeployment` per compiled router, and the controller that runs release authorizations.                                                                                                                   |
 | Node agent activation | `config/fabric-router/components/activation`          | `fabric-config-agent` acts on its node's deployment: stages candidates, and on the CRD source activates the active revision. Adds a host state directory and `/etc/machine-id`.                                                            |
-| Topology generator    | `config/fabric-router-controller/components/topology` | Adds `--topology`: generates `BGPPeer`s from `FabricTopology` relationships and `FabricEndpoint` records, with its own ClusterRole for writing peers. Optional; see [Generating peers from a topology](#generating-peers-from-a-topology). |
+| Topology generator    | `config/fabric-router-controller/components/topology` | Adds `--topology`: generates `BGPPeer`s from `FabricTopology` relationships and `FabricEndpoint` records, with its own RBAC, which writes peers only in `galactic-system`. Optional; see [Generating peers from a topology](#generating-peers-from-a-topology). |
 
 Install the first four in that order; the topology generator can come at any
 point after the compiler. Each one is safe on its own. Node agent
@@ -326,8 +326,11 @@ one only once a release promotes it.
 1. Apply the CRDs, which include `FabricEndpoint` and `FabricTopology`.
 2. Add `config/fabric-router-controller/components/topology` to the
    controller's overlay. It adds `--topology` and the
-   `fabric-router-controller-topology` ClusterRole, the only grant that lets
-   the controller write `BGPPeer`s. It restarts the controller, not FRR.
+   `fabric-router-controller-topology` ClusterRole, which reads topologies and
+   records cluster-wide, and Role, which grants every write, including the
+   only grant that lets the controller write `BGPPeer`s, in `galactic-system`
+   only. The controller serves topologies of `--topology-namespace`,
+   `galactic-system` by default; a topology anywhere else is ignored. It restarts the controller, not FRR.
 3. Apply every cell's records, then this cell's topology.
 
 A record looks like this, one per router per transport:
@@ -354,7 +357,9 @@ spec:
 
 Records of other cells must be present in this cell too, with the same
 content. Nothing in the cluster copies them: infra's per-cell bundles carry
-every cell's records.
+every cell's records. A record whose name sorts first wins a conflict over
+an identity or an address in every cell, whatever order the cell received
+them in.
 
 ### Moving from hand-authored or imported peers
 
@@ -385,33 +390,46 @@ are generated in its own cell. Release the changed routers.
 
 ### Removing a node or a cell
 
-A session is only released on evidence that an end is out of service, never
-because a record or label changed:
+A session the topology still generates is never released, however its
+router stands; one it no longer generates is released only on evidence that
+an end is out of service. So a router leaves in this order:
 
-1. Retire the router: `fabric-router-controller release create … --retire
-   DEPLOYMENT`. Once its node commits that release, the topology releases
-   every session toward it in this cell, and its own.
-2. Release the other routers' new candidates.
-3. Delete its records, from every cell, and its `BGPRouter`. In another cell,
-   deleting the record is what releases the sessions toward it.
+1. Retire it: `fabric-router-controller release create … --retire
+   DEPLOYMENT`, and wait until its node commits that release. Its sessions
+   stay, since the topology still generates them.
+2. Take it out of the topology: delete its records from every cell, or drop
+   it from the members. In its own cell the topology then releases every
+   session toward it and its own at once, because it is retired. In every
+   other cell, the deleted record releases the sessions toward it once the
+   absence has lasted the settle period (a minute).
+3. Release the other routers' new candidates.
+4. Delete its `BGPRouter`.
+
+A cell leaves the same way, router by router, or all at once with `drain`:
+deleting most of a topology's records at once trips the release guard (see
+below) and releases nothing until they are drained.
 
 For a node that will never report, list its router in the topology's
-`spec.drain.routers`, or a record in `spec.drain.endpoints`, to release its
-sessions without the retirement. The controller never removes an entry:
-remove it yourself once the router is gone for good, before a router of the
-same name joins.
+`spec.drain.routers`, or a record in `spec.drain.endpoints`, instead of step
+1. The controller never removes an entry: remove it yourself once the router
+is gone for good, before a router of the same name joins.
 
-Deleting a `BGPRouter` releases its sessions at once.
+Deleting a `BGPRouter` that still has generated sessions releases them after
+the settle period, unless the release guard holds them.
+
+Add a replacement record before removing the record it replaces. A record
+with another name at the same address takes the session over in place;
+removing the old one first leaves the session pending release until the new
+one arrives, and releases it if that takes longer than the settle period.
 
 ### Deleting a topology
 
-Deleting a `FabricTopology` drops no session. Its finalizer holds it until
-the controller has handed every peer it generated to manual control: the
-peers keep their spec, lose the topology's controller reference and
-generated labels, and are annotated
+Deleting a `FabricTopology` drops no session, with any cascade: generated
+peers have no owner reference. Its finalizer holds it until the controller
+has handed every peer it generated to manual control: the peers keep their
+spec, lose the generated labels and the topology's UID, and are annotated
 `galactic.datumapis.com/released-from-fabric-topology`. They then compile as
-hand-authored peers. Use the default cascade; `--cascade=foreground` lets
-the garbage collector delete peers before the hand-off.
+hand-authored peers.
 
 A topology created again reports every such peer as a conflict and adopts
 none. To hand a session back to it, delete the released peer outside a
@@ -419,22 +437,28 @@ release, as in [moving from hand-authored
 peers](#moving-from-hand-authored-or-imported-peers), and the topology
 generates its own. With `--topology` off, nothing removes the finalizer: turn
 the controller back on, or remove the finalizer by hand, which leaves the
-peers to the garbage collector.
+peers as they are, still labelled but owned by no topology.
 
 ### Reading its status
 
-| Condition                           | Meaning                                                                       | What to do                                                                                         |
-| ----------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `Accepted` False, `InvalidSelector` | A selector does not parse                                                     | Fix it. Nothing was changed                                                                        |
-| `Accepted` False, `TooManySessions` | A member would get more than `maxSessionsPerRouter` peers                     | Narrow the selectors or raise the limit. Nothing was changed                                       |
-| `ResolvedRefs` False                | A profile or policy a relationship names does not exist                       | Create it. Nothing was changed                                                                     |
-| `Conflicts` True                    | A peer the topology did not create, or a retained one, blocks a session       | Delete the named peer if the topology should own the session                                       |
-| `Ready` False, `MissingEndpoints`   | A member has no usable record, or an external peer's source record is missing | Write the record, or check its own `Ready`                                                         |
-| `status.retained` above zero        | Sessions kept until an end is retired, deleted or drained                     | Expected while a router is leaving; otherwise check for a member that left its selector by mistake |
+| Condition                           | Meaning                                                                                         | What to do                                                                                          |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `Accepted` False, `InvalidSelector` | A selector does not parse                                                                       | Fix it. Nothing was changed                                                                         |
+| `Accepted` False, `TooManySessions` | A member would hold more than `maxSessionsPerRouter` peers, retained ones included              | Narrow the selectors, release retained sessions, or raise the limit. Nothing was changed            |
+| `ReleaseHeld` True                  | More than half of the topology's peers would be released because their router or record is gone | Check the records and routers are meant to be gone, then list them in `drain`. Nothing was released |
+| `ResolvedRefs` False                | A profile or policy a relationship names does not exist                                         | Create it. Nothing was changed                                                                      |
+| `Conflicts` True                    | A peer the topology did not create, or a retained one, blocks a session                         | Delete the named peer if the topology should own the session                                        |
+| `Ready` False, `MissingEndpoints`   | A member has no usable record, or an external peer's source record is missing                   | Write the record, or check its own `Ready`                                                          |
+| `status.retained` above zero        | Sessions kept until an end is retired, deleted or drained, or pending release                   | Expected while a router is leaving; otherwise check for a member that left its selector by mistake  |
+
+Two cells that should agree report the same `status.recordsDigest` and
+`status.relationshipsDigest` on their topologies. Different digests mean
+their copies of the records, or their relationships, differ, and sessions
+between them may be configured at one end only.
 
 On a record, `Ready` False with `RouterNotFound` or `ASNMismatch` means the
 record of this cell disagrees with its `BGPRouter`, and `Conflict` True means
-an older record holds its identity or an address. Either way topologies do not
+a record whose name sorts first holds its identity or an address. Either way topologies do not
 peer over it, and keep the sessions they already generated toward it.
 
 ## Metrics and alerts

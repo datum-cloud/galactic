@@ -33,8 +33,12 @@ agree.
 
 The topology turns that into one record per router per transport network and
 a description of which records peer with which. Each cell generates its own
-side from the same records, so the two ends agree by construction and adding
-a node or a cell is adding its records.
+side from its copy of the records and its own topology. The two ends agree
+as long as every cell holds the same records and the same relationships,
+which nothing in a cell enforces: infra's per-cell bundles have to carry them,
+and each topology's `status.recordsDigest` and `status.relationshipsDigest`
+let the cells be compared. Adding a node or a cell is then adding its
+records.
 
 ## Model
 
@@ -102,8 +106,14 @@ router has no `BGPRouter` in this cell, so a role such as "reflector" has to
 be a property of the record every cell can see.
 
 Status: `members`, `generated`, `conflicting`, `missingEndpoints`, `retained`,
-and conditions `Accepted`, `ResolvedRefs`, `Conflicts` and `Ready`, each with
-`observedGeneration`.
+`recordsDigest` (the domain's records this cell holds, by name and spec) and
+`relationshipsDigest` (the routing domain and the mesh, reflection and
+external relationships), and conditions `Accepted`, `ResolvedRefs`,
+`Conflicts`, `ReleaseHeld` and `Ready`, each with `observedGeneration`.
+
+Only topologies in the namespace `--topology-namespace` names
+(`galactic-system` by default) are served; one anywhere else gets no
+finalizer, no status and no peers.
 
 ## What the generator writes
 
@@ -112,20 +122,38 @@ whose router is a member) gets one peer per remote record it pairs with, per
 family both carry, on a transport both are on. Nothing is generated for the
 other end: that end's cell generates it from the same records.
 
-| Peer field      | Value                                                                                                                                                                               |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| name            | `<local router>-<remote record>-<ipv4\|ipv6>`, or `<local router>-<relationship>-<address>` for external peers; over 253 characters it is cut and suffixed with a hash of the whole |
-| `routerRef`     | The local member                                                                                                                                                                    |
-| `peerASN`       | The remote record's `asn`, or the external peer's                                                                                                                                   |
-| `address`       | The remote record's address in the family, canonical form                                                                                                                           |
-| `updateSource`  | The local record's address in the family, with `EndpointAddress`                                                                                                                    |
-| owner reference | The topology, as controller                                                                                                                                                         |
-| labels          | `app.kubernetes.io/managed-by: fabric-topology`, `galactic.datumapis.com/fabric-topology`, `galactic.datumapis.com/peer-cell`, `galactic.datumapis.com/peer-failure-domain`         |
-| annotations     | The relationship (`mesh/NAME`, `reflection/NAME`, `external/NAME`), local and remote record names, the remote record's UID, the remote router                                       |
+| Peer field      | Value                                                                                                                                                                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| name            | `<local router>-<remote record>-<ipv4\|ipv6>-<hash>`, or `<local router>-<relationship>-<address>-<hash>` for external peers, cut to fit before the hash. The hash covers the three parts kept apart, so no two sessions share a name |
+| `routerRef`     | The local member                                                                                                                                                                                                                      |
+| `peerASN`       | The remote record's `asn`, or the external peer's                                                                                                                                                                                     |
+| `address`       | The remote record's address in the family, canonical form                                                                                                                                                                             |
+| `updateSource`  | The local record's address in the family, with `EndpointAddress`                                                                                                                                                                      |
+| owner reference | None                                                                                                                                                                                                                                  |
+| labels          | `app.kubernetes.io/managed-by: fabric-topology`, `galactic.datumapis.com/fabric-topology`, `galactic.datumapis.com/peer-cell`, `galactic.datumapis.com/peer-failure-domain`                                                           |
+| annotations     | The topology's UID (`galactic.datumapis.com/fabric-topology-uid`), the relationship (`mesh/NAME`, `reflection/NAME`, `external/NAME`), local and remote record names, the remote record's UID, the remote router                      |
 
-Names come from the records, never from a counter or the order things were
-seen in, so the same records always give the same peers; a resync compares
-spec, labels and annotations and writes nothing when they match.
+A session is its router and remote address. A session one of the topology's
+peers already holds is updated in that peer, whatever the peer is called:
+renaming the relationship that produces it, or replacing its record with a
+differently named one at the same address, changes the peer in place and
+never deletes it, so no release can catch the session missing. Only a
+session no peer holds gets a new peer, and only then is a name chosen. Names
+come from the records, never from a counter or the order things were seen
+in; a resync compares spec, labels and annotations and writes nothing when
+they match.
+
+The readable part of a name alone is ambiguous, since routers and records may
+contain `-` (router `a` toward record `b-c` and router `a-b` toward record `c`
+both read `a-b-c`), so every new name ends with a hash of its parts. If a plan
+still held two sessions under one name, the second is reported as a conflict
+and not generated.
+
+Peers generated before names carried a hash, or before ownership moved off
+owner references, are adopted where they stand: each keeps its name and UID,
+is updated in place if it is still wanted, and loses its owner reference to
+the topology in favour of the UID annotation. Nothing is renamed, so the
+migration deletes no peer.
 
 A generated peer is never described in FRR (no `description`), so a topology
 can replace imported or hand-authored peers without changing a single
@@ -139,7 +167,7 @@ names the other.
 
 | Owner                               | Owns                                                                                | The topology                                                                                                                                          |
 | ----------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The topology                        | Peers it created: controller reference to it and its labels                         | Creates, updates and deletes only these                                                                                                               |
+| The topology                        | Peers it created: its labels and its UID annotation                                 | Creates, updates and deletes only these                                                                                                               |
 | Operators and infra                 | Hand-authored and imported peers, `FabricEndpoint`s, `FabricTopology`s              | Never changes or deletes them. A hand-authored peer on the same router and address, or holding a generated name, blocks that session with `Conflicts` |
 | Revision compiler                   | `FabricRouterRevision`s                                                             | Unchanged. Generated peers reach it like any other peer                                                                                               |
 | Rollout manager and node agents     | `FabricRouterDeployment`s, releases, FRR                                            | Reads deployments for retirement only. Nothing it writes changes a node until a release promotes it                                                   |
@@ -148,20 +176,32 @@ names the other.
 | The addressing service              | Allocations                                                                         | Records a claim as provenance; never calls it                                                                                                         |
 
 The controller's own RBAC (`config/fabric-router-controller/rbac.yaml`) still
-only reads peers. Write access to `BGPPeer`s comes with the topology
-component's `fabric-router-controller-topology` ClusterRole, and the code, not
-RBAC, keeps it off peers it did not create: RBAC cannot select by owner.
+only reads peers. The topology component adds reads of its two kinds
+cluster-wide, and every write (peers, the topology's finalizer, both kinds'
+status) as a Role in `galactic-system` only, so a topology in another
+namespace can make the controller write nothing there; the reconcilers also
+ignore it. Within `galactic-system`, the code, not RBAC, keeps the controller
+off peers it did not create: RBAC cannot select by owner.
 
 ## Across cells
 
 Each cell holds every record of the routing domain, its own and every other
 cell's, delivered by infra's per-cell bundle along with the rest of its
-intent. Each cell's
-topology generates its local side toward every relevant record, local or
-remote. Because both cells compute from the same records, both ends of a
-cross-cell session agree: one cell's reflector generates a peer toward
-another cell's client record, and the client's cell generates the peer toward
-the reflector record.
+intent. Each cell's topology generates its local side toward every relevant
+record, local or remote: one cell's reflector generates a peer toward another
+cell's client record, and the client's cell generates the peer toward the
+reflector record. The two ends agree only while both cells hold the same
+records and topologies with the same relationships, families and
+transports; compare `status.recordsDigest` and `status.relationshipsDigest`
+across cells to check. Nothing compares them automatically yet.
+
+A topology never generates toward a record of its own cell whose router is
+not one of its members, but another cell does not know that and generates
+its side anyway. That side stays down until the router becomes a member.
+
+No lab session crosses cells: the lab's three clusters peer only with their
+own transit routers. Cross-cell generation is covered by the unit tests and
+envtests alone.
 
 While the records differ between cells, for example while a new record has
 reached one cell and not yet the other, one end exists and the other does
@@ -184,13 +224,33 @@ router that may still be carrying traffic over it. So the topology keeps it
 | The local router                     | its `BGPRouter` is deleted; or its `FabricRouterDeployment`, for the same router UID, has `spec.recovery.retired` and `status.appliedEpoch` at or above `spec.activationEpoch`; or `drain.routers` names it |
 | Either record it uses                | `drain.endpoints` names it                                                                                                                                                                                  |
 | A router of this cell at the far end | the same as the local router                                                                                                                                                                                |
-| A record of another cell             | the record is deleted (or deleted and recreated: the peer carries the UID it was generated from)                                                                                                            |
+| A record of another cell             | the record is deleted (or deleted and recreated without coming back within the settle period: the peer carries the UID it was generated from)                                                               |
 | An external peer                     | the topology no longer lists that address in that relationship                                                                                                                                              |
 
 Anything else keeps the session: a member that left the selector, a record of
 this cell deleted while its router still runs, a remote record that stays but
 stops matching a selector or drops a family, a profile edit. Those are
 retained until one of the rows above holds, and `retained` counts them.
+
+A release because something is gone (a deleted router or record) is checked
+three times before it happens:
+
+1. The absence seen in the controller's cache is confirmed by reading the
+   object from the API server; a lagging cache releases nothing.
+2. The absence must last the settle period, a minute by default: the peer is
+   annotated `galactic.datumapis.com/release-pending-since` when it is first
+   found, and released only once the period has passed. A record deleted and
+   recreated within it, as a replace does, keeps its session in the same
+   peer.
+3. The release guard weighs every pending absence together. When more than
+   two of the topology's peers, and more than half of them, are pending
+   release because something is gone, it releases none of them, sets
+   `ReleaseHeld` True and `Ready` False, and keeps them until `drain` names
+   the routers or records. A mass deletion, such as a pruned bundle, arrives
+   as a stream of events within the settle period, so it is held as a whole.
+
+Releases by retirement, drain or a removed external peer are explicit, and
+neither wait nor count toward the guard.
 
 The retirement signal is the one the rollout already has. `release create
 --retire` promotes a router's last revision with `recovery.retired`, and admission then
@@ -216,29 +276,29 @@ does nothing.
 
 ### Deleting a topology
 
-Deleting a topology drops no session. It carries the finalizer
-`galactic.datumapis.com/fabric-topology`, added on its first reconcile, so
-it stays until the controller has handed every peer it controls to manual
+Deleting a topology drops no session, whatever the deletion's propagation
+policy. Generated peers carry no owner reference, so the garbage collector
+has nothing to cascade to. The topology carries the finalizer
+`galactic.datumapis.com/fabric-topology`, added on its first reconcile, and
+stays until the controller has handed every peer it generated to manual
 control: each peer, listed from the API server rather than the cache, keeps
-its spec and loses the topology's controller reference and the
-`app.kubernetes.io/managed-by` and `galactic.datumapis.com/fabric-topology`
-labels, and gains the annotation
-`galactic.datumapis.com/released-from-fabric-topology` naming the topology.
-The other labels and annotations stay as provenance. The peers are then
-ordinary hand-authored peers: the garbage collector has no owner to collect
-them for, and every router keeps compiling the same sessions. The controller
-then removes the finalizer.
+its spec and loses the `app.kubernetes.io/managed-by` and
+`galactic.datumapis.com/fabric-topology` labels and the topology UID, and
+gains the annotation `galactic.datumapis.com/released-from-fabric-topology`
+naming the topology. The other labels and annotations stay as provenance. The
+peers are then ordinary hand-authored peers, and every router keeps compiling
+the same sessions. The controller then removes the finalizer.
 
-A topology created again, even with the same name, does not adopt them: it
-reports each as a conflict and generates nothing in its place. Adopting a
+A topology created again, even with the same name, has another UID and does
+not adopt them: it reports each as a conflict and generates nothing in its
+place. Adopting a
 session is the same as the [migration from imported
 peers](operations.md#moving-from-hand-authored-or-imported-peers): delete the
 hand-authored peer, outside a release, and the topology generates its own.
 
-Delete a topology with the default (background) cascade. `--cascade=foreground`
-makes the garbage collector delete the topology's dependents while the
-topology waits on its finalizers, racing the hand-off, and can delete peers
-before the controller releases them.
+With `--topology` off, nothing removes the finalizer. Turn the controller
+back on, or remove the finalizer by hand: the peers then keep their labels,
+but no topology of another UID treats them as its own.
 
 ## Partition
 
@@ -270,20 +330,24 @@ the rollout is a committed retirement, which can only remove sessions.
 
 ## Conflicts
 
-| Conflict                                                          | Outcome                                                                                                                          |
-| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Two records for one router on one transport                       | The older keeps it (creation time, then name); the newer is `Conflict` `DuplicateEndpoint`, `Ready` False, and generates nothing |
-| Two records holding one address on one transport of a domain      | The older keeps it; the newer is `AddressInUse`                                                                                  |
-| A peer the topology did not create on the same router and address | That session is not generated; `Conflicts` True names it; the peer is not touched                                                |
-| A peer the topology did not create holding a generated name       | The same                                                                                                                         |
-| A retained generated peer holding the address a new session wants | The new session waits until the retained one is released                                                                         |
-| Two relationships generating one router and address               | The first keeps it                                                                                                               |
-| A missing profile or policy                                       | `ResolvedRefs` False; the topology writes nothing until it exists                                                                |
-| More than `maxSessionsPerRouter` on a member                      | `Accepted` False; the topology writes nothing                                                                                    |
+| Conflict                                                             | Outcome                                                                                                                    |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Two records for one router on one transport                          | The one whose name sorts first keeps it; the other is `Conflict` `DuplicateEndpoint`, `Ready` False, and generates nothing |
+| Two records holding one address on one transport of a domain         | The one whose name sorts first keeps it; the other is `AddressInUse`                                                       |
+| A peer the topology did not create on the same router and address    | That session is not generated; `Conflicts` True names it; the peer is not touched                                          |
+| A peer the topology did not create holding a generated name          | The same                                                                                                                   |
+| A retained generated peer holding the address a new session wants    | The new session waits until the retained one is released                                                                   |
+| Two relationships generating one router and address                  | The first keeps it                                                                                                         |
+| A missing profile or policy                                          | `ResolvedRefs` False; the topology writes nothing until it exists                                                          |
+| More than `maxSessionsPerRouter` on a member, retained ones included | `Accepted` False; the topology writes nothing                                                                              |
 
-Older wins, as for router IDs in the compiler, so a newcomer never takes a
-session away from a record already in use. Where the topology writes nothing,
-it also deletes nothing: the peers already generated stay as they are.
+The record winning a conflict is decided by name alone, which every cell
+holding the same records sees identically; the order in which a cell's copies
+were created no longer matters. A newcomer whose name sorts first therefore
+does take an address from a record in use: the session moves to the newcomer
+in place, since it keeps the same router and address. Where the topology
+writes nothing, it also deletes nothing: the peers already generated stay as
+they are.
 
 ## Decisions and tradeoffs
 
@@ -320,6 +384,20 @@ it also deletes nothing: the peers already generated stay as they are.
   would withdraw every session on the next release. Keeping them as
   hand-authored peers changes nothing on any router, and makes adoption by a
   later topology an explicit, per-peer operator step rather than a silent one.
+- **Ownership by label and UID, not owner reference.** An owner reference
+  lets the garbage collector delete a peer whenever the topology goes, and
+  foreground deletion does so before any finalizer can intervene. Labels and
+  the topology's UID identify the peers just as well, and leave the collector
+  nothing to follow.
+- **A session is its router and address.** Matching retained and wanted
+  peers on that, rather than on the relationship or record that produced
+  them, makes renames updates in place. The cost is that a peer's name may
+  stop describing it after a rename; its annotations always do.
+- **Absence waits, and is weighed together.** Confirming with the API server
+  guards against a stale cache; the settle period guards against a replace;
+  the guard against a mass deletion. A real removal of most of a topology's
+  routers or records needs `drain` entries, and a single removal waits a
+  minute.
 - **Drain entries belong to the operator.** The controller cannot tell a
   drained router that is gone for good from one coming back, so it never
   removes an entry.
@@ -359,7 +437,7 @@ An addressing-backed writer would have to provide:
 3. `source.type: AddressClaim` with the claim of each address, set in the
    same write as the address.
 4. Uniqueness within each transport of a routing domain. The records'
-   older-wins conflict rule is a backstop, not a substitute.
+   name-ordered conflict rule is a backstop, not a substitute.
 5. Delivery of every record to every cell of the routing domain, and deletion
    from every cell.
 6. Release of an allocation only after the router's sessions are released:
@@ -402,6 +480,9 @@ imported peers are deleted, which is the migration in
 - Records carrying more than sessions need, such as the router ID or
   loopback, so the same records could later describe other per-router
   facts. Not planned now.
+- Comparing `recordsDigest` and `relationshipsDigest` across cells
+  automatically, for instance as an alert over the fleet's topologies.
+- An explicit priority between conflicting records; today the name decides.
 - Fleet metrics and alerts for topologies (`retained` and `conflicting` are
   in status only).
 - Failure-domain policy: domains are recorded on every peer, but no
