@@ -92,6 +92,19 @@ var (
 		"1 when a fabric router's latest inputs compiled into a revision, 0 when the controller refused them; "+
 			"reason is the Accepted condition's.",
 		[]string{labelNamespace, "router", "node", "reason"}, nil)
+
+	collectSuccess = prometheus.NewDesc(prefix+"collect_success",
+		"1 when this scrape read every object of the kind from the cache, 0 when the read failed and the "+
+			"kind's series are missing from it.",
+		[]string{"kind"}, nil)
+)
+
+// Kinds the collector reads, as its collect_success series name them.
+const (
+	kindRouterClasses = "bgprouterclasses"
+	kindRouters       = "bgprouters"
+	kindDeployments   = "fabricrouterdeployments"
+	kindReleases      = "fabricreleaseauthorizations"
 )
 
 // Collector reads the fleet from a cache-backed reader at scrape time.
@@ -125,15 +138,16 @@ func (c *Collector) NeedLeaderElection() bool { return true }
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{
 		deploymentInfo, activationEpoch, appliedEpoch, lastEpoch, heartbeat, bootAuthorized, condition, staged,
-		stagedLines, candidateDiffers, releases, releaseOutstanding, routerAccepted,
+		stagedLines, candidateDiffers, releases, releaseOutstanding, routerAccepted, collectSuccess,
 	} {
 		ch <- d
 	}
 }
 
-// Collect emits the fleet's current state. A list that fails is logged and
-// its series are left out of this scrape, so one unreadable kind never
-// fails the scrape of the controller's other metrics.
+// Collect emits the fleet's current state. A list that fails is logged,
+// its series are left out of this scrape and its kind's collect_success is
+// 0, so one unreadable kind never fails the scrape of the controller's
+// other metrics and is still seen.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	if !c.leading.Load() {
 		return
@@ -150,19 +164,28 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 	var deps networkv1alpha1.FabricRouterDeploymentList
-	if err := c.Reader.List(ctx, &deps); err != nil {
-		slog.Warn("could not list fabric router deployments for metrics", "error", err)
-	} else {
+	if list(ctx, ch, c.Reader, &deps, kindDeployments) {
 		for i := range deps.Items {
 			collectDeployment(ch, &deps.Items[i])
 		}
 	}
 	var auths networkv1alpha1.FabricReleaseAuthorizationList
-	if err := c.Reader.List(ctx, &auths); err != nil {
-		slog.Warn("could not list fabric release authorizations for metrics", "error", err)
-		return
+	if list(ctx, ch, c.Reader, &auths, kindReleases) {
+		collectReleases(ch, auths.Items)
 	}
-	collectReleases(ch, auths.Items)
+}
+
+// list reads every object of kind into into, emits whether it could, and
+// reports whether it did.
+func list(ctx context.Context, ch chan<- prometheus.Metric, r client.Reader, into client.ObjectList, kind string) bool {
+	err := r.List(ctx, into)
+	ok := 1.0
+	if err != nil {
+		ok = 0
+		slog.Warn("could not list objects for fabric routing metrics", "kind", kind, "error", err)
+	}
+	ch <- prometheus.MustNewConstMetric(collectSuccess, prometheus.GaugeValue, ok, kind)
+	return err == nil
 }
 
 func collectDeployment(ch chan<- prometheus.Metric, d *networkv1alpha1.FabricRouterDeployment) {
@@ -225,11 +248,11 @@ func collectReleases(ch chan<- prometheus.Metric, items []networkv1alpha1.Fabric
 }
 
 // collectRouters emits the compile result of every router whose class
-// names the fabric router controller.
+// names the fabric router controller. Routers are not read when no class
+// does.
 func (c *Collector) collectRouters(ctx context.Context, ch chan<- prometheus.Metric) {
 	var classes networkv1alpha1.BGPRouterClassList
-	if err := c.Reader.List(ctx, &classes); err != nil {
-		slog.Warn("could not list BGP router classes for metrics", "error", err)
+	if !list(ctx, ch, c.Reader, &classes, kindRouterClasses) {
 		return
 	}
 	fabric := map[string]bool{}
@@ -242,8 +265,7 @@ func (c *Collector) collectRouters(ctx context.Context, ch chan<- prometheus.Met
 		return
 	}
 	var routers networkv1alpha1.BGPRouterList
-	if err := c.Reader.List(ctx, &routers); err != nil {
-		slog.Warn("could not list BGP routers for metrics", "error", err)
+	if !list(ctx, ch, c.Reader, &routers, kindRouters) {
 		return
 	}
 	for i := range routers.Items {

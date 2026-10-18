@@ -1,3 +1,9 @@
+# HELP galactic_fabric_routing_collect_success 1 when this scrape read every object of the kind from the cache, 0 when the read failed and the kind's series are missing from it.
+# TYPE galactic_fabric_routing_collect_success gauge
+galactic_fabric_routing_collect_success{kind="bgprouterclasses"} 1
+galactic_fabric_routing_collect_success{kind="bgprouters"} 1
+galactic_fabric_routing_collect_success{kind="fabricreleaseauthorizations"} 1
+galactic_fabric_routing_collect_success{kind="fabricrouterdeployments"} 1
 # HELP galactic_fabric_routing_deployment_activation_epoch The deployment's spec.activationEpoch: the newest promotion.
 # TYPE galactic_fabric_routing_deployment_activation_epoch gauge
 galactic_fabric_routing_deployment_activation_epoch{deployment="edge-a",namespace="galactic-system",node="node-a"} 3

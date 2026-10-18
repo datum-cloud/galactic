@@ -5,11 +5,15 @@ package metrics
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -142,8 +146,8 @@ func TestCollector(t *testing.T) {
 func TestCollectorWithoutRollout(t *testing.T) {
 	c := &Collector{Reader: newReader(t, fleet()...)}
 	c.leading.Store(true)
-	if n := testutil.CollectAndCount(c); n != 2 {
-		t.Fatalf("got %d series, want the 2 router_accepted series", n)
+	if n := testutil.CollectAndCount(c); n != 4 {
+		t.Fatalf("got %d series, want 2 router_accepted and 2 collect_success", n)
 	}
 	if n := testutil.CollectAndCount(c, prefix+"router_accepted"); n != 2 {
 		t.Fatalf("got %d router_accepted series, want 2", n)
@@ -188,7 +192,74 @@ func TestCollectorNoFabricClass(t *testing.T) {
 	r.Status.Conditions = []metav1.Condition{cond("Accepted", "False", "Whatever")}
 	c := &Collector{Reader: newReader(t, r), Rollout: true}
 	c.leading.Store(true)
-	if n := testutil.CollectAndCount(c); n != 0 {
+	if n := testutil.CollectAndCount(c) - testutil.CollectAndCount(c, prefix+"collect_success"); n != 0 {
 		t.Fatalf("got %d series from a cluster that does not route fabric through the API, want none", n)
+	}
+}
+
+// failingReader fails every List of one kind.
+type failingReader struct {
+	client.Reader
+	fail client.ObjectList
+}
+
+func (r failingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if fmt.Sprintf("%T", list) == fmt.Sprintf("%T", r.fail) {
+		return errors.New("timed out waiting for cache to be synced")
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+// TestCollectorReportsFailedReads reports a kind it could not read as
+// collect_success 0, and still exports every other kind.
+func TestCollectorReportsFailedReads(t *testing.T) {
+	tests := []struct {
+		name string
+		fail client.ObjectList
+		kind string
+		// gone is a series the failed read leaves out.
+		gone string
+	}{
+		{"Deployments", &networkv1alpha1.FabricRouterDeploymentList{}, kindDeployments, "deployment_info"},
+		{"Releases", &networkv1alpha1.FabricReleaseAuthorizationList{}, kindReleases, "releases"},
+		{"Routers", &networkv1alpha1.BGPRouterList{}, kindRouters, "router_accepted"},
+		{"RouterClasses", &networkv1alpha1.BGPRouterClassList{}, kindRouterClasses, "router_accepted"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Collector{Reader: failingReader{Reader: newReader(t, fleet()...), fail: tt.fail}, Rollout: true}
+			c.leading.Store(true)
+			reg := prometheus.NewPedanticRegistry()
+			reg.MustRegister(c)
+			families, err := reg.Gather()
+			if err != nil {
+				t.Fatalf("a failed read failed the scrape: %v", err)
+			}
+			success := map[string]float64{}
+			present := map[string]bool{}
+			for _, f := range families {
+				present[strings.TrimPrefix(f.GetName(), prefix)] = true
+				if f.GetName() != prefix+"collect_success" {
+					continue
+				}
+				for _, m := range f.GetMetric() {
+					success[m.GetLabel()[0].GetValue()] = m.GetGauge().GetValue()
+				}
+			}
+			if v, ok := success[tt.kind]; !ok || v != 0 {
+				t.Errorf("collect_success{kind=%q} = %v (present %v), want 0", tt.kind, v, ok)
+			}
+			for kind, v := range success {
+				if kind != tt.kind && v != 1 {
+					t.Errorf("collect_success{kind=%q} = %v, want 1", kind, v)
+				}
+			}
+			if present[tt.gone] {
+				t.Errorf("%s exported from a failed read", tt.gone)
+			}
+			if tt.kind != kindDeployments && !present["deployment_info"] {
+				t.Error("deployments are missing although only another kind failed")
+			}
+		})
 	}
 }
