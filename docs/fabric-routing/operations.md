@@ -12,14 +12,16 @@ the agent reading ConfigMaps at all.
 
 ## The pieces
 
-| Piece                 | Where                                                | What it does                                                                                                                                                                         |
-| --------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| CRDs                  | `config/crd`                                         | `BGPRouter` and the objects it reads, plus `FabricRouterRevision`, `FabricRouterDeployment`, `FabricReleaseAuthorization` and `FabricRolloutPolicy`. Needs Kubernetes 1.32 or later. |
-| Revision compiler     | `config/fabric-router-controller` and its `base/`    | `fabric-router-controller run` compiles every fabric-class `BGPRouter` into immutable revisions and reports the result on the router. It writes no FRR.                              |
-| Rollout manager       | `config/fabric-router-controller/components/rollout` | Adds `--rollout`: one `FabricRouterDeployment` per compiled router, and the controller that runs release authorizations.                                                             |
-| Node agent activation | `config/fabric-router/components/activation`         | `fabric-config-agent` acts on its node's deployment: stages candidates, and on the CRD source activates the active revision. Adds a host state directory and `/etc/machine-id`.      |
+| Piece                 | Where                                                 | What it does                                                                                                                                                                                                                               |
+| --------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| CRDs                  | `config/crd`                                          | `BGPRouter` and the objects it reads, plus `FabricRouterRevision`, `FabricRouterDeployment`, `FabricReleaseAuthorization`, `FabricRolloutPolicy`, `FabricEndpoint` and `FabricTopology`. Needs Kubernetes 1.32 or later.                   |
+| Revision compiler     | `config/fabric-router-controller` and its `base/`     | `fabric-router-controller run` compiles every fabric-class `BGPRouter` into immutable revisions and reports the result on the router. It writes no FRR.                                                                                    |
+| Rollout manager       | `config/fabric-router-controller/components/rollout`  | Adds `--rollout`: one `FabricRouterDeployment` per compiled router, and the controller that runs release authorizations.                                                                                                                   |
+| Node agent activation | `config/fabric-router/components/activation`          | `fabric-config-agent` acts on its node's deployment: stages candidates, and on the CRD source activates the active revision. Adds a host state directory and `/etc/machine-id`.                                                            |
+| Topology generator    | `config/fabric-router-controller/components/topology` | Adds `--topology`: generates `BGPPeer`s from `FabricTopology` relationships and `FabricEndpoint` records, with its own ClusterRole for writing peers. Optional; see [Generating peers from a topology](#generating-peers-from-a-topology). |
 
-Install them in that order. Each one is safe on its own. Node agent
+Install the first four in that order; the topology generator can come at any
+point after the compiler. Each one is safe on its own. Node agent
 activation needs `/etc/machine-id` on every fabric router host, and adding it
 changes the pod template, so every fabric-router pod restarts and FRR with it:
 roll it out like a routing change, one canary node first. Without the rollout
@@ -253,6 +255,118 @@ To run a node from its ConfigMap again:
 2. Remove the Component, a routing change paced like adding it. The Role comes
    back, and every node keeps running from `CRD`.
 3. Hand the node back with `fabric-router-controller source DEPLOYMENT ConfigMap`.
+
+## Generating peers from a topology
+
+With `--topology`, `fabric-router-controller` writes a cell's fabric peers
+from one `FabricEndpoint` per router per transport network and a
+`FabricTopology` saying which records peer: a mesh, route reflection, and
+external peers such as transits. Each cell generates only its own routers'
+side, from records of every cell, so both ends of a session come from the
+same records. The design, including what is not implemented yet, is
+[topology.md](topology.md).
+
+Generated peers are ordinary `BGPPeer`s, labelled
+`app.kubernetes.io/managed-by: fabric-topology` and controlled by their
+topology. They compile into candidates like any other peer, and a node runs
+one only once a release promotes it.
+
+### Installing
+
+1. Apply the CRDs, which include `FabricEndpoint` and `FabricTopology`.
+2. Add `config/fabric-router-controller/components/topology` to the
+   controller's overlay. It adds `--topology` and the
+   `fabric-router-controller-topology` ClusterRole, the only grant that lets
+   the controller write `BGPPeer`s. It restarts the controller, not FRR.
+3. Apply every cell's records, then this cell's topology.
+
+A record looks like this, one per router per transport:
+
+```yaml
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: edge-a-private-mesh
+  namespace: galactic-system
+  labels:
+    fabric.example/role: client
+spec:
+  routingDomain: fabric
+  cell: cell-a
+  routerRef:
+    name: edge-a
+  transport: private-mesh
+  asn: 64512
+  addresses:
+    ipv6: 2001:db8:100::5
+  failureDomain: zone-1
+```
+
+Records of other cells must be present in this cell too, with the same
+content. Nothing in the cluster copies them; the deployment pipeline does.
+
+### Moving from hand-authored or imported peers
+
+The topology never changes or deletes a peer it did not create. Applied next
+to the peers it would generate, it reports each one as a conflict and
+generates nothing for that session:
+
+1. Apply the records and topology. Check `kubectl get fabrictopology` shows
+   the expected `CONFLICTING` count and every record is `Ready`
+   (`kubectl get fabricendpoint`).
+2. Outside any release, delete one router's conflicting peers; the
+   `Conflicts` condition names them. The topology creates its own at once.
+3. The router's new candidate renders the same sessions, possibly in another
+   order. With the node on `Shadow` or `CRD`, its staged candidate should report
+   `NoChange` with no lines added or removed. Release it as usual, or not at all.
+4. Repeat for the next router.
+
+Until a router's own peers are back, its candidate lacks those sessions; a
+release naming every changed deployment would promote that. Keep step 2 and
+the generated peers' appearance between releases.
+
+### Adding a node or a cell
+
+Create the router's `BGPRouter` with the topology's member labels and its
+records; for a cell, deliver its records to every cell of the routing domain.
+Every member that should peer with it gets a peer, and the new router's peers
+are generated in its own cell. Release the changed routers.
+
+### Removing a node or a cell
+
+A session is only released on evidence that an end is out of service, never
+because a record or label changed:
+
+1. Retire the router: `fabric-router-controller release create … --retire
+   DEPLOYMENT`. Once its node commits that release, the topology releases
+   every session toward it in this cell, and its own.
+2. Release the other routers' new candidates.
+3. Delete its records, from every cell, and its `BGPRouter`. In another cell,
+   deleting the record is what releases the sessions toward it.
+
+For a node that will never report, list its router in the topology's
+`spec.drain.routers`, or a record in `spec.drain.endpoints`, to release its
+sessions without the retirement. Remove the entry once the router is gone.
+
+Deleting a `BGPRouter` releases its sessions at once. Deleting a
+`FabricTopology` deletes every peer it generated; use
+`kubectl delete --cascade=orphan` to keep them.
+
+### Reading its status
+
+| Condition                           | Meaning                                                                       | What to do                                                                                         |
+| ----------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `Accepted` False, `InvalidSelector` | A selector does not parse                                                     | Fix it. Nothing was changed                                                                        |
+| `Accepted` False, `TooManySessions` | A member would get more than `maxSessionsPerRouter` peers                     | Narrow the selectors or raise the limit. Nothing was changed                                       |
+| `ResolvedRefs` False                | A profile or policy a relationship names does not exist                       | Create it. Nothing was changed                                                                     |
+| `Conflicts` True                    | A peer the topology did not create, or a retained one, blocks a session       | Delete the named peer if the topology should own the session                                       |
+| `Ready` False, `MissingEndpoints`   | A member has no usable record, or an external peer's source record is missing | Write the record, or check its own `Ready`                                                         |
+| `status.retained` above zero        | Sessions kept until an end is retired, deleted or drained                     | Expected while a router is leaving; otherwise check for a member that left its selector by mistake |
+
+On a record, `Ready` False with `RouterNotFound` or `ASNMismatch` means the
+record of this cell disagrees with its `BGPRouter`, and `Conflict` True means
+an older record holds its identity or an address. Either way topologies do not
+peer over it, and keep the sessions they already generated toward it.
 
 ## Metrics and alerts
 
