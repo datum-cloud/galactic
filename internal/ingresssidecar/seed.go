@@ -48,14 +48,23 @@ func SeedFromAPI(ctx context.Context, reader client.Reader, store *Store) error 
 	}
 	sel := labels.NewSelector().Add(*req)
 
+	inputs := store.inputMetrics()
+	inputs.beginSeed()
+	defer inputs.endSeed()
+
 	var list discoveryv1.EndpointSliceList
 	if err := reader.List(ctx, &list, client.MatchingLabelsSelector{Selector: sel}); err != nil {
 		return fmt.Errorf("list EndpointSlices: %w", err)
 	}
 
 	for i := range list.Items {
+		if err := ctx.Err(); err != nil {
+			return err // interrupted part way: not a completed seed
+		}
 		slice := &list.Items[i]
-		desired, err := BuildDesiredRoute(slice)
+		key := fmt.Sprintf("%s/%s", slice.Namespace, slice.Name)
+		state, desired, err := classifySlice(slice)
+		inputs.observeSeed(key, state)
 		if err != nil {
 			// Same handling as Reconciler.Reconcile: malformed-but-selected
 			// is worth logging, not worth failing startup over.
@@ -66,7 +75,6 @@ func SeedFromAPI(ctx context.Context, reader client.Reader, store *Store) error 
 		if desired == nil {
 			continue // not yet ready (no SID annotation) -- nothing to seed
 		}
-		key := fmt.Sprintf("%s/%s", slice.Namespace, slice.Name)
 		if err := store.SetDesired(ctx, key, desired); err != nil {
 			// The store keeps the route desired and retries it on every
 			// sweep, so one VPC whose datapath is not ready yet must not
