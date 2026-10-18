@@ -70,14 +70,37 @@ func newSidecarReturnHarness(t *testing.T) *sidecarReturnHarness {
 }
 
 // sidecarReturnClient holds BGPRouters and advertisements together, and
-// fails every List when listErr is set.
+// fails every List when listErr is set. Advertisements reach a node only
+// through a router targeting it, named in their routerRef: a router a test
+// passes is renamed after its node, and a node with advertisements but no
+// router gets one with no SRv6 identity, so the node's identity still comes
+// only from the routers a test passes.
 func sidecarReturnClient(t *testing.T, listErr error, objs ...client.Object) client.Client {
 	t.Helper()
 	s := runtime.NewScheme()
 	if err := bgpv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
-	b := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...)
+	all := make([]client.Object, 0, len(objs))
+	routed := make(map[string]bool)
+	for _, o := range objs {
+		if r, ok := o.(*bgpv1alpha1.BGPRouter); ok {
+			r = r.DeepCopy()
+			r.Name = r.Spec.TargetRef.Name
+			routed[r.Name] = true
+			o = r
+		}
+		all = append(all, o)
+	}
+	for _, o := range objs {
+		if a, ok := o.(*bgpv1alpha1.BGPAdvertisement); ok && !routed[a.Spec.RouterRef.Name] {
+			routed[a.Spec.RouterRef.Name] = true
+			r := router(a.Spec.RouterRef.Name, "", 0)
+			r.Name = a.Spec.RouterRef.Name
+			all = append(all, r)
+		}
+	}
+	b := fake.NewClientBuilder().WithScheme(s).WithObjects(all...)
 	if listErr != nil {
 		b = b.WithInterceptorFuncs(interceptor.Funcs{
 			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
