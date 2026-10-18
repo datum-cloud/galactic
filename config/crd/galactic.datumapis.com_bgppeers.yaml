@@ -67,8 +67,11 @@ spec:
                 - message: address must be a valid IPv4 or IPv6 address
                   rule: isIP(self)
               addressFamilies:
-                description: AddressFamilies defines the address families negotiated
-                  on this session.
+                description: |-
+                  AddressFamilies defines the address families negotiated on this session.
+                  Required unless peerProfileRef is set; a peer with a profile and no
+                  list activates the profile's families, and a list must then be a
+                  subset of them.
                 items:
                   description: |-
                     AddressFamily is a BGP address family expressed as an AFI/SAFI pair.
@@ -98,6 +101,7 @@ spec:
                     rule: 'self.afi == ''ipv6'' ? self.safi == ''unicast'' : true'
                   - message: L2VPN only supports evpn SAFI
                     rule: 'self.afi == ''l2vpn'' ? self.safi == ''evpn'' : true'
+                maxItems: 8
                 minItems: 1
                 type: array
               allowASIn:
@@ -184,12 +188,172 @@ spec:
               description:
                 description: Description is a human-readable label for this peer (e.g.,
                   "spine-1").
+                maxLength: 80
+                pattern: ^[^\r\n]*$
                 type: string
               ebgpMultiHop:
                 description: |-
                   EbgpMultiHop enables eBGP multihop when the peer is not directly connected.
                   When true, the TTL for BGP packets is set to 64 (vs. 1 for direct).
                 type: boolean
+              familySettings:
+                description: |-
+                  FamilySettings holds per-family settings. A field set here overrides
+                  the same field in the profile's family. Honored by the fabric router
+                  implementation only.
+                items:
+                  description: |-
+                    BGPPeerFamilySettings holds one address family's session settings for a
+                    peer or a peer profile. Every field is optional: on a peer, an unset field
+                    falls through to the profile's setting for the same family.
+                  properties:
+                    afi:
+                      description: AFI is the address family indicator.
+                      enum:
+                      - ipv4
+                      - ipv6
+                      - l2vpn
+                      type: string
+                    allowASIn:
+                      description: |-
+                        AllowASIn accepts routes whose AS path holds the local ASN up to this
+                        many times.
+                      format: int32
+                      maximum: 10
+                      minimum: 1
+                      type: integer
+                    exportPolicyRef:
+                      description: |-
+                        ExportPolicyRef names the BGPPolicy applied to routes sent to the peer
+                        in this family. A fabric peer family must resolve one: there is no
+                        implicit export-everything default.
+                      properties:
+                        name:
+                          description: Name is the referenced object's name.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    frr:
+                      description: FRR holds FRR-specific settings.
+                      properties:
+                        weight:
+                          description: |-
+                            Weight is FRR's local, non-propagated path preference for routes
+                            learned from the peer. It is not LOCAL_PREF.
+                          format: int32
+                          maximum: 65535
+                          minimum: 0
+                          type: integer
+                      type: object
+                    importPolicyRef:
+                      description: |-
+                        ImportPolicyRef names the BGPPolicy applied to routes received from
+                        the peer in this family.
+                      properties:
+                        name:
+                          description: Name is the referenced object's name.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    nextHopMode:
+                      description: NextHopMode controls the advertised next hop.
+                      enum:
+                      - Unchanged
+                      - Self
+                      - SelfForce
+                      type: string
+                    prefixLimit:
+                      description: PrefixLimit bounds the prefixes the peer may send
+                        in this family.
+                      properties:
+                        action:
+                          description: Action is what happens once maximum is exceeded.
+                          enum:
+                          - WarnOnly
+                          - Restart
+                          - Shutdown
+                          type: string
+                        maximum:
+                          description: Maximum is the number of prefixes accepted
+                            before the action applies.
+                          format: int64
+                          maximum: 4294967295
+                          minimum: 1
+                          type: integer
+                        restartMinutes:
+                          description: |-
+                            RestartMinutes is the delay before a Restart action re-establishes
+                            the session.
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        warningThresholdPercent:
+                          description: |-
+                            WarningThresholdPercent logs a warning once received prefixes reach
+                            this share of maximum.
+                          format: int32
+                          maximum: 100
+                          minimum: 1
+                          type: integer
+                      required:
+                      - action
+                      - maximum
+                      type: object
+                      x-kubernetes-validations:
+                      - message: restartMinutes is required with, and only with, action
+                          Restart
+                        rule: (self.action == 'Restart') == has(self.restartMinutes)
+                    routeReflectorClient:
+                      description: |-
+                        RouteReflectorClient treats the peer as a route-reflector client in
+                        this family.
+                      type: boolean
+                    safi:
+                      description: SAFI is the subsequent address family indicator.
+                      enum:
+                      - unicast
+                      - evpn
+                      type: string
+                    sendCommunity:
+                      description: |-
+                        SendCommunity restricts the community attributes sent to the peer to
+                        the named ones. Unset sends every community attribute, the pinned
+                        FRR's default.
+                      enum:
+                      - standard
+                      - extended
+                      - large
+                      - both
+                      type: string
+                    softReconfigurationInbound:
+                      description: |-
+                        SoftReconfigurationInbound keeps a copy of the routes received from
+                        the peer, so an import policy change applies without a refresh.
+                      type: boolean
+                  required:
+                  - afi
+                  - safi
+                  type: object
+                  x-kubernetes-validations:
+                  - message: IPv4 only supports unicast SAFI
+                    rule: 'self.afi == ''ipv4'' ? self.safi == ''unicast'' : true'
+                  - message: IPv6 only supports unicast SAFI
+                    rule: 'self.afi == ''ipv6'' ? self.safi == ''unicast'' : true'
+                  - message: L2VPN only supports evpn SAFI
+                    rule: 'self.afi == ''l2vpn'' ? self.safi == ''evpn'' : true'
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - afi
+                - safi
+                x-kubernetes-list-type: map
               gracefulRestart:
                 description: |-
                   GracefulRestart configures BGP graceful restart for this peer.
@@ -272,8 +436,23 @@ spec:
               peerASN:
                 description: PeerASN is the remote AS number.
                 format: int64
+                maximum: 4294967295
                 minimum: 1
                 type: integer
+              peerProfileRef:
+                description: |-
+                  PeerProfileRef names the BGPPeerProfile whose settings this peer
+                  uses. Honored by the fabric router implementation only; the Galactic
+                  EVPN router rejects a peer that sets it.
+                properties:
+                  name:
+                    description: Name is the referenced object's name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
               remotePort:
                 description: |-
                   RemotePort is the TCP port used to establish the BGP session with
@@ -367,20 +546,51 @@ spec:
                 - large
                 - both
                 type: string
+              transport:
+                description: |-
+                  Transport overrides the profile's transport settings field by field.
+                  Honored by the fabric router implementation only.
+                properties:
+                  advertisementIntervalSeconds:
+                    description: |-
+                      AdvertisementIntervalSeconds is the minimum interval between UPDATE
+                      messages. Unset leaves the implementation's default.
+                    format: int32
+                    maximum: 600
+                    minimum: 0
+                    type: integer
+                  ebgpMultihopTTL:
+                    description: |-
+                      EBGPMultihopTTL allows an eBGP session over up to this many hops.
+                      Unset renders no multihop line.
+                    format: int32
+                    maximum: 255
+                    minimum: 1
+                    type: integer
+                type: object
               updateSource:
                 description: |-
                   UpdateSource is the local IP address or interface name used as the
                   source for the BGP TCP session. Useful when the local router has
                   multiple addresses or when pinning to a specific loopback.
+                maxLength: 45
                 type: string
+                x-kubernetes-validations:
+                - message: updateSource must be an IP address or an interface name
+                  rule: isIP(self) || self.matches('^[A-Za-z0-9_.@-]{1,15}$')
             required:
             - address
-            - addressFamilies
             - peerASN
             type: object
             x-kubernetes-validations:
             - message: Exactly one of routerRef or routerSelector must be set
               rule: has(self.routerRef) != has(self.routerSelector)
+            - message: every familySettings entry must be one of addressFamilies
+              rule: '!has(self.addressFamilies) || !has(self.familySettings) || self.familySettings.all(f,
+                self.addressFamilies.exists(a, a.afi == f.afi && a.safi == f.safi))'
+            - message: addressFamilies is required unless peerProfileRef supplies
+                them
+              rule: has(self.addressFamilies) || has(self.peerProfileRef)
           status:
             description: BGPPeerStatus defines the observed state of BGPPeer.
             properties:

@@ -1,0 +1,366 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: fabricendpoints.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    kind: FabricEndpoint
+    listKind: FabricEndpointList
+    plural: fabricendpoints
+    shortNames:
+    - fep
+    singular: fabricendpoint
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.routingDomain
+      name: DOMAIN
+      type: string
+    - jsonPath: .spec.cell
+      name: CELL
+      type: string
+    - jsonPath: .spec.routerRef.name
+      name: ROUTER
+      type: string
+    - jsonPath: .spec.transport
+      name: TRANSPORT
+      type: string
+    - jsonPath: .spec.addresses.ipv4
+      name: IPV4
+      type: string
+    - jsonPath: .spec.addresses.ipv6
+      name: IPV6
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: READY
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FabricEndpoint is where one fabric router is reached on one transport
+          network: its addresses there, the ASN it speaks, the cell that owns it and
+          its failure domain. A FabricTopology generates both ends of a managed
+          session from two endpoint records, so a router's record must be present
+          in every cell whose routers peer with it, including cells where the router
+          itself does not run. Whoever distributes the rest of the cell's intent
+          distributes these records too; nothing in the cluster copies them between
+          cells.
+
+          An endpoint is a record, not an allocation: nothing here asks an
+          addressing service for an address. spec.source says where the addresses
+          came from.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              FabricEndpointSpec is one router's presence on one transport network. Its
+              identity (routing domain, cell, router and transport) is immutable: moving
+              a router to another transport is a new endpoint and the removal of the
+              old one, so the old one's sessions drain like any other removal.
+            properties:
+              addresses:
+                description: |-
+                  Addresses are the router's addresses on the transport, at most one
+                  per family. A session is generated only in a family both ends carry.
+                properties:
+                  ipv4:
+                    description: IPv4 is the router's IPv4 address on the transport.
+                    maxLength: 15
+                    type: string
+                    x-kubernetes-validations:
+                    - message: ipv4 must be an IPv4 address
+                      rule: isIP(self) && ip(self).family() == 4
+                  ipv6:
+                    description: IPv6 is the router's IPv6 address on the transport.
+                    maxLength: 45
+                    type: string
+                    x-kubernetes-validations:
+                    - message: ipv6 must be an IPv6 address
+                      rule: isIP(self) && ip(self).family() == 6
+                type: object
+                x-kubernetes-validations:
+                - message: an endpoint has an IPv4 or an IPv6 address
+                  rule: has(self.ipv4) || has(self.ipv6)
+              asn:
+                description: |-
+                  ASN is the router's local ASN, the remote ASN of every session toward
+                  this endpoint. In the owning cell it must equal the BGPRouter's.
+                format: int64
+                maximum: 4294967295
+                minimum: 1
+                type: integer
+              cell:
+                description: |-
+                  Cell is the cell that runs the router. The router exists as a
+                  BGPRouter only in that cell; every other cell knows it through this
+                  record alone.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              failureDomain:
+                description: |-
+                  FailureDomain is the failure domain the router is in. Unset, the
+                  owning cell reads it from the router's Node label the topology names.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                type: string
+              interface:
+                description: |-
+                  Interface is the router's interface on the transport. It is required
+                  with a link-local IPv6 address. The topology generator does not yet
+                  generate sessions toward an endpoint that names one.
+                maxLength: 15
+                pattern: ^[A-Za-z0-9_.@-]{1,15}$
+                type: string
+              routerRef:
+                description: RouterRef names the BGPRouter, in this namespace of the
+                  owning cell.
+                properties:
+                  name:
+                    description: Name is the referenced object's name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              routingDomain:
+                description: |-
+                  RoutingDomain is the fabric this endpoint belongs to. A topology
+                  considers only endpoints of its own routing domain.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              source:
+                default:
+                  type: Manual
+                description: Source records where the addresses came from.
+                properties:
+                  ipv4ClaimRef:
+                    description: IPv4ClaimRef is the claim the IPv4 address was allocated
+                      by.
+                    properties:
+                      apiGroup:
+                        default: ipam.miloapis.com
+                        description: APIGroup is the group of the claim resource.
+                        minLength: 1
+                        type: string
+                      kind:
+                        default: IPClaim
+                        description: Kind is the kind of the claim resource.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: |-
+                          Name is the name of the claim. The addressing service derives it from
+                          the thing being addressed, so it is stable across a shard's lifetime and
+                          is what a replacement finds again.
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace holding the claim
+                          within Project.
+                        minLength: 1
+                        type: string
+                      project:
+                        description: |-
+                          Project is the project whose control plane serves the claim. Required:
+                          a claim is namespaced within a project, and this reference is read from
+                          outside every project.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    - project
+                    type: object
+                  ipv6ClaimRef:
+                    description: IPv6ClaimRef is the claim the IPv6 address was allocated
+                      by.
+                    properties:
+                      apiGroup:
+                        default: ipam.miloapis.com
+                        description: APIGroup is the group of the claim resource.
+                        minLength: 1
+                        type: string
+                      kind:
+                        default: IPClaim
+                        description: Kind is the kind of the claim resource.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: |-
+                          Name is the name of the claim. The addressing service derives it from
+                          the thing being addressed, so it is stable across a shard's lifetime and
+                          is what a replacement finds again.
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace holding the claim
+                          within Project.
+                        minLength: 1
+                        type: string
+                      project:
+                        description: |-
+                          Project is the project whose control plane serves the claim. Required:
+                          a claim is namespaced within a project, and this reference is read from
+                          outside every project.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    - project
+                    type: object
+                  type:
+                    default: Manual
+                    description: Type is Manual or AddressClaim.
+                    enum:
+                    - Manual
+                    - AddressClaim
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: claim references need the AddressClaim source
+                  rule: self.type == 'AddressClaim' || (!has(self.ipv4ClaimRef) &&
+                    !has(self.ipv6ClaimRef))
+              transport:
+                description: |-
+                  Transport names the network the addresses are on, such as
+                  private-mesh or public. Two endpoints peer only over a transport they
+                  share.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+            required:
+            - addresses
+            - asn
+            - cell
+            - routerRef
+            - routingDomain
+            - transport
+            type: object
+            x-kubernetes-validations:
+            - message: an endpoint's routing domain, cell, router and transport are
+                immutable
+              rule: self.routingDomain == oldSelf.routingDomain && self.cell == oldSelf.cell
+                && self.routerRef == oldSelf.routerRef && self.transport == oldSelf.transport
+            - message: an IPv4 claim needs an IPv4 address
+              rule: '!has(self.source.ipv4ClaimRef) || has(self.addresses.ipv4)'
+            - message: an IPv6 claim needs an IPv6 address
+              rule: '!has(self.source.ipv6ClaimRef) || has(self.addresses.ipv6)'
+            - message: a link-local IPv6 address needs an interface
+              rule: '!has(self.addresses.ipv6) || !isIP(self.addresses.ipv6) || !ip(self.addresses.ipv6).isLinkLocalUnicast()
+                || has(self.interface)'
+            - message: an AddressClaim source names the claim of every address
+              rule: self.source.type != 'AddressClaim' || ((!has(self.addresses.ipv4)
+                || has(self.source.ipv4ClaimRef)) && (!has(self.addresses.ipv6) ||
+                has(self.source.ipv6ClaimRef)))
+          status:
+            description: FabricEndpointStatus is this cell's view of an endpoint.
+            properties:
+              conditions:
+                description: Conditions are Ready and Conflict.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              local:
+                description: |-
+                  Local is true when a FabricTopology in this namespace generates
+                  sessions for the endpoint's cell, so its router runs here.
+                type: boolean
+              observedGeneration:
+                description: ObservedGeneration is the generation the conditions describe.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

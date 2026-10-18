@@ -225,6 +225,14 @@ tasks:
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} check rules rules.yaml
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} test rules rules-test.yaml
 
+  test:fabric-parity:
+    desc: Compile every fabric frr.conf back through the typed API and diff it with the pinned FRR's frr-reload
+    # Needs Docker, so it is not part of ci. The synthetic fixtures always
+    # run; set FABRIC_PARITY_DIR to a <cluster>/<node>.conf tree of rendered
+    # fabric-router configs to check real routers too.
+    cmds:
+      - go test -count=1 -tags frr -run 'TestImportCompileParity' ./internal/fabric/routing/
+
   test:e2e:
     desc: E2E tests (Kind cluster, build+load image, lifecycle)
     # build:ebpf here is only for the host-side `go test ./tests/e2e/...`

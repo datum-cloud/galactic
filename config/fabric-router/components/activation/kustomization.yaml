@@ -1,0 +1,49 @@
+# Opt-in activation for the fabric-router DaemonSet: fabric-config-agent
+# acts on its node's FabricRouterDeployment (stages the candidate revision,
+# and on the CRD source activates the active one) instead of only applying
+# the node's ConfigMap. Include it from an overlay of config/fabric-router:
+#
+#   resources:
+#     - ../../config/fabric-router
+#   components:
+#     - ../../config/fabric-router/components/activation
+#
+# Without a FabricRouterDeployment for a node, or with one on the ConfigMap
+# source, the node keeps applying its ConfigMap exactly as before. A node
+# changes source only when its deployment says so.
+#
+# It adds:
+#   - FABRIC_ACTIVATION=true on frr-init and config-agent;
+#   - the host directory /var/lib/fabric-router/agent, holding the
+#     activation journal, the node's identity and the checkpoint a node
+#     restores at boot without the API. It must survive pod restarts and
+#     must never be copied to another host;
+#   - the host's /etc/machine-id, read-only, which binds that state to the
+#     machine. Every node must have it (systemd and Talos hosts do): a pod
+#     on a host without it stays in ContainerCreating and FRR does not
+#     start;
+#   - RBAC to read the node's deployment, its revisions, release
+#     authorizations, to write the deployment's status (and a
+#     ValidatingAdmissionPolicy limiting that write to the deployment
+#     targeting the pod's own Node),
+#     and to read its own Node and the kube-system namespace UID (the
+#     cluster's identity).
+#
+# Prerequisites: the galactic.datumapis.com CRDs from config/crd (Kubernetes
+# 1.32 or later for the deployment's spec.target.nodeName selector) and, to
+# create deployments and promote revisions, fabric-router-controller run
+# with --rollout (config/fabric-router-controller).
+#
+# Adding it changes the pod template, so every fabric-router pod restarts
+# and FRR with it: roll it out as a routing change (one canary node, check
+# underlay sessions and convergence, then paced expansion).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - rbac.yaml
+  - status-policy.yaml
+patches:
+  - path: daemonset-patch.yaml
+    target:
+      kind: DaemonSet
+      name: fabric-router

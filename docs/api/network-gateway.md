@@ -65,6 +65,12 @@ _Appears in:_
 | `name` _string_ | Name is the name of the claim. The addressing service derives it from<br />the thing being addressed, so it is stable across a shard's lifetime and<br />is what a replacement finds again. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
+
+
+
+
+
+
 #### EgressShard
 
 
@@ -196,6 +202,8 @@ _Appears in:_
 | `nat64Prefix` _string_ | NAT64Prefix is the prefix this shard's datapath is programmed to<br />translate. Empty whenever ShardAddressIPv4 is empty. |  |  |
 | `translatesWellKnownPrefix` _boolean_ | TranslatesWellKnownPrefix reports whether this shard's datapath is<br />programmed to translate the RFC 6052 Well-Known Prefix 64:ff9b::/96, from<br />Spec.TranslateWellKnownPrefix. False whenever ShardAddressIPv4 is empty. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource,<br />including Programmed (see ConditionTypeProgrammed). |  |  |
+
+
 
 
 

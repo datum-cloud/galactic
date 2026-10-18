@@ -34,8 +34,47 @@ type BGPRouter struct {
 	Status BGPRouterStatus `json:"status,omitempty"`
 }
 
+// BGPRoutingPlane names which routing plane a BGPRouter belongs to.
+//
+// +kubebuilder:validation:Enum=Underlay;Overlay
+type BGPRoutingPlane string
+
+const (
+	// BGPRoutingPlaneUnderlay is the fabric underlay that carries the
+	// overlay's sessions and SRv6 locators between nodes.
+	BGPRoutingPlaneUnderlay BGPRoutingPlane = "Underlay"
+
+	// BGPRoutingPlaneOverlay is the tenant EVPN overlay.
+	BGPRoutingPlaneOverlay BGPRoutingPlane = "Overlay"
+)
+
 // BGPRouterSpec defines the desired state of a BGPRouter.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.routerClassName) == has(oldSelf.routerClassName) && (!has(self.routerClassName) || self.routerClassName == oldSelf.routerClassName)",message="routerClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.plane) == has(oldSelf.plane) && (!has(self.plane) || self.plane == oldSelf.plane)",message="plane is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(self.plane) || self.plane != 'Underlay' || has(self.routerClassName)",message="an Underlay router must name a routerClassName"
+// +kubebuilder:validation:XValidation:rule="!has(self.frr) || has(self.routerClassName)",message="frr settings apply only to a router that names a routerClassName"
 type BGPRouterSpec struct {
+	// RouterClassName names the BGPRouterClass whose controller owns this
+	// router. A router without one is owned by the Galactic EVPN
+	// implementation (galactic-router and its related controllers). A
+	// router naming a class is ignored by every component except that
+	// class's controller, and by every component when the class does not
+	// exist. Immutable.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	RouterClassName *string `json:"routerClassName,omitempty"`
+
+	// Plane is the routing plane this router belongs to. Unset means the
+	// tenant EVPN overlay. Underlay requires a routerClassName. Immutable.
+	// +optional
+	Plane *BGPRoutingPlane `json:"plane,omitempty"`
+
+	// FRR holds settings for routers whose class is implemented with FRR.
+	// +optional
+	FRR *BGPRouterFRR `json:"frr,omitempty"`
+
 	// TargetRef identifies the Node this router executes on.
 	// +kubebuilder:validation:Required
 	TargetRef TargetRef `json:"targetRef"`
@@ -44,6 +83,7 @@ type BGPRouterSpec struct {
 	// Must be a valid 2-byte or 4-byte ASN per RFC 6793.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
 	LocalASN int64 `json:"localASN"`
 
 	// RouterID is a unique 32-bit identifier expressed in IPv4 dotted-decimal notation.
@@ -101,6 +141,11 @@ type BGPRouterStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Fabric is the fabric router controller's view of a classed router.
+	// Unset on routers the Galactic EVPN implementation owns.
+	// +optional
+	Fabric *BGPRouterFabricStatus `json:"fabric,omitempty"`
 }
 
 // BGPRouterPeerSummary summarizes BGP peer session counts.
@@ -122,4 +167,66 @@ type BGPRouterList struct {
 
 func init() {
 	SchemeBuilder.Register(&BGPRouter{}, &BGPRouterList{})
+}
+
+// BGPRouterFRR holds FRR settings for one router.
+type BGPRouterFRR struct {
+	// RolloutPolicyRef names the FabricRolloutPolicy the rollout manager
+	// applies to this router. Unset uses the policy defaults.
+	// +optional
+	RolloutPolicyRef *LocalObjectRef `json:"rolloutPolicyRef,omitempty"`
+
+	// Retain lists definitions rendered on this router even when no peer
+	// or advertisement references them, so a migrated router's first
+	// configuration matches the one it replaces. Retained definitions never
+	// create sessions or advertisements.
+	// +optional
+	Retain *BGPRouterFRRRetain `json:"retain,omitempty"`
+}
+
+// BGPRouterFRRRetain names definitions to render while unreferenced.
+type BGPRouterFRRRetain struct {
+	// PolicyRefs names BGPPolicies.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=256
+	PolicyRefs []LocalObjectRef `json:"policyRefs,omitempty"`
+
+	// PrefixListRefs names BGPPrefixLists.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=256
+	PrefixListRefs []LocalObjectRef `json:"prefixListRefs,omitempty"`
+
+	// CommunitySetRefs names BGPCommunitySets.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=512
+	CommunitySetRefs []LocalObjectRef `json:"communitySetRefs,omitempty"`
+
+	// PeerProfileRefs names BGPPeerProfiles.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	PeerProfileRefs []LocalObjectRef `json:"peerProfileRefs,omitempty"`
+}
+
+// BGPRouterFabricStatus is the fabric router controller's view of a router.
+type BGPRouterFabricStatus struct {
+	// LatestRevision is the newest FabricRouterRevision compiled for the
+	// router's current inputs.
+	// +optional
+	LatestRevision string `json:"latestRevision,omitempty"`
+
+	// ActivationDependencyDigest is that revision's digest.
+	// +optional
+	ActivationDependencyDigest string `json:"activationDependencyDigest,omitempty"`
+
+	// RenderedDigest is the SHA-256 of the frr.conf that revision renders.
+	// +optional
+	RenderedDigest string `json:"renderedDigest,omitempty"`
 }

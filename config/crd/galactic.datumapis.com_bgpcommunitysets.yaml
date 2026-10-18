@@ -69,6 +69,16 @@ spec:
                 maxItems: 256
                 minItems: 1
                 type: array
+              frr:
+                description: FRR holds FRR rendering settings.
+                properties:
+                  name:
+                    description: Name is the FRR object name.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                    type: string
+                type: object
               type:
                 description: Type is the community format for all entries in this
                   set.

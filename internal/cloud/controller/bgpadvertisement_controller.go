@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -71,6 +72,17 @@ func (r *BGPAdvertisementReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
+	// Ownership is checked before any status write: an advertisement on a
+	// router naming a routerClassName (the fabric underlay) never certifies
+	// a tenant attachment, interface or claim, whatever its name looks like.
+	router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if router != nil && !bgpv1alpha1.IsLegacyOwned(router) {
+		return ctrl.Result{}, nil
+	}
+
 	var attachments cloudv1alpha1.VPCAttachmentList
 	if err := r.List(ctx, &attachments,
 		client.MatchingFields{IndexVPCAttachmentIdentity: galactic.AdvertisementName(vpc, attachmentID)}); err != nil {
@@ -80,9 +92,9 @@ func (r *BGPAdvertisementReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
-	node, err := r.nodeForRouter(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
-	if err != nil {
-		return ctrl.Result{}, err
+	var node string
+	if router != nil {
+		node = router.Spec.TargetRef.Name
 	}
 	programmed := programmedCondition(&advertisement)
 	subnets := galactic.AllocatedSubnets(advertisement.Annotations)
@@ -189,6 +201,17 @@ func (r *BGPAdvertisementReconciler) advertisementForInterface(ctx context.Conte
 	requests := make([]reconcile.Request, 0, len(advertisements.Items))
 	for i := range advertisements.Items {
 		advertisement := &advertisements.Items[i]
+		// A fabric advertisement named like this attachment never enters
+		// the replay; Reconcile would ignore it anyway.
+		router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
+		if err != nil {
+			log.FromContext(ctx).Error(err, "get BGPRouter for replayed advertisement",
+				"advertisement", client.ObjectKeyFromObject(advertisement))
+			continue
+		}
+		if router != nil && !bgpv1alpha1.IsLegacyOwned(router) {
+			continue
+		}
 		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
 			Namespace: advertisement.Namespace,
 			Name:      advertisement.Name,
@@ -215,16 +238,20 @@ func BGPAdvertisementIdentity(obj client.Object) []string {
 	return []string{identity}
 }
 
-// nodeForRouter resolves the node a BGPRouter executes on.
-func (r *BGPAdvertisementReconciler) nodeForRouter(ctx context.Context, namespace, name string) (string, error) {
+// routerFor returns the named BGPRouter, or nil when the name is empty or the
+// router does not exist yet.
+func (r *BGPAdvertisementReconciler) routerFor(ctx context.Context, namespace, name string) (*bgpv1alpha1.BGPRouter, error) {
 	if name == "" {
-		return "", nil
+		return nil, nil
 	}
 	var router bgpv1alpha1.BGPRouter
 	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &router); err != nil {
-		return "", client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get BGPRouter %s/%s: %w", namespace, name, err)
 	}
-	return router.Spec.TargetRef.Name, nil
+	return &router, nil
 }
 
 // programmedCondition translates the data plane's Advertised condition.

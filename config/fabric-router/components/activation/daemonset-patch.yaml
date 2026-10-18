@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fabric-router
+  namespace: galactic-system
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: frr-init
+          env:
+            - name: FABRIC_ACTIVATION
+              value: "true"
+          volumeMounts:
+            - name: fabric-agent-state
+              mountPath: /var/lib/fabric-router/agent
+            - name: machine-id
+              mountPath: /etc/machine-id
+              readOnly: true
+      containers:
+        - name: config-agent
+          env:
+            - name: FABRIC_ACTIVATION
+              value: "true"
+          volumeMounts:
+            - name: fabric-agent-state
+              mountPath: /var/lib/fabric-router/agent
+            - name: machine-id
+              mountPath: /etc/machine-id
+              readOnly: true
+      volumes:
+        - name: fabric-agent-state
+          hostPath:
+            path: /var/lib/fabric-router/agent
+            type: DirectoryOrCreate
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File

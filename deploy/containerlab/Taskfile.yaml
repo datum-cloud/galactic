@@ -24,6 +24,7 @@ tasks:
       - "build:galactic-nat"
       - "build:galactic-gateway"
       - "build:galactic-controller"
+      - "build:fabric-router-controller"
       - "build:remote-host"
 
   "build:node":
@@ -68,6 +69,11 @@ tasks:
     cmds:
       - docker build --network=host -t galactic-controller:latest -f ../../containers/galactic-controller/Dockerfile ../..
 
+  "build:fabric-router-controller":
+    desc: Build the fabric-router-controller image (typed fabric routing)
+    cmds:
+      - docker build --network=host -t fabric-router-controller:latest -f ../../containers/fabric-router-controller/Dockerfile ../..
+
   "build:remote-host":
     desc: Build the off-fabric remote host image (nginx)
     cmds:
@@ -95,7 +101,9 @@ tasks:
       # before deploy:galactic-router, whose traffic policy reconciler
       # watches the CRDs it installs.
       - task: "deploy:traffic-policy"
+      - task: "deploy:node-addresses"
       - task: "deploy:fabric"
+      - task: "deploy:fabric-routing"
       - task: "deploy:bmp-collector"
       - task: "deploy:galactic-router"
       - task: "deploy:galactic-nat"
@@ -265,6 +273,7 @@ tasks:
         load galactic-gateway:latest {{.GATEWAY_NODES}}
         # The cell controller schedules on any untainted worker.
         load galactic-controller:latest {{.FABRIC_NODES}}
+        load fabric-router-controller:latest {{.FABRIC_NODES}}
 
   "deploy:system":
     desc: Install CRDs, namespace, and RBAC
@@ -299,10 +308,25 @@ tasks:
     cmds:
       - sudo ./scripts/host-setup.sh
 
+  "deploy:node-addresses":
+    desc: Address the fabric router nodes' interfaces, outside FRR
+    cmds:
+      - ./scripts/deploy-node-addresses.sh
+
   "deploy:fabric":
     desc: Install the FRR fabric DaemonSet
     cmds:
       - ./scripts/deploy-fabric.sh
+
+  "deploy:fabric-routing":
+    desc: Install fabric-router-controller and import every fabric router into the typed API
+    cmds:
+      - ./scripts/deploy-fabric-routing.sh
+
+  "deploy:fabric-topology":
+    desc: Generate each site's fabric peers from its topology instead of the imported ones (SITES, default sjc and iad)
+    cmds:
+      - ./scripts/deploy-fabric-topology.sh
 
   "deploy:traffic-policy":
     desc: Install the traffic policy CRDs and galactic-controller in every cluster
@@ -447,6 +471,13 @@ tasks:
           echo "--- $r (ipv4) ---"
           docker exec clab-gvpc-$r vtysh -c "show bgp ipv4 unicast summary"
         done
+
+  "verify:fabric-routing":
+    desc: >-
+      Move one site's fabric routers to the typed API and exercise every
+      activation path; leaves them on the CRD source (not part of verify)
+    cmds:
+      - ./scripts/verify-fabric-routing.sh
 
   "verify:bgp-fabric":
     desc: Verify fabric BGP sessions on all sites (both address families)

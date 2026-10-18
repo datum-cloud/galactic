@@ -120,8 +120,11 @@ func routersForNode(
 		return nil, fmt.Errorf("list BGPRouters: %w", err)
 	}
 
+	// Only Galactic-owned routers: GC, the eBPF sweeps and datapath repair
+	// must never treat a classed router's (the fabric underlay's) objects
+	// as this node's tenant state.
 	routers := make(map[string]bgpv1alpha1.BGPRouter)
-	for _, r := range routerList.Items {
+	for _, r := range bgpv1alpha1.LegacyOwnedRouters(routerList.Items) {
 		if r.Spec.TargetRef.Name == nodeName {
 			routers[r.Name] = r
 		}

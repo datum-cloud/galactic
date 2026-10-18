@@ -1,0 +1,6 @@
+# The sjc lab cluster's FabricEndpoints and FabricTopology, applied by
+# deploy:fabric-topology, which also deletes the cluster's imported peers:
+# until they are gone each would block its generated one as a conflict.
+resources:
+  - endpoints.yaml
+  - topology.yaml

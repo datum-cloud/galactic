@@ -213,7 +213,8 @@ func checkArgumentCollision(
 	return nil
 }
 
-// lookupBGPRouter finds the BGPRouter targeting this node in the given namespace.
+// lookupBGPRouter finds the Galactic-owned BGPRouter (one with no
+// routerClassName) targeting this node in the given namespace.
 // Returns an error if none is found or if multiple are found (ambiguous).
 func lookupBGPRouter(ctx context.Context, k8s client.Client, nodeName, namespace string) (bgpConfig, error) {
 	routerList := &bgpv1alpha1.BGPRouterList{}
@@ -222,7 +223,7 @@ func lookupBGPRouter(ctx context.Context, k8s client.Client, nodeName, namespace
 	}
 
 	var matches []bgpv1alpha1.BGPRouter
-	for _, r := range routerList.Items {
+	for _, r := range bgpv1alpha1.LegacyOwnedRouters(routerList.Items) {
 		if r.Spec.TargetRef.Name == nodeName {
 			matches = append(matches, r)
 		}

@@ -556,6 +556,10 @@ func (r *ServiceRoutePolicyReconciler) sidResolver(ctx context.Context) servicer
 		if err := r.Get(ctx, routerKey, router); err != nil {
 			return nil, fmt.Errorf("get BGPRouter %s: %w", routerKey, err)
 		}
+		if !networkv1alpha1.IsLegacyOwned(router) {
+			return nil, fmt.Errorf("BGPRouter %s names routerClassName %q and is not a Galactic router",
+				routerKey, *router.Spec.RouterClassName)
+		}
 		if router.Spec.TargetRef.Name != attachment.Status.Node {
 			return nil, fmt.Errorf("BGPRouter %s targets node %q, not attachment node %q",
 				routerKey, router.Spec.TargetRef.Name, attachment.Status.Node)

@@ -56,11 +56,18 @@ spec:
             description: BGPPrefixListSpec defines the desired state of BGPPrefixList.
             properties:
               entries:
-                description: Entries is the ordered list of prefix-match entries.
+                description: Entries is the ordered list of prefix-match entries,
+                  keyed by sequence.
                 items:
                   description: |-
                     BGPPrefixListEntry defines a single entry in a named BGP prefix-list.
                     Entries are evaluated in ascending sequence order.
+
+                    GE and LE bound the matched prefix length. Both are limited by the
+                    entry's family (32 for IPv4, 128 for IPv6), GE may not be shorter than
+                    the prefix's own length, and LE may not be shorter than GE (or the
+                    prefix's length when GE is unset): FRR's own rule, mask length <= ge <= le.
+                    A malformed prefix is reported by the prefix field's rule alone.
                   properties:
                     action:
                       description: Action is the disposition when a route's prefix
@@ -72,19 +79,21 @@ spec:
                     ge:
                       description: |-
                         GE is the minimum prefix-length to match (greater-than-or-equal).
-                        For example, "10.0.0.0/8 ge 16" matches 10.0.0.0/16 through 10.0.0.0/32.
+                        For example, "10.0.0.0/8 ge 16" matches lengths /16 through /32, and
+                        "2607:ed40:8003::/48 ge 49" lengths /49 through /128.
                         When unset, the prefix-length of Prefix is the lower bound.
                       format: int32
-                      maximum: 32
+                      maximum: 128
                       minimum: 0
                       type: integer
                     le:
                       description: |-
                         LE is the maximum prefix-length to match (less-than-or-equal).
                         For example, "10.0.0.0/8 le 24" matches 10.0.0.0/8 through 10.0.0.0/24.
-                        When unset, the prefix-length of Prefix is the upper bound.
+                        When unset, the prefix-length of Prefix is the upper bound, unless GE
+                        is set, in which case the family's maximum length is.
                       format: int32
-                      maximum: 32
+                      maximum: 128
                       minimum: 0
                       type: integer
                     prefix:
@@ -99,18 +108,45 @@ spec:
                       description: |-
                         Sequence is the evaluation order for this entry. Entries with lower
                         sequence numbers are evaluated first. Must be unique within the list.
-                      format: int32
+                        The range is FRR's: 1 to 4294967295.
+                      format: int64
                       maximum: 4294967295
-                      minimum: 5
+                      minimum: 1
                       type: integer
                   required:
                   - action
                   - prefix
                   - sequence
                   type: object
+                  x-kubernetes-validations:
+                  - message: ge must not exceed 32 for IPv4 or 128 for IPv6
+                    rule: '!isCIDR(self.prefix) || !has(self.ge) || self.ge <= (cidr(self.prefix).ip().family()
+                      == 4 ? 32 : 128)'
+                  - message: le must not exceed 32 for IPv4 or 128 for IPv6
+                    rule: '!isCIDR(self.prefix) || !has(self.le) || self.le <= (cidr(self.prefix).ip().family()
+                      == 4 ? 32 : 128)'
+                  - message: ge must be at least the prefix length
+                    rule: '!isCIDR(self.prefix) || !has(self.ge) || self.ge >= cidr(self.prefix).prefixLength()'
+                  - message: le must be at least ge, or the prefix length when ge
+                      is unset
+                    rule: '!isCIDR(self.prefix) || !has(self.le) || self.le >= (has(self.ge)
+                      ? self.ge : cidr(self.prefix).prefixLength())'
                 maxItems: 1024
                 minItems: 1
                 type: array
+                x-kubernetes-list-map-keys:
+                - sequence
+                x-kubernetes-list-type: map
+              frr:
+                description: FRR holds FRR rendering settings.
+                properties:
+                  name:
+                    description: Name is the FRR object name.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                    type: string
+                type: object
             required:
             - entries
             type: object

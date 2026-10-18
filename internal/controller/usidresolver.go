@@ -45,8 +45,9 @@ type backendSIDIndex struct {
 	vrfInstances map[string]*bgpv1alpha1.BGPVRFInstance // keyed by name: crdnames.BGPVRFInstanceName(vpc, nodeName)
 }
 
-// buildBackendSIDIndex lists every BGPRouter, BGPAdvertisement, and
-// BGPVRFInstance in namespace once, so resolving many backends across a
+// buildBackendSIDIndex lists every Galactic-owned BGPRouter (one with no
+// routerClassName), and every BGPAdvertisement and BGPVRFInstance, in
+// namespace once, so resolving many backends across a
 // reconcile costs one set of list calls rather than one per backend.
 //
 // Advertisements with no VRFID or function set are excluded up front: those
@@ -58,7 +59,11 @@ func buildBackendSIDIndex(ctx context.Context, c client.Client, namespace string
 	}
 	routers := make(map[string]*bgpv1alpha1.BGPRouter, len(routerList.Items))
 	for i := range routerList.Items {
-		routers[routerList.Items[i].Name] = &routerList.Items[i]
+		// Only Galactic-owned routers can host a backend: an advertisement
+		// on a classed router (the fabric underlay) never yields a uSID.
+		if bgpv1alpha1.IsLegacyOwned(&routerList.Items[i]) {
+			routers[routerList.Items[i].Name] = &routerList.Items[i]
+		}
 	}
 
 	advList := &bgpv1alpha1.BGPAdvertisementList{}

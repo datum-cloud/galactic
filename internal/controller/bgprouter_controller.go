@@ -68,6 +68,13 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("get BGPRouter %s: %w", req.NamespacedName, err)
 	}
 
+	// A router naming a routerClassName belongs to that class's controller
+	// (the fabric underlay). galactic-router never starts a runtime for it,
+	// writes its status, or acts on its deletion.
+	if !bgpv1alpha1.IsLegacyOwned(router) {
+		return ctrl.Result{}, nil
+	}
+
 	// Handle deletion.
 	if !router.DeletionTimestamp.IsZero() {
 		if stopErr := r.RuntimeManager.Stop(ctx, req.NamespacedName); stopErr != nil {

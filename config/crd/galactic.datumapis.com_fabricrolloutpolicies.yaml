@@ -1,0 +1,158 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: fabricrolloutpolicies.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    kind: FabricRolloutPolicy
+    listKind: FabricRolloutPolicyList
+    plural: fabricrolloutpolicies
+    shortNames:
+    - frpolicy
+    singular: fabricrolloutpolicy
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FabricRolloutPolicy sets how the rollout manager promotes and observes
+          the routers that reference it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              FabricRolloutPolicySpec are the rollout settings. The rollout manager
+              copies the ones the agent needs into each promotion's activation
+              settings.
+            properties:
+              applyTimeoutSeconds:
+                default: 60
+                description: ApplyTimeoutSeconds bounds one reload.
+                format: int32
+                maximum: 900
+                minimum: 5
+                type: integer
+              failureDomainLabel:
+                default: topology.kubernetes.io/zone
+                description: FailureDomainLabel is the Node label that groups routers.
+                maxLength: 317
+                pattern: ^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                type: string
+              heartbeatTimeoutSeconds:
+                default: 60
+                description: |-
+                  HeartbeatTimeoutSeconds is how long an agent's silence leaves its
+                  router healthy before readiness becomes Unknown.
+                format: int32
+                maximum: 3600
+                minimum: 10
+                type: integer
+              maintenancePeers:
+                description: |-
+                  MaintenancePeers names BGPPeers, in the policy's namespace, that are
+                  administratively down and excluded from health.
+                items:
+                  description: |-
+                    LocalObjectRef references an object of the kind the field names, in the
+                    referrer's namespace.
+                  properties:
+                    name:
+                      description: Name is the referenced object's name.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 256
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              maxUnavailable:
+                default: 1
+                description: |-
+                  MaxUnavailable is how many routers of one failure domain, within one
+                  cell, may be activating at once.
+                format: int32
+                minimum: 1
+                type: integer
+              minWitnesses:
+                default: 1
+                description: |-
+                  MinWitnesses is how many other routers must see a router's
+                  originations before a promotion counts as healthy.
+                format: int32
+                minimum: 1
+                type: integer
+              offlineBootSeconds:
+                default: 604800
+                description: |-
+                  OfflineBootSeconds is how long a committed checkpoint may be applied
+                  at boot without the API.
+                format: int64
+                maximum: 7776000
+                minimum: 0
+                type: integer
+              optionalPeers:
+                description: |-
+                  OptionalPeers names BGPPeers, in the policy's namespace, that need not
+                  reach Established for a router to be healthy.
+                items:
+                  description: |-
+                    LocalObjectRef references an object of the kind the field names, in the
+                    referrer's namespace.
+                  properties:
+                    name:
+                      description: Name is the referenced object's name.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 256
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              stabilizationSeconds:
+                default: 60
+                description: |-
+                  StabilizationSeconds is how long an applied revision must stay
+                  healthy before the agent commits it.
+                format: int32
+                maximum: 3600
+                minimum: 0
+                type: integer
+            type: object
+            x-kubernetes-validations:
+            - message: a peer is optional or in maintenance, not both
+              rule: '!has(self.optionalPeers) || !has(self.maintenancePeers) || self.optionalPeers.all(o,
+                !self.maintenancePeers.exists(m, m.name == o.name))'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true

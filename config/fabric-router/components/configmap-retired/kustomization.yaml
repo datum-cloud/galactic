@@ -1,0 +1,63 @@
+# Retires the ConfigMap path of the fabric-router DaemonSet, once every
+# node runs from the CRD source. List it after components/activation, which
+# it requires; the build fails without it, or with it listed later:
+#
+#   resources:
+#     - ../../config/fabric-router
+#   components:
+#     - ../../config/fabric-router/components/activation
+#     - ../../config/fabric-router/components/configmap-retired
+#
+# It adds FABRIC_CONFIGMAPS=false on frr-init and config-agent, and removes
+# the fabric-router-configmaps Role and RoleBinding, so the agent can no
+# longer read a ConfigMap. With it:
+#   - frr-init starts a node whose journal records the CRD source exactly
+#     as before, from its checkpoint or its deployment's active revision.
+#     A node with nothing activated starts from its deployment's active
+#     revision once a started release authorizes it; until then, and on
+#     any node whose journal records the ConfigMap or Shadow source, FRR
+#     does not start. Nothing falls back to a ConfigMap;
+#   - config-agent runs the deployment agent and the next-hop check only,
+#     with no ConfigMap informer. A deployment asking for a source other
+#     than CRD is reported as Accepted False, reason ConfigMapRetired, and
+#     the node stays on CRD.
+#
+# Adding or removing it changes the pod template, so every fabric-router
+# pod restarts and FRR with it: roll it out as a routing change (one canary
+# node, check underlay sessions and convergence, then paced expansion). See
+# docs/fabric-routing/operations.md for the preconditions and the way back.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: daemonset-patch.yaml
+    target:
+      kind: DaemonSet
+      name: fabric-router
+  - patch: |-
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: fabric-router-configmaps
+        namespace: galactic-system
+      $patch: delete
+  - patch: |-
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: fabric-router-configmaps
+        namespace: galactic-system
+      $patch: delete
+# Fails the build unless components/activation came first: copying
+# frr-init's FABRIC_ACTIVATION onto itself needs it to exist.
+replacements:
+  - source:
+      kind: DaemonSet
+      name: fabric-router
+      fieldPath: spec.template.spec.initContainers.[name=frr-init].env.[name=FABRIC_ACTIVATION].value
+    targets:
+      - select:
+          kind: DaemonSet
+          name: fabric-router
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=frr-init].env.[name=FABRIC_ACTIVATION].value
+          - spec.template.spec.containers.[name=config-agent].env.[name=FABRIC_ACTIVATION].value

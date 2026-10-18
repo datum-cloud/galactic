@@ -8,6 +8,7 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -49,12 +50,14 @@ func New(c client.Client, nodeName, localAddress string) *Reconciler {
 
 // BuildDesiredRouter assembles the full desired router from BGP CRDs for the
 // given BGPRouter. It returns nil with a nil error when the router targets
-// another node and should be silently skipped.
+// another node, or names a routerClassName, and should be silently skipped.
 func (r *Reconciler) BuildDesiredRouter(
 	ctx context.Context, router *bgpv1alpha1.BGPRouter,
 ) (*model.DesiredRouter, error) {
-	// Node check: skip routers that don't target this node.
-	if router.Spec.TargetRef.Name != r.nodeName {
+	// Node and owner check: skip routers that don't target this node, and
+	// routers naming a routerClassName, which belong to another
+	// implementation (the fabric underlay) even on this node.
+	if router.Spec.TargetRef.Name != r.nodeName || !bgpv1alpha1.IsLegacyOwned(router) {
 		return nil, nil
 	}
 
@@ -138,6 +141,10 @@ func (r *Reconciler) BuildDesiredRouter(
 		if err := validateAFI(adv.Spec.AddressFamily); err != nil {
 			return nil, fmt.Errorf("BGPAdvertisement %s/%s invalid address family: %w", namespace, adv.Name, err)
 		}
+		if adv.Spec.Aggregation != nil {
+			return nil, fmt.Errorf("BGPAdvertisement %s/%s: aggregation is implemented only by the fabric router",
+				namespace, adv.Name)
+		}
 		prefixes := make([]string, len(adv.Spec.Prefixes))
 		for i, p := range adv.Spec.Prefixes {
 			prefixes[i] = string(p)
@@ -165,6 +172,22 @@ func (r *Reconciler) BuildDesiredRouter(
 	return desired, nil
 }
 
+// rejectFabricPeerFields refuses the peer settings only the fabric router
+// implements, rather than running the session without them.
+func rejectFabricPeerFields(peer *bgpv1alpha1.BGPPeer) error {
+	switch {
+	case peer.Spec.PeerProfileRef != nil:
+		return errors.New("peerProfileRef is implemented only by the fabric router")
+	case peer.Spec.Transport != nil:
+		return errors.New("transport is implemented only by the fabric router")
+	case len(peer.Spec.FamilySettings) > 0:
+		return errors.New("familySettings is implemented only by the fabric router")
+	case len(peer.Spec.AddressFamilies) == 0:
+		return errors.New("addressFamilies is required")
+	}
+	return nil
+}
+
 // gatherPeers collects BGPPeers that bind to this router via routerRef or routerSelector.
 func (r *Reconciler) gatherPeers(ctx context.Context, router *bgpv1alpha1.BGPRouter) ([]model.DesiredPeer, error) {
 	namespace := router.Namespace
@@ -178,6 +201,9 @@ func (r *Reconciler) gatherPeers(ctx context.Context, router *bgpv1alpha1.BGPRou
 	for _, peer := range peerList.Items {
 		if !peerTargetsRouter(&peer, router) {
 			continue
+		}
+		if err := rejectFabricPeerFields(&peer); err != nil {
+			return nil, fmt.Errorf("BGPPeer %s/%s: %w", namespace, peer.Name, err)
 		}
 		if err := validateAFIsAll(peer.Spec.AddressFamilies); err != nil {
 			return nil, fmt.Errorf("BGPPeer %s/%s invalid address family: %w", namespace, peer.Name, err)

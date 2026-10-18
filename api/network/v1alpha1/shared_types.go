@@ -86,9 +86,9 @@ type RouterSelector struct {
 }
 
 // RouterTarget is embedded by resources that bind to one or more BGPRouters.
-// Exactly one of routerRef or routerSelector must be set.
-//
-// +kubebuilder:validation:XValidation:rule="has(self.routerRef) != has(self.routerSelector)",message="Exactly one of routerRef or routerSelector must be set"
+// Each embedding spec states how many of routerRef and routerSelector it
+// requires: BGPPeer and BGPVRFInstance need exactly one, and BGPPolicy at
+// most one, since an unbound policy is a reusable definition.
 type RouterTarget struct {
 	// RouterRef targets a single BGPRouter by name.
 	// Mutually exclusive with routerSelector.

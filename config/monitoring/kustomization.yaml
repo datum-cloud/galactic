@@ -1,6 +1,7 @@
 # Prometheus Operator resources for the BGP control and data planes, the
-# NAT egress shards and the fabric-api looking glass: scrape config for
-# fabric-router's frr-exporter (and its opt-in fabric-api sidecar),
+# NAT egress shards, fabric routing through the API and the fabric-api
+# looking glass: scrape config for fabric-router's frr-exporter and
+# config agent (and its opt-in fabric-api sidecar), fabric-router-controller,
 # galactic-router's metrics port, galactic-nat's metrics port and the
 # fabric-api gateway, and the alert rules built on them. Requires the Prometheus Operator CRDs
 # (monitoring.coreos.com), which this repo does not install, so it is not
@@ -16,6 +17,7 @@ namespace: galactic-system
 resources:
   - podmonitor-fabric-api-gateway.yaml
   - podmonitor-fabric-router.yaml
+  - podmonitor-fabric-router-controller.yaml
   - podmonitor-galactic-cni.yaml
   - podmonitor-galactic-nat.yaml
   - podmonitor-galactic-router.yaml

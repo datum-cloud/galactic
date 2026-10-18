@@ -417,11 +417,16 @@ func sidecarGatewayEndpoints(
 		return nil, fmt.Errorf("list BGPAdvertisements in namespace %s: %w", namespace, err)
 	}
 
+	routerNames, err := galacticRouterNamesForNode(ctx, k8s, namespace, nodeName)
+	if err != nil {
+		return nil, err
+	}
+
 	segment := crdnames.IngressAdvertisementSegment()
 	var out []sidecarEndpoint
 	for i := range advs.Items {
 		a := &advs.Items[i]
-		if a.Spec.RouterRef.Name != nodeName {
+		if _, mine := routerNames[a.Spec.RouterRef.Name]; !mine {
 			continue
 		}
 		if !isIngressAdvertisementName(a.Name, nodeName, segment) {
@@ -531,4 +536,24 @@ func ingressEntryPointAnnotations(annotations map[string]string) (int, net.Hardw
 		return 0, nil, false
 	}
 	return ifindex, mac, true
+}
+
+// galacticRouterNamesForNode returns the names of the Galactic-owned
+// BGPRouters (no routerClassName) targeting nodeName. Advertisements are
+// matched to the node through these names rather than by assuming a router is
+// named after its node, which nothing enforces.
+func galacticRouterNamesForNode(
+	ctx context.Context, k8s client.Client, namespace, nodeName string,
+) (map[string]struct{}, error) {
+	routers := &bgpv1alpha1.BGPRouterList{}
+	if err := k8s.List(ctx, routers, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list BGPRouters in namespace %s: %w", namespace, err)
+	}
+	names := make(map[string]struct{})
+	for _, r := range bgpv1alpha1.LegacyOwnedRouters(routers.Items) {
+		if r.Spec.TargetRef.Name == nodeName {
+			names[r.Name] = struct{}{}
+		}
+	}
+	return names, nil
 }

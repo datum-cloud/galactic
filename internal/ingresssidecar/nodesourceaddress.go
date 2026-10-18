@@ -54,8 +54,10 @@ func NewK8sNodeSourceAddressResolver(c client.Client, nodeName, namespace string
 	return &k8sNodeSourceAddressResolver{client: c, nodeName: nodeName, namespace: namespace}
 }
 
-// ResolveNodeSourceAddress derives this node's SID base from its BGPRouter's
-// SRv6 locator and node ID.
+// ResolveNodeSourceAddress derives this node's SID base from its
+// Galactic-owned BGPRouter's SRv6 locator and node ID. A router naming a
+// routerClassName (the fabric underlay) is skipped; two usable routers on the
+// node are an error rather than an arbitrary pick.
 //
 // A node whose router carries neither yet, its CRDs still converging after a
 // restart, returns an error for the caller's existing non-fatal handling to log
@@ -75,21 +77,30 @@ func (r *k8sNodeSourceAddressResolver) ResolveNodeSourceAddress() (net.IP, error
 	if err := r.client.List(ctx, routerList, client.InNamespace(r.namespace)); err != nil {
 		return nil, fmt.Errorf("list BGPRouters in namespace %s: %w", r.namespace, err)
 	}
-	for _, router := range routerList.Items {
-		if router.Spec.TargetRef.Name != r.nodeName {
+	var found *bgpv1alpha1.BGPRouter
+	for i := range routerList.Items {
+		router := &routerList.Items[i]
+		if router.Spec.TargetRef.Name != r.nodeName || !bgpv1alpha1.IsLegacyOwned(router) {
 			continue
 		}
 		if router.Spec.SRv6Locator == "" || router.Spec.NodeID == 0 {
 			continue
 		}
-		sid, err := srv6.NodeSIDBase(router.Spec.SRv6Locator, router.Spec.NodeID)
-		if err != nil {
-			return nil, fmt.Errorf("derive node SID base from BGPRouter %s: %w", router.Name, err)
+		if found != nil {
+			return nil, fmt.Errorf("ambiguous BGP config: BGPRouters %s and %s both carry an SRv6 locator for node %s",
+				found.Name, router.Name, r.nodeName)
 		}
-		return net.IP(sid.AsSlice()), nil
+		found = router
 	}
-	return nil, fmt.Errorf("no BGPRouter with an SRv6 locator and node ID found for node %s in namespace %s",
-		r.nodeName, r.namespace)
+	if found == nil {
+		return nil, fmt.Errorf("no BGPRouter with an SRv6 locator and node ID found for node %s in namespace %s",
+			r.nodeName, r.namespace)
+	}
+	sid, err := srv6.NodeSIDBase(found.Spec.SRv6Locator, found.Spec.NodeID)
+	if err != nil {
+		return nil, fmt.Errorf("derive node SID base from BGPRouter %s: %w", found.Name, err)
+	}
+	return net.IP(sid.AsSlice()), nil
 }
 
 // nodeSourceAddressResolverMu guards nodeSourceAddressResolver, the same
