@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -37,6 +38,9 @@ type NodeSourceAddressResolver interface {
 	ResolveNodeSourceAddress() (net.IP, error)
 }
 
+// nodeSourceResolveTimeout bounds one ResolveNodeSourceAddress call.
+const nodeSourceResolveTimeout = 5 * time.Second
+
 // k8sNodeSourceAddressResolver is the production NodeSourceAddressResolver.
 type k8sNodeSourceAddressResolver struct {
 	client    client.Client
@@ -62,9 +66,13 @@ func NewK8sNodeSourceAddressResolver(c client.Client, nodeName, namespace string
 // It uses a background context rather than a threaded one: the whole call chain
 // up through the VRF backend carries no context today, and adding one is a
 // cross-cutting signature change for a call that is cheap, idempotent, and
-// safe to retry on the next reconcile.
+// safe to retry on the next reconcile. The context is bounded, because callers
+// hold the Store's lock: a cached client whose informer has not synced, such
+// as one missing the RBAC to list BGPRouters, would otherwise block every
+// route update behind it.
 func (r *k8sNodeSourceAddressResolver) ResolveNodeSourceAddress() (net.IP, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), nodeSourceResolveTimeout)
+	defer cancel()
 	routerList := &bgpv1alpha1.BGPRouterList{}
 	if err := r.client.List(ctx, routerList, client.InNamespace(r.namespace)); err != nil {
 		return nil, fmt.Errorf("list BGPRouters in namespace %s: %w", r.namespace, err)

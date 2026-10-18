@@ -216,7 +216,9 @@ func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 }
 
 // ensureNodeSourceAddress registers this node's own SRv6 SID base into
-// node_src_addr_table. Idempotent and cheap, so it is safe on every call.
+// node_src_addr_table and reports whether it had to write it. Idempotent and
+// cheap, so it is safe on every call: it writes only when the table holds
+// nothing or another address, and reads the write back.
 //
 // The resolver configured through SetNodeSourceAddressResolver is the only
 // source. There is no local fallback: the value is this node's SID, which is
@@ -234,21 +236,17 @@ func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 // default, so no egress shard ever reflects this source back. A sidecar that
 // grows a NAT66 default would need a real Argument here first -- see
 // ingressSidecarBlock above for why these entries use a synthetic Block.
-func ensureNodeSourceAddress() error {
+func ensureNodeSourceAddress() (wrote bool, err error) {
 	resolver := getNodeSourceAddressResolver()
 	if resolver == nil {
-		return errors.New("no node source address resolver configured")
-	}
-	addr, err := resolver.ResolveNodeSourceAddress()
-	if err != nil {
-		return fmt.Errorf("resolve node source address: %w", err)
+		return false, errNodeSourceUnconfigured
 	}
 	nodeSrc, closer, err := egressroutemap.OpenPinnedNodeSourceAddress(ebpfPinDir)
 	if err != nil {
-		return fmt.Errorf("open pinned node_src_addr_table: %w", err)
+		return false, fmt.Errorf("open pinned node_src_addr_table: %w", err)
 	}
 	defer func() { _ = closer.Close() }()
-	return nodeSrc.Set(addr)
+	return syncNodeSourceAddress(resolver, nodeSrc)
 }
 
 // ensureEgressDatapath makes usid_egress's VRF resolution, from
@@ -285,7 +283,7 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	// Non-fatal, as at the CNI call site and for the same reason: resolving
 	// the address needs a converged underlay default route, which this pod can
 	// transiently lack right after a restart.
-	if err := ensureNodeSourceAddress(); err != nil {
+	if _, err := ensureNodeSourceAddress(); err != nil {
 		slog.Warn("ensureEgressDatapath: could not register this node's own SRv6 source address; "+
 			"egress routing will fail open until this succeeds", "err", err)
 	}

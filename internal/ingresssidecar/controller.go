@@ -15,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"go.datum.net/galactic/internal/crdnames"
@@ -30,10 +31,12 @@ type Reconciler struct {
 
 // Reconcile implements reconcile.Reconciler.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	inputs := r.Store.inputMetrics()
 	slice := &discoveryv1.EndpointSlice{}
 	err := r.Get(ctx, req.NamespacedName, slice)
 	switch {
 	case apierrors.IsNotFound(err):
+		inputs.forget(req.String())
 		if serr := r.Store.SetDesired(ctx, req.String(), nil); serr != nil {
 			return ctrl.Result{}, fmt.Errorf("mark EndpointSlice %s absent: %w", req.NamespacedName, serr)
 		}
@@ -42,7 +45,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("get EndpointSlice %s: %w", req.NamespacedName, err)
 	}
 
-	desired, err := BuildDesiredRoute(slice)
+	state, desired, err := classifySlice(slice)
+	inputs.observeWatch(req.String(), state)
 	if err != nil {
 		// Selected but malformed in a way retrying cannot fix: a bad annotation
 		// will not parse differently next time. Log through the returned
@@ -60,12 +64,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // SetupWithManager registers the controller against mgr, watching every
 // EndpointSlice cluster-wide, since these land in each pod's own namespace
 // rather than one fixed namespace, and filtering to those carrying the tenant
-// label.
+// label (see tenantLabelPredicate).
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Client = mgr.GetClient()
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&discoveryv1.EndpointSlice{}, builder.WithPredicates(predicate.NewPredicateFuncs(hasTenantLabel))).
+		For(&discoveryv1.EndpointSlice{}, builder.WithPredicates(tenantLabelPredicate())).
 		Complete(r)
+}
+
+// tenantLabelPredicate passes an event for a slice carrying the tenant label,
+// and an update when either the old or the new version carries it, so a slice
+// losing the label is reconciled, found no longer selected, and its route torn
+// down after the usual grace period.
+func tenantLabelPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool { return hasTenantLabel(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return hasTenantLabel(e.ObjectOld) || hasTenantLabel(e.ObjectNew)
+		},
+		DeleteFunc:  func(e event.DeleteEvent) bool { return hasTenantLabel(e.Object) },
+		GenericFunc: func(e event.GenericEvent) bool { return hasTenantLabel(e.Object) },
+	}
 }
 
 func hasTenantLabel(obj client.Object) bool {
@@ -91,10 +110,19 @@ var (
 // running Inventory without the seed would reopen the race SeedFromAPI closes.
 // A slice that fails to apply does not, since the store still records it as
 // desired and the sweep both retries it and keeps cleaning up everything else.
-func RunStartup(ctx context.Context, reader client.Reader, store *Store, interval time.Duration) {
+//
+// metrics, which may be nil, reports each stage's progress and the sweep's.
+func RunStartup(ctx context.Context, reader client.Reader, store *Store, interval time.Duration,
+	metrics *LifecycleMetrics,
+) {
 	delay := seedRetryInitial
 	for {
+		metrics.setStage(StageSeed, StatusRunning)
 		err := SeedFromAPI(ctx, reader, store)
+		if ctx.Err() != nil {
+			return // shutting down: an interrupted attempt is not a result
+		}
+		metrics.attempt(StageSeed, err)
 		if err == nil {
 			break
 		}
@@ -106,15 +134,33 @@ func RunStartup(ctx context.Context, reader client.Reader, store *Store, interva
 		}
 		delay = min(2*delay, seedRetryMax)
 	}
-	if err := store.Inventory(ctx, time.Now()); err != nil {
-		slog.Error("ingresssidecar: startup inventory", "error", err)
-	} else if err := store.PruneForeignDatapath(); err != nil {
-		// Not retried: the rows it leaves only hold map slots until the next
-		// sidecar pod's startup prune, or until the host's installer judges
-		// every sidecar on this node gone.
-		slog.Error("ingresssidecar: startup prune", "error", err)
+
+	metrics.setStage(StageInventory, StatusRunning)
+	err := store.Inventory(ctx, time.Now())
+	if ctx.Err() != nil {
+		return
 	}
-	RunSweeper(ctx, store, interval)
+	metrics.attempt(StageInventory, err)
+	if err != nil {
+		slog.Error("ingresssidecar: startup inventory", "error", err)
+		metrics.setStage(StagePrune, StatusSkipped)
+	} else {
+		metrics.setStage(StagePrune, StatusRunning)
+		removed, err := store.PruneForeignDatapath()
+		metrics.pruned(removed)
+		if ctx.Err() != nil {
+			return
+		}
+		metrics.attempt(StagePrune, err)
+		if err != nil {
+			// Not retried: the rows it leaves only hold map slots until the
+			// next sidecar pod's startup prune, or until the host's installer
+			// judges every sidecar on this node gone.
+			slog.Error("ingresssidecar: startup prune", "error", err)
+		}
+	}
+	metrics.startupComplete()
+	RunSweeper(ctx, store, interval, metrics)
 }
 
 // RunSweeper blocks, sweeping the store on a fixed interval until ctx is done.
@@ -123,8 +169,8 @@ func RunStartup(ctx context.Context, reader client.Reader, store *Store, interva
 // over many routes, not one watched object's transition.
 //
 // Callers must not start it until the API seed and the store's inventory pass
-// have both run.
-func RunSweeper(ctx context.Context, store *Store, interval time.Duration) {
+// have both run. metrics, which may be nil, records each completed sweep.
+func RunSweeper(ctx context.Context, store *Store, interval time.Duration, metrics *LifecycleMetrics) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -132,7 +178,9 @@ func RunSweeper(ctx context.Context, store *Store, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			start := metrics.sweepStart()
 			store.Sweep(ctx, time.Now())
+			metrics.sweepDone(start)
 		}
 	}
 }
