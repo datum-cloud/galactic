@@ -10,8 +10,18 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
+)
+
+// gatewayRetriesPerSweep bounds how many VPCs one sweep retries publishing a
+// gateway advertisement for, and gatewayRetryTimeout each attempt, so a slow
+// API delays a sweep by a bounded amount. Variables so tests can shorten them.
+var (
+	gatewayRetriesPerSweep = 4
+	gatewayRetryTimeout    = 10 * time.Second
 )
 
 // routeState tracks one pod's route lifecycle, keyed by its EndpointSlice's
@@ -30,6 +40,17 @@ type routeState struct {
 	// moment a nil desired value is first observed, and cleared again if the
 	// route is reactivated before Sweep tears it down.
 	absentSince time.Time
+	// pendingSince is when this route last became desired and apply-pending,
+	// or the zero Time while it is not both. A retry or a newer update of a
+	// route already pending keeps it: the claim has been unapplied since then.
+	pendingSince time.Time
+}
+
+// claim reports whether r counts as a desired route claim, and as one whose
+// latest update is not applied yet.
+func (r *routeState) claim() (desired, pending bool) {
+	desired = r.absentSince.IsZero()
+	return desired, desired && r.pending
 }
 
 // vrfState tracks one VPC's VRF device lifecycle, keyed by vpc.
@@ -40,11 +61,16 @@ type vrfState struct {
 	// this VPC, whether installed or itself within its grace period. Only once
 	// every such route is gone does this VPC's teardown clock start.
 	absentSince time.Time
-	// gatewayPublished is true once this VPC's return-path advertisement has
-	// been published. Set at most once per VRF lifetime, so a transient resolve
-	// or publish failure retries on the next SetDesired rather than being
-	// abandoned for the VRF's remaining lifetime.
+	// gatewayPublished is true while this VPC's return-path advertisement is
+	// published, from a successful publish until a successful withdrawal. A
+	// failed resolve or publish is retried on the next SetDesired and by
+	// every Sweep (retryGateways) until it succeeds.
 	gatewayPublished bool
+	// gatewayState is where this VRF's publication stands (GatewayAwaiting*,
+	// GatewayPublished), and gatewayWaitingSince when it last started waiting
+	// while counted. Both are bookkeeping for GatewayMetrics only.
+	gatewayState        string
+	gatewayWaitingSince time.Time
 }
 
 // Store is the in-process desired-versus-applied reconciler for this sidecar's
@@ -65,9 +91,44 @@ type Store struct {
 	// SetGatewayPublisher for what enabling them does.
 	gatewayPublisher GatewayPublisher
 	gatewayResolver  GatewayAddressResolver
+	// gatewayCursor rotates where retryGateways starts, so a VPC that keeps
+	// failing cannot starve the others of retries.
+	gatewayCursor int
+	// gatewayInFlight holds the VPCs retryGateways is publishing or
+	// withdrawing for outside the lock. publishGateway skips them, so no
+	// other publish for the VPC interleaves with that call; a VRF it skips
+	// is retried by a later Sweep.
+	gatewayInFlight map[string]struct{}
+
+	// gatewayMetrics is nil unless SetGatewayMetrics was called.
+	// gatewayCounts holds each counted VRF's state, kept in step at every
+	// change, and gatewayOldest the longest wait, rescanned over the VRFs
+	// (one per VPC) only when the VRF holding it stops waiting
+	// (gatewayOldestDirty).
+	gatewayMetrics     *GatewayMetrics
+	gatewayCounts      map[string]int
+	gatewayOldest      time.Time
+	gatewayOldestDirty bool
 
 	routes map[string]*routeState
 	vrfs   map[string]*vrfState
+
+	// convergence is nil unless SetConvergenceMetrics was called. The claim
+	// counts are kept in step with routes at every change, and pendingQueue
+	// holds each claim in the order it became pending, so publishing them
+	// never scans every route.
+	convergence   *ConvergenceMetrics
+	clock         func() time.Time
+	desiredClaims int
+	pendingClaims int
+	pendingQueue  []pendingEntry
+
+	// inputs holds nil unless SetInputMetrics was called. It is the seed's
+	// and the reconciler's, kept here so both reach it without taking s.mu.
+	inputs atomic.Pointer[InputMetrics]
+
+	// datapath is nil unless SetDatapathMetrics was called.
+	datapath *DatapathMetrics
 
 	// generation is the backend's DatapathGeneration as of the last time every
 	// tracked VRF and route was known to be written against it, or empty
@@ -76,6 +137,12 @@ type Store struct {
 	// the generation has not moved again.
 	generation     string
 	reapplyPending bool
+
+	// nodeSourceMetrics is nil unless SetNodeSourceMetrics configured it.
+	nodeSourceMetrics *NodeSourceMetrics
+	// nodeSourceStatus is the last node source check's status, so a repeated
+	// failure is logged once.
+	nodeSourceStatus string
 }
 
 // NewStore returns a Store that converges against backend, delaying teardown of
@@ -83,12 +150,117 @@ type Store struct {
 // as tests commonly pass.
 func NewStore(backend Backend, grace time.Duration, metrics *Metrics) *Store {
 	return &Store{
-		backend: backend,
-		grace:   grace,
-		metrics: metrics,
-		routes:  make(map[string]*routeState),
-		vrfs:    make(map[string]*vrfState),
+		backend:         backend,
+		grace:           grace,
+		metrics:         metrics,
+		routes:          make(map[string]*routeState),
+		vrfs:            make(map[string]*vrfState),
+		gatewayInFlight: make(map[string]struct{}),
+		clock:           time.Now,
 	}
+}
+
+// SetConvergenceMetrics has this Store report its desired and apply-pending
+// claims, overdue teardown and backend operations to m. Call it once, before
+// the first SetDesired.
+func (s *Store) SetConvergenceMetrics(m *ConvergenceMetrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.convergence = m
+	s.publishClaimsLocked()
+}
+
+// pendingEntry records that r became pending at since. It is stale once r
+// has applied, stopped being desired, or become pending again later.
+type pendingEntry struct {
+	r     *routeState
+	since time.Time
+}
+
+func (e pendingEntry) live() bool {
+	_, pending := e.r.claim()
+	return pending && e.r.pendingSince.Equal(e.since)
+}
+
+// claimChangedLocked updates the claim counts and pending starts after r
+// changed from a claim that was wasDesired and wasPending. Callers must hold
+// s.mu.
+func (s *Store) claimChangedLocked(r *routeState, wasDesired, wasPending bool) {
+	desired, pending := r.claim()
+	s.desiredClaims += boolDelta(wasDesired, desired)
+	s.pendingClaims += boolDelta(wasPending, pending)
+	switch {
+	case pending && !wasPending:
+		r.pendingSince = s.clock()
+		s.pendingQueue = append(s.pendingQueue, pendingEntry{r: r, since: r.pendingSince})
+	case !pending && wasPending:
+		r.pendingSince = time.Time{} // its queue entry is now stale
+	}
+}
+
+// oldestPendingLocked returns when the longest-pending claim became pending,
+// or the zero Time when none is pending. Stale entries are dropped from the
+// front as they surface, and the queue is compacted once they outnumber the
+// live ones, so the cost is constant per claim transition however the
+// backlog drains. Callers must hold s.mu.
+func (s *Store) oldestPendingLocked() time.Time {
+	if s.pendingClaims == 0 {
+		s.pendingQueue = s.pendingQueue[:0]
+		return time.Time{}
+	}
+	if len(s.pendingQueue) > 2*s.pendingClaims+64 {
+		live := s.pendingQueue[:0]
+		for _, e := range s.pendingQueue {
+			if e.live() {
+				live = append(live, e)
+			}
+		}
+		clear(s.pendingQueue[len(live):])
+		s.pendingQueue = live
+	}
+	for len(s.pendingQueue) > 0 && !s.pendingQueue[0].live() {
+		s.pendingQueue[0] = pendingEntry{}
+		s.pendingQueue = s.pendingQueue[1:]
+	}
+	if len(s.pendingQueue) == 0 {
+		return time.Time{}
+	}
+	return s.pendingQueue[0].since
+}
+
+// publishClaimsLocked publishes the claim counts and the oldest pending
+// start. Callers must hold s.mu.
+func (s *Store) publishClaimsLocked() {
+	s.convergence.claims(s.desiredClaims, s.pendingClaims, s.oldestPendingLocked())
+}
+
+func boolDelta(was, is bool) int {
+	switch {
+	case is && !was:
+		return 1
+	case was && !is:
+		return -1
+	}
+	return 0
+}
+
+// SetInputMetrics has the startup seed and the EndpointSlice reconciler
+// report each slice's input state to m. Call it once, before either runs.
+func (s *Store) SetInputMetrics(m *InputMetrics) {
+	s.inputs.Store(m)
+}
+
+// inputMetrics returns what SetInputMetrics set.
+func (s *Store) inputMetrics() *InputMetrics {
+	return s.inputs.Load()
+}
+
+// SetDatapathMetrics has this Store report each sweep's datapath checks and
+// reapply passes to m. Call it once, before the first Sweep.
+func (s *Store) SetDatapathMetrics(m *DatapathMetrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.datapath = m
 }
 
 // SetGatewayPublisher enables this Store to publish and withdraw a return-path
@@ -106,32 +278,124 @@ func (s *Store) SetGatewayPublisher(publisher GatewayPublisher, resolver Gateway
 	s.gatewayResolver = resolver
 }
 
-// publishGateway attempts to publish vpc's return-path advertisement once, the
-// first time its VRF is created. Called with s.mu held.
-//
-// A resolve failure because nothing has provisioned a gateway address yet is
-// logged at debug and left for the next SetDesired to retry, not treated as a
-// reconcile error. Any other error is logged at warn and likewise retried,
-// rather than failing the route reconcile that triggered it: a missing return
-// path degrades this VPC's ingress traffic, and withholding the forward-path
-// route as well would not improve it.
-func (s *Store) publishGateway(ctx context.Context, vpc string, v *vrfState) {
-	if s.gatewayPublisher == nil || s.gatewayResolver == nil || v.gatewayPublished {
+// SetGatewayMetrics has this Store report gateway publication state and
+// operations to m, counting the VRFs it already tracks. Call it after
+// SetGatewayPublisher.
+func (s *Store) SetGatewayMetrics(m *GatewayMetrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gatewayMetrics = m
+	s.gatewayCounts = map[string]int{}
+	s.gatewayOldest, s.gatewayOldestDirty = time.Time{}, false
+	for _, v := range s.vrfs {
+		v.gatewayWaitingSince = time.Time{}
+		s.gatewayChangedLocked(v, "")
+	}
+	s.publishGatewayStateLocked()
+}
+
+// gatewayCounted is the state a VRF contributes to gateway_vrfs: none while
+// publication is disabled, before the VRF is installed, or while it drains.
+func (s *Store) gatewayCounted(v *vrfState) string {
+	if s.gatewayPublisher == nil || s.gatewayResolver == nil || !v.installed || !v.absentSince.IsZero() {
+		return ""
+	}
+	if v.gatewayPublished {
+		return GatewayPublished
+	}
+	if v.gatewayState == "" {
+		return GatewayAwaitingAddress
+	}
+	return v.gatewayState
+}
+
+// gatewayChangedLocked updates the gateway counts after v changed from
+// contributing before. Callers must hold s.mu.
+func (s *Store) gatewayChangedLocked(v *vrfState, before string) {
+	if s.gatewayMetrics == nil {
 		return
 	}
+	after := s.gatewayCounted(v)
+	if before == after {
+		return
+	}
+	if before != "" {
+		s.gatewayCounts[before]--
+	}
+	if after != "" {
+		s.gatewayCounts[after]++
+	}
+	waitedBefore := before != "" && before != GatewayPublished
+	waitsAfter := after != "" && after != GatewayPublished
+	switch {
+	case waitsAfter && !waitedBefore:
+		v.gatewayWaitingSince = s.gatewayMetrics.clock()
+		if s.gatewayOldest.IsZero() || v.gatewayWaitingSince.Before(s.gatewayOldest) {
+			s.gatewayOldest = v.gatewayWaitingSince
+		}
+	case waitedBefore && !waitsAfter:
+		if v.gatewayWaitingSince.Equal(s.gatewayOldest) {
+			s.gatewayOldestDirty = true
+		}
+		v.gatewayWaitingSince = time.Time{}
+	}
+	s.publishGatewayStateLocked()
+}
+
+// publishGatewayStateLocked publishes the gateway counts and the oldest wait.
+// Callers must hold s.mu.
+func (s *Store) publishGatewayStateLocked() {
+	if s.gatewayMetrics == nil {
+		return
+	}
+	if s.gatewayOldestDirty {
+		s.gatewayOldest, s.gatewayOldestDirty = time.Time{}, false
+		for _, v := range s.vrfs {
+			if !v.gatewayWaitingSince.IsZero() &&
+				(s.gatewayOldest.IsZero() || v.gatewayWaitingSince.Before(s.gatewayOldest)) {
+				s.gatewayOldest = v.gatewayWaitingSince
+			}
+		}
+	}
+	s.gatewayMetrics.publish(s.gatewayCounts, s.gatewayOldest)
+}
+
+// publishGateway attempts to publish vpc's return-path advertisement once,
+// from SetDesired, while its VRF has none. Called with s.mu held. It skips a
+// VPC retryGateways is calling the API for.
+//
+// A resolve failure because nothing has provisioned a gateway address yet is
+// logged at debug and left for the next SetDesired or Sweep to retry, not
+// treated as a reconcile error. Any other error is logged at warn and likewise
+// retried, rather than failing the route reconcile that triggered it: a
+// missing return path degrades this VPC's ingress traffic, and withholding the
+// forward-path route as well would not improve it.
+func (s *Store) publishGateway(ctx context.Context, vpc string, v *vrfState) {
+	if s.gatewayPublisher == nil || s.gatewayResolver == nil || v.gatewayPublished || s.inFlightLocked(vpc) {
+		return
+	}
+	before := s.gatewayCounted(v)
+	defer func() { s.gatewayChangedLocked(v, before) }()
 	addr, err := s.gatewayResolver.ResolveGatewayAddress(vpc)
 	if err != nil {
+		v.gatewayState = GatewayAwaitingAddress
 		if errors.Is(err, ErrGatewayAddressNotProvisioned) {
+			s.gatewayMetrics.operation(GatewayOpResolve, GatewayNotProvisioned)
 			slog.Debug("ingresssidecar: no gateway address provisioned yet, will retry", "vpc", vpc, "err", err)
 		} else {
+			s.gatewayMetrics.operation(GatewayOpResolve, GatewayError)
 			slog.Warn("ingresssidecar: resolve gateway address", "vpc", vpc, "err", err)
 		}
 		return
 	}
+	s.gatewayMetrics.operation(GatewayOpResolve, GatewaySuccess)
+	v.gatewayState = GatewayAwaitingPublication
 	if err := s.gatewayPublisher.PublishGateway(ctx, vpc, addr); err != nil {
+		s.gatewayMetrics.operation(GatewayOpPublish, GatewayError)
 		slog.Warn("ingresssidecar: publish gateway advertisement", "vpc", vpc, "err", err)
 		return
 	}
+	s.gatewayMetrics.operation(GatewayOpPublish, GatewaySuccess)
 	v.gatewayPublished = true
 }
 
@@ -146,8 +410,145 @@ func (s *Store) withdrawGateway(ctx context.Context, vpc string, v *vrfState) {
 		return
 	}
 	if err := s.gatewayPublisher.WithdrawGateway(ctx, vpc); err != nil {
+		s.gatewayMetrics.operation(GatewayOpWithdraw, GatewayError)
 		slog.Warn("ingresssidecar: withdraw gateway advertisement", "vpc", vpc, "err", err)
+		return
 	}
+	s.gatewayMetrics.operation(GatewayOpWithdraw, GatewaySuccess)
+	// Withdrawn: if removing the VRF then fails and the VPC comes back, it is
+	// published again.
+	v.gatewayPublished = false
+}
+
+// retryGateways publishes the gateway advertisement of up to
+// gatewayRetriesPerSweep desired VRFs whose publication has not succeeded,
+// so a failed publish recovers without waiting for another EndpointSlice
+// update. One attempt per VPC, however many routes it has, starting where the
+// last sweep stopped.
+//
+// The API calls run without s.mu, each bounded by gatewayRetryTimeout and
+// cancelled with ctx, while the VPC is marked in flight. A successful publish
+// belongs to whichever VRF tracks the VPC when it completes, the one it was
+// made for or a replacement; the advertisement depends only on the VPC, and
+// teardown withdraws it as usual. With no VRF left for the VPC it is
+// withdrawn again before the VPC stops being in flight.
+//
+// Sweep has one caller, the sweeper goroutine, so no VRF is removed while
+// these calls run today; crediting a replacement and withdrawing for a removed
+// VRF keep the result right if that changes. A SetDesired for a VPC in flight
+// does not publish it, so if the retry then fails the VPC waits for the next
+// Sweep. The attempts can lengthen a sweep by up to gatewayRetriesPerSweep
+// times gatewayRetryTimeout, which delays the next sweep's teardown, not this
+// one's: teardown runs first.
+func (s *Store) retryGateways(ctx context.Context) {
+	s.mu.Lock()
+	publisher, resolver := s.gatewayPublisher, s.gatewayResolver
+	m := s.gatewayMetrics
+	if publisher == nil || resolver == nil {
+		s.mu.Unlock()
+		return
+	}
+	var pending []string
+	for vpc, v := range s.vrfs {
+		if v.installed && v.absentSince.IsZero() && !v.gatewayPublished && !s.inFlightLocked(vpc) {
+			pending = append(pending, vpc)
+		}
+	}
+	sort.Strings(pending)
+	n := min(len(pending), gatewayRetriesPerSweep)
+	vpcs := make([]string, 0, n)
+	for i := range n {
+		vpc := pending[(s.gatewayCursor+i)%len(pending)]
+		s.gatewayInFlight[vpc] = struct{}{}
+		vpcs = append(vpcs, vpc)
+	}
+	s.gatewayCursor += n
+	s.mu.Unlock()
+
+	for _, vpc := range vpcs {
+		s.retryGateway(ctx, m, publisher, resolver, vpc)
+	}
+}
+
+// retryGateway makes one retryGateways attempt for vpc, which the caller
+// marked in flight, records it to m, and clears the mark.
+func (s *Store) retryGateway(
+	ctx context.Context, m *GatewayMetrics, publisher GatewayPublisher, resolver GatewayAddressResolver, vpc string,
+) {
+	// Clear the mark however this returns, a panic included, or the VPC
+	// would never be published again.
+	defer func() {
+		s.mu.Lock()
+		delete(s.gatewayInFlight, vpc)
+		s.mu.Unlock()
+	}()
+	if ctx.Err() != nil {
+		return // shutting down
+	}
+	state, err := publishOnce(ctx, m, publisher, resolver, vpc)
+	s.mu.Lock()
+	v := s.vrfs[vpc]
+	if v != nil {
+		before := s.gatewayCounted(v)
+		if err == nil {
+			v.gatewayPublished = true
+		} else {
+			v.gatewayState = state
+		}
+		s.gatewayChangedLocked(v, before)
+	}
+	s.mu.Unlock()
+
+	switch {
+	case err == nil && v == nil:
+		wctx, cancel := context.WithTimeout(ctx, gatewayRetryTimeout)
+		defer cancel()
+		if werr := publisher.WithdrawGateway(wctx, vpc); werr != nil {
+			m.operation(GatewayOpWithdraw, GatewayError)
+			slog.Warn("ingresssidecar: withdraw a gateway advertisement published for a removed VRF",
+				"vpc", vpc, "err", werr)
+			return
+		}
+		m.operation(GatewayOpWithdraw, GatewaySuccess)
+	case ctx.Err() != nil:
+		// Shutting down: the next sidecar retries.
+	case errors.Is(err, ErrGatewayAddressNotProvisioned):
+		slog.Debug("ingresssidecar: no gateway address provisioned yet, will retry", "vpc", vpc, "err", err)
+	case err != nil:
+		slog.Warn("ingresssidecar: retry gateway advertisement", "vpc", vpc, "err", err)
+	}
+}
+
+// inFlightLocked reports whether retryGateways is calling the API for vpc.
+func (s *Store) inFlightLocked(vpc string) bool {
+	_, ok := s.gatewayInFlight[vpc]
+	return ok
+}
+
+// publishOnce resolves vpc's gateway address and publishes it, within
+// gatewayRetryTimeout, recording each step to m. On failure it returns the
+// state the VPC is left waiting in.
+func publishOnce(
+	ctx context.Context, m *GatewayMetrics, publisher GatewayPublisher, resolver GatewayAddressResolver, vpc string,
+) (string, error) {
+	addr, err := resolver.ResolveGatewayAddress(vpc)
+	if err != nil {
+		if errors.Is(err, ErrGatewayAddressNotProvisioned) {
+			m.operation(GatewayOpResolve, GatewayNotProvisioned)
+		} else {
+			m.operation(GatewayOpResolve, GatewayError)
+		}
+		return GatewayAwaitingAddress, err
+	}
+	m.operation(GatewayOpResolve, GatewaySuccess)
+	pctx, cancel := context.WithTimeout(ctx, gatewayRetryTimeout)
+	defer cancel()
+	if err := publisher.PublishGateway(pctx, vpc, addr); err != nil {
+		m.operation(GatewayOpPublish, GatewayError)
+		return GatewayAwaitingPublication, err
+	}
+	m.operation(GatewayOpPublish, GatewaySuccess)
+	return GatewayPublished, nil
 }
 
 // SetDesired updates the desired state for the route identified by key, an
@@ -170,10 +571,13 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.publishClaimsLocked()
 
 	if desired == nil {
 		if r, ok := s.routes[key]; ok && r.absentSince.IsZero() {
+			wasDesired, wasPending := r.claim()
 			r.absentSince = time.Now()
+			s.claimChangedLocked(r, wasDesired, wasPending)
 		}
 		return nil
 	}
@@ -181,14 +585,18 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 	// Read before the first write rather than after it: a reload landing
 	// between the two then shows up on the next Sweep as a changed generation
 	// instead of being mistaken for the one those writes went into.
+	// A baseline, not a check: Sweep's own read reports a failure.
 	if s.generation == "" {
 		if gen, gerr := s.backend.DatapathGeneration(); gerr == nil {
 			s.generation = gen
 		}
 	}
 
+	var wasDesired, wasPending bool
 	r, ok := s.routes[key]
-	if !ok {
+	if ok {
+		wasDesired, wasPending = r.claim()
+	} else {
 		r = &routeState{}
 		s.routes[key] = r
 	}
@@ -197,6 +605,7 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 	r.sid = desired.SID
 	r.absentSince = time.Time{} // (re)activated -- cancel any pending teardown
 	r.pending = true
+	s.claimChangedLocked(r, wasDesired, wasPending)
 	return s.applyLocked(ctx, r)
 }
 
@@ -208,26 +617,35 @@ func (s *Store) applyLocked(ctx context.Context, r *routeState) error {
 		v = &vrfState{}
 		s.vrfs[r.vpc] = v
 	}
+	before := s.gatewayCounted(v)
 	v.absentSince = time.Time{} // this VPC has a live pod again
+	s.gatewayChangedLocked(v, before)
 
 	if !v.installed {
 		tableID, verr := s.backend.EnsureVRF(r.vpc)
+		s.convergence.operation(OpEnsureVRF, verr)
 		if verr != nil {
 			s.countError("ensure_vrf")
 			return fmt.Errorf("ensure VRF for vpc %s: %w", r.vpc, verr)
 		}
+		beforeInstall := s.gatewayCounted(v)
 		v.installed = true
 		v.tableID = tableID
+		s.gatewayChangedLocked(v, beforeInstall)
 		s.vrfActiveDelta(1)
 	}
 	s.publishGateway(ctx, r.vpc, v)
 
-	if rerr := s.backend.EnsureRoute(r.prefix, r.sid, v.tableID); rerr != nil {
+	rerr := s.backend.EnsureRoute(r.prefix, r.sid, v.tableID)
+	s.convergence.operation(OpEnsureRoute, rerr)
+	if rerr != nil {
 		s.countError("ensure_route")
 		return fmt.Errorf("ensure route for %s: %w", r.prefix, rerr)
 	}
 
+	wasDesired, wasPending := r.claim()
 	r.pending = false
+	s.claimChangedLocked(r, wasDesired, wasPending)
 	if !r.installed {
 		r.installed = true
 		s.routeActiveDelta(1)
@@ -262,16 +680,28 @@ func (s *Store) retryPendingLocked(ctx context.Context) {
 // has been reloaded since they were written; see checkDatapathLocked. It then
 // retries every desired route an earlier SetDesired failed to apply.
 //
+// Sweep then retries the gateway advertisements still unpublished; see
+// retryGateways.
+//
 // Call this periodically, never reactively: VRF teardown is an aggregate
 // condition over many routes, not one watched object's transition.
 func (s *Store) Sweep(ctx context.Context, now time.Time) {
+	s.sweepLocked(ctx, now)
+	s.retryGateways(ctx)
+}
+
+// sweepLocked is Sweep's work under s.mu.
+func (s *Store) sweepLocked(ctx context.Context, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.checkDatapathLocked()
 	s.retryPendingLocked(ctx)
+	defer s.publishClaimsLocked()
+	s.checkNodeSourceLocked(now)
 
 	pendingRoutes, pendingVRFs := 0, 0
+	overdueRoutes, overdueVRFs := 0, 0
 
 	liveVPCs := make(map[string]struct{}, len(s.vrfs))
 	for key, r := range s.routes {
@@ -296,11 +726,12 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 			v, ok := s.vrfs[r.vpc]
 			if !ok {
 				slog.Error("ingresssidecar: sweep found route with no tracked VRF", "key", key, "vpc", r.vpc)
-			} else if err := s.backend.RemoveRoute(r.prefix, v.tableID); err != nil {
+			} else if err := s.removeRouteLocked(r, v.tableID); err != nil {
 				s.countError("remove_route")
 				slog.Error("ingresssidecar: remove route", "key", key, "vpc", r.vpc, "error", err)
 				liveVPCs[r.vpc] = struct{}{} // keep the VPC alive; retry next sweep
 				pendingRoutes++
+				overdueRoutes++
 				continue
 			}
 			s.routeActiveDelta(-1)
@@ -310,11 +741,15 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 
 	for vpc, v := range s.vrfs {
 		if _, live := liveVPCs[vpc]; live {
+			before := s.gatewayCounted(v)
 			v.absentSince = time.Time{}
+			s.gatewayChangedLocked(v, before)
 			continue
 		}
 		if v.absentSince.IsZero() {
+			before := s.gatewayCounted(v)
 			v.absentSince = now
+			s.gatewayChangedLocked(v, before)
 			pendingVRFs++
 			continue
 		}
@@ -324,10 +759,13 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 		}
 		if v.installed {
 			s.withdrawGateway(ctx, vpc, v)
-			if err := s.backend.RemoveVRF(vpc); err != nil {
+			err := s.backend.RemoveVRF(vpc)
+			s.convergence.operation(OpRemoveVRF, err)
+			if err != nil {
 				s.countError("remove_vrf")
 				slog.Error("ingresssidecar: remove VRF", "vpc", vpc, "error", err)
 				pendingVRFs++
+				overdueVRFs++
 				continue
 			}
 			s.vrfActiveDelta(-1)
@@ -339,6 +777,15 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 		s.metrics.RoutePending.Set(float64(pendingRoutes))
 		s.metrics.VRFPending.Set(float64(pendingVRFs))
 	}
+	s.convergence.overdueTeardown(overdueRoutes, overdueVRFs)
+}
+
+// removeRouteLocked removes r's kernel state from tableID, recording the
+// operation. Callers must hold s.mu.
+func (s *Store) removeRouteLocked(r *routeState, tableID uint32) error {
+	err := s.backend.RemoveRoute(r.prefix, tableID)
+	s.convergence.operation(OpRemoveRoute, err)
+	return err
 }
 
 // Inventory seeds Store with every managed VRF device, and its installed
@@ -402,7 +849,10 @@ func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 // tracked, so a row it does not account for belongs to a pod that is gone. It
 // holds the store's lock throughout, so a VRF SetDesired creates concurrently
 // is either already tracked or registers its rows after the prune.
-func (s *Store) PruneForeignDatapath() error {
+//
+// It returns how many rows it removed, which a failure part way through can
+// leave above zero.
+func (s *Store) PruneForeignDatapath() (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -419,9 +869,9 @@ func (s *Store) PruneForeignDatapath() error {
 	}
 	if err != nil {
 		s.countError("prune_datapath")
-		return fmt.Errorf("prune an earlier sidecar pod's eBPF map rows: %w", err)
+		return removed, fmt.Errorf("prune an earlier sidecar pod's eBPF map rows: %w", err)
 	}
-	return nil
+	return removed, nil
 }
 
 // checkDatapathLocked reapplies every live VRF and route when the backend's
@@ -444,19 +894,40 @@ func (s *Store) PruneForeignDatapath() error {
 //
 // A failed generation read is not acted on: it means the datapath is not
 // loaded at all, which nothing here can repair, and the next successful read
-// after it is loaded again will differ and trigger the reapply.
+// after it is loaded again will differ and trigger the reapply. It is still
+// reported, as an error rather than as a healthy check.
+//
+// A pass's reason is generation_changed whenever the generation moved, even
+// when a retry was also due; rows_missing when this check found rows gone;
+// otherwise retry.
+//
+// The registration rows are read only while the generation is unchanged and
+// no retry is due. On every other sweep, and after a reapply rewrote them, a
+// last ok becomes unknown rather than standing for rows nobody read back.
 func (s *Store) checkDatapathLocked() {
+	defer func() { s.datapath.reapplyPending(s.reapplyPending) }()
 	gen, err := s.backend.DatapathGeneration()
 	if err != nil {
+		s.datapath.checked(CheckGeneration, CheckError)
+		s.datapath.rowsNotChecked()
 		slog.Debug("ingresssidecar: read eBPF datapath generation", "err", err)
 		return
 	}
-	if gen == s.generation && !s.reapplyPending {
+	s.datapath.checked(CheckGeneration, CheckOK)
+	reason := ReapplyRetry
+	switch {
+	case gen != s.generation:
+		reason = ReapplyGenerationChanged
+		s.datapath.rowsNotChecked()
+	case s.reapplyPending:
+		s.datapath.rowsNotChecked()
+	default:
 		if s.rowsPresentLocked() {
 			return
 		}
 		slog.Warn("ingresssidecar: this sidecar's rows are missing from the shared eBPF maps, reapplying")
 		s.reapplyPending = true
+		reason = ReapplyRowsMissing
 	}
 	if s.generation == "" && !s.anyInstalledLocked() {
 		s.generation = gen // nothing written yet, so nothing to reapply
@@ -469,13 +940,16 @@ func (s *Store) checkDatapathLocked() {
 		s.metrics.Reapplies.Inc()
 	}
 	s.generation = gen
-	s.reapplyPending = !s.reapplyLocked()
+	ok := s.reapplyLocked()
+	s.reapplyPending = !ok
+	s.datapath.reapplied(reason, ok)
+	s.datapath.rowsNotChecked() // rewritten, not read back yet
 }
 
 // rowsPresentLocked reports whether the shared eBPF maps still hold the rows of
 // every VRF reapplyLocked would reapply. A failed read counts as present, for
-// the same reason a failed generation read is not acted on. Callers must hold
-// s.mu.
+// the same reason a failed generation read is not acted on, but is reported
+// as an error. Callers must hold s.mu.
 func (s *Store) rowsPresentLocked() bool {
 	var tableIDs []uint32
 	for _, v := range s.vrfs {
@@ -483,10 +957,20 @@ func (s *Store) rowsPresentLocked() bool {
 			tableIDs = append(tableIDs, v.tableID)
 		}
 	}
+	if len(tableIDs) == 0 {
+		s.datapath.rowsNotChecked() // nothing to read back
+		return true
+	}
 	present, err := s.backend.DatapathRowsPresent(tableIDs)
-	if err != nil {
+	switch {
+	case err != nil:
+		s.datapath.checked(CheckRegistrationRows, CheckError)
 		slog.Debug("ingresssidecar: read back eBPF map rows", "err", err)
 		return true
+	case !present:
+		s.datapath.checked(CheckRegistrationRows, CheckMissing)
+	default:
+		s.datapath.checked(CheckRegistrationRows, CheckOK)
 	}
 	return present
 }
@@ -504,6 +988,7 @@ func (s *Store) reapplyLocked() bool {
 			continue
 		}
 		tableID, err := s.backend.EnsureVRF(vpc)
+		s.convergence.operation(OpReapplyVRF, err)
 		if err != nil {
 			s.countError("reapply_vrf")
 			slog.Error("ingresssidecar: reapply VRF", "vpc", vpc, "error", err)
@@ -530,7 +1015,9 @@ func (s *Store) reapplyLocked() bool {
 			slog.Error("ingresssidecar: reapply found route with no tracked VRF", "key", key, "vpc", r.vpc)
 			continue
 		}
-		if err := s.backend.EnsureRoute(r.prefix, r.sid, v.tableID); err != nil {
+		err := s.backend.EnsureRoute(r.prefix, r.sid, v.tableID)
+		s.convergence.operation(OpReapplyRoute, err)
+		if err != nil {
 			s.countError("reapply_route")
 			slog.Error("ingresssidecar: reapply route", "key", key, "vpc", r.vpc, "error", err)
 			ok = false
