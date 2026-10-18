@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -59,8 +58,6 @@ func TestControllerRBACCoversEveryCall(t *testing.T) {
 	allowed = append(allowed, rbaccheck.Each([]string{rbaccheck.Create, rbaccheck.Patch}, "events.k8s.io", testNS,
 		"events")...)
 	allowed = append(allowed, rbaccheck.Each([]string{rbaccheck.Create, rbaccheck.Patch}, "", testNS, "events")...)
-	// Secret metadata, by name, for the credentials a revision uses.
-	allowed = append(allowed, rbaccheck.Each([]string{rbaccheck.Get}, "", testNS, secrets)...)
 	all := []string{rbaccheck.Get, rbaccheck.List, rbaccheck.Watch, rbaccheck.Create, rbaccheck.Update,
 		rbaccheck.Patch, rbaccheck.Delete}
 	allowed = append(allowed, rbaccheck.Each(all,
@@ -71,6 +68,8 @@ func TestControllerRBACCoversEveryCall(t *testing.T) {
 		{Verb: rbaccheck.Patch, Group: g, Resource: "fabricreleaseauthorizations/status", Namespace: testNS},
 		{Verb: rbaccheck.Get, Group: g, Resource: "bgprouters/status", Namespace: testNS},
 		{Verb: rbaccheck.Update, Group: g, Resource: "bgprouters/status", Namespace: testNS},
+		// No Secret access until a revision can name a credential.
+		{Verb: rbaccheck.Get, Resource: secrets, Namespace: testNS},
 		{Verb: rbaccheck.List, Resource: secrets, Namespace: testNS},
 		{Verb: rbaccheck.Watch, Resource: secrets, Namespace: testNS},
 		{Verb: rbaccheck.Update, Resource: secrets, Namespace: testNS},
@@ -87,10 +86,10 @@ func TestControllerRBACCoversEveryCall(t *testing.T) {
 	rbaccheck.Check(t, admin, user, groups, allowed, denied)
 }
 
-// TestCredentialsWithShippedRBAC: the shipped RBAC lets the rollout
-// manager read a credential's Secret metadata by name in its namespace,
-// uncached, and nowhere else: a Secret elsewhere is a
-// CredentialAccessError, which fails the target.
+// TestCredentialsWithShippedRBAC: the shipped RBAC grants the rollout
+// manager no Secret access yet, so a credential a revision names cannot be
+// resolved: a CredentialAccessError, which fails the target, in its own
+// namespace as elsewhere.
 func TestCredentialsWithShippedRBAC(t *testing.T) {
 	cfg := rbaccheck.Start(t)
 	admin, err := client.New(cfg, client.Options{})
@@ -107,10 +106,6 @@ func TestCredentialsWithShippedRBAC(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	secret := &corev1.Secret{}
-	if err := admin.Get(ctx, client.ObjectKey{Namespace: testNS, Name: secretName}, secret); err != nil {
-		t.Fatal(err)
-	}
 	dir := filepath.Join("..", "..", "..", "..", "config", "fabric-router-controller")
 	rbaccheck.Apply(t, admin, filepath.Join(dir, "serviceaccount.yaml"), filepath.Join(dir, "rbac.yaml"))
 	as := rest.CopyConfig(cfg)
@@ -120,18 +115,11 @@ func TestCredentialsWithShippedRBAC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	rev := routerRevision("edge-cccccccccc", digestC, secretName)
-	got, err := Credentials(ctx, c, testNS, rev)
-	if err != nil || got[secretName] != string(secret.UID) {
-		t.Fatalf("Credentials = %v, %v, want %s's UID %s", got, err, secretName, secret.UID)
-	}
-	missing := routerRevision("edge-eeeeeeeeee", strings.Repeat("e", 64), "missing")
-	if got, err := Credentials(ctx, c, testNS, missing); err != nil || len(got) != 0 {
-		t.Errorf("a missing Secret: %v, %v, want it left out", got, err)
-	}
-	var denied *CredentialAccessError
-	if _, err := Credentials(ctx, c, "elsewhere", rev); !errors.As(err, &denied) || denied.Secret != secretName {
-		t.Errorf("a Secret outside the controller's namespace: %v, want a CredentialAccessError", err)
+	for _, n := range []string{testNS, "elsewhere"} {
+		var denied *CredentialAccessError
+		if _, err := Credentials(ctx, c, n, rev); !errors.As(err, &denied) || denied.Secret != secretName {
+			t.Errorf("a Secret in %s: %v, want a CredentialAccessError", n, err)
+		}
 	}
 }

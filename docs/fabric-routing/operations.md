@@ -131,11 +131,13 @@ a revoked credential or one whose Secret does not exist.
 Credentials are revoked by Secret UID, in `spec.recovery.revokedCredentials`,
 so a Secret recreated under the same name is a new credential. To check them
 the rollout manager reads the metadata of each Secret a revision names, by name
-and around its cache. Its RBAC allows only `get` on Secrets in
-`galactic-system`, the namespace of the fabric routers. A credential whose
-Secret it may not read, such as one in another namespace, cannot be resolved:
-the release fails that target with `InvalidTarget`, naming the deployment and
-the namespace, rather than waiting and blocking its routing domain.
+and around its cache. The shipped RBAC grants it no Secret access yet: no
+revision can name a credential until the compiler accepts `authSecretRef`, and
+`get` on Secrets would also expose their data, including the cell's other
+keys. The change that lets a revision name a credential adds the grant. Until
+then, and for any Secret it may not read, a credential cannot be resolved: the
+release fails that target with `InvalidTarget`, naming the deployment and the
+namespace, rather than waiting and blocking its routing domain.
 `release create` makes the same check with the operator's access: a deployment
 using a credential it may not read is an error when named and left out
 otherwise.
