@@ -432,7 +432,7 @@ func TestFabricRoutingAdmission(t *testing.T) {
 				Address: "127.0.0.1", Port: 9348, MinRetryMilliseconds: ptr.To[int32](10000), MaxRetryMilliseconds: ptr.To[int32](1000),
 			}), "minRetryMilliseconds must not exceed maxRetryMilliseconds"},
 			{"retry bounds missing", bmpParams("no-retry", networkv1alpha1.BMPConnect{Address: "127.0.0.1", Port: 9348}),
-				"needs both minRetryMilliseconds and maxRetryMilliseconds"},
+				"needs minRetryMilliseconds, maxRetryMilliseconds or both"},
 			{"collector not an address", bmpParams("bad-address", networkv1alpha1.BMPConnect{Address: "collector", Port: 9348}),
 				"address must be a valid IP address"},
 			{"source interface not a name", bmpParams("bad-source", networkv1alpha1.BMPConnect{
@@ -451,6 +451,15 @@ func TestFabricRoutingAdmission(t *testing.T) {
 				},
 			}, "logSyslog"},
 		})
+		// FRR accepts either backoff alone.
+		for name, connect := range map[string]networkv1alpha1.BMPConnect{
+			"min-retry-only": {Address: "127.0.0.1", Port: 9348, MinRetryMilliseconds: ptr.To[int32](100)},
+			"max-retry-only": {Address: "127.0.0.1", Port: 9348, MaxRetryMilliseconds: ptr.To[int32](2000)},
+		} {
+			if err := c.Create(context.Background(), bmpParams(name, connect)); err != nil {
+				t.Errorf("%s refused: %v", name, err)
+			}
+		}
 		params.Spec.LogNeighborChanges = false
 		err := c.Update(context.Background(), params)
 		if err == nil || !strings.Contains(err.Error(), "spec is immutable") {

@@ -94,7 +94,7 @@ now, which the agent checks before handing the node back.`,
 			return ops.SetSuspended(cmd.Context(), c, namespace, args[0], false)
 		},
 	})
-	var fromUID, by, method string
+	var fromUID, rebindBy, fencedBy, method string
 	rebind := withNamespace(&cobra.Command{
 		Use:   "rebind DEPLOYMENT --from-uid UID --by WHO",
 		Short: "Let a recreated or restored deployment take over its node's activation journal",
@@ -104,12 +104,12 @@ now, which the agent checks before handing the node back.`,
 			if err != nil {
 				return err
 			}
-			return ops.Rebind(cmd.Context(), c, namespace, args[0], fromUID, by, time.Now())
+			return ops.Rebind(cmd.Context(), c, namespace, args[0], fromUID, rebindBy, time.Now())
 		},
 	})
 	rebind.Flags().StringVar(&fromUID, "from-uid", "",
 		"Deployment UID the node's journal is bound to (its RecoveryConflict condition names it)")
-	rebind.Flags().StringVar(&by, "by", "", "Who confirmed the old deployment is gone")
+	rebind.Flags().StringVar(&rebindBy, "by", "", "Who confirmed the old deployment is gone")
 	move := withNamespace(&cobra.Command{
 		Use:   "move DEPLOYMENT NODE --fenced-by WHO --method HOW",
 		Short: "Retarget a fabric router to another node once the node it leaves is fenced",
@@ -119,10 +119,10 @@ now, which the agent checks before handing the node back.`,
 			if err != nil {
 				return err
 			}
-			return ops.Move(cmd.Context(), c, namespace, args[0], args[1], method, by, time.Now())
+			return ops.Move(cmd.Context(), c, namespace, args[0], args[1], method, fencedBy, time.Now())
 		},
 	})
-	move.Flags().StringVar(&by, "fenced-by", "", "Who confirmed the old node is cut off from the fabric")
+	move.Flags().StringVar(&fencedBy, "fenced-by", "", "Who confirmed the old node is cut off from the fabric")
 	move.Flags().StringVar(&method, "method", "", "How it was fenced, such as a switch port shutdown")
 	return []*cobra.Command{status, newReleaseCommand(), source, suspend, resume, rebind, move}
 }
@@ -145,7 +145,10 @@ UID, and its current candidate revision and digest. Without deployment
 names it takes every deployment on the CRD source, not suspended, whose
 candidate differs from what it runs. --withdraw makes it an emergency
 withdrawal of those prefixes, which may start while a release is
-outstanding. --retire decommissions the routers with this promotion.`,
+outstanding. --retire decommissions the named routers with this
+promotion, for good; it needs deployment names. A deployment the rollout
+manager would refuse is refused here: named, it is an error; otherwise
+it is left out.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := opsClient()
@@ -179,7 +182,8 @@ outstanding. --retire decommissions the routers with this promotion.`,
 	create.Flags().StringVar(&spec.FleetReleaseID, "fleet-release", "",
 		"Release ID shared across cells (default: NAME)")
 	create.Flags().StringSliceVar(&spec.Withdraw, "withdraw", nil, "Make it an emergency withdrawal of these prefixes")
-	create.Flags().BoolVar(&spec.Retire, "retire", false, "Decommission the routers with this promotion")
+	create.Flags().BoolVar(&spec.Retire, "retire", false,
+		"Decommission the named routers with this promotion; cannot be undone")
 	create.Flags().DurationVar(&spec.StartWithin, "start-within", 0,
 		"Cancel the release if it cannot start within this long")
 	create.Flags().BoolVar(&dryRun, "dry-run", false, "Print the release instead of creating it")
