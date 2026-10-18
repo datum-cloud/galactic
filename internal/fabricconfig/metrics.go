@@ -25,9 +25,10 @@ const (
 	// authorization does not cover it, or the activator refused it as
 	// stale, mismatched or conflicting.
 	OutcomeRefused = "refused"
-	// OutcomeError is an activation that stopped on an error the agent
-	// retries, such as a revision that failed validation or an
-	// unwritable journal.
+	// OutcomeError is an activation attempt that stopped on an error the
+	// agent retries, such as a revision that failed validation or an
+	// unwritable journal. Unlike the other outcomes it counts every
+	// attempt, so its rate shows the retries.
 	OutcomeError = "error"
 )
 
@@ -36,6 +37,16 @@ const (
 	StageStaged           = "staged"
 	StageRejected         = "rejected"
 	StageRevisionNotFound = "revision_not_found"
+)
+
+// Results of waiting for the node's writer lock.
+const (
+	LockAcquired = "acquired"
+	// LockTimeout is a wait its context's deadline ended.
+	LockTimeout = "timeout"
+	// LockError is any other failure: the writer shutting down, or the
+	// lock file unusable.
+	LockError = "error"
 )
 
 // Writers of FRR whose wait for the node's writer lock is measured.
@@ -73,6 +84,16 @@ const DefaultBootRecord = "/run/frr/fabric-boot.json"
 type BootRecord struct {
 	Source BootSource `json:"source"`
 	Reason string     `json:"reason,omitempty"`
+}
+
+// ClearBootRecord removes the record at path, so an earlier boot's record
+// in the same pod is never exported as a later boot's. A missing record is
+// not an error.
+func ClearBootRecord(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove boot record: %w", err)
+	}
+	return nil
 }
 
 // WriteBootRecord writes rec to path, replacing any earlier record.
@@ -120,8 +141,9 @@ func NewAgentMetrics(reg prometheus.Registerer) *AgentMetrics {
 	m := &AgentMetrics{
 		activations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "fabric_router_activations_total",
-			Help: "Activation epochs by outcome: committed, recovered, degraded, refused or error. Each epoch " +
-				"counts at most once per outcome.",
+			Help: "Activations by outcome. committed, recovered, degraded and refused count each epoch once " +
+				"per agent process, so a restarted agent may count an epoch it meets again; error counts every " +
+				"failed attempt.",
 		}, []string{"outcome"}),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "fabric_router_activation_duration_seconds",
@@ -135,10 +157,11 @@ func NewAgentMetrics(reg prometheus.Registerer) *AgentMetrics {
 				"rejected or revision_not_found.",
 		}, []string{"result"}),
 		lockWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "fabric_router_writer_lock_wait_seconds",
-			Help:    "Time each FRR writer waited for the node's writer lock.",
-			Buckets: []float64{.001, .01, .1, .5, 1, 5, 10, 30, 60, 120, 300, 900},
-		}, []string{"writer"}),
+			Name: "fabric_router_writer_lock_wait_seconds",
+			Help: "Time each FRR writer waited for the node's writer lock, by result: acquired, timeout or " +
+				"error. The lock is retried every 100ms.",
+			Buckets: []float64{.1, .5, 1, 5, 10, 30, 60, 120, 300, 900},
+		}, []string{"writer", "result"}),
 		boot: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "fabric_router_boot_source",
 			Help: "1 for where the pod's init container took the configuration FRR started with: configmap, " +
@@ -163,27 +186,39 @@ type TimedLock struct {
 	Writer string
 }
 
-// Lock acquires the wrapped lock, recording the wait once it holds it.
+// Lock acquires the wrapped lock, recording the wait and how it ended.
 func (l TimedLock) Lock(ctx context.Context) (func(), error) {
 	start := time.Now()
 	unlock, err := l.Locker.Lock(ctx)
-	if err == nil && l.Metrics != nil {
-		l.Metrics.lockWait.WithLabelValues(l.Writer).Observe(time.Since(start).Seconds())
+	if l.Metrics != nil {
+		result := LockAcquired
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			result = LockTimeout
+		case err != nil:
+			result = LockError
+		}
+		l.Metrics.lockWait.WithLabelValues(l.Writer, result).Observe(time.Since(start).Seconds())
 	}
 	return unlock, err
 }
 
-// activationCounter counts each epoch's outcomes once, although the agent
-// sees a finished or refused epoch again on every sync.
+// activationCounter counts each epoch's outcomes once in this process,
+// although the agent sees a finished or refused epoch again on every sync.
 type activationCounter struct {
 	key     string
 	counted map[string]bool
 }
 
 // count records outcome for the deployment's epoch, and the activation's
-// duration when it ran, unless the epoch was already counted with it.
+// duration when it ran, unless this process already counted the epoch
+// with it. OutcomeError counts every call.
 func (d *DeploymentAgent) count(uid string, epoch int64, outcome string, took time.Duration) {
 	if d.Metrics == nil {
+		return
+	}
+	if outcome == OutcomeError {
+		d.Metrics.activations.WithLabelValues(outcome).Inc()
 		return
 	}
 	key := fmt.Sprintf("%s/%d", uid, epoch)

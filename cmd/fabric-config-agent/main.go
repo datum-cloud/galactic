@@ -219,8 +219,13 @@ func run(parent context.Context, opts *options, fn func(*fabricconfig.Agent, con
 
 // initNode installs the node's configuration and records where it came
 // from for the watch container, which has the metrics server this
-// container lacks. Failing to write the record stops nothing.
+// container lacks. An earlier init's record is removed first, so a record
+// that cannot be written leaves none rather than a stale one. Failing to
+// remove or write it stops nothing.
 func initNode(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
+	if err := fabricconfig.ClearBootRecord(opts.bootRecord); err != nil {
+		slog.Warn("could not remove an earlier boot record", "error", err)
+	}
 	rec := fabricconfig.BootRecord{Source: fabricconfig.BootConfigMap}
 	if err := installNode(ctx, a, opts, &rec); err != nil {
 		return err

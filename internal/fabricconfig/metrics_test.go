@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -153,20 +154,27 @@ func (l slowLock) Lock(context.Context) (func(), error) {
 	return func() {}, nil
 }
 
-// TestTimedLock observes each acquisition's wait under its writer, and
-// nothing for a lock it never got.
+// TestTimedLock observes every wait under its writer and how it ended:
+// acquired, ended by its deadline, or failed otherwise.
 func TestTimedLock(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewAgentMetrics(reg)
-	lock := TimedLock{Locker: slowLock{wait: 20 * time.Millisecond}, Metrics: m, Writer: WriterActivation}
-	unlock, err := lock.Lock(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	unlock()
-	failed := TimedLock{Locker: slowLock{err: context.Canceled}, Metrics: m, Writer: WriterNextHop}
-	if _, err := failed.Lock(context.Background()); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Lock = %v, want the wrapped lock's error", err)
+	for _, l := range []struct {
+		writer string
+		err    error
+	}{
+		{WriterActivation, nil},
+		{WriterDeployment, context.DeadlineExceeded},
+		{WriterNextHop, context.Canceled},
+	} {
+		lock := TimedLock{Locker: slowLock{wait: 20 * time.Millisecond, err: l.err}, Metrics: m, Writer: l.writer}
+		unlock, err := lock.Lock(context.Background())
+		if !errors.Is(err, l.err) {
+			t.Fatalf("Lock = %v, want the wrapped lock's %v", err, l.err)
+		}
+		if err == nil {
+			unlock()
+		}
 	}
 	families, err := reg.Gather()
 	if err != nil {
@@ -178,15 +186,39 @@ func TestTimedLock(t *testing.T) {
 			continue
 		}
 		for _, s := range f.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range s.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
 			h := s.GetHistogram()
-			waits = append(waits, fmt.Sprintf("%s=%d", s.GetLabel()[0].GetValue(), h.GetSampleCount()))
+			waits = append(waits, fmt.Sprintf("%s/%s=%d", labels["writer"], labels["result"], h.GetSampleCount()))
 			if h.GetSampleSum() < 0.02 {
 				t.Errorf("observed %vs, want at least the 20ms the lock took", h.GetSampleSum())
 			}
 		}
 	}
-	if got := strings.Join(waits, ","); got != WriterActivation+"=1" {
-		t.Errorf("lock waits = %q, want one activation wait and none for the failed lock", got)
+	sort.Strings(waits)
+	want := "activation/acquired=1,deployment/timeout=1,nexthop/error=1"
+	if got := strings.Join(waits, ","); got != want {
+		t.Errorf("lock waits = %q, want %q", got, want)
+	}
+}
+
+// TestActivationCounterOnce counts a finished or refused epoch once per
+// process, and every failed attempt.
+func TestActivationCounterOnce(t *testing.T) {
+	m := NewAgentMetrics(prometheus.NewRegistry())
+	d := &DeploymentAgent{Metrics: m}
+	for range 3 {
+		d.count("uid", 1, OutcomeRefused, 0)
+		d.count("uid", 1, OutcomeError, 0)
+	}
+	d.count("uid", 2, OutcomeRefused, 0)
+	if got := activations(m, OutcomeRefused); got != 2 {
+		t.Errorf("refused = %v, want one per epoch", got)
+	}
+	if got := activations(m, OutcomeError); got != 3 {
+		t.Errorf("error = %v, want one per attempt", got)
 	}
 }
 
@@ -204,6 +236,18 @@ func TestBootRecord(t *testing.T) {
 	got, err := ReadBootRecord(path)
 	if err != nil || got != want {
 		t.Fatalf("ReadBootRecord = %+v, %v; want %+v", got, err, want)
+	}
+
+	// A later init clears it before installing, so a record it then fails
+	// to write leaves none rather than this one.
+	if err := ClearBootRecord(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadBootRecord(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ReadBootRecord after ClearBootRecord = %v, want os.ErrNotExist", err)
+	}
+	if err := ClearBootRecord(path); err != nil {
+		t.Errorf("ClearBootRecord of nothing = %v", err)
 	}
 
 	m := NewAgentMetrics(prometheus.NewRegistry())
