@@ -31,6 +31,7 @@ func newRunCommand() *cobra.Command {
 		metricsAddress, healthAddress, namespace string
 		leaderElect, rolloutEnabled              bool
 		topologyEnabled                          bool
+		topologyNamespace                        string
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -46,9 +47,9 @@ candidate on the newest revision, and runs FabricReleaseAuthorizations:
 one release per routing domain at a time, promoting within each router's
 FabricRolloutPolicy. It never writes FRR; the node agents do.
 
-With --topology it also generates BGPPeers from FabricTopologies and the
-FabricEndpoint records of their routing domain, and reports on each
-endpoint whether topologies may peer over it. Generated peers are compiled
+With --topology it also generates BGPPeers from the FabricTopologies of
+--topology-namespace and the FabricEndpoint records of their routing
+domain, and reports on each endpoint whether topologies may peer over it. Generated peers are compiled
 like any other.
 
 The leader exports each router's compile result and, with --rollout, each
@@ -87,10 +88,12 @@ metrics on the metrics address.`,
 				}
 			}
 			if topologyEnabled {
-				if err := (&topology.Reconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
+				topologies := &topology.Reconciler{Client: mgr.GetClient(), Namespace: topologyNamespace}
+				if err := topologies.SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("set up topology controller: %w", err)
 				}
-				if err := (&topology.EndpointReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
+				endpoints := &topology.EndpointReconciler{Client: mgr.GetClient(), Namespace: topologyNamespace}
+				if err := endpoints.SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("set up endpoint controller: %w", err)
 				}
 			}
@@ -119,6 +122,8 @@ metrics on the metrics address.`,
 		"Give compiled routers FabricRouterDeployments and run FabricReleaseAuthorizations")
 	cmd.Flags().BoolVar(&topologyEnabled, "topology", false,
 		"Generate BGPPeers from FabricTopologies and FabricEndpoints")
+	cmd.Flags().StringVar(&topologyNamespace, "topology-namespace", "galactic-system",
+		"The only namespace whose FabricTopologies and FabricEndpoints --topology serves")
 	cmd.Flags().StringVar(&namespace, "leader-election-namespace", "galactic-system", "Namespace of the lease")
 	return cmd
 }

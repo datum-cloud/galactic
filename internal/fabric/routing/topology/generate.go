@@ -6,6 +6,7 @@ package topology
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -24,8 +25,13 @@ const (
 	KindExternal   = "external"
 )
 
-// maxNameLength is a Kubernetes object name's limit.
-const maxNameLength = 253
+const (
+	// maxNameLength is a Kubernetes object name's limit.
+	maxNameLength = 253
+	// nameHashLength is how many hex digits of a session's hash its name
+	// carries.
+	nameHashLength = 10
+)
 
 // Input is everything one topology's peers depend on.
 type Input struct {
@@ -71,8 +77,16 @@ type Plan struct {
 	// domain, and external sessions whose source endpoint is missing.
 	MissingEndpoints []string
 
+	// NameClashes are sessions dropped because an earlier session of the
+	// plan has the same name.
+	NameClashes []string
+
 	// OverLimit names members that would exceed MaxSessionsPerRouter.
 	OverLimit []string
+
+	// RecordsDigest and RelationshipsDigest identify the records and
+	// relationships the plan came from.
+	RecordsDigest, RelationshipsDigest string
 
 	// Profiles and Policies are every name the relationships reference.
 	Profiles, Policies []string
@@ -81,7 +95,7 @@ type Plan struct {
 // Generate computes the peers a topology wants. It returns an error only for
 // a selector that does not parse.
 func Generate(in Input) (Plan, error) {
-	g := &generator{in: in, topo: in.Topology, byKey: map[key]string{}}
+	g := &generator{in: in, topo: in.Topology, byKey: map[key]string{}, byName: map[string]key{}}
 	if err := g.members(); err != nil {
 		return Plan{}, err
 	}
@@ -102,6 +116,7 @@ func Generate(in Input) (Plan, error) {
 		}
 	}
 	g.references()
+	g.digests()
 	return g.plan(), nil
 }
 
@@ -111,10 +126,11 @@ type key struct {
 }
 
 type generator struct {
-	in    Input
-	topo  *networkv1alpha1.FabricTopology
-	out   Plan
-	byKey map[key]string
+	in     Input
+	topo   *networkv1alpha1.FabricTopology
+	out    Plan
+	byKey  map[key]string
+	byName map[string]key
 
 	memberSet map[string]*networkv1alpha1.BGPRouter
 	// local maps a member to its usable endpoints in the routing domain.
@@ -395,7 +411,13 @@ func (g *generator) add(peer *networkv1alpha1.BGPPeer, router string, remote net
 			Dropped: peer.Annotations[networkv1alpha1.AnnotationRelationship]})
 		return
 	}
+	if other, clash := g.byName[peer.Name]; clash {
+		g.out.NameClashes = append(g.out.NameClashes, fmt.Sprintf("%s for router %s toward %s and toward %s",
+			peer.Name, router, other.addr, remote))
+		return
+	}
 	g.byKey[k] = peer.Annotations[networkv1alpha1.AnnotationRelationship]
+	g.byName[peer.Name] = k
 	g.out.Sessions = append(g.out.Sessions, Session{Peer: peer})
 }
 
@@ -410,7 +432,7 @@ func (g *generator) peer(
 		networkv1alpha1.LabelManagedBy:      networkv1alpha1.ManagedByFabricTopology,
 		networkv1alpha1.LabelFabricTopology: g.topo.Name,
 	}
-	p.Annotations = map[string]string{}
+	p.Annotations = map[string]string{networkv1alpha1.AnnotationFabricTopologyUID: string(g.topo.UID)}
 	p.Spec.RouterRef = &networkv1alpha1.RouterRef{Name: router}
 	p.Spec.PeerASN = asn
 	p.Spec.Address = remote.String()
@@ -516,6 +538,40 @@ func (g *generator) plan() Plan {
 	return g.out
 }
 
+// digests hashes the domain's records and the relationships, so cells can
+// tell whether they generate from the same ones.
+func (g *generator) digests() {
+	type record struct {
+		Name string                             `json:"name"`
+		Spec networkv1alpha1.FabricEndpointSpec `json:"spec"`
+	}
+	var records []record
+	for _, s := range g.in.Endpoints {
+		if s.Endpoint.Spec.RoutingDomain == g.topo.Spec.RoutingDomain {
+			records = append(records, record{s.Endpoint.Name, s.Endpoint.Spec})
+		}
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Name < records[j].Name })
+	g.out.RecordsDigest = digest(records)
+	g.out.RelationshipsDigest = digest(struct {
+		RoutingDomain string                                         `json:"routingDomain"`
+		Mesh          []networkv1alpha1.FabricMeshRelationship       `json:"mesh"`
+		Reflection    []networkv1alpha1.FabricReflectionRelationship `json:"reflection"`
+		External      []networkv1alpha1.FabricExternalRelationship   `json:"external"`
+	}{g.topo.Spec.RoutingDomain, g.topo.Spec.Mesh, g.topo.Spec.Reflection, g.topo.Spec.External})
+}
+
+// digest is the SHA-256 of v's JSON encoding, which orders struct fields
+// and map keys deterministically.
+func digest(v any) string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(fmt.Sprintf("encode %T: %v", v, err))
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func sortedKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -536,14 +592,16 @@ func addressToken(a netip.Addr) string {
 	return strings.Trim(strings.NewReplacer(":", "-", ".", "-").Replace(a.String()), "-")
 }
 
-// peerName is the generated peer's name, router-remote-suffix. A name
-// longer than an object name may be is cut, keeping a hash of the whole so
-// it stays unique and stable.
+// peerName is a new generated peer's name: router-remote-suffix for
+// reading, cut to fit, then a hash of the three parts. The readable part
+// alone is ambiguous, since every part may contain '-'; the hash is taken
+// over the parts kept apart, so different sessions never share a name.
 func peerName(router, remote, suffix string) string {
-	name := router + "-" + remote + "-" + suffix
-	if len(name) <= maxNameLength {
-		return name
+	sum := sha256.Sum256([]byte(router + "\x00" + remote + "\x00" + suffix))
+	hash := hex.EncodeToString(sum[:])[:nameHashLength]
+	readable := router + "-" + remote + "-" + suffix
+	if limit := maxNameLength - nameHashLength - 1; len(readable) > limit {
+		readable = strings.TrimRight(readable[:limit], "-.")
 	}
-	sum := sha256.Sum256([]byte(name))
-	return strings.TrimRight(name[:maxNameLength-11], "-.") + "-" + hex.EncodeToString(sum[:])[:10]
+	return readable + "-" + hash
 }

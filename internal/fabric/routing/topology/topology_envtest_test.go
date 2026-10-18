@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -40,10 +41,15 @@ const (
 	zoneLabel = "topology.kubernetes.io/zone"
 	member    = "fabric.example/member"
 	topoName  = "fabric"
-	meshProf  = "mesh-profile"
+	// otherNS is a namespace the controller does not serve.
+	otherNS = "elsewhere"
+	// releaseSettle is the settle period the tests run with.
+	releaseSettle = 2 * time.Second
+	meshProf      = "mesh-profile"
 
 	resTopologies = "fabrictopologies"
 	resEndpoints  = "fabricendpoints"
+	resPeers      = "bgppeers"
 )
 
 var configDir = filepath.Join("..", "..", "..", "..", "config", "fabric-router-controller")
@@ -53,15 +59,16 @@ type env struct {
 	t   *testing.T
 	c   client.Client
 	ctx context.Context
-	// writes counts the generator's creates, updates and deletes.
-	writes *atomic.Int64
+	// writes counts the generator's creates, updates and deletes, and
+	// deletes its deletes alone.
+	writes, deletes *atomic.Int64
 }
 
 // countingClient counts the object writes made through it; status writes
 // go through Status() and are not counted.
 type countingClient struct {
 	client.Client
-	writes *atomic.Int64
+	writes, deletes *atomic.Int64
 }
 
 func (c countingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
@@ -76,6 +83,7 @@ func (c countingClient) Update(ctx context.Context, obj client.Object, opts ...c
 
 func (c countingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
 	c.writes.Add(1)
+	c.deletes.Add(1)
 	return c.Client.Delete(ctx, obj, opts...)
 }
 
@@ -138,11 +146,13 @@ func start(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writes := &atomic.Int64{}
-	if err := (&Reconciler{Client: countingClient{mgr.GetClient(), writes}}).SetupWithManager(mgr); err != nil {
+	writes, deletes := &atomic.Int64{}, &atomic.Int64{}
+	counting := countingClient{mgr.GetClient(), writes, deletes}
+	reconciler := &Reconciler{Client: counting, Namespace: unitNS, ReleaseSettle: releaseSettle}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&EndpointReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
+	if err := (&EndpointReconciler{Client: mgr.GetClient(), Namespace: unitNS}).SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
@@ -159,7 +169,7 @@ func start(t *testing.T) *env {
 			t.Errorf("stop API: %v", err)
 		}
 	})
-	return &env{t: t, c: admin, ctx: context.Background(), writes: writes}
+	return &env{t: t, c: admin, ctx: context.Background(), writes: writes, deletes: deletes}
 }
 
 func (e *env) create(objs ...client.Object) {
@@ -229,8 +239,14 @@ func (e *env) endpoint(
 	return &ep
 }
 
+// hashSuffix is the hash a generated peer's name ends with.
+var hashSuffix = regexp.MustCompile(`-[0-9a-f]{10}$`)
+
+// readable is a generated peer's name without its hash.
+func readable(name string) string { return hashSuffix.ReplaceAllString(name, "") }
+
 // generated are the peers in the namespace carrying the managed-by label,
-// by name.
+// by name without the hash.
 func (e *env) generated() map[string]*networkv1alpha1.BGPPeer {
 	e.t.Helper()
 	list := &networkv1alpha1.BGPPeerList{}
@@ -241,7 +257,7 @@ func (e *env) generated() map[string]*networkv1alpha1.BGPPeer {
 	out := map[string]*networkv1alpha1.BGPPeer{}
 	for i := range list.Items {
 		if list.Items[i].DeletionTimestamp.IsZero() {
-			out[list.Items[i].Name] = &list.Items[i]
+			out[readable(list.Items[i].Name)] = &list.Items[i]
 		}
 	}
 	return out
@@ -335,7 +351,7 @@ func (e *env) meshFixture() {
 	e.router("a1", 1, isMember)
 	e.router("a2", 2, isMember)
 	e.router("a3", 3, isMember)
-	e.endpoint("a1-mesh", "a1", meshTrans, "10.0.0.1", "fd00::1", nil)
+	e.endpoint("a1-mesh", "a1", meshTrans, "10.0.0.1", a1v6, nil)
 	e.endpoint("a2-mesh", "a2", meshTrans, "10.0.0.2", "fd00::2", nil)
 	e.endpoint("a3-mesh", "a3", meshTrans, "", "fd00::3", nil)
 }
@@ -354,7 +370,7 @@ func TestNodeLifecycle(t *testing.T) {
 	eventually(t, "the mesh", func() bool { return names(e.generated()) == meshPeers })
 
 	p := e.generated()["a1-a2-mesh-ipv6"]
-	if p.Spec.RouterRef.Name != "a1" || p.Spec.Address != "fd00::2" || *p.Spec.UpdateSource != "fd00::1" ||
+	if p.Spec.RouterRef.Name != "a1" || p.Spec.Address != "fd00::2" || *p.Spec.UpdateSource != a1v6 ||
 		p.Spec.PeerASN != unitASN || len(p.Spec.FamilySettings) != 1 || *p.Spec.FamilySettings[0].FRR.Weight != 100 {
 		t.Errorf("a1-a2-mesh-ipv6 spec %+v", p.Spec)
 	}
@@ -363,8 +379,10 @@ func TestNodeLifecycle(t *testing.T) {
 		p.Annotations[networkv1alpha1.AnnotationRemoteEndpoint] != "a2-mesh" {
 		t.Errorf("a1-a2-mesh-ipv6 labels %v annotations %v", p.Labels, p.Annotations)
 	}
-	if ref := metav1.GetControllerOf(p); ref == nil || ref.Kind != "FabricTopology" || ref.Name != topoName {
-		t.Errorf("controller %v", ref)
+	if len(p.OwnerReferences) != 0 ||
+		p.Annotations[networkv1alpha1.AnnotationFabricTopologyUID] != string(e.topology().UID) {
+		t.Errorf("owner references %v, topology UID %q", p.OwnerReferences,
+			p.Annotations[networkv1alpha1.AnnotationFabricTopologyUID])
 	}
 	if v4 := e.generated()["a1-a2-mesh-ipv4"]; len(v4.Spec.FamilySettings) != 0 {
 		t.Errorf("the IPv6 weight reached the IPv4 peer: %+v", v4.Spec.FamilySettings)
@@ -422,6 +440,17 @@ func TestNodeLifecycle(t *testing.T) {
 	if got := names(e.generated()); got != all {
 		t.Fatalf("sessions after the endpoint went: %s", got)
 	}
+
+	// a1 wants three sessions and retains two toward a4: a limit of four
+	// counts the retained ones and refuses.
+	topo = e.topology()
+	e.edit(topo, func() { topo.Spec.MaxSessionsPerRouter = 4 }, false)
+	eventually(t, "the limit counting retained sessions", func() bool {
+		c := condition(e.topology(), networkv1alpha1.ConditionTypeAccepted)
+		return c != nil && c.Reason == networkv1alpha1.FabricTopologyReasonTooManySessions
+	})
+	topo = e.topology()
+	e.edit(topo, func() { topo.Spec.MaxSessionsPerRouter = 64 }, false)
 
 	// A retiring promotion not yet committed keeps them.
 	node4 := &corev1.Node{}
@@ -553,7 +582,7 @@ func TestConflictsAndOwnership(t *testing.T) {
 	e.node("node-a2", "z2")
 	e.router("a1", 1, isMember)
 	e.router("a2", 2, isMember)
-	e.endpoint("a1-mesh", "a1", meshTrans, "10.0.0.1", "fd00::1", nil)
+	e.endpoint("a1-mesh", "a1", meshTrans, "10.0.0.1", a1v6, nil)
 	e.endpoint("a2-mesh", "a2", meshTrans, "10.0.0.2", "fd00::2", nil)
 	peer := func(name, address string, labels map[string]string) *networkv1alpha1.BGPPeer {
 		return &networkv1alpha1.BGPPeer{
@@ -566,7 +595,7 @@ func TestConflictsAndOwnership(t *testing.T) {
 		}
 	}
 	hand := peer("hand", "fd00::2", nil)
-	squatter := peer("a1-a2-mesh-ipv4", "fd00::99", nil)
+	squatter := peer(peerName("a1", "a2-mesh", "ipv4"), "fd00::99", nil)
 	spoof := peer("spoof", "fd00::98", map[string]string{
 		networkv1alpha1.LabelManagedBy:      networkv1alpha1.ManagedByFabricTopology,
 		networkv1alpha1.LabelFabricTopology: topoName})
@@ -606,25 +635,25 @@ func TestConflictsAndOwnership(t *testing.T) {
 		return e.generated()["a1-a2-mesh-ipv6"] != nil && e.topology().Status.Conflicting == 1
 	})
 
-	// An endpoint claiming an address an older one holds is in conflict
-	// and generates nothing. Creation times have a resolution of a second,
-	// and within one the name decides, which would favour a1-dup.
-	dup := e.endpoint("a2-dup", "a2", "other", "", "fd00::77", nil)
+	// Of two endpoints claiming one address, the one whose name sorts
+	// first keeps it, however much later it was created: every cell picks
+	// the same one.
+	dup := e.endpoint("b-dup", "a2", "other", "", "fd00::77", nil)
 	time.Sleep(1100 * time.Millisecond)
-	dup2 := e.endpoint("a1-dup", "a1", "other", "", "fd00::77", nil)
+	winner := e.endpoint("a-dup", "a1", "other", "", "fd00::77", nil)
 	eventually(t, "the address conflict", func() bool {
 		ep := &networkv1alpha1.FabricEndpoint{}
-		_ = e.c.Get(e.ctx, client.ObjectKeyFromObject(dup2), ep)
+		_ = e.c.Get(e.ctx, client.ObjectKeyFromObject(dup), ep)
 		c := meta.FindStatusCondition(ep.Status.Conditions, networkv1alpha1.FabricEndpointConditionConflict)
 		return c != nil && c.Status == metav1.ConditionTrue && c.Reason == networkv1alpha1.FabricEndpointReasonAddressInUse
 	})
 	ep := &networkv1alpha1.FabricEndpoint{}
-	if err := e.c.Get(e.ctx, client.ObjectKeyFromObject(dup), ep); err != nil {
+	if err := e.c.Get(e.ctx, client.ObjectKeyFromObject(winner), ep); err != nil {
 		t.Fatal(err)
 	}
 	if c := meta.FindStatusCondition(ep.Status.Conditions, networkv1alpha1.FabricEndpointConditionConflict); c == nil ||
 		c.Status != metav1.ConditionFalse {
-		t.Errorf("the older endpoint lost its address: %+v", c)
+		t.Errorf("the endpoint whose name sorts first lost its address: %+v", c)
 	}
 }
 
@@ -685,15 +714,23 @@ func TestTopologyRBACCoversEveryCall(t *testing.T) {
 	rbaccheck.Apply(t, admin, filepath.Join(configDir, "serviceaccount.yaml"), filepath.Join(configDir, "rbac.yaml"),
 		filepath.Join(configDir, "components", "topology", "rbac.yaml"))
 	const g = "galactic.datumapis.com"
-	allowed := rbaccheck.Each(rbaccheck.Read, g, unitNS, resTopologies, resEndpoints, "bgppeers",
+	allowed := rbaccheck.Each(rbaccheck.Read, g, unitNS, resTopologies, resEndpoints, resPeers,
 		"bgprouters", "bgppeerprofiles", "bgppolicies", "fabricrouterdeployments")
 	allowed = append(allowed, rbaccheck.Each(rbaccheck.Read, "", "", "nodes")...)
 	allowed = append(allowed, rbaccheck.Each([]string{rbaccheck.Patch}, g, unitNS,
 		resTopologies, "fabrictopologies/status", "fabricendpoints/status")...)
-	allowed = append(allowed, rbaccheck.Each([]string{rbaccheck.Update}, g, unitNS, "fabrictopologies/finalizers")...)
 	allowed = append(allowed, rbaccheck.Each([]string{rbaccheck.Create, rbaccheck.Update, rbaccheck.Delete}, g, unitNS,
-		"bgppeers")...)
+		resPeers)...)
+	// Reads are cluster-wide; writes stop at the served namespace.
+	allowed = append(allowed, rbaccheck.Each(rbaccheck.Read, g, otherNS, resTopologies, resEndpoints, resPeers)...)
 	denied := []rbaccheck.Access{
+		{Verb: rbaccheck.Create, Group: g, Resource: resPeers, Namespace: otherNS},
+		{Verb: rbaccheck.Update, Group: g, Resource: resPeers, Namespace: otherNS},
+		{Verb: rbaccheck.Delete, Group: g, Resource: resPeers, Namespace: otherNS},
+		{Verb: rbaccheck.Patch, Group: g, Resource: resTopologies, Namespace: otherNS},
+		{Verb: rbaccheck.Patch, Group: g, Resource: "fabrictopologies/status", Namespace: otherNS},
+		{Verb: rbaccheck.Patch, Group: g, Resource: "fabricendpoints/status", Namespace: otherNS},
+		{Verb: rbaccheck.Update, Group: g, Resource: "fabrictopologies/finalizers", Namespace: unitNS},
 		{Verb: rbaccheck.Create, Group: g, Resource: resTopologies, Namespace: unitNS},
 		{Verb: rbaccheck.Update, Group: g, Resource: resTopologies, Namespace: unitNS},
 		{Verb: rbaccheck.Delete, Group: g, Resource: resTopologies, Namespace: unitNS},
@@ -738,11 +775,13 @@ func (e *env) allPeers() map[string]*networkv1alpha1.BGPPeer {
 }
 
 // TestDeleteHandsPeersToManualControl: deleting a topology drops no
-// session. Its peers stay, with the same UIDs and specs, and lose the
-// controller reference and generated labels, so the garbage collector has
-// nothing to delete; envtest runs no garbage collector, so the owner
-// references are the evidence. A topology created again reports them as
-// conflicts and adopts none, until an operator deletes one.
+// session, even with foreground propagation. Its peers carry no owner
+// reference at any point, so the garbage collector has nothing to delete;
+// envtest runs no garbage collector, so the owner references are the
+// evidence. The controller hands them to manual control and drops its
+// finalizer while the topology waits on the collector's. A topology
+// created again reports them as conflicts and adopts none, until an
+// operator deletes one.
 func TestDeleteHandsPeersToManualControl(t *testing.T) {
 	e := start(t)
 	e.meshFixture()
@@ -753,9 +792,23 @@ func TestDeleteHandsPeersToManualControl(t *testing.T) {
 		return slices.Contains(e.topology().Finalizers, networkv1alpha1.FabricTopologyFinalizer)
 	})
 	before := e.allPeers()
+	for n, p := range before {
+		if len(p.OwnerReferences) != 0 {
+			t.Errorf("%s has owner references %v", n, p.OwnerReferences)
+		}
+	}
 	uid := e.topology().UID
 
-	e.delete(topo)
+	if err := e.c.Delete(e.ctx, topo, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the hand-off", func() bool {
+		return !slices.Contains(e.topology().Finalizers, networkv1alpha1.FabricTopologyFinalizer) &&
+			len(e.generated()) == 0
+	})
+	// The garbage collector would now find no dependents and finish.
+	gone := e.topology()
+	e.edit(gone, func() { gone.Finalizers = nil }, false)
 	eventually(t, "the topology gone", func() bool {
 		err := e.c.Get(e.ctx, client.ObjectKeyFromObject(topo), &networkv1alpha1.FabricTopology{})
 		return apierrors.IsNotFound(err)
@@ -769,10 +822,8 @@ func TestDeleteHandsPeersToManualControl(t *testing.T) {
 		if was == nil || was.UID != p.UID || !equality.Semantic.DeepEqual(was.Spec, p.Spec) {
 			t.Errorf("%s replaced or changed", n)
 		}
-		for _, ref := range p.OwnerReferences {
-			if ref.UID == uid {
-				t.Errorf("%s still owned by the deleted topology", n)
-			}
+		if len(p.OwnerReferences) != 0 || p.Annotations[networkv1alpha1.AnnotationFabricTopologyUID] == string(uid) {
+			t.Errorf("%s still tied to the deleted topology", n)
 		}
 		if _, ok := p.Labels[networkv1alpha1.LabelManagedBy]; ok {
 			t.Errorf("%s still labelled as generated", n)
@@ -800,9 +851,247 @@ func TestDeleteHandsPeersToManualControl(t *testing.T) {
 
 	// The adoption path: delete a released peer and the topology
 	// generates its own.
-	e.delete(after["a1-a2-mesh-ipv6"])
+	e.delete(after[peerName("a1", "a2-mesh", "ipv6")])
 	eventually(t, "the generated replacement", func() bool {
 		p := e.generated()["a1-a2-mesh-ipv6"]
-		return p != nil && metav1.GetControllerOf(p) != nil && e.topology().Status.Conflicting == 7
+		return p != nil && p.Annotations[networkv1alpha1.AnnotationFabricTopologyUID] == string(e.topology().UID) &&
+			e.topology().Status.Conflicting == 7
 	})
+}
+
+// byAddress are the generated peers by router and remote address.
+func (e *env) byAddress() map[string]*networkv1alpha1.BGPPeer {
+	out := map[string]*networkv1alpha1.BGPPeer{}
+	for _, p := range e.generated() {
+		out[p.Spec.RouterRef.Name+"/"+p.Spec.Address] = p
+	}
+	return out
+}
+
+// remoteRecord creates a client endpoint of cell-b.
+func (e *env) remoteRecord(name, routerName, v6 string, labels map[string]string) *networkv1alpha1.FabricEndpoint {
+	ep := endpoint(name, cellB, routerName, transportP, "", v6, 0, labels)
+	ep.UID, ep.CreationTimestamp = "", metav1.Time{}
+	e.create(&ep)
+	return &ep
+}
+
+// reflectorFixture is a member reflector of cell-a on the public transport,
+// and a topology reflecting for clients over IPv6.
+func (e *env) reflectorFixture() *networkv1alpha1.FabricTopology {
+	e.node("node-rr", "z1")
+	e.router("rr", 1, isMember)
+	e.endpoint("a-rr-public", "rr", transportP, "198.51.100.1", "2001:db8:a::1", reflectorRole)
+	topo := reflectionTopology(cellA, "rr")
+	topo.Name = topoName
+	topo.Spec.Members = networkv1alpha1.FabricTopologyMembers{RouterSelector: &metav1.LabelSelector{MatchLabels: isMember}}
+	return topo
+}
+
+// TestMigratesLegacyPeers: peers an earlier controller generated, with a
+// controller reference and readable names, are adopted where they stand:
+// each keeps its name and UID, a wanted one is updated in place, a
+// retained one only loses the reference, and nothing is deleted.
+func TestMigratesLegacyPeers(t *testing.T) {
+	e := start(t)
+	e.meshFixture()
+	far := e.remoteRecord("far", "x", "fd00::99", nil)
+	// A limit of one session holds every write until the legacy peers
+	// exist, so the wanted one is migrated by the update that keeps it.
+	topo := meshTopology()
+	topo.Spec.MaxSessionsPerRouter = 1
+	e.create(topo)
+	eventually(t, "the topology holding its writes", func() bool {
+		c := condition(e.topology(), networkv1alpha1.ConditionTypeAccepted)
+		return c != nil && c.Reason == networkv1alpha1.FabricTopologyReasonTooManySessions &&
+			slices.Contains(e.topology().Finalizers, networkv1alpha1.FabricTopologyFinalizer)
+	})
+	owner := e.topology()
+	ref := metav1.OwnerReference{APIVersion: networkv1alpha1.GroupVersion.String(), Kind: "FabricTopology",
+		Name: owner.Name, UID: owner.UID, Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)}
+	legacy := func(name, address string, annotations map[string]string) *networkv1alpha1.BGPPeer {
+		return &networkv1alpha1.BGPPeer{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: unitNS, OwnerReferences: []metav1.OwnerReference{ref},
+				Labels: map[string]string{networkv1alpha1.LabelManagedBy: networkv1alpha1.ManagedByFabricTopology,
+					networkv1alpha1.LabelFabricTopology: topoName, networkv1alpha1.LabelPeerCell: cellB},
+				Annotations: annotations},
+			Spec: networkv1alpha1.BGPPeerSpec{
+				RouterTarget: networkv1alpha1.RouterTarget{RouterRef: &networkv1alpha1.RouterRef{Name: "a1"}},
+				PeerASN:      unitASN, Address: address,
+				AddressFamilies: []networkv1alpha1.AddressFamily{{AFI: networkv1alpha1.AFIIPv6, SAFI: networkv1alpha1.SAFIUnicast}},
+			},
+		}
+	}
+	wanted := legacy("a1-a2-mesh-ipv6", "fd00::2", map[string]string{
+		networkv1alpha1.AnnotationRelationship: "mesh/private", networkv1alpha1.AnnotationRemoteEndpoint: "a2-mesh"})
+	retained := legacy("a1-far-mesh-ipv6", "fd00::99", map[string]string{
+		networkv1alpha1.AnnotationRelationship: "mesh/old", networkv1alpha1.AnnotationRemoteEndpoint: "far",
+		networkv1alpha1.AnnotationRemoteEndpointUID: string(far.UID)})
+	e.create(wanted, retained)
+	deletes := e.deletes.Load()
+
+	topo = e.topology()
+	e.edit(topo, func() { topo.Spec.MaxSessionsPerRouter = 64 }, false)
+	eventually(t, "the mesh, adopting the legacy peers", func() bool {
+		return names(e.generated()) == listedAll(append(strings.Fields(meshPeers), "a1-far-mesh-ipv6")) &&
+			e.topology().Status.Retained == 1
+	})
+	for _, p := range []*networkv1alpha1.BGPPeer{wanted, retained} {
+		now := &networkv1alpha1.BGPPeer{}
+		if err := e.c.Get(e.ctx, client.ObjectKeyFromObject(p), now); err != nil {
+			t.Fatalf("%s: %v", p.Name, err)
+		}
+		if now.UID != p.UID || len(now.OwnerReferences) != 0 ||
+			now.Annotations[networkv1alpha1.AnnotationFabricTopologyUID] != string(owner.UID) {
+			t.Errorf("%s: uid kept %t, owner references %v, annotations %v", p.Name, now.UID == p.UID,
+				now.OwnerReferences, now.Annotations)
+		}
+	}
+	if got := e.byAddress()["a1/fd00::2"]; got.Name != "a1-a2-mesh-ipv6" ||
+		got.Annotations[networkv1alpha1.AnnotationRemoteEndpointUID] == "" {
+		t.Errorf("the wanted legacy peer was not updated in place: %s %v", got.Name, got.Annotations)
+	}
+	if n := e.deletes.Load() - deletes; n != 0 {
+		t.Errorf("%d peers deleted while migrating", n)
+	}
+}
+
+// TestRenameKeepsSessions: renaming a relationship, or replacing a record
+// with a differently named one at the same address, updates the session's
+// peer in place: the same object, never deleted, so no release in between
+// can withdraw the session.
+func TestRenameKeepsSessions(t *testing.T) {
+	e := start(t)
+	topo := e.reflectorFixture()
+	topo.Spec.External = []networkv1alpha1.FabricExternalRelationship{{
+		Name: extRel, UpdateSource: networkv1alpha1.FabricUpdateSourceNone,
+		Routers: networkv1alpha1.FabricTopologyMembers{Routers: []networkv1alpha1.LocalObjectRef{{Name: "rr"}}},
+		Peers:   []networkv1alpha1.FabricExternalPeer{{Address: extPeer, ASN: 64999}},
+	}}
+	e.create(topo)
+	old := e.remoteRecord("b-c1-public", "c1", "2001:db8:b::1", clientRole)
+	eventually(t, "both sessions", func() bool { return len(e.generated()) == 2 })
+	before := e.byAddress()
+	deletes := e.deletes.Load()
+
+	topo = e.topology()
+	e.edit(topo, func() { topo.Spec.External[0].Name = "transit-2" }, false)
+	eventually(t, "the renamed relationship", func() bool {
+		p := e.byAddress()["rr/2001:db8:ffff::1"]
+		return p != nil && p.Annotations[networkv1alpha1.AnnotationRelationship] == "external/transit-2"
+	})
+
+	// The replacement sorts first, so it takes the address at once.
+	e.remoteRecord("b-c0-public", "c0", "2001:db8:b::1", clientRole)
+	eventually(t, "the replacement record", func() bool {
+		p := e.byAddress()["rr/2001:db8:b::1"]
+		return p != nil && p.Annotations[networkv1alpha1.AnnotationRemoteEndpoint] == "b-c0-public"
+	})
+	e.delete(old)
+	consistently(t, "the sessions", func() bool { return len(e.generated()) == 2 })
+	for k, p := range e.byAddress() {
+		if before[k] == nil || before[k].UID != p.UID {
+			t.Errorf("%s: the peer was replaced", k)
+		}
+	}
+	if n := e.deletes.Load() - deletes; n != 0 {
+		t.Errorf("%d peers deleted by renames", n)
+	}
+}
+
+// TestReleaseGuard: when most of a topology's sessions would be released
+// at once because their records vanished, it releases none and reports
+// ReleaseHeld; draining the records releases them.
+func TestReleaseGuard(t *testing.T) {
+	e := start(t)
+	e.create(e.reflectorFixture())
+	var records []*networkv1alpha1.FabricEndpoint
+	for i := 1; i <= 4; i++ {
+		records = append(records, e.remoteRecord(fmt.Sprintf("b-c%d-public", i), fmt.Sprintf("c%d", i),
+			fmt.Sprintf("2001:db8:b::%d", i), clientRole))
+	}
+	eventually(t, "four sessions", func() bool { return len(e.generated()) == 4 })
+	for _, r := range records[:3] {
+		e.delete(r)
+	}
+	eventually(t, "ReleaseHeld", func() bool {
+		c := condition(e.topology(), networkv1alpha1.FabricTopologyConditionReleaseHeld)
+		return c != nil && c.Status == metav1.ConditionTrue
+	})
+	consistently(t, "the held sessions", func() bool { return len(e.generated()) == 4 })
+
+	topo := e.topology()
+	e.edit(topo, func() {
+		topo.Spec.Drain = &networkv1alpha1.FabricTopologyDrain{}
+		for _, r := range records[:3] {
+			topo.Spec.Drain.Endpoints = append(topo.Spec.Drain.Endpoints, networkv1alpha1.LocalObjectRef{Name: r.Name})
+		}
+	}, false)
+	eventually(t, "the drained sessions released", func() bool {
+		c := condition(e.topology(), networkv1alpha1.FabricTopologyConditionReleaseHeld)
+		return len(e.generated()) == 1 && c != nil && c.Status == metav1.ConditionFalse
+	})
+}
+
+// TestOtherNamespaceIgnored: a topology outside the served namespace gets
+// no finalizer, no status and no peers.
+func TestOtherNamespaceIgnored(t *testing.T) {
+	e := start(t)
+	e.create(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: otherNS}})
+	for _, name := range []string{"a1", "a2"} {
+		r := router(name, isMember)
+		r.Namespace, r.UID = otherNS, ""
+		r.Spec.Plane = ptr.To(networkv1alpha1.BGPRoutingPlaneUnderlay)
+		r.Spec.RouterID = "192.0.2." + name[1:]
+		r.Spec.AddressFamilies = []networkv1alpha1.AddressFamily{
+			{AFI: networkv1alpha1.AFIIPv6, SAFI: networkv1alpha1.SAFIUnicast}}
+		ep := endpoint(name+"-mesh", cellA, name, meshTrans, "", "fd00::"+name[1:], 0, nil)
+		ep.Namespace, ep.UID, ep.CreationTimestamp = otherNS, "", metav1.Time{}
+		e.create(r, &ep)
+	}
+	topo := meshTopology()
+	topo.Namespace = otherNS
+	e.create(topo)
+	consistently(t, "nothing in the other namespace", func() bool {
+		got := &networkv1alpha1.FabricTopology{}
+		if err := e.c.Get(e.ctx, client.ObjectKeyFromObject(topo), got); err != nil {
+			return false
+		}
+		peers := &networkv1alpha1.BGPPeerList{}
+		if err := e.c.List(e.ctx, peers, client.InNamespace(otherNS)); err != nil {
+			return false
+		}
+		return len(peers.Items) == 0 && len(got.Finalizers) == 0 && len(got.Status.Conditions) == 0
+	})
+}
+
+// TestSettleKeepsReturningRecord: a record deleted and recreated within
+// the settle period, as a GitOps replace does, keeps its session in the
+// same peer, and the pending release is cleared.
+func TestSettleKeepsReturningRecord(t *testing.T) {
+	e := start(t)
+	e.create(e.reflectorFixture())
+	rec := e.remoteRecord("b-c1-public", "c1", "2001:db8:b::1", clientRole)
+	eventually(t, "the session", func() bool { return len(e.generated()) == 1 })
+	before := e.byAddress()["rr/2001:db8:b::1"]
+	deletes := e.deletes.Load()
+
+	e.delete(rec)
+	e.remoteRecord("b-c1-public", "c1", "2001:db8:b::1", clientRole)
+	deadline := time.Now().Add(2 * releaseSettle)
+	for time.Now().Before(deadline) {
+		if p := e.byAddress()["rr/2001:db8:b::1"]; p == nil || p.UID != before.UID {
+			t.Fatal("the session's peer was replaced")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	eventually(t, "the pending release cleared", func() bool {
+		p := e.byAddress()["rr/2001:db8:b::1"]
+		_, pending := p.Annotations[networkv1alpha1.AnnotationReleasePendingSince]
+		uid := networkv1alpha1.AnnotationRemoteEndpointUID
+		return !pending && p.Annotations[uid] != before.Annotations[uid]
+	})
+	if n := e.deletes.Load() - deletes; n != 0 {
+		t.Errorf("%d peers deleted", n)
+	}
 }

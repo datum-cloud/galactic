@@ -4,10 +4,14 @@
 package topology
 
 import (
+	"context"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
@@ -18,14 +22,14 @@ import (
 func TestReleased(t *testing.T) {
 	base := func() *snapshot {
 		topo := reflectionTopology("cell-a", "l")
-		topo.Spec.External = []networkv1alpha1.FabricExternalRelationship{{Name: "transit",
-			Peers: []networkv1alpha1.FabricExternalPeer{{Address: "2001:db8:ffff::1", ASN: 64999}}}}
-		remote := endpoint("remote", "cell-b", "r", transportP, "", "2001:db8:b::1", 0, nil)
+		topo.Spec.External = []networkv1alpha1.FabricExternalRelationship{{Name: extRel,
+			Peers: []networkv1alpha1.FabricExternalPeer{{Address: extPeer, ASN: 64999}}}}
+		remote := endpoint(remoteRec, "cell-b", "r", transportP, "", "2001:db8:b::1", 0, nil)
 		return &snapshot{
 			topology: topo,
 			routers:  routerMap(router("l", nil), router("same-cell", nil)),
 			endpoints: map[string]*EndpointState{
-				"remote": {Endpoint: &remote},
+				remoteRec: {Endpoint: &remote},
 			},
 			deployments: map[string]*networkv1alpha1.FabricRouterDeployment{},
 		}
@@ -48,12 +52,12 @@ func TestReleased(t *testing.T) {
 		}
 	}
 	toRemote := func() *networkv1alpha1.BGPPeer {
-		return peer("reflection/public", "cell-b", "r", "remote", "uid-remote", "2001:db8:b::1")
+		return peer("reflection/public", "cell-b", "r", remoteRec, "uid-remote", "2001:db8:b::1")
 	}
 	toSameCell := func() *networkv1alpha1.BGPPeer {
 		return peer("mesh/m", "cell-a", "same-cell", "same-cell-ep", "uid-same", "2001:db8:a::9")
 	}
-	external := func() *networkv1alpha1.BGPPeer { return peer("external/transit", "", "", "", "", "2001:db8:ffff::1") }
+	external := func() *networkv1alpha1.BGPPeer { return peer("external/transit", "", "", "", "", extPeer) }
 	retire := func(s *snapshot, name string, applied int64) {
 		s.deployments[name] = &networkv1alpha1.FabricRouterDeployment{
 			Spec: networkv1alpha1.FabricRouterDeploymentSpec{
@@ -69,12 +73,12 @@ func TestReleased(t *testing.T) {
 		release bool
 	}{
 		{"RemoteRecordPresent", toRemote, nil, false},
-		{"RemoteRecordDeleted", toRemote, func(s *snapshot) { delete(s.endpoints, "remote") }, true},
+		{"RemoteRecordDeleted", toRemote, func(s *snapshot) { delete(s.endpoints, remoteRec) }, true},
 		{"RemoteRecordRecreated", toRemote, func(s *snapshot) {
-			s.endpoints["remote"].Endpoint.UID = types.UID("new")
+			s.endpoints[remoteRec].Endpoint.UID = types.UID("new")
 		}, true},
 		{"RemoteRecordDrained", toRemote, func(s *snapshot) {
-			drainEndpoint(s, "remote")
+			drainEndpoint(s, remoteRec)
 		}, true},
 		{"LocalEndpointDrained", toRemote, func(s *snapshot) {
 			drainEndpoint(s, "local-ep")
@@ -107,7 +111,11 @@ func TestReleased(t *testing.T) {
 			if tc.mutate != nil {
 				tc.mutate(s)
 			}
-			if why := s.released(tc.peer()); (why != "") != tc.release {
+			why, _, err := s.released(context.Background(), tc.peer())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (why != "") != tc.release {
 				t.Errorf("released %q, want release %t", why, tc.release)
 			}
 		})
@@ -120,4 +128,117 @@ func drainEndpoint(s *snapshot, name string) {
 
 func drainRouter(s *snapshot, name string) {
 	s.topology.Spec.Drain = &networkv1alpha1.FabricTopologyDrain{Routers: []networkv1alpha1.LocalObjectRef{{Name: name}}}
+}
+
+// TestReleasedConfirmsAbsence: a router or record missing from the cache is
+// released only once the API server confirms it is gone, and a release on
+// absence says so, for the release guard. A peer without a router is kept.
+func TestReleasedConfirmsAbsence(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = networkv1alpha1.AddToScheme(scheme)
+	topo := reflectionTopology(cellA, "l")
+	remote := endpoint(remoteRec, cellB, "r", transportP, "", "2001:db8:b::1", 0, nil)
+	local := router("l", nil)
+	toRemote := &networkv1alpha1.BGPPeer{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Labels: map[string]string{networkv1alpha1.LabelPeerCell: cellB},
+			Annotations: map[string]string{
+				networkv1alpha1.AnnotationRelationship:      "reflection/public",
+				networkv1alpha1.AnnotationRemoteEndpoint:    remoteRec,
+				networkv1alpha1.AnnotationRemoteEndpointUID: "uid-remote",
+			}},
+		Spec: networkv1alpha1.BGPPeerSpec{
+			RouterTarget: networkv1alpha1.RouterTarget{RouterRef: &networkv1alpha1.RouterRef{Name: "l"}},
+			Address:      "2001:db8:b::1"},
+	}
+	stored := func(objs ...*networkv1alpha1.FabricEndpoint) []*networkv1alpha1.FabricEndpoint { return objs }
+	for _, tc := range []struct {
+		name         string
+		inCache      bool
+		apiRouter    bool
+		apiEndpoints []*networkv1alpha1.FabricEndpoint
+		release      bool
+		absent       bool
+	}{
+		{"RouterOnlyInAPI", false, true, stored(&remote), false, false},
+		{"RouterGone", false, false, stored(&remote), true, true},
+		{"RecordOnlyInAPI", true, true, stored(&remote), false, false},
+		{"RecordGone", true, true, nil, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := fake.NewClientBuilder().WithScheme(scheme)
+			if tc.apiRouter {
+				r := local.DeepCopy()
+				r.Namespace, r.UID = topo.Namespace, ""
+				b = b.WithObjects(r)
+			}
+			for _, ep := range tc.apiEndpoints {
+				e := ep.DeepCopy()
+				e.Namespace, e.UID = topo.Namespace, ""
+				b = b.WithObjects(e)
+			}
+			reader := b.Build()
+			// The fake API server assigns UIDs; the peer was generated from
+			// the stored record.
+			if len(tc.apiEndpoints) > 0 {
+				e := &networkv1alpha1.FabricEndpoint{}
+				key := types.NamespacedName{Namespace: topo.Namespace, Name: remoteRec}
+				if err := reader.Get(context.Background(), key, e); err != nil {
+					t.Fatal(err)
+				}
+				toRemote.Annotations[networkv1alpha1.AnnotationRemoteEndpointUID] = string(e.UID)
+			}
+			s := &snapshot{topology: topo, reader: reader, endpoints: map[string]*EndpointState{},
+				routers: map[string]*networkv1alpha1.BGPRouter{}, deployments: map[string]*networkv1alpha1.FabricRouterDeployment{}}
+			if tc.inCache {
+				s.routers["l"] = local
+			}
+			why, absent, err := s.released(context.Background(), toRemote)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (why != "") != tc.release || absent != tc.absent {
+				t.Errorf("released %q absent %t, want release %t absent %t", why, absent, tc.release, tc.absent)
+			}
+		})
+	}
+
+	s := &snapshot{topology: topo}
+	noRouter := toRemote.DeepCopy()
+	noRouter.Spec.RouterRef = nil
+	if why, _, _ := s.released(context.Background(), noRouter); why != "" {
+		t.Errorf("a peer without a router released: %s", why)
+	}
+}
+
+// TestReconcileIgnoresOtherNamespaces: the reconcilers act on nothing
+// outside the served namespace, whatever RBAC would allow.
+func TestReconcileIgnoresOtherNamespaces(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = networkv1alpha1.AddToScheme(scheme)
+	topo := reflectionTopology(cellA, "a1")
+	topo.Namespace = otherNS
+	ep := endpoint("ep", cellA, "a1", transportP, "", a1v6, 0, nil)
+	ep.Namespace, ep.UID = otherNS, ""
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(topo, &ep).
+		WithStatusSubresource(&networkv1alpha1.FabricEndpoint{}, &networkv1alpha1.FabricTopology{}).Build()
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: otherNS, Name: topo.Name}}
+	if _, err := (&Reconciler{Client: c, APIReader: c, Namespace: unitNS}).Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&EndpointReconciler{Client: c, Namespace: unitNS}).Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	got := &networkv1alpha1.FabricTopology{}
+	if err := c.Get(ctx, req.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	gotEP := &networkv1alpha1.FabricEndpoint{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: otherNS, Name: "ep"}, gotEP); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Finalizers) != 0 || len(got.Status.Conditions) != 0 || len(gotEP.Status.Conditions) != 0 {
+		t.Errorf("acted outside the served namespace: finalizers %v, conditions %d and %d", got.Finalizers,
+			len(got.Status.Conditions), len(gotEP.Status.Conditions))
+	}
 }

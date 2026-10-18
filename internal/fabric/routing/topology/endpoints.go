@@ -54,10 +54,10 @@ func (s *EndpointState) Address(f networkv1alpha1.FabricSessionFamily) (netip.Ad
 // namespace's BGPRouters by name.
 //
 // Of two endpoints for the same router on the same transport, or holding
-// one address on the same transport of a routing domain, the older one (by
-// creation time, then name) keeps it and the newer one is in conflict and
-// unusable. A newcomer therefore never takes sessions away from an endpoint
-// already in use.
+// one address on the same transport of a routing domain, the one whose name
+// sorts first keeps it and the other is in conflict and unusable. Every cell
+// holding the same records picks the same winner, whatever order its copies
+// were created in.
 func Analyze(
 	endpoints []networkv1alpha1.FabricEndpoint, localCells map[string]bool,
 	routers map[string]*networkv1alpha1.BGPRouter,
@@ -66,7 +66,7 @@ func Analyze(
 	for i := range endpoints {
 		ordered = append(ordered, &endpoints[i])
 	}
-	sort.SliceStable(ordered, func(i, j int) bool { return older(ordered[i], ordered[j]) })
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
 
 	type identity struct{ domain, cell, router, transport string }
 	type claim struct {
@@ -150,11 +150,4 @@ func parse(s *string, v4 bool) netip.Addr {
 		return netip.Addr{}
 	}
 	return a
-}
-
-func older(a, b *networkv1alpha1.FabricEndpoint) bool {
-	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
-		return a.CreationTimestamp.Before(&b.CreationTimestamp)
-	}
-	return a.Name < b.Name
 }

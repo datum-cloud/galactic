@@ -23,10 +23,16 @@ import (
 // endpoint of the namespace, so one pass covers the whole namespace.
 type EndpointReconciler struct {
 	client.Client
+	// Namespace is the only namespace whose endpoints are served; empty
+	// serves every namespace.
+	Namespace string
 }
 
 // Reconcile updates the status of every endpoint in req's namespace.
 func (r *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if r.Namespace != "" && req.Namespace != r.Namespace {
+		return ctrl.Result{}, nil
+	}
 	ns := client.InNamespace(req.Namespace)
 	endpoints := &networkv1alpha1.FabricEndpointList{}
 	if err := r.List(ctx, endpoints, ns); err != nil {

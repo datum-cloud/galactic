@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -29,23 +30,39 @@ import (
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
-// maxListed bounds how many conflicts or missing endpoints a condition
-// message names.
-const maxListed = 5
+const (
+	// maxListed bounds how many conflicts or missing endpoints a condition
+	// message names.
+	maxListed = 5
+
+	// minHeldReleases is the number of pending releases on absence below
+	// which the release guard never holds.
+	minHeldReleases = 2
+
+	// DefaultReleaseSettle is how long a router or record must stay gone
+	// before the sessions toward it are released.
+	DefaultReleaseSettle = time.Minute
+)
 
 // Reconciler generates one FabricTopology's BGPPeers.
 type Reconciler struct {
 	client.Client
-	// APIReader reads around the cache, so a deleted topology releases
-	// every peer it controls, including one the cache has not seen yet.
+	// APIReader reads around the cache: absence that would release a
+	// session, and the peers of a deleted topology, are confirmed with it.
 	APIReader client.Reader
+	// Namespace is the only namespace whose topologies are served; empty
+	// serves every namespace.
+	Namespace string
+	// ReleaseSettle is how long an absence must last before it releases a
+	// session; zero is DefaultReleaseSettle. Absences that pile up within it
+	// are weighed together by the release guard.
+	ReleaseSettle time.Duration
 }
 
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabrictopologies;fabricendpoints,verbs=get;list;watch
-// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabrictopologies,verbs=patch
-// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabrictopologies/status;fabricendpoints/status,verbs=patch
-// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabrictopologies/finalizers,verbs=update
-// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=bgppeers,verbs=create;update;delete
+// +kubebuilder:rbac:groups=galactic.datumapis.com,namespace=galactic-system,resources=fabrictopologies,verbs=patch
+// +kubebuilder:rbac:groups=galactic.datumapis.com,namespace=galactic-system,resources=fabrictopologies/status;fabricendpoints/status,verbs=patch
+// +kubebuilder:rbac:groups=galactic.datumapis.com,namespace=galactic-system,resources=bgppeers,verbs=create;update;delete
 
 // snapshot is the namespace state one pass reads.
 type snapshot struct {
@@ -57,10 +74,16 @@ type snapshot struct {
 	deployments map[string]*networkv1alpha1.FabricRouterDeployment
 	peers       []networkv1alpha1.BGPPeer
 	nodeLabels  map[string]map[string]string
+	// reader confirms an absence seen in the cache; nil trusts the cache.
+	reader client.Reader
 }
 
 // Reconcile generates one topology's peers and reports what it did.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if r.Namespace != "" && req.Namespace != r.Namespace {
+		// RBAC grants writes in the served namespace only.
+		return ctrl.Result{}, nil
+	}
 	topo := &networkv1alpha1.FabricTopology{}
 	if err := r.Get(ctx, req.NamespacedName, topo); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -69,8 +92,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, r.releaseAll(ctx, topo)
 	}
 	if !controllerutil.ContainsFinalizer(topo, networkv1alpha1.FabricTopologyFinalizer) {
-		// Without the finalizer, deleting the topology would leave its
-		// peers to the garbage collector.
+		// The finalizer holds the topology until its peers are handed to
+		// manual control.
 		patch := client.MergeFromWithOptions(topo.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		controllerutil.AddFinalizer(topo, networkv1alpha1.FabricTopologyFinalizer)
 		if err := r.Patch(ctx, topo, patch); err != nil {
@@ -90,10 +113,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	st.members = int32(len(plan.Members))
 	st.missing = plan.MissingEndpoints
-	if len(plan.OverLimit) > 0 {
+	st.recordsDigest, st.relationshipsDigest = plan.RecordsDigest, plan.RelationshipsDigest
+	for _, c := range plan.NameClashes {
+		st.conflict("two sessions named " + c)
+	}
+	if over := snap.overLimit(plan); len(over) > 0 {
 		st.notAccepted(networkv1alpha1.FabricTopologyReasonTooManySessions,
-			fmt.Sprintf("more than %d sessions on %s; nothing was changed", topo.Spec.MaxSessionsPerRouter,
-				listed(plan.OverLimit)))
+			fmt.Sprintf("more than %d sessions, counting retained ones, on %s; nothing was changed",
+				topo.Spec.MaxSessionsPerRouter, listed(over)))
 		return ctrl.Result{}, r.writeStatus(ctx, topo, st)
 	}
 	if missing := snap.unresolved(plan); len(missing) > 0 {
@@ -103,7 +130,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.apply(ctx, snap, plan, st); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.writeStatus(ctx, topo, st)
+	return ctrl.Result{RequeueAfter: st.requeue}, r.writeStatus(ctx, topo, st)
 }
 
 // read gathers the namespace state the topology depends on.
@@ -111,7 +138,8 @@ func (r *Reconciler) read(ctx context.Context, topo *networkv1alpha1.FabricTopol
 	ns := client.InNamespace(topo.Namespace)
 	snap := &snapshot{topology: topo, routers: map[string]*networkv1alpha1.BGPRouter{},
 		profiles: map[string]*networkv1alpha1.BGPPeerProfile{}, policies: map[string]bool{},
-		deployments: map[string]*networkv1alpha1.FabricRouterDeployment{}, nodeLabels: map[string]map[string]string{}}
+		deployments: map[string]*networkv1alpha1.FabricRouterDeployment{}, nodeLabels: map[string]map[string]string{},
+		reader: r.APIReader}
 
 	routers := &networkv1alpha1.BGPRouterList{}
 	if err := r.List(ctx, routers, ns); err != nil {
@@ -156,6 +184,7 @@ func (r *Reconciler) read(ctx context.Context, topo *networkv1alpha1.FabricTopol
 		return nil, err
 	}
 	snap.peers = peers.Items
+	sort.Slice(snap.peers, func(i, j int) bool { return snap.peers[i].Name < snap.peers[j].Name })
 
 	for _, router := range snap.routers {
 		node := router.Spec.TargetRef.Name
@@ -205,90 +234,82 @@ func (s *snapshot) unresolved(plan Plan) []string {
 	return out
 }
 
-// owned reports whether the topology generated peer: it controls it and
-// labelled it. Anything else is never changed or deleted.
+// overLimit names the members that would hold more than the topology's
+// session limit: the sessions the plan wants plus the generated peers it
+// retains.
+func (s *snapshot) overLimit(plan Plan) []string {
+	limit := s.topology.Spec.MaxSessionsPerRouter
+	if limit <= 0 {
+		return nil
+	}
+	wanted := map[key]bool{}
+	count := map[string]int32{}
+	for _, sess := range plan.Sessions {
+		k, _ := peerKey(sess.Peer)
+		wanted[k] = true
+		count[k.router]++
+	}
+	for i := range s.peers {
+		p := &s.peers[i]
+		if k, ok := peerKey(p); ok && owned(s.topology, p) && !wanted[k] {
+			wanted[k] = true
+			count[k.router]++
+		}
+	}
+	var out []string
+	for router, n := range count {
+		if n > limit {
+			out = append(out, router)
+		}
+	}
+	return out
+}
+
+// peerKey is the session a peer configures: its router and remote address.
+func peerKey(p *networkv1alpha1.BGPPeer) (key, bool) {
+	if p.Spec.RouterRef == nil {
+		return key{}, false
+	}
+	a, err := netip.ParseAddr(p.Spec.Address)
+	if err != nil {
+		return key{}, false
+	}
+	return key{p.Spec.RouterRef.Name, a}, true
+}
+
+// owned reports whether the topology generated peer: it carries the
+// generated labels and the topology's UID. A peer of an earlier version of
+// the controller carries a controller reference to the topology instead of
+// the UID annotation, and is owned too until it is migrated. Anything else
+// is never changed or deleted.
 func owned(topo *networkv1alpha1.FabricTopology, peer *networkv1alpha1.BGPPeer) bool {
+	if peer.Labels[networkv1alpha1.LabelManagedBy] != networkv1alpha1.ManagedByFabricTopology ||
+		peer.Labels[networkv1alpha1.LabelFabricTopology] != topo.Name {
+		return false
+	}
+	if uid, ok := peer.Annotations[networkv1alpha1.AnnotationFabricTopologyUID]; ok {
+		return uid == string(topo.UID)
+	}
 	ref := metav1.GetControllerOf(peer)
-	return ref != nil && ref.UID == topo.UID &&
-		peer.Labels[networkv1alpha1.LabelManagedBy] == networkv1alpha1.ManagedByFabricTopology &&
-		peer.Labels[networkv1alpha1.LabelFabricTopology] == topo.Name
+	return ref != nil && ref.UID == topo.UID
 }
 
-// apply writes the plan's peers, keeps or deletes the generated peers it no
-// longer holds, and records the outcome in st.
-func (r *Reconciler) apply(ctx context.Context, snap *snapshot, plan Plan, st *status) error {
-	topo := snap.topology
-	byName := map[string]*networkv1alpha1.BGPPeer{}
-	holders := map[key]*networkv1alpha1.BGPPeer{}
-	for i := range snap.peers {
-		p := &snap.peers[i]
-		byName[p.Name] = p
-		if p.Spec.RouterRef == nil {
-			continue
-		}
-		if a, err := netip.ParseAddr(p.Spec.Address); err == nil {
-			holders[key{p.Spec.RouterRef.Name, a}] = p
+// withoutOwner is refs without any reference to uid.
+func withoutOwner(refs []metav1.OwnerReference, uid types.UID) []metav1.OwnerReference {
+	var out []metav1.OwnerReference
+	for _, ref := range refs {
+		if ref.UID != uid {
+			out = append(out, ref)
 		}
 	}
-	for _, o := range plan.Overlaps {
-		st.conflict(fmt.Sprintf("%s and %s both peer router %s with %s", o.Kept, o.Dropped, o.Router, o.Address))
-	}
-
-	held := map[string]bool{}
-	for _, s := range plan.Sessions {
-		want := s.Peer
-		held[want.Name] = true
-		addr, _ := netip.ParseAddr(want.Spec.Address)
-		holder := holders[key{want.Spec.RouterRef.Name, addr}]
-		existing := byName[want.Name]
-		switch {
-		case holder != nil && holder.Name != want.Name:
-			kind := "hand-authored"
-			if owned(topo, holder) {
-				kind = "retained"
-			}
-			st.conflict(fmt.Sprintf("%s BGPPeer %s already peers router %s with %s", kind, holder.Name,
-				want.Spec.RouterRef.Name, want.Spec.Address))
-		case existing != nil && !owned(topo, existing):
-			st.conflict(fmt.Sprintf("BGPPeer %s exists and was not generated by this topology", want.Name))
-		case existing != nil:
-			if err := r.update(ctx, existing, want); err != nil {
-				return err
-			}
-			st.generated++
-		default:
-			if err := controllerutil.SetControllerReference(topo, want, r.Scheme()); err != nil {
-				return err
-			}
-			if err := r.Create(ctx, want); err != nil && !apierrors.IsAlreadyExists(err) {
-				return fmt.Errorf("create BGPPeer %s: %w", want.Name, err)
-			}
-			st.generated++
-		}
-	}
-
-	for i := range snap.peers {
-		p := &snap.peers[i]
-		if held[p.Name] || !owned(topo, p) || !p.DeletionTimestamp.IsZero() {
-			continue
-		}
-		if why := snap.released(p); why != "" {
-			log.FromContext(ctx).Info("releasing generated peer", "peer", p.Name, "reason", why)
-			if err := r.Delete(ctx, p, client.Preconditions{UID: &p.UID}); client.IgnoreNotFound(err) != nil {
-				return fmt.Errorf("delete BGPPeer %s: %w", p.Name, err)
-			}
-			continue
-		}
-		st.retained++
-	}
-	return nil
+	return out
 }
 
-// releaseAll hands every peer the deleting topology controls to manual
-// control, then lets the topology go. A released peer keeps its spec, so the
-// router keeps compiling the same sessions; it loses the controller
-// reference and generated labels, so neither the garbage collector nor a
-// topology created again acts on it.
+// releaseAll hands every peer the deleting topology generated to manual
+// control, then lets the topology go. A released peer keeps its spec, so
+// the router keeps compiling the same sessions; it loses the generated
+// labels, UID and any owner reference, so neither the garbage collector
+// nor a topology created again acts on it.
 func (r *Reconciler) releaseAll(ctx context.Context, topo *networkv1alpha1.FabricTopology) error {
 	if !controllerutil.ContainsFinalizer(topo, networkv1alpha1.FabricTopologyFinalizer) {
 		return nil
@@ -302,18 +323,13 @@ func (r *Reconciler) releaseAll(ctx context.Context, topo *networkv1alpha1.Fabri
 		if !owned(topo, p) {
 			continue
 		}
-		refs := p.OwnerReferences[:0]
-		for _, ref := range p.OwnerReferences {
-			if ref.UID != topo.UID {
-				refs = append(refs, ref)
-			}
-		}
-		p.OwnerReferences = refs
+		p.OwnerReferences = withoutOwner(p.OwnerReferences, topo.UID)
 		delete(p.Labels, networkv1alpha1.LabelManagedBy)
 		delete(p.Labels, networkv1alpha1.LabelFabricTopology)
 		if p.Annotations == nil {
 			p.Annotations = map[string]string{}
 		}
+		delete(p.Annotations, networkv1alpha1.AnnotationFabricTopologyUID)
 		p.Annotations[networkv1alpha1.AnnotationReleasedFromTopology] = topo.Name
 		if err := r.Update(ctx, p); err != nil {
 			return fmt.Errorf("release BGPPeer %s: %w", p.Name, err)
@@ -325,20 +341,223 @@ func (r *Reconciler) releaseAll(ctx context.Context, topo *networkv1alpha1.Fabri
 	return client.IgnoreNotFound(r.Patch(ctx, topo, patch))
 }
 
-// update makes existing match want's spec, labels and annotations, writing
-// only when something differs.
+// release is a generated peer the topology no longer wants, and why it may
+// go.
+type release struct {
+	peer *networkv1alpha1.BGPPeer
+	why  string
+	// absent is a release because a router or record is gone, which the
+	// release guard bounds.
+	absent bool
+}
+
+// apply writes the plan's sessions, keeps or releases the generated peers
+// it no longer wants, and records the outcome in st.
+//
+// A session is its router and remote address. A wanted session already
+// held by one of the topology's peers is updated in that peer, whatever the
+// peer's name, so renaming the relationship or record that produces it
+// never deletes the peer. Only a session no peer holds gets a new peer.
+func (r *Reconciler) apply(ctx context.Context, snap *snapshot, plan Plan, st *status) error {
+	topo := snap.topology
+	byName := map[string]*networkv1alpha1.BGPPeer{}
+	mine := map[key]*networkv1alpha1.BGPPeer{}
+	foreign := map[key]*networkv1alpha1.BGPPeer{}
+	for i := range snap.peers {
+		p := &snap.peers[i]
+		byName[p.Name] = p
+		k, ok := peerKey(p)
+		switch {
+		case !ok:
+		case !owned(topo, p):
+			foreign[k] = p
+		case mine[k] == nil && p.DeletionTimestamp.IsZero():
+			mine[k] = p
+		}
+	}
+	for _, o := range plan.Overlaps {
+		st.conflict(fmt.Sprintf("%s and %s both peer router %s with %s", o.Kept, o.Dropped, o.Router, o.Address))
+	}
+
+	held, err := r.applySessions(ctx, plan, mine, foreign, byName, st)
+	if err != nil {
+		return err
+	}
+	return r.releaseUnwanted(ctx, snap, held, st)
+}
+
+// applySessions writes the plan's sessions: each is updated in the peer of
+// the topology holding it, or created, unless a peer the topology did not
+// generate is in its way. It returns the names of the peers holding wanted
+// sessions.
+func (r *Reconciler) applySessions(
+	ctx context.Context, plan Plan, mine, foreign map[key]*networkv1alpha1.BGPPeer,
+	byName map[string]*networkv1alpha1.BGPPeer, st *status,
+) (map[string]bool, error) {
+	held := map[string]bool{}
+	for _, s := range plan.Sessions {
+		want := s.Peer
+		k, _ := peerKey(want)
+		existing := mine[k]
+		if existing != nil {
+			// Even blocked, the session stays where it is.
+			held[existing.Name] = true
+		}
+		switch other := foreign[k]; {
+		case other != nil:
+			st.conflict(fmt.Sprintf("BGPPeer %s, not generated by this topology, already peers router %s with %s",
+				other.Name, want.Spec.RouterRef.Name, want.Spec.Address))
+		case existing != nil:
+			if err := r.update(ctx, existing, want); err != nil {
+				return nil, err
+			}
+			st.generated++
+		case byName[want.Name] != nil:
+			st.conflict(fmt.Sprintf("BGPPeer %s exists for another session", want.Name))
+		default:
+			if err := r.Create(ctx, want); err != nil && !apierrors.IsAlreadyExists(err) {
+				return nil, fmt.Errorf("create BGPPeer %s: %w", want.Name, err)
+			}
+			st.generated++
+		}
+	}
+	return held, nil
+}
+
+// releaseUnwanted keeps or releases the topology's peers that hold no
+// wanted session. A release because something is gone waits out the settle
+// period, and none happens while the release guard holds.
+func (r *Reconciler) releaseUnwanted(ctx context.Context, snap *snapshot, held map[string]bool, st *status) error {
+	topo := snap.topology
+	var releases []release
+	owners := 0
+	for i := range snap.peers {
+		p := &snap.peers[i]
+		if !owned(topo, p) || !p.DeletionTimestamp.IsZero() {
+			continue
+		}
+		owners++
+		if held[p.Name] {
+			continue
+		}
+		why, absent, err := snap.released(ctx, p)
+		if err != nil {
+			return err
+		}
+		if why == "" {
+			if err := r.migrate(ctx, topo, p); err != nil {
+				return err
+			}
+			st.retained++
+			continue
+		}
+		releases = append(releases, release{p, why, absent})
+	}
+
+	absent := 0
+	for _, rel := range releases {
+		if rel.absent {
+			absent++
+		}
+	}
+	// Absences are weighed together: every one still pending counts, so a
+	// mass deletion arriving as a stream of events is held as a whole.
+	hold := absent > minHeldReleases && 2*absent > owners
+	settle := r.ReleaseSettle
+	if settle <= 0 {
+		settle = DefaultReleaseSettle
+	}
+	now := time.Now()
+	for _, rel := range releases {
+		if rel.absent {
+			since, err := r.pendingSince(ctx, topo, rel.peer, now)
+			if err != nil {
+				return err
+			}
+			if wait := settle - now.Sub(since); hold || wait > 0 {
+				if !hold && (st.requeue == 0 || wait < st.requeue) {
+					st.requeue = wait
+				}
+				st.retained++
+				continue
+			}
+		}
+		log.FromContext(ctx).Info("releasing generated peer", "peer", rel.peer.Name, "reason", rel.why)
+		uid := rel.peer.UID
+		if err := r.Delete(ctx, rel.peer, client.Preconditions{UID: &uid}); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("delete BGPPeer %s: %w", rel.peer.Name, err)
+		}
+	}
+	if hold {
+		st.held = fmt.Sprintf("%d of the topology's %d peers would be released because their router or record "+
+			"is gone; drain them explicitly to release them", absent, owners)
+	}
+	return nil
+}
+
+// pendingSince is when the peer's release on absence was first found,
+// recording now on the peer, and migrating it, when it was not.
+func (r *Reconciler) pendingSince(
+	ctx context.Context, topo *networkv1alpha1.FabricTopology, p *networkv1alpha1.BGPPeer, now time.Time,
+) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, p.Annotations[networkv1alpha1.AnnotationReleasePendingSince]); err == nil {
+		return t, nil
+	}
+	next := p.DeepCopy()
+	next.OwnerReferences = withoutOwner(p.OwnerReferences, topo.UID)
+	if next.Annotations == nil {
+		next.Annotations = map[string]string{}
+	}
+	next.Annotations[networkv1alpha1.AnnotationFabricTopologyUID] = string(topo.UID)
+	next.Annotations[networkv1alpha1.AnnotationReleasePendingSince] = now.UTC().Format(time.RFC3339)
+	if err := r.Update(ctx, next); err != nil {
+		return now, fmt.Errorf("mark BGPPeer %s pending release: %w", p.Name, err)
+	}
+	return now, nil
+}
+
+// update makes existing match want's spec, labels and annotations, drops
+// any owner reference to the topology, and writes only when something
+// differs. The peer keeps its name.
 func (r *Reconciler) update(ctx context.Context, existing, want *networkv1alpha1.BGPPeer) error {
 	next := existing.DeepCopy()
 	next.Spec = want.Spec
 	next.Labels = merged(existing.Labels, want.Labels, generatedLabels)
 	next.Annotations = merged(existing.Annotations, want.Annotations, generatedAnnotations)
+	if uid := want.Annotations[networkv1alpha1.AnnotationFabricTopologyUID]; uid != "" {
+		next.OwnerReferences = withoutOwner(existing.OwnerReferences, types.UID(uid))
+	}
 	if equality.Semantic.DeepEqual(existing.Spec, next.Spec) &&
 		equality.Semantic.DeepEqual(existing.Labels, next.Labels) &&
-		equality.Semantic.DeepEqual(existing.Annotations, next.Annotations) {
+		equality.Semantic.DeepEqual(existing.Annotations, next.Annotations) &&
+		equality.Semantic.DeepEqual(existing.OwnerReferences, next.OwnerReferences) {
 		return nil
 	}
 	if err := r.Update(ctx, next); err != nil {
 		return fmt.Errorf("update BGPPeer %s: %w", existing.Name, err)
+	}
+	return nil
+}
+
+// migrate moves a retained peer of an earlier controller version from a
+// controller reference to the UID annotation, and clears a pending release
+// whose absence ended, leaving its spec alone.
+func (r *Reconciler) migrate(
+	ctx context.Context, topo *networkv1alpha1.FabricTopology, p *networkv1alpha1.BGPPeer,
+) error {
+	next := p.DeepCopy()
+	next.OwnerReferences = withoutOwner(p.OwnerReferences, topo.UID)
+	if next.Annotations == nil {
+		next.Annotations = map[string]string{}
+	}
+	next.Annotations[networkv1alpha1.AnnotationFabricTopologyUID] = string(topo.UID)
+	delete(next.Annotations, networkv1alpha1.AnnotationReleasePendingSince)
+	if equality.Semantic.DeepEqual(p.OwnerReferences, next.OwnerReferences) &&
+		equality.Semantic.DeepEqual(p.Annotations, next.Annotations) {
+		return nil
+	}
+	if err := r.Update(ctx, next); err != nil {
+		return fmt.Errorf("migrate BGPPeer %s: %w", p.Name, err)
 	}
 	return nil
 }
@@ -348,7 +567,8 @@ var (
 		networkv1alpha1.LabelPeerFailureDomain, networkv1alpha1.LabelPeerCell}
 	generatedAnnotations = []string{networkv1alpha1.AnnotationRelationship, networkv1alpha1.AnnotationLocalEndpoint,
 		networkv1alpha1.AnnotationRemoteEndpoint, networkv1alpha1.AnnotationRemoteEndpointUID,
-		networkv1alpha1.AnnotationRemoteRouter}
+		networkv1alpha1.AnnotationRemoteRouter, networkv1alpha1.AnnotationFabricTopologyUID,
+		networkv1alpha1.AnnotationReleasePendingSince}
 )
 
 // merged is have with every key in keys set as in want: keys want lacks are
@@ -371,9 +591,10 @@ func merged(have, want map[string]string, keys []string) map[string]string {
 	return out
 }
 
-// released says why a generated peer the topology no longer holds may be
-// deleted, or returns empty when it must be kept. A session is released only
-// on evidence that one of its ends is out of service:
+// released says why a generated peer the topology no longer wants may be
+// deleted, or returns empty when it must be kept, and whether the reason is
+// that something is gone. A session is released only on evidence that one
+// of its ends is out of service:
 //   - the local router is gone, retired (its deployment committed a
 //     retiring promotion), or drained;
 //   - an endpoint it uses is drained;
@@ -384,61 +605,92 @@ func merged(have, want map[string]string, keys []string) map[string]string {
 //     which is visible here because the peer exists only because the record
 //     did.
 //
-// A record that still exists but no longer matches, a member that left the
+// An absence seen in the cache is confirmed with the API server first. A
+// record that still exists but no longer matches, a member that left the
 // selector, or an endpoint of this cell deleted while its router still runs,
 // keeps the session until one of those holds.
-func (s *snapshot) released(p *networkv1alpha1.BGPPeer) string {
+func (s *snapshot) released(ctx context.Context, p *networkv1alpha1.BGPPeer) (string, bool, error) {
+	if p.Spec.RouterRef == nil {
+		return "", false, nil
+	}
 	topo := s.topology
 	local := p.Spec.RouterRef.Name
-	if why := s.routerOut(local); why != "" {
-		return "local router " + local + " " + why
+	if why, absent, err := s.routerOut(ctx, local); why != "" || err != nil {
+		return "local router " + local + " " + why, absent, err
 	}
 	for _, ann := range []string{networkv1alpha1.AnnotationLocalEndpoint, networkv1alpha1.AnnotationRemoteEndpoint} {
 		if ep := p.Annotations[ann]; ep != "" && s.drainedEndpoint(ep) {
-			return "endpoint " + ep + " is drained"
+			return "endpoint " + ep + " is drained", false, nil
 		}
 	}
 	kind, name, _ := strings.Cut(p.Annotations[networkv1alpha1.AnnotationRelationship], "/")
 	if kind == KindExternal {
 		if !externalListed(topo, name, p.Spec.Address) {
-			return "external peer " + p.Spec.Address + " is no longer in relationship " + name
+			return "external peer " + p.Spec.Address + " is no longer in relationship " + name, false, nil
 		}
-		return ""
+		return "", false, nil
 	}
 	remoteEP := p.Annotations[networkv1alpha1.AnnotationRemoteEndpoint]
 	if p.Labels[networkv1alpha1.LabelPeerCell] == topo.Spec.Cell {
 		remote := p.Annotations[networkv1alpha1.AnnotationRemoteRouter]
-		if why := s.routerOut(remote); why != "" {
-			return "remote router " + remote + " " + why
+		why, absent, err := s.routerOut(ctx, remote)
+		if why != "" {
+			why = "remote router " + remote + " " + why
 		}
-		return ""
+		return why, absent, err
 	}
-	ep := s.endpoints[remoteEP]
-	if ep == nil || string(ep.Endpoint.UID) != p.Annotations[networkv1alpha1.AnnotationRemoteEndpointUID] {
-		return "endpoint record " + remoteEP + " was deleted"
+	uid := p.Annotations[networkv1alpha1.AnnotationRemoteEndpointUID]
+	if ep := s.endpoints[remoteEP]; ep != nil && string(ep.Endpoint.UID) == uid {
+		return "", false, nil
 	}
-	return ""
+	gone, err := s.confirmGone(ctx, &networkv1alpha1.FabricEndpoint{}, remoteEP, uid)
+	if err != nil || !gone {
+		return "", false, err
+	}
+	return "endpoint record " + remoteEP + " was deleted", true, nil
 }
 
 // routerOut says how a router of this cell is out of service, or returns
-// empty while it may still be running.
-func (s *snapshot) routerOut(name string) string {
+// empty while it may still be running, and whether the reason is that it
+// is gone.
+func (s *snapshot) routerOut(ctx context.Context, name string) (string, bool, error) {
 	if d := s.topology.Spec.Drain; d != nil {
 		for _, r := range d.Routers {
 			if r.Name == name {
-				return "is drained"
+				return "is drained", false, nil
 			}
 		}
 	}
 	router := s.routers[name]
 	if router == nil {
-		return "is deleted"
+		gone, err := s.confirmGone(ctx, &networkv1alpha1.BGPRouter{}, name, "")
+		if err != nil || !gone {
+			return "", false, err
+		}
+		return "is deleted", true, nil
 	}
 	dep := s.deployments[name]
 	if dep != nil && dep.Spec.RouterRef.UID == string(router.UID) && retired(dep) {
-		return "is retired"
+		return "is retired", false, nil
 	}
-	return ""
+	return "", false, nil
+}
+
+// confirmGone reads the named object from the API server, around the
+// cache: it is gone when it does not exist, or exists with another UID
+// than uid when uid is set. Without a reader the cache's absence stands.
+func (s *snapshot) confirmGone(ctx context.Context, obj client.Object, name, uid string) (bool, error) {
+	if s.reader == nil {
+		return true, nil
+	}
+	err := s.reader.Get(ctx, types.NamespacedName{Namespace: s.topology.Namespace, Name: name}, obj)
+	switch {
+	case apierrors.IsNotFound(err):
+		return true, nil
+	case err != nil:
+		return false, err
+	}
+	return uid != "" && string(obj.GetUID()) != uid, nil
 }
 
 // retired reports whether the deployment's router committed the promotion
@@ -480,12 +732,15 @@ func externalListed(topo *networkv1alpha1.FabricTopology, rel, address string) b
 
 // status accumulates one pass's outcome.
 type status struct {
-	acceptReason, acceptMessage string
-	unresolved                  []string
-	conflicts                   []string
-	missing                     []string
-	members, generated          int32
-	retained                    int32
+	acceptReason, acceptMessage        string
+	unresolved                         []string
+	conflicts                          []string
+	missing                            []string
+	held                               string
+	requeue                            time.Duration
+	members, generated                 int32
+	retained                           int32
+	recordsDigest, relationshipsDigest string
 }
 
 func (st *status) notAccepted(reason, message string) {
@@ -542,6 +797,13 @@ func (r *Reconciler) writeStatus(ctx context.Context, topo *networkv1alpha1.Fabr
 		set(networkv1alpha1.FabricTopologyConditionConflicts, true, networkv1alpha1.FabricTopologyReasonPeerConflict,
 			listed(st.conflicts))
 	}
+	if st.held == "" {
+		set(networkv1alpha1.FabricTopologyConditionReleaseHeld, false, networkv1alpha1.FabricTopologyReasonNothingHeld,
+			"no release is held")
+	} else {
+		set(networkv1alpha1.FabricTopologyConditionReleaseHeld, true, networkv1alpha1.FabricTopologyReasonReleaseHeld,
+			st.held)
+	}
 	switch {
 	case !accepted:
 		set(networkv1alpha1.ConditionTypeReady, false, networkv1alpha1.FabricTopologyReasonNotAccepted, st.acceptMessage)
@@ -551,6 +813,8 @@ func (r *Reconciler) writeStatus(ctx context.Context, topo *networkv1alpha1.Fabr
 	case len(st.conflicts) > 0:
 		set(networkv1alpha1.ConditionTypeReady, false, networkv1alpha1.FabricTopologyReasonConflictsBlocking,
 			fmt.Sprintf("%d sessions are blocked", len(st.conflicts)))
+	case st.held != "":
+		set(networkv1alpha1.ConditionTypeReady, false, networkv1alpha1.FabricTopologyReasonReleaseHeld, st.held)
 	case len(st.missing) > 0:
 		set(networkv1alpha1.ConditionTypeReady, false, networkv1alpha1.FabricTopologyReasonMissingEndpoints,
 			"no usable endpoint: "+listed(st.missing))
@@ -566,6 +830,9 @@ func (r *Reconciler) writeStatus(ctx context.Context, topo *networkv1alpha1.Fabr
 		topo.Status.Retained = st.retained
 	}
 	topo.Status.MissingEndpoints = int32(len(st.missing))
+	if st.recordsDigest != "" {
+		topo.Status.RecordsDigest, topo.Status.RelationshipsDigest = st.recordsDigest, st.relationshipsDigest
+	}
 	if equality.Semantic.DeepEqual(before.Status, topo.Status) {
 		return nil
 	}
@@ -573,9 +840,9 @@ func (r *Reconciler) writeStatus(ctx context.Context, topo *networkv1alpha1.Fabr
 }
 
 // SetupWithManager reconciles a namespace's topologies when the topology,
-// a peer it controls, or anything it reads changes: endpoints, routers,
-// peers (a hand-authored one may conflict), profiles, policies,
-// deployments (retirement), and the failure-domain labels of Nodes.
+// or anything it reads, changes: endpoints, routers, peers (its own, or a
+// hand-authored one that may conflict), profiles, policies, deployments
+// (retirement), and the failure-domain labels of Nodes.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
@@ -598,8 +865,6 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("fabric-topology").
 		For(&networkv1alpha1.FabricTopology{}).
-		Owns(&networkv1alpha1.BGPPeer{}).
-		Watches(&networkv1alpha1.FabricTopology{}, namespaceTopologies).
 		Watches(&networkv1alpha1.FabricEndpoint{}, namespaceTopologies).
 		Watches(&networkv1alpha1.BGPRouter{}, namespaceTopologies).
 		Watches(&networkv1alpha1.BGPPeer{}, namespaceTopologies).

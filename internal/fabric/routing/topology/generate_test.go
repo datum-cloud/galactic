@@ -28,6 +28,10 @@ const (
 	cellB      = "cell-b"
 	rrV6       = "2001:db8:a::1"
 	rrProfile  = "rr-clients"
+	extRel     = "transit"
+	extPeer    = "2001:db8:ffff::1"
+	a1v6       = "fd00::1"
+	remoteRec  = "remote"
 )
 
 var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -253,8 +257,9 @@ func TestNoSessionWithoutBothFamilies(t *testing.T) {
 	}
 }
 
-// TestAnalyzeConflicts: the older of two endpoints sharing an identity or
-// an address keeps it; the newer is unusable. Endpoints of a local cell need
+// TestAnalyzeConflicts: of two endpoints sharing an identity or an address,
+// the one whose name sorts first keeps it, however recently it was created;
+// the other is unusable. Endpoints of a local cell need
 // their router with the same ASN; remote ones cannot be checked.
 func TestAnalyzeConflicts(t *testing.T) {
 	routers := routerMap(router("r1", nil), router("r2", nil))
@@ -263,9 +268,9 @@ func TestAnalyzeConflicts(t *testing.T) {
 	withIf := endpoint("if", cellB, "x", transportM, "", "fe80::1", 0, nil)
 	withIf.Spec.Interface = ptr.To("eth0")
 	eps := []networkv1alpha1.FabricEndpoint{
-		endpoint("new-dup", cellA, "r1", transportM, "", "2001:db8:1::2", 5, nil),
-		endpoint("old", cellA, "r1", transportM, "", "2001:db8:1::1", 0, nil),
-		endpoint("new-addr", cellB, "r9", transportM, "", "2001:db8:1::1", 5, nil),
+		endpoint("dup-b", cellA, "r1", transportM, "", "2001:db8:1::2", 0, nil),
+		endpoint("dup-a", cellA, "r1", transportM, "", "2001:db8:1::1", 5, nil),
+		endpoint("zz-addr", cellB, "r9", transportM, "", "2001:db8:1::1", 0, nil),
 		endpoint("other-transport", cellB, "r9", transportP, "", "2001:db8:1::1", 5, nil),
 		endpoint("ghost", cellA, "missing", transportM, "", "2001:db8:1::3", 0, nil),
 		asn, withIf,
@@ -275,9 +280,9 @@ func TestAnalyzeConflicts(t *testing.T) {
 		usable bool
 		reason string
 	}{
-		"old":             {true, networkv1alpha1.FabricEndpointReasonLocal},
-		"new-dup":         {false, networkv1alpha1.FabricEndpointReasonDuplicate},
-		"new-addr":        {false, networkv1alpha1.FabricEndpointReasonAddressInUse},
+		"dup-a":           {true, networkv1alpha1.FabricEndpointReasonLocal},
+		"dup-b":           {false, networkv1alpha1.FabricEndpointReasonDuplicate},
+		"zz-addr":         {false, networkv1alpha1.FabricEndpointReasonAddressInUse},
 		"other-transport": {true, networkv1alpha1.FabricEndpointReasonRemote},
 		"ghost":           {false, networkv1alpha1.FabricEndpointReasonRouterNotFound},
 		"asn":             {false, networkv1alpha1.FabricEndpointReasonASNMismatch},
@@ -310,7 +315,8 @@ func TestNamesAreDeterministic(t *testing.T) {
 			t.Errorf("session %d: %s then %s", i, first.Sessions[i].Peer.Name, second.Sessions[i].Peer.Name)
 		}
 	}
-	if got := first.Sessions[0].Peer.Name; got != "c1-a-rr-public-ipv4" {
+	if got := first.Sessions[0].Peer.Name; got != peerName("c1", "a-rr-public", "ipv4") ||
+		!strings.HasPrefix(got, "c1-a-rr-public-ipv4-") {
 		t.Errorf("first name %s", got)
 	}
 
@@ -356,12 +362,12 @@ func TestExternal(t *testing.T) {
 	topo := reflectionTopology(cellA, "rr", "c1")
 	topo.Spec.Reflection = nil
 	topo.Spec.External = []networkv1alpha1.FabricExternalRelationship{{
-		Name: "transit", Transport: ptr.To(transportP),
+		Name: extRel, Transport: ptr.To(transportP),
 		UpdateSource: networkv1alpha1.FabricUpdateSourceEndpointAddress,
 		Routers: networkv1alpha1.FabricTopologyMembers{
 			Routers: []networkv1alpha1.LocalObjectRef{{Name: "c1"}, {Name: "not-a-member"}}},
 		Peers: []networkv1alpha1.FabricExternalPeer{
-			{Address: "203.0.113.1", ASN: 64999}, {Address: "2001:db8:ffff::1", ASN: 64999}},
+			{Address: "203.0.113.1", ASN: 64999}, {Address: extPeer, ASN: 64999}},
 	}}
 	plan := generate(t, topo, eps, routersA)
 	if len(plan.Sessions) != 2 {
@@ -410,7 +416,7 @@ func TestSessionLimit(t *testing.T) {
 func TestOnlyLocalMembersGenerate(t *testing.T) {
 	routers := routerMap(router("a1", nil), router("a2", nil))
 	eps := []networkv1alpha1.FabricEndpoint{
-		endpoint("a1-mesh", cellA, "a1", transportM, "", "fd00::1", 0, nil),
+		endpoint("a1-mesh", cellA, "a1", transportM, "", a1v6, 0, nil),
 		endpoint("a2-mesh", cellA, "a2", transportM, "", "fd00::2", 0, nil),
 		endpoint("b-a1-mesh", cellB, "a1", transportM, "", "fd00::b1", 0, nil),
 	}
@@ -425,7 +431,78 @@ func TestOnlyLocalMembersGenerate(t *testing.T) {
 		t.Fatalf("sessions %d, want a1's one toward cell-b's a1", len(plan.Sessions))
 	}
 	p := plan.Sessions[0].Peer
-	if p.Name != "a1-b-a1-mesh-ipv6" || p.Spec.Address != "fd00::b1" || *p.Spec.UpdateSource != "fd00::1" {
+	if p.Name != peerName("a1", "b-a1-mesh", "ipv6") || p.Spec.Address != "fd00::b1" || *p.Spec.UpdateSource != a1v6 {
 		t.Errorf("session %s toward %s from %s", p.Name, p.Spec.Address, *p.Spec.UpdateSource)
+	}
+}
+
+// TestNamesNeverCollide: routers and records whose readable names join to
+// the same string still get different peer names, and a plan that would
+// hold two sessions under one name reports it instead.
+func TestNamesNeverCollide(t *testing.T) {
+	if a, b := peerName("a", "b-c", "ipv6"), peerName("a-b", "c", "ipv6"); a == b {
+		t.Fatalf("a/b-c and a-b/c share the name %s", a)
+	}
+	routers := routerMap(router("a", nil), router("a-b", nil))
+	eps := []networkv1alpha1.FabricEndpoint{
+		endpoint("b-c", cellB, "x", transportM, "", a1v6, 0, nil),
+		endpoint("c", cellB, "y", transportM, "", "fd00::2", 0, nil),
+		endpoint("a-mesh", cellA, "a", transportM, "", "fd00::a", 0, nil),
+		endpoint("a-b-mesh", cellA, "a-b", transportM, "", "fd00::ab", 0, nil),
+	}
+	topo := reflectionTopology(cellA, "a", "a-b")
+	topo.Spec.Reflection = nil
+	topo.Spec.Mesh = []networkv1alpha1.FabricMeshRelationship{{
+		Name: "all", Transports: []string{transportM}, Families: both()}}
+	plan := generate(t, topo, eps, routers)
+	seen := map[string]bool{}
+	for _, s := range plan.Sessions {
+		if seen[s.Peer.Name] {
+			t.Errorf("two sessions named %s", s.Peer.Name)
+		}
+		seen[s.Peer.Name] = true
+	}
+	if len(plan.Sessions) != 6 || len(plan.NameClashes) != 0 {
+		t.Errorf("%d sessions, clashes %v; want 6 and none", len(plan.Sessions), plan.NameClashes)
+	}
+
+	// Two sessions forced onto one name: the second is reported, not kept.
+	g := &generator{topo: topo, byKey: map[key]string{}, byName: map[string]key{}}
+	for _, addr := range []string{a1v6, "fd00::2"} {
+		p := &networkv1alpha1.BGPPeer{}
+		p.Name = "same"
+		p.Annotations = map[string]string{networkv1alpha1.AnnotationRelationship: "mesh/all"}
+		g.add(p, "a", netip.MustParseAddr(addr))
+	}
+	if len(g.out.Sessions) != 1 || len(g.out.NameClashes) != 1 {
+		t.Errorf("sessions %d clashes %v, want one of each", len(g.out.Sessions), g.out.NameClashes)
+	}
+}
+
+// TestDigests: the same records and relationships give the same digests in
+// every cell, whatever order the records arrive in; a changed record or
+// relationship changes them.
+func TestDigests(t *testing.T) {
+	eps, routersA, routersB := twoCells()
+	a := generate(t, reflectionTopology(cellA, "rr", "c1"), eps, routersA)
+	if len(a.RecordsDigest) != 64 || len(a.RelationshipsDigest) != 64 {
+		t.Fatalf("digests %q %q", a.RecordsDigest, a.RelationshipsDigest)
+	}
+	// Map iteration orders the records differently from run to run; every
+	// run must agree.
+	for i := range 50 {
+		shuffled := []networkv1alpha1.FabricEndpoint{eps[i%3], eps[(i+1)%3], eps[(i+2)%3]}
+		b := generate(t, reflectionTopology(cellB, "c1"), shuffled, routersB)
+		if a.RecordsDigest != b.RecordsDigest || a.RelationshipsDigest != b.RelationshipsDigest {
+			t.Fatalf("cells disagree: %s/%s, %s/%s", a.RecordsDigest, b.RecordsDigest, a.RelationshipsDigest,
+				b.RelationshipsDigest)
+		}
+	}
+	eps[0].Spec.Addresses.IPv6 = ptr.To("2001:db8:a::99")
+	topo := reflectionTopology(cellA, "rr", "c1")
+	topo.Spec.Reflection[0].Families = topo.Spec.Reflection[0].Families[1:]
+	c := generate(t, topo, eps, routersA)
+	if c.RecordsDigest == a.RecordsDigest || c.RelationshipsDigest == a.RelationshipsDigest {
+		t.Error("a changed record and relationship kept the digests")
 	}
 }
