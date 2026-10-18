@@ -22,8 +22,14 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 // A session the topology no longer generates is kept until one of its ends
 // is out of service: the router is deleted, its FabricRouterDeployment
 // committed a retiring release, the other cell deleted the endpoint record,
-// or spec.drain names it. Deleting the topology deletes every peer it
-// generated.
+// or spec.drain names it. Entries in spec.drain stay until an operator
+// removes them.
+//
+// Deleting the topology drops no session: before it goes, the controller
+// hands every peer it generated to manual control, removing its controller
+// reference and generated labels, so the peers keep compiling as
+// hand-authored ones. A topology created again reports them as conflicts
+// rather than adopting them.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -362,6 +368,13 @@ const (
 	AnnotationRemoteEndpointUID = "galactic.datumapis.com/remote-endpoint-uid"
 	// AnnotationRemoteRouter names the remote router in its own cell.
 	AnnotationRemoteRouter = "galactic.datumapis.com/remote-router"
+	// AnnotationReleasedFromTopology names the deleted topology that handed
+	// a peer to manual control.
+	AnnotationReleasedFromTopology = "galactic.datumapis.com/released-from-fabric-topology"
+
+	// FabricTopologyFinalizer holds a topology until its generated peers
+	// are handed to manual control.
+	FabricTopologyFinalizer = "galactic.datumapis.com/fabric-topology"
 )
 
 // Topology condition types. Accepted and Ready are shared with the other

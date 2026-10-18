@@ -19,7 +19,7 @@ addressing service can write the records. Operating it is in
 | Compiler, revisions, rollout                                                      | Unchanged. Generated peers are ordinary `BGPPeer`s                                                                                                                                                                     |
 | Lab fixtures (`deploy/containerlab/resources/fabric-topology`)                    | Implemented. `TestLabParity` proves they generate every lab session and compile to what the imported peers compile to. No deploy script applies them                                                                   |
 | An authoritative writer of endpoint records                                       | **Not implemented, and not available anywhere.** Until one exists, infra has to write the records from the same hostvars it renders `frr.conf` from; it writes none yet. See [the addressing gap](#the-addressing-gap) |
-| Distribution of records between cells                                             | **External.** Whatever distributes a cell's intent (infra's GitOps today) must put every cell's records in every cell of the routing domain                                                                            |
+| Distribution of records between cells                                             | **External.** Infra's per-cell bundles must carry every cell's records into every cell of the routing domain                                                                                                           |
 
 ## Why
 
@@ -155,7 +155,8 @@ RBAC, keeps it off peers it did not create: RBAC cannot select by owner.
 ## Across cells
 
 Each cell holds every record of the routing domain, its own and every other
-cell's, delivered by whatever already delivers its intent. Each cell's
+cell's, delivered by infra's per-cell bundle along with the rest of its
+intent. Each cell's
 topology generates its local side toward every relevant record, local or
 remote. Because both cells compute from the same records, both ends of a
 cross-cell session agree: one cell's reflector generates a peer toward
@@ -208,10 +209,36 @@ Releasing a peer deletes the `BGPPeer`. That only produces a new candidate
 revision: the session leaves a node's FRR when a release promotes that
 revision, so the order in which the two ends leave is still the operator's.
 
-Deleting a topology deletes every peer it controls, through the garbage
-collector, with no drain. Use `kubectl delete --cascade=orphan` to keep them;
-they then belong to nobody, and a later topology reports them as conflicts
-rather than adopting them.
+Entries in `spec.drain` stay until an operator removes them. The topology
+never clears one, since only an operator knows when a drained router or
+record is gone for good; an entry naming something that no longer exists
+does nothing.
+
+### Deleting a topology
+
+Deleting a topology drops no session. It carries the finalizer
+`galactic.datumapis.com/fabric-topology`, added on its first reconcile, so
+it stays until the controller has handed every peer it controls to manual
+control: each peer, listed from the API server rather than the cache, keeps
+its spec and loses the topology's controller reference and the
+`app.kubernetes.io/managed-by` and `galactic.datumapis.com/fabric-topology`
+labels, and gains the annotation
+`galactic.datumapis.com/released-from-fabric-topology` naming the topology.
+The other labels and annotations stay as provenance. The peers are then
+ordinary hand-authored peers: the garbage collector has no owner to collect
+them for, and every router keeps compiling the same sessions. The controller
+then removes the finalizer.
+
+A topology created again, even with the same name, does not adopt them: it
+reports each as a conflict and generates nothing in its place. Adopting a
+session is the same as the [migration from imported
+peers](operations.md#moving-from-hand-authored-or-imported-peers): delete the
+hand-authored peer, outside a release, and the topology generates its own.
+
+Delete a topology with the default (background) cascade. `--cascade=foreground`
+makes the garbage collector delete the topology's dependents while the
+topology waits on its finalizers, racing the hand-off, and can delete peers
+before the controller releases them.
 
 ## Partition
 
@@ -288,10 +315,17 @@ it also deletes nothing: the peers already generated stay as they are.
   on a selector mistake would withdraw a live one. The `retained` count makes
   the former visible.
 - **No finalizers on records,** for the reason in [Partition](#partition).
-- **Topology deletion is not drained.** Owner references give the garbage
-  collector the generated peers; a finalizer on the topology would have to
-  reimplement the drain rules for the whole set. The revision that results is
-  still not promoted without a release.
+- **Topology deletion hands peers to manual control.** Releasing them would
+  need the drain rules applied to the whole set at once, and deleting them
+  would withdraw every session on the next release. Keeping them as
+  hand-authored peers changes nothing on any router, and makes adoption by a
+  later topology an explicit, per-peer operator step rather than a silent one.
+- **Drain entries belong to the operator.** The controller cannot tell a
+  drained router that is gone for good from one coming back, so it never
+  removes an entry.
+- **Records are distributed by infra's per-cell bundles.** Each cell's bundle
+  carries every record of the routing domain; no cluster component copies
+  them between cells. A fleet controller doing so is possible later.
 - **A bounded session count.** The plan rules out an unbounded fleet-wide
   full mesh; `maxSessionsPerRouter` makes a selector that matches too much a
   refusal rather than a fleet change.
@@ -365,6 +399,9 @@ imported peers are deleted, which is the migration in
 - Sessions over an interface or a link-local address.
 - Authentication on generated sessions: `familySettings` and profiles carry
   none, and a per-session secret has no place in a shared relationship yet.
+- Records carrying more than sessions need, such as the router ID or
+  loopback, so the same records could later describe other per-router
+  facts. Not planned now.
 - Fleet metrics and alerts for topologies (`retained` and `conflicting` are
   in status only).
 - Failure-domain policy: domains are recorded on every peer, but no

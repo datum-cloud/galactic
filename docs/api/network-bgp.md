@@ -2811,8 +2811,14 @@ reports a conflict where one is in its way.
 A session the topology no longer generates is kept until one of its ends
 is out of service: the router is deleted, its FabricRouterDeployment
 committed a retiring release, the other cell deleted the endpoint record,
-or spec.drain names it. Deleting the topology deletes every peer it
-generated.
+or spec.drain names it. Entries in spec.drain stay until an operator
+removes them.
+
+Deleting the topology drops no session: before it goes, the controller
+hands every peer it generated to manual control, removing its controller
+reference and generated labels, so the peers keep compiling as
+hand-authored ones. A topology created again reports them as conflicts
+rather than adopting them.
 
 
 

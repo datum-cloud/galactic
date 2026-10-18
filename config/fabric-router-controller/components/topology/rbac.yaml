@@ -4,7 +4,8 @@
 # is one the code uses; TestTopologyRBACCoversEveryCall checks them against
 # the API server. Peers are created, updated and deleted only when the
 # topology controls them; the code, not RBAC, keeps it off hand-authored
-# peers, which this role could otherwise write.
+# peers, which this role could otherwise write. A deleted topology's
+# peers are updated to drop its controller reference, never deleted.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -13,6 +14,11 @@ rules:
   - apiGroups: [galactic.datumapis.com]
     resources: [fabrictopologies, fabricendpoints]
     verbs: [get, list, watch]
+  # The finalizer that hands a deleted topology's peers to manual control,
+  # added and removed by patch.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabrictopologies]
+    verbs: [patch]
   # Accepted, ResolvedRefs, Conflicts and Ready, and each endpoint's Ready
   # and Conflict.
   - apiGroups: [galactic.datumapis.com]

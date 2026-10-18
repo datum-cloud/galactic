@@ -353,7 +353,8 @@ spec:
 ```
 
 Records of other cells must be present in this cell too, with the same
-content. Nothing in the cluster copies them; the deployment pipeline does.
+content. Nothing in the cluster copies them: infra's per-cell bundles carry
+every cell's records.
 
 ### Moving from hand-authored or imported peers
 
@@ -396,11 +397,29 @@ because a record or label changed:
 
 For a node that will never report, list its router in the topology's
 `spec.drain.routers`, or a record in `spec.drain.endpoints`, to release its
-sessions without the retirement. Remove the entry once the router is gone.
+sessions without the retirement. The controller never removes an entry:
+remove it yourself once the router is gone for good, before a router of the
+same name joins.
 
-Deleting a `BGPRouter` releases its sessions at once. Deleting a
-`FabricTopology` deletes every peer it generated; use
-`kubectl delete --cascade=orphan` to keep them.
+Deleting a `BGPRouter` releases its sessions at once.
+
+### Deleting a topology
+
+Deleting a `FabricTopology` drops no session. Its finalizer holds it until
+the controller has handed every peer it generated to manual control: the
+peers keep their spec, lose the topology's controller reference and
+generated labels, and are annotated
+`galactic.datumapis.com/released-from-fabric-topology`. They then compile as
+hand-authored peers. Use the default cascade; `--cascade=foreground` lets
+the garbage collector delete peers before the hand-off.
+
+A topology created again reports every such peer as a conflict and adopts
+none. To hand a session back to it, delete the released peer outside a
+release, as in [moving from hand-authored
+peers](#moving-from-hand-authored-or-imported-peers), and the topology
+generates its own. With `--topology` off, nothing removes the finalizer: turn
+the controller back on, or remove the finalizer by hand, which leaves the
+peers to the garbage collector.
 
 ### Reading its status
 

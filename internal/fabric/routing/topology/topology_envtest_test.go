@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -687,7 +689,7 @@ func TestTopologyRBACCoversEveryCall(t *testing.T) {
 		"bgprouters", "bgppeerprofiles", "bgppolicies", "fabricrouterdeployments")
 	allowed = append(allowed, rbaccheck.Each(rbaccheck.Read, "", "", "nodes")...)
 	allowed = append(allowed, rbaccheck.Each([]string{rbaccheck.Patch}, g, unitNS,
-		"fabrictopologies/status", "fabricendpoints/status")...)
+		resTopologies, "fabrictopologies/status", "fabricendpoints/status")...)
 	allowed = append(allowed, rbaccheck.Each([]string{rbaccheck.Update}, g, unitNS, "fabrictopologies/finalizers")...)
 	allowed = append(allowed, rbaccheck.Each([]string{rbaccheck.Create, rbaccheck.Update, rbaccheck.Delete}, g, unitNS,
 		"bgppeers")...)
@@ -695,6 +697,7 @@ func TestTopologyRBACCoversEveryCall(t *testing.T) {
 		{Verb: rbaccheck.Create, Group: g, Resource: resTopologies, Namespace: unitNS},
 		{Verb: rbaccheck.Update, Group: g, Resource: resTopologies, Namespace: unitNS},
 		{Verb: rbaccheck.Delete, Group: g, Resource: resTopologies, Namespace: unitNS},
+		{Verb: rbaccheck.Patch, Group: g, Resource: resEndpoints, Namespace: unitNS},
 		{Verb: rbaccheck.Create, Group: g, Resource: resEndpoints, Namespace: unitNS},
 		{Verb: rbaccheck.Update, Group: g, Resource: resEndpoints, Namespace: unitNS},
 		{Verb: rbaccheck.Delete, Group: g, Resource: resEndpoints, Namespace: unitNS},
@@ -718,4 +721,88 @@ func TestTopologyComponent(t *testing.T) {
 			t.Errorf("the build lacks %q", want)
 		}
 	}
+}
+
+// allPeers are every peer in the namespace, by name.
+func (e *env) allPeers() map[string]*networkv1alpha1.BGPPeer {
+	e.t.Helper()
+	list := &networkv1alpha1.BGPPeerList{}
+	if err := e.c.List(e.ctx, list, client.InNamespace(unitNS)); err != nil {
+		e.t.Fatal(err)
+	}
+	out := map[string]*networkv1alpha1.BGPPeer{}
+	for i := range list.Items {
+		out[list.Items[i].Name] = &list.Items[i]
+	}
+	return out
+}
+
+// TestDeleteHandsPeersToManualControl: deleting a topology drops no
+// session. Its peers stay, with the same UIDs and specs, and lose the
+// controller reference and generated labels, so the garbage collector has
+// nothing to delete; envtest runs no garbage collector, so the owner
+// references are the evidence. A topology created again reports them as
+// conflicts and adopts none, until an operator deletes one.
+func TestDeleteHandsPeersToManualControl(t *testing.T) {
+	e := start(t)
+	e.meshFixture()
+	topo := meshTopology()
+	e.create(topo)
+	eventually(t, "the mesh", func() bool { return names(e.generated()) == meshPeers })
+	eventually(t, "the finalizer", func() bool {
+		return slices.Contains(e.topology().Finalizers, networkv1alpha1.FabricTopologyFinalizer)
+	})
+	before := e.allPeers()
+	uid := e.topology().UID
+
+	e.delete(topo)
+	eventually(t, "the topology gone", func() bool {
+		err := e.c.Get(e.ctx, client.ObjectKeyFromObject(topo), &networkv1alpha1.FabricTopology{})
+		return apierrors.IsNotFound(err)
+	})
+	after := e.allPeers()
+	if len(after) != len(before) {
+		t.Fatalf("%d peers before the deletion, %d after", len(before), len(after))
+	}
+	for n, p := range after {
+		was := before[n]
+		if was == nil || was.UID != p.UID || !equality.Semantic.DeepEqual(was.Spec, p.Spec) {
+			t.Errorf("%s replaced or changed", n)
+		}
+		for _, ref := range p.OwnerReferences {
+			if ref.UID == uid {
+				t.Errorf("%s still owned by the deleted topology", n)
+			}
+		}
+		if _, ok := p.Labels[networkv1alpha1.LabelManagedBy]; ok {
+			t.Errorf("%s still labelled as generated", n)
+		}
+		if p.Annotations[networkv1alpha1.AnnotationReleasedFromTopology] != topoName {
+			t.Errorf("%s: annotations %v", n, p.Annotations)
+		}
+	}
+
+	// Created again, it adopts nothing.
+	e.create(meshTopology())
+	eventually(t, "every session a conflict", func() bool {
+		t := e.topology()
+		c := condition(t, networkv1alpha1.FabricTopologyConditionConflicts)
+		return c != nil && c.Status == metav1.ConditionTrue && t.Status.Conflicting == 8 && t.Status.Generated == 0
+	})
+	consistently(t, "the released peers", func() bool {
+		for n, p := range e.allPeers() {
+			if p.ResourceVersion != after[n].ResourceVersion {
+				return false
+			}
+		}
+		return len(e.generated()) == 0
+	})
+
+	// The adoption path: delete a released peer and the topology
+	// generates its own.
+	e.delete(after["a1-a2-mesh-ipv6"])
+	eventually(t, "the generated replacement", func() bool {
+		p := e.generated()["a1-a2-mesh-ipv6"]
+		return p != nil && metav1.GetControllerOf(p) != nil && e.topology().Status.Conflicting == 7
+	})
 }

@@ -36,9 +36,13 @@ const maxListed = 5
 // Reconciler generates one FabricTopology's BGPPeers.
 type Reconciler struct {
 	client.Client
+	// APIReader reads around the cache, so a deleted topology releases
+	// every peer it controls, including one the cache has not seen yet.
+	APIReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabrictopologies;fabricendpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabrictopologies,verbs=patch
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabrictopologies/status;fabricendpoints/status,verbs=patch
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabrictopologies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=bgppeers,verbs=create;update;delete
@@ -62,8 +66,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !topo.DeletionTimestamp.IsZero() {
-		// The garbage collector deletes what the topology controls.
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.releaseAll(ctx, topo)
+	}
+	if !controllerutil.ContainsFinalizer(topo, networkv1alpha1.FabricTopologyFinalizer) {
+		// Without the finalizer, deleting the topology would leave its
+		// peers to the garbage collector.
+		patch := client.MergeFromWithOptions(topo.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		controllerutil.AddFinalizer(topo, networkv1alpha1.FabricTopologyFinalizer)
+		if err := r.Patch(ctx, topo, patch); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+		}
 	}
 	snap, err := r.read(ctx, topo)
 	if err != nil {
@@ -270,6 +282,47 @@ func (r *Reconciler) apply(ctx context.Context, snap *snapshot, plan Plan, st *s
 		st.retained++
 	}
 	return nil
+}
+
+// releaseAll hands every peer the deleting topology controls to manual
+// control, then lets the topology go. A released peer keeps its spec, so the
+// router keeps compiling the same sessions; it loses the controller
+// reference and generated labels, so neither the garbage collector nor a
+// topology created again acts on it.
+func (r *Reconciler) releaseAll(ctx context.Context, topo *networkv1alpha1.FabricTopology) error {
+	if !controllerutil.ContainsFinalizer(topo, networkv1alpha1.FabricTopologyFinalizer) {
+		return nil
+	}
+	peers := &networkv1alpha1.BGPPeerList{}
+	if err := r.APIReader.List(ctx, peers, client.InNamespace(topo.Namespace)); err != nil {
+		return err
+	}
+	for i := range peers.Items {
+		p := &peers.Items[i]
+		if !owned(topo, p) {
+			continue
+		}
+		refs := p.OwnerReferences[:0]
+		for _, ref := range p.OwnerReferences {
+			if ref.UID != topo.UID {
+				refs = append(refs, ref)
+			}
+		}
+		p.OwnerReferences = refs
+		delete(p.Labels, networkv1alpha1.LabelManagedBy)
+		delete(p.Labels, networkv1alpha1.LabelFabricTopology)
+		if p.Annotations == nil {
+			p.Annotations = map[string]string{}
+		}
+		p.Annotations[networkv1alpha1.AnnotationReleasedFromTopology] = topo.Name
+		if err := r.Update(ctx, p); err != nil {
+			return fmt.Errorf("release BGPPeer %s: %w", p.Name, err)
+		}
+		log.FromContext(ctx).Info("handed generated peer to manual control", "peer", p.Name)
+	}
+	patch := client.MergeFromWithOptions(topo.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	controllerutil.RemoveFinalizer(topo, networkv1alpha1.FabricTopologyFinalizer)
+	return client.IgnoreNotFound(r.Patch(ctx, topo, patch))
 }
 
 // update makes existing match want's spec, labels and annotations, writing
@@ -524,6 +577,9 @@ func (r *Reconciler) writeStatus(ctx context.Context, topo *networkv1alpha1.Fabr
 // peers (a hand-authored one may conflict), profiles, policies,
 // deployments (retirement), and the failure-domain labels of Nodes.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	namespaceTopologies := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, o client.Object) []reconcile.Request {
 			return topologies(ctx, r.Client, client.InNamespace(o.GetNamespace()))
