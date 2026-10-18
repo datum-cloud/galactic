@@ -456,7 +456,7 @@ type FabricTopologyStatus struct {
 	Retained int32 `json:"retained,omitempty"`
 
 	// RecordsDigest is the SHA-256 of every FabricEndpoint of the routing
-	// domain this cell holds, by name and spec. Cells holding the same
+	// domain this cell holds, by name, labels and spec. Cells holding the same
 	// records report the same digest.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^([0-9a-f]{64})?$`

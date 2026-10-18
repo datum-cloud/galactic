@@ -539,16 +539,18 @@ func (g *generator) plan() Plan {
 }
 
 // digests hashes the domain's records and the relationships, so cells can
-// tell whether they generate from the same ones.
+// tell whether they generate from the same ones. A record's labels count:
+// the relationships select records by them.
 func (g *generator) digests() {
 	type record struct {
-		Name string                             `json:"name"`
-		Spec networkv1alpha1.FabricEndpointSpec `json:"spec"`
+		Name   string                             `json:"name"`
+		Labels map[string]string                  `json:"labels,omitempty"`
+		Spec   networkv1alpha1.FabricEndpointSpec `json:"spec"`
 	}
 	var records []record
 	for _, s := range g.in.Endpoints {
 		if s.Endpoint.Spec.RoutingDomain == g.topo.Spec.RoutingDomain {
-			records = append(records, record{s.Endpoint.Name, s.Endpoint.Spec})
+			records = append(records, record{s.Endpoint.Name, s.Endpoint.Labels, s.Endpoint.Spec})
 		}
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Name < records[j].Name })

@@ -106,7 +106,7 @@ router has no `BGPRouter` in this cell, so a role such as "reflector" has to
 be a property of the record every cell can see.
 
 Status: `members`, `generated`, `conflicting`, `missingEndpoints`, `retained`,
-`recordsDigest` (the domain's records this cell holds, by name and spec) and
+`recordsDigest` (the domain's records this cell holds, by name, labels and spec) and
 `relationshipsDigest` (the routing domain and the mesh, reflection and
 external relationships), and conditions `Accepted`, `ResolvedRefs`,
 `Conflicts`, `ReleaseHeld` and `Ready`, each with `observedGeneration`.
@@ -465,9 +465,9 @@ except the transit sessions:
 `TestLabParity` imports every lab `frr.conf`, generates peers from the
 fixtures, and checks that each router compiles to the same configuration with
 the generated peers as with the imported ones. Every construct the lab uses
-can be generated. The fixtures are not applied by any lab task: applying them
-next to the imported peers reports every session as a conflict until the
-imported peers are deleted, which is the migration in
+can be generated. `deploy:fabric-topology` applies them and deletes the
+site's labelled imported peers, which would otherwise report every session
+as a conflict; that is the migration in
 [operations.md](operations.md#generating-peers-from-a-topology).
 
 ## Not yet done

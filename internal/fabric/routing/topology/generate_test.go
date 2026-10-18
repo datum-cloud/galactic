@@ -498,6 +498,13 @@ func TestDigests(t *testing.T) {
 				b.RelationshipsDigest)
 		}
 	}
+	// Relationships select records by label, so a label changes the digest.
+	relabelled := append([]networkv1alpha1.FabricEndpoint(nil), eps...)
+	relabelled[0] = *eps[0].DeepCopy()
+	relabelled[0].Labels = map[string]string{"relabelled": "true"}
+	if l := generate(t, reflectionTopology(cellA, "rr", "c1"), relabelled, routersA); l.RecordsDigest == a.RecordsDigest {
+		t.Error("a relabelled record kept the records digest")
+	}
 	eps[0].Spec.Addresses.IPv6 = ptr.To("2001:db8:a::99")
 	topo := reflectionTopology(cellA, "rr", "c1")
 	topo.Spec.Reflection[0].Families = topo.Spec.Reflection[0].Families[1:]

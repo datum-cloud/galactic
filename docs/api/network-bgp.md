@@ -2920,7 +2920,7 @@ _Appears in:_
 | `conflicting` _integer_ | Conflicting counts the sessions blocked by a conflict. |  |  |
 | `missingEndpoints` _integer_ | MissingEndpoints counts the members with no usable endpoint in the<br />routing domain, and external sessions whose source endpoint is<br />missing. |  |  |
 | `retained` _integer_ | Retained counts the generated peers the topology no longer generates<br />and keeps until an end is out of service. |  |  |
-| `recordsDigest` _string_ | RecordsDigest is the SHA-256 of every FabricEndpoint of the routing<br />domain this cell holds, by name and spec. Cells holding the same<br />records report the same digest. |  | Pattern: `^([0-9a-f]\{64\})?$` <br /> |
+| `recordsDigest` _string_ | RecordsDigest is the SHA-256 of every FabricEndpoint of the routing<br />domain this cell holds, by name, labels and spec. Cells holding the same<br />records report the same digest. |  | Pattern: `^([0-9a-f]\{64\})?$` <br /> |
 | `relationshipsDigest` _string_ | RelationshipsDigest is the SHA-256 of the routing domain and the<br />mesh, reflection and external relationships. Cells generating the two<br />ends of one session from the same relationships report the same<br />digest. |  | Pattern: `^([0-9a-f]\{64\})?$` <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Accepted, ResolvedRefs, Conflicts, ReleaseHeld and<br />Ready. |  |  |
 

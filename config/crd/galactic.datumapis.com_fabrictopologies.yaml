@@ -1604,7 +1604,7 @@ spec:
               recordsDigest:
                 description: |-
                   RecordsDigest is the SHA-256 of every FabricEndpoint of the routing
-                  domain this cell holds, by name and spec. Cells holding the same
+                  domain this cell holds, by name, labels and spec. Cells holding the same
                   records report the same digest.
                 pattern: ^([0-9a-f]{64})?$
                 type: string
