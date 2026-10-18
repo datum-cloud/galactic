@@ -1,0 +1,42 @@
+# What fabric-router-controller --topology needs beyond
+# config/fabric-router-controller/rbac.yaml. Every rule matches a
+# kubebuilder:rbac marker in internal/fabric/routing/topology, and every verb
+# is one the code uses; TestTopologyRBACCoversEveryCall checks them against
+# the API server. Peers are created, updated and deleted only when the
+# topology controls them; the code, not RBAC, keeps it off hand-authored
+# peers, which this role could otherwise write.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fabric-router-controller-topology
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabrictopologies, fabricendpoints]
+    verbs: [get, list, watch]
+  # Accepted, ResolvedRefs, Conflicts and Ready, and each endpoint's Ready
+  # and Conflict.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabrictopologies/status, fabricendpoints/status]
+    verbs: [patch]
+  # A generated peer is owned by its topology with blockOwnerDeletion, which
+  # needs update on the owner's finalizers where owner-reference
+  # enforcement is on.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabrictopologies/finalizers]
+    verbs: [update]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [bgppeers]
+    verbs: [create, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fabric-router-controller-topology
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fabric-router-controller-topology
+subjects:
+  - kind: ServiceAccount
+    name: fabric-router-controller
+    namespace: galactic-system

@@ -20,6 +20,7 @@ import (
 	"go.datum.net/galactic/internal/fabric/routing/controller"
 	routingmetrics "go.datum.net/galactic/internal/fabric/routing/metrics"
 	"go.datum.net/galactic/internal/fabric/routing/rollout"
+	"go.datum.net/galactic/internal/fabric/routing/topology"
 )
 
 // leaderElectionID is the lease the controller's replicas share.
@@ -29,6 +30,7 @@ func newRunCommand() *cobra.Command {
 	var (
 		metricsAddress, healthAddress, namespace string
 		leaderElect, rolloutEnabled              bool
+		topologyEnabled                          bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -43,6 +45,11 @@ With --rollout it also gives each compiled router a FabricRouterDeployment, keep
 candidate on the newest revision, and runs FabricReleaseAuthorizations:
 one release per routing domain at a time, promoting within each router's
 FabricRolloutPolicy. It never writes FRR; the node agents do.
+
+With --topology it also generates BGPPeers from FabricTopologies and the
+FabricEndpoint records of their routing domain, and reports on each
+endpoint whether topologies may peer over it. Generated peers are compiled
+like any other.
 
 The leader exports each router's compile result and, with --rollout, each
 deployment's and outstanding release's state as galactic_fabric_routing_*
@@ -79,6 +86,14 @@ metrics on the metrics address.`,
 					return fmt.Errorf("set up release controller: %w", err)
 				}
 			}
+			if topologyEnabled {
+				if err := (&topology.Reconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
+					return fmt.Errorf("set up topology controller: %w", err)
+				}
+				if err := (&topology.EndpointReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
+					return fmt.Errorf("set up endpoint controller: %w", err)
+				}
+			}
 			// The leader exports the fleet's state from its cache beside
 			// controller-runtime's own metrics.
 			fleet := &routingmetrics.Collector{Reader: mgr.GetClient(), Rollout: rolloutEnabled}
@@ -102,6 +117,8 @@ metrics on the metrics address.`,
 	cmd.Flags().BoolVar(&leaderElect, "leader-elect", true, "Run one active replica, elected through a lease")
 	cmd.Flags().BoolVar(&rolloutEnabled, "rollout", false,
 		"Give compiled routers FabricRouterDeployments and run FabricReleaseAuthorizations")
+	cmd.Flags().BoolVar(&topologyEnabled, "topology", false,
+		"Generate BGPPeers from FabricTopologies and FabricEndpoints")
 	cmd.Flags().StringVar(&namespace, "leader-election-namespace", "galactic-system", "Namespace of the lease")
 	return cmd
 }
