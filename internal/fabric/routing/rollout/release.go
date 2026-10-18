@@ -341,7 +341,8 @@ func (r *ReleaseReconciler) eligibleRecovery(ctx context.Context, namespace stri
 		return nil
 	}
 	rev := &networkv1alpha1.FabricRouterRevision{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: rec.TargetRevisionRef.Name}, rev)
+	// Around the cache: a revision not cached yet is not gone.
+	err := r.reader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: rec.TargetRevisionRef.Name}, rev)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}

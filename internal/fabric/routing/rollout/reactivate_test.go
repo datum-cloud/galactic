@@ -283,3 +283,30 @@ func TestReactivationRequiresRunningRevision(t *testing.T) {
 			d.Spec.ActiveRevisionRef.Name)
 	}
 }
+
+// TestPromotionReadsRecoveryAroundCache: a recovery target the cache has
+// not seen yet is read from the API server, not dropped as gone.
+func TestPromotionReadsRecoveryAroundCache(t *testing.T) {
+	running := routerRevision("edge-bbbbbbbbbb", digestB, "")
+	f := newFakeFleet(t, map[string]string{"a1": "a"}, running)
+	f.committedOn("a1", f.rev, 1, nil)
+	f.r.APIReader = f.c
+	f.r.Client = interceptor.NewClient(f.c.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			if _, ok := obj.(*networkv1alpha1.FabricRouterRevision); ok && key.Name == f.rev.Name {
+				return apierrors.NewNotFound(networkv1alpha1.GroupVersion.WithResource("fabricrouterrevisions").
+					GroupResource(), key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	f.releaseOf(relName, 1, running, nil, "a1")
+	f.reconcile(relName)
+	d := f.deployment("a1")
+	if d.Spec.ActivationEpoch != 2 || d.Spec.Recovery.TargetRevisionRef == nil ||
+		d.Spec.Recovery.TargetRevisionRef.Name != f.rev.Name {
+		t.Errorf("a1 at epoch %d with recovery %+v; want promoted recovering to %s", d.Spec.ActivationEpoch,
+			d.Spec.Recovery, f.rev.Name)
+	}
+}

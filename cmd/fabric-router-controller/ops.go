@@ -150,7 +150,8 @@ promotion, for good; it needs deployment names. --reactivate promotes
 each named deployment's active revision again, as a new epoch, instead
 of its candidate, so a node that lost its state starts from it; each must
 report that revision committed. A deployment the rollout manager would
-refuse is refused here: named, it is an error; otherwise it is left out.`,
+refuse is refused here: named, it is an error; otherwise it is left out,
+and why is printed on standard error.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := opsClient()
@@ -158,6 +159,9 @@ refuse is refused here: named, it is an error; otherwise it is left out.`,
 				return err
 			}
 			spec.Namespace, spec.Name, spec.Deployments = namespace, args[0], args[1:]
+			spec.Omitted = func(deployment string, reason error) {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "left out %s: %v\n", deployment, reason)
+			}
 			auth, err := ops.BuildRelease(cmd.Context(), c, spec, time.Now())
 			if err != nil {
 				return err

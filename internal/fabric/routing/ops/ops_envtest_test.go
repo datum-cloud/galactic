@@ -28,6 +28,7 @@ import (
 	"go.datum.net/galactic/internal/fabric/routing/controller"
 	"go.datum.net/galactic/internal/fabric/routing/frrimport"
 	"go.datum.net/galactic/internal/fabric/routing/revision"
+	"go.datum.net/galactic/internal/fabric/routing/rollout"
 )
 
 const (
@@ -565,9 +566,15 @@ func TestReleaseRefusesRevokedCredential(t *testing.T) {
 		"uses credential "+credentialName+" (Secret UID "+string(secret.UID)+"), which is revoked") {
 		t.Errorf("a revoked credential: %v", err)
 	}
+	fleetWide.Omitted = func(d string, reason error) {
+		if d != nodeA || !strings.Contains(reason.Error(), "which is revoked") {
+			t.Errorf("omitted %s: %v", d, reason)
+		}
+	}
 	if _, err := BuildRelease(ctx, c, fleetWide, now); !errors.Is(err, ErrNothingToRelease) {
 		t.Errorf("a revoked credential, fleet-wide: %v, want it left out", err)
 	}
+	fleetWide.Omitted = nil
 
 	if err := c.Delete(ctx, secret); err != nil {
 		t.Fatal(err)
@@ -608,9 +615,15 @@ func TestReleaseRefusesUnreadableCredential(t *testing.T) {
 		!strings.Contains(err.Error(), "cannot read Secrets in namespace "+ns) {
 		t.Errorf("an unreadable credential: %v", err)
 	}
+	omitted := map[string]error{}
 	if _, err := BuildRelease(ctx, c, ReleaseSpec{Namespace: ns, Name: "unreadable", RoutingDomain: domain,
-		FleetSequence: 1}, now); !errors.Is(err, ErrNothingToRelease) {
+		FleetSequence: 1, Omitted: func(d string, reason error) { omitted[d] = reason }},
+		now); !errors.Is(err, ErrNothingToRelease) {
 		t.Errorf("an unreadable credential, fleet-wide: %v, want it left out", err)
+	}
+	var denied *rollout.CredentialAccessError
+	if reason := omitted[nodeA]; len(omitted) != 1 || !errors.As(reason, &denied) {
+		t.Errorf("omitted %v, want %s reported with the unreadable credential", omitted, nodeA)
 	}
 }
 

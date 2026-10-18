@@ -57,6 +57,10 @@ type ReleaseSpec struct {
 	Reactivate bool
 	// StartWithin bounds when the release may start; zero leaves it open.
 	StartWithin time.Duration
+	// Omitted, when set, hears of each deployment a release without
+	// Deployments leaves out because the rollout manager would refuse it,
+	// and why.
+	Omitted func(deployment string, reason error)
 }
 
 // ErrNothingToRelease is a release that would promote nothing.
@@ -108,60 +112,83 @@ func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 	}
 	explicit := len(spec.Deployments) > 0
 	for i := range deps {
-		d := &deps[i]
-		if spec.Reactivate {
-			if err := reactivatable(d); err != nil {
-				return nil, err
-			}
-		} else if d.Spec.CandidateRevisionRef == nil {
-			if explicit {
-				return nil, fmt.Errorf("deployment %s has no candidate revision", d.Name)
-			}
-			continue
-		}
-		which, ref := "candidate", d.Spec.CandidateRevisionRef
-		if spec.Reactivate {
-			which, ref = "active", d.Spec.ActiveRevisionRef
-		}
-		rev := &networkv1alpha1.FabricRouterRevision{}
-		if err := c.Get(ctx, types.NamespacedName{Namespace: d.Namespace, Name: ref.Name}, rev); err != nil {
-			if apierrors.IsNotFound(err) && !explicit {
-				continue
-			}
-			return nil, fmt.Errorf("deployment %s's %s revision %s: %w", d.Name, which, ref.Name, err)
-		}
-		runs := d.Spec.ActiveRevisionRef != nil && d.Spec.ActiveRevisionRef.Name == rev.Name &&
-			d.Spec.ActivationDependencyDigest == rev.Spec.ActivationDependencyDigest
-		if runs && !explicit {
-			continue
-		}
-		target := networkv1alpha1.FabricReleaseTarget{
-			Deployment: d.Name, DeploymentUID: string(d.UID),
-			Revision: rev.Name, ActivationDependencyDigest: rev.Spec.ActivationDependencyDigest,
-			Retire: spec.Retire, Reactivate: spec.Reactivate,
-		}
-		credentials, err := rollout.Credentials(ctx, c, d.Namespace, rev)
-		var denied *rollout.CredentialAccessError
+		target, err := releaseTarget(ctx, c, spec, &deps[i], explicit)
+		var refused refusal
 		switch {
-		case errors.As(err, &denied) && !explicit:
-			continue
-		case err != nil:
-			return nil, fmt.Errorf("deployment %s's %s revision %s: %w", d.Name, which, rev.Name, err)
-		}
-		// The rollout manager fails a release on any target it cannot
-		// promote, so refuse here what it would refuse there.
-		if err := rollout.CheckTarget(d, rev, target, credentials); err != nil {
-			if explicit {
-				return nil, err
+		case errors.As(err, &refused) && !explicit:
+			if spec.Omitted != nil {
+				spec.Omitted(deps[i].Name, refused.err)
 			}
-			continue
+		case err != nil:
+			return nil, err
+		case target != nil:
+			auth.Spec.Deployments = append(auth.Spec.Deployments, *target)
 		}
-		auth.Spec.Deployments = append(auth.Spec.Deployments, target)
 	}
 	if len(auth.Spec.Deployments) == 0 {
 		return nil, ErrNothingToRelease
 	}
 	return auth, nil
+}
+
+// refusal is a deployment the rollout manager would refuse to promote.
+type refusal struct{ err error }
+
+func (r refusal) Error() string { return r.err.Error() }
+func (r refusal) Unwrap() error { return r.err }
+
+// releaseTarget returns d's release target under spec: its candidate
+// revision, or with Reactivate its active revision. With explicit unset it
+// returns nil for a deployment with nothing to release, and a refusal for
+// one the rollout manager would refuse; with explicit set both are errors.
+func releaseTarget(ctx context.Context, c client.Client, spec ReleaseSpec, d *networkv1alpha1.FabricRouterDeployment,
+	explicit bool) (*networkv1alpha1.FabricReleaseTarget, error) {
+	if spec.Reactivate {
+		if err := reactivatable(d); err != nil {
+			return nil, err
+		}
+	} else if d.Spec.CandidateRevisionRef == nil {
+		if explicit {
+			return nil, fmt.Errorf("deployment %s has no candidate revision", d.Name)
+		}
+		return nil, nil
+	}
+	which, ref := "candidate", d.Spec.CandidateRevisionRef
+	if spec.Reactivate {
+		which, ref = "active", d.Spec.ActiveRevisionRef
+	}
+	rev := &networkv1alpha1.FabricRouterRevision{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: d.Namespace, Name: ref.Name}, rev); err != nil {
+		err = fmt.Errorf("deployment %s's %s revision %s: %w", d.Name, which, ref.Name, err)
+		if apierrors.IsNotFound(err) {
+			return nil, refusal{err}
+		}
+		return nil, err
+	}
+	runs := d.Spec.ActiveRevisionRef != nil && d.Spec.ActiveRevisionRef.Name == rev.Name &&
+		d.Spec.ActivationDependencyDigest == rev.Spec.ActivationDependencyDigest
+	if runs && !explicit {
+		return nil, nil
+	}
+	target := networkv1alpha1.FabricReleaseTarget{
+		Deployment: d.Name, DeploymentUID: string(d.UID),
+		Revision: rev.Name, ActivationDependencyDigest: rev.Spec.ActivationDependencyDigest,
+		Retire: spec.Retire, Reactivate: spec.Reactivate,
+	}
+	credentials, err := rollout.Credentials(ctx, c, d.Namespace, rev)
+	var denied *rollout.CredentialAccessError
+	switch {
+	case errors.As(err, &denied):
+		return nil, refusal{fmt.Errorf("deployment %s: %w", d.Name, err)}
+	case err != nil:
+		return nil, fmt.Errorf("deployment %s's %s revision %s: %w", d.Name, which, rev.Name, err)
+	}
+	// The rollout manager fails a release on any target it cannot
+	// promote, so refuse here what it would refuse there.
+	if err := rollout.CheckTarget(d, rev, target, credentials); err != nil {
+		return nil, refusal{err}
+	}
+	return &target, nil
 }
 
 // reactivatable reports why d's active revision cannot be re-activated:

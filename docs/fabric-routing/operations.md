@@ -148,7 +148,9 @@ release fails that target with `InvalidTarget`, naming the deployment and the
 namespace, rather than waiting and blocking its routing domain.
 `release create` makes the same check with the operator's access: a deployment
 using a credential it may not read is an error when named and left out
-otherwise.
+otherwise. Every deployment a fleet-wide `release create` leaves out because
+the rollout manager would refuse it is printed on standard error with the
+reason.
 
 An `EmergencyWithdrawal` release names the prefixes it withdraws, may start
 beside an outstanding release, and adds those prefixes to the deployment's
