@@ -8,6 +8,9 @@ package rbaccheck
 import (
 	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -80,20 +83,109 @@ func Apply(t *testing.T, c client.Client, paths ...string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, doc := range strings.Split(string(data), "\n---\n") {
-			obj := &unstructured.Unstructured{}
-			if err := yaml.Unmarshal([]byte(doc), &obj.Object); err != nil {
-				t.Fatal(err)
-			}
-			if len(obj.Object) == 0 {
-				continue
-			}
-			if err := c.Create(context.Background(), obj); err != nil {
-				t.Fatalf("apply %s %s: %v", obj.GetKind(), obj.GetName(), err)
-			}
+		ApplyYAML(t, c, data)
+	}
+}
+
+// ApplyYAML creates every object in a YAML stream whose kind is one of
+// kinds, or every object when kinds is empty.
+func ApplyYAML(t *testing.T, c client.Client, data []byte, kinds ...string) {
+	t.Helper()
+	for _, obj := range Objects(t, data) {
+		if len(kinds) > 0 && !slices.Contains(kinds, obj.GetKind()) {
+			continue
+		}
+		if err := c.Create(context.Background(), obj); err != nil {
+			t.Fatalf("apply %s %s: %v", obj.GetKind(), obj.GetName(), err)
 		}
 	}
 }
+
+// Objects decodes a YAML stream.
+func Objects(t *testing.T, data []byte) []*unstructured.Unstructured {
+	t.Helper()
+	var out []*unstructured.Unstructured
+	for _, doc := range strings.Split(string(data), "\n---\n") {
+		obj := &unstructured.Unstructured{}
+		if err := yaml.Unmarshal([]byte(doc), &obj.Object); err != nil {
+			t.Fatal(err)
+		}
+		if len(obj.Object) > 0 {
+			out = append(out, obj)
+		}
+	}
+	return out
+}
+
+// RBACKinds are the kinds that grant access.
+var RBACKinds = []string{"ServiceAccount", "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding"}
+
+// Kustomize builds an overlay of the resources and components directories,
+// in that order, with kustomize or kubectl, and returns the YAML stream. It
+// skips the test when neither is installed, and fails it when the build
+// fails; Build returns that error instead.
+func Kustomize(t *testing.T, resources, components []string) []byte {
+	t.Helper()
+	out, err := Build(t, resources, components)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// Build is Kustomize returning the build's error.
+func Build(t *testing.T, resources, components []string) ([]byte, error) {
+	t.Helper()
+	var cmd []string
+	if path, err := exec.LookPath("kustomize"); err == nil {
+		cmd = []string{path, "build"}
+	} else if path, err := exec.LookPath("kubectl"); err == nil {
+		cmd = []string{path, "kustomize"}
+	} else {
+		t.Skip("install kustomize or kubectl for the manifest check")
+	}
+	dir := t.TempDir()
+	rel := func(paths []string) []string {
+		out := make([]string, 0, len(paths))
+		for _, p := range paths {
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// kustomize refuses an absolute path to another kustomization.
+			r, err := filepath.Rel(dir, abs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, r)
+		}
+		return out
+	}
+	k, err := yaml.Marshal(map[string][]string{"resources": rel(resources), "components": rel(components)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), k, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	build := exec.CommandContext(t.Context(), cmd[0], append(cmd[1:], dir)...)
+	build.Stderr = &stderr
+	out, err := build.Output()
+	if err != nil {
+		return nil, &BuildError{Err: err, Stderr: stderr.String()}
+	}
+	return out, nil
+}
+
+// BuildError is a failed kustomize build and what it printed.
+type BuildError struct {
+	Err    error
+	Stderr string
+}
+
+func (e *BuildError) Error() string { return e.Err.Error() + ": " + e.Stderr }
+func (e *BuildError) Unwrap() error { return e.Err }
 
 // Check asks whether user may make each call, and fails the test for each
 // allowed call that is denied and each denied call that is allowed.
