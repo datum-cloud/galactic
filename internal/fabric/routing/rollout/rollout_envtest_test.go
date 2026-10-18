@@ -537,3 +537,69 @@ func TestRolloutReactivation(t *testing.T) {
 		return phase(c, "reactivate") == networkv1alpha1.FabricReleasePhaseCompleted
 	})
 }
+
+// TestRolloutRefusesUnreadableCredential: with the shipped RBAC the
+// controller cannot read Secrets outside its namespace, so a release there
+// of a revision using a credential fails its target visibly, naming the
+// deployment and the namespace, rather than retrying and blocking its
+// routing domain.
+func TestRolloutRefusesUnreadableCredential(t *testing.T) {
+	c := startRolloutAs(t, true)
+	seed(t, c)
+	ctx := context.Background()
+	eventually(t, "a revision", func() bool {
+		r := &networkv1alpha1.BGPRouter{}
+		return c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: testNode}, r) == nil &&
+			r.Status.Fabric != nil && r.Status.Fabric.LatestRevision != ""
+	})
+	const other = "elsewhere"
+	src := latestRevision(t, c)
+	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: other}}); err != nil {
+		t.Fatal(err)
+	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: other, Name: secretName}}
+	if err := c.Create(ctx, secret); err != nil {
+		t.Fatal(err)
+	}
+	rev := &networkv1alpha1.FabricRouterRevision{
+		ObjectMeta: metav1.ObjectMeta{Namespace: other, Name: src.Name, Labels: src.Labels},
+		Spec:       *src.Spec.DeepCopy(),
+	}
+	rev.Spec.Configuration.Peers[0].Spec.AuthSecretRef = &networkv1alpha1.LocalSecretRef{Name: secretName}
+	if err := c.Create(ctx, rev); err != nil {
+		t.Fatal(err)
+	}
+	dep := &networkv1alpha1.FabricRouterDeployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: other, Name: testNode},
+		Spec: networkv1alpha1.FabricRouterDeploymentSpec{
+			RouterRef: networkv1alpha1.FabricObjectIdentity{Name: testNode, UID: "elsewhere-router-uid"},
+			Target:    networkv1alpha1.FabricNodeIdentity{NodeName: testNode, NodeUID: "elsewhere-node-uid"},
+			Source:    networkv1alpha1.FabricConfigSourceCRD,
+		},
+	}
+	if err := c.Create(ctx, dep); err != nil {
+		t.Fatal(err)
+	}
+	rel := newRelease("unreadable", 1, dep, rev)
+	rel.Namespace = other
+	if err := c.Create(ctx, rel); err != nil {
+		t.Fatal(err)
+	}
+	var cond *metav1.Condition
+	eventually(t, "the release cancelled", func() bool {
+		a := &networkv1alpha1.FabricReleaseAuthorization{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: other, Name: rel.Name}, a); err != nil {
+			return false
+		}
+		cond = meta.FindStatusCondition(a.Status.Conditions, ConditionProgressing)
+		return a.Status.Phase == networkv1alpha1.FabricReleasePhaseCancelled
+	})
+	if cond == nil || cond.Reason != reasonInvalidTarget || !strings.Contains(cond.Message, "deployment "+testNode) ||
+		!strings.Contains(cond.Message, "cannot read Secrets in namespace "+other) {
+		t.Errorf("condition %+v, want InvalidTarget naming the deployment and namespace", cond)
+	}
+	got := &networkv1alpha1.FabricRouterDeployment{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(dep), got); err != nil || got.Spec.ActivationEpoch != 0 {
+		t.Errorf("deployment %+v, %v; want nothing promoted", got.Spec, err)
+	}
+}

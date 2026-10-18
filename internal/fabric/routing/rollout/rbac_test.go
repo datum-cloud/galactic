@@ -5,6 +5,7 @@ package rollout
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -88,8 +89,8 @@ func TestControllerRBACCoversEveryCall(t *testing.T) {
 
 // TestCredentialsWithShippedRBAC: the shipped RBAC lets the rollout
 // manager read a credential's Secret metadata by name in its namespace,
-// uncached, and nowhere else: a Secret elsewhere is an error, not
-// unresolvable, so the release is never promoted past it.
+// uncached, and nowhere else: a Secret elsewhere is a
+// CredentialAccessError, which fails the target.
 func TestCredentialsWithShippedRBAC(t *testing.T) {
 	cfg := rbaccheck.Start(t)
 	admin, err := client.New(cfg, client.Options{})
@@ -129,7 +130,8 @@ func TestCredentialsWithShippedRBAC(t *testing.T) {
 	if got, err := Credentials(ctx, c, testNS, missing); err != nil || len(got) != 0 {
 		t.Errorf("a missing Secret: %v, %v, want it left out", got, err)
 	}
-	if _, err := Credentials(ctx, c, "elsewhere", rev); err == nil {
-		t.Error("read a Secret outside the controller's namespace")
+	var denied *CredentialAccessError
+	if _, err := Credentials(ctx, c, "elsewhere", rev); !errors.As(err, &denied) || denied.Secret != secretName {
+		t.Errorf("a Secret outside the controller's namespace: %v, want a CredentialAccessError", err)
 	}
 }

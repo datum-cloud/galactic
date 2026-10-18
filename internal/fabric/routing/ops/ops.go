@@ -141,7 +141,11 @@ func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 			Retire: spec.Retire, Reactivate: spec.Reactivate,
 		}
 		credentials, err := rollout.Credentials(ctx, c, d.Namespace, rev)
-		if err != nil {
+		var denied *rollout.CredentialAccessError
+		switch {
+		case errors.As(err, &denied) && !explicit:
+			continue
+		case err != nil:
 			return nil, fmt.Errorf("deployment %s's %s revision %s: %w", d.Name, which, rev.Name, err)
 		}
 		// The rollout manager fails a release on any target it cannot

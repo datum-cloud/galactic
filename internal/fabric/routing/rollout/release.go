@@ -230,7 +230,12 @@ func (r *ReleaseReconciler) target(ctx context.Context, auth *networkv1alpha1.Fa
 		return nil, nil, err
 	}
 	credentials, err := Credentials(ctx, r.reader(), auth.Namespace, rev)
-	if err != nil {
+	var denied *CredentialAccessError
+	switch {
+	case errors.As(err, &denied):
+		// Retrying cannot help, and a release left pending blocks its domain.
+		return nil, nil, targetError{fmt.Sprintf("deployment %s: %s", dep.Name, denied)}
+	case err != nil:
 		return nil, nil, err
 	}
 	if err := CheckTarget(dep, rev, t, credentials); err != nil {
@@ -239,10 +244,26 @@ func (r *ReleaseReconciler) target(ctx context.Context, auth *networkv1alpha1.Fa
 	return dep, rev, nil
 }
 
+// CredentialAccessError is a credential whose Secret the reader may not
+// read, such as one outside the controller's namespace. Like a Secret that
+// does not exist, it leaves the credential unresolvable.
+type CredentialAccessError struct {
+	Namespace, Secret, Revision string
+	Err                         error
+}
+
+func (e *CredentialAccessError) Error() string {
+	return fmt.Sprintf("the controller cannot read Secrets in namespace %s, so credential %s that revision %s uses "+
+		"cannot be resolved: %v", e.Namespace, e.Secret, e.Revision, e.Err)
+}
+
+func (e *CredentialAccessError) Unwrap() error { return e.Err }
+
 // Credentials maps each Secret rev's peers authenticate with to its
 // current UID, reading only the Secrets' metadata from r. A Secret that
-// does not exist is left out, so a check treats it as unresolvable; any
-// other read error is returned.
+// does not exist is left out, so a check treats it as unresolvable; one
+// the reader may not read is a *CredentialAccessError; any other read
+// error is returned.
 func Credentials(ctx context.Context, r client.Reader, namespace string,
 	rev *networkv1alpha1.FabricRouterRevision) (map[string]string, error) {
 	out := map[string]string{}
@@ -253,6 +274,8 @@ func Credentials(ctx context.Context, r client.Reader, namespace string,
 		switch {
 		case apierrors.IsNotFound(err):
 			continue
+		case apierrors.IsForbidden(err):
+			return nil, &CredentialAccessError{Namespace: namespace, Secret: name, Revision: rev.Name, Err: err}
 		case err != nil:
 			return nil, fmt.Errorf("read Secret %s's metadata: %w", name, err)
 		}
@@ -319,10 +342,12 @@ func (r *ReleaseReconciler) eligibleRecovery(ctx context.Context, namespace stri
 	}
 	if err == nil {
 		credentials, err := Credentials(ctx, r.reader(), namespace, rev)
-		if err != nil {
+		var denied *CredentialAccessError
+		if err != nil && !errors.As(err, &denied) {
 			return err
 		}
-		if rev.Spec.ActivationDependencyDigest == rec.TargetDependencyDigest &&
+		// An unreadable credential leaves the target unrestorable.
+		if err == nil && rev.Spec.ActivationDependencyDigest == rec.TargetDependencyDigest &&
 			revokedOrigination(rec.RevokedPrefixes, rev) == "" &&
 			credentialProblem(rec.RevokedCredentials, rev, credentials) == "" {
 			return nil

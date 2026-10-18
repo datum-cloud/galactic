@@ -15,6 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -578,4 +579,48 @@ func TestReleaseRefusesRevokedCredential(t *testing.T) {
 	if _, err := BuildRelease(ctx, c, named, now); err != nil {
 		t.Errorf("a recreated Secret: %v", err)
 	}
+}
+
+// TestReleaseRefusesUnreadableCredential: a credential whose Secret the
+// operator may not read is an error naming it when its deployment is
+// named, and leaves the deployment out otherwise.
+func TestReleaseRefusesUnreadableCredential(t *testing.T) {
+	admin := startAPI(t)
+	ctx := context.Background()
+	node := fleet(t, admin, networkv1alpha1.FabricConfigSourceCRD, nodeA)
+	rev := buildRevision(t, node, func(s string) string {
+		return strings.Replace(s, "advertisement-interval 30", "advertisement-interval 10", 1)
+	})
+	rev.Spec.Configuration.Peers[0].Spec.AuthSecretRef = &networkv1alpha1.LocalSecretRef{Name: credentialName}
+	if err := admin.Create(ctx, rev); err != nil {
+		t.Fatal(err)
+	}
+	d := edgeA(t, admin)
+	d.Spec.CandidateRevisionRef = &networkv1alpha1.LocalObjectRef{Name: rev.Name}
+	if err := admin.Update(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	c := secretsForbidden{admin}
+	now := time.Now()
+	named := ReleaseSpec{Namespace: ns, Name: "unreadable", RoutingDomain: domain, FleetSequence: 1,
+		Deployments: []string{nodeA}}
+	if _, err := BuildRelease(ctx, c, named, now); err == nil ||
+		!strings.Contains(err.Error(), "cannot read Secrets in namespace "+ns) {
+		t.Errorf("an unreadable credential: %v", err)
+	}
+	if _, err := BuildRelease(ctx, c, ReleaseSpec{Namespace: ns, Name: "unreadable", RoutingDomain: domain,
+		FleetSequence: 1}, now); !errors.Is(err, ErrNothingToRelease) {
+		t.Errorf("an unreadable credential, fleet-wide: %v, want it left out", err)
+	}
+}
+
+// secretsForbidden is a client that may not read any Secret.
+type secretsForbidden struct{ client.Client }
+
+func (c secretsForbidden) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	if md, ok := obj.(*metav1.PartialObjectMetadata); ok && md.Kind == "Secret" {
+		return apierrors.NewForbidden(corev1.Resource("secrets"), key.Name, errors.New("denied"))
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
 }

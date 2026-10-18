@@ -132,8 +132,13 @@ Credentials are revoked by Secret UID, in `spec.recovery.revokedCredentials`,
 so a Secret recreated under the same name is a new credential. To check them
 the rollout manager reads the metadata of each Secret a revision names, by name
 and around its cache. Its RBAC allows only `get` on Secrets in
-`galactic-system`, the namespace of the fabric routers. `release create` makes
-the same check, so it needs the same access.
+`galactic-system`, the namespace of the fabric routers. A credential whose
+Secret it may not read, such as one in another namespace, cannot be resolved:
+the release fails that target with `InvalidTarget`, naming the deployment and
+the namespace, rather than waiting and blocking its routing domain.
+`release create` makes the same check with the operator's access: a deployment
+using a credential it may not read is an error when named and left out
+otherwise.
 
 An `EmergencyWithdrawal` release names the prefixes it withdraws, may start
 beside an outstanding release, and adds those prefixes to the deployment's

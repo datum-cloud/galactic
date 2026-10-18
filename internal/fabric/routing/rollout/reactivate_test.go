@@ -5,12 +5,15 @@ package rollout
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
@@ -207,5 +210,29 @@ func TestReactivationDropsRevokedRecovery(t *testing.T) {
 				t.Errorf("a dropped recovery target left its digest %s", d.Spec.Recovery.TargetDependencyDigest)
 			}
 		})
+	}
+}
+
+// TestReactivationDropsUnreadableRecovery: a recovery target whose
+// credential the controller may not read is unrestorable, so the
+// re-activation records none rather than retrying.
+func TestReactivationDropsUnreadableRecovery(t *testing.T) {
+	cred := routerRevision("edge-cccccccccc", digestC, secretName)
+	running := routerRevision("edge-bbbbbbbbbb", digestB, "")
+	funcs := &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+		obj client.Object, opts ...client.GetOption) error {
+		if md, ok := obj.(*metav1.PartialObjectMetadata); ok && md.Kind == "Secret" {
+			return apierrors.NewForbidden(corev1.Resource("secrets"), key.Name, errors.New("denied"))
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}}
+	f := newFakeFleetWith(t, map[string]string{"a1": "a"}, funcs, cred, running, credentialSecret(secretUID))
+	f.committedOn("a1", running, 2, recoveryTo(cred))
+	f.releaseOf(relName, 1, running, reactivate, "a1")
+	f.reconcile(relName)
+	d := f.deployment("a1")
+	if d.Spec.ActivationEpoch != 3 || d.Spec.Recovery.TargetRevisionRef != nil {
+		t.Errorf("a1 at epoch %d with recovery %+v; want re-activated with no recovery target",
+			d.Spec.ActivationEpoch, d.Spec.Recovery)
 	}
 }
