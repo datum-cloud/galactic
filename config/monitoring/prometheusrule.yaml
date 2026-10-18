@@ -277,10 +277,10 @@ spec:
               time() - max without (pod, instance) (last_over_time(galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller"}[2m])) > 300
               or
               max without (pod, instance, source, effective_source) (last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller"}[2m]))
-                unless
+                unless ignoring (source, effective_source)
               max without (pod, instance) (last_over_time(galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller"}[2m]))
             )
-            and
+            and ignoring (source, effective_source)
             max without (pod, instance, source, effective_source) (
               last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller", source=~"Shadow|CRD"}[2m])
               or
