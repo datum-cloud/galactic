@@ -225,10 +225,14 @@ on its ConfigMap is held to nothing but its compile result.
 Each carries a `runbook_url` into infra's galactic runbook, anchored at the
 alert's name. Only the leader exports the fleet, and a leader change leaves
 its series absent for up to about a minute, so the rules read each series'
-last value over 2 minutes and aggregate away the exporting pod: a leader
-change neither resets a pending alert nor resolves a firing one, and an alert
-on a deleted deployment or a finished release clears up to 2 minutes late.
-`fabric-router-controller status` shows the same state one line per router.
+last value over 2 minutes and aggregate away only `pod` and `instance`, the
+labels that differ between the two replicas: a leader change neither resets a
+pending alert nor resolves a firing one, and an alert on a deleted deployment
+or a finished release clears up to 2 minutes late. Every other label is kept,
+so where the rules run centrally over many clusters an alert carries its
+`cluster` label, and one cluster's failure is never hidden by another's
+healthy series. `fabric-router-controller status` shows the same state one
+line per router.
 
 ## Ports
 

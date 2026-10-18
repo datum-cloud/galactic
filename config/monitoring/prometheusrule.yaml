@@ -186,13 +186,17 @@ spec:
     # absent for up to about a minute: the old leader stops at once, and the
     # new one exports from its first scrape after it wins the lease. Every
     # rule therefore reads each series' last value over 2 minutes and
-    # aggregates away the pod, so a leader change neither resets a pending
-    # alert nor resolves a firing one. In exchange, an alert on a deleted
-    # object or a finished release clears up to 2 minutes late. Every series
-    # describes a FabricRouterDeployment, release or fabric-class BGPRouter,
-    # which exist only once routing goes through the API, so a cluster on
-    # ConfigMaps alone has nothing here to fire on; a deployment left on its
-    # ConfigMap is held to nothing but its compile result.
+    # aggregates away only what differs between the replicas, pod and
+    # instance, so a leader change neither resets a pending alert nor
+    # resolves a firing one. Every other label, such as the cluster label a
+    # central evaluator adds, is kept, so an alert names its cluster and one
+    # cluster's alert is never masked by another's healthy series. In
+    # exchange, an alert on a deleted object or a finished release clears
+    # up to 2 minutes late. Every series describes a FabricRouterDeployment,
+    # release or fabric-class BGPRouter, which exist only once routing goes
+    # through the API, so a cluster on ConfigMaps alone has nothing here to
+    # fire on; a deployment left on its ConfigMap is held to nothing but its
+    # compile result.
     - name: fabric-routing
       rules:
         # The activation failed and nothing may be restored: the router runs
@@ -200,7 +204,7 @@ spec:
         # blocked until an operator confirms recovery.
         - alert: FabricRoutingNoEligibleRecovery
           expr: >-
-            max by (namespace, deployment, node) (
+            max without (pod, instance, type, status, reason) (
               last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Degraded", status="True", reason="NoEligibleRecovery"}[2m])
             ) == 1
           for: 5m
@@ -224,7 +228,7 @@ spec:
         # covers.
         - alert: FabricRoutingDeploymentDegraded
           expr: >-
-            max by (namespace, deployment, node, reason) (
+            max without (pod, instance, type, status) (
               last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Degraded", status="True", reason!~"NoEligibleRecovery|Recovered"}[2m])
             ) == 1
           for: 15m
@@ -246,7 +250,7 @@ spec:
         # it.
         - alert: FabricRoutingRecoveryConflict
           expr: >-
-            max by (namespace, deployment, node) (
+            max without (pod, instance, type, status, reason) (
               last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="RecoveryConflict", status="True"}[2m])
             ) == 1
           for: 10m
@@ -270,14 +274,14 @@ spec:
         - alert: FabricRoutingAgentHeartbeatStale
           expr: >-
             (
-              time() - max by (namespace, deployment, node) (last_over_time(galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller"}[2m])) > 300
+              time() - max without (pod, instance) (last_over_time(galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller"}[2m])) > 300
               or
-              max by (namespace, deployment, node) (last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller"}[2m]))
-                unless on (namespace, deployment)
-              last_over_time(galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller"}[2m])
+              max without (pod, instance, source, effective_source) (last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller"}[2m]))
+                unless
+              max without (pod, instance) (last_over_time(galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller"}[2m]))
             )
-            and on (namespace, deployment)
-            max by (namespace, deployment) (
+            and
+            max without (pod, instance, source, effective_source) (
               last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller", source=~"Shadow|CRD"}[2m])
               or
               last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller", effective_source=~"Shadow|CRD"}[2m])
@@ -299,7 +303,7 @@ spec:
         # it failed reports Recovered or an operator verifies recovery.
         - alert: FabricRoutingReleaseFailed
           expr: >-
-            max by (namespace, release, routing_domain) (
+            max without (pod, instance, type, phase) (
               last_over_time(galactic_fabric_routing_release_outstanding{job="fabric-router-controller", phase="Failed"}[2m])
             ) == 1
           for: 30m
@@ -319,7 +323,7 @@ spec:
         # manager cannot tell whether it committed.
         - alert: FabricRoutingReleaseUnknown
           expr: >-
-            max by (namespace, release, routing_domain) (
+            max without (pod, instance, type, phase) (
               last_over_time(galactic_fabric_routing_release_outstanding{job="fabric-router-controller", phase="Unknown"}[2m])
             ) == 1
           for: 15m
@@ -339,7 +343,7 @@ spec:
         # handoff was written keeps the node on CRD for good.
         - alert: FabricRoutingHandoffPending
           expr: >-
-            max by (namespace, deployment, node) (
+            max without (pod, instance, type, status, reason) (
               last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Accepted", status="False", reason="HandoffPending"}[2m])
             ) == 1
           for: 15m
@@ -360,11 +364,11 @@ spec:
         # never fires.
         - alert: FabricRoutingCandidateRejected
           expr: >-
-            max by (namespace, deployment, node, reason) (
+            max without (pod, instance, type, status) (
               last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Staged", status="False"}[2m])
             ) == 1
-            and on (namespace, deployment)
-            max by (namespace, deployment) (
+            and ignoring (reason)
+            max without (pod, instance, source, effective_source) (
               last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller", effective_source=~"Shadow|CRD"}[2m])
             )
           for: 15m
@@ -387,7 +391,7 @@ spec:
         # The release fails or waits on it, but the router is named here.
         - alert: FabricRoutingPromotionRefused
           expr: >-
-            max by (namespace, deployment, node, reason) (
+            max without (pod, instance, type, status) (
               last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Accepted", status="False", reason=~"PromotionRefused|NotAuthorized|RevisionNotFound"}[2m])
             ) == 1
           for: 15m
@@ -408,7 +412,7 @@ spec:
         # it keeps its last revision and nothing new reaches the node.
         - alert: FabricRoutingRevisionRefused
           expr: >-
-            max by (namespace, router, node, reason) (
+            max without (pod, instance) (
               last_over_time(galactic_fabric_routing_router_accepted{job="fabric-router-controller"}[2m])
             ) == 0
           for: 15m
@@ -429,7 +433,7 @@ spec:
         # ten minutes is well past that.
         - alert: FabricRoutingCollectFailing
           expr: >-
-            max by (kind) (
+            max without (pod, instance) (
               last_over_time(galactic_fabric_routing_collect_success{job="fabric-router-controller"}[2m])
             ) == 0
           for: 10m
