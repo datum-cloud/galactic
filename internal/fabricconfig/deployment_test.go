@@ -88,6 +88,10 @@ type fakeRouter struct {
 	reloads   int
 	peerState string
 	reloadErr error
+	// runningErr fails Running, as vtysh does while bgpd is down.
+	runningErr error
+	// diffs counts dry runs.
+	diffs int
 }
 
 func (f *fakeRouter) Check(_ context.Context, path string) error {
@@ -96,6 +100,7 @@ func (f *fakeRouter) Check(_ context.Context, path string) error {
 }
 
 func (f *fakeRouter) Changes(_ context.Context, path string) (added, removed []string, err error) {
+	f.diffs++
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, err
@@ -128,6 +133,9 @@ func (f *fakeRouter) Reload(_ context.Context, path string) error {
 // Running wraps the configuration as vtysh displays it, with an empty
 // block for a VRF device on the host.
 func (f *fakeRouter) Running(context.Context) (string, error) {
+	if f.runningErr != nil {
+		return "", f.runningErr
+	}
 	return "Building configuration...\n\nCurrent configuration:\n!\nfrr version 10.7.1\n" +
 		"service integrated-vtysh-config\n" + f.get() + "!\nvrf G000000010V\nexit-vrf\n!\nend\n", nil
 }
@@ -305,6 +313,26 @@ func TestDeploymentAgentShadowRestagesWhenRunningChanges(t *testing.T) {
 	got := h.sync()
 	if got.Status.Staged == nil || got.Status.Staged.Class != networkv1alpha1.FabricChangeNone {
 		t.Fatalf("staged once FRR runs the candidate = %+v", got.Status.Staged)
+	}
+}
+
+// A failed vtysh read keeps what was staged rather than restaging.
+func TestDeploymentAgentShadowKeepsStagedWhenFRRSilent(t *testing.T) {
+	d := deployment(networkv1alpha1.FabricConfigSourceShadow)
+	h := newHarness(t, d)
+	h.frr.running = rendered(t, h.revs[0])
+	h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
+		d.Spec.CandidateRevisionRef = &networkv1alpha1.LocalObjectRef{Name: h.revs[1].Name}
+	})
+	before := h.sync().Status.Staged
+	if before == nil || before.Class != networkv1alpha1.FabricChangeNonDisruptive {
+		t.Fatalf("staged = %+v", before)
+	}
+	h.frr.runningErr = errors.New("bgpd is not running")
+	diffs := h.frr.diffs
+	if got := h.sync().Status.Staged; got == nil || got.Revision != before.Revision || h.frr.diffs != diffs {
+		t.Errorf("staged %+v with %d more dry runs after a failed read, want what was staged kept",
+			got, h.frr.diffs-diffs)
 	}
 }
 

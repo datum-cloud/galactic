@@ -40,7 +40,11 @@ k() { docker exec -i "${CP}" kubectl -n "${NS}" "$@"; }
 RESTORE_PEER=""
 UNBLOCK="for t in iptables ip6tables; do while \$t -S OUTPUT | grep -q verify-fabric-routing; do
   \$t -S OUTPUT | grep verify-fabric-routing | head -1 | sed 's/^-A/-D/' | xargs \$t; done; done"
+REMOVE_ROUTE=""
 cleanup() {
+  if [[ -n "${REMOVE_ROUTE}" ]]; then
+    k delete bgpstaticroute "${CHANGE_ROUTE}" --ignore-not-found >/dev/null || true
+  fi
   if [[ -n "${RESTORE_PEER}" ]]; then
     k patch bgppeer "${RESTORE_PEER% *}" --type=merge -p "{\"spec\":{\"peerASN\":${RESTORE_PEER#* }}}" >/dev/null || true
   fi
@@ -167,6 +171,9 @@ echo "ok   every router committed, every session Established"
 
 echo "--- 3. A change release commits a new static route on ${ROUTER}"
 before=$(dep "${ROUTER}" '{.spec.candidateRevisionRef.name}')
+vtysh "${ROUTER}" "show ipv6 route ${CHANGE_PREFIX}" | grep -q static &&
+  fail "${ROUTER} already routes ${CHANGE_PREFIX}, so adding it would change nothing"
+REMOVE_ROUTE=1
 k apply -f - <<EOF
 apiVersion: galactic.datumapis.com/v1alpha1
 kind: BGPStaticRoute
@@ -264,6 +271,7 @@ echo "ok   ${ROUTER}'s agent reports again once the API is back"
 
 echo "--- Cleanup: remove the change"
 k delete bgpstaticroute "${CHANGE_ROUTE}"
+REMOVE_ROUTE=""
 wait_for 120 "a new candidate for ${ROUTER}" candidate_moved "${changed}"
 wait_for 120 "${ROUTER} to stage the removal" staged_matches "${ROUTER}" NonDisruptive
 release "verify-${stamp}-cleanup" "${ROUTER}"

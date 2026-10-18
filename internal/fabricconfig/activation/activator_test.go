@@ -375,6 +375,20 @@ func TestStageIgnoresHostname(t *testing.T) {
 	}
 }
 
+// TestRunningKey: what vtysh adds around a configuration, and the VRF
+// devices on the host, do not change what it means.
+func TestRunningKey(t *testing.T) {
+	conf := "router bgp 64500\n neighbor 2001:db8::1 remote-as 64496\nexit\n"
+	wrapped := "Building configuration...\n\nCurrent configuration:\n!\nfrr version 10.7.1\n" +
+		"hostname host-a\nservice integrated-vtysh-config\n" + conf + "!\nvrf G000000010V\nexit-vrf\n!\nend\n"
+	if RunningKey(conf) != RunningKey(wrapped) {
+		t.Error("vtysh's own lines or a host VRF changed the key")
+	}
+	if RunningKey(conf) == RunningKey(strings.Replace(conf, "64496", "64497", 1)) {
+		t.Error("a routing change kept the key")
+	}
+}
+
 func TestClassify(t *testing.T) {
 	for _, tc := range []struct {
 		added, removed []string
