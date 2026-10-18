@@ -157,7 +157,9 @@ fails. It sets `FABRIC_CONFIGMAPS=false` on `frr-init` and `config-agent`, and
 deletes the `fabric-router-configmaps` Role and RoleBinding, so the agent
 neither reads, watches nor raises events on any ConfigMap, the node's own or the
 legacy shared `fabric-config`, and could not if it tried. It keeps the events
-permission, for the `MappedNextHopReset` events on the agent's own Pod.
+permission, for the `MappedNextHopReset` events on the agent's own Pod. The
+opt-in fabric-api sidecar's `fabric-api` ConfigMap (the cell's site and name)
+is not routing configuration and stays.
 
 With it, `frr-init` starts FRR as follows, and never from a ConfigMap:
 
@@ -323,7 +325,7 @@ on its ConfigMap is held to nothing but its compile result.
 | `FabricRoutingAgentHeartbeatStale`  | on Shadow or CRD, by spec or as reported, and no report for 5m, or never               | 5m  | warning  |
 | `FabricRoutingReleaseFailed`        | a failed release still blocks its routing domain                                       | 30m | warning  |
 | `FabricRoutingReleaseUnknown`       | a release is `Unknown`                                                                 | 15m | warning  |
-| `FabricRoutingHandoffPending`       | `Accepted` False with reason `HandoffPending`                                          | 15m | warning  |
+| `FabricRoutingHandoffPending`       | `Accepted` False with reason `HandoffPending` or `ConfigMapRetired`                    | 15m | warning  |
 | `FabricRoutingCandidateRejected`    | `Staged` False on a node staging on Shadow or CRD                                      | 15m | warning  |
 | `FabricRoutingPromotionRefused`     | `Accepted` False with reason `PromotionRefused`, `NotAuthorized` or `RevisionNotFound` | 15m | warning  |
 | `FabricRoutingRevisionRefused`      | the controller refuses a fabric router's inputs                                        | 15m | warning  |

@@ -696,7 +696,7 @@ nodes' egress shard groups, and the fabric-api looking glass. Every alert
 carries `service: galactic`, `team: connect` and a `runbook_url`.
 
 | Alert                                | Fires when                                                                | For | Severity |
-|--------------------------------------|---------------------------------------------------------------------------|-----|----------|
+| ------------------------------------ | ------------------------------------------------------------------------- | --- | -------- |
 | FabricBGPSessionDown                 | `frr_bgp_peer_state == 0`                                                 | 5m  | critical |
 | FabricBGPSessionAdminDown            | `frr_bgp_peer_state == 2`                                                 | 1h  | warning  |
 | FabricBGPSessionFlapping             | `resets(frr_bgp_peer_uptime_seconds[30m]) >= 3`                           | 0   | warning  |
@@ -712,7 +712,7 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | FabricRoutingAgentHeartbeatStale     | on Shadow or CRD, no agent report for 5m, or never                        | 5m  | warning  |
 | FabricRoutingReleaseFailed           | a failed release still blocks its routing domain                          | 30m | warning  |
 | FabricRoutingReleaseUnknown          | a release is `Unknown`                                                    | 15m | warning  |
-| FabricRoutingHandoffPending          | `Accepted` False with reason `HandoffPending`                             | 15m | warning  |
+| FabricRoutingHandoffPending          | `Accepted` False with reason `HandoffPending` or `ConfigMapRetired`       | 15m | warning  |
 | FabricRoutingCandidateRejected       | `Staged` False on a node staging on Shadow or CRD                         | 15m | warning  |
 | FabricRoutingPromotionRefused        | `Accepted` False: `PromotionRefused`, `NotAuthorized`, `RevisionNotFound` | 15m | warning  |
 | FabricRoutingRevisionRefused         | the controller refuses a fabric router's inputs                           | 15m | warning  |

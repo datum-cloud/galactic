@@ -343,8 +343,8 @@ spec:
         # handoff was written keeps the node on CRD for good.
         - alert: FabricRoutingHandoffPending
           expr: >-
-            max without (pod, instance, type, status, reason) (
-              last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Accepted", status="False", reason="HandoffPending"}[2m])
+            max without (pod, instance, type, status) (
+              last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Accepted", status="False", reason=~"HandoffPending|ConfigMapRetired"}[2m])
             ) == 1
           for: 15m
           labels:
@@ -355,10 +355,12 @@ spec:
             summary: "Fabric router {{ $labels.deployment }} on {{ $labels.node }} is stuck handing back to its ConfigMap"
             runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutinghandoffpending"
             description: >-
-              FabricRouterDeployment {{ $labels.namespace }}/{{ $labels.deployment }} asks for the ConfigMap source
-              but the agent has kept the node on CRD for 15 minutes because spec.sourceHandoff does not name the
-              node's ConfigMap as it is now. Run `fabric-router-controller source {{ $labels.deployment }}
-              ConfigMap` again to name the current version.
+              FabricRouterDeployment {{ $labels.namespace }}/{{ $labels.deployment }} asks to leave the CRD source
+              but the agent has kept the node on CRD for 15 minutes ({{ $labels.reason }}). HandoffPending: the
+              spec.sourceHandoff does not name the node's ConfigMap as it is now; run `fabric-router-controller
+              source {{ $labels.deployment }} ConfigMap` again to name the current version. ConfigMapRetired: the
+              node runs with the ConfigMap path retired; set the source back to CRD, or follow the way back in the
+              runbook before handing the node to a ConfigMap.
         # The node validated the candidate and refused it, or cannot read it.
         # The agent stages only on Shadow and CRD, so a node on its ConfigMap
         # never fires.
