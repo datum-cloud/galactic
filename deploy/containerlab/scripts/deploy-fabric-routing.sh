@@ -24,6 +24,10 @@ import_router() {
   docker run --rm -i fabric-router-controller:latest import /dev/stdin --node "$2" <"$1"
 }
 
+# IMPORTED labels every peer the import writes, so deploy:fabric-topology
+# deletes those and nothing else.
+IMPORTED=lab.galactic.datumapis.com/imported
+
 # without_peers drops the BGPPeers from an import's YAML stream, whose
 # documents each start with "---" and carry a top-level kind.
 without_peers() {
@@ -31,6 +35,57 @@ without_peers() {
 import re, sys
 docs = re.split(r"^---$", sys.stdin.read(), flags=re.M)
 sys.stdout.write("---".join(d for d in docs if not re.search(r"^kind: BGPPeer$", d, re.M)))
+'
+}
+
+# label_imported marks every BGPPeer in an import's YAML stream as imported.
+# The importer writes no labels, so each peer gains a labels map.
+label_imported() {
+  python3 -c '
+import re, sys
+docs = re.split(r"^---$", sys.stdin.read(), flags=re.M)
+out = []
+for d in docs:
+    if re.search(r"^kind: BGPPeer$", d, re.M):
+        if re.search(r"^  labels:$", d, re.M):
+            sys.exit("an imported BGPPeer already has labels")
+        d = re.sub(r"^metadata:$", "metadata:\n  labels:\n    " + sys.argv[1] + ": \"true\"", d, count=1, flags=re.M)
+    out.append(d)
+sys.stdout.write("---".join(out))
+' "${IMPORTED}"
+}
+
+# topology_members prints the BGPRouters a FabricTopology in the namespace
+# selects as members, by name or by label selector.
+topology_members() {
+  local node="$1"
+  {
+    docker exec "${node}" kubectl -n galactic-system get fabrictopologies -o json
+    echo "---"
+    docker exec "${node}" kubectl -n galactic-system get bgprouters -o json
+  } | python3 -c '
+import json, sys
+topos, routers = (json.loads(d) for d in sys.stdin.read().split("\n---\n"))
+def matches(sel, labels):
+    for k, v in (sel.get("matchLabels") or {}).items():
+        if labels.get(k) != v:
+            return False
+    for e in sel.get("matchExpressions") or []:
+        k, op, vals = e["key"], e["operator"], e.get("values") or []
+        ok = {"In": k in labels and labels[k] in vals, "NotIn": labels.get(k) not in vals,
+              "Exists": k in labels, "DoesNotExist": k not in labels}[op]
+        if not ok:
+            return False
+    return True
+members = set()
+for t in topos["items"]:
+    m = t["spec"]["members"]
+    members.update(r["name"] for r in m.get("routers") or [])
+    if m.get("routerSelector") is not None:
+        for r in routers["items"]:
+            if matches(m["routerSelector"], r["metadata"].get("labels") or {}):
+                members.add(r["metadata"]["name"])
+print("\n".join(sorted(members)))
 '
 }
 
@@ -52,16 +107,19 @@ for site in dfw sjc iad; do
   apply_k "${node}" /galactic/resources/fabric-router-controller/
   docker exec "${node}" kubectl -n galactic-system rollout status deployment/fabric-router-controller --timeout=180s
 
-  # A site whose peers come from a FabricTopology (deploy:fabric-topology)
+  # A router whose peers come from a FabricTopology (deploy:fabric-topology)
   # keeps them: importing its peers again would conflict with every
-  # generated one.
-  keep=cat
-  if [[ -n "$(docker exec "${node}" kubectl -n galactic-system get fabrictopologies -o name 2>/dev/null)" ]]; then
-    keep=without_peers
-  fi
+  # generated one. Every other router's peers are imported, labelled.
+  members=$(topology_members "${node}")
   for conf in "${FABRIC_CONF}/${site}"/frr.conf.*; do
     router=${conf##*/frr.conf.}
-    echo "Importing ${router}..."
-    import_router "${conf}" "${router}" | "${keep}" | apply_f "${node}" -
+    keep=cat
+    if grep -qx "${router}" <<<"${members}"; then
+      keep=without_peers
+      echo "Importing ${router}, whose peers its topology generates..."
+    else
+      echo "Importing ${router}..."
+    fi
+    import_router "${conf}" "${router}" | "${keep}" | label_imported | apply_f "${node}" -
   done
 done
