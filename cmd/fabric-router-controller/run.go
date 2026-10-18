@@ -13,10 +13,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/fabric/routing/controller"
+	routingmetrics "go.datum.net/galactic/internal/fabric/routing/metrics"
 	"go.datum.net/galactic/internal/fabric/routing/rollout"
 )
 
@@ -40,7 +42,11 @@ uses.
 With --rollout it also gives each compiled router a FabricRouterDeployment, keeps its
 candidate on the newest revision, and runs FabricReleaseAuthorizations:
 one release per routing domain at a time, promoting within each router's
-FabricRolloutPolicy. It never writes FRR; the node agents do.`,
+FabricRolloutPolicy. It never writes FRR; the node agents do.
+
+The leader exports each router's compile result and, with --rollout, each
+deployment's and outstanding release's state as galactic_fabric_routing_*
+metrics on the metrics address.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctrl.SetLogger(zap.New())
@@ -72,6 +78,15 @@ FabricRolloutPolicy. It never writes FRR; the node agents do.`,
 				if err := releases.SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("set up release controller: %w", err)
 				}
+			}
+			// The leader exports the fleet's state from its cache beside
+			// controller-runtime's own metrics.
+			fleet := &routingmetrics.Collector{Reader: mgr.GetClient(), Rollout: rolloutEnabled}
+			if err := ctrlmetrics.Registry.Register(fleet); err != nil {
+				return fmt.Errorf("register fleet metrics: %w", err)
+			}
+			if err := mgr.Add(fleet); err != nil {
+				return fmt.Errorf("add fleet metrics: %w", err)
 			}
 			if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 				return err
