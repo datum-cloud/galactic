@@ -289,8 +289,8 @@ func TestReleaseConcurrency(t *testing.T) {
 }
 
 // TestPromoteReactivation: re-activating the committed revision is a new
-// epoch that keeps the recovery target the deployment had, never the
-// revision itself, and carries every revocation over.
+// epoch with no recovery target, not even the one the deployment had,
+// which a rollback may have abandoned, and carries every revocation over.
 func TestPromoteReactivation(t *testing.T) {
 	r1, r2 := revisionWith("r-aaaaaaaaaa", digestA, nil), revisionWith("r-bbbbbbbbbb", digestB, nil)
 	auth := &networkv1alpha1.FabricReleaseAuthorization{ObjectMeta: metav1.ObjectMeta{Name: relName, UID: relUID}}
@@ -307,17 +307,32 @@ func TestPromoteReactivation(t *testing.T) {
 		t.Fatalf("re-activated = %+v", spec)
 	}
 	r := spec.Recovery
-	if r.TargetRevisionRef == nil || r.TargetRevisionRef.Name != r1.Name || r.TargetDependencyDigest != digestA {
-		t.Errorf("recovery target %+v, want the one the deployment had", r)
+	if r.TargetRevisionRef != nil || r.TargetDependencyDigest != "" {
+		t.Errorf("recovery target %+v, want none", r)
 	}
 	if !slices.Equal(r.RevokedPrefixes, []string{prefixB}) || len(r.RevokedCredentials) != 1 {
 		t.Errorf("revocations %+v", r)
 	}
 
-	// With no earlier target there is none: never the revision itself.
-	d.Spec.Recovery = nil
+	// Never the earlier target, even read before the status caught up.
+	lagging := committedDeployment(4, r2)
+	lagging.Status.AppliedEpoch = 3
+	lagging.Spec.Recovery = &networkv1alpha1.FabricRecovery{
+		TargetRevisionRef: &networkv1alpha1.LocalObjectRef{Name: r1.Name}, TargetDependencyDigest: digestA,
+	}
+	if r := promote(lagging, r2, auth, target, nil).Recovery; r.TargetRevisionRef != nil {
+		t.Errorf("recovery target %s for a re-activation", r.TargetRevisionRef.Name)
+	}
+
+	// The same promotion without re-activation recovers to what runs:
+	// here the revision itself, so none either; to another, that one.
+	target.Reactivate = false
 	if r := promote(d, r2, auth, target, nil).Recovery; r.TargetRevisionRef != nil {
-		t.Errorf("recovery target %s for a re-activation with none before", r.TargetRevisionRef.Name)
+		t.Errorf("recovery target %s, the revision being promoted", r.TargetRevisionRef.Name)
+	}
+	if r := promote(d, r1, auth, target, nil).Recovery; r.TargetRevisionRef == nil ||
+		r.TargetRevisionRef.Name != r2.Name {
+		t.Errorf("recovery %+v for an ordinary promotion, want %s", r, r2.Name)
 	}
 }
 

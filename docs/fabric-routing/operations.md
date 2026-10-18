@@ -114,19 +114,27 @@ revision and digest each may activate. It is immutable. The rollout manager:
 A target the deployment already runs, committed by its status, counts as
 committed at once: the release promotes nothing to it. A target with
 `reactivate: true` is promoted anyway, as a new epoch of the same revision.
-Only a `Release` may set it; an `EmergencyWithdrawal` that does is refused at
-admission.
 That is how a node that lost its state starts again (see
-[A node that lost its state](#a-node-that-lost-its-state)). A re-activation
-goes through every check and limit above, and the agent accepts it as any
-other promotion. Its recovery target is the one the deployment already had,
-which is never the revision itself. For any other revision `reactivate`
-changes nothing.
+[A node that lost its state](#a-node-that-lost-its-state)). Only a `Release`
+may set it; an `EmergencyWithdrawal` that does is refused at admission. A
+re-activation goes through every check and limit above, and the agent accepts
+it as any other promotion. The deployment must run the target's revision,
+committed, both when the release starts and just before the promotion: if
+another release moved the router on in between, the target fails with
+`InvalidTarget` rather than rolling the router back.
 
-Each promotion's recovery target, the revision the deployment ran before, or
-for a re-activation the one it already had, is dropped when no failure could
-restore it: the revision is gone, or it originates a revoked prefix, or it uses
-a revoked credential or one whose Secret does not exist.
+A re-activation has no recovery target. The target the deployment had could be
+newer than the revision it runs, one an operator rolled back from, and a failed
+re-activation must not move the router forward to it. A failed re-activation
+reports `Degraded` with reason `NoEligibleRecovery`: FRR keeps what the failed
+activation left, and a restarted pod is held in `Init` under the rules in
+[Recovery and boot](#recovery-and-boot). Its release fails, and blocks its
+routing domain until an operator confirms the router is safe.
+
+Each other promotion's recovery target, the revision the deployment ran
+before, is dropped when no failure could restore it: the revision is gone, or
+it originates a revoked prefix, or it uses a revoked credential or one whose
+Secret does not exist or cannot be read.
 
 Credentials are revoked by Secret UID, in `spec.recovery.revokedCredentials`,
 so a Secret recreated under the same name is a new credential. To check them
@@ -157,9 +165,8 @@ with a new release.
 
 ## Recovery and boot
 
-Each epoch carries a recovery target, the last committed revision (for a
-re-activation, the target the deployment already had), and the prefixes and
-credentials no recovery may use. When an activation fails (the
+Each epoch carries a recovery target, the last committed revision (none for a
+re-activation), and the prefixes and credentials no recovery may use. When an activation fails (the
 reload fails, the running configuration differs, or a required peer or static
 route stays down through the stabilization window), the agent restores the
 recovery target if it is still allowed, and reports `Recovered`. Otherwise it
@@ -306,12 +313,17 @@ With the ConfigMap path retired, handing the node back is refused, so:
    running it. The release promotes the revision as a new epoch, and the node
    starts from it once the release starts. The release is `Unknown` until the
    node first reports, which does not stop a node without a journal booting.
-   Its recovery target is the one the deployment already had.
+   It has no recovery target: if the revision fails on the node, the router
+   reports `NoEligibleRecovery` rather than moving to another revision, and the
+   release blocks its domain until an operator confirms the router is safe
+   (`release confirm-recovery`).
    - It needs a `--sequence` above every earlier release in the domain. It is
      refused for a retired router, a deployment still activating an epoch or
      not reporting its active revision committed, and a revision that
      originates a revoked prefix or uses a revoked credential, or one whose
-     Secret does not exist. The node would refuse to start those.
+     Secret does not exist or cannot be read. The node would refuse to start
+     those. If another release moves the router on before this one promotes
+     it, the target fails rather than rolling the router back.
    - After a compiler or FRR upgrade the deployment's candidate is the
      recompiled revision, and a `release create` naming the deployment without
      `--reactivate` promotes that instead.

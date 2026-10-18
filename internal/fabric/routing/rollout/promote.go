@@ -112,12 +112,12 @@ func Committed(d *networkv1alpha1.FabricRouterDeployment) bool { return committe
 
 // promote returns d's spec promoted to rev under auth: the next epoch, the
 // revision and its digest, the authorization, the activation settings, and
-// a recovery to the revision d runs now when that is committed and is not
-// rev (otherwise the recovery d already had, so re-activating the running
-// revision keeps the target its promotion had). A recovery target that is
-// rev itself is dropped. Revocations carry over; an emergency withdrawal
-// adds the prefixes it withdraws. The caller checks the recovery target is
-// still eligible.
+// a recovery to the revision d runs now when that is committed (otherwise
+// the recovery d already had). A recovery target that is rev itself is
+// dropped, and a re-activation has none: the target it had could be newer
+// than the revision, abandoned by a rollback. Revocations carry over; an
+// emergency withdrawal adds the prefixes it withdraws. The caller checks
+// the recovery target is still eligible.
 func promote(d *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.FabricRouterRevision,
 	auth *networkv1alpha1.FabricReleaseAuthorization, target networkv1alpha1.FabricReleaseTarget,
 	settings *networkv1alpha1.FabricActivationSettings) networkv1alpha1.FabricRouterDeploymentSpec {
@@ -126,12 +126,14 @@ func promote(d *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.Fab
 	if d.Spec.Recovery != nil {
 		recovery = d.Spec.Recovery.DeepCopy()
 	}
-	if committed(d) && d.Spec.ActiveRevisionRef.Name != rev.Name {
+	if committed(d) {
 		recovery.TargetRevisionRef = &networkv1alpha1.LocalObjectRef{Name: d.Spec.ActiveRevisionRef.Name}
 		recovery.TargetDependencyDigest = d.Spec.ActivationDependencyDigest
 	}
-	if recovery.TargetRevisionRef != nil && recovery.TargetRevisionRef.Name == rev.Name {
-		// Recovery to the revision being promoted would restore the failure.
+	if target.Reactivate || (recovery.TargetRevisionRef != nil && recovery.TargetRevisionRef.Name == rev.Name) {
+		// Recovery to the revision being promoted would restore the
+		// failure; a re-activation's earlier target may be one a rollback
+		// abandoned.
 		recovery.TargetRevisionRef, recovery.TargetDependencyDigest = nil, ""
 	}
 	if auth.Spec.Type == networkv1alpha1.FabricReleaseTypeEmergencyWithdrawal {

@@ -467,9 +467,10 @@ func TestRolloutUnknownWhenSilent(t *testing.T) {
 
 // TestRolloutReactivation re-activates the committed revision through the
 // API server, as the shipped RBAC allows: the promotion to the same
-// revision at a new epoch, keeping the earlier recovery target, passes the
+// revision at a new epoch, with no recovery target, passes the
 // deployment's admission rules, and the release completes once the node
-// commits it. A release without re-activation completes at once.
+// commits it. A release without re-activation completes at once, and a
+// re-activation of a revision the router has since left is refused.
 func TestRolloutReactivation(t *testing.T) {
 	c := startRolloutAs(t, true)
 	peer := seed(t, c)
@@ -508,7 +509,25 @@ func TestRolloutReactivation(t *testing.T) {
 	report(t, c, networkv1alpha1.FabricStageCommitted, rev2)
 	eventually(t, "r2 completed", func() bool { return phase(c, "r2") == networkv1alpha1.FabricReleasePhaseCompleted })
 
-	if err := c.Create(ctx, newRelease("again", 3, dep, rev2)); err != nil {
+	// Written for rev1 before r2 moved the router on: refused, not a rollback.
+	stale := newRelease("stale", 3, dep, rev1)
+	stale.Spec.Deployments[0].Reactivate = true
+	if err := c.Create(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "stale cancelled", func() bool {
+		return phase(c, "stale") == networkv1alpha1.FabricReleasePhaseCancelled
+	})
+	if cond := meta.FindStatusCondition(getRelease(t, c, "stale").Status.Conditions, ConditionProgressing); cond == nil ||
+		cond.Reason != reasonInvalidTarget || !strings.Contains(cond.Message, "does not run revision "+rev1.Name) {
+		t.Errorf("stale condition %+v", cond)
+	}
+	if d := getDeployment(t, c); d.Spec.ActivationEpoch != 2 || d.Spec.ActiveRevisionRef.Name != rev2.Name {
+		t.Fatalf("a stale re-activation moved the router to epoch %d on %s", d.Spec.ActivationEpoch,
+			d.Spec.ActiveRevisionRef.Name)
+	}
+
+	if err := c.Create(ctx, newRelease("again", 4, dep, rev2)); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "again completed", func() bool {
@@ -518,7 +537,7 @@ func TestRolloutReactivation(t *testing.T) {
 		t.Fatalf("a release without re-activation promoted to epoch %d", e)
 	}
 
-	re := newRelease("reactivate", 4, dep, rev2)
+	re := newRelease("reactivate", 5, dep, rev2)
 	re.Spec.Deployments[0].Reactivate = true
 	if err := c.Create(ctx, re); err != nil {
 		t.Fatal(err)
@@ -529,8 +548,8 @@ func TestRolloutReactivation(t *testing.T) {
 		"reactivate").UID) {
 		t.Fatalf("re-activated spec = %+v", dep.Spec)
 	}
-	if r := dep.Spec.Recovery; r == nil || r.TargetRevisionRef == nil || r.TargetRevisionRef.Name != rev1.Name {
-		t.Errorf("recovery = %+v, want the earlier target %s", dep.Spec.Recovery, rev1.Name)
+	if r := dep.Spec.Recovery; r != nil && r.TargetRevisionRef != nil {
+		t.Errorf("recovery = %+v, want no target, not the earlier %s", dep.Spec.Recovery, rev1.Name)
 	}
 	report(t, c, networkv1alpha1.FabricStageCommitted, rev2)
 	eventually(t, "reactivate completed", func() bool {

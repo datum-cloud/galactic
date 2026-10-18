@@ -2397,7 +2397,7 @@ _Appears in:_
 | `revision` _string_ | Revision is the FabricRouterRevision to activate. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
 | `activationDependencyDigest` _string_ | ActivationDependencyDigest is that revision's digest. |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
 | `retire` _boolean_ | Retire decommissions the router with this promotion: its revision<br />is the last it runs, nothing is restored over it and no later<br />release promotes it. |  |  |
-| `reactivate` _boolean_ | Reactivate promotes the revision as a new epoch even when the<br />deployment already reports it committed, so a node that lost its<br />state starts from it again. Without it such a target counts as<br />committed at once and nothing is promoted. The promotion passes<br />every check an ordinary one does; its recovery target is the one<br />the deployment already has, never the revision itself. Only a<br />Release re-activates. |  |  |
+| `reactivate` _boolean_ | Reactivate promotes the revision as a new epoch even when the<br />deployment already reports it committed, so a node that lost its<br />state starts from it again. Without it such a target counts as<br />committed at once and nothing is promoted. The promotion passes<br />every check an ordinary one does, and the deployment must run the<br />revision, committed, when the release starts and when it is<br />promoted. It has no recovery target: a failure reports<br />NoEligibleRecovery rather than restoring another revision. Only a<br />Release re-activates. |  |  |
 
 
 #### FabricReleaseType

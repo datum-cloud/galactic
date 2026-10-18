@@ -148,16 +148,22 @@ func TestReleaseFailsOnCredentialRevokedAfterStart(t *testing.T) {
 	}
 	f.report(first, networkv1alpha1.FabricStageCommitted, true)
 	// Once: a later pass reports the failed release's recovery instead.
-	key := types.NamespacedName{Namespace: testNS, Name: relName}
-	if _, err := f.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
-		t.Fatal(err)
-	}
-	a := &networkv1alpha1.FabricReleaseAuthorization{}
-	if err := f.c.Get(context.Background(), key, a); err != nil {
-		t.Fatal(err)
-	}
-	cancelledFor(t, a, networkv1alpha1.FabricReleasePhaseFailed, "credential "+secretName)
+	cancelledFor(t, f.reconcileOnce(), networkv1alpha1.FabricReleasePhaseFailed, "credential "+secretName)
 	if e := f.deployment(second).Spec.ActivationEpoch; e != 0 {
 		t.Errorf("%s promoted to epoch %d with a revoked credential", second, e)
 	}
+}
+
+// reconcileOnce reconciles the release named relName once and returns it.
+func (f *fakeFleet) reconcileOnce() *networkv1alpha1.FabricReleaseAuthorization {
+	f.t.Helper()
+	key := types.NamespacedName{Namespace: testNS, Name: relName}
+	if _, err := f.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		f.t.Fatal(err)
+	}
+	a := &networkv1alpha1.FabricReleaseAuthorization{}
+	if err := f.c.Get(context.Background(), key, a); err != nil {
+		f.t.Fatal(err)
+	}
+	return a
 }

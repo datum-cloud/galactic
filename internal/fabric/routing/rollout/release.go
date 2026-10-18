@@ -286,8 +286,9 @@ func Credentials(ctx context.Context, r client.Reader, namespace string,
 // CheckTarget reports why dep cannot be promoted to rev under target t:
 // another deployment UID, a source other than CRD, suspended, retired, a
 // digest the release does not name, a revision compiled for another
-// router, an originated prefix an emergency withdrawal revoked, or a
-// credential that is revoked on the deployment or cannot be resolved.
+// router, an originated prefix an emergency withdrawal revoked, a
+// credential that is revoked on the deployment or cannot be resolved, or a
+// re-activation of a revision the deployment does not run, committed.
 // credentials maps the Secrets rev uses to their current UIDs, as
 // Credentials reads them.
 func CheckTarget(dep *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.FabricRouterRevision,
@@ -308,6 +309,11 @@ func CheckTarget(dep *networkv1alpha1.FabricRouterDeployment, rev *networkv1alph
 	case rev.Labels[routerLabel] != dep.Spec.RouterRef.Name:
 		return targetError{fmt.Sprintf("revision %s was compiled for router %q, not %s",
 			rev.Name, rev.Labels[routerLabel], dep.Spec.RouterRef.Name)}
+	case t.Reactivate && !runs(dep, t):
+		// Promoted anyway, it would move the router back to a revision it
+		// left since the release was written.
+		return targetError{fmt.Sprintf("deployment %s does not run revision %s committed; a re-activation "+
+			"promotes only the revision a deployment runs", dep.Name, t.Revision)}
 	}
 	var revoked []networkv1alpha1.FabricObjectIdentity
 	if dep.Spec.Recovery != nil {
@@ -522,8 +528,7 @@ func (r *ReleaseReconciler) promoteWaiting(ctx context.Context, auth *networkv1a
 			// Promoted under another release since it was read.
 			continue
 		}
-		reactivated := e.target.Reactivate && dep.Spec.ActiveRevisionRef != nil &&
-			dep.Spec.ActiveRevisionRef.Name == rev.Name
+		reactivated := e.target.Reactivate
 		spec := promote(dep, rev, auth, e.target, activationSettings(e.policy, rev))
 		if err := r.eligibleRecovery(ctx, dep.Namespace, &spec); err != nil {
 			return false, err

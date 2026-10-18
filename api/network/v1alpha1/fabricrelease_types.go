@@ -143,8 +143,10 @@ type FabricReleaseTarget struct {
 	// deployment already reports it committed, so a node that lost its
 	// state starts from it again. Without it such a target counts as
 	// committed at once and nothing is promoted. The promotion passes
-	// every check an ordinary one does; its recovery target is the one
-	// the deployment already has, never the revision itself. Only a
+	// every check an ordinary one does, and the deployment must run the
+	// revision, committed, when the release starts and when it is
+	// promoted. It has no recovery target: a failure reports
+	// NoEligibleRecovery rather than restoring another revision. Only a
 	// Release re-activates.
 	// +optional
 	Reactivate bool `json:"reactivate,omitempty"`

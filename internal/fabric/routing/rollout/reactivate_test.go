@@ -55,8 +55,8 @@ func recoveryTo(rev *networkv1alpha1.FabricRouterRevision) *networkv1alpha1.Fabr
 
 // TestReleaseReactivatesLostNode: a release re-activating the revision a
 // deployment reports committed promotes it as a new epoch, under that
-// release, keeping the recovery target the deployment had; the same
-// release without the flag promotes nothing.
+// release, with no recovery target; the same release without the flag
+// promotes nothing.
 func TestReleaseReactivatesLostNode(t *testing.T) {
 	other := routerRevision("edge-bbbbbbbbbb", digestB, "")
 	f := newFakeFleet(t, map[string]string{"a1": "a"}, other)
@@ -81,9 +81,8 @@ func TestReleaseReactivatesLostNode(t *testing.T) {
 		t.Fatalf("a1 at epoch %d on %s under %+v, want epoch 3 on %s under reactivate", d.Spec.ActivationEpoch,
 			d.Spec.ActiveRevisionRef.Name, d.Spec.AuthorizationRef, other.Name)
 	}
-	if r := d.Spec.Recovery; r == nil || r.TargetRevisionRef == nil || r.TargetRevisionRef.Name != f.rev.Name ||
-		r.TargetDependencyDigest != digestA {
-		t.Errorf("recovery %+v, want the earlier target %s", d.Spec.Recovery, f.rev.Name)
+	if r := d.Spec.Recovery; r == nil || r.TargetRevisionRef != nil || r.TargetDependencyDigest != "" {
+		t.Errorf("recovery %+v, want no target, not the earlier %s", d.Spec.Recovery, f.rev.Name)
 	}
 	f.report("a1", networkv1alpha1.FabricStageCommitted, true)
 	if a := f.reconcile("reactivate"); a.Status.Phase != networkv1alpha1.FabricReleasePhaseCompleted {
@@ -148,11 +147,11 @@ func TestReactivationRefused(t *testing.T) {
 	}
 }
 
-// TestReactivationDropsRevokedRecovery: the recovery target a
-// re-activation keeps is dropped when a failure could not restore it: it
-// originates a revoked prefix, or uses a revoked or unresolvable
-// credential, or is gone.
-func TestReactivationDropsRevokedRecovery(t *testing.T) {
+// TestPromotionDropsRevokedRecovery: the recovery target a promotion
+// records, the revision the deployment ran, is dropped when a failure
+// could not restore it: it originates a revoked prefix, or uses a revoked
+// or unresolvable credential, or is gone.
+func TestPromotionDropsRevokedRecovery(t *testing.T) {
 	cred := routerRevision("edge-cccccccccc", digestC, secretName)
 	running := routerRevision("edge-bbbbbbbbbb", digestB, "")
 	revoked := []networkv1alpha1.FabricObjectIdentity{{Name: secretName, UID: secretUID}}
@@ -195,12 +194,13 @@ func TestReactivationDropsRevokedRecovery(t *testing.T) {
 			if tc.edit != nil {
 				tc.edit(rec)
 			}
-			f.committedOn("a1", running, 2, rec)
-			f.releaseOf(relName, 1, running, reactivate, "a1")
+			rec.TargetRevisionRef, rec.TargetDependencyDigest = nil, ""
+			f.committedOn("a1", target, 2, rec)
+			f.releaseOf(relName, 1, running, nil, "a1")
 			f.reconcile(relName)
 			d := f.deployment("a1")
 			if d.Spec.ActivationEpoch != 3 {
-				t.Fatalf("a1 at epoch %d, want re-activated at 3", d.Spec.ActivationEpoch)
+				t.Fatalf("a1 at epoch %d, want promoted to 3", d.Spec.ActivationEpoch)
 			}
 			kept := d.Spec.Recovery.TargetRevisionRef != nil
 			if kept != tc.keep {
@@ -213,10 +213,10 @@ func TestReactivationDropsRevokedRecovery(t *testing.T) {
 	}
 }
 
-// TestReactivationDropsUnreadableRecovery: a recovery target whose
+// TestPromotionDropsUnreadableRecovery: a recovery target whose
 // credential the controller may not read is unrestorable, so the
-// re-activation records none rather than retrying.
-func TestReactivationDropsUnreadableRecovery(t *testing.T) {
+// promotion records none rather than retrying.
+func TestPromotionDropsUnreadableRecovery(t *testing.T) {
 	cred := routerRevision("edge-cccccccccc", digestC, secretName)
 	running := routerRevision("edge-bbbbbbbbbb", digestB, "")
 	funcs := &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
@@ -227,12 +227,59 @@ func TestReactivationDropsUnreadableRecovery(t *testing.T) {
 		return c.Get(ctx, key, obj, opts...)
 	}}
 	f := newFakeFleetWith(t, map[string]string{"a1": "a"}, funcs, cred, running, credentialSecret(secretUID))
-	f.committedOn("a1", running, 2, recoveryTo(cred))
-	f.releaseOf(relName, 1, running, reactivate, "a1")
+	f.committedOn("a1", cred, 2, nil)
+	f.releaseOf(relName, 1, running, nil, "a1")
 	f.reconcile(relName)
 	d := f.deployment("a1")
 	if d.Spec.ActivationEpoch != 3 || d.Spec.Recovery.TargetRevisionRef != nil {
-		t.Errorf("a1 at epoch %d with recovery %+v; want re-activated with no recovery target",
+		t.Errorf("a1 at epoch %d with recovery %+v; want promoted with no recovery target",
 			d.Spec.ActivationEpoch, d.Spec.Recovery)
+	}
+}
+
+// TestReactivationRequiresRunningRevision: a re-activation of a revision
+// the deployment no longer runs, committed, is refused when the release
+// starts and again just before promotion, rather than promoted as a
+// rollback nobody asked for.
+func TestReactivationRequiresRunningRevision(t *testing.T) {
+	other := routerRevision("edge-bbbbbbbbbb", digestB, "")
+
+	// Moved on before the release started.
+	f := newFakeFleet(t, map[string]string{"a1": "a"}, other)
+	f.committedOn("a1", other, 2, nil)
+	f.releaseOf(relName, 1, f.rev, reactivate, "a1")
+	cancelledFor(t, f.reconcile(relName), networkv1alpha1.FabricReleasePhaseCancelled, "does not run revision")
+	if e := f.deployment("a1").Spec.ActivationEpoch; e != 2 {
+		t.Errorf("a1 promoted to epoch %d", e)
+	}
+
+	// Still activating: not committed either.
+	f = newFakeFleet(t, map[string]string{"a1": "a"}, other)
+	f.committedOn("a1", f.rev, 1, nil)
+	d := f.deployment("a1")
+	d.Status.AppliedEpoch = 0
+	if err := f.c.Status().Update(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	f.releaseOf(relName, 1, f.rev, reactivate, "a1")
+	cancelledFor(t, f.reconcile(relName), networkv1alpha1.FabricReleasePhaseCancelled, "does not run revision")
+
+	// Moved on after the release started, before its turn.
+	f = newFakeFleet(t, map[string]string{"a1": "a", "a2": "a"}, other)
+	f.committedOn("a1", f.rev, 1, nil)
+	f.committedOn("a2", f.rev, 1, nil)
+	f.releaseOf(relName, 1, f.rev, reactivate, "a1", "a2")
+	f.reconcileOnce()
+	f.reconcileOnce()
+	first, second := "a1", "a2"
+	if f.deployment("a1").Spec.ActivationEpoch == 1 {
+		first, second = "a2", "a1"
+	}
+	f.committedOn(second, other, 2, nil)
+	f.report(first, networkv1alpha1.FabricStageCommitted, true)
+	cancelledFor(t, f.reconcileOnce(), networkv1alpha1.FabricReleasePhaseFailed, "does not run revision")
+	if d := f.deployment(second); d.Spec.ActivationEpoch != 2 || d.Spec.ActiveRevisionRef.Name != other.Name {
+		t.Errorf("%s at epoch %d on %s; a re-activation rolled it back", second, d.Spec.ActivationEpoch,
+			d.Spec.ActiveRevisionRef.Name)
 	}
 }
