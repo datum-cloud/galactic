@@ -8,8 +8,9 @@
 // ConfigMap; its watch subcommand runs beside FRR and applies later changes to
 // that ConfigMap with frr-reload, without restarting FRR. watch also
 // hard-resets any IPv6 session that comes up announcing an IPv4-mapped next
-// hop, and serves metrics on those sessions and on BGP routes zebra failed to
-// install.
+// hop, and serves metrics on those sessions, on BGP routes zebra failed to
+// install, on activations and staging runs, on waits for the node's FRR
+// writer lock, and on the source init started FRR from.
 package main
 
 import (
@@ -74,6 +75,7 @@ type options struct {
 	stateDir      string
 	machineIDFile string
 	writerLock    string
+	bootRecord    string
 
 	// watch only.
 	metricsBindAddress string
@@ -127,6 +129,8 @@ func newRootCommand() *cobra.Command {
 	pf.StringVar(&opts.machineIDFile, "machine-id-file", "/etc/machine-id", "The host's machine ID file")
 	pf.StringVar(&opts.writerLock, "writer-lock", fabricconfig.DefaultWriterLock,
 		"File every FRR writer on the node locks while it changes FRR")
+	pf.StringVar(&opts.bootRecord, "boot-record", fabricconfig.DefaultBootRecord,
+		"File where init records the source FRR started from, for watch to export")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 
@@ -149,7 +153,8 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 	watch.Flags().StringVar(&opts.metricsBindAddress, "metrics-bind-address", ":9343",
-		"Address serving the next-hop check's Prometheus metrics at /metrics; empty disables them")
+		"Address serving the next-hop check's and the activation path's Prometheus metrics at /metrics; "+
+			"empty disables them")
 	watch.Flags().BoolVar(&opts.nextHopDetectOnly, "detect-only", false,
 		"Report IPv6 sessions announcing an IPv4-mapped next hop without resetting them")
 	cmd.AddCommand(watch)
@@ -212,15 +217,30 @@ func run(parent context.Context, opts *options, fn func(*fabricconfig.Agent, con
 	return fn(agent, ctx)
 }
 
-// initNode installs the node's configuration: from the activation state
-// when the node is on the CRD source, otherwise from its ConfigMap. Only a
-// node on CRD needs its machine ID and identity, so a fault in either never
-// stops a ConfigMap node from starting.
+// initNode installs the node's configuration and records where it came
+// from for the watch container, which has the metrics server this
+// container lacks. Failing to write the record stops nothing.
 func initNode(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
+	rec := fabricconfig.BootRecord{Source: fabricconfig.BootConfigMap}
+	if err := installNode(ctx, a, opts, &rec); err != nil {
+		return err
+	}
+	if err := fabricconfig.WriteBootRecord(opts.bootRecord, rec); err != nil {
+		slog.Warn("could not record the boot source", "error", err)
+	}
+	return nil
+}
+
+// installNode installs the node's configuration: from the activation state
+// when the node is on the CRD source, otherwise from its ConfigMap, and
+// sets rec to the source it used. Only a node on CRD needs its machine ID
+// and identity, so a fault in either never stops a ConfigMap node from
+// starting.
+func installNode(ctx context.Context, a *fabricconfig.Agent, opts *options, rec *fabricconfig.BootRecord) error {
 	if !opts.activation {
 		return a.Init(ctx)
 	}
-	d, err := newDeploymentAgent(ctx, opts)
+	d, err := newDeploymentAgent(ctx, opts, nil)
 	if err != nil {
 		// A corrupt journal leaves the source unknown; starting from the
 		// ConfigMap could leave CRD without a handoff, so nothing starts
@@ -244,8 +264,12 @@ func initNode(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
 		if errors.Is(err, fabricconfig.ErrNotActivated) {
 			// Enrolled on CRD before anything was activated: the ConfigMap
 			// is all there is to run.
-			return a.ConfigMapConfig(ctx)
+			*rec = fabricconfig.BootRecord{Source: fabricconfig.BootConfigMap}
+			conf, reason, err = a.ConfigMapConfig(ctx)
+			rec.Reason = reason
+			return conf, reason, err
 		}
+		*rec = fabricconfig.BootRecord{Source: d.Booted, Reason: reason}
 		return conf, reason, err
 	})
 }
@@ -254,8 +278,11 @@ func initNode(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
 // agent. It reads the node's identity from the API once; when that fails,
 // as at an offline boot, the agent resolves it later. A missing machine ID
 // or state bound to another Node, cluster or machine is kept as
-// IdentityErr: the state is left untouched and nothing is activated.
-func newDeploymentAgent(ctx context.Context, opts *options) (*fabricconfig.DeploymentAgent, error) {
+// IdentityErr: the state is left untouched and nothing is activated. A
+// non-nil metrics counts its activations and times its writer locks.
+func newDeploymentAgent(
+	ctx context.Context, opts *options, metrics *fabricconfig.AgentMetrics,
+) (*fabricconfig.DeploymentAgent, error) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return nil, err
@@ -276,14 +303,16 @@ func newDeploymentAgent(ctx context.Context, opts *options) (*fabricconfig.Deplo
 	if err := os.MkdirAll(opts.stateDir, 0o700); err != nil {
 		return nil, err
 	}
-	act := &activation.Activator{Dir: opts.stateDir, FRR: frr, Lock: fabricconfig.FileLock{Path: opts.writerLock}}
+	act := &activation.Activator{
+		Dir: opts.stateDir, FRR: frr, Lock: writerLock(opts, metrics, fabricconfig.WriterActivation),
+	}
 	if err := act.Open(); err != nil {
 		return nil, err
 	}
 	d := &fabricconfig.DeploymentAgent{
 		Client: c, Namespace: opts.namespace, NodeName: opts.nodeName,
 		Activator: act, BGP: frr, ConfigDir: opts.configDir, Version: metadata.Version,
-		Lock: fabricconfig.FileLock{Path: opts.writerLock},
+		Lock: writerLock(opts, metrics, fabricconfig.WriterDeployment), Metrics: metrics,
 	}
 	d.MachineID, err = activation.ReadMachineID(opts.machineIDFile)
 	if err != nil {
@@ -333,10 +362,28 @@ func identity(ctx context.Context, c ctrlclient.Client, nodeName string) (nodeUI
 	return string(node.UID), string(ns.UID), nil
 }
 
+// writerLock is the node's FRR writer lock for one writer, timed when
+// metrics is non-nil.
+func writerLock(opts *options, metrics *fabricconfig.AgentMetrics, writer string) fabricconfig.Locker {
+	lock := fabricconfig.FileLock{Path: opts.writerLock}
+	if metrics == nil {
+		return lock
+	}
+	return fabricconfig.TimedLock{Locker: lock, Metrics: metrics, Writer: writer}
+}
+
 // watchWithGuard runs a.Watch alongside a NextHopGuard over the same FRR
-// instance, and serves the guard's metrics when opts asks for them.
+// instance, and serves the guard's and the activation path's metrics, and
+// the boot source init recorded, when opts asks for them.
 func watchWithGuard(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
 	metrics := fabricconfig.NewNextHopMetrics()
+	agentMetrics := fabricconfig.NewAgentMetrics(metrics.Registry)
+	if rec, err := fabricconfig.ReadBootRecord(opts.bootRecord); err == nil {
+		agentMetrics.SetBoot(rec.Source)
+	} else {
+		slog.Warn("could not read the boot source init recorded", "error", err)
+	}
+	a.Lock = writerLock(opts, agentMetrics, fabricconfig.WriterConfigMap)
 	guard := &fabricconfig.NextHopGuard{
 		BGP:        fabricconfig.ExecFRR{Vtysh: opts.vtysh, Reloader: opts.reloader, ConfigDir: opts.configDir},
 		Metrics:    metrics,
@@ -344,10 +391,10 @@ func watchWithGuard(ctx context.Context, a *fabricconfig.Agent, opts *options) e
 		Pod:        a.Pod,
 		NodeName:   a.NodeName,
 		DetectOnly: opts.nextHopDetectOnly,
-		Lock:       a.Lock,
+		Lock:       writerLock(opts, agentMetrics, fabricconfig.WriterNextHop),
 	}
 	if opts.activation {
-		d, err := newDeploymentAgent(ctx, opts)
+		d, err := newDeploymentAgent(ctx, opts, agentMetrics)
 		if err != nil {
 			// The source is unknown: hold the ConfigMap path off FRR, as on
 			// CRD, while the guard keeps running.

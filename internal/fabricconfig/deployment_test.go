@@ -592,6 +592,9 @@ func TestBootConfig(t *testing.T) {
 	if err != nil || conf != rendered(t, h.revs[0]) || !strings.Contains(reason, "active revision") {
 		t.Fatalf("BootConfig before a commit = %q, %v", reason, err)
 	}
+	if h.agent.Booted != BootActiveRevision {
+		t.Errorf("Booted = %s, want %s", h.agent.Booted, BootActiveRevision)
+	}
 
 	h.sync()
 	// After a commit, offline: the checkpoint.
@@ -600,6 +603,9 @@ func TestBootConfig(t *testing.T) {
 	conf, reason, err = offline.BootConfig(context.Background(), depMachine)
 	if err != nil || conf != rendered(t, h.revs[0]) || !strings.Contains(reason, "restoring committed") {
 		t.Fatalf("BootConfig offline = %q, %v", reason, err)
+	}
+	if offline.Booted != BootCheckpointOffline {
+		t.Errorf("Booted = %s, want %s", offline.Booted, BootCheckpointOffline)
 	}
 
 	// On another machine, and offline: nothing.
@@ -834,6 +840,9 @@ func TestBootConfigOnlineAfterExpiry(t *testing.T) {
 	conf, reason, err := h.agent.BootConfig(context.Background(), depMachine)
 	if err != nil || conf != rendered(t, h.revs[0]) || !strings.Contains(reason, "with the API") {
 		t.Fatalf("BootConfig = %q, %v", reason, err)
+	}
+	if h.agent.Booted != BootCheckpointOnline {
+		t.Errorf("Booted = %s, want %s", h.agent.Booted, BootCheckpointOnline)
 	}
 }
 

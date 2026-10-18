@@ -87,6 +87,11 @@ type DeploymentAgent struct {
 	Version string
 	// Now reads the clock; nil is time.Now.
 	Now func() time.Time
+	// Metrics counts activations and staging runs. Nil disables them.
+	Metrics *AgentMetrics
+	// Booted is where the last configuration BootConfig returned came
+	// from.
+	Booted BootSource
 
 	// staged is the candidate last staged and the running configuration it
 	// was staged against, so an unchanged candidate is not restaged every
@@ -96,6 +101,8 @@ type DeploymentAgent struct {
 	written *networkv1alpha1.FabricRouterDeploymentStatus
 	// inSync is whether FRR was last seen running the checkpoint.
 	inSync bool
+	// counter remembers which outcomes the current epoch was counted with.
+	counter activationCounter
 	// Resolve, when NodeUID is not known yet, reads this node's identity
 	// from the API and binds the state directory to it, setting NodeUID,
 	// ClusterID and IdentityErr.
@@ -352,16 +359,19 @@ func (d *DeploymentAgent) stage(ctx context.Context, dep *networkv1alpha1.Fabric
 	}
 	rev, err := d.revision(ctx, ref.Name)
 	if err != nil {
+		d.countStage(StageRevisionNotFound)
 		setCondition(status, dep, networkv1alpha1.FabricConditionStaged, metav1.ConditionFalse,
 			reasonRevisionNotFound, err.Error())
 		return
 	}
 	staged, err := d.Activator.Stage(ctx, rev)
 	if err != nil {
+		d.countStage(StageRejected)
 		setCondition(status, dep, networkv1alpha1.FabricConditionStaged, metav1.ConditionFalse, reasonRejected,
 			err.Error())
 		return
 	}
+	d.countStage(StageStaged)
 	diff := strings.Join(append(prefixed("+ ", staged.Added), prefixed("- ", staged.Removed)...), "\n")
 	if len(diff) > maxStagedDiff {
 		diff = diff[:maxStagedDiff]
@@ -405,6 +415,7 @@ func (d *DeploymentAgent) activate(ctx context.Context, dep *networkv1alpha1.Fab
 			reason := reasonNotAuthorized
 			if errors.Is(err, errRefused) {
 				reason = networkv1alpha1.FabricReasonPromotionRefused
+				d.count(act.DeploymentUID, act.Epoch, OutcomeRefused, 0)
 			}
 			accepted(metav1.ConditionFalse, reason, err.Error())
 			return
@@ -421,25 +432,34 @@ func (d *DeploymentAgent) activate(ctx context.Context, dep *networkv1alpha1.Fab
 	if err := d.writeStatus(ctx, dep, status); err != nil {
 		slog.Warn("could not report the activation starting", "error", err)
 	}
+	start := d.now()
 	res, err := d.Activator.Activate(ctx, req)
 	degraded := func(s metav1.ConditionStatus, reason, msg string) {
 		setCondition(status, dep, networkv1alpha1.FabricConditionDegraded, s, reason, msg)
 	}
 	switch {
 	case err != nil:
+		// A failed epoch comes back as ErrFailedEpoch on every later
+		// sync; it was counted when it failed. A shutdown is no outcome.
+		if ctx.Err() == nil && !errors.Is(err, activation.ErrFailedEpoch) {
+			d.count(act.DeploymentUID, act.Epoch, errorOutcome(err), 0)
+		}
 		accepted(metav1.ConditionFalse, activationReason(err), err.Error())
 		return
 	case res.Outcome == activation.OutcomeCommitted:
+		d.count(act.DeploymentUID, act.Epoch, OutcomeCommitted, d.now().Sub(start))
 		d.inSync = true
 		msg := fmt.Sprintf("%s committed at epoch %d", act.Revision, act.Epoch)
 		accepted(metav1.ConditionTrue, networkv1alpha1.FabricReasonCommitted, msg)
 		degraded(metav1.ConditionFalse, networkv1alpha1.FabricReasonCommitted, msg)
 	case res.Outcome == activation.OutcomeRecovered:
+		d.count(act.DeploymentUID, act.Epoch, OutcomeRecovered, d.now().Sub(start))
 		d.inSync = true
 		accepted(metav1.ConditionFalse, networkv1alpha1.FabricReasonFailedEpoch,
 			fmt.Sprintf("epoch %d failed and was recovered", act.Epoch))
 		degraded(metav1.ConditionTrue, "Recovered", res.Detail)
 	default:
+		d.count(act.DeploymentUID, act.Epoch, OutcomeDegraded, d.now().Sub(start))
 		accepted(metav1.ConditionFalse, networkv1alpha1.FabricReasonFailedEpoch, fmt.Sprintf("epoch %d failed", act.Epoch))
 		degraded(metav1.ConditionTrue, networkv1alpha1.FabricReasonNoEligibleRecovery, res.Detail)
 		return
@@ -872,8 +892,9 @@ var ErrNotActivated = errors.New("no activation accepted yet")
 // with: the checkpoint when boot may restore it offline; with the API, the
 // checkpoint again when the deployment is bound to the journal and nothing
 // since forbids it; otherwise the active revision, verified, authorized
-// and allowed by the journal. It returns ErrNotActivated for a node with
-// nothing activated yet, and an error when nothing may start yet.
+// and allowed by the journal. It records which of the three in Booted. It
+// returns ErrNotActivated for a node with nothing activated yet, and an
+// error when nothing may start yet.
 func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (config, reason string, err error) {
 	if !d.Activator.Activated() {
 		return "", "", ErrNotActivated
@@ -884,6 +905,7 @@ func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (con
 	id := activation.Identity{MachineID: machineID, NodeUID: d.NodeUID, ClusterID: d.ClusterID}
 	decision := d.Activator.Boot(id)
 	if decision.Apply != "" {
+		d.Booted = BootCheckpointOffline
 		return decision.Apply, decision.Reason, nil
 	}
 	dep, err := d.find(ctx)
@@ -895,6 +917,7 @@ func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (con
 	}
 	if d.Activator.Journal().BoundDeployment() == string(dep.UID) {
 		if online := d.Activator.BootOnline(id); online.Apply != "" {
+			d.Booted = BootCheckpointOnline
 			return online.Apply, online.Reason + " with the API", nil
 		}
 	}
@@ -921,6 +944,7 @@ func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (con
 	if err != nil {
 		return "", "", err
 	}
+	d.Booted = BootActiveRevision
 	return res.Config, fmt.Sprintf("%s; starting from active revision %s at epoch %d",
 		decision.Reason, req.Revision.Name, dep.Spec.ActivationEpoch), nil
 }
