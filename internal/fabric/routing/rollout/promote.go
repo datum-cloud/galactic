@@ -153,7 +153,7 @@ func Busy(d *networkv1alpha1.FabricRouterDeployment) bool { return busy(d) }
 // is still activating: promoted, and neither committed nor finished
 // failing, nor refused by its agent.
 func busy(d *networkv1alpha1.FabricRouterDeployment) bool {
-	if d.Spec.ActivationEpoch == 0 || committed(d) || refused(d) {
+	if d.Spec.ActivationEpoch == 0 || committed(d) || refused(d) || handedBack(d) {
 		return false
 	}
 	for _, e := range d.Status.Epochs {
@@ -170,6 +170,14 @@ func busy(d *networkv1alpha1.FabricRouterDeployment) bool {
 		}
 	}
 	return true
+}
+
+// handedBack reports whether the agent has handed the node back to its
+// ConfigMap: nothing activates there, whatever its last epoch reported.
+func handedBack(d *networkv1alpha1.FabricRouterDeployment) bool {
+	eff := d.Status.EffectiveSource
+	return d.Spec.Source != networkv1alpha1.FabricConfigSourceCRD && eff != "" &&
+		eff != networkv1alpha1.FabricConfigSourceCRD
 }
 
 // refused reports whether the agent refused the current promotion for

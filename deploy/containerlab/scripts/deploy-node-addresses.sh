@@ -12,7 +12,9 @@ source "${SCRIPT_DIR}/lib.sh"
 # deploy:fabric, so FRR starts on addressed interfaces. A lab deployed when
 # FRR's config still carried "interface" blocks loses these addresses when
 # its agents reload the config without them, since zebra removes what it
-# configured; rerun this once those reloads finish.
+# configured; rerun this once those reloads finish. Like the bonds the
+# topology creates, the addresses do not survive a node container restart;
+# rerun this after one.
 for file in "${RESOURCES_DIR}"/node-addresses/*.addrs; do
   node=$(basename "${file}" .addrs)
   echo "Addressing ${node}..."

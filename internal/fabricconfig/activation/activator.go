@@ -17,6 +17,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -798,6 +799,14 @@ func (a *Activator) runningDiff(ctx context.Context, rendered string) ([]string,
 		return nil, err
 	}
 	return frrtext.Diff(normalizeRunning(rendered), normalizeRunning(running)), nil
+}
+
+// RunningKey identifies what a running configuration means, ignoring what
+// normalizeRunning drops, such as the VRF devices on the host.
+func RunningKey(running string) string {
+	data, _ := json.Marshal(normalizeRunning(running)) // a map of maps of ints always marshals
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // normalizeRunning drops the lines FRR adds to or omits from a displayed

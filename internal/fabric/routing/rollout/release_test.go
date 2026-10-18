@@ -389,6 +389,25 @@ func TestBusyUntilRefused(t *testing.T) {
 	}
 }
 
+// A router whose activation failed with nothing to recover to, handed back
+// to its ConfigMap, activates nothing and holds no slot, though its agent
+// no longer reports Degraded off CRD.
+func TestBusyUntilHandedBack(t *testing.T) {
+	r1 := revisionWith("r-aaaaaaaaaa", digestA, nil)
+	d := committedDeployment(2, r1)
+	d.Status.AppliedEpoch = 1
+	d.Status.Epochs = []networkv1alpha1.FabricEpochStatus{{Epoch: 2, Stage: networkv1alpha1.FabricStageApplyFailed}}
+	d.Spec.Source = networkv1alpha1.FabricConfigSourceConfigMap
+	d.Status.EffectiveSource = networkv1alpha1.FabricConfigSourceCRD
+	if !busy(d) {
+		t.Error("a router still on CRD, its handoff pending, counts as free")
+	}
+	d.Status.EffectiveSource = networkv1alpha1.FabricConfigSourceConfigMap
+	if busy(d) {
+		t.Error("a router handed back to its ConfigMap still counts as busy")
+	}
+}
+
 func TestBusyWhileRecovering(t *testing.T) {
 	r1 := revisionWith("r-aaaaaaaaaa", digestA, nil)
 	d := committedDeployment(2, r1)

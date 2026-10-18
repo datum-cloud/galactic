@@ -6,8 +6,6 @@ package fabricconfig
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -339,12 +337,17 @@ func (d *DeploymentAgent) stage(ctx context.Context, dep *networkv1alpha1.Fabric
 		d.unstage(status)
 		return
 	}
-	key := ref.Name
-	if running, err := d.Activator.FRR.Running(ctx); err == nil {
-		sum := sha256.Sum256([]byte(running))
-		key += "@" + hex.EncodeToString(sum[:])
+	reported := status.Staged != nil && status.Staged.Revision == ref.Name
+	running, err := d.Activator.FRR.Running(ctx)
+	if err != nil && reported && strings.HasPrefix(d.staged, ref.Name+"@") {
+		// FRR could not say what it runs; what was staged still stands.
+		return
 	}
-	if key == d.staged && status.Staged != nil && status.Staged.Revision == ref.Name {
+	key := ref.Name
+	if err == nil {
+		key += "@" + activation.RunningKey(running)
+	}
+	if key == d.staged && reported {
 		return
 	}
 	rev, err := d.revision(ctx, ref.Name)

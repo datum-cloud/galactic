@@ -35,8 +35,20 @@ OFFLINE_LIMIT=300
 
 k() { docker exec -i "${CP}" kubectl -n "${NS}" "$@"; }
 
+# Whatever the script changes on the lab, it puts back on any exit: the
+# peer step 4 breaks, and the API block step 6 installs.
+RESTORE_PEER=""
+UNBLOCK="for t in iptables ip6tables; do while \$t -S OUTPUT | grep -q verify-fabric-routing; do
+  \$t -S OUTPUT | grep verify-fabric-routing | head -1 | sed 's/^-A/-D/' | xargs \$t; done; done"
+cleanup() {
+  if [[ -n "${RESTORE_PEER}" ]]; then
+    k patch bgppeer "${RESTORE_PEER% *}" --type=merge -p "{\"spec\":{\"peerASN\":${RESTORE_PEER#* }}}" >/dev/null || true
+  fi
+  docker exec "${ROUTER}" sh -c "${UNBLOCK}" || true
+  rm -f "${KUBECONFIG_FILE}"
+}
 KUBECONFIG_FILE=$(mktemp)
-trap 'rm -f "${KUBECONFIG_FILE}"' EXIT
+trap cleanup EXIT
 kind get kubeconfig --internal --name "${SITE}" >"${KUBECONFIG_FILE}"
 
 # frc runs fabric-router-controller's operator commands against the site.
@@ -79,16 +91,17 @@ release_phase() { k get fabricreleaseauthorization "$1" -o jsonpath='{.status.ph
 release_done() { [[ "$(release_phase "$1")" =~ ^(Completed|Failed|Cancelled)$ ]]; }
 
 # release NAME [DEPLOYMENT...] creates a release at the domain's next fleet
-# sequence and waits for it to finish, printing its phase.
+# sequence, waits for it to finish and sets PHASE to how it ended. It runs
+# in this shell, so a failure stops the script with its own reason.
 release() {
   local name=$1 seq
   shift
   seq=$(k get fabricreleaseauthorizations -o jsonpath="{range .items[?(@.spec.routingDomain==\"${DOMAIN}\")]}{.spec.fleetSequence}{\"\n\"}{end}" |
     sort -n | tail -1)
-  frc release create "${name}" --domain "${DOMAIN}" --sequence $((${seq:-0} + 1)) "$@" >&2
+  frc release create "${name}" --domain "${DOMAIN}" --sequence $((${seq:-0} + 1)) "$@"
   wait_for 600 "release ${name} to finish" release_done "${name}"
-  frc release status "${name}" >&2
-  release_phase "${name}"
+  frc release status "${name}"
+  PHASE=$(release_phase "${name}")
 }
 
 frr_pod() {
@@ -143,7 +156,8 @@ echo "--- 2. CRD: a release commits every router with its sessions held"
 for node in "${NODES[@]}"; do
   frc source "${node}" CRD
 done
-[[ "$(release "verify-${stamp}-enroll" "${NODES[@]}")" == Completed ]] || fail "the enrollment release did not complete"
+release "verify-${stamp}-enroll" "${NODES[@]}"
+[[ "${PHASE}" == Completed ]] || fail "the enrollment release ended ${PHASE}"
 for node in "${NODES[@]}"; do
   [[ "$(dep "${node}" '{.status.appliedEpoch}')" == "$(dep "${node}" '{.spec.activationEpoch}')" ]] ||
     fail "${node} did not commit its epoch"
@@ -170,7 +184,8 @@ candidate_moved() { [[ "$(dep "${ROUTER}" '{.spec.candidateRevisionRef.name}')" 
 wait_for 120 "a new candidate for ${ROUTER}" candidate_moved "${before}"
 wait_for 120 "${ROUTER} to stage the change as non-disruptive" staged_matches "${ROUTER}" NonDisruptive
 changed=$(dep "${ROUTER}" '{.spec.candidateRevisionRef.name}')
-[[ "$(release "verify-${stamp}-change" "${ROUTER}")" == Completed ]] || fail "the change release did not complete"
+release "verify-${stamp}-change" "${ROUTER}"
+[[ "${PHASE}" == Completed ]] || fail "the change release ended ${PHASE}"
 vtysh "${ROUTER}" "show ipv6 route ${CHANGE_PREFIX}" | grep -q static || fail "${CHANGE_PREFIX} is not installed"
 echo "ok   ${ROUTER} committed ${changed} and installed ${CHANGE_PREFIX}"
 
@@ -179,12 +194,14 @@ peer=$(k get bgppeers -o jsonpath="{range .items[?(@.spec.routerRef.name==\"${RO
   grep -v '^$' | sort | head -1)
 peer_name=${peer% *}
 peer_asn=${peer#* }
+RESTORE_PEER="${peer_name} ${peer_asn}"
 k patch bgppeer "${peer_name}" --type=merge -p "{\"spec\":{\"peerASN\":$((peer_asn + 99))}}"
 wait_for 120 "a new candidate for ${ROUTER}" candidate_moved "${changed}"
 wait_for 120 "${ROUTER} to stage the bad peer" staged_matches "${ROUTER}" SessionReset
-phase=$(release "verify-${stamp}-fail" "${ROUTER}")
+release "verify-${stamp}-fail" "${ROUTER}"
 k patch bgppeer "${peer_name}" --type=merge -p "{\"spec\":{\"peerASN\":${peer_asn}}}"
-[[ "${phase}" == Failed ]] || fail "a release with a dead required peer ended ${phase}"
+RESTORE_PEER=""
+[[ "${PHASE}" == Failed ]] || fail "a release with a dead required peer ended ${PHASE}"
 [[ "$(dep "${ROUTER}" '{.status.appliedRevision}')" == "${changed}" ]] ||
   fail "${ROUTER} did not restore ${changed}"
 [[ "$(k get fabricreleaseauthorization "verify-${stamp}-fail" -o jsonpath='{.status.recoveryVerified}')" == true ]] ||
@@ -196,22 +213,21 @@ echo "--- 5. A release rolls forward once the peer is fixed"
 back_to() { [[ "$(dep "${ROUTER}" '{.spec.candidateRevisionRef.name}')" == "$1" ]]; }
 wait_for 120 "${ROUTER}'s candidate to return to ${changed}" back_to "${changed}"
 wait_for 120 "${ROUTER} to stage ${changed} with no change" staged_matches "${ROUTER}" NoChange
-[[ "$(release "verify-${stamp}-forward" "${ROUTER}")" == Completed ]] || fail "the roll-forward did not complete"
+release "verify-${stamp}-forward" "${ROUTER}"
+[[ "${PHASE}" == Completed ]] || fail "the roll-forward ended ${PHASE}"
 echo "ok   ${ROUTER} committed ${changed} again"
 
 echo "--- 6. ${ROUTER} restarts without the API and restores its checkpoint"
 api4=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${CP}")
 api6=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.GlobalIPv6Address}}{{end}}' "${CP}")
 svc=$(k exec "$(frr_pod "${ROUTER}")" -c config-agent -- printenv KUBERNETES_SERVICE_HOST | tr -d '\r')
-unblock='for t in iptables ip6tables; do while $t -S OUTPUT | grep -q verify-fabric-routing; do
-  $t -S OUTPUT | grep verify-fabric-routing | head -1 | sed "s/^-A/-D/" | xargs $t; done; done'
-docker exec "${ROUTER}" sh -c "
-  iptables -I OUTPUT -d ${api4} -p tcp --dport 6443 -m comment --comment verify-fabric-routing -j DROP
-  ip6tables -I OUTPUT -d ${api6} -p tcp --dport 6443 -m comment --comment verify-fabric-routing -j DROP
-  case ${svc} in *:*) t=ip6tables ;; *) t=iptables ;; esac
-  \$t -I OUTPUT -d ${svc} -p tcp --dport 443 -m comment --comment verify-fabric-routing -j DROP"
-docker exec -d "${ROUTER}" sh -c "sleep ${OFFLINE_LIMIT}; ${unblock}"
-trap 'docker exec "${ROUTER}" sh -c "${unblock}"; rm -f "${KUBECONFIG_FILE}"' EXIT
+# The timer lifts the block even if this script is killed; the EXIT trap
+# lifts it on any other exit. Both are in place before the first rule.
+docker exec -d "${ROUTER}" sh -c "sleep ${OFFLINE_LIMIT}; ${UNBLOCK}"
+block() { docker exec "${ROUTER}" "$1" -I OUTPUT -d "$2" -p tcp --dport "$3" -m comment --comment verify-fabric-routing -j DROP; }
+[[ -n "${api4}" ]] && block iptables "${api4}" 6443
+[[ -n "${api6}" ]] && block ip6tables "${api6}" 6443
+case "${svc}" in *:*) block ip6tables "${svc}" 443 ;; ?*) block iptables "${svc}" 443 ;; esac
 sandbox=$(docker exec "${ROUTER}" crictl pods --name fabric-router --state ready -q | head -1)
 started=$(date +%s)
 docker exec "${ROUTER}" crictl stopp "${sandbox}" >/dev/null
@@ -237,7 +253,7 @@ wait_for 120 "${ROUTER}'s sessions to come up without the API" offline_establish
 docker exec "${ROUTER}" crictl exec "${frr}" vtysh -c "show ipv6 route ${CHANGE_PREFIX}" | grep -q static ||
   fail "${CHANGE_PREFIX} is missing after the offline restart"
 echo "ok   ${ROUTER} runs ${changed} without the API, every session Established"
-docker exec "${ROUTER}" sh -c "${unblock}"
+docker exec "${ROUTER}" sh -c "${UNBLOCK}"
 agent_reports() {
   local hb
   hb=$(dep "${ROUTER}" '{.status.heartbeatTime}')
@@ -250,5 +266,6 @@ echo "--- Cleanup: remove the change"
 k delete bgpstaticroute "${CHANGE_ROUTE}"
 wait_for 120 "a new candidate for ${ROUTER}" candidate_moved "${changed}"
 wait_for 120 "${ROUTER} to stage the removal" staged_matches "${ROUTER}" NonDisruptive
-[[ "$(release "verify-${stamp}-cleanup" "${ROUTER}")" == Completed ]] || fail "the cleanup release did not complete"
+release "verify-${stamp}-cleanup" "${ROUTER}"
+[[ "${PHASE}" == Completed ]] || fail "the cleanup release ended ${PHASE}"
 echo "PASS fabric routing on ${SITE}: Shadow, CRD, change, failure and recovery, offline restart"
