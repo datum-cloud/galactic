@@ -16,7 +16,9 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-SITES=${SITES:-"dfw sjc iad"}
+# dfw keeps its imported peers by default: verify:fabric-routing's failure
+# step breaks a peer, which a topology would rewrite.
+SITES=${SITES:-"sjc iad"}
 CLASS=fabric-frr
 NS=galactic-system
 

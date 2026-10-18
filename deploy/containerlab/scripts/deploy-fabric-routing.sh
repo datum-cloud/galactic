@@ -24,12 +24,13 @@ import_router() {
   docker run --rm -i fabric-router-controller:latest import /dev/stdin --node "$2" <"$1"
 }
 
-# without_peers drops the BGPPeers from an import's YAML stream.
+# without_peers drops the BGPPeers from an import's YAML stream, whose
+# documents each start with "---" and carry a top-level kind.
 without_peers() {
   python3 -c '
-import sys, yaml
-docs = [d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") != "BGPPeer"]
-yaml.safe_dump_all(docs, sys.stdout, sort_keys=False)
+import re, sys
+docs = re.split(r"^---$", sys.stdin.read(), flags=re.M)
+sys.stdout.write("---".join(d for d in docs if not re.search(r"^kind: BGPPeer$", d, re.M)))
 '
 }
 

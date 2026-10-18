@@ -324,7 +324,7 @@ tasks:
       - ./scripts/deploy-fabric-routing.sh
 
   "deploy:fabric-topology":
-    desc: Generate each site's fabric peers from its topology instead of the imported ones (SITES to limit)
+    desc: Generate each site's fabric peers from its topology instead of the imported ones (SITES, default sjc and iad)
     cmds:
       - ./scripts/deploy-fabric-topology.sh
 

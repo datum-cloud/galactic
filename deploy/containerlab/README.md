@@ -415,9 +415,10 @@ deploy/containerlab/
 │   │                            #   routing only, with node activation on
 │   ├── node-addresses/          # each fabric router node's interface addresses,
 │   │                            #   applied by the host rather than FRR
-│   ├── fabric-router-controller/ # the typed fabric routing controller, rollout on
+│   ├── fabric-router-controller/ # the typed fabric routing controller, rollout and
+│   │                            #   topology generator on
 │   ├── fabric-topology/         # each site's FabricEndpoints and FabricTopology,
-│   │                            #   generating the imported peers; not deployed
+│   │                            #   applied by deploy:fabric-topology
 │   ├── galactic-router/         # galactic-router DaemonSet + BGP CRs, compute and edge nodes
 │   ├── galactic-control/iad/    # the EVPN route reflector + one BGPPeer per client
 │   ├── bmp-collector/iad/       # the lab's one BMP collector, on the reflector's host network
@@ -514,7 +515,7 @@ task deploy
 | `deploy:node-addresses`          | Address every fabric router node's interfaces outside FRR, as the host does in production                                                   |
 | `deploy:fabric`                  | Apply FRR DaemonSets to all clusters                                                                                                        |
 | `deploy:fabric-routing`          | Install fabric-router-controller and import every node's `frr.conf` into the typed API (each stays on its ConfigMap)                        |
-| `deploy:fabric-topology`         | Generate each site's fabric peers from its `FabricTopology` instead of the imported ones (`SITES` to limit)                                 |
+| `deploy:fabric-topology`         | Generate each site's fabric peers from its `FabricTopology` instead of the imported ones (`SITES`, default sjc and iad)                     |
 | `deploy:bmp-collector`           | Install the BMP collector on iad-worker3, where the route reflector streams to it                                                           |
 | `deploy:galactic-router`         | Apply galactic-router DaemonSets and BGP CRs                                                                                                |
 | `deploy:galactic-gateway`        | Install galactic-gateway on every edge node, with each site's VIP rules (after `deploy:scenarios`)                                          |
