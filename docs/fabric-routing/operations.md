@@ -144,9 +144,83 @@ ports shut down). The rollout manager never moves a deployment: when a
 | `RecoveryConflict`, state belongs to another Node, cluster or machine | The host state directory came from elsewhere, or the Node was recreated                      | Remove `/var/lib/fabric-router/agent` on the host and restart the pod. Its replay protection starts over, so check no older promotion is pending first |
 | A pod held in Init on the CRD source                                  | Nothing may start yet: the router is retired, its epoch failed, or the journal is unreadable | Promote a new revision, hand the node back to its ConfigMap, or repair the state directory                                                             |
 
+## Metrics and alerts
+
+`config/monitoring` scrapes `fabric-router-controller` on port `metrics` (9185)
+as `job="fabric-router-controller"`, and each node's `fabric-config-agent` on
+port `agent-metrics` (9343) as `job="fabric-config-agent"`. The
+`fabric-routing` rule group in its PrometheusRule alerts on both.
+
+### Fleet state, from the controller
+
+The leader exports the fleet as it stands in its cache, at every scrape; the
+standby replica exports none of it. Deployments and releases need `--rollout`.
+Every deployment series carries `namespace`, `deployment` and `node`. Revision
+names are never labels.
+
+| Metric                                                                       | Labels                                                      | Meaning                                                                                          |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `galactic_fabric_routing_deployment_info`                                    | `source`, `effective_source`                                | `1` per deployment: the source its spec asks for, and the one the agent reports honouring        |
+| `galactic_fabric_routing_deployment_activation_epoch`                        |                                                             | `spec.activationEpoch`, the newest promotion                                                     |
+| `galactic_fabric_routing_deployment_applied_epoch`                           |                                                             | `status.appliedEpoch`, the last epoch the agent committed                                        |
+| `galactic_fabric_routing_deployment_last_epoch`                              | `stage`                                                     | The newest journaled epoch, labelled with the stage it reached                                   |
+| `galactic_fabric_routing_deployment_heartbeat_timestamp_seconds`             |                                                             | The agent's last report. Absent until it first reports                                           |
+| `galactic_fabric_routing_deployment_boot_authorized_until_timestamp_seconds` |                                                             | When the checkpoint stops being restorable at boot without the API                               |
+| `galactic_fabric_routing_deployment_condition`                               | `type`, `status`, `reason`                                  | `1` per condition the agent reports                                                              |
+| `galactic_fabric_routing_deployment_staged`                                  | `class`                                                     | `1` while a validated candidate is staged, labelled with what applying it disturbs               |
+| `galactic_fabric_routing_deployment_staged_lines`                            | `change` (`added`, `removed`)                               | Lines the staged candidate adds or removes                                                       |
+| `galactic_fabric_routing_deployment_candidate_differs`                       |                                                             | `1` when the candidate is not the active revision, so a release would change the router          |
+| `galactic_fabric_routing_release_outstanding`                                | `namespace`, `release`, `routing_domain`, `type`, `phase`   | `1` per release still blocking its domain: Pending, Started, Unknown, or Failed without recovery |
+| `galactic_fabric_routing_releases`                                           | `namespace`, `routing_domain`, `phase`, `recovery_verified` | Every release, counted by phase                                                                  |
+| `galactic_fabric_routing_router_accepted`                                    | `namespace`, `router`, `node`, `reason`                     | `1` when a fabric router's inputs compiled, `0` when the controller refused them                 |
+
+### Activation, from the node agent
+
+Served beside the next-hop check's metrics, on the node's port 9343.
+
+| Metric                                      | Type      | Labels    | Meaning                                                                                                                                                  |
+| ------------------------------------------- | --------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fabric_router_activations_total`           | counter   | `outcome` | Epochs that ended `committed`, `recovered` or `degraded`, were `refused`, or stopped on an `error` the agent retries. Each epoch counts once per outcome |
+| `fabric_router_activation_duration_seconds` | histogram | `outcome` | Time to commit, recover or degrade an activation, stabilization window included                                                                          |
+| `fabric_router_staging_runs_total`          | counter   | `result`  | Candidates validated and diffed: `staged`, `rejected`, `revision_not_found`. A rejected candidate is retried every sync                                  |
+| `fabric_router_writer_lock_wait_seconds`    | histogram | `writer`  | Time each writer waited for `/run/frr/fabric-agent.lock`: `configmap`, `deployment`, `activation`, `nexthop`                                             |
+| `fabric_router_boot_source`                 | gauge     | `source`  | `1` for what FRR started from: `configmap`, `checkpoint_offline`, `checkpoint_online` or `active_revision`                                               |
+
+`refused` is a promotion the agent will never activate: its release
+authorization does not cover it, or the epoch is stale, the digest differs, or
+the journal is bound elsewhere. The `frr-init` container chooses the boot
+source but serves no metrics, so it records its choice in
+`/run/frr/fabric-boot.json`, which lasts as long as the pod, and the watch
+container exports it.
+
+### Alerts
+
+None fires merely because routing does not go through the API: every one
+reads a deployment, a release or a fabric-class router, and a node on its
+ConfigMap is held to nothing but its compile result.
+
+| Alert                               | Fires when                                                               | For | Severity |
+| ----------------------------------- | ------------------------------------------------------------------------ | --- | -------- |
+| `FabricRoutingNoEligibleRecovery`   | `Degraded` with reason `NoEligibleRecovery`                              | 5m  | critical |
+| `FabricRoutingDeploymentDegraded`   | `Degraded` for any other reason than that or `Recovered`                 | 15m | warning  |
+| `FabricRoutingRecoveryConflict`     | `RecoveryConflict` True                                                  | 10m | warning  |
+| `FabricRoutingAgentHeartbeatStale`  | on Shadow or CRD, by spec or as reported, and no report for 5m, or never | 5m  | warning  |
+| `FabricRoutingReleaseFailed`        | a failed release still blocks its routing domain                         | 30m | warning  |
+| `FabricRoutingReleaseUnknown`       | a release is `Unknown`                                                   | 15m | warning  |
+| `FabricRoutingHandoffPending`       | `Accepted` False with reason `HandoffPending`                            | 15m | warning  |
+| `FabricRoutingCandidateRejected`    | `Staged` False on a node staging on Shadow or CRD                        | 15m | warning  |
+| `FabricRoutingRevisionRefused`      | the controller refuses a fabric router's inputs                          | 15m | warning  |
+| `FabricRouterControllerMetricsDown` | a `fabric-router-controller` scrape fails                                | 5m  | warning  |
+
+Each carries a `runbook_url` into infra's galactic runbook, anchored at the
+alert's name. The rules aggregate away the exporting pod, so a leader handoff
+does not restart their timers. `fabric-router-controller status` shows the
+same state one line per router.
+
 ## Ports
 
-| Component                  | Port | Purpose       |
-| -------------------------- | ---- | ------------- |
-| `fabric-router-controller` | 9185 | Metrics       |
-| `fabric-router-controller` | 8081 | Health probes |
+| Component                  | Port | Purpose              |
+| -------------------------- | ---- | -------------------- |
+| `fabric-router-controller` | 9185 | Metrics              |
+| `fabric-router-controller` | 8081 | Health probes        |
+| `fabric-config-agent`      | 9343 | Metrics, on the node |

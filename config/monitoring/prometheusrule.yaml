@@ -1,8 +1,9 @@
 # Alerts on the underlay (fabric-router's FRR, via frr-exporter and
-# fabric-config-agent), on galactic-router's BMP export and route installs,
-# on the galactic-nat egress shards' session tables, masquerade ports and
-# uplink NICs, and on the fabric-api looking glass's gateway and node
-# sidecars. A BGP session that drops is also streamed to the BMP collector as
+# fabric-config-agent), on fabric routing through the API
+# (fabric-router-controller's deployments, releases and compile results), on
+# galactic-router's BMP export and route installs, on the galactic-nat egress
+# shards' session tables, masquerade ports and uplink NICs, and on the
+# fabric-api looking glass's gateway and node sidecars. A BGP session that drops is also streamed to the BMP collector as
 # a Peer Down carrying the reason and any NOTIFICATION; these rules are the
 # Prometheus-side signal for the same events, so an alert does not depend on
 # the collector or the log pipeline behind it.
@@ -179,6 +180,233 @@ spec:
             description: >-
               Prometheus cannot reach fabric-config-agent on {{ $labels.node }} (port 9343), so
               FabricBGPMappedNextHop and FabricBGPRoutesNotInstalled cannot fire for it.
+    # Fabric routing through the API, from fabric-router-controller (job
+    # fabric-router-controller, port 9185). Only the leader exports the
+    # galactic_fabric_routing_* series, so every rule aggregates away the pod
+    # and a leader handoff does not restart its timer. Every series describes
+    # a FabricRouterDeployment, release or fabric-class BGPRouter, which exist
+    # only once routing goes through the API, so a cluster on ConfigMaps
+    # alone has nothing here to fire on; a deployment left on its ConfigMap
+    # is held to nothing but its compile result.
+    - name: fabric-routing
+      rules:
+        # The activation failed and nothing may be restored: the router runs
+        # whatever the failed apply left, and its release's domain stays
+        # blocked until an operator confirms recovery.
+        - alert: FabricRoutingNoEligibleRecovery
+          expr: >-
+            max by (namespace, deployment, node) (
+              galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Degraded", status="True", reason="NoEligibleRecovery"}
+            ) == 1
+          for: 5m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric router {{ $labels.deployment }} on {{ $labels.node }} failed an activation and cannot recover"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingnoeligiblerecovery"
+            description: >-
+              The node agent on {{ $labels.node }} failed to activate FabricRouterDeployment
+              {{ $labels.namespace }}/{{ $labels.deployment }}'s active revision and had no recovery target it may
+              restore, so FRR runs what the failed apply left. The deployment's status.epochs[0].detail says why
+              the activation failed. Promote a fixed revision, or hand the node back to its ConfigMap.
+        # The node runs its committed revision's checkpoint in name only: FRR
+        # drifted from it and could not be brought back (ReassertFailed), or
+        # frr.conf could not be rewritten, so a restart would start from
+        # something else (PersistFailed). Recovered is a failed epoch the
+        # agent already recovered from, which FabricRoutingReleaseFailed
+        # covers.
+        - alert: FabricRoutingDeploymentDegraded
+          expr: >-
+            max by (namespace, deployment, node, reason) (
+              galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Degraded", status="True", reason!~"NoEligibleRecovery|Recovered"}
+            ) == 1
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric router {{ $labels.deployment }} on {{ $labels.node }} is degraded ({{ $labels.reason }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingdeploymentdegraded"
+            description: >-
+              FabricRouterDeployment {{ $labels.namespace }}/{{ $labels.deployment }} has reported Degraded with
+              reason {{ $labels.reason }} for 15 minutes: FRR on {{ $labels.node }} does not run the committed
+              checkpoint and the agent could not bring it back, or frr.conf could not be rewritten to it. The
+              condition's message names the error.
+        # The agent refuses to act: its journal is bound to another
+        # deployment, or its state directory to another Node, cluster or
+        # machine. Nothing is promoted on the node until an operator resolves
+        # it.
+        - alert: FabricRoutingRecoveryConflict
+          expr: >-
+            max by (namespace, deployment, node) (
+              galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="RecoveryConflict", status="True"}
+            ) == 1
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "The node agent on {{ $labels.node }} refuses FabricRouterDeployment {{ $labels.deployment }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingrecoveryconflict"
+            description: >-
+              fabric-config-agent on {{ $labels.node }} has reported RecoveryConflict on
+              {{ $labels.namespace }}/{{ $labels.deployment }} for 10 minutes: its journal is bound to another
+              deployment UID, or its host state belongs to another Node, cluster or machine. It activates nothing
+              until an operator sets spec.rebind or clears the host state directory.
+        # The agent writes status at least every 30s. Only a deployment on
+        # Shadow or CRD, by spec or as last reported, needs it to: a node on
+        # its ConfigMap runs without the API's involvement. A deployment
+        # there that never reported counts as stale, as on a node without
+        # the activation Component.
+        - alert: FabricRoutingAgentHeartbeatStale
+          expr: >-
+            (
+              time() - max by (namespace, deployment, node) (galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller"}) > 300
+              or
+              max by (namespace, deployment, node) (galactic_fabric_routing_deployment_info{job="fabric-router-controller"})
+                unless on (namespace, deployment)
+              galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller"}
+            )
+            and on (namespace, deployment)
+            max by (namespace, deployment) (
+              galactic_fabric_routing_deployment_info{job="fabric-router-controller", source=~"Shadow|CRD"}
+              or
+              galactic_fabric_routing_deployment_info{job="fabric-router-controller", effective_source=~"Shadow|CRD"}
+            )
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "The node agent on {{ $labels.node }} has stopped reporting on {{ $labels.deployment }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingagentheartbeatstale"
+            description: >-
+              FabricRouterDeployment {{ $labels.namespace }}/{{ $labels.deployment }} is on the Shadow or CRD
+              source, but fabric-config-agent on {{ $labels.node }} has not written its status for over 10 minutes,
+              or never has. Nothing is staged or activated there, and a release promoting it goes Unknown. Check
+              that the node's fabric-router pod runs with the activation Component and can reach the API server.
+        # A failed release keeps its routing domain blocked until every router
+        # it failed reports Recovered or an operator verifies recovery.
+        - alert: FabricRoutingReleaseFailed
+          expr: >-
+            max by (namespace, release, routing_domain) (
+              galactic_fabric_routing_release_outstanding{job="fabric-router-controller", phase="Failed"}
+            ) == 1
+          for: 30m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Failed fabric release {{ $labels.release }} is blocking routing domain {{ $labels.routing_domain }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingreleasefailed"
+            description: >-
+              FabricReleaseAuthorization {{ $labels.namespace }}/{{ $labels.release }} failed over 30 minutes ago
+              and no release in {{ $labels.routing_domain }} can start until its routers report Recovered or an
+              operator confirms them safe (`fabric-router-controller release confirm-recovery`).
+              `fabric-router-controller release status {{ $labels.release }}` shows where each router stands.
+        # A promoted router stopped reporting mid-release, so the rollout
+        # manager cannot tell whether it committed.
+        - alert: FabricRoutingReleaseUnknown
+          expr: >-
+            max by (namespace, release, routing_domain) (
+              galactic_fabric_routing_release_outstanding{job="fabric-router-controller", phase="Unknown"}
+            ) == 1
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric release {{ $labels.release }} has lost track of a router it promoted"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingreleaseunknown"
+            description: >-
+              FabricReleaseAuthorization {{ $labels.namespace }}/{{ $labels.release }} has been Unknown for 15
+              minutes: a router it promoted stopped reporting, so the release can neither complete nor fail, and
+              {{ $labels.routing_domain }} stays blocked. FabricRoutingAgentHeartbeatStale names the router.
+        # Leaving CRD waits for the handoff's ConfigMap UID and
+        # resourceVersion to match the live ConfigMap; an edit after the
+        # handoff was written keeps the node on CRD for good.
+        - alert: FabricRoutingHandoffPending
+          expr: >-
+            max by (namespace, deployment, node) (
+              galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Accepted", status="False", reason="HandoffPending"}
+            ) == 1
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric router {{ $labels.deployment }} on {{ $labels.node }} is stuck handing back to its ConfigMap"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutinghandoffpending"
+            description: >-
+              FabricRouterDeployment {{ $labels.namespace }}/{{ $labels.deployment }} asks for the ConfigMap source
+              but the agent has kept the node on CRD for 15 minutes because spec.sourceHandoff does not name the
+              node's ConfigMap as it is now. Run `fabric-router-controller source {{ $labels.deployment }}
+              ConfigMap` again to name the current version.
+        # The node validated the candidate and refused it, or cannot read it.
+        # The agent stages only on Shadow and CRD, so a node on its ConfigMap
+        # never fires.
+        - alert: FabricRoutingCandidateRejected
+          expr: >-
+            max by (namespace, deployment, node, reason) (
+              galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Staged", status="False"}
+            ) == 1
+            and on (namespace, deployment)
+            max by (namespace, deployment) (
+              galactic_fabric_routing_deployment_info{job="fabric-router-controller", effective_source=~"Shadow|CRD"}
+            )
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric router {{ $labels.deployment }} on {{ $labels.node }} cannot stage its candidate ({{ $labels.reason }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingcandidaterejected"
+            description: >-
+              fabric-config-agent on {{ $labels.node }} has reported Staged False ({{ $labels.reason }}) on
+              {{ $labels.namespace }}/{{ $labels.deployment }} for 15 minutes: the candidate revision fails FRR's
+              validation on this node, or the agent cannot read it. A release promoting it would fail here. The
+              condition's message carries FRR's error.
+        # The controller refused to compile the router's latest inputs, so
+        # it keeps its last revision and nothing new reaches the node.
+        - alert: FabricRoutingRevisionRefused
+          expr: >-
+            max by (namespace, router, node, reason) (
+              galactic_fabric_routing_router_accepted{job="fabric-router-controller"}
+            ) == 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric router {{ $labels.router }} on {{ $labels.node }} does not compile ({{ $labels.reason }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingrevisionrefused"
+            description: >-
+              fabric-router-controller has refused BGPRouter {{ $labels.namespace }}/{{ $labels.router }}'s inputs
+              for 15 minutes with reason {{ $labels.reason }}, so no revision of the current inputs exists and the
+              router keeps running its last one. The router's Accepted condition names each problem.
+        - alert: FabricRouterControllerMetricsDown
+          expr: up{job="fabric-router-controller"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-router-controller metrics on {{ $labels.pod }} cannot be scraped"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutercontrollermetricsdown"
+            description: >-
+              Prometheus cannot reach fabric-router-controller's metrics port on {{ $labels.pod }} (9185). If that
+              pod leads, no fabric-routing alert can fire.
     - name: galactic-router
       rules:
         - alert: GalacticRouterBMPStationDown

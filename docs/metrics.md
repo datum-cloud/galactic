@@ -12,32 +12,36 @@ Every DaemonSet under `config/` runs `hostNetwork: true`, so its port is
 bound on the node itself. `galactic-vrf` runs as a sidecar in the ingress
 proxy's pod instead, which has its own network namespace, so it shares
 the 9182 default with `galactic-nat` without clashing, even on the edge
-nodes that run both. `galactic-controller` and the fabric-api gateway are
-Deployments, scraped per pod.
+nodes that run both. `galactic-controller`, `fabric-router-controller` and
+the fabric-api gateway are Deployments, scraped per pod.
 
-| Area                   | Component                                                 | Metric prefix                           | Port           | `job` from `config/monitoring/`          |
-| ---------------------- | --------------------------------------------------------- | --------------------------------------- | -------------- | ---------------------------------------- |
-| VPC dataplane          | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_usid_*`                       | 9180           | `galactic-cni`                           |
-| Tenant egress pool     | `galactic-cni`                                            | `galactic_cni_egress_*`                 | 9180           | `galactic-cni`                           |
-| VPC ingress            | `galactic-vrf`                                            | `galactic_ingress_sidecar_*`            | 9182 (default) | none shipped                             |
-| Edge load balancer     | `galactic-gateway`                                        | `galactic_edge_*`, controller-runtime   | 8081           | none shipped                             |
-| Tenant routing (GoBGP) | `galactic-router`, `galactic-router-rr`                   | `galactic_router_*`, controller-runtime | 9179           | `galactic-router` / `galactic-router-rr` |
-| Private service routes | `galactic-router` (plain mode only)                       | `galactic_service_route_*`              | 9179           | `galactic-router`                        |
-| Traffic policy         | `galactic-router` with `GALACTIC_ROUTER_TRAFFIC_POLICY`   | `galactic_cni_traffic_policy_*`         | 9179           | `galactic-router`                        |
-| Traffic policy webhook | `galactic-controller`                                     | controller-runtime only                 | 9184           | none shipped                             |
-| Underlay routing (FRR) | `fabric-router` `frr-exporter` sidecar                    | `frr_*`                                 | 9342           | `fabric-router`                          |
-| Underlay config        | `fabric-router` `fabric-config-agent`                     | `fabric_router_*`                       | 9343           | `fabric-config-agent`                    |
-| Fabric looking glass   | `fabric-api` node sidecar                                 | `fabric_api_node_*`, `fabric_api_*`     | 9345           | `fabric-api-node`                        |
-| Fabric looking glass   | `fabric-api` cell gateway                                 | `fabric_api_gateway_*`, `fabric_api_*`  | 9347           | `fabric-api-gateway`                     |
-| NAT66 / NAT64          | `galactic-nat` (one per egress shard)                     | `galactic_nat_*`                        | 9182           | `galactic-nat`                           |
+| Area                   | Component                                                 | Metric prefix                                                 | Port           | `job` from `config/monitoring/`          |
+| ---------------------- | --------------------------------------------------------- | ------------------------------------------------------------- | -------------- | ---------------------------------------- |
+| VPC dataplane          | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_usid_*`                                             | 9180           | `galactic-cni`                           |
+| Tenant egress pool     | `galactic-cni`                                            | `galactic_cni_egress_*`                                       | 9180           | `galactic-cni`                           |
+| VPC ingress            | `galactic-vrf`                                            | `galactic_ingress_sidecar_*`                                  | 9182 (default) | none shipped                             |
+| Edge load balancer     | `galactic-gateway`                                        | `galactic_edge_*`, controller-runtime                         | 8081           | none shipped                             |
+| Tenant routing (GoBGP) | `galactic-router`, `galactic-router-rr`                   | `galactic_router_*`, controller-runtime                       | 9179           | `galactic-router` / `galactic-router-rr` |
+| Private service routes | `galactic-router` (plain mode only)                       | `galactic_service_route_*`                                    | 9179           | `galactic-router`                        |
+| Traffic policy         | `galactic-router` with `GALACTIC_ROUTER_TRAFFIC_POLICY`   | `galactic_cni_traffic_policy_*`                               | 9179           | `galactic-router`                        |
+| Traffic policy webhook | `galactic-controller`                                     | controller-runtime only                                       | 9184           | none shipped                             |
+| Underlay routing (FRR) | `fabric-router` `frr-exporter` sidecar                    | `frr_*`                                                       | 9342           | `fabric-router`                          |
+| Underlay config        | `fabric-router` `fabric-config-agent`                     | `fabric_router_*`                                             | 9343           | `fabric-config-agent`                    |
+| Fabric routing (API)   | `fabric-router-controller`                                | `galactic_fabric_routing_*` (leader only), controller-runtime | 9185           | `fabric-router-controller`               |
+| Fabric looking glass   | `fabric-api` node sidecar                                 | `fabric_api_node_*`, `fabric_api_*`                           | 9345           | `fabric-api-node`                        |
+| Fabric looking glass   | `fabric-api` cell gateway                                 | `fabric_api_gateway_*`, `fabric_api_*`                        | 9347           | `fabric-api-gateway`                     |
+| NAT66 / NAT64          | `galactic-nat` (one per egress shard)                     | `galactic_nat_*`                                              | 9182           | `galactic-nat`                           |
 
 `config/monitoring/` ships PodMonitors for `galactic-cni`,
 `galactic-router`, `fabric-router` (including the opt-in fabric-api
-sidecar), the fabric-api gateway and `galactic-nat`. Scraping
-`galactic-vrf`, `galactic-gateway` or `galactic-controller` needs a scrape
-object of your own. Copy the shipped PodMonitors' relabeling of
-`__meta_kubernetes_pod_node_name` into `node`: every galactic metric is per
-node, and `node` is the label you group and alert by.
+sidecar), `fabric-router-controller`, the fabric-api gateway and
+`galactic-nat`. Scraping `galactic-vrf`, `galactic-gateway` or
+`galactic-controller` needs a scrape object of your own. Copy the shipped
+PodMonitors' relabeling of `__meta_kubernetes_pod_node_name` into `node`:
+every galactic metric is per node, and `node` is the label you group and
+alert by. `fabric-router-controller`'s fleet series name the node each
+deployment or router targets themselves, and their `namespace` is the
+object's, which its PodMonitor keeps with `honorLabels`.
 
 The eBPF-backed metrics (`galactic_usid_*`, `galactic_cni_egress_shard_*`,
 `galactic_edge_*`, `galactic_nat_*`) are read from BPF maps at scrape time,
@@ -440,7 +444,20 @@ frr_bgp_peer_prefixes_received_count_total < 0.5 * (frr_bgp_peer_prefixes_receiv
 | `fabric_router_bgp_mapped_nexthop_resets_total` | counter | `peer`                 | Hard resets the agent issued to clear a mapped next hop                                                                                                                            |
 | `fabric_router_bgp_uninstalled_routes`          | gauge   | `afi` (`ipv4`, `ipv6`) | Prefixes zebra has a BGP route for but that have no kernel route from any protocol                                                                                                 |
 
-Both gauges refresh every 30s.
+Both gauges refresh every 30s. On a node routed through the API the agent
+also exports `fabric_router_activations_total`,
+`fabric_router_activation_duration_seconds`,
+`fabric_router_staging_runs_total`, `fabric_router_writer_lock_wait_seconds`
+and `fabric_router_boot_source`; see below.
+
+### Fabric routing — `galactic_fabric_routing_*`
+
+`fabric-router-controller`'s leader exports each FabricRouterDeployment's
+source, epochs, heartbeat, conditions and staged candidate, each outstanding
+FabricReleaseAuthorization, and each fabric router's compile result, read from
+its cache at scrape time. The full list, with the node agent's activation
+metrics, lives with the rest of the operator guide in
+[fabric-routing/operations.md](fabric-routing/operations.md#metrics-and-alerts).
 
 ### Tenant routing — `galactic_router_*`
 
@@ -672,7 +689,8 @@ its operator reference in
 ## Shipped alerts
 
 `config/monitoring/prometheusrule.yaml` (the `galactic-bgp` PrometheusRule,
-unit-tested with `task test:alerts`) covers routing, the NAT session table
+unit-tested with `task test:alerts`) covers routing, fabric routing through
+the API, the NAT session table
 and ports, the egress shards' state, drop ratio and uplinks, the compute
 nodes' egress shard groups, and the fabric-api looking glass. Every alert
 carries `service: galactic`, `team: connect` and a `runbook_url`.
@@ -688,6 +706,16 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | FabricBGPMappedNextHop               | `fabric_router_bgp_mapped_nexthop == 1`                            | 15m | critical |
 | FabricBGPRoutesNotInstalled          | `fabric_router_bgp_uninstalled_routes > 0`                         | 10m | warning  |
 | FabricConfigAgentMetricsDown         | `fabric-config-agent` scrape down                                  | 5m  | warning  |
+| FabricRoutingNoEligibleRecovery      | `Degraded` with reason `NoEligibleRecovery`                        | 5m  | critical |
+| FabricRoutingDeploymentDegraded      | `Degraded` for another reason than that or `Recovered`             | 15m | warning  |
+| FabricRoutingRecoveryConflict        | `RecoveryConflict` True                                            | 10m | warning  |
+| FabricRoutingAgentHeartbeatStale     | on Shadow or CRD, no agent report for 5m, or never                 | 5m  | warning  |
+| FabricRoutingReleaseFailed           | a failed release still blocks its routing domain                   | 30m | warning  |
+| FabricRoutingReleaseUnknown          | a release is `Unknown`                                             | 15m | warning  |
+| FabricRoutingHandoffPending          | `Accepted` False with reason `HandoffPending`                      | 15m | warning  |
+| FabricRoutingCandidateRejected       | `Staged` False on a node staging on Shadow or CRD                  | 15m | warning  |
+| FabricRoutingRevisionRefused         | the controller refuses a fabric router's inputs                    | 15m | warning  |
+| FabricRouterControllerMetricsDown    | `fabric-router-controller` scrape down                             | 5m  | warning  |
 | GalacticRouterBMPStationDown         | `galactic_router_bmp_station_up == 0`                              | 10m | warning  |
 | GalacticRouterRoutesNotInstalled     | `galactic_router_route_install_failing > 0`                        | 10m | warning  |
 | GalacticRouterMetricsDown            | `galactic-router` or `galactic-router-rr` scrape down              | 5m  | warning  |

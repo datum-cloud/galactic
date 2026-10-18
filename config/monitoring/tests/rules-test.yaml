@@ -259,6 +259,383 @@ tests:
         alertname: FabricRouterMetricsDown
         exp_alerts: []
 
+  # fabric-routing: series from fabric-router-controller's leader. A label
+  # set below is one deployment, router or release; `pod` is the replica
+  # that exported it.
+  #
+  # edge-a reports NoEligibleRecovery from 0, through a leader handoff at
+  # 3m: the new leader's series carry another pod, which the rule aggregates
+  # away, so it still fires at 5m. edge-b's Degraded is a recovered epoch,
+  # which a release alert covers, and fires neither. edge-c's checkpoint
+  # drifted (ReassertFailed) and fires the generic alert after 15m.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Degraded",status="True",reason="NoEligibleRecovery"}'
+        values: "1x7"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Degraded",status="True",reason="NoEligibleRecovery"}'
+        values: "_x6 1x40"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Degraded",status="True",reason="Recovered"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Degraded",status="True",reason="ReassertFailed"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: FabricRoutingNoEligibleRecovery
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: FabricRoutingNoEligibleRecovery
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-a
+              node: edge-a
+            exp_annotations:
+              summary: "Fabric router edge-a on edge-a failed an activation and cannot recover"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingnoeligiblerecovery"
+              description: >-
+                The node agent on edge-a failed to activate FabricRouterDeployment galactic-system/edge-a's active
+                revision and had no recovery target it may restore, so FRR runs what the failed apply left. The
+                deployment's status.epochs[0].detail says why the activation failed. Promote a fixed revision, or
+                hand the node back to its ConfigMap.
+      - eval_time: 14m
+        alertname: FabricRoutingDeploymentDegraded
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: FabricRoutingDeploymentDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-c
+              node: edge-c
+              reason: ReassertFailed
+            exp_annotations:
+              summary: "Fabric router edge-c on edge-c is degraded (ReassertFailed)"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingdeploymentdegraded"
+              description: >-
+                FabricRouterDeployment galactic-system/edge-c has reported Degraded with reason ReassertFailed for
+                15 minutes: FRR on edge-c does not run the committed checkpoint and the agent could not bring it
+                back, or frr.conf could not be rewritten to it. The condition's message names the error.
+
+  # A RecoveryConflict for 10m fires; a deployment whose journal is bound
+  # to it (RecoveryConflict False) does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="RecoveryConflict",status="True",reason="RecoveryConflict"}'
+        values: "1x30"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="RecoveryConflict",status="False",reason="Bound"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: FabricRoutingRecoveryConflict
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: FabricRoutingRecoveryConflict
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-a
+              node: edge-a
+            exp_annotations:
+              summary: "The node agent on edge-a refuses FabricRouterDeployment edge-a"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingrecoveryconflict"
+              description: >-
+                fabric-config-agent on edge-a has reported RecoveryConflict on galactic-system/edge-a for 10
+                minutes: its journal is bound to another deployment UID, or its host state belongs to another Node,
+                cluster or machine. It activates nothing until an operator sets spec.rebind or clears the host state
+                directory.
+
+  # Heartbeats: edge-a on CRD reports every scrape and never fires. edge-b
+  # on Shadow last reported at 0 and fires once that is 5 minutes old and
+  # has stayed so for 5 more. edge-d on CRD never reported, and fires after
+  # 5m. edge-e asks for its ConfigMap but the agent still honours CRD (a
+  # pending handoff), so its stale heartbeat fires too. edge-c, stale on its
+  # ConfigMap, and edge-f, a ConfigMap deployment that never reported (no
+  # activation Component on its node), do not: nothing waits on them.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",source="CRD",effective_source="CRD"}'
+        values: "1x30"
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a"}'
+        values: "0+30x30"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",source="Shadow",effective_source="Shadow"}'
+        values: "1x30"
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b"}'
+        values: "0x30"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",source="ConfigMap",effective_source="ConfigMap"}'
+        values: "1x30"
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c"}'
+        values: "0x30"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-d",node="edge-d",source="CRD"}'
+        values: "1x30"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-e",node="edge-e",source="ConfigMap",effective_source="CRD"}'
+        values: "1x30"
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-e",node="edge-e"}'
+        values: "0x30"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-f",node="edge-f",source="ConfigMap"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: FabricRoutingAgentHeartbeatStale
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: FabricRoutingAgentHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-d
+              node: edge-d
+            exp_annotations: &heartbeatEdgeD
+              summary: "The node agent on edge-d has stopped reporting on edge-d"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingagentheartbeatstale"
+              description: >-
+                FabricRouterDeployment galactic-system/edge-d is on the Shadow or CRD source, but
+                fabric-config-agent on edge-d has not written its status for over 10 minutes, or never has. Nothing
+                is staged or activated there, and a release promoting it goes Unknown. Check that the node's
+                fabric-router pod runs with the activation Component and can reach the API server.
+      - eval_time: 11m
+        alertname: FabricRoutingAgentHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-b
+              node: edge-b
+            exp_annotations:
+              summary: "The node agent on edge-b has stopped reporting on edge-b"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingagentheartbeatstale"
+              description: >-
+                FabricRouterDeployment galactic-system/edge-b is on the Shadow or CRD source, but
+                fabric-config-agent on edge-b has not written its status for over 10 minutes, or never has. Nothing
+                is staged or activated there, and a release promoting it goes Unknown. Check that the node's
+                fabric-router pod runs with the activation Component and can reach the API server.
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-d
+              node: edge-d
+            exp_annotations: *heartbeatEdgeD
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-e
+              node: edge-e
+            exp_annotations:
+              summary: "The node agent on edge-e has stopped reporting on edge-e"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingagentheartbeatstale"
+              description: >-
+                FabricRouterDeployment galactic-system/edge-e is on the Shadow or CRD source, but
+                fabric-config-agent on edge-e has not written its status for over 10 minutes, or never has. Nothing
+                is staged or activated there, and a release promoting it goes Unknown. Check that the node's
+                fabric-router pod runs with the activation Component and can reach the API server.
+
+  # Releases: r2 failed and is outstanding from 0, and fires after 30m. r3
+  # failed but its recovery was verified, so it exports no outstanding
+  # series. r4 is Unknown and fires after 15m; r5 is Started and fires
+  # nothing. A cell with no releases exports none of these series at all.
+  - interval: 1m
+    input_series:
+      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r2",routing_domain="fabric",type="Release",phase="Failed"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r4",routing_domain="fabric",type="Release",phase="Unknown"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r5",routing_domain="edge",type="Release",phase="Started"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_releases{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",routing_domain="fabric",phase="Failed",recovery_verified="true"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: FabricRoutingReleaseFailed
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: FabricRoutingReleaseFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              release: r2
+              routing_domain: fabric
+            exp_annotations:
+              summary: "Failed fabric release r2 is blocking routing domain fabric"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingreleasefailed"
+              description: >-
+                FabricReleaseAuthorization galactic-system/r2 failed over 30 minutes ago and no release in fabric
+                can start until its routers report Recovered or an operator confirms them safe
+                (`fabric-router-controller release confirm-recovery`). `fabric-router-controller release status r2`
+                shows where each router stands.
+      - eval_time: 14m
+        alertname: FabricRoutingReleaseUnknown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: FabricRoutingReleaseUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              release: r4
+              routing_domain: fabric
+            exp_annotations:
+              summary: "Fabric release r4 has lost track of a router it promoted"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingreleaseunknown"
+              description: >-
+                FabricReleaseAuthorization galactic-system/r4 has been Unknown for 15 minutes: a router it promoted
+                stopped reporting, so the release can neither complete nor fail, and fabric stays blocked.
+                FabricRoutingAgentHeartbeatStale names the router.
+
+  # A handoff that stays pending for 15m fires; a deployment merely waiting
+  # for its first promotion (Accepted False, WaitingForPromotion) does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Accepted",status="False",reason="HandoffPending"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Accepted",status="False",reason="WaitingForPromotion"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FabricRoutingHandoffPending
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: FabricRoutingHandoffPending
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-a
+              node: edge-a
+            exp_annotations:
+              summary: "Fabric router edge-a on edge-a is stuck handing back to its ConfigMap"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutinghandoffpending"
+              description: >-
+                FabricRouterDeployment galactic-system/edge-a asks for the ConfigMap source but the agent has kept
+                the node on CRD for 15 minutes because spec.sourceHandoff does not name the node's ConfigMap as it
+                is now. Run `fabric-router-controller source edge-a ConfigMap` again to name the current version.
+
+  # A candidate rejected on Shadow for 15m fires. edge-b's Staged False is
+  # left from before it went back to its ConfigMap and does not; edge-c
+  # staged its candidate and does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Staged",status="False",reason="Rejected"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",source="Shadow",effective_source="Shadow"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Staged",status="False",reason="Rejected"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",source="ConfigMap",effective_source="ConfigMap"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Staged",status="True",reason="Staged"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",source="CRD",effective_source="CRD"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FabricRoutingCandidateRejected
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: FabricRoutingCandidateRejected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-a
+              node: edge-a
+              reason: Rejected
+            exp_annotations:
+              summary: "Fabric router edge-a on edge-a cannot stage its candidate (Rejected)"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingcandidaterejected"
+              description: >-
+                fabric-config-agent on edge-a has reported Staged False (Rejected) on galactic-system/edge-a for 15
+                minutes: the candidate revision fails FRR's validation on this node, or the agent cannot read it. A
+                release promoting it would fail here. The condition's message carries FRR's error.
+
+  # A router refused for 15m fires; an accepted one does not, nor one the
+  # controller refused for a moment while its references were created.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-a",node="edge-a",reason="UnresolvedRef"}'
+        values: "0x40"
+      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-b",node="edge-b",reason="Compiled"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-c",node="edge-c",reason="UnresolvedRef"}'
+        values: "0x4 _x36"
+      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-c",node="edge-c",reason="Compiled"}'
+        values: "_x4 1x36"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FabricRoutingRevisionRefused
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: FabricRoutingRevisionRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              router: edge-a
+              node: edge-a
+              reason: UnresolvedRef
+            exp_annotations:
+              summary: "Fabric router edge-a on edge-a does not compile (UnresolvedRef)"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingrevisionrefused"
+              description: >-
+                fabric-router-controller has refused BGPRouter galactic-system/edge-a's inputs for 15 minutes with
+                reason UnresolvedRef, so no revision of the current inputs exists and the router keeps running its
+                last one. The router's Accepted condition names each problem.
+
+  # A replica unreachable for 5m fires; the other replica stays up.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="fabric-router-controller",namespace="galactic-system",pod="frc-1"}'
+        values: "0x20"
+      - series: 'up{job="fabric-router-controller",namespace="galactic-system",pod="frc-2"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: FabricRouterControllerMetricsDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: FabricRouterControllerMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: fabric-router-controller
+              namespace: galactic-system
+              pod: frc-1
+            exp_annotations:
+              summary: "fabric-router-controller metrics on frc-1 cannot be scraped"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutercontrollermetricsdown"
+              description: >-
+                Prometheus cannot reach fabric-router-controller's metrics port on frc-1 (9185). If that pod leads,
+                no fabric-routing alert can fire.
+
   # A station down for 10m fires; one that recovers inside that does not.
   - interval: 30s
     input_series:
