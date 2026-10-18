@@ -529,3 +529,73 @@ func TestReleaseNeverPromotesOverAnotherEpoch(t *testing.T) {
 			d.Spec.ActivationEpoch, d.Spec.AuthorizationRef.Name)
 	}
 }
+
+// TestReleaseRestartsLostNode: a release naming a deployment for the
+// revision its status reports committed promotes nothing, and with the
+// status cleared it waits on an epoch nothing reports, so a node that lost its checkpoint cannot be restarted
+// that way. Promoting another revision of its router, then the current one
+// again, does: each is a new epoch under a release that starts.
+func TestReleaseRestartsLostNode(t *testing.T) {
+	ctx := context.Background()
+	other := revisionWith("edge-bbbbbbbbbb", digestB, nil)
+	other.Labels = map[string]string{routerLabel: testRouter}
+	f := newFakeFleet(t, map[string]string{"a1": "a"}, append(widePolicy(), other)...)
+	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
+	f.reconcile(relName)
+	f.report("a1", networkv1alpha1.FabricStageCommitted, true)
+	if a := f.reconcile(relName); a.Status.Phase != networkv1alpha1.FabricReleasePhaseCompleted {
+		t.Fatalf("first release %s", a.Status.Phase)
+	}
+
+	f.release("again", networkv1alpha1.FabricReleaseTypeRelease, 2, "a1")
+	if a := f.reconcile("again"); a.Status.Phase != networkv1alpha1.FabricReleasePhaseCompleted {
+		t.Errorf("a release of the committed revision is %s, want Completed at once", a.Status.Phase)
+	}
+	d := f.deployment("a1")
+	d.Status.AppliedEpoch, d.Status.AppliedRevision, d.Status.AppliedDigest, d.Status.Epochs = 0, "", "", nil
+	if err := f.c.Status().Update(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	f.release("cleared", networkv1alpha1.FabricReleaseTypeRelease, 3, "a1")
+	f.reconcile("cleared")
+	if d := f.deployment("a1"); d.Spec.ActivationEpoch != 1 {
+		t.Fatalf("a1 at epoch %d, want the same revision never promoted again", d.Spec.ActivationEpoch)
+	}
+	// Cleared, the deployment reads as still activating epoch 1; once
+	// it reports the commit again the release has nothing to do.
+	f.report("a1", networkv1alpha1.FabricStageCommitted, true)
+	if a := f.reconcile("cleared"); a.Status.Phase != networkv1alpha1.FabricReleasePhaseCompleted {
+		t.Fatalf("cleared %s", a.Status.Phase)
+	}
+
+	// Another revision of the router is a real promotion.
+	step := func(name string, seq int64, rev *networkv1alpha1.FabricRouterRevision, epoch int64) {
+		t.Helper()
+		a := &networkv1alpha1.FabricReleaseAuthorization{
+			ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: name, UID: types.UID(name + "-uid")},
+			Spec: networkv1alpha1.FabricReleaseAuthorizationSpec{
+				Type: networkv1alpha1.FabricReleaseTypeRelease, RoutingDomain: testDomain, FleetReleaseID: name,
+				FleetSequence: seq, Deployments: []networkv1alpha1.FabricReleaseTarget{{
+					Deployment: "a1", DeploymentUID: "a1-uid", Revision: rev.Name,
+					ActivationDependencyDigest: rev.Spec.ActivationDependencyDigest,
+				}},
+			},
+		}
+		if err := f.c.Create(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		f.reconcile(name)
+		d := f.deployment("a1")
+		if d.Spec.ActivationEpoch != epoch || d.Spec.ActiveRevisionRef.Name != rev.Name ||
+			d.Spec.AuthorizationRef.Name != name {
+			t.Fatalf("after %s: a1 at epoch %d on %s under %s, want epoch %d on %s", name, d.Spec.ActivationEpoch,
+				d.Spec.ActiveRevisionRef.Name, d.Spec.AuthorizationRef.Name, epoch, rev.Name)
+		}
+		f.report("a1", networkv1alpha1.FabricStageCommitted, true)
+		if a := f.reconcile(name); a.Status.Phase != networkv1alpha1.FabricReleasePhaseCompleted {
+			t.Fatalf("%s %s", name, a.Status.Phase)
+		}
+	}
+	step("other", 4, other, 2)
+	step("back", 5, f.rev, 3)
+}

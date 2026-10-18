@@ -696,7 +696,7 @@ nodes' egress shard groups, and the fabric-api looking glass. Every alert
 carries `service: galactic`, `team: connect` and a `runbook_url`.
 
 | Alert                                | Fires when                                                                | For | Severity |
-| ------------------------------------ | ------------------------------------------------------------------------- | --- | -------- |
+|--------------------------------------|---------------------------------------------------------------------------|-----|----------|
 | FabricBGPSessionDown                 | `frr_bgp_peer_state == 0`                                                 | 5m  | critical |
 | FabricBGPSessionAdminDown            | `frr_bgp_peer_state == 2`                                                 | 1h  | warning  |
 | FabricBGPSessionFlapping             | `resets(frr_bgp_peer_uptime_seconds[30m]) >= 3`                           | 0   | warning  |

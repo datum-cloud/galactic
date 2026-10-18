@@ -548,11 +548,13 @@ func Eligible(rec Recovery, rev *networkv1alpha1.FabricRouterRevision, credentia
 // revision of act read from the API, when no checkpoint may be restored:
 // the state directory belongs to another Node or cluster, the journal is
 // bound to another deployment, the epoch is behind the journal or already
-// failed, or the newest journaled recovery retired the router or revokes a
-// prefix rev originates or a credential it uses. credentials maps the Secret
-// names rev uses to their current UIDs.
+// failed, or the newest journaled recovery or asked, the deployment's
+// recovery authorization, retired the router or revokes a prefix rev
+// originates or a credential it uses. credentials maps the Secret names rev
+// uses to their current UIDs; with a journaled recovery, a credential
+// missing from it is refused too.
 func (a *Activator) StartAllowed(act Activation, rev *networkv1alpha1.FabricRouterRevision,
-	credentials map[string]string) error {
+	credentials map[string]string, asked Recovery) error {
 	if a.journal == nil {
 		return fmt.Errorf("%w: the journal is unreadable", ErrRecoveryConflict)
 	}
@@ -574,10 +576,8 @@ func (a *Activator) StartAllowed(act Activation, rev *networkv1alpha1.FabricRout
 	if rec, ok := a.journal.LastForEpoch(act.DeploymentUID, act.Epoch); ok && rec.Activation != act {
 		return fmt.Errorf("%w: epoch %d was accepted for %s", ErrStale, act.Epoch, rec.describe())
 	}
-	rec, ok := a.journal.LatestRecovery()
-	if !ok {
-		return nil
-	}
+	journaled, ok := a.journal.LatestRecovery()
+	rec := mergeRecovery(journaled, asked)
 	if rec.Retired {
 		return fmt.Errorf("%w: the router is retired", ErrNoEligibleRecovery)
 	}
@@ -585,8 +585,8 @@ func (a *Activator) StartAllowed(act Activation, rev *networkv1alpha1.FabricRout
 		return fmt.Errorf("%s originates revoked %s", rev.Name, p)
 	}
 	for _, name := range credentialNames(rev) {
-		uid, ok := credentials[name]
-		if !ok || slices.Contains(rec.RevokedCredentials, uid) {
+		uid, found := credentials[name]
+		if (ok && !found) || (found && slices.Contains(rec.RevokedCredentials, uid)) {
 			return fmt.Errorf("%s uses credential %s, which is revoked or cannot be resolved", rev.Name, name)
 		}
 	}
