@@ -399,6 +399,11 @@ func TestReleaseAuthorizationAdmission(t *testing.T) {
 		{name: "release withdrawing prefixes", setup: func(r *R) { r.Spec.WithdrawnPrefixes = []string{"192.0.2.0/24"} },
 			wantErr: "and only it does"},
 		{name: "re-activation", setup: func(r *R) { r.Spec.Deployments[0].Reactivate = true }},
+		{name: "emergency withdrawal re-activating", setup: func(r *R) {
+			r.Spec.Type = networkv1alpha1.FabricReleaseTypeEmergencyWithdrawal
+			r.Spec.WithdrawnPrefixes = []string{"192.0.2.0/24"}
+			r.Spec.Deployments[0].Reactivate = true
+		}, wantErr: "only a Release re-activates"},
 		{name: "withdrawn prefix that is no prefix", setup: func(r *R) {
 			r.Spec.Type = networkv1alpha1.FabricReleaseTypeEmergencyWithdrawal
 			r.Spec.WithdrawnPrefixes = []string{"edge"}

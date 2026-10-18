@@ -114,6 +114,8 @@ revision and digest each may activate. It is immutable. The rollout manager:
 A target the deployment already runs, committed by its status, counts as
 committed at once: the release promotes nothing to it. A target with
 `reactivate: true` is promoted anyway, as a new epoch of the same revision.
+Only a `Release` may set it; an `EmergencyWithdrawal` that does is refused at
+admission.
 That is how a node that lost its state starts again (see
 [A node that lost its state](#a-node-that-lost-its-state)). A re-activation
 goes through every check and limit above, and the agent accepts it as any

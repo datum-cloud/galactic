@@ -61,6 +61,7 @@ type FabricReleaseAuthorization struct {
 //
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="a release authorization is immutable"
 // +kubebuilder:validation:XValidation:rule="(self.type == 'EmergencyWithdrawal') == (has(self.withdrawnPrefixes) && size(self.withdrawnPrefixes) > 0)",message="an emergency withdrawal names the prefixes it withdraws, and only it does"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Release' || self.deployments.all(d, !has(d.reactivate) || !d.reactivate)",message="only a Release re-activates; an emergency withdrawal's targets do not"
 type FabricReleaseAuthorizationSpec struct {
 	// Type is Release or EmergencyWithdrawal.
 	Type FabricReleaseType `json:"type"`
@@ -143,7 +144,8 @@ type FabricReleaseTarget struct {
 	// state starts from it again. Without it such a target counts as
 	// committed at once and nothing is promoted. The promotion passes
 	// every check an ordinary one does; its recovery target is the one
-	// the deployment already has, never the revision itself.
+	// the deployment already has, never the revision itself. Only a
+	// Release re-activates.
 	// +optional
 	Reactivate bool `json:"reactivate,omitempty"`
 }
