@@ -18,6 +18,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -105,6 +106,9 @@ func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 		rev := &networkv1alpha1.FabricRouterRevision{}
 		key := types.NamespacedName{Namespace: d.Namespace, Name: d.Spec.CandidateRevisionRef.Name}
 		if err := c.Get(ctx, key, rev); err != nil {
+			if apierrors.IsNotFound(err) && !explicit {
+				continue
+			}
 			return nil, fmt.Errorf("deployment %s's candidate revision %s: %w", d.Name, key.Name, err)
 		}
 		runs := d.Spec.ActiveRevisionRef != nil && d.Spec.ActiveRevisionRef.Name == rev.Name &&
