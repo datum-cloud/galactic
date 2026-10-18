@@ -140,13 +140,13 @@ ports shut down). The rollout manager never moves a deployment: when a
 
 ## When the agent refuses to act
 
-| Condition                                                             | Meaning                                                                                      | What to do                                                                                                                                             |
-| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `RecoveryConflict`, journal bound to another deployment               | The deployment was deleted and recreated                                                     | Set `spec.rebind` naming the old deployment UID, after confirming the old one is gone                                                                  |
-| `RecoveryConflict`, state belongs to another Node, cluster or machine | The host state directory came from elsewhere, or the Node was recreated                      | Remove `/var/lib/fabric-router/agent` on the host and restart the pod. Its replay protection starts over, so check no older promotion is pending first |
-| A pod held in Init on the CRD source                                  | Nothing may start yet: the router is retired, its epoch failed, or the journal is unreadable | Promote a new revision, hand the node back to its ConfigMap, or repair the state directory                                                             |
-| `Accepted` False with reason `ConfigMapRetired`                       | The deployment asks for a source other than CRD on a node whose ConfigMap path is retired    | Move it back to `CRD`, or take [the way back](#the-way-back) first                                                                                     |
-| frr-init exits with `the ConfigMap path is retired`                   | The ConfigMap path is retired and the node's journal records the ConfigMap or Shadow source  | Take [the way back](#the-way-back) for the node, which never reached CRD                                                                               |
+| Condition                                                             | Meaning                                                                                      | What to do                                                                                                                                                                                                       |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RecoveryConflict`, journal bound to another deployment               | The deployment was deleted and recreated                                                     | Set `spec.rebind` naming the old deployment UID, after confirming the old one is gone                                                                                                                            |
+| `RecoveryConflict`, state belongs to another Node, cluster or machine | The host state directory came from elsewhere, or the Node was recreated                      | Remove `/var/lib/fabric-router/agent` on the host and restart the pod. Its replay protection starts over, so check no older promotion is pending first                                                           |
+| A pod held in Init on the CRD source                                  | Nothing may start yet: the router is retired, its epoch failed, or the journal is unreadable | Promote a new revision, hand the node back to its ConfigMap, or repair the state directory. With the ConfigMap path retired a handback is refused: see [A node that lost its state](#a-node-that-lost-its-state) |
+| `Accepted` False with reason `ConfigMapRetired`                       | The deployment asks for a source other than CRD on a node whose ConfigMap path is retired    | Move it back to `CRD`, or take [the way back](#the-way-back) first                                                                                                                                               |
+| frr-init exits with `the ConfigMap path is retired`                   | The ConfigMap path is retired and the node's journal records the ConfigMap or Shadow source  | Take [the way back](#the-way-back) for the node, which never reached CRD                                                                                                                                         |
 
 ## Retiring the ConfigMap path
 
@@ -163,11 +163,11 @@ is not routing configuration and stays.
 
 With it, `frr-init` starts FRR as follows, and never from a ConfigMap:
 
-| The node's journal                                    | `frr-init` starts FRR from                                                                                                                                                                                   |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| On `CRD`, activated                                   | The checkpoint or the active revision, exactly as with the ConfigMap path on (see [Recovery and boot](#recovery-and-boot))                                                                                   |
-| On `CRD` with nothing activated, or none (a new node) | The deployment's active revision, once the deployment is on `CRD` and a `Started` release, or one `Unknown` only because this node has not reported yet, authorizes it. Until then the pod is held in `Init` |
-| On `ConfigMap` or `Shadow`                            | Nothing. `frr-init` exits with `the ConfigMap path is retired`, and the kubelet retries it with backoff                                                                                                      |
+| The node's journal                                    | `frr-init` starts FRR from                                                                                                                                                                                                                                                                                                   |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| On `CRD`, activated                                   | The checkpoint or the active revision, exactly as with the ConfigMap path on (see [Recovery and boot](#recovery-and-boot)); the active revision needs its release `Started`                                                                                                                                                  |
+| On `CRD` with nothing activated, or none (a new node) | The deployment's active revision, once the deployment is on `CRD` and a `Started` release, or one `Unknown` only because this node has not reported yet, authorizes it, and its recovery authorization neither retires the router nor revokes a prefix or credential the revision uses. Until then the pod is held in `Init` |
+| On `ConfigMap` or `Shadow`                            | Nothing. `frr-init` exits with `the ConfigMap path is retired`, and the kubelet retries it with backoff                                                                                                                                                                                                                      |
 
 `config-agent` runs only the deployment agent and the next-hop check. A
 deployment asking for a source other than `CRD` reports `Accepted` False with
@@ -175,6 +175,11 @@ reason `ConfigMapRetired`, and the node stays on `CRD`: no handoff is checked or
 made. The `source` command still writes such a move, since it cannot tell the
 node is retired; leaving `CRD` still needs the node's ConfigMap, and the command
 says so when it is missing.
+
+The Role split ships as separate objects, so a bundle bump that crosses it can
+briefly deny ConfigMap reads to a pod that restarts at that moment, before the
+new `fabric-router-configmaps` binding lands. That is harmless: `frr-init`
+retries until the read succeeds.
 
 ### Preconditions
 
@@ -241,15 +246,55 @@ its deployment's active revision may start:
 Its first boot needs the API: the agent reads the Node's UID and the cluster's
 before anything may start.
 
+### A node that lost its state
+
+A node whose checkpoint can no longer be restored, because its host lost the
+state directory (a reimage, a wiped `/var/lib/fabric-router/agent`) or the
+checkpoint is from another compiler or FRR version, starts only from its
+deployment's active revision. Once that revision's release has completed, it
+authorizes nothing more, and the pod is held in `Init` with the release named.
+With the ConfigMap path retired, handing the node back is refused, so:
+
+1. If the host kept its state directory, remove it, so the node starts as a new
+   node does: an activated node needs its release `Started`, and a node that
+   cannot report makes it `Unknown`. Its replay protection starts over, so check
+   no older promotion is pending first.
+2. Promote a revision other than the one the deployment's status reports
+   committed. A release naming the deployment for that same revision promotes
+   nothing, since the rollout manager reads the deployment as running it.
+   - After a compiler or FRR upgrade the deployment's candidate is the
+     recompiled revision: `fabric-router-controller release create` naming only
+     the deployment promotes it, and the node starts from it.
+   - Otherwise roll back and forward: write a release by hand (`release create
+     --dry-run` prints one to start from) naming only the deployment, with its
+     `spec.recovery.targetRevisionRef` revision and that revision's digest, and
+     once the node commits it, `release create` naming the deployment promotes
+     its candidate, the revision it ran before, again. A deployment with no
+     recovery target has committed only one revision; a change to its
+     router's resources compiles a new candidate to promote instead.
+
 ### The way back
 
 To run a node from its ConfigMap again:
 
-1. Re-create its `fabric-router.<node>` ConfigMap from what it runs:
-   `kubectl get fabricrouterrevision ACTIVE_REVISION -n galactic-system -o yaml > rev.yaml`,
-   then `fabric-router-controller preview --revision rev.yaml > frr.conf`, which
-   prints the revision's `frr.conf` only when it matches the digests the
-   revision records, and create the ConfigMap with key `frr.conf` from it.
+1. Re-create its `fabric-router.<node>` ConfigMap from the revision FRR runs:
+   the deployment's committed revision, `status.appliedRevision` at
+   `status.appliedEpoch`, with `Ready` True, which means FRR runs it.
+   `spec.activeRevisionRef` can name a newer promotion the node has not
+   committed. Then:
+   - `kubectl get fabricrouterrevision APPLIED_REVISION -n galactic-system -o yaml > rev.yaml`
+     and `fabric-router-controller preview --revision rev.yaml > frr.conf`. It
+     prints the revision's `frr.conf` only when it matches the digests the
+     revision records, and refuses a revision compiled for another compiler or
+     FRR version, so run the `fabric-router-controller` build that compiled it.
+   - Compare it with what the node runs before going further:
+     `kubectl exec POD -c frr -- cat /etc/frr/frr.conf | diff - frr.conf`
+     shows nothing, since the agent writes each committed revision there, and
+     `kubectl exec POD -c frr -- vtysh -c 'show running-config'` shows the same
+     configuration.
+   - Create the ConfigMap with the single key `frr.conf`. A retired node runs
+     the image's default `daemons` and `vtysh.conf`; any override the node's
+     old ConfigMap carried is gone, and comes back only if added again.
 2. Remove the Component, a routing change paced like adding it. The Role comes
    back, and every node keeps running from `CRD`.
 3. Hand the node back with `fabric-router-controller source DEPLOYMENT ConfigMap`.
