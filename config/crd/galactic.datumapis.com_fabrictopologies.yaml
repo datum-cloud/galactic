@@ -47,14 +47,19 @@ spec:
           relationships between endpoints of one routing domain: a full mesh, route
           reflection, and external peers. For every relationship it creates the
           local side only: a peer on each member router toward each endpoint the
-          relationship pairs it with. Every cell holds the same endpoint records,
-          so the cell on the other end generates the reciprocal peer from them and
-          both ends agree without either naming the other's peers.
+          relationship pairs it with. The cell on the other end generates the
+          reciprocal peer from its own copy of the records and its own topology;
+          the two ends agree only while those copies and relationships agree,
+          which status.recordsDigest and status.relationshipsDigest let cells
+          compare.
 
-          Generated peers are ordinary BGPPeers, controlled by the topology and
-          labelled as generated; the revision compiler reads them like any other
-          peer. The topology never changes or deletes a peer it did not create, and
-          reports a conflict where one is in its way.
+          Generated peers are ordinary BGPPeers, labelled as generated and
+          annotated with the topology's UID, with no owner reference; the revision
+          compiler reads them like any other peer. The topology never changes or
+          deletes a peer it did not create, and reports a conflict where one is in
+          its way. A session is identified by its router and remote address, so a
+          peer keeps its name when the relationship or record producing it is
+          renamed.
 
           A session the topology no longer generates is kept until one of its ends
           is out of service: the router is deleted, its FabricRouterDeployment
@@ -62,10 +67,12 @@ spec:
           or spec.drain names it. Entries in spec.drain stay until an operator
           removes them.
 
-          Deleting the topology drops no session: before it goes, the controller
-          hands every peer it generated to manual control, removing its controller
-          reference and generated labels, so the peers keep compiling as
-          hand-authored ones. A topology created again reports them as conflicts
+          Deleting the topology drops no session, whatever the deletion's
+          propagation policy: generated peers have no owner reference for the
+          garbage collector to follow, and before the topology goes the controller
+          hands every peer it generated to manual control by removing its
+          generated labels and UID, so the peers keep compiling as hand-authored
+          ones. A topology created again reports them as conflicts
           rather than adopting them.
         properties:
           apiVersion:
@@ -1508,7 +1515,8 @@ spec:
               pass.
             properties:
               conditions:
-                description: Conditions are Accepted, ResolvedRefs, Conflicts and
+                description: |-
+                  Conditions are Accepted, ResolvedRefs, Conflicts, ReleaseHeld and
                   Ready.
                 items:
                   description: Condition contains details for one aspect of the current
@@ -1593,6 +1601,21 @@ spec:
                 description: ObservedGeneration is the generation the status describes.
                 format: int64
                 type: integer
+              recordsDigest:
+                description: |-
+                  RecordsDigest is the SHA-256 of every FabricEndpoint of the routing
+                  domain this cell holds, by name and spec. Cells holding the same
+                  records report the same digest.
+                pattern: ^([0-9a-f]{64})?$
+                type: string
+              relationshipsDigest:
+                description: |-
+                  RelationshipsDigest is the SHA-256 of the routing domain and the
+                  mesh, reflection and external relationships. Cells generating the two
+                  ends of one session from the same relationships report the same
+                  digest.
+                pattern: ^([0-9a-f]{64})?$
+                type: string
               retained:
                 description: |-
                   Retained counts the generated peers the topology no longer generates

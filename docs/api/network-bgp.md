@@ -2799,14 +2799,19 @@ FabricEndpoint records. It names the cell's member routers and the
 relationships between endpoints of one routing domain: a full mesh, route
 reflection, and external peers. For every relationship it creates the
 local side only: a peer on each member router toward each endpoint the
-relationship pairs it with. Every cell holds the same endpoint records,
-so the cell on the other end generates the reciprocal peer from them and
-both ends agree without either naming the other's peers.
+relationship pairs it with. The cell on the other end generates the
+reciprocal peer from its own copy of the records and its own topology;
+the two ends agree only while those copies and relationships agree,
+which status.recordsDigest and status.relationshipsDigest let cells
+compare.
 
-Generated peers are ordinary BGPPeers, controlled by the topology and
-labelled as generated; the revision compiler reads them like any other
-peer. The topology never changes or deletes a peer it did not create, and
-reports a conflict where one is in its way.
+Generated peers are ordinary BGPPeers, labelled as generated and
+annotated with the topology's UID, with no owner reference; the revision
+compiler reads them like any other peer. The topology never changes or
+deletes a peer it did not create, and reports a conflict where one is in
+its way. A session is identified by its router and remote address, so a
+peer keeps its name when the relationship or record producing it is
+renamed.
 
 A session the topology no longer generates is kept until one of its ends
 is out of service: the router is deleted, its FabricRouterDeployment
@@ -2814,10 +2819,12 @@ committed a retiring release, the other cell deleted the endpoint record,
 or spec.drain names it. Entries in spec.drain stay until an operator
 removes them.
 
-Deleting the topology drops no session: before it goes, the controller
-hands every peer it generated to manual control, removing its controller
-reference and generated labels, so the peers keep compiling as
-hand-authored ones. A topology created again reports them as conflicts
+Deleting the topology drops no session, whatever the deletion's
+propagation policy: generated peers have no owner reference for the
+garbage collector to follow, and before the topology goes the controller
+hands every peer it generated to manual control by removing its
+generated labels and UID, so the peers keep compiling as hand-authored
+ones. A topology created again reports them as conflicts
 rather than adopting them.
 
 
@@ -2913,7 +2920,9 @@ _Appears in:_
 | `conflicting` _integer_ | Conflicting counts the sessions blocked by a conflict. |  |  |
 | `missingEndpoints` _integer_ | MissingEndpoints counts the members with no usable endpoint in the<br />routing domain, and external sessions whose source endpoint is<br />missing. |  |  |
 | `retained` _integer_ | Retained counts the generated peers the topology no longer generates<br />and keeps until an end is out of service. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Accepted, ResolvedRefs, Conflicts and Ready. |  |  |
+| `recordsDigest` _string_ | RecordsDigest is the SHA-256 of every FabricEndpoint of the routing<br />domain this cell holds, by name and spec. Cells holding the same<br />records report the same digest. |  | Pattern: `^([0-9a-f]\{64\})?$` <br /> |
+| `relationshipsDigest` _string_ | RelationshipsDigest is the SHA-256 of the routing domain and the<br />mesh, reflection and external relationships. Cells generating the two<br />ends of one session from the same relationships report the same<br />digest. |  | Pattern: `^([0-9a-f]\{64\})?$` <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Accepted, ResolvedRefs, Conflicts, ReleaseHeld and<br />Ready. |  |  |
 
 
 #### FabricUpdateSource

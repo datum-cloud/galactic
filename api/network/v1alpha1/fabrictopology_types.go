@@ -10,14 +10,19 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 // relationships between endpoints of one routing domain: a full mesh, route
 // reflection, and external peers. For every relationship it creates the
 // local side only: a peer on each member router toward each endpoint the
-// relationship pairs it with. Every cell holds the same endpoint records,
-// so the cell on the other end generates the reciprocal peer from them and
-// both ends agree without either naming the other's peers.
+// relationship pairs it with. The cell on the other end generates the
+// reciprocal peer from its own copy of the records and its own topology;
+// the two ends agree only while those copies and relationships agree,
+// which status.recordsDigest and status.relationshipsDigest let cells
+// compare.
 //
-// Generated peers are ordinary BGPPeers, controlled by the topology and
-// labelled as generated; the revision compiler reads them like any other
-// peer. The topology never changes or deletes a peer it did not create, and
-// reports a conflict where one is in its way.
+// Generated peers are ordinary BGPPeers, labelled as generated and
+// annotated with the topology's UID, with no owner reference; the revision
+// compiler reads them like any other peer. The topology never changes or
+// deletes a peer it did not create, and reports a conflict where one is in
+// its way. A session is identified by its router and remote address, so a
+// peer keeps its name when the relationship or record producing it is
+// renamed.
 //
 // A session the topology no longer generates is kept until one of its ends
 // is out of service: the router is deleted, its FabricRouterDeployment
@@ -25,10 +30,12 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 // or spec.drain names it. Entries in spec.drain stay until an operator
 // removes them.
 //
-// Deleting the topology drops no session: before it goes, the controller
-// hands every peer it generated to manual control, removing its controller
-// reference and generated labels, so the peers keep compiling as
-// hand-authored ones. A topology created again reports them as conflicts
+// Deleting the topology drops no session, whatever the deletion's
+// propagation policy: generated peers have no owner reference for the
+// garbage collector to follow, and before the topology goes the controller
+// hands every peer it generated to manual control by removing its
+// generated labels and UID, so the peers keep compiling as hand-authored
+// ones. A topology created again reports them as conflicts
 // rather than adopting them.
 //
 // +kubebuilder:object:root=true
@@ -368,6 +375,14 @@ const (
 	AnnotationRemoteEndpointUID = "galactic.datumapis.com/remote-endpoint-uid"
 	// AnnotationRemoteRouter names the remote router in its own cell.
 	AnnotationRemoteRouter = "galactic.datumapis.com/remote-router"
+	// AnnotationFabricTopologyUID is the generating topology's UID. A peer
+	// whose UID differs, such as one a deleted topology of the same name
+	// generated, is not the topology's.
+	AnnotationFabricTopologyUID = "galactic.datumapis.com/fabric-topology-uid"
+	// AnnotationReleasePendingSince is when the topology first found a
+	// generated peer's router or record gone. The peer is released once the
+	// absence has lasted the settle period, unless the release guard holds.
+	AnnotationReleasePendingSince = "galactic.datumapis.com/release-pending-since"
 	// AnnotationReleasedFromTopology names the deleted topology that handed
 	// a peer to manual control.
 	AnnotationReleasedFromTopology = "galactic.datumapis.com/released-from-fabric-topology"
@@ -383,6 +398,10 @@ const (
 	// FabricTopologyConditionResolvedRefs is True when every profile and
 	// policy the relationships name exists.
 	FabricTopologyConditionResolvedRefs = "ResolvedRefs"
+	// FabricTopologyConditionReleaseHeld is True when the topology keeps
+	// sessions it would release because their records or routers vanished
+	// in numbers that look like a mistake rather than a removal.
+	FabricTopologyConditionReleaseHeld = "ReleaseHeld"
 	// FabricTopologyConditionConflicts is True when a session the topology
 	// would generate is blocked by a peer it does not control, or two
 	// relationships generate one session.
@@ -402,6 +421,8 @@ const (
 	FabricTopologyReasonMissingEndpoints  = "MissingEndpoints"
 	FabricTopologyReasonNotAccepted       = "NotAccepted"
 	FabricTopologyReasonConflictsBlocking = "ConflictsBlocking"
+	FabricTopologyReasonReleaseHeld       = "ReleaseHeld"
+	FabricTopologyReasonNothingHeld       = "NothingHeld"
 )
 
 // FabricTopologyStatus is what the generator did on its last pass.
@@ -434,7 +455,23 @@ type FabricTopologyStatus struct {
 	// +optional
 	Retained int32 `json:"retained,omitempty"`
 
-	// Conditions are Accepted, ResolvedRefs, Conflicts and Ready.
+	// RecordsDigest is the SHA-256 of every FabricEndpoint of the routing
+	// domain this cell holds, by name and spec. Cells holding the same
+	// records report the same digest.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^([0-9a-f]{64})?$`
+	RecordsDigest string `json:"recordsDigest,omitempty"`
+
+	// RelationshipsDigest is the SHA-256 of the routing domain and the
+	// mesh, reflection and external relationships. Cells generating the two
+	// ends of one session from the same relationships report the same
+	// digest.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^([0-9a-f]{64})?$`
+	RelationshipsDigest string `json:"relationshipsDigest,omitempty"`
+
+	// Conditions are Accepted, ResolvedRefs, Conflicts, ReleaseHeld and
+	// Ready.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
