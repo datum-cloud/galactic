@@ -261,23 +261,34 @@ tests:
 
   # fabric-routing: series from fabric-router-controller's leader. A label
   # set below is one deployment, router or release; `pod` is the replica
-  # that exported it.
+  # that exported it. Every series an alert fires on changes leader at
+  # 3m30s (1m-interval tests: 7m): frc-1's series goes stale and frc-2's
+  # starts after a gap, as when the old leader exits and the new one is
+  # first scraped. The alerts must fire through it on time.
   #
-  # edge-a reports NoEligibleRecovery from 0, through a leader handoff at
-  # 3m: the new leader's series carry another pod, which the rule aggregates
-  # away, so it still fires at 5m. edge-b's Degraded is a recovered epoch,
-  # which a release alert covers, and fires neither. edge-c's checkpoint
-  # drifted (ReassertFailed) and fires the generic alert after 15m.
+  # edge-a reports NoEligibleRecovery from 0 through a leader change: the
+  # old leader's last sample is at 2m30s and its series goes stale at 3m,
+  # and the new leader's first sample, under another pod, comes at 4m. The
+  # rule reads the last value over 2m and aggregates the pod away, so the
+  # gap neither resets it nor resolves it: it fires at 5m and still fires
+  # at 13m. edge-d fires too, until it is deleted at 10m (stale at 10m30s);
+  # it clears within 2m. edge-b's Degraded is a recovered epoch, which a
+  # release alert covers, and fires neither. edge-c's checkpoint drifted
+  # (ReassertFailed) and fires the generic alert after 15m.
   - interval: 30s
     input_series:
       - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Degraded",status="True",reason="NoEligibleRecovery"}'
-        values: "1x7"
+        values: "1x5 stale"
       - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Degraded",status="True",reason="NoEligibleRecovery"}'
-        values: "_x6 1x40"
+        values: "_x8 1x40"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-d",node="edge-d",type="Degraded",status="True",reason="NoEligibleRecovery"}'
+        values: "1x5 stale _x1 1x12 stale"
       - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Degraded",status="True",reason="Recovered"}'
         values: "1x40"
       - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Degraded",status="True",reason="ReassertFailed"}'
-        values: "1x40"
+        values: "1x7 stale"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Degraded",status="True",reason="ReassertFailed"}'
+        values: "_x10 1x40"
     alert_rule_test:
       - eval_time: 4m
         alertname: FabricRoutingNoEligibleRecovery
@@ -285,14 +296,14 @@ tests:
       - eval_time: 6m
         alertname: FabricRoutingNoEligibleRecovery
         exp_alerts:
-          - exp_labels:
+          - exp_labels: &noRecoveryEdgeA
               severity: critical
               service: galactic
               team: connect
               namespace: galactic-system
               deployment: edge-a
               node: edge-a
-            exp_annotations:
+            exp_annotations: &noRecoveryEdgeAAnnotations
               summary: "Fabric router edge-a on edge-a failed an activation and cannot recover"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingnoeligiblerecovery"
               description: >-
@@ -300,6 +311,26 @@ tests:
                 revision and had no recovery target it may restore, so FRR runs what the failed apply left. The
                 deployment's status.epochs[0].detail says why the activation failed. Promote a fixed revision, or
                 hand the node back to its ConfigMap.
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-d
+              node: edge-d
+            exp_annotations:
+              summary: "Fabric router edge-d on edge-d failed an activation and cannot recover"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingnoeligiblerecovery"
+              description: >-
+                The node agent on edge-d failed to activate FabricRouterDeployment galactic-system/edge-d's active
+                revision and had no recovery target it may restore, so FRR runs what the failed apply left. The
+                deployment's status.epochs[0].detail says why the activation failed. Promote a fixed revision, or
+                hand the node back to its ConfigMap.
+      - eval_time: 13m
+        alertname: FabricRoutingNoEligibleRecovery
+        exp_alerts:
+          - exp_labels: *noRecoveryEdgeA
+            exp_annotations: *noRecoveryEdgeAAnnotations
       - eval_time: 14m
         alertname: FabricRoutingDeploymentDegraded
         exp_alerts: []
@@ -327,7 +358,9 @@ tests:
   - interval: 30s
     input_series:
       - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="RecoveryConflict",status="True",reason="RecoveryConflict"}'
-        values: "1x30"
+        values: "1x7 stale"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="RecoveryConflict",status="True",reason="RecoveryConflict"}'
+        values: "_x10 1x30"
       - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="RecoveryConflict",status="False",reason="Bound"}'
         values: "1x30"
     alert_rule_test:
@@ -367,15 +400,21 @@ tests:
       - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a"}'
         values: "0+30x30"
       - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",source="Shadow",effective_source="Shadow"}'
-        values: "1x30"
+        values: "1x7 stale"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-b",node="edge-b",source="Shadow",effective_source="Shadow"}'
+        values: "_x10 1x30"
       - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b"}'
-        values: "0x30"
+        values: "0x7 stale"
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-b",node="edge-b"}'
+        values: "_x10 0x30"
       - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",source="ConfigMap",effective_source="ConfigMap"}'
         values: "1x30"
       - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c"}'
         values: "0x30"
       - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-d",node="edge-d",source="CRD"}'
-        values: "1x30"
+        values: "1x7 stale"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-d",node="edge-d",source="CRD"}'
+        values: "_x10 1x30"
       - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-e",node="edge-e",source="ConfigMap",effective_source="CRD"}'
         values: "1x30"
       - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-e",node="edge-e"}'
@@ -446,16 +485,22 @@ tests:
                 is staged or activated there, and a release promoting it goes Unknown. Check that the node's
                 fabric-router pod runs with the activation Component and can reach the API server.
 
-  # Releases: r2 failed and is outstanding from 0, and fires after 30m. r3
+  # Releases: r2 failed and is outstanding from 0, and fires after 30m;
+  # an operator verifies its recovery at 35m and its series goes stale at
+  # 36m, so it clears within 2m. r3
   # failed but its recovery was verified, so it exports no outstanding
   # series. r4 is Unknown and fires after 15m; r5 is Started and fires
   # nothing. A cell with no releases exports none of these series at all.
   - interval: 1m
     input_series:
       - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r2",routing_domain="fabric",type="Release",phase="Failed"}'
-        values: "1x40"
+        values: "1x7 stale"
+      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",release="r2",routing_domain="fabric",type="Release",phase="Failed"}'
+        values: "_x9 1x26 stale"
       - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r4",routing_domain="fabric",type="Release",phase="Unknown"}'
-        values: "1x40"
+        values: "1x7 stale"
+      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",release="r4",routing_domain="fabric",type="Release",phase="Unknown"}'
+        values: "_x9 1x40"
       - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r5",routing_domain="edge",type="Release",phase="Started"}'
         values: "1x40"
       - series: 'galactic_fabric_routing_releases{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",routing_domain="fabric",phase="Failed",recovery_verified="true"}'
@@ -482,6 +527,9 @@ tests:
                 can start until its routers report Recovered or an operator confirms them safe
                 (`fabric-router-controller release confirm-recovery`). `fabric-router-controller release status r2`
                 shows where each router stands.
+      - eval_time: 38m
+        alertname: FabricRoutingReleaseFailed
+        exp_alerts: []
       - eval_time: 14m
         alertname: FabricRoutingReleaseUnknown
         exp_alerts: []
@@ -508,7 +556,9 @@ tests:
   - interval: 30s
     input_series:
       - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Accepted",status="False",reason="HandoffPending"}'
-        values: "1x40"
+        values: "1x7 stale"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Accepted",status="False",reason="HandoffPending"}'
+        values: "_x10 1x40"
       - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Accepted",status="False",reason="WaitingForPromotion"}'
         values: "1x40"
     alert_rule_test:
@@ -539,9 +589,13 @@ tests:
   - interval: 30s
     input_series:
       - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Staged",status="False",reason="Rejected"}'
-        values: "1x40"
+        values: "1x7 stale"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Staged",status="False",reason="Rejected"}'
+        values: "_x10 1x40"
       - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",source="Shadow",effective_source="Shadow"}'
-        values: "1x40"
+        values: "1x7 stale"
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",source="Shadow",effective_source="Shadow"}'
+        values: "_x10 1x40"
       - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Staged",status="False",reason="Rejected"}'
         values: "1x40"
       - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",source="ConfigMap",effective_source="ConfigMap"}'
@@ -578,7 +632,9 @@ tests:
   - interval: 30s
     input_series:
       - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-a",node="edge-a",reason="UnresolvedRef"}'
-        values: "0x40"
+        values: "0x7 stale"
+      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",router="edge-a",node="edge-a",reason="UnresolvedRef"}'
+        values: "_x10 0x40"
       - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-b",node="edge-b",reason="Compiled"}'
         values: "1x40"
       - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-c",node="edge-c",reason="UnresolvedRef"}'
@@ -607,6 +663,97 @@ tests:
                 fabric-router-controller has refused BGPRouter galactic-system/edge-a's inputs for 15 minutes with
                 reason UnresolvedRef, so no revision of the current inputs exists and the router keeps running its
                 last one. The router's Accepted condition names each problem.
+
+  # A promotion the agent refuses for 15m fires: for good (PromotionRefused)
+  # or because its release never started (NotAuthorized). One it refuses
+  # for 3 minutes while its release starts does not, nor does a deployment
+  # waiting for its first promotion.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Accepted",status="False",reason="PromotionRefused"}'
+        values: "1x7 stale"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Accepted",status="False",reason="PromotionRefused"}'
+        values: "_x10 1x40"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Accepted",status="False",reason="NotAuthorized"}'
+        values: "1x5 stale"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Accepted",status="True",reason="Committed"}'
+        values: "_x6 1x34"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Accepted",status="False",reason="WaitingForPromotion"}'
+        values: "1x40"
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-d",node="edge-d",type="Accepted",status="False",reason="NotAuthorized"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FabricRoutingPromotionRefused
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: FabricRoutingPromotionRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-a
+              node: edge-a
+              reason: PromotionRefused
+            exp_annotations:
+              summary: "The node agent on edge-a will not activate edge-a's promotion (PromotionRefused)"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingpromotionrefused"
+              description: >-
+                fabric-config-agent on edge-a has refused FabricRouterDeployment galactic-system/edge-a's active
+                epoch for 15 minutes with reason PromotionRefused: its release authorization does not cover it or
+                has not started, or the revision cannot be read. The node keeps running what it ran. The
+                deployment's Accepted condition names the release and revision.
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              deployment: edge-d
+              node: edge-d
+              reason: NotAuthorized
+            exp_annotations:
+              summary: "The node agent on edge-d will not activate edge-d's promotion (NotAuthorized)"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingpromotionrefused"
+              description: >-
+                fabric-config-agent on edge-d has refused FabricRouterDeployment galactic-system/edge-d's active
+                epoch for 15 minutes with reason NotAuthorized: its release authorization does not cover it or
+                has not started, or the revision cannot be read. The node keeps running what it ran. The
+                deployment's Accepted condition names the release and revision.
+
+  # The leader cannot read deployments from its cache for 10m: fires.
+  # Releases fail to read for 3m while the cache syncs, then read: does
+  # not. Routers always read: does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",kind="fabricrouterdeployments"}'
+        values: "0x7 stale"
+      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",kind="fabricrouterdeployments"}'
+        values: "_x10 0x30"
+      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",kind="fabricreleaseauthorizations"}'
+        values: "0x6 1x24"
+      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",kind="bgprouters"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: FabricRoutingCollectFailing
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: FabricRoutingCollectFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              kind: fabricrouterdeployments
+            exp_annotations:
+              summary: "fabric-router-controller cannot read fabricrouterdeployments for its fleet metrics"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingcollectfailing"
+              description: >-
+                fabric-router-controller's leader has failed for 10 minutes to read fabricrouterdeployments from
+                its cache, so their galactic_fabric_routing_* series are missing and the fabric-routing alerts that
+                read them cannot fire. The controller's log names the error.
 
   # A replica unreachable for 5m fires; the other replica stays up.
   - interval: 30s

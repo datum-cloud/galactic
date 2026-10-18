@@ -3,8 +3,8 @@
 # queue metrics from both replicas, and, from the leader only, the
 # galactic_fabric_routing_* fleet state: each FabricRouterDeployment's
 # source, epochs, heartbeat, conditions and staged candidate, each
-# outstanding FabricReleaseAuthorization, and each fabric router's compile
-# result.
+# outstanding FabricReleaseAuthorization, each fabric router's compile
+# result, and whether each kind could be read from its cache.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
