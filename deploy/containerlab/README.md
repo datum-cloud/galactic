@@ -416,6 +416,8 @@ deploy/containerlab/
 │   ├── node-addresses/          # each fabric router node's interface addresses,
 │   │                            #   applied by the host rather than FRR
 │   ├── fabric-router-controller/ # the typed fabric routing controller, rollout on
+│   ├── fabric-topology/         # each site's FabricEndpoints and FabricTopology,
+│   │                            #   generating the imported peers; not deployed
 │   ├── galactic-router/         # galactic-router DaemonSet + BGP CRs, compute and edge nodes
 │   ├── galactic-control/iad/    # the EVPN route reflector + one BGPPeer per client
 │   ├── bmp-collector/iad/       # the lab's one BMP collector, on the reflector's host network

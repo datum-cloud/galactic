@@ -1,0 +1,6 @@
+# The sjc lab cluster's FabricEndpoints and FabricTopology. Not applied
+# by any deploy script: the cluster's imported peers would block every
+# generated one as a conflict until they are deleted.
+resources:
+  - endpoints.yaml
+  - topology.yaml

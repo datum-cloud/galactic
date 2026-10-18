@@ -1,0 +1,88 @@
+# Generated-peer fixtures for the dfw lab cluster: one FabricEndpoint
+# per router per link. topology.yaml's FabricTopology generates from them
+# every BGPPeer the cluster's frr.conf files configure. Each link between
+# two lab nodes is its own transport, so a hub peers only with the router
+# at the other end of its own link. The edge nodes reflect for their
+# site's compute node (next-hop-self force on the hub side), and peer with
+# their transit router as external peers. TestLabParity in
+# internal/fabric/routing/topology compiles the generated peers and checks
+# the result matches what importing the frr.conf files compiles to.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: dfw-worker2-link-10
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: hub
+spec:
+  routingDomain: lab
+  cell: dfw
+  routerRef:
+    name: dfw-worker2
+  transport: link-10
+  asn: 65000
+  addresses:
+    ipv4: 10.1.10.1
+    ipv6: 2001:db8:1:10::1
+  source:
+    type: Manual
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: dfw-worker-link-10
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: spoke
+spec:
+  routingDomain: lab
+  cell: dfw
+  routerRef:
+    name: dfw-worker
+  transport: link-10
+  asn: 65000
+  addresses:
+    ipv4: 10.1.10.2
+    ipv6: 2001:db8:1:10::2
+  source:
+    type: Manual
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: dfw-worker3-link-13
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: hub
+spec:
+  routingDomain: lab
+  cell: dfw
+  routerRef:
+    name: dfw-worker3
+  transport: link-13
+  asn: 65000
+  addresses:
+    ipv4: 10.1.13.1
+    ipv6: 2001:db8:1:13::1
+  source:
+    type: Manual
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: dfw-worker-link-13
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: spoke
+spec:
+  routingDomain: lab
+  cell: dfw
+  routerRef:
+    name: dfw-worker
+  transport: link-13
+  asn: 65000
+  addresses:
+    ipv4: 10.1.13.2
+    ipv6: 2001:db8:1:13::2
+  source:
+    type: Manual
