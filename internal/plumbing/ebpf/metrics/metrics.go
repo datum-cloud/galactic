@@ -23,6 +23,8 @@ type Metrics struct {
 	Events   *EventCounters
 	// Egress is galactic-cni's egress shard group control-loop state.
 	Egress *EgressControl
+	// SidecarReturn is the ingress sidecar's host-side return path.
+	SidecarReturn *SidecarReturn
 }
 
 // New builds a Metrics with the event counters already registered. Call
@@ -32,7 +34,9 @@ func New() *Metrics {
 	reg := prometheus.NewRegistry()
 	events := NewEventCounters()
 	events.MustRegister(reg)
-	return &Metrics{Registry: reg, Events: events, Egress: NewEgressControl(reg)}
+	return &Metrics{
+		Registry: reg, Events: events, Egress: NewEgressControl(reg), SidecarReturn: NewSidecarReturn(reg),
+	}
 }
 
 // RegisterDatapathCollector registers a collector reading live map state from
