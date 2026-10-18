@@ -554,7 +554,7 @@ func TestStorePruneForeignDatapathKeepsEveryTrackedVRF(t *testing.T) {
 	if err := store.Inventory(ctx, time.Now()); err != nil {
 		t.Fatalf("Inventory: %v", err)
 	}
-	if err := store.PruneForeignDatapath(); err != nil {
+	if _, err := store.PruneForeignDatapath(); err != nil {
 		t.Fatalf("PruneForeignDatapath: %v", err)
 	}
 
@@ -574,7 +574,7 @@ func TestStorePruneForeignDatapathReportsFailure(t *testing.T) {
 	backend.failPrune = errTest
 	store := NewStore(backend, testGrace, nil)
 
-	if err := store.PruneForeignDatapath(); !errors.Is(err, errTest) {
+	if _, err := store.PruneForeignDatapath(); !errors.Is(err, errTest) {
 		t.Errorf("PruneForeignDatapath = %v, want %v", err, errTest)
 	}
 }

@@ -303,6 +303,9 @@ func (f *fakeGatewayPublisher) WithdrawGateway(_ context.Context, vpc string) er
 
 type fakeGatewayResolver struct {
 	addrs map[string]net.IP
+	// err, when set, fails every resolve with something other than
+	// ErrGatewayAddressNotProvisioned.
+	err error
 }
 
 func newFakeGatewayResolver() *fakeGatewayResolver {
@@ -310,6 +313,9 @@ func newFakeGatewayResolver() *fakeGatewayResolver {
 }
 
 func (f *fakeGatewayResolver) ResolveGatewayAddress(vpc string) (net.IP, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	if addr, ok := f.addrs[vpc]; ok {
 		return addr, nil
 	}
