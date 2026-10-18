@@ -59,8 +59,8 @@ var ErrNothingToRelease = errors.New("no deployment has a candidate to release")
 
 // BuildRelease reads the deployments and their candidate revisions and
 // returns the release authorization for them, without creating it. Every
-// target must be on the CRD source, not suspended, and have a candidate
-// revision that exists.
+// target must pass rollout.CheckTarget, with its credentials read from c,
+// and have a candidate revision that exists.
 func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 	now time.Time) (*networkv1alpha1.FabricReleaseAuthorization, error) {
 	if spec.Retire && len(spec.Deployments) == 0 {
@@ -121,9 +121,13 @@ func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 			Revision: rev.Name, ActivationDependencyDigest: rev.Spec.ActivationDependencyDigest,
 			Retire: spec.Retire,
 		}
+		credentials, err := rollout.Credentials(ctx, c, d.Namespace, rev)
+		if err != nil {
+			return nil, fmt.Errorf("deployment %s's candidate revision %s: %w", d.Name, rev.Name, err)
+		}
 		// The rollout manager fails a release on any target it cannot
 		// promote, so refuse here what it would refuse there.
-		if err := rollout.CheckTarget(d, rev, target); err != nil {
+		if err := rollout.CheckTarget(d, rev, target, credentials); err != nil {
 			if explicit {
 				return nil, err
 			}

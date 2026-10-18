@@ -97,13 +97,25 @@ revision and digest each may activate. It is immutable. The rollout manager:
 1. Starts it once no earlier release in its routing domain is outstanding. It
    cancels it if a later fleet sequence already started, its start deadline
    passes, or a target cannot be promoted (wrong UID, not on `CRD`, suspended,
-   retired, wrong digest, or originating a prefix revoked on the deployment).
+   retired, wrong digest, originating a prefix revoked on the deployment, or
+   using a credential revoked on the deployment or whose Secret does not
+   exist). The condition's `InvalidTarget` message names the deployment and
+   what it refused, such as the credential.
 2. Promotes targets one epoch at a time, at most `maxUnavailable` at once per
    failure domain (the Node label `failureDomainLabel`, by default
    `topology.kubernetes.io/zone`). Every deployment still activating counts,
-   whichever release promoted it.
+   whichever release promoted it. It checks each target again just before
+   promoting it, and fails the release with `InvalidTarget` if one became
+   unpromotable since it started.
 3. Completes when every target commits, fails (and promotes nothing more) when
    one fails, and goes `Unknown` while a promoted router stops reporting.
+
+Credentials are revoked by Secret UID, in `spec.recovery.revokedCredentials`,
+so a Secret recreated under the same name is a new credential. To check them
+the rollout manager reads the metadata of each Secret a revision names, by name
+and around its cache. Its RBAC allows only `get` on Secrets in
+`galactic-system`, the namespace of the fabric routers. `release create` makes
+the same check, so it needs the same access.
 
 An `EmergencyWithdrawal` release names the prefixes it withdraws, may start
 beside an outstanding release, and adds those prefixes to the deployment's
@@ -274,11 +286,10 @@ With the ConfigMap path retired, handing the node back is refused, so:
      its candidate, the revision it ran before, again. Each release needs
      `--domain` and a `--sequence` above every earlier release in the domain,
      and is refused for a retired router or a revision that originates a
-     revoked prefix. A release does not check revoked credentials; a node
-     refuses to start a revision that uses one, so check its Secret
-     references first. A deployment with no
-     recovery target has committed only one revision; a change to its
-     router's resources compiles a new candidate to promote instead.
+     revoked prefix or uses a revoked credential, or one whose Secret does not
+     exist. A deployment with no recovery target has committed only one
+     revision; a change to its router's resources compiles a new candidate to
+     promote instead.
 
 ### The way back
 

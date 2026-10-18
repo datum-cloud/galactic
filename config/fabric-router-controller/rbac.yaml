@@ -3,8 +3,9 @@
 # FabricRouterDeployment and runs FabricReleaseAuthorizations. Every rule
 # here matches a kubebuilder:rbac marker in internal/fabric/routing, and
 # every verb is one the code uses; TestControllerRBACCoversEveryCall
-# checks them against the API server. It never reads Secrets: revisions
-# name credentials, the node agent resolves them.
+# checks them against the API server. It reads no Secret's data: revisions
+# name credentials and the node agent resolves them; the rollout manager
+# reads only a named Secret's metadata, in galactic-system, below.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -92,6 +93,35 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: fabric-router-controller-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: fabric-router-controller
+    namespace: galactic-system
+---
+# A release target whose revision uses a revoked credential is refused, and
+# credentials are revoked by Secret UID: the rollout manager reads the
+# metadata of each Secret a revision names, by name, uncached. Get only:
+# no list or watch, so it never holds every Secret, and only in the
+# namespace of the fabric routers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fabric-router-controller-credentials
+  namespace: galactic-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fabric-router-controller-credentials
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fabric-router-controller-credentials
 subjects:
   - kind: ServiceAccount
     name: fabric-router-controller

@@ -410,3 +410,99 @@ func TestAttention(t *testing.T) {
 		t.Errorf("attention = %q", got)
 	}
 }
+
+// promoteTo moves edge-a to epoch on rev, with recovery, and reports it
+// committed when committed is set, as the rollout manager and the node
+// agent would.
+func promoteTo(t *testing.T, c client.Client, epoch int64, rev *networkv1alpha1.FabricRouterRevision,
+	recovery *networkv1alpha1.FabricRecovery, committed bool) {
+	t.Helper()
+	ctx := context.Background()
+	d := edgeA(t, c)
+	d.Spec.ActivationEpoch = epoch
+	d.Spec.ActiveRevisionRef = &networkv1alpha1.LocalObjectRef{Name: rev.Name}
+	d.Spec.ActivationDependencyDigest = rev.Spec.ActivationDependencyDigest
+	d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: "earlier", UID: "earlier-uid"}
+	d.Spec.Activation = &networkv1alpha1.FabricActivationSettings{ApplyTimeoutSeconds: 60}
+	d.Spec.Recovery = recovery
+	if err := c.Update(ctx, d); err != nil {
+		t.Fatalf("promote edge-a to epoch %d: %v", epoch, err)
+	}
+	if !committed {
+		return
+	}
+	now := metav1.Now()
+	d.Status = networkv1alpha1.FabricRouterDeploymentStatus{HeartbeatTime: &now, AppliedEpoch: epoch,
+		AppliedRevision: rev.Name, AppliedDigest: rev.Spec.ActivationDependencyDigest,
+		Epochs: []networkv1alpha1.FabricEpochStatus{{Epoch: epoch, Revision: rev.Name,
+			Stage: networkv1alpha1.FabricStageCommitted}}}
+	if err := c.Status().Update(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// credentialName is the Secret a test revision's peer authenticates with.
+const credentialName = "bgp-auth"
+
+// TestReleaseRefusesRevokedCredential: a revision using a credential the
+// deployment revoked, by Secret UID, or one that cannot be resolved, is an
+// error when named and left out otherwise; a Secret recreated under the
+// same name is a new credential.
+func TestReleaseRefusesRevokedCredential(t *testing.T) {
+	c := startAPI(t)
+	ctx := context.Background()
+	node := fleet(t, c, networkv1alpha1.FabricConfigSourceCRD, nodeA)
+	now := time.Now()
+	rev := buildRevision(t, node, func(s string) string {
+		return strings.Replace(s, "advertisement-interval 30", "advertisement-interval 10", 1)
+	})
+	rev.Spec.Configuration.Peers[0].Spec.AuthSecretRef = &networkv1alpha1.LocalSecretRef{Name: credentialName}
+	if err := c.Create(ctx, rev); err != nil {
+		t.Fatal(err)
+	}
+	d := edgeA(t, c)
+	d.Spec.CandidateRevisionRef = &networkv1alpha1.LocalObjectRef{Name: rev.Name}
+	if err := c.Update(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	named := ReleaseSpec{Namespace: ns, Name: "rel", RoutingDomain: domain, FleetSequence: 1,
+		Deployments: []string{nodeA}}
+	fleetWide := ReleaseSpec{Namespace: ns, Name: "rel", RoutingDomain: domain, FleetSequence: 1}
+
+	if _, err := BuildRelease(ctx, c, named, now); err == nil || !strings.Contains(err.Error(),
+		"uses credential "+credentialName+", which cannot be resolved") {
+		t.Errorf("an unresolvable credential: %v", err)
+	}
+	if _, err := BuildRelease(ctx, c, fleetWide, now); !errors.Is(err, ErrNothingToRelease) {
+		t.Errorf("an unresolvable credential, fleet-wide: %v, want it left out", err)
+	}
+
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: credentialName}}
+	if err := c.Create(ctx, secret); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildRelease(ctx, c, named, now); err != nil {
+		t.Fatalf("a resolvable credential: %v", err)
+	}
+	promoteTo(t, c, 1, revisions[nodeA], &networkv1alpha1.FabricRecovery{
+		RevokedCredentials: []networkv1alpha1.FabricObjectIdentity{{Name: secret.Name, UID: string(secret.UID)}},
+	}, true)
+	if _, err := BuildRelease(ctx, c, named, now); err == nil || !strings.Contains(err.Error(),
+		"uses credential "+credentialName+" (Secret UID "+string(secret.UID)+"), which is revoked") {
+		t.Errorf("a revoked credential: %v", err)
+	}
+	if _, err := BuildRelease(ctx, c, fleetWide, now); !errors.Is(err, ErrNothingToRelease) {
+		t.Errorf("a revoked credential, fleet-wide: %v, want it left out", err)
+	}
+
+	if err := c.Delete(ctx, secret); err != nil {
+		t.Fatal(err)
+	}
+	recreated := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: credentialName}}
+	if err := c.Create(ctx, recreated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildRelease(ctx, c, named, now); err != nil {
+		t.Errorf("a recreated Secret: %v", err)
+	}
+}

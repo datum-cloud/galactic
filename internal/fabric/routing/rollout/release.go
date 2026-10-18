@@ -79,6 +79,7 @@ type ReleaseReconciler struct {
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricreleaseauthorizations,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricreleaseauthorizations/status,verbs=update
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=fabricrolloutpolicies,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",namespace=galactic-system,resources=secrets,verbs=get
 
 func (r *ReleaseReconciler) reader() client.Reader {
 	if r.APIReader != nil {
@@ -228,18 +229,47 @@ func (r *ReleaseReconciler) target(ctx context.Context, auth *networkv1alpha1.Fa
 		}
 		return nil, nil, err
 	}
-	if err := CheckTarget(dep, rev, t); err != nil {
+	credentials, err := Credentials(ctx, r.reader(), auth.Namespace, rev)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := CheckTarget(dep, rev, t, credentials); err != nil {
 		return nil, nil, err
 	}
 	return dep, rev, nil
 }
 
+// Credentials maps each Secret rev's peers authenticate with to its
+// current UID, reading only the Secrets' metadata from r. A Secret that
+// does not exist is left out, so a check treats it as unresolvable; any
+// other read error is returned.
+func Credentials(ctx context.Context, r client.Reader, namespace string,
+	rev *networkv1alpha1.FabricRouterRevision) (map[string]string, error) {
+	out := map[string]string{}
+	for _, name := range credentialNames(rev) {
+		md := &metav1.PartialObjectMetadata{}
+		md.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Secret"))
+		err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, md)
+		switch {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("read Secret %s's metadata: %w", name, err)
+		}
+		out[name] = string(md.UID)
+	}
+	return out, nil
+}
+
 // CheckTarget reports why dep cannot be promoted to rev under target t:
 // another deployment UID, a source other than CRD, suspended, retired, a
 // digest the release does not name, a revision compiled for another
-// router, or an originated prefix an emergency withdrawal revoked.
+// router, an originated prefix an emergency withdrawal revoked, or a
+// credential that is revoked on the deployment or cannot be resolved.
+// credentials maps the Secrets rev uses to their current UIDs, as
+// Credentials reads them.
 func CheckTarget(dep *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.FabricRouterRevision,
-	t networkv1alpha1.FabricReleaseTarget) error {
+	t networkv1alpha1.FabricReleaseTarget, credentials map[string]string) error {
 	switch {
 	case string(dep.UID) != t.DeploymentUID:
 		return targetError{fmt.Sprintf("deployment %s is UID %s, the release names %s", dep.Name, dep.UID,
@@ -257,12 +287,18 @@ func CheckTarget(dep *networkv1alpha1.FabricRouterDeployment, rev *networkv1alph
 		return targetError{fmt.Sprintf("revision %s was compiled for router %q, not %s",
 			rev.Name, rev.Labels[routerLabel], dep.Spec.RouterRef.Name)}
 	}
+	var revoked []networkv1alpha1.FabricObjectIdentity
 	if dep.Spec.Recovery != nil {
 		if p := revokedOrigination(dep.Spec.Recovery.RevokedPrefixes, rev); p != "" {
 			// An emergency withdrawal revoked it; no release brings it back.
 			return targetError{fmt.Sprintf("revision %s originates %s, revoked on deployment %s",
 				rev.Name, p, dep.Name)}
 		}
+		revoked = dep.Spec.Recovery.RevokedCredentials
+	}
+	if p := credentialProblem(revoked, rev, credentials); p != "" {
+		// The node would refuse to start it, and hold its pod in Init.
+		return targetError{fmt.Sprintf("revision %s %s on deployment %s", rev.Name, p, dep.Name)}
 	}
 	return nil
 }

@@ -742,7 +742,9 @@ func TestTopologyRBACCoversEveryCall(t *testing.T) {
 		{Verb: rbaccheck.Patch, Group: g, Resource: "bgppeers/status", Namespace: unitNS},
 		{Verb: rbaccheck.Create, Group: g, Resource: "bgppolicies", Namespace: unitNS},
 		{Verb: rbaccheck.Update, Group: g, Resource: "bgprouters", Namespace: unitNS},
-		{Verb: rbaccheck.Get, Resource: "secrets", Namespace: unitNS},
+		// The base RBAC reads named Secrets' metadata, in its namespace only.
+		{Verb: rbaccheck.List, Resource: "secrets", Namespace: unitNS},
+		{Verb: rbaccheck.Get, Resource: "secrets", Namespace: "kube-system"},
 	}
 	user, groups := rbaccheck.ServiceAccount(unitNS, "fabric-router-controller")
 	rbaccheck.Check(t, admin, user, groups, allowed, denied)

@@ -10,6 +10,7 @@
 package rollout
 
 import (
+	"fmt"
 	"net/netip"
 	"slices"
 	"time"
@@ -242,6 +243,37 @@ func revokedOrigination(revoked []string, rev *networkv1alpha1.FabricRouterRevis
 		for _, c := range covers {
 			if p.Bits() >= c.Bits() && c.Contains(p.Addr()) {
 				return o
+			}
+		}
+	}
+	return ""
+}
+
+// credentialNames lists the Secrets a revision's peers authenticate with.
+func credentialNames(rev *networkv1alpha1.FabricRouterRevision) []string {
+	var out []string
+	for _, p := range rev.Spec.Configuration.Peers {
+		if ref := p.Spec.AuthSecretRef; ref != nil && !slices.Contains(out, ref.Name) {
+			out = append(out, ref.Name)
+		}
+	}
+	return out
+}
+
+// credentialProblem says why rev may not use its credentials: a Secret
+// that cannot be resolved, which revocation by UID could never match, or
+// one whose UID revoked holds. It returns empty when there is none.
+// credentials maps Secret names to their current UIDs.
+func credentialProblem(revoked []networkv1alpha1.FabricObjectIdentity, rev *networkv1alpha1.FabricRouterRevision,
+	credentials map[string]string) string {
+	for _, n := range credentialNames(rev) {
+		uid, ok := credentials[n]
+		if !ok {
+			return "uses credential " + n + ", which cannot be resolved"
+		}
+		for _, r := range revoked {
+			if r.UID == uid {
+				return fmt.Sprintf("uses credential %s (Secret UID %s), which is revoked", n, uid)
 			}
 		}
 	}
