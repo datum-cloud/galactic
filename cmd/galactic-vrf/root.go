@@ -67,9 +67,23 @@ func runCmd(cfg *config.VRFConfig) error {
 
 	metrics := ingresssidecar.NewMetrics()
 	metrics.MustRegister(ctrlmetrics.Registry)
+	lifecycle := ingresssidecar.NewLifecycleMetrics(cfg.SweepInterval, cfg.TeardownGracePeriod)
+	lifecycle.MustRegister(ctrlmetrics.Registry)
 
 	backend := ingresssidecar.NewKernelBackend()
 	store := ingresssidecar.NewStore(backend, cfg.TeardownGracePeriod, metrics)
+	convergence := ingresssidecar.NewConvergenceMetrics()
+	convergence.MustRegister(ctrlmetrics.Registry)
+	store.SetConvergenceMetrics(convergence)
+	inputs := ingresssidecar.NewInputMetrics()
+	inputs.MustRegister(ctrlmetrics.Registry)
+	store.SetInputMetrics(inputs)
+	datapath := ingresssidecar.NewDatapathMetrics()
+	datapath.MustRegister(ctrlmetrics.Registry)
+	store.SetDatapathMetrics(datapath)
+	nodeSourceMetrics := ingresssidecar.NewNodeSourceMetrics()
+	nodeSourceMetrics.MustRegister(ctrlmetrics.Registry)
+	store.SetNodeSourceMetrics(nodeSourceMetrics)
 
 	// Return-path gateway advertisement is opt-in on the node name alone,
 	// and leaving it unset is fully inert. The cached client is fine here:
@@ -115,6 +129,10 @@ func runCmd(cfg *config.VRFConfig) error {
 			"return-path gateway advertisement publishing is disabled", config.EnvVRFNodeName)
 	}
 
+	gateway := ingresssidecar.NewGatewayMetrics(cfg.NodeName != "", cfg.NodeName != "" && cfg.GatewayPrefix != "")
+	gateway.MustRegister(ctrlmetrics.Registry)
+	store.SetGatewayMetrics(gateway)
+
 	if err := (&ingresssidecar.Reconciler{Store: store}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup EndpointSlice controller: %w", err)
 	}
@@ -129,7 +147,7 @@ func runCmd(cfg *config.VRFConfig) error {
 	// controller's own reconciles have drained the workqueue that list
 	// fed, so on a busy node at boot the two race. Seeding uses the
 	// manager's uncached reader, which depends on neither.
-	go ingresssidecar.RunStartup(ctx, mgr.GetAPIReader(), store, cfg.SweepInterval)
+	go ingresssidecar.RunStartup(ctx, mgr.GetAPIReader(), store, cfg.SweepInterval, lifecycle)
 
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
