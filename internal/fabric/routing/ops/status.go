@@ -30,8 +30,7 @@ func FleetStatus(ctx context.Context, c client.Client, namespace string, now tim
 		return err
 	}
 	slices.SortFunc(list.Items, func(a, b networkv1alpha1.FabricRouterDeployment) int {
-		return compare(a.Name,
-			b.Name)
+		return strings.Compare(a.Name, b.Name)
 	})
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "DEPLOYMENT\tNODE\tSOURCE\tEPOCH\tACTIVE\tAPPLIED\tCANDIDATE\tATTENTION\tREPORTED")

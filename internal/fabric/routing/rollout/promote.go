@@ -144,6 +144,10 @@ func promote(d *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.Fab
 	return spec
 }
 
+// Busy reports whether a deployment's current epoch is still activating,
+// so nothing should move it until the epoch finishes.
+func Busy(d *networkv1alpha1.FabricRouterDeployment) bool { return busy(d) }
+
 // busy reports whether a deployment's current epoch, under any release,
 // is still activating: promoted, and neither committed nor finished
 // failing.
