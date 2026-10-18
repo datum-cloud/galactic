@@ -208,7 +208,11 @@ func SetSource(ctx context.Context, c client.Client, namespace, name string,
 	case d.Spec.Source == networkv1alpha1.FabricConfigSourceCRD || pending && source == d.Spec.Source:
 		cm := &corev1.ConfigMap{}
 		cmName := "fabric-router." + d.Spec.Target.NodeName
-		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: cmName}, cm); err != nil {
+		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: cmName}, cm); apierrors.IsNotFound(err) {
+			return fmt.Errorf("the handoff needs node %s's ConfigMap %s; if the ConfigMap path is retired, "+
+				"re-create it from the active revision and remove the configmap-retired component first: %w",
+				d.Spec.Target.NodeName, cmName, err)
+		} else if err != nil {
 			return fmt.Errorf("the handoff needs node %s's ConfigMap %s: %w", d.Spec.Target.NodeName, cmName, err)
 		}
 		handoff = &networkv1alpha1.FabricSourceHandoff{

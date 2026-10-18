@@ -319,8 +319,9 @@ func TestSourceWorkflows(t *testing.T) {
 	if err := SetSource(ctx, c, ns, nodeA, networkv1alpha1.FabricConfigSourceShadow); err == nil {
 		t.Error("left CRD for Shadow")
 	}
-	if err := SetSource(ctx, c, ns, nodeA, networkv1alpha1.FabricConfigSourceConfigMap); err == nil {
-		t.Error("handed back without the node's ConfigMap")
+	if err := SetSource(ctx, c, ns, nodeA, networkv1alpha1.FabricConfigSourceConfigMap); err == nil ||
+		!strings.Contains(err.Error(), "configmap-retired") {
+		t.Errorf("handed back without the node's ConfigMap: %v, want an error pointing at the retirement", err)
 	}
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "fabric-router." + nodeA}}
 	if err := c.Create(ctx, cm); err != nil {

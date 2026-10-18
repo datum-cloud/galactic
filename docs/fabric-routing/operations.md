@@ -6,7 +6,9 @@ install, how a node moves between configuration sources, how releases promote
 revisions, and how to recover when something goes wrong.
 
 Every step here is opt-in. A cluster that installs none of it keeps applying each
-node's `fabric-router.<node>` ConfigMap exactly as before.
+node's `fabric-router.<node>` ConfigMap exactly as before. Once every node runs
+from the API, [retiring the ConfigMap path](#retiring-the-configmap-path) stops
+the agent reading ConfigMaps at all.
 
 ## The pieces
 
@@ -44,7 +46,7 @@ namespace, `galactic-system` by default.
 | `suspend DEPLOYMENT`, `resume DEPLOYMENT`                   | Stops and allows promotion; the router keeps running what it runs                                                                                                                                                      |
 | `rebind DEPLOYMENT --from-uid UID --by WHO`                 | Lets a recreated or restored deployment take over its node's journal                                                                                                                                                   |
 | `move DEPLOYMENT NODE --fenced-by WHO --method HOW`         | Retargets a router once the node it leaves is fenced                                                                                                                                                                   |
-| `import`, `preview`, `diff`                                 | Turn a rendered `frr.conf` into typed resources, show what resources compile to, and compare that with a running configuration                                                                                         |
+| `import`, `preview`, `diff`                                 | Turn a rendered `frr.conf` into typed resources, show what resources or a stored revision (`preview --revision`) compile to, and compare that with a running configuration                                             |
 
 ## Configuration sources
 
@@ -143,6 +145,112 @@ ports shut down). The rollout manager never moves a deployment: when a
 | `RecoveryConflict`, journal bound to another deployment               | The deployment was deleted and recreated                                                     | Set `spec.rebind` naming the old deployment UID, after confirming the old one is gone                                                                  |
 | `RecoveryConflict`, state belongs to another Node, cluster or machine | The host state directory came from elsewhere, or the Node was recreated                      | Remove `/var/lib/fabric-router/agent` on the host and restart the pod. Its replay protection starts over, so check no older promotion is pending first |
 | A pod held in Init on the CRD source                                  | Nothing may start yet: the router is retired, its epoch failed, or the journal is unreadable | Promote a new revision, hand the node back to its ConfigMap, or repair the state directory                                                             |
+| `Accepted` False with reason `ConfigMapRetired`                       | The deployment asks for a source other than CRD on a node whose ConfigMap path is retired    | Move it back to `CRD`, or take [the way back](#the-way-back) first                                                                                     |
+| frr-init exits with `the ConfigMap path is retired`                   | The ConfigMap path is retired and the node's journal records the ConfigMap or Shadow source  | Take [the way back](#the-way-back) for the node, which never reached CRD                                                                               |
+
+## Retiring the ConfigMap path
+
+Once every node runs from the API, the `config/fabric-router/components/configmap-retired`
+Component turns the ConfigMap path off. List it after `components/activation`,
+which it requires; a build without that, or with the two in the other order,
+fails. It sets `FABRIC_CONFIGMAPS=false` on `frr-init` and `config-agent`, and
+deletes the `fabric-router-configmaps` Role and RoleBinding, so the agent
+neither reads, watches nor raises events on any ConfigMap, the node's own or the
+legacy shared `fabric-config`, and could not if it tried. It keeps the events
+permission, for the `MappedNextHopReset` events on the agent's own Pod.
+
+With it, `frr-init` starts FRR as follows, and never from a ConfigMap:
+
+| The node's journal                                    | `frr-init` starts FRR from                                                                                                                                                                                   |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| On `CRD`, activated                                   | The checkpoint or the active revision, exactly as with the ConfigMap path on (see [Recovery and boot](#recovery-and-boot))                                                                                   |
+| On `CRD` with nothing activated, or none (a new node) | The deployment's active revision, once the deployment is on `CRD` and a `Started` release, or one `Unknown` only because this node has not reported yet, authorizes it. Until then the pod is held in `Init` |
+| On `ConfigMap` or `Shadow`                            | Nothing. `frr-init` exits with `the ConfigMap path is retired`, and the kubelet retries it with backoff                                                                                                      |
+
+`config-agent` runs only the deployment agent and the next-hop check. A
+deployment asking for a source other than `CRD` reports `Accepted` False with
+reason `ConfigMapRetired`, and the node stays on `CRD`: no handoff is checked or
+made. The `source` command still writes such a move, since it cannot tell the
+node is retired; leaving `CRD` still needs the node's ConfigMap, and the command
+says so when it is missing.
+
+### Preconditions
+
+- Every fabric router has a deployment on `CRD`, reported as its effective
+  source, with its active revision committed (`fabric-router-controller status`
+  shows `Ready` and no `HandoffPending`), and no node's journal records another
+  source.
+- Every fabric-router pod runs an image whose agent knows `FABRIC_CONFIGMAPS`.
+  An older agent ignores it, and once the Role is gone its ConfigMap watch fails.
+- Every node's checkpoint and active revision come from the compiler and FRR
+  version the image carries: a node restores neither from another, and no
+  ConfigMap remains to start from. Keep fabric-router image upgrades out of the
+  retirement until it completes, and recompile and promote before one later.
+- Recovery is proven on a canary node: a pod restarted with the API reachable
+  starts from `checkpoint_online` or `checkpoint_offline`
+  (`fabric_router_boot_source`), and one restarted with the API unreachable,
+  within `offlineBootSeconds`, from `checkpoint_offline`.
+
+### Procedure
+
+1. Add the Component to the fabric-router overlay, after `components/activation`.
+   It changes the pod template, so every fabric-router pod restarts and FRR
+   with it: roll it out as a routing change, one canary node first, checking its
+   underlay sessions, convergence and boot source, then paced across the rest.
+2. Once every pod runs with it, delete each `fabric-router.<node>` ConfigMap
+   and the legacy `fabric-config`.
+3. Remove what the deployment pipeline still carries for the ConfigMap path:
+   - the generators rendering each node's ConfigMap, and anything that depends
+     on them being applied first;
+   - the DaemonSet patch adding the legacy shared ConfigMap's volume;
+   - any ConfigMap permission granted to the `fabric-router` ServiceAccount
+     outside this repository;
+   - the legacy shared `fabric-config` and whatever renders it, the fallback a
+     node with no ConfigMap of its own consulted;
+   - committed `frr.conf` files, except as fixtures the compiler is tested
+     against (`import`, `diff`).
+
+### Verifying
+
+- RBAC denies the reads:
+  `kubectl auth can-i get configmaps -n galactic-system --as system:serviceaccount:galactic-system:fabric-router`
+  answers `no`, and so do `list` and `watch`.
+- The API audit log shows no ConfigMap request from that ServiceAccount after
+  the rollout.
+- Every node reports `fabric_router_boot_source` as `checkpoint_offline`,
+  `checkpoint_online` or `active_revision`, never `configmap`, and its
+  `config-agent` logs `configMaps=false` at start.
+- A canary pod restarted with the API unreachable, within `offlineBootSeconds`,
+  starts from `checkpoint_offline`, with every ConfigMap deleted.
+
+### A node joining after retirement
+
+A new node has no journal and no ConfigMap, so its pod is held in `Init` until
+its deployment's active revision may start:
+
+1. The rollout manager creates its deployment on the `ConfigMap` source; `frr-init`
+   logs that it is not on `CRD`.
+2. `fabric-router-controller source DEPLOYMENT CRD`, which needs no ConfigMap.
+3. `fabric-router-controller release create` naming only that deployment. Once
+   the release starts, `frr-init` starts FRR from the active revision, and the
+   sidecar activates and commits it. The release is `Unknown` until the node
+   first reports, which does not stop it booting.
+
+Its first boot needs the API: the agent reads the Node's UID and the cluster's
+before anything may start.
+
+### The way back
+
+To run a node from its ConfigMap again:
+
+1. Re-create its `fabric-router.<node>` ConfigMap from what it runs:
+   `kubectl get fabricrouterrevision ACTIVE_REVISION -n galactic-system -o yaml > rev.yaml`,
+   then `fabric-router-controller preview --revision rev.yaml > frr.conf`, which
+   prints the revision's `frr.conf` only when it matches the digests the
+   revision records, and create the ConfigMap with key `frr.conf` from it.
+2. Remove the Component, a routing change paced like adding it. The Role comes
+   back, and every node keeps running from `CRD`.
+3. Hand the node back with `fabric-router-controller source DEPLOYMENT ConfigMap`.
 
 ## Metrics and alerts
 

@@ -5,12 +5,13 @@
 // resources into FRR configuration. run is the in-cluster controller that
 // turns every fabric-class router into immutable FabricRouterRevisions. The
 // offline subcommands contact no cluster: import turns a rendered frr.conf
-// into typed resources, preview compiles resources into the frr.conf a
-// router would run, and diff compares that with a configuration FRR runs
+// into typed resources, preview compiles resources, or a stored revision,
+// into the frr.conf a router would run, and diff compares that with a configuration FRR runs
 // today.
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,11 +20,14 @@ import (
 
 	"github.com/spf13/cobra"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/yaml"
 
+	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/fabric/routing/bundle"
 	"go.datum.net/galactic/internal/fabric/routing/compile"
 	"go.datum.net/galactic/internal/fabric/routing/frrimport"
 	"go.datum.net/galactic/internal/fabric/routing/frrtext"
+	"go.datum.net/galactic/internal/fabric/routing/revision"
 	"go.datum.net/galactic/internal/metadata"
 )
 
@@ -90,13 +94,28 @@ Any line outside the fabric conformance matrix is an error, never dropped.`,
 }
 
 func newPreviewCommand() *cobra.Command {
-	var router string
+	var router, revisionFile string
 	cmd := &cobra.Command{
-		Use:   "preview RESOURCES_YAML",
-		Short: "Print the frr.conf a router's typed resources compile to",
-		Args:  cobra.ExactArgs(1),
+		Use:   "preview RESOURCES_YAML --router ROUTER | preview --revision REVISION_YAML",
+		Short: "Print the frr.conf a router's typed resources, or a stored revision, compile to",
+		Long: `With --router, compiles the named router from RESOURCES_YAML. With
+--revision, recompiles a FabricRouterRevision as kubectl get -o yaml writes
+it, and prints its frr.conf only when that matches the digests the revision
+records.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := compileFile(args[0], router)
+			var res compile.Result
+			var err error
+			switch {
+			case revisionFile != "" && (router != "" || len(args) > 0):
+				return errors.New("--revision takes no RESOURCES_YAML or --router")
+			case revisionFile != "":
+				res, err = compileRevisionFile(revisionFile)
+			case router == "" || len(args) != 1:
+				return errors.New("name RESOURCES_YAML and --router, or --revision")
+			default:
+				res, err = compileFile(args[0], router)
+			}
 			if err != nil {
 				return err
 			}
@@ -104,9 +123,26 @@ func newPreviewCommand() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&router, "router", "", "BGPRouter to compile (required)")
-	_ = cmd.MarkFlagRequired("router")
+	cmd.Flags().StringVar(&router, "router", "", "BGPRouter to compile from RESOURCES_YAML")
+	cmd.Flags().StringVar(&revisionFile, "revision", "", "FabricRouterRevision manifest to recompile and verify")
 	return cmd
+}
+
+// compileRevisionFile reads one FabricRouterRevision from path and
+// recompiles it, failing unless the result matches its recorded digests.
+func compileRevisionFile(path string) (compile.Result, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return compile.Result{}, err
+	}
+	rev := &networkv1alpha1.FabricRouterRevision{}
+	if err := yaml.Unmarshal(data, rev); err != nil {
+		return compile.Result{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if rev.Kind != "FabricRouterRevision" {
+		return compile.Result{}, fmt.Errorf("%s: kind %q, not FabricRouterRevision", path, rev.Kind)
+	}
+	return revision.Verify(rev)
 }
 
 func newDiffCommand() *cobra.Command {
