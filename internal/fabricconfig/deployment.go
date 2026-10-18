@@ -559,10 +559,11 @@ func (d *DeploymentAgent) authorized(ctx context.Context, dep *networkv1alpha1.F
 }
 
 // authorizedIn is authorized, also accepting a release whose outcome is
-// Unknown when atBoot is set: a router that cannot start cannot report,
-// and a router that does not report makes its release Unknown.
+// Unknown when unreported is set, for a node booting with nothing
+// activated: it has never reported and cannot until it starts, and a
+// promoted router that does not report makes its release Unknown.
 func (d *DeploymentAgent) authorizedIn(ctx context.Context, dep *networkv1alpha1.FabricRouterDeployment,
-	atBoot bool) error {
+	unreported bool) error {
 	ref := dep.Spec.AuthorizationRef
 	if ref == nil {
 		return fmt.Errorf("%w: the promotion names no release authorization", errRefused)
@@ -581,7 +582,7 @@ func (d *DeploymentAgent) authorizedIn(ctx context.Context, dep *networkv1alpha1
 	switch auth.Status.Phase {
 	case networkv1alpha1.FabricReleasePhaseStarted:
 	case networkv1alpha1.FabricReleasePhaseUnknown:
-		if !atBoot {
+		if !unreported {
 			return fmt.Errorf("release authorization %s is %q, not Started", ref.Name, auth.Status.Phase)
 		}
 	case networkv1alpha1.FabricReleasePhaseCompleted, networkv1alpha1.FabricReleasePhaseFailed,
@@ -934,13 +935,16 @@ var ErrNotActivated = errors.New("no activation accepted yet")
 // with: the checkpoint when boot may restore it offline; with the API, the
 // checkpoint again when the deployment is bound to the journal and nothing
 // since forbids it; otherwise the active revision, verified, authorized
-// and allowed by the journal. It records which of the three in Booted. It
+// and allowed by the journal and the deployment's recovery authorization
+// (not retired, originating no revoked prefix and using no revoked
+// credential). It records which of the three in Booted. It
 // returns ErrNotActivated for a node with nothing activated yet, and an
 // error when nothing may start yet.
 //
 // With ConfigMapsRetired a node with nothing activated, whether its journal
 // records CRD or no source at all, starts from its deployment's active
-// revision under the same checks, its deployment on CRD; until it may, the
+// revision under the same checks, its deployment on CRD and its release
+// Started, or Unknown since the node has never reported; until it may, the
 // error wraps ErrNotActivated. A journal recording another source returns
 // a fatal error wrapping ErrConfigMapsRetired: only a node on CRD may start.
 func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (config, reason string, err error) {
@@ -965,7 +969,8 @@ func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (con
 }
 
 // bootConfig is BootConfig past its source and identity checks. fresh is a
-// node with nothing activated, which needs its deployment on CRD.
+// node with nothing activated, which needs its deployment on CRD and is the
+// only one a release whose outcome is Unknown authorizes.
 func (d *DeploymentAgent) bootConfig(ctx context.Context, machineID string, fresh bool) (config, reason string,
 	err error) {
 	id := activation.Identity{MachineID: machineID, NodeUID: d.NodeUID, ClusterID: d.ClusterID}
@@ -994,7 +999,7 @@ func (d *DeploymentAgent) bootConfig(ctx context.Context, machineID string, fres
 	if dep.Spec.ActivationEpoch == 0 {
 		return "", "", fmt.Errorf("%s; node %s has no active revision", decision.Reason, d.NodeName)
 	}
-	if err := d.authorizedIn(ctx, dep, true); err != nil {
+	if err := d.authorizedIn(ctx, dep, fresh); err != nil {
 		if _, accepted := d.Activator.Journal().Accepted(string(dep.UID), dep.Spec.ActivationEpoch); !accepted {
 			return "", "", fmt.Errorf("%s; %w", decision.Reason, err)
 		}
@@ -1007,7 +1012,7 @@ func (d *DeploymentAgent) bootConfig(ctx context.Context, machineID string, fres
 	if err != nil {
 		return "", "", err
 	}
-	if err := d.Activator.StartAllowed(act, req.Revision, req.Credentials); err != nil {
+	if err := d.Activator.StartAllowed(act, req.Revision, req.Credentials, req.Recovery); err != nil {
 		return "", "", fmt.Errorf("%s; %w", decision.Reason, err)
 	}
 	res, err := revision.Verify(req.Revision)

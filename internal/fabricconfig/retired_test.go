@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/fabricconfig/activation"
 )
 
 // isConfigMap reports whether obj is a ConfigMap or a list of them, typed,
@@ -314,28 +315,91 @@ func TestRetiredBootConfig(t *testing.T) {
 	}
 }
 
-// TestBootConfigReleaseUnknown: at boot a release whose outcome is Unknown
-// still authorizes the active revision, but an activation waits for it to
-// start again.
+// TestBootConfigReleaseUnknown: a release whose outcome is Unknown
+// authorizes a boot only on a node with nothing activated, which has never
+// reported; an activated node, in either mode, needs it Started.
 func TestBootConfigReleaseUnknown(t *testing.T) {
 	ctx := context.Background()
-	h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
-	auth := release(h.revs[0])
-	auth.Status.Phase = networkv1alpha1.FabricReleasePhaseUnknown
-	if err := h.client.Create(ctx, auth); err != nil {
-		t.Fatal(err)
+	for _, retired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("Retired=%t", retired), func(t *testing.T) {
+			h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
+			h.agent.ConfigMapsRetired = retired
+			auth := release(h.revs[0])
+			auth.Status.Phase = networkv1alpha1.FabricReleasePhaseUnknown
+			if err := h.client.Create(ctx, auth); err != nil {
+				t.Fatal(err)
+			}
+			h.update(func(d *networkv1alpha1.FabricRouterDeployment) { promote(d, 1, h.revs[0]) })
+			// Activated before, for another epoch: no checkpoint to restore.
+			journalAccept(h, depUID, 0, nil)
+			if _, _, err := h.agent.BootConfig(ctx, depMachine); err == nil ||
+				!strings.Contains(err.Error(), "not Started") {
+				t.Fatalf("BootConfig = %v, want an activated node refused under an Unknown release", err)
+			}
+			got := h.sync()
+			if c := condition(got, networkv1alpha1.FabricConditionAccepted); c == nil ||
+				c.Reason != reasonNotAuthorized || got.Status.AppliedEpoch != 0 {
+				t.Errorf("Accepted = %+v, applied epoch %d; want an Unknown release to authorize no activation", c,
+					got.Status.AppliedEpoch)
+			}
+		})
 	}
-	h.update(func(d *networkv1alpha1.FabricRouterDeployment) { promote(d, 1, h.revs[0]) })
-	// Activated before, for another epoch: no checkpoint to restore.
-	journalAccept(h, depUID, 0, nil)
-	if conf, reason, err := h.agent.BootConfig(ctx, depMachine); err != nil || conf != rendered(t, h.revs[0]) {
-		t.Fatalf("BootConfig = %q, %v", reason, err)
-	}
-	got := h.sync()
-	if c := condition(got, networkv1alpha1.FabricConditionAccepted); c == nil || c.Reason != reasonNotAuthorized ||
-		got.Status.AppliedEpoch != 0 {
-		t.Errorf("Accepted = %+v, applied epoch %d; want an Unknown release to authorize no activation", c,
-			got.Status.AppliedEpoch)
+}
+
+// TestBootConfigHonoursRecoveryAuthorization: starting from the active
+// revision is refused when the deployment's recovery authorization retired
+// the router, or revokes a prefix the revision originates or a credential
+// it uses, whatever the journal says: on a node with nothing activated and
+// its ConfigMap path retired, and on an activated node without a
+// checkpoint with it on.
+func TestBootConfigHonoursRecoveryAuthorization(t *testing.T) {
+	const md5Secret = "md5"
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		recovery networkv1alpha1.FabricRecovery
+		want     string
+	}{
+		{"Retired", networkv1alpha1.FabricRecovery{Retired: true}, "router is retired"},
+		{"RevokedPrefix", networkv1alpha1.FabricRecovery{RevokedPrefixes: []string{"192.0.2.0/24"}},
+			"originates revoked"},
+		{"RevokedCredential", networkv1alpha1.FabricRecovery{RevokedCredentials: []networkv1alpha1.FabricObjectIdentity{
+			{Name: md5Secret, UID: "secret-uid"}}}, "credential " + md5Secret},
+	} {
+		for _, retired := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/Retired=%t", tc.name, retired), func(t *testing.T) {
+				secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: depNamespace, Name: md5Secret,
+					UID: "secret-uid"}}
+				h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD), secret)
+				h.agent.ConfigMapsRetired = retired
+				if !retired {
+					journalAccept(h, depUID, 0, nil)
+				}
+				if err := h.client.Create(ctx, release(h.revs[0])); err != nil {
+					t.Fatal(err)
+				}
+				// The revision authenticates its first peer with Secret md5.
+				rev := &networkv1alpha1.FabricRouterRevision{}
+				if err := h.client.Get(ctx, client.ObjectKeyFromObject(h.revs[0]), rev); err != nil {
+					t.Fatal(err)
+				}
+				rev.Spec.Configuration.Peers[0].Spec.AuthSecretRef = &networkv1alpha1.LocalSecretRef{Name: md5Secret}
+				if err := h.client.Update(ctx, rev); err != nil {
+					t.Fatal(err)
+				}
+				h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
+					promote(d, 1, h.revs[0])
+					d.Spec.Recovery = tc.recovery.DeepCopy()
+				})
+				_, _, err := h.agent.BootConfig(ctx, depMachine)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("BootConfig = %v, want it refused naming %q", err, tc.want)
+				}
+				if retired && !errors.Is(err, ErrNotActivated) {
+					t.Errorf("BootConfig = %v, want ErrNotActivated on a node with nothing activated", err)
+				}
+			})
+		}
 	}
 }
 
@@ -455,4 +519,53 @@ func TestInitActivated(t *testing.T) {
 			t.Errorf("frr.conf written: %v", err)
 		}
 	})
+}
+
+// TestRetiredBootAfterLostState: a retired node whose state directory is
+// gone after its release completed starts from nothing: its committed
+// revision's release no longer authorizes it, and a release promoting
+// another revision of the router does.
+func TestRetiredBootAfterLostState(t *testing.T) {
+	ctx := context.Background()
+	h := retiredHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
+	h.committed()
+	auth := &networkv1alpha1.FabricReleaseAuthorization{}
+	if err := h.client.Get(ctx, client.ObjectKey{Namespace: depNamespace, Name: releaseName}, auth); err != nil {
+		t.Fatal(err)
+	}
+	auth.Status.Phase = networkv1alpha1.FabricReleasePhaseCompleted
+	if err := h.client.Update(ctx, auth); err != nil {
+		t.Fatal(err)
+	}
+
+	// The host lost its state directory.
+	dir := filepath.Join(t.TempDir(), "state")
+	if _, err := activation.BindIdentity(dir, activation.Identity{
+		NodeUID: depNodeUID, MachineID: depMachine, ClusterID: depCluster,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.agent.Activator = &activation.Activator{Dir: dir, FRR: h.frr}
+	if err := h.agent.Activator.Open(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.agent.BootConfig(ctx, depMachine); !errors.Is(err, ErrNotActivated) ||
+		!strings.Contains(err.Error(), "is Completed") {
+		t.Fatalf("BootConfig = %v, want the completed release refused", err)
+	}
+
+	next := release(h.revs[1])
+	next.Name, next.UID = "next", "next-uid"
+	next.Status.Phase = networkv1alpha1.FabricReleasePhaseUnknown
+	if err := h.client.Create(ctx, next); err != nil {
+		t.Fatal(err)
+	}
+	h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
+		promote(d, 2, h.revs[1])
+		d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: next.Name, UID: string(next.UID)}
+	})
+	conf, reason, err := h.agent.BootConfig(ctx, depMachine)
+	if err != nil || conf != rendered(t, h.revs[1]) || h.agent.Booted != BootActiveRevision {
+		t.Fatalf("BootConfig = %q, %v, booted %s", reason, err, h.agent.Booted)
+	}
 }
