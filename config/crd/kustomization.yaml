@@ -12,10 +12,12 @@ resources:
   - galactic.datumapis.com_bgpstaticroutes.yaml
   - galactic.datumapis.com_bgpvrfinstances.yaml
   - galactic.datumapis.com_egressshards.yaml
+  - galactic.datumapis.com_fabricendpoints.yaml
   - galactic.datumapis.com_fabricreleaseauthorizations.yaml
   - galactic.datumapis.com_fabricrolloutpolicies.yaml
   - galactic.datumapis.com_fabricrouterdeployments.yaml
   - galactic.datumapis.com_fabricrouterrevisions.yaml
+  - galactic.datumapis.com_fabrictopologies.yaml
   - galactic.datumapis.com_frrrouterparameters.yaml
   - galactic.datumapis.com_networkegresspolicies.yaml
   - galactic.datumapis.com_networkfabricidentities.yaml

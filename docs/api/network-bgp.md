@@ -20,10 +20,12 @@ Package v1alpha1 contains API Schema definitions for the galactic.datumapis.com/
 - [BGPVRFInstance](#bgpvrfinstance)
 - [EgressShard](#egressshard)
 - [FRRRouterParameters](#frrrouterparameters)
+- [FabricEndpoint](#fabricendpoint)
 - [FabricReleaseAuthorization](#fabricreleaseauthorization)
 - [FabricRolloutPolicy](#fabricrolloutpolicy)
 - [FabricRouterDeployment](#fabricrouterdeployment)
 - [FabricRouterRevision](#fabricrouterrevision)
+- [FabricTopology](#fabrictopology)
 - [ServiceEndpoint](#serviceendpoint)
 - [ServiceRoutePolicy](#serviceroutepolicy)
 - [ServiceVIPBinding](#servicevipbinding)
@@ -123,6 +125,7 @@ address has this field or nothing.
 
 _Appears in:_
 - [EgressShardSpec](#egressshardspec)
+- [FabricEndpointSource](#fabricendpointsource)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -526,6 +529,7 @@ falls through to the profile's setting for the same family.
 _Appears in:_
 - [BGPPeerProfileSpec](#bgppeerprofilespec)
 - [BGPPeerSpec](#bgppeerspec)
+- [FabricSessionSettings](#fabricsessionsettings)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -734,6 +738,7 @@ profile. A field set on a BGPPeer overrides the same field on its profile.
 _Appears in:_
 - [BGPPeerProfileSpec](#bgppeerprofilespec)
 - [BGPPeerSpec](#bgppeerspec)
+- [FabricSessionSettings](#fabricsessionsettings)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1949,6 +1954,138 @@ _Appears in:_
 | `CRD` | FabricConfigSourceCRD applies the active FabricRouterRevision.<br /> |
 
 
+#### FabricEndpoint
+
+
+
+FabricEndpoint is where one fabric router is reached on one transport
+network: its addresses there, the ASN it speaks, the cell that owns it and
+its failure domain. A FabricTopology generates both ends of a managed
+session from two endpoint records, so a router's record must be present
+in every cell whose routers peer with it, including cells where the router
+itself does not run. Whoever distributes the rest of the cell's intent
+distributes these records too; nothing in the cluster copies them between
+cells.
+
+An endpoint is a record, not an allocation: nothing here asks an
+addressing service for an address. spec.source says where the addresses
+came from.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `FabricEndpoint` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[FabricEndpointSpec](#fabricendpointspec)_ |  |  | Required: \{\} <br /> |
+| `status` _[FabricEndpointStatus](#fabricendpointstatus)_ |  |  |  |
+
+
+#### FabricEndpointAddresses
+
+
+
+FabricEndpointAddresses are a router's addresses on one transport.
+
+
+
+_Appears in:_
+- [FabricEndpointSpec](#fabricendpointspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `ipv4` _string_ | IPv4 is the router's IPv4 address on the transport. |  | MaxLength: 15 <br /> |
+| `ipv6` _string_ | IPv6 is the router's IPv6 address on the transport. |  | MaxLength: 45 <br /> |
+
+
+#### FabricEndpointSource
+
+
+
+FabricEndpointSource records where an endpoint's addresses came from. A
+claim reference is provenance: nothing resolves it, and the addresses in
+the spec are what sessions use.
+
+
+
+_Appears in:_
+- [FabricEndpointSpec](#fabricendpointspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[FabricEndpointSourceType](#fabricendpointsourcetype)_ | Type is Manual or AddressClaim. | Manual | Enum: [Manual AddressClaim] <br /> |
+| `ipv4ClaimRef` _[AddressClaimRef](#addressclaimref)_ | IPv4ClaimRef is the claim the IPv4 address was allocated by. |  |  |
+| `ipv6ClaimRef` _[AddressClaimRef](#addressclaimref)_ | IPv6ClaimRef is the claim the IPv6 address was allocated by. |  |  |
+
+
+#### FabricEndpointSourceType
+
+_Underlying type:_ _string_
+
+FabricEndpointSourceType names who wrote an endpoint's addresses.
+
+_Validation:_
+- Enum: [Manual AddressClaim]
+
+_Appears in:_
+- [FabricEndpointSource](#fabricendpointsource)
+
+| Field | Description |
+| --- | --- |
+| `Manual` | FabricEndpointSourceManual is an address an operator or the<br />deployment pipeline authored, with no allocation behind it.<br /> |
+| `AddressClaim` | FabricEndpointSourceAddressClaim is an address allocated by an<br />addressing-service claim, which the endpoint records.<br /> |
+
+
+#### FabricEndpointSpec
+
+
+
+FabricEndpointSpec is one router's presence on one transport network. Its
+identity (routing domain, cell, router and transport) is immutable: moving
+a router to another transport is a new endpoint and the removal of the
+old one, so the old one's sessions drain like any other removal.
+
+
+
+_Appears in:_
+- [FabricEndpoint](#fabricendpoint)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `routingDomain` _string_ | RoutingDomain is the fabric this endpoint belongs to. A topology<br />considers only endpoints of its own routing domain. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `cell` _string_ | Cell is the cell that runs the router. The router exists as a<br />BGPRouter only in that cell; every other cell knows it through this<br />record alone. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `routerRef` _[LocalObjectRef](#localobjectref)_ | RouterRef names the BGPRouter, in this namespace of the owning cell. |  |  |
+| `transport` _string_ | Transport names the network the addresses are on, such as<br />private-mesh or public. Two endpoints peer only over a transport they<br />share. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `asn` _integer_ | ASN is the router's local ASN, the remote ASN of every session toward<br />this endpoint. In the owning cell it must equal the BGPRouter's. |  | Maximum: 4.294967295e+09 <br />Minimum: 1 <br /> |
+| `addresses` _[FabricEndpointAddresses](#fabricendpointaddresses)_ | Addresses are the router's addresses on the transport, at most one<br />per family. A session is generated only in a family both ends carry. |  |  |
+| `interface` _string_ | Interface is the router's interface on the transport. It is required<br />with a link-local IPv6 address. The topology generator does not yet<br />generate sessions toward an endpoint that names one. |  | MaxLength: 15 <br />Pattern: `^[A-Za-z0-9_.@-]\{1,15\}$` <br /> |
+| `failureDomain` _string_ | FailureDomain is the failure domain the router is in. Unset, the<br />owning cell reads it from the router's Node label the topology names. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$` <br /> |
+| `source` _[FabricEndpointSource](#fabricendpointsource)_ | Source records where the addresses came from. | \{ type:Manual \} |  |
+
+
+#### FabricEndpointStatus
+
+
+
+FabricEndpointStatus is this cell's view of an endpoint.
+
+
+
+_Appears in:_
+- [FabricEndpoint](#fabricendpoint)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the generation the conditions describe. |  |  |
+| `local` _boolean_ | Local is true when a FabricTopology in this namespace generates<br />sessions for the endpoint's cell, so its router runs here. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Ready and Conflict. |  |  |
+
+
 #### FabricEpochStatus
 
 
@@ -1970,6 +2107,46 @@ _Appears in:_
 | `detail` _string_ | Detail explains a failure. |  | MaxLength: 1024 <br /> |
 
 
+#### FabricExternalPeer
+
+
+
+FabricExternalPeer is one external router.
+
+
+
+_Appears in:_
+- [FabricExternalRelationship](#fabricexternalrelationship)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `address` _string_ | Address is the external router's address. A session runs in its<br />family. |  | MaxLength: 45 <br /> |
+| `asn` _integer_ | ASN is the external router's ASN. |  | Maximum: 4.294967295e+09 <br />Minimum: 1 <br /> |
+
+
+#### FabricExternalRelationship
+
+
+
+FabricExternalRelationship peers member routers with routers outside
+every topology. Its peers are explicit: an external router has no
+endpoint record.
+
+
+
+_Appears in:_
+- [FabricTopologySpec](#fabrictopologyspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name identifies the relationship on its generated peers. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `routers` _[FabricTopologyMembers](#fabrictopologymembers)_ | Routers selects the members that peer with every external peer. |  |  |
+| `transport` _string_ | Transport is the transport of the local endpoint sessions are<br />sourced from. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `updateSource` _[FabricUpdateSource](#fabricupdatesource)_ | UpdateSource is where sessions are sourced from. | EndpointAddress | Enum: [EndpointAddress None] <br /> |
+| `peers` _[FabricExternalPeer](#fabricexternalpeer) array_ | Peers are the external routers. |  | MaxItems: 16 <br />MinItems: 1 <br /> |
+| `settings` _[FabricSessionSettings](#fabricsessionsettings)_ | Settings apply to every generated peer. |  |  |
+
+
 #### FabricFence
 
 
@@ -1987,6 +2164,28 @@ _Appears in:_
 | `method` _string_ | Method is how it was fenced, such as a switch port shutdown. |  | MaxLength: 256 <br />MinLength: 1 <br /> |
 | `fencedBy` _string_ | FencedBy is who confirmed it. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
 | `fencedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | FencedAt is when. |  |  |
+
+
+#### FabricMeshRelationship
+
+
+
+FabricMeshRelationship peers every selected endpoint with every other on
+the same transport.
+
+
+
+_Appears in:_
+- [FabricTopologySpec](#fabrictopologyspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name identifies the relationship on its generated peers. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `transports` _string array_ | Transports are the transports the mesh runs over. Two endpoints peer<br />over each transport both are on. |  | MaxItems: 16 <br />MinItems: 1 <br />items:MaxLength: 63 <br />items:Pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ <br /> |
+| `families` _[FabricSessionFamily](#fabricsessionfamily) array_ | Families are the IP families sessions run over: one session per<br />family both endpoints have an address in. |  | Enum: [ipv4 ipv6] <br />MaxItems: 2 <br />MinItems: 1 <br /> |
+| `updateSource` _[FabricUpdateSource](#fabricupdatesource)_ | UpdateSource is where sessions are sourced from. | EndpointAddress | Enum: [EndpointAddress None] <br /> |
+| `endpointSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | EndpointSelector selects the mesh's endpoints by label. An empty<br />selector selects every endpoint of the routing domain. |  |  |
+| `settings` _[FabricSessionSettings](#fabricsessionsettings)_ | Settings apply to every generated peer. |  |  |
 
 
 #### FabricNodeIdentity
@@ -2062,6 +2261,30 @@ _Appears in:_
 | `revokedPrefixes` _string array_ | RevokedPrefixes are prefixes no recovery target may originate. They<br />can be added, never removed. |  | MaxItems: 64 <br />items:MaxLength: 43 <br /> |
 | `revokedCredentials` _[FabricObjectIdentity](#fabricobjectidentity) array_ | RevokedCredentials are Secrets no recovery target may use. They can<br />be added, never removed. |  | MaxItems: 32 <br /> |
 | `retired` _boolean_ | Retired means the router is decommissioned; no revision may be<br />restored. It is set with the router's last promotion, which usually<br />withdraws everything. Since a retired router is never promoted again<br />and recovery changes only with a promotion, it cannot be cleared. |  |  |
+
+
+#### FabricReflectionRelationship
+
+
+
+FabricReflectionRelationship peers every reflector with every client on
+the same transport. Reflectors do not peer with each other here.
+
+
+
+_Appears in:_
+- [FabricTopologySpec](#fabrictopologyspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name identifies the relationship on its generated peers. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `transports` _string array_ | Transports are the transports reflection runs over. |  | MaxItems: 16 <br />MinItems: 1 <br />items:MaxLength: 63 <br />items:Pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ <br /> |
+| `families` _[FabricSessionFamily](#fabricsessionfamily) array_ | Families are the IP families sessions run over. |  | Enum: [ipv4 ipv6] <br />MaxItems: 2 <br />MinItems: 1 <br /> |
+| `updateSource` _[FabricUpdateSource](#fabricupdatesource)_ | UpdateSource is where sessions are sourced from. | EndpointAddress | Enum: [EndpointAddress None] <br /> |
+| `reflectorSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | ReflectorSelector selects the reflectors' endpoints by label. |  |  |
+| `clientSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | ClientSelector selects the clients' endpoints by label. |  |  |
+| `reflector` _[FabricSessionSettings](#fabricsessionsettings)_ | Reflector applies to the peers a reflector generates toward its<br />clients, each of which is a route-reflector client in every family. |  |  |
+| `client` _[FabricSessionSettings](#fabricsessionsettings)_ | Client applies to the peers a client generates toward its<br />reflectors. |  |  |
 
 
 #### FabricReleaseAuthorization
@@ -2486,6 +2709,48 @@ _Appears in:_
 | `nodeUID` _string_ | NodeUID is the Node's UID. Empty when the Node was not found. |  | MaxLength: 36 <br /> |
 
 
+#### FabricSessionFamily
+
+_Underlying type:_ _string_
+
+FabricSessionFamily is an IP family a session runs over, and the unicast
+family it carries when no peer profile names its families.
+
+_Validation:_
+- Enum: [ipv4 ipv6]
+
+_Appears in:_
+- [FabricMeshRelationship](#fabricmeshrelationship)
+- [FabricReflectionRelationship](#fabricreflectionrelationship)
+
+| Field | Description |
+| --- | --- |
+| `ipv4` |  |
+| `ipv6` |  |
+
+
+#### FabricSessionSettings
+
+
+
+FabricSessionSettings are the settings of the peers one side of a
+relationship generates. Route-reflector clients are set by the
+relationship, never here.
+
+
+
+_Appears in:_
+- [FabricExternalRelationship](#fabricexternalrelationship)
+- [FabricMeshRelationship](#fabricmeshrelationship)
+- [FabricReflectionRelationship](#fabricreflectionrelationship)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `peerProfileRef` _[LocalObjectRef](#localobjectref)_ | PeerProfileRef names the BGPPeerProfile of every generated peer. With<br />one, a peer activates the profile's families; without one, the<br />unicast family of the transport family it runs over. |  |  |
+| `transport` _[BGPPeerTransport](#bgppeertransport)_ | Transport overrides the profile's transport settings. |  |  |
+| `familySettings` _[BGPPeerFamilySettings](#bgppeerfamilysettings) array_ | FamilySettings are per-family settings: import and export policies,<br />next-hop mode, local weight, prefix limits. Without a profile only<br />the entry for a peer's own family applies to it. |  | MaxItems: 2 <br /> |
+
+
 #### FabricSourceHandoff
 
 
@@ -2525,6 +2790,146 @@ _Appears in:_
 | `validatedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ValidatedAt is when the agent validated it. |  |  |
 
 
+#### FabricTopology
+
+
+
+FabricTopology generates the BGPPeers of one cell's fabric routers from
+FabricEndpoint records. It names the cell's member routers and the
+relationships between endpoints of one routing domain: a full mesh, route
+reflection, and external peers. For every relationship it creates the
+local side only: a peer on each member router toward each endpoint the
+relationship pairs it with. Every cell holds the same endpoint records,
+so the cell on the other end generates the reciprocal peer from them and
+both ends agree without either naming the other's peers.
+
+Generated peers are ordinary BGPPeers, controlled by the topology and
+labelled as generated; the revision compiler reads them like any other
+peer. The topology never changes or deletes a peer it did not create, and
+reports a conflict where one is in its way.
+
+A session the topology no longer generates is kept until one of its ends
+is out of service: the router is deleted, its FabricRouterDeployment
+committed a retiring release, the other cell deleted the endpoint record,
+or spec.drain names it. Deleting the topology deletes every peer it
+generated.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `FabricTopology` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[FabricTopologySpec](#fabrictopologyspec)_ |  |  | Required: \{\} <br /> |
+| `status` _[FabricTopologyStatus](#fabrictopologystatus)_ |  |  |  |
+
+
+#### FabricTopologyDrain
+
+
+
+FabricTopologyDrain names what may lose its retained sessions.
+
+
+
+_Appears in:_
+- [FabricTopologySpec](#fabrictopologyspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `routers` _[LocalObjectRef](#localobjectref) array_ | Routers names BGPRouters of this cell. Every retained session from<br />or toward one is released. |  | MaxItems: 256 <br /> |
+| `endpoints` _[LocalObjectRef](#localobjectref) array_ | Endpoints names FabricEndpoints, of any cell. Every retained session<br />toward or sourced from one is released. |  | MaxItems: 256 <br /> |
+
+
+#### FabricTopologyMembers
+
+
+
+FabricTopologyMembers selects BGPRouters by label, by name, or both.
+
+
+
+_Appears in:_
+- [FabricExternalRelationship](#fabricexternalrelationship)
+- [FabricTopologySpec](#fabrictopologyspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `routerSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | RouterSelector selects BGPRouters by label. |  |  |
+| `routers` _[LocalObjectRef](#localobjectref) array_ | Routers names BGPRouters. |  | MaxItems: 256 <br /> |
+
+
+#### FabricTopologySpec
+
+
+
+FabricTopologySpec is one cell's routing relationships.
+
+
+
+_Appears in:_
+- [FabricTopology](#fabrictopology)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `routingDomain` _string_ | RoutingDomain is the fabric whose FabricEndpoints the topology reads. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `cell` _string_ | Cell is the cell the topology generates for. Endpoints of this cell<br />belong to routers that run here; every other endpoint is remote. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `members` _[FabricTopologyMembers](#fabrictopologymembers)_ | Members are the fabric-class BGPRouters, in this namespace, the<br />topology generates peers on. |  |  |
+| `mesh` _[FabricMeshRelationship](#fabricmeshrelationship) array_ | Mesh relationships peer every selected endpoint with every other. |  | MaxItems: 8 <br /> |
+| `reflection` _[FabricReflectionRelationship](#fabricreflectionrelationship) array_ | Reflection relationships peer every reflector with every client. |  | MaxItems: 8 <br /> |
+| `external` _[FabricExternalRelationship](#fabricexternalrelationship) array_ | External relationships peer members with routers no topology<br />manages, such as providers' and transits'. |  | MaxItems: 32 <br /> |
+| `failureDomainLabel` _string_ | FailureDomainLabel is the Node label that gives a local endpoint<br />without spec.failureDomain its failure domain. | topology.kubernetes.io/zone | MaxLength: 317 <br />Pattern: `^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$` <br /> |
+| `maxSessionsPerRouter` _integer_ | MaxSessionsPerRouter bounds the peers the topology generates on one<br />router. A topology that would exceed it changes nothing and reports<br />Accepted False. | 64 | Maximum: 1024 <br />Minimum: 1 <br /> |
+| `drain` _[FabricTopologyDrain](#fabrictopologydrain)_ | Drain releases the sessions of routers and endpoints whose removal<br />cannot be observed otherwise, such as a router on a node that will<br />never report its retirement. |  |  |
+
+
+#### FabricTopologyStatus
+
+
+
+FabricTopologyStatus is what the generator did on its last pass.
+
+
+
+_Appears in:_
+- [FabricTopology](#fabrictopology)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the generation the status describes. |  |  |
+| `members` _integer_ | Members counts the member routers. |  |  |
+| `generated` _integer_ | Generated counts the peers the topology generates and holds as<br />generated. |  |  |
+| `conflicting` _integer_ | Conflicting counts the sessions blocked by a conflict. |  |  |
+| `missingEndpoints` _integer_ | MissingEndpoints counts the members with no usable endpoint in the<br />routing domain, and external sessions whose source endpoint is<br />missing. |  |  |
+| `retained` _integer_ | Retained counts the generated peers the topology no longer generates<br />and keeps until an end is out of service. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Accepted, ResolvedRefs, Conflicts and Ready. |  |  |
+
+
+#### FabricUpdateSource
+
+_Underlying type:_ _string_
+
+FabricUpdateSource is where a generated session is sourced from.
+
+_Validation:_
+- Enum: [EndpointAddress None]
+
+_Appears in:_
+- [FabricExternalRelationship](#fabricexternalrelationship)
+- [FabricMeshRelationship](#fabricmeshrelationship)
+- [FabricReflectionRelationship](#fabricreflectionrelationship)
+
+| Field | Description |
+| --- | --- |
+| `EndpointAddress` | FabricUpdateSourceEndpointAddress sources the session from the local<br />router's own endpoint address on the transport.<br /> |
+| `None` | FabricUpdateSourceNone leaves the source to the router's route to the<br />peer, for directly connected links.<br /> |
+
+
 #### LargeCommunityAction
 
 
@@ -2558,9 +2963,13 @@ _Appears in:_
 - [BGPPolicySetActions](#bgppolicysetactions)
 - [BGPRouterFRR](#bgprouterfrr)
 - [BGPRouterFRRRetain](#bgprouterfrrretain)
+- [FabricEndpointSpec](#fabricendpointspec)
 - [FabricRecovery](#fabricrecovery)
 - [FabricRolloutPolicySpec](#fabricrolloutpolicyspec)
 - [FabricRouterDeploymentSpec](#fabricrouterdeploymentspec)
+- [FabricSessionSettings](#fabricsessionsettings)
+- [FabricTopologyDrain](#fabrictopologydrain)
+- [FabricTopologyMembers](#fabrictopologymembers)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
