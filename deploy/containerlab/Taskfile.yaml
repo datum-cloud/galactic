@@ -323,6 +323,11 @@ tasks:
     cmds:
       - ./scripts/deploy-fabric-routing.sh
 
+  "deploy:fabric-topology":
+    desc: Generate each site's fabric peers from its topology instead of the imported ones (SITES to limit)
+    cmds:
+      - ./scripts/deploy-fabric-topology.sh
+
   "deploy:traffic-policy":
     desc: Install the traffic policy CRDs and galactic-controller in every cluster
     cmds:

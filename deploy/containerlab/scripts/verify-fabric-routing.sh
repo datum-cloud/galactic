@@ -200,6 +200,10 @@ echo "--- 4. A failing release fails on ${ROUTER}, which recovers by itself"
 peer=$(k get bgppeers -o jsonpath="{range .items[?(@.spec.routerRef.name==\"${ROUTER}\")]}{.metadata.name} {.spec.peerASN}{\"\n\"}{end}" |
   grep -v '^$' | sort | head -1)
 peer_name=${peer% *}
+# A generated peer is rewritten by its topology, so the broken AS would not
+# last; this step needs a hand-authored or imported one.
+[[ -z "$(k get bgppeer "${peer_name}" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')" ]] ||
+  fail "${ROUTER}'s peers come from a FabricTopology; pick a ROUTER on a site deploy:fabric-topology has not converted"
 peer_asn=${peer#* }
 RESTORE_PEER="${peer_name} ${peer_asn}"
 k patch bgppeer "${peer_name}" --type=merge -p "{\"spec\":{\"peerASN\":$((peer_asn + 99))}}"

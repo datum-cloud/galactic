@@ -24,6 +24,15 @@ import_router() {
   docker run --rm -i fabric-router-controller:latest import /dev/stdin --node "$2" <"$1"
 }
 
+# without_peers drops the BGPPeers from an import's YAML stream.
+without_peers() {
+  python3 -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") != "BGPPeer"]
+yaml.safe_dump_all(docs, sys.stdout, sort_keys=False)
+'
+}
+
 for site in dfw sjc iad; do
   node=$(control_plane "${site}")
   echo "Installing fabric-router-controller on ${site}..."
@@ -37,12 +46,21 @@ for site in dfw sjc iad; do
   docker cp "${CONFIG}/fabric-router-controller/base" "${node}:/galactic/resources/fabric-router-controller/base"
   docker cp "${CONFIG}/fabric-router-controller/components/rollout" \
     "${node}:/galactic/resources/fabric-router-controller/rollout"
+  docker cp "${CONFIG}/fabric-router-controller/components/topology" \
+    "${node}:/galactic/resources/fabric-router-controller/topology"
   apply_k "${node}" /galactic/resources/fabric-router-controller/
   docker exec "${node}" kubectl -n galactic-system rollout status deployment/fabric-router-controller --timeout=180s
 
+  # A site whose peers come from a FabricTopology (deploy:fabric-topology)
+  # keeps them: importing its peers again would conflict with every
+  # generated one.
+  keep=cat
+  if [[ -n "$(docker exec "${node}" kubectl -n galactic-system get fabrictopologies -o name 2>/dev/null)" ]]; then
+    keep=without_peers
+  fi
   for conf in "${FABRIC_CONF}/${site}"/frr.conf.*; do
     router=${conf##*/frr.conf.}
     echo "Importing ${router}..."
-    import_router "${conf}" "${router}" | apply_f "${node}" -
+    import_router "${conf}" "${router}" | "${keep}" | apply_f "${node}" -
   done
 done

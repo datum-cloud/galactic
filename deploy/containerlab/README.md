@@ -460,6 +460,7 @@ deploy/containerlab/
     ├── deploy-node-addresses.sh
     ├── deploy-fabric.sh
     ├── deploy-fabric-routing.sh
+    ├── deploy-fabric-topology.sh
     ├── deploy-galactic-router.sh
     ├── deploy-traffic-policy.sh
     ├── deploy-tenant-policy.sh
@@ -513,6 +514,7 @@ task deploy
 | `deploy:node-addresses`          | Address every fabric router node's interfaces outside FRR, as the host does in production                                                   |
 | `deploy:fabric`                  | Apply FRR DaemonSets to all clusters                                                                                                        |
 | `deploy:fabric-routing`          | Install fabric-router-controller and import every node's `frr.conf` into the typed API (each stays on its ConfigMap)                        |
+| `deploy:fabric-topology`         | Generate each site's fabric peers from its `FabricTopology` instead of the imported ones (`SITES` to limit)                                 |
 | `deploy:bmp-collector`           | Install the BMP collector on iad-worker3, where the route reflector streams to it                                                           |
 | `deploy:galactic-router`         | Apply galactic-router DaemonSets and BGP CRs                                                                                                |
 | `deploy:galactic-gateway`        | Install galactic-gateway on every edge node, with each site's VIP rules (after `deploy:scenarios`)                                          |
