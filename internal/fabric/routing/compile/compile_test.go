@@ -485,6 +485,13 @@ func TestCompileLabConstructs(t *testing.T) {
 		Monitors: []networkv1alpha1.BMPMonitor{{
 			AFI: networkv1alpha1.AFIIPv6, SAFI: networkv1alpha1.SAFIUnicast, Mode: networkv1alpha1.BMPMonitorLocRIB,
 		}},
+	}, {
+		// One backoff: FRR displays its default for the other.
+		Name:    "one-backoff",
+		Connect: networkv1alpha1.BMPConnect{Address: "2001:db8::9", Port: 5000, MinRetryMilliseconds: ptr.To[int32](100)},
+		Monitors: []networkv1alpha1.BMPMonitor{{
+			AFI: networkv1alpha1.AFIIPv6, SAFI: networkv1alpha1.SAFIUnicast, Mode: networkv1alpha1.BMPMonitorLocRIB,
+		}},
 	}}
 	// With the requirement off, a family may export with no policy.
 	in.Profiles["upstream"].Spec.AddressFamilies[0].ExportPolicyRef = nil
@@ -513,6 +520,7 @@ func TestCompileLabConstructs(t *testing.T) {
 		"route-map set-src permit 10\n set src 2001:db8::1\nexit\n",
 		" bmp targets collector\n  bmp stats interval 60000\n" +
 			"  bmp connect 2001:db8::8 port 5000 min-retry 1000 max-retry 30000 source-interface lo\n",
+		"  bmp connect 2001:db8::9 port 5000 min-retry 100 max-retry 720000\n",
 	} {
 		if !strings.Contains(res.Config, want) {
 			t.Errorf("config lacks %q:\n%s", want, res.Config)

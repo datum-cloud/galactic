@@ -139,6 +139,11 @@ func (p *parser) meta(name string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{Name: name, Namespace: p.opts.Namespace}
 }
 
+// routeMapCommands are the commands FRR reads inside a route-map entry.
+var routeMapCommands = map[string]bool{
+	kwMatch: true, "set": true, "call": true, "on-match": true, "continue": true, kwDesc: true,
+}
+
 func (p *parser) line(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	// FRR reads a line starting with ! or # as a comment, wherever it is.
@@ -154,11 +159,11 @@ func (p *parser) line(raw string) error {
 			p.ctx = ctxTop
 			return nil
 		}
-		if indented {
+		// FRR keeps a route-map command in the entry however it is
+		// indented, and falls back to the top level for any other.
+		if routeMapCommands[f[0]] {
 			return p.routeMapLine(f, trimmed)
 		}
-		// An unindented line closes the entry, as FRR's parser falls back
-		// to the top level for a command the entry does not know.
 		p.ctx = ctxTop
 	case ctxBMP:
 		if trimmed == kwExit {
@@ -235,6 +240,7 @@ const (
 	kwBGP       = "bgp"
 	kwBMP       = "bmp"
 	kwCommunity = "community"
+	kwDesc      = "description"
 	kwExit      = "exit"
 	kwIPv6      = "ipv6"
 	kwLarge     = "large-community"
@@ -375,7 +381,7 @@ func (p *parser) neighborSession(f []string, line string) error {
 			return fmt.Errorf("peer group %s is not defined", f[3])
 		}
 		pe.Spec.PeerProfileRef = &networkv1alpha1.LocalObjectRef{Name: objectName(f[3])}
-	case verb == "description" && pe != nil:
+	case verb == kwDesc && pe != nil:
 		pe.Spec.Description = strings.TrimSpace(strings.SplitN(line, " description ", 2)[1])
 	case verb == "update-source" && len(f) == 4 && pe != nil:
 		pe.Spec.UpdateSource = ptr.To(f[3])
@@ -783,8 +789,8 @@ func (p *parser) routeMapHeader(f []string) error {
 
 func (p *parser) routeMapLine(f []string, line string) error {
 	switch f[0] {
-	case "description":
-		p.term.Description = strings.TrimSpace(strings.TrimPrefix(line, "description"))
+	case kwDesc:
+		p.term.Description = strings.TrimSpace(strings.TrimPrefix(line, kwDesc))
 		return nil
 	case kwMatch:
 		return p.matchLine(f[1:])

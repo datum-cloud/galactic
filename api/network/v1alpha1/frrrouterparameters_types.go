@@ -68,7 +68,7 @@ type BMPMonitor struct {
 // BMPConnect is where FRR opens a BMP session.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.minRetryMilliseconds) || !has(self.maxRetryMilliseconds) || self.minRetryMilliseconds <= self.maxRetryMilliseconds",message="minRetryMilliseconds must not exceed maxRetryMilliseconds"
-// +kubebuilder:validation:XValidation:rule="has(self.minRetryMilliseconds) && has(self.maxRetryMilliseconds)",message="FRR needs both minRetryMilliseconds and maxRetryMilliseconds on bmp connect"
+// +kubebuilder:validation:XValidation:rule="has(self.minRetryMilliseconds) || has(self.maxRetryMilliseconds)",message="FRR needs minRetryMilliseconds, maxRetryMilliseconds or both on bmp connect"
 type BMPConnect struct {
 	// Address is the collector's IP address.
 	// +kubebuilder:validation:MaxLength=45
@@ -81,7 +81,8 @@ type BMPConnect struct {
 	Port int32 `json:"port"`
 
 	// MinRetryMilliseconds is the shortest reconnect backoff. FRR's bmp
-	// connect command takes both backoffs or neither parses.
+	// connect command needs at least one backoff and fills in its default
+	// for the other: 30000 for this one, 720000 for the longest.
 	// +optional
 	// +kubebuilder:validation:Minimum=100
 	// +kubebuilder:validation:Maximum=86400000
@@ -188,9 +189,11 @@ type FRRRouterParametersSpec struct {
 	// no policy in a direction exchanges no routes in it. Unset or true
 	// keeps FRR's default, which is on; false renders
 	// `no bgp ebgp-requires-policy`. False also lets the routers' peer
-	// families leave exportPolicyRef unset, which exports every route the
-	// router selects to that peer; any other class refuses a peer family
-	// with no export policy.
+	// families, iBGP and eBGP alike, leave exportPolicyRef unset, which
+	// exports every route the router selects to that peer; any other class
+	// refuses a peer family with no export policy. Either way an eBGP peer
+	// family with no importPolicyRef accepts every route the peer sends
+	// once this is false.
 	// +optional
 	EBGPRequiresPolicy *bool `json:"ebgpRequiresPolicy,omitempty"`
 

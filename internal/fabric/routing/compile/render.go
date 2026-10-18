@@ -323,19 +323,29 @@ func (c *compiler) renderFamilySettings(
 	}
 }
 
+// FRR's bmp connect backoffs, in milliseconds, when one is left out.
+const (
+	bmpDefaultMinRetry = 30000
+	bmpDefaultMaxRetry = 720000
+)
+
 func renderBMPTarget(w *writer, t networkv1alpha1.BMPTarget) {
 	w.line(" bmp targets %s", t.Name)
 	if t.StatsIntervalMilliseconds != nil {
 		// FRR displays the interval first in the block.
 		w.line("  bmp stats interval %d", *t.StatsIntervalMilliseconds)
 	}
-	connect := fmt.Sprintf("  bmp connect %s port %d", t.Connect.Address, t.Connect.Port)
+	// FRR displays both backoffs, its default standing in for one left
+	// out.
+	minRetry, maxRetry := int32(bmpDefaultMinRetry), int32(bmpDefaultMaxRetry)
 	if t.Connect.MinRetryMilliseconds != nil {
-		connect += fmt.Sprintf(" min-retry %d", *t.Connect.MinRetryMilliseconds)
+		minRetry = *t.Connect.MinRetryMilliseconds
 	}
 	if t.Connect.MaxRetryMilliseconds != nil {
-		connect += fmt.Sprintf(" max-retry %d", *t.Connect.MaxRetryMilliseconds)
+		maxRetry = *t.Connect.MaxRetryMilliseconds
 	}
+	connect := fmt.Sprintf("  bmp connect %s port %d min-retry %d max-retry %d", t.Connect.Address, t.Connect.Port,
+		minRetry, maxRetry)
 	if t.Connect.SourceInterface != nil {
 		connect += " source-interface " + *t.Connect.SourceInterface
 	}

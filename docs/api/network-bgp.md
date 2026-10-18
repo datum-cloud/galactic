@@ -1408,7 +1408,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `address` _string_ | Address is the collector's IP address. |  | MaxLength: 45 <br /> |
 | `port` _integer_ | Port is the collector's TCP port. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
-| `minRetryMilliseconds` _integer_ | MinRetryMilliseconds is the shortest reconnect backoff. FRR's bmp<br />connect command takes both backoffs or neither parses. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
+| `minRetryMilliseconds` _integer_ | MinRetryMilliseconds is the shortest reconnect backoff. FRR's bmp<br />connect command needs at least one backoff and fills in its default<br />for the other: 30000 for this one, 720000 for the longest. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
 | `maxRetryMilliseconds` _integer_ | MaxRetryMilliseconds is the longest reconnect backoff. |  | Maximum: 8.64e+07 <br />Minimum: 100 <br /> |
 | `sourceInterface` _string_ | SourceInterface is the local interface whose address the session is<br />sourced from. Unset lets the kernel choose the source address. |  | MaxLength: 15 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9_.@-]+$` <br /> |
 
@@ -1845,7 +1845,7 @@ _Appears in:_
 | `logNeighborChanges` _boolean_ | LogNeighborChanges logs BGP session state changes. |  |  |
 | `ipv4UnicastDefault` _boolean_ | IPv4UnicastDefault activates IPv4 unicast for every neighbor by<br />default. False renders `no bgp default ipv4-unicast`. |  |  |
 | `allowMartianNexthop` _boolean_ | AllowMartianNexthop accepts next hops FRR otherwise treats as<br />martian. |  |  |
-| `ebgpRequiresPolicy` _boolean_ | EBGPRequiresPolicy is FRR's RFC 8212 behavior: an eBGP session with<br />no policy in a direction exchanges no routes in it. Unset or true<br />keeps FRR's default, which is on; false renders<br />`no bgp ebgp-requires-policy`. False also lets the routers' peer<br />families leave exportPolicyRef unset, which exports every route the<br />router selects to that peer; any other class refuses a peer family<br />with no export policy. |  |  |
+| `ebgpRequiresPolicy` _boolean_ | EBGPRequiresPolicy is FRR's RFC 8212 behavior: an eBGP session with<br />no policy in a direction exchanges no routes in it. Unset or true<br />keeps FRR's default, which is on; false renders<br />`no bgp ebgp-requires-policy`. False also lets the routers' peer<br />families, iBGP and eBGP alike, leave exportPolicyRef unset, which<br />exports every route the router selects to that peer; any other class<br />refuses a peer family with no export policy. Either way an eBGP peer<br />family with no importPolicyRef accepts every route the peer sends<br />once this is false. |  |  |
 | `bmpTargets` _[BMPTarget](#bmptarget) array_ | BMPTargets lists the BMP collectors every router of the class streams<br />to. The router image must load bgpd's BMP module. |  | MaxItems: 4 <br /> |
 
 

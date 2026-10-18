@@ -165,6 +165,26 @@ func TestImportLabConstructs(t *testing.T) {
 	}
 }
 
+// TestImportRouteMapIndentation: FRR keeps a route-map command in its
+// entry however it is indented, and returns to the top level for any
+// other command.
+func TestImportRouteMapIndentation(t *testing.T) {
+	for name, set := range map[string]string{"unindented": "set src 2001:db8::1", "tab": "\tset src 2001:db8::1"} {
+		t.Run(name, func(t *testing.T) {
+			text := strings.Replace(minimal, "route-map OUT permit 10\nexit\n",
+				"route-map OUT permit 10\n"+set+"\nroute-map OUT permit 20\nexit\n", 1)
+			o, err := importText(text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			terms := o.Policies[0].Spec.Terms
+			if len(terms) != 2 || terms[0].Set == nil || terms[0].Set.Source == nil || terms[1].Set != nil {
+				t.Errorf("terms = %+v", terms)
+			}
+		})
+	}
+}
+
 // TestImportSyslogDefaultLevel: `log syslog` alone is FRR's default level.
 func TestImportSyslogDefaultLevel(t *testing.T) {
 	o, err := importText(strings.Replace(minimal, hostnameLine, hostnameLine+"log syslog\n", 1))
