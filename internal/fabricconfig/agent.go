@@ -49,6 +49,10 @@ const (
 // cannot succeed until the ConfigMap changes.
 var errRejected = errors.New("configuration rejected")
 
+// ErrConfigMapsRetired is a ConfigMap read refused because the node's
+// ConfigMap path is retired.
+var ErrConfigMapsRetired = errors.New("the ConfigMap path is retired")
+
 // Agent installs and maintains one node's FRR configuration.
 type Agent struct {
 	// Client reads ConfigMaps.
@@ -68,6 +72,9 @@ type Agent struct {
 	// LegacyConfigMap names the shared legacy ConfigMap consulted when the
 	// node has no ConfigMap of its own. Empty disables the fallback.
 	LegacyConfigMap string
+	// ConfigMapsRetired refuses every ConfigMap read and watch without
+	// calling the API.
+	ConfigMapsRetired bool
 
 	// ConfigDir is the FRR configuration directory.
 	ConfigDir string
@@ -166,6 +173,41 @@ func (a *Agent) installBoot(ctx context.Context, boot func(context.Context) (str
 	}
 	slog.Info("installed fabric-router configuration from the activation state", "reason", reason, "hash", Hash(conf))
 	return nil
+}
+
+// InitActivated installs the configuration of a node whose activation
+// path is on, and sets rec to the source it used. A node whose journal
+// records the CRD source starts from what d.BootConfig chooses, and from
+// its ConfigMap while nothing is activated; any other node starts from its
+// ConfigMap. With d.ConfigMapsRetired every node starts from what
+// d.BootConfig chooses, and one it refuses holds FRR off instead of
+// falling back to a ConfigMap.
+func (a *Agent) InitActivated(ctx context.Context, d *DeploymentAgent, rec *BootRecord) error {
+	if !d.ConfigMapsRetired && JournalSource(d.Activator.Journal()) != networkv1alpha1.FabricConfigSourceCRD {
+		return a.Init(ctx)
+	}
+	// d was built moments ago, when its identity was read; a retry reads
+	// it again, in case the API came back.
+	retry := false
+	return a.InitFrom(ctx, func(ctx context.Context) (string, string, error) {
+		if retry && d.NodeUID == "" && d.Resolve != nil {
+			if err := d.Resolve(ctx); err != nil {
+				slog.Warn("could not read this node's identity; trying the checkpoint offline", "error", err)
+			}
+		}
+		retry = true
+		conf, reason, err := d.BootConfig(ctx, d.MachineID)
+		if errors.Is(err, ErrNotActivated) && !d.ConfigMapsRetired {
+			// Enrolled on CRD before anything was activated: the ConfigMap
+			// is all there is to run.
+			*rec = BootRecord{Source: BootConfigMap}
+			conf, reason, err = a.ConfigMapConfig(ctx)
+			rec.Reason = reason
+			return conf, reason, err
+		}
+		*rec = BootRecord{Source: d.Booted, Reason: reason}
+		return conf, reason, err
+	})
 }
 
 // ConfigMapConfig resolves the node's frr.conf from its ConfigMap, for a
@@ -457,8 +499,13 @@ func (a *Agent) loadApplied() error {
 	return nil
 }
 
-// get returns the named ConfigMap, or nil when it does not exist.
+// get returns the named ConfigMap, or nil when it does not exist. With the
+// ConfigMap path retired it returns a fatal error wrapping
+// ErrConfigMapsRetired.
 func (a *Agent) get(ctx context.Context, name string) (*corev1.ConfigMap, error) {
+	if a.ConfigMapsRetired {
+		return nil, fatal(fmt.Errorf("get ConfigMap %s/%s: %w", a.Namespace, name, ErrConfigMapsRetired))
+	}
 	cm, err := a.Client.CoreV1().ConfigMaps(a.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil
@@ -470,8 +517,12 @@ func (a *Agent) get(ctx context.Context, name string) (*corev1.ConfigMap, error)
 }
 
 // startInformer starts an informer over the single named ConfigMap, waits for
-// it to sync, and returns its store.
+// it to sync, and returns its store. With the ConfigMap path retired it
+// returns an error wrapping ErrConfigMapsRetired.
 func (a *Agent) startInformer(ctx context.Context, name string, h cache.ResourceEventHandler) (cache.Store, error) {
+	if a.ConfigMapsRetired {
+		return nil, fmt.Errorf("watch ConfigMap %s/%s: %w", a.Namespace, name, ErrConfigMapsRetired)
+	}
 	factory := informers.NewSharedInformerFactoryWithOptions(a.Client, 0,
 		informers.WithNamespace(a.Namespace),
 		informers.WithTweakListOptions(func(o *metav1.ListOptions) {

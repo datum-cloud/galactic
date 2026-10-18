@@ -92,6 +92,11 @@ type DeploymentAgent struct {
 	// Booted is where the last configuration BootConfig returned came
 	// from.
 	Booted BootSource
+	// ConfigMapsRetired keeps the node on the CRD source without reading
+	// any ConfigMap: a deployment asking for another source is reported,
+	// never handed off, and BootConfig starts a node with nothing
+	// activated from its deployment's active revision.
+	ConfigMapsRetired bool
 
 	// staged is the candidate last staged and the running configuration it
 	// was staged against, so an unchanged candidate is not restaged every
@@ -283,6 +288,9 @@ func (d *DeploymentAgent) settleSourceLocked(ctx context.Context, dep *networkv1
 	status *networkv1alpha1.FabricRouterDeploymentStatus) (pending bool, err error) {
 	journal := d.Activator.Journal()
 	current, want := JournalSource(journal), dep.Spec.Source
+	if d.ConfigMapsRetired {
+		return d.settleRetiredLocked(dep, status)
+	}
 	if current == networkv1alpha1.FabricConfigSourceCRD && want != networkv1alpha1.FabricConfigSourceCRD {
 		if err := d.checkHandoff(ctx, dep); err != nil {
 			setCondition(status, dep, networkv1alpha1.FabricConditionAccepted, metav1.ConditionFalse,
@@ -308,6 +316,28 @@ func (d *DeploymentAgent) settleSourceLocked(ctx context.Context, dep *networkv1
 	d.Gate.Set(want)
 	status.EffectiveSource = want
 	return false, nil
+}
+
+// settleRetiredLocked keeps the node on CRD, the only source it can run
+// with its ConfigMap path retired. A deployment asking for another source
+// is reported as pending, and no handoff is checked: that would read the
+// ConfigMap.
+func (d *DeploymentAgent) settleRetiredLocked(dep *networkv1alpha1.FabricRouterDeployment,
+	status *networkv1alpha1.FabricRouterDeploymentStatus) (pending bool, err error) {
+	crd := networkv1alpha1.FabricConfigSourceCRD
+	if err := d.Activator.Journal().SetSourceHandoff(string(crd), ""); err != nil {
+		return false, err
+	}
+	d.Gate.SetHandoff("")
+	d.Gate.Set(crd)
+	status.EffectiveSource = crd
+	if dep.Spec.Source == crd {
+		return false, nil
+	}
+	setCondition(status, dep, networkv1alpha1.FabricConditionAccepted, metav1.ConditionFalse,
+		networkv1alpha1.FabricReasonConfigMapRetired,
+		fmt.Sprintf("the node's ConfigMap path is retired, so it stays on CRD rather than move to %s", dep.Spec.Source))
+	return true, nil
 }
 
 func (d *DeploymentAgent) checkHandoff(ctx context.Context, dep *networkv1alpha1.FabricRouterDeployment) error {
@@ -523,8 +553,16 @@ func (d *DeploymentAgent) persist(ctx context.Context, dep *networkv1alpha1.Fabr
 }
 
 // authorized checks the deployment's release authorization covers its
-// active revision.
+// active revision. Only a started release authorizes.
 func (d *DeploymentAgent) authorized(ctx context.Context, dep *networkv1alpha1.FabricRouterDeployment) error {
+	return d.authorizedIn(ctx, dep, false)
+}
+
+// authorizedIn is authorized, also accepting a release whose outcome is
+// Unknown when atBoot is set: a router that cannot start cannot report,
+// and a router that does not report makes its release Unknown.
+func (d *DeploymentAgent) authorizedIn(ctx context.Context, dep *networkv1alpha1.FabricRouterDeployment,
+	atBoot bool) error {
 	ref := dep.Spec.AuthorizationRef
 	if ref == nil {
 		return fmt.Errorf("%w: the promotion names no release authorization", errRefused)
@@ -542,6 +580,10 @@ func (d *DeploymentAgent) authorized(ctx context.Context, dep *networkv1alpha1.F
 	}
 	switch auth.Status.Phase {
 	case networkv1alpha1.FabricReleasePhaseStarted:
+	case networkv1alpha1.FabricReleasePhaseUnknown:
+		if !atBoot {
+			return fmt.Errorf("release authorization %s is %q, not Started", ref.Name, auth.Status.Phase)
+		}
 	case networkv1alpha1.FabricReleasePhaseCompleted, networkv1alpha1.FabricReleasePhaseFailed,
 		networkv1alpha1.FabricReleasePhaseCancelled:
 		// A release never starts again once it ends.
@@ -895,13 +937,37 @@ var ErrNotActivated = errors.New("no activation accepted yet")
 // and allowed by the journal. It records which of the three in Booted. It
 // returns ErrNotActivated for a node with nothing activated yet, and an
 // error when nothing may start yet.
+//
+// With ConfigMapsRetired a node with nothing activated, whether its journal
+// records CRD or no source at all, starts from its deployment's active
+// revision under the same checks, its deployment on CRD; until it may, the
+// error wraps ErrNotActivated. A journal recording another source returns
+// a fatal error wrapping ErrConfigMapsRetired: only a node on CRD may start.
 func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (config, reason string, err error) {
-	if !d.Activator.Activated() {
+	fresh := !d.Activator.Activated()
+	if d.ConfigMapsRetired {
+		if src := d.Activator.Journal().Source(); src != "" && src != string(networkv1alpha1.FabricConfigSourceCRD) {
+			return "", "", fatal(fmt.Errorf("%w: node %s's journal records the %s source, and only a node on CRD may "+
+				"start", ErrConfigMapsRetired, d.NodeName, src))
+		}
+	} else if fresh {
 		return "", "", ErrNotActivated
 	}
 	if d.IdentityErr != nil {
 		return "", "", d.IdentityErr
 	}
+	config, reason, err = d.bootConfig(ctx, machineID, fresh)
+	if err != nil && fresh {
+		return "", "", fmt.Errorf("%w on node %s, and with its ConfigMap retired it starts only from its "+
+			"deployment's active revision: %w", ErrNotActivated, d.NodeName, err)
+	}
+	return config, reason, err
+}
+
+// bootConfig is BootConfig past its source and identity checks. fresh is a
+// node with nothing activated, which needs its deployment on CRD.
+func (d *DeploymentAgent) bootConfig(ctx context.Context, machineID string, fresh bool) (config, reason string,
+	err error) {
 	id := activation.Identity{MachineID: machineID, NodeUID: d.NodeUID, ClusterID: d.ClusterID}
 	decision := d.Activator.Boot(id)
 	if decision.Apply != "" {
@@ -915,6 +981,10 @@ func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (con
 	if dep == nil {
 		return "", "", fmt.Errorf("%s; node %s has no deployment", decision.Reason, d.NodeName)
 	}
+	if fresh && dep.Spec.Source != networkv1alpha1.FabricConfigSourceCRD {
+		return "", "", fmt.Errorf("%s; deployment %s is on the %s source, not CRD", decision.Reason, dep.Name,
+			dep.Spec.Source)
+	}
 	if d.Activator.Journal().BoundDeployment() == string(dep.UID) {
 		if online := d.Activator.BootOnline(id); online.Apply != "" {
 			d.Booted = BootCheckpointOnline
@@ -924,7 +994,7 @@ func (d *DeploymentAgent) BootConfig(ctx context.Context, machineID string) (con
 	if dep.Spec.ActivationEpoch == 0 {
 		return "", "", fmt.Errorf("%s; node %s has no active revision", decision.Reason, d.NodeName)
 	}
-	if err := d.authorized(ctx, dep); err != nil {
+	if err := d.authorizedIn(ctx, dep, true); err != nil {
 		if _, accepted := d.Activator.Journal().Accepted(string(dep.UID), dep.Spec.ActivationEpoch); !accepted {
 			return "", "", fmt.Errorf("%s; %w", decision.Reason, err)
 		}

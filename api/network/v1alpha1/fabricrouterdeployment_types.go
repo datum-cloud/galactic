@@ -48,6 +48,11 @@ const (
 	// the agent never accepted and never will: its release authorization
 	// is gone, finished, or does not cover the promotion.
 	FabricReasonPromotionRefused = "PromotionRefused"
+	// FabricReasonConfigMapRetired is an Accepted condition for a
+	// deployment asking for a source other than CRD on a node whose
+	// ConfigMap path is retired: the node stays on CRD and nothing is
+	// handed off.
+	FabricReasonConfigMapRetired = "ConfigMapRetired"
 )
 
 // FabricRouterDeployment is the single activation point of one fabric

@@ -40,7 +40,10 @@ const (
 	depUID       = "deployment-uid"
 	authUID      = "release-uid"
 	cmUID        = "cm-uid"
-	testVersion  = "test"
+	releaseName  = "release"
+	// minimalConf is a node ConfigMap's frr.conf.
+	minimalConf = "frr defaults traditional\n"
+	testVersion = "test"
 )
 
 // fixtureRevision imports the routing package's edge fixture, with edit
@@ -226,13 +229,13 @@ func promote(d *networkv1alpha1.FabricRouterDeployment, epoch int64, rev *networ
 	d.Spec.ActivationEpoch = epoch
 	d.Spec.ActiveRevisionRef = &networkv1alpha1.LocalObjectRef{Name: rev.Name}
 	d.Spec.ActivationDependencyDigest = rev.Spec.ActivationDependencyDigest
-	d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: "release", UID: authUID}
+	d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: releaseName, UID: authUID}
 	d.Spec.Activation = &networkv1alpha1.FabricActivationSettings{ApplyTimeoutSeconds: 60, OfflineBootSeconds: 3600}
 }
 
 func release(revs ...*networkv1alpha1.FabricRouterRevision) *networkv1alpha1.FabricReleaseAuthorization {
 	a := &networkv1alpha1.FabricReleaseAuthorization{
-		ObjectMeta: metav1.ObjectMeta{Namespace: depNamespace, Name: "release", UID: authUID},
+		ObjectMeta: metav1.ObjectMeta{Namespace: depNamespace, Name: releaseName, UID: authUID},
 		Spec: networkv1alpha1.FabricReleaseAuthorizationSpec{
 			Type: networkv1alpha1.FabricReleaseTypeRelease, RoutingDomain: "fabric", FleetReleaseID: "r1", FleetSequence: 1,
 		},
@@ -460,7 +463,7 @@ func TestDeploymentAgentRefusesUnauthorized(t *testing.T) {
 func TestDeploymentAgentHandoff(t *testing.T) {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: depNamespace, Name: ConfigMapName(depNode),
 		UID: cmUID},
-		Data: map[string]string{KeyFRRConf: "frr defaults traditional\n"}}
+		Data: map[string]string{KeyFRRConf: minimalConf}}
 	h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD), cm)
 	h.sync()
 	if src, _ := h.agent.Gate.Get(); src != networkv1alpha1.FabricConfigSourceCRD {

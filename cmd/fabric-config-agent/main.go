@@ -6,7 +6,9 @@
 // configuration for the fabric-router DaemonSet. Its init subcommand runs as
 // the pod's init container and installs the node's configuration from its own
 // ConfigMap; its watch subcommand runs beside FRR and applies later changes to
-// that ConfigMap with frr-reload, without restarting FRR. watch also
+// that ConfigMap with frr-reload, without restarting FRR. With the
+// activation path on, both act on the node's FabricRouterDeployment, and
+// with the ConfigMap path retired neither reads a ConfigMap. watch also
 // hard-resets any IPv6 session that comes up announcing an IPv4-mapped next
 // hop, and serves metrics on those sessions, on BGP routes zebra failed to
 // install, on activations and staging runs, on waits for the node's FRR
@@ -71,7 +73,10 @@ type options struct {
 	reloader        string
 
 	// activation enables the FabricRouterDeployment path.
-	activation    bool
+	activation bool
+	// configMaps is false once the ConfigMap path is retired: the node
+	// starts and runs only from the CRD source.
+	configMaps    bool
 	stateDir      string
 	machineIDFile string
 	writerLock    string
@@ -124,6 +129,10 @@ func newRootCommand() *cobra.Command {
 	pf.BoolVar(&opts.activation, "activation", os.Getenv("FABRIC_ACTIVATION") == "true",
 		"Act on this node's FabricRouterDeployment: its source mode, candidate and active revisions "+
 			"(env FABRIC_ACTIVATION=true)")
+	pf.BoolVar(&opts.configMaps, "configmaps", os.Getenv("FABRIC_CONFIGMAPS") != "false",
+		"Read this node's configuration ConfigMaps. false retires the ConfigMap path: the node starts and runs "+
+			"only from the CRD source and never reads, watches or raises events on a ConfigMap; needs --activation "+
+			"(env FABRIC_CONFIGMAPS=false)")
 	pf.StringVar(&opts.stateDir, "state-dir", "/var/lib/fabric-router/agent",
 		"Host directory holding the activation journal, identity and checkpoint")
 	pf.StringVar(&opts.machineIDFile, "machine-id-file", "/etc/machine-id", "The host's machine ID file")
@@ -170,6 +179,9 @@ func run(parent context.Context, opts *options, fn func(*fabricconfig.Agent, con
 	if opts.namespace == "" {
 		return errors.New("--namespace (or POD_NAMESPACE) is required")
 	}
+	if !opts.configMaps && !opts.activation {
+		return errors.New("--configmaps=false (or FABRIC_CONFIGMAPS=false) needs --activation (or FABRIC_ACTIVATION=true)")
+	}
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -192,15 +204,16 @@ func run(parent context.Context, opts *options, fn func(*fabricconfig.Agent, con
 	defer broadcaster.Shutdown()
 
 	agent := &fabricconfig.Agent{
-		Client:          client,
-		Recorder:        broadcaster.NewRecorder(clientgoscheme.Scheme, appName),
-		FRR:             fabricconfig.ExecFRR{Vtysh: opts.vtysh, Reloader: opts.reloader, ConfigDir: opts.configDir},
-		Namespace:       opts.namespace,
-		NodeName:        opts.nodeName,
-		LegacyConfigMap: opts.legacyConfigMap,
-		ConfigDir:       opts.configDir,
-		DefaultsDir:     opts.defaultsDir,
-		Lock:            fabricconfig.FileLock{Path: opts.writerLock},
+		Client:            client,
+		Recorder:          broadcaster.NewRecorder(clientgoscheme.Scheme, appName),
+		FRR:               fabricconfig.ExecFRR{Vtysh: opts.vtysh, Reloader: opts.reloader, ConfigDir: opts.configDir},
+		Namespace:         opts.namespace,
+		NodeName:          opts.nodeName,
+		LegacyConfigMap:   opts.legacyConfigMap,
+		ConfigMapsRetired: !opts.configMaps,
+		ConfigDir:         opts.configDir,
+		DefaultsDir:       opts.defaultsDir,
+		Lock:              fabricconfig.FileLock{Path: opts.writerLock},
 	}
 	if opts.podName != "" {
 		agent.Pod = &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
@@ -213,7 +226,7 @@ func run(parent context.Context, opts *options, fn func(*fabricconfig.Agent, con
 	opts.restCfg = restCfg
 
 	slog.Info("starting "+appName, "version", metadata.Version, "node", opts.nodeName, "namespace", opts.namespace,
-		"activation", opts.activation)
+		"activation", opts.activation, "configMaps", opts.configMaps)
 	return fn(agent, ctx)
 }
 
@@ -237,10 +250,10 @@ func initNode(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
 }
 
 // installNode installs the node's configuration: from the activation state
-// when the node is on the CRD source, otherwise from its ConfigMap, and
-// sets rec to the source it used. Only a node on CRD needs its machine ID
-// and identity, so a fault in either never stops a ConfigMap node from
-// starting.
+// when the node is on the CRD source or its ConfigMap path is retired,
+// otherwise from its ConfigMap, and sets rec to the source it used. Only a
+// node on CRD needs its machine ID and identity, so a fault in either
+// never stops a ConfigMap node from starting.
 func installNode(ctx context.Context, a *fabricconfig.Agent, opts *options, rec *fabricconfig.BootRecord) error {
 	if !opts.activation {
 		return a.Init(ctx)
@@ -252,31 +265,7 @@ func installNode(ctx context.Context, a *fabricconfig.Agent, opts *options, rec 
 		// until an operator repairs or removes the state.
 		return err
 	}
-	if fabricconfig.JournalSource(d.Activator.Journal()) != networkv1alpha1.FabricConfigSourceCRD {
-		return a.Init(ctx)
-	}
-	// newDeploymentAgent just tried to read the identity; a retry tries
-	// again, in case the API came back.
-	retry := false
-	return a.InitFrom(ctx, func(ctx context.Context) (string, string, error) {
-		if retry && d.NodeUID == "" && d.Resolve != nil {
-			if err := d.Resolve(ctx); err != nil {
-				slog.Warn("could not read this node's identity; trying the checkpoint offline", "error", err)
-			}
-		}
-		retry = true
-		conf, reason, err := d.BootConfig(ctx, d.MachineID)
-		if errors.Is(err, fabricconfig.ErrNotActivated) {
-			// Enrolled on CRD before anything was activated: the ConfigMap
-			// is all there is to run.
-			*rec = fabricconfig.BootRecord{Source: fabricconfig.BootConfigMap}
-			conf, reason, err = a.ConfigMapConfig(ctx)
-			rec.Reason = reason
-			return conf, reason, err
-		}
-		*rec = fabricconfig.BootRecord{Source: d.Booted, Reason: reason}
-		return conf, reason, err
-	})
+	return a.InitActivated(ctx, d, rec)
 }
 
 // newDeploymentAgent opens the activation state and builds the deployment
@@ -318,6 +307,7 @@ func newDeploymentAgent(
 		Client: c, Namespace: opts.namespace, NodeName: opts.nodeName,
 		Activator: act, BGP: frr, ConfigDir: opts.configDir, Version: metadata.Version,
 		Lock: writerLock(opts, metrics, fabricconfig.WriterDeployment), Metrics: metrics,
+		ConfigMapsRetired: !opts.configMaps,
 	}
 	d.MachineID, err = activation.ReadMachineID(opts.machineIDFile)
 	if err != nil {
@@ -379,7 +369,9 @@ func writerLock(opts *options, metrics *fabricconfig.AgentMetrics, writer string
 
 // watchWithGuard runs a.Watch alongside a NextHopGuard over the same FRR
 // instance, and serves the guard's and the activation path's metrics, and
-// the boot source init recorded, when opts asks for them.
+// the boot source init recorded, when opts asks for them. With the
+// ConfigMap path retired it runs only the deployment agent and the guard
+// until ctx ends.
 func watchWithGuard(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
 	metrics := fabricconfig.NewNextHopMetrics()
 	agentMetrics := fabricconfig.NewAgentMetrics(metrics.Registry)
@@ -436,5 +428,9 @@ func watchWithGuard(ctx context.Context, a *fabricconfig.Agent, opts *options) e
 	}
 
 	go guard.Run(ctx)
+	if !opts.configMaps {
+		<-ctx.Done()
+		return nil
+	}
 	return a.Watch(ctx)
 }
