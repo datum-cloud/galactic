@@ -168,11 +168,11 @@ with a new release.
 ## Recovery and boot
 
 Each epoch carries a recovery target, the last committed revision (none for a
-re-activation), and the prefixes and credentials no recovery may use. When an activation fails (the
-reload fails, the running configuration differs, or a required peer or static
-route stays down through the stabilization window), the agent restores the
-recovery target if it is still allowed, and reports `Recovered`. Otherwise it
-reports `Degraded` with reason `NoEligibleRecovery`.
+re-activation), and the prefixes and credentials no recovery may use. When an
+activation fails (the reload fails, the running configuration differs, or a
+required peer or static route stays down through the stabilization window),
+the agent restores the recovery target if it is still allowed, and reports
+`Recovered`. Otherwise it reports `Degraded` with reason `NoEligibleRecovery`.
 
 The committed or recovered configuration is checkpointed in the host state
 directory. A pod that restarts without the API restores the checkpoint while
