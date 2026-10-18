@@ -43,6 +43,7 @@ namespace, `galactic-system` by default.
 | `release create NAME --domain D --sequence N [DEPLOYMENT…]` | Authorizes promoting the named deployments, or every changed one on CRD, to their candidates. A deployment the rollout manager would refuse is an error when named and left out otherwise. `--dry-run` prints it first |
 | `release create … --withdraw PREFIX`                        | The same as an emergency withdrawal of those prefixes, which no later release or recovery restores                                                                                                                     |
 | `release create … --retire DEPLOYMENT…`                     | Decommissions the named routers with this last promotion. It cannot be undone, so it never applies to the whole fleet                                                                                                  |
+| `release create … --reactivate DEPLOYMENT…`                 | Promotes each named router's active revision again, as a new epoch, instead of its candidate. Each must report that revision committed. Never fleet-wide, never a withdrawal                                           |
 | `release status NAME`                                       | The release's phase and where each router stands                                                                                                                                                                       |
 | `release confirm-recovery NAME --by WHO`                    | Releases a failed release's routing domain once an operator confirmed its routers are safe                                                                                                                             |
 | `suspend DEPLOYMENT`, `resume DEPLOYMENT`                   | Stops and allows promotion; the router keeps running what it runs                                                                                                                                                      |
@@ -110,6 +111,21 @@ revision and digest each may activate. It is immutable. The rollout manager:
 3. Completes when every target commits, fails (and promotes nothing more) when
    one fails, and goes `Unknown` while a promoted router stops reporting.
 
+A target the deployment already runs, committed by its status, counts as
+committed at once: the release promotes nothing to it. A target with
+`reactivate: true` is promoted anyway, as a new epoch of the same revision.
+That is how a node that lost its state starts again (see
+[A node that lost its state](#a-node-that-lost-its-state)). A re-activation
+goes through every check and limit above, and the agent accepts it as any
+other promotion. Its recovery target is the one the deployment already had,
+which is never the revision itself. For any other revision `reactivate`
+changes nothing.
+
+Each promotion's recovery target, the revision the deployment ran before, or
+for a re-activation the one it already had, is dropped when no failure could
+restore it: the revision is gone, or it originates a revoked prefix, or it uses
+a revoked credential or one whose Secret does not exist.
+
 Credentials are revoked by Secret UID, in `spec.recovery.revokedCredentials`,
 so a Secret recreated under the same name is a new credential. To check them
 the rollout manager reads the metadata of each Secret a revision names, by name
@@ -132,8 +148,9 @@ with a new release.
 
 ## Recovery and boot
 
-Each epoch carries a recovery target, the last committed revision, and the
-prefixes and credentials no recovery may use. When an activation fails (the
+Each epoch carries a recovery target, the last committed revision (for a
+re-activation, the target the deployment already had), and the prefixes and
+credentials no recovery may use. When an activation fails (the
 reload fails, the running configuration differs, or a required peer or static
 route stays down through the stabilization window), the agent restores the
 recovery target if it is still allowed, and reports `Recovered`. Otherwise it
@@ -273,23 +290,22 @@ With the ConfigMap path retired, handing the node back is refused, so:
    node does: an activated node needs its release `Started`, and a node that
    cannot report makes it `Unknown`. Its replay protection starts over, so check
    no older promotion is pending first.
-2. Promote a revision other than the one the deployment's status reports
-   committed. A release naming the deployment for that same revision promotes
-   nothing, since the rollout manager reads the deployment as running it.
+2. Re-activate the revision the deployment's status reports committed:
+   `fabric-router-controller release create NAME --domain D --sequence N
+   --reactivate DEPLOYMENT`. A release without `--reactivate` naming that same
+   revision promotes nothing, since the rollout manager reads the deployment as
+   running it. The release promotes the revision as a new epoch, and the node
+   starts from it once the release starts. The release is `Unknown` until the
+   node first reports, which does not stop a node without a journal booting.
+   Its recovery target is the one the deployment already had.
+   - It needs a `--sequence` above every earlier release in the domain. It is
+     refused for a retired router, a deployment still activating an epoch or
+     not reporting its active revision committed, and a revision that
+     originates a revoked prefix or uses a revoked credential, or one whose
+     Secret does not exist. The node would refuse to start those.
    - After a compiler or FRR upgrade the deployment's candidate is the
-     recompiled revision: `fabric-router-controller release create` naming only
-     the deployment promotes it, and the node starts from it.
-   - Otherwise roll back and forward: write a release by hand (`release create
-     --dry-run` prints one to start from) naming only the deployment, with its
-     `spec.recovery.targetRevisionRef` revision and that revision's digest, and
-     once the node commits it, `release create` naming the deployment promotes
-     its candidate, the revision it ran before, again. Each release needs
-     `--domain` and a `--sequence` above every earlier release in the domain,
-     and is refused for a retired router or a revision that originates a
-     revoked prefix or uses a revoked credential, or one whose Secret does not
-     exist. A deployment with no recovery target has committed only one
-     revision; a change to its router's resources compiles a new candidate to
-     promote instead.
+     recompiled revision, and a `release create` naming the deployment without
+     `--reactivate` promotes that instead.
 
 ### The way back
 

@@ -83,3 +83,18 @@ func TestPreviewRevision(t *testing.T) {
 		}
 	}
 }
+
+// TestReleaseCreateFlags: release create offers re-activation beside
+// retirement, both off unless asked for.
+func TestReleaseCreateFlags(t *testing.T) {
+	create, _, err := newReleaseCommand().Find([]string{"create"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"reactivate", "retire"} {
+		f := create.Flags().Lookup(name)
+		if f == nil || f.DefValue != "false" {
+			t.Errorf("release create --%s = %+v, want a flag off by default", name, f)
+		}
+	}
+}

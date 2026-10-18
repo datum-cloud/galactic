@@ -86,6 +86,15 @@ spec:
                       maxLength: 36
                       minLength: 1
                       type: string
+                    reactivate:
+                      description: |-
+                        Reactivate promotes the revision as a new epoch even when the
+                        deployment already reports it committed, so a node that lost its
+                        state starts from it again. Without it such a target counts as
+                        committed at once and nothing is promoted. The promotion passes
+                        every check an ordinary one does; its recovery target is the one
+                        the deployment already has, never the revision itself.
+                      type: boolean
                     retire:
                       description: |-
                         Retire decommissions the router with this promotion: its revision

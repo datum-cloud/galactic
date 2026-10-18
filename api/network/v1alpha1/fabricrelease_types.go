@@ -138,6 +138,14 @@ type FabricReleaseTarget struct {
 	// release promotes it.
 	// +optional
 	Retire bool `json:"retire,omitempty"`
+	// Reactivate promotes the revision as a new epoch even when the
+	// deployment already reports it committed, so a node that lost its
+	// state starts from it again. Without it such a target counts as
+	// committed at once and nothing is promoted. The promotion passes
+	// every check an ordinary one does; its recovery target is the one
+	// the deployment already has, never the revision itself.
+	// +optional
+	Reactivate bool `json:"reactivate,omitempty"`
 }
 
 // FabricReleaseAuthorizationStatus is a release's progress.

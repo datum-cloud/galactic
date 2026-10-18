@@ -303,6 +303,35 @@ func CheckTarget(dep *networkv1alpha1.FabricRouterDeployment, rev *networkv1alph
 	return nil
 }
 
+// eligibleRecovery drops spec's recovery target when no failure could
+// restore it: the revision is gone, or it originates a revoked prefix or
+// uses a revoked or unresolvable credential.
+func (r *ReleaseReconciler) eligibleRecovery(ctx context.Context, namespace string,
+	spec *networkv1alpha1.FabricRouterDeploymentSpec) error {
+	rec := spec.Recovery
+	if rec == nil || rec.TargetRevisionRef == nil {
+		return nil
+	}
+	rev := &networkv1alpha1.FabricRouterRevision{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: rec.TargetRevisionRef.Name}, rev)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	if err == nil {
+		credentials, err := Credentials(ctx, r.reader(), namespace, rev)
+		if err != nil {
+			return err
+		}
+		if rev.Spec.ActivationDependencyDigest == rec.TargetDependencyDigest &&
+			revokedOrigination(rec.RevokedPrefixes, rev) == "" &&
+			credentialProblem(rec.RevokedCredentials, rev, credentials) == "" {
+			return nil
+		}
+	}
+	rec.TargetRevisionRef, rec.TargetDependencyDigest = nil, ""
+	return nil
+}
+
 // routerLabel names a revision's router; the revision controller sets it.
 const routerLabel = controller.RouterLabel
 
@@ -469,13 +498,22 @@ func (r *ReleaseReconciler) promoteWaiting(ctx context.Context, auth *networkv1a
 			// Promoted under another release since it was read.
 			continue
 		}
-		dep.Spec = promote(dep, rev, auth, e.target, activationSettings(e.policy, rev))
+		reactivated := e.target.Reactivate && dep.Spec.ActiveRevisionRef != nil &&
+			dep.Spec.ActiveRevisionRef.Name == rev.Name
+		spec := promote(dep, rev, auth, e.target, activationSettings(e.policy, rev))
+		if err := r.eligibleRecovery(ctx, dep.Namespace, &spec); err != nil {
+			return false, err
+		}
+		dep.Spec = spec
 		if err := r.Update(ctx, dep); err != nil {
 			return false, err
 		}
 		inFlight[e.domain]++
-		r.event(auth, corev1.EventTypeNormal, ReasonPromoted, "promoted %s to %s at epoch %d",
-			dep.Name, rev.Name, dep.Spec.ActivationEpoch)
+		format := "promoted %s to %s at epoch %d"
+		if reactivated {
+			format = "re-activated %s on %s at epoch %d"
+		}
+		r.event(auth, corev1.EventTypeNormal, ReasonPromoted, format, dep.Name, rev.Name, dep.Spec.ActivationEpoch)
 	}
 	return false, nil
 }

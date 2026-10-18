@@ -5,6 +5,7 @@ package v1alpha1_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -257,6 +258,15 @@ func TestDeploymentAdmission(t *testing.T) {
 				d.Spec.Recovery.TargetRevisionRef = &networkv1alpha1.LocalObjectRef{Name: previous}
 				d.Spec.Recovery.TargetDependencyDigest = digestA
 			}},
+			{name: "re-activation of the active revision", mutate: func(d *D) {
+				promote(d, 2, digestA)
+				d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: "release-2", UID: "release-2-uid"}
+			}},
+			{name: "re-activation recovering to itself", mutate: func(d *D) {
+				promote(d, 2, digestA)
+				d.Spec.Recovery.TargetRevisionRef = &networkv1alpha1.LocalObjectRef{Name: d.Spec.ActiveRevisionRef.Name}
+				d.Spec.Recovery.TargetDependencyDigest = digestA
+			}, wantErr: "not the revision it recovers from"},
 			{name: "retired with its last promotion", mutate: func(d *D) {
 				promote(d, 2, digestB)
 				d.Spec.Recovery.Retired = true
@@ -388,6 +398,7 @@ func TestReleaseAuthorizationAdmission(t *testing.T) {
 		}},
 		{name: "release withdrawing prefixes", setup: func(r *R) { r.Spec.WithdrawnPrefixes = []string{"192.0.2.0/24"} },
 			wantErr: "and only it does"},
+		{name: "re-activation", setup: func(r *R) { r.Spec.Deployments[0].Reactivate = true }},
 		{name: "withdrawn prefix that is no prefix", setup: func(r *R) {
 			r.Spec.Type = networkv1alpha1.FabricReleaseTypeEmergencyWithdrawal
 			r.Spec.WithdrawnPrefixes = []string{"edge"}
@@ -409,6 +420,18 @@ func TestReleaseAuthorizationAdmission(t *testing.T) {
 		}
 		r.Spec.FleetSequence = 8
 		checkAdmission(t, c.Update(ctx, r), "immutable")
+	})
+
+	t.Run("re-activation is immutable", func(t *testing.T) {
+		for _, from := range []bool{false, true} {
+			r := newRelease(fmt.Sprintf("reactivate-%t", from))
+			r.Spec.Deployments[0].Reactivate = from
+			if err := c.Create(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+			r.Spec.Deployments[0].Reactivate = !from
+			checkAdmission(t, c.Update(ctx, r), "immutable")
+		}
 	})
 
 	t.Run("status transitions", func(t *testing.T) {

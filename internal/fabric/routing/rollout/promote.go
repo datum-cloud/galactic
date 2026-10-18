@@ -106,11 +106,18 @@ func committed(d *networkv1alpha1.FabricRouterDeployment) bool {
 		d.Status.AppliedDigest == d.Spec.ActivationDependencyDigest
 }
 
+// Committed reports whether a deployment's status reports its active
+// epoch committed.
+func Committed(d *networkv1alpha1.FabricRouterDeployment) bool { return committed(d) }
+
 // promote returns d's spec promoted to rev under auth: the next epoch, the
 // revision and its digest, the authorization, the activation settings, and
-// a recovery to the revision d runs now when that is committed (otherwise
-// the recovery d already had). Revocations carry over; an emergency
-// withdrawal adds the prefixes it withdraws.
+// a recovery to the revision d runs now when that is committed and is not
+// rev (otherwise the recovery d already had, so re-activating the running
+// revision keeps the target its promotion had). A recovery target that is
+// rev itself is dropped. Revocations carry over; an emergency withdrawal
+// adds the prefixes it withdraws. The caller checks the recovery target is
+// still eligible.
 func promote(d *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.FabricRouterRevision,
 	auth *networkv1alpha1.FabricReleaseAuthorization, target networkv1alpha1.FabricReleaseTarget,
 	settings *networkv1alpha1.FabricActivationSettings) networkv1alpha1.FabricRouterDeploymentSpec {
@@ -119,7 +126,7 @@ func promote(d *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.Fab
 	if d.Spec.Recovery != nil {
 		recovery = d.Spec.Recovery.DeepCopy()
 	}
-	if committed(d) {
+	if committed(d) && d.Spec.ActiveRevisionRef.Name != rev.Name {
 		recovery.TargetRevisionRef = &networkv1alpha1.LocalObjectRef{Name: d.Spec.ActiveRevisionRef.Name}
 		recovery.TargetDependencyDigest = d.Spec.ActivationDependencyDigest
 	}
@@ -309,8 +316,9 @@ func stateOf(d *networkv1alpha1.FabricRouterDeployment, auth *networkv1alpha1.Fa
 	if ref == nil || ref.UID != string(auth.UID) || d.Spec.ActiveRevisionRef == nil ||
 		d.Spec.ActiveRevisionRef.Name != target.Revision {
 		switch {
-		case runs(d, target):
-			// Already committed on this revision and digest.
+		case runs(d, target) && !target.Reactivate:
+			// Already committed on this revision and digest; a
+			// re-activation promotes it again.
 			return targetCommitted
 		case busy(d):
 			return targetBlocked

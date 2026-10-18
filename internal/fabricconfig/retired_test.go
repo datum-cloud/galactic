@@ -569,3 +569,104 @@ func TestRetiredBootAfterLostState(t *testing.T) {
 		t.Fatalf("BootConfig = %q, %v, booted %s", reason, err, h.agent.Booted)
 	}
 }
+
+// reactivation creates a release re-activating rev in phase, and promotes
+// the deployment to rev again at epoch under it.
+func (h *harness) reactivation(rev *networkv1alpha1.FabricRouterRevision, epoch int64,
+	phase networkv1alpha1.FabricReleasePhase) {
+	h.t.Helper()
+	a := release(rev)
+	a.Name, a.UID, a.Spec.FleetSequence = "reactivate", "reactivate-uid", 2
+	a.Spec.Deployments[0].Reactivate = true
+	a.Status.Phase = phase
+	if err := h.client.Create(context.Background(), a); err != nil {
+		h.t.Fatal(err)
+	}
+	h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
+		promote(d, epoch, rev)
+		d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: a.Name, UID: string(a.UID)}
+	})
+}
+
+// completeRelease marks the harness's first release Completed.
+func (h *harness) completeRelease() {
+	h.t.Helper()
+	ctx := context.Background()
+	auth := &networkv1alpha1.FabricReleaseAuthorization{}
+	if err := h.client.Get(ctx, client.ObjectKey{Namespace: depNamespace, Name: releaseName}, auth); err != nil {
+		h.t.Fatal(err)
+	}
+	auth.Status.Phase = networkv1alpha1.FabricReleasePhaseCompleted
+	if err := h.client.Update(ctx, auth); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// TestRetiredBootFromReactivatedEpoch: a retired node whose state
+// directory is gone starts from its committed revision once one release
+// re-activates it, as a new epoch: frr-init boots it while the release is
+// Unknown, and the sidecar then commits the epoch as any promotion.
+func TestRetiredBootFromReactivatedEpoch(t *testing.T) {
+	ctx := context.Background()
+	h := retiredHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
+	h.committed()
+	h.completeRelease()
+
+	dir := filepath.Join(t.TempDir(), "state")
+	if _, err := activation.BindIdentity(dir, activation.Identity{
+		NodeUID: depNodeUID, MachineID: depMachine, ClusterID: depCluster,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.agent.Activator = &activation.Activator{Dir: dir, FRR: h.frr}
+	if err := h.agent.Activator.Open(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.agent.BootConfig(ctx, depMachine); !errors.Is(err, ErrNotActivated) {
+		t.Fatalf("BootConfig = %v, want the completed release refused", err)
+	}
+
+	h.reactivation(h.revs[0], 2, networkv1alpha1.FabricReleasePhaseUnknown)
+	conf, reason, err := h.agent.BootConfig(ctx, depMachine)
+	if err != nil || conf != rendered(t, h.revs[0]) || h.agent.Booted != BootActiveRevision ||
+		!strings.Contains(reason, "at epoch 2") {
+		t.Fatalf("BootConfig = %q, %v, booted %s", reason, err, h.agent.Booted)
+	}
+
+	auth := &networkv1alpha1.FabricReleaseAuthorization{}
+	if err := h.client.Get(ctx, client.ObjectKey{Namespace: depNamespace, Name: "reactivate"}, auth); err != nil {
+		t.Fatal(err)
+	}
+	auth.Status.Phase = networkv1alpha1.FabricReleasePhaseStarted
+	if err := h.client.Update(ctx, auth); err != nil {
+		t.Fatal(err)
+	}
+	got := h.sync()
+	if got.Status.AppliedEpoch != 2 || got.Status.AppliedRevision != h.revs[0].Name ||
+		got.Status.Epochs[0].Stage != networkv1alpha1.FabricStageCommitted {
+		t.Errorf("applied epoch %d %s, epochs %+v; want the re-activated epoch committed", got.Status.AppliedEpoch,
+			got.Status.AppliedRevision, got.Status.Epochs)
+	}
+}
+
+// TestAgentCommitsReactivatedEpoch: a node that kept its journal accepts a
+// re-activation of the revision it runs as a new epoch, above the one it
+// committed, as it would any promotion.
+func TestAgentCommitsReactivatedEpoch(t *testing.T) {
+	h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
+	h.committed()
+	h.completeRelease()
+	reloads := h.frr.reloads
+	h.reactivation(h.revs[0], 2, networkv1alpha1.FabricReleasePhaseStarted)
+	got := h.sync()
+	if got.Status.AppliedEpoch != 2 || got.Status.AppliedRevision != h.revs[0].Name {
+		t.Fatalf("applied epoch %d %s, want the re-activated epoch 2", got.Status.AppliedEpoch,
+			got.Status.AppliedRevision)
+	}
+	if h.frr.reloads == reloads {
+		t.Error("the re-activated epoch was never applied")
+	}
+	if high, _ := h.agent.Activator.Journal().HighWater(depUID); high != 2 {
+		t.Errorf("journal high water %d, want 2", high)
+	}
+}

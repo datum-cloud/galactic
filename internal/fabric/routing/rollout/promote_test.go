@@ -287,3 +287,65 @@ func TestReleaseConcurrency(t *testing.T) {
 		t.Errorf("phase %s, want Completed", final.Status.Phase)
 	}
 }
+
+// TestPromoteReactivation: re-activating the committed revision is a new
+// epoch that keeps the recovery target the deployment had, never the
+// revision itself, and carries every revocation over.
+func TestPromoteReactivation(t *testing.T) {
+	r1, r2 := revisionWith("r-aaaaaaaaaa", digestA, nil), revisionWith("r-bbbbbbbbbb", digestB, nil)
+	auth := &networkv1alpha1.FabricReleaseAuthorization{ObjectMeta: metav1.ObjectMeta{Name: relName, UID: relUID}}
+	d := committedDeployment(4, r2)
+	d.Spec.Recovery = &networkv1alpha1.FabricRecovery{
+		TargetRevisionRef: &networkv1alpha1.LocalObjectRef{Name: r1.Name}, TargetDependencyDigest: digestA,
+		RevokedPrefixes:    []string{prefixB},
+		RevokedCredentials: []networkv1alpha1.FabricObjectIdentity{{Name: "old", UID: "old-uid"}},
+	}
+	target := networkv1alpha1.FabricReleaseTarget{Revision: r2.Name, ActivationDependencyDigest: digestB,
+		Reactivate: true}
+	spec := promote(d, r2, auth, target, &networkv1alpha1.FabricActivationSettings{})
+	if spec.ActivationEpoch != 5 || spec.ActiveRevisionRef.Name != r2.Name || spec.AuthorizationRef.UID != relUID {
+		t.Fatalf("re-activated = %+v", spec)
+	}
+	r := spec.Recovery
+	if r.TargetRevisionRef == nil || r.TargetRevisionRef.Name != r1.Name || r.TargetDependencyDigest != digestA {
+		t.Errorf("recovery target %+v, want the one the deployment had", r)
+	}
+	if !slices.Equal(r.RevokedPrefixes, []string{prefixB}) || len(r.RevokedCredentials) != 1 {
+		t.Errorf("revocations %+v", r)
+	}
+
+	// With no earlier target there is none: never the revision itself.
+	d.Spec.Recovery = nil
+	if r := promote(d, r2, auth, target, nil).Recovery; r.TargetRevisionRef != nil {
+		t.Errorf("recovery target %s for a re-activation with none before", r.TargetRevisionRef.Name)
+	}
+}
+
+// TestStateOfReactivation: a target the deployment runs, committed, is
+// done at once unless it re-activates; then it waits for its promotion,
+// or behind an epoch still activating.
+func TestStateOfReactivation(t *testing.T) {
+	r1 := revisionWith("r-aaaaaaaaaa", digestA, nil)
+	auth := &networkv1alpha1.FabricReleaseAuthorization{ObjectMeta: metav1.ObjectMeta{Name: relName, UID: relUID}}
+	d := committedDeployment(2, r1)
+	d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: "earlier", UID: "earlier-uid"}
+	target := networkv1alpha1.FabricReleaseTarget{Revision: r1.Name, ActivationDependencyDigest: digestA}
+	if got := stateOf(d, auth, target, time.Minute, time.Now()); got != targetCommitted {
+		t.Errorf("the running revision: state %d, want committed", got)
+	}
+	target.Reactivate = true
+	if got := stateOf(d, auth, target, time.Minute, time.Now()); got != targetWaiting {
+		t.Errorf("re-activating the running revision: state %d, want waiting", got)
+	}
+	d.Status.AppliedEpoch = 1
+	if got := stateOf(d, auth, target, time.Minute, time.Now()); got != targetBlocked {
+		t.Errorf("re-activating behind an epoch in flight: state %d, want blocked", got)
+	}
+	// Promoted under the release, its outcome is read as any other's.
+	d = committedDeployment(3, r1)
+	d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: relName, UID: relUID}
+	d.Status.Epochs = []networkv1alpha1.FabricEpochStatus{{Epoch: 3, Stage: networkv1alpha1.FabricStageCommitted}}
+	if got := stateOf(d, auth, target, time.Minute, time.Now()); got != targetCommitted {
+		t.Errorf("re-activated and committed: state %d, want committed", got)
+	}
+}

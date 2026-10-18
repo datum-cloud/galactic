@@ -530,11 +530,13 @@ func TestReleaseNeverPromotesOverAnotherEpoch(t *testing.T) {
 	}
 }
 
-// TestReleaseRestartsLostNode: a release naming a deployment for the
-// revision its status reports committed promotes nothing, and with the
-// status cleared it waits on an epoch nothing reports, so a node that lost its checkpoint cannot be restarted
-// that way. Promoting another revision of its router, then the current one
-// again, does: each is a new epoch under a release that starts.
+// TestReleaseRestartsLostNode: without re-activation, a release naming a
+// deployment for the revision its status reports committed promotes
+// nothing, and with the status cleared it waits on an epoch nothing
+// reports. Promoting another revision of its router, then the current one
+// again, still restarts a node that lost its checkpoint: each is a new
+// epoch under a release that starts. TestReleaseReactivatesLostNode does
+// it in one release.
 func TestReleaseRestartsLostNode(t *testing.T) {
 	ctx := context.Background()
 	other := revisionWith("edge-bbbbbbbbbb", digestB, nil)

@@ -464,3 +464,76 @@ func TestRolloutUnknownWhenSilent(t *testing.T) {
 			"silent") == networkv1alpha1.FabricReleasePhaseStarted
 	})
 }
+
+// TestRolloutReactivation re-activates the committed revision through the
+// API server, as the shipped RBAC allows: the promotion to the same
+// revision at a new epoch, keeping the earlier recovery target, passes the
+// deployment's admission rules, and the release completes once the node
+// commits it. A release without re-activation completes at once.
+func TestRolloutReactivation(t *testing.T) {
+	c := startRolloutAs(t, true)
+	peer := seed(t, c)
+	ctx := context.Background()
+	eventually(t, "the deployment", func() bool {
+		return c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: testNode},
+			&networkv1alpha1.FabricRouterDeployment{}) == nil
+	})
+	dep := getDeployment(t, c)
+	dep.Spec.Source = networkv1alpha1.FabricConfigSourceCRD
+	if err := c.Update(ctx, dep); err != nil {
+		t.Fatal(err)
+	}
+	rev1 := latestRevision(t, c)
+	if err := c.Create(ctx, newRelease("r1", 1, dep, rev1)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "epoch 1", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 1 })
+	report(t, c, networkv1alpha1.FabricStageCommitted, rev1)
+	eventually(t, "r1 completed", func() bool { return phase(c, "r1") == networkv1alpha1.FabricReleasePhaseCompleted })
+
+	p := &networkv1alpha1.BGPPeer{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: peer}, p); err != nil {
+		t.Fatal(err)
+	}
+	p.Spec.Description = "CHANGED"
+	if err := c.Update(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "a second revision", func() bool { return latestRevision(t, c).Name != rev1.Name })
+	rev2 := latestRevision(t, c)
+	if err := c.Create(ctx, newRelease("r2", 2, dep, rev2)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "epoch 2", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 2 })
+	report(t, c, networkv1alpha1.FabricStageCommitted, rev2)
+	eventually(t, "r2 completed", func() bool { return phase(c, "r2") == networkv1alpha1.FabricReleasePhaseCompleted })
+
+	if err := c.Create(ctx, newRelease("again", 3, dep, rev2)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "again completed", func() bool {
+		return phase(c, "again") == networkv1alpha1.FabricReleasePhaseCompleted
+	})
+	if e := getDeployment(t, c).Spec.ActivationEpoch; e != 2 {
+		t.Fatalf("a release without re-activation promoted to epoch %d", e)
+	}
+
+	re := newRelease("reactivate", 4, dep, rev2)
+	re.Spec.Deployments[0].Reactivate = true
+	if err := c.Create(ctx, re); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the re-activation at epoch 3", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 3 })
+	dep = getDeployment(t, c)
+	if dep.Spec.ActiveRevisionRef.Name != rev2.Name || dep.Spec.AuthorizationRef.UID != string(getRelease(t, c,
+		"reactivate").UID) {
+		t.Fatalf("re-activated spec = %+v", dep.Spec)
+	}
+	if r := dep.Spec.Recovery; r == nil || r.TargetRevisionRef == nil || r.TargetRevisionRef.Name != rev1.Name {
+		t.Errorf("recovery = %+v, want the earlier target %s", dep.Spec.Recovery, rev1.Name)
+	}
+	report(t, c, networkv1alpha1.FabricStageCommitted, rev2)
+	eventually(t, "reactivate completed", func() bool {
+		return phase(c, "reactivate") == networkv1alpha1.FabricReleasePhaseCompleted
+	})
+}

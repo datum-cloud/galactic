@@ -146,9 +146,11 @@ names it takes every deployment on the CRD source, not suspended, whose
 candidate differs from what it runs. --withdraw makes it an emergency
 withdrawal of those prefixes, which may start while a release is
 outstanding. --retire decommissions the named routers with this
-promotion, for good; it needs deployment names. A deployment the rollout
-manager would refuse is refused here: named, it is an error; otherwise
-it is left out.`,
+promotion, for good; it needs deployment names. --reactivate promotes
+each named deployment's active revision again, as a new epoch, instead
+of its candidate, so a node that lost its state starts from it; each must
+report that revision committed. A deployment the rollout manager would
+refuse is refused here: named, it is an error; otherwise it is left out.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := opsClient()
@@ -184,6 +186,8 @@ it is left out.`,
 	create.Flags().StringSliceVar(&spec.Withdraw, "withdraw", nil, "Make it an emergency withdrawal of these prefixes")
 	create.Flags().BoolVar(&spec.Retire, "retire", false,
 		"Decommission the named routers with this promotion; cannot be undone")
+	create.Flags().BoolVar(&spec.Reactivate, "reactivate", false,
+		"Promote the named routers' active revisions again, as new epochs, instead of their candidates")
 	create.Flags().DurationVar(&spec.StartWithin, "start-within", 0,
 		"Cancel the release if it cannot start within this long")
 	create.Flags().BoolVar(&dryRun, "dry-run", false, "Print the release instead of creating it")

@@ -50,6 +50,11 @@ type ReleaseSpec struct {
 	// Retire decommissions every named router with this promotion, for
 	// good. It needs Deployments.
 	Retire bool
+	// Reactivate promotes each named deployment's active revision again,
+	// as a new epoch, instead of its candidate: a node that lost its state
+	// starts from it. Each must report that revision committed. It needs
+	// Deployments and is not an emergency withdrawal.
+	Reactivate bool
 	// StartWithin bounds when the release may start; zero leaves it open.
 	StartWithin time.Duration
 }
@@ -57,15 +62,22 @@ type ReleaseSpec struct {
 // ErrNothingToRelease is a release that would promote nothing.
 var ErrNothingToRelease = errors.New("no deployment has a candidate to release")
 
-// BuildRelease reads the deployments and their candidate revisions and
-// returns the release authorization for them, without creating it. Every
-// target must pass rollout.CheckTarget, with its credentials read from c,
-// and have a candidate revision that exists.
+// BuildRelease reads the deployments and their candidate revisions, or
+// with Reactivate their active revisions, and returns the release
+// authorization for them, without creating it. Every target must pass
+// rollout.CheckTarget, with its credentials read from c, and have a
+// revision that exists.
 func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 	now time.Time) (*networkv1alpha1.FabricReleaseAuthorization, error) {
-	if spec.Retire && len(spec.Deployments) == 0 {
+	switch {
+	case spec.Retire && len(spec.Deployments) == 0:
 		// Retirement cannot be undone, so it never applies to the fleet.
 		return nil, errors.New("name the deployments to retire")
+	case spec.Reactivate && len(spec.Deployments) == 0:
+		// Re-activating restarts a router's activation; it is never fleet-wide.
+		return nil, errors.New("name the deployments to re-activate")
+	case spec.Reactivate && len(spec.Withdraw) > 0:
+		return nil, errors.New("an emergency withdrawal promotes candidates; re-activate in a release of its own")
 	}
 	deps, err := deploymentsFor(ctx, c, spec.Namespace, spec.Deployments)
 	if err != nil {
@@ -97,19 +109,26 @@ func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 	explicit := len(spec.Deployments) > 0
 	for i := range deps {
 		d := &deps[i]
-		if d.Spec.CandidateRevisionRef == nil {
+		if spec.Reactivate {
+			if err := reactivatable(d); err != nil {
+				return nil, err
+			}
+		} else if d.Spec.CandidateRevisionRef == nil {
 			if explicit {
 				return nil, fmt.Errorf("deployment %s has no candidate revision", d.Name)
 			}
 			continue
 		}
+		which, ref := "candidate", d.Spec.CandidateRevisionRef
+		if spec.Reactivate {
+			which, ref = "active", d.Spec.ActiveRevisionRef
+		}
 		rev := &networkv1alpha1.FabricRouterRevision{}
-		key := types.NamespacedName{Namespace: d.Namespace, Name: d.Spec.CandidateRevisionRef.Name}
-		if err := c.Get(ctx, key, rev); err != nil {
+		if err := c.Get(ctx, types.NamespacedName{Namespace: d.Namespace, Name: ref.Name}, rev); err != nil {
 			if apierrors.IsNotFound(err) && !explicit {
 				continue
 			}
-			return nil, fmt.Errorf("deployment %s's candidate revision %s: %w", d.Name, key.Name, err)
+			return nil, fmt.Errorf("deployment %s's %s revision %s: %w", d.Name, which, ref.Name, err)
 		}
 		runs := d.Spec.ActiveRevisionRef != nil && d.Spec.ActiveRevisionRef.Name == rev.Name &&
 			d.Spec.ActivationDependencyDigest == rev.Spec.ActivationDependencyDigest
@@ -119,11 +138,11 @@ func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 		target := networkv1alpha1.FabricReleaseTarget{
 			Deployment: d.Name, DeploymentUID: string(d.UID),
 			Revision: rev.Name, ActivationDependencyDigest: rev.Spec.ActivationDependencyDigest,
-			Retire: spec.Retire,
+			Retire: spec.Retire, Reactivate: spec.Reactivate,
 		}
 		credentials, err := rollout.Credentials(ctx, c, d.Namespace, rev)
 		if err != nil {
-			return nil, fmt.Errorf("deployment %s's candidate revision %s: %w", d.Name, rev.Name, err)
+			return nil, fmt.Errorf("deployment %s's %s revision %s: %w", d.Name, which, rev.Name, err)
 		}
 		// The rollout manager fails a release on any target it cannot
 		// promote, so refuse here what it would refuse there.
@@ -139,6 +158,23 @@ func BuildRelease(ctx context.Context, c client.Client, spec ReleaseSpec,
 		return nil, ErrNothingToRelease
 	}
 	return auth, nil
+}
+
+// reactivatable reports why d's active revision cannot be re-activated:
+// it has none, it is still activating an epoch, or its status does not
+// report the revision committed, when an ordinary release promotes it.
+func reactivatable(d *networkv1alpha1.FabricRouterDeployment) error {
+	switch {
+	case d.Spec.ActiveRevisionRef == nil:
+		return fmt.Errorf("deployment %s has no active revision to re-activate", d.Name)
+	case rollout.Busy(d):
+		return fmt.Errorf("deployment %s is activating epoch %d; re-activate it once that finishes", d.Name,
+			d.Spec.ActivationEpoch)
+	case !rollout.Committed(d):
+		return fmt.Errorf("deployment %s does not report its active revision %s committed; a release without "+
+			"re-activation promotes it", d.Name, d.Spec.ActiveRevisionRef.Name)
+	}
+	return nil
 }
 
 func deploymentsFor(ctx context.Context, c client.Client, namespace string,

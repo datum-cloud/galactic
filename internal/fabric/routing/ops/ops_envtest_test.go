@@ -441,6 +441,79 @@ func promoteTo(t *testing.T, c client.Client, epoch int64, rev *networkv1alpha1.
 	}
 }
 
+// TestReleaseReactivate: --reactivate targets each named deployment's
+// active revision, not its candidate, only once the deployment reports it
+// committed, and is refused where the rollout manager would refuse it.
+func TestReleaseReactivate(t *testing.T) {
+	c := startAPI(t)
+	ctx := context.Background()
+	fleet(t, c, networkv1alpha1.FabricConfigSourceCRD, nodeA)
+	now := time.Now()
+	spec := func(name string, seq int64) ReleaseSpec {
+		return ReleaseSpec{Namespace: ns, Name: name, RoutingDomain: domain, FleetSequence: seq,
+			Deployments: []string{nodeA}, Reactivate: true}
+	}
+
+	for _, tc := range []struct {
+		name string
+		edit func(*ReleaseSpec)
+		want string
+	}{
+		{"fleet-wide", func(s *ReleaseSpec) { s.Deployments = nil }, "name the deployments to re-activate"},
+		{"withdrawal", func(s *ReleaseSpec) { s.Withdraw = []string{"192.0.2.0/24"} }, "a release of its own"},
+		{"nothing active", func(*ReleaseSpec) {}, "no active revision"},
+	} {
+		s := spec("r", 1)
+		tc.edit(&s)
+		if _, err := BuildRelease(ctx, c, s, now); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want %q", tc.name, err, tc.want)
+		}
+	}
+
+	rev := revisions[nodeA]
+	promoteTo(t, c, 1, rev, nil, false)
+	if _, err := BuildRelease(ctx, c, spec("r", 1), now); err == nil || !strings.Contains(err.Error(), "activating") {
+		t.Errorf("re-activating an epoch still activating: %v", err)
+	}
+	promoteTo(t, c, 2, rev, nil, true)
+	d := edgeA(t, c)
+	d.Spec.CandidateRevisionRef = &networkv1alpha1.LocalObjectRef{Name: "edge-a-candidate"}
+	if err := c.Update(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := BuildRelease(ctx, c, spec("reactivate", 1), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(auth.Spec.Deployments) != 1 {
+		t.Fatalf("targets %+v", auth.Spec.Deployments)
+	}
+	if tg := auth.Spec.Deployments[0]; !tg.Reactivate || tg.Revision != rev.Name ||
+		tg.ActivationDependencyDigest != rev.Spec.ActivationDependencyDigest || tg.DeploymentUID != string(d.UID) {
+		t.Errorf("target %+v, want the active revision %s re-activated", tg, rev.Name)
+	}
+	if err := c.Create(ctx, auth); err != nil {
+		t.Fatalf("the re-activation does not pass admission: %v", err)
+	}
+
+	// Its active epoch failed and recovered: it runs an older revision.
+	d = edgeA(t, c)
+	d.Status.AppliedRevision = "edge-a-older"
+	d.Status.Epochs[0].Stage = networkv1alpha1.FabricStageRecovered
+	if err := c.Status().Update(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildRelease(ctx, c, spec("r", 2), now); err == nil || !strings.Contains(err.Error(), "committed") {
+		t.Errorf("re-activating a revision the deployment does not report committed: %v", err)
+	}
+
+	// Retired: never promoted again.
+	promoteTo(t, c, 3, rev, &networkv1alpha1.FabricRecovery{Retired: true}, true)
+	if _, err := BuildRelease(ctx, c, spec("r", 2), now); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Errorf("re-activating a retired router: %v", err)
+	}
+}
+
 // credentialName is the Secret a test revision's peer authenticates with.
 const credentialName = "bgp-auth"
 
