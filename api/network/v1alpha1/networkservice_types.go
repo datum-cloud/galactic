@@ -6,14 +6,11 @@ import (
 
 // NetworkServiceProtocol is the IP protocol a VIP or endpoint matches.
 //
-// The set of values is open-ended: later releases add values as the datapath
-// serves more protocols. A client reading an object that carries this type
-// must accept a value it does not recognise, preserve it when it writes the
-// object back, and treat it as a protocol it cannot act on, never as tcp or
-// udp. See the Kubernetes API change guidelines on enumerated values
-// (https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api_changes.md#backward-compatibility-gotchas).
-// Each field of this type admits only the values it lists, and the API server
-// refuses any other.
+// The set of values is open-ended. A client reading an object that carries
+// this type must accept a value it does not recognise, preserve it when it
+// writes the object back, and treat it as a protocol it cannot act on, never
+// as tcp or udp. Each field of this type admits only the values it lists, and
+// the API server refuses any other.
 type NetworkServiceProtocol string
 
 const (
@@ -137,9 +134,9 @@ type NetworkServiceSpec struct {
 	// refused with a message saying its protocol is not served yet. sctp has
 	// ports and needs Port and BackendPort. esp, gre and icmp have no ports
 	// and must set neither; a backend for them is chosen from the client and
-	// VIP addresses alone. Later releases may admit more values, so clients
-	// must tolerate and preserve values they do not recognise (see
-	// NetworkServiceProtocol).
+	// VIP addresses alone. The set of values is open-ended, so a client must
+	// accept and preserve a value it does not recognise, as
+	// NetworkServiceProtocol describes.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=tcp;udp;sctp;esp;gre;icmp
 	// +kubebuilder:validation:XValidation:rule="self in ['tcp', 'udp']",message="protocol is not served yet: the gateway datapath serves tcp and udp only"
