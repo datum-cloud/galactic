@@ -416,6 +416,17 @@ var invalidRuleEdits = []struct {
 		message: `protocol "icmp" is not served`,
 	},
 	{
+		// A rule with no IPv6 VIP needs no bindings, but a protocol the
+		// datapath does not serve still leaves the existing ones alone.
+		name: "unserved protocol on an IPv4-only rule",
+		edit: func(rule *bgpv1alpha1.NetworkService) {
+			rule.Spec.VIPAddresses = []string{"203.0.113.33"}
+			rule.Spec.Protocol = bgpv1alpha1.NetworkServiceProtocolGRE
+			rule.Spec.Port, rule.Spec.BackendPort = 0, 0
+		},
+		message: `protocol "gre" is not served`,
+	},
+	{
 		name: "unset port",
 		edit: func(rule *bgpv1alpha1.NetworkService) {
 			rule.Spec.Port = 0

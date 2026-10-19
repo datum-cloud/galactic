@@ -235,11 +235,9 @@ func ruleCandidateBackends(
 // datapath does not serve.
 var errUnservedProtocol = errors.New("the gateway datapath serves tcp and udp only")
 
-// rulePorts returns rule's ingress port and backend port. Admission admits only
-// tcp and udp rules with both ports in 1-65535, but a rule stored under a
-// schema that admitted more can still reach a controller, so this refuses any
-// other protocol, wrapping errUnservedProtocol, and an unset or out-of-range
-// port, rather than letting a rule be served on port 0.
+// rulePorts returns rule's ingress port and backend port. It refuses any
+// protocol but tcp and udp, wrapping errUnservedProtocol, and a port outside
+// 1-65535, so no reader of the ports ever serves a rule on port 0.
 func rulePorts(rule *bgpv1alpha1.NetworkService) (port, backendPort uint16, err error) {
 	switch rule.Spec.Protocol {
 	case bgpv1alpha1.NetworkServiceProtocolTCP, bgpv1alpha1.NetworkServiceProtocolUDP:

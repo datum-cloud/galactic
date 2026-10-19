@@ -149,13 +149,13 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 	if buildErr != nil {
 		// The spec cannot be built into bindings: a second IPv6 VIP, a
 		// selector that does not parse, or a protocol or port the datapath
-		// does not serve. Deleting the bindings then would
-		// remove every backend node's vip_xlat_table rows at once, while the
-		// gateways still drain the rule's established flows toward them, so
-		// an edit that is reverted minutes later would still have dropped
-		// every connection. Existing bindings stay untouched until a valid
-		// spec says otherwise, and the rule says why. A spec error does not
-		// heal on retry, so none is requested: the fix bumps the generation,
+		// does not serve. Deleting the bindings then would remove every
+		// backend node's vip_xlat_table rows at once, while the gateways
+		// still drain the rule's established flows toward them, so an edit
+		// that is reverted minutes later would still have dropped every
+		// connection. Existing bindings stay untouched until a valid spec
+		// says otherwise, and the rule says why. A spec error does not heal
+		// on retry, so none is requested: the fix bumps the generation,
 		// which the predicate passes.
 		existing, err := r.nodeBindings(ctx, rule)
 		if err != nil {
@@ -180,10 +180,14 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 // IPv6 VIP per selected backend on this node that owners does not assign to
 // another rule. It also returns the backends on this node it left out for that
 // reason. The datapath translates IPv6 only, so a rule with no IPv6 VIP needs
-// none, and ruleTranslatedVIP refuses a rule with more than one.
+// none, and ruleTranslatedVIP refuses a rule with more than one. A protocol or
+// port the datapath does not serve (rulePorts) is an error whatever the VIPs.
 func (r *NetworkServiceBindingReconciler) desiredBindings(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
 ) ([]*bgpv1alpha1.ServiceVIPBinding, []claimedBackend, error) {
+	if _, _, err := rulePorts(rule); err != nil {
+		return nil, nil, err
+	}
 	vip, ok, err := ruleTranslatedVIP(rule)
 	if err != nil || !ok {
 		return nil, nil, err

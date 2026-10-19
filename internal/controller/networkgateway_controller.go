@@ -160,8 +160,7 @@ const (
 
 	// reasonUnservedProtocol is the per-node Programmed reason for a rule
 	// whose protocol the datapath does not serve, so nothing is loaded or
-	// advertised for it. Admission refuses such a rule, so it appears only on
-	// one stored under a schema that admitted it.
+	// advertised for it.
 	reasonUnservedProtocol = "UnservedProtocol"
 
 	// reasonIPv4Unsupported is the per-node IPv4Served reason for a rule with
