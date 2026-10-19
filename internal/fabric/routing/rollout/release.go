@@ -87,10 +87,9 @@ func (r *ReleaseReconciler) reader() client.Reader {
 	return r.Client
 }
 
-// getConfirmed reads key from the cache, and when the cache does not hold
-// it, from the API server: an object created moments before its release can
-// be missing from the cache, and a target refused as missing fails its
-// release for good.
+// getConfirmed reads key through the cache and, when the cache does not
+// hold it, through APIReader, so a target missing only from the cache is not
+// refused. It returns the API server's error, NotFound included.
 func (r *ReleaseReconciler) getConfirmed(ctx context.Context, key types.NamespacedName, obj client.Object) error {
 	err := r.Get(ctx, key, obj)
 	if apierrors.IsNotFound(err) && r.APIReader != nil {
