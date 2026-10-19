@@ -29,6 +29,7 @@ import (
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/gateway"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
@@ -401,6 +402,97 @@ func TestNetworkGatewayReconciler_ServesThroughResolvedBackends(t *testing.T) {
 	cond := ruleProgrammedCondition(t, fakeClient, testRuleName)
 	if !strings.Contains(cond.Message, "1 of 2 backends") || !strings.Contains(cond.Message, "[fd00:99::1]:8443") {
 		t.Errorf("Programmed message = %q, want it to count 1 of 2 backends and name [fd00:99::1]:8443", cond.Message)
+	}
+}
+
+// TestNetworkGatewayReconciler_BackendCoveredOnlyByOtherTenantNeverResolves
+// verifies that a backend of the rule's own VPC whose address is covered only
+// by another tenant's advertisement on the same node is left out of desired
+// state, never programmed with the other tenant's SID, and reported in the
+// rule's Programmed condition. It fails if the tenant ownership check is
+// removed.
+func TestNetworkGatewayReconciler_BackendCoveredOnlyByOtherTenantNeverResolves(t *testing.T) {
+	const (
+		otherVRFID    = int32(101)
+		collidingAddr = "fd00:20::5"
+		collidingPfx  = "fd00:20::/64"
+	)
+	tests := []struct {
+		name            string
+		attachment      *cloudv1alpha1.VPCAttachment
+		wantServed      bool
+		wantStatus      metav1.ConditionStatus
+		wantReason      string
+		wantMsgContains string
+	}{
+		{
+			name:            "one own backend still serves",
+			attachment:      newBackendAttachment("vpc-1", testBackendAddr, collidingAddr),
+			wantServed:      true,
+			wantStatus:      metav1.ConditionTrue,
+			wantReason:      reasonBackendsUnresolved,
+			wantMsgContains: "[" + collidingAddr + "]:8443",
+		},
+		{
+			name:            "no own backend resolves",
+			attachment:      newBackendAttachment("vpc-1", collidingAddr),
+			wantStatus:      metav1.ConditionFalse,
+			wantReason:      reasonInvalidRule,
+			wantMsgContains: "[" + collidingAddr + "]:8443",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newRuleTestScheme(t)
+			router, _, ownVRF := newBackendFixtures("vpc-1")
+			_, ownAdv, _ := newBackendFixtures("vpc-1")
+			// The other tenant shares the node and router, and advertises
+			// the prefix that covers collidingAddr under its own VRFID.
+			_, otherAdv, otherVRF := newBackendFixtures(testOtherVPCRef)
+			otherAdv.Spec.Prefixes = []bgpv1alpha1.Prefix{collidingPfx}
+			otherAdv.Spec.VRFID = ptr(otherVRFID)
+			otherVRF.Spec.VRFID = otherVRFID
+			rule := newTestRule(testRuleName, "vpc-1", testVIP)
+			acceptRule(rule)
+
+			fakeClient := newIndexedClientBuilder(scheme).
+				WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
+				WithObjects(newTestGateway(testNodeGWA), newTestRouter(), router, ownAdv, ownVRF,
+					otherAdv, otherVRF, tt.attachment, rule).
+				Build()
+
+			engine := newFakeGatewayEngine()
+			r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+			req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("Reconcile: unexpected error: %v", err)
+			}
+
+			dr, served := engine.lastDesired.Rules[testNamespace+"/"+testRuleName]
+			if served != tt.wantServed {
+				t.Fatalf("rule in desired state = %v, want %v", served, tt.wantServed)
+			}
+			for _, b := range dr.Backends {
+				if b.Address == netip.MustParseAddr(collidingAddr) {
+					t.Errorf("backend %s is in desired state with uSID %s; it is covered only by %s's advertisement",
+						b.Address, b.USID, testOtherVPCRef)
+				}
+				fields, err := uformat.Decode(b.USID)
+				if err != nil {
+					t.Fatalf("decode uSID %s: %v", b.USID, err)
+				}
+				if int32(fields.Argument) != testBackendVRFID {
+					t.Errorf("backend %s uSID %s carries VRFID %d, want vpc-1's own %d",
+						b.Address, b.USID, fields.Argument, testBackendVRFID)
+				}
+			}
+
+			assertRuleProgrammed(t, fakeClient, tt.wantStatus, tt.wantReason)
+			cond := ruleProgrammedCondition(t, fakeClient, rule.Name)
+			if !strings.Contains(cond.Message, tt.wantMsgContains) {
+				t.Errorf("Programmed message = %q, want it to name %s", cond.Message, tt.wantMsgContains)
+			}
+		})
 	}
 }
 
