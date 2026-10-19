@@ -51,9 +51,9 @@ case "$COMMAND" in
       sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update -qq
       # Pin to the running kernel so modprobe finds the modules. The unversioned
       # meta-package may pull a newer kernel's modules than the one the runner is
-      # actually executing, which causes modprobe to fail. Kernels that ship no
-      # extra-modules package carry vrf in their base modules, which the
-      # modprobe above already found.
+      # actually executing, which causes modprobe to fail. This runs only when
+      # modprobe cannot find vrf, since some kernels ship it in their base
+      # modules and publish no extra-modules package at all.
       sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
     fi
     sudo modprobe vrf
