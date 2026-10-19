@@ -310,3 +310,30 @@ func TestPromotionReadsRecoveryAroundCache(t *testing.T) {
 			d.Spec.Recovery, f.rev.Name)
 	}
 }
+
+// TestReleaseReadsTargetAroundCache: a target revision the cache has not
+// seen yet, such as one compiled moments before its release, is read from
+// the API server and promoted, not refused as missing, which would fail the
+// release for good.
+func TestReleaseReadsTargetAroundCache(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a"})
+	f.r.APIReader = f.c
+	f.r.Client = interceptor.NewClient(f.c.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			if _, ok := obj.(*networkv1alpha1.FabricRouterRevision); ok {
+				return apierrors.NewNotFound(networkv1alpha1.GroupVersion.WithResource("fabricrouterrevisions").
+					GroupResource(), key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
+	if a := f.reconcile(relName); a.Status.Phase == networkv1alpha1.FabricReleasePhaseCancelled ||
+		a.Status.Phase == networkv1alpha1.FabricReleasePhaseFailed {
+		t.Fatalf("release %s: a target the cache had not seen was refused: %+v", a.Status.Phase, a.Status.Conditions)
+	}
+	if d := f.deployment("a1"); d.Spec.ActivationEpoch != 1 {
+		t.Errorf("a1 at epoch %d, want promoted to epoch 1", d.Spec.ActivationEpoch)
+	}
+}

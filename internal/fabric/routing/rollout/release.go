@@ -87,6 +87,18 @@ func (r *ReleaseReconciler) reader() client.Reader {
 	return r.Client
 }
 
+// getConfirmed reads key from the cache, and when the cache does not hold
+// it, from the API server: an object created moments before its release can
+// be missing from the cache, and a target refused as missing fails its
+// release for good.
+func (r *ReleaseReconciler) getConfirmed(ctx context.Context, key types.NamespacedName, obj client.Object) error {
+	err := r.Get(ctx, key, obj)
+	if apierrors.IsNotFound(err) && r.APIReader != nil {
+		return r.APIReader.Get(ctx, key, obj)
+	}
+	return err
+}
+
 func (r *ReleaseReconciler) now() time.Time {
 	if r.Now != nil {
 		return r.Now()
@@ -215,14 +227,14 @@ func (r *ReleaseReconciler) target(ctx context.Context, auth *networkv1alpha1.Fa
 	t networkv1alpha1.FabricReleaseTarget,
 ) (*networkv1alpha1.FabricRouterDeployment, *networkv1alpha1.FabricRouterRevision, error) {
 	dep := &networkv1alpha1.FabricRouterDeployment{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Deployment}, dep); err != nil {
+	if err := r.getConfirmed(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Deployment}, dep); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil, targetError{"deployment " + t.Deployment + " does not exist"}
 		}
 		return nil, nil, err
 	}
 	rev := &networkv1alpha1.FabricRouterRevision{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Revision}, rev); err != nil {
+	if err := r.getConfirmed(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Revision}, rev); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil, targetError{"revision " + t.Revision + " does not exist"}
 		}
