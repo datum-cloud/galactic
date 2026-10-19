@@ -158,6 +158,12 @@ const (
 	// or advertised for it.
 	reasonNoServedVIP = "NoServedVIP"
 
+	// reasonUnservedProtocol is the per-node Programmed reason for a rule
+	// whose protocol the datapath does not serve, so nothing is loaded or
+	// advertised for it. Admission refuses such a rule, so it appears only on
+	// one stored under a schema that admitted it.
+	reasonUnservedProtocol = "UnservedProtocol"
+
 	// reasonIPv4Unsupported is the per-node IPv4Served reason for a rule with
 	// one or more IPv4 VIPs, which the datapath cannot load. They are left out
 	// of the engine and never advertised, and the rule's IPv6 VIPs serve
@@ -561,8 +567,11 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 	}
 	if o.buildErr != nil {
 		cond.Status, cond.Reason = metav1.ConditionFalse, reasonInvalidRule
-		if errors.Is(o.buildErr, errNoServedVIP) {
+		switch {
+		case errors.Is(o.buildErr, errNoServedVIP):
 			cond.Reason = reasonNoServedVIP
+		case errors.Is(o.buildErr, errUnservedProtocol):
+			cond.Reason = reasonUnservedProtocol
 		}
 		cond.Message = fmt.Sprintf("not loaded on node %s: %v", node, o.buildErr)
 		return cond
@@ -830,8 +839,9 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
 // depends only on the backend set, so nodes that see the same objects build
 // the same table. Only when nothing resolves does the rule fail, so it is
 // withdrawn rather than advertised with nothing behind it. An invalid VIP or
-// selector fails the rule outright, since that is a spec error rather than a
-// passing state.
+// selector, or a protocol or port the datapath does not serve (rulePorts),
+// fails the rule outright, since that is a spec error rather than a passing
+// state.
 //
 // IPv4 VIPs, plain or IPv4-mapped (isIPv4VIP), are left out because the
 // datapath cannot serve them: loading one would fail the whole rule, and
@@ -841,6 +851,10 @@ func buildDesiredRule(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
 	sidIndex *backendSIDIndex, owners backendOwners,
 ) (dr gateway.DesiredRule, unresolved []string, err error) {
+	port, _, err := rulePorts(rule)
+	if err != nil {
+		return gateway.DesiredRule{}, nil, err
+	}
 	vips := make([]netip.Addr, 0, len(rule.Spec.VIPAddresses))
 	var withheld int
 	for _, v := range rule.Spec.VIPAddresses {
@@ -908,9 +922,8 @@ func buildDesiredRule(
 		VPCRef:       rule.Spec.VPCRef,
 		VIPAddresses: vips,
 		Protocol:     string(rule.Spec.Protocol),
-		//nolint:gosec // rule.Spec.Port is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkServiceSpec.Port)
-		Port:     uint16(rule.Spec.Port),
-		Backends: backends,
+		Port:         port,
+		Backends:     backends,
 	}, unresolved, nil
 }
 

@@ -181,12 +181,14 @@ func selectRuleBackends(
 func ruleCandidateBackends(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
 ) (backends []ruleBackend, pending []string, err error) {
+	_, port, err := rulePorts(rule)
+	if err != nil {
+		return nil, nil, err
+	}
 	selector, err := ruleBackendSelector(rule)
 	if err != nil {
 		return nil, nil, err
 	}
-	//nolint:gosec // BackendPort is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkServiceSpec.BackendPort)
-	port := uint16(rule.Spec.BackendPort)
 
 	for _, attachment := range attachments {
 		if attachment.Status.VPC != rule.Spec.VPCRef || !selector.Matches(labels.Set(attachment.Labels)) {
@@ -227,6 +229,30 @@ func ruleCandidateBackends(
 	pending = append(pending, rejected...)
 	sort.Strings(pending)
 	return backends, pending, nil
+}
+
+// errUnservedProtocol is rulePorts' error for a rule whose protocol the
+// datapath does not serve.
+var errUnservedProtocol = errors.New("the gateway datapath serves tcp and udp only")
+
+// rulePorts returns rule's ingress port and backend port. Admission admits only
+// tcp and udp rules with both ports in 1-65535, but a rule stored under a
+// schema that admitted more can still reach a controller, so this refuses any
+// other protocol, wrapping errUnservedProtocol, and an unset or out-of-range
+// port, rather than letting a rule be served on port 0.
+func rulePorts(rule *bgpv1alpha1.NetworkService) (port, backendPort uint16, err error) {
+	switch rule.Spec.Protocol {
+	case bgpv1alpha1.NetworkServiceProtocolTCP, bgpv1alpha1.NetworkServiceProtocolUDP:
+	default:
+		return 0, 0, fmt.Errorf("protocol %q is not served: %w", rule.Spec.Protocol, errUnservedProtocol)
+	}
+	if rule.Spec.Port < 1 || rule.Spec.Port > 65535 {
+		return 0, 0, fmt.Errorf("port %d is outside 1-65535", rule.Spec.Port)
+	}
+	if rule.Spec.BackendPort < 1 || rule.Spec.BackendPort > 65535 {
+		return 0, 0, fmt.Errorf("backendPort %d is outside 1-65535", rule.Spec.BackendPort)
+	}
+	return uint16(rule.Spec.Port), uint16(rule.Spec.BackendPort), nil
 }
 
 // backendClaim identifies the egress vip_xlat_table row a backend's node

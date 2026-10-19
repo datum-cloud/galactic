@@ -62,10 +62,10 @@ const (
 	// why it cannot be.
 	reasonBindingsPending = "BindingsNotBound"
 
-	// reasonBindingsInvalid: the rule's spec cannot be built into bindings,
-	// either a second IPv6 VIP or a selector that does not parse. Only nodes
-	// that serve the rule report it, and they keep their bindings until the
-	// spec is fixed.
+	// reasonBindingsInvalid: the rule's spec cannot be built into bindings: a
+	// second IPv6 VIP, a selector that does not parse, or a protocol or port
+	// the datapath does not serve. Only nodes that serve the rule report it,
+	// and they keep their bindings until the spec is fixed.
 	reasonBindingsInvalid = "InvalidRule"
 
 	// reasonBindingsClaimed: at least one backend the rule selects on this
@@ -147,8 +147,9 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 	owners := ruleBackendOwners(rules.Items, attachments)
 	desired, claimed, buildErr := r.desiredBindings(rule, attachments, owners)
 	if buildErr != nil {
-		// The spec cannot be built into bindings: a second IPv6 VIP, or a
-		// selector that does not parse. Deleting the bindings then would
+		// The spec cannot be built into bindings: a second IPv6 VIP, a
+		// selector that does not parse, or a protocol or port the datapath
+		// does not serve. Deleting the bindings then would
 		// remove every backend node's vip_xlat_table rows at once, while the
 		// gateways still drain the rule's established flows toward them, so
 		// an edit that is reverted minutes later would still have dropped
