@@ -88,8 +88,10 @@ func (r *ReleaseReconciler) reader() client.Reader {
 }
 
 // getConfirmed reads key through the cache and, when the cache does not
-// hold it, through APIReader, so a target missing only from the cache is not
-// refused. It returns the API server's error, NotFound included.
+// hold it, through APIReader. The release path reads everything a missing
+// object decides through it, so an object missing only from the cache never
+// fails, cancels, releases or loosens a release. It returns the API
+// server's error, NotFound included, or the cache's when APIReader is nil.
 func (r *ReleaseReconciler) getConfirmed(ctx context.Context, key types.NamespacedName, obj client.Object) error {
 	err := r.Get(ctx, key, obj)
 	if apierrors.IsNotFound(err) && r.APIReader != nil {
@@ -446,7 +448,7 @@ func (r *ReleaseReconciler) survey(ctx context.Context,
 	var sum releaseSurvey
 	for _, t := range auth.Spec.Deployments {
 		dep := &networkv1alpha1.FabricRouterDeployment{}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Deployment}, dep); err != nil {
+		if err := r.getConfirmed(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Deployment}, dep); err != nil {
 			if apierrors.IsNotFound(err) {
 				sum.failed = append(sum.failed, t.Deployment+": deployment deleted")
 				continue
@@ -568,7 +570,7 @@ func (r *ReleaseReconciler) verifyRecovery(ctx context.Context,
 	var pending []string
 	for _, t := range auth.Spec.Deployments {
 		dep := &networkv1alpha1.FabricRouterDeployment{}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Deployment}, dep); err != nil {
+		if err := r.getConfirmed(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Deployment}, dep); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
 			}
@@ -615,7 +617,7 @@ func (r *ReleaseReconciler) supersededBy(ctx context.Context, auth *networkv1alp
 		return "", nil
 	}
 	other := &networkv1alpha1.FabricReleaseAuthorization{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: ref.Name}, other)
+	err := r.getConfirmed(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: ref.Name}, other)
 	if apierrors.IsNotFound(err) || (err == nil && string(other.UID) != ref.UID) {
 		return "", nil
 	}
@@ -635,7 +637,7 @@ func (r *ReleaseReconciler) supersededBy(ctx context.Context, auth *networkv1alp
 func (r *ReleaseReconciler) policy(ctx context.Context,
 	dep *networkv1alpha1.FabricRouterDeployment) (networkv1alpha1.FabricRolloutPolicySpec, error) {
 	router := &networkv1alpha1.BGPRouter{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: dep.Namespace, Name: dep.Spec.RouterRef.Name}, router)
+	err := r.getConfirmed(ctx, types.NamespacedName{Namespace: dep.Namespace, Name: dep.Spec.RouterRef.Name}, router)
 	if apierrors.IsNotFound(err) || (err == nil && (router.Spec.FRR == nil || router.Spec.FRR.RolloutPolicyRef == nil)) {
 		return effectivePolicy(nil), nil
 	}
@@ -643,7 +645,8 @@ func (r *ReleaseReconciler) policy(ctx context.Context,
 		return networkv1alpha1.FabricRolloutPolicySpec{}, err
 	}
 	p := &networkv1alpha1.FabricRolloutPolicy{}
-	err = r.Get(ctx, types.NamespacedName{Namespace: dep.Namespace, Name: router.Spec.FRR.RolloutPolicyRef.Name}, p)
+	key := types.NamespacedName{Namespace: dep.Namespace, Name: router.Spec.FRR.RolloutPolicyRef.Name}
+	err = r.getConfirmed(ctx, key, p)
 	if apierrors.IsNotFound(err) {
 		// A missing policy is the strictest default, not a stalled release.
 		return effectivePolicy(nil), nil
@@ -660,7 +663,7 @@ func (r *ReleaseReconciler) domain(ctx context.Context, dep *networkv1alpha1.Fab
 	label string) (string, error) {
 	node := &metav1.PartialObjectMetadata{}
 	node.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Node"))
-	if err := r.Get(ctx, types.NamespacedName{Name: dep.Spec.Target.NodeName}, node); err != nil {
+	if err := r.getConfirmed(ctx, types.NamespacedName{Name: dep.Spec.Target.NodeName}, node); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "node/" + dep.Spec.Target.NodeName, nil
 		}

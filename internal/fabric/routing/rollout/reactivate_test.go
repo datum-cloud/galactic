@@ -337,3 +337,53 @@ func TestReleaseReadsTargetAroundCache(t *testing.T) {
 		t.Errorf("a1 at epoch %d, want promoted to epoch 1", d.Spec.ActivationEpoch)
 	}
 }
+
+// TestReleaseReadsDeploymentsAroundCache: deployments, routers, policies
+// and nodes the cache has not seen yet are read from the API server, so a
+// release neither fails its target as deleted nor reports it recovered.
+func TestReleaseReadsDeploymentsAroundCache(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a"})
+	f.r.APIReader = f.c
+	f.r.Client = interceptor.NewClient(f.c.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			switch obj.(type) {
+			case *networkv1alpha1.FabricRouterRevision, *networkv1alpha1.FabricRouterDeployment,
+				*networkv1alpha1.BGPRouter, *networkv1alpha1.FabricRolloutPolicy, *corev1.Node:
+				return apierrors.NewNotFound(networkv1alpha1.GroupVersion.WithResource("objects").GroupResource(),
+					key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
+	f.reconcile(relName)
+	if d := f.deployment("a1"); d.Spec.ActivationEpoch != 1 {
+		t.Fatalf("a1 at epoch %d, want promoted to epoch 1", d.Spec.ActivationEpoch)
+	}
+	f.report("a1", networkv1alpha1.FabricStageCommitted, true)
+	if a := f.reconcile(relName); a.Status.Phase != networkv1alpha1.FabricReleasePhaseCompleted {
+		t.Errorf("release %s, want Completed: %+v", a.Status.Phase, a.Status.Conditions)
+	}
+}
+
+// TestReleaseWithoutAPIReaderTrustsCache: with no API reader the cache
+// answers, as before: a target it does not hold is refused.
+func TestReleaseWithoutAPIReaderTrustsCache(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a"})
+	f.r.APIReader = nil
+	f.r.Client = interceptor.NewClient(f.c.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			if _, ok := obj.(*networkv1alpha1.FabricRouterRevision); ok {
+				return apierrors.NewNotFound(networkv1alpha1.GroupVersion.WithResource("fabricrouterrevisions").
+					GroupResource(), key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
+	if a := f.reconcile(relName); a.Status.Phase != networkv1alpha1.FabricReleasePhaseCancelled {
+		t.Errorf("release %s, want Cancelled for a target the only reader lacks", a.Status.Phase)
+	}
+}
