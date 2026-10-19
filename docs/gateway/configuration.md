@@ -485,9 +485,9 @@ tcp and udp only`. Both ports are required for `tcp`, `udp` and `sctp`, and
 must be unset for `esp`, `gre` and `icmp`, whose backends are chosen from the
 client and VIP addresses alone (see
 [ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md#protocols-without-ports-designed-not-served)).
-Later releases may list more protocols, so a client reading a rule must
-tolerate a `protocol` value it does not recognise and keep it when writing the
-rule back. A rule that reaches the gateways with a protocol they do not serve,
+The set of protocols is open-ended, so a client reading a rule must accept a
+`protocol` value it does not recognise, keep it when writing the rule back, and
+never treat it as `tcp` or `udp`. A rule that reaches the gateways with a protocol they do not serve,
 for example one stored under a schema that admitted it, is not loaded or
 advertised, and its `<gateway-node>/Programmed` condition reports
 `UnservedProtocol`. One with an unset or out-of-range port reports
