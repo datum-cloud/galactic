@@ -19,7 +19,7 @@ import (
 // and over 1,000,000 at 40, which failed every load on every node. This budget
 // leaves modest headroom above today's largest program: clang 18 reports about
 // 17,800 instructions while newer compilers report about 13,600. It remains
-// 50 times below the kernel limit, so a change that starts multiplying verifier
+// 35 times below the kernel limit, so a change that starts multiplying verifier
 // states fails here, in a unit test, long before it reaches the cliff.
 //
 // Raising it is fine when a change genuinely needs the room. Measure first:
@@ -29,7 +29,11 @@ import (
 // calls tp_capture and tp_decide verifies both global functions once, about
 // 2,900 instructions whatever the rule count: usid_ingress went from 18,255 to
 // about 21,100 and usid_egress from 9,701 to about 12,500 (clang 21).
-const verifierCostBudget = 24000
+//
+// A newer kernel verifier raised it from 24,000 to 28,000. With the same
+// source and clang 18, usid_ingress costs 21,840 on kernel 6.17 and 24,292 on
+// kernel 7.0, which the GitHub runner images moved to.
+const verifierCostBudget = 28000
 
 var processedInsns = regexp.MustCompile(`processed (\d+) insns`)
 
