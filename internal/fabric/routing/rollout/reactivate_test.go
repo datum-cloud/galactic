@@ -30,7 +30,7 @@ func (f *fakeFleet) committedOn(name string, rev *networkv1alpha1.FabricRouterRe
 	d.Spec.ActivationEpoch = epoch
 	d.Spec.ActiveRevisionRef = &networkv1alpha1.LocalObjectRef{Name: rev.Name}
 	d.Spec.ActivationDependencyDigest = rev.Spec.ActivationDependencyDigest
-	d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: "earlier", UID: "earlier-uid"}
+	d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: earlierName, UID: "earlier-uid"}
 	d.Spec.Activation = &networkv1alpha1.FabricActivationSettings{}
 	d.Spec.Recovery = recovery
 	if err := f.c.Update(ctx, d); err != nil {
@@ -385,5 +385,98 @@ func TestReleaseWithoutAPIReaderTrustsCache(t *testing.T) {
 	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
 	if a := f.reconcile(relName); a.Status.Phase != networkv1alpha1.FabricReleasePhaseCancelled {
 		t.Errorf("release %s, want Cancelled for a target the only reader lacks", a.Status.Phase)
+	}
+}
+
+// hideFromCache makes the release controller's cache miss every object
+// hide selects, while its API reader still holds them.
+func (f *fakeFleet) hideFromCache(hide func(obj client.Object, key client.ObjectKey) bool) {
+	f.r.APIReader = f.c
+	f.r.Client = interceptor.NewClient(f.c.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			if hide(obj, key) {
+				return apierrors.NewNotFound(networkv1alpha1.GroupVersion.WithResource("objects").GroupResource(),
+					key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+}
+
+// TestReleaseReadsPolicyAroundCache: a router or rollout policy the cache
+// has not seen yet is read from the API server, so the release keeps the
+// policy's concurrency rather than the strictest default.
+func TestReleaseReadsPolicyAroundCache(t *testing.T) {
+	for name, hidden := range map[string]func(client.Object) bool{
+		"router": func(o client.Object) bool { _, ok := o.(*networkv1alpha1.BGPRouter); return ok },
+		"policy": func(o client.Object) bool { _, ok := o.(*networkv1alpha1.FabricRolloutPolicy); return ok },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeFleet(t, map[string]string{"a1": "a", "a2": "a"}, widePolicy()...)
+			f.hideFromCache(func(o client.Object, _ client.ObjectKey) bool { return hidden(o) })
+			f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1", "a2")
+			f.reconcile(relName)
+			if f.deployment("a1").Spec.ActivationEpoch == 0 || f.deployment("a2").Spec.ActivationEpoch == 0 {
+				t.Error("only one router promoted; the policy allowing two at once was read as missing")
+			}
+		})
+	}
+}
+
+// TestReleaseReadsNodesAroundCache: a Node the cache has not seen yet is
+// read from the API server, so two routers in one failure domain still
+// count against one limit.
+func TestReleaseReadsNodesAroundCache(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a", "a2": "a"})
+	// The controller reads Nodes as metadata only; any cluster-scoped read
+	// here is a Node.
+	f.hideFromCache(func(_ client.Object, key client.ObjectKey) bool { return key.Namespace == "" })
+	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1", "a2")
+	f.reconcile(relName)
+	if f.deployment("a1").Spec.ActivationEpoch != 0 && f.deployment("a2").Spec.ActivationEpoch != 0 {
+		t.Error("both routers in one failure domain promoted at once; their Nodes were read as missing")
+	}
+}
+
+// TestReleaseReadsSupersedingReleaseAroundCache: a later release the cache
+// has not seen yet is read from the API server, so an older release never
+// rewinds a router the later one moved to another revision.
+func TestReleaseReadsSupersedingReleaseAroundCache(t *testing.T) {
+	other := routerRevision("edge-bbbbbbbbbb", digestB, "")
+	f := newFakeFleet(t, map[string]string{"a1": "a"}, other)
+	// committedOn records the promotion under earlierName; here that
+	// release is the later one, with the higher fleet sequence.
+	f.release(earlierName, networkv1alpha1.FabricReleaseTypeRelease, 2, "a1")
+	f.committedOn("a1", other, 3, nil)
+	f.hideFromCache(func(o client.Object, key client.ObjectKey) bool {
+		_, ok := o.(*networkv1alpha1.FabricReleaseAuthorization)
+		return ok && key.Name == earlierName
+	})
+	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
+	f.reconcile(relName)
+	if d := f.deployment("a1"); d.Spec.ActivationEpoch != 3 || d.Spec.ActiveRevisionRef.Name != other.Name {
+		t.Errorf("a1 at epoch %d on %s; an older release rewound a router a later one moved",
+			d.Spec.ActivationEpoch, d.Spec.ActiveRevisionRef.Name)
+	}
+}
+
+// TestFailedReleaseReadsDeploymentsAroundCache: a failed router's
+// deployment the cache has not seen is read from the API server, so the
+// release is not reported recovered while the router has not recovered.
+func TestFailedReleaseReadsDeploymentsAroundCache(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a"})
+	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
+	f.reconcile(relName)
+	f.report("a1", networkv1alpha1.FabricStageApplyFailed, false)
+	if a := f.reconcile(relName); a.Status.Phase != networkv1alpha1.FabricReleasePhaseFailed {
+		t.Fatalf("phase %s, want Failed", a.Status.Phase)
+	}
+	f.hideFromCache(func(o client.Object, _ client.ObjectKey) bool {
+		_, ok := o.(*networkv1alpha1.FabricRouterDeployment)
+		return ok
+	})
+	if a := f.reconcile(relName); a.Status.RecoveryVerified {
+		t.Error("a failed release was reported recovered while its router had not recovered")
 	}
 }

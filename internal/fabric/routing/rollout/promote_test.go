@@ -27,6 +27,8 @@ const (
 	prefixB = "198.51.100.0/24"
 	relName = "rel"
 	relUID  = "rel-uid"
+	// earlierName is the release committedOn records a promotion under.
+	earlierName = "earlier"
 )
 
 func revisionWith(name, digest string, peers map[string]string,
@@ -343,7 +345,7 @@ func TestStateOfReactivation(t *testing.T) {
 	r1 := revisionWith("r-aaaaaaaaaa", digestA, nil)
 	auth := &networkv1alpha1.FabricReleaseAuthorization{ObjectMeta: metav1.ObjectMeta{Name: relName, UID: relUID}}
 	d := committedDeployment(2, r1)
-	d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: "earlier", UID: "earlier-uid"}
+	d.Spec.AuthorizationRef = &networkv1alpha1.FabricObjectIdentity{Name: earlierName, UID: "earlier-uid"}
 	target := networkv1alpha1.FabricReleaseTarget{Revision: r1.Name, ActivationDependencyDigest: digestA}
 	if got := stateOf(d, auth, target, time.Minute, time.Now()); got != targetCommitted {
 		t.Errorf("the running revision: state %d, want committed", got)
