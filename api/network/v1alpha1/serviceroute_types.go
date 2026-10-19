@@ -40,6 +40,7 @@ type ServiceEndpointSpec struct {
 
 	// Protocol is the transport protocol accepted by the endpoint.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=tcp;udp
 	Protocol NetworkServiceProtocol `json:"protocol"`
 
 	// DeliveryMode defines how a backing attachment is selected relative to a
@@ -198,6 +199,7 @@ type ServiceRouteFrontend struct {
 type ServiceRouteProtocolPort struct {
 	// Protocol is the transport protocol.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=tcp;udp
 	Protocol NetworkServiceProtocol `json:"protocol"`
 
 	// Port is the transport port.
