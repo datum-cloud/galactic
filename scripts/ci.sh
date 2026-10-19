@@ -42,7 +42,7 @@ case "$COMMAND" in
 
     trap 'kind delete cluster --name "$CLUSTER_NAME"' EXIT
 
-    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]] && ! sudo modprobe vrf; then
       echo "--- Loading kernel modules required by galactic"
       # -o Acquire::Retries/::*::Timeout: bare `apt-get update` has no
       # per-request timeout, so a stalled mirror connection hangs until the
@@ -51,7 +51,9 @@ case "$COMMAND" in
       sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update -qq
       # Pin to the running kernel so modprobe finds the modules. The unversioned
       # meta-package may pull a newer kernel's modules than the one the runner is
-      # actually executing, which causes modprobe to fail.
+      # actually executing, which causes modprobe to fail. Kernels that ship no
+      # extra-modules package carry vrf in their base modules, which the
+      # modprobe above already found.
       sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
     fi
     sudo modprobe vrf
