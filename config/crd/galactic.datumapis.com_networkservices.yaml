@@ -167,9 +167,9 @@ spec:
                   refused with a message saying its protocol is not served yet. sctp has
                   ports and needs Port and BackendPort. esp, gre and icmp have no ports
                   and must set neither; a backend for them is chosen from the client and
-                  VIP addresses alone. Later releases may admit more values, so clients
-                  must tolerate and preserve values they do not recognise (see
-                  NetworkServiceProtocol).
+                  VIP addresses alone. The set of values is open-ended, so a client must
+                  accept and preserve a value it does not recognise, as
+                  NetworkServiceProtocol describes.
                 enum:
                 - tcp
                 - udp
