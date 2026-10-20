@@ -579,7 +579,10 @@ func newIPv4Forwarding() *ipv4Forwarding {
 
 // track records the datapath's currently resolved targets. Once forwarding is
 // on, a target not configured yet, such as a bond member enslaved after
-// startup, gets it now; a failure is logged and retried on the next call.
+// startup, gets it now; a failure is logged and retried on the next call. A
+// target no longer resolved is forgotten, so an interface deleted and
+// created again under the same name, which starts with forwarding off, is
+// written again once it returns.
 func (f *ipv4Forwarding) track(targets []string) {
 	if f == nil {
 		return
@@ -587,6 +590,11 @@ func (f *ipv4Forwarding) track(targets []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.targets = dedupe(targets)
+	for target := range f.configured {
+		if !slices.Contains(f.targets, target) {
+			delete(f.configured, target)
+		}
+	}
 	if !f.on {
 		return
 	}
