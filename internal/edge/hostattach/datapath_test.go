@@ -5,6 +5,7 @@
 package hostattach
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -32,6 +33,15 @@ const (
 	dpNodeY   = int32(0x20)
 	dpArgA    = int32(0x101)
 	dpArgB    = int32(0x102)
+
+	// Attachment IDs, base62 values that fit the 16-bit VPCAttachment
+	// field byte accounting decodes.
+	dpWorkloadAtt = "001"
+	dpSocketAtt   = "011"
+	dpPacketAtt   = "013"
+
+	// siteMTU is the MTU of VPC A's site TUN, below tenantMTU.
+	siteMTU = 1400
 )
 
 var remoteWorkloadAddr = netip.MustParseAddr("fd00:10::20")
@@ -225,11 +235,11 @@ func newDatapathFixture(t *testing.T) *datapathFixture {
 	f.xH = f.x.open(t)
 	f.setupNodeY(t)
 
-	wlA, wlB := intf.GenerateInterfaceNameHost(vpcA, "W01"), intf.GenerateInterfaceNameHost(vpcB, "W01")
+	wlA, wlB := intf.GenerateInterfaceNameHost(vpcA, dpWorkloadAtt), intf.GenerateInterfaceNameHost(vpcB, dpWorkloadAtt)
 	f.wlXA = newWorkload(t, f.x, vrfA, wlA, workloadAddr.String())
 	f.wlXB = newWorkload(t, f.x, vrfB, wlB, workloadAddr.String())
-	f.register(t, vpcA, "W01", dpArgA, []string{workloadAddr.String() + "/128"})
-	f.register(t, vpcB, "W01", dpArgB, []string{workloadAddr.String() + "/128"})
+	f.register(t, vpcA, dpWorkloadAtt, dpArgA, []string{workloadAddr.String() + "/128"})
+	f.register(t, vpcB, dpWorkloadAtt, dpArgB, []string{workloadAddr.String() + "/128"})
 
 	for i, name := range []string{"pod1", "pod3", "pod4"} {
 		f.pods[name] = newPod(t, f.x, "mgmt-"+name, i+1)
@@ -238,17 +248,21 @@ func newDatapathFixture(t *testing.T) *datapathFixture {
 	att := func(vpc, vrfName, attID, podLink string, table uint32, index int, addr string) Attachment {
 		return Attachment{
 			ID: "uid-" + vpc + attID, HostVRF: vrfName, HostLink: intf.GenerateInterfaceNameHost(vpc, attID),
-			PodVRF: vrfName, PodTable: table, PodLink: podLink, PodIndex: index, Address: netip.MustParseAddr(addr),
+			PodVRF: vrfName, PodTable: table, PodLink: podLink, PodIndex: index, MTU: tenantMTU,
+			Address: netip.MustParseAddr(addr),
 		}
 	}
-	f.atts[pod1A] = att(vpcA, vrfA, "S01", "a0", podTable, podIndex, "fd00:aa::1")
-	f.atts["pod1/B"] = att(vpcB, vrfB, "S01", "b0", podTable+1, podIndex+1, "fd00:aa::1")
+	f.atts[pod1A] = att(vpcA, vrfA, dpSocketAtt, "a0", podTable, podIndex, "fd00:aa::1")
+	f.atts["pod1/B"] = att(vpcB, vrfB, dpSocketAtt, "b0", podTable+1, podIndex+1, "fd00:aa::1")
 	for key, v := range map[string][2]string{pod3A: {vpcA, vrfA}, pod4B: {vpcB, vrfB}} {
-		a := att(v[0], v[1], "S03", "a0", podTable, podIndex, "fd00:aa::3")
+		a := att(v[0], v[1], dpPacketAtt, "a0", podTable, podIndex, "fd00:aa::3")
 		a.Prefixes = []netip.Prefix{sitePrefix}
 		a.TUN = &TUN{Name: tunName, Owner: 65534, Group: 65534}
 		f.atts[key] = a
 	}
+	// VPC A's site is behind a session that carries less than the tenant
+	// MTU, so the pod's own forwarding must report Packet Too Big.
+	f.atts[pod3A].TUN.MTU = siteMTU
 	for _, key := range []string{pod1A, "pod1/B", pod3A, pod4B} {
 		a := f.atts[key]
 		res, err := Provision(f.xH, f.handles[key[:4]], a)
@@ -256,16 +270,19 @@ func newDatapathFixture(t *testing.T) *datapathFixture {
 			t.Fatalf("provision %s: %v", key, err)
 		}
 		f.results[key] = res
-		vpc, arg := vpcA, dpArgA
+		vpc, arg, attID := vpcA, dpArgA, dpSocketAtt
 		if a.HostVRF == vrfB {
 			vpc, arg = vpcB, dpArgB
+		}
+		if a.TUN != nil {
+			attID = dpPacketAtt
 		}
 		local := make([]string, 0, 1+len(a.Prefixes))
 		local = append(local, a.Address.String()+"/128")
 		for _, p := range a.Prefixes {
 			local = append(local, p.String())
 		}
-		f.register(t, vpc, a.HostLink[len(a.HostLink)-4:len(a.HostLink)-1], arg, local)
+		f.register(t, vpc, attID, arg, local)
 	}
 
 	// What galactic-router installs for a remote EVPN route: Y's workload,
@@ -314,7 +331,9 @@ func TestHostAttachmentDatapath(t *testing.T) {
 		{"RemoteSocketForwardAndReturn", f.testRemoteSocketForwardAndReturn},
 		{"RemotePacketConsumerIsolation", f.testRemotePacketConsumerIsolation},
 		{"RemoteMinimumIPv6MTU", f.testRemoteMinimumIPv6MTU},
+		{"RemotePacketTooBigFromNarrowerTUN", f.testRemotePacketTooBig},
 		{"SameNodeDoesNotHairpin", f.testSameNodeDoesNotHairpin},
+		{"TenantMTUAboveLinkDefault", f.testTenantMTUAboveLinkDefault},
 	} {
 		t.Run(sub.name, sub.fn)
 	}
@@ -396,6 +415,18 @@ func (f *datapathFixture) testRemoteMinimumIPv6MTU(t *testing.T) {
 	}
 }
 
+func (f *datapathFixture) testRemotePacketTooBig(t *testing.T) {
+	err := ping(f.wlYA, siteHost, siteMTU+50)
+	var tooBig *packetTooBigError
+	if !errors.As(err, &tooBig) || tooBig.MTU != siteMTU {
+		t.Fatalf("remote %d-byte packet to a %d-byte site = %v, want Packet Too Big with MTU %d",
+			siteMTU+50, siteMTU, err, siteMTU)
+	}
+	if err := ping(f.wlYA, siteHost, siteMTU); err != nil {
+		t.Fatalf("remote %d-byte packet after Packet Too Big: %v", siteMTU, err)
+	}
+}
+
 func (f *datapathFixture) testSameNodeDoesNotHairpin(t *testing.T) {
 	toAttachment := watchLeaks(t, f.x, uplinkName, netip.MustParseAddr("fd00:aa::1"))
 	toSite := watchLeaks(t, f.x, uplinkName, siteHost)
@@ -405,5 +436,61 @@ func (f *datapathFixture) testSameNodeDoesNotHairpin(t *testing.T) {
 	}
 	if a, b := toAttachment.stop(), toSite.stop(); a != 0 || b != 0 {
 		t.Fatalf("same-node traffic left the uplink: %d packets to the attachment, %d to the site", a, b)
+	}
+}
+
+// testTenantMTUAboveLinkDefault raises the tenant MTU above the 1500-byte
+// veth default and checks that a packet that large reaches the attachment
+// over the fabric only because the attachment link carries the tenant MTU:
+// with the host link left at the default, the datapath drops the
+// decapsulated packet and the sender hears nothing.
+func (f *datapathFixture) testTenantMTUAboveLinkDefault(t *testing.T) {
+	const jumbo = 1800
+	for _, n := range []struct {
+		ns    testNS
+		links []string
+	}{
+		{f.x, []string{uplinkName}},
+		{f.y, []string{uplinkName, "wlA"}},
+		{f.wlYA, []string{podEth0}},
+	} {
+		n.ns.do(t, func() error {
+			for _, name := range n.links {
+				l, err := netlink.LinkByName(name)
+				if err != nil {
+					return err
+				}
+				mtu := jumbo
+				if name == uplinkName {
+					mtu = 9000
+				}
+				if err := netlink.LinkSetMTU(l, mtu); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	a := f.atts[pod1A]
+	a.MTU = jumbo
+	if _, err := Provision(f.xH, f.handles["pod1"], a); err != nil {
+		t.Fatal(err)
+	}
+	dst := netip.MustParseAddr("fd00:aa::1")
+	if err := ping(f.wlYA, dst, jumbo); err != nil {
+		t.Fatalf("%d-byte packet to an attachment carrying the tenant MTU: %v", jumbo, err)
+	}
+	f.x.do(t, func() error {
+		l, err := netlink.LinkByName(a.HostLink)
+		if err != nil {
+			return err
+		}
+		return netlink.LinkSetMTU(l, tenantMTU)
+	})
+	if err := ping(f.wlYA, dst, jumbo); !errors.Is(err, errNoReply) {
+		t.Fatalf("%d-byte packet with the host link at the default MTU = %v, want no reply", jumbo, err)
+	}
+	if _, err := Provision(f.xH, f.handles["pod1"], f.atts[pod1A]); err != nil {
+		t.Fatal(err)
 	}
 }

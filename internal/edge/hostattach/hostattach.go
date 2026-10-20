@@ -44,6 +44,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// MinMTU is the smallest MTU an attachment link or packet device may have:
+// the IPv6 minimum link MTU (RFC 8200 section 5).
+const MinMTU = 1280
+
 // UnreachableDefaultMetric is the metric of the unreachable default routes a
 // pod VRF gets. It matches the canonical host VRFs', so any real default
 // route wins over it.
@@ -85,6 +89,15 @@ type Attachment struct {
 	PodLink string
 	// PodIndex, when non-zero, is the ifindex the pod end is created with.
 	PodIndex int
+	// MTU is the MTU of both ends of the veth pair. It must be at least the
+	// largest inner packet any interface of the VPC can send, the fabric's
+	// tenant MTU, so a packet the node's datapath decapsulates always fits
+	// the host link: the decapsulation path drops a packet that does not
+	// fit without reporting Packet Too Big. A smaller limit further in, such
+	// as a TUN device's, is reported by the pod's own forwarding. It must
+	// not exceed what the fabric underlay carries once a packet is
+	// encapsulated, which the provisioner cannot see.
+	MTU int
 	// Address is the attachment's own address in the VPC: the source of the
 	// pod's sockets and the next hop the host table routes Prefixes through.
 	Address netip.Addr
@@ -104,6 +117,10 @@ type TUN struct {
 	// without CAP_NET_ADMIN.
 	Owner uint32
 	Group uint32
+	// MTU of the device. Zero leaves it at the attachment's MTU; a smaller
+	// value makes the pod answer larger packets routed to the device with
+	// Packet Too Big.
+	MTU int
 }
 
 // Result describes a provisioned attachment.
@@ -127,8 +144,12 @@ func (a Attachment) validate() error {
 		return errors.New("hostattach: pod VRF table is required")
 	case !a.Address.Is6() || a.Address.Is4In6() || !a.Address.IsGlobalUnicast():
 		return fmt.Errorf("hostattach: attachment address %s is not a global IPv6 unicast address", a.Address)
+	case a.MTU < MinMTU:
+		return fmt.Errorf("hostattach: MTU %d is below the IPv6 minimum of %d", a.MTU, MinMTU)
 	case a.TUN != nil && a.TUN.Name == "":
 		return errors.New("hostattach: TUN name is required")
+	case a.TUN != nil && a.TUN.MTU != 0 && (a.TUN.MTU < MinMTU || a.TUN.MTU > a.MTU):
+		return fmt.Errorf("hostattach: TUN MTU %d must be between %d and the attachment MTU %d", a.TUN.MTU, MinMTU, a.MTU)
 	}
 	for _, p := range a.Prefixes {
 		if !p.IsValid() || !p.Addr().Is6() || p.Addr().Is4In6() || p.Bits() == 0 || p != p.Masked() {
@@ -297,7 +318,8 @@ func ensureVeth(hostH, podH *netlink.Handle, host, pod *Namespace, a Attachment)
 		return nil, nil, podErr
 	}
 	if hostErr != nil && podErr != nil {
-		veth := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: a.PodLink, Index: a.PodIndex},
+		veth := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: a.PodLink, Index: a.PodIndex, MTU: a.MTU},
+			PeerMTU:  uint32(a.MTU), //nolint:gosec // validated range
 			PeerName: a.HostLink, PeerNamespace: netlink.NsFd(int(host.fd))}
 		if err := podH.LinkAdd(veth); err != nil {
 			return nil, nil, fmt.Errorf("hostattach: create veth: %w", err)
@@ -357,6 +379,23 @@ func hostRoute(addr netip.Addr) *netlink.Addr {
 	}
 }
 
+func (t *TUN) effectiveMTU(attachment int) int {
+	if t.MTU != 0 {
+		return t.MTU
+	}
+	return attachment
+}
+
+func ensureMTU(h *netlink.Handle, link netlink.Link, mtu int) error {
+	if link.Attrs().MTU == mtu {
+		return nil
+	}
+	if err := h.LinkSetMTU(link, mtu); err != nil {
+		return fmt.Errorf("hostattach: set MTU %d on %q: %w", mtu, link.Attrs().Name, err)
+	}
+	return nil
+}
+
 // ensureAddr adds addr to link unless it is already there. It never replaces
 // an existing address: replacing one on a VRF slave drops the kernel's local
 // route for it from the VRF table, after which the address no longer accepts
@@ -389,6 +428,9 @@ func configureHostLink(
 	}
 	if err := h.LinkSetMasterByIndex(link, vrfLink.Attrs().Index); err != nil {
 		return fmt.Errorf("hostattach: enslave %q to %q: %w", a.HostLink, a.HostVRF, err)
+	}
+	if err := ensureMTU(h, link, a.MTU); err != nil {
+		return err
 	}
 	if err := ensureAddr(h, link, linkLocal(hostLinkLocal)); err != nil {
 		return fmt.Errorf("hostattach: address host link %q: %w", a.HostLink, err)
@@ -454,6 +496,9 @@ func configurePodLink(h *netlink.Handle, link netlink.Link, a Attachment, hostMA
 	if err := h.LinkSetMasterByIndex(link, vrfLink.Attrs().Index); err != nil {
 		return fmt.Errorf("hostattach: enslave %q to %q: %w", a.PodLink, a.PodVRF, err)
 	}
+	if err := ensureMTU(h, link, a.MTU); err != nil {
+		return err
+	}
 	for _, addr := range []*netlink.Addr{linkLocal(podLinkLocal), hostRoute(a.Address)} {
 		if err := ensureAddr(h, link, addr); err != nil {
 			return fmt.Errorf("hostattach: address pod link %q: %w", a.PodLink, err)
@@ -513,6 +558,9 @@ func ensureTUN(h *netlink.Handle, pod *Namespace, a Attachment) error {
 	}
 	if err := h.LinkSetMasterByIndex(tun, vrfLink.Attrs().Index); err != nil {
 		return fmt.Errorf("hostattach: enslave TUN %q to %q: %w", a.TUN.Name, a.PodVRF, err)
+	}
+	if err := ensureMTU(h, tun, a.TUN.effectiveMTU(a.MTU)); err != nil {
+		return err
 	}
 	if err := h.LinkSetUp(tun); err != nil {
 		return fmt.Errorf("hostattach: set TUN %q up: %w", a.TUN.Name, err)

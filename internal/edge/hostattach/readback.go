@@ -51,12 +51,18 @@ func Readback(host, pod *Namespace, a Attachment) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDrift, err)
 	}
+	if hostLink.Attrs().MTU != a.MTU {
+		add("link %q MTU %d, want %d", a.HostLink, hostLink.Attrs().MTU, a.MTU)
+	}
 	if hostLink.Attrs().Alias != ownerAlias(a.ID) {
 		add("host link %q has owner %q, want %q", a.HostLink, hostLink.Attrs().Alias, ownerAlias(a.ID))
 	}
 	podLink, err := checkLink(podH, a.PodLink, a.PodVRF, add)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDrift, err)
+	}
+	if podLink.Attrs().MTU != a.MTU {
+		add("link %q MTU %d, want %d", a.PodLink, podLink.Attrs().MTU, a.MTU)
 	}
 	if podTable, err := vrfTable(podH, a.PodVRF); err != nil || podTable != a.PodTable {
 		add("pod VRF %q table %d, want %d (%v)", a.PodVRF, podTable, a.PodTable, err)
@@ -80,6 +86,9 @@ func Readback(host, pod *Namespace, a Attachment) error {
 	if a.TUN != nil {
 		tun, err := checkLink(podH, a.TUN.Name, a.PodVRF, add)
 		if err == nil {
+			if want := a.TUN.effectiveMTU(a.MTU); tun.Attrs().MTU != want {
+				add("TUN %q MTU %d, want %d", a.TUN.Name, tun.Attrs().MTU, want)
+			}
 			checkExtraRoutes(podH, tun.Attrs().Index, a.PodTable, a.Prefixes, add)
 			if tun.Attrs().Alias != ownerAlias(a.ID) {
 				add("TUN ownership does not match attachment")

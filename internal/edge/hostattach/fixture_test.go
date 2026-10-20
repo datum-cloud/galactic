@@ -390,11 +390,16 @@ var (
 	errNoReply     = errors.New("no echo reply")
 )
 
+// packetTooBigError is an ICMPv6 Packet Too Big answering a ping.
+type packetTooBigError struct{ MTU int }
+
+func (e *packetTooBigError) Error() string { return fmt.Sprintf("packet too big, MTU %d", e.MTU) }
+
 var echoID atomic.Uint32
 
 // ping sends one ICMPv6 echo request of size bytes, IPv6 header included,
-// from inside n and waits for the reply. It returns errUnreachable if an
-// ICMPv6 destination-unreachable comes back instead.
+// from inside n and waits for the reply. It returns errUnreachable or a
+// *packetTooBigError if the matching ICMPv6 error comes back instead.
 func ping(n testNS, dst netip.Addr, size int) error {
 	return n.Do(func(ns.NetNS) error {
 		var lc net.ListenConfig
@@ -431,6 +436,10 @@ func ping(n testNS, dst netip.Addr, size int) error {
 				}
 			case ipv6.ICMPTypeDestinationUnreachable:
 				return errUnreachable
+			case ipv6.ICMPTypePacketTooBig:
+				if b, ok := m.Body.(*icmp.PacketTooBig); ok {
+					return &packetTooBigError{MTU: b.MTU}
+				}
 			}
 		}
 	})

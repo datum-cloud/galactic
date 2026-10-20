@@ -19,7 +19,7 @@ import (
 
 func recoveryAttachment() Attachment {
 	return Attachment{ID: "recovery", HostVRF: vrfA, HostLink: "recover-h", PodVRF: "recover-vrf",
-		PodTable: 100, PodLink: "recover-p", PodIndex: 42, Address: netip.MustParseAddr("fd00:aa::9")}
+		MTU: 1500, PodTable: 100, PodLink: "recover-p", PodIndex: 42, Address: netip.MustParseAddr("fd00:aa::9")}
 }
 
 func TestRejectPrefixContainingAttachmentAddress(t *testing.T) {

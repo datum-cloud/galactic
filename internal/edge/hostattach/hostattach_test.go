@@ -35,6 +35,10 @@ const (
 	tunName    = "tun0"
 	pod4B      = "pod4/B"
 
+	// tenantMTU is the largest packet a tenant interface sends, the MTU every
+	// attachment link gets.
+	tenantMTU = 1500
+
 	workloadPort = 7000
 	podPort      = 8000
 )
@@ -86,7 +90,7 @@ func newEdgeFixture(t *testing.T) *edgeFixture {
 	att := func(id, hostVRF, hostLink, podLink string, addr string) Attachment {
 		return Attachment{
 			ID: id, HostVRF: hostVRF, HostLink: hostLink, PodVRF: hostVRF, PodTable: podTable,
-			PodLink: podLink, PodIndex: podIndex, Address: netip.MustParseAddr(addr),
+			PodLink: podLink, PodIndex: podIndex, MTU: tenantMTU, Address: netip.MustParseAddr(addr),
 		}
 	}
 	f.atts[pod1A] = att("uid-pod1-a", vrfA, "p1a", "a0", "fd00:aa::1")
