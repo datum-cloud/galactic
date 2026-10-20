@@ -109,21 +109,34 @@ type NetworkServiceSpec struct {
 	VPCRef string `json:"vpcRef"`
 
 	// VIPAddresses is the list of ingress VIP addresses this service provisions
-	// on the assigned gateway node(s).
+	// on the gateway nodes: at most one IPv6 and at most one IPv4 address.
 	//
-	// Only IPv6 addresses are admitted until the gateway datapath serves IPv4
-	// VIPs (datum-cloud/galactic#705). A service created with an IPv4 VIP before
-	// this restriction keeps it while the list is unchanged, since the API
-	// server ratchets validation of an unchanged field on Kubernetes 1.30 and
-	// later; any edit to the list must drop it, and on an older API server any
-	// update to such a service is refused. The gateways do not load or advertise
-	// an IPv4 VIP.
+	// A backend node rewrites a reply's source from the backend's address, port
+	// and protocol back to a single VIP of the backend's family, so a backend
+	// cannot answer for a second VIP of one family. Another VIP of a family
+	// needs its own service whose backends listen on a different BackendPort.
+	// An IPv4 VIP is written in dotted form; the IPv4-mapped IPv6 form is
+	// refused.
+	//
+	// A gateway node serves the IPv4 VIP only while it has IPv4 VIPs turned on,
+	// and load-balances it only over the selected IPv4 backends whose
+	// ServiceVIPBinding reports Bound. It advertises the IPv4 VIP while at
+	// least one such backend exists, and reports the outcome in its
+	// "<node>/IPv4Served" condition. The IPv6 VIP is served independently of
+	// the IPv4 one.
+	//
+	// An existing service whose list breaks these limits keeps validating while
+	// the list is unchanged, since the API server ratchets validation of an
+	// unchanged field on Kubernetes 1.30 and later; any edit to the list must
+	// bring it within them, and an older API server refuses any update to such
+	// a service.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=8
 	// +kubebuilder:validation:items:MaxLength=45
-	// +kubebuilder:validation:XValidation:rule="self.all(v, isIP(v))",message="vipAddresses must all be valid IPv4 or IPv6 addresses"
-	// +kubebuilder:validation:XValidation:rule="self.all(v, !isIP(v) || ip(v).family() == 6)",message="vipAddresses must be IPv6: IPv4 VIPs are not served yet (datum-cloud/galactic#705)"
+	// +kubebuilder:validation:XValidation:rule="self.all(v, isIP(v))",message="vipAddresses must all be valid IPv4 or IPv6 addresses, an IPv4 address in dotted form rather than IPv4-mapped (::ffff:a.b.c.d)"
+	// +kubebuilder:validation:XValidation:rule="self.filter(v, isIP(v) && ip(v).family() == 6).size() <= 1",message="vipAddresses may hold at most one IPv6 address: a backend answers for only one VIP of each family, so serve another IPv6 VIP from its own NetworkService with a different backendPort"
+	// +kubebuilder:validation:XValidation:rule="self.filter(v, isIP(v) && ip(v).family() == 4).size() <= 1",message="vipAddresses may hold at most one IPv4 address: a backend answers for only one VIP of each family, so serve another IPv4 VIP from its own NetworkService with a different backendPort"
 	// +listType=set
 	VIPAddresses []string `json:"vipAddresses"`
 
@@ -156,11 +169,12 @@ type NetworkServiceSpec struct {
 	// VPCAttachment object's own labels. Only attachments whose status.vpc
 	// equals VPCRef are candidates, whatever their labels, so a selector cannot
 	// reach into another tenant's VPC. Each selected attachment contributes the
-	// IPv6 addresses in its spec.interface.addresses as backends, on
-	// BackendPort; the DSR datapath carries IPv6 backends only. An attachment
-	// with no status.node or no IPv6 address is not a backend until it has
-	// both. An empty selector is rejected rather than read as "every attachment
-	// in the VPC".
+	// addresses in its spec.interface.addresses as backends, on BackendPort:
+	// its IPv6 addresses serve the IPv6 VIP and its IPv4 addresses the IPv4
+	// VIP, since a backend node never translates between the families. An
+	// attachment with no status.node, or no address of a VIP's family, is not
+	// a backend of that VIP until it has both. An empty selector is rejected
+	// rather than read as "every attachment in the VPC".
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="(has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions) && size(self.matchExpressions) > 0)",message="backendSelector must not be empty"
 	BackendSelector metav1.LabelSelector `json:"backendSelector"`

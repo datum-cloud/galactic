@@ -24,14 +24,23 @@ import (
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
-// ipv4VIPRuleMarker identifies the vipAddresses rule that refuses IPv4 VIPs
-// until galactic serves them.
-const ipv4VIPRuleMarker = "ip(v).family() == 6"
+// vipCountRuleMarker identifies the vipAddresses rules that limit a service
+// to one VIP per family.
+const vipCountRuleMarker = ".size() <= 1"
 
-// TestNetworkServiceVIPFamilyAdmission covers the IPv4 VIP stopgap against a
-// real API server: a new IPv4 VIP is refused and an IPv6 one admitted, and a
-// rule that already held an IPv4 VIP before the rule was installed survives
-// edits that leave vipAddresses alone, but not an edit to the list.
+// Messages the vipAddresses rules refuse a list with.
+const (
+	invalidVIPMessage = "IPv4-mapped"
+	twoIPv6Message    = "at most one IPv6 address"
+	twoIPv4Message    = "at most one IPv4 address"
+)
+
+// TestNetworkServiceVIPFamilyAdmission covers the one-VIP-per-family rules
+// against a real API server: an IPv4-only, IPv6-only or dual-stack list is
+// admitted, a second VIP of a family and an IPv4-mapped address are refused,
+// and a service stored with two VIPs of a family before the rules were
+// installed survives edits that leave vipAddresses alone, while an edit to
+// the list must bring it within the rules.
 func TestNetworkServiceVIPFamilyAdmission(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("set KUBEBUILDER_ASSETS for isolated API admission tests")
@@ -44,11 +53,11 @@ func TestNetworkServiceVIPFamilyAdmission(t *testing.T) {
 	if err := yaml.Unmarshal(data, full); err != nil {
 		t.Fatal(err)
 	}
-	// The CRD as it was before the rule, to create an object the current
+	// The CRD without the per-family limits, to create objects the current
 	// schema would refuse.
 	legacy := full.DeepCopy()
-	if !dropVIPFamilyRule(legacy) {
-		t.Fatalf("CRD has no vipAddresses rule containing %q", ipv4VIPRuleMarker)
+	if n := dropVIPCountRules(legacy); n != 2 {
+		t.Fatalf("CRD has %d vipAddresses rules containing %q, want 2", n, vipCountRuleMarker)
 	}
 
 	environment := &envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{legacy}}
@@ -88,9 +97,12 @@ func TestNetworkServiceVIPFamilyAdmission(t *testing.T) {
 		}
 	}
 
-	existing := rule("existing", "2001:db8:1::10", "203.0.113.10")
-	if err := c.Create(ctx, existing); err != nil {
-		t.Fatalf("create IPv4 rule under the legacy schema: %v", err)
+	twoIPv4 := rule("existing-two-ipv4", "2001:db8:1::10", "203.0.113.10", "203.0.113.20")
+	twoIPv6 := rule("existing-two-ipv6", "2001:db8:1::20", "2001:db8:1::21")
+	for _, existing := range []*networkv1alpha1.NetworkService{twoIPv4, twoIPv6} {
+		if err := c.Create(ctx, existing); err != nil {
+			t.Fatalf("create %s under the legacy schema: %v", existing.Name, err)
+		}
 	}
 	installSchema(ctx, t, c, full)
 
@@ -99,11 +111,15 @@ func TestNetworkServiceVIPFamilyAdmission(t *testing.T) {
 		vips      []string
 		wantError string
 	}{
-		{"ipv6", []string{"2001:db8:1::11"}, ""},
-		{"ipv4", []string{"203.0.113.11"}, "galactic#705"},
-		{"dual-stack", []string{"2001:db8:1::12", "203.0.113.12"}, "galactic#705"},
-		// isIP refuses an IPv4-mapped IPv6 address, so the first rule does.
-		{"ipv4-mapped", []string{"::ffff:203.0.113.13"}, "valid IPv4 or IPv6"},
+		{"ipv6-only", []string{"2001:db8:1::11"}, ""},
+		{"ipv4-only", []string{"203.0.113.11"}, ""},
+		{"dual-stack", []string{"2001:db8:1::12", "203.0.113.12"}, ""},
+		{"two-ipv4", []string{"203.0.113.13", "203.0.113.14"}, twoIPv4Message},
+		{"dual-stack-second-ipv4", []string{"2001:db8:1::15", "203.0.113.15", "203.0.113.16"}, twoIPv4Message},
+		{"two-ipv6", []string{"2001:db8:1::17", "2001:db8:1::18"}, twoIPv6Message},
+		// isIP refuses an IPv4-mapped IPv6 address; its message says how to
+		// write the address instead.
+		{"ipv4-mapped", []string{"::ffff:203.0.113.19"}, invalidVIPMessage},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := c.Create(ctx, rule(tt.name, tt.vips...))
@@ -119,53 +135,72 @@ func TestNetworkServiceVIPFamilyAdmission(t *testing.T) {
 		})
 	}
 
-	t.Run("existing rule keeps an unchanged IPv4 VIP", func(t *testing.T) {
-		current := &networkv1alpha1.NetworkService{}
-		if err := c.Get(ctx, client.ObjectKeyFromObject(existing), current); err != nil {
-			t.Fatal(err)
-		}
-		current.Labels = map[string]string{"edited": "true"}
-		current.Spec.Port = 8443
-		if err := c.Update(ctx, current); err != nil {
-			t.Fatalf("update leaving vipAddresses unchanged: %v", err)
-		}
-	})
-
-	t.Run("existing rule cannot edit a list holding an IPv4 VIP", func(t *testing.T) {
-		current := &networkv1alpha1.NetworkService{}
-		if err := c.Get(ctx, client.ObjectKeyFromObject(existing), current); err != nil {
-			t.Fatal(err)
-		}
-		current.Spec.VIPAddresses = append(current.Spec.VIPAddresses, "2001:db8:1::13")
-		err := c.Update(ctx, current)
-		if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "galactic#705") {
-			t.Fatalf("update adding a VIP beside an IPv4 VIP: err = %v, want the IPv4 VIP rule's rejection", err)
-		}
-		current.Spec.VIPAddresses = []string{"2001:db8:1::10"}
-		if err := c.Update(ctx, current); err != nil {
-			t.Fatalf("update dropping the IPv4 VIP: %v", err)
-		}
-	})
+	for _, tt := range []struct {
+		existing  *networkv1alpha1.NetworkService
+		stillBad  []string
+		fixed     []string
+		wantError string
+	}{
+		{
+			existing:  twoIPv4,
+			stillBad:  []string{"2001:db8:1::10", "203.0.113.10", "203.0.113.30"},
+			fixed:     []string{"2001:db8:1::10", "203.0.113.10"},
+			wantError: twoIPv4Message,
+		},
+		{
+			existing:  twoIPv6,
+			stillBad:  []string{"2001:db8:1::20", "2001:db8:1::22"},
+			fixed:     []string{"2001:db8:1::20"},
+			wantError: twoIPv6Message,
+		},
+	} {
+		t.Run(tt.existing.Name+" keeps an unchanged list", func(t *testing.T) {
+			current := &networkv1alpha1.NetworkService{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(tt.existing), current); err != nil {
+				t.Fatal(err)
+			}
+			current.Labels = map[string]string{"edited": "true"}
+			current.Spec.Port = 8443
+			if err := c.Update(ctx, current); err != nil {
+				t.Fatalf("update leaving vipAddresses unchanged: %v", err)
+			}
+		})
+		t.Run(tt.existing.Name+" must fix an edited list", func(t *testing.T) {
+			current := &networkv1alpha1.NetworkService{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(tt.existing), current); err != nil {
+				t.Fatal(err)
+			}
+			current.Spec.VIPAddresses = tt.stillBad
+			err := c.Update(ctx, current)
+			if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("update keeping two VIPs of a family: err = %v, want a rejection naming %q", err, tt.wantError)
+			}
+			current.Spec.VIPAddresses = tt.fixed
+			if err := c.Update(ctx, current); err != nil {
+				t.Fatalf("update to one VIP per family: %v", err)
+			}
+		})
+	}
 }
 
-// dropVIPFamilyRule removes the IPv4 VIP rule from crd's vipAddresses schema,
-// reporting whether it was there.
-func dropVIPFamilyRule(crd *apiextensionsv1.CustomResourceDefinition) bool {
+// dropVIPCountRules removes the per-family VIP limits from crd's vipAddresses
+// schema and returns how many rules it removed.
+func dropVIPCountRules(crd *apiextensionsv1.CustomResourceDefinition) int {
 	field := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["vipAddresses"]
 	kept := field.XValidations[:0]
 	for _, v := range field.XValidations {
-		if !strings.Contains(v.Rule, ipv4VIPRuleMarker) {
+		if !strings.Contains(v.Rule, vipCountRuleMarker) {
 			kept = append(kept, v)
 		}
 	}
-	dropped := len(kept) != len(field.XValidations)
+	dropped := len(field.XValidations) - len(kept)
 	field.XValidations = kept
 	crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["vipAddresses"] = field
 	return dropped
 }
 
 // installSchema replaces the served NetworkService schema with want's and waits
-// until the API server enforces it, which a fresh create of an IPv4 VIP
+// until the API server enforces it, which a fresh create of two IPv4 VIPs
 // shows.
 func installSchema(ctx context.Context, t *testing.T, c client.Client, want *apiextensionsv1.CustomResourceDefinition) {
 	t.Helper()
@@ -181,7 +216,7 @@ func installSchema(ctx context.Context, t *testing.T, c client.Client, want *api
 		ObjectMeta: metav1.ObjectMeta{Name: "schema-probe", Namespace: "vip-family"},
 		Spec: networkv1alpha1.NetworkServiceSpec{
 			VPCRef:          "vpc-a",
-			VIPAddresses:    []string{"198.51.100.1"},
+			VIPAddresses:    []string{"198.51.100.1", "198.51.100.2"},
 			Protocol:        networkv1alpha1.NetworkServiceProtocolTCP,
 			Port:            443,
 			BackendSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
@@ -196,7 +231,7 @@ func installSchema(ctx context.Context, t *testing.T, c client.Client, want *api
 			if lastErr == nil {
 				return false, c.Delete(ctx, p)
 			}
-			return apierrors.IsInvalid(lastErr) && strings.Contains(lastErr.Error(), "galactic#705"), nil
+			return apierrors.IsInvalid(lastErr) && strings.Contains(lastErr.Error(), twoIPv4Message), nil
 		})
 	if err != nil {
 		t.Fatalf("API server never enforced the current NetworkService schema: %v (last create: %v)", err, lastErr)
