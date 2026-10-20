@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"slices"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -171,6 +173,18 @@ func TestIPv4Gate(t *testing.T) {
 			binding: func(rule *bgpv1alpha1.NetworkService) *bgpv1alpha1.ServiceVIPBinding {
 				b := bound(rule)
 				b.Generation = 2
+				return b
+			},
+			wantStatus: metav1.ConditionFalse, wantReason: reasonIPv4BindingsNotBound,
+			wantV4Loaded: true, wantV6Advert: true, wantProgrammed: metav1.ConditionTrue,
+		},
+		{
+			name: "binding being deleted", ipv4VIPs: true, rule: dualStack(), attachment: dualAttachment,
+			binding: func(rule *bgpv1alpha1.NetworkService) *bgpv1alpha1.ServiceVIPBinding {
+				b := bound(rule)
+				now := metav1.Now()
+				b.DeletionTimestamp = &now
+				b.Finalizers = []string{"galactic.datum.net/test-teardown"}
 				return b
 			},
 			wantStatus: metav1.ConditionFalse, wantReason: reasonIPv4BindingsNotBound,
@@ -422,6 +436,9 @@ func TestIPv4BindingReadinessChanged(t *testing.T) {
 	reworded.Status.Conditions[0].Message = "still bound"
 	respecced := v4.DeepCopy()
 	respecced.Generation = 2
+	deleting := v4.DeepCopy()
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
 
 	p := ipv4BindingReadinessChanged()
 	for _, tc := range []struct {
@@ -436,10 +453,111 @@ func TestIPv4BindingReadinessChanged(t *testing.T) {
 		{"BoundToFailed", p.Update(event.UpdateEvent{ObjectOld: v4, ObjectNew: failed}), true},
 		{"SpecChanged", p.Update(event.UpdateEvent{ObjectOld: v4, ObjectNew: respecced}), true},
 		{"MessageOnly", p.Update(event.UpdateEvent{ObjectOld: v4, ObjectNew: reworded}), false},
+		{"DeletionStarted", p.Update(event.UpdateEvent{ObjectOld: v4, ObjectNew: deleting}), true},
 		{"IPv6Changed", p.Update(event.UpdateEvent{ObjectOld: v6, ObjectNew: v6.DeepCopy()}), false},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s: passed = %v, want %v", tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+// TestIPv4Gate_WithdrawsDespiteFailedIPv6Write covers the gate closing on a
+// pass whose -v6 write fails: the -v4 route is withdrawn anyway, rather than
+// waiting for the failed family, and the pass returns the -v6 error for retry.
+func TestIPv4Gate_WithdrawsDespiteFailedIPv6Write(t *testing.T) {
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	rule := newTestRule(testRuleName, "vpc-1", testVIP, testVIP4)
+	acceptRule(rule)
+	binding := newIPv4Binding(rule, testBackendAddr, metav1.ConditionTrue, "Bound")
+
+	failV6 := false
+	errV6 := errors.New("injected -v6 write failure")
+	reject := func(obj client.Object) error {
+		if failV6 && obj.GetName() == testRuleAdv {
+			return errV6
+		}
+		return nil
+	}
+	scheme := newRuleTestScheme(t)
+	c := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{},
+			&bgpv1alpha1.ServiceVIPBinding{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+			newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4), rule, binding).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if err := reject(obj); err != nil {
+					return err
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if err := reject(obj); err != nil {
+					return err
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := newGatewayReconciler(c, scheme, newFakeGatewayEngine(), testNodeGWA)
+	r.IPv4VIPs = true
+	runGatewayPass(t, r)
+	if _, ok := advertisedPrefixes(t, c, testIPv4AdvName); !ok {
+		t.Fatal("-v4 not advertised with the binding Bound")
+	}
+
+	ctx := context.Background()
+	if err := c.Delete(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	failV6 = true
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)})
+	if !errors.Is(err, errV6) {
+		t.Errorf("Reconcile error = %v, want the injected -v6 failure", err)
+	}
+	if _, ok := advertisedPrefixes(t, c, testIPv4AdvName); ok {
+		t.Error("-v4 still advertised after the gate closed, behind a failed -v6 write")
+	}
+}
+
+// TestDepartedGatewayNodes_ConfirmsWithAPIServer covers condition pruning
+// against a lagging cache: a gateway node the cache has not seen but the API
+// server has keeps its conditions, and only a node missing from both is
+// pruned.
+func TestDepartedGatewayNodes_ConfirmsWithAPIServer(t *testing.T) {
+	const (
+		departed = "gw-gone"
+		newNode  = "gw-new"
+	)
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	rule := newTestRule(testRuleName, "vpc-1", testVIP, testVIP4)
+	acceptRule(rule)
+	for _, node := range []string{departed, newNode} {
+		meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
+			Type: ipv4ServedConditionType(node), Status: metav1.ConditionTrue, Reason: reasonIPv4Advertised,
+		})
+	}
+
+	scheme := newRuleTestScheme(t)
+	cached := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+			newBackendAttachment("vpc-1"), rule).
+		Build()
+	// The API server already holds the new node's NetworkGateway.
+	apiServer := newIndexedClientBuilder(scheme).
+		WithObjects(newTestGateway(testNodeGWA), newTestGateway(newNode)).
+		Build()
+	r := newGatewayReconciler(cached, scheme, newFakeGatewayEngine(), testNodeGWA)
+	r.APIReader = apiServer
+	runGatewayPass(t, r)
+
+	conds := ruleConditions(t, cached, testRuleName)
+	if meta.FindStatusCondition(conds, ipv4ServedConditionType(departed)) != nil {
+		t.Error("departed node's IPv4Served condition was kept")
+	}
+	if meta.FindStatusCondition(conds, ipv4ServedConditionType(newNode)) == nil {
+		t.Error("a node whose NetworkGateway the cache has not seen lost its IPv4Served condition")
 	}
 }

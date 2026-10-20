@@ -89,7 +89,8 @@ const (
 	// flows, and advertises it once those backends' ServiceVIPBindings are
 	// Bound. It stays as a per-node kill switch: off, the gateway leaves
 	// every IPv4 VIP out of the datapath and withdraws every IPv4 VIP this
-	// node advertises, and IPv6 VIPs are not affected.
+	// node advertises, and IPv6 VIPs are not affected. A gateway that cannot
+	// list and watch ServiceVIPBindings runs as if it were off.
 	EnvGatewayIPv4VIPs = "GALACTIC_GATEWAY_IPV4_VIPS"
 
 	// EnvGatewayProcSysPath is the procfs sysctl root the datapath writes its

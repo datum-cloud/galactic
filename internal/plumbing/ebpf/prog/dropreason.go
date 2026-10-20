@@ -35,19 +35,22 @@ const (
 	DropReasonVIPXlatFailed              uint32 = 42
 	DropReasonVIPIPv4Fragment            uint32 = 43
 	DropReasonVIPUDPNoChecksum           uint32 = 44
+	DropReasonVIPIPv4Backend             uint32 = 45
+	DropReasonVIPTTLExceeded             uint32 = 46
 )
 
 // DropReasonMetricIndices lists stable production counters. Diagnostic trace
 // slots between DropReasonCount and the service-route counters are deliberately
 // excluded from metrics.
 var DropReasonMetricIndices = func() []uint32 {
-	indices := make([]uint32, 0, DropReasonCount+5)
+	indices := make([]uint32, 0, DropReasonCount+7)
 	for index := range DropReasonCount {
 		indices = append(indices, index)
 	}
 	return append(indices,
 		DropReasonServiceRouteDenied, DropReasonServiceRouteRedirectFailed,
-		DropReasonVIPXlatFailed, DropReasonVIPIPv4Fragment, DropReasonVIPUDPNoChecksum)
+		DropReasonVIPXlatFailed, DropReasonVIPIPv4Fragment, DropReasonVIPUDPNoChecksum,
+		DropReasonVIPIPv4Backend, DropReasonVIPTTLExceeded)
 }()
 
 // DropReasonNames maps each index to a short, stable, metrics-friendly name,
@@ -75,4 +78,6 @@ var DropReasonNames = map[uint32]string{
 	DropReasonVIPXlatFailed:              "vip_xlat_failed",
 	DropReasonVIPIPv4Fragment:            "vip_ipv4_fragment",
 	DropReasonVIPUDPNoChecksum:           "vip_udp_no_checksum",
+	DropReasonVIPIPv4Backend:             "vip_ipv4_backend",
+	DropReasonVIPTTLExceeded:             "vip_ttl_exceeded",
 }

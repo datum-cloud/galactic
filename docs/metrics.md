@@ -139,7 +139,7 @@ has no name for.
 | FIB / forwarding | `fib_lookup_failed`, `fib_no_neigh`, `fib_unreachable`, `fib_frag_needed`, `redirect_failed`                                   | Kernel route or neighbor missing for the inner destination                                      |
 | Egress           | `egress_route_encap_failed`, `egress_route_fib_lookup_failed`, `egress_route_redirect_failed`, `public_uplink_redirect_failed` | Tenant traffic leaving the node couldn't be encapsulated or sent                                |
 | Service routes   | `service_route_denied`, `service_route_redirect_failed`                                                                        | A private service route refused the sender, or its redirect to the target failed                |
-| IPv4 VIP         | `vip_xlat_failed`, `vip_ipv4_fragment`, `vip_udp_no_checksum`                                                                  | IPv4 VIP packet failed translation (a bug), or was a fragment or checksum-less UDP              |
+| IPv4 VIP         | `vip_xlat_failed`, `vip_ipv4_fragment`, `vip_udp_no_checksum`, `vip_ipv4_backend`, `vip_ttl_exceeded`                          | An IPv4 VIP packet was untranslatable; `vip_ipv4_backend` means a pre-translation router        |
 
 ```promql
 sum by (node, reason) (rate(galactic_usid_drops_total[5m])) > 0
