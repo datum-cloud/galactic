@@ -37,10 +37,17 @@
 #   - every gateway node in the site reports <node>/IPv4Served True with
 #     reason Advertised on both rules.
 #
+# Through each node, one more flow per protocol goes from a source port
+# fixed for the site (STICKY), so the same 5-tuple reaches every one of the
+# site's gateways in turn. Every gateway builds the same Maglev table, so each
+# must send it to the same backend: a client whose path moves to another
+# gateway keeps its backend.
+#
 # Across the flows through each node:
 #
 #   - the pinned node's own galactic_edge_rule_packets_total for the VIP
-#     rises: its XDP datapath claimed the traffic;
+#     rises: its XDP datapath claimed the traffic, and every other gateway's
+#     stays flat, so a pin that leaks to another node fails;
 #   - galactic_edge_return_packets_total for the VIP rises on some gateway in
 #     the site: the translated reply crossed edge_return;
 #   - no gateway in the site counts a datapath drop, and none drops a packet
@@ -56,6 +63,11 @@
 #
 #   pins          every gateway node of every checked site pinned once
 #   MIN_BACKENDS  at least 2 distinct backends answer per site
+#   same flow     one fixed 5-tuple per protocol, sent through every
+#                 gateway node of a site in turn, draws the same backend
+#                 on every node (needs two gateways: dfw only)
+#   pin isolation the rule counter of every unpinned gateway in the site
+#                 stays flat while another node is pinned
 #   flows         every one of FLOWS flows per protocol per node answered
 #   client        every backend saw the client as 64:ff9b::b01:2802
 #   reply source  every reply to the client came from the VIP
@@ -297,6 +309,9 @@ EMBEDDED=$(embed4 "${CLIENT}")
 # A random source-port base per run, so the flows are new ones: a port an
 # earlier run used can still be in TIME_WAIT on the client.
 sport=$((20000 + RANDOM % 30000))
+# STICKY is the same-flow check's source port base, below the range above;
+# each site takes the next two ports, TCP then UDP.
+sticky=$((10000 + RANDOM % 9000))
 work=$(mktemp -d)
 
 pinned=0
@@ -315,7 +330,9 @@ for site in "${SITES[@]}"; do
   echo "--- ${site}: ${vip} reachability and control plane ---"
   check_route "${site}"
   check_control_plane "${site}" "${backends}"
-  declare -A served=()
+  declare -A served=() sticky_pod=()
+  sticky=$((sticky + 2))
+  declare -A STICKY=([tcp]="${sticky}" [udp]="$((sticky + 1))")
   site_pins=""
 
   for gw in ${GATEWAYS[${site}]}; do
@@ -338,6 +355,10 @@ for site in "${SITES[@]}"; do
       was_nat[${n}]=$(nat "${n}")
     done
     was_fwd=$(metric "${gw}" galactic_edge_rule_packets_total "${vip}")
+    declare -A was_other=()
+    for n in ${GATEWAYS[${site}]}; do
+      [ "${n}" = "${gw}" ] || was_other[${n}]=$(metric "${n}" galactic_edge_rule_packets_total "${vip}")
+    done
     was_vdr=$(vip_drops "${COMPUTE[${site}]}")
 
     # Every packet the client receives from port 80 while the flows run.
@@ -369,6 +390,17 @@ for site in "${SITES[@]}"; do
       echo "  ${proto}: ${answered}/${FLOWS} flows answered by ${site}'s backends, client seen as ${EMBEDDED}"
     done
 
+    # The same-flow check's 5-tuple, once per protocol through this node.
+    for proto in tcp udp; do
+      read -r pod _ <<<"$(request "${proto}" "${vip}" "${STICKY[${proto}]}")"
+      if [ -z "${pod:-}" ]; then
+        fail "${proto} same-flow probe from port ${STICKY[${proto}]}: no reply through ${gw}"
+        continue
+      fi
+      sticky_pod[${proto}]="${sticky_pod[${proto}]:-} ${gw}=${pod}"
+      sports+=("${STICKY[${proto}]}")
+    done
+
     sleep 1
     stop_capture
     client cat /tmp/ingress-ipv4.cap >"${work}/cap" 2>/dev/null || true
@@ -379,7 +411,9 @@ for site in "${SITES[@]}"; do
       fail "the client got port-${PORT} replies from ${others}instead of only the VIP ${vip}"
     fi
     missing=0
-    for p in "${sports[@]}"; do
+    # ${sports[@]+...}: an empty array is unset to bash before 4.4, and
+    # "${sports[@]}" on it fails under set -u.
+    for p in ${sports[@]+"${sports[@]}"}; do
       grep -q " ${vip}\.${PORT} > ${CLIENT}\.${p}:" "${work}/cap" || missing=$((missing + 1))
     done
     if [ "${missing}" -gt 0 ]; then
@@ -395,6 +429,16 @@ for site in "${SITES[@]}"; do
       fail "${gw} never matched the VIP (galactic_edge_rule_packets_total ${was_fwd} -> ${now_fwd}):" \
         "its XDP datapath did not see the traffic"
     fi
+    for n in "${!was_other[@]}"; do
+      now=$(metric "${n}" galactic_edge_rule_packets_total "${vip}")
+      if rose "${was_other[${n}]}" "${now}"; then
+        fail "${n} matched the VIP while it was pinned to ${gw} (rule packets ${was_other[${n}]} -> ${now}):" \
+          "the pin leaked"
+      else
+        echo "  ok   ${n} saw none of the flows pinned to ${gw} (rule packets ${now})"
+      fi
+    done
+    unset was_other
 
     now_vdr=$(vip_drops "${COMPUTE[${site}]}")
     if ! counted "${COMPUTE[${site}]} vip_*/service_route_* drops" "${was_vdr}" "${now_vdr}"; then
@@ -426,6 +470,11 @@ for site in "${SITES[@]}"; do
       else
         echo "  ok   ${n} dropped nothing as ctstate INVALID (${now})"
       fi
+      # The shard's packet and new-session counters only count up, and a
+      # VIP flow that took source NAT anywhere on this node would add to
+      # both, so any rise across the flows fails, whatever else the shard
+      # was doing at the time: the lab sends no egress traffic during this
+      # check.
       now=$(nat "${n}")
       if ! counted "${n} egress shard packets and sessions" "${was_nat[${n}]}" "${now}"; then
         :
@@ -444,6 +493,19 @@ for site in "${SITES[@]}"; do
     transit "${tr}" ip -4 route del "${vip}/32"
   done
 
+  for proto in tcp udp; do
+    seen=${sticky_pod[${proto}]:-}
+    distinct=$(tr ' ' '\n' <<<"${seen}" | sed -n 's/^.*=//p' | sort -u | wc -l)
+    nodes=$(wc -w <<<"${seen}")
+    if [ "${nodes}" -lt 2 ]; then
+      echo "  --   ${proto} same flow: ${nodes} gateway node(s) in ${site}, nothing to compare (${seen# })"
+    elif [ "${distinct}" -eq 1 ]; then
+      echo "  ok   ${proto} same flow from port ${STICKY[${proto}]} drew one backend on every gateway:${seen}"
+    else
+      fail "${proto} same flow from port ${STICKY[${proto}]} drew different backends on different gateways:${seen}"
+    fi
+  done
+
   hit=0
   for pod in ${backends}; do
     if [ -n "${served[${pod}]:-}" ]; then
@@ -457,7 +519,7 @@ for site in "${SITES[@]}"; do
     fail "${site}: ${hit} backend(s) answered, want at least ${MIN_BACKENDS}"
   fi
   summary+=("${site} ${vip}: pinned${site_pins:- none}; ${hit} backend(s) answered")
-  unset served
+  unset served sticky_pod STICKY
 done
 
 if [ "${want_pins}" -eq 0 ]; then

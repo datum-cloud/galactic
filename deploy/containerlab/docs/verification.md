@@ -221,8 +221,11 @@ IPv4 TCP and UDP from remote-host (`11.1.40.2`) through each gateway node in
 turn. It fails unless the backend saw the client as `64:ff9b::b01:2802`, its
 IPv4 address under `64:ff9b::/96`, the client's capture shows every reply
 coming from the VIP, both backends answer, and no gateway counts a drop, a
-`ctstate INVALID` drop or an egress shard translation. The script's header
-lists every threshold.
+`ctstate INVALID` drop or an egress shard translation. In dfw, the one site
+with two gateways, it also sends one fixed 5-tuple per protocol through each
+gateway in turn and fails unless both draw the same backend, and it fails if
+the gateway that is not pinned counts any of the flows, which is how a pin
+that leaks shows. The script's header lists every threshold.
 
 The binding counts assume IPv4 VIPs are on. A backend node writes a rule's
 IPv4 bindings only while some gateway in its site reports the IPv4 VIP
