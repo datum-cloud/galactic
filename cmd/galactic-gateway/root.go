@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -118,7 +119,13 @@ func runCmd(cfg *config.GatewayConfig) error {
 	}
 
 	// Pre-flight RBAC check.
-	checkWatchPermissions(mgr, cfg.IPv4VIPs)
+	checkWatchPermissions(mgr)
+
+	// IPv4 VIPs need read access to ServiceVIPBindings; without it they stay
+	// off for this process rather than stalling the manager's cache.
+	reviewCtx, cancelReview := context.WithTimeout(ctx, 10*time.Second)
+	ipv4VIPs := resolveIPv4VIPs(reviewCtx, mgr.GetClient(), cfg.IPv4VIPs)
+	cancelReview()
 
 	// Load and attach the edge eBPF datapath. Always a real datapath, never a
 	// no-op: configuration validation rejects an empty public interface before
@@ -147,7 +154,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 			return err
 		}
 		gwDatapath, err = setupGatewayDatapath(ctx, cfg.PublicInterface, cfg.InternalInterfaces, encapSrc,
-			cfg.XDPAttach, cfg.IPv4VIPs, ctrlmetrics.Registry, coverage)
+			cfg.XDPAttach, ipv4VIPs, ctrlmetrics.Registry, coverage)
 		if err != nil {
 			return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 		}
@@ -178,7 +185,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		NodeName:  nodeName,
 		APIReader: mgr.GetAPIReader(),
 		Disabled:  !cfg.DatapathEnabled,
-		IPv4VIPs:  cfg.IPv4VIPs,
+		IPv4VIPs:  ipv4VIPs,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}

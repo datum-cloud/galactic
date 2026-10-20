@@ -1,0 +1,96 @@
+// Copyright 2026 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package main
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	authorizationv1 "k8s.io/api/authorization/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+)
+
+// accessReviewClient returns a client that answers every
+// SelfSubjectAccessReview with allowed(verb, resource), or fails the review
+// with reviewErr when it is set.
+func accessReviewClient(
+	t *testing.T, allowed func(verb, resource string) bool, reviewErr error,
+) (client.Client, *[]string) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := authorizationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	var asked []string
+	c := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
+			review, ok := obj.(*authorizationv1.SelfSubjectAccessReview)
+			if !ok {
+				t.Fatalf("unexpected create of %T", obj)
+			}
+			attrs := review.Spec.ResourceAttributes
+			asked = append(asked, attrs.Verb+" "+attrs.Resource)
+			if reviewErr != nil {
+				return reviewErr
+			}
+			review.Status.Allowed = allowed(attrs.Verb, attrs.Resource)
+			return nil
+		},
+	}).Build()
+	return c, &asked
+}
+
+// TestResolveIPv4VIPs covers the IPv4 VIP RBAC pre-flight: IPv4 VIPs stay on
+// only when they are requested and ServiceVIPBindings can be listed and
+// watched, and a denied verb or a review that cannot be submitted turns them
+// off, naming what is missing, so the gateway keeps serving IPv6 rather than
+// stalling on a cache that never syncs.
+func TestResolveIPv4VIPs(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name      string
+		requested bool
+		allowed   func(verb, resource string) bool
+		reviewErr error
+		want      bool
+		wantAsked bool
+	}{
+		{name: "NotRequested", allowed: func(string, string) bool { return true }},
+		{
+			name: "Allowed", requested: true, want: true, wantAsked: true,
+			allowed: func(_, resource string) bool { return resource == resourceServiceVIPBinding },
+		},
+		{
+			name: "WatchDenied", requested: true, wantAsked: true,
+			allowed: func(verb, _ string) bool { return verb == "list" },
+		},
+		{
+			name: "ReviewFails", requested: true, wantAsked: true,
+			allowed:   func(string, string) bool { return true },
+			reviewErr: errors.New("injected review failure"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, asked := accessReviewClient(t, tc.allowed, tc.reviewErr)
+			if got := resolveIPv4VIPs(ctx, c, tc.requested); got != tc.want {
+				t.Errorf("resolveIPv4VIPs = %v, want %v", got, tc.want)
+			}
+			if (len(*asked) > 0) != tc.wantAsked {
+				t.Errorf("access reviews = %v, want any: %v", *asked, tc.wantAsked)
+			}
+		})
+	}
+
+	c, _ := accessReviewClient(t, func(string, string) bool { return false }, nil)
+	err := ipv4VIPsAllowed(ctx, c)
+	if err == nil || !strings.Contains(err.Error(), "list and watch on servicevipbindings") {
+		t.Errorf("ipv4VIPsAllowed error = %v, want one naming list and watch on servicevipbindings", err)
+	}
+}
