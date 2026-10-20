@@ -313,7 +313,7 @@ func clientDatagram(proto byte, dst netip.Addr, dport uint16, ipOptions []byte, 
 // TestUsidIngress_VIPXlat4TranslatesToIPv6Backend: a client's TCP or UDP
 // packet to an IPv4 VIP reaches the backend as IPv6, from the client's
 // 64:ff9b:: address to the backend's address and port, with the TOS as its
-// traffic class, the TTL as its hop limit, no flow label, its IP options
+// traffic class, the TTL less one as its hop limit, no flow label, its IP options
 // dropped, its payload intact and a valid checksum.
 func TestUsidIngress_VIPXlat4TranslatesToIPv6Backend(t *testing.T) {
 	timestamp := []byte{68, 12, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0} // RFC 791 timestamp option, room for two
@@ -343,9 +343,9 @@ func TestUsidIngress_VIPXlat4TranslatesToIPv6Backend(t *testing.T) {
 			if got.src != xlat4ClientMapped || got.sport != xlat4ClientPort {
 				t.Errorf("source = %s:%d, want %s:%d", got.src, got.sport, xlat4ClientMapped, xlat4ClientPort)
 			}
-			if got.nexthdr != tc.proto || got.trafficClass != xlat4TOS || got.flowLabel != 0 || got.hopLimit != xlat4TTL {
+			if got.nexthdr != tc.proto || got.trafficClass != xlat4TOS || got.flowLabel != 0 || got.hopLimit != xlat4TTL-1 {
 				t.Errorf("next header %d, traffic class %#02x, flow label %#x, hop limit %d; want %d, %#02x, 0, %d",
-					got.nexthdr, got.trafficClass, got.flowLabel, got.hopLimit, tc.proto, xlat4TOS, xlat4TTL)
+					got.nexthdr, got.trafficClass, got.flowLabel, got.hopLimit, tc.proto, xlat4TOS, xlat4TTL-1)
 			}
 			if !got.l4Valid {
 				t.Errorf("L4 checksum %#04x is wrong after the translation", got.l4csum)
@@ -393,8 +393,10 @@ func TestUsidIngress_VIPXlat4ChecksumEdges(t *testing.T) {
 }
 
 // TestUsidIngress_VIPXlat4DropsUntranslatable: a fragment for a VIP backend,
-// first or later, and a UDP datagram to the VIP with no checksum are dropped
-// and counted under their own reasons.
+// first or later, a UDP datagram to the VIP with no checksum, a packet whose
+// TTL translation would exhaust, and a packet whose row names an IPv4 backend,
+// which an IPv6-only workload cannot receive, are dropped and counted under
+// their own reasons, never delivered.
 func TestUsidIngress_VIPXlat4DropsUntranslatable(t *testing.T) {
 	const moreFragments = 0x2000
 	noChecksum := func() []byte {
@@ -411,9 +413,19 @@ func TestUsidIngress_VIPXlat4DropsUntranslatable(t *testing.T) {
 		{"LaterFragment", clientDatagram(ipProtoUDP, xlat4VIP, xlat4VIPPort, nil, 3, []byte("two")),
 			DropReasonVIPIPv4Fragment},
 		{"UDPNoChecksum", noChecksum(), DropReasonVIPUDPNoChecksum},
+		{"TTLOne", withTTL(clientDatagram(ipProtoTCP, xlat4VIP, xlat4VIPPort, nil, 0, []byte("ttl")), 1),
+			DropReasonVIPTTLExceeded},
+		{"TTLZero", withTTL(clientDatagram(ipProtoUDP, xlat4VIP, xlat4VIPPort, nil, 0, []byte("ttl")), 0),
+			DropReasonVIPTTLExceeded},
+		{"IPv4BackendRow", clientDatagram(ipProtoTCP, xlat4VIP, nativeVIPPort, nil, 0, []byte("native")),
+			DropReasonVIPIPv4Backend},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			objs, usid := vip4IngressFixture(t)
+			// The row a router predating translation writes: an IPv4 VIP
+			// rewritten to an IPv4 backend, both IPv4-mapped.
+			putXlatRow(t, objs, usid.block, usid.argument, usid.slot, ipProtoTCP, usidVIPXlatDirIngress,
+				xlat4VIP, nativeVIPPort, netip.MustParseAddr("10.60.0.5"), xlat4BackendPort)
 			ret, _, err := objs.UsidIngress.Test(encapsulate4(usid.addr(t), tc.inner))
 			if err != nil {
 				t.Fatalf("program test-run: %v", err)
@@ -499,6 +511,67 @@ func TestUsidIngress_VIPXlat4IPv6PathsUnaffected(t *testing.T) {
 	}
 }
 
+// withTTL returns the IPv4 packet pkt with TTL ttl and its header checksum
+// recomputed.
+func withTTL(pkt []byte, ttl byte) []byte {
+	out := bytes.Clone(pkt)
+	ihl := int(out[0]&0x0F) * 4
+	out[8] = ttl
+	out[10], out[11] = 0, 0
+	binary.BigEndian.PutUint16(out[10:12], ^fold(onesComplementSum(0, out[:ihl])))
+	return out
+}
+
+// nativeVIPPort is the VIP port the IPv4-backend row in
+// TestUsidIngress_VIPXlat4DropsUntranslatable is keyed on.
+const nativeVIPPort = 8080
+
+// TestUsidIngress_VIPXlat4TranslatedPacketSkipsIPv6Rewrites: a translated
+// packet already carries the backend's real address, so neither the IPv6
+// VIP lookup nor NPTv6 touches it, even where a row is keyed on that address
+// and port or the VRF has NPTv6.
+func TestUsidIngress_VIPXlat4TranslatedPacketSkipsIPv6Rewrites(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setUp func(*testing.T, *UsidObjects, testUSID)
+	}{
+		{"IPv6VIPRowOnBackend", func(t *testing.T, objs *UsidObjects, usid testUSID) {
+			putXlatRow(t, objs, usid.block, usid.argument, usid.slot, ipProtoTCP, usidVIPXlatDirIngress,
+				xlat4Backend, xlat4BackendPort, netip.MustParseAddr("fd20:60::99"), 9999)
+		}},
+		{"NPTv6", func(t *testing.T, objs *UsidObjects, usid testUSID) {
+			putNPTv6(t, objs, usid.block, usid.argument)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs, usid := vip4IngressFixture(t)
+			tc.setUp(t, objs, usid)
+			in := clientDatagram(ipProtoTCP, xlat4VIP, xlat4VIPPort, nil, 0, []byte("once"))
+			got := parseIP6(t, runIngressXlat4(t, objs, encapsulate4(usid.addr(t), in))[ethHeaderLen:])
+			if got.dst != xlat4Backend || got.dport != xlat4BackendPort || !got.l4Valid {
+				t.Errorf("translated packet left for %s:%d (checksum valid %v), want %s:%d and valid",
+					got.dst, got.dport, got.l4Valid, xlat4Backend, xlat4BackendPort)
+			}
+		})
+	}
+}
+
+// TestUsidIngress_VIPXlat4TruncatedPacketUntouched: an IPv4 packet whose total
+// length claims more bytes than arrived is not translated, since its IPv6
+// payload length would claim bytes that are not there.
+func TestUsidIngress_VIPXlat4TruncatedPacketUntouched(t *testing.T) {
+	objs, usid := vip4IngressFixture(t)
+	in := clientDatagram(ipProtoUDP, xlat4VIP, xlat4VIPPort, nil, 0, []byte("short"))
+	binary.BigEndian.PutUint16(in[2:4], uint16(len(in)+64))
+	binary.BigEndian.PutUint16(in[10:12], 0)
+	binary.BigEndian.PutUint16(in[10:12], ^fold(onesComplementSum(0, in[:20])))
+
+	out := runIngressXlat4(t, objs, encapsulate4(usid.addr(t), in))
+	if !bytes.Equal(out[ethHeaderLen:ethHeaderLen+len(in)], in) {
+		t.Errorf("truncated packet changed:\n in: % x\nout: % x", in, out[ethHeaderLen:])
+	}
+}
+
 // buildPacketWithV6Inner wraps an IPv6 packet in an Ethernet and outer IPv6
 // header toward outerDst with Next Header 41.
 func buildPacketWithV6Inner(outerDst netip.Addr, inner []byte) []byte {
@@ -580,7 +653,8 @@ func runEgressRedirect(t *testing.T, objs *UsidObjects, pkt []byte) []byte {
 // TestUsidEgress_VIPXlat4TranslatesReplyToIPv4: the backend's TCP or UDP reply
 // to a client's 64:ff9b:: address leaves as IPv4 from the VIP's address and
 // port to the client's own address, unencapsulated, out the public uplink,
-// past the VRF's NAT64 route. Its header has no options, the hop limit as TTL,
+// past the VRF's NAT64 route. Its header has no options, the hop limit less
+// one as TTL,
 // the traffic class as TOS, ID 0 and Don't Fragment, and both checksums are
 // valid.
 func TestUsidEgress_VIPXlat4TranslatesReplyToIPv4(t *testing.T) {
@@ -608,9 +682,9 @@ func TestUsidEgress_VIPXlat4TranslatesReplyToIPv4(t *testing.T) {
 			if got.dst != xlat4Client || got.dport != xlat4ClientPort {
 				t.Errorf("destination = %s:%d, want the client's %s:%d", got.dst, got.dport, xlat4Client, xlat4ClientPort)
 			}
-			if got.ihl != 20 || got.ttl != xlat4TTL || got.tos != xlat4TOS || got.id != 0 || got.fragOff != 0x4000 {
+			if got.ihl != 20 || got.ttl != xlat4TTL-1 || got.tos != xlat4TOS || got.id != 0 || got.fragOff != 0x4000 {
 				t.Errorf("IHL %d, TTL %d, TOS %#02x, ID %#x, flags/offset %#04x; want 20, %d, %#02x, 0, 0x4000",
-					got.ihl, got.ttl, got.tos, got.id, got.fragOff, xlat4TTL, xlat4TOS)
+					got.ihl, got.ttl, got.tos, got.id, got.fragOff, xlat4TTL-1, xlat4TOS)
 			}
 			if !got.hdrValid || !got.l4Valid {
 				t.Errorf("header checksum valid %v, L4 checksum %#04x valid %v; want both valid",
@@ -620,6 +694,24 @@ func TestUsidEgress_VIPXlat4TranslatesReplyToIPv4(t *testing.T) {
 				t.Errorf("payload = %q, want %q", got.payload, payload)
 			}
 		})
+	}
+}
+
+// TestUsidEgress_VIPXlat4HopLimitExceeded: a reply whose hop limit
+// translation would exhaust is dropped and counted, not sent.
+func TestUsidEgress_VIPXlat4HopLimitExceeded(t *testing.T) {
+	for _, hop := range []byte{0, 1} {
+		objs := vip4EgressFixture(t)
+		pkt := backendReply(ipProtoTCP, xlat4Backend, xlat4BackendPort, xlat4ClientMapped, []byte("hop"))
+		pkt[ethHeaderLen+7] = hop
+		ret, _, err := objs.UsidEgress.Test(pkt)
+		if err != nil {
+			t.Fatalf("program test-run: %v", err)
+		}
+		if ret != tcActShot {
+			t.Errorf("hop limit %d: verdict = %d, want TC_ACT_SHOT (%d)", hop, ret, tcActShot)
+		}
+		assertOnlyMetricDropReason(t, objs, DropReasonVIPTTLExceeded)
 	}
 }
 

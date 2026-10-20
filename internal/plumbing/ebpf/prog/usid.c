@@ -282,6 +282,8 @@ static long (*bpf_skb_change_head)(struct __sk_buff *skb, __u32 len, __u64 flags
 #define USID_SIIT_FAILED (-1)
 #define USID_SIIT_FRAGMENT (-2)
 #define USID_SIIT_UDP_NO_CHECKSUM (-3)
+#define USID_SIIT_IPV4_BACKEND (-4)
+#define USID_SIIT_TTL_EXCEEDED (-5)
 
 // IPv6 next-header values that are extension headers, which clamp_tcp_mss
 // does not walk. Counted rather than silently skipped, so a tenant whose SYNs
@@ -1191,6 +1193,14 @@ enum drop_reason {
 	// requires one, and computing it would mean summing the whole payload,
 	// so it is dropped rather than translated.
 	DROP_REASON_VIP_UDP_NO_CHECKSUM = 44,
+	// An IPv4 VIP's ingress row names an IPv4 backend, which no IPv6-only
+	// workload can receive, so the packet is dropped rather than delivered
+	// untranslated. Only a router that predates IPv4-to-IPv6 translation
+	// writes such a row.
+	DROP_REASON_VIP_IPV4_BACKEND = 45,
+	// A packet of an IPv4 VIP's flow arrived with a TTL or hop limit that
+	// translating it, as a router, would take to zero.
+	DROP_REASON_VIP_TTL_EXCEEDED = 46,
 	__DROP_REASON_MAX,
 };
 
@@ -2843,7 +2853,9 @@ static USID_ALWAYS_INLINE __u16 usid_ip4_hdr_csum(const __u16 *w)
 // (block, argument, slot, protocol, IPv4-mapped destination, destination
 // port), gives the backend's IPv6 address and port. The new header's source is
 // 64:ff9b:: plus the client's IPv4 address, its traffic class the TOS, its hop
-// limit the TTL, and its flow label 0. IPv4 options are dropped. The L4
+// limit the TTL less one, since the translator forwards the packet as a
+// router does (RFC 7915 section 4.1), and its flow label 0. IPv4 options are
+// dropped. The L4
 // checksum is updated for the pseudo-header and port changes, and a UDP
 // checksum the update would leave zero is sent as 0xFFFF, zero not being a
 // valid IPv6 UDP checksum.
@@ -2854,7 +2866,10 @@ static USID_ALWAYS_INLINE __u16 usid_ip4_hdr_csum(const __u16 *w)
 // later fragment has no ports to key on. A matched UDP datagram with no
 // checksum returns USID_SIIT_UDP_NO_CHECKSUM, since computing one would mean
 // summing the whole payload, which RFC 7915 lets a stateless translator refuse.
-// Neither changes the packet.
+// A matched packet with a TTL of 1 or less returns USID_SIIT_TTL_EXCEEDED. A
+// row whose value is IPv4-mapped, an IPv4 backend no IPv6-only workload can
+// receive, returns USID_SIIT_IPV4_BACKEND rather than passing the packet on
+// untranslated. None of these changes the packet.
 //
 // The skb's checksum state stays consistent: the header is stored with
 // BPF_F_RECOMPUTE_CSUM, which keeps a CHECKSUM_COMPLETE sum right, and the L4
@@ -2866,8 +2881,9 @@ static USID_ALWAYS_INLINE __u16 usid_ip4_hdr_csum(const __u16 *w)
 // global function, so the verifier checks it once.
 //
 // Returns USID_SIIT_TRANSLATED, USID_SIIT_PASS when no row applies and the
-// packet is unchanged, USID_SIIT_FRAGMENT, USID_SIIT_UDP_NO_CHECKSUM, or
-// USID_SIIT_FAILED when a helper failed and the packet may be half-translated.
+// packet is unchanged, USID_SIIT_FRAGMENT, USID_SIIT_UDP_NO_CHECKSUM,
+// USID_SIIT_IPV4_BACKEND, USID_SIIT_TTL_EXCEEDED, or USID_SIIT_FAILED when a
+// helper failed and the packet may be half-translated.
 // Every caller re-derives its packet pointers afterwards.
 __attribute__((noinline)) int vip_siit_ingress(struct __sk_buff *skb, __u64 block, __u32 argument, __u32 slot)
 {
@@ -2911,11 +2927,14 @@ __attribute__((noinline)) int vip_siit_ingress(struct __sk_buff *skb, __u64 bloc
 	struct vip_xlat_value *vv = lookup_vip_xlat(block, (__u16) argument, (__u16) slot, ip4.protocol,
 						    USID_VIP_XLAT_DIR_INGRESS, ports.dest, key_addr);
 
-	// An IPv4-mapped value is no IPv6 backend: nothing writes one.
-	if (!vv || usid_is_v4_mapped(vv->addr))
+	if (!vv)
 		return USID_SIIT_PASS;
+	if (usid_is_v4_mapped(vv->addr))
+		return USID_SIIT_IPV4_BACKEND;
 	if (is_udp && csum == 0)
 		return USID_SIIT_UDP_NO_CHECKSUM;
+	if (ip4.ttl <= 1)
+		return USID_SIIT_TTL_EXCEEDED;
 
 	struct usid_ip6hdr ip6;
 
@@ -2925,7 +2944,7 @@ __attribute__((noinline)) int vip_siit_ingress(struct __sk_buff *skb, __u64 bloc
 	ip6.vtc_flow[3] = 0;
 	ip6.payload_len = __builtin_bswap16((__u16) (tot_len - ihl_len));
 	ip6.nexthdr = ip4.protocol;
-	ip6.hop_limit = ip4.ttl;
+	ip6.hop_limit = ip4.ttl - 1;
 	__builtin_memset(ip6.saddr, 0, sizeof(ip6.saddr));
 	ip6.saddr[1] = 0x64;
 	ip6.saddr[2] = 0xFF;
@@ -2973,8 +2992,8 @@ __attribute__((noinline)) int vip_siit_ingress(struct __sk_buff *skb, __u64 bloc
 // on (block, argument, protocol, USID_VIP_XLAT_DIR_EGRESS_XLAT, source address,
 // source port). The new header's source is the row's IPv4 VIP and its
 // destination the client address embedded in the IPv6 destination; the source
-// port becomes the VIP's. TTL comes from the hop limit and TOS from the traffic
-// class. The header has no options, ID 0 and Don't Fragment set: a stateless
+// port becomes the VIP's. TTL is the hop limit less one, as on ingress, and
+// TOS comes from the traffic class. The header has no options, ID 0 and Don't Fragment set: a stateless
 // translator has no way to pick IDs unique enough for fragments to reassemble,
 // and with DF set the ID is unused (RFC 6864). The header checksum is computed
 // and the L4 checksum updated for the pseudo-header and port changes; a UDP
@@ -2983,8 +3002,9 @@ __attribute__((noinline)) int vip_siit_ingress(struct __sk_buff *skb, __u64 bloc
 // Checksum state is kept consistent as in vip_siit_ingress.
 //
 // Returns USID_SIIT_TRANSLATED, USID_SIIT_PASS when no row applies and the
-// packet is unchanged, or USID_SIIT_FAILED when a helper failed and the packet
-// may be half-translated. Every caller re-derives its packet pointers
+// packet is unchanged, USID_SIIT_TTL_EXCEEDED for a matched reply with a hop
+// limit of 1 or less, also unchanged, or USID_SIIT_FAILED when a helper failed
+// and the packet may be half-translated. Every caller re-derives its packet pointers
 // afterwards.
 __attribute__((noinline)) int vip_siit_egress(struct __sk_buff *skb, __u64 block, __u32 argument)
 {
@@ -3016,6 +3036,8 @@ __attribute__((noinline)) int vip_siit_egress(struct __sk_buff *skb, __u64 block
 
 	if (!vv || !usid_is_v4_mapped(vv->addr))
 		return USID_SIIT_PASS;
+	if (ip6.hop_limit <= 1)
+		return USID_SIIT_TTL_EXCEEDED;
 
 	// A union so the header checksum can sum it as aligned 16-bit words.
 	union {
@@ -3028,7 +3050,7 @@ __attribute__((noinline)) int vip_siit_egress(struct __sk_buff *skb, __u64 block
 	ip4.h.tot_len = __builtin_bswap16((__u16) (payload_len + USID_IPV4_MIN_HDR_LEN));
 	ip4.h.id = 0;
 	ip4.h.frag_off = __builtin_bswap16(USID_IPV4_DONT_FRAGMENT);
-	ip4.h.ttl = ip6.hop_limit;
+	ip4.h.ttl = ip6.hop_limit - 1;
 	ip4.h.protocol = ip6.nexthdr;
 	ip4.h.check = 0;
 	__builtin_memcpy(ip4.h.saddr, &vv->addr[12], 4);
@@ -4085,6 +4107,14 @@ int usid_ingress(struct __sk_buff *skb)
 		}
 		if (siit_rc == USID_SIIT_UDP_NO_CHECKSUM) {
 			count_claimed_drop(DROP_REASON_VIP_UDP_NO_CHECKSUM, vrf, vrf_key, VRF_DIRECTION_INGRESS);
+			return TC_ACT_SHOT;
+		}
+		if (siit_rc == USID_SIIT_IPV4_BACKEND) {
+			count_claimed_drop(DROP_REASON_VIP_IPV4_BACKEND, vrf, vrf_key, VRF_DIRECTION_INGRESS);
+			return TC_ACT_SHOT;
+		}
+		if (siit_rc == USID_SIIT_TTL_EXCEEDED) {
+			count_claimed_drop(DROP_REASON_VIP_TTL_EXCEEDED, vrf, vrf_key, VRF_DIRECTION_INGRESS);
 			return TC_ACT_SHOT;
 		}
 		if (siit_rc < 0) {
@@ -5255,11 +5285,22 @@ int usid_egress(struct __sk_buff *skb)
 	// reply path. A reply to 64:ff9b::/96 that matches no row is ordinary
 	// NAT64 egress and goes on unchanged. A half-translated packet fits
 	// neither family, so a failure is dropped.
+	//
+	// The destination prefix and next header are read through the packet
+	// pointer first, so the rest of a tenant's IPv6 traffic pays no helper
+	// call for this.
 	__u8 siit = 0;
+	struct usid_ip6hdr *siit_ip6 = (void *) (eth + 1);
 
-	if (h_proto == __builtin_bswap16(USID_ETH_P_IPV6)) {
+	if (h_proto == __builtin_bswap16(USID_ETH_P_IPV6) && (void *) (siit_ip6 + 1) <= data_end &&
+	    (siit_ip6->nexthdr == USID_IPPROTO_TCP || siit_ip6->nexthdr == USID_IPPROTO_UDP) &&
+	    usid_is_nat64_wkp(siit_ip6->daddr)) {
 		int siit_rc = vip_siit_egress(skb, iv->block, iv->argument);
 
+		if (siit_rc == USID_SIIT_TTL_EXCEEDED) {
+			count_claimed_drop(DROP_REASON_VIP_TTL_EXCEEDED, vrf, vrf_key, VRF_DIRECTION_EGRESS);
+			return TC_ACT_SHOT;
+		}
 		if (siit_rc < 0) {
 			count_claimed_drop(DROP_REASON_VIP_XLAT_FAILED, vrf, vrf_key, VRF_DIRECTION_EGRESS);
 			return TC_ACT_SHOT;

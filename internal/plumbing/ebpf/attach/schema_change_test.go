@@ -77,9 +77,9 @@ func TestLoad_SchemaChangeRecreatesOnlyTheChangedMap(t *testing.T) {
 	}
 }
 
-// drop_reasons grew slots for the IPv4 VIP translation's drop reasons. Loading
-// over the previous version's shorter pin recreates drop_reasons alone, with
-// the new slots, and vip_xlat_table keeps its rows, an IPv4 VIP's alike.
+// TestLoad_DropReasonsGrowthKeepsVIPXlatRows: Load over a pinned drop_reasons
+// with fewer entries than the program's recreates drop_reasons alone, at the
+// program's size, and vip_xlat_table keeps its rows, an IPv4 VIP's alike.
 func TestLoad_DropReasonsGrowthKeepsVIPXlatRows(t *testing.T) {
 	requireRoot(t)
 	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-dropreasons-test-%d", os.Getpid()))
@@ -118,8 +118,8 @@ func TestLoad_DropReasonsGrowthKeepsVIPXlatRows(t *testing.T) {
 	}
 	defer objs.Close() //nolint:errcheck // test-owned objects
 
-	if got := objs.DropReasons.MaxEntries(); got != prog.DropReasonVIPUDPNoChecksum+1 {
-		t.Errorf("drop_reasons entries = %d after reload, want %d", got, prog.DropReasonVIPUDPNoChecksum+1)
+	if got := objs.DropReasons.MaxEntries(); got != prog.DropReasonVIPTTLExceeded+1 {
+		t.Errorf("drop_reasons entries = %d after reload, want %d", got, prog.DropReasonVIPTTLExceeded+1)
 	}
 	var v prog.UsidVipXlatValue
 	if err := objs.VipXlatTable.Lookup(row, &v); err != nil {
