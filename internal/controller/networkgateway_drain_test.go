@@ -254,7 +254,7 @@ func TestApplyBGPAdvertisements_SkipsDeletingRule(t *testing.T) {
 		VIPAddresses: []netip.Addr{netip.MustParseAddr(testVIP)},
 	}
 
-	if err := r.applyBGPAdvertisements(ctx, rule, desired, testRouterName); err != nil {
+	if err := r.applyBGPAdvertisements(ctx, rule, desired, testRouterName, false); err != nil {
 		t.Fatalf("applyBGPAdvertisements: %v", err)
 	}
 	advList := &bgpv1alpha1.BGPAdvertisementList{}

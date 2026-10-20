@@ -23,9 +23,9 @@ import (
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
-// TestNetworkGatewayReconciler_WithholdsIPv4VIPs covers the #705 stopgap: an
-// IPv4 VIP is never loaded or advertised, a "-v4" advertisement an earlier
-// release made is withdrawn, the rule's IPv6 VIP keeps serving, and the
+// TestNetworkGatewayReconciler_WithholdsIPv4VIPs covers a node with IPv4VIPs
+// off: an IPv4 VIP is never loaded or advertised, a "-v4" advertisement this
+// node made is withdrawn, the rule's IPv6 VIP keeps serving, and the
 // node's IPv4Served condition says why the IPv4 address does not work.
 func TestNetworkGatewayReconciler_WithholdsIPv4VIPs(t *testing.T) {
 	tests := []struct {
@@ -115,7 +115,7 @@ func TestNetworkGatewayReconciler_WithholdsIPv4VIPs(t *testing.T) {
 
 // TestNetworkGatewayReconciler_RemovesIPv4ServedWithoutIPv4VIP covers a rule
 // whose IPv4 VIP was removed: this node drops its own IPv4Served condition
-// and leaves another node's alone.
+// and leaves another live gateway node's alone.
 func TestNetworkGatewayReconciler_RemovesIPv4ServedWithoutIPv4VIP(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
@@ -129,7 +129,8 @@ func TestNetworkGatewayReconciler_RemovesIPv4ServedWithoutIPv4VIP(t *testing.T) 
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
-		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+		WithObjects(newTestGateway(testNodeGWA), newTestGateway(testNodeGWB), newTestRouter(), backendRouter,
+			backendAdv, backendVRF,
 			newBackendAttachment("vpc-1"), rule).
 		Build()
 
@@ -193,7 +194,8 @@ func TestBuildDesiredRule_LeavesOutIPv4VIPs(t *testing.T) {
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
 
-	dr, _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, testVIP), attachments, idx, nil, false)
+	dr, _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, testVIP), attachments, idx, nil,
+		false, nil)
 	if err != nil {
 		t.Fatalf("dual-stack rule: %v", err)
 	}
@@ -202,13 +204,13 @@ func TestBuildDesiredRule_LeavesOutIPv4VIPs(t *testing.T) {
 	}
 
 	_, _, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, "198.51.100.7"), attachments, idx,
-		nil, false)
+		nil, false, nil)
 	if !errors.Is(err, errNoServedVIP) {
 		t.Errorf("IPv4-only rule: err = %v, want errNoServedVIP", err)
 	}
 
 	_, _, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, "not-an-ip"), attachments, idx,
-		nil, false)
+		nil, false, nil)
 	if err == nil || errors.Is(err, errNoServedVIP) {
 		t.Errorf("rule with an unparseable VIP: err = %v, want a parse error", err)
 	}
@@ -217,7 +219,7 @@ func TestBuildDesiredRule_LeavesOutIPv4VIPs(t *testing.T) {
 	if !hasIPv4VIP(mapped) {
 		t.Error("hasIPv4VIP missed an IPv4-mapped IPv6 VIP")
 	}
-	dr, _, _, err = buildDesiredRule(mapped, attachments, idx, nil, false)
+	dr, _, _, err = buildDesiredRule(mapped, attachments, idx, nil, false, nil)
 	if err != nil {
 		t.Fatalf("rule with an IPv4-mapped VIP: %v", err)
 	}
@@ -261,7 +263,7 @@ func TestDrainingOutcome_WithholdsIPv4VIPs(t *testing.T) {
 			fakeClient := newIndexedClientBuilder(scheme).WithObjects(rule, stillAdvertised).Build()
 			r := newGatewayReconciler(fakeClient, scheme, newFakeGatewayEngine(), testNodeGWA)
 
-			o, draining, err := r.drainingOutcome(context.Background(), rule, attachments, idx, nil)
+			o, draining, err := r.drainingOutcome(context.Background(), rule, attachments, idx, nil, nil)
 			if err != nil {
 				t.Fatalf("drainingOutcome: %v", err)
 			}
@@ -284,7 +286,7 @@ func TestBuildDesiredRule_ServesIPv4WhenEnabled(t *testing.T) {
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4)}
 
 	dr, unresolved, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP, "::ffff:"+testVIP4),
-		attachments, idx, nil, true)
+		attachments, idx, nil, true, nil)
 	if err != nil {
 		t.Fatalf("dual-stack rule: %v", err)
 	}
@@ -318,7 +320,7 @@ func TestBuildDesiredRule_ServesIPv4WhenEnabled(t *testing.T) {
 		}
 	}
 
-	dr, _, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4), attachments, idx, nil, true)
+	dr, _, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4), attachments, idx, nil, true, nil)
 	if err != nil {
 		t.Fatalf("IPv4-only rule with IPv4 VIPs served: %v", err)
 	}
@@ -336,7 +338,7 @@ func TestBuildDesiredRule_IPv4FamilyWithoutBackends(t *testing.T) {
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
 
 	dr, unresolved, ipv4, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP, testVIP4), attachments,
-		idx, nil, true)
+		idx, nil, true, nil)
 	if err != nil {
 		t.Fatalf("dual-stack rule: %v", err)
 	}
@@ -351,7 +353,7 @@ func TestBuildDesiredRule_IPv4FamilyWithoutBackends(t *testing.T) {
 	}
 
 	if _, _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4), attachments, idx, nil,
-		true); err == nil {
+		true, nil); err == nil {
 		t.Error("IPv4-only rule with no IPv4 backend: want an error")
 	}
 }
@@ -369,7 +371,7 @@ func TestBuildDesiredRule_SecondIPv4VIP(t *testing.T) {
 		serveIPv4 bool
 		want      ipv4Family
 	}{{true, ipv4MultipleVIPs}, {false, ipv4Off}} {
-		dr, _, ipv4, err := buildDesiredRule(rule, attachments, idx, nil, tc.serveIPv4)
+		dr, _, ipv4, err := buildDesiredRule(rule, attachments, idx, nil, tc.serveIPv4, nil)
 		if err != nil {
 			t.Fatalf("IPv4VIPs %v: %v", tc.serveIPv4, err)
 		}
@@ -383,43 +385,51 @@ func TestBuildDesiredRule_SecondIPv4VIP(t *testing.T) {
 	}
 
 	_, _, ipv4, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, "198.51.100.7"), attachments,
-		idx, nil, true)
+		idx, nil, true, nil)
 	if err == nil || ipv4 != ipv4MultipleVIPs {
 		t.Errorf("IPv4-only rule with two IPv4 VIPs: err = %v, ipv4 = %d; want an error and %d",
 			err, ipv4, ipv4MultipleVIPs)
 	}
 }
 
-// TestIPv4ServedCondition covers each IPv4Served reason, and that only the
-// loaded one counts as loaded for the backend nodes.
+// TestIPv4ServedCondition covers each IPv4Served reason, that only an
+// advertised IPv4 VIP is True, and which reasons count as loaded for the
+// backend nodes.
 func TestIPv4ServedCondition(t *testing.T) {
 	rule := newTestRule(testRuleName, "vpc-1", testVIP, testVIP4)
 	for _, tc := range []struct {
 		name       string
 		ipv4       ipv4Family
 		programmed bool
+		advertised bool
 		want       string
+		wantStatus metav1.ConditionStatus
+		wantLoaded bool
 	}{
-		{"SwitchOff", ipv4Off, true, reasonIPv4Unsupported},
-		{"Loaded", ipv4Loaded, true, reasonIPv4NotAdvertised},
-		{"LoadedButRuleNotLoaded", ipv4Loaded, false, reasonIPv4NotLoaded},
-		{"NoBackend", ipv4NoBackend, true, reasonIPv4NoBackend},
-		{"MultipleVIPs", ipv4MultipleVIPs, true, reasonIPv4MultipleVIPs},
-		{"RuleFailed", ipv4NotLoaded, false, reasonIPv4NotLoaded},
+		{"SwitchOff", ipv4Off, true, true, reasonIPv4Unsupported, metav1.ConditionFalse, false},
+		{"Advertised", ipv4Loaded, true, true, reasonIPv4Advertised, metav1.ConditionTrue, true},
+		{"LoadedRouteNotPublished", ipv4Loaded, true, false, reasonIPv4NotAdvertised, metav1.ConditionFalse, true},
+		{"BindingsNotBound", ipv4Unbound, true, true, reasonIPv4BindingsNotBound, metav1.ConditionFalse, true},
+		{"LoadedButRuleNotLoaded", ipv4Loaded, false, false, reasonIPv4NotLoaded, metav1.ConditionFalse, false},
+		{"UnboundButRuleNotLoaded", ipv4Unbound, false, false, reasonIPv4NotLoaded, metav1.ConditionFalse, false},
+		{"NoBackend", ipv4NoBackend, true, true, reasonIPv4NoBackend, metav1.ConditionFalse, false},
+		{"MultipleVIPs", ipv4MultipleVIPs, true, true, reasonIPv4MultipleVIPs, metav1.ConditionFalse, false},
+		{"RuleFailed", ipv4NotLoaded, false, false, reasonIPv4NotLoaded, metav1.ConditionFalse, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := ipv4ServedCondition(testNodeGWA, rule, tc.ipv4, tc.programmed)
-			if c == nil || c.Status != metav1.ConditionFalse || c.Reason != tc.want {
-				t.Fatalf("IPv4Served = %+v, want False/%s", c, tc.want)
+			c := ipv4ServedCondition(testNodeGWA, rule, tc.ipv4, tc.programmed, tc.advertised)
+			if c == nil || c.Status != tc.wantStatus || c.Reason != tc.want {
+				t.Fatalf("IPv4Served = %+v, want %s/%s", c, tc.wantStatus, tc.want)
 			}
 			withCond := rule.DeepCopy()
 			withCond.Status.Conditions = []metav1.Condition{*c}
-			if got, want := ipv4LoadedOnSomeNode(withCond), tc.want == reasonIPv4NotAdvertised; got != want {
-				t.Errorf("ipv4LoadedOnSomeNode = %v, want %v", got, want)
+			if got := ipv4LoadedOnSomeNode(withCond); got != tc.wantLoaded {
+				t.Errorf("ipv4LoadedOnSomeNode = %v, want %v", got, tc.wantLoaded)
 			}
 		})
 	}
-	if c := ipv4ServedCondition(testNodeGWA, newTestRule(testRuleName, "vpc-1", testVIP), ipv4Loaded, true); c != nil {
+	if c := ipv4ServedCondition(testNodeGWA, newTestRule(testRuleName, "vpc-1", testVIP), ipv4Loaded, true,
+		true); c != nil {
 		t.Errorf("rule with no IPv4 VIP: IPv4Served = %+v, want none", c)
 	}
 	advertised := rule.DeepCopy()
@@ -473,11 +483,12 @@ func newTestSIDIndex() *backendSIDIndex {
 	}
 }
 
-// TestNetworkGatewayReconciler_LoadsButNeverAdvertisesIPv4 covers a node with
-// IPv4VIPs set: the IPv4 VIP reaches the engine, no -v4 advertisement is made
-// and an old one is withdrawn, and IPv4Served says the address is loaded but
-// not advertised.
-func TestNetworkGatewayReconciler_LoadsButNeverAdvertisesIPv4(t *testing.T) {
+// TestNetworkGatewayReconciler_LoadsIPv4WithoutBoundBindings covers a node
+// with IPv4VIPs set and no ServiceVIPBinding for the IPv4 backend yet: the
+// IPv4 VIP reaches the engine over that backend, so the backend nodes write
+// their bindings, but no -v4 advertisement is made and an old one is
+// withdrawn, and IPv4Served says the bindings are not Bound.
+func TestNetworkGatewayReconciler_LoadsIPv4WithoutBoundBindings(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	rule := newTestRule(testRuleName, "vpc-1", testVIP, testVIP4)
@@ -518,7 +529,7 @@ func TestNetworkGatewayReconciler_LoadsButNeverAdvertisesIPv4(t *testing.T) {
 		t.Fatalf("get NetworkService: %v", err)
 	}
 	ipv4 := meta.FindStatusCondition(got.Status.Conditions, ipv4ServedConditionType(testNodeGWA))
-	if ipv4 == nil || ipv4.Status != metav1.ConditionFalse || ipv4.Reason != reasonIPv4NotAdvertised {
-		t.Errorf("IPv4Served = %+v, want False/%s", ipv4, reasonIPv4NotAdvertised)
+	if ipv4 == nil || ipv4.Status != metav1.ConditionFalse || ipv4.Reason != reasonIPv4BindingsNotBound {
+		t.Errorf("IPv4Served = %+v, want False/%s", ipv4, reasonIPv4BindingsNotBound)
 	}
 }

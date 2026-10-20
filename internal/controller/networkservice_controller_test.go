@@ -37,7 +37,7 @@ const (
 	testVIPPrefix  = testVIP + "/128"
 
 	// testVIP4 is an IPv4 VIP, which the gateway leaves out of the engine
-	// unless IPv4VIPs is set, and never advertises.
+	// unless IPv4VIPs is set.
 	testVIP4 = "203.0.113.5"
 
 	// testBackendAddr4 is an IPv4 backend address in testBackendPrefix4,

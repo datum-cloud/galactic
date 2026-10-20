@@ -246,19 +246,28 @@ func (r *NetworkServiceBindingReconciler) desiredBindings(
 func (r *NetworkServiceBindingReconciler) newBinding(
 	rule *bgpv1alpha1.NetworkService, vip netip.Addr, b ruleBackend,
 ) *bgpv1alpha1.ServiceVIPBinding {
+	return generatedBinding(rule, r.NodeName, vip, b)
+}
+
+// generatedBinding returns the binding node writes for rule's VIP vip and
+// backend b: its name, labels and spec. The gateway compares a binding against
+// it before trusting its Bound condition.
+func generatedBinding(
+	rule *bgpv1alpha1.NetworkService, node string, vip netip.Addr, b ruleBackend,
+) *bgpv1alpha1.ServiceVIPBinding {
 	return &bgpv1alpha1.ServiceVIPBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: rule.Namespace,
 			Name: crdnames.ServiceVIPBindingName(
-				rule.Name, r.NodeName, vip.String(), b.addr.String(), int32(b.port)),
+				rule.Name, node, vip.String(), b.addr.String(), int32(b.port)),
 			Labels: map[string]string{
 				networkRuleLabel:      rule.Name,
-				bindingNodeLabel:      gatewayNodeLabelValue(r.NodeName),
+				bindingNodeLabel:      gatewayNodeLabelValue(node),
 				bindingManagedByLabel: bindingManagedByValue,
 			},
 		},
 		Spec: bgpv1alpha1.ServiceVIPBindingSpec{
-			TargetRef:      bgpv1alpha1.TargetRef{Kind: bindingTargetKind, Name: r.NodeName},
+			TargetRef:      bgpv1alpha1.TargetRef{Kind: bindingTargetKind, Name: node},
 			VPCRef:         rule.Spec.VPCRef,
 			VIPAddress:     vip.String(),
 			Port:           rule.Spec.Port,
@@ -439,16 +448,26 @@ func (r *NetworkServiceBindingReconciler) unboundBindings(
 			unbound = append(unbound, label+": not created yet")
 			continue
 		}
-		bound := meta.FindStatusCondition(got.Status.Conditions, bgpv1alpha1.ConditionTypeBound)
-		switch {
-		case bound == nil || bound.ObservedGeneration != got.Generation:
-			unbound = append(unbound, label+": not reconciled yet")
-		case bound.Status != metav1.ConditionTrue:
-			unbound = append(unbound, label+": "+bound.Reason)
+		if reason := bindingUnboundReason(got); reason != "" {
+			unbound = append(unbound, label+": "+reason)
 		}
 	}
 	sort.Strings(unbound)
 	return unbound, nil
+}
+
+// bindingUnboundReason returns why binding is not Bound for its current
+// generation, "not reconciled yet" or its Bound condition's reason, or ""
+// when it is Bound.
+func bindingUnboundReason(binding *bgpv1alpha1.ServiceVIPBinding) string {
+	bound := meta.FindStatusCondition(binding.Status.Conditions, bgpv1alpha1.ConditionTypeBound)
+	switch {
+	case bound == nil || bound.ObservedGeneration != binding.Generation:
+		return "not reconciled yet"
+	case bound.Status != metav1.ConditionTrue:
+		return bound.Reason
+	}
+	return ""
 }
 
 // updateRuleCondition applies mutate to rule's current conditions and writes

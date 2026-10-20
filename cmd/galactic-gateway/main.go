@@ -31,6 +31,7 @@ const (
 	resourceBGPAdvertisements = "bgpadvertisements"
 	resourceBGPRouters        = "bgprouters"
 	resourceBGPVRFInstances   = "bgpvrfinstances"
+	resourceServiceVIPBinding = "servicevipbindings"
 
 	cloudAPIGroup          = "galactic.datumapis.com"
 	cloudAPIVersion        = "v1alpha1"
@@ -51,8 +52,9 @@ func main() {
 //
 // BGPRouter is included even though this binary has no BGP client of its own:
 // resolving a backend's uSID lists those CRDs directly, so read access to them
-// is a real requirement here.
-func checkWatchPermissions(mgr ctrl.Manager) {
+// is a real requirement here. ServiceVIPBinding is checked only when ipv4VIPs
+// is set, the only case in which the manager watches it.
+func checkWatchPermissions(mgr ctrl.Manager, ipv4VIPs bool) {
 	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
 	if err != nil {
 		ctrl.Log.Error(err, "RBAC pre-flight: cannot create client, skipping check")
@@ -64,17 +66,19 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 
 	logger := ctrl.Log.WithName("rbac-preflight")
 
-	resources := []struct {
-		group    string
-		version  string
-		resource string
-	}{
+	type watchedResource struct{ group, version, resource string }
+	resources := []watchedResource{
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceNetworkGateways},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceNetworkServices},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPAdvertisements},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPRouters},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPVRFInstances},
 		{group: cloudAPIGroup, version: cloudAPIVersion, resource: resourceVPCAttachments},
+	}
+	if ipv4VIPs {
+		resources = append(resources, watchedResource{
+			group: networkAPIGroup, version: networkAPIVersion, resource: resourceServiceVIPBinding,
+		})
 	}
 
 	for _, r := range resources {
