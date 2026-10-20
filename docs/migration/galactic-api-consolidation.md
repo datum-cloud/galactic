@@ -62,3 +62,20 @@ The old group's VPC finalizers require the old controller to finish deletion,
 or an operator-reviewed cleanup after the old objects are no longer serving.
 Do not remove old CRDs while objects still carry finalizers or while a node
 still depends on their advertisements.
+
+## Retiring the old API groups
+
+The new Galactic binaries read and write `galactic.datumapis.com`. Old
+`network.datumapis.com` BGP objects can remain after rollout, including objects
+for a workload whose CNI ADD ran before the new group was installed. Their old
+`Ready` conditions may be stale; do not treat that status as proof that the new
+router still advertises their routes.
+
+Run `hack/audit-legacy-bgp.py --context <cell>` for every migrated cell. For
+each old-only advertisement or VRF, check whether its workload still needs a
+route. Reattach or restart a live workload and confirm the new-group
+advertisement and VRF become ready before removing the old object. Once the
+old group has no users, export its objects for the migration record, remove the
+old objects, then remove the old CRDs through infra's retirement procedure.
+Never delete an old CRD while it still holds objects: Kubernetes deletes those
+objects with the CRD.
