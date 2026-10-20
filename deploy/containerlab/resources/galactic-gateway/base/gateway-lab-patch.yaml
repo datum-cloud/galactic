@@ -5,10 +5,19 @@ metadata:
 spec:
   template:
     spec:
-      # Image override only. GALACTIC_GATEWAY_XDP_ATTACH stays at the
-      # base's default, dispatch: every edge node also runs an egress shard,
-      # and the two share the uplinks through the node's XDP dispatcher.
+      # The lab image, and IPv4 VIPs turned on. GALACTIC_GATEWAY_XDP_ATTACH
+      # stays at the base's default, dispatch: every edge node also runs an
+      # egress shard, and the two share the uplinks through the node's XDP
+      # dispatcher.
       containers:
         - name: galactic-gateway
           image: galactic-gateway:latest
           imagePullPolicy: Never
+          env:
+            # Off by default. Every lab gateway serves its site's IPv4 VIP,
+            # which the edge nodes originate into the IPv4 underlay
+            # (resources/fabric-router/<site>/frr.conf.<edge node>), and
+            # config/galactic-gateway/rbac.yaml grants the binding access
+            # it needs (verify:gateway-ingress-ipv4).
+            - name: GALACTIC_GATEWAY_IPV4_VIPS
+              value: "true"

@@ -227,7 +227,9 @@ gateway in turn and fails unless both draw the same backend, and it fails if
 the gateway that is not pinned counts any of the flows, which is how a pin
 that leaks shows. The script's header lists every threshold.
 
-The binding counts assume IPv4 VIPs are on. A backend node writes a rule's
+The binding counts assume IPv4 VIPs are on, which the lab's gateway base
+sets on every gateway (`GALACTIC_GATEWAY_IPV4_VIPS=true`; the default is
+off). A backend node writes a rule's
 IPv4 bindings only while some gateway in its site reports the IPv4 VIP
 loaded, so setting `GALACTIC_GATEWAY_IPV4_VIPS=false` on every gateway of a
 site leaves that site four bindings, and `deploy:galactic-gateway`'s wait and
