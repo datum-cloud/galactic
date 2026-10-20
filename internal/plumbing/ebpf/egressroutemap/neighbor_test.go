@@ -262,3 +262,42 @@ func TestResolveNeighbor_TimesOutIfNeverAnswered(t *testing.T) {
 			unreachable, elapsed, neighborResolveTimeout)
 	}
 }
+
+// TestResolveNeighbor_SolicitsLinkLocalNextHop covers a next hop that is a
+// link-local address, as a route learned over an IPv6 link-local BGP session
+// carries. The kernel refuses a connect to a link-local address that names no
+// link, so a solicit dialed without one sends nothing and the next hop never
+// resolves (#933).
+func TestResolveNeighbor_SolicitsLinkLocalNextHop(t *testing.T) {
+	requireRoot(t)
+
+	nearNS, linkIndex, farIP := setUpVethPair(t,
+		"vrfnt2", "fe80::1/64",
+		"vrfnt2p", "fe80::2/64")
+
+	var alreadyResolved bool
+	var mac net.HardwareAddr
+	err := nearNS.Do(func(_ ns.NetNS) error {
+		before, lookupErr := lookupNeighbor(linkIndex, farIP)
+		if lookupErr != nil {
+			return fmt.Errorf("lookupNeighbor before resolve: %w", lookupErr)
+		}
+		alreadyResolved = before != nil
+
+		var resolveErr error
+		mac, resolveErr = resolveNeighbor(linkIndex, farIP)
+		if resolveErr != nil {
+			return fmt.Errorf("resolveNeighbor(%s): %w", farIP, resolveErr)
+		}
+		return nil
+	})
+	if alreadyResolved {
+		t.Fatalf("neighbor for %s already resolved before resolveNeighbor ran -- setup is not exercising a cold cache", farIP)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mac) != 6 {
+		t.Errorf("resolveNeighbor(%s) returned a %d-byte address, want 6", farIP, len(mac))
+	}
+}

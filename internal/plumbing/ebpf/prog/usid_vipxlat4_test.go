@@ -652,11 +652,10 @@ func runEgressRedirect(t *testing.T, objs *UsidObjects, pkt []byte) []byte {
 
 // TestUsidEgress_VIPXlat4TranslatesReplyToIPv4: the backend's TCP or UDP reply
 // to a client's 64:ff9b:: address leaves as IPv4 from the VIP's address and
-// port to the client's own address, unencapsulated, out the public uplink,
-// past the VRF's NAT64 route. Its header has no options, the hop limit less
-// one as TTL,
-// the traffic class as TOS, ID 0 and Don't Fragment, and both checksums are
-// valid.
+// port to the client's own address, unencapsulated, out the public uplink, past
+// the VRF's NAT64 route. Its header has no options, the hop limit less one as
+// TTL, the traffic class as TOS, ID 0 and Don't Fragment, and both checksums
+// are valid.
 func TestUsidEgress_VIPXlat4TranslatesReplyToIPv4(t *testing.T) {
 	payload := []byte("hello, client")
 	for _, proto := range []byte{ipProtoTCP, ipProtoUDP} {

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strconv"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -215,7 +216,7 @@ func resolveNeighbor(linkIndex int, nextHop net.IP) (net.HardwareAddr, error) {
 		return mac, nil
 	}
 
-	solicitNeighbor(nextHop)
+	solicitNeighbor(linkIndex, nextHop)
 
 	deadline := time.Now().Add(neighborResolveTimeout)
 	for {
@@ -249,9 +250,15 @@ func resolveNeighbor(linkIndex int, nextHop net.IP) (net.HardwareAddr, error) {
 // drives the kernel to resolve the neighbor before the packet reaches the wire.
 // Errors from Dial and Write are ignored deliberately: resolveNeighbor's poll
 // loop is the only judge of whether this worked.
-func solicitNeighbor(nextHop net.IP) {
+//
+// The destination carries linkIndex as its zone. A link-local next hop needs
+// one: without a scope ID the kernel refuses the connect with EINVAL, so
+// nothing is sent and the next hop never resolves. The kernel ignores the zone
+// for any other address.
+func solicitNeighbor(linkIndex int, nextHop net.IP) {
 	dialer := &net.Dialer{Timeout: neighborSolicitDialTimeout}
-	conn, err := dialer.DialContext(context.Background(), "udp6", net.JoinHostPort(nextHop.String(), "9"))
+	host := nextHop.String() + "%" + strconv.Itoa(linkIndex)
+	conn, err := dialer.DialContext(context.Background(), "udp6", net.JoinHostPort(host, "9"))
 	if err != nil {
 		return
 	}

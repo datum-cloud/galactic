@@ -2850,25 +2850,24 @@ static USID_ALWAYS_INLINE __u16 usid_ip4_hdr_csum(const __u16 *w)
 // vip_siit_ingress translates a client's IPv4 packet to an IPv4 VIP into the
 // IPv6 packet its backend receives (RFC 7915 stateless translation), for the
 // decapsulated packet at USID_L3_OFFSET. The VIP's ingress row, keyed on
-// (block, argument, slot, protocol, IPv4-mapped destination, destination
-// port), gives the backend's IPv6 address and port. The new header's source is
+// (block, argument, slot, protocol, IPv4-mapped destination, destination port),
+// gives the backend's IPv6 address and port. The new header's source is
 // 64:ff9b:: plus the client's IPv4 address, its traffic class the TOS, its hop
-// limit the TTL less one, since the translator forwards the packet as a
-// router does (RFC 7915 section 4.1), and its flow label 0. IPv4 options are
-// dropped. The L4
-// checksum is updated for the pseudo-header and port changes, and a UDP
+// limit the TTL less one, since the translator forwards the packet as a router
+// does (RFC 7915 section 4.1), and its flow label 0. IPv4 options are dropped.
+// The L4 checksum is updated for the pseudo-header and port changes, and a UDP
 // checksum the update would leave zero is sent as 0xFFFF, zero not being a
 // valid IPv6 UDP checksum.
 //
 // The caller passes only a packet whose outer destination carries a backend
 // slot, which only galactic-gateway's do. Such an IPv4 fragment returns
-// USID_SIIT_FRAGMENT without a lookup: the gateway never sends one, and a
-// later fragment has no ports to key on. A matched UDP datagram with no
-// checksum returns USID_SIIT_UDP_NO_CHECKSUM, since computing one would mean
-// summing the whole payload, which RFC 7915 lets a stateless translator refuse.
-// A matched packet with a TTL of 1 or less returns USID_SIIT_TTL_EXCEEDED. A
-// row whose value is IPv4-mapped, an IPv4 backend no IPv6-only workload can
-// receive, returns USID_SIIT_IPV4_BACKEND rather than passing the packet on
+// USID_SIIT_FRAGMENT without a lookup: the gateway never sends one, and a later
+// fragment has no ports to key on. A matched UDP datagram with no checksum
+// returns USID_SIIT_UDP_NO_CHECKSUM, since computing one would mean summing the
+// whole payload, which RFC 7915 lets a stateless translator refuse. A matched
+// packet with a TTL of 1 or less returns USID_SIIT_TTL_EXCEEDED. A row whose
+// value is IPv4-mapped, an IPv4 backend no IPv6-only workload can receive,
+// returns USID_SIIT_IPV4_BACKEND rather than passing the packet on
 // untranslated. None of these changes the packet.
 //
 // The skb's checksum state stays consistent: the header is stored with
@@ -2883,8 +2882,8 @@ static USID_ALWAYS_INLINE __u16 usid_ip4_hdr_csum(const __u16 *w)
 // Returns USID_SIIT_TRANSLATED, USID_SIIT_PASS when no row applies and the
 // packet is unchanged, USID_SIIT_FRAGMENT, USID_SIIT_UDP_NO_CHECKSUM,
 // USID_SIIT_IPV4_BACKEND, USID_SIIT_TTL_EXCEEDED, or USID_SIIT_FAILED when a
-// helper failed and the packet may be half-translated.
-// Every caller re-derives its packet pointers afterwards.
+// helper failed and the packet may be half-translated. Every caller re-derives
+// its packet pointers afterwards.
 __attribute__((noinline)) int vip_siit_ingress(struct __sk_buff *skb, __u64 block, __u32 argument, __u32 slot)
 {
 	struct usid_iphdr ip4;
@@ -2988,24 +2987,25 @@ __attribute__((noinline)) int vip_siit_ingress(struct __sk_buff *skb, __u64 bloc
 // vip_siit_egress translates an IPv6 backend's reply to an IPv4 client of an
 // IPv4 VIP back into the IPv4 packet the client expects, for the packet at
 // USID_L3_OFFSET. Only a TCP or UDP packet with no extension header whose
-// destination is in 64:ff9b::/96 is looked up, in the VIP's egress row keyed
-// on (block, argument, protocol, USID_VIP_XLAT_DIR_EGRESS_XLAT, source address,
+// destination is in 64:ff9b::/96 is looked up, in the VIP's egress row keyed on
+// (block, argument, protocol, USID_VIP_XLAT_DIR_EGRESS_XLAT, source address,
 // source port). The new header's source is the row's IPv4 VIP and its
 // destination the client address embedded in the IPv6 destination; the source
-// port becomes the VIP's. TTL is the hop limit less one, as on ingress, and
-// TOS comes from the traffic class. The header has no options, ID 0 and Don't Fragment set: a stateless
-// translator has no way to pick IDs unique enough for fragments to reassemble,
-// and with DF set the ID is unused (RFC 6864). The header checksum is computed
-// and the L4 checksum updated for the pseudo-header and port changes; a UDP
-// checksum of zero stays zero, which IPv4 reads as none.
+// port becomes the VIP's. TTL is the hop limit less one, as on ingress, and TOS
+// comes from the traffic class. The header has no options, ID 0 and Don't
+// Fragment set: a stateless translator has no way to pick IDs unique enough for
+// fragments to reassemble, and with DF set the ID is unused (RFC 6864). The
+// header checksum is computed and the L4 checksum updated for the pseudo-header
+// and port changes; a UDP checksum of zero stays zero, which IPv4 reads as
+// none.
 //
 // Checksum state is kept consistent as in vip_siit_ingress.
 //
 // Returns USID_SIIT_TRANSLATED, USID_SIIT_PASS when no row applies and the
 // packet is unchanged, USID_SIIT_TTL_EXCEEDED for a matched reply with a hop
 // limit of 1 or less, also unchanged, or USID_SIIT_FAILED when a helper failed
-// and the packet may be half-translated. Every caller re-derives its packet pointers
-// afterwards.
+// and the packet may be half-translated. Every caller re-derives its packet
+// pointers afterwards.
 __attribute__((noinline)) int vip_siit_egress(struct __sk_buff *skb, __u64 block, __u32 argument)
 {
 	struct usid_ip6hdr ip6;
