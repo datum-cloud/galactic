@@ -60,6 +60,12 @@ import (
 // guestHWAddr is the guest-side veth's MAC, used to prime a permanent neighbor
 // entry for the pod's address. It is nil for a tap, which has no guest-side
 // link in this namespace to read a MAC from.
+//
+// The pod-subnet routes are installed only while the host-side interface is
+// up: the kernel refuses a route through a down device and flushes a device's
+// routes when it goes down. While traffic policy is on, the interface stays
+// down until galactic-bgp verifies enforcement, and galactic-bgp installs the
+// routes with InstallPodSubnetRoutes once it brings the interface up.
 func ConfigureHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, guestHWAddr net.HardwareAddr) error {
 	if res == nil {
 		return nil
@@ -69,17 +75,9 @@ func ConfigureHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, gu
 	if err != nil {
 		return fmt.Errorf("get host interface %q: %w", hostName, err)
 	}
-	tableID, err := vrf.TableID(vpc)
-	if err != nil {
-		return fmt.Errorf("get VRF table ID for pod subnet route: %w", err)
-	}
-
 	if res.IPv6Gateway != nil {
 		gwNet := &net.IPNet{IP: res.IPv6Gateway, Mask: net.CIDRMask(128, 128)}
 		if err := installGatewayAddress(hostLink, gwNet, 0); err != nil {
-			return err
-		}
-		if err := installPodSubnetRoute(hostLink, res.IPv6Subnet, netlink.FAMILY_V6, int(tableID)); err != nil {
 			return err
 		}
 		if guestHWAddr != nil {
@@ -94,14 +92,51 @@ func ConfigureHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, gu
 		if err := installGatewayAddress(hostLink, gwNet, addrFlags); err != nil {
 			return err
 		}
-		ipv4Subnet := &net.IPNet{IP: res.IPv4Address, Mask: net.CIDRMask(32, 32)}
-		if err := installPodSubnetRoute(hostLink, ipv4Subnet, netlink.FAMILY_V4, int(tableID)); err != nil {
-			return err
-		}
 		if guestHWAddr != nil {
 			if err := installGatewayNeighbor(hostLink, res.IPv4Address, netlink.FAMILY_V4, guestHWAddr); err != nil {
 				return err
 			}
+		}
+	}
+	if hostLink.Attrs().Flags&net.FlagUp == 0 {
+		return nil
+	}
+	return installPodSubnetRoutes(hostLink, vpc, res)
+}
+
+// InstallPodSubnetRoutes installs this attachment's pod-subnet routes, one per
+// configured family, into the VPC's shared VRF table, pointing at its
+// host-side interface. The interface must be up, or the kernel refuses the
+// routes. Idempotent, with the same stale-route handling as
+// ConfigureHostGateway. A nil res installs nothing.
+func InstallPodSubnetRoutes(vpc, vpcAttachment string, res *cniipam.IPAMResult) error {
+	if res == nil {
+		return nil
+	}
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	hostLink, err := netlink.LinkByName(hostName)
+	if err != nil {
+		return fmt.Errorf("get host interface %q: %w", hostName, err)
+	}
+	return installPodSubnetRoutes(hostLink, vpc, res)
+}
+
+// installPodSubnetRoutes installs res's pod-subnet route for each family whose
+// gateway res configures, on hostLink, in vpc's VRF table.
+func installPodSubnetRoutes(hostLink netlink.Link, vpc string, res *cniipam.IPAMResult) error {
+	tableID, err := vrf.TableID(vpc)
+	if err != nil {
+		return fmt.Errorf("get VRF table ID for pod subnet route: %w", err)
+	}
+	if res.IPv6Gateway != nil {
+		if err := installPodSubnetRoute(hostLink, res.IPv6Subnet, netlink.FAMILY_V6, int(tableID)); err != nil {
+			return err
+		}
+	}
+	if res.IPv4Gateway != nil {
+		ipv4Subnet := &net.IPNet{IP: res.IPv4Address, Mask: net.CIDRMask(32, 32)}
+		if err := installPodSubnetRoute(hostLink, ipv4Subnet, netlink.FAMILY_V4, int(tableID)); err != nil {
+			return err
 		}
 	}
 	return nil

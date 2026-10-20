@@ -120,7 +120,7 @@ bare host route. Because a wider mask would normally make the kernel
 auto-install a connected route for the whole `/25` in the VRF table — exactly
 the subnet-router-anycast hazard the `/32` choice exists to avoid elsewhere —
 the address is added with `IFA_F_NOPREFIXROUTE`, which suppresses that
-auto-created route. The explicit pod-subnet `/32` route `hostgw.ConfigureHostGateway`
+auto-created route. The explicit pod-subnet `/32` route the host gateway step
 installs remains the only route governing delivery to the VM's address.
 
 ## IPAM Fields

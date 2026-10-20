@@ -16,6 +16,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
@@ -45,12 +46,12 @@ func activateTrafficPolicy(pinDir, vpc, vpcAttachment string, registered bool, i
 			return errors.Join(quarantineLink(hostName), err,
 				fmt.Errorf("%w: the node has no SRv6 locator, so nothing is attached", errNoEnforcement))
 		}
-		return ensureLinkUp(hostName)
+		return bringUp(hostName, vpc, vpcAttachment, ipamResult)
 	}
 	maps, err := tpmap.OpenPinned(pinDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return ensureLinkUp(hostName) // an older datapath: nothing to activate
+			return bringUp(hostName, vpc, vpcAttachment, ipamResult) // an older datapath: nothing to activate
 		}
 		return errors.Join(quarantineLink(hostName), fmt.Errorf("open traffic policy maps: %w", err))
 	}
@@ -103,7 +104,7 @@ func activateTrafficPolicy(pinDir, vpc, vpcAttachment string, registered bool, i
 	program, err := ebpf.LoadPinnedProgram(filepath.Join(pinDir, attach.TpDeliverPinName), nil)
 	if err != nil {
 		if !active {
-			return ensureLinkUp(hostName) // an older datapath without tp_deliver
+			return bringUp(hostName, vpc, vpcAttachment, ipamResult) // an older datapath without tp_deliver
 		}
 		return fmt.Errorf("load pinned tp_deliver: %w", err)
 	}
@@ -116,7 +117,7 @@ func activateTrafficPolicy(pinDir, vpc, vpcAttachment string, registered bool, i
 			return err
 		}
 	}
-	return ensureLinkUp(hostName)
+	return bringUp(hostName, vpc, vpcAttachment, ipamResult)
 }
 
 // quarantineLink takes hostName down if it is up.
@@ -130,6 +131,28 @@ func quarantineLink(hostName string) error {
 	}
 	if err := netlink.LinkSetDown(link); err != nil {
 		return fmt.Errorf("quarantine %s: %w", hostName, err)
+	}
+	return nil
+}
+
+// bringUp brings hostName up and then installs the attachment's pod-subnet
+// routes. The master plugin cannot add them while the link is down, and the
+// kernel flushes them whenever it goes down, so they are installed here,
+// after the link's final transition. A missing link is left to the master
+// plugin that owns it.
+func bringUp(hostName, vpc, vpcAttachment string, ipamResult *cniipam.IPAMResult) error {
+	if err := ensureLinkUp(hostName); err != nil {
+		return err
+	}
+	if _, err := netlink.LinkByName(hostName); err != nil {
+		var notFound netlink.LinkNotFoundError
+		if errors.As(err, &notFound) {
+			return nil
+		}
+		return fmt.Errorf("find host interface %q: %w", hostName, err)
+	}
+	if err := hostgw.InstallPodSubnetRoutes(vpc, vpcAttachment, ipamResult); err != nil {
+		return fmt.Errorf("install pod subnet routes: %w", err)
 	}
 	return nil
 }

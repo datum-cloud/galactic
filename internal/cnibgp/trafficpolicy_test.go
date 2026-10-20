@@ -13,9 +13,11 @@ import (
 	"testing"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
@@ -105,6 +107,79 @@ func TestActivateTrafficPolicyEnforce(t *testing.T) {
 	if err := maps.Interfaces.Lookup(uint32(link.Attrs().Index), &row); err != nil || row.PolicyToken == 0 ||
 		row.Kind != tpmap.KindTenant {
 		t.Errorf("policy row = %+v, %v; want a tenant row with a token", row, err)
+	}
+}
+
+// podRoutes returns the destinations of the unicast routes on host in the
+// test VPC's VRF table, leaving out the ones the kernel adds itself.
+func podRoutes(t *testing.T, host string) map[string]bool {
+	t.Helper()
+	link, err := netlink.LinkByName(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table, err := vrf.TableID(testVPC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL,
+		&netlink.Route{Table: int(table), LinkIndex: link.Attrs().Index},
+		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, r := range routes {
+		if r.Dst != nil && r.Type == unix.RTN_UNICAST && r.Protocol != unix.RTPROT_KERNEL {
+			got[r.Dst.String()] = true
+		}
+	}
+	return got
+}
+
+// TestActivateTrafficPolicyInstallsPodRoutes covers a quarantined host side:
+// the master plugin's host gateway step succeeds without the pod-subnet
+// routes, which the kernel refuses on a down link, and activation installs
+// them once it brings the link up. A link quarantined after the master left
+// it up, which flushes its routes, gets them back the same way.
+func TestActivateTrafficPolicyInstallsPodRoutes(t *testing.T) {
+	_, ipv6, _ := net.ParseCIDR("2001:db8::5/64")
+	ipv6.IP = net.ParseIP("2001:db8::5")
+	ipam := &cniipam.IPAMResult{
+		IPv6Subnet:  ipv6,
+		IPv6Gateway: net.ParseIP("2001:db8::1"),
+		IPv4Address: net.ParseIP("192.0.2.5"),
+		IPv4Gateway: net.ParseIP("192.0.2.1"),
+	}
+	want := []string{"2001:db8::/64", "192.0.2.5/32"}
+	for _, tt := range []struct {
+		name        string
+		quarantined bool
+	}{
+		{"master left the link down", true},
+		{"master left the link up", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pinDir, host, _ := activationFixture(t, tpmap.State{Mode: tpmap.ModeEnforce, Capable: true}, tt.quarantined)
+			if err := hostgw.ConfigureHostGateway(testVPC, testAttachment, ipam, nil); err != nil {
+				t.Fatalf("ConfigureHostGateway: %v", err)
+			}
+			if got := podRoutes(t, host); tt.quarantined && len(got) != 0 {
+				t.Errorf("routes on a down link = %v, want none", got)
+			}
+			if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, ipam); err != nil {
+				t.Fatalf("activateTrafficPolicy: %v", err)
+			}
+			if !linkUp(t, host) {
+				t.Fatal("host side still down after activation")
+			}
+			got := podRoutes(t, host)
+			for _, dst := range want {
+				if !got[dst] {
+					t.Errorf("route to %s missing after activation; routes %v", dst, got)
+				}
+			}
+		})
 	}
 }
 

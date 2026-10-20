@@ -124,7 +124,9 @@ sequenceDiagram
     Master->>HostGW: hostgw.ConfigureHostGateway(vpc, attachment, ipamResult, guestMAC-or-nil)
     activate HostGW
     HostGW->>HostGW: AddrAdd(gateway) on this attachment's own host iface<br/>(/128 IPv6, /32 IPv4 veth, /25 + NOPREFIXROUTE IPv4 tap)
-    HostGW->>HostGW: RouteAdd(pod subnet) into the (VPC-shared) VRF table
+    opt host iface up (traffic policy off)
+        HostGW->>HostGW: RouteAdd(pod subnet) into the (VPC-shared) VRF table
+    end
     opt guest MAC known (veth only)
         HostGW->>HostGW: NeighSet(pod IP -> guest MAC), permanent
     end
@@ -207,13 +209,17 @@ sequenceDiagram
   persisted to an on-disk, flock-guarded marker file keyed by `containerID`
   under this node's own filesystem, not to a CRD — so `galactic-ipam`'s own
   DEL never needs a Kubernetes round-trip to find what to release.
-- **Host gateway configuration is why `galactic-bgp` never touches the
-  kernel.** `internal/hostgw.ConfigureHostGateway` — called directly by
-  both master plugins, before they print their own result — assigns the
-  gateway address on *this attachment's own* host interface (never the
-  shared VRF device: IPv6 NDP only resolves on the link an address is
-  actually configured on) and installs an explicit pod-subnet route into
-  the VRF table. For veth, it also primes a permanent ARP/NDP neighbor
+- **Host gateway configuration belongs to the master plugins.**
+  `internal/hostgw.ConfigureHostGateway` — called directly by both master
+  plugins, before they print their own result — assigns the gateway
+  address on *this attachment's own* host interface (never the shared VRF
+  device: IPv6 NDP only resolves on the link an address is actually
+  configured on) and installs an explicit pod-subnet route into the VRF
+  table. The kernel refuses a route through a down interface and flushes a
+  device's routes when it goes down, so while traffic policy holds the host
+  interface down the route is skipped here, and `galactic-bgp` installs it
+  (`hostgw.InstallPodSubnetRoutes`) once it has verified enforcement and
+  brought the interface up. For veth, it also primes a permanent ARP/NDP neighbor
   entry for the pod's address, so the eBPF uSID datapath's
   `bpf_fib_lookup()` always finds one and every packet takes the
   `bpf_redirect_peer` fast path. Tap has no separate guest-side link in this
