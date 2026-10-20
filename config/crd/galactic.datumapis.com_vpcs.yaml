@@ -133,12 +133,12 @@ spec:
                 format: int64
                 type: integer
               vpc:
-                description: Base62-encoded VPC identifier.
+                description: |-
+                  Base62-encoded VPC identifier.
+                  Empty until the fabric identity reaches this cell.
                 maxLength: 16
                 minLength: 1
                 type: string
-            required:
-            - vpc
             type: object
         required:
         - spec

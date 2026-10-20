@@ -50,9 +50,11 @@ type VPCStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// Base62-encoded VPC identifier.
+	// Empty until the fabric identity reaches this cell.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=16
-	VPC string `json:"vpc"`
+	VPC string `json:"vpc,omitempty"`
 }
 
 // +kubebuilder:object:root=true
