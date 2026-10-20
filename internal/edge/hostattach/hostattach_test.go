@@ -19,18 +19,21 @@ import (
 )
 
 const (
-	vpcA = "vpcA00001"
-	vpcB = "vpcB00001"
+	vpcA = "00000001A"
+	vpcB = "00000001B"
 
 	// Pod-local identifiers every consumer pod uses, deliberately equal.
 	podTable = 100
 	podIndex = 42
 
+	pod1A = "pod1/A"
 	pod3A = "pod3/A"
-	pod4B = "pod4/B"
 
-	// tunName is every packet pod's TUN device.
-	tunName = "tun0"
+	// uplinkName is the node's underlay interface and tunName every packet
+	// pod's TUN device.
+	uplinkName = "uplink0"
+	tunName    = "tun0"
+	pod4B      = "pod4/B"
 
 	workloadPort = 7000
 	podPort      = 8000
@@ -86,7 +89,7 @@ func newEdgeFixture(t *testing.T) *edgeFixture {
 			PodLink: podLink, PodIndex: podIndex, Address: netip.MustParseAddr(addr),
 		}
 	}
-	f.atts["pod1/A"] = att("uid-pod1-a", vrfA, "p1a", "a0", "fd00:aa::1")
+	f.atts[pod1A] = att("uid-pod1-a", vrfA, "p1a", "a0", "fd00:aa::1")
 	f.atts["pod1/B"] = att("uid-pod1-b", vrfB, "p1b", "b0", "fd00:aa::1")
 	pod1B := f.atts["pod1/B"]
 	pod1B.PodTable, pod1B.PodIndex = podTable+1, podIndex+1
@@ -95,10 +98,10 @@ func newEdgeFixture(t *testing.T) *edgeFixture {
 	for key, vrfName := range map[string]string{pod3A: vrfA, pod4B: vrfB} {
 		a := att("uid-"+key, vrfName, "p"+key[3:4]+"t", "a0", "fd00:aa::3")
 		a.Prefixes = []netip.Prefix{sitePrefix}
-		a.TUN = &TUN{Name: "tun0", Owner: 65534, Group: 65534}
+		a.TUN = &TUN{Name: tunName, Owner: 65534, Group: 65534}
 		f.atts[key] = a
 	}
-	for _, key := range []string{"pod1/A", "pod1/B", "pod2/A", pod3A, pod4B} {
+	for _, key := range []string{pod1A, "pod1/B", "pod2/A", pod3A, pod4B} {
 		res, err := Provision(f.hostH, f.handles[key[:4]], f.atts[key])
 		if err != nil {
 			t.Fatalf("provision %s: %v", key, err)
@@ -113,8 +116,8 @@ func newEdgeFixture(t *testing.T) *edgeFixture {
 	serveIdentity(t, f.pods["pod1"], vrfA, podPort, "pod1-A")
 	serveIdentity(t, f.pods["pod1"], vrfB, podPort, "pod1-B")
 	serveIdentity(t, f.pods["pod2"], vrfA, podPort, "pod2-A")
-	f.tunA = newTUNResponder(t, f.pods["pod3"], "tun0")
-	f.tunB = newTUNResponder(t, f.pods["pod4"], "tun0")
+	f.tunA = newTUNResponder(t, f.pods["pod3"])
+	f.tunB = newTUNResponder(t, f.pods["pod4"])
 	return f
 }
 
@@ -173,7 +176,7 @@ func TestHostAttachmentFixture(t *testing.T) {
 
 func (f *edgeFixture) testEqualPodLocalIdentifiersHostOnlyKeys(t *testing.T) {
 	hostIdx := map[int]string{}
-	for _, key := range []string{"pod1/A", "pod2/A", pod3A, pod4B} {
+	for _, key := range []string{pod1A, "pod2/A", pod3A, pod4B} {
 		res := f.results[key]
 		if res.PodIndex != podIndex {
 			t.Errorf("%s pod ifindex %d, want the shared pod-local %d", key, res.PodIndex, podIndex)
@@ -274,7 +277,7 @@ func (f *edgeFixture) testMinimumIPv6MTU(t *testing.T) {
 }
 
 func (f *edgeFixture) testMissingHostRouteFailsInsideVRF(t *testing.T) {
-	leaks := watchLeaks(t, f.host, "uplink0", siteHost)
+	leaks := watchLeaks(t, f.host, uplinkName, siteHost)
 	f.host.do(t, func() error {
 		return netlink.RouteDel(&netlink.Route{Table: int(f.results[pod3A].HostTable), Dst: prefixNet(sitePrefix)})
 	})
@@ -301,12 +304,12 @@ func (f *edgeFixture) testMissingPodRouteFailsInsidePodVRF(t *testing.T) {
 	if got := leaks.stop(); got != 0 {
 		t.Fatalf("pod eth0 transmitted %d packets for a VRF-bound socket", got)
 	}
-	f.provision(t, "pod1/A")
+	f.provision(t, pod1A)
 	expectIdentity(t, f.pods["pod1"], vrfA, wlDst, "workload-A")
 }
 
 func (f *edgeFixture) testDetachedInterfaceFailsInsideVRF(t *testing.T) {
-	leaks := watchLeaks(t, f.host, "uplink0", netip.MustParseAddr("fd00:aa::2"))
+	leaks := watchLeaks(t, f.host, uplinkName, netip.MustParseAddr("fd00:aa::2"))
 	f.pods["pod2"].do(t, func() error {
 		link, err := netlink.LinkByName("a0")
 		if err != nil {

@@ -95,7 +95,7 @@ func newHost(t *testing.T, vpcs ...string) testNS {
 		if err := enableSysctl("net/ipv6/conf/all/forwarding"); err != nil {
 			return err
 		}
-		uplink := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "uplink0"}}
+		uplink := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: uplinkName}}
 		if err := netlink.LinkAdd(uplink); err != nil {
 			return err
 		}
@@ -444,7 +444,7 @@ type tunResponder struct {
 	largest atomic.Uint64
 }
 
-func newTUNResponder(t *testing.T, pod testNS, name string) *tunResponder {
+func newTUNResponder(t *testing.T, pod testNS) *tunResponder {
 	t.Helper()
 	r := &tunResponder{}
 	pod.do(t, func() error {
@@ -452,7 +452,7 @@ func newTUNResponder(t *testing.T, pod testNS, name string) *tunResponder {
 		if err != nil {
 			return err
 		}
-		ifr, err := unix.NewIfreq(name)
+		ifr, err := unix.NewIfreq(tunName)
 		if err != nil {
 			_ = unix.Close(fd)
 			return err
@@ -460,9 +460,9 @@ func newTUNResponder(t *testing.T, pod testNS, name string) *tunResponder {
 		ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
 		if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
 			_ = unix.Close(fd)
-			return fmt.Errorf("attach to TUN %q: %w", name, err)
+			return fmt.Errorf("attach to TUN %q: %w", tunName, err)
 		}
-		r.f = os.NewFile(uintptr(fd), name)
+		r.f = os.NewFile(uintptr(fd), tunName)
 		return nil
 	})
 	t.Cleanup(func() { _ = r.f.Close() })
@@ -554,7 +554,7 @@ func TestLeakWatchSeesTransmittedPackets(t *testing.T) {
 	requireRoot(t)
 	host := newHost(t)
 	dst, other := netip.MustParseAddr("2001:db8:7::1"), netip.MustParseAddr("2001:db8:7::2")
-	w := watchLeaks(t, host, "uplink0", dst)
+	w := watchLeaks(t, host, uplinkName, dst)
 	host.do(t, func() error {
 		for _, to := range []netip.Addr{dst, other} {
 			c, err := net.DialUDP("udp6", nil, net.UDPAddrFromAddrPort(netip.AddrPortFrom(to, 9)))
