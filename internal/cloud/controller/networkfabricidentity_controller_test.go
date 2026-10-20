@@ -220,7 +220,7 @@ func newIdentityFixture(t *testing.T, presences ...string) *identityFixture {
 		presence.Namespace = testNamespace
 		presence.Name = testNetworkName + "-" + location
 		presence.Spec.Network = networkingv1alpha.LocalNetworkRef{Name: testNetworkName}
-		presence.Spec.Location = networkingv1alpha.LocationReference{Name: location}
+		presence.Spec.Location.Name = location
 		objects = append(objects, presence)
 	}
 
@@ -277,7 +277,7 @@ func (f *identityFixture) addNetwork(name string, locations ...string) {
 		presence.Namespace = testNamespace
 		presence.Name = name + "-" + location
 		presence.Spec.Network = networkingv1alpha.LocalNetworkRef{Name: name}
-		presence.Spec.Location = networkingv1alpha.LocationReference{Name: location}
+		presence.Spec.Location.Name = location
 		if err := f.networks.Create(f.ctx, presence); err != nil {
 			f.t.Fatalf("declare the presence of %q in %q: %v", name, location, err)
 		}
@@ -608,7 +608,7 @@ func newPresence(location string) *networkingv1alpha.NetworkContext {
 	presence.Namespace = testNamespace
 	presence.Name = testNetworkName + "-" + location
 	presence.Spec.Network = networkingv1alpha.LocalNetworkRef{Name: testNetworkName}
-	presence.Spec.Location = networkingv1alpha.LocationReference{Name: location}
+	presence.Spec.Location.Name = location
 	return presence
 }
 
