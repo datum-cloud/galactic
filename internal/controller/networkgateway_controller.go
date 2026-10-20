@@ -105,10 +105,10 @@ type NetworkGatewayReconciler struct {
 	Disabled bool
 
 	// IPv4VIPs loads a rule's IPv4 VIPs into the engine alongside its IPv6
-	// ones (config.EnvGatewayIPv4VIPs), over the rule's IPv6 backends, whose
-	// nodes translate its flows, and advertises one once its backends' ServiceVIPBindings are Bound; see
-	// buildDesiredRule and applyBGPAdvertisements. Off, no IPv4 VIP is loaded
-	// or advertised.
+	// ones (config.EnvGatewayIPv4VIPs), over the rule's IPv6 backends,
+	// whose nodes translate its flows, and advertises one once its
+	// backends' ServiceVIPBindings are Bound; see buildDesiredRule and
+	// applyBGPAdvertisements. Off, no IPv4 VIP is loaded or advertised.
 	IPv4VIPs bool
 
 	// drain keeps a deleted rule loaded until its route is withdrawn. See
