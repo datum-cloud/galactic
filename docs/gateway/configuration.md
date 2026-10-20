@@ -862,6 +862,20 @@ Roll out in this order:
    later, set `GALACTIC_GATEWAY_IPV4_VIPS=false` on the gateways for the
    upgrade, then remove the override one gateway node at a time.
 
+Upgrading `galactic-router` (step 2) before `galactic-gateway` (step 4) is
+the safe order. Until a backend node's binding reports `Bound`, an upgraded
+gateway loads the rule's IPv4 VIP but reports `BindingsNotBound` and
+advertises nothing, so no IPv4 traffic is drawn to a backend that cannot
+translate it yet.
+
+Two things about the gateway's access check at startup matter during the
+rollout. With the switch on, startup waits up to 30 seconds for the
+`servicevipbindings` access review and exits if the review cannot be made,
+so a gateway that starts while the API server is unreachable restarts
+rather than coming up. And the check runs only at startup: a gateway that
+started before step 3's grant landed stays with IPv4 VIPs off, reporting
+`Unsupported`, until its pod is restarted.
+
 Skew to watch for during the rollout. It fails closed at every step:
 
 - An older gateway leaves IPv4 VIPs out and never advertises them.

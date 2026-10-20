@@ -224,6 +224,14 @@ coming from the VIP, both backends answer, and no gateway counts a drop, a
 `ctstate INVALID` drop or an egress shard translation. The script's header
 lists every threshold.
 
+The binding counts assume IPv4 VIPs are on. A backend node writes a rule's
+IPv4 bindings only while some gateway in its site reports the IPv4 VIP
+loaded, so setting `GALACTIC_GATEWAY_IPV4_VIPS=false` on every gateway of a
+site leaves that site four bindings, and `deploy:galactic-gateway`'s wait and
+`verify:gateway` then fail. sjc and iad each have one gateway, so the
+switch on either one is enough; dfw needs it on both. The IPv4 check fails
+for any gateway node with the switch off, whatever its site.
+
 ```bash
 # NetworkGateways Ready, NetworkServices Accepted, ServiceVIPBindings Bound
 task verify:gateway
