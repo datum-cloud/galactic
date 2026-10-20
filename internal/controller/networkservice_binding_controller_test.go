@@ -405,6 +405,41 @@ var invalidRuleEdits = []struct {
 		},
 		message: "Bogus",
 	},
+	{
+		// Admission refuses every protocol but tcp and udp; this is a rule
+		// stored under a schema that admitted one.
+		name: "unserved protocol",
+		edit: func(rule *bgpv1alpha1.NetworkService) {
+			rule.Spec.Protocol = bgpv1alpha1.NetworkServiceProtocolICMP
+			rule.Spec.Port, rule.Spec.BackendPort = 0, 0
+		},
+		message: `protocol "icmp" is not served`,
+	},
+	{
+		// A rule with no IPv6 VIP needs no bindings, but a protocol the
+		// datapath does not serve still leaves the existing ones alone.
+		name: "unserved protocol on an IPv4-only rule",
+		edit: func(rule *bgpv1alpha1.NetworkService) {
+			rule.Spec.VIPAddresses = []string{"203.0.113.33"}
+			rule.Spec.Protocol = bgpv1alpha1.NetworkServiceProtocolGRE
+			rule.Spec.Port, rule.Spec.BackendPort = 0, 0
+		},
+		message: `protocol "gre" is not served`,
+	},
+	{
+		name: "unset port",
+		edit: func(rule *bgpv1alpha1.NetworkService) {
+			rule.Spec.Port = 0
+		},
+		message: "port 0 is outside 1-65535",
+	},
+	{
+		name: "unset backend port",
+		edit: func(rule *bgpv1alpha1.NetworkService) {
+			rule.Spec.BackendPort = 0
+		},
+		message: "backendPort 0 is outside 1-65535",
+	},
 }
 
 // TestNetworkServiceBindingReconciler_InvalidRuleOnServingNode covers a rule

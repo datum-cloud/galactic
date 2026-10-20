@@ -4,10 +4,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// NetworkServiceProtocol is the transport protocol matched by a NetworkService's
-// ingress VIP.
+// NetworkServiceProtocol is the IP protocol a VIP or endpoint matches.
 //
-// +kubebuilder:validation:Enum=tcp;udp
+// The set of values is open-ended. A client reading an object that carries
+// this type must accept a value it does not recognise, preserve it when it
+// writes the object back, and treat it as a protocol it cannot act on, never
+// as tcp or udp. Each field of this type admits only the values it lists, and
+// the API server refuses any other.
 type NetworkServiceProtocol string
 
 const (
@@ -16,6 +19,24 @@ const (
 
 	// NetworkServiceProtocolUDP matches UDP traffic.
 	NetworkServiceProtocolUDP NetworkServiceProtocol = "udp"
+
+	// NetworkServiceProtocolSCTP matches SCTP traffic (IP protocol 132), which
+	// has ports. It is declared but not served yet.
+	NetworkServiceProtocolSCTP NetworkServiceProtocol = "sctp"
+
+	// NetworkServiceProtocolESP matches IPsec Encapsulating Security Payload
+	// traffic (IP protocol 50), which has no ports. It is declared but not
+	// served yet.
+	NetworkServiceProtocolESP NetworkServiceProtocol = "esp"
+
+	// NetworkServiceProtocolGRE matches Generic Routing Encapsulation traffic
+	// (IP protocol 47), which has no ports. It is declared but not served yet.
+	NetworkServiceProtocolGRE NetworkServiceProtocol = "gre"
+
+	// NetworkServiceProtocolICMP matches ICMP traffic: ICMPv6 (IP protocol 58)
+	// on an IPv6 VIP and ICMP (IP protocol 1) on an IPv4 VIP. It has no ports.
+	// It is declared but not served yet.
+	NetworkServiceProtocolICMP NetworkServiceProtocol = "icmp"
 )
 
 // Accepted reasons — used as Accepted.Reason on NetworkService (and reused by
@@ -72,6 +93,11 @@ type NetworkService struct {
 
 // NetworkServiceSpec defines the desired ingress load-balancing state for a
 // tenant VPC.
+//
+// +kubebuilder:validation:XValidation:rule="!(self.protocol in ['tcp', 'udp', 'sctp']) || has(self.port)",message="port is required for tcp, udp and sctp"
+// +kubebuilder:validation:XValidation:rule="!(self.protocol in ['tcp', 'udp', 'sctp']) || has(self.backendPort)",message="backendPort is required for tcp, udp and sctp"
+// +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.port)",message="port must not be set for esp, gre and icmp, which have no ports"
+// +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.backendPort)",message="backendPort must not be set for esp, gre and icmp, which have no ports"
 type NetworkServiceSpec struct {
 	// VPCRef is the opaque identifier of the target VPC this service applies
 	// to. This repo does not own the VPC API and does not validate the
@@ -101,15 +127,29 @@ type NetworkServiceSpec struct {
 	// +listType=set
 	VIPAddresses []string `json:"vipAddresses"`
 
-	// Protocol is the transport protocol matched by VIPAddresses/Port.
+	// Protocol is the IP protocol this service load-balances on VIPAddresses.
+	//
+	// The API admits tcp, udp, sctp, esp, gre and icmp, and the gateway
+	// datapath serves tcp and udp. A service with any other admitted value is
+	// refused with a message saying its protocol is not served yet. sctp has
+	// ports and needs Port and BackendPort. esp, gre and icmp have no ports
+	// and must set neither; a backend for them is chosen from the client and
+	// VIP addresses alone. The set of values is open-ended, so a client must
+	// accept and preserve a value it does not recognise, as
+	// NetworkServiceProtocol describes.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=tcp;udp;sctp;esp;gre;icmp
+	// +kubebuilder:validation:XValidation:rule="self in ['tcp', 'udp']",message="protocol is not served yet: the gateway datapath serves tcp and udp only"
 	Protocol NetworkServiceProtocol `json:"protocol"`
 
-	// Port is the ingress port on VIPAddresses that this service load-balances.
-	// +kubebuilder:validation:Required
+	// Port is the ingress port on VIPAddresses that this service load-balances,
+	// 1-65535. It is required for a protocol with ports (tcp, udp and sctp)
+	// and must be unset for one without (esp, gre and icmp). Zero means unset
+	// and is omitted when encoding, and an explicit 0 is refused.
+	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
-	Port int32 `json:"port"`
+	Port int32 `json:"port,omitempty"`
 
 	// BackendSelector selects the VPCAttachments (galactic.datumapis.com/v1alpha1,
 	// in any namespace) that serve this service, matched against each
@@ -125,11 +165,14 @@ type NetworkServiceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="(has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions) && size(self.matchExpressions) > 0)",message="backendSelector must not be empty"
 	BackendSelector metav1.LabelSelector `json:"backendSelector"`
 
-	// BackendPort is the destination port on every selected backend.
-	// +kubebuilder:validation:Required
+	// BackendPort is the destination port on every selected backend, 1-65535.
+	// Like Port, it is required for tcp, udp and sctp and must be unset for
+	// esp, gre and icmp. Zero means unset and is omitted when encoding, and an
+	// explicit 0 is refused.
+	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
-	BackendPort int32 `json:"backendPort"`
+	BackendPort int32 `json:"backendPort,omitempty"`
 }
 
 // NetworkServiceStatus defines the observed state of a NetworkService.

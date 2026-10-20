@@ -407,11 +407,15 @@ selection.
 
 _Underlying type:_ _string_
 
-NetworkServiceProtocol is the transport protocol matched by a NetworkService's
-ingress VIP.
+NetworkServiceProtocol is the IP protocol a VIP or endpoint matches.
 
-_Validation:_
-- Enum: [tcp udp]
+The set of values is open-ended. A client reading an object that carries
+this type must accept a value it does not recognise, preserve it when it
+writes the object back, and treat it as a protocol it cannot act on, never
+as tcp or udp. Each field of this type admits only the values it lists, and
+the API server refuses any other.
+
+
 
 _Appears in:_
 - [NetworkServiceSpec](#networkservicespec)
@@ -423,6 +427,10 @@ _Appears in:_
 | --- | --- |
 | `tcp` | NetworkServiceProtocolTCP matches TCP traffic.<br /> |
 | `udp` | NetworkServiceProtocolUDP matches UDP traffic.<br /> |
+| `sctp` | NetworkServiceProtocolSCTP matches SCTP traffic (IP protocol 132), which<br />has ports. It is declared but not served yet.<br /> |
+| `esp` | NetworkServiceProtocolESP matches IPsec Encapsulating Security Payload<br />traffic (IP protocol 50), which has no ports. It is declared but not<br />served yet.<br /> |
+| `gre` | NetworkServiceProtocolGRE matches Generic Routing Encapsulation traffic<br />(IP protocol 47), which has no ports. It is declared but not served yet.<br /> |
+| `icmp` | NetworkServiceProtocolICMP matches ICMP traffic: ICMPv6 (IP protocol 58)<br />on an IPv6 VIP and ICMP (IP protocol 1) on an IPv4 VIP. It has no ports.<br />It is declared but not served yet.<br /> |
 
 
 #### NetworkServiceSpec
@@ -441,10 +449,10 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `vpcRef` _string_ | VPCRef is the opaque identifier of the target VPC this service applies<br />to. This repo does not own the VPC API and does not validate the<br />identifier beyond non-emptiness; the admission webhook of the<br />consuming controller is responsible for verifying the requester is<br />authorized for this VPC before the service is accepted. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `vipAddresses` _string array_ | VIPAddresses is the list of ingress VIP addresses this service provisions<br />on the assigned gateway node(s).<br />Only IPv6 addresses are admitted until the gateway datapath serves IPv4<br />VIPs (datum-cloud/galactic#705). A service created with an IPv4 VIP before<br />this restriction keeps it while the list is unchanged, since the API<br />server ratchets validation of an unchanged field on Kubernetes 1.30 and<br />later; any edit to the list must drop it, and on an older API server any<br />update to such a service is refused. The gateways do not load or advertise<br />an IPv4 VIP. |  | MaxItems: 8 <br />MinItems: 1 <br />Required: \{\} <br />items:MaxLength: 45 <br /> |
-| `protocol` _[NetworkServiceProtocol](#networkserviceprotocol)_ | Protocol is the transport protocol matched by VIPAddresses/Port. |  | Enum: [tcp udp] <br />Required: \{\} <br /> |
-| `port` _integer_ | Port is the ingress port on VIPAddresses that this service load-balances. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
+| `protocol` _[NetworkServiceProtocol](#networkserviceprotocol)_ | Protocol is the IP protocol this service load-balances on VIPAddresses.<br />The API admits tcp, udp, sctp, esp, gre and icmp, and the gateway<br />datapath serves tcp and udp. A service with any other admitted value is<br />refused with a message saying its protocol is not served yet. sctp has<br />ports and needs Port and BackendPort. esp, gre and icmp have no ports<br />and must set neither; a backend for them is chosen from the client and<br />VIP addresses alone. The set of values is open-ended, so a client must<br />accept and preserve a value it does not recognise, as<br />NetworkServiceProtocol describes. |  | Enum: [tcp udp sctp esp gre icmp] <br />Required: \{\} <br /> |
+| `port` _integer_ | Port is the ingress port on VIPAddresses that this service load-balances,<br />1-65535. It is required for a protocol with ports (tcp, udp and sctp)<br />and must be unset for one without (esp, gre and icmp). Zero means unset<br />and is omitted when encoding, and an explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 | `backendSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | BackendSelector selects the VPCAttachments (galactic.datumapis.com/v1alpha1,<br />in any namespace) that serve this service, matched against each<br />VPCAttachment object's own labels. Only attachments whose status.vpc<br />equals VPCRef are candidates, whatever their labels, so a selector cannot<br />reach into another tenant's VPC. Each selected attachment contributes the<br />IPv6 addresses in its spec.interface.addresses as backends, on<br />BackendPort; the DSR datapath carries IPv6 backends only. An attachment<br />with no status.node or no IPv6 address is not a backend until it has<br />both. An empty selector is rejected rather than read as "every attachment<br />in the VPC". |  | Required: \{\} <br /> |
-| `backendPort` _integer_ | BackendPort is the destination port on every selected backend. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
+| `backendPort` _integer_ | BackendPort is the destination port on every selected backend, 1-65535.<br />Like Port, it is required for tcp, udp and sctp and must be unset for<br />esp, gre and icmp. Zero means unset and is omitted when encoding, and an<br />explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 
 
 #### NetworkServiceStatus

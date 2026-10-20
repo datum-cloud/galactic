@@ -103,10 +103,10 @@ per-VPC gateway design to colocate with the workload's own VRF.
 
 ### The two CRDs
 
-| CRD              | Scope                                                                | Written by                                                                                                                                    | Purpose                                                                                                                                                                                                                                                                                  |
-| ---------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NetworkGateway` | Namespaced, one per gateway node (`spec.targetRef.name` = node name) | Operator, once per gateway node (see [worked example](#worked-containerlab-example) below)                                                    | Node-scoped root object, mirroring `BGPRouter`'s pattern. Identifies which nodes participate in the anycast mesh and surfaces each node's engine health via `status.conditions`. Carries **no** self-address field — DSR rewrites nothing, so there is no translation source to publish. |
-| `NetworkService`    | Namespaced, internal                                                 | The platform API that serves tenants, after it verifies the tenant owns `vpcRef` (galactic does not repeat the check — see Known Constraints) | Ingress load-balancing spec: `vpcRef` (opaque tenant identifier), `vipAddresses` (1–8, IPv4/IPv6; IPv4 is not served yet, #705), `protocol` (`tcp`/`udp`), `port`, `backendSelector` (the VPCAttachments in `vpcRef` that serve it), `backendPort`. Served by every `NetworkGateway` in the namespace identically.     |
+| CRD              | Scope                                                                | Written by                                                                                                                                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NetworkGateway` | Namespaced, one per gateway node (`spec.targetRef.name` = node name) | Operator, once per gateway node (see [worked example](#worked-containerlab-example) below)                                                    | Node-scoped root object, mirroring `BGPRouter`'s pattern. Identifies which nodes participate in the anycast mesh and surfaces each node's engine health via `status.conditions`. Carries **no** self-address field — DSR rewrites nothing, so there is no translation source to publish.                                                                                                                                                                              |
+| `NetworkService` | Namespaced, internal                                                 | The platform API that serves tenants, after it verifies the tenant owns `vpcRef` (galactic does not repeat the check — see Known Constraints) | Ingress load-balancing spec: `vpcRef` (opaque tenant identifier), `vipAddresses` (1–8, IPv4/IPv6; IPv4 is not served yet, #705), `protocol` (`tcp`/`udp` served; `sctp`, `esp`, `gre`, `icmp` refused until served, see [below](#protocols-without-ports-designed-not-served)), `port` and `backendPort` (for protocols with ports), `backendSelector` (the VPCAttachments in `vpcRef` that serve it). Served by every `NetworkGateway` in the namespace identically. |
 
 Both are defined in `api/network/v1alpha1` package
 (`gateway_types.go`, `rule_types.go`) — the same external CRD module the
@@ -471,6 +471,51 @@ itself, an address present exactly while some rule still uses it, with its
 own generation for the same crash-safe reconcile cutoff. Its counters live
 in `vip_return_stats_table` and surface as `galactic_edge_return_*`,
 labeled by `vip` and `vpc`.
+
+### Protocols without ports (designed, not served)
+
+**Not implemented.** The datapath serves TCP and UDP only, and admission
+refuses every other protocol (see
+[configuration.md](../gateway/configuration.md#networkservice--internal-ingress-load-balancing-spec)).
+This section is the design the API already fits, so serving these protocols
+needs datapath and controller work but no API change.
+
+`NetworkService.spec.protocol` lists `sctp`, which has ports and will be
+served like TCP and UDP, and three protocols without ports: `esp` (IP
+protocol 50), `gre` (47) and `icmp` (ICMPv6, 58, on an IPv6 VIP). A rule for
+one of the three sets neither `port` nor `backendPort`, and the schema refuses
+either. Backend selection for them works as follows.
+
+- **Map key.** The rule registers in `vip_table` with its protocol number and
+  port 0. No TCP, UDP or SCTP rule can hold port 0, so a portless rule never
+  collides with one, and a VIP can carry a portless rule beside TCP and UDP
+  rules: the key's protocol keeps them apart. `edge_lb` builds the lookup key
+  with port 0 for these protocols instead of reading an L4 header.
+- **Maglev input.** The hash input is the client's address alone, not
+  `(address, port)`. Every packet of one client to one VIP over one protocol
+  reaches the same backend, so all of a client's ESP security associations or
+  GRE tunnels land together. A client behind a NAT that shares its address
+  with others sends them all to one backend. The Maglev table itself, and
+  the reason anycast is safe, are unchanged.
+- **Backend side.** The backend's `vip_xlat_table` row and its claim
+  (`backendClaim`) carry port 0, so a backend serves at most one rule per
+  portless protocol in its VPC. The uSID slot hashes the backend's address
+  with port 0. `edge_return` already matches replies on source address alone
+  and needs nothing new.
+- **Fragments.** Today `edge_lb` parses no extension headers, so a fragmented
+  packet is unclaimed. A portless protocol reads nothing past the IP header,
+  so once the datapath parses the Fragment header it can claim every fragment,
+  first or not, by the Fragment header's next-header value, and the
+  address-only hash sends them all to one backend. TCP and UDP cannot do this
+  for non-first fragments, which carry no ports.
+- **ICMP.** An `icmp` rule claims ICMPv6 informational messages, Echo Request
+  first, addressed to the VIP. It never claims ICMPv6 error messages. An error
+  about a TCP or UDP flow belongs to the backend serving that flow, which only
+  the quoted packet's ports identify, and claiming it for the `icmp` rule's
+  backend would hand it to the wrong one. Errors addressed to a VIP stay
+  unclaimed as today. The datapath already sends its own Packet Too Big for
+  claimed TCP and UDP traffic, and an `icmp` rule changes none of that, nor
+  `edge_return`'s forwarding of the ICMPv6 errors a backend sources.
 
 ---
 

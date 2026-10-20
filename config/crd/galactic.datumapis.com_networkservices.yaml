@@ -79,8 +79,11 @@ spec:
               tenant VPC.
             properties:
               backendPort:
-                description: BackendPort is the destination port on every selected
-                  backend.
+                description: |-
+                  BackendPort is the destination port on every selected backend, 1-65535.
+                  Like Port, it is required for tcp, udp and sctp and must be unset for
+                  esp, gre and icmp. Zero means unset and is omitted when encoding, and an
+                  explicit 0 is refused.
                 format: int32
                 maximum: 65535
                 minimum: 1
@@ -146,18 +149,39 @@ spec:
                   rule: (has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions)
                     && size(self.matchExpressions) > 0)
               port:
-                description: Port is the ingress port on VIPAddresses that this service
-                  load-balances.
+                description: |-
+                  Port is the ingress port on VIPAddresses that this service load-balances,
+                  1-65535. It is required for a protocol with ports (tcp, udp and sctp)
+                  and must be unset for one without (esp, gre and icmp). Zero means unset
+                  and is omitted when encoding, and an explicit 0 is refused.
                 format: int32
                 maximum: 65535
                 minimum: 1
                 type: integer
               protocol:
-                description: Protocol is the transport protocol matched by VIPAddresses/Port.
+                description: |-
+                  Protocol is the IP protocol this service load-balances on VIPAddresses.
+
+                  The API admits tcp, udp, sctp, esp, gre and icmp, and the gateway
+                  datapath serves tcp and udp. A service with any other admitted value is
+                  refused with a message saying its protocol is not served yet. sctp has
+                  ports and needs Port and BackendPort. esp, gre and icmp have no ports
+                  and must set neither; a backend for them is chosen from the client and
+                  VIP addresses alone. The set of values is open-ended, so a client must
+                  accept and preserve a value it does not recognise, as
+                  NetworkServiceProtocol describes.
                 enum:
                 - tcp
                 - udp
+                - sctp
+                - esp
+                - gre
+                - icmp
                 type: string
+                x-kubernetes-validations:
+                - message: 'protocol is not served yet: the gateway datapath serves
+                    tcp and udp only'
+                  rule: self in ['tcp', 'udp']
               vipAddresses:
                 description: |-
                   VIPAddresses is the list of ingress VIP addresses this service provisions
@@ -193,13 +217,21 @@ spec:
                 minLength: 1
                 type: string
             required:
-            - backendPort
             - backendSelector
-            - port
             - protocol
             - vipAddresses
             - vpcRef
             type: object
+            x-kubernetes-validations:
+            - message: port is required for tcp, udp and sctp
+              rule: '!(self.protocol in [''tcp'', ''udp'', ''sctp'']) || has(self.port)'
+            - message: backendPort is required for tcp, udp and sctp
+              rule: '!(self.protocol in [''tcp'', ''udp'', ''sctp'']) || has(self.backendPort)'
+            - message: port must not be set for esp, gre and icmp, which have no ports
+              rule: '!(self.protocol in [''esp'', ''gre'', ''icmp'']) || !has(self.port)'
+            - message: backendPort must not be set for esp, gre and icmp, which have
+                no ports
+              rule: '!(self.protocol in [''esp'', ''gre'', ''icmp'']) || !has(self.backendPort)'
           status:
             description: NetworkServiceStatus defines the observed state of a NetworkService.
             properties:

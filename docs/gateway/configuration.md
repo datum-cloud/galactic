@@ -449,12 +449,12 @@ gateway node, named after that node (see the worked example above).
 
 | Field                  | Required | Type                   | Description                                                                                                                                                                                                                                                                                  |
 | ---------------------- | -------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the Galactic cell controller, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                                                                                                             |
+| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the Galactic cell controller, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                                                                                                       |
 | `spec.vipAddresses`    | Yes      | `[]string` (1–8)       | Ingress VIP addresses this rule provisions. IPv4 VIPs are accepted but not served yet (#705); see below.                                                                                                                                                                                     |
-| `spec.protocol`        | Yes      | `tcp` \| `udp`         | Transport protocol matched by `vipAddresses`/`port`.                                                                                                                                                                                                                                         |
-| `spec.port`            | Yes      | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances.                                                                                                                                                                                                                                      |
-| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`galactic.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends. Must not be empty.                                                                                                                       |
-| `spec.backendPort`     | Yes      | `int32` (1–65535)      | Destination port on every selected backend.                                                                                                                                                                                                                                                  |
+| `spec.protocol`        | Yes      | `tcp` \| `udp`         | IP protocol load-balanced on `vipAddresses`. The API also accepts `sctp`, `esp`, `gre` and `icmp`, but refuses them as not served yet; see below.                                                                                                                                            |
+| `spec.port`            | tcp, udp | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances. Required for a protocol with ports, refused for one without.                                                                                                                                                                         |
+| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`galactic.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends. Must not be empty.                                                                                                                    |
+| `spec.backendPort`     | tcp, udp | `int32` (1–65535)      | Destination port on every selected backend. Required for a protocol with ports, refused for one without.                                                                                                                                                                                     |
 | `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes exist in the namespace; not an ownership check, see below), `<gateway-node>/Programmed` per gateway node, `<gateway-node>/IPv4Served` per gateway node for a rule with an IPv4 VIP, and `<backend-node>/BackendsBound` per node hosting a backend. |
 
 Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkservices.yaml`:
@@ -476,6 +476,23 @@ spec:
       app: backend
   backendPort: 80
 ```
+
+The gateways serve `tcp` and `udp`. The API also lists `sctp`, which has
+ports, and `esp`, `gre` and `icmp`, which have none, so that serving them
+later needs no API change. Until then, creating or updating a rule with any of
+them is refused with `protocol is not served yet: the gateway datapath serves
+tcp and udp only`. Both ports are required for `tcp`, `udp` and `sctp`, and
+must be unset for `esp`, `gre` and `icmp`, whose backends are chosen from the
+client and VIP addresses alone (see
+[ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md#protocols-without-ports-designed-not-served)).
+The set of protocols is open-ended, so a client reading a rule must accept a
+`protocol` value it does not recognise, keep it when writing the rule back, and
+never treat it as `tcp` or `udp`. A rule that reaches the gateways with a protocol they do not serve,
+for example one stored under a schema that admitted it, is not loaded or
+advertised, and its `<gateway-node>/Programmed` condition reports
+`UnservedProtocol`. One with an unset or out-of-range port reports
+`InvalidRule`. Its backend nodes keep the bindings they already have and
+report `InvalidRule` on `<backend-node>/BackendsBound`.
 
 A rule may carry at most one IPv6 VIP: a backend node rewrites a reply's
 source back to a single VIP, so a backend cannot answer for a second one. A

@@ -98,6 +98,7 @@ type ServiceVIPBindingSpec struct {
 
 	// Protocol is the transport protocol this binding applies to.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=tcp;udp
 	Protocol NetworkServiceProtocol `json:"protocol"`
 
 	// BackendAddress is the backend's own real address (its pod-netns

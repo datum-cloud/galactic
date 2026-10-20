@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -147,13 +148,86 @@ func TestNetworkServiceBackendFieldNames(t *testing.T) {
 	}
 }
 
-// TestNetworkServiceProtocolValues is a regression test pinning the accepted
-// NetworkServiceProtocol enum values.
+// TestNetworkServiceProtocolValues pins the NetworkServiceProtocol values,
+// which are part of the published API.
 func TestNetworkServiceProtocolValues(t *testing.T) {
-	if NetworkServiceProtocolTCP != "tcp" {
-		t.Errorf("NetworkServiceProtocolTCP: got %q, want %q", NetworkServiceProtocolTCP, "tcp")
+	for got, want := range map[NetworkServiceProtocol]string{
+		NetworkServiceProtocolTCP:  "tcp",
+		NetworkServiceProtocolUDP:  "udp",
+		NetworkServiceProtocolSCTP: "sctp",
+		NetworkServiceProtocolESP:  "esp",
+		NetworkServiceProtocolGRE:  "gre",
+		NetworkServiceProtocolICMP: "icmp",
+	} {
+		if string(got) != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
 	}
-	if NetworkServiceProtocolUDP != "udp" {
-		t.Errorf("NetworkServiceProtocolUDP: got %q, want %q", NetworkServiceProtocolUDP, "udp")
+}
+
+// TestNetworkServiceExistingShapeEncoding covers clients that set protocol,
+// port and backendPort as every earlier release required: a tcp or udp
+// service encodes both ports and decodes back to the same values.
+func TestNetworkServiceExistingShapeEncoding(t *testing.T) {
+	for _, protocol := range []NetworkServiceProtocol{NetworkServiceProtocolTCP, NetworkServiceProtocolUDP} {
+		orig := newTestService()
+		orig.Spec.Protocol = protocol
+		data, err := json.Marshal(orig)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		for _, field := range []string{`"protocol":"` + string(protocol) + `"`, `"port":443`, `"backendPort":8443`} {
+			if !strings.Contains(string(data), field) {
+				t.Errorf("%s: encoding %s lacks %s", protocol, data, field)
+			}
+		}
+		var got NetworkService
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if got.Spec.Protocol != protocol || got.Spec.Port != 443 || got.Spec.BackendPort != 8443 {
+			t.Errorf("%s: decoded protocol/port/backendPort = %s/%d/%d", protocol,
+				got.Spec.Protocol, got.Spec.Port, got.Spec.BackendPort)
+		}
+	}
+}
+
+// TestNetworkServiceZeroPortsOmitted covers a service for a protocol without
+// ports: zero means unset, so neither port is encoded.
+func TestNetworkServiceZeroPortsOmitted(t *testing.T) {
+	svc := newTestService()
+	svc.Spec.Protocol = NetworkServiceProtocolICMP
+	svc.Spec.Port, svc.Spec.BackendPort = 0, 0
+	data, err := json.Marshal(svc.Spec)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, field := range []string{`"port"`, `"backendPort"`} {
+		if strings.Contains(string(data), field) {
+			t.Errorf("encoding %s has %s, want it omitted", data, field)
+		}
+	}
+}
+
+// TestNetworkServiceUnknownProtocolPreserved covers a client built against
+// this package reading a protocol a later release added: the value decodes
+// and encodes back unchanged, so the client can write the object back without
+// losing it.
+func TestNetworkServiceUnknownProtocolPreserved(t *testing.T) {
+	in := `{"vpcRef":"vpc-a","vipAddresses":["2001:db8:1::10"],"protocol":"future-protocol",` +
+		`"backendSelector":{"matchLabels":{"app":"web"}}}`
+	var spec NetworkServiceSpec
+	if err := json.Unmarshal([]byte(in), &spec); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if spec.Protocol != "future-protocol" {
+		t.Fatalf("decoded protocol = %q, want %q", spec.Protocol, "future-protocol")
+	}
+	out, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(out) != in {
+		t.Errorf("re-encoded\n%s\nwant\n%s", out, in)
 	}
 }
