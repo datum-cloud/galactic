@@ -174,9 +174,18 @@ to start while another datapath's slot is live there. See
 node. It does three things:
 
 - It turns on IPv4 forwarding on every public and internal interface for the
-  datapath's FIB lookups. That includes the host-wide `net.ipv4.ip_forward`,
-  so the node routes IPv4 between all of its interfaces while the switch is
-  on.
+  datapath's FIB lookups, including the host-wide `net.ipv4.ip_forward`, so
+  the node then routes IPv4 between all of its interfaces. It does so only
+  when the node is about to load its first IPv4 VIP, not at startup, so
+  upgrading a gateway on which no rule has an IPv4 VIP leaves its IPv4
+  forwarding as it was. An interface the datapath picks up later, such as a
+  replacement bond member, gets it too. Once on, it stays on until the node
+  reboots, even after the last IPv4 VIP goes or the switch is turned off:
+  `net.ipv4.ip_forward` is host-wide, and turning it back off could cut
+  another datapath on the node. If it cannot be turned on, the pass that
+  would load the IPv4 VIP is not applied at all, the `NetworkGateway`'s
+  `Ready` reads `False` with reason `IPv4ForwardingFailed`, and the pass is
+  retried; the rules the node already serves stay as they were.
 - It loads each rule's IPv4 VIP into the datapath beside its IPv6 VIP,
   balanced over the rule's IPv6 backends, whose nodes translate its flows
   (see [What an IPv4 VIP needs](#what-an-ipv4-vip-needs)).
@@ -472,10 +481,10 @@ object.
 
 ### `NetworkGateway` — one per gateway node
 
-| Field                 | Required | Type     | Description                                                                                                                                                                   |
-| --------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                         |
-| `status.conditions`   | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, or `Terminating`. |
+| Field                 | Required | Type     | Description                                                                                                                                                                                                                                                                                                                                     |
+| --------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                                                                                                                                                                                           |
+| `status.conditions`   | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, `IPv4ForwardingFailed` (an IPv4 VIP is due to load but the node's IPv4 forwarding could not be turned on, so nothing in the pass is applied), or `Terminating`. |
 
 There is deliberately **no** self-address or primary-node field on this
 status — DSR has nothing analogous to publish. Create one object per

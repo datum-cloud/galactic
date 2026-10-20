@@ -685,7 +685,7 @@ normal while ingress traffic quietly stopped being intercepted at all.
 | `GALACTIC_GATEWAY_SRV6_ADDRESS`     | No       | Derived | This node's own plain SRv6-reachable IPv6 address, used as the DSR outer-header encap source (`encap_config_table`) — never compared against anything on a receive path; must be a native IPv6 address (rejected if IPv4 or 4-in-6) |
 | `GALACTIC_GATEWAY_METRICS_PORT`     | No       | `8081`  | Prometheus metrics port                                                                                                                                                                                                             |
 | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT` | No       | `5181`  | gRPC health check port                                                                                                                                                                                                              |
-| `GALACTIC_GATEWAY_IPV4_VIPS`        | No       | `true`  | Serves IPv4 VIPs: turns on IPv4 forwarding on every target, loads each rule's IPv4 VIP over its IPv6 backends, which translate it, and advertises it once their bindings are Bound                                                  |
+| `GALACTIC_GATEWAY_IPV4_VIPS`        | No       | `true`  | Serves IPv4 VIPs: turns on IPv4 forwarding on every target once its first IPv4 VIP is due to load, loads each rule's IPv4 VIP over its IPv6 backends, which translate it, and advertises it once their bindings are Bound           |
 
 Both required fields are enforced by `GatewayConfig.Validate` at
 startup, not deferred to a later, less obvious kernel-datapath error — a

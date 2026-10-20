@@ -83,11 +83,12 @@ const (
 	EnvGatewayDatapathEnabled = "GALACTIC_GATEWAY_DATAPATH_ENABLED"
 
 	// EnvGatewayIPv4VIPs turns on serving IPv4 VIPs. Optional, defaulting to
-	// true. On, the gateway turns on IPv4 forwarding for the FIB lookups
-	// edge_return and the Fragmentation Needed reply make, loads each rule's
-	// IPv4 VIP over the rule's IPv6 backends, whose nodes translate its
-	// flows, and advertises it once those backends' ServiceVIPBindings are
-	// Bound. It stays as a per-node kill switch: off, the gateway leaves
+	// true. On, the gateway loads each rule's IPv4 VIP over the rule's IPv6
+	// backends, whose nodes translate its flows, and advertises it once those
+	// backends' ServiceVIPBindings are Bound. The IPv4 forwarding the FIB
+	// lookups of edge_return and the Fragmentation Needed reply need is
+	// turned on only once the first IPv4 VIP is due to load, and then left
+	// on. It stays as a per-node kill switch: off, the gateway leaves
 	// every IPv4 VIP out of the datapath and withdraws every IPv4 VIP this
 	// node advertises, and IPv6 VIPs are not affected. A gateway that cannot
 	// list and watch ServiceVIPBindings runs as if it were off.
