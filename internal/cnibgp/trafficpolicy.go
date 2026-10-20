@@ -38,7 +38,9 @@ var errNoEnforcement = errors.New("traffic policy is on but this node cannot enf
 // nothing to enforce with. The interface then denies everything until
 // galactic-router publishes its bindings. galactic-bgp owns the link's final
 // state: it does not rely on the master plugin having read the same mode.
-func activateTrafficPolicy(pinDir, vpc, vpcAttachment string, registered bool, ipamResult *cniipam.IPAMResult) error {
+func activateTrafficPolicy(
+	pinDir, vpc, vpcAttachment string, registered bool, ipamResult *cniipam.IPAMResult, guestHWAddr net.HardwareAddr,
+) error {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	if !registered {
 		active, err := tpmap.Active(pinDir)
@@ -46,12 +48,12 @@ func activateTrafficPolicy(pinDir, vpc, vpcAttachment string, registered bool, i
 			return errors.Join(quarantineLink(hostName), err,
 				fmt.Errorf("%w: the node has no SRv6 locator, so nothing is attached", errNoEnforcement))
 		}
-		return bringUp(hostName, vpc, vpcAttachment, ipamResult)
+		return bringUp(hostName, vpc, vpcAttachment, ipamResult, guestHWAddr)
 	}
 	maps, err := tpmap.OpenPinned(pinDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return bringUp(hostName, vpc, vpcAttachment, ipamResult) // an older datapath: nothing to activate
+			return bringUp(hostName, vpc, vpcAttachment, ipamResult, guestHWAddr) // an older datapath: nothing to activate
 		}
 		return errors.Join(quarantineLink(hostName), fmt.Errorf("open traffic policy maps: %w", err))
 	}
@@ -104,7 +106,7 @@ func activateTrafficPolicy(pinDir, vpc, vpcAttachment string, registered bool, i
 	program, err := ebpf.LoadPinnedProgram(filepath.Join(pinDir, attach.TpDeliverPinName), nil)
 	if err != nil {
 		if !active {
-			return bringUp(hostName, vpc, vpcAttachment, ipamResult) // an older datapath without tp_deliver
+			return bringUp(hostName, vpc, vpcAttachment, ipamResult, guestHWAddr) // an older datapath without tp_deliver
 		}
 		return fmt.Errorf("load pinned tp_deliver: %w", err)
 	}
@@ -117,7 +119,7 @@ func activateTrafficPolicy(pinDir, vpc, vpcAttachment string, registered bool, i
 			return err
 		}
 	}
-	return bringUp(hostName, vpc, vpcAttachment, ipamResult)
+	return bringUp(hostName, vpc, vpcAttachment, ipamResult, guestHWAddr)
 }
 
 // quarantineLink takes hostName down if it is up.
@@ -135,12 +137,13 @@ func quarantineLink(hostName string) error {
 	return nil
 }
 
-// bringUp brings hostName up and then installs the attachment's pod-subnet
-// routes. The master plugin cannot add them while the link is down, and the
-// kernel flushes them whenever it goes down, so they are installed here,
-// after the link's final transition. A missing link is left to the master
-// plugin that owns it.
-func bringUp(hostName, vpc, vpcAttachment string, ipamResult *cniipam.IPAMResult) error {
+// bringUp brings hostName up and then restores the attachment's host gateway
+// (hostgw.RestoreHostGateway). The master plugin cannot add the pod-subnet
+// routes while the link is down, and taking a link down drops its routes, its
+// IPv6 addresses and its neighbor entries, so they are restored here, after
+// the link's last transition. guestHWAddr is the guest-side veth's MAC, or nil
+// for a tap. A missing link is left to the master plugin that owns it.
+func bringUp(hostName, vpc, vpcAttachment string, ipamResult *cniipam.IPAMResult, guestHWAddr net.HardwareAddr) error {
 	if err := ensureLinkUp(hostName); err != nil {
 		return err
 	}
@@ -151,8 +154,8 @@ func bringUp(hostName, vpc, vpcAttachment string, ipamResult *cniipam.IPAMResult
 		}
 		return fmt.Errorf("find host interface %q: %w", hostName, err)
 	}
-	if err := hostgw.InstallPodSubnetRoutes(vpc, vpcAttachment, ipamResult); err != nil {
-		return fmt.Errorf("install pod subnet routes: %w", err)
+	if err := hostgw.RestoreHostGateway(vpc, vpcAttachment, ipamResult, guestHWAddr); err != nil {
+		return fmt.Errorf("restore host gateway: %w", err)
 	}
 	return nil
 }

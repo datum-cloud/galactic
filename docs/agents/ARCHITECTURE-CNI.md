@@ -185,7 +185,8 @@ galactic/
 │   │                        #   dependency
 │   ├── cnibgp/              # galactic-bgp: BGP/SRv6/eBPF publish plugin;
 │   │                        #   learns interface kind + addresses from
-│   │                        #   prevResult alone, zero kernel-interface access
+│   │                        #   prevResult alone; touches only the host side's
+│   │                        #   final link state and host gateway
 │   ├── cniroute/            # galactic-route: termination-route plugin;
 │   │                        #   zero Kubernetes dependency
 │   ├── installer/           # galactic-cni DaemonSet init/run logic: binary
@@ -237,7 +238,7 @@ See [docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) for the full CNI ADD/
 | `internal/cni`             | `galactic-veth`                                                          | Veth master plugin: cmdAdd/cmdDel/cmdCheck/cmdStatus, PluginConf parsing, NAD annotation, host-device delegation                          |
 | `internal/cnitap`          | `galactic-tap`                                                           | Tap master plugin (mirrors `internal/cni`, no guest netns)                                                                                |
 | `internal/cniipam`         | `galactic-ipam`                                                          | Delegated CNI IPAM plugin (no k8s dependency)                                                                                             |
-| `internal/cnibgp`          | `galactic-bgp`                                                           | BGP/SRv6/eBPF publish plugin (zero kernel-interface dependency)                                                                           |
+| `internal/cnibgp`          | `galactic-bgp`                                                           | BGP/SRv6/eBPF publish plugin (kernel work limited to the host side's final link state and host gateway)                                   |
 | `internal/cniroute`        | `galactic-route`                                                         | Termination-route plugin (no k8s dependency)                                                                                              |
 | `internal/installer`       | `galactic-cni`                                                           | DaemonSet `init`/`run` logic: binary staging (every chain binary), conflist/kubeconfig templating, credential refresh, gRPC health server |
 | `internal/plumbing/intf`   | every CNI-chain binary                                                   | Interface naming, base62↔hex encoding                                                                                                     |
@@ -338,8 +339,11 @@ Chained after the master plugin (and, when present, `galactic-route`) per confli
 order, never run standalone. `internal/cnibgp.RunPlugin()` learns everything it needs
 — which interface kind was created, what addresses were allocated — from `prevResult`
 alone (`RawPrevResult`, not the never-populated typed `PrevResult` field — see
-`internal/cnibgp/prevresult.go`), so it has zero kernel-interface dependency of its
-own. Unlike `galactic-ipam`/`galactic-route`, it does resolve node name/kubeconfig
+`internal/cnibgp/prevresult.go`). Its only kernel-interface work is the host side's
+final state: with traffic policy on it brings the interface up once enforcement is
+verified, and after its last link transition it restores the host gateway
+(`hostgw.RestoreHostGateway`: addresses, neighbors and pod-subnet routes, which a link
+going down drops and which the kernel refuses on a down link). Unlike `galactic-ipam`/`galactic-route`, it does resolve node name/kubeconfig
 (reusing `internal/config.CNIConfig`, the same `GALACTIC_CNI_*` env vars every other
 k8s-talking binary in the chain uses) since it talks to the API server for
 `BGPVRFInstance`/`BGPAdvertisement` CRUD — via `sigs.k8s.io/controller-runtime/pkg/client`
@@ -592,6 +596,7 @@ auto-detect directly (see Configuration above).
 | BGP CRD publish (VRF + advertisement) + eBPF registration                   | `internal/cnibgp/bgp.go:publishBGPState`, `registerEBPFDatapath`; entry point `internal/cnibgp/ops_add.go:cmdAdd`            |
 | How `galactic-bgp`/`galactic-route` learn state without touching the kernel | `internal/cnibgp/prevresult.go:inferFromPrevResult` (reads `RawPrevResult`, not the dead `PrevResult` field)                 |
 | Host gateway address/route configuration (shared by both master plugins)    | `internal/hostgw/hostgw.go:ConfigureHostGateway`                                                                             |
+| Host gateway restore after the host side comes up (`galactic-bgp`)          | `internal/hostgw/hostgw.go:RestoreHostGateway`                                                                               |
 | CNI DaemonSet install/refresh                                               | `internal/installer/installer.go:Bootstrap` (init container), `internal/installer/installer.go:Run` (long-running container) |
 | Egress shard placement (ordered and hashed mode)                            | `internal/installer/egressgroup.go`, `internal/plumbing/ebpf/egressroutemap/shardgroup.go`, `usid.c:resolve_egress_group`    |
 | Interface naming / base62 encoding                                          | `internal/plumbing/intf/intf.go`                                                                                             |

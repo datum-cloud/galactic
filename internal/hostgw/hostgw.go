@@ -62,10 +62,8 @@ import (
 // link in this namespace to read a MAC from.
 //
 // The pod-subnet routes are installed only while the host-side interface is
-// up: the kernel refuses a route through a down device and flushes a device's
-// routes when it goes down. While traffic policy is on, the interface stays
-// down until galactic-bgp verifies enforcement, and galactic-bgp installs the
-// routes with InstallPodSubnetRoutes once it brings the interface up.
+// up, since the kernel refuses a route through a down interface. An interface
+// brought up later gets them from RestoreHostGateway.
 func ConfigureHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, guestHWAddr net.HardwareAddr) error {
 	if res == nil {
 		return nil
@@ -75,6 +73,19 @@ func ConfigureHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, gu
 	if err != nil {
 		return fmt.Errorf("get host interface %q: %w", hostName, err)
 	}
+	if err := installGateway(hostLink, res, guestHWAddr); err != nil {
+		return err
+	}
+	if hostLink.Attrs().Flags&net.FlagUp == 0 {
+		return nil
+	}
+	return installPodSubnetRoutes(hostLink, vpc, res, true)
+}
+
+// installGateway assigns res's gateway address for each configured family on
+// hostLink and, when guestHWAddr is known, the guest's permanent neighbor
+// entry.
+func installGateway(hostLink netlink.Link, res *cniipam.IPAMResult, guestHWAddr net.HardwareAddr) error {
 	if res.IPv6Gateway != nil {
 		gwNet := &net.IPNet{IP: res.IPv6Gateway, Mask: net.CIDRMask(128, 128)}
 		if err := installGatewayAddress(hostLink, gwNet, 0); err != nil {
@@ -98,18 +109,18 @@ func ConfigureHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, gu
 			}
 		}
 	}
-	if hostLink.Attrs().Flags&net.FlagUp == 0 {
-		return nil
-	}
-	return installPodSubnetRoutes(hostLink, vpc, res)
+	return nil
 }
 
-// InstallPodSubnetRoutes installs this attachment's pod-subnet routes, one per
-// configured family, into the VPC's shared VRF table, pointing at its
-// host-side interface. The interface must be up, or the kernel refuses the
-// routes. Idempotent, with the same stale-route handling as
-// ConfigureHostGateway. A nil res installs nothing.
-func InstallPodSubnetRoutes(vpc, vpcAttachment string, res *cniipam.IPAMResult) error {
+// RestoreHostGateway re-applies this attachment's host gateway after its
+// host-side interface came up: the gateway addresses, the guest's permanent
+// neighbor entries when guestHWAddr is known, and the pod-subnet routes. Taking
+// an interface down drops its routes, its IPv6 addresses and its neighbor
+// entries, and the kernel refuses a route through a down interface, so
+// ConfigureHostGateway alone leaves an interface brought up later without
+// them. Idempotent. Unlike ConfigureHostGateway it removes no other route, so
+// routes a later plugin in the chain added survive. A nil res restores nothing.
+func RestoreHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, guestHWAddr net.HardwareAddr) error {
 	if res == nil {
 		return nil
 	}
@@ -118,24 +129,28 @@ func InstallPodSubnetRoutes(vpc, vpcAttachment string, res *cniipam.IPAMResult) 
 	if err != nil {
 		return fmt.Errorf("get host interface %q: %w", hostName, err)
 	}
-	return installPodSubnetRoutes(hostLink, vpc, res)
+	if err := installGateway(hostLink, res, guestHWAddr); err != nil {
+		return err
+	}
+	return installPodSubnetRoutes(hostLink, vpc, res, false)
 }
 
 // installPodSubnetRoutes installs res's pod-subnet route for each family whose
-// gateway res configures, on hostLink, in vpc's VRF table.
-func installPodSubnetRoutes(hostLink netlink.Link, vpc string, res *cniipam.IPAMResult) error {
+// gateway res configures, on hostLink, in vpc's VRF table. sweep removes the
+// other pod-subnet routes on hostLink (see installPodSubnetRoute).
+func installPodSubnetRoutes(hostLink netlink.Link, vpc string, res *cniipam.IPAMResult, sweep bool) error {
 	tableID, err := vrf.TableID(vpc)
 	if err != nil {
 		return fmt.Errorf("get VRF table ID for pod subnet route: %w", err)
 	}
 	if res.IPv6Gateway != nil {
-		if err := installPodSubnetRoute(hostLink, res.IPv6Subnet, netlink.FAMILY_V6, int(tableID)); err != nil {
+		if err := installPodSubnetRoute(hostLink, res.IPv6Subnet, netlink.FAMILY_V6, int(tableID), sweep); err != nil {
 			return err
 		}
 	}
 	if res.IPv4Gateway != nil {
 		ipv4Subnet := &net.IPNet{IP: res.IPv4Address, Mask: net.CIDRMask(32, 32)}
-		if err := installPodSubnetRoute(hostLink, ipv4Subnet, netlink.FAMILY_V4, int(tableID)); err != nil {
+		if err := installPodSubnetRoute(hostLink, ipv4Subnet, netlink.FAMILY_V4, int(tableID), sweep); err != nil {
 			return err
 		}
 	}
@@ -194,15 +209,17 @@ func installGatewayAddress(hostLink netlink.Link, gwNet *net.IPNet, addrFlags in
 // route is left alone, and a conflicting one is an error rather than being
 // overwritten.
 //
-// It is also authoritative for hostLink: any other route already in this
-// table on hostLink, for a destination that isn't subnet, is removed first. A
+// With sweep, it is also authoritative for hostLink: any other route already
+// in this table on hostLink, for a destination that isn't subnet, is removed
+// first. Only the master plugin sweeps, before any later plugin in the chain
+// adds routes of its own on hostLink. A
 // tap's host-side name is keyed by (vpc, vpcAttachment) alone, so a container
 // replacing another on the same attachment reuses the very same device and
 // the very same call finds it "already exists" and adopts it in place rather
 // than recreating it fresh. Left on its own, a route this device carried for
 // its previous container's subnet would keep routing to that address forever,
 // while the new container's own subnet never gets a route at all.
-func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tableID int) error {
+func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tableID int, sweep bool) error {
 	desiredRoute := &netlink.Route{
 		Dst:       subnet,
 		LinkIndex: hostLink.Attrs().Index,
@@ -234,7 +251,7 @@ func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tab
 			continue
 		}
 
-		if r.LinkIndex != desiredRoute.LinkIndex || !isPodSubnetRouteCandidate(&r) {
+		if !sweep || r.LinkIndex != desiredRoute.LinkIndex || !isPodSubnetRouteCandidate(&r) {
 			continue
 		}
 		stale := r
