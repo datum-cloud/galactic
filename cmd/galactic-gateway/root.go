@@ -292,10 +292,9 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().Bool("gateway-datapath-enabled", true,
 		"Run the edge gateway datapath; false keeps the process up but attaches nothing and withdraws "+
 			"this node's VIP advertisements")
-	cmd.Flags().Bool("gateway-ipv4-vips", true,
+	cmd.Flags().Bool("gateway-ipv4-vips", false,
 		"Serve IPv4 VIPs: load them over the rule's IPv6 backends, which translate them, and advertise "+
-			"each once its backends' ServiceVIPBindings are Bound; false withdraws and unloads this node's "+
-			"IPv4 VIPs")
+			"each once its backends' ServiceVIPBindings are Bound")
 	cmd.Flags().String("gateway-proc-sys-path", config.DefaultProcSysPath,
 		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
 			"of the host's /proc/sys/net at <path>/net")
