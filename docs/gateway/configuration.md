@@ -159,7 +159,7 @@ flags, or a combination of both (CLI flags take precedence), with the
 | Internal interfaces | `GALACTIC_GATEWAY_INTERNAL_INTERFACES` | `--gateway-internal-interfaces` | —           | No            |
 | XDP attach mode     | `GALACTIC_GATEWAY_XDP_ATTACH`          | `--gateway-xdp-attach`          | `dispatch`  | No            |
 | Datapath enabled    | `GALACTIC_GATEWAY_DATAPATH_ENABLED`    | `--gateway-datapath-enabled`    | `true`      | No            |
-| IPv4 VIPs           | `GALACTIC_GATEWAY_IPV4_VIPS`           | `--gateway-ipv4-vips`           | `false`     | No            |
+| IPv4 VIPs           | `GALACTIC_GATEWAY_IPV4_VIPS`           | `--gateway-ipv4-vips`           | `true`      | No            |
 | Procfs sysctl root  | `GALACTIC_GATEWAY_PROC_SYS_PATH`       | `--gateway-proc-sys-path`       | `/proc/sys` | No            |
 | Metrics port        | `GALACTIC_GATEWAY_METRICS_PORT`        | `--metrics-port`                | `8081`      | No            |
 | gRPC health port    | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`    | `--grpc-health-port`            | `5181`      | No            |
@@ -173,8 +173,8 @@ exits. It first detaches an idle dispatcher from its interfaces, and refuses
 to start while another datapath's slot is live there. See
 [Sharing the XDP hook](../agents/ARCHITECTURE-GATEWAY.md#sharing-the-xdp-hook-xdpdispatch).
 
-`GALACTIC_GATEWAY_IPV4_VIPS=true` serves IPv4 VIPs on this node. It does
-three things:
+`GALACTIC_GATEWAY_IPV4_VIPS=true`, the default, serves IPv4 VIPs on this
+node. It does three things:
 
 - It turns on IPv4 forwarding on every public and internal interface for the
   datapath's FIB lookups. That includes the host-wide `net.ipv4.ip_forward`,
@@ -192,10 +192,14 @@ turn it on (`config/galactic-gateway/rbac.yaml`). Without that access the
 gateway's cache never syncs and the node stops reconciling every rule, IPv6
 included. The startup RBAC check logs the missing permission.
 
-The default is `false` in this release, so an upgrade changes nothing until
-you turn the switch on. A later release turns it on by default. The switch
-stays as a per-node kill switch after that: turning it off withdraws every
-IPv4 VIP the node advertises and unloads them, and leaves IPv6 untouched. See
+The default is `true`, so upgrading a gateway to this release turns IPv4
+VIPs on. Its ClusterRole must grant `get`, `list` and `watch` on
+`servicevipbindings` before the release reaches a cluster. Infra deploys its
+own copy of that ClusterRole, so the grant has to land there first.
+Otherwise each gateway runs with IPv4 VIPs off and reports the missing
+permission, as the paragraph above describes. The switch stays as a
+per-node kill switch: setting it to `false` withdraws every IPv4 VIP the
+node advertises and unloads them, and leaves IPv6 untouched. See
 [Rolling out and rolling back IPv4 VIPs](#rolling-out-and-rolling-back-ipv4-vips).
 
 `GALACTIC_GATEWAY_DATAPATH_ENABLED=false` keeps the process up and its pod
@@ -807,19 +811,25 @@ Roll out in this order:
    are written, and an earlier `galactic-cni` datapath ignores an IPv4 VIP's
    rows, so a newer router beside an older CNI reports a binding `Bound` that
    cannot translate. The gate cannot see the datapath's version.
-3. `galactic-gateway` on every gateway node, with the
-   `servicevipbindings` read access in its ClusterRole.
-4. `GALACTIC_GATEWAY_IPV4_VIPS=true`, one gateway node at a time. The backend
+3. `get`, `list` and `watch` on `servicevipbindings` in the
+   `galactic-gateway` ClusterRole, infra's copy of
+   `config/galactic-gateway/rbac.yaml`. This must land before this release
+   of `galactic-gateway` reaches the cluster, because the release serves
+   IPv4 VIPs by default.
+4. `galactic-gateway`, one gateway node at a time. The switch is on by
+   default, so each upgraded node loads every rule's IPv4 VIP. The backend
    nodes write IPv4 bindings once a gateway reports an IPv4 VIP loaded, so
-   turning the switch on is what brings them in. Each node then advertises
-   the VIP once its bindings are `Bound`. Check that node's
-   `<gateway-node>/IPv4Served` before moving to the next.
+   this is what brings them in. Each node then advertises the VIP once its
+   bindings are `Bound`. Check that node's `<gateway-node>/IPv4Served`
+   before moving to the next. To upgrade with IPv4 off and turn it on
+   later, set `GALACTIC_GATEWAY_IPV4_VIPS=false` on the gateways for the
+   upgrade, then remove the override one gateway node at a time.
 
 Version skew is safe at every step. An older gateway leaves IPv4 VIPs out and
 never advertises them. An older router writes no IPv4 binding, so no binding
 is ever `Bound` and the gate never opens. An older CNI ignores an IPv4
 VIP's `vip_xlat_table` rows, which is why step 2 upgrades it before the
-router. Before turning the switch on, make sure the backends accept
+router. Before the gateways are upgraded, make sure the backends accept
 `64:ff9b::/96` sources.
 Restarts are safe too: a gateway rebuilds its gate from the API on its first
 pass, and a backend node's router re-verifies its bindings when it restarts,
@@ -833,7 +843,7 @@ other IPv4 packet, NAT64's replies included, to the next slot. An IPv4 VIP
 must therefore never be one of an egress shard's IPv4 masquerade addresses,
 or the gateway would take that address's NAT64 replies.
 
-To roll back, turn `GALACTIC_GATEWAY_IPV4_VIPS` off on every gateway first.
+To roll back, set `GALACTIC_GATEWAY_IPV4_VIPS=false` on every gateway first.
 Each node withdraws its `-v4` advertisements on its next pass and reports
 `Unsupported`, the backend nodes delete their IPv4 bindings, and the
 bindings' finalizers remove their `vip_xlat_table` rows. Once no IPv4
