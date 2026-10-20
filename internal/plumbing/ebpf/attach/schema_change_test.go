@@ -77,9 +77,9 @@ func TestLoad_SchemaChangeRecreatesOnlyTheChangedMap(t *testing.T) {
 	}
 }
 
-// drop_reasons grew a slot for vip_reply_rewrite_failed. Loading over the
-// previous version's shorter pin recreates drop_reasons alone, with the new
-// slot, and vip_xlat_table keeps its rows, IPv4 and IPv6 alike.
+// drop_reasons grew slots for the IPv4 VIP translation's drop reasons. Loading
+// over the previous version's shorter pin recreates drop_reasons alone, with
+// the new slots, and vip_xlat_table keeps its rows, an IPv4 VIP's alike.
 func TestLoad_DropReasonsGrowthKeepsVIPXlatRows(t *testing.T) {
 	requireRoot(t)
 	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-dropreasons-test-%d", os.Getpid()))
@@ -102,7 +102,7 @@ func TestLoad_DropReasonsGrowthKeepsVIPXlatRows(t *testing.T) {
 	}
 	old, err := ebpf.NewMap(&ebpf.MapSpec{
 		Name: prog.UsidMapDropReasons, Type: ebpf.PerCPUArray, KeySize: 4, ValueSize: 8,
-		MaxEntries: prog.DropReasonVIPReplyRewriteFailed,
+		MaxEntries: prog.DropReasonServiceRouteRedirectFailed + 1,
 	})
 	if err != nil {
 		t.Fatalf("create previous drop_reasons: %v", err)
@@ -118,8 +118,8 @@ func TestLoad_DropReasonsGrowthKeepsVIPXlatRows(t *testing.T) {
 	}
 	defer objs.Close() //nolint:errcheck // test-owned objects
 
-	if got := objs.DropReasons.MaxEntries(); got != prog.DropReasonVIPReplyRewriteFailed+1 {
-		t.Errorf("drop_reasons entries = %d after reload, want %d", got, prog.DropReasonVIPReplyRewriteFailed+1)
+	if got := objs.DropReasons.MaxEntries(); got != prog.DropReasonVIPUDPNoChecksum+1 {
+		t.Errorf("drop_reasons entries = %d after reload, want %d", got, prog.DropReasonVIPUDPNoChecksum+1)
 	}
 	var v prog.UsidVipXlatValue
 	if err := objs.VipXlatTable.Lookup(row, &v); err != nil {

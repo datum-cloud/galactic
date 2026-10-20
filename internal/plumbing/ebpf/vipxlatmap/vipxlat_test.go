@@ -220,11 +220,10 @@ func TestVipXlatTable_RegisterRejectsInvalidProto(t *testing.T) {
 	}
 }
 
-// TestVipXlatTable_RegisterRejectsMappedOrMixedAddresses: an IPv4 address in
-// 16-byte IPv4-mapped form, which net.IP cannot tell from an IPv6 one, and a
-// row whose VIP and backend are of different families are refused without a
-// write.
-func TestVipXlatTable_RegisterRejectsMappedOrMixedAddresses(t *testing.T) {
+// TestVipXlatTable_RegisterRejectsMappedOrIPv4Backend: an IPv4 address in
+// 16-byte IPv4-mapped form, which net.IP cannot tell from an IPv6 one, and an
+// IPv4 backend, behind either family's VIP, are refused without a write.
+func TestVipXlatTable_RegisterRejectsMappedOrIPv4Backend(t *testing.T) {
 	vip6, backend6 := net.ParseIP("2001:db8::1"), net.ParseIP("fd20:60::1")
 	vip4, backend4 := net.ParseIP("203.0.113.10").To4(), net.ParseIP("10.0.0.5").To4()
 	mapped := net.ParseIP("10.0.0.5") // 16 bytes, ::ffff:10.0.0.5
@@ -233,9 +232,9 @@ func TestVipXlatTable_RegisterRejectsMappedOrMixedAddresses(t *testing.T) {
 		vip, backend net.IP
 	}{
 		{"MappedBackend", vip6, mapped},
-		{"MappedVIP", mapped, backend4},
+		{"MappedVIP", mapped, backend6},
 		{"IPv6VIPIPv4Backend", vip6, backend4},
-		{"IPv4VIPIPv6Backend", vip4, backend6},
+		{"IPv4VIPIPv4Backend", vip4, backend4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vt, ft := newTestTable(constClock(1))
@@ -255,12 +254,14 @@ func TestVipXlatTable_RegisterRejectsMappedOrMixedAddresses(t *testing.T) {
 	}
 }
 
-// TestVipXlatTable_IPv4RowsRoundTripInMappedForm: an IPv4 binding's rows are
-// stored with IPv4-mapped addresses, the form usid.c builds from an IPv4
-// header, and read back as plain IPv4 addresses.
-func TestVipXlatTable_IPv4RowsRoundTripInMappedForm(t *testing.T) {
+// TestVipXlatTable_IPv4VIPRowsRoundTrip: an IPv4 VIP's binding to an IPv6
+// backend stores its ingress row keyed on the IPv4-mapped VIP and rewriting to
+// the backend, and an egress-translated row keyed on the backend and rewriting
+// to the IPv4-mapped VIP. Both read back with the VIP as a plain IPv4 address,
+// and no egress row is written.
+func TestVipXlatTable_IPv4VIPRowsRoundTrip(t *testing.T) {
 	vt, ft := newTestTable(constClock(5))
-	vip, backend := net.ParseIP("203.0.113.10").To4(), net.ParseIP("10.60.0.5").To4()
+	vip, backend := net.ParseIP("203.0.113.10").To4(), net.ParseIP("fd20:60::5")
 	const slot, vipPort, backendPort = 0x4a4a, 443, 8443
 
 	if err := vt.RegisterIngress(testBlock, 0x705, slot, ProtoUDP, vip, vipPort, backend, backendPort); err != nil {
@@ -270,30 +271,28 @@ func TestVipXlatTable_IPv4RowsRoundTripInMappedForm(t *testing.T) {
 		t.Fatalf("RegisterEgress: %v", err)
 	}
 
-	wantMapped := map[uint8]struct{ key, value [16]byte }{
-		directionIngress: {netip.MustParseAddr("::ffff:203.0.113.10").As16(), netip.MustParseAddr("::ffff:10.60.0.5").As16()},
-		directionEgress:  {netip.MustParseAddr("::ffff:10.60.0.5").As16(), netip.MustParseAddr("::ffff:203.0.113.10").As16()},
+	mappedVIP := netip.MustParseAddr("::ffff:203.0.113.10").As16()
+	backend16 := netip.MustParseAddr("fd20:60::5").As16()
+	want := map[uint8]struct {
+		slot       uint16
+		key, value [16]byte
+	}{
+		directionIngress:    {slot, mappedVIP, backend16},
+		directionEgressXlat: {0, backend16, mappedVIP},
+	}
+	if ft.len() != len(want) {
+		t.Fatalf("table has %d rows, want %d", ft.len(), len(want))
 	}
 	for k, v := range ft.entries {
 		key, value := k.(prog.UsidVipXlatKey), v.(prog.UsidVipXlatValue)
-		want := wantMapped[key.Direction]
-		if key.Addr != want.key || value.Addr != want.value {
-			t.Errorf("direction %d row stored key %x value %x, want %x and %x",
-				key.Direction, key.Addr, value.Addr, want.key, want.value)
+		w, ok := want[key.Direction]
+		if !ok {
+			t.Errorf("unexpected direction %d row", key.Direction)
+			continue
 		}
-	}
-
-	entries, err := vt.List()
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("List returned %d entries, want 2", len(entries))
-	}
-	for _, e := range entries {
-		if !e.Addr.Is4() || len(e.RewriteAddr) != net.IPv4len {
-			t.Errorf("%s row reads back as %s -> %s (%d bytes), want plain IPv4 on both sides",
-				e.Direction, e.Addr, e.RewriteAddr, len(e.RewriteAddr))
+		if key.Slot != w.slot || key.Addr != w.key || value.Addr != w.value {
+			t.Errorf("direction %d row stored slot %#x key %x value %x, want %#x, %x and %x",
+				key.Direction, key.Slot, key.Addr, value.Addr, w.slot, w.key, w.value)
 		}
 	}
 
@@ -304,74 +303,119 @@ func TestVipXlatTable_IPv4RowsRoundTripInMappedForm(t *testing.T) {
 	if ingress.Addr != netip.MustParseAddr("203.0.113.10") || !ingress.RewriteAddr.Equal(backend) {
 		t.Errorf("ingress row %s -> %s, want 203.0.113.10 -> %s", ingress.Addr, ingress.RewriteAddr, backend)
 	}
+	egress, ok, err := vt.GetEgressTranslated(testBlock, 0x705, ProtoUDP, backend, backendPort)
+	if err != nil || !ok {
+		t.Fatalf("GetEgressTranslated = ok %v, err %v; want the row", ok, err)
+	}
+	if egress.Direction != DirectionEgressTranslated || len(egress.RewriteAddr) != net.IPv4len ||
+		!egress.RewriteAddr.Equal(vip) || egress.RewritePort != vipPort {
+		t.Errorf("egress-translated row %s -> %s:%d (%d bytes), want %s -> %s:%d in 4 bytes",
+			egress.Direction, egress.RewriteAddr, egress.RewritePort, len(egress.RewriteAddr), egress.Addr, vip, vipPort)
+	}
+	if _, ok, _ := vt.GetEgress(testBlock, 0x705, ProtoUDP, backend, backendPort); ok {
+		t.Error("an IPv4 VIP's binding wrote an egress row; want only its egress-translated row")
+	}
 }
 
-// TestVipXlatTable_IPv4AndIPv6RowsAreIndependent: an IPv4 and an IPv6 binding
-// on one VRF, protocol and port each keep their own rows, and removing one
-// leaves the other.
-func TestVipXlatTable_IPv4AndIPv6RowsAreIndependent(t *testing.T) {
-	vt, ft := newTestTable(constClock(1))
-	vip4, backend4 := net.ParseIP("203.0.113.10").To4(), net.ParseIP("10.60.0.5").To4()
-	vip6, backend6 := net.ParseIP("2001:db8:6060::10"), net.ParseIP("fd20:60::5")
+// TestVipXlatTable_IPv4AndIPv6VIPsShareBackendSocket: one backend socket
+// bound to an IPv4 VIP and an IPv6 VIP keeps four rows, its two egress rows
+// apart by direction, and removing either binding leaves the other's.
+func TestVipXlatTable_IPv4AndIPv6VIPsShareBackendSocket(t *testing.T) {
+	vip4, vip6 := net.ParseIP("203.0.113.10").To4(), net.ParseIP("2001:db8:6060::10")
+	backend := net.ParseIP("fd20:60::5")
 	const port = 443
 
-	for _, b := range []struct{ vip, backend net.IP }{{vip4, backend4}, {vip6, backend6}} {
-		if err := vt.RegisterIngress(testBlock, 0x705, 7, ProtoTCP, b.vip, port, b.backend, port); err != nil {
-			t.Fatalf("RegisterIngress %s: %v", b.vip, err)
-		}
-		if err := vt.RegisterEgress(testBlock, 0x705, ProtoTCP, b.backend, port, b.vip, port); err != nil {
-			t.Fatalf("RegisterEgress %s: %v", b.backend, err)
-		}
-	}
-	if ft.len() != 4 {
-		t.Fatalf("table has %d rows, want 4", ft.len())
-	}
+	for _, remove := range []net.IP{vip4, vip6} {
+		t.Run(remove.String(), func(t *testing.T) {
+			vt, ft := newTestTable(constClock(1))
+			for _, vip := range []net.IP{vip4, vip6} {
+				if err := vt.RegisterIngress(testBlock, 0x705, 7, ProtoTCP, vip, port, backend, port); err != nil {
+					t.Fatalf("RegisterIngress %s: %v", vip, err)
+				}
+				if err := vt.RegisterEgress(testBlock, 0x705, ProtoTCP, backend, port, vip, port); err != nil {
+					t.Fatalf("RegisterEgress %s: %v", vip, err)
+				}
+			}
+			if ft.len() != 4 {
+				t.Fatalf("table has %d rows, want 4", ft.len())
+			}
 
-	removed, err := vt.UnregisterBinding(7, ProtoTCP, vip4, port, backend4, port)
-	if err != nil {
-		t.Fatalf("UnregisterBinding: %v", err)
-	}
-	if len(removed) != 2 {
-		t.Errorf("UnregisterBinding removed %d rows, want the IPv4 binding's 2", len(removed))
-	}
-	for _, e := range removed {
-		if !e.Addr.Is4() {
-			t.Errorf("removed %s row for %s, want only IPv4 rows", e.Direction, e.Addr)
-		}
-	}
-	if _, ok, _ := vt.GetIngress(testBlock, 0x705, 7, ProtoTCP, vip6, port); !ok {
-		t.Error("IPv6 ingress row is gone after removing the IPv4 binding")
-	}
-	if _, ok, _ := vt.GetEgress(testBlock, 0x705, ProtoTCP, backend6, port); !ok {
-		t.Error("IPv6 egress row is gone after removing the IPv4 binding")
+			removed, err := vt.UnregisterBinding(7, ProtoTCP, remove, port, backend, port)
+			if err != nil {
+				t.Fatalf("UnregisterBinding: %v", err)
+			}
+			if len(removed) != 2 {
+				t.Fatalf("UnregisterBinding removed %d rows, want its own 2", len(removed))
+			}
+			for _, e := range removed {
+				if vip := e.RewriteAddr; e.Direction != DirectionIngress && !vip.Equal(remove) {
+					t.Errorf("removed the %s row rewriting to %s, want only %s's rows", e.Direction, vip, remove)
+				}
+			}
+			entries, err := vt.List()
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			for _, e := range entries {
+				kept := e.RewriteAddr
+				if e.Direction == DirectionIngress {
+					kept = net.IP(e.Addr.AsSlice())
+				}
+				if kept.Equal(remove) {
+					t.Errorf("%s row for %s is still there", e.Direction, remove)
+				}
+			}
+			if len(entries) != 2 {
+				t.Errorf("table has %d rows after the removal, want the other binding's 2", len(entries))
+			}
+		})
 	}
 }
 
-// TestVipXlatTable_ReconcileMatchesIPv4KeysUnmapped: Reconcile's live set
-// names IPv4 rows by their plain address, as List reports them.
-func TestVipXlatTable_ReconcileMatchesIPv4KeysUnmapped(t *testing.T) {
-	vt, ft := newTestTable(constClock(1))
-	vip, backend := net.ParseIP("203.0.113.10").To4(), net.ParseIP("10.60.0.5").To4()
-	stale := net.ParseIP("10.60.0.6").To4()
-	if err := vt.RegisterEgress(testBlock, 0x705, ProtoTCP, backend, 8443, vip, 443); err != nil {
-		t.Fatalf("RegisterEgress: %v", err)
+// TestVipXlatTable_ReconcileTellsEgressDirectionsApart: a live egress row
+// does not keep a stale egress-translated row on the same backend socket, and
+// UnregisterEgressTranslated removes only the latter.
+func TestVipXlatTable_ReconcileTellsEgressDirectionsApart(t *testing.T) {
+	vip4, vip6 := net.ParseIP("203.0.113.10").To4(), net.ParseIP("2001:db8:6060::10")
+	backend := net.ParseIP("fd20:60::5")
+	register := func(t *testing.T, vt *VipXlatTable) {
+		t.Helper()
+		for _, vip := range []net.IP{vip4, vip6} {
+			if err := vt.RegisterEgress(testBlock, 0x705, ProtoTCP, backend, 8443, vip, 443); err != nil {
+				t.Fatalf("RegisterEgress %s: %v", vip, err)
+			}
+		}
 	}
-	if err := vt.RegisterEgress(testBlock, 0x705, ProtoTCP, stale, 8443, vip, 443); err != nil {
-		t.Fatalf("RegisterEgress: %v", err)
-	}
-	live := map[Key]struct{}{
-		{Block: testBlock, Argument: 0x705, Proto: ProtoTCP, Addr: netip.MustParseAddr("10.60.0.5"), Port: 8443}: {},
-	}
-	removed, err := vt.Reconcile(live, 2)
-	if err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	if len(removed) != 1 || removed[0].Addr != netip.MustParseAddr("10.60.0.6") {
-		t.Errorf("Reconcile removed %+v, want only the 10.60.0.6 row", removed)
-	}
-	if ft.len() != 1 {
-		t.Errorf("table has %d rows, want 1", ft.len())
-	}
+
+	t.Run("Reconcile", func(t *testing.T) {
+		vt, ft := newTestTable(constClock(1))
+		register(t, vt)
+		live := map[Key]struct{}{{
+			Block: testBlock, Argument: 0x705, Proto: ProtoTCP, Direction: DirectionEgress,
+			Addr: netip.MustParseAddr("fd20:60::5"), Port: 8443,
+		}: {}}
+		removed, err := vt.Reconcile(live, 2)
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if len(removed) != 1 || removed[0].Direction != DirectionEgressTranslated {
+			t.Errorf("Reconcile removed %+v, want only the egress-translated row", removed)
+		}
+		if _, ok, _ := vt.GetEgress(testBlock, 0x705, ProtoTCP, backend, 8443); !ok || ft.len() != 1 {
+			t.Errorf("egress row kept %v, %d rows left; want it kept and alone", ok, ft.len())
+		}
+	})
+
+	t.Run("UnregisterEgressTranslated", func(t *testing.T) {
+		vt, ft := newTestTable(constClock(1))
+		register(t, vt)
+		if err := vt.UnregisterEgressTranslated(testBlock, 0x705, ProtoTCP, backend, 8443); err != nil {
+			t.Fatalf("UnregisterEgressTranslated: %v", err)
+		}
+		if _, ok, _ := vt.GetEgress(testBlock, 0x705, ProtoTCP, backend, 8443); !ok || ft.len() != 1 {
+			t.Errorf("egress row kept %v, %d rows left; want it kept and alone", ok, ft.len())
+		}
+	})
 }
 
 func TestVipXlatTable_RegisterRejectsReservedArgumentZero(t *testing.T) {
@@ -558,8 +602,8 @@ func TestVipXlatTable_UnregisterBindingRejectsInvalidInput(t *testing.T) {
 	if _, err := vt.UnregisterBinding(0, 1, vip, 8080, backend, 30080); err == nil {
 		t.Error("UnregisterBinding with proto 1: expected an error")
 	}
-	if _, err := vt.UnregisterBinding(0, ProtoTCP, net.ParseIP("192.0.2.1").To4(), 8080, backend, 30080); err == nil {
-		t.Error("UnregisterBinding with an IPv4 VIP and an IPv6 backend: expected an error")
+	if _, err := vt.UnregisterBinding(0, ProtoTCP, vip, 8080, net.ParseIP("192.0.2.1").To4(), 30080); err == nil {
+		t.Error("UnregisterBinding with an IPv4 backend: expected an error")
 	}
 	if _, err := vt.UnregisterBinding(0, ProtoTCP, vip, 8080, nil, 30080); err == nil {
 		t.Error("UnregisterBinding with a nil backend: expected an error")

@@ -67,19 +67,25 @@ func testXlatEntries() []vipxlatmap.Entry {
 		{
 			Key: vipxlatmap.Key{
 				Block: 0x20010db8ff01, Argument: 70, Slot: 0xbeef, Proto: vipxlatmap.ProtoTCP,
-				Addr: netip.MustParseAddr("2001:db8::1"), Port: 8080,
+				Direction: vipxlatmap.DirectionIngress, Addr: netip.MustParseAddr("2001:db8::1"), Port: 8080,
 			},
-			Direction:   vipxlatmap.DirectionIngress,
 			RewriteAddr: net.ParseIP("fd20:60::1"),
 			RewritePort: 30080,
 		},
 		{
 			Key: vipxlatmap.Key{
 				Block: 0x20010db8ff01, Argument: 70, Proto: vipxlatmap.ProtoTCP,
-				Addr: netip.MustParseAddr("fd20:60::1"), Port: 30080,
+				Direction: vipxlatmap.DirectionEgress, Addr: netip.MustParseAddr("fd20:60::1"), Port: 30080,
 			},
-			Direction:   vipxlatmap.DirectionEgress,
 			RewriteAddr: net.ParseIP("2001:db8::1"),
+			RewritePort: 8080,
+		},
+		{
+			Key: vipxlatmap.Key{
+				Block: 0x20010db8ff01, Argument: 70, Proto: vipxlatmap.ProtoTCP,
+				Direction: vipxlatmap.DirectionEgressTranslated, Addr: netip.MustParseAddr("fd20:60::1"), Port: 30080,
+			},
+			RewriteAddr: net.ParseIP("203.0.113.10").To4(),
 			RewritePort: 8080,
 		},
 	}
@@ -91,7 +97,7 @@ func TestVIPXlatList(t *testing.T) {
 		t.Fatalf("list: unexpected error: %v", err)
 	}
 	for _, want := range []string{
-		"DIRECTION", "SLOT", "0xbeef", "MATCH", "ingress", "egress",
+		"DIRECTION", "SLOT", "0xbeef", "MATCH", "ingress", "egress", "egress-translated", "203.0.113.10:8080",
 		"0x20010db8ff01", "[fd20:60::1]:30080", "[2001:db8::1]:8080",
 	} {
 		if !strings.Contains(out, want) {
@@ -118,24 +124,24 @@ func TestVIPXlatRemove(t *testing.T) {
 	}
 }
 
-// TestVIPXlatRemoveIPv4: an IPv4 binding's addresses, written plainly or
-// IPv4-mapped, reach the table in 4-byte form, the one vipxlatmap takes, with
-// the slot derived from the IPv4 backend as galactic-router derives it.
+// TestVIPXlatRemoveIPv4: an IPv4 VIP, written plainly or IPv4-mapped, reaches
+// the table in 4-byte form, the one vipxlatmap takes, beside its IPv6 backend,
+// with the slot derived from that backend as galactic-router derives it.
 func TestVIPXlatRemoveIPv4(t *testing.T) {
 	for _, vip := range []string{"203.0.113.10", "::ffff:203.0.113.10"} {
 		table := &fakeXlatTable{}
 		if _, err := runXlat(t, table, "remove",
 			"--protocol", "udp", "--vip", vip, "--port", "443",
-			"--backend", "10.60.0.5", "--backend-port", "8443"); err != nil {
+			"--backend", "fd20:60::5", "--backend-port", "8443"); err != nil {
 			t.Fatalf("remove --vip %s: unexpected error: %v", vip, err)
 		}
-		slot := srv6.BackendSlot(netip.MustParseAddr("10.60.0.5"), 8443)
-		want := "slot=" + itoa(slot) + " udp 203.0.113.10:443 10.60.0.5:8443"
+		slot := srv6.BackendSlot(netip.MustParseAddr("fd20:60::5"), 8443)
+		want := "slot=" + itoa(slot) + " udp 203.0.113.10:443 [fd20:60::5]:8443"
 		if len(table.calls) != 1 || table.calls[0] != want {
 			t.Errorf("--vip %s: UnregisterBinding calls = %q, want [%q]", vip, table.calls, want)
 		}
-		if len(table.addrs) == 1 && (len(table.addrs[0][0]) != net.IPv4len || len(table.addrs[0][1]) != net.IPv4len) {
-			t.Errorf("--vip %s: addresses passed as %d and %d bytes, want 4 and 4",
+		if len(table.addrs) == 1 && (len(table.addrs[0][0]) != net.IPv4len || len(table.addrs[0][1]) != net.IPv6len) {
+			t.Errorf("--vip %s: addresses passed as %d and %d bytes, want 4 and 16",
 				vip, len(table.addrs[0][0]), len(table.addrs[0][1]))
 		}
 	}

@@ -59,7 +59,9 @@ func newVIPXlatListCommand(pinDir *string) *cobra.Command {
 		Short: "Print every vip_xlat_table row",
 		Long: `list prints every vip_xlat_table row. An ingress row is keyed on the VIP,
 its port and the backend's slot, and rewrites to the backend. An egress row is
-keyed on the backend and its port, with slot 0, and rewrites to the VIP.`,
+keyed on the backend and its port, with slot 0, and rewrites to an IPv6 VIP. An
+egress-translated row is keyed the same way and rewrites to an IPv4 VIP, for
+replies the datapath translates back to IPv4.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			table, closer, err := openVipXlatTable(*pinDir)

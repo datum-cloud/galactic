@@ -32,33 +32,43 @@
 // VIP and port or the same backend and port. Deciding which one owns it is the
 // caller's job, since this table has no record of who wrote a row.
 //
-// # Both address families, one layout
+// # IPv4 VIPs, translated to IPv6 backends
 //
-// A row is IPv6 or IPv4, its VIP and backend always of one family. struct
-// vip_xlat_key and struct vip_xlat_value carry 16-byte addresses, so an IPv4
-// row stores both addresses in IPv4-mapped form (::ffff:a.b.c.d), the form
-// usid.c's vip_xlat4 builds from an IPv4 header, and the IPv6 rewrite paths
-// skip an IPv4-mapped address, so the two families never share a row. Callers
-// pass an IPv4 address as a 4-byte net.IP. A 16-byte IPv4-mapped one is
+// Workloads are IPv6 only, so an IPv4 VIP is served by an IPv6 backend, and
+// usid.c translates between the families statelessly (RFC 7915): a client's
+// IPv4 packet reaches the backend from 64:ff9b::<client address>, and the
+// backend's reply to that address leaves as IPv4 from the VIP. A binding is
+// therefore an IPv6 VIP with an IPv6 backend, or an IPv4 VIP with an IPv6
+// backend. An IPv4 backend is refused.
+//
+// Callers pass an IPv4 VIP as a 4-byte net.IP. A 16-byte IPv4-mapped address is
 // refused rather than taken as IPv4, since net.IP cannot tell it apart from an
-// IPv6 address, and so is a binding that mixes the families. Reads unmap: an
-// IPv4 row's Key.Addr is a plain IPv4 netip.Addr and its RewriteAddr a 4-byte
-// net.IP.
+// IPv6 address. The map's 16-byte address fields hold an IPv4 VIP in
+// IPv4-mapped form (::ffff:a.b.c.d), the form the datapath builds from an IPv4
+// header, and reads unmap it: such a row's Key.Addr or RewriteAddr is a plain
+// IPv4 address.
 //
-// The map's layout predates IPv4 rows and is unchanged by them: a 32-byte key
-// (block, argument, proto, direction, port, slot, address) and an 18-byte value
-// (address, port), pinned at <attach.PinDir>/vip_xlat_table. galactic-cni loads
-// and pins it, and attach.Load reuses the pin with its rows across restarts and
-// upgrades. galactic-router's ServiceVIPBinding reconciler is the only writer
-// besides the vip xlat CLI, removing a binding's rows when the binding is
-// deleted, and its periodic sweep removes rows no binding claims. Every IPv6
-// row a release before IPv4 rows wrote reads, matches and is swept the same
-// way. Rolling back to such a release leaves any IPv4 rows in place, inert for
-// the traffic the gateway sends, since its datapath looks up no IPv4 packet,
-// though its IPv6 path can still match an IPv6 packet sent to an IPv4-mapped
-// VIP against one. Its router can delete none of them and its sweep counts an
-// error for each on every pass, so delete the IPv4 bindings, or remove their
-// rows with this release's vip xlat CLI, before rolling back.
+// The rows of one binding, by its VIP's family:
+//
+//	VIP   direction          key: slot, address, port      value: address, port
+//	IPv6  ingress            slot, VIP, VIP port           backend, backend port
+//	IPv6  egress             0, backend, backend port      VIP, VIP port
+//	IPv4  ingress            slot, ::ffff:VIP, VIP port    backend, backend port
+//	IPv4  egress-translated  0, backend, backend port      ::ffff:VIP, VIP port
+//
+// Every key also carries the block, argument and protocol. The datapath looks
+// up an egress-translated row only for a reply to 64:ff9b::/96, and an egress
+// row for every other reply, so a backend socket serving one IPv4 VIP and one
+// IPv6 VIP has a row of each and they never collide.
+//
+// The map's layout is fixed: a 32-byte key (block, argument, proto, direction,
+// port, slot, address) and an 18-byte value (address, port), pinned at
+// <attach.PinDir>/vip_xlat_table. galactic-cni loads and pins it, and
+// attach.Load reuses the pin with its rows across restarts and upgrades, so a
+// layout change would empty it until every binding was written again.
+// galactic-router's ServiceVIPBinding reconciler is the only writer besides the
+// vip xlat CLI, removing a binding's rows when the binding is deleted, and its
+// periodic sweep removes rows no binding claims.
 //
 // # Generation is per-process here, unlike vrf_table
 //
@@ -100,9 +110,11 @@ const (
 )
 
 // Key identifies one vip_xlat_table row as the kernel composes it. Block and
-// Argument identify the tenant VRF and Proto is the transport protocol. Addr and
-// Port are direction-dependent: the VIP's for an ingress row, the backend's for
-// an egress row. Port is in host order here and converted internally.
+// Argument identify the tenant VRF and Proto is the transport protocol.
+// Direction is the lookup the row serves. Addr and Port are
+// direction-dependent: the VIP's for an ingress row, the backend's for an
+// egress or egress-translated row. Port is in host order here and converted
+// internally.
 //
 // Slot is the backend slot an ingress row is keyed on, the value
 // srv6.BackendSlot derives from the row's backend and galactic-gateway writes
@@ -110,12 +122,13 @@ const (
 // one VIP share a node and VRF, each with its own ingress row. Egress rows
 // always carry Slot 0.
 type Key struct {
-	Block    uint64
-	Argument uint16
-	Slot     uint16
-	Proto    uint8
-	Addr     netip.Addr
-	Port     uint16
+	Block     uint64
+	Argument  uint16
+	Slot      uint16
+	Proto     uint8
+	Direction Direction
+	Addr      netip.Addr
+	Port      uint16
 }
 
 // Entry is one decoded vip_xlat_table row, kept separate from the generated
@@ -123,12 +136,8 @@ type Key struct {
 type Entry struct {
 	Key
 
-	// Direction is the lookup this row serves, which the kernel key carries
-	// but Key does not.
-	Direction Direction
-
 	// RewriteAddr is the rewrite target's address (backend for an
-	// ingress-direction row, VIP for an egress-direction row).
+	// ingress-direction row, VIP for an egress or egress-translated row).
 	RewriteAddr net.IP
 
 	// RewritePort is the rewrite target's port (host order), paired with
@@ -194,8 +203,8 @@ func validatePort(port uint16) error {
 
 // addrTo16 returns addr in the 16-byte form the map stores: an IPv6 address
 // as is, and a 4-byte IPv4 address in its IPv4-mapped form. A 16-byte
-// IPv4-mapped address is refused, so no caller can write an IPv6 row under an
-// IPv4 row's key; see the package doc comment.
+// IPv4-mapped address is refused, so no caller can write an IPv6 VIP's row
+// under an IPv4 VIP's key; see the package doc comment.
 func addrTo16(addr net.IP) ([16]byte, error) {
 	if addr == nil {
 		return [16]byte{}, errors.New("vipxlatmap: vip_xlat_table: address is nil")
@@ -212,14 +221,16 @@ func addrTo16(addr net.IP) ([16]byte, error) {
 	return a.As16(), nil
 }
 
-// sameFamily returns an error unless a and b, already validated by addrTo16,
-// are of one family. A row rewrites one family's address to the same
-// family's: the datapath never translates between them.
-func sameFamily(a, b net.IP) error {
-	if (len(a) == net.IPv4len) != (len(b) == net.IPv4len) {
-		return fmt.Errorf("vipxlatmap: vip_xlat_table: %s and %s are not of one address family", a, b)
+// translatedVIP reports whether a binding of vipAddr to backendAddr, both
+// already validated by addrTo16, is an IPv4 VIP translated to an IPv6
+// backend. It returns an error for an IPv4 backend, which no VIP can have.
+func translatedVIP(vipAddr, backendAddr net.IP) (bool, error) {
+	if len(backendAddr) == net.IPv4len {
+		return false, fmt.Errorf(
+			"vipxlatmap: vip_xlat_table: backend %s is IPv4; a VIP of either family is served by an IPv6 backend",
+			backendAddr)
 	}
-	return nil
+	return len(vipAddr) == net.IPv4len, nil
 }
 
 // fromWire returns the address a 16-byte map address holds, unmapping an
@@ -228,48 +239,65 @@ func fromWire(raw [16]byte) netip.Addr {
 	return netip.AddrFrom16(raw).Unmap()
 }
 
-// directionIngress and directionEgress mirror the datapath's direction
-// constants, the byte the kernel key must carry so each program's
-// direction-fixed key construction finds the row it is looking for.
+// directionIngress, directionEgress and directionEgressXlat mirror the
+// datapath's direction constants, the byte the kernel key must carry so each
+// program's direction-fixed key construction finds the row it is looking for.
 //
 // A direction field is needed because (block, argument, proto, port) is not
 // always unique: a binding that keeps the same port number on both the VIP and
 // the backend, an ordinary case, would otherwise collapse the two rows into one
-// entry and silently lose whichever was registered first. The exported API
-// stays direction-implicit, so only the key construction needs these values.
+// entry and silently lose whichever was registered first. directionEgressXlat
+// keeps an IPv4 VIP's egress row apart from an IPv6 VIP's on the same backend
+// socket in the same way.
 const (
-	directionIngress = uint8(0)
-	directionEgress  = uint8(1)
+	directionIngress    = uint8(0)
+	directionEgress     = uint8(1)
+	directionEgressXlat = uint8(2)
 )
 
-// Direction reports which lookup a decoded row serves: DirectionIngress for the
-// row RegisterIngress writes, DirectionEgress for the row RegisterEgress writes.
+// Direction reports which lookup a row serves: DirectionIngress for the row
+// RegisterIngress writes, and DirectionEgress or DirectionEgressTranslated for
+// the row RegisterEgress writes for an IPv6 or an IPv4 VIP.
 type Direction uint8
 
-// The two directions an Entry can report, matching the kernel key's byte.
+// The directions a Key can carry, matching the kernel key's byte.
 const (
-	DirectionIngress = Direction(directionIngress)
-	DirectionEgress  = Direction(directionEgress)
+	DirectionIngress          = Direction(directionIngress)
+	DirectionEgress           = Direction(directionEgress)
+	DirectionEgressTranslated = Direction(directionEgressXlat)
 )
 
-// String returns "ingress", "egress", or the raw byte for any other value.
+// String returns "ingress", "egress", "egress-translated", or the raw byte for
+// any other value.
 func (d Direction) String() string {
 	switch d {
 	case DirectionIngress:
 		return "ingress"
 	case DirectionEgress:
 		return "egress"
+	case DirectionEgressTranslated:
+		return "egress-translated"
 	default:
 		return fmt.Sprintf("direction(%d)", uint8(d))
 	}
 }
 
+// egressDirection returns the direction of the egress row for a VIP that is,
+// or is not, translated from IPv4.
+func egressDirection(translated bool) uint8 {
+	if translated {
+		return directionEgressXlat
+	}
+	return directionEgress
+}
+
 // register is the shared primitive RegisterIngress and RegisterEgress build
 // their key and value around. keyAddr and keyPort are what the kernel key is
 // composed with, which is direction-dependent; valAddr and valPort are the
-// rewrite target the row substitutes in.
+// rewrite target the row substitutes in. egress says which of them is the VIP;
+// an egress row's direction follows the VIP's family.
 func (t *VipXlatTable) register(
-	direction uint8, block uint64, argument, slot uint16, proto uint8,
+	egress bool, block uint64, argument, slot uint16, proto uint8,
 	keyAddr net.IP, keyPort uint16, valAddr net.IP, valPort uint16,
 ) error {
 	t.writeMu.Lock()
@@ -290,16 +318,28 @@ func (t *VipXlatTable) register(
 	if err := validatePort(valPort); err != nil {
 		return fmt.Errorf("vipxlatmap: vip_xlat_table: register: rewrite port: %w", err)
 	}
-	key, err := kernelKey(direction, block, argument, slot, proto, keyAddr, keyPort)
-	if err != nil {
+	if _, err := addrTo16(keyAddr); err != nil {
 		return fmt.Errorf("vipxlatmap: vip_xlat_table: register: key address: %w", err)
 	}
 	rawAddr, err := addrTo16(valAddr)
 	if err != nil {
 		return fmt.Errorf("vipxlatmap: vip_xlat_table: register: rewrite address: %w", err)
 	}
-	if err := sameFamily(keyAddr, valAddr); err != nil {
+	vipAddr, backendAddr := keyAddr, valAddr
+	if egress {
+		vipAddr, backendAddr = valAddr, keyAddr
+	}
+	translated, err := translatedVIP(vipAddr, backendAddr)
+	if err != nil {
 		return fmt.Errorf("vipxlatmap: vip_xlat_table: register: %w", err)
+	}
+	direction := directionIngress
+	if egress {
+		direction = egressDirection(translated)
+	}
+	key, err := kernelKey(direction, block, argument, slot, proto, keyAddr, keyPort)
+	if err != nil {
+		return fmt.Errorf("vipxlatmap: vip_xlat_table: register: key address: %w", err)
 	}
 
 	value := prog.UsidVipXlatValue{
@@ -321,23 +361,26 @@ func (t *VipXlatTable) register(
 // (block, argument, slot, proto, vipAddr, vipPort), the packet's outer
 // destination slot and inner destination on an inbound request, and rewriting
 // to backendAddr and backendPort. slot is srv6.BackendSlot of the backend.
+// vipAddr is IPv6, or IPv4 as 4 bytes; backendAddr is IPv6.
 func (t *VipXlatTable) RegisterIngress(
 	block uint64, argument, slot uint16, proto uint8,
 	vipAddr net.IP, vipPort uint16,
 	backendAddr net.IP, backendPort uint16,
 ) error {
-	return t.register(directionIngress, block, argument, slot, proto, vipAddr, vipPort, backendAddr, backendPort)
+	return t.register(false, block, argument, slot, proto, vipAddr, vipPort, backendAddr, backendPort)
 }
 
-// RegisterEgress writes the egress-direction row for one binding, keyed on
-// (block, argument, proto, backendAddr, backendPort), the packet's source on
-// the backend's reply, and rewriting to vipAddr and vipPort.
+// RegisterEgress writes the egress row for one binding, keyed on (block,
+// argument, proto, backendAddr, backendPort), the packet's source on the
+// backend's reply, and rewriting to vipAddr and vipPort. The row's direction
+// is DirectionEgress for an IPv6 VIP and DirectionEgressTranslated for an IPv4
+// one, passed as 4 bytes; backendAddr is IPv6.
 func (t *VipXlatTable) RegisterEgress(
 	block uint64, argument uint16, proto uint8,
 	backendAddr net.IP, backendPort uint16,
 	vipAddr net.IP, vipPort uint16,
 ) error {
-	return t.register(directionEgress, block, argument, 0, proto, backendAddr, backendPort, vipAddr, vipPort)
+	return t.register(true, block, argument, 0, proto, backendAddr, backendPort, vipAddr, vipPort)
 }
 
 // kernelKey composes the kernel key for (direction, block, argument, slot,
@@ -394,8 +437,9 @@ func (t *VipXlatTable) UnregisterIngress(
 	return t.unregister(directionIngress, block, argument, slot, proto, vipAddr, vipPort)
 }
 
-// UnregisterEgress removes the egress-direction row RegisterEgress would
-// have written for (block, argument, proto, backendAddr, backendPort).
+// UnregisterEgress removes the egress row RegisterEgress would have written
+// for an IPv6 VIP's binding of (block, argument, proto, backendAddr,
+// backendPort).
 func (t *VipXlatTable) UnregisterEgress(
 	block uint64, argument uint16, proto uint8, backendAddr net.IP, backendPort uint16,
 ) error {
@@ -404,18 +448,32 @@ func (t *VipXlatTable) UnregisterEgress(
 	return t.unregister(directionEgress, block, argument, 0, proto, backendAddr, backendPort)
 }
 
+// UnregisterEgressTranslated removes the egress-translated row RegisterEgress
+// would have written for an IPv4 VIP's binding of (block, argument, proto,
+// backendAddr, backendPort).
+func (t *VipXlatTable) UnregisterEgressTranslated(
+	block uint64, argument uint16, proto uint8, backendAddr net.IP, backendPort uint16,
+) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	return t.unregister(directionEgressXlat, block, argument, 0, proto, backendAddr, backendPort)
+}
+
 // binding identifies the two rows one binding writes, validated and in the
-// raw form the map stores. slot is the ingress row's backend slot.
+// raw form the map stores. slot is the ingress row's backend slot, and
+// translated says the VIP is IPv4.
 type binding struct {
 	slot        uint16
 	proto       uint8
+	translated  bool
 	vip         [16]byte
 	vipPort     uint16
 	backend     [16]byte
 	backendPort uint16
 }
 
-// newBinding validates a binding's protocol and addresses.
+// newBinding validates a binding's protocol and addresses: an IPv6 or 4-byte
+// IPv4 VIP, and an IPv6 backend.
 func newBinding(
 	slot uint16, proto uint8, vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16,
 ) (binding, error) {
@@ -430,16 +488,18 @@ func newBinding(
 	if err != nil {
 		return binding{}, fmt.Errorf("vipxlatmap: vip_xlat_table: unregister binding: backend address: %w", err)
 	}
-	if err := sameFamily(vipAddr, backendAddr); err != nil {
+	translated, err := translatedVIP(vipAddr, backendAddr)
+	if err != nil {
 		return binding{}, fmt.Errorf("vipxlatmap: vip_xlat_table: unregister binding: %w", err)
 	}
 	return binding{
-		slot: slot, proto: proto, vip: rawVIP, vipPort: vipPort, backend: rawBackend, backendPort: backendPort,
+		slot: slot, proto: proto, translated: translated,
+		vip: rawVIP, vipPort: vipPort, backend: rawBackend, backendPort: backendPort,
 	}, nil
 }
 
 // vipIP and backendIP return b's addresses as callers pass them: 4 bytes for
-// an IPv4 binding, 16 for an IPv6 one.
+// an IPv4 VIP, 16 for an IPv6 VIP or backend.
 func (b binding) vipIP() net.IP     { return net.IP(fromWire(b.vip).AsSlice()) }
 func (b binding) backendIP() net.IP { return net.IP(fromWire(b.backend).AsSlice()) }
 
@@ -451,10 +511,10 @@ func (b binding) isIngressRow(e Entry) bool {
 		e.RewriteAddr.Equal(b.backendIP()) && e.RewritePort == b.backendPort
 }
 
-// isEgressRow reports whether e is the egress row b writes: keyed on b's
-// backend and port, and rewriting to b's VIP and port.
+// isEgressRow reports whether e is the egress or egress-translated row b
+// writes: keyed on b's backend and port, and rewriting to b's VIP and port.
 func (b binding) isEgressRow(e Entry) bool {
-	return e.Direction == DirectionEgress && e.Slot == 0 && e.Proto == b.proto &&
+	return e.Direction == Direction(egressDirection(b.translated)) && e.Slot == 0 && e.Proto == b.proto &&
 		e.Addr == fromWire(b.backend) && e.Port == b.backendPort &&
 		e.RewriteAddr.Equal(b.vipIP()) && e.RewritePort == b.vipPort
 }
@@ -482,13 +542,14 @@ func (t *VipXlatTable) removeAt(block uint64, argument uint16, b binding) ([]Ent
 		removed = append(removed, ingress)
 	}
 
-	egress, found, err := t.get(directionEgress, block, argument, 0, b.proto, b.backendIP(), b.backendPort)
+	direction := egressDirection(b.translated)
+	egress, found, err := t.get(direction, block, argument, 0, b.proto, b.backendIP(), b.backendPort)
 	if err != nil {
 		return removed, err
 	}
 	if found && b.isEgressRow(egress) {
 		backend := b.backendIP()
-		if err := t.unregister(directionEgress, block, argument, 0, b.proto, backend, b.backendPort); err != nil {
+		if err := t.unregister(direction, block, argument, 0, b.proto, backend, b.backendPort); err != nil {
 			return removed, err
 		}
 		removed = append(removed, egress)
@@ -573,14 +634,14 @@ func (t *VipXlatTable) decodeEntry(key prog.UsidVipXlatKey, value prog.UsidVipXl
 
 	return Entry{
 		Key: Key{
-			Block:    key.Block,
-			Argument: key.Argument,
-			Slot:     key.Slot,
-			Proto:    key.Proto,
-			Addr:     fromWire(key.Addr),
-			Port:     hostToNetwork16(key.Port), // self-inverse: wire -> host
+			Block:     key.Block,
+			Argument:  key.Argument,
+			Slot:      key.Slot,
+			Proto:     key.Proto,
+			Direction: Direction(key.Direction),
+			Addr:      fromWire(key.Addr),
+			Port:      hostToNetwork16(key.Port), // self-inverse: wire -> host
 		},
-		Direction:   Direction(key.Direction),
 		RewriteAddr: net.IP(fromWire(value.Addr).AsSlice()),
 		RewritePort: hostToNetwork16(value.Port), // self-inverse: wire -> host
 		Generation:  gen,
@@ -597,12 +658,21 @@ func (t *VipXlatTable) GetIngress(
 }
 
 // GetEgress reads the egress-direction entry for (block, argument, proto,
-// backendAddr, backendPort), the row RegisterEgress writes, and reports whether
-// it exists.
+// backendAddr, backendPort), the row RegisterEgress writes for an IPv6 VIP,
+// and reports whether it exists.
 func (t *VipXlatTable) GetEgress(
 	block uint64, argument uint16, proto uint8, backendAddr net.IP, backendPort uint16,
 ) (Entry, bool, error) {
 	return t.get(directionEgress, block, argument, 0, proto, backendAddr, backendPort)
+}
+
+// GetEgressTranslated reads the egress-translated entry for (block, argument,
+// proto, backendAddr, backendPort), the row RegisterEgress writes for an IPv4
+// VIP, and reports whether it exists.
+func (t *VipXlatTable) GetEgressTranslated(
+	block uint64, argument uint16, proto uint8, backendAddr net.IP, backendPort uint16,
+) (Entry, bool, error) {
+	return t.get(directionEgressXlat, block, argument, 0, proto, backendAddr, backendPort)
 }
 
 // get is GetIngress/GetEgress's shared primitive.
@@ -671,14 +741,8 @@ func (t *VipXlatTable) Reconcile(live map[Key]struct{}, cutoff uint64) (removed 
 		if e.Generation >= cutoff {
 			continue
 		}
-		// Key carries no direction, so try both. unregister is a no-op for
-		// whichever direction was never registered at this exact key, so this
-		// never deletes anything that did not already match e.
 		addr := net.IP(e.Addr.AsSlice())
-		delErr := errors.Join(
-			t.unregister(directionIngress, e.Block, e.Argument, e.Slot, e.Proto, addr, e.Port),
-			t.unregister(directionEgress, e.Block, e.Argument, e.Slot, e.Proto, addr, e.Port),
-		)
+		delErr := t.unregister(uint8(e.Direction), e.Block, e.Argument, e.Slot, e.Proto, addr, e.Port)
 		if delErr != nil {
 			errs = append(errs, fmt.Errorf("vipxlatmap: vip_xlat_table: reconcile: delete stale entry %+v: %w", e.Key, delErr))
 			continue
