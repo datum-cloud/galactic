@@ -131,9 +131,11 @@ nodes, plus `galactic-nat`, the egress shard, and `galactic-gateway`, the VIP lo
 (one DaemonSet per node, `galactic-gateway-<node>`). Both run from the node's XDP dispatcher
 (`GALACTIC_NAT_XDP_ATTACH=dispatch`; the gateway's default), each in its own slot, so either
 can restart without detaching the other. Each site has its own VIP `/64`
-(`2001:db8:6060:1::/64` for dfw, `:2::` for sjc, `:3::` for iad), originated only by that
-site's edge nodes and served by two `ns60` backends on the site's compute node, which the
-site's `NetworkService`s select by label through their `VPCAttachment`s.
+(`2001:db8:6060:1::/64` for dfw, `:2::` for sjc, `:3::` for iad) and IPv4 VIP `/26`
+(`198.51.100.0/26`, `.64/26`, `.128/26`), originated only by that site's edge nodes and
+served by two IPv6-only `ns60` backends on the site's compute node, which the site's
+`NetworkService`s select by label through their `VPCAttachment`s. The compute node
+translates the IPv4 VIP's flows to IPv6 for them.
 Compute nodes run no shard: each egresses through its own site's edge shards only. The
 reflector runs neither `galactic-cni` nor a shard — its
 `galactic=control` label is mutually exclusive with the `galactic=router` value that pulls
@@ -531,6 +533,7 @@ task deploy
 | `verify:underlay`                | Ping every underlay loopback from tr1 over both IPv4 and IPv6                                                                               |
 | `verify:gateway`                 | Check every NetworkGateway is Ready, every NetworkService Accepted, every generated ServiceVIPBinding Bound                                 |
 | `verify:gateway-ingress`         | TCP and UDP from the off-fabric host to each site's VIP, through every gateway node in turn                                                 |
+| `verify:gateway-ingress-ipv4`    | IPv4 TCP and UDP to each site's IPv4 VIP through every gateway node, translated to the IPv6-only backends                                   |
 | `verify:gateway-restart`         | Restart dfw-worker2's gateway and shard in turn while the other carries traffic (#710)                                                      |
 | `verify:gateway-detach`          | Turn dfw-worker2's gateway datapath off: the ingress check must fail, then pass (not in `verify`)                                           |
 | `verify:nat-datapath`            | Full egress round trip to the off-fabric host, IPv6 (NAT66) and IPv4 (NAT64)                                                                |

@@ -222,26 +222,38 @@ func TestGatewayConfigProcSysPath(t *testing.T) {
 	}
 }
 
-// TestGatewayConfigIPv4VIPs covers the IPv4 VIP switch: off by default, on
-// from the environment, and on from the flag over the environment.
+// TestGatewayConfigIPv4VIPs covers the IPv4 VIP switch: on by default, off
+// from the environment as a kill switch, and on from the flag over the
+// environment.
 func TestGatewayConfigIPv4VIPs(t *testing.T) {
-	if NewGatewayConfig().IPv4VIPs {
-		t.Error("IPv4VIPs = true by default, want false")
-	}
-	t.Setenv(EnvGatewayIPv4VIPs, "true")
 	if !NewGatewayConfig().IPv4VIPs {
-		t.Error("IPv4VIPs = false with the env set to true")
+		t.Error("IPv4VIPs = false by default, want true")
+	}
+	t.Setenv(EnvGatewayIPv4VIPs, "false")
+	if NewGatewayConfig().IPv4VIPs {
+		t.Error("IPv4VIPs = true with the env set to false")
 	}
 
-	t.Setenv(EnvGatewayIPv4VIPs, "false")
 	cfg := NewGatewayConfig()
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
-	flags.Bool("gateway-ipv4-vips", false, "")
+	flags.Bool("gateway-ipv4-vips", true, "")
 	if err := flags.Parse([]string{"--gateway-ipv4-vips=true"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg.BindFlags(flags)
 	if !cfg.IPv4VIPs {
 		t.Error("IPv4VIPs = false with the flag set to true over the env")
+	}
+
+	// An unchanged flag leaves the environment's kill switch in force.
+	cfg = NewGatewayConfig()
+	flags = pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.Bool("gateway-ipv4-vips", true, "")
+	if err := flags.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BindFlags(flags)
+	if cfg.IPv4VIPs {
+		t.Error("IPv4VIPs = true with the env set to false and the flag unset")
 	}
 }
