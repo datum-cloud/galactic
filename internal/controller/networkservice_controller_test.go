@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"net/netip"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,8 +37,14 @@ const (
 	testVIPPrefix  = testVIP + "/128"
 
 	// testVIP4 is an IPv4 VIP, which the gateway leaves out of the engine
-	// and never advertises until IPv4 VIPs are served (#705).
+	// unless IPv4VIPs is set, and never advertises (#705).
 	testVIP4 = "203.0.113.5"
+
+	// testBackendAddr4 is an IPv4 backend address in testBackendPrefix4,
+	// which newBackendFixtures' advertisement also carries, so it resolves
+	// like testBackendAddr.
+	testBackendAddr4   = "10.60.0.5"
+	testBackendPrefix4 = "10.60.0.0/24"
 
 	// testBackendAddr is the default backend address newTestRule uses.
 	// testBackendRouterName/testBackendPrefix/testBackendVRFID describe the
@@ -115,16 +122,21 @@ const (
 )
 
 // newBackendAttachment returns the VPCAttachment newTestRule's selector picks
-// for vpcRef: addr on testComputeNodeName, the node newBackendFixtures'
-// router targets, so the two together resolve one backend. With no addr it
-// carries testBackendAddr.
+// for vpcRef: addrs on testComputeNodeName, the node newBackendFixtures'
+// router targets, so the two together resolve one backend per address. With no
+// addr it carries testBackendAddr. An IPv6 address gets a /64 and an IPv4 one a
+// /24.
 func newBackendAttachment(vpcRef string, addrs ...string) *cloudv1alpha1.VPCAttachment {
 	if len(addrs) == 0 {
 		addrs = []string{testBackendAddr}
 	}
 	interfaceAddrs := make([]cloudv1alpha1.IPAddress, 0, len(addrs))
 	for _, a := range addrs {
-		interfaceAddrs = append(interfaceAddrs, cloudv1alpha1.IPAddress(a+"/64"))
+		suffix := "/64"
+		if addr, err := netip.ParseAddr(a); err == nil && addr.Is4() {
+			suffix = "/24"
+		}
+		interfaceAddrs = append(interfaceAddrs, cloudv1alpha1.IPAddress(a+suffix))
 	}
 	return &cloudv1alpha1.VPCAttachment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -181,7 +193,7 @@ func newBackendFixtures(
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: testBackendRouterName},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-			Prefixes:      []bgpv1alpha1.Prefix{testBackendPrefix},
+			Prefixes:      []bgpv1alpha1.Prefix{testBackendPrefix, testBackendPrefix4},
 			VRFID:         &vrfID,
 			Function:      &function,
 		},
