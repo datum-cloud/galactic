@@ -37,11 +37,19 @@
 #   - every gateway node in the site reports <node>/IPv4Served True with
 #     reason Advertised on both rules.
 #
-# Through each node, one more flow per protocol goes from a source port
-# fixed for the site (STICKY), so the same 5-tuple reaches every one of the
-# site's gateways in turn. Every gateway builds the same Maglev table, so each
-# must send it to the same backend: a client whose path moves to another
-# gateway keeps its backend.
+# Through each node, STICKY_FLOWS more flows per protocol go from source
+# ports fixed for the site, so the same STICKY_FLOWS 5-tuples reach every one
+# of the site's gateways in turn. Every gateway builds the same Maglev table,
+# so each must send every tuple to the same backend: a client whose path
+# moves to another gateway keeps its backend. With two backends, one tuple
+# would match by chance half the time even across differing tables; eight
+# leave about one chance in 256.
+#
+# A TCP tuple's second connection reuses the client port the first one left
+# in TIME_WAIT, which Linux refuses by default (net.ipv4.tcp_tw_reuse=2
+# allows it on loopback only). The check sets tcp_tw_reuse=1 in remote-host's
+# own network namespace for its duration, restores it on exit, and counts the
+# connections it made over a TIME_WAIT entry.
 #
 # Across the flows through each node:
 #
@@ -63,9 +71,11 @@
 #
 #   pins          every gateway node of every checked site pinned once
 #   MIN_BACKENDS  at least 2 distinct backends answer per site
-#   same flow     one fixed 5-tuple per protocol, sent through every
-#                 gateway node of a site in turn, draws the same backend
-#                 on every node (needs two gateways: dfw only)
+#   same flow     each of STICKY_FLOWS fixed 5-tuples per protocol, sent
+#                 through every gateway node of a site in turn, draws the
+#                 same backend on every node; a site with two gateways
+#                 (dfw) fails unless both took part, and a site with one
+#                 says it has nothing to compare
 #   pin isolation the rule counter of every unpinned gateway in the site
 #                 stays flat while another node is pinned
 #   flows         every one of FLOWS flows per protocol per node answered
@@ -95,6 +105,7 @@ LAB=${LAB:-gvpc}
 CLIENT="11.1.40.2"
 PORT=80
 FLOWS=8
+STICKY_FLOWS=8
 MIN_BACKENDS=2
 GATEWAY_METRICS_PORT=8081
 CNI_METRICS_PORT=9180
@@ -143,7 +154,13 @@ if [ "${1:-}" = "--unpin" ]; then
   unpin_all
   exit 0
 fi
-trap 'unpin_all; stop_capture; rm -rf "${work:-}"' EXIT
+restore_tw_reuse() {
+  [ -z "${tw_reuse:-}" ] || client sysctl -qw "net.ipv4.tcp_tw_reuse=${tw_reuse}" || true
+}
+trap 'unpin_all; stop_capture; restore_tw_reuse; rm -rf "${work:-}"' EXIT
+# See the header: the same-flow check reconnects from a port in TIME_WAIT.
+tw_reuse=$(client cat /proc/sys/net/ipv4/tcp_tw_reuse)
+client sysctl -qw net.ipv4.tcp_tw_reuse=1
 
 rc=0
 fail() {
@@ -309,9 +326,10 @@ EMBEDDED=$(embed4 "${CLIENT}")
 # A random source-port base per run, so the flows are new ones: a port an
 # earlier run used can still be in TIME_WAIT on the client.
 sport=$((20000 + RANDOM % 30000))
-# STICKY is the same-flow check's source port base, below the range above;
-# each site takes the next two ports, TCP then UDP.
+# sticky is the same-flow check's source port base, below the range above;
+# each site takes the next 2 * STICKY_FLOWS ports, TCP then UDP.
 sticky=$((10000 + RANDOM % 9000))
+tw_reused=0
 work=$(mktemp -d)
 
 pinned=0
@@ -331,8 +349,8 @@ for site in "${SITES[@]}"; do
   check_route "${site}"
   check_control_plane "${site}" "${backends}"
   declare -A served=() sticky_pod=()
-  sticky=$((sticky + 2))
-  declare -A STICKY=([tcp]="${sticky}" [udp]="$((sticky + 1))")
+  declare -A STICKY=([tcp]="${sticky}" [udp]="$((sticky + STICKY_FLOWS))")
+  sticky=$((sticky + 2 * STICKY_FLOWS))
   site_pins=""
 
   for gw in ${GATEWAYS[${site}]}; do
@@ -390,15 +408,21 @@ for site in "${SITES[@]}"; do
       echo "  ${proto}: ${answered}/${FLOWS} flows answered by ${site}'s backends, client seen as ${EMBEDDED}"
     done
 
-    # The same-flow check's 5-tuple, once per protocol through this node.
+    # The same-flow check's tuples, each once per protocol through this node.
     for proto in tcp udp; do
-      read -r pod _ <<<"$(request "${proto}" "${vip}" "${STICKY[${proto}]}")"
-      if [ -z "${pod:-}" ]; then
-        fail "${proto} same-flow probe from port ${STICKY[${proto}]}: no reply through ${gw}"
-        continue
-      fi
-      sticky_pod[${proto}]="${sticky_pod[${proto}]:-} ${gw}=${pod}"
-      sports+=("${STICKY[${proto}]}")
+      for i in $(seq 0 $((STICKY_FLOWS - 1))); do
+        p=$((STICKY[${proto}] + i))
+        if [ "${proto}" = tcp ] && [ -n "$(client ss -Htan state time-wait "sport = :${p}")" ]; then
+          tw_reused=$((tw_reused + 1))
+        fi
+        read -r pod _ <<<"$(request "${proto}" "${vip}" "${p}")"
+        if [ -z "${pod:-}" ]; then
+          fail "${proto} same-flow probe from port ${p}: no reply through ${gw}"
+          continue
+        fi
+        sticky_pod[${proto}:${p}]="${sticky_pod[${proto}:${p}]:-} ${gw}=${pod}"
+        sports+=("${p}")
+      done
     done
 
     sleep 1
@@ -493,16 +517,34 @@ for site in "${SITES[@]}"; do
     transit "${tr}" ip -4 route del "${vip}/32"
   done
 
+  want_nodes=$(wc -w <<<"${GATEWAYS[${site}]}")
   for proto in tcp udp; do
-    seen=${sticky_pod[${proto}]:-}
-    distinct=$(tr ' ' '\n' <<<"${seen}" | sed -n 's/^.*=//p' | sort -u | wc -l)
-    nodes=$(wc -w <<<"${seen}")
-    if [ "${nodes}" -lt 2 ]; then
-      echo "  --   ${proto} same flow: ${nodes} gateway node(s) in ${site}, nothing to compare (${seen# })"
-    elif [ "${distinct}" -eq 1 ]; then
-      echo "  ok   ${proto} same flow from port ${STICKY[${proto}]} drew one backend on every gateway:${seen}"
-    else
-      fail "${proto} same flow from port ${STICKY[${proto}]} drew different backends on different gateways:${seen}"
+    agreed=0 compared=0
+    for i in $(seq 0 $((STICKY_FLOWS - 1))); do
+      p=$((STICKY[${proto}] + i))
+      seen=${sticky_pod[${proto}:${p}]:-}
+      nodes=$(wc -w <<<"${seen}")
+      distinct=$(tr ' ' '\n' <<<"${seen}" | sed -n 's/^.*=//p' | sort -u | wc -l)
+      if [ "${nodes}" -lt 2 ]; then
+        continue
+      fi
+      compared=$((compared + 1))
+      if [ "${distinct}" -eq 1 ]; then
+        agreed=$((agreed + 1))
+      else
+        fail "${proto} tuple from port ${p} drew different backends on different gateways:${seen}"
+      fi
+    done
+    if [ "${want_nodes}" -lt 2 ]; then
+      echo "  ok   ${proto} same flow: ${site} has one gateway node (${GATEWAYS[${site}]}), so there is no" \
+        "second gateway to compare its ${STICKY_FLOWS} tuples with"
+    elif [ -n "${only}" ]; then
+      echo "  ok   ${proto} same flow: only ${only} checked (--node), so nothing to compare"
+    elif [ "${compared}" -lt "${STICKY_FLOWS}" ]; then
+      fail "${proto} same flow: ${compared} of ${STICKY_FLOWS} tuples reached both of ${site}'s gateways," \
+        "want all ${STICKY_FLOWS}"
+    elif [ "${agreed}" -eq "${compared}" ]; then
+      echo "  ok   ${proto} same flow: all ${agreed} tuples drew one backend on every one of ${site}'s gateways"
     fi
   done
 
@@ -530,6 +572,7 @@ if [ "${pinned}" -lt "${want_pins}" ]; then
   fail "pinned ${pinned} of ${want_pins} gateway nodes"
 fi
 echo "--- summary ---"
+echo "  ${tw_reused} same-flow TCP connection(s) made over a TIME_WAIT entry for their port"
 for line in "${summary[@]}"; do echo "  ${line}"; done
 if [ "${rc}" -ne 0 ]; then
   echo "FAIL: an IPv4 VIP did not serve TCP and UDP through every gateway node" >&2
