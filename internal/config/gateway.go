@@ -82,13 +82,13 @@ const (
 	// public interface is not required while it is off.
 	EnvGatewayDatapathEnabled = "GALACTIC_GATEWAY_DATAPATH_ENABLED"
 
-	// EnvGatewayIPv4VIPs turns on loading IPv4 VIPs into the datapath.
-	// Optional, defaulting to false. Off, the gateway leaves every IPv4 VIP out
-	// of the datapath, as before IPv4 support. On, it loads them and turns on
-	// IPv4 forwarding for the FIB lookups edge_return and the Fragmentation
-	// Needed reply make, but still never advertises an IPv4 VIP: that waits on
-	// backend-side translation and a readiness gate (#705), so an IPv4 VIP
-	// draws no traffic until then except where a route is pinned by hand.
+	// EnvGatewayIPv4VIPs turns on serving IPv4 VIPs. Optional, defaulting to
+	// false. Off, the gateway leaves every IPv4 VIP out of the datapath and
+	// advertises none. On, it turns on IPv4 forwarding for the FIB lookups
+	// edge_return and the Fragmentation Needed reply make, loads each rule's
+	// IPv4 VIP over the rule's IPv4 backends, and advertises it once those
+	// backends' ServiceVIPBindings are Bound. Turning it off withdraws every
+	// IPv4 VIP this node advertises.
 	EnvGatewayIPv4VIPs = "GALACTIC_GATEWAY_IPV4_VIPS"
 
 	// EnvGatewayProcSysPath is the procfs sysctl root the datapath writes its

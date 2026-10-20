@@ -118,7 +118,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 	}
 
 	// Pre-flight RBAC check.
-	checkWatchPermissions(mgr)
+	checkWatchPermissions(mgr, cfg.IPv4VIPs)
 
 	// Load and attach the edge eBPF datapath. Always a real datapath, never a
 	// no-op: configuration validation rejects an empty public interface before
@@ -276,7 +276,8 @@ func newRootCommand() *cobra.Command {
 		"Run the edge gateway datapath; false keeps the process up but attaches nothing and withdraws "+
 			"this node's VIP advertisements")
 	cmd.Flags().Bool("gateway-ipv4-vips", false,
-		"Load IPv4 VIPs into the datapath; they are still never advertised until IPv4 backends can answer")
+		"Serve IPv4 VIPs: load them over their IPv4 backends and advertise each once its backends' "+
+			"ServiceVIPBindings are Bound")
 	cmd.Flags().String("gateway-proc-sys-path", config.DefaultProcSysPath,
 		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
 			"of the host's /proc/sys/net at <path>/net")

@@ -422,6 +422,42 @@ func TestKernelDatapath_ApplyRuleBuildsMaglevTableOverMultipleBackends(t *testin
 	}
 }
 
+// TestKernelDatapath_ApplyRuleBalancesEachFamilyOverItsOwnBackends: a rule's
+// IPv6 VIP is registered over its IPv6 backends and its IPv4 VIP over its IPv4
+// backends, and an IPv4 VIP with no IPv4 backend fails the rule rather than
+// borrowing the IPv6 ones.
+func TestKernelDatapath_ApplyRuleBalancesEachFamilyOverItsOwnBackends(t *testing.T) {
+	d := newTestKernelDatapath()
+	rule := testDesiredRule(t, testKeyA, "2001:db8:1::10", "203.0.113.10")
+	rule.IPv4Backends = []DesiredBackend{
+		{Address: netip.MustParseAddr("10.60.0.5"), Port: 8443, USID: netip.MustParseAddr("2001:db8:2::4a4a")},
+	}
+
+	if err := d.ApplyRule(context.Background(), rule); err != nil {
+		t.Fatalf("ApplyRule: %v", err)
+	}
+	for _, tc := range []struct {
+		vip  string
+		want DesiredBackend
+	}{
+		{"2001:db8:1::10", rule.Backends[0]},
+		{"203.0.113.10", rule.IPv4Backends[0]},
+	} {
+		entry, ok, err := d.vipTable.Get(edgemap.VIPKey{Proto: 6, VPort: 443, VIP: netip.MustParseAddr(tc.vip)})
+		if err != nil || !ok {
+			t.Fatalf("Get(%s): ok=%v err=%v", tc.vip, ok, err)
+		}
+		if len(entry.Backends) != 1 || entry.Backends[0].Addr != tc.want.Address || entry.Backends[0].USID != tc.want.USID {
+			t.Errorf("VIP %s backends = %+v, want only %s via %s", tc.vip, entry.Backends, tc.want.Address, tc.want.USID)
+		}
+	}
+
+	rule.IPv4Backends = nil
+	if err := d.ApplyRule(context.Background(), rule); err == nil {
+		t.Error("ApplyRule with an IPv4 VIP and no IPv4 backend: want an error, got nil")
+	}
+}
+
 func TestKernelDatapath_ReconcileOrphansRemovesUnownedKeys(t *testing.T) {
 	d := newTestKernelDatapath()
 	ctx := context.Background()

@@ -70,6 +70,15 @@ rules:
     resources:
       - vpcattachments
     verbs: ["get", "list", "watch"]
+  # With GALACTIC_GATEWAY_IPV4_VIPS on, a rule's IPv4 VIP is load-balanced
+  # only over backends whose ServiceVIPBinding (written by galactic-router on
+  # the backend's node) reports Bound, and advertised only while one does, so
+  # the reconciler reads and watches them. Read-only: the gateway never
+  # writes a binding.
+  - apiGroups: ["galactic.datumapis.com"]
+    resources:
+      - servicevipbindings
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

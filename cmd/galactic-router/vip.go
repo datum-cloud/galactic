@@ -32,11 +32,15 @@ subcommands read and edit this node's vip_xlat_table instead.`,
 }
 
 // parseVIPAddr parses addr as an IP address, returning a clear error rather than
-// letting a nil address propagate silently.
+// letting a nil address propagate silently. An IPv4 address, written plainly or
+// IPv4-mapped, is returned in its 4-byte form, the one vipxlatmap takes.
 func parseVIPAddr(addr string) (net.IP, error) {
 	ip := net.ParseIP(addr)
 	if ip == nil {
 		return nil, fmt.Errorf("invalid IP address %q", addr)
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4, nil
 	}
 	return ip, nil
 }

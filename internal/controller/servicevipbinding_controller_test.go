@@ -592,7 +592,7 @@ func TestServiceVIPBindingReconciler_FinalizerKeptWhenRowRemovalFails(t *testing
 // accepts and vip_xlat_table does not, or an unset one. With the VRF gone too,
 // deletion must still finish without looking for rows by value.
 func TestServiceVIPBindingReconciler_DeleteSkipsAddressesWithNoRows(t *testing.T) {
-	for name, backend := range map[string]string{"ipv4": "10.0.0.1", "unset": ""} {
+	for name, backend := range map[string]string{"mixed family": "10.0.0.1", "unset": ""} {
 		t.Run(name, func(t *testing.T) {
 			scheme := newRuleTestScheme(t)
 			router, _, _ := newBackendFixtures(testVPCRef)
@@ -717,7 +717,7 @@ func TestServiceVIPBindingReconciler_BackendMustBeAdvertised(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := newRuleTestScheme(t)
-			router, adv, vrf := newBackendFixtures(testVPCRef) // advertises testBackendPrefix only
+			router, adv, vrf := newBackendFixtures(testVPCRef) // advertises testBackendPrefix and testBackendPrefix4 only
 			binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindTap, testComputeNodeName)
 			binding.Spec.BackendAddress = tt.backend
 

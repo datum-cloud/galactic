@@ -32,17 +32,19 @@ const (
 	DropReasonCount                      uint32 = 16
 	DropReasonServiceRouteDenied         uint32 = 40
 	DropReasonServiceRouteRedirectFailed uint32 = 41
+	DropReasonVIPReplyRewriteFailed      uint32 = 42
 )
 
 // DropReasonMetricIndices lists stable production counters. Diagnostic trace
 // slots between DropReasonCount and the service-route counters are deliberately
 // excluded from metrics.
 var DropReasonMetricIndices = func() []uint32 {
-	indices := make([]uint32, 0, DropReasonCount+2)
+	indices := make([]uint32, 0, DropReasonCount+3)
 	for index := range DropReasonCount {
 		indices = append(indices, index)
 	}
-	return append(indices, DropReasonServiceRouteDenied, DropReasonServiceRouteRedirectFailed)
+	return append(indices,
+		DropReasonServiceRouteDenied, DropReasonServiceRouteRedirectFailed, DropReasonVIPReplyRewriteFailed)
 }()
 
 // DropReasonNames maps each index to a short, stable, metrics-friendly name,
@@ -67,4 +69,5 @@ var DropReasonNames = map[uint32]string{
 	DropReasonPublicUplinkRedirectFailed: "public_uplink_redirect_failed",
 	DropReasonServiceRouteDenied:         "service_route_denied",
 	DropReasonServiceRouteRedirectFailed: "service_route_redirect_failed",
+	DropReasonVIPReplyRewriteFailed:      "vip_reply_rewrite_failed",
 }

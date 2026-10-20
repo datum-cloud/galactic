@@ -51,7 +51,20 @@ type DesiredRule struct {
 	// galactic.datumapis.com/v1alpha1's NetworkServiceProtocol enum values.
 	Protocol string
 	Port     uint16
-	Backends []DesiredBackend
+
+	// Backends serve the rule's IPv6 VIPs and IPv4Backends its IPv4 VIPs, each
+	// VIP load-balancing over the backends of its own family. A family with a
+	// VIP has at least one backend.
+	Backends     []DesiredBackend
+	IPv4Backends []DesiredBackend
+}
+
+// backendsFor returns the backends that serve vip.
+func (r DesiredRule) backendsFor(vip netip.Addr) []DesiredBackend {
+	if vip.Is4() {
+		return r.IPv4Backends
+	}
+	return r.Backends
 }
 
 // EngineState is the full desired state for one gateway node's engine,

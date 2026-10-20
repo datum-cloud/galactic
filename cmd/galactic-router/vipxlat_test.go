@@ -21,12 +21,16 @@ import (
 type fakeXlatTable struct {
 	entries []vipxlatmap.Entry
 	calls   []string
+
+	// addrs holds every call's VIP and backend as passed.
+	addrs [][2]net.IP
 }
 
 func (f *fakeXlatTable) List() ([]vipxlatmap.Entry, error) { return f.entries, nil }
 
 func (f *fakeXlatTable) UnregisterBinding(slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
 	backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error) {
+	f.addrs = append(f.addrs, [2]net.IP{vipAddr, backendAddr})
 	f.calls = append(f.calls, strings.Join([]string{
 		"slot=" + itoa(slot),
 		xlatProtocolName(proto),
@@ -111,6 +115,29 @@ func TestVIPXlatRemove(t *testing.T) {
 	}
 	if !strings.Contains(out, "egress") {
 		t.Errorf("remove output does not list the removed rows:\n%s", out)
+	}
+}
+
+// TestVIPXlatRemoveIPv4: an IPv4 binding's addresses, written plainly or
+// IPv4-mapped, reach the table in 4-byte form, the one vipxlatmap takes, with
+// the slot derived from the IPv4 backend as galactic-router derives it.
+func TestVIPXlatRemoveIPv4(t *testing.T) {
+	for _, vip := range []string{"203.0.113.10", "::ffff:203.0.113.10"} {
+		table := &fakeXlatTable{}
+		if _, err := runXlat(t, table, "remove",
+			"--protocol", "udp", "--vip", vip, "--port", "443",
+			"--backend", "10.60.0.5", "--backend-port", "8443"); err != nil {
+			t.Fatalf("remove --vip %s: unexpected error: %v", vip, err)
+		}
+		slot := srv6.BackendSlot(netip.MustParseAddr("10.60.0.5"), 8443)
+		want := "slot=" + itoa(slot) + " udp 203.0.113.10:443 10.60.0.5:8443"
+		if len(table.calls) != 1 || table.calls[0] != want {
+			t.Errorf("--vip %s: UnregisterBinding calls = %q, want [%q]", vip, table.calls, want)
+		}
+		if len(table.addrs) == 1 && (len(table.addrs[0][0]) != net.IPv4len || len(table.addrs[0][1]) != net.IPv4len) {
+			t.Errorf("--vip %s: addresses passed as %d and %d bytes, want 4 and 4",
+				vip, len(table.addrs[0][0]), len(table.addrs[0][1]))
+		}
 	}
 }
 
