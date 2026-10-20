@@ -33,10 +33,12 @@ copy_gateway_config() {
   docker cp "${GALACTIC_GATEWAY_BASE_DIR}" "${node}:/galactic/resources/galactic-gateway/base/gateway"
 }
 
-# A VIP route verify-gateway-ingress.sh pins on a transit router is removed
-# when the check exits, unless it was killed outright. Clear any left over
-# from such a run, so the transit forwards by BGP again.
+# A VIP route verify-gateway-ingress.sh or verify-gateway-ingress-ipv4.sh
+# pins on a transit router is removed when the check exits, unless it was
+# killed outright. Clear any left over from such a run, so the transit
+# forwards by BGP again.
 "${SCRIPT_DIR}/verify-gateway-ingress.sh" --unpin
+"${SCRIPT_DIR}/verify-gateway-ingress-ipv4.sh" --unpin
 
 # NS60_BINDINGS is how many ServiceVIPBindings each site's backend node
 # writes: one per rule (TCP and UDP) per ns60 backend per VIP family. The

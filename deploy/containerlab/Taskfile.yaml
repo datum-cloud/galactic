@@ -430,6 +430,7 @@ tasks:
       - task: "verify:evpn"
       - task: "verify:gateway"
       - task: "verify:gateway-ingress"
+      - task: "verify:gateway-ingress-ipv4"
       - task: "verify:gateway-restart"
       - task: "verify:nat-sharding"
       - task: "verify:nat-egress"
@@ -603,6 +604,17 @@ tasks:
     desc: TCP and UDP from the off-fabric host to each site's VIP, through every gateway node
     cmds:
       - LAB={{.LAB}} ./scripts/verify-gateway-ingress.sh
+
+  # The same through each site's IPv4 VIP, to the same IPv6-only backends:
+  # IPv4 TCP and UDP from the off-fabric host, which the backend's node
+  # translates to IPv6. The backend must see the client as its address under
+  # 64:ff9b::/96, the client must see the VIP as the reply's source, and the
+  # IPv4 bindings and every gateway's IPv4Served must be in place first. The
+  # script's header lists its pass thresholds.
+  "verify:gateway-ingress-ipv4":
+    desc: IPv4 TCP and UDP from the off-fabric host to each site's IPv4 VIP, through every gateway node
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-gateway-ingress-ipv4.sh
 
   # #710: the gateway and the egress shard share each edge node's uplinks
   # through its XDP dispatcher, so restarting either must leave the other's
