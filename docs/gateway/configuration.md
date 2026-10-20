@@ -925,6 +925,8 @@ must therefore never be one of an egress shard's IPv4 masquerade addresses,
 or the gateway would take that address's NAT64 replies.
 
 To roll back, turn `GALACTIC_GATEWAY_IPV4_VIPS` off on every gateway first.
+The IPv4 forwarding the gateway turned on, `net.ipv4.ip_forward` included,
+stays on after the switch goes off, until the node reboots.
 Each node withdraws its `-v4` advertisements on its next pass and reports
 `Unsupported`, the backend nodes delete their IPv4 bindings, and the bindings'
 finalizers remove their `vip_xlat_table` rows. Once no IPv4
