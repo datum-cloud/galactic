@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -147,9 +148,9 @@ const (
 	// turned off by configuration.
 	reasonDatapathDisabled = "DatapathDisabled"
 
-	// reasonIPv4ForwardingFailed is the Ready reason while this node cannot
-	// turn on the IPv4 forwarding its IPv4 VIPs need, so the pass that would
-	// load them is not applied.
+	// reasonIPv4ForwardingFailed is the Ready reason, and each affected
+	// rule's IPv4Served reason, while this node cannot turn on the IPv4
+	// forwarding its IPv4 VIPs need, so they are left out and IPv6 is served.
 	reasonIPv4ForwardingFailed = "IPv4ForwardingFailed"
 
 	// reasonProgrammed is the per-node Programmed reason for a rule this
@@ -272,6 +273,10 @@ const (
 	// ipv4NotLoaded: the rule failed to build or load before or apart from
 	// its IPv4 VIPs.
 	ipv4NotLoaded
+	// ipv4NoForwarding: they would load, but this node's IPv4 forwarding
+	// could not be turned on, so they are left out for this pass
+	// (ensureIPv4Forwarding).
+	ipv4NoForwarding
 )
 
 // Reconcile reconciles a single NetworkGateway.
@@ -415,9 +420,10 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
+	desired, fwdErr := r.ensureIPv4Forwarding(desired, outcomes)
 	status, err := r.reconcileEngine(ctx, gw, desired)
 	if err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, errors.Join(fwdErr, err)
 	}
 
 	switch {
@@ -431,7 +437,16 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	gwCopy := gw.DeepCopy()
 	gwCopy.Status.ObservedGeneration = gw.Generation
-	setGatewayCondition(gwCopy, readyConditionFor(status, advErr))
+	ready := readyConditionFor(status, advErr)
+	if fwdErr != nil {
+		ready = metav1.Condition{
+			Type:    bgpv1alpha1.ConditionTypeReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  reasonIPv4ForwardingFailed,
+			Message: fwdErr.Error() + "; IPv4 VIPs are left out until it succeeds, and IPv6 VIPs are served",
+		}
+	}
+	setGatewayCondition(gwCopy, ready)
 	if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
 		logger.Error(updateErr, "update NetworkGateway status")
 	}
@@ -446,11 +461,11 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// status write above so the failure stays visible on the object.
 	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
 		logger.Error(err, "reconcile orphaned vip_table state")
-		return ctrl.Result{}, errors.Join(advErr, ruleStatusErr, sweepErr,
+		return ctrl.Result{}, errors.Join(fwdErr, advErr, ruleStatusErr, sweepErr,
 			fmt.Errorf("reconcile orphaned vip_table state: %w", err))
 	}
 
-	if err := errors.Join(advErr, ruleStatusErr, sweepErr); err != nil {
+	if err := errors.Join(fwdErr, advErr, ruleStatusErr, sweepErr); err != nil {
 		return ctrl.Result{}, err
 	}
 	// Nothing else is sure to trigger the pass that drops a held rule once
@@ -458,15 +473,11 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-// reconcileEngine converges the engine on desired, first turning on the IPv4
-// forwarding desired's IPv4 VIPs need (ensureIPv4Forwarding). A failure of
-// either is recorded on gw's Ready condition and returned.
+// reconcileEngine converges the engine on desired. A failure is recorded on
+// gw's Ready condition and returned.
 func (r *NetworkGatewayReconciler) reconcileEngine(
 	ctx context.Context, gw *bgpv1alpha1.NetworkGateway, desired gateway.EngineState,
 ) (gateway.EngineStatus, error) {
-	if err := r.ensureIPv4Forwarding(ctx, gw, desired); err != nil {
-		return gateway.EngineStatus{}, err
-	}
 	status, err := r.Engine.Reconcile(ctx, desired)
 	if err != nil {
 		gwCopy := gw.DeepCopy()
@@ -485,40 +496,55 @@ func (r *NetworkGatewayReconciler) reconcileEngine(
 }
 
 // ensureIPv4Forwarding turns on this node's IPv4 forwarding before the engine
-// loads desired, when desired holds an IPv4 VIP (EnsureIPv4Forwarding). A
-// failure is recorded on gw's Ready condition and returned, so the caller
-// drives nothing on this pass.
+// loads desired, when desired holds an IPv4 VIP (EnsureIPv4Forwarding), and
+// returns the state to load. When it cannot be turned on, IPv4 fails closed
+// for this pass only: every IPv4 VIP and its backends are left out of the
+// returned state, each affected outcome is marked ipv4NoForwarding so its
+// -v4 route is not published, and the error is returned for the caller to
+// report and retry. IPv6 VIPs are loaded and advertised as usual. A rule left
+// with no VIP is dropped from the state and reported as serving none.
 func (r *NetworkGatewayReconciler) ensureIPv4Forwarding(
-	ctx context.Context, gw *bgpv1alpha1.NetworkGateway, desired gateway.EngineState,
-) error {
+	desired gateway.EngineState, outcomes []ruleOutcome,
+) (gateway.EngineState, error) {
 	if !r.IPv4VIPs || r.EnsureIPv4Forwarding == nil || !loadsIPv4VIP(desired) {
-		return nil
+		return desired, nil
 	}
-	err := r.EnsureIPv4Forwarding()
-	if err == nil {
-		return nil
+	fwdErr := r.EnsureIPv4Forwarding()
+	if fwdErr == nil {
+		return desired, nil
 	}
-	gwCopy := gw.DeepCopy()
-	setGatewayCondition(gwCopy, metav1.Condition{
-		Type:    bgpv1alpha1.ConditionTypeReady,
-		Status:  metav1.ConditionFalse,
-		Reason:  reasonIPv4ForwardingFailed,
-		Message: err.Error(),
-	})
-	if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
-		log.FromContext(ctx).Error(updateErr, "update NetworkGateway status after IPv4 forwarding error")
+	fwdErr = fmt.Errorf("turn on IPv4 forwarding for this node's IPv4 VIPs: %w", fwdErr)
+
+	stripped := gateway.EngineState{Rules: make(map[string]gateway.DesiredRule, len(desired.Rules))}
+	for key, rule := range desired.Rules {
+		rule.VIPAddresses = slices.DeleteFunc(slices.Clone(rule.VIPAddresses), isIPv4VIP)
+		rule.IPv4Backends = nil
+		if len(rule.VIPAddresses) > 0 {
+			stripped.Rules[key] = rule
+		}
 	}
-	return fmt.Errorf("turn on IPv4 forwarding for this node's IPv4 VIPs: %w", err)
+	for i := range outcomes {
+		o := &outcomes[i]
+		if o.ipv4 != ipv4Loaded && o.ipv4 != ipv4Unbound {
+			continue
+		}
+		o.ipv4 = ipv4NoForwarding
+		rule, kept := stripped.Rules[o.desired.Key]
+		if kept {
+			o.desired = rule
+		} else if !o.draining {
+			o.buildErr = fmt.Errorf("%w: %w", errIPv4ForwardingUnavailable, fwdErr)
+		}
+	}
+	return stripped, fwdErr
 }
 
 // loadsIPv4VIP reports whether desired holds any IPv4 VIP for the engine to
 // load.
 func loadsIPv4VIP(desired gateway.EngineState) bool {
 	for _, rule := range desired.Rules {
-		for _, vip := range rule.VIPAddresses {
-			if vip.Unmap().Is4() {
-				return true
-			}
+		if slices.ContainsFunc(rule.VIPAddresses, isIPv4VIP) {
+			return true
 		}
 	}
 	return false
@@ -761,7 +787,7 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 	if o.buildErr != nil {
 		cond.Status, cond.Reason = metav1.ConditionFalse, reasonInvalidRule
 		switch {
-		case errors.Is(o.buildErr, errNoServedVIP):
+		case errors.Is(o.buildErr, errNoServedVIP), errors.Is(o.buildErr, errIPv4ForwardingUnavailable):
 			cond.Reason = reasonNoServedVIP
 		case errors.Is(o.buildErr, errUnservedProtocol):
 			cond.Reason = reasonUnservedProtocol
@@ -903,6 +929,10 @@ func ipv4ServedCondition(
 		reason = reasonIPv4MultipleVIPs
 		message = fmt.Sprintf("IPv4 VIPs are not loaded or advertised on node %s: the rule has more than "+
 			"one, and a backend node translates only one IPv4 VIP per rule; the IPv6 VIP serves without them", node)
+	case ipv4NoForwarding:
+		reason = reasonIPv4ForwardingFailed
+		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: its IPv4 forwarding could not be turned "+
+			"on; the NetworkGateway's Ready condition says why, and the IPv6 VIP serves without them", node)
 	case ipv4NotLoaded:
 		reason = reasonIPv4NotLoaded
 		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: the rule is not loaded", node)
@@ -1110,6 +1140,11 @@ func pruneRuleAdvertisements(
 // errNoServedVIP is buildDesiredRule's error for a rule whose every VIP is
 // IPv4 while IPv4VIPs is off, leaving nothing to load.
 var errNoServedVIP = errors.New("every VIP is IPv4, and IPv4 VIPs are turned off on this node")
+
+// errIPv4ForwardingUnavailable is the build error of a rule whose every VIP is
+// IPv4 on a pass where this node's IPv4 forwarding could not be turned on, so
+// it serves none of them (ensureIPv4Forwarding).
+var errIPv4ForwardingUnavailable = errors.New("every VIP is IPv4, and this node's IPv4 forwarding is not on")
 
 // isIPv4VIP reports whether vip is an IPv4 address, written plainly or as an
 // IPv4-mapped IPv6 address. Both forms load as the plain IPv4 address when

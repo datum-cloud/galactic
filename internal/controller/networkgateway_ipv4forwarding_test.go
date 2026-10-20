@@ -7,9 +7,12 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/netip"
+	"slices"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -92,35 +95,84 @@ func TestNetworkGatewayReconciler_IPv4ForwardingFollowsNeed(t *testing.T) {
 }
 
 // TestNetworkGatewayReconciler_IPv4ForwardingFailure covers a node that
-// cannot turn on IPv4 forwarding: the pass fails before the engine loads
-// anything, nothing is advertised, and Ready names the reason.
+// cannot turn on IPv4 forwarding: IPv4 fails closed for the pass, with no
+// IPv4 VIP loaded or advertised, while IPv6 keeps being loaded, advertised
+// and updated, and the IPv4 VIP returns once forwarding succeeds.
 func TestNetworkGatewayReconciler_IPv4ForwardingFailure(t *testing.T) {
 	c, engine, rec, r := newForwardingGateway(t, true, testVIP, testVIP4)
 	rec.err = errors.New("injected sysctl failure")
-
+	key := testNamespace + "/" + testRuleName
 	ctx := context.Background()
+
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)})
 	if !errors.Is(err, rec.err) {
 		t.Fatalf("Reconcile error = %v, want the injected sysctl failure", err)
 	}
-	if engine.reconciled != 0 {
-		t.Errorf("engine reconciled %d times, want 0", engine.reconciled)
+	desired, ok := engine.lastDesired.Rules[key]
+	if !ok || !slices.Equal(desired.VIPAddresses, []netip.Addr{netip.MustParseAddr(testVIP)}) ||
+		len(desired.IPv4Backends) != 0 {
+		t.Fatalf("engine state = %+v (loaded %v), want the rule with its IPv6 VIP only", desired, ok)
 	}
 	if _, ok := advertisedPrefixes(t, c, testIPv4AdvName); ok {
 		t.Error("-v4 advertised though IPv4 forwarding could not be turned on")
+	}
+	if v6, ok := advertisedPrefixes(t, c, testRuleAdv); !ok || !slices.Equal(v6, []bgpv1alpha1.Prefix{testVIPPrefix}) {
+		t.Errorf("-v6 = %v (exists %v), want %s", v6, ok, testVIPPrefix)
 	}
 	gw := &bgpv1alpha1.NetworkGateway{}
 	if err := c.Get(ctx, testRuleKey(testNodeGWA), gw); err != nil {
 		t.Fatal(err)
 	}
 	ready := meta.FindStatusCondition(gw.Status.Conditions, bgpv1alpha1.ConditionTypeReady)
-	if ready == nil || ready.Reason != reasonIPv4ForwardingFailed {
-		t.Errorf("Ready = %+v, want reason %s", ready, reasonIPv4ForwardingFailed)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != reasonIPv4ForwardingFailed {
+		t.Errorf("Ready = %+v, want False/%s", ready, reasonIPv4ForwardingFailed)
+	}
+	ipv4 := meta.FindStatusCondition(ruleConditions(t, c, testRuleName), ipv4ServedConditionType(testNodeGWA))
+	if ipv4 == nil || ipv4.Status != metav1.ConditionFalse || ipv4.Reason != reasonIPv4ForwardingFailed {
+		t.Errorf("IPv4Served = %+v, want False/%s", ipv4, reasonIPv4ForwardingFailed)
+	}
+
+	// An IPv6 change still applies while the write keeps failing.
+	rule := &bgpv1alpha1.NetworkService{}
+	if err := c.Get(ctx, testRuleKey(testRuleName), rule); err != nil {
+		t.Fatal(err)
+	}
+	rule.Spec.Port = 8443
+	if err := c.Update(ctx, rule); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}); !errors.Is(err, rec.err) {
+		t.Fatalf("Reconcile error = %v, want the injected sysctl failure", err)
+	}
+	if got := engine.lastDesired.Rules[key].Port; got != 8443 {
+		t.Errorf("engine port = %d while forwarding fails, want the updated 8443", got)
 	}
 
 	rec.err = nil
 	runGatewayPass(t, r)
+	desired = engine.lastDesired.Rules[key]
+	if !slices.Contains(desired.VIPAddresses, netip.MustParseAddr(testVIP4)) {
+		t.Errorf("engine VIPs = %v once forwarding succeeded, want the IPv4 VIP back", desired.VIPAddresses)
+	}
+}
+
+// TestNetworkGatewayReconciler_IPv4OnlyRuleWithoutForwarding covers a rule
+// whose every VIP is IPv4 on a pass where forwarding cannot be turned on: it
+// is not loaded and reports serving no VIP, while the pass still applies.
+func TestNetworkGatewayReconciler_IPv4OnlyRuleWithoutForwarding(t *testing.T) {
+	c, engine, rec, r := newForwardingGateway(t, true, testVIP4)
+	rec.err = errors.New("injected sysctl failure")
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}); err == nil {
+		t.Fatal("Reconcile succeeded, want the injected sysctl failure")
+	}
 	if engine.reconciled != 1 {
-		t.Errorf("engine reconciled %d times after forwarding succeeded, want 1", engine.reconciled)
+		t.Errorf("engine reconciled %d times, want 1", engine.reconciled)
+	}
+	if _, ok := engine.lastDesired.Rules[testNamespace+"/"+testRuleName]; ok {
+		t.Error("IPv4-only rule loaded though IPv4 forwarding could not be turned on")
+	}
+	programmed := meta.FindStatusCondition(ruleConditions(t, c, testRuleName), programmedConditionType(testNodeGWA))
+	if programmed == nil || programmed.Status != metav1.ConditionFalse || programmed.Reason != reasonNoServedVIP {
+		t.Errorf("Programmed = %+v, want False/%s", programmed, reasonNoServedVIP)
 	}
 }
