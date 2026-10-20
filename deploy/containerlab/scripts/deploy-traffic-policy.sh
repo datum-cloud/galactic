@@ -17,6 +17,14 @@ source "${SCRIPT_DIR}/lib.sh"
 
 CONFIG=$(cd "${SCRIPT_DIR}/../../../config" && pwd)
 
+# galactic-controller --role=cell watches network-services-operator's
+# networking.datumapis.com kinds and exits when their CRDs are missing. The
+# lab installs the four it reads, from the module version go.mod pins, so the
+# CRDs always match the types the controller is built with.
+NSO_CRDS=$(cd "${SCRIPT_DIR}/../../.." && go mod download -json go.datum.net/network-services-operator |
+  sed -n 's/^\t"Dir": "\(.*\)",$/\1/p')/config/crd/bases
+NSO_KINDS="networks networkcontexts networkinterfaces networkinterfaceclaims"
+
 # A server-side dry run of a valid policy goes through the webhook and stores
 # nothing, so it succeeds only once the webhook serves.
 PROBE='apiVersion: galactic.datumapis.com/v1alpha1
@@ -39,6 +47,14 @@ for site in dfw sjc iad; do
   apply_k "${node}" /galactic/traffic-policy/crd/
   docker exec "${node}" kubectl wait --for=condition=Established --timeout=60s \
     crd/trafficpolicies.galactic.datumapis.com crd/trafficpolicybindings.galactic.datumapis.com
+  docker exec "${node}" mkdir -p /galactic/traffic-policy/networking-crd
+  for kind in ${NSO_KINDS}; do
+    docker cp "${NSO_CRDS}/networking.datumapis.com_${kind}.yaml" "${node}:/galactic/traffic-policy/networking-crd/"
+  done
+  apply_f "${node}" /galactic/traffic-policy/networking-crd/
+  for kind in ${NSO_KINDS}; do
+    docker exec "${node}" kubectl wait --for=condition=Established --timeout=60s "crd/${kind}.networking.datumapis.com"
+  done
   # ServiceAccount and RBAC only; the Deployment comes from the lab overlay.
   apply_k "${node}" /galactic/traffic-policy/galactic-controller/
 
