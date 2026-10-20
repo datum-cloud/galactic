@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"sort"
 	"strconv"
@@ -66,6 +67,9 @@ type publishConfig struct {
 	// ifaceType selects the attachment's egress kind, veth or tap. Inferred from
 	// prevResult, never a config field.
 	ifaceType string
+	// guestHWAddr is the guest-side veth's MAC from prevResult, or nil for a
+	// tap, which reports no sandboxed interface.
+	guestHWAddr net.HardwareAddr
 }
 
 // publishResult records what publishBGPState created, so cmdAdd can fold it
@@ -462,7 +466,8 @@ func publishBGPState(
 		if registered {
 			registerTenantGateway(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, ipamResult)
 		}
-		if err := activateTrafficPolicy(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, registered, ipamResult); err != nil {
+		err = activateTrafficPolicy(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, registered, ipamResult, cfg.guestHWAddr)
+		if err != nil {
 			return fmt.Errorf("activate traffic policy: %w", err)
 		}
 

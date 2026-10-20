@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
@@ -91,4 +92,25 @@ func inferFromPrevResult(
 		ipamResult = nil
 	}
 	return ifaceType, ipamResult, parsed, nil
+}
+
+// guestHWAddrFrom returns the MAC of prevResult's sandboxed interface, the
+// guest-side veth, or nil when it has none, as for a tap master, or its MAC
+// does not parse.
+func guestHWAddrFrom(prevResult types.Result) net.HardwareAddr {
+	versioned, err := type100.GetResult(prevResult)
+	if err != nil {
+		return nil
+	}
+	for _, iface := range versioned.Interfaces {
+		if iface.Sandbox == "" {
+			continue
+		}
+		mac, err := net.ParseMAC(iface.Mac)
+		if err != nil {
+			return nil
+		}
+		return mac
+	}
+	return nil
 }

@@ -104,8 +104,10 @@ func buildVethResult(
 		return fmt.Errorf("parse guest interface MAC %q: %w", guestMac, err)
 	}
 
-	// Configure the host-side gateway address and VRF route before printing the
-	// result: kernel-interface work this plugin owns.
+	// Configure the host-side gateway address, and the VRF route while the host
+	// side is up, before printing the result: kernel-interface work this plugin
+	// owns. While traffic policy keeps the host side down, galactic-bgp adds
+	// the route when it brings the interface up.
 	if err := hostgw.ConfigureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult, guestHWAddr); err != nil {
 		return fmt.Errorf("configure host gateway: %w", err)
 	}

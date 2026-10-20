@@ -176,7 +176,7 @@ func TestInstallPodSubnetRouteReplacesStaleRoute(t *testing.T) {
 		}
 	}
 
-	if err := installPodSubnetRoute(ownLink, desiredSubnet, netlink.FAMILY_V6, tableID); err != nil {
+	if err := installPodSubnetRoute(ownLink, desiredSubnet, netlink.FAMILY_V6, tableID, true); err != nil {
 		t.Fatalf("installPodSubnetRoute: %v", err)
 	}
 
@@ -261,7 +261,7 @@ func TestInstallPodSubnetRouteKeepsUnreachableDefault(t *testing.T) {
 		{"fd00:aa:ee::1/96", netlink.FAMILY_V6},
 		{"10.250.0.0/24", netlink.FAMILY_V4},
 	} {
-		if err := installPodSubnetRoute(ownLink, mustParseCIDR(t, sub.cidr), sub.family, tableID); err != nil {
+		if err := installPodSubnetRoute(ownLink, mustParseCIDR(t, sub.cidr), sub.family, tableID, true); err != nil {
 			t.Fatalf("installPodSubnetRoute %s: %v", sub.cidr, err)
 		}
 	}
