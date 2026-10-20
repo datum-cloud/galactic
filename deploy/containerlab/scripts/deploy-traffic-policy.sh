@@ -1,6 +1,7 @@
 #!/bin/bash
 # deploy-traffic-policy.sh — install interface traffic policy's cell side in
-# every cluster: the galactic.datumapis.com CRDs and galactic-controller
+# every cluster: the galactic.datumapis.com CRDs, the networking.datumapis.com
+# CRDs the cell controller watches, and galactic-controller
 # --role=cell (its ServiceAccount, RBAC, and the lab overlay of
 # config/galactic-controller/base), then wait until its fail-closed webhook
 # admits a policy.
@@ -18,12 +19,18 @@ source "${SCRIPT_DIR}/lib.sh"
 CONFIG=$(cd "${SCRIPT_DIR}/../../../config" && pwd)
 
 # galactic-controller --role=cell watches network-services-operator's
-# networking.datumapis.com kinds and exits when their CRDs are missing. The
-# lab installs the four it reads, from the module version go.mod pins, so the
-# CRDs always match the types the controller is built with.
-NSO_CRDS=$(cd "${SCRIPT_DIR}/../../.." && go mod download -json go.datum.net/network-services-operator |
-  sed -n 's/^\t"Dir": "\(.*\)",$/\1/p')/config/crd/bases
-NSO_KINDS="networks networkcontexts networkinterfaces networkinterfaceclaims"
+# NetworkInterface and NetworkInterfaceClaim kinds and exits when their CRDs
+# are missing. The lab installs both from the module version go.mod pins, so
+# the CRDs always match the types the controller is built with. This needs go
+# and the module on the host.
+NSO_MODULE=go.datum.net/network-services-operator
+NSO_DIR=$(cd "${SCRIPT_DIR}/../../.." && go mod download "${NSO_MODULE}" && go list -m -f '{{.Dir}}' "${NSO_MODULE}")
+NSO_CRDS="${NSO_DIR}/config/crd/bases"
+if [ -z "${NSO_DIR}" ] || [ ! -d "${NSO_CRDS}" ]; then
+  echo "error: no CRDs for ${NSO_MODULE} at '${NSO_CRDS}'" >&2
+  exit 1
+fi
+NSO_KINDS="networkinterfaces networkinterfaceclaims"
 
 # A server-side dry run of a valid policy goes through the webhook and stores
 # nothing, so it succeeds only once the webhook serves.
@@ -47,6 +54,7 @@ for site in dfw sjc iad; do
   apply_k "${node}" /galactic/traffic-policy/crd/
   docker exec "${node}" kubectl wait --for=condition=Established --timeout=60s \
     crd/trafficpolicies.galactic.datumapis.com crd/trafficpolicybindings.galactic.datumapis.com
+  docker exec "${node}" rm -rf /galactic/traffic-policy/networking-crd
   docker exec "${node}" mkdir -p /galactic/traffic-policy/networking-crd
   for kind in ${NSO_KINDS}; do
     docker cp "${NSO_CRDS}/networking.datumapis.com_${kind}.yaml" "${node}:/galactic/traffic-policy/networking-crd/"

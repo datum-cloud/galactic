@@ -329,7 +329,7 @@ tasks:
       - ./scripts/deploy-fabric-topology.sh
 
   "deploy:traffic-policy":
-    desc: Install the traffic policy CRDs and galactic-controller in every cluster
+    desc: Install the traffic policy and networking CRDs and galactic-controller in every cluster
     cmds:
       - ./scripts/deploy-traffic-policy.sh
 
