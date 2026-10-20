@@ -570,7 +570,7 @@ func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 			}
 			rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
-			dr, unresolved, err := buildDesiredRule(rule, tt.attachments, idx, nil, false)
+			dr, unresolved, _, err := buildDesiredRule(rule, tt.attachments, idx, nil, false)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("buildDesiredRule: err = nil, want an error; got %+v", dr)
@@ -606,12 +606,12 @@ func TestBuildDesiredRule_RefusesSecondIPv6VIP(t *testing.T) {
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
 	rule := newTestRule(testRuleName, "vpc-1", "2001:db8:100::32", "2001:db8:100::33", testVIP4)
-	if _, _, err := buildDesiredRule(rule, attachments, idx, nil, false); err == nil {
+	if _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false); err == nil {
 		t.Fatal("buildDesiredRule: err = nil, want an error for two IPv6 VIPs")
 	}
 
 	rule.Spec.VIPAddresses = []string{"2001:db8:100::32", testVIP4}
-	if _, _, err := buildDesiredRule(rule, attachments, idx, nil, false); err != nil {
+	if _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false); err != nil {
 		t.Fatalf("buildDesiredRule with one IPv6 and one IPv4 VIP: %v", err)
 	}
 }
@@ -681,7 +681,7 @@ func TestBuildDesiredRule_SameNodeBackendsGetTheirOwnSlot(t *testing.T) {
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")}
 
-	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), attachments, idx, nil, false)
+	dr, _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), attachments, idx, nil, false)
 	if err != nil {
 		t.Fatalf("buildDesiredRule: %v", err)
 	}
