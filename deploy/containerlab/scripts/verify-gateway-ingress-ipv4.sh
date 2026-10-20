@@ -38,12 +38,12 @@
 #     reason Advertised on both rules.
 #
 # Through each node, STICKY_FLOWS more flows per protocol go from source
-# ports fixed for the site, so the same STICKY_FLOWS 5-tuples reach every one
-# of the site's gateways in turn. Every gateway builds the same Maglev table,
-# so each must send every tuple to the same backend: a client whose path
-# moves to another gateway keeps its backend. With two backends, one tuple
-# would match by chance half the time even across differing tables; eight
-# leave about one chance in 256.
+# ports drawn at random once for the site, so the same STICKY_FLOWS 5-tuples
+# reach every one of the site's gateways in turn. Every gateway builds the
+# same Maglev table, so each must send every tuple to the same backend: a
+# client whose path moves to another gateway keeps its backend. With two
+# backends, one tuple would match by chance half the time even across
+# differing tables; eight independent ones leave about one chance in 256.
 #
 # A TCP tuple's second connection reuses the client port the first one left
 # in TIME_WAIT, which Linux refuses by default (net.ipv4.tcp_tw_reuse=2
@@ -323,12 +323,10 @@ check_control_plane() {
 
 EMBEDDED=$(embed4 "${CLIENT}")
 
-# A random source-port base per run, so the flows are new ones: a port an
-# earlier run used can still be in TIME_WAIT on the client.
-sport=$((20000 + RANDOM % 30000))
-# sticky is the same-flow check's source port base, below the range above;
-# each site takes the next 2 * STICKY_FLOWS ports, TCP then UDP.
-sticky=$((10000 + RANDOM % 9000))
+# Each flow's source port is drawn at random (pick_port in lib.sh), so the
+# flows are independent draws of the backend, and new ones: a port an earlier
+# run used can still be in TIME_WAIT on the client.
+sport=0
 tw_reused=0
 work=$(mktemp -d)
 
@@ -348,9 +346,15 @@ for site in "${SITES[@]}"; do
   echo "--- ${site}: ${vip} reachability and control plane ---"
   check_route "${site}"
   check_control_plane "${site}" "${backends}"
-  declare -A served=() sticky_pod=()
-  declare -A STICKY=([tcp]="${sticky}" [udp]="$((sticky + STICKY_FLOWS))")
-  sticky=$((sticky + 2 * STICKY_FLOWS))
+  # The site's same-flow tuples: STICKY_FLOWS random source ports per
+  # protocol, drawn once and reused through every gateway node.
+  declare -A served=() sticky_pod=() STICKY=()
+  for proto in tcp udp; do
+    for i in $(seq 0 $((STICKY_FLOWS - 1))); do
+      pick_port
+      STICKY[${proto}:${i}]=${PORT_PICKED}
+    done
+  done
   site_pins=""
 
   for gw in ${GATEWAYS[${site}]}; do
@@ -389,7 +393,8 @@ for site in "${SITES[@]}"; do
     for proto in tcp udp; do
       answered=0
       for _ in $(seq "${FLOWS}"); do
-        sport=$((sport + 1))
+        pick_port
+        sport=${PORT_PICKED}
         read -r pod peer <<<"$(request "${proto}" "${vip}" "${sport}")"
         peer=${peer#[}
         peer=${peer%]}
@@ -411,7 +416,7 @@ for site in "${SITES[@]}"; do
     # The same-flow check's tuples, each once per protocol through this node.
     for proto in tcp udp; do
       for i in $(seq 0 $((STICKY_FLOWS - 1))); do
-        p=$((STICKY[${proto}] + i))
+        p=${STICKY[${proto}:${i}]}
         if [ "${proto}" = tcp ] && [ -n "$(client ss -Htan state time-wait "sport = :${p}")" ]; then
           tw_reused=$((tw_reused + 1))
         fi
@@ -521,7 +526,7 @@ for site in "${SITES[@]}"; do
   for proto in tcp udp; do
     agreed=0 compared=0
     for i in $(seq 0 $((STICKY_FLOWS - 1))); do
-      p=$((STICKY[${proto}] + i))
+      p=${STICKY[${proto}:${i}]}
       seen=${sticky_pod[${proto}:${p}]:-}
       nodes=$(wc -w <<<"${seen}")
       distinct=$(tr ' ' '\n' <<<"${seen}" | sed -n 's/^.*=//p' | sort -u | wc -l)
