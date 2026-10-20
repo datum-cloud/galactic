@@ -1147,6 +1147,11 @@ enum drop_reason {
 	DROP_REASON_TRACE_NDP_BAIL = 39,
 	DROP_REASON_SERVICE_ROUTE_DENIED = 40,
 	DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED = 41,
+	// vip_xlat4 failed partway through rewriting a DSR backend's IPv4 reply
+	// to its VIP, leaving checksums that fit neither address. Its loads have
+	// already proved every offset it writes is in the packet, so this is not
+	// expected to fire.
+	DROP_REASON_VIP_REPLY_REWRITE_FAILED = 42,
 	__DROP_REASON_MAX,
 };
 
@@ -5216,8 +5221,10 @@ int usid_egress(struct __sk_buff *skb)
 		// neither address, so a failed rewrite is dropped.
 		int xlat = vip_xlat4(skb, iv->block, iv->argument, 0, USID_VIP_XLAT_DIR_EGRESS);
 
-		if (xlat < 0)
+		if (xlat < 0) {
+			count_claimed_drop(DROP_REASON_VIP_REPLY_REWRITE_FAILED, vrf, vrf_key, VRF_DIRECTION_EGRESS);
 			return TC_ACT_SHOT;
+		}
 		if (xlat > 0) {
 			if (clamp_tcp_mss(skb, 4, 0))
 				return TC_ACT_SHOT;
