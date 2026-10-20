@@ -5,6 +5,7 @@
 package ingresssidecar
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -130,12 +131,11 @@ func mergeRouteInventory(
 // table that leaves through linkIndex, the VRF device ensureRedirectRoute
 // points them at, except a host route to an address in local.
 //
-// ensureGatewayVRFRoute also routes main-table traffic into the VRF device:
-// the VPC's gateway address, assigned inside the VRF, so replies arriving on
-// eth0 reach it. No EndpointSlice claims that address, so inventorying it
-// seeds an unclaimed route the sweep tears down after its grace period,
-// leaving every VPC present at startup with no return path. A backend
-// redirect always targets a remote address, never one this VRF holds.
+// ensureGatewayVRFRoute also routes into the VRF device, for the VPC's own
+// gateway address, and no EndpointSlice claims that route. A backend redirect
+// always targets a remote address, never one this VRF holds, since
+// DeriveGatewayAddress draws gateway addresses from a prefix disjoint from
+// tenant address space.
 func redirectPrefixes(linkIndex int, local map[string]struct{}) ([]*net.IPNet, error) {
 	var out []*net.IPNet
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
@@ -173,6 +173,9 @@ func vrfLocalAddresses(vrfIndex int) (map[string]struct{}, error) {
 			continue
 		}
 		addrs, err := netlink.AddrList(link, netlink.FAMILY_ALL)
+		if errors.Is(err, unix.ENODEV) {
+			continue // removed since LinkList, so it holds no address
+		}
 		if err != nil {
 			return nil, fmt.Errorf("list addresses on %s: %w", link.Attrs().Name, err)
 		}
