@@ -178,10 +178,9 @@ beside its IPv6 ones, balanced over the rule's IPv4 backends, and turns on
 IPv4 forwarding on every public and internal interface for the datapath's
 FIB lookups. That includes the host-wide `net.ipv4.ip_forward`, so the node
 routes IPv4 between all of its interfaces while the switch is on. The node
-still advertises no IPv4 VIP: admission refuses new ones and nothing yet
-gates advertising one on its backends being bound (#705), so the switch is
-for testing the datapath, with a route pinned by hand, until then. Leave it
-off in production.
+never advertises an IPv4 VIP, so the switch serves only traffic sent to the
+node by a route pinned by hand. Leave it off in production. See
+[Rolling out and rolling back IPv4 VIPs](#rolling-out-and-rolling-back-ipv4-vips).
 
 `GALACTIC_GATEWAY_DATAPATH_ENABLED=false` keeps the process up and its pod
 ready but loads nothing, empties the gateway's dispatcher slots, and
@@ -509,23 +508,34 @@ A rule may carry at most one VIP of each family: a backend node rewrites a
 reply's source back to a single VIP of the backend's family, so a backend
 cannot answer for a second one. A rule with two IPv6 VIPs fails to load on
 the gateways and reports `InvalidRule` on its backend nodes. A rule with two
-IPv4 VIPs reports `InvalidRule` on its backend nodes too, which write no
-binding for either IPv4 VIP and keep the IPv4 bindings they had, while its
-IPv6 VIP's bindings stay current. A gateway that loads IPv4 VIPs fails such
-a rule to load; one that does not ignores its IPv4 VIPs as it ignores any.
+IPv4 VIPs keeps its IPv6 VIP: the gateways leave both IPv4 VIPs out, and its
+backend nodes report `InvalidRule` and write no IPv4 binding, while the IPv6
+VIP's bindings stay current.
 
-IPv4 VIPs are not served yet (#705). The gateways never advertise them and
-withdraw any `-v4` advertisement an earlier release made. By default they
-also leave them out of the datapath and report
-`<gateway-node>/IPv4Served=False` with reason `Unsupported` on the rule. A
-gateway with `GALACTIC_GATEWAY_IPV4_VIPS=true` loads them and reports reason
-`NotAdvertised` instead. The rule's IPv6 VIP keeps serving. A rule
-whose every VIP is IPv4 is not loaded, and its `<gateway-node>/Programmed`
-condition reports `NoServedVIP`. The backend side is in place: an IPv4 VIP's
-backends are the selected attachments' IPv4 addresses, each backend node
-writes a binding for each of them, and its datapath translates the client's
-IPv4 packet to the backend and the reply back to the VIP, leaving the
-client's own IPv4 source as it arrived (see
+The gateways never advertise an IPv4 VIP, and withdraw any `-v4`
+advertisement an earlier release made. Each gateway node reports what it did
+with a rule's IPv4 VIPs as `<gateway-node>/IPv4Served=False`, with one of
+these reasons:
+
+| Reason          | Meaning                                                                                |
+| --------------- | -------------------------------------------------------------------------------------- |
+| `Unsupported`   | `GALACTIC_GATEWAY_IPV4_VIPS` is off, so they are left out of the datapath              |
+| `NotAdvertised` | loaded, over the rule's IPv4 backends, but not advertised                              |
+| `NoBackend`     | the switch is on, but no selected attachment has an IPv4 address that is a backend yet |
+| `MultipleVIPs`  | the switch is on, but the rule has more than one IPv4 VIP, so none loads               |
+| `NotLoaded`     | the switch is on, but the node did not load the rule at all                            |
+
+The rule's IPv6 VIP keeps serving in every case. A rule whose every VIP is
+IPv4 is not loaded where none of them can be, and its
+`<gateway-node>/Programmed` condition reports `NoServedVIP` with the switch
+off and `InvalidRule` with it on. An IPv4 VIP's backends are the selected
+attachments' IPv4 addresses. Each backend node writes a binding for each of
+them, but only while some gateway node reports `NotAdvertised` (or
+`Advertised`, which counts as loaded too) for the rule, and deletes them once
+none does, so a cell whose gateways leave IPv4 VIPs out has no IPv4 bindings
+or rows. With a binding, the node's datapath translates the client's IPv4
+packet to the backend and the reply back to the VIP, leaving the client's own
+IPv4 source as it arrived (see
 [the CNI datapath](../agents/ARCHITECTURE-CNI.md#key-design-decisions)).
 
 For the same reason a backend serves only one rule on a given backend port.
@@ -603,7 +613,9 @@ A `NetworkService` configures the gateway side of DSR. For a backend to
 hand: `galactic-router` on every node runs `NetworkServiceBindingReconciler`
 (`internal/controller/networkservice_binding_controller.go`), which writes one
 for each VIP of each accepted rule, at most one per family, and each
-selected backend of that VIP's family whose attachment reports that node, and deletes the ones that no longer apply.
+selected backend of that VIP's family whose attachment reports that node, and
+deletes the ones that no longer apply. An IPv4 VIP gets bindings only while
+a gateway node has it loaded (see above).
 `ServiceVIPBindingReconciler`, in the same process, then programs the
 node's `vip_xlat_table` from it. Example of a generated binding:
 
@@ -700,6 +712,28 @@ deletion and every `--gc-interval`, so one that was down when the node left
 still cleans up. Delete the `Node` object only once the node is gone for
 good: if the node is still running, its bindings are deleted without
 teardown, and it writes them again on its next reconcile.
+
+### Rolling out and rolling back IPv4 VIPs
+
+Roll out a release that serves IPv4 VIPs to the backend side first:
+`galactic-cni`, whose datapath translates IPv4 VIPs, and `galactic-router`,
+which writes their bindings, on every node. Then upgrade `galactic-gateway`,
+and turn on `GALACTIC_GATEWAY_IPV4_VIPS` on a gateway only after that. The
+backend nodes write IPv4 bindings once a gateway reports an IPv4 VIP loaded,
+so turning the switch on is what brings them in.
+
+To roll back, turn `GALACTIC_GATEWAY_IPV4_VIPS` off on every gateway first.
+Each then reports `Unsupported`, the backend nodes delete their IPv4 bindings,
+and the bindings' finalizers remove their `vip_xlat_table` rows. Once no
+IPv4 `ServiceVIPBinding` is left, downgrade the gateways, then
+`galactic-router` and `galactic-cni`. An earlier `galactic-router` cannot
+remove an IPv4 row. If one is left, remove it with this release's
+`galactic-router vip xlat remove` before downgrading that node's router.
+
+`galactic-cni` adds a `vip_reply_rewrite_failed` slot to its `drop_reasons`
+map, so the upgrade, and a downgrade past it, recreate that map and restart
+every `galactic_usid_drops_total` counter from zero on each node. No other
+map changes, and `vip_xlat_table`'s rows survive both.
 
 ## Verifying the deployment
 

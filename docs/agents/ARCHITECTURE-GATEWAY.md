@@ -276,17 +276,22 @@ that converges this node's whole gateway engine:
    so the fabric never sends a VIP's traffic to a node with nothing loaded
    for it. A rule where only some backends resolve is loaded and advertised
    with the rest (#713). IPv4 VIPs are left out of the engine unless
-   `GALACTIC_GATEWAY_IPV4_VIPS` is on, and never advertised (#705), and a
-   `-v4` advertisement an earlier release made is withdrawn with the prune
-   above. The rule's IPv6 VIPs serve without them, and a rule with no other
-   VIP is not loaded. A loaded IPv4 VIP whose selected attachments have no
-   IPv4 address resolving to a backend is left out too, and the rule serves
-   its IPv6 VIPs. Each node records the result on the rule as its
+   `GALACTIC_GATEWAY_IPV4_VIPS` is on, and never advertised, and a `-v4`
+   advertisement an earlier release made is withdrawn with the prune above.
+   The rule's IPv6 VIPs serve without them, and a rule with no other VIP is
+   not loaded. With the switch on, the IPv4 VIPs are still left out, and the
+   IPv6 ones still serve, when no selected attachment has an IPv4 address
+   resolving to a backend or the rule has more than one IPv4 VIP. Each node records the result on the rule as its
    own `<node>/Programmed` condition (`Programmed`, `BackendsUnresolved`,
    `LoadFailed`, `InvalidRule`, or `NoServedVIP` for an IPv4-only rule, with
    the error or the unresolved backends in the message), and, for a rule
    with an IPv4 VIP, a `<node>/IPv4Served` condition that is `False` with
-   reason `Unsupported`. The type is node-scoped because
+   reason `Unsupported` (switch off), `NotAdvertised` (loaded), `NoBackend`,
+   `MultipleVIPs` or `NotLoaded` (the rule as a whole is not loaded). Only
+   `NotAdvertised`, and `Advertised`, which no node sets but which counts too,
+   mean loaded (`ipv4LoadedReasons`), and `galactic-router` writes a rule's
+   IPv4 bindings only while some node reports one of them. The type is
+   node-scoped because
    `NetworkService` status is shared by every gateway node while loading
    is per node; a node writes it only when it changes, and a
    departing, deleted, or disabled node's conditions are removed with its
@@ -648,7 +653,7 @@ normal while ingress traffic quietly stopped being intercepted at all.
 | `GALACTIC_GATEWAY_SRV6_ADDRESS`     | No       | Derived | This node's own plain SRv6-reachable IPv6 address, used as the DSR outer-header encap source (`encap_config_table`) — never compared against anything on a receive path; must be a native IPv6 address (rejected if IPv4 or 4-in-6) |
 | `GALACTIC_GATEWAY_METRICS_PORT`     | No       | `8081`  | Prometheus metrics port                                                                                                                                                                                                             |
 | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT` | No       | `5181`  | gRPC health check port                                                                                                                                                                                                              |
-| `GALACTIC_GATEWAY_IPV4_VIPS`        | No       | `false` | Loads IPv4 VIPs into the datapath, over each rule's IPv4 backends, and turns on IPv4 forwarding for its FIB lookups on every target. IPv4 VIPs are still never advertised (#705)                                                    |
+| `GALACTIC_GATEWAY_IPV4_VIPS`        | No       | `false` | Loads IPv4 VIPs into the datapath, over each rule's IPv4 backends, and turns on IPv4 forwarding for its FIB lookups on every target. IPv4 VIPs are never advertised                                                                 |
 
 Both required fields are enforced by `GatewayConfig.Validate` at
 startup, not deferred to a later, less obvious kernel-datapath error — a
@@ -978,7 +983,7 @@ that tag into `config/galactic-gateway/base`.
 - **The return path is opt-in per node and fails closed at startup, not silently.** `edge_return` attaches only where `GALACTIC_GATEWAY_INTERNAL_INTERFACES` names an interface; a node that needs it and does not set it drops every reply in `KUBE-FORWARD` with nothing to say why, exactly as before this program existed. Where it *is* set, an attach failure is fatal to `setupGatewayDatapath` and the pod crash-loops rather than running with the forward half working and replies dying — the same all-or-nothing choice `edgeattach.Attach` already makes across a bond's slaves.
 - **A backend in another site replies through that site's edge node.** The gateway can pick a backend anywhere its `NetworkService` reaches, and the reply then leaves through the edge node in front of *that* backend, whose own `vip_addr_table` must hold the same anycast VIP or the reply meets the unmodified kernel path and dies. Within one cluster the reconciler guarantees this; across clusters it depends on the same `NetworkService` existing on both sides, which nothing in this repo enforces.
 - **Backends depend on the Galactic cell attachment controller.** `selectRuleBackends` skips a `VPCAttachment` whose `status.vpc` is not the rule's VPC, and keeps a selected one pending until its `status.node` is set. The cell controller writes both fields, `status.node` from the attachment's `BGPAdvertisement`. Without them an attachment with no `status.vpc` is silently unselected, one with `status.vpc` but no `status.node` is pending with `status.node not set by the Galactic cell controller`, and a rule with no other backend never loads; the containerlab lab patches the status by hand (`deploy/containerlab/scripts/publish-attachments.sh`). See #821.
-- **IPv4 VIPs load only behind a switch and are never advertised yet.** A rule that predates the CRD's IPv6-only rule can still hold an IPv4 VIP. `edge_lb` and `edge_return` handle IPv4, and backend nodes translate an IPv4 VIP to the rule's IPv4 backends, but admission refuses new IPv4 VIPs and nothing gates advertising one on its backends being bound. With `GALACTIC_GATEWAY_IPV4_VIPS` off, the default, `buildDesiredRule` leaves IPv4 VIPs, plain or IPv4-mapped, out of the engine and each gateway node reports `<node>/IPv4Served=False` (`Unsupported`). With it on, they load, in their plain form, over the IPv4 backends with each backend's slot hashed from its IPv4 address and port, as its node keys the binding, and the node reports `NotAdvertised`; a second IPv4 VIP then fails the rule like a second IPv6 one. Either way `applyBGPAdvertisements` makes no `-v4` advertisement and withdraws an old one, so the address draws no traffic until admission and a readiness gate land (#705), and the rule's IPv6 VIP keeps serving.
+- **IPv4 VIPs load only behind a switch and are never advertised.** A rule that predates the CRD's IPv6-only rule can still hold an IPv4 VIP. `edge_lb` and `edge_return` handle IPv4, and backend nodes translate an IPv4 VIP to the rule's IPv4 backends once a gateway reports it loaded. With `GALACTIC_GATEWAY_IPV4_VIPS` off, the default, `buildDesiredRule` leaves IPv4 VIPs, plain or IPv4-mapped, out of the engine and each gateway node reports `<node>/IPv4Served=False` (`Unsupported`), so no backend node writes IPv4 bindings for the rule. With it on, they load, in their plain form, over the IPv4 backends with each backend's slot hashed from its IPv4 address and port, as its node keys the binding, and the node reports `NotAdvertised`. A rule with no IPv4 backend (`NoBackend`) or with more than one IPv4 VIP (`MultipleVIPs`) has its IPv4 VIPs left out and keeps serving IPv6. Either way `applyBGPAdvertisements` makes no `-v4` advertisement and withdraws an old one, so the address draws no traffic except where a route is pinned by hand, and the rule's IPv6 VIP keeps serving. See [configuration.md](../gateway/configuration.md#rolling-out-and-rolling-back-ipv4-vips) for the rollout order.
 - **`vip_table` has no active GC beyond crash-recovery reconcile.** By design (see Key Design Decisions above) — DSR keeps no flow state to leak in the first place.
 - **Egress is out of this binary's scope, not unimplemented.** Egress translation is a separate, sharded tier (`galactic-nat`, its own binary — see `cmd/galactic-nat` and `internal/controller/egressshard_controller.go`). `NetworkService`/this datapath remain ingress-only: external client → VIP → tenant backend.
 

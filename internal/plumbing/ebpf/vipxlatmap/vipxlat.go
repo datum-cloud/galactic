@@ -53,11 +53,12 @@
 // besides the vip xlat CLI, removing a binding's rows when the binding is
 // deleted, and its periodic sweep removes rows no binding claims. Every IPv6
 // row a release before IPv4 rows wrote reads, matches and is swept the same
-// way. Rolling back to such a release leaves any IPv4 rows in place, inert,
-// since its datapath never looks one up, but its router can delete none of
-// them and its sweep counts an error for each on every pass, so delete the
-// IPv4 bindings, or remove their rows with this release's vip xlat CLI, before
-// rolling back.
+// way. Rolling back to such a release leaves any IPv4 rows in place, inert for
+// the traffic the gateway sends, since its datapath looks up no IPv4 packet,
+// though its IPv6 path can still match an IPv6 packet sent to an IPv4-mapped
+// VIP against one. Its router can delete none of them and its sweep counts an
+// error for each on every pass, so delete the IPv4 bindings, or remove their
+// rows with this release's vip xlat CLI, before rolling back.
 //
 // # Generation is per-process here, unlike vrf_table
 //
