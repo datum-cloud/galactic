@@ -64,6 +64,8 @@
 #   drops         0 new gateway drops, 0 new ctstate INVALID drops, 0 new
 #                 compute vip_*/service_route_* drops
 #   NAT           0 new egress shard packets or sessions in the site
+#   scrapes       every counter above readable before and after; an
+#                 absent series fails rather than reading as 0
 #   bindings      every generated IPv4 binding Bound, one per rule per
 #                 backend at least
 #   IPv4Served    True/Advertised for every gateway node on both rules
@@ -146,9 +148,12 @@ metric() {
       'index($0, name"{") == 1 && index($0, vip) {s += $NF} END {print s + 0}'
 }
 
+# The counter helpers below print "missing" rather than 0 when the series
+# they sum is absent, so a failed scrape cannot pass for a clean count; see
+# counted.
 drops() {
   scrape "$1" "${GATEWAY_METRICS_PORT}" |
-    awk '/^galactic_edge_drops_total/ {s += $NF} END {print s + 0}'
+    awk '/^galactic_edge_drops_total\{/ {s += $NF; n++} END {if (n) print s + 0; else print "missing"}'
 }
 
 # vip_drops NODE sums the uSID datapath's drops for the reasons an IPv4
@@ -156,14 +161,16 @@ drops() {
 # checksum-less UDP, and the reply's service route.
 vip_drops() {
   scrape "$1" "${CNI_METRICS_PORT}" |
-    awk '/^galactic_usid_drops_total\{/ && /reason="(vip_|service_route_)/ {s += $NF} END {print s + 0}'
+    awk '/^galactic_usid_drops_total\{/ && /reason="(vip_|service_route_)/ {s += $NF; n++}
+      END {if (n) print s + 0; else print "missing"}'
 }
 
 # nat NODE sums the egress shard's translated packets and new sessions, every
 # family and direction: a flow to the VIP must add nothing to either.
 nat() {
   scrape "$1" "${NAT_METRICS_PORT}" |
-    awk '/^galactic_nat_(packets|session_creates)_total\{/ {s += $NF} END {print s + 0}'
+    awk '/^galactic_nat_(packets|session_creates)_total\{/ {s += $NF; n++}
+      END {if (n) print s + 0; else print "missing"}'
 }
 
 # invalid NODE sums KUBE-FORWARD's ctstate INVALID drop counts for both
@@ -174,9 +181,25 @@ invalid() {
   for t in iptables ip6tables; do
     c=$(docker exec "$1" "${t}" -t filter -L KUBE-FORWARD -n -v -x 2>/dev/null |
       awk '/ctstate INVALID/ {print $1; exit}')
-    n=$((n + ${c:-0}))
+    if [ -z "${c}" ]; then
+      echo missing
+      return
+    fi
+    n=$((n + c))
   done
   echo "${n}"
+}
+
+# counted WHAT VALUE... fails, naming WHAT, when any VALUE is "missing".
+counted() {
+  local what="$1" v
+  shift
+  for v in "$@"; do
+    if [ "${v}" = missing ]; then
+      fail "${what}: the counter could not be read"
+      return 1
+    fi
+  done
 }
 
 # expand6 ADDR prints ADDR as eight four-digit groups, the form socat reports
@@ -374,7 +397,9 @@ for site in "${SITES[@]}"; do
     fi
 
     now_vdr=$(vip_drops "${COMPUTE[${site}]}")
-    if rose "${was_vdr}" "${now_vdr}"; then
+    if ! counted "${COMPUTE[${site}]} vip_*/service_route_* drops" "${was_vdr}" "${now_vdr}"; then
+      :
+    elif rose "${was_vdr}" "${now_vdr}"; then
       fail "${COMPUTE[${site}]} dropped VIP packets (vip_*/service_route_* drops ${was_vdr} -> ${now_vdr})"
     else
       echo "  ok   ${COMPUTE[${site}]} dropped no VIP packet (vip_*/service_route_* drops ${now_vdr})"
@@ -385,20 +410,26 @@ for site in "${SITES[@]}"; do
       now=$(metric "${n}" galactic_edge_return_packets_total "${vip}")
       rose "${was_ret[${n}]}" "${now}" && returned="${returned} ${n} (${was_ret[${n}]} -> ${now})"
       now=$(drops "${n}")
-      if rose "${was_drp[${n}]}" "${now}"; then
+      if ! counted "${n} galactic_edge_drops_total" "${was_drp[${n}]}" "${now}"; then
+        :
+      elif rose "${was_drp[${n}]}" "${now}"; then
         fail "${n} counted datapath drops (galactic_edge_drops_total ${was_drp[${n}]} -> ${now})"
       else
         echo "  ok   ${n} counted no datapath drop (galactic_edge_drops_total ${now})"
       fi
       now=$(invalid "${n}")
-      if [ "${now}" -gt "${was_inv[${n}]}" ]; then
+      if ! counted "${n} ctstate INVALID" "${was_inv[${n}]}" "${now}"; then
+        :
+      elif [ "${now}" -gt "${was_inv[${n}]}" ]; then
         fail "${n} dropped $((now - was_inv[${n}])) packet(s) as ctstate INVALID: a reply took the" \
           "kernel's forwarding path instead of edge_return (#554)"
       else
         echo "  ok   ${n} dropped nothing as ctstate INVALID (${now})"
       fi
       now=$(nat "${n}")
-      if rose "${was_nat[${n}]}" "${now}"; then
+      if ! counted "${n} egress shard packets and sessions" "${was_nat[${n}]}" "${now}"; then
+        :
+      elif rose "${was_nat[${n}]}" "${now}"; then
         fail "${n}'s egress shard translated packets during the VIP flows (${was_nat[${n}]} -> ${now})"
       else
         echo "  ok   ${n}'s egress shard translated nothing (packets and sessions ${now})"
