@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fabric-router
+  namespace: galactic-system
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: frr-init
+          env:
+            - name: FABRIC_CONFIGMAPS
+              value: "false"
+      containers:
+        - name: config-agent
+          env:
+            - name: FABRIC_CONFIGMAPS
+              value: "false"

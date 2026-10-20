@@ -18,9 +18,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/intf"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -303,6 +303,9 @@ func (f *fakeGatewayPublisher) WithdrawGateway(_ context.Context, vpc string) er
 
 type fakeGatewayResolver struct {
 	addrs map[string]net.IP
+	// err, when set, fails every resolve with something other than
+	// ErrGatewayAddressNotProvisioned.
+	err error
 }
 
 func newFakeGatewayResolver() *fakeGatewayResolver {
@@ -310,6 +313,9 @@ func newFakeGatewayResolver() *fakeGatewayResolver {
 }
 
 func (f *fakeGatewayResolver) ResolveGatewayAddress(vpc string) (net.IP, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	if addr, ok := f.addrs[vpc]; ok {
 		return addr, nil
 	}

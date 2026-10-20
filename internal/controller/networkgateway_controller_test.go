@@ -26,10 +26,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/gateway"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // errAdvertisementWrite and errOrphanSweep are the injected failures the
@@ -116,7 +117,7 @@ func newIndexedClientBuilder(scheme *runtime.Scheme) *fake.ClientBuilder {
 		})
 }
 
-func acceptRule(rule *bgpv1alpha1.NetworkRule) {
+func acceptRule(rule *bgpv1alpha1.NetworkService) {
 	meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
 		Type:   bgpv1alpha1.ConditionTypeAccepted,
 		Status: metav1.ConditionTrue,
@@ -166,12 +167,12 @@ func gatewayReadyCondition(t *testing.T, c client.Client) *metav1.Condition {
 }
 
 // ruleProgrammedCondition returns testNodeGWA's Programmed condition on the
-// named NetworkRule, or nil when the rule carries none.
+// named NetworkService, or nil when the rule carries none.
 func ruleProgrammedCondition(t *testing.T, c client.Client, name string) *metav1.Condition {
 	t.Helper()
-	rule := &bgpv1alpha1.NetworkRule{}
+	rule := &bgpv1alpha1.NetworkService{}
 	if err := c.Get(context.Background(), testRuleKey(name), rule); err != nil {
-		t.Fatalf("get NetworkRule %s: %v", name, err)
+		t.Fatalf("get NetworkService %s: %v", name, err)
 	}
 	return meta.FindStatusCondition(rule.Status.Conditions, programmedConditionType(testNodeGWA))
 }
@@ -183,10 +184,10 @@ func assertRuleProgrammed(t *testing.T, c client.Client, status metav1.Condition
 	name := testRuleName
 	cond := ruleProgrammedCondition(t, c, name)
 	if cond == nil {
-		t.Fatalf("NetworkRule %s has no %s condition", name, programmedConditionType(testNodeGWA))
+		t.Fatalf("NetworkService %s has no %s condition", name, programmedConditionType(testNodeGWA))
 	}
 	if cond.Status != status || cond.Reason != reason {
-		t.Errorf("NetworkRule %s %s = %s/%s, want %s/%s",
+		t.Errorf("NetworkService %s %s = %s/%s, want %s/%s",
 			name, cond.Type, cond.Status, cond.Reason, status, reason)
 	}
 }
@@ -196,7 +197,7 @@ func TestNetworkGatewayReconciler_SkipsNonMatchingNode(t *testing.T) {
 	gw := newTestGateway(testNodeGWA)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gw).
 		Build()
 
@@ -236,7 +237,7 @@ func TestNetworkGatewayReconciler_IgnoresDeletionOfOtherNodesGateway(t *testing.
 	gwA := newTestGateway(testNodeGWA) // this node's own gateway; still exists
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA).
 		Build()
 
@@ -257,7 +258,7 @@ func TestNetworkGatewayReconciler_IgnoresDeletionOfOtherNodesGateway(t *testing.
 }
 
 // TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedRules covers
-// DSR's anycast model directly: every accepted, non-deleting NetworkRule in
+// DSR's anycast model directly: every accepted, non-deleting NetworkService in
 // the namespace goes into desired state, with no primary/secondary
 // distinction to gate on: every gateway node in a PoP serves every accepted
 // rule identically.
@@ -292,7 +293,7 @@ func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedRules(t *testing.
 	deleting.DeletionTimestamp = &now
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, gwB, backendRouter, backendAdv, backendVRF, backendAdv2, backendVRF2,
 			newBackendAttachment("vpc-1"), newBackendAttachment("vpc-2"),
 			ruleA, ruleB, notAccepted, deleting).
@@ -341,7 +342,7 @@ func TestNetworkGatewayReconciler_ExcludesRuleWithUnresolvableBackend(t *testing
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, rule).
 		Build()
 
@@ -373,7 +374,7 @@ func TestNetworkGatewayReconciler_ServesThroughResolvedBackends(t *testing.T) {
 	attachment := newBackendAttachment("vpc-1", testBackendAddr, "fd00:99::1")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, attachment, rule).
 		Build()
 
@@ -401,6 +402,97 @@ func TestNetworkGatewayReconciler_ServesThroughResolvedBackends(t *testing.T) {
 	cond := ruleProgrammedCondition(t, fakeClient, testRuleName)
 	if !strings.Contains(cond.Message, "1 of 2 backends") || !strings.Contains(cond.Message, "[fd00:99::1]:8443") {
 		t.Errorf("Programmed message = %q, want it to count 1 of 2 backends and name [fd00:99::1]:8443", cond.Message)
+	}
+}
+
+// TestNetworkGatewayReconciler_BackendCoveredOnlyByOtherTenantNeverResolves
+// verifies that a backend of the rule's own VPC whose address is covered only
+// by another tenant's advertisement on the same node is left out of desired
+// state, never programmed with the other tenant's SID, and reported in the
+// rule's Programmed condition. It fails if the tenant ownership check is
+// removed.
+func TestNetworkGatewayReconciler_BackendCoveredOnlyByOtherTenantNeverResolves(t *testing.T) {
+	const (
+		otherVRFID    = int32(101)
+		collidingAddr = "fd00:20::5"
+		collidingPfx  = "fd00:20::/64"
+	)
+	tests := []struct {
+		name            string
+		attachment      *cloudv1alpha1.VPCAttachment
+		wantServed      bool
+		wantStatus      metav1.ConditionStatus
+		wantReason      string
+		wantMsgContains string
+	}{
+		{
+			name:            "one own backend still serves",
+			attachment:      newBackendAttachment("vpc-1", testBackendAddr, collidingAddr),
+			wantServed:      true,
+			wantStatus:      metav1.ConditionTrue,
+			wantReason:      reasonBackendsUnresolved,
+			wantMsgContains: "[" + collidingAddr + "]:8443",
+		},
+		{
+			name:            "no own backend resolves",
+			attachment:      newBackendAttachment("vpc-1", collidingAddr),
+			wantStatus:      metav1.ConditionFalse,
+			wantReason:      reasonInvalidRule,
+			wantMsgContains: "[" + collidingAddr + "]:8443",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newRuleTestScheme(t)
+			router, _, ownVRF := newBackendFixtures("vpc-1")
+			_, ownAdv, _ := newBackendFixtures("vpc-1")
+			// The other tenant shares the node and router, and advertises
+			// the prefix that covers collidingAddr under its own VRFID.
+			_, otherAdv, otherVRF := newBackendFixtures(testOtherVPCRef)
+			otherAdv.Spec.Prefixes = []bgpv1alpha1.Prefix{collidingPfx}
+			otherAdv.Spec.VRFID = ptr(otherVRFID)
+			otherVRF.Spec.VRFID = otherVRFID
+			rule := newTestRule(testRuleName, "vpc-1", testVIP)
+			acceptRule(rule)
+
+			fakeClient := newIndexedClientBuilder(scheme).
+				WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
+				WithObjects(newTestGateway(testNodeGWA), newTestRouter(), router, ownAdv, ownVRF,
+					otherAdv, otherVRF, tt.attachment, rule).
+				Build()
+
+			engine := newFakeGatewayEngine()
+			r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+			req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("Reconcile: unexpected error: %v", err)
+			}
+
+			dr, served := engine.lastDesired.Rules[testNamespace+"/"+testRuleName]
+			if served != tt.wantServed {
+				t.Fatalf("rule in desired state = %v, want %v", served, tt.wantServed)
+			}
+			for _, b := range dr.Backends {
+				if b.Address == netip.MustParseAddr(collidingAddr) {
+					t.Errorf("backend %s is in desired state with uSID %s; it is covered only by %s's advertisement",
+						b.Address, b.USID, testOtherVPCRef)
+				}
+				fields, err := uformat.Decode(b.USID)
+				if err != nil {
+					t.Fatalf("decode uSID %s: %v", b.USID, err)
+				}
+				if int32(fields.Argument) != testBackendVRFID {
+					t.Errorf("backend %s uSID %s carries VRFID %d, want vpc-1's own %d",
+						b.Address, b.USID, fields.Argument, testBackendVRFID)
+				}
+			}
+
+			assertRuleProgrammed(t, fakeClient, tt.wantStatus, tt.wantReason)
+			cond := ruleProgrammedCondition(t, fakeClient, rule.Name)
+			if !strings.Contains(cond.Message, tt.wantMsgContains) {
+				t.Errorf("Programmed message = %q, want it to name %s", cond.Message, tt.wantMsgContains)
+			}
+		})
 	}
 }
 
@@ -537,14 +629,14 @@ func TestGatherRules_SharedBackendServesOldestRule(t *testing.T) {
 		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
-	rule := func(name, vip string, created int64, backendPort int32) bgpv1alpha1.NetworkRule {
+	rule := func(name, vip string, created int64, backendPort int32) bgpv1alpha1.NetworkService {
 		r := newTestRule(name, "vpc-1", vip)
 		r.CreationTimestamp = metav1.NewTime(time.Unix(created, 0))
 		r.Spec.BackendPort = backendPort
 		acceptRule(r)
 		return *r
 	}
-	rules := []bgpv1alpha1.NetworkRule{
+	rules := []bgpv1alpha1.NetworkService{
 		rule("newer", "2001:db8:100::33", 200, testBackendPort),
 		rule("older", "2001:db8:100::32", 100, testBackendPort),
 		rule("other-port", "2001:db8:100::34", 300, testBackendPort+1),
@@ -570,9 +662,9 @@ func TestGatherRules_SharedBackendServesOldestRule(t *testing.T) {
 		t.Error("rule newer is loaded, want it left out: its only backend is served by rule older")
 	}
 	newer := byName["newer"]
-	wantOwner := "served by NetworkRule " + testNamespace + "/older"
+	wantOwner := "served by NetworkService " + testNamespace + "/older"
 	if newer.buildErr == nil || !strings.Contains(newer.buildErr.Error(), wantOwner) {
-		t.Errorf("rule newer build error = %v, want it to name NetworkRule %s/older", newer.buildErr, testNamespace)
+		t.Errorf("rule newer build error = %v, want it to name NetworkService %s/older", newer.buildErr, testNamespace)
 	}
 }
 
@@ -629,7 +721,7 @@ func TestNetworkGatewayReconciler_SkipsBGPAdvertisementWiringWithoutRouter(t *te
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule).
 		Build()
 
@@ -667,7 +759,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 	rule.UID = testRuleUID
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, gwB, router, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule).
 		Build()
 
@@ -697,7 +789,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 		t.Errorf("Prefixes = %v, want [%s]", adv.Spec.Prefixes, testVIPPrefix)
 	}
 	if got := adv.Labels[networkRuleLabel]; got != testRuleName {
-		t.Errorf("Labels[%s] = %q, want %q (networkrule_controller.go's teardown depends on this)",
+		t.Errorf("Labels[%s] = %q, want %q (networkservice_controller.go's teardown depends on this)",
 			networkRuleLabel, got, testRuleName)
 	}
 	assertRuleOwnerReference(t, adv)
@@ -712,7 +804,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 // applyBGPAdvertisements's update path self-healing an advertisement that
 // was created before networkRuleLabel (issue #367) or gatewayNodeLabel
 // (issue #714) existed — without this, an advertisement from an older
-// release would stay permanently invisible to NetworkRuleReconciler's
+// release would stay permanently invisible to NetworkServiceReconciler's
 // teardown List and to withdrawNodeAdvertisements's. The owner reference to
 // the rule (#715) is backfilled the same way, so garbage collection covers it
 // too.
@@ -736,7 +828,7 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 	}
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule, preexisting).
 		Build()
 
@@ -776,7 +868,7 @@ func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(
@@ -810,7 +902,7 @@ func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
 		t.Errorf("Ready reason = %q, want %q", cond.Reason, reasonAdvertisementFailed)
 	}
 	if !strings.Contains(cond.Message, testRuleName) {
-		t.Errorf("Ready message = %q, want it to name the failing NetworkRule %q", cond.Message, testRuleName)
+		t.Errorf("Ready message = %q, want it to name the failing NetworkService %q", cond.Message, testRuleName)
 	}
 }
 
@@ -827,7 +919,7 @@ func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) 
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule).
 		Build()
 
@@ -868,7 +960,7 @@ func TestNetworkGatewayReconciler_DoesNotAdvertiseUnloadedRule(t *testing.T) {
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
 			newBackendAttachment("vpc-1"), rule).
 		Build()
@@ -912,7 +1004,7 @@ func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsLoading(t *testing.T) {
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
 			newBackendAttachment("vpc-1"), rule).
 		Build()
@@ -963,7 +1055,7 @@ func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsBuilding(t *testing.T) {
 
 	// No backend fixtures: the backend no longer resolves.
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), rule, stale).
 		Build()
 
@@ -989,7 +1081,7 @@ func TestNetworkGatewayReconciler_ReturnsOrphanSweepFailure(t *testing.T) {
 	gwA := newTestGateway(testNodeGWA)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA).
 		Build()
 
@@ -1049,7 +1141,7 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode(
 	survivorAdv := newNodeAdvertisement(testRuleName, testNodeGWA, "v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, ruleV4, ruleV6, otherRuleV4, survivorAdv).
 		Build()
 
@@ -1097,7 +1189,7 @@ func TestNetworkGatewayReconciler_DepartedNodeLeavesSuffixSharingNodesAlone(t *t
 	cniAdv := newAdvertisement("vpc0000001-att0000001-" + surviving + "-v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(surviving),
 			departedV4, departedV6, survivorV4, survivorV6, unlabelledSurvivor, cniAdv).
 		Build()
@@ -1135,7 +1227,7 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForLongNamedNode(t *tes
 	survivorV4 := newNodeAdvertisement(testRuleName, surviving, "v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), departedV4, survivorV4).
 		Build()
 
@@ -1213,7 +1305,7 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsOnOwnDeletion(t *testin
 	ruleV4 := newNodeAdvertisement(testRuleName, testNodeGWA, "v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, ruleV4).
 		Build()
 
@@ -1294,7 +1386,7 @@ func TestRuleToGatewayRequests_UsesRuleNamespace(t *testing.T) {
 // than a panic-inducing cast) is what makes that safe to rely on.
 func TestRuleToGatewayRequests_WrongTypeReturnsNil(t *testing.T) {
 	if reqs := ruleToGatewayRequests(context.Background(), nil, &bgpv1alpha1.NetworkGateway{}); reqs != nil {
-		t.Errorf("reqs = %v, want nil for a non-NetworkRule object", reqs)
+		t.Errorf("reqs = %v, want nil for a non-NetworkService object", reqs)
 	}
 }
 
@@ -1319,7 +1411,7 @@ func TestNetworkGatewayReconciler_DisabledWithdrawsAndSkipsTheEngine(t *testing.
 	other := newNodeAdvertisement(testRuleName, testNodeGWB, "v6")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(gwA, own, other).
 		Build()
 
@@ -1402,7 +1494,7 @@ func TestNetworkGatewayReconciler_ClearsDepartedNodeProgrammedCondition(t *testi
 	}
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), rule).
 		Build()
 
@@ -1412,15 +1504,15 @@ func TestNetworkGatewayReconciler_ClearsDepartedNodeProgrammedCondition(t *testi
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
 
-	got := &bgpv1alpha1.NetworkRule{}
+	got := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleName), got); err != nil {
-		t.Fatalf("get NetworkRule %s: %v", testRuleName, err)
+		t.Fatalf("get NetworkService %s: %v", testRuleName, err)
 	}
 	if meta.FindStatusCondition(got.Status.Conditions, programmedConditionType(testNodeGWB)) != nil {
-		t.Errorf("departed node %s's condition is still on NetworkRule %s", testNodeGWB, testRuleName)
+		t.Errorf("departed node %s's condition is still on NetworkService %s", testNodeGWB, testRuleName)
 	}
 	if meta.FindStatusCondition(got.Status.Conditions, programmedConditionType(testNodeGWA)) == nil {
-		t.Errorf("surviving node %s's condition was removed from NetworkRule %s", testNodeGWA, testRuleName)
+		t.Errorf("surviving node %s's condition was removed from NetworkService %s", testNodeGWA, testRuleName)
 	}
 }
 
@@ -1462,15 +1554,15 @@ func TestNetworkGatewayReconciler_RuleDeletedMidPassIsNotAnError(t *testing.T) {
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
 			newBackendAttachment("vpc-1"), rule).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(
 				ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption,
 			) error {
-				if _, ok := obj.(*bgpv1alpha1.NetworkRule); ok {
-					return apierrors.NewNotFound(bgpv1alpha1.GroupVersion.WithResource("networkrules").GroupResource(), key.Name)
+				if _, ok := obj.(*bgpv1alpha1.NetworkService); ok {
+					return apierrors.NewNotFound(bgpv1alpha1.GroupVersion.WithResource("networkservices").GroupResource(), key.Name)
 				}
 				return c.Get(ctx, key, obj, opts...)
 			},
@@ -1495,14 +1587,14 @@ func TestNetworkGatewayReconciler_UnchangedProgrammedConditionWritesNothing(t *t
 
 	var ruleWrites atomic.Int32
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
 			newBackendAttachment("vpc-1"), rule).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(
 				ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption,
 			) error {
-				if _, ok := obj.(*bgpv1alpha1.NetworkRule); ok {
+				if _, ok := obj.(*bgpv1alpha1.NetworkService); ok {
 					ruleWrites.Add(1)
 				}
 				return c.SubResource(sub).Update(ctx, obj, opts...)
@@ -1517,13 +1609,13 @@ func TestNetworkGatewayReconciler_UnchangedProgrammedConditionWritesNothing(t *t
 		t.Fatalf("first Reconcile: %v", err)
 	}
 	if got := ruleWrites.Load(); got != 1 {
-		t.Fatalf("first pass wrote NetworkRule status %d times, want 1", got)
+		t.Fatalf("first pass wrote NetworkService status %d times, want 1", got)
 	}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}
 	if got := ruleWrites.Load(); got != 1 {
-		t.Errorf("unchanged second pass wrote NetworkRule status %d times in total, want 1", got)
+		t.Errorf("unchanged second pass wrote NetworkService status %d times in total, want 1", got)
 	}
 }
 
@@ -1677,7 +1769,7 @@ func TestNetworkGatewayReconciler_WithdrawsOwnAdvertisementForDeletedRule(t *tes
 	other := newNodeAdvertisement(testRuleName, testNodeGWB, "v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), own, other).
 		Build()
 
@@ -1705,7 +1797,7 @@ func TestNetworkGatewayReconciler_KeepsAdvertisementForRuleMissingFromCache(t *t
 	own := newNodeAdvertisement(testRuleName, testNodeGWA, "v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), rule, own).
 		Build()
 

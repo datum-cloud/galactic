@@ -1,0 +1,116 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: networkfabricidentities.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    kind: NetworkFabricIdentity
+    listKind: NetworkFabricIdentityList
+    plural: networkfabricidentities
+    singular: networkfabricidentity
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.identity
+      name: Identity
+      type: integer
+    - jsonPath: .spec.networkRef.name
+      name: Network
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          NetworkFabricIdentity tells a location what identity the fabric knows a
+          network by.
+
+          There is one per network, not one per location. A VPC is the network's
+          realization at a single location and takes its identity from here, which is
+          what makes the locations of one network the same network on the fabric
+          instead of unrelated ones that happen to share a name.
+
+          This is platform-internal. It is written centrally and carried to the cells
+          where the network is required; it never appears in a project control plane
+          and no consumer reads or writes one. The identity is a value the fabric acts
+          on directly, so it is kept to the platform rather than published beside the
+          network it belongs to.
+
+          This object is managed for you. It follows the Network it was allocated for.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              Spec is the whole of this object. There is no status: federation carries
+              configuration to a cell and deliberately does not carry status, so
+              anything a cell has to read has to be here.
+            properties:
+              identity:
+                description: |-
+                  Identity is what the fabric knows the network by, the same in every
+                  location the network reaches. The Route Target is derived from it, which
+                  is what makes two locations of one network import each other's routes
+                  rather than behave as two networks that share a name. The VRF device is
+                  named from it for the same reason.
+
+                  It is an integer rather than an encoded string because a consumer builds
+                  `ASN:<identity>` from it and encodes it for its own use. It is 32 bits
+                  wide because that is what survives into the Route Target: the fabric
+                  truncates, so a wider value would be uniqueness the platform believes it
+                  has and the fabric does not.
+
+                  It is never zero and never changes. The fabric embeds it in import policy
+                  in every location the network reaches, so a network that changed identity
+                  would be a different network to everything already carrying its traffic.
+                format: int64
+                maximum: 4294967295
+                minimum: 1
+                type: integer
+                x-kubernetes-validations:
+                - message: identity is immutable
+                  rule: self == oldSelf
+              networkRef:
+                description: |-
+                  NetworkRef names the network this identity belongs to.
+
+                  It carries a name and no UID, deliberately. The identity is a permanent
+                  property of a name in a namespace, not of one object's lifetime: a
+                  network deleted and recreated under the same name inherits it. A UID here
+                  would document the opposite of the rule.
+                properties:
+                  name:
+                    description: Name is the network's name.
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - identity
+            - networkRef
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}

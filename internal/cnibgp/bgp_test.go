@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/config"
@@ -35,7 +36,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -461,6 +461,16 @@ func withNetNSExistsFn(t *testing.T, fn func(string) bool) {
 	t.Cleanup(func() { netNSExistsFn = orig })
 }
 
+// withoutDatapath points ebpfPinDir at an empty directory, as on a node
+// whose datapath was never loaded, so an unprivileged test neither reads
+// the host's real pinned maps nor is refused by their permissions.
+func withoutDatapath(t *testing.T) {
+	t.Helper()
+	orig := ebpfPinDir
+	ebpfPinDir = t.TempDir()
+	t.Cleanup(func() { ebpfPinDir = orig })
+}
+
 // withTempPinDir points the package-level ebpfPinDir var (see cnibgp.go's
 // doc comment) at a throwaway bpffs directory for the duration of the test,
 // loading the eBPF datapath's pinned maps into it first (simulating the run
@@ -562,6 +572,7 @@ func TestPruneDeadContainerAnnotationsIgnoresUnrelatedAnnotations(t *testing.T) 
 // netns now gone — must succeed, and must not leave two annotations with the
 // same CIDR value in spec.Prefixes.
 func TestPublishBGPStateReplacedPodDoesNotDuplicatePrefix(t *testing.T) {
+	withoutDatapath(t)
 	const (
 		nodeName  = "node1"
 		namespace = "default"
@@ -614,6 +625,7 @@ func TestPublishBGPStateReplacedPodDoesNotDuplicatePrefix(t *testing.T) {
 // BGPAdvertisement — so its empty spec.Prefixes reads as intentional, not as
 // addressing that silently failed to arrive (#342).
 func TestPublishBGPStateNilIPAMMarksNoAddressing(t *testing.T) {
+	withoutDatapath(t)
 	const (
 		nodeName  = "node1"
 		namespace = "default"
@@ -649,6 +661,7 @@ func TestPublishBGPStateNilIPAMMarksNoAddressing(t *testing.T) {
 // covering an attachment whose config changes, or a retried ADD that now
 // resolves an allocation after a previous attempt ran without one.
 func TestPublishBGPStateIPAMClearsNoAddressing(t *testing.T) {
+	withoutDatapath(t)
 	const (
 		nodeName  = "node1"
 		namespace = "default"
@@ -695,6 +708,7 @@ func TestPublishBGPStateIPAMClearsNoAddressing(t *testing.T) {
 // case, so this test needs no root privileges (registerEBPFDatapath itself
 // never opens a pinned eBPF map here).
 func TestPublishBGPStateSIDNotComputedWhenSRv6Unconfigured(t *testing.T) {
+	withoutDatapath(t)
 	const (
 		nodeName  = "node1"
 		namespace = "default"
@@ -779,6 +793,7 @@ func TestPublishBGPStateComputesSIDWhenSRv6Configured(t *testing.T) {
 // BGPAdvertisement still backing a live sibling's route on an unrelated
 // later failure.
 func TestPublishBGPStateAdvertisementCreatedGatedOnCreate(t *testing.T) {
+	withoutDatapath(t)
 	const (
 		nodeName  = "node1"
 		namespace = "default"
@@ -1019,7 +1034,7 @@ func TestIsTransientError(t *testing.T) {
 		{"validation error is not transient", apierrors.NewBadRequest("bad request"), false},
 		{
 			"not found error is not transient",
-			apierrors.NewNotFound(schema.GroupResource{Group: "network.datumapis.com", Resource: "bgpadvertisements"}, "test"),
+			apierrors.NewNotFound(schema.GroupResource{Group: "galactic.datumapis.com", Resource: "bgpadvertisements"}, "test"),
 			false,
 		},
 		{"503 service unavailable is transient", apierrors.NewServiceUnavailable("service unavailable"), true},

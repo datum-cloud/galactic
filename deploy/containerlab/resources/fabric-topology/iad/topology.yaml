@@ -1,0 +1,75 @@
+# The iad lab cluster's FabricTopology; see endpoints.yaml.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricTopology
+metadata:
+  name: lab
+  namespace: galactic-system
+spec:
+  routingDomain: lab
+  cell: iad
+  members:
+    routers:
+      - name: iad-worker
+      - name: iad-worker2
+      - name: iad-worker3
+  reflection:
+    # Each edge node reflects for the compute node at the other end of its
+    # link, rewriting the next hop to itself; the compute node accepts
+    # paths carrying its own AS, which the transit reflects between sites.
+    - name: edge-hub
+      transports: [link-30]
+      families: [ipv4, ipv6]
+      updateSource: None
+      reflectorSelector:
+        matchLabels:
+          lab.galactic.datumapis.com/role: hub
+      clientSelector:
+        matchLabels:
+          lab.galactic.datumapis.com/role: spoke
+      reflector:
+        familySettings:
+          - {afi: ipv4, safi: unicast, nextHopMode: SelfForce}
+          - {afi: ipv6, safi: unicast, nextHopMode: SelfForce}
+      client:
+        familySettings:
+          - {afi: ipv4, safi: unicast, allowASIn: 1}
+          - {afi: ipv6, safi: unicast, allowASIn: 1}
+    # The EVPN route reflector's node is a client of its site's edge node
+    # like a compute node, and also sets the source of the IPv6 routes it
+    # installs to its own loopback.
+    - name: reflector-uplink
+      transports: [link-31]
+      families: [ipv4, ipv6]
+      updateSource: None
+      reflectorSelector:
+        matchLabels:
+          lab.galactic.datumapis.com/role: hub
+      clientSelector:
+        matchLabels:
+          lab.galactic.datumapis.com/role: uplink
+      reflector:
+        familySettings:
+          - {afi: ipv4, safi: unicast, nextHopMode: SelfForce}
+          - {afi: ipv6, safi: unicast, nextHopMode: SelfForce}
+      client:
+        familySettings:
+          - {afi: ipv4, safi: unicast, allowASIn: 1}
+          - afi: ipv6
+            safi: unicast
+            allowASIn: 1
+            importPolicyRef:
+              name: set-src
+  external:
+    # iad-worker2's transit router, which is not a cluster node.
+    - name: transit-iad-worker2
+      routers:
+        routers:
+          - name: iad-worker2
+      updateSource: None
+      peers:
+        - {address: 10.1.32.1, asn: 65100}
+        - {address: 2001:db8:1:32::1, asn: 65100}
+      settings:
+        familySettings:
+          - {afi: ipv4, safi: unicast, allowASIn: 1}
+          - {afi: ipv6, safi: unicast, allowASIn: 1}

@@ -1,0 +1,7 @@
+# The fabric-router-controller Deployment. Apply config/fabric-router-controller
+# (ServiceAccount, RBAC) and config/crd first.
+resources:
+  - deployment.yaml
+images:
+  - name: ghcr.io/datum-cloud/fabric-router-controller
+    newTag: latest

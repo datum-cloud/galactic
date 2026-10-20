@@ -77,6 +77,14 @@ jobs:
         # its bpf2go output regenerated first.
         uses: ./.github/actions/install-ebpf-deps
 
+      - name: Install envtest binaries
+        # The CRD schema tests (api/v1alpha1, internal/fabric/api/v1alpha1)
+        # need a real kube-apiserver and etcd, and skip without them.
+        run: |
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.24 use 1.35.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          test -x "$assets/kube-apiserver"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
+
       - name: Run unit tests
         run: task test:unit
 
@@ -132,20 +140,25 @@ jobs:
         # "operation not supported" (EOPNOTSUPP) on this runner: the vrf
         # module isn't built into its kernel and isn't preinstalled either,
         # so a bare `modprobe vrf` 404s with "Module vrf not found". It
-        # lives in linux-modules-extra-<kernel-version> -- pinned to
-        # `uname -r` rather than the unversioned meta-package, which can
-        # pull a newer kernel's modules than the one actually running --
-        # same fix and same reasoning as scripts/ci.sh's e2etest case,
-        # which needs this for the same underlying reason (SEG6Local
-        # END.DT46's VRFTABLE flag) and already does this exact install.
+        # lives in linux-modules-extra-<kernel-version> on kernels that
+        # split their modules -- pinned to `uname -r` rather than the
+        # unversioned meta-package, which can pull a newer kernel's
+        # modules than the one actually running. Kernels that ship no
+        # such package carry vrf in the modules installed with the
+        # kernel, so the package is installed only when modprobe cannot
+        # find the module. Same fix and same reasoning as scripts/ci.sh's
+        # e2etest case, which needs this for the same underlying reason
+        # (SEG6Local END.DT46's VRFTABLE flag).
         #
         # -o Acquire::Retries/::*::Timeout: see install-ebpf-deps' own
         # identical flags -- without them this step hung the whole job
         # against a stalled mirror until timeout-minutes killed it (#425).
         run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update -qq
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
-          sudo modprobe vrf
+          if ! sudo modprobe vrf; then
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update -qq
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe vrf
+          fi
 
       - name: Install eBPF build dependencies
         # `task test:unit-root` builds internal/plumbing/ebpf/prog, which
@@ -155,6 +168,14 @@ jobs:
         # root's PATH, which -E's preserved PATH (asserted explicitly via
         # `env "PATH=$PATH"`) already covers.
         uses: ./.github/actions/install-ebpf-deps
+
+      - name: Install envtest binaries
+        # The traffic policy node reconciler's test needs a real API server
+        # as well as root, and skips without one.
+        run: |
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.24 use 1.35.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          test -x "$assets/kube-apiserver"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
 
       - name: Run root-gated unit tests as root
         # sudo's secure_path policy overrides -E's preserved PATH for

@@ -290,3 +290,22 @@ func TestRouterConfigServiceFrontendEnv(t *testing.T) {
 		t.Fatal("explicit service frontend enablement was ignored")
 	}
 }
+
+func TestRouterConfigTrafficPolicy(t *testing.T) {
+	if NewRouterConfig().TrafficPolicy {
+		t.Fatal("traffic policy is on by default")
+	}
+	t.Setenv(EnvRouterNodeName, "node-a")
+	t.Setenv(EnvRouterTrafficPolicy, testBoolTrue)
+	cfg := NewRouterConfig()
+	if !cfg.TrafficPolicy {
+		t.Fatal("explicit traffic policy enablement was ignored")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+	cfg.Reflector = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("a route reflector accepted traffic policy")
+	}
+}

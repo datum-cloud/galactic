@@ -3,7 +3,7 @@
 > The edge XDP Maglev/DSR (Direct Server Return) load-balancing gateway
 > control plane: a controller-runtime process that loads and attaches an
 > anycast consistent-hash L4 load-balancing program to a dedicated gateway
-> node's public uplink and drives it from `NetworkGateway`/`NetworkRule`
+> node's public uplink and drives it from `NetworkGateway`/`NetworkService`
 > CRDs. Every gateway node advertises every VIP identically over the
 > existing tenant EVPN mesh — there is no primary/secondary node, no BGP
 > local-preference split, and no address rewriting anywhere in the datapath.
@@ -11,7 +11,7 @@
 _Last updated: 2026-10-06_
 
 This document covers `galactic-gateway` and the `NetworkGateway`/
-`NetworkRule` reconcilers only. See
+`NetworkService` reconcilers only. See
 [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md) for the tenant-BGP core
 (`galactic-router`, its own separate DaemonSet co-located on gateway-role
 nodes — not the same pod) and
@@ -103,12 +103,12 @@ per-VPC gateway design to colocate with the workload's own VRF.
 
 ### The two CRDs
 
-| CRD              | Scope                                                                | Written by                                                                                                                                    | Purpose                                                                                                                                                                                                                                                                                  |
-| ---------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NetworkGateway` | Namespaced, one per gateway node (`spec.targetRef.name` = node name) | Operator, once per gateway node (see [worked example](#worked-containerlab-example) below)                                                    | Node-scoped root object, mirroring `BGPRouter`'s pattern. Identifies which nodes participate in the anycast mesh and surfaces each node's engine health via `status.conditions`. Carries **no** self-address field — DSR rewrites nothing, so there is no translation source to publish. |
-| `NetworkRule`    | Namespaced, internal                                                 | The platform API that serves tenants, after it verifies the tenant owns `vpcRef` (galactic does not repeat the check — see Known Constraints) | Ingress load-balancing spec: `vpcRef` (opaque tenant identifier), `vipAddresses` (1–8, IPv4/IPv6; IPv4 is not served yet, #705), `protocol` (`tcp`/`udp`), `port`, `backendSelector` (the VPCAttachments in `vpcRef` that serve it), `backendPort`. Served by every `NetworkGateway` in the namespace identically.     |
+| CRD              | Scope                                                                | Written by                                                                                                                                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NetworkGateway` | Namespaced, one per gateway node (`spec.targetRef.name` = node name) | Operator, once per gateway node (see [worked example](#worked-containerlab-example) below)                                                    | Node-scoped root object, mirroring `BGPRouter`'s pattern. Identifies which nodes participate in the anycast mesh and surfaces each node's engine health via `status.conditions`. Carries **no** self-address field — DSR rewrites nothing, so there is no translation source to publish.                                                                                                                                                                              |
+| `NetworkService` | Namespaced, internal                                                 | The platform API that serves tenants, after it verifies the tenant owns `vpcRef` (galactic does not repeat the check — see Known Constraints) | Ingress load-balancing spec: `vpcRef` (opaque tenant identifier), `vipAddresses` (1–8, IPv4/IPv6; IPv4 is not served yet, #705), `protocol` (`tcp`/`udp` served; `sctp`, `esp`, `gre`, `icmp` refused until served, see [below](#protocols-without-ports-designed-not-served)), `port` and `backendPort` (for protocols with ports), `backendSelector` (the VPCAttachments in `vpcRef` that serve it). Served by every `NetworkGateway` in the namespace identically. |
 
-Both are defined in `go.datum.net/network`'s `api/v1alpha1` package
+Both are defined in `api/network/v1alpha1` package
 (`gateway_types.go`, `rule_types.go`) — the same external CRD module the
 BGP-family types live in. Both types' own doc comments describe this
 DSR/anycast model directly.
@@ -122,7 +122,7 @@ galactic/
 ├── cmd/
 │   └── galactic-gateway/    # Gateway control-plane binary (controller-runtime)
 ├── internal/
-│   ├── controller/          # NetworkGatewayReconciler, NetworkRuleReconciler,
+│   ├── controller/          # NetworkGatewayReconciler, NetworkServiceReconciler,
 │   │                        #   usidresolver.go (backend-address → SRv6 uSID
 │   │                        #   resolution) — shares the internal/controller
 │   │                        #   package with the BGP-family reconcilers (see
@@ -203,7 +203,7 @@ The node's `BGPRouter`/`BGPPeer` live with the separate `galactic-router`
 DaemonSet's config, in `resources/galactic-router/<site>/`.
 
 Each site directory (`dfw/`, `sjc/`, `iad/`) adds the site's
-`networkrules.yaml` (`ns60-tcp` and `ns60-udp`, port 80) and
+`networkservices.yaml` (`ns60-tcp` and `ns60-udp`, port 80) and
 `servicevipbindings.yaml`. Each site has its own VIP, in a `/64` only that
 site's edge nodes originate into the underlay (`2001:db8:6060:1::/64` for
 dfw, `:2::` for sjc, `:3::` for iad), and one `ns60` backend on its compute
@@ -222,7 +222,7 @@ See [docs/architecture/](../architecture/) for C4 context/container diagrams cov
 that converges this node's whole gateway engine:
 
 1. **Assemble desired state.** Lists every accepted, non-deleting
-   `NetworkRule` in the namespace — under the DSR anycast model every
+   `NetworkService` in the namespace — under the DSR anycast model every
    gateway node in a PoP serves every accepted rule identically, so there
    is no primary/secondary subset to filter on — expands each rule's
    `backendSelector` into backends, the IPv6 interface addresses of the
@@ -243,7 +243,7 @@ that converges this node's whole gateway engine:
    none of the fields `selectRuleBackends` reads (labels, `status.vpc`,
    `status.node`, `spec.interface.addresses`, `spec.interface.mode`), so a
    conditions-only status write triggers no pass. The router's
-   `NetworkRuleBindingReconciler` uses the same predicate and re-queues
+   `NetworkServiceBindingReconciler` uses the same predicate and re-queues
    only the rules in the attachment's VPC. A deleting rule stays in that state,
    as *draining*, while it still carries the teardown finalizer and any
    `BGPAdvertisement` labelled with its name exists: it is not advertised
@@ -282,14 +282,14 @@ that converges this node's whole gateway engine:
    the error or the unresolved backends in the message), and, for a rule
    with an IPv4 VIP, a `<node>/IPv4Served` condition that is `False` with
    reason `Unsupported`. The type is node-scoped because
-   `NetworkRule` status is shared by every gateway node while loading
+   `NetworkService` status is shared by every gateway node while loading
    is per node; a node writes it only when it changes, and a
    departing, deleted, or disabled node's conditions are removed with its
    advertisements. The `NetworkGateway`'s `EngineDegraded` message
    lists every failed rule. Every rule
    advertisement carries a `networkRuleLabel` label and a plain (not
    controller, no `blockOwnerDeletion`) owner reference to its
-   `NetworkRule`, both backfilled on existing objects, and nothing is
+   `NetworkService`, both backfilled on existing objects, and nothing is
    created or updated for a rule that is being deleted. A pass whose cache
    has not yet seen that deletion can still create one after teardown has
    finished. Each pass therefore withdraws this node's advertisements for
@@ -299,7 +299,7 @@ that converges this node's whole gateway engine:
 3. **Crash recovery.** Runs `Engine.ReconcileOrphans` (see
    [Crash recovery](#crash-recovery) below).
 
-`NetworkRuleReconciler.Reconcile` separately owns two **per-object**
+`NetworkServiceReconciler.Reconcile` separately owns two **per-object**
 lifecycle pieces the aggregate pass above is the wrong place for:
 `status.conditions`'s `Accepted` condition (`updateAcceptedCondition` — set
 once gateway nodes exist for the namespace) and the
@@ -316,7 +316,7 @@ not wait for every node to finish draining; that would need a cross-node
 protocol that does not exist.
 
 Every gateway node's own process runs both reconcilers, unconditionally, on
-every `NetworkGateway`/`NetworkRule` in the namespace, with no leader
+every `NetworkGateway`/`NetworkService` in the namespace, with no leader
 election anywhere in this codebase — safe because the reconcile logic is
 either idempotent (finalizer add/remove, `BGPAdvertisement` create/delete)
 or a pure function of inputs every gateway node observes identically
@@ -485,6 +485,51 @@ own generation for the same crash-safe reconcile cutoff. Its counters live
 in `vip_return_stats_table` and surface as `galactic_edge_return_*`,
 labeled by `vip` and `vpc`.
 
+### Protocols without ports (designed, not served)
+
+**Not implemented.** The datapath serves TCP and UDP only, and admission
+refuses every other protocol (see
+[configuration.md](../gateway/configuration.md#networkservice--internal-ingress-load-balancing-spec)).
+This section is the design the API already fits, so serving these protocols
+needs datapath and controller work but no API change.
+
+`NetworkService.spec.protocol` lists `sctp`, which has ports and will be
+served like TCP and UDP, and three protocols without ports: `esp` (IP
+protocol 50), `gre` (47) and `icmp` (ICMPv6, 58, on an IPv6 VIP). A rule for
+one of the three sets neither `port` nor `backendPort`, and the schema refuses
+either. Backend selection for them works as follows.
+
+- **Map key.** The rule registers in `vip_table` with its protocol number and
+  port 0. No TCP, UDP or SCTP rule can hold port 0, so a portless rule never
+  collides with one, and a VIP can carry a portless rule beside TCP and UDP
+  rules: the key's protocol keeps them apart. `edge_lb` builds the lookup key
+  with port 0 for these protocols instead of reading an L4 header.
+- **Maglev input.** The hash input is the client's address alone, not
+  `(address, port)`. Every packet of one client to one VIP over one protocol
+  reaches the same backend, so all of a client's ESP security associations or
+  GRE tunnels land together. A client behind a NAT that shares its address
+  with others sends them all to one backend. The Maglev table itself, and
+  the reason anycast is safe, are unchanged.
+- **Backend side.** The backend's `vip_xlat_table` row and its claim
+  (`backendClaim`) carry port 0, so a backend serves at most one rule per
+  portless protocol in its VPC. The uSID slot hashes the backend's address
+  with port 0. `edge_return` already matches replies on source address alone
+  and needs nothing new.
+- **Fragments.** Today `edge_lb` parses no extension headers, so a fragmented
+  packet is unclaimed. A portless protocol reads nothing past the IP header,
+  so once the datapath parses the Fragment header it can claim every fragment,
+  first or not, by the Fragment header's next-header value, and the
+  address-only hash sends them all to one backend. TCP and UDP cannot do this
+  for non-first fragments, which carry no ports.
+- **ICMP.** An `icmp` rule claims ICMPv6 informational messages, Echo Request
+  first, addressed to the VIP. It never claims ICMPv6 error messages. An error
+  about a TCP or UDP flow belongs to the backend serving that flow, which only
+  the quoted packet's ports identify, and claiming it for the `icmp` rule's
+  backend would hand it to the wrong one. Errors addressed to a VIP stay
+  unclaimed as today. The datapath already sends its own Packet Too Big for
+  claimed TCP and UDP traffic, and an `icmp` rule changes none of that, nor
+  `edge_return`'s forwarding of the ICMPv6 errors a backend sources.
+
 ---
 
 ## Entry Points
@@ -493,10 +538,10 @@ labeled by `vip` and `vpc`.
 
 `main.go` holds `checkWatchPermissions` (RBAC pre-flight, mirroring
 `cmd/galactic-router/main.go`'s identically-named function, scoped to this
-binary's own resource set: `networkgateways`, `networkrules`,
+binary's own resource set: `networkgateways`, `networkservices`,
 `bgpadvertisements`, and — even though this binary has no BGP client of its
 own — `bgprouters`, since `usidresolver.go` reads `BGPRouter` CRDs directly
-to resolve backend uSIDs). The scheme also registers `cloud.datumapis.com`,
+to resolve backend uSIDs). The scheme also registers the cloud types in `galactic.datumapis.com`,
 since a rule's backends are `VPCAttachment`s.
 
 `root.go`'s `runCmd`:
@@ -525,7 +570,7 @@ since a rule's backends are `VPCAttachment`s.
    it being empty before `runCmd` was ever reached.
 6. Construct real (not stubbed) `gateway.NodeQuotaEnforcer` and
    `gateway.PrometheusTelemetryEmitter`, wire `gateway.NewEngine`.
-7. Register `NetworkGatewayReconciler` and `NetworkRuleReconciler`.
+7. Register `NetworkGatewayReconciler` and `NetworkServiceReconciler`.
 8. `mgr.Start(ctx)`.
 
 ### `cmd/galactic-gateway/gateway.go` — datapath setup
@@ -660,11 +705,11 @@ separate pod spec entirely, not part of this manifest.
 ### RBAC
 
 `config/galactic-gateway/rbac.yaml`'s `ClusterRole` covers exactly what
-`NetworkGatewayReconciler`/`NetworkRuleReconciler` touch:
-`networkgateways`/`networkrules` (+ `/status`) read-write,
+`NetworkGatewayReconciler`/`NetworkServiceReconciler` touch:
+`networkgateways`/`networkservices` (+ `/status`) read-write,
 `bgpadvertisements` full CRUD, and read-only `get`/`list`/`watch` on both
 `bgprouters` (for `usidresolver.go` — see above), `vpcattachments` in
-`cloud.datumapis.com` (a rule's backends, selected and watched
+`galactic.datumapis.com` (a rule's backends, selected and watched
 cluster-wide) and `bgpvrfinstances`
 (`NetworkGatewayReconciler.SetupWithManager` also watches `BGPVRFInstance`
 to re-trigger reconciliation once a backend's owning VRF/advertisement data
@@ -673,7 +718,7 @@ finishing `WaitForCacheSync`, silently, behind a `bgpvrfinstances ...
 is forbidden` reflector error loop). This was split out of
 `config/galactic-router/rbac.yaml`'s single `ClusterRole`, which used to grant one
 `galactic-router` identity both the BGP-family CRD verbs and
-`networkgateways`/`networkrules` verbs when both reconciler sets lived in
+`networkgateways`/`networkservices` verbs when both reconciler sets lived in
 the same binary — every *other* (non-gateway) node's `galactic-router`
 ServiceAccount now loses that access entirely, rather than every
 `galactic-router` pod in the cluster carrying it as before.
@@ -694,8 +739,8 @@ pod on that node is not a supported configuration.
 | ------------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
 | `internal/config` (`gateway.go`)                        | galactic-gateway | `GatewayConfig`: node name, ports, public interface, SRv6 encap-source address; three-tier CLI/env/default precedence via viper                                                                                                                                 | No                                   |
 | `internal/controller` (`networkgateway_controller.go`)  | galactic-gateway | `NetworkGatewayReconciler`: desired-state assembly (with the deleted-rule drain in `networkgateway_drain.go`), BGP wiring, orphan-crash recovery                                                                                                                | No                                   |
-| `internal/controller` (`networkrule_controller.go`)     | galactic-gateway | `NetworkRuleReconciler`: finalizer-guarded teardown ordering, `Accepted`-condition maintenance (`updateAcceptedCondition`)                                                                                                                                      | No                                   |
-| `internal/controller` (`usidresolver.go`)               | galactic-gateway | `backendSIDIndex`: resolves a `NetworkRule` backend address to the SRv6 uSID of the node its `VPCAttachment` reports by matching against `BGPAdvertisement`/`BGPRouter`/`BGPVRFInstance` CRDs, verifying tenant ownership; `backendSID` adds the backend's slot | No                                   |
+| `internal/controller` (`networkservice_controller.go`)     | galactic-gateway | `NetworkServiceReconciler`: finalizer-guarded teardown ordering, `Accepted`-condition maintenance (`updateAcceptedCondition`)                                                                                                                                      | No                                   |
+| `internal/controller` (`usidresolver.go`)               | galactic-gateway | `backendSIDIndex`: resolves a `NetworkService` backend address to the SRv6 uSID of the node its `VPCAttachment` reports by matching against `BGPAdvertisement`/`BGPRouter`/`BGPVRFInstance` CRDs, verifying tenant ownership; `backendSID` adds the backend's slot | No                                   |
 | `internal/gateway` (`engine.go`)                        | galactic-gateway | `Engine`: mutex-guarded convergence loop ("apply everything in desired, remove everything not in desired"), mirroring `GoBGPRuntime`'s shape                                                                                                                    | Yes (active-rule map)                |
 | `internal/gateway` (`types.go`)                         | galactic-gateway | `DesiredRule`/`DesiredBackend`/`EngineState`/`EngineStatus`/`RuleStatus` — the engine's own representation, assembled by the controllers above; `DesiredBackend` implements `internal/maglev.Backend`                                                           | No                                   |
 | `internal/gateway` (`datapath.go`, `kerneldatapath.go`) | galactic-gateway | `Datapath`/`QuotaEnforcer`/`TelemetryEmitter` interfaces; `KernelDatapath`, the real `Datapath` backed by `edgemap.VIPTable` over a loaded `edgeprog.EdgedsrObjects`, building a `internal/maglev.Table` per rule; `NoopDatapath` for tests                     | Yes (`vipKeysByName` bookkeeping)    |
@@ -718,8 +763,8 @@ pod on that node is not a supported configuration.
 | Dependency                            | Version           | Purpose                                                                                                                                                                                                                                                                                             |
 | -------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `github.com/cilium/ebpf`              | v0.22.0           | XDP program load/attach/map bindings (`edgeprog`/`edgemap`/`edgeattach`) — the same library version `internal/plumbing/ebpf` (the CNI chain's TC-BPF uSID datapath, see [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md)) uses, but a fully separate program/map/attach surface with no shared map layout |
-| `go.datum.net/network`                | bumped frequently | `NetworkGateway`/`NetworkRule` CRD API types, plus the BGP-family types this binary reads (`BGPAdvertisement`, `BGPRouter`, `BGPVRFInstance`)                                                                                                                                                       |
-| `go.datum.net/cloud`                  | pseudo-version    | `VPCAttachment` types a rule's `backendSelector` picks from. Galactic only reads them. datum-cloud/cloud's controllers write `status.vpc` and `status.node`, which backend selection waits on (#821)                                                                                                |
+| `api/network/v1alpha1` (local) | in-tree | Galactic BGP, gateway, egress, and service API types |
+| `api/cloud/v1alpha1` (local) | in-tree | VPC and VPCAttachment API types; the Galactic cell controller writes their status |
 | `sigs.k8s.io/controller-runtime`      | v0.24.1           | Full manager + reconciler framework — like `galactic-router`, not a bare client like the CNI chain                                                                                                                                                                                                  |
 | `github.com/prometheus/client_golang` | v1.24.1           | `PrometheusTelemetryEmitter`'s control-plane-drop counter, plus `edgemetrics`'s pull-based `vip_table`/`vip_stats_table`/`drop_reasons` collector                                                                                                                                                   |
 | `github.com/spf13/cobra`              | v1.10.2           | CLI command/flag handling                                                                                                                                                                                                                                                                            |
@@ -795,7 +840,7 @@ pod on that node is not a supported configuration.
   that needs advertising as a node-reachability route.
 - **Quota/telemetry are real but deliberately coarse.** `NodeQuotaEnforcer`
   enforces two node-level admission caps entirely from control-plane state
-  already held by `Engine` (no eBPF map read required): max `NetworkRule`s
+  already held by `Engine` (no eBPF map read required): max `NetworkService`s
   per tenant, and total `vip_table` rows across every tenant vs. the map's
   fixed capacity. It deliberately does **not** do per-flow rate limiting —
   `vip_table`'s key carries no tenant dimension (by design, see above), and
@@ -838,7 +883,7 @@ pod on that node is not a supported configuration.
 - **Generation-based crash recovery, not a Geneve-interface scan.**
   `Engine.ReconcileOrphans` delegates to `edgemap.VIPTable.Reconcile`'s
   `Generation`-cutoff mechanism: a caller must capture
-  `Engine.DatapathGeneration()` *before* listing the `NetworkRule` CRDs
+  `Engine.DatapathGeneration()` *before* listing the `NetworkService` CRDs
   that become the live set, so a rule created between the snapshot and the
   list is never mistaken for an orphan. `vip_table` state (not a kernel
   interface) is the only thing this design can leak on a crash — DSR keeps
@@ -874,7 +919,7 @@ that code.
 
 | Layer           | Command                               | Framework                       | Scope                                                                                                                                                                                                                                                                                                                                    |
 | --------------- | -------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Unit            | `task test:unit`                      | `go test -race`                 | `internal/config` (`gateway_test.go`), `internal/controller` (`networkgateway_controller_test.go`, `networkrule_controller_test.go`, `usidresolver_test.go`), `internal/gateway` (`engine_test.go`, `diff_test.go`, `kerneldatapath_test.go`, `quota_test.go`, `recovery_test.go`, `telemetry_test.go`), `internal/maglev` (`table_test.go`), `internal/plumbing/bond` (`bond_test.go`, faked `netlink.Link`s, no kernel required — shared bond-master/slave detection used by both this package's `edgeattach.ResolveTargets` and `internal/plumbing/ebpf/attach`'s CNI TC-BPF path), `internal/plumbing/ebpf/edgemap` (`viptable_test.go`, in-memory fake `Table`, no kernel required), `internal/plumbing/ebpf/edgemetrics` (`collector_test.go`), `internal/plumbing/ebpf/edgepreflight` (`preflight_test.go`, `kernel_prober_test.go`); `edgeattach.ResolveTargets` also has its own faked-netlink `TestResolveTargets` (non-bond passthrough, bond-expands-to-slaves-only, no-slaves error) |
+| Unit            | `task test:unit`                      | `go test -race`                 | `internal/config` (`gateway_test.go`), `internal/controller` (`networkgateway_controller_test.go`, `networkservice_controller_test.go`, `usidresolver_test.go`), `internal/gateway` (`engine_test.go`, `diff_test.go`, `kerneldatapath_test.go`, `quota_test.go`, `recovery_test.go`, `telemetry_test.go`), `internal/maglev` (`table_test.go`), `internal/plumbing/bond` (`bond_test.go`, faked `netlink.Link`s, no kernel required — shared bond-master/slave detection used by both this package's `edgeattach.ResolveTargets` and `internal/plumbing/ebpf/attach`'s CNI TC-BPF path), `internal/plumbing/ebpf/edgemap` (`viptable_test.go`, in-memory fake `Table`, no kernel required), `internal/plumbing/ebpf/edgemetrics` (`collector_test.go`), `internal/plumbing/ebpf/edgepreflight` (`preflight_test.go`, `kernel_prober_test.go`); `edgeattach.ResolveTargets` also has its own faked-netlink `TestResolveTargets` (non-bond passthrough, bond-expands-to-slaves-only, no-slaves error) |
 | Kernel-required | `task test:unit` (root/CAP_BPF gated) | `go test` + `BPF_PROG_TEST_RUN` | `internal/plumbing/ebpf/edgeprog/edgedsr_test.go` — exercises the compiled program directly, including the version-nibble/payload_len regression tests; `internal/plumbing/ebpf/edgeattach/attach_test.go`                                                                                                                                |
 | E2E             | `task verify:gateway-ingress` (in `deploy/containerlab/`) | bash, live containerlab lab | Real TCP and UDP from the off-fabric host to each site's VIP, pinned through each gateway node in turn by a temporary `/128` on the transit router. Asserts the pinned node's `galactic_edge_rule_packets_total` rises, `edge_return` counts the replies, no gateway counts a drop or a `ctstate INVALID` drop, and the backend sees the client's own address. `verify:gateway-restart` restarts a node's gateway and its egress shard in turn while the other carries traffic (#710). `verify:gateway-detach`, outside `task verify`, turns one node's datapath off and confirms the ingress check fails. The lab's uplinks are LACP bonds of veths, which accept a native XDP attach and so do not reproduce the real igb/tg3 bond failure; the root-gated `TestResolveTargetsAndAttach_RealBondDevice` above covers that. |
 
@@ -909,7 +954,7 @@ that tag into `config/galactic-gateway/base`.
 ## Known Constraints
 
 - **E2E coverage is lab-only.** `task verify:gateway-ingress` in `deploy/containerlab/` sends real traffic through every lab gateway node (see [Testing](#testing)). Before it, the `gatewayDatapathKeepAlive` incident described in [Entry Points](#cmd-galactic-gatewaygateway-go--datapath-setup) above was only discovered because ingress traffic silently stopped being intercepted. Nothing runs that check in CI, since it needs the containerlab lab.
-- **Galactic does not check VPC ownership on `NetworkRule`.** `NetworkRule` is internal: the platform API that serves tenants verifies the tenant owns `vpcRef` before it writes the rule, and RBAC on `galactic-system` decides who else can write one. `updateAcceptedCondition` sets `Accepted=True` once gateway nodes exist for the namespace; it is not an ownership result. galactic-router used to carry an allow-all admission webhook for this, never deployed, removed in #366. The `go.datum.net/network` API's doc comments still call the CRD tenant-writable and define `OwnershipVerified`/`OwnershipDenied` reasons nothing sets.
+- **Galactic does not check VPC ownership on `NetworkService`.** `NetworkService` is internal: the platform API that serves tenants verifies the tenant owns `vpcRef` before it writes the rule, and RBAC on `galactic-system` decides who else can write one. `updateAcceptedCondition` sets `Accepted=True` once gateway nodes exist for the namespace; it is not an ownership result. galactic-router used to carry an allow-all admission webhook for this, never deployed, removed in #366. The `api/network/v1alpha1` doc comments still call the CRD tenant-writable and define `OwnershipVerified`/`OwnershipDenied` reasons nothing sets.
 - **The uSID backend resolver's tenant-ownership check depends on `BGPVRFInstance` naming staying deterministic.** `verifyTenantOwnership` closes the ambiguous-match gap an earlier version of this resolver had, but it is only as strong as `crdnames.BGPVRFInstanceName(vpc, nodeName)` staying the exact name `galactic-bgp` writes — a divergence between the two would fail closed (a real backend never resolving) rather than open (a wrong-tenant resolve), which is the safer failure direction but still worth knowing about when either side of that naming contract changes.
 - **The derived SRv6 encap source is read once, at startup.** Changing a gateway node's `BGPRouter` locator or node ID does not move its encapsulation source until `galactic-gateway` restarts. See [SRv6 encap-source address](#srv6-encap-source-address) above.
 - **`edge_return` sends no ICMP for an oversized reply.** `edge_lb` answers a packet too big for the fabric once encapsulated: an IPv6 client with a Packet Too Big (`send_too_big6`), an IPv4 client that set Don't Fragment with a Fragmentation Needed (`send_frag_needed4`, for a header without options, which is all a fixed-size quote covers). An IPv4 packet without Don't Fragment, or with options, is counted as `fib_frag_needed` and dropped: a router would fragment the first, which XDP cannot. `edge_return` drops an oversized reply the same way for both families; the backend's MSS clamp keeps TCP replies under the fabric MTU. ICMP a client sends to a VIP is not claimed, so path MTU discovery from the client toward a backend is not relayed.
@@ -917,11 +962,11 @@ that tag into `config/galactic-gateway/base`.
 - **A bonded public uplink attaches per-slave, with per-slave FIB-lookup sysctls to match.** Native-mode XDP against a Linux bonding master is not reliable: confirmed failing outright with "operation not supported" on a real gateway node (802.3ad over an igb/tg3 slave pair). Not every kernel's bonding driver categorically lacks `ndo_bpf` — some do implement it by forwarding the attach to every slave — but that still requires each slave's own driver to support native XDP itself, which not every NIC driver does (tg3 is a commonly cited example that doesn't), so this codebase never relies on attaching to the master working, on any kernel. `edgeattach.ResolveTargets` expands a bonding-master `GALACTIC_GATEWAY_PUBLIC_INTERFACE` to its slave interfaces (never the master itself — see `internal/plumbing/bond`, shared with `internal/plumbing/ebpf/attach`'s TC-BPF path, which attaches to the master *and* its slaves instead), and `setupGatewayDatapath` attaches to and configures FIB-lookup sysctls on every one of them. This is not cosmetic: `edgedsr.c`'s `push_outer_header` calls `bpf_fib_lookup()` with `ctx->ingress_ifindex` — confirmed against the source, not assumed — which for a native XDP program attached to a bond slave is that slave's own ifindex, not the bond master's, so `net.ipv6.conf.<slave>.forwarding` (not `net.ipv6.conf.<bond-master>.forwarding`) is what the kernel actually checks. A bonding master with no resolvable slaves is a hard startup error, not a silent fallback to attaching the master (which would only risk repeating the same failure). `edgeattach.Attach` is all-or-nothing across every resolved slave in one call — if any single slave's driver can't accept a native XDP attach (a real possibility per the tg3 note above, not independently confirmed against that node specifically), the whole datapath startup fails rather than running in a degraded, missing-that-slave's-traffic state. The attach step itself lives in `internal/plumbing/ebpf/xdpattach`, shared with `natattach`: every target is checked for native XDP support through the netdev generic netlink family before any is touched, and each bond slave is waited back into its aggregate (MII up, plus LACP collecting|distributing on an 802.3ad bond) before the next is attached (#583); this has not been exercised against real igb/tg3 hardware, only veth in tests, so whether all of a real bonded pair's slaves actually accept native XDP on the affected class of hardware is still open. Attaching per-slave rather than to the bond as a whole means the slave set has to be kept current after startup: `watchTargets` (`cmd/galactic-gateway/gateway.go`) re-runs `ResolveTargets` on every netlink link or route change, and every 30s with none, and hands the result to an `xdpattach.Set` per program (#647). The set attaches a member enslaved or replaced (new ifindex under the same name) since startup through the same gate, one at a time, and skips one whose bounce would leave its bond with no member carrying traffic; it never detaches a member that still exists, since detaching bounces the link as attaching does. Unlike the startup attach, one member failing there does not undo the rest: it is retried on the next pass, and while any resolved target lacks the program the gateway's `readiness` gRPC health service (`config.GRPCReadinessService`, the readinessProbe's `service`) reports NOT_SERVING, without failing liveness.
 - **`XDP_REDIRECT` into a veth needs NAPI enabled on the *peer*, which is a lab-only concern.** `edgedsr.c` returns `XDP_REDIRECT` whenever the route to the backend egresses an interface other than the ingress one. In native mode that calls the egress device's `ndo_xdp_xmit`, and veth's implementation silently discards the frame unless the peer end has NAPI enabled — which for a veth means the peer runs its own XDP program or has GRO turned on. A containerlab peer inside an FRR/transit container has neither by default, so a redirect there can fail exactly the way this datapath's original bug did: no drop counter moves, because `bpf_redirect()` itself succeeded and the discard happens later in `xdp_do_redirect`. Both programs are affected, and `edge_return` more so: it attaches to compute-facing links, which are veth pairs in the lab and may be veth or a plain NIC in production. `bpftool prog tracelog` and the `xdp:xdp_redirect_err` tracepoint are the diagnostics; `ethtool -K <peer> gro on` is the lab fix. A production uplink (physical NIC, or a bond slave per the bullet above) implements `ndo_xdp_xmit` natively and has no peer to ask about. This is the redirect-side analogue of the `XDP_TX`-on-veth observability quirk noted above.
 - **The return path is opt-in per node and fails closed at startup, not silently.** `edge_return` attaches only where `GALACTIC_GATEWAY_INTERNAL_INTERFACES` names an interface; a node that needs it and does not set it drops every reply in `KUBE-FORWARD` with nothing to say why, exactly as before this program existed. Where it *is* set, an attach failure is fatal to `setupGatewayDatapath` and the pod crash-loops rather than running with the forward half working and replies dying — the same all-or-nothing choice `edgeattach.Attach` already makes across a bond's slaves.
-- **A backend in another site replies through that site's edge node.** The gateway can pick a backend anywhere its `NetworkRule` reaches, and the reply then leaves through the edge node in front of *that* backend, whose own `vip_addr_table` must hold the same anycast VIP or the reply meets the unmodified kernel path and dies. Within one cluster the reconciler guarantees this; across clusters it depends on the same `NetworkRule` existing on both sides, which nothing in this repo enforces.
-- **Backends depend on an attachment controller outside this repo.** `selectRuleBackends` skips a `VPCAttachment` whose `status.vpc` is not the rule's VPC, and keeps a selected one pending until its `status.node` is set. Galactic writes neither field; controllers in datum-cloud/cloud do, `status.node` from the attachment's `BGPAdvertisement`. Without them an attachment with no `status.vpc` is silently unselected, one with `status.vpc` but no `status.node` is pending with `status.node not set by datum-cloud/cloud`, and a rule with no other backend never loads; the containerlab lab patches the status by hand (`deploy/containerlab/scripts/publish-ns60-attachments.sh`). See #821.
+- **A backend in another site replies through that site's edge node.** The gateway can pick a backend anywhere its `NetworkService` reaches, and the reply then leaves through the edge node in front of *that* backend, whose own `vip_addr_table` must hold the same anycast VIP or the reply meets the unmodified kernel path and dies. Within one cluster the reconciler guarantees this; across clusters it depends on the same `NetworkService` existing on both sides, which nothing in this repo enforces.
+- **Backends depend on the Galactic cell attachment controller.** `selectRuleBackends` skips a `VPCAttachment` whose `status.vpc` is not the rule's VPC, and keeps a selected one pending until its `status.node` is set. The cell controller writes both fields, `status.node` from the attachment's `BGPAdvertisement`. Without them an attachment with no `status.vpc` is silently unselected, one with `status.vpc` but no `status.node` is pending with `status.node not set by the Galactic cell controller`, and a rule with no other backend never loads; the containerlab lab patches the status by hand (`deploy/containerlab/scripts/publish-attachments.sh`). See #821.
 - **IPv4 VIPs load only behind a switch and are never advertised yet.** A rule that predates the CRD's IPv6-only rule can still hold an IPv4 VIP. `edge_lb` and `edge_return` handle IPv4, but backend nodes translate only IPv6 VIPs, so an IPv4 flow would reach a backend that cannot answer it. With `GALACTIC_GATEWAY_IPV4_VIPS` off, the default, `buildDesiredRule` leaves IPv4 VIPs, plain or IPv4-mapped, out of the engine and each gateway node reports `<node>/IPv4Served=False` (`Unsupported`). With it on, they load, in their plain form, and the node reports `NotAdvertised`. Either way `applyBGPAdvertisements` makes no `-v4` advertisement and withdraws an old one, so the address draws no traffic until backend translation and a readiness gate land (#705), and the rule's IPv6 VIP keeps serving.
 - **`vip_table` has no active GC beyond crash-recovery reconcile.** By design (see Key Design Decisions above) — DSR keeps no flow state to leak in the first place.
-- **Egress is out of this binary's scope, not unimplemented.** Egress translation is a separate, sharded tier (`galactic-nat`, its own binary — see `cmd/galactic-nat` and `internal/controller/egressshard_controller.go`). `NetworkRule`/this datapath remain ingress-only: external client → VIP → tenant backend.
+- **Egress is out of this binary's scope, not unimplemented.** Egress translation is a separate, sharded tier (`galactic-nat`, its own binary — see `cmd/galactic-nat` and `internal/controller/egressshard_controller.go`). `NetworkService`/this datapath remain ingress-only: external client → VIP → tenant backend.
 
 ---
 
@@ -932,10 +977,10 @@ that tag into `config/galactic-gateway/base`.
 | Concern                                                                              | Start here                                                                                              |
 | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
 | Node-scoped aggregate reconcile (desired-state assembly, BGP wiring, crash recovery) | `internal/controller/networkgateway_controller.go:Reconcile`                                            |
-| Per-object lifecycle (finalizer teardown ordering, `Accepted`-condition maintenance) | `internal/controller/networkrule_controller.go:Reconcile`, `updateAcceptedCondition`, `reconcileDelete` |
+| Per-object lifecycle (finalizer teardown ordering, `Accepted`-condition maintenance) | `internal/controller/networkservice_controller.go:Reconcile`, `updateAcceptedCondition`, `reconcileDelete` |
 | Backend address → SRv6 uSID resolution (with tenant-ownership verification)          | `internal/controller/usidresolver.go:buildBackendSIDIndex`, `resolveUSID`, `verifyTenantOwnership`      |
 | Backend selection from `backendSelector` (shared with the binding writer)            | `internal/controller/rulebackends.go:selectRuleBackends`, `ruleBackendOwners`                           |
-| Backend-side `ServiceVIPBinding`s, generated per node                                | `internal/controller/networkrule_binding_controller.go` (runs in `galactic-router`)                     |
+| Backend-side `ServiceVIPBinding`s, generated per node                                | `internal/controller/networkservice_binding_controller.go` (runs in `galactic-router`)                     |
 | SRv6 encap source (configured, or derived from this node's `BGPRouter`)              | `cmd/galactic-gateway/encapsource.go:resolveEncapSource`, `srv6.NodeLocatorAddress`                     |
 | Engine convergence loop                                                              | `internal/gateway/engine.go:Reconcile`, `applyRuleLocked`, `removeRuleLocked`                           |
 | Real datapath implementation (vip_table read/write, Maglev table construction)       | `internal/gateway/kerneldatapath.go:ApplyRule`, `RemoveRule`, `buildMaglevTable`                        |
@@ -954,9 +999,9 @@ that tag into `config/galactic-gateway/base`.
 
 **Non-obvious patterns:**
 - `gatewayDatapathKeepAlive` (`cmd/galactic-gateway/gateway.go`) intentionally never calls `Close` on the loaded eBPF objects or the XDP `link.Link` — see that var's doc comment for the live incident this guards against (silent GC-triggered detach with every control-plane signal still looking healthy).
-- Every gateway node reconciles every `NetworkGateway`/`NetworkRule` in the namespace — there is no leader election and no per-node filtering predicate on the watch itself; filtering happens inside `Reconcile` (`gw.Spec.TargetRef.Name != r.NodeName` early-return) and via `isGatewayNode`/broadcast watch mappers, not via `SetupWithManager` predicates.
+- Every gateway node reconciles every `NetworkGateway`/`NetworkService` in the namespace — there is no leader election and no per-node filtering predicate on the watch itself; filtering happens inside `Reconcile` (`gw.Spec.TargetRef.Name != r.NodeName` early-return) and via `isGatewayNode`/broadcast watch mappers, not via `SetupWithManager` predicates.
 - `BGPAdvertisement` names for gateway-originated routes are node-qualified (`<rule>-<node>-<hash>-v4`/`-v6`, built by `ruleAdvertisementName`) specifically because the anycast model means every gateway node computes the same rule independently — omitting the node qualifier caused two nodes to race to create/update one shared object, which would leave the second node failing with `AlreadyExists` forever and only the first node's route ever advertised. The hash is a 10-hex-character SHA-256 of `<rule>/<node>`. Without it, rule `a-b` on node `c` and rule `a` on node `b-c` shared the name `a-b-c-v4`, so the two nodes overwrote one object and withdrawing either rule deleted the other's route (issue #762). Nothing rebuilds a name to find an advertisement: withdrawal and cleanup select by the `galactic.datum.net/network-rule` label and then check the name. Releases up to v0.5.3 used `<rule>-<node>-v4`/`-v6` and labelled those objects with the rule label alone. `applyBGPAdvertisements` deletes this node's old-named objects once their replacements exist (`pruneRuleAdvertisements`).
 - A deleted `NetworkGateway` reconcile can't just call `Engine.Stop()` unconditionally — every gateway node's process reconciles every `NetworkGateway` in the namespace, so a *sibling* node's deletion reaches this reconciler too. `isGatewayNode` re-checks whether *this* node still has its own `NetworkGateway` before stopping the engine (issue #364).
 - Advertisement failures during `Reconcile` are collected, not returned immediately — one bad rule's BGP-wiring failure must not stop the rest of the pass, but a node that converged its engine while failing to publish any route must still report `AdvertisementFailed`, not `EngineHealthy` (issue #365) — see `readyConditionFor`.
 - `withdrawNodeAdvertisements` selects a node's routes by the `galactic.datum.net/gateway-node` label `applyBGPAdvertisements` sets (and backfills) on every advertisement — the node name, or for a name over a label value's 63 characters a truncated prefix plus a short hash (`gatewayNodeLabelValue`) — then deletes only those named by `ruleAdvertisementName` (or the pre-#762 `<rule>-<node>-v4`/`-v6`) for their `galactic.datum.net/network-rule` label; the anycast model publishes no other per-node route (see the package doc comment in `networkgateway_controller.go`). It never matches by name suffix, which once let removing node `edge-1` withdraw node `east-edge-1`'s routes and CNI-written advertisements ending in `-edge-1-v4` (issue #714). An unlabelled advertisement left by a node that departed before running a release that backfills the label is not withdrawn automatically and needs deleting by hand.
-- A deleting `NetworkRule` is not dropped from the engine on the pass that first sees its deletion timestamp. Doing so ran `Datapath.RemoveRule` before `reconcileDelete` had withdrawn the route, breaking the withdraw-first contract on `Datapath.RemoveRule` (issue #715). It drains instead: kept loaded while any labelled advertisement exists, then for `ruleDrainDelay` more.
+- A deleting `NetworkService` is not dropped from the engine on the pass that first sees its deletion timestamp. Doing so ran `Datapath.RemoveRule` before `reconcileDelete` had withdrawn the route, breaking the withdraw-first contract on `Datapath.RemoveRule` (issue #715). It drains instead: kept loaded while any labelled advertisement exists, then for `ruleDrainDelay` more.

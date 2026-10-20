@@ -20,7 +20,7 @@ cluster, and its status is written by that cell's gateway and returned by Karmad
 
 | Property        | Value                                                                                                                                               |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Group, version  | `network.datumapis.com/v1alpha1`                                                                                                                    |
+| Group, version  | `galactic.datumapis.com/v1alpha1`                                                                                                                    |
 | Kind            | `FabricQuery`, list kind `FabricQueryList`                                                                                                          |
 | Scope           | Namespaced (the project's mapped namespace on the hub)                                                                                              |
 | Short name      | `fq`                                                                                                                                                |
@@ -34,8 +34,8 @@ ships the kind; `config/fabric-api/crd/` is a generated copy for the lab and tes
 only, and infra owns the CRD in every cell. Regenerate with `task generate:crd`.
 
 NSO sets two labels on every object so a janitor could find requests without
-reading specs: `network.datumapis.com/fabric-request-id` (the request ID) and
-`network.datumapis.com/fabric-expires-at` (the expiration, Unix seconds). The cell
+reading specs: `galactic.datumapis.com/fabric-request-id` (the request ID) and
+`galactic.datumapis.com/fabric-expires-at` (the expiration, Unix seconds). The cell
 gateway and janitor in this repository read `spec`, not the labels.
 
 ## Spec
@@ -421,14 +421,14 @@ A route lookup for a prefix in the `dfw` cell, as NSO would write it on the hub.
 Names, addresses and ASNs are illustrative.
 
 ```yaml
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: FabricQuery
 metadata:
   name: 6f1c2e8a-9b3d-4a57-8e10-2c4d5a6b7c8d-dfw
   namespace: project-example
   labels:
-    network.datumapis.com/fabric-request-id: 6f1c2e8a-9b3d-4a57-8e10-2c4d5a6b7c8d-dfw
-    network.datumapis.com/fabric-expires-at: "1791396120"
+    galactic.datumapis.com/fabric-request-id: 6f1c2e8a-9b3d-4a57-8e10-2c4d5a6b7c8d-dfw
+    galactic.datumapis.com/fabric-expires-at: "1791396120"
 spec:
   requestID: 6f1c2e8a-9b3d-4a57-8e10-2c4d5a6b7c8d-dfw
   source:

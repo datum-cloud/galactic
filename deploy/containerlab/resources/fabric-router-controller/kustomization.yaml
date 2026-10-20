@@ -1,0 +1,21 @@
+# The lab's fabric-router-controller: config/fabric-router-controller/base,
+# copied into base/ at deploy time (scripts/deploy-fabric-routing.sh), with
+# the rollout manager and the topology generator on and the locally built
+# image. The generator writes nothing until deploy:fabric-topology applies a
+# site's FabricTopology.
+resources:
+  - base
+components:
+  - rollout
+  - topology
+patches:
+  - target:
+      kind: Deployment
+      name: fabric-router-controller
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: fabric-router-controller:latest
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

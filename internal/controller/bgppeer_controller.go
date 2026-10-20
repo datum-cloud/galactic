@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 // BGPPeerReconciler watches BGPPeer resources and enqueues the owning BGPRouter(s).

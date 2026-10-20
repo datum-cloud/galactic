@@ -22,11 +22,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/model"
 	"go.datum.net/galactic/internal/plumbing/nptv6"
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // annotationConfigHash is the annotation key used to persist the last-applied
@@ -66,6 +66,13 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("get BGPRouter %s: %w", req.NamespacedName, err)
+	}
+
+	// A router naming a routerClassName belongs to that class's controller
+	// (the fabric underlay). galactic-router never starts a runtime for it,
+	// writes its status, or acts on its deletion.
+	if !bgpv1alpha1.IsLegacyOwned(router) {
+		return ctrl.Result{}, nil
 	}
 
 	// Handle deletion.

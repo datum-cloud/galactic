@@ -26,12 +26,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vip"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // serviceVIPBindingFinalizer guards teardown: the veth or tap unbind must
@@ -679,13 +679,13 @@ func (e *vipRowConflictError) Error() string {
 	return "not programmed: " + strings.Join(parts, "; ")
 }
 
-// ipProtocolNumber maps a NetworkRuleProtocol to the IANA protocol number
+// ipProtocolNumber maps a NetworkServiceProtocol to the IANA protocol number
 // vip_xlat_table's key uses (usid.c's USID_IPPROTO_TCP/UDP).
-func ipProtocolNumber(proto bgpv1alpha1.NetworkRuleProtocol) (uint8, error) {
+func ipProtocolNumber(proto bgpv1alpha1.NetworkServiceProtocol) (uint8, error) {
 	switch proto {
-	case bgpv1alpha1.NetworkRuleProtocolTCP:
+	case bgpv1alpha1.NetworkServiceProtocolTCP:
 		return ipProtoTCP, nil
-	case bgpv1alpha1.NetworkRuleProtocolUDP:
+	case bgpv1alpha1.NetworkServiceProtocolUDP:
 		return ipProtoUDP, nil
 	default:
 		return 0, fmt.Errorf(
@@ -743,12 +743,23 @@ func resolveVIPBindingVRF(idx *backendSIDIndex, nodeName, vpcRef string) (vipBin
 	if vpcRef == "" {
 		return vipBindingVRF{}, errors.New("binding has no vpcRef")
 	}
+	// idx.routers holds only Galactic-owned routers. Ranging over a map
+	// picks in random order, so more than one on the node is an error
+	// rather than a coin toss between two locators.
 	var router *bgpv1alpha1.BGPRouter
 	for _, rt := range idx.routers {
-		if rt.Spec.TargetRef.Name == nodeName {
-			router = rt
-			break
+		if rt.Spec.TargetRef.Name != nodeName {
+			continue
 		}
+		if router != nil {
+			first, second := router.Name, rt.Name
+			if second < first {
+				first, second = second, first
+			}
+			return vipBindingVRF{}, fmt.Errorf("ambiguous BGP config: BGPRouters %s and %s both target node %q",
+				first, second, nodeName)
+		}
+		router = rt
 	}
 	if router == nil {
 		return vipBindingVRF{}, fmt.Errorf("no BGPRouter targets node %q", nodeName)
@@ -875,7 +886,7 @@ func (r *ServiceVIPBindingReconciler) advertisementRequests(
 		}
 		return nil
 	}
-	if router.Spec.TargetRef.Name != r.NodeName {
+	if router.Spec.TargetRef.Name != r.NodeName || !bgpv1alpha1.IsLegacyOwned(router) {
 		return nil
 	}
 	list := &bgpv1alpha1.ServiceVIPBindingList{}

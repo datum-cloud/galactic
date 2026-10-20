@@ -104,7 +104,7 @@ const labelBlock = "block"
 // vrfLabels are the identity labels of every per-VRF series, and
 // vrfDirectionLabels adds the direction of travel.
 var (
-	vrfLabels          = []string{labelBlock, "argument", "vrf_table_id", "vpc", "vpc_attachment"}
+	vrfLabels          = []string{labelBlock, "argument", "vrf_table_id", "vpc", "vpc_attachment", "vrf_interface"}
 	vrfDirectionLabels = append(append([]string(nil), vrfLabels...), "direction")
 )
 
@@ -324,12 +324,12 @@ func (c *Collector) collectVRF(ch chan<- prometheus.Metric) {
 		vrfTableID := strconv.FormatUint(uint64(e.VRFTableID), 10)
 		attributionEntry, found := attribution[e.VRFKey]
 		vpc, vpcAttachment := vpcLabels(attributionEntry, found, e.VRFKey)
+		labels := []string{block, argument, vrfTableID, vpc, vpcAttachment, attributionEntry.VRFInterface}
 		ch <- prometheus.MustNewConstMetric(
-			vrfPacketsDesc, prometheus.CounterValue, float64(e.Packets), block, argument, vrfTableID, vpc, vpcAttachment)
+			vrfPacketsDesc, prometheus.CounterValue, float64(e.Packets), labels...)
 		ch <- prometheus.MustNewConstMetric(
-			vrfBytesDesc, prometheus.CounterValue, float64(e.Bytes), block, argument, vrfTableID, vpc, vpcAttachment)
+			vrfBytesDesc, prometheus.CounterValue, float64(e.Bytes), labels...)
 		if t, ok := traffic[e.VRFKey]; ok {
-			labels := []string{block, argument, vrfTableID, vpc, vpcAttachment}
 			emitVRFDirection(ch, t.Ingress, append(labels, directionIngress))
 			emitVRFDirection(ch, t.Egress, append(labels, directionEgress))
 		}

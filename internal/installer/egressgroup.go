@@ -24,13 +24,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // egressGroupDebounce is how long a burst of route, neighbor or EgressShard
@@ -70,8 +70,13 @@ var egressGroupDebounce = 250 * time.Millisecond
 type egressGroup struct {
 	cfg        config.EgressGroupConfig
 	staticSIDs []net.IP
-	pinDir     string
-	trigger    chan struct{}
+
+	// natLocators, when set, receives every configured and cluster shard SID
+	// once the EgressShard watch has listed the cluster, for traffic policy's
+	// path classification.
+	natLocators func([]net.IP)
+	pinDir      string
+	trigger     chan struct{}
 
 	// nodeName is this node's name, which marks the EgressShards running on
 	// it as local members. Empty marks none.
@@ -338,6 +343,10 @@ func (g *egressGroup) sweepHashed(
 			firstErr = err
 			synced = false
 		}
+	}
+
+	if synced && g.natLocators != nil {
+		g.natLocators(append(append([]net.IP(nil), recognized...), shardSIDs(shards)...))
 	}
 
 	refsKnown := g.refs != nil
@@ -922,4 +931,16 @@ func isUplink(ifindex int) bool {
 	}
 	_, ok := uplinks[ifindex]
 	return ok
+}
+
+// shardSIDs are the parseable status.shardSIDs of shards, whatever their
+// readiness: a draining or unready shard's replies still return through it.
+func shardSIDs(shards []bgpv1alpha1.EgressShard) []net.IP {
+	out := make([]net.IP, 0, len(shards))
+	for i := range shards {
+		if sid := net.ParseIP(shards[i].Status.ShardSID); sid != nil {
+			out = append(out, sid)
+		}
+	}
+	return out
 }

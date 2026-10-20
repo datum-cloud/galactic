@@ -1,0 +1,14 @@
+# galactic-controller's cell-wide prerequisites: its ServiceAccount and
+# RBAC, safe and idempotent to apply in any cell.
+#
+# Deliberately NOT included:
+#   - base/, the Deployment, its webhook Service and certificate, and the
+#     ValidatingWebhookConfiguration: the webhook fails closed, so it must
+#     only be installed together with a running controller, after the
+#     galactic.datumapis.com CRDs (config/crd) and cert-manager.
+#
+# Not part of the root config/kustomization.yaml either: traffic policy is
+# not enforced anywhere yet.
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml

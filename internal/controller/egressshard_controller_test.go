@@ -19,7 +19,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 const (
@@ -923,4 +923,33 @@ func TestEgressShardReconciler_ProgramsOnceTheLocatorConflictIsResolved(t *testi
 	}
 	assertCondition(t, got, bgpv1alpha1.ConditionTypeProgrammed, metav1.ConditionTrue,
 		bgpv1alpha1.ProgrammedReasonAddressesProgrammed)
+}
+
+// TestEgressShardReconciler_RefusesSIDOverlappingFabricRouter: the locator
+// check covers classed routers (the fabric underlay) too, since a clash
+// misroutes their traffic whoever owns the router.
+func TestEgressShardReconciler_RefusesSIDOverlappingFabricRouter(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newEgressShard(testNAT66NodeA)
+	class := "fabric-frr"
+	fabric := withUSIDIdentity(&bgpv1alpha1.BGPRouter{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNAT66Namespace, Name: "fabric-node-b"},
+		Spec: bgpv1alpha1.BGPRouterSpec{
+			TargetRef:       bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: testNAT66NodeB},
+			RouterClassName: &class,
+		},
+	}, 9)
+	c := newIndexedClientBuilder(scheme).WithObjects(shard, fabric, newTestNAT66Router()).
+		WithStatusSubresource(shard).Build()
+	datapath := &fakeEgressDatapath{attached: true}
+	r := newNAT66Reconciler(c, scheme, datapath)
+
+	got, err := reconcileShard(t, r, c)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if _, ok := datapath.Programmed(); ok {
+		t.Errorf("datapath holds an identity for a shard clashing with a fabric router")
+	}
+	assertCondition(t, got, bgpv1alpha1.ConditionTypeProgrammed, metav1.ConditionFalse, reasonEgressShardLocatorConflict)
 }

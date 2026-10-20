@@ -158,6 +158,8 @@ checked=0
 for site in "${SITES[@]}"; do
   cp=$(control_plane "${site}")
   vip=${VIP[${site}]}
+  # --node checks one gateway, so a site without it is not checked at all.
+  [ -z "${only}" ] || [[ " ${GATEWAYS[${site}]} " == *" ${only} "* ]] || continue
   backends=$(pod_names "${cp}" ns60 app=backend)
   if [ -z "${backends}" ]; then
     fail "${site}: no ns60 backend pod (run deploy:ns60)"

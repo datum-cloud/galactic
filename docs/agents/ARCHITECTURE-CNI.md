@@ -45,9 +45,9 @@ same `ghcr.io/datum-cloud/galactic-cni` image — see
 [Repository Layout](#repository-layout) and
 [Module / Package Reference](#module--package-reference) below.
 
-VPC and VPCAttachment CRDs are owned by a separate companion operator
-(`go.datum.net/cloud`). Galactic receives pre-populated identifiers through the
-CNI config and acts on them.
+VPC and VPCAttachment CRDs are defined in `api/cloud/v1alpha1` and
+reconciled by `galactic-controller --role=cell`. The CNI receives their
+pre-populated identifiers and acts on them.
 
 ### SRv6 SID encoding
 
@@ -121,6 +121,17 @@ pods overlap on a node, and the installer when a replacement pod fails to
 publish for two sweeps. So every sidecar reads its own `vrf_table` and
 `ifindex_vrf_table` rows back on each sweep and reapplies its VRFs and routes
 when any are missing, the same reapply a datapath reload triggers.
+A sidecar also retries a failed gateway publication on each sweep, at most
+four VPCs a sweep, so a publish that failed once does not wait for the VPC's
+next EndpointSlice change.
+While any VRF is installed, each sweep also reads `node_src_addr_table` and
+restores this node's source address when it is unset or wrong, since only a
+new VRF otherwise writes it.
+A restarted sidecar container finds the routes its pod already installed by
+their redirect routes in the pod's own main table, which no other pod can
+write, and reads each one's SID from `egress_route_table`. An entry in that
+map with no redirect route in the pod may belong to an overlapping sibling
+pod, so the sidecar logs it and leaves it in place.
 
 `galactic-router`'s own reconciler independently derives the *same* SID value
 from the same inputs (`srv6.ComputeSID`, `internal/plumbing/srv6/usid.go`,
@@ -492,7 +503,7 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 
 | Dependency                               | Version               | Purpose                                                                                                                                                                                                                                                    |
 | ---------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `go.datum.net/network`                   | bumped frequently     | BGP CRD API types (`BGPAdvertisement`, `BGPVRFInstance`) — `galactic-bgp` writes these via a bare `sigs.k8s.io/controller-runtime/pkg/client.Client`, no manager/reconciler                                                                                |
+| `api/network/v1alpha1` (local) | in-tree | Galactic BGP, gateway, egress, and service API types |
 | `sigs.k8s.io/controller-runtime`         | v0.24.1               | `pkg/client` only for `galactic-bgp`/`galactic-cni`'s installer (CRD CRUD, node lookup) — neither runs a manager or reconciler; that usage lives entirely in `galactic-router`/`galactic-gateway`, see the other two architecture docs                     |
 | `github.com/spf13/cobra`                 | v1.10.2               | CLI command/flag handling for every binary                                                                                                                                                                                                                 |
 | `github.com/containernetworking/cni`     | v1.3.1                | CNI plugin spec, skel, invoke                                                                                                                                                                                                                              |
@@ -528,6 +539,8 @@ auto-detect directly (see Configuration above).
 - **`galactic-cni`'s install DaemonSet is a Go installer, not a shell script.** See Known Constraints below.
 
 ---
+
+- **Interface traffic policy is decided at each egress exit, and is off unless a node turns it on.** `usid_egress` and `usid_service_egress` call `tp_capture` at their top, before any NPTv6 or VIP rewrite, which parses the packet with `bpf_skb_load_bytes` into the per-CPU `tp_scratch`; every exit that hands the packet on then calls `tp_decide` with the forwarding path that exit implies (a shard group sentinel or a route whose SID's locator is in `tp_nat_locator_table` is PublicNAT, the VIP reply redirect PublicService, everything else Private). `tp_decide` walks the interface's snapshot in `tp_binding_table` (a `HASH_OF_MAPS` keyed by ifindex and direction) with `bpf_for_each_map_elem` and counts exactly one outcome. Both return at once while `tp_state.mode` is off, the default, so the datapath forwards as before. Entries carry precomputed masks: a prefix compare that branched on the length cost the verifier about 13,000 instructions. The maps are written through `internal/plumbing/ebpf/tpmap`, whose kernel tests hold the datapath to the Go evaluator in `internal/trafficpolicy`. Toward the workload, `usid_ingress` decides after decapsulation and before any of its three delivery helpers, with the path read from the outer header (a private service tunnel is Private, a gateway slot PublicService, an outer source in `tp_nat_locator_table` PublicNAT), and marks what it sends through the host interface so `tp_deliver`, a new program on every managed interface's tc egress, does not decide it twice; `tp_deliver` decides everything else the host transmits to the interface as Private. While the mode is on, the master plugins leave a new host side down and `galactic-bgp` brings it up only after writing the interface's `tp_iface_table` row with a fresh policy token and reading both hooks' programs back; CNI DEL removes the row, its addresses, fallback counters and bindings; the ingress sidecar's peers are `infra` rows that are never evaluated. See [the design](../enhancements/networking/interface-traffic-policy/README.md).
 
 ## Testing
 

@@ -63,7 +63,7 @@ func TestMatchTableID_UnknownVRFSkipped(t *testing.T) {
 // anycast ingress-VIP advertisements (buildEVPNPaths never attaches the
 // attribute when adv.Communities is empty) -- must resolve to a plain
 // route (plain=true), not be silently dropped. This is the exact bug found
-// live in containerlab: an ns60 NetworkRule's VIP BGPAdvertisement reported
+// live in containerlab: an ns60 NetworkService's VIP BGPAdvertisement reported
 // Advertised/Ready, but no receiving node anywhere in the mesh ever
 // installed a route for it.
 func TestMatchTableID_RTLessPathIsPlain(t *testing.T) {

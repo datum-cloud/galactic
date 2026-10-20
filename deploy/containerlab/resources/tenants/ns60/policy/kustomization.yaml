@@ -1,0 +1,7 @@
+# ns60's traffic policy: the public-service set (../../policies/README.md), bound to
+# every attachment ns60 has, in both directions. A binding is named after
+# its VPCAttachment, which scripts/publish-attachments.sh creates.
+namespace: ns60
+resources:
+  - ../../policies/public-service
+  - bindings.yaml

@@ -241,7 +241,7 @@ under `/sys/fs/bpf/galactic-nat`. In dispatch mode it also pins the node's
 XDP dispatcher under `/sys/fs/bpf/galactic-xdp`, which the same `/sys/fs/bpf`
 mount covers.
 
-## `EgressShard` CRD (`network.datumapis.com/v1alpha1`)
+## `EgressShard` CRD (`galactic.datumapis.com/v1alpha1`)
 
 One object per shard node, in the `galactic-system` namespace. The spec
 assigns the shard's identity; the `galactic-nat` process on the target node
@@ -364,7 +364,7 @@ expire. Tenants reach the prefix only once
 Example:
 
 ```yaml
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: EgressShard
 metadata:
   name: dfw-worker2-egress
@@ -489,7 +489,7 @@ hashed mode with more than three NAT64 prefixes in
   must print `false`.
 - **`galactic-cni` may watch `EgressShard`s.** `config/galactic-cni/rbac.yaml`
   grants `get`, `list` and `watch` on `egressshards`;
-  `kubectl auth can-i watch egressshards.network.datumapis.com -n galactic-system --as=system:serviceaccount:galactic-system:galactic-cni`
+  `kubectl auth can-i watch egressshards.galactic.datumapis.com -n galactic-system --as=system:serviceaccount:galactic-system:galactic-cni`
   must answer `yes`.
 - **Every shard has its own identity and return route.** Each shard needs a
   distinct `shardSID` locator, a distinct `shardAddressIPv6` and, for NAT64,

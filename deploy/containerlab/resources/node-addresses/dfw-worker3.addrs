@@ -1,0 +1,8 @@
+lo 10.255.255.7/32
+lo fc00:0:b::1/128
+bond0 alias tr1-facing (transit uplink) -- LACP bond of eth1 + eth3
+bond0 10.1.12.2/24
+bond0 2001:db8:1:12::2/64
+bond1 alias dfw-worker-facing (compute, backup path) -- LACP bond of eth2 + eth4
+bond1 10.1.13.1/24
+bond1 2001:db8:1:13::1/64

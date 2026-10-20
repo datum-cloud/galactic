@@ -10,9 +10,9 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // VIPXlatSweepTable is the part of *vipxlatmap.VipXlatTable VIPXlatSweeper

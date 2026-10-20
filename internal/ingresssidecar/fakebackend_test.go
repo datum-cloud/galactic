@@ -42,6 +42,11 @@ type fakeBackend struct {
 	// failPrune, if set, is the error it returns.
 	pruned    []map[uint32]struct{}
 	failPrune error
+	// pruneRemoved is how many rows PruneDatapath reports removing, even when
+	// failPrune is set, as a prune failing part way through does.
+	pruneRemoved int
+	// failListVRFs fails Inventory's first step.
+	failListVRFs error
 
 	// rowsMissing, if set, is the set of VRF tables whose rows
 	// DatapathRowsPresent reports absent, standing in for another writer
@@ -50,6 +55,15 @@ type fakeBackend struct {
 	// logged in calls, since Store makes them on every Sweep.
 	rowsMissing  map[uint32]bool
 	failRowsRead error
+
+	// nodeSource is what EnsureNodeSourceAddress finds in the table, and
+	// nodeSourceWant what it writes. failNodeSource, if set, is the error it
+	// returns instead. nodeSourceChecks counts calls; they are not logged in
+	// calls, since Store makes them on every Sweep.
+	nodeSource       string
+	nodeSourceWant   string
+	failNodeSource   error
+	nodeSourceChecks int
 }
 
 type routeRecord struct {
@@ -120,6 +134,9 @@ func (f *fakeBackend) RemoveRoute(prefix *net.IPNet, tableID uint32) error {
 func (f *fakeBackend) ListVRFs() ([]VRFInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failListVRFs != nil {
+		return nil, f.failListVRFs
+	}
 	infos := make([]VRFInfo, 0, len(f.vrfs))
 	for vpc, id := range f.vrfs {
 		infos = append(infos, VRFInfo{VPC: vpc, TableID: id})
@@ -151,7 +168,7 @@ func (f *fakeBackend) PruneDatapath(keepTableIDs map[uint32]struct{}) (int, erro
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "PruneDatapath")
 	f.pruned = append(f.pruned, keepTableIDs)
-	return 0, f.failPrune
+	return f.pruneRemoved, f.failPrune
 }
 
 func (f *fakeBackend) DatapathRowsPresent(tableIDs []uint32) (bool, error) {
@@ -204,4 +221,18 @@ func (f *fakeBackend) seedRoute(vpc string, tableID uint32, prefix *net.IPNet, s
 	}
 	key := fmt.Sprintf("%d/%s", tableID, prefix)
 	f.routes[key] = routeRecord{prefix: prefix, sid: sid}
+}
+
+func (f *fakeBackend) EnsureNodeSourceAddress() (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nodeSourceChecks++
+	if f.failNodeSource != nil {
+		return false, f.failNodeSource
+	}
+	if f.nodeSource == f.nodeSourceWant {
+		return false, nil
+	}
+	f.nodeSource = f.nodeSourceWant
+	return true, nil
 }

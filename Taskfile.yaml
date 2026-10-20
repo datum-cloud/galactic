@@ -96,10 +96,25 @@ tasks:
       - buf generate
 
   generate:crd:
-    desc: Regenerate the FabricQuery deepcopy code and CRD (requires controller-gen)
+    desc: Regenerate all Galactic API deepcopy code and CRDs (requires controller-gen)
     cmds:
       - controller-gen object:headerFile=hack/boilerplate.go.txt paths=./internal/fabric/api/...
       - controller-gen crd paths=./internal/fabric/api/... output:crd:artifacts:config=config/fabric-api/crd
+      - controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/v1alpha1/...
+      - controller-gen crd paths=./api/v1alpha1/... output:crd:artifacts:config=config/crd
+      - controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/cloud/v1alpha1/...
+      - controller-gen crd paths=./api/cloud/v1alpha1/... output:crd:artifacts:config=config/crd
+      - controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/network/v1alpha1/...
+      - controller-gen crd paths=./api/network/v1alpha1/... output:crd:artifacts:config=config/crd
+
+  generate:api-docs:
+    desc: Regenerate Galactic, cloud, BGP and gateway API references
+    cmds:
+      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/v1alpha1 --output-path=docs/api/galactic.md --config=.crd-ref-docs.yaml
+      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/cloud/v1alpha1 --output-path=docs/api/cloud.md --config=.crd-ref-docs-cloud.yaml
+      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/network/v1alpha1 --output-path=docs/api/network-bgp.md --config=.crd-ref-docs-network-bgp.yaml
+      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/network/v1alpha1 --output-path=docs/api/network-gateway.md --config=.crd-ref-docs-network-gateway.yaml
+      - python3 -c 'from pathlib import Path; files = ["docs/api/galactic.md", "docs/api/cloud.md", "docs/api/network-bgp.md", "docs/api/network-gateway.md"]; [p.write_text(p.read_text().rstrip() + "\n") for p in map(Path, files)]'
 
   build:ebpf:
     desc: Regenerate the eBPF uSID, edge gateway DSR, NAT egress, and XDP dispatcher datapaths (requires clang)
@@ -161,6 +176,7 @@ tasks:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-vrf ./cmd/galactic-vrf
       - go build -ldflags "{{.LDFLAGS}}" -o bin/fabric-config-agent ./cmd/fabric-config-agent
       - go build -ldflags "{{.LDFLAGS}}" -o bin/fabric-api ./cmd/fabric-api
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-controller ./cmd/galactic-controller
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-usid ./cmd/galactic-usid
       - GOBIN={{.LOCALBIN}} go install github.com/containernetworking/plugins/plugins/main/host-device@v1.9.1
 
@@ -208,6 +224,14 @@ tasks:
       - cp config/monitoring/tests/rules-test.yaml {{.ALERTS_DIR}}/
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} check rules rules.yaml
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} test rules rules-test.yaml
+
+  test:fabric-parity:
+    desc: Compile every fabric frr.conf back through the typed API and diff it with the pinned FRR's frr-reload
+    # Needs Docker, so it is not part of ci. The synthetic fixtures always
+    # run; set FABRIC_PARITY_DIR to a <cluster>/<node>.conf tree of rendered
+    # fabric-router configs to check real routers too.
+    cmds:
+      - go test -count=1 -tags frr -run 'TestImportCompileParity' ./internal/fabric/routing/
 
   test:e2e:
     desc: E2E tests (Kind cluster, build+load image, lifecycle)

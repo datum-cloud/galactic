@@ -1,0 +1,23 @@
+# Opt-in rollout for fabric-router-controller: give every compiled fabric
+# router a FabricRouterDeployment and run FabricReleaseAuthorizations.
+# Include it from an overlay of config/fabric-router-controller/base:
+#
+#   resources:
+#     - ../../config/fabric-router-controller/base
+#   components:
+#     - ../../config/fabric-router-controller/components/rollout
+#
+# Deployments are created on the ConfigMap source, so nothing changes on a
+# node until an operator moves its deployment to Shadow or CRD and its
+# fabric-router pods run with config/fabric-router/components/activation.
+# A release promotes only deployments on the CRD source.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: Deployment
+      name: fabric-router-controller
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --rollout

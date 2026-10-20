@@ -39,13 +39,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // maxRetries is the number of retry attempts for transient Kubernetes API
@@ -213,7 +213,8 @@ func checkArgumentCollision(
 	return nil
 }
 
-// lookupBGPRouter finds the BGPRouter targeting this node in the given namespace.
+// lookupBGPRouter finds the Galactic-owned BGPRouter (one with no
+// routerClassName) targeting this node in the given namespace.
 // Returns an error if none is found or if multiple are found (ambiguous).
 func lookupBGPRouter(ctx context.Context, k8s client.Client, nodeName, namespace string) (bgpConfig, error) {
 	routerList := &bgpv1alpha1.BGPRouterList{}
@@ -222,7 +223,7 @@ func lookupBGPRouter(ctx context.Context, k8s client.Client, nodeName, namespace
 	}
 
 	var matches []bgpv1alpha1.BGPRouter
-	for _, r := range routerList.Items {
+	for _, r := range bgpv1alpha1.LegacyOwnedRouters(routerList.Items) {
 		if r.Spec.TargetRef.Name == nodeName {
 			matches = append(matches, r)
 		}
@@ -460,6 +461,9 @@ func publishBGPState(
 		}
 		if registered {
 			registerTenantGateway(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, ipamResult)
+		}
+		if err := activateTrafficPolicy(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, registered, ipamResult); err != nil {
+			return fmt.Errorf("activate traffic policy: %w", err)
 		}
 
 		adv := &bgpv1alpha1.BGPAdvertisement{

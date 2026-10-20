@@ -17,6 +17,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/dan"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/radv"
 )
@@ -128,6 +129,13 @@ func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 
 	if err := kinds.Unregister(uint32(link.Attrs().Index)); err != nil {
 		slog.Warn("DEL: failed to unregister eBPF ifindex_egress_kind_table entry", "err", err,
+			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
+	}
+
+	// The interface's traffic policy state belongs to this lifetime alone:
+	// its bindings, policy token, addresses and fallback counter rows.
+	if err := tpmap.RemovePinnedInterface(attach.PinDir, uint32(link.Attrs().Index)); err != nil {
+		slog.Warn("DEL: failed to remove traffic policy state", "err", err,
 			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
 	}
 

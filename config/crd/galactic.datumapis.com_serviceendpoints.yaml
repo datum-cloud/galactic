@@ -1,0 +1,185 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: serviceendpoints.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    kind: ServiceEndpoint
+    listKind: ServiceEndpointList
+    plural: serviceendpoints
+    shortNames:
+    - svcendpoint
+    singular: serviceendpoint
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.address
+      name: ADDRESS
+      type: string
+    - jsonPath: .spec.port
+      name: PORT
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ServiceEndpoint publishes a platform service that can be reached through a
+          VPC attachment. The object describes the service contract; the controller
+          that owns the service is responsible for its health and implementation.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ServiceEndpointSpec defines a platform service address and
+              its scope.
+            properties:
+              address:
+                description: Address is the stable address that consumers use to reach
+                  the service.
+                type: string
+                x-kubernetes-validations:
+                - message: address must be an IP address
+                  rule: isIP(self)
+              attachmentRef:
+                description: |-
+                  AttachmentRef identifies the Cloud API VPCAttachment that hosts this
+                  endpoint when the service is delivered through a private VPC path.
+                  The network API keeps this reference opaque; the consuming controller
+                  resolves it against the Cloud API.
+                properties:
+                  name:
+                    description: Name is the Cloud API VPCAttachment name.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace containing the Cloud API
+                      VPCAttachment.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              attachmentSelector:
+                description: |-
+                  AttachmentSelector selects the Cloud API VPCAttachments that host replicas
+                  of this endpoint. Labels used here must be assigned by the platform service
+                  controller, not by tenants. The dataplane selects one ready replica for
+                  each consumer according to DeliveryMode.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              deliveryMode:
+                description: |-
+                  DeliveryMode defines how a backing attachment is selected relative to a
+                  consumer. PreferNodeLocal uses a ready attachment on the consumer's node
+                  when one exists and otherwise falls back to a ready remote attachment.
+                  The dataplane preserves the consumer source address. If consumers with
+                  overlapping address space present an identical TCP or UDP five-tuple to the
+                  same replica, it rejects the later ambiguous flow fail-closed rather than
+                  translate the source or risk returning traffic to the wrong VPC.
+                enum:
+                - NodeLocal
+                - PreferNodeLocal
+                type: string
+              port:
+                description: Port is the service port.
+                format: int32
+                maximum: 65535
+                minimum: 1
+                type: integer
+              protocol:
+                description: Protocol is the transport protocol accepted by the endpoint.
+                enum:
+                - tcp
+                - udp
+                type: string
+              region:
+                description: |-
+                  Region limits endpoint selection to a region. An empty value means the
+                  endpoint is not region-scoped.
+                type: string
+              serviceClass:
+                description: |-
+                  ServiceClass identifies the platform capability implemented by this
+                  endpoint, for example "ipv6-egress-dns".
+                minLength: 1
+                type: string
+            required:
+            - address
+            - deliveryMode
+            - port
+            - protocol
+            - serviceClass
+            type: object
+            x-kubernetes-validations:
+            - message: exactly one of attachmentRef or attachmentSelector must be
+                set
+              rule: has(self.attachmentRef) != has(self.attachmentSelector)
+        type: object
+    served: true
+    storage: true
+    subresources: {}

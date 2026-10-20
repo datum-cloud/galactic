@@ -1,0 +1,25 @@
+# Scrapes fabric-router-controller (port metrics, 9185) as
+# job="fabric-router-controller": controller-runtime's reconcile and work
+# queue metrics from both replicas, and, from the leader only, the
+# galactic_fabric_routing_* fleet state: each FabricRouterDeployment's
+# source, epochs, heartbeat, conditions and staged candidate, each
+# outstanding FabricReleaseAuthorization, each fabric router's compile
+# result, and whether each kind could be read from its cache.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: fabric-router-controller
+  labels:
+    app.kubernetes.io/name: fabric-router-controller
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fabric-router-controller
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      # The fleet series carry the namespace of the object they describe,
+      # which must not be renamed to exported_namespace for the controller
+      # pod's own.
+      honorLabels: true

@@ -1,0 +1,19 @@
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicyBinding
+metadata:
+  name: private
+spec:
+  ingressPolicyRef:
+    name: lab-ingress
+  egressPolicyRef:
+    name: lab-egress
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicyBinding
+metadata:
+  name: private-b
+spec:
+  ingressPolicyRef:
+    name: lab-ingress
+  egressPolicyRef:
+    name: lab-egress

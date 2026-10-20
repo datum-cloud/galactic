@@ -1,0 +1,126 @@
+# Traffic policy on the node
+
+`galactic-router` programs interface traffic policy on each node. For every
+VPCAttachment whose `status.node` is its node, it compiles the TrafficPolicy
+each direction of the interface is bound to, publishes it into the uSID
+datapath, reports what it applied in the TrafficPolicyBinding's
+`status.nodes`, and exports the policy counters. The cell side, which
+validates policies and resolves bindings, is
+[galactic-controller](controller.md); the design is in
+[the traffic policy proposal](../enhancements/networking/interface-traffic-policy/README.md).
+
+## Enabling it
+
+Set `GALACTIC_ROUTER_TRAFFIC_POLICY=true` on the plain `galactic-router`
+DaemonSet, never on the route reflector, which refuses it. Install first:
+
+1. the `galactic.datumapis.com` CRDs (`config/crd/`), since an informer for
+   a missing CRD never syncs;
+2. the ClusterRole in `config/galactic-router/rbac.yaml`, which grants read
+   access to policies and bindings and `patch` on the bindings' status.
+
+Whether the datapath enforces, audits or ignores what galactic-router
+publishes is galactic-cni's setting, `GALACTIC_CNI_TRAFFIC_POLICY`. With it
+off, galactic-router still publishes and reports, and nothing is enforced.
+
+## What it applies
+
+| Binding                                       | The direction gets                                                                  |
+| --------------------------------------------- | ----------------------------------------------------------------------------------- |
+| No TrafficPolicyBinding                       | The built-in `default-deny-all`, which denies everything                            |
+| A binding with no reference for a direction   | The built-in `default-deny-all`                                                     |
+| A reference to a valid policy                 | That policy, at its current generation                                              |
+| A reference to a missing policy               | Nothing: the direction denies as `policy_unavailable` and its status is `Pending`   |
+| A reference to a policy that does not compile | The last snapshot of the same policy, if any, otherwise nothing; status is `Failed` |
+
+A reference to a `default-deny-all` the controller does not own resolves to
+nothing, as on the cell side.
+
+Each rule keeps its counter row while its name and action stay the same
+within one policy and one interface lifetime, so editing a match does not
+reset its counts. Renaming a rule, flipping its action, binding a different
+policy or recreating the interface starts a new series.
+
+galactic-router reconciles on every change and every five minutes. When it
+restarts, it adopts each snapshot still bound in the datapath that holds
+exactly what the current policy compiles to, for the same token, policy UID
+and generation, so counts continue; a snapshot an older galactic-router
+compiled differently is republished, starting its rules from zero. A
+snapshot on an interface no attachment claims within one resync is unbound,
+and its rows are freed.
+
+A rebind that cannot be installed, such as one that runs out of counter
+rows, unbinds the direction rather than keeping the old policy's grants,
+and reports `Failed`. A failed update of the same policy keeps its last
+snapshot. Status is written only when this node's entry changes.
+
+## Status
+
+Each node owns one entry in the binding's `status.nodes`, written with
+server-side apply as field manager `galactic-router/<node>`:
+
+```yaml
+status:
+  nodes:
+    - node: worker-1
+      ingress:
+        state: Applied
+        policy: {name: default-deny-all, uid: ..., generation: 1}
+        observedGeneration: 3
+        lastTransitionTime: "2026-10-15T12:00:00Z"
+      egress:
+        state: Applied
+        policy: {name: web, uid: ..., generation: 7}
+        observedGeneration: 3
+        lastTransitionTime: "2026-10-15T12:00:00Z"
+```
+
+`Pending` means the interface's datapath state is not ready yet, or a
+reference resolves to nothing. `Failed` carries the reason in `message`. The
+entry disappears when the attachment leaves the node.
+
+## Metrics
+
+galactic-router serves the policy counters on its metrics port (`9179`),
+which the `galactic-router` PodMonitor already scrapes, as
+`galactic_cni_traffic_policy_*`: the prefix names the datapath that counts,
+not the process that serves them. [docs/metrics.md](../metrics.md#traffic-policy--galactic_cni_traffic_policy_)
+lists every series, its labels and example queries.
+
+Every installed rule has a series from the moment it is published, at zero,
+including the built-in default's deny-all rule, whose `policy_uid` is
+`builtin:default-deny-all:v1`; an interface still on the default is visible
+by that label. A hit is one evaluation, not one forwarded packet. The
+supported budget is 27,200 series per node, 100 interfaces at the 64-rule
+limit. After a restart, series return once galactic-router reconciles each
+interface and adopts its snapshot, with their counts intact. A counter row
+the collector cannot read is left out, never reported as zero, and counted
+in `galactic_cni_traffic_policy_counter_read_errors`.
+
+## Diagnostics
+
+Run these in the galactic-router pod.
+
+`galactic-router policy explain` decides one packet against a policy, from a
+file or the cluster, without touching the datapath:
+
+```console
+$ galactic-router policy explain --policy tenant/web \
+    --path Private --src 10.0.0.1 --dst 10.0.0.2 --proto tcp --dport 80
+policy            web
+path              Private
+verdict           allow
+reason            rule
+rule              http (#0)
+compiled entries  1
+```
+
+It decides with both the Go evaluator and the compiled entries the datapath
+runs, and fails if they disagree. Leave `--path` out to see what an
+unclassified packet gets.
+
+`galactic-router policy show <namespace>/<attachment>` prints what this node
+holds for one attachment: each direction's binding, status, bound snapshot
+and every rule's counters, plus any fallback counts. Rules are named when the
+policy in the cluster is still the generation the snapshot was compiled from,
+and numbered otherwise.

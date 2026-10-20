@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 // Condition types used across BGP resources.
@@ -124,10 +124,10 @@ func setBindingCondition(binding *bgpv1alpha1.ServiceVIPBinding, condition metav
 	meta.SetStatusCondition(&binding.Status.Conditions, condition)
 }
 
-// setRuleCondition sets or updates a condition on a NetworkRule. It uses two
+// setRuleCondition sets or updates a condition on a NetworkService. It uses two
 // types: Accepted, once gateway nodes exist to serve it, and Ready, from the
 // engine's convergence result for that rule.
-func setRuleCondition(rule *bgpv1alpha1.NetworkRule, condition metav1.Condition) {
+func setRuleCondition(rule *bgpv1alpha1.NetworkService, condition metav1.Condition) {
 	condition.ObservedGeneration = rule.Generation
 	meta.SetStatusCondition(&rule.Status.Conditions, condition)
 }

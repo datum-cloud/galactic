@@ -14,10 +14,12 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 )
 
 const (
-	bgpAPIGroup   = "network.datumapis.com"
+	bgpAPIGroup   = "galactic.datumapis.com"
 	bgpAPIVersion = "v1alpha1"
 
 	resourceBGPRouters         = "bgprouters"
@@ -26,7 +28,7 @@ const (
 	resourceBGPPolicies        = "bgppolicies"
 	resourceBGPVRFInstances    = "bgpvrfinstances"
 	resourceServiceVIPBindings = "servicevipbindings"
-	resourceNetworkRules       = "networkrules"
+	resourceNetworkServices    = "networkservices"
 	resourceServiceEndpoints   = "serviceendpoints"
 	resourceServiceRoutePolicy = "serviceroutepolicies"
 	resourceVPCAttachments     = "vpcattachments"
@@ -45,7 +47,7 @@ func main() {
 // resource the manager watches. A denial means the informer cache never syncs
 // and every reconciler is silently blocked, so this logs a clear, actionable
 // message at startup instead.
-func checkWatchPermissions(mgr ctrl.Manager) {
+func checkWatchPermissions(mgr ctrl.Manager, trafficPolicy bool) {
 	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
 	if err != nil {
 		ctrl.Log.Error(err, "RBAC pre-flight: cannot create client, skipping check")
@@ -69,12 +71,23 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPPolicies},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPVRFInstances},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceServiceVIPBindings},
-		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceNetworkRules},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceNetworkServices},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceServiceEndpoints},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceServiceRoutePolicy},
-		{group: "cloud.datumapis.com", version: "v1alpha1", resource: resourceVPCAttachments},
+		{group: "galactic.datumapis.com", version: "v1alpha1", resource: resourceVPCAttachments},
 		{version: "v1", resource: resourceSecrets},
 		{version: "v1", resource: resourceNodes},
+	}
+	if trafficPolicy {
+		resources = append(resources,
+			struct{ group, version, resource, namespace string }{
+				group: galacticv1alpha1.GroupVersion.Group, version: galacticv1alpha1.GroupVersion.Version,
+				resource: "trafficpolicies",
+			},
+			struct{ group, version, resource, namespace string }{
+				group: galacticv1alpha1.GroupVersion.Group, version: galacticv1alpha1.GroupVersion.Version,
+				resource: "trafficpolicybindings",
+			})
 	}
 
 	for _, r := range resources {

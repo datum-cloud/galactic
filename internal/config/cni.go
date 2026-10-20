@@ -126,7 +126,76 @@ const (
 	// is expected to have. It is exported as a metric for the pool alert to
 	// compare against, and does not change forwarding. Default 1.
 	EnvCNIEgressPoolMinActive = "GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE"
+
+	// EnvCNITrafficPolicy is the node's interface traffic policy mode: "off"
+	// (the default) loads the policy programs but decides nothing, "audit"
+	// decides and counts every packet but forwards as before, and "enforce"
+	// drops what policy denies. Read by galactic-cni run, which writes it
+	// where the datapath and the CNI plugins read it.
+	EnvCNITrafficPolicy = "GALACTIC_CNI_TRAFFIC_POLICY"
+
+	// EnvCNIPolicyMark is the skb mark usid_ingress sets on a packet whose
+	// ingress policy it already decided and delivers through the host
+	// interface, so tp_deliver does not decide it twice. It must not collide
+	// with a mark another host component uses; 0 disables it, which counts
+	// such packets twice. Default DefaultPolicyMark.
+	EnvCNIPolicyMark = "GALACTIC_CNI_POLICY_MARK"
+
+	// EnvCNITrafficPolicyKernelCheck, when "false", skips the traffic policy
+	// preflight's kernel version check, for a distribution kernel older than
+	// 6.8 that carries the inner-map freeing fix. Default true.
+	EnvCNITrafficPolicyKernelCheck = "GALACTIC_CNI_TRAFFIC_POLICY_KERNEL_CHECK"
 )
+
+// The EnvCNITrafficPolicy values.
+const (
+	TrafficPolicyOff     = "off"
+	TrafficPolicyAudit   = "audit"
+	TrafficPolicyEnforce = "enforce"
+)
+
+// DefaultPolicyMark is EnvCNIPolicyMark's default.
+const DefaultPolicyMark uint32 = 0x0de10000
+
+// TrafficPolicyConfig is galactic-cni run's traffic policy configuration.
+type TrafficPolicyConfig struct {
+	Mode        string
+	Mark        uint32
+	KernelCheck bool
+}
+
+// ParseTrafficPolicyConfig reads the traffic policy settings from getenv. A
+// set but invalid value is an error, so a typo fails the installer at
+// startup instead of silently leaving enforcement off.
+func ParseTrafficPolicyConfig(getenv func(string) string) (TrafficPolicyConfig, error) {
+	cfg := TrafficPolicyConfig{Mode: TrafficPolicyOff, Mark: DefaultPolicyMark, KernelCheck: true}
+	var errs []error
+	switch mode := strings.TrimSpace(getenv(EnvCNITrafficPolicy)); mode {
+	case "":
+	case TrafficPolicyOff, TrafficPolicyAudit, TrafficPolicyEnforce:
+		cfg.Mode = mode
+	default:
+		errs = append(errs, fmt.Errorf("%s=%q: want %q, %q or %q", EnvCNITrafficPolicy, mode,
+			TrafficPolicyOff, TrafficPolicyAudit, TrafficPolicyEnforce))
+	}
+	if raw := strings.TrimSpace(getenv(EnvCNIPolicyMark)); raw != "" {
+		mark, err := strconv.ParseUint(raw, 0, 32)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s=%q: %w", EnvCNIPolicyMark, raw, err))
+		} else {
+			cfg.Mark = uint32(mark)
+		}
+	}
+	if raw := strings.TrimSpace(getenv(EnvCNITrafficPolicyKernelCheck)); raw != "" {
+		check, err := strconv.ParseBool(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s=%q: %w", EnvCNITrafficPolicyKernelCheck, raw, err))
+		} else {
+			cfg.KernelCheck = check
+		}
+	}
+	return cfg, errors.Join(errs...)
+}
 
 // EgressMode is how tenant VRFs reach the cluster's egress shards; see
 // EnvCNIEgressMode.

@@ -23,14 +23,14 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/gateway"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -185,13 +185,13 @@ func runCmd(cfg *config.GatewayConfig) error {
 
 	// The rule reconciler: finalizer-guarded teardown ordering and the Accepted
 	// condition.
-	if err := (&controller.NetworkRuleReconciler{
+	if err := (&controller.NetworkServiceReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		NodeName:  nodeName,
 		APIReader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup NetworkRule controller: %w", err)
+		return fmt.Errorf("setup NetworkService controller: %w", err)
 	}
 
 	if err := mgr.Start(ctx); err != nil {

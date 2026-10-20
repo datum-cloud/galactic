@@ -8,21 +8,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/netip"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // The ingress sidecar's return path, host side.
@@ -121,11 +124,15 @@ func reconcileSidecarReturnPath(ctx context.Context, st ebpfDatapathState) {
 	// Before the return path, so a deleted pod's advertisements are gone by
 	// the time it lists them, rather than failing to install every tick.
 	if st.sidecarReap != nil {
-		if err := st.sidecarReap.reap(ctx, st.k8sClient, st.namespace, st.nodeName); err != nil {
+		err := st.sidecarReap.reap(ctx, st.k8sClient, st.namespace, st.nodeName)
+		st.sidecarReturn.Operation(metrics.SidecarReturnOpReap, err)
+		if err != nil {
 			slog.Warn("Could not remove what a deleted ingress sidecar pod left behind", "err", err)
 		}
 	}
-	if err := ensureSidecarReturnPath(ctx, st.k8sClient, st.namespace, st.nodeName); err != nil {
+	if err := ensureSidecarReturnPath(
+		ctx, st.k8sClient, st.namespace, st.nodeName, st.sidecarReturn, time.Now,
+	); err != nil {
 		slog.Warn("Could not install the ingress sidecar's return path; "+
 			"replies to this node's sidecar gateway addresses will be dropped until this succeeds", "err", err)
 	}
@@ -135,11 +142,19 @@ func reconcileSidecarReturnPath(ctx context.Context, st ebpfDatapathState) {
 // gateway address on this node up to date and prunes what no longer belongs.
 // Idempotent, and safe on a node with no sidecar: with no matching
 // advertisement it installs nothing and only prunes.
-func ensureSidecarReturnPath(ctx context.Context, k8s client.Client, namespace, nodeName string) error {
+//
+// rec records the pass's result, its endpoint counts and each step, at the
+// time now reports when the pass ends. It may be nil.
+func ensureSidecarReturnPath(
+	ctx context.Context, k8s client.Client, namespace, nodeName string,
+	rec *metrics.SidecarReturn, now func() time.Time,
+) error {
 	endpoints, err := sidecarGatewayEndpoints(ctx, k8s, namespace, nodeName)
 	if err != nil {
+		rec.DiscoveryFailed()
 		return err
 	}
+	desired := len(endpoints)
 
 	// Prune first and unconditionally: a withdrawn advertisement must stop
 	// being routed here even on a node whose identity has gone away, and
@@ -150,55 +165,111 @@ func ensureSidecarReturnPath(ctx context.Context, k8s client.Client, namespace, 
 			live[table] = e.addr
 		}
 	}
-	if perr := pruneSidecarReturnRoutes(live); perr != nil {
+	perr := pruneSidecarReturnRoutesFn(live)
+	rec.Operation(metrics.SidecarReturnOpPrune, perr)
+	if perr != nil {
 		slog.Warn("Could not prune stale sidecar return routes", "err", perr)
+	}
+	// result is the pass's outcome once every endpoint installed; a failed
+	// prune leaves it partial.
+	result := metrics.SidecarReturnSuccess
+	if perr != nil {
+		result = metrics.SidecarReturnPartial
 	}
 
 	if len(endpoints) == 0 {
+		rec.Completed(now(), result, 0, 0)
 		return nil
 	}
 
 	block, nodeID, ok, err := nodeLocatorIdentity(ctx, k8s, namespace, nodeName)
 	if err != nil {
+		rec.Completed(now(), metrics.SidecarReturnError, desired, 0)
 		return err
 	}
 	if !ok {
 		// No SRv6 identity for this node yet. The advertisements exist but
 		// nothing can be keyed off a Block we do not have; the ticker
 		// retries.
+		rec.Completed(now(), metrics.SidecarReturnWaitingIdentity, desired, 0)
 		return nil
 	}
 
-	registry, closer, err := usidmap.OpenPinnedRegistry(attach.PinDir)
+	dp, err := openSidecarReturnDatapath(block, nodeID)
+	rec.Operation(metrics.SidecarReturnOpRegister, err)
 	if err != nil {
-		return fmt.Errorf("open pinned uSID maps for the sidecar return path: %w", err)
+		rec.Completed(now(), metrics.SidecarReturnError, desired, 0)
+		return err
 	}
-	defer func() { _ = closer.Close() }()
-
-	// Per-node, not per-endpoint, and the reason a sidecar-only node needs this
-	// file at all: without these, usid_ingress rejects every arriving uSID
-	// packet before reaching any Argument-specific decision.
-	if err := registry.Locator.Register(block, nodeID); err != nil {
-		return fmt.Errorf("register locator_table entry for the sidecar return path: %w", err)
-	}
-	if err := registry.Function.Register(block, uformat.FunctionEndDT46); err != nil {
-		return fmt.Errorf("register function_table entry for the sidecar return path: %w", err)
-	}
+	defer func() { _ = dp.Close() }()
 
 	var errs []error
+	applied := 0
 	for _, e := range endpoints {
-		if err := installSidecarReturn(registry, block, e); err != nil {
+		err := dp.install(block, e)
+		rec.Operation(metrics.SidecarReturnOpInstall, err)
+		if err != nil {
 			// Per-endpoint and never fatal to the sweep: one Envoy pod still
 			// starting must not stop another VPC's return path from being
 			// installed.
 			errs = append(errs, fmt.Errorf("advertisement %s: %w", e.advName, err))
+			continue
 		}
+		applied++
 	}
+	if len(errs) > 0 {
+		result = metrics.SidecarReturnPartial
+	}
+	rec.Completed(now(), result, desired, applied)
 	if len(errs) > 0 {
 		return fmt.Errorf("sidecar return path: %w", errors.Join(errs...))
 	}
 	return nil
 }
+
+// sidecarReturnDatapath is the datapath half of a pass, behind an interface so
+// tests can drive a pass's accounting without root or pinned maps.
+type sidecarReturnDatapath interface {
+	// install wires up one endpoint; see installSidecarReturn.
+	install(block uint64, e sidecarEndpoint) error
+	io.Closer
+}
+
+// openSidecarReturnDatapath opens the pinned uSID maps and registers this
+// node's locator and function entries. A variable so tests can replace it.
+var openSidecarReturnDatapath = func(block uint64, nodeID uint16) (sidecarReturnDatapath, error) {
+	registry, closer, err := usidmap.OpenPinnedRegistry(attach.PinDir)
+	if err != nil {
+		return nil, fmt.Errorf("open pinned uSID maps for the sidecar return path: %w", err)
+	}
+
+	// Per-node, not per-endpoint, and the reason a sidecar-only node needs this
+	// file at all: without these, usid_ingress rejects every arriving uSID
+	// packet before reaching any Argument-specific decision.
+	if err := registry.Locator.Register(block, nodeID); err != nil {
+		_ = closer.Close()
+		return nil, fmt.Errorf("register locator_table entry for the sidecar return path: %w", err)
+	}
+	if err := registry.Function.Register(block, uformat.FunctionEndDT46); err != nil {
+		_ = closer.Close()
+		return nil, fmt.Errorf("register function_table entry for the sidecar return path: %w", err)
+	}
+	return kernelSidecarReturn{registry: registry, Closer: closer}, nil
+}
+
+// kernelSidecarReturn is the production sidecarReturnDatapath.
+type kernelSidecarReturn struct {
+	registry *usidmap.Registry
+	io.Closer
+}
+
+func (k kernelSidecarReturn) install(block uint64, e sidecarEndpoint) error {
+	return installSidecarReturn(k.registry, block, e)
+}
+
+// pruneSidecarReturnRoutesFn is pruneSidecarReturnRoutes, a variable so tests
+// can replace it.
+var pruneSidecarReturnRoutesFn = pruneSidecarReturnRoutes
 
 // installSidecarReturn wires up one endpoint: the route, the neighbor, and the
 // vrf_table entry that together point a decapsulated reply at the pod holding
@@ -346,11 +417,16 @@ func sidecarGatewayEndpoints(
 		return nil, fmt.Errorf("list BGPAdvertisements in namespace %s: %w", namespace, err)
 	}
 
+	routerNames, err := galacticRouterNamesForNode(ctx, k8s, namespace, nodeName)
+	if err != nil {
+		return nil, err
+	}
+
 	segment := crdnames.IngressAdvertisementSegment()
 	var out []sidecarEndpoint
 	for i := range advs.Items {
 		a := &advs.Items[i]
-		if a.Spec.RouterRef.Name != nodeName {
+		if _, mine := routerNames[a.Spec.RouterRef.Name]; !mine {
 			continue
 		}
 		if !isIngressAdvertisementName(a.Name, nodeName, segment) {
@@ -460,4 +536,24 @@ func ingressEntryPointAnnotations(annotations map[string]string) (int, net.Hardw
 		return 0, nil, false
 	}
 	return ifindex, mac, true
+}
+
+// galacticRouterNamesForNode returns the names of the Galactic-owned
+// BGPRouters (no routerClassName) targeting nodeName. Advertisements are
+// matched to the node through these names rather than by assuming a router is
+// named after its node, which nothing enforces.
+func galacticRouterNamesForNode(
+	ctx context.Context, k8s client.Client, namespace, nodeName string,
+) (map[string]struct{}, error) {
+	routers := &bgpv1alpha1.BGPRouterList{}
+	if err := k8s.List(ctx, routers, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list BGPRouters in namespace %s: %w", namespace, err)
+	}
+	names := make(map[string]struct{})
+	for _, r := range bgpv1alpha1.LegacyOwnedRouters(routers.Items) {
+		if r.Spec.TargetRef.Name == nodeName {
+			names[r.Name] = struct{}{}
+		}
+	}
+	return names, nil
 }

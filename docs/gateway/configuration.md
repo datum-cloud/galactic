@@ -80,7 +80,7 @@ This kustomization covers exactly two resources —
 `config/galactic-gateway/serviceaccount.yaml` (the `galactic-gateway`
 ServiceAccount in `galactic-system`) and `config/galactic-gateway/rbac.yaml`
 (a `ClusterRole`/`ClusterRoleBinding` pair granting that ServiceAccount
-`get`/`list`/`watch`/`update`/`patch` on `networkgateways`/`networkrules`
+`get`/`list`/`watch`/`update`/`patch` on `networkgateways`/`networkservices`
 (+`/status`), full CRUD on `bgpadvertisements`, and read-only
 `get`/`list`/`watch` on both `bgprouters` and `bgpvrfinstances` — the latter
 so `NetworkGatewayReconciler`'s `BGPVRFInstance` watch has an informer it's
@@ -284,7 +284,7 @@ deploy/containerlab/resources/galactic-gateway/
 ├── iad-worker2/             #   "
 ├── dfw/
 │   ├── kustomization.yaml        # composes this site's edge nodes + its rules
-│   └── networkrules.yaml         # ns60-tcp and ns60-udp, port 80, selecting ns60's backends
+│   └── networkservices.yaml         # ns60-tcp and ns60-udp, port 80, selecting ns60's backends
 ├── sjc/                     # same shape, one edge node
 └── iad/                     #   "
 ```
@@ -382,7 +382,7 @@ the rest of the router config, in
 and `bgppeer-dfw-worker2.yaml`:
 
 ```yaml
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: BGPRouter
 metadata:
   name: galactic-router-dfw-worker2
@@ -399,7 +399,7 @@ spec:
     - afi: l2vpn
       safi: evpn
 ---
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: BGPPeer
 metadata:
   name: galactic-control-dfw-worker2
@@ -423,7 +423,7 @@ gateway-specific.
 ### `networkgateway.yaml` — register this node as a gateway node
 
 ```yaml
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: NetworkGateway
 metadata:
   name: dfw-worker2
@@ -440,10 +440,10 @@ after the node it targets. `NetworkGatewayReconciler` matches this against
 `--node-name`/`GALACTIC_GATEWAY_NODE_NAME` to decide whether it owns this
 object.
 
-## Configuring `NetworkGateway` and `NetworkRule`
+## Configuring `NetworkGateway` and `NetworkService`
 
 `galactic-gateway` reconciles exactly two CRDs
-(`go.datum.net/network`'s `api/v1alpha1` package):
+(`api/network/v1alpha1`):
 
 ### `NetworkGateway` — one per gateway node
 
@@ -456,23 +456,23 @@ There is deliberately **no** self-address or primary-node field on this
 status — DSR has nothing analogous to publish. Create one object per
 gateway node, named after that node (see the worked example above).
 
-### `NetworkRule` — internal ingress load-balancing spec
+### `NetworkService` — internal ingress load-balancing spec
 
 | Field                  | Required | Type                   | Description                                                                                                                                                                                                                                                                                  |
 | ---------------------- | -------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the companion operator, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                                                                                                             |
+| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the Galactic cell controller, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                                                                                                       |
 | `spec.vipAddresses`    | Yes      | `[]string` (1–8)       | Ingress VIP addresses this rule provisions. IPv4 VIPs are accepted but not served yet (#705); see below.                                                                                                                                                                                     |
-| `spec.protocol`        | Yes      | `tcp` \| `udp`         | Transport protocol matched by `vipAddresses`/`port`.                                                                                                                                                                                                                                         |
-| `spec.port`            | Yes      | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances.                                                                                                                                                                                                                                      |
-| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`cloud.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends. Must not be empty.                                                                                                                       |
-| `spec.backendPort`     | Yes      | `int32` (1–65535)      | Destination port on every selected backend.                                                                                                                                                                                                                                                  |
+| `spec.protocol`        | Yes      | `tcp` \| `udp`         | IP protocol load-balanced on `vipAddresses`. The API also accepts `sctp`, `esp`, `gre` and `icmp`, but refuses them as not served yet; see below.                                                                                                                                            |
+| `spec.port`            | tcp, udp | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances. Required for a protocol with ports, refused for one without.                                                                                                                                                                         |
+| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`galactic.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends. Must not be empty.                                                                                                                    |
+| `spec.backendPort`     | tcp, udp | `int32` (1–65535)      | Destination port on every selected backend. Required for a protocol with ports, refused for one without.                                                                                                                                                                                     |
 | `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes exist in the namespace; not an ownership check, see below), `<gateway-node>/Programmed` per gateway node, `<gateway-node>/IPv4Served` per gateway node for a rule with an IPv4 VIP, and `<backend-node>/BackendsBound` per node hosting a backend. |
 
-Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkrules.yaml`:
+Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkservices.yaml`:
 
 ```yaml
-apiVersion: network.datumapis.com/v1alpha1
-kind: NetworkRule
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
 metadata:
   name: ns60-tcp
   namespace: galactic-system
@@ -487,6 +487,23 @@ spec:
       app: backend
   backendPort: 80
 ```
+
+The gateways serve `tcp` and `udp`. The API also lists `sctp`, which has
+ports, and `esp`, `gre` and `icmp`, which have none, so that serving them
+later needs no API change. Until then, creating or updating a rule with any of
+them is refused with `protocol is not served yet: the gateway datapath serves
+tcp and udp only`. Both ports are required for `tcp`, `udp` and `sctp`, and
+must be unset for `esp`, `gre` and `icmp`, whose backends are chosen from the
+client and VIP addresses alone (see
+[ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md#protocols-without-ports-designed-not-served)).
+The set of protocols is open-ended, so a client reading a rule must accept a
+`protocol` value it does not recognise, keep it when writing the rule back, and
+never treat it as `tcp` or `udp`. A rule that reaches the gateways with a protocol they do not serve,
+for example one stored under a schema that admitted it, is not loaded or
+advertised, and its `<gateway-node>/Programmed` condition reports
+`UnservedProtocol`. One with an unset or out-of-range port reports
+`InvalidRule`. Its backend nodes keep the bindings they already have and
+report `InvalidRule` on `<backend-node>/BackendsBound`.
 
 A rule may carry at most one IPv6 VIP: a backend node rewrites a reply's
 source back to a single VIP, so a backend cannot answer for a second one. A
@@ -525,20 +542,19 @@ it could not answer. Until then it appears in the rule's
 a backend whose node advertises no route for it yet. A rule with no backend
 at all is not loaded.
 
-Galactic never writes an attachment's status.
-[datum-cloud/cloud](https://github.com/datum-cloud/cloud)'s controllers do.
+The Galactic cell controllers write attachment status.
 One of them reads the `BGPAdvertisement` that `galactic-router` publishes for
 the attachment and copies the node of that advertisement's `BGPRouter` into
 `status.node`. Without them, an attachment with no `status.vpc` is never
 selected, so the rule reports no backends and no pending entry for it. An
 attachment whose `status.vpc` is set but whose `status.node` is not stays
-pending with `status.node not set by datum-cloud/cloud`. A rule whose
+pending with `status.node not set by the Galactic cell controller`. A rule whose
 attachments are all pending or unselected does not load. The containerlab lab
 runs none of these controllers, so
-`deploy/containerlab/scripts/publish-ns60-attachments.sh` patches
+`deploy/containerlab/scripts/publish-attachments.sh` patches
 `status.vpc` and `status.node` in by hand.
 
-Every accepted, non-deleting `NetworkRule` in the namespace is served by
+Every accepted, non-deleting `NetworkService` in the namespace is served by
 **every** `NetworkGateway` node identically — there is no
 `status.primaryNode`/placement field to set, and no per-node subset to
 target. `galactic-gateway` resolves each backend to the SRv6 uSID of the
@@ -556,32 +572,32 @@ without an edit. See
 [ARCHITECTURE-GATEWAY.md's Data Flow section](../agents/ARCHITECTURE-GATEWAY.md#data-flow)
 for the full mechanics.
 
-Deleting a `NetworkRule` withdraws its VIP routes before any gateway node
+Deleting a `NetworkService` withdraws its VIP routes before any gateway node
 stops serving it. The rule's finalizer deletes its `BGPAdvertisement`s,
 and each node keeps the rule loaded until they are gone plus a 5-second
 drain delay, so traffic already on its way to the VIP is not dropped.
 
-> **Note:** `NetworkRule` is not a tenant API. The platform API that serves
+> **Note:** `NetworkService` is not a tenant API. The platform API that serves
 > tenants writes it, after checking that the tenant owns the VPC `vpcRef`
 > names. Galactic does not repeat that check: `Accepted` means only that
 > gateway nodes exist in the namespace. Anyone RBAC allows to write a
-> `NetworkRule` in `galactic-system` can provision ingress for any `vpcRef`,
+> `NetworkService` in `galactic-system` can provision ingress for any `vpcRef`,
 > so grant that access only to platform controllers.
 
 ### `ServiceVIPBinding` — the backend-side half, generated by `galactic-router`
 
-A `NetworkRule` configures the gateway side of DSR. For a backend to
+A `NetworkService` configures the gateway side of DSR. For a backend to
 **answer the client directly** on the VIP, its own node also needs a
 `ServiceVIPBinding` for each `(VIP, backend)` pair. Nobody writes these by
-hand: `galactic-router` on every node runs `NetworkRuleBindingReconciler`
-(`internal/controller/networkrule_binding_controller.go`), which writes one
+hand: `galactic-router` on every node runs `NetworkServiceBindingReconciler`
+(`internal/controller/networkservice_binding_controller.go`), which writes one
 for each IPv6 VIP of each accepted rule and each selected backend whose
 attachment reports that node, and deletes the ones that no longer apply.
 `ServiceVIPBindingReconciler`, in the same process, then programs the
 node's `vip_xlat_table` from it. Example of a generated binding:
 
 ```yaml
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: ServiceVIPBinding
 metadata:
   name: ns60-tcp-iad-worker-3f0c9a1d6b2e4f57
@@ -591,8 +607,8 @@ metadata:
     galactic.datum.net/network-rule: ns60-tcp
     galactic.datum.net/binding-node: iad-worker
   ownerReferences:
-    - apiVersion: network.datumapis.com/v1alpha1
-      kind: NetworkRule
+    - apiVersion: galactic.datumapis.com/v1alpha1
+      kind: NetworkService
       name: ns60-tcp
 spec:
   targetRef:
@@ -680,17 +696,17 @@ Confirm the DaemonSet and CRDs exist and are healthy:
 
 ```sh
 kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway
-kubectl get networkgateways,networkrules -n galactic-system
+kubectl get networkgateways,networkservices -n galactic-system
 kubectl get pods -n galactic-system -l app.kubernetes.io/name=galactic-gateway -o wide
 ```
 
 Inspect a specific `NetworkGateway`'s `Ready` condition (`EngineHealthy`,
 `AdvertisementFailed`, or `Terminating` — see the field reference above)
-and a `NetworkRule`'s `Accepted` condition:
+and a `NetworkService`'s `Accepted` condition:
 
 ```sh
 kubectl get networkgateway <node-name> -n galactic-system -o yaml
-kubectl get networkrule <rule-name> -n galactic-system -o yaml
+kubectl get networkservice <rule-name> -n galactic-system -o yaml
 ```
 
 Check both pods' logs — `galactic-gateway`'s own gRPC health check only

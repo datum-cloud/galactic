@@ -114,7 +114,7 @@ func Load(pinDir string, dispatchMaps map[string]*ebpf.Map) (*edgeprog.EdgedsrOb
 				pinDir, loadErr)
 		}
 		slog.Warn("edgeattach: pinned eBPF maps incompatible with the newly compiled map spec, recreating them "+
-			"(control-plane state will repopulate on the next NetworkRule reconcile)",
+			"(control-plane state will repopulate on the next NetworkService reconcile)",
 			"pinDir", pinDir, "maps", unpinned, "err", loadErr)
 		if loadErr = spec.LoadAndAssign(&loaded, opts); loadErr != nil {
 			loadErr = fmt.Errorf("after recreating %v: %w", unpinned, loadErr)

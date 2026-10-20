@@ -1,0 +1,57 @@
+# HELP galactic_fabric_routing_collect_success 1 when this scrape read every object of the kind from the cache, 0 when the read failed and the kind's series are missing from it.
+# TYPE galactic_fabric_routing_collect_success gauge
+galactic_fabric_routing_collect_success{kind="bgprouterclasses"} 1
+galactic_fabric_routing_collect_success{kind="bgprouters"} 1
+galactic_fabric_routing_collect_success{kind="fabricreleaseauthorizations"} 1
+galactic_fabric_routing_collect_success{kind="fabricrouterdeployments"} 1
+# HELP galactic_fabric_routing_deployment_activation_epoch The deployment's spec.activationEpoch: the newest promotion.
+# TYPE galactic_fabric_routing_deployment_activation_epoch gauge
+galactic_fabric_routing_deployment_activation_epoch{deployment="edge-a",namespace="galactic-system",node="node-a"} 3
+galactic_fabric_routing_deployment_activation_epoch{deployment="edge-b",namespace="galactic-system",node="node-b"} 0
+# HELP galactic_fabric_routing_deployment_applied_epoch The last epoch the node agent committed, from status.appliedEpoch.
+# TYPE galactic_fabric_routing_deployment_applied_epoch gauge
+galactic_fabric_routing_deployment_applied_epoch{deployment="edge-a",namespace="galactic-system",node="node-a"} 2
+galactic_fabric_routing_deployment_applied_epoch{deployment="edge-b",namespace="galactic-system",node="node-b"} 0
+# HELP galactic_fabric_routing_deployment_boot_authorized_until_timestamp_seconds When the committed configuration stops being restorable at boot without the API.
+# TYPE galactic_fabric_routing_deployment_boot_authorized_until_timestamp_seconds gauge
+galactic_fabric_routing_deployment_boot_authorized_until_timestamp_seconds{deployment="edge-a",namespace="galactic-system",node="node-a"} 1.7000864e+09
+# HELP galactic_fabric_routing_deployment_candidate_differs 1 when the deployment's candidate revision is not its active revision, so a release would change it.
+# TYPE galactic_fabric_routing_deployment_candidate_differs gauge
+galactic_fabric_routing_deployment_candidate_differs{deployment="edge-a",namespace="galactic-system",node="node-a"} 1
+galactic_fabric_routing_deployment_candidate_differs{deployment="edge-b",namespace="galactic-system",node="node-b"} 0
+# HELP galactic_fabric_routing_deployment_condition 1 for each condition the node agent reports, with its status and reason.
+# TYPE galactic_fabric_routing_deployment_condition gauge
+galactic_fabric_routing_deployment_condition{deployment="edge-a",namespace="galactic-system",node="node-a",reason="FailedEpoch",status="False",type="Accepted"} 1
+galactic_fabric_routing_deployment_condition{deployment="edge-a",namespace="galactic-system",node="node-a",reason="NoEligibleRecovery",status="True",type="Degraded"} 1
+galactic_fabric_routing_deployment_condition{deployment="edge-a",namespace="galactic-system",node="node-a",reason="Staged",status="True",type="Staged"} 1
+# HELP galactic_fabric_routing_deployment_heartbeat_timestamp_seconds When the node agent last reported, from status.heartbeatTime. Absent until it first reports.
+# TYPE galactic_fabric_routing_deployment_heartbeat_timestamp_seconds gauge
+galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{deployment="edge-a",namespace="galactic-system",node="node-a"} 1.7e+09
+# HELP galactic_fabric_routing_deployment_info 1 for each FabricRouterDeployment: its node, the source its spec asks for and the source the node agent reports honouring (empty until it reports).
+# TYPE galactic_fabric_routing_deployment_info gauge
+galactic_fabric_routing_deployment_info{deployment="edge-a",effective_source="CRD",namespace="galactic-system",node="node-a",source="CRD"} 1
+galactic_fabric_routing_deployment_info{deployment="edge-b",effective_source="",namespace="galactic-system",node="node-b",source="ConfigMap"} 1
+# HELP galactic_fabric_routing_deployment_last_epoch The newest epoch the node agent journaled, labelled with the stage it reached.
+# TYPE galactic_fabric_routing_deployment_last_epoch gauge
+galactic_fabric_routing_deployment_last_epoch{deployment="edge-a",namespace="galactic-system",node="node-a",stage="Degraded"} 3
+# HELP galactic_fabric_routing_deployment_staged 1 while the node agent reports a validated candidate, labelled with what applying it would disturb.
+# TYPE galactic_fabric_routing_deployment_staged gauge
+galactic_fabric_routing_deployment_staged{class="SessionReset",deployment="edge-a",namespace="galactic-system",node="node-a"} 1
+# HELP galactic_fabric_routing_deployment_staged_lines Lines applying the staged candidate would add or remove.
+# TYPE galactic_fabric_routing_deployment_staged_lines gauge
+galactic_fabric_routing_deployment_staged_lines{change="added",deployment="edge-a",namespace="galactic-system",node="node-a"} 4
+galactic_fabric_routing_deployment_staged_lines{change="removed",deployment="edge-a",namespace="galactic-system",node="node-a"} 1
+# HELP galactic_fabric_routing_release_outstanding 1 for each release still blocking its routing domain: Pending, Started, Unknown, or Failed without verified recovery.
+# TYPE galactic_fabric_routing_release_outstanding gauge
+galactic_fabric_routing_release_outstanding{namespace="galactic-system",phase="Failed",release="r2",routing_domain="fabric",type="Release"} 1
+galactic_fabric_routing_release_outstanding{namespace="galactic-system",phase="Pending",release="r4",routing_domain="fabric",type="Release"} 1
+# HELP galactic_fabric_routing_releases FabricReleaseAuthorizations by routing domain, phase and whether a failed one's recovery was verified.
+# TYPE galactic_fabric_routing_releases gauge
+galactic_fabric_routing_releases{namespace="galactic-system",phase="Completed",recovery_verified="false",routing_domain="fabric"} 1
+galactic_fabric_routing_releases{namespace="galactic-system",phase="Failed",recovery_verified="false",routing_domain="fabric"} 1
+galactic_fabric_routing_releases{namespace="galactic-system",phase="Failed",recovery_verified="true",routing_domain="fabric"} 1
+galactic_fabric_routing_releases{namespace="galactic-system",phase="Pending",recovery_verified="false",routing_domain="fabric"} 1
+# HELP galactic_fabric_routing_router_accepted 1 when a fabric router's latest inputs compiled into a revision, 0 when the controller refused them; reason is the Accepted condition's.
+# TYPE galactic_fabric_routing_router_accepted gauge
+galactic_fabric_routing_router_accepted{namespace="galactic-system",node="node-a",reason="Compiled",router="edge-a"} 1
+galactic_fabric_routing_router_accepted{namespace="galactic-system",node="node-b",reason="UnresolvedRef",router="edge-b"} 0

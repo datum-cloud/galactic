@@ -131,9 +131,12 @@ members() { echo "galactic_cni_egress_pool_members{class=\"$1\",state=\"$2\"}"; 
 
 # --- tenants --------------------------------------------------------------------
 
-# Tenant pods on the compute node, as ns/pod.
+# Tenant pods on the compute node, as ns/pod. ns60's VIP backends are left
+# out: the lab enforces traffic policy, and their egress grants only the
+# PublicService path (resources/tenants/policies/public-service/), so they
+# cannot egress through a shard at all.
 mapfile -t TENANTS < <(kc get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.nodeName}{"\n"}{end}' |
-  awk -v n="${COMPUTE}" '$2 == n && $1 ~ /^ns[0-9]+\// {print $1}')
+  awk -v n="${COMPUTE}" '$2 == n && $1 ~ /^ns[0-9]+\// && $1 !~ /^ns60\// {print $1}')
 [ "${#TENANTS[@]}" -ge 3 ] || die "need at least 3 tenant pods on ${COMPUTE}, found ${#TENANTS[@]}"
 FRESH_POD=$(kc -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
 FRESH_POD="ns10/${FRESH_POD}"
@@ -445,14 +448,14 @@ if [ "${V6[${SHARDS[0]}]}" = "${V6[${SHARDS[1]}]}" ] || [ "${V4[${SHARDS[0]}]}" 
   [ "$(sid64 "${SHARDS[0]}")" = "$(sid64 "${SHARDS[1]}")" ]; then
   die "the shards share a SID locator or masquerade address"
 fi
-schema=$(kc get crd egressshards.network.datumapis.com \
+schema=$(kc get crd egressshards.galactic.datumapis.com \
   -o jsonpath='{.spec.versions[?(@.name=="v1alpha1")].schema.openAPIV3Schema.properties.spec.properties.drain.type}')
 [ "${schema}" = boolean ] || die "the EgressShard CRD has no spec.drain; install the network CRD that adds it"
 set_drain "${SHARDS[1]}" true
 [ "$(kc -n galactic-system get egressshard "${SHARDS[1]}" -o jsonpath='{.spec.drain}')" = true ] ||
   die "spec.drain does not persist: the API server pruned it"
 set_drain "${SHARDS[1]}" "${SAVED_DRAIN[${SHARDS[1]}]}"
-[ "$(kc auth can-i watch egressshards.network.datumapis.com -n galactic-system \
+[ "$(kc auth can-i watch egressshards.galactic.datumapis.com -n galactic-system \
   --as=system:serviceaccount:galactic-system:galactic-cni)" = yes ] || die "galactic-cni may not watch EgressShards"
 log "ok   shards distinct and routed back, spec.drain persists, galactic-cni may watch EgressShards"
 

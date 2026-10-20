@@ -1,0 +1,8 @@
+lo 10.255.255.8/32
+lo fc00:0:c::1/128
+bond0 alias tr2-facing (transit uplink) -- LACP bond of eth1 + eth3
+bond0 10.1.21.2/24
+bond0 2001:db8:1:21::2/64
+bond1 alias sjc-worker-facing (compute) -- LACP bond of eth2 + eth4
+bond1 10.1.20.1/24
+bond1 2001:db8:1:20::1/64

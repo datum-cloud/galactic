@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: galactic-controller-fabric
+  namespace: fabric-identity-system
+  labels:
+    app.kubernetes.io/name: galactic-controller-fabric
+    app.kubernetes.io/component: fabric-identity-controller
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # A network's identity is decided once. Leader election is what keeps that
+  # true across a rollout; the replica count is not.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-controller-fabric
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: galactic-controller-fabric
+        app.kubernetes.io/component: fabric-identity-controller
+    spec:
+      serviceAccountName: galactic-controller-fabric
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: ghcr.io/datum-cloud/galactic-controller:latest
+          # Args reference env vars so an overlay can retarget any value with a
+          # strategic-merge patch on env, matched by name, instead of rewriting
+          # the args list.
+          args:
+            - --role=fabric
+            - --namespace=fabric-identity-system
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=:8080
+            - --identity-class=$(IDENTITY_CLASS)
+            - --identity-namespace=$(IDENTITY_NAMESPACE)
+            - --platform-project=$(PLATFORM_PROJECT)
+            - --ipam-kubeconfig=/etc/ipam-cluster/kubeconfig
+            - --hub-kubeconfig=/etc/kubernetes/federation/auth/kubeconfig
+          env:
+            # The IPClass that hands out identities. Required; a deployment
+            # naming no class refuses to start rather than draw from a default
+            # that would collide with something else's space.
+            - name: IDENTITY_CLASS
+              value: datum-fabric-identity
+            - name: IDENTITY_NAMESPACE
+              value: default
+            # The identity has to be unique across every consumer, so the claim
+            # is written in a project the platform owns rather than in the
+            # consumer's. Required, and deployment-specific.
+            - name: PLATFORM_PROJECT
+              value: ""
+          ports:
+            - name: metrics
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: ipam-cluster-kubeconfig
+              mountPath: /etc/ipam-cluster
+              readOnly: true
+            - name: federation-kubeconfig
+              mountPath: /etc/kubernetes/federation/auth
+              readOnly: true
+      volumes:
+        # Neither mount is optional. This component reads networks on the hub
+        # and draws identities from IPAM, so it can do nothing at all without
+        # both. A pod waiting in ContainerCreating for a credential that has not
+        # landed yet says so plainly; one started against an empty dir
+        # crashloops until the kubelet's next volume resync swaps the real
+        # secret in, which reads as a broken image rather than a missing secret.
+        #
+        # The hub credential is not what this pod authenticates to its own
+        # cluster with. Leader election runs locally under the ServiceAccount.
+        - name: ipam-cluster-kubeconfig
+          secret:
+            secretName: ipam-cluster-kubeconfig
+        # The hub credential is a client certificate paired with a kubeconfig
+        # naming the Karmada endpoint. They are separate objects because the
+        # certificate is issued per deployment and the endpoint is not, so they
+        # are joined at the mount rather than duplicated into one secret.
+        - name: federation-kubeconfig
+          projected:
+            sources:
+              - secret:
+                  name: fabric-identity-federation-client-cert
+              - configMap:
+                  name: fabric-identity-federation-kubeconfig
+      terminationGracePeriodSeconds: 10

@@ -16,8 +16,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 // TestNetworkGatewayReconciler_WithholdsIPv4VIPs covers the #705 stopgap: an
@@ -56,7 +56,7 @@ func TestNetworkGatewayReconciler_WithholdsIPv4VIPs(t *testing.T) {
 			otherNodeV4 := newNodeAdvertisement(testRuleName, testNodeGWB, "v4")
 
 			fakeClient := newIndexedClientBuilder(scheme).
-				WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+				WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 				WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
 					newBackendAttachment("vpc-1"), rule, staleV4, otherNodeV4).
 				Build()
@@ -91,9 +91,9 @@ func TestNetworkGatewayReconciler_WithholdsIPv4VIPs(t *testing.T) {
 				t.Errorf("-v6 advertisement: err = %v, want NotFound for a rule with no IPv6 VIP", err)
 			}
 
-			got := &bgpv1alpha1.NetworkRule{}
+			got := &bgpv1alpha1.NetworkService{}
 			if err := fakeClient.Get(ctx, testRuleKey(testRuleName), got); err != nil {
-				t.Fatalf("get NetworkRule: %v", err)
+				t.Fatalf("get NetworkService: %v", err)
 			}
 			programmed := meta.FindStatusCondition(got.Status.Conditions, programmedConditionType(testNodeGWA))
 			if programmed == nil || programmed.Status != tt.wantProgrammed || programmed.Reason != tt.wantReason {
@@ -125,7 +125,7 @@ func TestNetworkGatewayReconciler_RemovesIPv4ServedWithoutIPv4VIP(t *testing.T) 
 	}
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
 			newBackendAttachment("vpc-1"), rule).
 		Build()
@@ -135,9 +135,9 @@ func TestNetworkGatewayReconciler_RemovesIPv4ServedWithoutIPv4VIP(t *testing.T) 
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	got := &bgpv1alpha1.NetworkRule{}
+	got := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleName), got); err != nil {
-		t.Fatalf("get NetworkRule: %v", err)
+		t.Fatalf("get NetworkService: %v", err)
 	}
 	if c := meta.FindStatusCondition(got.Status.Conditions, ipv4ServedConditionType(testNodeGWA)); c != nil {
 		t.Errorf("node %s kept IPv4Served for a rule with no IPv4 VIP: %+v", testNodeGWA, c)
@@ -159,7 +159,7 @@ func TestNetworkGatewayReconciler_ClearsDepartedNodeIPv4ServedCondition(t *testi
 	})
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), rule).
 		Build()
 
@@ -168,9 +168,9 @@ func TestNetworkGatewayReconciler_ClearsDepartedNodeIPv4ServedCondition(t *testi
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	got := &bgpv1alpha1.NetworkRule{}
+	got := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleName), got); err != nil {
-		t.Fatalf("get NetworkRule: %v", err)
+		t.Fatalf("get NetworkService: %v", err)
 	}
 	if c := meta.FindStatusCondition(got.Status.Conditions, ipv4ServedConditionType(testNodeGWB)); c != nil {
 		t.Errorf("departed node %s's IPv4Served condition is still on the rule: %+v", testNodeGWB, c)
@@ -310,7 +310,7 @@ func TestNetworkGatewayReconciler_LoadsButNeverAdvertisesIPv4(t *testing.T) {
 	staleV4 := newNodeAdvertisement(testRuleName, testNodeGWA, "v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
 			newBackendAttachment("vpc-1"), rule, staleV4).
 		Build()
@@ -335,9 +335,9 @@ func TestNetworkGatewayReconciler_LoadsButNeverAdvertisesIPv4(t *testing.T) {
 		t.Errorf("-v6 advertisement: %v", err)
 	}
 
-	got := &bgpv1alpha1.NetworkRule{}
+	got := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(ctx, testRuleKey(testRuleName), got); err != nil {
-		t.Fatalf("get NetworkRule: %v", err)
+		t.Fatalf("get NetworkService: %v", err)
 	}
 	ipv4 := meta.FindStatusCondition(got.Status.Conditions, ipv4ServedConditionType(testNodeGWA))
 	if ipv4 == nil || ipv4.Status != metav1.ConditionFalse || ipv4.Reason != reasonIPv4NotAdvertised {

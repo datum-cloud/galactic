@@ -12,15 +12,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // testVPCRef is the tenant identity used by the single-VPC fixtures below.
-// See TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes for
-// the case where two different VPCRef values are in play at once.
-const testVPCRef = "vpc-1"
+// See the colliding-prefix tests below for the cases where two different
+// VPCRef values are in play at once.
+const (
+	testVPCRef      = "vpc-1"
+	testOtherVPCRef = "vpc-2"
+)
 
 func TestBackendSIDIndex_ResolvesMatchingPrefix(t *testing.T) {
 	scheme := newRuleTestScheme(t)
@@ -80,7 +83,7 @@ func TestBackendSIDIndex_NoMatchingPrefixIsError(t *testing.T) {
 }
 
 // TestBackendSIDIndex_ExcludesAdvertisementsWithoutVRFIDOrFunction verifies
-// that an advertisement with no SRv6 VRFID/Function (e.g. a NetworkRule VIP
+// that an advertisement with no SRv6 VRFID/Function (e.g. a NetworkService VIP
 // advertisement -- see NetworkGatewayReconciler.applyBGPAdvertisements)
 // is excluded from matching even if its prefix would otherwise contain the
 // address, since it carries no SRv6 decap behavior of its own.
@@ -149,13 +152,13 @@ func TestBackendSIDIndex_SkipsRouterWithoutSRv6Config(t *testing.T) {
 	}
 }
 
-// TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes is the
-// regression test for the gap usidresolver.go's own doc comment used to
-// flag: two tenants (here vpc-1 and vpc-2) each advertising the *same*
-// backend prefix -- realistic for colliding ULA space across VPCs -- must
-// resolve independently and correctly, never into each other's VRF, even
-// though both candidate BGPAdvertisements pass prefix containment.
-func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testing.T) {
+// TestBackendSIDIndex_CollidingPrefixesOnDifferentNodesResolveSeparately
+// verifies that two tenants (vpc-1 and vpc-2) advertising the same backend
+// prefix from routers on different nodes each resolve to their own node's
+// uSID. The backend's node alone separates them here, so this test does not
+// exercise the tenant ownership check; see
+// TestBackendSIDIndex_CollidingPrefixesOnSharedNodeResolveToOwnVRF for that.
+func TestBackendSIDIndex_CollidingPrefixesOnDifferentNodesResolveSeparately(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 
 	const (
@@ -275,6 +278,66 @@ func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testin
 
 	if gotA == gotB {
 		t.Fatal("resolveUSID(vpc-1) and resolveUSID(vpc-2) must never agree for a colliding backend address")
+	}
+}
+
+// TestBackendSIDIndex_CollidingPrefixesOnSharedNodeResolveToOwnVRF verifies
+// that two tenants on the same node and router, each with its own
+// BGPVRFInstance and VRFID, advertising an identical prefix each resolve a
+// backend in that prefix to their own VRFID's uSID, whichever advertisement
+// is listed first. It fails if the tenant ownership check is removed, since
+// the node and router filters cannot tell these advertisements apart.
+func TestBackendSIDIndex_CollidingPrefixesOnSharedNodeResolveToOwnVRF(t *testing.T) {
+	vrfIDs := map[string]int32{testVPCRef: 100, testOtherVPCRef: 101}
+	router, _, _ := newBackendFixtures(testVPCRef)
+	advs := map[string]*bgpv1alpha1.BGPAdvertisement{}
+	vrfs := map[string]*bgpv1alpha1.BGPVRFInstance{}
+	for vpc, vrfID := range vrfIDs {
+		_, adv, vrf := newBackendFixtures(vpc)
+		adv.Spec.VRFID = ptr(vrfID)
+		vrf.Spec.VRFID = vrfID
+		advs[vpc], vrfs[vpc] = adv, vrf
+	}
+
+	tests := []struct {
+		name     string
+		advOrder []string
+	}{
+		{"first tenant listed first", []string{testVPCRef, testOtherVPCRef}},
+		{"second tenant listed first", []string{testOtherVPCRef, testVPCRef}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := &backendSIDIndex{
+				routers: map[string]*bgpv1alpha1.BGPRouter{router.Name: router},
+				vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{
+					vrfs[testVPCRef].Name:      vrfs[testVPCRef],
+					vrfs[testOtherVPCRef].Name: vrfs[testOtherVPCRef],
+				},
+			}
+			for _, vpc := range tt.advOrder {
+				idx.advs = append(idx.advs, advs[vpc])
+			}
+
+			got := map[string]netip.Addr{}
+			for vpc, vrfID := range vrfIDs {
+				sid, err := idx.resolveUSID(netip.MustParseAddr(testBackendAddr), vpc, testComputeNodeName)
+				if err != nil {
+					t.Fatalf("resolveUSID(%s): %v", vpc, err)
+				}
+				want, err := srv6.ComputeSID(testBackendLocator, testBackendNodeID, vrfID, bgpv1alpha1.SRv6FunctionEndDT46)
+				if err != nil {
+					t.Fatalf("srv6.ComputeSID(%s): %v", vpc, err)
+				}
+				if sid != want {
+					t.Errorf("resolveUSID(%s) = %s, want %s (VRFID %d)", vpc, sid, want, vrfID)
+				}
+				got[vpc] = sid
+			}
+			if got[testVPCRef] == got[testOtherVPCRef] {
+				t.Errorf("both tenants resolved to %s; each must resolve into its own VRF", got[testVPCRef])
+			}
+		})
 	}
 }
 
