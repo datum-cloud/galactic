@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
@@ -290,5 +291,49 @@ func TestVIPXlatSweeper_KeepsIPv4VIPRows(t *testing.T) {
 	}
 	if len(entries) != len(live) {
 		t.Errorf("%d rows left, want %d", len(entries), len(live))
+	}
+}
+
+// TestVIPXlatSweeper_RemovesIPv4BackendRows: the rows of a binding from
+// before IPv4-to-IPv6 translation, an IPv4 VIP rewritten to an IPv4 backend
+// with both addresses IPv4-mapped, are removed by the sweep even while that
+// binding still exists, since an IPv4 backend claims no row.
+func TestVIPXlatSweeper_RemovesIPv4BackendRows(t *testing.T) {
+	router, adv, vrf := newBackendFixtures(testVPCRef)
+	native := newIPv4TapBinding()
+	native.Spec.BackendAddress = testBackendAddr4
+	c := fake.NewClientBuilder().WithScheme(newRuleTestScheme(t)).WithObjects(router, adv, vrf, native).Build()
+	block, argument, err := resolveVIPBindingContext(context.Background(), c, testNamespace,
+		testComputeNodeName, testVPCRef)
+	if err != nil {
+		t.Fatalf("resolveVIPBindingContext: %v", err)
+	}
+	vip := netip.MustParseAddr("::ffff:" + testVIP4).As16()
+	backend := netip.MustParseAddr("::ffff:" + testBackendAddr4).As16()
+	mem := newMemTable()
+	for _, row := range []struct {
+		key   prog.UsidVipXlatKey
+		value prog.UsidVipXlatValue
+	}{
+		{prog.UsidVipXlatKey{Block: block, Argument: argument, Proto: ipProtoTCP,
+			Direction: uint8(vipxlatmap.DirectionIngress), Port: 0x901f, Addr: vip,
+			Slot: srv6.BackendSlot(netip.MustParseAddr(testBackendAddr4), 30080)},
+			prog.UsidVipXlatValue{Addr: backend, Port: 0x5e75}},
+		{prog.UsidVipXlatKey{Block: block, Argument: argument, Proto: ipProtoTCP,
+			Direction: uint8(vipxlatmap.DirectionEgress), Port: 0x5e75, Addr: backend},
+			prog.UsidVipXlatValue{Addr: vip, Port: 0x901f}},
+	} {
+		if err := mem.Put(row.key, row.value); err != nil {
+			t.Fatalf("seed row: %v", err)
+		}
+	}
+
+	table := vipxlatmap.NewVipXlatTable(mem)
+	result := (&VIPXlatSweeper{Client: c, NodeName: testComputeNodeName, Table: table}).Sweep(context.Background())
+	if result.Errors != 0 || result.EBPFVIPXlatEntriesRemoved != 2 {
+		t.Errorf("Sweep: %d errors, %d removed; want 0 and 2", result.Errors, result.EBPFVIPXlatEntriesRemoved)
+	}
+	if len(mem.entries) != 0 {
+		t.Errorf("%d IPv4-backend rows left, want none", len(mem.entries))
 	}
 }
