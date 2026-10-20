@@ -209,7 +209,7 @@ func TestRuleBackendOwners(t *testing.T) {
 
 			owner := owners[backendClaimFor(a, ruleBackend{
 				addr: netip.MustParseAddr(testBackendAddr), port: testBackendPort,
-			})]
+			}, familyIPv6)]
 			if owner.Name != tt.wantOwner {
 				t.Errorf("owner of rule a's backend = %q, want %q", owner.Name, tt.wantOwner)
 			}

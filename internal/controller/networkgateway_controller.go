@@ -105,8 +105,8 @@ type NetworkGatewayReconciler struct {
 	Disabled bool
 
 	// IPv4VIPs loads a rule's IPv4 VIPs into the engine alongside its IPv6
-	// ones (config.EnvGatewayIPv4VIPs), over the rule's IPv4 backends, and
-	// advertises one once its backends' ServiceVIPBindings are Bound; see
+	// ones (config.EnvGatewayIPv4VIPs), over the rule's IPv6 backends, whose
+	// nodes translate its flows, and advertises one once its backends' ServiceVIPBindings are Bound; see
 	// buildDesiredRule and applyBGPAdvertisements. Off, no IPv4 VIP is loaded
 	// or advertised.
 	IPv4VIPs bool
@@ -178,7 +178,7 @@ const (
 	reasonIPv4Advertised = "Advertised"
 
 	// reasonIPv4BindingsNotBound is the per-node IPv4Served reason for a rule
-	// whose IPv4 VIP this node loaded over its eligible IPv4 backends, none
+	// whose IPv4 VIP this node loaded over its eligible backends, none
 	// of whose ServiceVIPBindings is Bound yet, so it is not advertised. The
 	// VIP is loaded so that galactic-router writes those bindings
 	// (ipv4LoadedOnSomeNode).
@@ -186,7 +186,8 @@ const (
 
 	// reasonIPv4NoBackend is the per-node IPv4Served reason for a rule whose
 	// IPv4 VIPs IPv4VIPs would load but none of whose selected attachments has
-	// an IPv4 address that resolves to a backend, so they are left out.
+	// an IPv6 address that resolves to a backend for them, so they are left
+	// out.
 	reasonIPv4NoBackend = "NoBackend"
 
 	// reasonIPv4MultipleVIPs is the per-node IPv4Served reason for a rule
@@ -243,14 +244,15 @@ type ipv4Family int
 const (
 	// ipv4Off: IPv4VIPs is off, so they are left out.
 	ipv4Off ipv4Family = iota
-	// ipv4Loaded: they are in the rule's engine state, over IPv4 backends
-	// whose ServiceVIPBindings are all Bound, so they may be advertised.
+	// ipv4Loaded: they are in the rule's engine state, over IPv6 backends
+	// whose ServiceVIPBindings for them are all Bound, so they may be
+	// advertised.
 	ipv4Loaded
 	// ipv4Unbound: they are in the rule's engine state, over every eligible
-	// IPv4 backend, none of whose ServiceVIPBindings is Bound yet, so they
+	// backend, none of whose ServiceVIPBindings is Bound yet, so they
 	// are not advertised.
 	ipv4Unbound
-	// ipv4NoBackend: no IPv4 backend resolves, so they are left out.
+	// ipv4NoBackend: no IPv6 backend resolves for them, so they are left out.
 	ipv4NoBackend
 	// ipv4MultipleVIPs: the rule has more than one, so they are left out.
 	ipv4MultipleVIPs
@@ -835,12 +837,12 @@ func ipv4ServedCondition(
 			"targets the node or the advertisement failed; the NetworkGateway's Ready condition says which", node)
 	case ipv4Unbound:
 		reason = reasonIPv4BindingsNotBound
-		message = fmt.Sprintf("IPv4 VIP is loaded on node %s but not advertised: none of its IPv4 backends' "+
+		message = fmt.Sprintf("IPv4 VIP is loaded on node %s but not advertised: none of its backends' "+
 			"ServiceVIPBindings is Bound yet; the backend nodes' BackendsBound conditions say why", node)
 	case ipv4NoBackend:
 		reason = reasonIPv4NoBackend
-		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: no selected attachment has an IPv4 "+
-			"address that resolves to a backend this rule serves", node)
+		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: no selected attachment has an IPv6 "+
+			"address that resolves to a backend this rule serves for them", node)
 	case ipv4MultipleVIPs:
 		reason = reasonIPv4MultipleVIPs
 		message = fmt.Sprintf("IPv4 VIPs are not loaded or advertised on node %s: the rule has more than "+
@@ -1032,10 +1034,11 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
 }
 
 // buildDesiredRule converts rule into a gateway.DesiredRule. Its backends are
-// the addresses of the VPCAttachments rule's BackendSelector picks from
-// attachments (selectRuleBackends), one list per VIP family: the IPv6
-// addresses for the IPv6 VIPs and, when they load, the IPv4 addresses for the
-// IPv4 VIPs. Each is resolved through sidIndex to the SRv6 uSID of the node
+// the IPv6 addresses of the VPCAttachments rule's BackendSelector picks from
+// attachments (selectRuleBackends), one list per VIP family, since another
+// rule can own a backend's claim for one family and not the other: Backends
+// for the IPv6 VIPs and, when they load, IPv4Backends for the IPv4 VIPs, whose
+// backend nodes translate them to IPv6. Each is resolved through sidIndex to the SRv6 uSID of the node
 // its attachment reports, with that backend's own slot (backendSID), so a node
 // hosting several of the rule's backends can tell which one Maglev chose.
 // There is no kernel VRF or FIB dependency.
@@ -1058,10 +1061,11 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
 // IPv4 VIPs, plain or IPv4-mapped (isIPv4VIP), are left out unless serveIPv4
 // is set. Without it the rule's IPv6 VIPs serve without them, and a rule with
 // no other VIP fails with errNoServedVIP. With it they load beside the IPv6
-// ones, over the IPv4 backends whose ServiceVIPBinding in bindings is Bound
+// ones, over the IPv6 backends whose ServiceVIPBinding for the IPv4 VIP in
+// bindings is Bound
 // (ipv4Bindings.unbound); the rest are returned in unresolved, so a flow never
 // reaches a backend that cannot answer it. While none is Bound the VIP loads
-// over every eligible IPv4 backend, so that the backend nodes write their
+// over every eligible backend, so that the backend nodes write their
 // bindings, and ipv4 is ipv4Unbound, which keeps it unadvertised. A rule with
 // more than one IPv4 VIP, like one whose IPv4 VIP has no backend, serves its
 // IPv6 VIPs without them. ipv4 says which of these happened to the rule's

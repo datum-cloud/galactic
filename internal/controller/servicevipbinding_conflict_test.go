@@ -176,7 +176,7 @@ func TestServiceVIPBinding_SameBackendConflicts(t *testing.T) {
 				t.Errorf("old Bound = %+v, want True", cond)
 			}
 			cond := boundCondition(t, c, testConflictYoung)
-			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "Conflict" {
+			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonVIPRowConflict {
 				t.Fatalf("young Bound = %+v, want False/Conflict", cond)
 			}
 			assertRowRewrite(t, table, egressRow(testConflictBackendA), testConflictVIPA, "backend A egress row")

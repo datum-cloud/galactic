@@ -156,21 +156,19 @@ func (s *VIPXlatSweeper) liveRows(
 // key returns the vip_xlat_table key r is written under.
 func (r vipRow) key() vipxlatmap.Key {
 	return vipxlatmap.Key{
-		Block: r.block, Argument: r.argument, Slot: r.slot, Proto: r.proto, Addr: r.addr, Port: r.port,
+		Block: r.block, Argument: r.argument, Slot: r.slot, Proto: r.proto, Direction: r.direction,
+		Addr: r.addr, Port: r.port,
 	}
 }
 
 // shapes reports whether e has the direction, slot, protocol, address and port
 // of one of rows' two rows, under any block and argument.
 func (rows vipBindingRows) shapes(e vipxlatmap.Entry) bool {
-	var row vipRow
-	switch e.Direction {
-	case vipxlatmap.DirectionIngress:
-		row = rows.ingress
-	case vipxlatmap.DirectionEgress:
-		row = rows.egress
-	default:
-		return false
+	for _, row := range []vipRow{rows.ingress, rows.egress} {
+		if e.Direction == row.direction && e.Slot == row.slot && e.Proto == row.proto &&
+			e.Addr == row.addr && e.Port == row.port {
+			return true
+		}
 	}
-	return e.Slot == row.slot && e.Proto == row.proto && e.Addr == row.addr && e.Port == row.port
+	return false
 }

@@ -30,7 +30,7 @@ const testBindFailed = "BindFailed"
 var testIPv4AdvName = ruleAdvertisementName(testRuleName, testNodeGWA, "v4")
 
 // newIPv4Binding returns the binding testComputeNodeName writes for rule's
-// IPv4 VIP testVIP4 and the IPv4 backend at addr, with its Bound condition set to
+// IPv4 VIP testVIP4 and the IPv6 backend at addr, with its Bound condition set to
 // status and reason for its current generation.
 func newIPv4Binding(
 	rule *bgpv1alpha1.NetworkService, addr string, status metav1.ConditionStatus, reason string,
@@ -102,7 +102,7 @@ func advertisedPrefixes(t *testing.T, c client.Client, name string) ([]bgpv1alph
 }
 
 // TestIPv4Gate covers each state of the IPv4 advertisement gate on one node:
-// it opens only with IPv4VIPs on, the IPv4 VIP loaded, an eligible IPv4
+// it opens only with IPv4VIPs on, the IPv4 VIP loaded, an eligible IPv6
 // backend and that backend's binding Bound for its current spec, and every
 // other state leaves -v4 unadvertised with its own IPv4Served reason, while
 // the rule's IPv6 VIP is advertised as before.
@@ -113,7 +113,7 @@ func TestIPv4Gate(t *testing.T) {
 		return rule
 	}
 	bound := func(rule *bgpv1alpha1.NetworkService) *bgpv1alpha1.ServiceVIPBinding {
-		return newIPv4Binding(rule, testBackendAddr4, metav1.ConditionTrue, "Bound")
+		return newIPv4Binding(rule, testBackendAddr, metav1.ConditionTrue, "Bound")
 	}
 	dualAttachment := newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4)
 
@@ -160,7 +160,7 @@ func TestIPv4Gate(t *testing.T) {
 		{
 			name: "binding failed", ipv4VIPs: true, rule: dualStack(), attachment: dualAttachment,
 			binding: func(rule *bgpv1alpha1.NetworkService) *bgpv1alpha1.ServiceVIPBinding {
-				return newIPv4Binding(rule, testBackendAddr4, metav1.ConditionFalse, testBindFailed)
+				return newIPv4Binding(rule, testBackendAddr, metav1.ConditionFalse, testBindFailed)
 			},
 			wantStatus: metav1.ConditionFalse, wantReason: reasonIPv4BindingsNotBound,
 			wantV4Loaded: true, wantV6Advert: true, wantProgrammed: metav1.ConditionTrue,
@@ -193,9 +193,10 @@ func TestIPv4Gate(t *testing.T) {
 			wantV4Loaded: true, wantProgrammed: metav1.ConditionTrue,
 		},
 		{
-			name: "no IPv4 backend", ipv4VIPs: true, rule: dualStack(), attachment: newBackendAttachment("vpc-1"),
+			name: "IPv4 address only, no IPv6 backend", ipv4VIPs: true, rule: dualStack(),
+			attachment: newBackendAttachment("vpc-1", testBackendAddr4),
 			wantStatus: metav1.ConditionFalse, wantReason: reasonIPv4NoBackend,
-			wantV6Advert: true, wantProgrammed: metav1.ConditionTrue,
+			wantProgrammed: metav1.ConditionFalse,
 		},
 		{
 			name: "two IPv4 VIPs stored before admission refused them", ipv4VIPs: true,
@@ -228,8 +229,8 @@ func TestIPv4Gate(t *testing.T) {
 				t.Errorf("IPv4 VIP loaded = %v, want %v (VIPs %v)", v4Loaded, tt.wantV4Loaded, desired.VIPAddresses)
 			}
 			if v4Loaded && (len(desired.IPv4Backends) != 1 ||
-				desired.IPv4Backends[0].Address != netip.MustParseAddr(testBackendAddr4)) {
-				t.Errorf("IPv4 backends = %+v, want only %s", desired.IPv4Backends, testBackendAddr4)
+				desired.IPv4Backends[0].Address != netip.MustParseAddr(testBackendAddr)) {
+				t.Errorf("IPv4 backends = %+v, want only the IPv6 backend %s", desired.IPv4Backends, testBackendAddr)
 			}
 
 			v4, ok := advertisedPrefixes(t, c, testIPv4AdvName)
@@ -267,7 +268,7 @@ func TestIPv4Gate_WithdrawsWhenBindingStopsBeingBound(t *testing.T) {
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	rule := newTestRule(testRuleName, "vpc-1", testVIP, testVIP4)
 	acceptRule(rule)
-	binding := newIPv4Binding(rule, testBackendAddr4, metav1.ConditionTrue, "Bound")
+	binding := newIPv4Binding(rule, testBackendAddr, metav1.ConditionTrue, "Bound")
 	c, _, r := reconcileGateway(t, true, newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv,
 		backendVRF, newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4), rule, binding)
 	if _, ok := advertisedPrefixes(t, c, testIPv4AdvName); !ok {
@@ -300,22 +301,25 @@ func TestIPv4Gate_WithdrawsWhenBindingStopsBeingBound(t *testing.T) {
 	}
 }
 
-// TestIPv4Gate_LeavesUnboundBackendsOut covers a rule with two IPv4 backends,
-// one Bound: the IPv4 VIP is balanced over the Bound one alone and advertised,
+// TestIPv4Gate_LeavesUnboundBackendsOut covers a rule with two backends whose
+// IPv4 VIP bindings differ, one Bound: the IPv4 VIP is balanced over the Bound one alone and advertised,
 // and the other is named on the Programmed condition until it is Bound.
 func TestIPv4Gate_LeavesUnboundBackendsOut(t *testing.T) {
-	const secondAddr4 = "10.60.0.6"
+	const secondAddr = "fd00:10::6"
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	rule := newTestRule(testRuleName, "vpc-1", testVIP, testVIP4)
 	acceptRule(rule)
 	c, engine, _ := reconcileGateway(t, true, newTestGateway(testNodeGWA), newTestRouter(), backendRouter,
-		backendAdv, backendVRF, newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4, secondAddr4), rule,
-		newIPv4Binding(rule, testBackendAddr4, metav1.ConditionTrue, "Bound"),
-		newIPv4Binding(rule, secondAddr4, metav1.ConditionFalse, "Conflict"))
+		backendAdv, backendVRF, newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4, secondAddr), rule,
+		newIPv4Binding(rule, testBackendAddr, metav1.ConditionTrue, "Bound"),
+		newIPv4Binding(rule, secondAddr, metav1.ConditionFalse, "Conflict"))
 
 	desired := engine.lastDesired.Rules[testNamespace+"/"+testRuleName]
-	if len(desired.IPv4Backends) != 1 || desired.IPv4Backends[0].Address != netip.MustParseAddr(testBackendAddr4) {
-		t.Errorf("IPv4 backends = %+v, want only the Bound %s", desired.IPv4Backends, testBackendAddr4)
+	if len(desired.IPv4Backends) != 1 || desired.IPv4Backends[0].Address != netip.MustParseAddr(testBackendAddr) {
+		t.Errorf("IPv4 backends = %+v, want only the Bound %s", desired.IPv4Backends, testBackendAddr)
+	}
+	if len(desired.Backends) != 2 {
+		t.Errorf("IPv6 VIP backends = %+v, want both: its own bindings are not gated", desired.Backends)
 	}
 	if _, ok := advertisedPrefixes(t, c, testIPv4AdvName); !ok {
 		t.Error("-v4 not advertised over a Bound backend")
@@ -323,9 +327,9 @@ func TestIPv4Gate_LeavesUnboundBackendsOut(t *testing.T) {
 	conds := ruleConditions(t, c, testRuleName)
 	programmed := meta.FindStatusCondition(conds, programmedConditionType(testNodeGWA))
 	if programmed == nil || programmed.Reason != reasonBackendsUnresolved ||
-		!strings.Contains(programmed.Message, secondAddr4) || !strings.Contains(programmed.Message, "Conflict") {
+		!strings.Contains(programmed.Message, secondAddr) || !strings.Contains(programmed.Message, "Conflict") {
 		t.Errorf("Programmed = %+v, want %s naming %s and its binding's reason", programmed,
-			reasonBackendsUnresolved, secondAddr4)
+			reasonBackendsUnresolved, secondAddr)
 	}
 	if ipv4 := meta.FindStatusCondition(conds, ipv4ServedConditionType(testNodeGWA)); ipv4 == nil ||
 		ipv4.Reason != reasonIPv4Advertised {
@@ -333,10 +337,10 @@ func TestIPv4Gate_LeavesUnboundBackendsOut(t *testing.T) {
 	}
 }
 
-// TestIPv4Gate_SharedBackendSocket covers two rules selecting the same IPv4
-// backend on one backendPort and protocol: the older rule owns it and is
-// advertised, and the newer IPv4-only rule has no IPv4 backend, so its gate
-// stays closed with NoBackend.
+// TestIPv4Gate_SharedBackendSocket covers two rules with an IPv4 VIP selecting
+// the same backend on one backendPort and protocol: the older rule owns its
+// egress-translated row and is advertised, and the newer IPv4-only rule has no
+// backend for its IPv4 VIP, so its gate stays closed with NoBackend.
 func TestIPv4Gate_SharedBackendSocket(t *testing.T) {
 	const newerVIP4 = "203.0.113.9"
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
@@ -349,7 +353,7 @@ func TestIPv4Gate_SharedBackendSocket(t *testing.T) {
 
 	c, _, _ := reconcileGateway(t, true, newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv,
 		backendVRF, newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4), older, newer,
-		newIPv4Binding(older, testBackendAddr4, metav1.ConditionTrue, "Bound"))
+		newIPv4Binding(older, testBackendAddr, metav1.ConditionTrue, "Bound"))
 
 	if _, ok := advertisedPrefixes(t, c, testIPv4AdvName); !ok {
 		t.Error("older rule's -v4 not advertised")
@@ -407,7 +411,7 @@ func TestNetworkGatewayReconciler_PrunesDepartedNodeConditions(t *testing.T) {
 // unrelated status writes do not.
 func TestIPv4BindingReadinessChanged(t *testing.T) {
 	rule := newTestRule(testRuleName, "vpc-1", testVIP, testVIP4)
-	v4 := newIPv4Binding(rule, testBackendAddr4, metav1.ConditionTrue, "Bound")
+	v4 := newIPv4Binding(rule, testBackendAddr, metav1.ConditionTrue, "Bound")
 	v6 := v4.DeepCopy()
 	v6.Spec.VIPAddress, v6.Spec.BackendAddress = testVIP, testBackendAddr
 	handWritten := v4.DeepCopy()

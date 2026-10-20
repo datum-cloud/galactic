@@ -18,8 +18,8 @@ import (
 )
 
 // ipv4Bindings holds the generated ServiceVIPBindings of IPv4 VIPs in one
-// namespace, by name. The gateway reads them to decide which IPv4 backends a
-// rule's IPv4 VIP may be balanced over and whether it may be advertised.
+// namespace, by name. The gateway reads them to decide which backends a rule's
+// IPv4 VIP may be balanced over and whether it may be advertised.
 type ipv4Bindings map[string]*bgpv1alpha1.ServiceVIPBinding
 
 // listIPv4Bindings returns the generated ServiceVIPBindings of IPv4 VIPs in
@@ -44,8 +44,8 @@ func listIPv4Bindings(ctx context.Context, c client.Client, namespace string) (i
 
 // unbound returns why backend b of rule has no Bound binding for the IPv4 VIP
 // vip, or "" when it has one. A binding counts only when it is the one
-// b's node writes for rule today (generatedBinding): same name, rule label and
-// spec, so a binding left from an earlier spec, or not yet updated to the
+// b's node writes for rule today (generatedBinding), the IPv4 VIP paired with
+// b's IPv6 address: same name, rule label and spec, so a binding left from an earlier spec, or not yet updated to the
 // current one, does not open the gate.
 func (idx ipv4Bindings) unbound(rule *bgpv1alpha1.NetworkService, vip netip.Addr, b ruleBackend) string {
 	want := generatedBinding(rule, b.node, vip, b)

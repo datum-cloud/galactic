@@ -200,11 +200,15 @@ func sweepRowKey(block uint64, argument uint16, r sweepRow) vipxlatmap.Key {
 		argument = r.argument
 	}
 	if r.egress {
-		return vipxlatmap.Key{Block: block, Argument: argument, Proto: ipProtoTCP,
+		direction := vipxlatmap.DirectionEgress
+		if netip.MustParseAddr(r.vip).Is4() {
+			direction = vipxlatmap.DirectionEgressTranslated
+		}
+		return vipxlatmap.Key{Block: block, Argument: argument, Proto: ipProtoTCP, Direction: direction,
 			Addr: netip.MustParseAddr(r.backend), Port: 30080}
 	}
 	return vipxlatmap.Key{Block: block, Argument: argument, Slot: r.slot, Proto: ipProtoTCP,
-		Addr: netip.MustParseAddr(r.vip), Port: 8080}
+		Direction: vipxlatmap.DirectionIngress, Addr: netip.MustParseAddr(r.vip), Port: 8080}
 }
 
 // TestVIPXlatSweeper_ListErrorSkipsPass checks that a failure to list the
@@ -239,10 +243,12 @@ func TestVIPXlatSweeper_ListErrorSkipsPass(t *testing.T) {
 	}
 }
 
-// TestVIPXlatSweeper_KeepsIPv4BindingRows: a live IPv4 binding's rows, which
-// the map holds IPv4-mapped and List reports plain, survive the sweep, and an
-// IPv4 row no binding claims is removed.
-func TestVIPXlatSweeper_KeepsIPv4BindingRows(t *testing.T) {
+// TestVIPXlatSweeper_KeepsIPv4VIPRows: a live IPv4 VIP's binding keeps its
+// ingress row, which the map holds IPv4-mapped and List reports plain, and its
+// egress-translated row. The live IPv6 VIP's binding to the same backend
+// socket does not keep the egress-translated row of an IPv4 VIP no binding
+// claims, nor does the IPv4 binding keep an orphan IPv6 egress row there.
+func TestVIPXlatSweeper_KeepsIPv4VIPRows(t *testing.T) {
 	router, adv, vrf := newBackendFixtures(testVPCRef)
 	c := fake.NewClientBuilder().WithScheme(newRuleTestScheme(t)).
 		WithObjects(router, adv, vrf, newIPv4TapBinding()).Build()
@@ -251,11 +257,13 @@ func TestVIPXlatSweeper_KeepsIPv4BindingRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveVIPBindingContext: %v", err)
 	}
-	slot := srv6.BackendSlot(netip.MustParseAddr(testBackendAddr4), 30080)
+	slot := srv6.BackendSlot(netip.MustParseAddr(testBackendAddr), 30080)
 	rows := []sweepRow{
-		{name: "IPv4 ingress", slot: slot, vip: testVIP4, backend: testBackendAddr4},
-		{name: "IPv4 egress", egress: true, vip: testVIP4, backend: testBackendAddr4},
-		{name: "IPv4 orphan egress", egress: true, vip: testVIP4, backend: "10.60.0.9"},
+		{name: "IPv4 ingress", slot: slot, vip: testVIP4, backend: testBackendAddr},
+		{name: "IPv4 egress-translated", egress: true, vip: testVIP4, backend: testBackendAddr},
+		{name: "orphan IPv6 egress on the IPv4 VIP's socket", egress: true, vip: testVIPBindingVIPAddr,
+			backend: testBackendAddr},
+		{name: "orphan IPv4 egress-translated", egress: true, vip: testVIP4, backend: "fd00:10::9"},
 	}
 	live := rows[:2]
 	mem := newMemTable()
@@ -263,8 +271,9 @@ func TestVIPXlatSweeper_KeepsIPv4BindingRows(t *testing.T) {
 
 	table := vipxlatmap.NewVipXlatTable(mem)
 	result := (&VIPXlatSweeper{Client: c, NodeName: testComputeNodeName, Table: table}).Sweep(context.Background())
-	if result.Errors != 0 || result.EBPFVIPXlatEntriesRemoved != 1 {
-		t.Fatalf("Sweep: %d errors, %d removed; want 0 and 1", result.Errors, result.EBPFVIPXlatEntriesRemoved)
+	if result.Errors != 0 || result.EBPFVIPXlatEntriesRemoved != len(rows)-len(live) {
+		t.Fatalf("Sweep: %d errors, %d removed; want 0 and %d",
+			result.Errors, result.EBPFVIPXlatEntriesRemoved, len(rows)-len(live))
 	}
 	entries, err := table.List()
 	if err != nil {
