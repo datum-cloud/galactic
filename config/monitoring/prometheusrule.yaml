@@ -1,8 +1,9 @@
 # Alerts on the underlay (fabric-router's FRR, via frr-exporter and
-# fabric-config-agent), on galactic-router's BMP export and route installs,
-# on the galactic-nat egress shards' session tables, masquerade ports and
-# uplink NICs, and on the fabric-api looking glass's gateway and node
-# sidecars. A BGP session that drops is also streamed to the BMP collector as
+# fabric-config-agent), on fabric routing through the API
+# (fabric-router-controller's deployments, releases and compile results), on
+# galactic-router's BMP export and route installs, on the galactic-nat egress
+# shards' session tables, masquerade ports and uplink NICs, and on the
+# fabric-api looking glass's gateway and node sidecars. A BGP session that drops is also streamed to the BMP collector as
 # a Peer Down carrying the reason and any NOTIFICATION; these rules are the
 # Prometheus-side signal for the same events, so an alert does not depend on
 # the collector or the log pipeline behind it.
@@ -179,6 +180,289 @@ spec:
             description: >-
               Prometheus cannot reach fabric-config-agent on {{ $labels.node }} (port 9343), so
               FabricBGPMappedNextHop and FabricBGPRoutesNotInstalled cannot fire for it.
+    # Fabric routing through the API, from fabric-router-controller (job
+    # fabric-router-controller, port 9185). Only the leader exports the
+    # galactic_fabric_routing_* series, and a leader change leaves them
+    # absent for up to about a minute: the old leader stops at once, and the
+    # new one exports from its first scrape after it wins the lease. Every
+    # rule therefore reads each series' last value over 2 minutes and
+    # aggregates away only what differs between the replicas, pod and
+    # instance, so a leader change neither resets a pending alert nor
+    # resolves a firing one. Every other label, such as the cluster label a
+    # central evaluator adds, is kept, so an alert names its cluster and one
+    # cluster's alert is never masked by another's healthy series. In
+    # exchange, an alert on a deleted object or a finished release clears
+    # up to 2 minutes late. Every series describes a FabricRouterDeployment,
+    # release or fabric-class BGPRouter, which exist only once routing goes
+    # through the API, so a cluster on ConfigMaps alone has nothing here to
+    # fire on; a deployment left on its ConfigMap is held to nothing but its
+    # compile result.
+    - name: fabric-routing
+      rules:
+        # The activation failed and nothing may be restored: the router runs
+        # whatever the failed apply left, and its release's domain stays
+        # blocked until an operator confirms recovery.
+        - alert: FabricRoutingNoEligibleRecovery
+          expr: >-
+            max without (pod, instance, type, status, reason) (
+              last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Degraded", status="True", reason="NoEligibleRecovery"}[2m])
+            ) == 1
+          for: 5m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric router {{ $labels.deployment }} on {{ $labels.node }} failed an activation and cannot recover"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingnoeligiblerecovery"
+            description: >-
+              The node agent on {{ $labels.node }} failed to activate FabricRouterDeployment
+              {{ $labels.namespace }}/{{ $labels.deployment }}'s active revision and had no recovery target it may
+              restore, so FRR runs what the failed apply left. The deployment's status.epochs[0].detail says why
+              the activation failed. Promote a fixed revision, or hand the node back to its ConfigMap.
+        # The node runs its committed revision's checkpoint in name only: FRR
+        # drifted from it and could not be brought back (ReassertFailed), or
+        # frr.conf could not be rewritten, so a restart would start from
+        # something else (PersistFailed). Recovered is a failed epoch the
+        # agent already recovered from, which FabricRoutingReleaseFailed
+        # covers.
+        - alert: FabricRoutingDeploymentDegraded
+          expr: >-
+            max without (pod, instance, type, status) (
+              last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Degraded", status="True", reason!~"NoEligibleRecovery|Recovered"}[2m])
+            ) == 1
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric router {{ $labels.deployment }} on {{ $labels.node }} is degraded ({{ $labels.reason }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingdeploymentdegraded"
+            description: >-
+              FabricRouterDeployment {{ $labels.namespace }}/{{ $labels.deployment }} has reported Degraded with
+              reason {{ $labels.reason }} for 15 minutes: FRR on {{ $labels.node }} does not run the committed
+              checkpoint and the agent could not bring it back, or frr.conf could not be rewritten to it. The
+              condition's message names the error.
+        # The agent refuses to act: its journal is bound to another
+        # deployment, or its state directory to another Node, cluster or
+        # machine. Nothing is promoted on the node until an operator resolves
+        # it.
+        - alert: FabricRoutingRecoveryConflict
+          expr: >-
+            max without (pod, instance, type, status, reason) (
+              last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="RecoveryConflict", status="True"}[2m])
+            ) == 1
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "The node agent on {{ $labels.node }} refuses FabricRouterDeployment {{ $labels.deployment }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingrecoveryconflict"
+            description: >-
+              fabric-config-agent on {{ $labels.node }} has reported RecoveryConflict on
+              {{ $labels.namespace }}/{{ $labels.deployment }} for 10 minutes: its journal is bound to another
+              deployment UID, or its host state belongs to another Node, cluster or machine. It activates nothing
+              until an operator sets spec.rebind or clears the host state directory.
+        # The agent writes status at least every 30s. Only a deployment on
+        # Shadow or CRD, by spec or as last reported, needs it to: a node on
+        # its ConfigMap runs without the API's involvement. A deployment
+        # there that never reported counts as stale, as on a node without
+        # the activation Component.
+        - alert: FabricRoutingAgentHeartbeatStale
+          expr: >-
+            (
+              time() - max without (pod, instance) (last_over_time(galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller"}[2m])) > 300
+              or
+              max without (pod, instance, source, effective_source) (last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller"}[2m]))
+                unless ignoring (source, effective_source)
+              max without (pod, instance) (last_over_time(galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller"}[2m]))
+            )
+            and ignoring (source, effective_source)
+            max without (pod, instance, source, effective_source) (
+              last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller", source=~"Shadow|CRD"}[2m])
+              or
+              last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller", effective_source=~"Shadow|CRD"}[2m])
+            )
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "The node agent on {{ $labels.node }} has stopped reporting on {{ $labels.deployment }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingagentheartbeatstale"
+            description: >-
+              FabricRouterDeployment {{ $labels.namespace }}/{{ $labels.deployment }} is on the Shadow or CRD
+              source, but fabric-config-agent on {{ $labels.node }} has not written its status for over 10 minutes,
+              or never has. Nothing is staged or activated there, and a release promoting it goes Unknown. Check
+              that the node's fabric-router pod runs with the activation Component and can reach the API server.
+        # A failed release keeps its routing domain blocked until every router
+        # it failed reports Recovered or an operator verifies recovery.
+        - alert: FabricRoutingReleaseFailed
+          expr: >-
+            max without (pod, instance, type, phase) (
+              last_over_time(galactic_fabric_routing_release_outstanding{job="fabric-router-controller", phase="Failed"}[2m])
+            ) == 1
+          for: 30m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Failed fabric release {{ $labels.release }} is blocking routing domain {{ $labels.routing_domain }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingreleasefailed"
+            description: >-
+              FabricReleaseAuthorization {{ $labels.namespace }}/{{ $labels.release }} failed over 30 minutes ago
+              and no release in {{ $labels.routing_domain }} can start until its routers report Recovered or an
+              operator confirms them safe (`fabric-router-controller release confirm-recovery`).
+              `fabric-router-controller release status {{ $labels.release }}` shows where each router stands.
+        # A promoted router stopped reporting mid-release, so the rollout
+        # manager cannot tell whether it committed.
+        - alert: FabricRoutingReleaseUnknown
+          expr: >-
+            max without (pod, instance, type, phase) (
+              last_over_time(galactic_fabric_routing_release_outstanding{job="fabric-router-controller", phase="Unknown"}[2m])
+            ) == 1
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric release {{ $labels.release }} has lost track of a router it promoted"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingreleaseunknown"
+            description: >-
+              FabricReleaseAuthorization {{ $labels.namespace }}/{{ $labels.release }} has been Unknown for 15
+              minutes: a router it promoted stopped reporting, so the release can neither complete nor fail, and
+              {{ $labels.routing_domain }} stays blocked. FabricRoutingAgentHeartbeatStale names the router.
+        # Leaving CRD waits for the handoff's ConfigMap UID and
+        # resourceVersion to match the live ConfigMap; an edit after the
+        # handoff was written keeps the node on CRD for good.
+        - alert: FabricRoutingHandoffPending
+          expr: >-
+            max without (pod, instance, type, status) (
+              last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Accepted", status="False", reason=~"HandoffPending|ConfigMapRetired"}[2m])
+            ) == 1
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric router {{ $labels.deployment }} on {{ $labels.node }} is stuck handing back to its ConfigMap"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutinghandoffpending"
+            description: >-
+              FabricRouterDeployment {{ $labels.namespace }}/{{ $labels.deployment }} asks to leave the CRD source
+              but the agent has kept the node on CRD for 15 minutes ({{ $labels.reason }}). HandoffPending: the
+              spec.sourceHandoff does not name the node's ConfigMap as it is now; run `fabric-router-controller
+              source {{ $labels.deployment }} ConfigMap` again to name the current version. ConfigMapRetired: the
+              node runs with the ConfigMap path retired; set the source back to CRD, or follow the way back in the
+              runbook before handing the node to a ConfigMap.
+        # The node validated the candidate and refused it, or cannot read it.
+        # The agent stages only on Shadow and CRD, so a node on its ConfigMap
+        # never fires.
+        - alert: FabricRoutingCandidateRejected
+          expr: >-
+            max without (pod, instance, type, status) (
+              last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Staged", status="False"}[2m])
+            ) == 1
+            and ignoring (reason)
+            max without (pod, instance, source, effective_source) (
+              last_over_time(galactic_fabric_routing_deployment_info{job="fabric-router-controller", effective_source=~"Shadow|CRD"}[2m])
+            )
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric router {{ $labels.deployment }} on {{ $labels.node }} cannot stage its candidate ({{ $labels.reason }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingcandidaterejected"
+            description: >-
+              fabric-config-agent on {{ $labels.node }} has reported Staged False ({{ $labels.reason }}) on
+              {{ $labels.namespace }}/{{ $labels.deployment }} for 15 minutes: the candidate revision fails FRR's
+              validation on this node, or the agent cannot read it. A release promoting it would fail here. The
+              condition's message carries FRR's error.
+        # The agent will not activate the promoted revision: its release
+        # authorization is gone, finished or does not cover it
+        # (PromotionRefused), the release has not started or went Unknown
+        # (NotAuthorized), or the revision cannot be read (RevisionNotFound).
+        # The release fails or waits on it, but the router is named here.
+        - alert: FabricRoutingPromotionRefused
+          expr: >-
+            max without (pod, instance, type, status) (
+              last_over_time(galactic_fabric_routing_deployment_condition{job="fabric-router-controller", type="Accepted", status="False", reason=~"PromotionRefused|NotAuthorized|RevisionNotFound"}[2m])
+            ) == 1
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "The node agent on {{ $labels.node }} will not activate {{ $labels.deployment }}'s promotion ({{ $labels.reason }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingpromotionrefused"
+            description: >-
+              fabric-config-agent on {{ $labels.node }} has refused FabricRouterDeployment
+              {{ $labels.namespace }}/{{ $labels.deployment }}'s active epoch for 15 minutes with reason
+              {{ $labels.reason }}: its release authorization does not cover it or has not started, or the
+              revision cannot be read. The node keeps running what it ran. The deployment's Accepted condition
+              names the release and revision.
+        # The controller refused to compile the router's latest inputs, so
+        # it keeps its last revision and nothing new reaches the node.
+        - alert: FabricRoutingRevisionRefused
+          expr: >-
+            max without (pod, instance) (
+              last_over_time(galactic_fabric_routing_router_accepted{job="fabric-router-controller"}[2m])
+            ) == 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Fabric router {{ $labels.router }} on {{ $labels.node }} does not compile ({{ $labels.reason }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingrevisionrefused"
+            description: >-
+              fabric-router-controller has refused BGPRouter {{ $labels.namespace }}/{{ $labels.router }}'s inputs
+              for 15 minutes with reason {{ $labels.reason }}, so no revision of the current inputs exists and the
+              router keeps running its last one. The router's Accepted condition names each problem.
+        # The leader could not read a kind from its cache, so that kind's
+        # series are missing and every alert on them looks healthy. A read
+        # just after the leader starts can time out while its cache syncs;
+        # ten minutes is well past that.
+        - alert: FabricRoutingCollectFailing
+          expr: >-
+            max without (pod, instance) (
+              last_over_time(galactic_fabric_routing_collect_success{job="fabric-router-controller"}[2m])
+            ) == 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-router-controller cannot read {{ $labels.kind }} for its fleet metrics"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingcollectfailing"
+            description: >-
+              fabric-router-controller's leader has failed for 10 minutes to read {{ $labels.kind }} from its
+              cache, so their galactic_fabric_routing_* series are missing and the fabric-routing alerts that read
+              them cannot fire. The controller's log names the error.
+        - alert: FabricRouterControllerMetricsDown
+          expr: up{job="fabric-router-controller"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-router-controller metrics on {{ $labels.pod }} cannot be scraped"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutercontrollermetricsdown"
+            description: >-
+              Prometheus cannot reach fabric-router-controller's metrics port on {{ $labels.pod }} (9185). If that
+              pod leads, no fabric-routing alert can fire.
     - name: galactic-router
       rules:
         - alert: GalacticRouterBMPStationDown
@@ -278,22 +562,42 @@ spec:
               ({{ $labels.reason }}) in every 10-minute window for 15 minutes, about {{ $value | humanize }} in the last
               one. Each drop is a connection a tenant failed to open. Many flows to one destination address and
               port fill its ports first.
-        # One NIC receive queue dropping a steady share of its traffic while
-        # most of the interface's queues do not (#673). The NIC drops these
-        # before the XDP datapath sees them, so galactic_nat_drops_total stays
-        # flat. Every flow hashed to the queue keeps failing on retry, and a
-        # BGP session on it expires its hold timer. Three conditions, all for
-        # 10 minutes: the queue drops over 1% of its packets while no more than
-        # half of the interface's queues drop that much (a burst spreads across
-        # queues, and a single-queue uplink is all of its own queues so it
-        # cannot fire), and the queue either delivers over 10 packets a second
-        # (so a handful of drops on an idle queue does not count) or delivers
-        # none while discarding. That second case is a queue that has stopped
-        # entirely, which is unambiguous at any rate; the floor alone measures
-        # delivered packets, which a dead queue has none of. Idle queues count
-        # as queues of the interface. Only drivers that count discards per
-        # queue report them, bnxt_en among them.
+        # One NIC receive queue that has stopped delivering while it still
+        # discards (#673). The NIC drops these before the XDP datapath sees
+        # them, so galactic_nat_drops_total stays flat. Every flow hashed to
+        # the queue fails on every retry, and a BGP session on it expires its
+        # hold timer. A burst never empties a queue entirely, so this is
+        # unambiguous at any rate and however many of the interface's queues
+        # share it. Only drivers that count discards per queue report them,
+        # bnxt_en among them.
         - alert: GalacticNatUplinkRxQueueStalled
+          expr: |
+            rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m]) > 0
+            and
+            rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) == 0
+          for: 10m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Receive queue {{ $labels.queue }} of {{ $labels.interface }} on {{ $labels.node }} has stopped delivering"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuestalled"
+            description: >-
+              Queue {{ $labels.queue }} of uplink {{ $labels.interface }} ({{ $labels.driver }}) has delivered nothing
+              for 10 minutes while discarding about {{ $value | humanize }} packets a second. Flows hashed to that
+              queue fail on every retry. Bouncing the interface clears it, once its bond partner is confirmed up.
+        # One NIC receive queue dropping a steady share of its traffic while it
+        # still delivers and most of the interface's queues do not. One heavy
+        # flow overrunning a ring looks the same for a few minutes and clears
+        # by itself, so the conditions must hold for 30 minutes: the queue
+        # drops over 1% of its packets while no more than half of the
+        # interface's queues drop that much (a burst spreads across queues, and
+        # a single-queue uplink is all of its own queues so it cannot fire),
+        # and delivers over 10 packets a second (so a handful of drops on an
+        # idle queue does not count). Idle queues count as queues of the
+        # interface.
+        - alert: GalacticNatUplinkRxQueueLossy
           expr: |
             (
               rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m])
@@ -319,28 +623,20 @@ spec:
               )
             )
             and
-            (
-              rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) > 10
-              or
-              (
-                rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) == 0
-                and
-                rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m]) > 0
-              )
-            )
-          for: 10m
+            rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) > 10
+          for: 30m
           labels:
-            severity: critical
+            severity: warning
             service: galactic
             team: connect
           annotations:
-            summary: "Receive queue {{ $labels.queue }} of {{ $labels.interface }} on {{ $labels.node }} is dropping packets"
-            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuestalled"
+            summary: "Receive queue {{ $labels.queue }} of {{ $labels.interface }} on {{ $labels.node }} is losing packets"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuelossy"
             description: >-
               Queue {{ $labels.queue }} of uplink {{ $labels.interface }} ({{ $labels.driver }}) has discarded
-              {{ $value | humanizePercentage }} of its packets for 10 minutes while no more than half of the
-              interface's queues have. Flows hashed to that queue fail on every retry. Bouncing the interface clears it,
-              once its bond partner is confirmed up.
+              {{ $value | humanizePercentage }} of its packets for 30 minutes while no more than half of the
+              interface's queues have. Flows hashed to that queue are retrying. GalacticNatUplinkRxQueueStalled
+              fires if it stops delivering entirely.
         # A shard that is turned on but holds no EgressShard identity claims no
         # packet: tenants routed to it get no egress. Ten minutes covers a
         # restart and the first reconcile.
@@ -520,19 +816,18 @@ spec:
     # rather than read missing pool series as a healthy pool.
     - name: galactic-cni-egress
       rules:
-        # A class's group has shards, or routes still name it, but no shard
-        # takes tenants: every candidate is unreachable from this node or
-        # draining, or the cluster has none left. Every tenant of that class
-        # on the node without a live pin has no egress.
+        # Routes on this node name a class's group, but no shard takes
+        # tenants: every candidate is unreachable from this node or draining,
+        # or the cluster has none left. Every tenant of that class on the
+        # node without a live pin has no egress. A node with no route on the
+        # group has nothing to egress, so an empty pool there is no outage:
+        # an edge node running a shard sees its own shard as local, never
+        # active, and has no tenant.
         - alert: GalacticEgressPoolEmpty
           expr: |
             sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="active"}) == 0
             and on (node, class)
-            (
-              sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"draining|unreachable"}) > 0
-              or
-              sum by (node, class) (galactic_cni_egress_group_routes{job="galactic-cni"}) > 0
-            )
+            sum by (node, class) (galactic_cni_egress_group_routes{job="galactic-cni"}) > 0
           for: 2m
           labels:
             severity: critical
@@ -543,12 +838,15 @@ spec:
             runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticegresspoolempty"
             description: >-
               No egress shard in {{ $labels.node }}'s {{ $labels.class }} group has taken new tenants for 2
-              minutes while the group has shards or routes, so new {{ $labels.class }} egress from that node is
-              dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
+              minutes while routes on that node name the group, so new {{ $labels.class }} egress from that node
+              is dropped. galactic_cni_egress_pool_members shows whether its shards are unreachable (no route to their
               SID over an SRv6 uplink) or draining.
         # Fewer shards take tenants than the operator said the class should
-        # have. A class with no eligible shard at all is
-        # GalacticEgressClassUnserved instead.
+        # have, on a node with routes on the group. A class with no eligible
+        # shard at all is GalacticEgressClassUnserved instead. A node with no
+        # route on the group is left out for the same reason as in
+        # GalacticEgressPoolEmpty: an edge node running a shard counts one
+        # shard fewer than the rest of the cluster, its own.
         - alert: GalacticEgressPoolBelowMinimum
           expr: |
             sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="active"})
@@ -557,6 +855,8 @@ spec:
             sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|draining|unreachable"}) > 0
             and on (node, class)
             max by (node, class) (galactic_cni_egress_pool_enabled{job="galactic-cni"}) == 1
+            and on (node, class)
+            sum by (node, class) (galactic_cni_egress_group_routes{job="galactic-cni"}) > 0
           for: 10m
           labels:
             severity: warning
@@ -576,7 +876,7 @@ spec:
         # for the class, so its traffic has no egress.
         - alert: GalacticEgressClassUnserved
           expr: |
-            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|draining|unreachable"}) == 0
+            sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state=~"active|draining|unreachable|local"}) == 0
             and on (node, class)
             sum by (node, class) (galactic_cni_egress_pool_members{job="galactic-cni", state="ineligible"}) > 0
           for: 15m

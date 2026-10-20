@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,9 +32,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/gateway"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // GatewayEngine is the interface NetworkGatewayReconciler drives, satisfied by
@@ -44,13 +45,13 @@ type GatewayEngine interface {
 	Reconcile(ctx context.Context, desired gateway.EngineState) (gateway.EngineStatus, error)
 
 	// DatapathGeneration returns the datapath's current generation counter. It
-	// must be captured before the NetworkRule CRDs are listed; see
+	// must be captured before the NetworkService CRDs are listed; see
 	// ReconcileOrphans.
 	DatapathGeneration() uint64
 
 	// ReconcileOrphans removes vip_table state left behind by a mid-reconcile
 	// crash. cutoff must come from DatapathGeneration, read before desired's
-	// NetworkRule CRDs were listed, so an entry written during the listing
+	// NetworkService CRDs were listed, so an entry written during the listing
 	// survives.
 	ReconcileOrphans(ctx context.Context, desired gateway.EngineState, cutoff uint64) error
 
@@ -65,7 +66,7 @@ type GatewayEngine interface {
 // Each pass does three things:
 //
 //  1. Assembles a gateway.EngineState from every accepted, non-deleting
-//     NetworkRule in the namespace, resolving each backend's SRv6 uSID, and
+//     NetworkService in the namespace, resolving each backend's SRv6 uSID, and
 //     converges the engine toward it. Under the anycast model every gateway
 //     node in a PoP serves every accepted rule identically, so there is no
 //     primary or secondary node to gate on. A deleting rule stays in that
@@ -102,6 +103,13 @@ type NetworkGatewayReconciler struct {
 	// stops sending VIP traffic to a node that will not load-balance it. The
 	// engine is never driven.
 	Disabled bool
+
+	// IPv4VIPs loads a rule's IPv4 VIPs into the engine alongside its IPv6
+	// ones (config.EnvGatewayIPv4VIPs), over the rule's IPv4 backends, and
+	// advertises one once its backends' ServiceVIPBindings are Bound; see
+	// buildDesiredRule and applyBGPAdvertisements. Off, no IPv4 VIP is loaded
+	// or advertised.
+	IPv4VIPs bool
 
 	// drain keeps a deleted rule loaded until its route is withdrawn. See
 	// ruleDrainTracker.
@@ -152,10 +160,104 @@ const (
 	// serving through the rest.
 	reasonBackendsUnresolved = "BackendsUnresolved"
 
+	// reasonNoServedVIP is the per-node Programmed reason for a rule whose
+	// every VIP is IPv4 while IPv4VIPs is off, so nothing is loaded or
+	// advertised for it.
+	reasonNoServedVIP = "NoServedVIP"
+
+	// reasonIPv4NotAdvertised is the per-node IPv4Served reason for a rule
+	// whose IPv4 VIP this node loaded over Bound backends, with IPv4VIPs set,
+	// but whose route it could not publish: no BGPRouter targets the node, or
+	// the advertisement failed, which the NetworkGateway's Ready condition
+	// reports.
+	reasonIPv4NotAdvertised = "NotAdvertised"
+
+	// reasonIPv4Advertised is the per-node IPv4Served reason, with status
+	// True, for a rule whose IPv4 VIP this node loaded over only the eligible
+	// backends whose ServiceVIPBinding is Bound, at least one, and advertises.
+	reasonIPv4Advertised = "Advertised"
+
+	// reasonIPv4BindingsNotBound is the per-node IPv4Served reason for a rule
+	// whose IPv4 VIP this node loaded over its eligible IPv4 backends, none
+	// of whose ServiceVIPBindings is Bound yet, so it is not advertised. The
+	// VIP is loaded so that galactic-router writes those bindings
+	// (ipv4LoadedOnSomeNode).
+	reasonIPv4BindingsNotBound = "BindingsNotBound"
+
+	// reasonIPv4NoBackend is the per-node IPv4Served reason for a rule whose
+	// IPv4 VIPs IPv4VIPs would load but none of whose selected attachments has
+	// an IPv4 address that resolves to a backend, so they are left out.
+	reasonIPv4NoBackend = "NoBackend"
+
+	// reasonIPv4MultipleVIPs is the per-node IPv4Served reason for a rule
+	// with more than one IPv4 VIP while IPv4VIPs is on. None of them is
+	// loaded, and the rule's IPv6 VIPs serve without them.
+	reasonIPv4MultipleVIPs = "MultipleVIPs"
+
+	// reasonIPv4NotLoaded is the per-node IPv4Served reason for a rule whose
+	// IPv4 VIPs IPv4VIPs would load, but which this node did not load at all,
+	// for example because the engine refused it.
+	reasonIPv4NotLoaded = "NotLoaded"
+
+	// reasonUnservedProtocol is the per-node Programmed reason for a rule
+	// whose protocol the datapath does not serve, so nothing is loaded or
+	// advertised for it.
+	reasonUnservedProtocol = "UnservedProtocol"
+
+	// reasonIPv4Unsupported is the per-node IPv4Served reason for a rule with
+	// one or more IPv4 VIPs while IPv4VIPs is off. They are left out of the
+	// engine and never advertised, and the rule's IPv6 VIPs serve without
+	// them.
+	reasonIPv4Unsupported = "Unsupported"
+
 	// reasonTerminating is the Ready reason for a NetworkGateway being deleted,
 	// whether observed on a live object carrying a deletion timestamp or
 	// reconstructed for the case where the object is already gone.
 	reasonTerminating = "Terminating"
+)
+
+// ipv4LoadedReasons are the IPv4Served reasons that mean the reporting
+// gateway node has the rule's IPv4 VIP loaded. galactic-router writes a
+// rule's IPv4 bindings only while some node reports one of them
+// (ipv4LoadedOnSomeNode).
+var ipv4LoadedReasons = map[string]bool{
+	reasonIPv4NotAdvertised:    true,
+	reasonIPv4Advertised:       true,
+	reasonIPv4BindingsNotBound: true,
+}
+
+// ipv4LoadedOnSomeNode reports whether any gateway node's IPv4Served
+// condition on rule says it loaded the rule's IPv4 VIP.
+func ipv4LoadedOnSomeNode(rule *bgpv1alpha1.NetworkService) bool {
+	for _, c := range rule.Status.Conditions {
+		if strings.HasSuffix(c.Type, "/"+conditionTypeIPv4Served) && ipv4LoadedReasons[c.Reason] {
+			return true
+		}
+	}
+	return false
+}
+
+// ipv4Family is what buildDesiredRule did with a rule's IPv4 VIPs.
+type ipv4Family int
+
+const (
+	// ipv4Off: IPv4VIPs is off, so they are left out.
+	ipv4Off ipv4Family = iota
+	// ipv4Loaded: they are in the rule's engine state, over only the eligible
+	// IPv4 backends whose ServiceVIPBinding is Bound, at least one, so they
+	// may be advertised.
+	ipv4Loaded
+	// ipv4Unbound: they are in the rule's engine state, over every eligible
+	// IPv4 backend, none of whose ServiceVIPBindings is Bound yet, so they
+	// are not advertised.
+	ipv4Unbound
+	// ipv4NoBackend: no IPv4 backend resolves, so they are left out.
+	ipv4NoBackend
+	// ipv4MultipleVIPs: the rule has more than one, so they are left out.
+	ipv4MultipleVIPs
+	// ipv4NotLoaded: the rule failed to build or load before or apart from
+	// its IPv4 VIPs.
+	ipv4NotLoaded
 )
 
 // Reconcile reconciles a single NetworkGateway.
@@ -267,17 +369,19 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// Crash-safety ordering contract (see GatewayEngine.ReconcileOrphans):
-	// cutoff must be captured before desired's NetworkRule CRDs are listed.
+	// cutoff must be captured before desired's NetworkService CRDs are listed.
 	cutoff := r.Engine.DatapathGeneration()
 
-	ruleList := &bgpv1alpha1.NetworkRuleList{}
+	ruleList := &bgpv1alpha1.NetworkServiceList{}
 	if err := r.List(ctx, ruleList, client.InNamespace(gw.Namespace)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("list NetworkRules for NetworkGateway %s: %w", req.NamespacedName, err)
+		return ctrl.Result{}, fmt.Errorf("list NetworkServices for NetworkGateway %s: %w", req.NamespacedName, err)
 	}
 
-	routerName, err := r.routerNameForNode(ctx, gw.Namespace)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolve BGPRouter for node %s: %w", r.NodeName, err)
+	// An ambiguous router only blocks advertisement wiring; the datapath
+	// below is still programmed, as it is when no router exists yet.
+	routerName, routerErr := r.routerNameForNode(ctx, gw.Namespace)
+	if routerErr != nil && !errors.Is(routerErr, errAmbiguousRouter) {
+		return ctrl.Result{}, fmt.Errorf("resolve BGPRouter for node %s: %w", r.NodeName, routerErr)
 	}
 
 	sidIndex, err := buildBackendSIDIndex(ctx, r.Client, gw.Namespace)
@@ -312,11 +416,14 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	if routerName == "" {
+	switch {
+	case routerErr != nil:
+		logger.Error(routerErr, "skipping BGPAdvertisement wiring", "node", r.NodeName)
+	case routerName == "":
 		logger.Info("no BGPRouter targets this node; skipping BGPAdvertisement wiring", "node", r.NodeName)
 	}
 
-	advErr, ruleStatusErr := r.publishRuleOutcomes(ctx, outcomes, status, routerName)
+	advErr, ruleStatusErr := r.publishRuleOutcomes(ctx, gw.Namespace, outcomes, status, routerName)
 
 	gwCopy := gw.DeepCopy()
 	gwCopy.Status.ObservedGeneration = gw.Generation
@@ -327,7 +434,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	sweepErr := r.sweepOrphanedAdvertisements(ctx, gw.Namespace, ruleList.Items)
 	if sweepErr != nil {
-		logger.Error(sweepErr, "withdraw advertisements for deleted NetworkRules")
+		logger.Error(sweepErr, "withdraw advertisements for deleted NetworkServices")
 	}
 
 	// Crash recovery. A failed sweep leaves orphaned vip_table state behind
@@ -347,17 +454,33 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
+// passIPv4Bindings returns namespace's IPv4 bindings for one pass, which IPv4
+// VIPs are balanced over and advertised by, or nil while IPv4VIPs is off, when
+// nothing reads them.
+func (r *NetworkGatewayReconciler) passIPv4Bindings(ctx context.Context, namespace string) (ipv4Bindings, error) {
+	if !r.IPv4VIPs {
+		return nil, nil
+	}
+	return listIPv4Bindings(ctx, r.Client, namespace)
+}
+
 // gatherRules builds this pass's engine state and rule outcomes from rules,
-// every NetworkRule in namespace, and settles the drain tracker against it.
+// every NetworkService in namespace, and settles the drain tracker against it.
 // attachments holds every VPCAttachment in the cluster; each rule selects from
-// those in its own VPC (groupAttachmentsByVPC). It returns how long until a
-// held rule's drain delay ends, or zero.
+// those in its own VPC (groupAttachmentsByVPC). It reads the namespace's IPv4
+// bindings once, while IPv4VIPs is on (passIPv4Bindings). It returns how long
+// until a held rule's drain delay ends, or zero.
 func (r *NetworkGatewayReconciler) gatherRules(
-	ctx context.Context, namespace string, rules []bgpv1alpha1.NetworkRule,
+	ctx context.Context, namespace string, rules []bgpv1alpha1.NetworkService,
 	attachments []*cloudv1alpha1.VPCAttachment, sidIndex *backendSIDIndex,
 ) (gateway.EngineState, []ruleOutcome, time.Duration, error) {
 	logger := log.FromContext(ctx)
 	desired := gateway.EngineState{Rules: make(map[string]gateway.DesiredRule)}
+
+	bindings, err := r.passIPv4Bindings(ctx, namespace)
+	if err != nil {
+		return desired, nil, 0, err
+	}
 
 	// Every accepted, non-deleting rule gets an outcome, including one that
 	// failed to build: the engine drops it from the datapath, so the outcome
@@ -377,7 +500,7 @@ func (r *NetworkGatewayReconciler) gatherRules(
 	for i := range rules {
 		rule := &rules[i]
 		if !rule.DeletionTimestamp.IsZero() {
-			// Being torn down. NetworkRuleReconciler's finalizer owns the
+			// Being torn down. NetworkServiceReconciler's finalizer owns the
 			// rule's advertisements: reconcileDelete deletes every one
 			// carrying networkRuleLabel, whichever node made it. Until they
 			// are all gone the route may still draw traffic here, so the rule
@@ -385,7 +508,7 @@ func (r *NetworkGatewayReconciler) gatherRules(
 			// the Programmed condition alone. Once they are gone, the drain
 			// tracker keeps it for ruleDrainDelay so the withdrawal can reach
 			// every peer before the datapath drops it.
-			o, draining, err := r.drainingOutcome(ctx, rule, byVPC[rule.Spec.VPCRef], sidIndex, owners)
+			o, draining, err := r.drainingOutcome(ctx, rule, byVPC[rule.Spec.VPCRef], sidIndex, owners, bindings)
 			if err != nil {
 				return desired, nil, 0, err
 			}
@@ -405,17 +528,18 @@ func (r *NetworkGatewayReconciler) gatherRules(
 			continue
 		}
 
-		dr, unresolved, err := buildDesiredRule(rule, byVPC[rule.Spec.VPCRef], sidIndex, owners)
+		dr, unresolved, ipv4, err := buildDesiredRule(rule, byVPC[rule.Spec.VPCRef], sidIndex, owners, r.IPv4VIPs,
+			bindings)
 		if err != nil {
 			logger.Error(err, "build desired rule; skipping", "networkRule", rule.Name)
-			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err})
+			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err, ipv4: ipv4})
 			continue
 		}
 		if len(unresolved) > 0 {
 			logger.Info("loading rule without unresolved backends", "networkRule", rule.Name, "unresolved", unresolved)
 		}
 		desired.Rules[dr.Key] = dr
-		outcomes = append(outcomes, ruleOutcome{rule: rule, desired: dr, unresolved: unresolved})
+		outcomes = append(outcomes, ruleOutcome{rule: rule, desired: dr, unresolved: unresolved, ipv4: ipv4})
 	}
 
 	return desired, outcomes, r.drain.settle(r.clock(), namespace, desired.Rules, live), nil
@@ -437,10 +561,11 @@ func (r *NetworkGatewayReconciler) clock() time.Time {
 // The rule is rebuilt as usual. If it no longer builds, for example because
 // its backends were deleted with it, the rule as this node last loaded it is
 // kept instead. If this node never loaded it, there is nothing to keep.
-// attachments are the candidates for rule's backends, as for buildDesiredRule.
+// attachments and bindings are the candidates for rule's backends and their
+// IPv4 bindings, as for buildDesiredRule.
 func (r *NetworkGatewayReconciler) drainingOutcome(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
-	sidIndex *backendSIDIndex, owners backendOwners,
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
+	sidIndex *backendSIDIndex, owners backendOwners, bindings ipv4Bindings,
 ) (ruleOutcome, bool, error) {
 	if !controllerutil.ContainsFinalizer(rule, networkRuleFinalizer) {
 		return ruleOutcome{}, false, nil
@@ -450,14 +575,14 @@ func (r *NetworkGatewayReconciler) drainingOutcome(
 		client.InNamespace(rule.Namespace),
 		client.MatchingLabels{networkRuleLabel: rule.Name},
 	); err != nil {
-		return ruleOutcome{}, false, fmt.Errorf("list BGPAdvertisements for deleting NetworkRule %s/%s: %w",
+		return ruleOutcome{}, false, fmt.Errorf("list BGPAdvertisements for deleting NetworkService %s/%s: %w",
 			rule.Namespace, rule.Name, err)
 	}
 	if len(advList.Items) == 0 {
 		return ruleOutcome{}, false, nil
 	}
 
-	dr, _, err := buildDesiredRule(rule, attachments, sidIndex, owners)
+	dr, _, _, err := buildDesiredRule(rule, attachments, sidIndex, owners, r.IPv4VIPs, bindings)
 	if err != nil {
 		var ok bool
 		if dr, ok = r.drain.lastLoaded(rule.Namespace + "/" + rule.Name); !ok {
@@ -467,14 +592,18 @@ func (r *NetworkGatewayReconciler) drainingOutcome(
 	return ruleOutcome{rule: rule, desired: dr, draining: true}, true, nil
 }
 
-// ruleOutcome is one accepted NetworkRule's result from a reconcile pass: the
+// ruleOutcome is one accepted NetworkService's result from a reconcile pass: the
 // engine state it built, or why it could not be built. unresolved lists the
 // backends left out of desired because their uSID did not resolve.
 type ruleOutcome struct {
-	rule       *bgpv1alpha1.NetworkRule
+	rule       *bgpv1alpha1.NetworkService
 	desired    gateway.DesiredRule
 	unresolved []string
 	buildErr   error
+
+	// ipv4 is what became of the rule's IPv4 VIPs, for its IPv4Served
+	// condition.
+	ipv4 ipv4Family
 
 	// draining marks a deleting rule kept loaded until its route is
 	// withdrawn. Nothing is advertised or written to its status.
@@ -483,7 +612,9 @@ type ruleOutcome struct {
 
 // publishRuleOutcomes advertises every rule the engine loaded, withdraws this
 // node's advertisements for every other rule, and records the result on each
-// rule's Programmed condition for this node.
+// rule's Programmed condition for this node. Conditions of gateway nodes that
+// no NetworkGateway in namespace targets are removed with it
+// (departedGatewayNodes).
 //
 // Failures are collected rather than returned on the spot, so one bad rule
 // does not stop the others. Advertisement failures come back as advErr, which
@@ -493,9 +624,16 @@ type ruleOutcome struct {
 // statusErr: they are retried too, but say nothing about whether this node
 // serves traffic, so they stay out of the Ready condition.
 func (r *NetworkGatewayReconciler) publishRuleOutcomes(
-	ctx context.Context, outcomes []ruleOutcome, status gateway.EngineStatus, routerName string,
+	ctx context.Context, namespace string, outcomes []ruleOutcome, status gateway.EngineStatus, routerName string,
 ) (advErr, statusErr error) {
 	logger := log.FromContext(ctx)
+
+	// A failed lookup only skips pruning other nodes' conditions this pass.
+	var statusErrs []error
+	departed, err := r.departedGatewayNodes(ctx, namespace, outcomes)
+	if err != nil {
+		statusErrs = append(statusErrs, err)
+	}
 
 	// The engine reports one status per desired rule. Only a rule it loaded
 	// is advertised: a route for anything else draws traffic this node drops.
@@ -506,27 +644,35 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 		}
 	}
 
-	var advErrs, statusErrs []error
+	var advErrs []error
 	for _, o := range outcomes {
 		if o.draining {
 			continue
 		}
 		cond := programmedCondition(r.NodeName, o, loadErrs)
+		// The rule's IPv4 VIP is advertised only when this node loaded it over
+		// only its Bound backends, at least one (ipv4Loaded), and the rule
+		// loaded.
+		advertiseIPv4 := r.IPv4VIPs && o.ipv4 == ipv4Loaded
+		advertised := false
 		switch {
 		case cond.Status != metav1.ConditionTrue:
 			if err := withdrawRuleAdvertisements(ctx, r.Client, o.rule, r.NodeName); err != nil {
-				logger.Error(err, "withdraw BGPAdvertisements for unloaded NetworkRule", "networkRule", o.rule.Name)
+				logger.Error(err, "withdraw BGPAdvertisements for unloaded NetworkService", "networkRule", o.rule.Name)
 				advErrs = append(advErrs, fmt.Errorf("networkRule %s: %w", o.rule.Name, err))
 			}
 		case routerName != "":
-			if err := r.applyBGPAdvertisements(ctx, o.rule, o.desired, routerName); err != nil {
-				logger.Error(err, "apply BGPAdvertisements for NetworkRule", "networkRule", o.rule.Name)
+			if err := r.applyBGPAdvertisements(ctx, o.rule, o.desired, routerName, advertiseIPv4); err != nil {
+				logger.Error(err, "apply BGPAdvertisements for NetworkService", "networkRule", o.rule.Name)
 				advErrs = append(advErrs, fmt.Errorf("networkRule %s: %w", o.rule.Name, err))
+			} else {
+				advertised = true
 			}
 		}
 
-		if err := r.setRuleProgrammed(ctx, o.rule, cond); err != nil {
-			logger.Error(err, "update NetworkRule Programmed condition", "networkRule", o.rule.Name)
+		ipv4 := ipv4ServedCondition(r.NodeName, o.rule, o.ipv4, cond.Status == metav1.ConditionTrue, advertised)
+		if err := r.setRuleConditions(ctx, o.rule, cond, ipv4, departed); err != nil {
+			logger.Error(err, "update NetworkService conditions", "networkRule", o.rule.Name)
 			statusErrs = append(statusErrs, fmt.Errorf("networkRule %s status: %w", o.rule.Name, err))
 		}
 	}
@@ -544,6 +690,12 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 	}
 	if o.buildErr != nil {
 		cond.Status, cond.Reason = metav1.ConditionFalse, reasonInvalidRule
+		switch {
+		case errors.Is(o.buildErr, errNoServedVIP):
+			cond.Reason = reasonNoServedVIP
+		case errors.Is(o.buildErr, errUnservedProtocol):
+			cond.Reason = reasonUnservedProtocol
+		}
 		cond.Message = fmt.Sprintf("not loaded on node %s: %v", node, o.buildErr)
 		return cond
 	}
@@ -556,10 +708,10 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 		return cond
 	}
 	if len(o.unresolved) > 0 {
+		loaded := len(o.desired.Backends) + len(o.desired.IPv4Backends)
 		cond.Reason = reasonBackendsUnresolved
 		cond.Message = fmt.Sprintf("loaded on node %s with %d of %d backends; unresolved: %s",
-			node, len(o.desired.Backends), len(o.desired.Backends)+len(o.unresolved),
-			cappedList(o.unresolved))
+			node, loaded, loaded+len(o.unresolved), cappedList(o.unresolved))
 	}
 	return cond
 }
@@ -599,7 +751,7 @@ func readyConditionFor(status gateway.EngineStatus, advErr error) metav1.Conditi
 			more = len(failures) - maxReadyFailures
 			failures = failures[:maxReadyFailures]
 		}
-		msg := "NetworkRules failed to apply: " + strings.Join(failures, "; ")
+		msg := "NetworkServices failed to apply: " + strings.Join(failures, "; ")
 		if more > 0 {
 			msg += fmt.Sprintf(" and %d more", more)
 		}
@@ -621,33 +773,115 @@ func readyConditionFor(status gateway.EngineStatus, advErr error) metav1.Conditi
 	}
 }
 
-// programmedConditionType returns the NetworkRule condition type that records
-// whether node's engine loaded the rule. NetworkRule status is shared by every
+// programmedConditionType returns the NetworkService condition type that records
+// whether node's engine loaded the rule. NetworkService status is shared by every
 // gateway node in the namespace while loading is per node, so each node owns
 // its own condition type and never overwrites another node's result.
 func programmedConditionType(node string) string {
 	return node + "/" + bgpv1alpha1.ConditionTypeProgrammed
 }
 
-// setRuleProgrammed writes cond to rule's status, skipping the write when
-// nothing changed. Every write fans out to every gateway node through the
-// NetworkRule watch, so an unconditional write would never settle.
+// ipv4ServedConditionType returns the NetworkService condition type that records
+// whether node serves the rule's IPv4 VIPs. Like programmedConditionType, each
+// gateway node owns its own.
+func ipv4ServedConditionType(node string) string {
+	return node + "/" + conditionTypeIPv4Served
+}
+
+// conditionTypeIPv4Served is the suffix of every node's IPv4Served condition
+// type.
+const conditionTypeIPv4Served = "IPv4Served"
+
+// ipv4ServedCondition returns node's IPv4Served condition for rule, or nil
+// when rule has no IPv4 VIP, in which case the condition is removed. Its
+// reason says what became of the IPv4 VIP on node: ipv4 from buildDesiredRule,
+// programmed whether node's engine loaded the rule, and advertised whether
+// node published the rule's routes. It is True, with reasonIPv4Advertised,
+// only when node loaded the IPv4 VIP over Bound backends and advertises it.
+// ipv4LoadedReasons lists the reasons that mean the VIP is loaded.
+func ipv4ServedCondition(
+	node string, rule *bgpv1alpha1.NetworkService, ipv4 ipv4Family, programmed, advertised bool,
+) *metav1.Condition {
+	if !hasIPv4VIP(rule) {
+		return nil
+	}
+	if (ipv4 == ipv4Loaded || ipv4 == ipv4Unbound) && !programmed {
+		ipv4 = ipv4NotLoaded
+	}
+	status := metav1.ConditionFalse
+	var reason, message string
+	switch ipv4 {
+	case ipv4Loaded:
+		if advertised {
+			status, reason = metav1.ConditionTrue, reasonIPv4Advertised
+			message = fmt.Sprintf("IPv4 VIP is loaded and advertised on node %s over the backends whose "+
+				"ServiceVIPBindings are Bound", node)
+			break
+		}
+		reason = reasonIPv4NotAdvertised
+		message = fmt.Sprintf("IPv4 VIP is loaded on node %s but its route is not published: no BGPRouter "+
+			"targets the node or the advertisement failed; the NetworkGateway's Ready condition says which", node)
+	case ipv4Unbound:
+		reason = reasonIPv4BindingsNotBound
+		message = fmt.Sprintf("IPv4 VIP is loaded on node %s but not advertised: none of its IPv4 backends' "+
+			"ServiceVIPBindings is Bound yet; the backend nodes' BackendsBound conditions say why", node)
+	case ipv4NoBackend:
+		reason = reasonIPv4NoBackend
+		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: no selected attachment has an IPv4 "+
+			"address that resolves to a backend this rule serves", node)
+	case ipv4MultipleVIPs:
+		reason = reasonIPv4MultipleVIPs
+		message = fmt.Sprintf("IPv4 VIPs are not loaded or advertised on node %s: the rule has more than "+
+			"one, and a backend node translates only one IPv4 VIP per rule; the IPv6 VIP serves without them", node)
+	case ipv4NotLoaded:
+		reason = reasonIPv4NotLoaded
+		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: the rule is not loaded", node)
+	default:
+		reason = reasonIPv4Unsupported
+		message = fmt.Sprintf("IPv4 VIPs are not served on node %s: IPv4 VIPs are turned off there, so they "+
+			"are not loaded or advertised, and the rule's IPv6 VIPs serve without them", node)
+	}
+	return &metav1.Condition{
+		Type: ipv4ServedConditionType(node), Status: status, Reason: reason, Message: message,
+	}
+}
+
+// setRuleConditions writes programmed and, when non-nil, ipv4 to rule's
+// status in one update, and removes node's IPv4Served condition when ipv4 is
+// nil. In the same update it removes the Programmed and IPv4Served conditions
+// of every node in departed (departedGatewayNodes), so a gateway node that
+// left without its conditions being cleared, for example while no other
+// gateway was running to see its NetworkGateway go, cannot keep a stale
+// IPv4Served condition telling the backend nodes to keep their IPv4 bindings
+// (ipv4LoadedOnSomeNode). It skips the write when nothing changed. Every write fans out to every
+// gateway node through the NetworkService watch, so an unconditional write would
+// never settle.
 //
-// Every gateway node and NetworkRuleReconciler write the same status, so a
+// Every gateway node and NetworkServiceReconciler write the same status, so a
 // write retries on conflict against a fresh read. A rule deleted mid-pass
 // has nothing left to record and counts as success.
-func (r *NetworkGatewayReconciler) setRuleProgrammed(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, cond metav1.Condition,
+func (r *NetworkGatewayReconciler) setRuleConditions(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, programmed metav1.Condition, ipv4 *metav1.Condition,
+	departed map[string]bool,
 ) error {
 	key := client.ObjectKeyFromObject(rule)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current := &bgpv1alpha1.NetworkRule{}
+		current := &bgpv1alpha1.NetworkService{}
 		if err := r.Get(ctx, key, current); err != nil {
 			return err
 		}
-		c := cond
+		c := programmed
 		c.ObservedGeneration = current.Generation
-		if !meta.SetStatusCondition(&current.Status.Conditions, c) {
+		changed := meta.SetStatusCondition(&current.Status.Conditions, c)
+		if ipv4 != nil {
+			c4 := *ipv4
+			c4.ObservedGeneration = current.Generation
+			changed = meta.SetStatusCondition(&current.Status.Conditions, c4) || changed
+		} else {
+			changed = meta.RemoveStatusCondition(&current.Status.Conditions, ipv4ServedConditionType(r.NodeName)) || changed
+		}
+		changed = removeDepartedNodeConditions(&current.Status.Conditions, departed) || changed
+		if !changed {
 			return nil
 		}
 		return r.Status().Update(ctx, current)
@@ -658,30 +892,99 @@ func (r *NetworkGatewayReconciler) setRuleProgrammed(
 	return err
 }
 
-// clearNodeRuleConditions removes node's Programmed condition from every
-// NetworkRule in namespace, for a node that no longer serves any of them. A
-// write retries on conflict against a fresh read, and a rule deleted
-// mid-pass counts as cleared.
+// removeDepartedNodeConditions removes from conditions the Programmed and
+// IPv4Served condition of every node in departed, and reports whether it
+// removed any. Other node-scoped conditions, such as a backend node's
+// BackendsBound, are left alone.
+func removeDepartedNodeConditions(conditions *[]metav1.Condition, departed map[string]bool) bool {
+	var gone []string
+	for _, c := range *conditions {
+		if node, ok := gatewayNodeConditionNode(c.Type); ok && departed[node] {
+			gone = append(gone, c.Type)
+		}
+	}
+	for _, t := range gone {
+		meta.RemoveStatusCondition(conditions, t)
+	}
+	return len(gone) > 0
+}
+
+// gatewayNodeConditionNode returns the node of a gateway node's Programmed or
+// IPv4Served condition type, and false for any other type.
+func gatewayNodeConditionNode(condType string) (string, bool) {
+	node, kind, ok := strings.Cut(condType, "/")
+	if !ok || (kind != bgpv1alpha1.ConditionTypeProgrammed && kind != conditionTypeIPv4Served) {
+		return "", false
+	}
+	return node, true
+}
+
+// departedGatewayNodes returns the nodes other than this one whose Programmed
+// or IPv4Served condition some rule in outcomes carries but that no
+// NetworkGateway in namespace targets. A node missing from the cached
+// NetworkGateway list is confirmed against the API server through APIReader
+// before it counts, so a cache that has not yet seen a new gateway node's
+// NetworkGateway never strips that node's conditions. The uncached list runs
+// only when the cache suggests a node has departed.
+func (r *NetworkGatewayReconciler) departedGatewayNodes(
+	ctx context.Context, namespace string, outcomes []ruleOutcome,
+) (map[string]bool, error) {
+	cached, err := gatewayNodeNames(ctx, r.Client, namespace)
+	if err != nil {
+		return nil, err
+	}
+	live := make(map[string]bool, len(cached)+1)
+	live[r.NodeName] = true
+	for _, n := range cached {
+		live[n] = true
+	}
+	candidates := map[string]bool{}
+	for _, o := range outcomes {
+		for _, c := range o.rule.Status.Conditions {
+			if node, ok := gatewayNodeConditionNode(c.Type); ok && !live[node] {
+				candidates[node] = true
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	list := &bgpv1alpha1.NetworkGatewayList{}
+	if err := r.APIReader.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list NetworkGateways from the API server: %w", err)
+	}
+	for _, gw := range list.Items {
+		delete(candidates, gw.Spec.TargetRef.Name)
+	}
+	return candidates, nil
+}
+
+// clearNodeRuleConditions removes node's Programmed and IPv4Served
+// conditions from every NetworkService in namespace, for a node that no longer
+// serves any of them. A write retries on conflict against a fresh read, and a
+// rule deleted mid-pass counts as cleared.
 func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, node string) error {
-	list := &bgpv1alpha1.NetworkRuleList{}
+	list := &bgpv1alpha1.NetworkServiceList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		return fmt.Errorf("list NetworkRules to clear node %s conditions: %w", node, err)
+		return fmt.Errorf("list NetworkServices to clear node %s conditions: %w", node, err)
 	}
 	var errs []error
 	for i := range list.Items {
 		key := client.ObjectKeyFromObject(&list.Items[i])
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			current := &bgpv1alpha1.NetworkRule{}
+			current := &bgpv1alpha1.NetworkService{}
 			if err := c.Get(ctx, key, current); err != nil {
 				return err
 			}
-			if !meta.RemoveStatusCondition(&current.Status.Conditions, programmedConditionType(node)) {
+			removed := meta.RemoveStatusCondition(&current.Status.Conditions, programmedConditionType(node))
+			removed = meta.RemoveStatusCondition(&current.Status.Conditions, ipv4ServedConditionType(node)) || removed
+			if !removed {
 				return nil
 			}
 			return c.Status().Update(ctx, current)
 		})
 		if err != nil && !apierrors.IsNotFound(err) {
-			errs = append(errs, fmt.Errorf("clear node %s condition on NetworkRule %s: %w", node, key.Name, err))
+			errs = append(errs, fmt.Errorf("clear node %s condition on NetworkService %s: %w", node, key.Name, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -691,7 +994,7 @@ func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, no
 // rule, one per address family, so the fabric stops sending the rule's VIP
 // traffic to a node that has not loaded it.
 func withdrawRuleAdvertisements(
-	ctx context.Context, c client.Client, rule *bgpv1alpha1.NetworkRule, node string,
+	ctx context.Context, c client.Client, rule *bgpv1alpha1.NetworkService, node string,
 ) error {
 	return pruneRuleAdvertisements(ctx, c, rule, node, nil)
 }
@@ -708,14 +1011,14 @@ func withdrawRuleAdvertisements(
 // its renamed replacement, and withdrawing the rule from the node would miss
 // it.
 func pruneRuleAdvertisements(
-	ctx context.Context, c client.Client, rule *bgpv1alpha1.NetworkRule, node string, keep map[string]bool,
+	ctx context.Context, c client.Client, rule *bgpv1alpha1.NetworkService, node string, keep map[string]bool,
 ) error {
 	advList := &bgpv1alpha1.BGPAdvertisementList{}
 	if err := c.List(ctx, advList,
 		client.InNamespace(rule.Namespace),
 		client.MatchingLabels{networkRuleLabel: rule.Name},
 	); err != nil {
-		return fmt.Errorf("list BGPAdvertisements for NetworkRule %s: %w", rule.Name, err)
+		return fmt.Errorf("list BGPAdvertisements for NetworkService %s: %w", rule.Name, err)
 	}
 
 	var errs []error
@@ -734,12 +1037,37 @@ func pruneRuleAdvertisements(
 	return errors.Join(errs...)
 }
 
+// errNoServedVIP is buildDesiredRule's error for a rule whose every VIP is
+// IPv4 while IPv4VIPs is off, leaving nothing to load.
+var errNoServedVIP = errors.New("every VIP is IPv4, and IPv4 VIPs are turned off on this node")
+
+// isIPv4VIP reports whether vip is an IPv4 address, written plainly or as an
+// IPv4-mapped IPv6 address. Both forms load as the plain IPv4 address when
+// IPv4VIPs is on.
+func isIPv4VIP(vip netip.Addr) bool {
+	return vip.Unmap().Is4()
+}
+
+// hasIPv4VIP reports whether rule lists an IPv4 VIP in either form isIPv4VIP
+// accepts. Addresses that do not parse are left to buildDesiredRule, which
+// rejects them.
+func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
+	for _, v := range rule.Spec.VIPAddresses {
+		if addr, err := netip.ParseAddr(v); err == nil && isIPv4VIP(addr) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildDesiredRule converts rule into a gateway.DesiredRule. Its backends are
-// the IPv6 addresses of the VPCAttachments rule's BackendSelector picks from
-// attachments (selectRuleBackends), each resolved through sidIndex to the
-// SRv6 uSID of the node its attachment reports, with that backend's own slot
-// (backendSID), so a node hosting several of the rule's backends can tell which
-// one Maglev chose. There is no kernel VRF or FIB dependency.
+// the addresses of the VPCAttachments rule's BackendSelector picks from
+// attachments (selectRuleBackends), one list per VIP family: the IPv6
+// addresses for the IPv6 VIPs and, when they load, the IPv4 addresses for the
+// IPv4 VIPs. Each is resolved through sidIndex to the SRv6 uSID of the node
+// its attachment reports, with that backend's own slot (backendSID), so a node
+// hosting several of the rule's backends can tell which one Maglev chose.
+// There is no kernel VRF or FIB dependency.
 //
 // A selected attachment that is not a backend yet, a backend owners assigns to
 // another rule, or a backend whose uSID does not resolve, is left out and
@@ -749,37 +1077,164 @@ func pruneRuleAdvertisements(
 // this, since its BGPAdvertisement is gone until the new pod is attached.
 // Every gateway node resolves from the same API objects and the Maglev table
 // depends only on the backend set, so nodes that see the same objects build
-// the same table. Only when nothing resolves does the rule fail, so it is
-// withdrawn rather than advertised with nothing behind it. An invalid VIP or
-// selector fails the rule outright, since that is a spec error rather than a
-// passing state.
+// the same table. A family whose backends all fail is left out, its VIPs
+// unloaded, and only when no family has a backend does the rule fail, so it
+// is withdrawn rather than advertised with nothing behind it. An invalid VIP
+// or selector, a second IPv6 VIP, or a protocol or port the datapath does not
+// serve (rulePorts), fails the rule outright, since that is a spec error
+// rather than a passing state.
+//
+// IPv4 VIPs, plain or IPv4-mapped (isIPv4VIP), are left out unless serveIPv4
+// is set. Without it the rule's IPv6 VIPs serve without them, and a rule with
+// no other VIP fails with errNoServedVIP. With it they load beside the IPv6
+// ones, over the IPv4 backends whose ServiceVIPBinding in bindings is Bound
+// (ipv4Bindings.unbound); the rest are returned in unresolved, so a flow never
+// reaches a backend that cannot answer it. While none is Bound the VIP loads
+// over every eligible IPv4 backend, so that the backend nodes write their
+// bindings, and ipv4 is ipv4Unbound, which keeps it unadvertised. A rule with
+// more than one IPv4 VIP, like one whose IPv4 VIP has no backend, serves its
+// IPv6 VIPs without them. ipv4 says which of these happened to the rule's
+// IPv4 VIPs; see ipv4Family.
 func buildDesiredRule(
-	rule *bgpv1alpha1.NetworkRule, attachments []*cloudv1alpha1.VPCAttachment,
-	sidIndex *backendSIDIndex, owners backendOwners,
-) (dr gateway.DesiredRule, unresolved []string, err error) {
-	vips := make([]netip.Addr, 0, len(rule.Spec.VIPAddresses))
+	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
+	sidIndex *backendSIDIndex, owners backendOwners, serveIPv4 bool, bindings ipv4Bindings,
+) (dr gateway.DesiredRule, unresolved []string, ipv4 ipv4Family, err error) {
+	ipv4 = ipv4Off
+	if serveIPv4 {
+		ipv4 = ipv4NotLoaded
+	}
+	port, _, err := rulePorts(rule)
+	if err != nil {
+		return gateway.DesiredRule{}, nil, ipv4, err
+	}
+	var v6VIPs, v4VIPs []netip.Addr
+	var withheld int
 	for _, v := range rule.Spec.VIPAddresses {
 		addr, err := netip.ParseAddr(v)
 		if err != nil {
-			return gateway.DesiredRule{}, nil, fmt.Errorf("invalid VIP address %q: %w", v, err)
+			return gateway.DesiredRule{}, nil, ipv4, fmt.Errorf("invalid VIP address %q: %w", v, err)
 		}
-		vips = append(vips, addr)
+		if !isIPv4VIP(addr) {
+			v6VIPs = append(v6VIPs, addr)
+			continue
+		}
+		if !serveIPv4 {
+			withheld++
+			continue
+		}
+		// The datapath keys an IPv4 VIP by its plain form and refuses the
+		// IPv4-mapped one, so load the address unmapped.
+		v4VIPs = append(v4VIPs, addr.Unmap())
+	}
+	if len(v6VIPs) == 0 && len(v4VIPs) == 0 && withheld > 0 {
+		return gateway.DesiredRule{}, nil, ipv4, errNoServedVIP
 	}
 
-	if _, _, err := ruleTranslatedVIP(rule); err != nil {
-		return gateway.DesiredRule{}, nil, err
-	}
-
-	sel, err := selectRuleBackends(rule, attachments, owners)
+	translated, err := ruleTranslatedVIPs(rule)
 	if err != nil {
-		return gateway.DesiredRule{}, nil, err
+		return gateway.DesiredRule{}, nil, ipv4, err
+	}
+	var firstFamilyError error
+	if len(v4VIPs) > 0 && translated.v4Err != nil {
+		// A backend node translates only one IPv4 VIP per rule, so none of
+		// them is served; the IPv6 VIPs still are.
+		ipv4, firstFamilyError, v4VIPs = ipv4MultipleVIPs, translated.v4Err, nil
+	}
+
+	var (
+		vips       []netip.Addr
+		v6Backends []gateway.DesiredBackend
+		v4Backends []gateway.DesiredBackend
+	)
+	for _, f := range []struct {
+		family   addrFamily
+		vips     []netip.Addr
+		backends *[]gateway.DesiredBackend
+	}{
+		{familyIPv6, v6VIPs, &v6Backends},
+		{familyIPv4, v4VIPs, &v4Backends},
+	} {
+		if len(f.vips) == 0 {
+			continue
+		}
+		var unbound func(ruleBackend) string
+		if f.family == familyIPv4 {
+			vip := f.vips[0]
+			unbound = func(b ruleBackend) string { return bindings.unbound(rule, vip, b) }
+		}
+		backends, familyUnresolved, noneBound, err := resolveFamilyBackends(
+			rule, attachments, sidIndex, owners, f.family, unbound)
+		unresolved = append(unresolved, familyUnresolved...)
+		if err != nil {
+			var selErr *backendSelectionError
+			if !errors.As(err, &selErr) {
+				return gateway.DesiredRule{}, nil, ipv4, err
+			}
+			if firstFamilyError == nil {
+				firstFamilyError = err
+			}
+			if f.family == familyIPv4 {
+				ipv4 = ipv4NoBackend
+			}
+			continue
+		}
+		vips = append(vips, f.vips...)
+		*f.backends = backends
+		if f.family == familyIPv4 {
+			ipv4 = ipv4Loaded
+			if noneBound {
+				ipv4 = ipv4Unbound
+			}
+		}
+	}
+	if len(vips) == 0 {
+		return gateway.DesiredRule{}, nil, ipv4, firstFamilyError
+	}
+
+	return gateway.DesiredRule{
+		Key:          rule.Namespace + "/" + rule.Name,
+		VPCRef:       rule.Spec.VPCRef,
+		VIPAddresses: vips,
+		Protocol:     string(rule.Spec.Protocol),
+		Port:         port,
+		Backends:     v6Backends,
+		IPv4Backends: v4Backends,
+	}, unresolved, ipv4, nil
+}
+
+// backendSelectionError is resolveFamilyBackends' error for a family none of
+// whose selected backends can take a flow. It is not a spec error: the
+// family's VIPs are left unloaded until a backend appears.
+type backendSelectionError struct{ err error }
+
+func (e *backendSelectionError) Error() string { return e.err.Error() }
+func (e *backendSelectionError) Unwrap() error { return e.err }
+
+// resolveFamilyBackends returns rule's backends of family, each resolved to its
+// node's uSID with its slot, and the selected attachments and backends that are
+// not part of it, as status messages. An invalid selector is returned as is.
+// When no backend resolves it returns a *backendSelectionError saying why.
+//
+// A non-nil unbound returns why a resolved backend's ServiceVIPBinding is not
+// Bound, or "" when it is. Only Bound backends are returned then, and the rest
+// join unresolved; while none is Bound, every resolved backend is returned and
+// noneBound is set.
+func resolveFamilyBackends(
+	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
+	sidIndex *backendSIDIndex, owners backendOwners, family addrFamily, unbound func(ruleBackend) string,
+) (backends []gateway.DesiredBackend, unresolved []string, noneBound bool, err error) {
+	sel, err := selectRuleBackends(rule, attachments, owners, family)
+	if err != nil {
+		return nil, nil, false, err
 	}
 	unresolved = sel.pending
 	for _, c := range sel.claimed {
 		unresolved = append(unresolved, c.String())
 	}
 
-	backends := make([]gateway.DesiredBackend, 0, len(sel.backends))
+	backends = make([]gateway.DesiredBackend, 0, len(sel.backends))
+	bound := make([]gateway.DesiredBackend, 0, len(sel.backends))
+	var held []string
 	var firstResolveErr error
 	for _, b := range sel.backends {
 		usid, err := sidIndex.resolveUSID(b.addr, rule.Spec.VPCRef, b.node)
@@ -793,46 +1248,59 @@ func buildDesiredRule(
 			unresolved = append(unresolved, b.String())
 			continue
 		}
-		backends = append(backends, gateway.DesiredBackend{Address: b.addr, Port: b.port, USID: usid})
+		backend := gateway.DesiredBackend{Address: b.addr, Port: b.port, USID: usid}
+		backends = append(backends, backend)
+		if unbound == nil {
+			continue
+		}
+		if why := unbound(b); why != "" {
+			held = append(held, b.String()+": "+why)
+			continue
+		}
+		bound = append(bound, backend)
 	}
-	if len(backends) == 0 {
+	if len(backends) > 0 {
 		switch {
-		case firstResolveErr != nil:
-			return gateway.DesiredRule{}, nil, fmt.Errorf("none of %d backends resolves: %w", len(unresolved), firstResolveErr)
-		case len(sel.claimed) > 0 && len(sel.pending) == 0:
-			return gateway.DesiredRule{}, nil, fmt.Errorf("every selected backend is served by an older rule: %s",
-				cappedList(unresolved))
-		case len(unresolved) > 0:
-			return gateway.DesiredRule{}, nil, fmt.Errorf("no selected attachment is a backend yet: %s",
-				cappedList(unresolved))
+		case unbound == nil:
+			return backends, unresolved, false, nil
+		case len(bound) > 0:
+			return bound, append(unresolved, held...), false, nil
 		default:
-			return gateway.DesiredRule{}, nil, fmt.Errorf("backendSelector matches no VPCAttachment in VPC %s",
-				rule.Spec.VPCRef)
+			return backends, unresolved, true, nil
 		}
 	}
-
-	return gateway.DesiredRule{
-		Key:          rule.Namespace + "/" + rule.Name,
-		VPCRef:       rule.Spec.VPCRef,
-		VIPAddresses: vips,
-		Protocol:     string(rule.Spec.Protocol),
-		//nolint:gosec // rule.Spec.Port is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkRuleSpec.Port)
-		Port:     uint16(rule.Spec.Port),
-		Backends: backends,
-	}, unresolved, nil
+	switch {
+	case firstResolveErr != nil:
+		err = fmt.Errorf("none of %d backends resolves: %w", len(unresolved), firstResolveErr)
+	case len(sel.claimed) > 0 && len(sel.pending) == 0:
+		err = fmt.Errorf("every selected backend is served by an older rule: %s", cappedList(unresolved))
+	case len(unresolved) > 0:
+		err = fmt.Errorf("no selected attachment is a backend yet: %s", cappedList(unresolved))
+	default:
+		err = fmt.Errorf("backendSelector matches no VPCAttachment in VPC %s", rule.Spec.VPCRef)
+	}
+	return nil, unresolved, false, &backendSelectionError{err: err}
 }
 
-// routerNameForNode returns the name of the BGPRouter whose targetRef.name
-// matches this node, or "" if none exists yet. A method wrapper around the
+// routerNameForNode returns the name of this node's Galactic-owned
+// BGPRouter, or "" if none exists yet. A method wrapper around the
 // package-level function of the same name.
 func (r *NetworkGatewayReconciler) routerNameForNode(ctx context.Context, namespace string) (string, error) {
 	return routerNameForNode(ctx, r.Client, namespace, r.NodeName)
 }
 
-// routerNameForNode returns the name of the BGPRouter whose targetRef.name
-// matches nodeName, or "" if none exists yet. A free function so
-// EgressShardReconciler can resolve the same "which BGPRouter is mine" lookup
-// without duplicating it or reaching into another reconciler's method set.
+// errAmbiguousRouter reports more than one Galactic-owned BGPRouter on a
+// node.
+var errAmbiguousRouter = errors.New("ambiguous BGP config")
+
+// routerNameForNode returns the name of the Galactic-owned BGPRouter whose
+// targetRef.name matches nodeName, or "" if none exists yet. Routers that
+// name a routerClassName belong to another implementation (the fabric
+// underlay) and are skipped. More than one Galactic-owned router on the node
+// is an error rather than an arbitrary pick, since the caller attaches
+// advertisements to the result. A free function so EgressShardReconciler can
+// resolve the same "which BGPRouter is mine" lookup without duplicating it or
+// reaching into another reconciler's method set.
 func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName string) (string, error) {
 	list := &bgpv1alpha1.BGPRouterList{}
 	if err := c.List(ctx, list,
@@ -841,17 +1309,33 @@ func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName
 	); err != nil {
 		return "", fmt.Errorf("list BGPRouters for node %s: %w", nodeName, err)
 	}
-	if len(list.Items) == 0 {
+	owned := bgpv1alpha1.LegacyOwnedRouters(list.Items)
+	switch len(owned) {
+	case 0:
 		return "", nil
+	case 1:
+		return owned[0].Name, nil
+	default:
+		names := make([]string, 0, len(owned))
+		for _, rt := range owned {
+			names = append(names, rt.Name)
+		}
+		sort.Strings(names)
+		return "", fmt.Errorf("%w: node %s has %d BGPRouters (%s)",
+			errAmbiguousRouter, nodeName, len(owned), strings.Join(names, ", "))
 	}
-	return list.Items[0].Name, nil
 }
 
 // applyBGPAdvertisements reconciles the BGPAdvertisements for a single rule,
-// one per non-empty VIP address family, named by ruleAdvertisementName. Once
-// every one is applied, it deletes any other advertisement this node made for
-// the rule: one for a family whose VIPs are gone, or one under a name from an
-// earlier naming scheme.
+// one per non-empty VIP address family, named by ruleAdvertisementName.
+// The IPv4 family is advertised only with advertiseIPv4, which the caller sets
+// when this node loaded the rule's IPv4 VIP over only the eligible backends
+// whose ServiceVIPBinding is Bound, at least one. Without it this node's "-v4"
+// advertisement is deleted first, before and whatever the outcome of the
+// other families' writes, so the route goes as soon as the gate closes.
+// Once every one is applied, it deletes any other advertisement this node made
+// for the rule: one for a family whose VIPs are gone, or one under a name from
+// an earlier naming scheme.
 //
 // The node qualifier is required. This reconciler runs once per gateway node,
 // and under the anycast model every gateway node advertises every accepted
@@ -880,12 +1364,22 @@ func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName
 // nor needs extra RBAC. A rule that is already being deleted gets nothing
 // created or updated at all.
 func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired gateway.DesiredRule, routerName string,
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, desired gateway.DesiredRule, routerName string,
+	advertiseIPv4 bool,
 ) error {
 	if !rule.DeletionTimestamp.IsZero() {
 		return nil
 	}
 	v4Prefixes, v6Prefixes := prefixesByFamily(desired.VIPAddresses)
+	if !advertiseIPv4 {
+		// The gate is closed. Withdraw this node's -v4 route now rather than
+		// through the prune below, which waits for every other family's write
+		// to succeed.
+		v4Prefixes = nil
+		if err := r.withdrawIPv4Advertisement(ctx, rule); err != nil {
+			return err
+		}
+	}
 
 	groups := []struct {
 		suffix   string
@@ -982,6 +1476,29 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 	return pruneRuleAdvertisements(ctx, r.Client, rule, r.NodeName, keep)
 }
 
+// withdrawIPv4Advertisement deletes the "-v4" advertisement this node made for
+// rule, if any. It deletes only an object isNodeAdvertisement accepts for this
+// node, so it never removes another node's route.
+func (r *NetworkGatewayReconciler) withdrawIPv4Advertisement(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService,
+) error {
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	key := types.NamespacedName{Namespace: rule.Namespace, Name: ruleAdvertisementName(rule.Name, r.NodeName, "v4")}
+	if err := r.Get(ctx, key, adv); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get BGPAdvertisement %s: %w", key.Name, err)
+	}
+	if !isNodeAdvertisement(adv, r.NodeName) {
+		return nil
+	}
+	if err := r.Delete(ctx, adv); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("withdraw BGPAdvertisement %s: %w", key.Name, err)
+	}
+	return nil
+}
+
 // prefixesByFamily splits vips into IPv4 and IPv6 host-prefix strings
 // (/32 or /128).
 func prefixesByFamily(vips []netip.Addr) (v4, v6 []string) {
@@ -998,9 +1515,9 @@ func prefixesByFamily(vips []netip.Addr) (v4, v6 []string) {
 
 // SetupWithManager registers the NetworkGatewayReconciler with the manager.
 func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.NetworkGateway{}).
-		Watches(&bgpv1alpha1.NetworkRule{}, handler.EnqueueRequestsFromMapFunc(
+		Watches(&bgpv1alpha1.NetworkService{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return ruleToGatewayRequests(ctx, r.Client, obj)
 			}),
@@ -1052,9 +1569,21 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return allGatewayRequests(ctx, r.Client, "VPCAttachment", obj.GetNamespace()+"/"+obj.GetName())
 			}),
 			builder.WithPredicates(vpcAttachmentBackendChanged()),
-		).
-		Named("networkgateway").
-		Complete(r)
+		)
+	if r.IPv4VIPs {
+		// A rule's IPv4 VIP is balanced over, and advertised for, only the
+		// backends whose bindings are Bound, so a binding appearing, going,
+		// changing or becoming Bound or not opens or closes the gate. Bindings
+		// live in the gateways' namespace. Without IPv4VIPs nothing reads them,
+		// and the gateway needs no access to them.
+		b = b.Watches(&bgpv1alpha1.ServiceVIPBinding{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "ServiceVIPBinding", obj.GetName())
+			}),
+			builder.WithPredicates(ipv4BindingReadinessChanged()),
+		)
+	}
+	return b.Named("networkgateway").Complete(r)
 }
 
 // backendAdvertisementPredicate passes only BGPAdvertisement events a pass can
@@ -1096,27 +1625,27 @@ func locatesBackend(obj client.Object) bool {
 }
 
 // isRuleAdvertisement reports whether obj is a gateway VIP advertisement made
-// for a NetworkRule.
+// for a NetworkService.
 func isRuleAdvertisement(obj client.Object) bool {
 	_, ok := obj.GetLabels()[networkRuleLabel]
 	return ok
 }
 
-// ruleToGatewayRequests maps a NetworkRule change to every NetworkGateway in
-// its namespace. A NetworkRule carries no gatewayRef, and every gateway node
+// ruleToGatewayRequests maps a NetworkService change to every NetworkGateway in
+// its namespace. A NetworkService carries no gatewayRef, and every gateway node
 // advertises every VIP identically (anycast), so every gateway node in the
 // rule's PoP must re-evaluate its own engine state whenever any rule changes.
 // The broadcast is intentional rather than a missing index.
 func ruleToGatewayRequests(ctx context.Context, c client.Client, obj client.Object) []ctrlreconcile.Request {
-	rule, ok := obj.(*bgpv1alpha1.NetworkRule)
+	rule, ok := obj.(*bgpv1alpha1.NetworkService)
 	if !ok {
 		return nil
 	}
-	return broadcastToGatewayRequests(ctx, c, rule.Namespace, "NetworkRule", rule.Name)
+	return broadcastToGatewayRequests(ctx, c, rule.Namespace, "NetworkService", rule.Name)
 }
 
 // broadcastToGatewayRequests lists every NetworkGateway in namespace and
-// returns a reconcile request for each. It is the primitive the NetworkRule,
+// returns a reconcile request for each. It is the primitive the NetworkService,
 // BGPRouter, BGPAdvertisement, and BGPVRFInstance watches all build on.
 // sourceKind and sourceName appear only in the list-failure log line.
 func broadcastToGatewayRequests(
@@ -1160,9 +1689,9 @@ func gatewayNodeNames(ctx context.Context, c client.Client, namespace string) ([
 }
 
 // isGatewayNode reports whether nodeName is one of namespace's registered
-// gateway nodes. NetworkRuleReconciler uses it to scope its per-object
+// gateway nodes. NetworkServiceReconciler uses it to scope its per-object
 // lifecycle work to gateway-role nodes, so every other node's router process
-// leaves NetworkRule objects alone.
+// leaves NetworkService objects alone.
 func isGatewayNode(ctx context.Context, c client.Client, namespace, nodeName string) (bool, error) {
 	names, err := gatewayNodeNames(ctx, c, namespace)
 	if err != nil {
@@ -1245,11 +1774,11 @@ func isNodeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, nodeName string) boo
 }
 
 // sweepOrphanedAdvertisements deletes this node's BGPAdvertisements for rules
-// that no longer exist. rules is every NetworkRule in namespace as this pass
+// that no longer exist. rules is every NetworkService in namespace as this pass
 // listed them.
 //
 // This node can create an advertisement from a cache that has not yet seen its
-// rule's deletion timestamp, after NetworkRuleReconciler's teardown has already
+// rule's deletion timestamp, after NetworkServiceReconciler's teardown has already
 // removed the finalizer. Teardown never sees that advertisement. Without this
 // sweep it would stay advertised, with no node serving the rule, until
 // Kubernetes garbage collection follows its owner reference. Here it is
@@ -1260,7 +1789,7 @@ func isNodeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, nodeName string) boo
 // still exists, so a cache that has not yet seen a new rule never withdraws a
 // live route.
 func (r *NetworkGatewayReconciler) sweepOrphanedAdvertisements(
-	ctx context.Context, namespace string, rules []bgpv1alpha1.NetworkRule,
+	ctx context.Context, namespace string, rules []bgpv1alpha1.NetworkService,
 ) error {
 	known := make(map[string]bool, len(rules))
 	for i := range rules {
@@ -1286,16 +1815,16 @@ func (r *NetworkGatewayReconciler) sweepOrphanedAdvertisements(
 			continue
 		}
 		err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ruleName},
-			&bgpv1alpha1.NetworkRule{})
+			&bgpv1alpha1.NetworkService{})
 		switch {
 		case err == nil:
 			continue
 		case !apierrors.IsNotFound(err):
-			errs = append(errs, fmt.Errorf("check NetworkRule %s for BGPAdvertisement %s: %w", ruleName, adv.Name, err))
+			errs = append(errs, fmt.Errorf("check NetworkService %s for BGPAdvertisement %s: %w", ruleName, adv.Name, err))
 			continue
 		}
 		if err := r.Delete(ctx, adv); err != nil && !apierrors.IsNotFound(err) {
-			errs = append(errs, fmt.Errorf("withdraw BGPAdvertisement %s for deleted NetworkRule %s: %w",
+			errs = append(errs, fmt.Errorf("withdraw BGPAdvertisement %s for deleted NetworkService %s: %w",
 				adv.Name, ruleName, err))
 		}
 	}
@@ -1305,7 +1834,7 @@ func (r *NetworkGatewayReconciler) sweepOrphanedAdvertisements(
 // withdrawNodeAdvertisements deletes every BGPAdvertisement that gateway node
 // nodeName created in namespace: each per-rule, per-address-family route it
 // advertised. It lists by gatewayNodeLabel and deletes those that
-// isNodeAdvertisement accepts, so it needs no NetworkRule object, live or
+// isNodeAdvertisement accepts, so it needs no NetworkService object, live or
 // deleted, and never matches by name suffix. An advertisement without
 // gatewayNodeLabel is not withdrawn and has to be deleted by hand.
 //

@@ -37,13 +37,14 @@ func diffRuleKeys(active map[string]DesiredRule, desired map[string]DesiredRule)
 }
 
 // rulesEqual reports whether a and b would program identical datapath state.
-// VIPAddresses and Backends compare in order: the controller builds both in
-// spec order, so a reordered spec reapplies once with the same result.
+// VIPAddresses and both backend lists compare in order: the controller builds
+// them in spec order, so a reordered spec reapplies once with the same result.
 func rulesEqual(a, b DesiredRule) bool {
 	return a.Key == b.Key &&
 		a.VPCRef == b.VPCRef &&
 		a.Protocol == b.Protocol &&
 		a.Port == b.Port &&
 		slices.Equal(a.VIPAddresses, b.VIPAddresses) &&
-		slices.Equal(a.Backends, b.Backends)
+		slices.Equal(a.Backends, b.Backends) &&
+		slices.Equal(a.IPv4Backends, b.IPv4Backends)
 }

@@ -193,12 +193,81 @@ func TestVIPTable_RegisterRejectsTooManyBackends(t *testing.T) {
 	}
 }
 
-func TestVIPTable_RegisterRejectsIPv4Backend(t *testing.T) {
+func TestVIPTable_RegisterRejectsIPv4MappedAddresses(t *testing.T) {
 	vt := newTestVIPTable()
+	mapped := mustAddr(t, "::ffff:192.0.2.1")
+
 	backend := testBackend(t)
-	backend.Addr = netip.MustParseAddr("192.0.2.1")
+	backend.Addr = mapped
 	if err := vt.Register(testKey(t), []Backend{backend}, [MaglevTableSize]byte{}); err == nil {
-		t.Error("Register with an IPv4 backend address: want error, got nil")
+		t.Error("Register with an IPv4-mapped backend address: want error, got nil")
+	}
+	key := testKey(t)
+	key.VIP = mapped
+	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err == nil {
+		t.Error("Register with an IPv4-mapped VIP: want error, got nil")
+	}
+}
+
+// TestVIPTable_IPv4RoundTrip covers an IPv4 VIP and backend: both are written
+// in their IPv4-mapped form, the form edgedsr.c builds from an IPv4 header,
+// and read back as the IPv4 addresses they were written for.
+func TestVIPTable_IPv4RoundTrip(t *testing.T) {
+	table, addrs := newFakeTable(), newFakeAddrTable()
+	vt := NewVIPTable(table, newFakeStatsTable(), addrs, newFakeReturnStatsTable())
+	key := VIPKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "192.0.2.10")}
+	backend := testBackend(t)
+	backend.Addr = mustAddr(t, "10.60.0.5")
+
+	if err := vt.Register(key, []Backend{backend}, [MaglevTableSize]byte{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	wire := mustAddr(t, "::ffff:192.0.2.10").As16()
+	if _, ok := table.entries[edgeprog.EdgedsrVipKey{Proto: 6, Port: beU16(443), Vip: wire}]; !ok {
+		t.Errorf("vip_table holds no row under the IPv4-mapped key")
+	}
+	if _, ok := addrs.entries[edgeprog.EdgedsrVipAddrKey{Vip: wire}]; !ok {
+		t.Errorf("vip_addr_table holds no row under the IPv4-mapped key")
+	}
+
+	got, ok, err := vt.Get(key)
+	if err != nil || !ok {
+		t.Fatalf("Get = %v, %v; want the entry", ok, err)
+	}
+	if got.VIP != key.VIP || len(got.Backends) != 1 || got.Backends[0] != backend {
+		t.Errorf("Get = %+v, want VIP %s and backend %+v", got, key.VIP, backend)
+	}
+	entries, err := vt.ListReturn()
+	if err != nil || len(entries) != 1 || entries[0].VIP != key.VIP {
+		t.Errorf("ListReturn = %+v, %v; want one entry for %s", entries, err, key.VIP)
+	}
+}
+
+// TestVIPTable_IPv4AndIPv6RowsDoNotCollide registers an IPv4 and an IPv6 VIP
+// on the same port and protocol: they occupy separate rows, and removing one
+// leaves the other.
+func TestVIPTable_IPv4AndIPv6RowsDoNotCollide(t *testing.T) {
+	vt := newTestVIPTable()
+	v6, v4 := testKey(t), VIPKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "192.0.2.10")}
+	for _, k := range []VIPKey{v6, v4} {
+		if err := vt.Register(k, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+			t.Fatalf("Register %s: %v", k.VIP, err)
+		}
+	}
+	entries, err := vt.List()
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("List = %d entries, %v; want 2", len(entries), err)
+	}
+	if err := vt.Unregister(v4); err != nil {
+		t.Fatalf("Unregister IPv4: %v", err)
+	}
+	if _, ok, _ := vt.Get(v6); !ok {
+		t.Error("removing the IPv4 VIP removed the IPv6 one")
+	}
+	ret, err := vt.ListReturn()
+	if err != nil || len(ret) != 1 || ret[0].VIP != v6.VIP {
+		t.Errorf("ListReturn = %+v, %v; want only %s", ret, err, v6.VIP)
 	}
 }
 
@@ -273,7 +342,7 @@ func TestVIPTable_ReconcileRemovesStaleNotLive(t *testing.T) {
 	// The cutoff snapshot is taken strictly after both entries were
 	// written (generation 100 < cutoff 150), matching the real ordering
 	// contract: capture Generation() immediately before listing the live
-	// NetworkRule CRDs, i.e. after whatever already-registered state
+	// NetworkService CRDs, i.e. after whatever already-registered state
 	// exists, not before it.
 	fakeClock = 150
 	cutoff := vt.Generation()

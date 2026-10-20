@@ -1,0 +1,42 @@
+# The lab's galactic-controller --role=cell: config/galactic-controller/base,
+# copied into base/ at deploy time (scripts/deploy-traffic-policy.sh), with
+# only what the lab needs to differ patched in (see
+# controller-lab-patch.yaml for why).
+resources:
+  - base
+patches:
+  - path: controller-lab-patch.yaml
+  # With one replica, the base's minAvailable: 1 budget would block draining
+  # the worker it runs on.
+  - patch: |-
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: galactic-controller
+        namespace: galactic-system
+  # Replaced rather than merged: a strategic merge keys ports on
+  # containerPort and would keep the base's alongside these.
+  - target:
+      kind: Deployment
+      name: galactic-controller
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value:
+          - --role=cell
+          - --webhook-port=10261
+          - --health-probe-bind-address=:10262
+          - --metrics-bind-address=:10263
+      - op: replace
+        path: /spec/template/spec/containers/0/ports
+        value:
+          - name: webhook
+            containerPort: 10261
+            protocol: TCP
+          - name: health
+            containerPort: 10262
+            protocol: TCP
+          - name: metrics
+            containerPort: 10263
+            protocol: TCP

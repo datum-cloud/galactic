@@ -1,0 +1,27 @@
+# Opt-in topology generation for fabric-router-controller: generate the
+# BGPPeers of this cell's fabric routers from FabricTopologies and the
+# FabricEndpoint records of their routing domain. Include it from an
+# overlay of config/fabric-router-controller/base:
+#
+#   resources:
+#     - ../../config/fabric-router-controller/base
+#   components:
+#     - ../../config/fabric-router-controller/components/topology
+#
+# It adds --topology and the ClusterRole that lets the controller write
+# BGPPeers, which nothing else in fabric-router-controller does. Generated
+# peers compile into candidate revisions like hand-authored ones, and a node
+# runs one only once a release promotes it. Nothing is generated until a
+# FabricTopology exists.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - rbac.yaml
+patches:
+  - target:
+      kind: Deployment
+      name: fabric-router-controller
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --topology

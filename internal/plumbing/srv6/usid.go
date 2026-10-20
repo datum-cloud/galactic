@@ -9,8 +9,8 @@ import (
 	"hash/fnv"
 	"net/netip"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // functionNibble maps an SRv6Function to its 4-bit uFMT 48+16 Function value.

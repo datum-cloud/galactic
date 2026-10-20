@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/sidecarmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -214,7 +216,9 @@ func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 }
 
 // ensureNodeSourceAddress registers this node's own SRv6 SID base into
-// node_src_addr_table. Idempotent and cheap, so it is safe on every call.
+// node_src_addr_table and reports whether it had to write it. Idempotent and
+// cheap, so it is safe on every call: it writes only when the table holds
+// nothing or another address, and reads the write back.
 //
 // The resolver configured through SetNodeSourceAddressResolver is the only
 // source. There is no local fallback: the value is this node's SID, which is
@@ -232,21 +236,17 @@ func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 // default, so no egress shard ever reflects this source back. A sidecar that
 // grows a NAT66 default would need a real Argument here first -- see
 // ingressSidecarBlock above for why these entries use a synthetic Block.
-func ensureNodeSourceAddress() error {
+func ensureNodeSourceAddress() (wrote bool, err error) {
 	resolver := getNodeSourceAddressResolver()
 	if resolver == nil {
-		return errors.New("no node source address resolver configured")
-	}
-	addr, err := resolver.ResolveNodeSourceAddress()
-	if err != nil {
-		return fmt.Errorf("resolve node source address: %w", err)
+		return false, errNodeSourceUnconfigured
 	}
 	nodeSrc, closer, err := egressroutemap.OpenPinnedNodeSourceAddress(ebpfPinDir)
 	if err != nil {
-		return fmt.Errorf("open pinned node_src_addr_table: %w", err)
+		return false, fmt.Errorf("open pinned node_src_addr_table: %w", err)
 	}
 	defer func() { _ = closer.Close() }()
-	return nodeSrc.Set(addr)
+	return syncNodeSourceAddress(resolver, nodeSrc)
 }
 
 // ensureEgressDatapath makes usid_egress's VRF resolution, from
@@ -283,7 +283,7 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	// Non-fatal, as at the CNI call site and for the same reason: resolving
 	// the address needs a converged underlay default route, which this pod can
 	// transiently lack right after a restart.
-	if err := ensureNodeSourceAddress(); err != nil {
+	if _, err := ensureNodeSourceAddress(); err != nil {
 		slog.Warn("ensureEgressDatapath: could not register this node's own SRv6 source address; "+
 			"egress routing will fail open until this succeeds", "err", err)
 	}
@@ -338,6 +338,11 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	if err := ifindexTable.Register(uint32(peerLink.Attrs().Index), ingressSidecarBlock, argument); err != nil {
 		return fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
 	}
+	// The peer is the platform's, not a tenant interface: traffic policy never
+	// evaluates it, and checks what it passes on at the tenant interface.
+	if err := tpmap.PutPinnedInfra(ebpfPinDir, uint32(peerLink.Attrs().Index)); err != nil {
+		return fmt.Errorf("mark veth peer as infrastructure for traffic policy: %w", err)
+	}
 
 	serviceProgram, err := ebpf.LoadPinnedProgram(filepath.Join(ebpfPinDir, attach.UsidServiceEgressPinName), nil)
 	if err != nil {
@@ -353,6 +358,20 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 
 	if err := attach.AttachEgress(serviceProgram, program, peerLink.Attrs().Name); err != nil {
 		return fmt.Errorf("attach usid_egress to VRF %d's veth peer %q: %w", tableID, peerLink.Attrs().Name, err)
+	}
+	// tp_deliver passes everything on an infra interface, but clears the
+	// mark usid_ingress sets on what it delivers here, so the mark cannot
+	// travel on with the packet and make a later check skip it.
+	deliver, err := ebpf.LoadPinnedProgram(filepath.Join(ebpfPinDir, attach.TpDeliverPinName), nil)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // an older datapath without tp_deliver
+		}
+		return fmt.Errorf("load pinned tp_deliver program: %w", err)
+	}
+	defer func() { _ = deliver.Close() }()
+	if err := attach.AttachDeliver(deliver, peerLink.Attrs().Name); err != nil {
+		return fmt.Errorf("attach tp_deliver to VRF %d's veth peer %q: %w", tableID, peerLink.Attrs().Name, err)
 	}
 	return nil
 }
@@ -430,6 +449,9 @@ func removeEgressDatapath(tableID uint32) error {
 				errs = append(errs, fmt.Errorf("unregister eBPF ifindex_vrf_table entry: %w", err))
 			}
 			_ = closer.Close()
+		}
+		if err := tpmap.RemovePinnedInterface(ebpfPinDir, uint32(peerLink.Attrs().Index)); err != nil {
+			errs = append(errs, fmt.Errorf("remove traffic policy row: %w", err))
 		}
 		if err := netlink.LinkDel(peerLink); err != nil {
 			errs = append(errs, fmt.Errorf("delete veth pair %q/%q: %w", inner, peer, err))

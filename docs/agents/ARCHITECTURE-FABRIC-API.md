@@ -418,7 +418,7 @@ access and gets no token.
 | bgpd's BMP module (`-M bmp`)                | Streams the Loc-RIB to the sidecar's station on `127.0.0.1:9348` when the node's `frr.conf` has the `bmp targets fabric-api` block. The `fabric-router` image's `daemons` file already loads the module. The production `frr.conf` renderer (infra) must emit the block |
 | cert-manager and its csi-driver             | Issues each `fabric-api-certs` pod's and the gateway's short-lived certificate and renews it in place. A required prerequisite; this repo installs none of it                                                                                                           |
 | The cell's `fabric-api` `Issuer`            | Backed by a dedicated per-cell CA. Owned by infra in production; the lab's own is `deploy/containerlab/resources/fabric-api/pki/`                                                                                                                                       |
-| `FabricQuery` CRD (`network.datumapis.com`) | Installed by infra in every cell. `config/fabric-api/crd/` is the lab and test copy                                                                                                                                                                                     |
+| `FabricQuery` CRD (`galactic.datumapis.com`) | Installed by infra in every cell. `config/fabric-api/crd/` is the lab and test copy                                                                                                                                                                                     |
 | NSO and Karmada                             | Create `FabricQuery` objects on the hub and propagate them to the pinned cluster; return status. Out of scope here                                                                                                                                                      |
 | `sigs.k8s.io/controller-runtime`            | Manager, leader election, cached client for `FabricQuery` and `Pod`                                                                                                                                                                                                     |
 | `google.golang.org/grpc`                    | Node and debug services, health service, keepalive                                                                                                                                                                                                                      |
@@ -432,7 +432,7 @@ access and gets no token.
 ## Key Design Decisions
 
 - **`FabricQuery` types live in galactic until the `network` repository ships
-  them.** The kind is `network.datumapis.com/v1alpha1`, as the plan locks, but
+  them.** The kind is `galactic.datumapis.com/v1alpha1`, as the plan locks, but
   `../network` does not contain it yet and is read-only from here. The Go types
   are in `internal/fabric/api/v1alpha1`; `config/fabric-api/crd/` holds a
   generated CRD for the lab and tests only (`task generate:crd`). The shared

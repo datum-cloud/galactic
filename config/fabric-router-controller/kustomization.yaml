@@ -1,0 +1,14 @@
+# fabric-router-controller's cell-wide prerequisites: its ServiceAccount
+# and RBAC, safe and idempotent to apply in any cell.
+#
+# Deliberately NOT included: base/, the Deployment. It compiles every
+# fabric-class BGPRouter into revisions as soon as it runs, so install it
+# only after the galactic.datumapis.com CRDs (config/crd). base/ runs the
+# revision compiler alone; components/rollout adds deployments and
+# releases.
+#
+# Not part of the root config/kustomization.yaml: fabric routing through
+# the API is opt-in.
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml

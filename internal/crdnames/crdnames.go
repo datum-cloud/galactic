@@ -199,7 +199,7 @@ func BGPAdvertisementName(vpc, vpcAttachment, nodeName string) string {
 const serviceVIPBindingHashLen = 16
 
 // ServiceVIPBindingName returns the deterministic name of the ServiceVIPBinding
-// galactic-router writes for one backend of one NetworkRule VIP on nodeName:
+// galactic-router writes for one backend of one NetworkService VIP on nodeName:
 // "<rule>-<node>-<hash>", where the hash covers every part of the identity, so
 // two backends of one VIP on one node, the case a selector makes routine, get
 // distinct names. The readable prefix is cut to keep the result within an

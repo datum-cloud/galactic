@@ -201,7 +201,7 @@ and a `NetworkGateway` named after the node. Each site has its own VIP
 (`2001:db8:6060:1::1` in dfw, `:2::1` in sjc, `:3::1` in iad), in a `/64` only
 that site's edge nodes originate, and two `ns60` backends on its compute node
 that answer TCP and UDP on port 80 with their pod name and the client address
-they saw. The site's `NetworkRule`s select both through their
+they saw. The site's `NetworkService`s select both through their
 `VPCAttachment`s, and the compute node writes one `ServiceVIPBinding` per rule
 per backend, labelled `app.kubernetes.io/managed-by=galactic-router`.
 `verify:gateway` counts and checks only those, and `deploy:galactic-gateway`
@@ -210,7 +210,7 @@ an older lab applied. `verify:gateway-ingress` fails unless both backends
 answer.
 
 ```bash
-# NetworkGateways Ready, NetworkRules Accepted, ServiceVIPBindings Bound
+# NetworkGateways Ready, NetworkServices Accepted, ServiceVIPBindings Bound
 task verify:gateway
 
 # TCP and UDP from remote-host to every site's VIP, pinned through each

@@ -1,4 +1,4 @@
-# ns60's VIP backends, two per site, behind that site's NetworkRules
+# ns60's VIP backends, two per site, behind that site's NetworkServices
 # (resources/galactic-gateway/<site>/). Each answers TCP and UDP on port 80
 # with its own pod name and the address it saw the client as, which is how
 # scripts/verify-gateway-ingress.sh tells which backend answered and checks

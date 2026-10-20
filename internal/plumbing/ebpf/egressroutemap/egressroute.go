@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strconv"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -215,7 +216,7 @@ func resolveNeighbor(linkIndex int, nextHop net.IP) (net.HardwareAddr, error) {
 		return mac, nil
 	}
 
-	solicitNeighbor(nextHop)
+	solicitNeighbor(linkIndex, nextHop)
 
 	deadline := time.Now().Add(neighborResolveTimeout)
 	for {
@@ -249,9 +250,15 @@ func resolveNeighbor(linkIndex int, nextHop net.IP) (net.HardwareAddr, error) {
 // drives the kernel to resolve the neighbor before the packet reaches the wire.
 // Errors from Dial and Write are ignored deliberately: resolveNeighbor's poll
 // loop is the only judge of whether this worked.
-func solicitNeighbor(nextHop net.IP) {
+//
+// The destination carries linkIndex as its zone. A link-local next hop needs
+// one: without a scope ID the kernel refuses the connect with EINVAL, so
+// nothing is sent and the next hop never resolves. The kernel ignores the zone
+// for any other address.
+func solicitNeighbor(linkIndex int, nextHop net.IP) {
 	dialer := &net.Dialer{Timeout: neighborSolicitDialTimeout}
-	conn, err := dialer.DialContext(context.Background(), "udp6", net.JoinHostPort(nextHop.String(), "9"))
+	host := nextHop.String() + "%" + strconv.Itoa(linkIndex)
+	conn, err := dialer.DialContext(context.Background(), "udp6", net.JoinHostPort(host, "9"))
 	if err != nil {
 		return
 	}
@@ -540,6 +547,9 @@ type RefreshResult struct {
 	// serves their class; in ordered mode because no configured shard
 	// resolves for them yet.
 	InGroup int
+	// Removed is the shard group sentinels deleted in hashed mode because
+	// their route's class is no longer configured.
+	Removed int
 	// GroupRoutes counts, by group ID, the sentinels egress_route_table holds
 	// once the sweep's writes are done: those left in place and those just
 	// written. Valid only when Refresh returns no error.
@@ -561,6 +571,31 @@ type RefreshOption func(*refreshConfig)
 
 type refreshConfig struct {
 	groupFor func(prefix *net.IPNet) (uint32, bool)
+	layout   *ClassLayout
+}
+
+// ClassLayout is the hashed-mode assignment of translation classes to shard
+// groups that a sweep enforces on existing sentinels.
+type ClassLayout struct {
+	// Configured is every class this node routes.
+	Configured map[TranslationClass]bool
+	// Assigned is the group each configured class owns. A configured class
+	// lacks one only while every group is still held by a retired class.
+	Assigned map[TranslationClass]uint32
+	// Published is the class of every group that has a snapshot.
+	Published map[uint32]TranslationClass
+}
+
+// WithClassLayout makes the sweep keep every sentinel on a group of its own
+// route's class. A sentinel whose route's class is not configured is deleted,
+// so its group can be retired. One naming a group published for another class
+// is moved to its class's assigned group, even an empty one, which drops
+// rather than translate the wrong class. Every other sentinel is left to
+// WithShardGroups, or to ordered mode without it.
+func WithClassLayout(layout ClassLayout) RefreshOption {
+	return func(c *refreshConfig) {
+		c.layout = &layout
+	}
 }
 
 // WithShardGroups runs the sweep in hashed mode. groupFor names the group
@@ -659,7 +694,10 @@ func (t *EgressRouteTable) Refresh(
 		key   prog.UsidEgressRouteKey
 		value prog.UsidEgressRouteValue
 	}
-	var updates []pending
+	var (
+		updates []pending
+		removes []prog.UsidEgressRouteKey
+	)
 
 	var (
 		key   prog.UsidEgressRouteKey
@@ -684,6 +722,13 @@ func (t *EgressRouteTable) Refresh(
 		}
 
 		if isGroupSentinel(value) {
+			if cfg.layout != nil && cfg.layout.retired(keyPrefix(key)) {
+				removes = append(removes, key)
+				groupID, _ := sentinelGroup(value)
+				slog.Info("egressroutemap: refresh: egress route removed, its translation class is no longer configured",
+					"table", key.TableId, "prefix", keyPrefix(key), "group", groupID)
+				continue
+			}
 			update, ok := t.refreshSentinel(key, value, cfg, shards, &result)
 			if ok {
 				updates = append(updates, pending{key: key, value: update})
@@ -750,7 +795,34 @@ func (t *EgressRouteTable) Refresh(
 		}
 		result.Refreshed++
 	}
+	for _, k := range removes {
+		if err := t.table.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return result, fmt.Errorf("egressroutemap: egress_route_table: refresh: remove table=%d: %w", k.TableId, err)
+		}
+		result.Removed++
+	}
 	return result, nil
+}
+
+// retired reports whether a route toward prefix belongs to a class this node
+// no longer routes.
+func (l *ClassLayout) retired(prefix *net.IPNet) bool {
+	class, ok := ClassForRoute(prefix)
+	return ok && !l.Configured[class]
+}
+
+// misplaced returns the group a sentinel for prefix naming groupID must move
+// to when groupID is not published for prefix's class.
+func (l *ClassLayout) misplaced(prefix *net.IPNet, groupID uint32) (target uint32, move bool) {
+	class, ok := ClassForRoute(prefix)
+	if !ok {
+		return 0, false
+	}
+	if published, present := l.Published[groupID]; present && published == class {
+		return 0, false
+	}
+	target, ok = l.Assigned[class]
+	return target, ok && target != groupID
 }
 
 // refreshSentinel decides what one shard group sentinel becomes. In hashed
@@ -763,6 +835,15 @@ func (t *EgressRouteTable) refreshSentinel(
 	result *RefreshResult,
 ) (prog.UsidEgressRouteValue, bool) {
 	groupID, argument := sentinelGroup(value)
+	if cfg.layout != nil {
+		if target, move := cfg.layout.misplaced(keyPrefix(key), groupID); move {
+			result.Grouped++
+			result.GroupRoutes[target]++
+			slog.Warn("egressroutemap: refresh: egress route named a group of another translation class; moved to its own",
+				"table", key.TableId, "fromGroup", groupID, "toGroup", target)
+			return groupSentinel(target, argument), true
+		}
+	}
 	if cfg.groupFor != nil {
 		target, ok := cfg.groupFor(keyPrefix(key))
 		if !ok || target == groupID {

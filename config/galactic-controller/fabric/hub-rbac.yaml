@@ -1,0 +1,16 @@
+# Apply this ClusterRole on the federation hub and bind it to the identity in
+# the mounted hub kubeconfig. The binding is deployment specific.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: galactic-controller-fabric
+rules:
+  - apiGroups: [networking.datumapis.com]
+    resources: [networks, networkcontexts]
+    verbs: [get, list, watch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [networkfabricidentities]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [policy.karmada.io]
+    resources: [clusterpropagationpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]

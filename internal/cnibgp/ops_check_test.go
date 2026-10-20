@@ -12,10 +12,10 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 func withNodeName(t *testing.T, nodeName string) {

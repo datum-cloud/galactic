@@ -26,12 +26,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vip"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // serviceVIPBindingFinalizer guards teardown: the veth or tap unbind must
@@ -356,10 +356,10 @@ func (r *ServiceVIPBindingReconciler) applyUnbind(ctx context.Context, binding *
 // from those of another live binding with the same values, so when one exists
 // on this node nothing is removed: that binding owns the rows now.
 //
-// Registration writes rows only for an IPv6 VIP and backend, so an IPv4 or
-// unparseable address means there is nothing to remove, which must not block
-// deletion. Every removal is attempted even if an earlier one fails, and the
-// errors are joined.
+// Registration writes rows only for a VIP and backend of one family, so an
+// unparseable address or a mixed pair means there is nothing to remove, which
+// must not block deletion. Every removal is attempted even if an earlier one
+// fails, and the errors are joined.
 func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
 ) error {
@@ -374,10 +374,9 @@ func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	}
 	logger := log.FromContext(ctx).WithValues("binding", client.ObjectKeyFromObject(binding))
 
-	vipAddr, vipOK := ipv6Address(binding.Spec.VIPAddress)
-	backendAddr, backendOK := ipv6Address(binding.Spec.BackendAddress)
-	if !vipOK || !backendOK {
-		logger.Info("vipAddress or backendAddress is not an IPv6 address; no vip_xlat_table rows to remove",
+	vipAddr, backendAddr, ok := xlatAddresses(binding)
+	if !ok {
+		logger.Info("vipAddress and backendAddress are not addresses of one family; no vip_xlat_table rows to remove",
 			"vipAddress", binding.Spec.VIPAddress, "backendAddress", binding.Spec.BackendAddress)
 		return nil
 	}
@@ -394,8 +393,8 @@ func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 		return nil
 	}
 
-	backendAddrIP, _ := netip.AddrFromSlice(backendAddr) // a 16-byte slice ipv6Address returned
-	slot := srv6.BackendSlot(backendAddrIP.Unmap(), backendPort)
+	backendAddrIP, _ := netip.AddrFromSlice(backendAddr) // a slice xlatAddresses returned
+	slot := srv6.BackendSlot(backendAddrIP, backendPort)
 
 	var errs []error
 	if _, err := r.VIPTranslationTable.UnregisterBinding(
@@ -431,23 +430,32 @@ func (r *ServiceVIPBindingReconciler) liveTwin(
 			b.Spec.Port != binding.Spec.Port || b.Spec.BackendPort != binding.Spec.BackendPort {
 			continue
 		}
-		bVIP, vipOK := ipv6Address(b.Spec.VIPAddress)
-		bBackend, backendOK := ipv6Address(b.Spec.BackendAddress)
-		if vipOK && backendOK && bVIP.Equal(vipAddr) && bBackend.Equal(backendAddr) {
+		bVIP, bBackend, ok := xlatAddresses(b)
+		if ok && bVIP.Equal(vipAddr) && bBackend.Equal(backendAddr) {
 			return b, nil
 		}
 	}
 	return nil, nil
 }
 
-// ipv6Address parses s and reports whether it is an IPv6 address, the only
-// family vip_xlat_table holds. An IPv4-mapped address counts as IPv4.
-func ipv6Address(s string) (net.IP, bool) {
-	addr, err := netip.ParseAddr(s)
-	if err != nil || !addr.Unmap().Is6() {
-		return nil, false
+// xlatAddresses returns binding's VIP and backend addresses in the form
+// vipxlatmap takes, 4 bytes for IPv4 and 16 for IPv6, an IPv4-mapped address
+// counting as IPv4. It reports false unless both parse and share a family,
+// the only bindings vip_xlat_table holds rows for.
+func xlatAddresses(binding *bgpv1alpha1.ServiceVIPBinding) (vipAddr, backendAddr net.IP, ok bool) {
+	v, err := netip.ParseAddr(binding.Spec.VIPAddress)
+	if err != nil {
+		return nil, nil, false
 	}
-	return net.IP(addr.AsSlice()), true
+	b, err := netip.ParseAddr(binding.Spec.BackendAddress)
+	if err != nil {
+		return nil, nil, false
+	}
+	v, b = v.Unmap(), b.Unmap()
+	if v.Is4() != b.Is4() {
+		return nil, nil, false
+	}
+	return net.IP(v.AsSlice()), net.IP(b.AsSlice()), true
 }
 
 // unregisterRow removes one vip_xlat_table row.
@@ -536,6 +544,11 @@ func parseVIPBindingRows(binding *bgpv1alpha1.ServiceVIPBinding) (vipBindingRows
 			binding.Spec.BackendAddress, err)
 	}
 	vipIP, backendIP = vipIP.Unmap(), backendIP.Unmap()
+	if vipIP.Is4() != backendIP.Is4() {
+		return vipBindingRows{}, fmt.Errorf(
+			"vipAddress %s and backendAddress %s are not of one address family: a VIP is translated only "+
+				"to a backend of its own family", vipIP, backendIP)
+	}
 
 	proto, err := ipProtocolNumber(binding.Spec.Protocol)
 	if err != nil {
@@ -679,13 +692,13 @@ func (e *vipRowConflictError) Error() string {
 	return "not programmed: " + strings.Join(parts, "; ")
 }
 
-// ipProtocolNumber maps a NetworkRuleProtocol to the IANA protocol number
+// ipProtocolNumber maps a NetworkServiceProtocol to the IANA protocol number
 // vip_xlat_table's key uses (usid.c's USID_IPPROTO_TCP/UDP).
-func ipProtocolNumber(proto bgpv1alpha1.NetworkRuleProtocol) (uint8, error) {
+func ipProtocolNumber(proto bgpv1alpha1.NetworkServiceProtocol) (uint8, error) {
 	switch proto {
-	case bgpv1alpha1.NetworkRuleProtocolTCP:
+	case bgpv1alpha1.NetworkServiceProtocolTCP:
 		return ipProtoTCP, nil
-	case bgpv1alpha1.NetworkRuleProtocolUDP:
+	case bgpv1alpha1.NetworkServiceProtocolUDP:
 		return ipProtoUDP, nil
 	default:
 		return 0, fmt.Errorf(
@@ -743,12 +756,23 @@ func resolveVIPBindingVRF(idx *backendSIDIndex, nodeName, vpcRef string) (vipBin
 	if vpcRef == "" {
 		return vipBindingVRF{}, errors.New("binding has no vpcRef")
 	}
+	// idx.routers holds only Galactic-owned routers. Ranging over a map
+	// picks in random order, so more than one on the node is an error
+	// rather than a coin toss between two locators.
 	var router *bgpv1alpha1.BGPRouter
 	for _, rt := range idx.routers {
-		if rt.Spec.TargetRef.Name == nodeName {
-			router = rt
-			break
+		if rt.Spec.TargetRef.Name != nodeName {
+			continue
 		}
+		if router != nil {
+			first, second := router.Name, rt.Name
+			if second < first {
+				first, second = second, first
+			}
+			return vipBindingVRF{}, fmt.Errorf("ambiguous BGP config: BGPRouters %s and %s both target node %q",
+				first, second, nodeName)
+		}
+		router = rt
 	}
 	if router == nil {
 		return vipBindingVRF{}, fmt.Errorf("no BGPRouter targets node %q", nodeName)
@@ -875,7 +899,7 @@ func (r *ServiceVIPBindingReconciler) advertisementRequests(
 		}
 		return nil
 	}
-	if router.Spec.TargetRef.Name != r.NodeName {
+	if router.Spec.TargetRef.Name != r.NodeName || !bgpv1alpha1.IsLegacyOwned(router) {
 		return nil
 	}
 	list := &bgpv1alpha1.ServiceVIPBindingList{}

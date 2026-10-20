@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 const (
@@ -65,7 +65,7 @@ func newDepartureTestBinding(name, node string, generated bool) *bgpv1alpha1.Ser
 
 // newDepartureTestRule returns testRuleName with a BackendsBound condition
 // for each of nodes.
-func newDepartureTestRule(nodes ...string) *bgpv1alpha1.NetworkRule {
+func newDepartureTestRule(nodes ...string) *bgpv1alpha1.NetworkService {
 	rule := newBindingTestRule()
 	for _, node := range nodes {
 		meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
@@ -81,7 +81,7 @@ func newDepartureReconciler(t *testing.T, objs ...client.Object) (*NodeDeparture
 	t.Helper()
 	c := fake.NewClientBuilder().
 		WithScheme(newDepartureTestScheme(t)).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}, &bgpv1alpha1.ServiceVIPBinding{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkService{}, &bgpv1alpha1.ServiceVIPBinding{}).
 		WithObjects(objs...).
 		Build()
 	return &NodeDepartureReconciler{Client: c, APIReader: c, Interval: testDepartureSweep}, c

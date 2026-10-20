@@ -23,6 +23,8 @@ tasks:
       - "build:galactic-cni"
       - "build:galactic-nat"
       - "build:galactic-gateway"
+      - "build:galactic-controller"
+      - "build:fabric-router-controller"
       - "build:remote-host"
 
   "build:node":
@@ -35,42 +37,42 @@ tasks:
     # No --build-arg FRR_VERSION: the lab builds the FRR version the
     # Dockerfile pins, the same one the published image ships to production.
     cmds:
-      - docker build --network=host --build-context network=../../../network -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
+      - docker build --network=host -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
 
   "build:fabric-api":
     desc: Build the fabric-api image (node sidecar, cell gateway, janitor)
     cmds:
-      - docker build --network=host --build-context network=../../../network -t fabric-api:latest -f ../../containers/fabric-api/Dockerfile ../..
+      - docker build --network=host -t fabric-api:latest -f ../../containers/fabric-api/Dockerfile ../..
 
-  # --build-context network=../../../network satisfies go.mod's local
-  # `replace go.datum.net/network => ../network` (see that line's own
-  # comment) inside each Dockerfile's "network" build stage -- see
-  # containers/galactic-{router,cni,nat,gateway}/Dockerfile's own comment on
-  # that stage for the full mechanism. ../../../network is this Taskfile's
-  # own cwd (deploy/containerlab) relative to the network repo checked out
-  # as galactic's sibling; harmless to pass even once that replace
-  # directive is eventually removed, since the Dockerfile's "network"
-  # stage is unused by go.mod at that point regardless of what's passed
-  # here.
   "build:galactic-router":
     desc: Build the galactic-router container image
     cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
+      - docker build --network=host -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
 
   "build:galactic-cni":
     desc: Build the galactic-cni installer image
     cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
+      - docker build --network=host -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
 
   "build:galactic-nat":
     desc: Build the galactic-nat egress datapath image
     cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-nat:latest -f ../../containers/galactic-nat/Dockerfile ../..
+      - docker build --network=host -t galactic-nat:latest -f ../../containers/galactic-nat/Dockerfile ../..
 
   "build:galactic-gateway":
     desc: Build the galactic-gateway edge load balancer image
     cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
+      - docker build --network=host -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
+
+  "build:galactic-controller":
+    desc: Build the galactic-controller image (traffic policy's cell role)
+    cmds:
+      - docker build --network=host -t galactic-controller:latest -f ../../containers/galactic-controller/Dockerfile ../..
+
+  "build:fabric-router-controller":
+    desc: Build the fabric-router-controller image (typed fabric routing)
+    cmds:
+      - docker build --network=host -t fabric-router-controller:latest -f ../../containers/fabric-router-controller/Dockerfile ../..
 
   "build:remote-host":
     desc: Build the off-fabric remote host image (nginx)
@@ -95,12 +97,18 @@ tasks:
       # mounts a csi-driver volume, and without the driver the pod (FRR
       # included) cannot start.
       - task: "deploy:cert-manager"
+      # After cert-manager, which issues its webhook's certificate, and
+      # before deploy:galactic-router, whose traffic policy reconciler
+      # watches the CRDs it installs.
+      - task: "deploy:traffic-policy"
+      - task: "deploy:node-addresses"
       - task: "deploy:fabric"
+      - task: "deploy:fabric-routing"
       - task: "deploy:bmp-collector"
       - task: "deploy:galactic-router"
       - task: "deploy:galactic-nat"
       - task: "deploy:scenarios"
-      # After the scenarios: the gateway's NetworkRules select ns60's
+      # After the scenarios: the gateway's NetworkServices select ns60's
       # backends, which deploy:scenarios creates.
       - task: "deploy:galactic-gateway"
       - task: "deploy:fabric-api"
@@ -263,6 +271,9 @@ tasks:
         load galactic-cni:latest {{.CNI_NODES}}
         load galactic-nat:latest {{.NAT_NODES}}
         load galactic-gateway:latest {{.GATEWAY_NODES}}
+        # The cell controller schedules on any untainted worker.
+        load galactic-controller:latest {{.FABRIC_NODES}}
+        load fabric-router-controller:latest {{.FABRIC_NODES}}
 
   "deploy:system":
     desc: Install CRDs, namespace, and RBAC
@@ -297,10 +308,30 @@ tasks:
     cmds:
       - sudo ./scripts/host-setup.sh
 
+  "deploy:node-addresses":
+    desc: Address the fabric router nodes' interfaces, outside FRR
+    cmds:
+      - ./scripts/deploy-node-addresses.sh
+
   "deploy:fabric":
     desc: Install the FRR fabric DaemonSet
     cmds:
       - ./scripts/deploy-fabric.sh
+
+  "deploy:fabric-routing":
+    desc: Install fabric-router-controller and import every fabric router into the typed API
+    cmds:
+      - ./scripts/deploy-fabric-routing.sh
+
+  "deploy:fabric-topology":
+    desc: Generate each site's fabric peers from its topology instead of the imported ones (SITES, default sjc and iad)
+    cmds:
+      - ./scripts/deploy-fabric-topology.sh
+
+  "deploy:traffic-policy":
+    desc: Install the traffic policy and networking CRDs and galactic-controller in every cluster
+    cmds:
+      - ./scripts/deploy-traffic-policy.sh
 
   "deploy:cert-manager":
     desc: Install cert-manager and its csi-driver (fabric-api certificates)
@@ -345,33 +376,44 @@ tasks:
   "deploy:ns10":
     desc: Deploy ns10 test VPC (IPv6-only, fd20 ULA)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns10 dfw sjc iad
       - ./scripts/deploy-ns.sh ns10 dfw sjc iad
+      - ./scripts/publish-attachments.sh ns10 dfw sjc iad
 
   "deploy:ns20":
     desc: Deploy ns20 test VPC (dual-stack)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns20 dfw sjc iad
       - ./scripts/deploy-ns.sh ns20 dfw sjc iad
+      - ./scripts/publish-attachments.sh ns20 dfw sjc iad
 
   "deploy:ns30":
     desc: Deploy ns30 test VPC (dfw only, 2 pods)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns30 dfw
       - ./scripts/deploy-ns.sh ns30 dfw
+      - ./scripts/publish-attachments.sh ns30 dfw
 
   "deploy:ns40":
     desc: Deploy ns40 test VPC (iad only, 2 pods)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns40 iad
       - ./scripts/deploy-ns.sh ns40 iad
+      - ./scripts/publish-attachments.sh ns40 iad
 
   "deploy:ns60":
     desc: Deploy ns60 test VPC (two VIP backends per site, on one node)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns60 dfw sjc iad
       - ./scripts/deploy-ns.sh ns60 dfw sjc iad
-      - ./scripts/publish-ns60-attachments.sh dfw sjc iad
+      - ./scripts/publish-attachments.sh ns60 dfw sjc iad
 
   "deploy:ns71":
     desc: Deploy ns71 test VPCs (overlapping ULA on one node, same-node collision fixture)
     cmds:
+      - ./scripts/deploy-tenant-policy.sh ns71 sjc
       - ./scripts/deploy-ns.sh ns71 sjc
+      - ./scripts/publish-attachments.sh ns71 sjc
 
   verify:
     desc: Run all verification checks
@@ -400,6 +442,9 @@ tasks:
       - task: "verify:nat64-non-global"
       - task: "verify:nat-active-active"
       - task: "verify:scenarios"
+      # Last: it briefly rebinds and edits tenant policies, and restores
+      # them before it returns.
+      - task: "verify:traffic-policy"
 
   # First, because every check after it rides these bonds: a member that
   # never joined its aggregate leaves everything else passing over the
@@ -426,6 +471,13 @@ tasks:
           echo "--- $r (ipv4) ---"
           docker exec clab-gvpc-$r vtysh -c "show bgp ipv4 unicast summary"
         done
+
+  "verify:fabric-routing":
+    desc: >-
+      Move one site's fabric routers to the typed API and exercise every
+      activation path; leaves them on the CRD source (not part of verify)
+    cmds:
+      - ./scripts/verify-fabric-routing.sh
 
   "verify:bgp-fabric":
     desc: Verify fabric BGP sessions on all sites (both address families)
@@ -518,7 +570,7 @@ tasks:
         for site in dfw sjc iad; do
           cp=${site}-control-plane
           echo "--- ${site} ---"
-          docker exec ${cp} kubectl -n galactic-system get networkgateways,networkrules,servicevipbindings
+          docker exec ${cp} kubectl -n galactic-system get networkgateways,networkservices,servicevipbindings
           # Ready: the engine loaded every rule and advertised it. Accepted:
           # the rule found a gateway. Bound: the backend's node rewrites the
           # VIP for it. Each backend's node writes one binding per rule per
@@ -531,7 +583,7 @@ tasks:
             echo "FAIL ${site}: ${bindings} generated ServiceVIPBindings, want 4" >&2
             rc=1
           fi
-          for check in "networkgateway Ready --all" "networkrule Accepted --all" "servicevipbinding Bound -l=${generated}"; do
+          for check in "networkgateway Ready --all" "networkservice Accepted --all" "servicevipbinding Bound -l=${generated}"; do
             set -- ${check}
             if ! docker exec ${cp} kubectl -n galactic-system wait $1 $3 \
                 --for=condition=$2 --timeout=10s >/dev/null; then
@@ -1104,6 +1156,13 @@ tasks:
       - task: "verify:ns20"
       - task: "verify:ns30"
       - task: "verify:ns40"
+
+  # Not idempotent while it runs: it edits ns60's dfw policy and unbinds
+  # ns30/private-b's ingress for a moment, and restores both on exit.
+  "verify:traffic-policy":
+    desc: Verify every tenant binding is installed and each path forwards what it grants and drops what it does not
+    cmds:
+      - ./scripts/verify-traffic-policy.sh
 
   "verify:ns10":
     desc: Verify ns10 ping (IPv6-only, 3-site mesh)

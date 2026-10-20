@@ -20,9 +20,9 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 
+	api "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/serviceroutemap"
-	api "go.datum.net/network/api/v1alpha1"
 )
 
 type routeRef struct {
@@ -918,11 +918,11 @@ func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
 	return nil
 }
 
-func protocolNumber(protocol api.NetworkRuleProtocol) (uint8, error) {
+func protocolNumber(protocol api.NetworkServiceProtocol) (uint8, error) {
 	switch protocol {
-	case api.NetworkRuleProtocolTCP:
+	case api.NetworkServiceProtocolTCP:
 		return serviceroutemap.ProtocolTCP, nil
-	case api.NetworkRuleProtocolUDP:
+	case api.NetworkServiceProtocolUDP:
 		return serviceroutemap.ProtocolUDP, nil
 	default:
 		return 0, fmt.Errorf("unsupported service route protocol %q", protocol)

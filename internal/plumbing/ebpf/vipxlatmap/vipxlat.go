@@ -32,6 +32,34 @@
 // VIP and port or the same backend and port. Deciding which one owns it is the
 // caller's job, since this table has no record of who wrote a row.
 //
+// # Both address families, one layout
+//
+// A row is IPv6 or IPv4, its VIP and backend always of one family. struct
+// vip_xlat_key and struct vip_xlat_value carry 16-byte addresses, so an IPv4
+// row stores both addresses in IPv4-mapped form (::ffff:a.b.c.d), the form
+// usid.c's vip_xlat4 builds from an IPv4 header, and the IPv6 rewrite paths
+// skip an IPv4-mapped address, so the two families never share a row. Callers
+// pass an IPv4 address as a 4-byte net.IP. A 16-byte IPv4-mapped one is
+// refused rather than taken as IPv4, since net.IP cannot tell it apart from an
+// IPv6 address, and so is a binding that mixes the families. Reads unmap: an
+// IPv4 row's Key.Addr is a plain IPv4 netip.Addr and its RewriteAddr a 4-byte
+// net.IP.
+//
+// The map's layout predates IPv4 rows and is unchanged by them: a 32-byte key
+// (block, argument, proto, direction, port, slot, address) and an 18-byte value
+// (address, port), pinned at <attach.PinDir>/vip_xlat_table. galactic-cni loads
+// and pins it, and attach.Load reuses the pin with its rows across restarts and
+// upgrades. galactic-router's ServiceVIPBinding reconciler is the only writer
+// besides the vip xlat CLI, removing a binding's rows when the binding is
+// deleted, and its periodic sweep removes rows no binding claims. Every IPv6
+// row a release before IPv4 rows wrote reads, matches and is swept the same
+// way. Rolling back to such a release leaves any IPv4 rows in place, inert for
+// the traffic the gateway sends, since its datapath looks up no IPv4 packet,
+// though its IPv6 path can still match an IPv6 packet sent to an IPv4-mapped
+// VIP against one. Its router can delete none of them and its sweep counts an
+// error for each on every pass, so delete the IPv4 bindings, or remove their
+// rows with this release's vip xlat CLI, before rolling back.
+//
 // # Generation is per-process here, unlike vrf_table
 //
 // usidmap.VRFTable stores its crash-safety generation in the kernel value
@@ -164,10 +192,10 @@ func validatePort(port uint16) error {
 	return nil
 }
 
-// addrTo16 returns addr's raw 16 bytes in wire order, or an error if addr is
-// not a genuine IPv6 address. Both datapath paths are IPv6-only by design, so
-// an IPv4 or IPv4-mapped address is rejected rather than silently truncated or
-// zero-padded into something the datapath would misread.
+// addrTo16 returns addr in the 16-byte form the map stores: an IPv6 address
+// as is, and a 4-byte IPv4 address in its IPv4-mapped form. A 16-byte
+// IPv4-mapped address is refused, so no caller can write an IPv6 row under an
+// IPv4 row's key; see the package doc comment.
 func addrTo16(addr net.IP) ([16]byte, error) {
 	if addr == nil {
 		return [16]byte{}, errors.New("vipxlatmap: vip_xlat_table: address is nil")
@@ -176,12 +204,28 @@ func addrTo16(addr net.IP) ([16]byte, error) {
 	if !ok {
 		return [16]byte{}, fmt.Errorf("vipxlatmap: vip_xlat_table: %v is not a valid IP address", addr)
 	}
-	a = a.Unmap()
-	if !a.Is6() {
+	if a.Is4In6() {
 		return [16]byte{}, fmt.Errorf(
-			"vipxlatmap: vip_xlat_table: %s is not a 16-byte IPv6 address (the tap-VIP substitution is IPv6-only)", a)
+			"vipxlatmap: vip_xlat_table: %s is an IPv4-mapped IPv6 address; pass an IPv4 address as 4 bytes",
+			addr[12:])
 	}
 	return a.As16(), nil
+}
+
+// sameFamily returns an error unless a and b, already validated by addrTo16,
+// are of one family. A row rewrites one family's address to the same
+// family's: the datapath never translates between them.
+func sameFamily(a, b net.IP) error {
+	if (len(a) == net.IPv4len) != (len(b) == net.IPv4len) {
+		return fmt.Errorf("vipxlatmap: vip_xlat_table: %s and %s are not of one address family", a, b)
+	}
+	return nil
+}
+
+// fromWire returns the address a 16-byte map address holds, unmapping an
+// IPv4 row's.
+func fromWire(raw [16]byte) netip.Addr {
+	return netip.AddrFrom16(raw).Unmap()
 }
 
 // directionIngress and directionEgress mirror the datapath's direction
@@ -254,6 +298,9 @@ func (t *VipXlatTable) register(
 	if err != nil {
 		return fmt.Errorf("vipxlatmap: vip_xlat_table: register: rewrite address: %w", err)
 	}
+	if err := sameFamily(keyAddr, valAddr); err != nil {
+		return fmt.Errorf("vipxlatmap: vip_xlat_table: register: %w", err)
+	}
 
 	value := prog.UsidVipXlatValue{
 		Addr: rawAddr,
@@ -294,7 +341,7 @@ func (t *VipXlatTable) RegisterEgress(
 }
 
 // kernelKey composes the kernel key for (direction, block, argument, slot,
-// proto, addr, port), returning an error if addr is not an IPv6 address.
+// proto, addr, port), returning an error if addrTo16 refuses addr.
 func kernelKey(
 	direction uint8, block uint64, argument, slot uint16, proto uint8, addr net.IP, port uint16,
 ) (prog.UsidVipXlatKey, error) {
@@ -383,25 +430,33 @@ func newBinding(
 	if err != nil {
 		return binding{}, fmt.Errorf("vipxlatmap: vip_xlat_table: unregister binding: backend address: %w", err)
 	}
+	if err := sameFamily(vipAddr, backendAddr); err != nil {
+		return binding{}, fmt.Errorf("vipxlatmap: vip_xlat_table: unregister binding: %w", err)
+	}
 	return binding{
 		slot: slot, proto: proto, vip: rawVIP, vipPort: vipPort, backend: rawBackend, backendPort: backendPort,
 	}, nil
 }
 
+// vipIP and backendIP return b's addresses as callers pass them: 4 bytes for
+// an IPv4 binding, 16 for an IPv6 one.
+func (b binding) vipIP() net.IP     { return net.IP(fromWire(b.vip).AsSlice()) }
+func (b binding) backendIP() net.IP { return net.IP(fromWire(b.backend).AsSlice()) }
+
 // isIngressRow reports whether e is the ingress row b writes: keyed on b's
 // slot, VIP and port, and rewriting to b's backend and port.
 func (b binding) isIngressRow(e Entry) bool {
 	return e.Direction == DirectionIngress && e.Slot == b.slot && e.Proto == b.proto &&
-		e.Addr == netip.AddrFrom16(b.vip) && e.Port == b.vipPort &&
-		[16]byte(e.RewriteAddr) == b.backend && e.RewritePort == b.backendPort
+		e.Addr == fromWire(b.vip) && e.Port == b.vipPort &&
+		e.RewriteAddr.Equal(b.backendIP()) && e.RewritePort == b.backendPort
 }
 
 // isEgressRow reports whether e is the egress row b writes: keyed on b's
 // backend and port, and rewriting to b's VIP and port.
 func (b binding) isEgressRow(e Entry) bool {
 	return e.Direction == DirectionEgress && e.Slot == 0 && e.Proto == b.proto &&
-		e.Addr == netip.AddrFrom16(b.backend) && e.Port == b.backendPort &&
-		[16]byte(e.RewriteAddr) == b.vip && e.RewritePort == b.vipPort
+		e.Addr == fromWire(b.backend) && e.Port == b.backendPort &&
+		e.RewriteAddr.Equal(b.vipIP()) && e.RewritePort == b.vipPort
 }
 
 // removeAt removes b's rows at (block, argument), reading each one first and
@@ -416,23 +471,23 @@ func (b binding) isEgressRow(e Entry) bool {
 func (t *VipXlatTable) removeAt(block uint64, argument uint16, b binding) ([]Entry, error) {
 	var removed []Entry
 
-	ingress, found, err := t.get(directionIngress, block, argument, b.slot, b.proto, net.IP(b.vip[:]), b.vipPort)
+	ingress, found, err := t.get(directionIngress, block, argument, b.slot, b.proto, b.vipIP(), b.vipPort)
 	if err != nil {
 		return nil, err
 	}
 	if found && b.isIngressRow(ingress) {
-		if err := t.unregister(directionIngress, block, argument, b.slot, b.proto, net.IP(b.vip[:]), b.vipPort); err != nil {
+		if err := t.unregister(directionIngress, block, argument, b.slot, b.proto, b.vipIP(), b.vipPort); err != nil {
 			return nil, err
 		}
 		removed = append(removed, ingress)
 	}
 
-	egress, found, err := t.get(directionEgress, block, argument, 0, b.proto, net.IP(b.backend[:]), b.backendPort)
+	egress, found, err := t.get(directionEgress, block, argument, 0, b.proto, b.backendIP(), b.backendPort)
 	if err != nil {
 		return removed, err
 	}
 	if found && b.isEgressRow(egress) {
-		backend := net.IP(b.backend[:])
+		backend := b.backendIP()
 		if err := t.unregister(directionEgress, block, argument, 0, b.proto, backend, b.backendPort); err != nil {
 			return removed, err
 		}
@@ -516,20 +571,17 @@ func (t *VipXlatTable) decodeEntry(key prog.UsidVipXlatKey, value prog.UsidVipXl
 	gen := t.generations[key]
 	t.mu.Unlock()
 
-	addr := make(net.IP, 16)
-	copy(addr, value.Addr[:])
-
 	return Entry{
 		Key: Key{
 			Block:    key.Block,
 			Argument: key.Argument,
 			Slot:     key.Slot,
 			Proto:    key.Proto,
-			Addr:     netip.AddrFrom16(key.Addr),
+			Addr:     fromWire(key.Addr),
 			Port:     hostToNetwork16(key.Port), // self-inverse: wire -> host
 		},
 		Direction:   Direction(key.Direction),
-		RewriteAddr: addr,
+		RewriteAddr: net.IP(fromWire(value.Addr).AsSlice()),
 		RewritePort: hostToNetwork16(value.Port), // self-inverse: wire -> host
 		Generation:  gen,
 	}

@@ -16,6 +16,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
@@ -456,7 +457,9 @@ func (m *Maps) fillAttribution(a Attachment) (bool, error) {
 			"vpc", a.VPC, "vpcAttachment", a.VPCAttachment, "err", err)
 		return false, nil
 	}
-	if err := m.Registry.VPCAttribution.Register(a.Block, a.Argument, vpcNum, vpcAttachmentNum); err != nil {
+	if err := m.Registry.VPCAttribution.Register(
+		a.Block, a.Argument, vpcNum, vpcAttachmentNum, intf.GenerateInterfaceNameVRF(a.VPC),
+	); err != nil {
 		return false, fmt.Errorf("register vpc_attribution_table entry: %w", err)
 	}
 	return true, nil

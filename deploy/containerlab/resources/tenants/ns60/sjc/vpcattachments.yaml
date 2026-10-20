@@ -1,10 +1,10 @@
 # The VPCAttachments for ns60's two backends in sjc, which the site's
-# NetworkRules select by label (resources/galactic-gateway/sjc/).
+# NetworkServices select by label (resources/galactic-gateway/sjc/).
 # In production the attachment controller writes these and their status. The
 # lab has no such controller, so deploy:ns60 applies them here and then
 # writes each one's status from where its pod actually runs
-# (scripts/publish-ns60-attachments.sh).
-apiVersion: cloud.datumapis.com/v1alpha1
+# (scripts/publish-attachments.sh).
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: VPCAttachment
 metadata:
   name: backend-a
@@ -21,7 +21,7 @@ spec:
     addresses:
       - fd20:60:ff02:a::100/96
 ---
-apiVersion: cloud.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: VPCAttachment
 metadata:
   name: backend-b

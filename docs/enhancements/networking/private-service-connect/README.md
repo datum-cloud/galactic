@@ -204,7 +204,7 @@ through platform-managed labels, including producers in the DNS service's edge
 namespace. Each eligible producer must serve this destination and DNS context.
 
 ```yaml
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: ServiceEndpoint
 metadata:
   name: context-a-dns-udp
@@ -255,7 +255,7 @@ the VPC named `application-vpc` in `consumer-a` to its live edge UID. The select
 narrows eligible attachments; it does not replace the VPC identity check.
 
 ```yaml
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: ServiceRoutePolicy
 metadata:
   name: application-vpc-dns-udp

@@ -7,10 +7,10 @@ kind: ClusterRole
 metadata:
   name: fabric-api-gateway
 rules:
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources: ["fabricqueries"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources: ["fabricqueries/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: [""]
@@ -70,7 +70,7 @@ kind: ClusterRole
 metadata:
   name: fabric-api-janitor
 rules:
-  - apiGroups: ["network.datumapis.com"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources: ["fabricqueries"]
     verbs: ["list", "delete"]
 ---

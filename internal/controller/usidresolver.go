@@ -11,13 +11,13 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// backendSIDIndex resolves a NetworkRule backend's address to the SRv6 uSID of
+// backendSIDIndex resolves a NetworkService backend's address to the SRv6 uSID of
 // the worker node it is reachable through, by listing BGPAdvertisement,
 // BGPRouter, and BGPVRFInstance CRDs and matching by prefix containment, then
 // confirming tenant ownership of the match before trusting it.
@@ -45,8 +45,9 @@ type backendSIDIndex struct {
 	vrfInstances map[string]*bgpv1alpha1.BGPVRFInstance // keyed by name: crdnames.BGPVRFInstanceName(vpc, nodeName)
 }
 
-// buildBackendSIDIndex lists every BGPRouter, BGPAdvertisement, and
-// BGPVRFInstance in namespace once, so resolving many backends across a
+// buildBackendSIDIndex lists every Galactic-owned BGPRouter (one with no
+// routerClassName), and every BGPAdvertisement and BGPVRFInstance, in
+// namespace once, so resolving many backends across a
 // reconcile costs one set of list calls rather than one per backend.
 //
 // Advertisements with no VRFID or function set are excluded up front: those
@@ -58,7 +59,11 @@ func buildBackendSIDIndex(ctx context.Context, c client.Client, namespace string
 	}
 	routers := make(map[string]*bgpv1alpha1.BGPRouter, len(routerList.Items))
 	for i := range routerList.Items {
-		routers[routerList.Items[i].Name] = &routerList.Items[i]
+		// Only Galactic-owned routers can host a backend: an advertisement
+		// on a classed router (the fabric underlay) never yields a uSID.
+		if bgpv1alpha1.IsLegacyOwned(&routerList.Items[i]) {
+			routers[routerList.Items[i].Name] = &routerList.Items[i]
+		}
 	}
 
 	advList := &bgpv1alpha1.BGPAdvertisementList{}

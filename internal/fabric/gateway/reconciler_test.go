@@ -429,7 +429,7 @@ func TestReconcileRetriesStatusConflictWithoutRerunning(t *testing.T) {
 		) error {
 			fq := obj.(*fabricapi.FabricQuery)
 			if terminal(fq) && conflicts.Add(1) <= 2 {
-				gr := schema.GroupResource{Group: "network.datumapis.com", Resource: "fabricqueries"}
+				gr := schema.GroupResource{Group: "galactic.datumapis.com", Resource: "fabricqueries"}
 				return apierrors.NewConflict(gr, fq.Name, nil)
 			}
 			return c.SubResource(sub).Update(ctx, obj, opts...)

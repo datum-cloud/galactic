@@ -15,9 +15,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -49,7 +49,7 @@ func writeSweepRows(t *testing.T, mem *memTable, block uint64, argument uint16, 
 		if r.argument != 0 {
 			arg = r.argument
 		}
-		vip, backend := net.ParseIP(r.vip), net.ParseIP(r.backend)
+		vip, backend := sweepIP(r.vip), sweepIP(r.backend)
 		var err error
 		if r.egress {
 			err = prev.RegisterEgress(block, arg, ipProtoTCP, backend, 30080, vip, 8080)
@@ -60,6 +60,15 @@ func writeSweepRows(t *testing.T, mem *memTable, block uint64, argument uint16, 
 			t.Fatalf("write row %s: %v", r.name, err)
 		}
 	}
+}
+
+// sweepIP parses s in the form vipxlatmap takes: 4 bytes for IPv4.
+func sweepIP(s string) net.IP {
+	ip := net.ParseIP(s)
+	if v4 := ip.To4(); v4 != nil {
+		return v4
+	}
+	return ip
 }
 
 // liveSlot is the slot the test binding's ingress row is keyed on.
@@ -227,5 +236,50 @@ func TestVIPXlatSweeper_ListErrorSkipsPass(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("table holds %d rows, want the 1 row untouched", len(entries))
+	}
+}
+
+// TestVIPXlatSweeper_KeepsIPv4BindingRows: a live IPv4 binding's rows, which
+// the map holds IPv4-mapped and List reports plain, survive the sweep, and an
+// IPv4 row no binding claims is removed.
+func TestVIPXlatSweeper_KeepsIPv4BindingRows(t *testing.T) {
+	router, adv, vrf := newBackendFixtures(testVPCRef)
+	c := fake.NewClientBuilder().WithScheme(newRuleTestScheme(t)).
+		WithObjects(router, adv, vrf, newIPv4TapBinding()).Build()
+	block, argument, err := resolveVIPBindingContext(context.Background(), c, testNamespace,
+		testComputeNodeName, testVPCRef)
+	if err != nil {
+		t.Fatalf("resolveVIPBindingContext: %v", err)
+	}
+	slot := srv6.BackendSlot(netip.MustParseAddr(testBackendAddr4), 30080)
+	rows := []sweepRow{
+		{name: "IPv4 ingress", slot: slot, vip: testVIP4, backend: testBackendAddr4},
+		{name: "IPv4 egress", egress: true, vip: testVIP4, backend: testBackendAddr4},
+		{name: "IPv4 orphan egress", egress: true, vip: testVIP4, backend: "10.60.0.9"},
+	}
+	live := rows[:2]
+	mem := newMemTable()
+	writeSweepRows(t, mem, block, argument, rows)
+
+	table := vipxlatmap.NewVipXlatTable(mem)
+	result := (&VIPXlatSweeper{Client: c, NodeName: testComputeNodeName, Table: table}).Sweep(context.Background())
+	if result.Errors != 0 || result.EBPFVIPXlatEntriesRemoved != 1 {
+		t.Fatalf("Sweep: %d errors, %d removed; want 0 and 1", result.Errors, result.EBPFVIPXlatEntriesRemoved)
+	}
+	entries, err := table.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := map[vipxlatmap.Key]bool{}
+	for _, r := range live {
+		want[sweepRowKey(block, argument, r)] = true
+	}
+	for _, e := range entries {
+		if !want[e.Key] {
+			t.Errorf("row %+v survived the sweep", e.Key)
+		}
+	}
+	if len(entries) != len(live) {
+		t.Errorf("%d rows left, want %d", len(entries), len(live))
 	}
 }

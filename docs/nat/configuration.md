@@ -99,10 +99,13 @@ containerlab lab. Detection would attach there too.
 A bonding master can be named in place of its members. It is expanded to
 its slaves at startup and the program attached to each of them, never to
 the master itself, the same way `galactic-gateway` treats a bonded public
-interface. As with the gateway, every resolved interface is checked for
-native XDP support before any is touched, and the slaves are attached one
-at a time, each waited back into its LACP aggregate before the next, so a
-NIC whose driver drops carrier to attach a native XDP program bounces one
+interface. As with the gateway, the program is attached in the host's XDP
+mode, generic on a host with a `bnxt_en` NIC and native elsewhere (see
+[XDP attach mode](../xdp-attach-mode.md)). In native mode every resolved
+interface is checked for native XDP support before any is touched. In either
+mode the slaves are attached one at a time, each waited back into its LACP
+aggregate before the next, so a NIC whose driver drops carrier to attach an
+XDP program bounces one
 member of the bond at a time rather than all of them at once. A slave that
 does not rejoin within 45 seconds fails the shard's startup with the
 remaining slaves left untouched. Neither guard helps a bond with `miimon`
@@ -141,7 +144,7 @@ that still holds the hook directly, and reports those uplinks missing until
 the gateway joins the dispatcher.
 
 - **`direct`** (the binary's default) attaches `nat_ingress` to every
-  resolved uplink in native driver mode, as described above. The attachment
+  resolved uplink in the host's XDP mode, as described above. The attachment
   is not pinned, so it detaches when the process exits, and every restart
   bounces each uplink, once on the detach and again on the attach. On a
   node where an earlier `dispatch`-mode shard left the node's XDP
@@ -169,11 +172,17 @@ the gateway joins the dispatcher.
 
   Nothing in dispatch mode is all-or-nothing. An uplink the dispatcher cannot
   hold yet, because another XDP program is attached there, the driver has no
-  native XDP, or attaching would take a bond down, is reported missing and
+  native XDP in native mode, or attaching would take a bond down, is reported
+  missing and
   retried on the next link or route change. The first attach to each bond
   member, and the wait for it to rejoin its bond, run under a node-wide lock,
   so two datapaths sharing the dispatcher never bounce two members of one bond
   at once.
+
+  The dispatcher attaches in the host's XDP mode. A pinned link left in the
+  other mode, such as a native link on a host that now selects generic mode,
+  counts as uncovered until it is migrated, one bond member at a time under
+  the same lock, keeping every slot, lease and role.
 
   The dispatcher stays attached after the shard is removed from a node.
   `hack/xdp-dispatch-release.sh` detaches it. Run it before rolling back to
@@ -232,7 +241,7 @@ under `/sys/fs/bpf/galactic-nat`. In dispatch mode it also pins the node's
 XDP dispatcher under `/sys/fs/bpf/galactic-xdp`, which the same `/sys/fs/bpf`
 mount covers.
 
-## `EgressShard` CRD (`network.datumapis.com/v1alpha1`)
+## `EgressShard` CRD (`galactic.datumapis.com/v1alpha1`)
 
 One object per shard node, in the `galactic-system` namespace. The spec
 assigns the shard's identity; the `galactic-nat` process on the target node
@@ -355,7 +364,7 @@ expire. Tenants reach the prefix only once
 Example:
 
 ```yaml
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: EgressShard
 metadata:
   name: dfw-worker2-egress
@@ -480,7 +489,7 @@ hashed mode with more than three NAT64 prefixes in
   must print `false`.
 - **`galactic-cni` may watch `EgressShard`s.** `config/galactic-cni/rbac.yaml`
   grants `get`, `list` and `watch` on `egressshards`;
-  `kubectl auth can-i watch egressshards.network.datumapis.com -n galactic-system --as=system:serviceaccount:galactic-system:galactic-cni`
+  `kubectl auth can-i watch egressshards.galactic.datumapis.com -n galactic-system --as=system:serviceaccount:galactic-system:galactic-cni`
   must answer `yes`.
 - **Every shard has its own identity and return route.** Each shard needs a
   distinct `shardSID` locator, a distinct `shardAddressIPv6` and, for NAT64,
@@ -500,10 +509,13 @@ hashed mode with more than three NAT64 prefixes in
   `translatesWellKnownPrefix`. A NAT66-only shard therefore never receives
   NAT64 traffic, and a shard translating another NAT64 prefix never receives
   this one's. A shard that is ready but cannot serve a class is counted as
-  `ineligible` for it and logged. A class no shard can serve gets no route,
-  as an empty shard list gives none, and `GalacticEgressClassUnserved`
-  fires. A cluster whose shards all serve one family is a legitimate
-  single-family deployment.
+  `ineligible` for it and logged. When no shard can serve NAT66, `::/0`
+  gets no route, as an empty shard list gives none. When no shard can serve
+  a configured NAT64 prefix, its route still names its own empty group, so
+  its packets are dropped and counted as `group_empty` instead of matching
+  `::/0` and reaching a NAT66 shard. Either way
+  `GalacticEgressClassUnserved` fires. A cluster whose shards all serve one
+  family is a legitimate single-family deployment.
 - **The pool is the cluster.** One metro is one cluster, so a class's pool is
   every eligible `EgressShard` in `galactic-cni`'s namespace. A shard is a
   candidate once its status carries a `shardSID` and both `Programmed` and
@@ -608,6 +620,33 @@ never visible to a packet, so no pin can hold it. The counter is 32 bits and
 skips 0; wrapping takes four billion slot assignments, far longer than any
 pin lives.
 
+### Changing the NAT64 prefix list
+
+A group keeps the class it was first published for, so a class keeps its
+group across edits to `GALACTIC_CNI_NAT64_PREFIX` and across restarts. The
+pinned group map is the record of which group serves which class; nothing
+depends on the order of the list.
+
+- **Reordering** the list changes nothing.
+- **Adding** a prefix gives it a group that has never been used, or a retired
+  one that no route names any more.
+- **Removing** a prefix retires its group. Within one sweep of `galactic-cni`
+  restarting, the group is marked closing, so no CNI ADD names it again, and
+  every VRF's route toward the removed prefix is deleted. That leaves the
+  VRF exactly as an attachment made under the new list: traffic to the old
+  prefix follows `::/0`. The next sweep that finds no route naming the group
+  disables it, and only then can another prefix take it.
+- **Replacing** a prefix when all three NAT64 groups are in use takes two
+  sweeps: the new prefix gets a group once the old one is disabled, and has
+  no group, so no route, until then.
+
+A route the ingress sidecar owns is never deleted by `galactic-cni`, so a
+group it still names stays retired but enabled, serving its old class, and a
+new prefix waits for it. A route that names a group published for a
+different class, which only an earlier release could leave behind, is moved
+to its own class's group, even an empty one, which drops rather than
+translate the wrong class.
+
 ### Turning it on and off
 
 Follow [active-active-rollout.md](active-active-rollout.md). In short: install
@@ -639,7 +678,7 @@ route as a redirect to a nonexistent interface and drops the traffic.
 | `galactic_cni_egress_shard_watch_synced`                   | 1 once the `EgressShard` watch has listed the cluster.                                                                               |
 | `galactic_cni_egress_group_routes{class}`                  | Routes naming each class's group after the last successful sweep. Must be 0 before rolling back to an older release.                 |
 | `galactic_cni_egress_sweep_errors_total{stage}`            | Sweep failures: `apply`, `refresh`, `watch`, `close`, `disable`.                                                                     |
-| `galactic_cni_egress_pool_members{class,state}`            | Each class's shards: `active`, `draining`, `unreachable`, and `ineligible` (cannot translate the class).                             |
+| `galactic_cni_egress_pool_members{class,state}`            | Each class's shards: `active`, `draining`, `unreachable`, `local` (runs on this node), and `ineligible` (cannot translate it).       |
 | `galactic_cni_egress_pool_enabled{class}`                  | 1 while the class's group takes new routes; 0 while it is being retired.                                                             |
 | `galactic_cni_egress_pool_min_active`                      | `GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE`.                                                                                               |
 | `galactic_cni_egress_shard_packets_total{shard_sid,class}` | Tenant packets this node sent to each shard for each class, since the shard took its slot. `..._bytes_total` is the same in bytes.   |
@@ -647,7 +686,18 @@ route as a redirect to a nonexistent interface and drops the traffic.
 
 A node that never published a group exports no `pool_*` series. That is not
 a healthy empty pool: read it together with `galactic_cni_egress_mode` and
-`galactic_cni_egress_shard_watch_synced`. `config/monitoring/` alerts on these
+`galactic_cni_egress_shard_watch_synced`.
+
+A shard whose `spec.targetRef` names the node itself is `local` on that node.
+The node originates the shard's locator, so the SID never resolves over an
+uplink there, and it takes no tenant from that node. Hashed mode does not
+resolve a local shard's SID at all. Ordered mode, which tries each SID in the
+list, fails to resolve it and moves on, so neither mode sends that node's
+traffic to its own shard. An edge node running the cluster's only shard
+therefore has no active member. It also has no tenant, so
+`GalacticEgressPoolEmpty` and `GalacticEgressPoolBelowMinimum` fire only on a
+node with routes on the group (`galactic_cni_egress_group_routes` above 0):
+an empty pool on a node with nothing to egress is no outage. `config/monitoring/` alerts on these
 (`GalacticEgressPoolEmpty`, `GalacticEgressPoolBelowMinimum`,
 `GalacticEgressClassUnserved`, `GalacticEgressShardGroupDropping`,
 `GalacticEgressShardWatchNotSynced`, `GalacticEgressSweepFailing`,

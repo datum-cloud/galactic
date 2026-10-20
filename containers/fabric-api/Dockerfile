@@ -4,9 +4,6 @@
 # build and version independently; the sidecar checks FRR's version at
 # runtime instead (see internal/fabric/frr/version.go).
 
-# "network" is an empty stage by default -- see
-# containers/galactic-router/Dockerfile's own comment on this stage.
-FROM scratch AS network
 
 # fabric-api imports no eBPF packages, so unlike the other Go images this
 # needs no clang or go generate step.
@@ -23,7 +20,6 @@ ARG GIT_URL=https://github.com/datum-cloud/galactic
 WORKDIR /workspace
 COPY go.mod go.mod
 COPY go.sum go.sum
-COPY --from=network / /network
 RUN go mod download
 
 COPY api/ api/

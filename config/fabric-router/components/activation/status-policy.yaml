@@ -1,0 +1,37 @@
+# Every fabric-router pod shares one ServiceAccount, and RBAC cannot scope
+# its status writes to the node a pod runs on, so this policy does: the
+# agent may write only the status of the deployment targeting the Node its
+# token is bound to, by name and UID. The rollout manager trusts that
+# status to decide a promotion committed, so a node must not report for
+# another. Bound service account tokens carry the pod's Node in the
+# request's user extras (Kubernetes 1.32 or later).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: fabric-router-own-deployment-status
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [galactic.datumapis.com]
+        apiVersions: ["*"]
+        operations: [UPDATE]
+        resources: [fabricrouterdeployments/status]
+  matchConditions:
+    - name: fabric-router-agent
+      expression: request.userInfo.username == 'system:serviceaccount:galactic-system:fabric-router'
+  validations:
+    - expression: >-
+        'authentication.kubernetes.io/node-name' in request.userInfo.extra &&
+        'authentication.kubernetes.io/node-uid' in request.userInfo.extra &&
+        request.userInfo.extra['authentication.kubernetes.io/node-name'][0] == object.spec.target.nodeName &&
+        request.userInfo.extra['authentication.kubernetes.io/node-uid'][0] == object.spec.target.nodeUID
+      message: a fabric-router pod may write only the status of the deployment targeting its own Node
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: fabric-router-own-deployment-status
+spec:
+  policyName: fabric-router-own-deployment-status
+  validationActions: [Deny]

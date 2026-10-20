@@ -1,0 +1,68 @@
+# What fabric-config-agent needs once it acts on its node's
+# FabricRouterDeployment. Namespaced reads are namespace-wide for the same
+# reason as config/fabric-router/rbac.yaml: RBAC cannot scope them to the
+# node a pod landed on.
+#
+# No Secret access: the agent reads a Secret's UID only for a peer
+# credential, and the compiler refuses credentials until activation
+# resolves them. Without access a credential's lookup is refused and the
+# activation with it, so adding credentials later fails closed. The pods
+# are hostNetwork and run as root, so granting namespace-wide Secret reads
+# here would expose every Secret in galactic-system to a node.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fabric-router-activation
+  namespace: galactic-system
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabricrouterdeployments]
+    verbs: [get, list]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabricrouterdeployments/status]
+    verbs: [patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabricrouterrevisions, fabricreleaseauthorizations]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fabric-router-activation
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fabric-router-activation
+subjects:
+  - kind: ServiceAccount
+    name: fabric-router
+    namespace: galactic-system
+---
+# The node's identity: its own Node's UID and the cluster's, the
+# kube-system namespace UID. Cluster-scoped objects need a ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fabric-router-activation
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [kube-system]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fabric-router-activation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fabric-router-activation
+subjects:
+  - kind: ServiceAccount
+    name: fabric-router
+    namespace: galactic-system

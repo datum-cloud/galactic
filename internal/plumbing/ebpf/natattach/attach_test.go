@@ -18,6 +18,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/bond"
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 func requireRoot(t *testing.T) {
@@ -31,7 +32,7 @@ func requireRoot(t *testing.T) {
 // TestAttach_NilProgramIsError covers Attach's defensive nil-program
 // guard directly, without needing root.
 func TestAttach_NilProgramIsError(t *testing.T) {
-	if _, err := Attach(nil, []string{testUplink}); err == nil {
+	if _, err := Attach(nil, []string{testUplink}, xdpmode.Native); err == nil {
 		t.Error("Attach(nil program, ...) error = nil, want an error")
 	}
 }
@@ -42,7 +43,7 @@ func TestAttach_NilProgramIsError(t *testing.T) {
 // untranslated and uncounted -- the silent failure #545 is about, node-wide.
 func TestAttach_EmptyInterfaceListIsError(t *testing.T) {
 	for _, names := range [][]string{nil, {}} {
-		if _, err := Attach(nil, names); err == nil {
+		if _, err := Attach(nil, names, xdpmode.Native); err == nil {
 			t.Errorf("Attach(_, %v) error = nil, want an error", names)
 		}
 	}
@@ -211,7 +212,7 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		attached, err := Attach(objs.NatIngress, []string{ifaceName})
+		attached, err := Attach(objs.NatIngress, []string{ifaceName}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("attach: %w", err)
 		}
@@ -242,7 +243,7 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		attached, err := Attach(objs.NatIngress, []string{ifaceName})
+		attached, err := Attach(objs.NatIngress, []string{ifaceName}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("re-attach after restart: %w", err)
 		}
@@ -329,7 +330,7 @@ func TestAttach_MultipleUplinksRollsBackOnPartialFailure(t *testing.T) {
 		defer func() { _ = objs.Close() }()
 
 		// --- both uplinks of a dual-homed shard node: two links back. ---
-		links, err := Attach(objs.NatIngress, []string{uplink0Name, uplink1Name})
+		links, err := Attach(objs.NatIngress, []string{uplink0Name, uplink1Name}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("attach to both uplinks: %w", err)
 		}
@@ -342,14 +343,14 @@ func TestAttach_MultipleUplinksRollsBackOnPartialFailure(t *testing.T) {
 
 		// --- a second uplink that can never attach: the first uplink's
 		// attach must be rolled back, not left dangling. ---
-		if _, err := Attach(objs.NatIngress, []string{uplink0Name, "does-not-exist"}); err == nil {
+		if _, err := Attach(objs.NatIngress, []string{uplink0Name, "does-not-exist"}, xdpmode.Native); err == nil {
 			return errors.New("Attach() with an unresolvable second uplink error = nil, want an error")
 		}
 
 		// If the rollback genuinely closed the first uplink's link, a fresh
 		// solo attach to it succeeds; if it leaked, this fails with the
 		// kernel refusing a second native XDP program on the same interface.
-		links, err = Attach(objs.NatIngress, []string{uplink0Name})
+		links, err = Attach(objs.NatIngress, []string{uplink0Name}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf(
 				"re-attach to %q after a rolled-back partial failure: %w "+
@@ -434,7 +435,7 @@ func TestResolveTargetsAndAttach_RealBondDevice(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		links, err := Attach(objs.NatIngress, got)
+		links, err := Attach(objs.NatIngress, got, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("attach to bond slaves %v: %w", got, err)
 		}

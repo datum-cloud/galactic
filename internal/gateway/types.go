@@ -30,13 +30,13 @@ func (b DesiredBackend) Key() string {
 	return fmt.Sprintf("%s:%d", b.Address, b.Port)
 }
 
-// DesiredRule is the engine's representation of one NetworkRule, assembled by
+// DesiredRule is the engine's representation of one NetworkService, assembled by
 // the reconcilers from the CRD. There is no tunnel identifier or VRF table here,
 // this engine having no VRF dependency, and no placement field either, every
 // gateway node serving every rule identically under anycast.
 type DesiredRule struct {
 	// Key uniquely identifies the rule (namespace/name of the source
-	// NetworkRule), used as the map key in Engine's convergence pass.
+	// NetworkService), used as the map key in Engine's convergence pass.
 	Key string
 
 	// VPCRef is the tenant's opaque VPC identifier, used to count rules against
@@ -48,10 +48,23 @@ type DesiredRule struct {
 	VIPAddresses []netip.Addr
 
 	// Protocol is "tcp" or "udp", matching
-	// network.datumapis.com/v1alpha1's NetworkRuleProtocol enum values.
+	// galactic.datumapis.com/v1alpha1's NetworkServiceProtocol enum values.
 	Protocol string
 	Port     uint16
-	Backends []DesiredBackend
+
+	// Backends serve the rule's IPv6 VIPs and IPv4Backends its IPv4 VIPs, each
+	// VIP load-balancing over the backends of its own family. A family with a
+	// VIP has at least one backend.
+	Backends     []DesiredBackend
+	IPv4Backends []DesiredBackend
+}
+
+// backendsFor returns the backends that serve vip.
+func (r DesiredRule) backendsFor(vip netip.Addr) []DesiredBackend {
+	if vip.Is4() {
+		return r.IPv4Backends
+	}
+	return r.Backends
 }
 
 // EngineState is the full desired state for one gateway node's engine,

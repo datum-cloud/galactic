@@ -28,12 +28,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/serviceroute"
-	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const reconcileResultError = "error"
@@ -555,6 +555,10 @@ func (r *ServiceRoutePolicyReconciler) sidResolver(ctx context.Context) servicer
 		router := &networkv1alpha1.BGPRouter{}
 		if err := r.Get(ctx, routerKey, router); err != nil {
 			return nil, fmt.Errorf("get BGPRouter %s: %w", routerKey, err)
+		}
+		if !networkv1alpha1.IsLegacyOwned(router) {
+			return nil, fmt.Errorf("BGPRouter %s names routerClassName %q and is not a Galactic router",
+				routerKey, *router.Spec.RouterClassName)
 		}
 		if router.Spec.TargetRef.Name != attachment.Status.Node {
 			return nil, fmt.Errorf("BGPRouter %s targets node %q, not attachment node %q",

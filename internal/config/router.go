@@ -56,6 +56,10 @@ const (
 	EnvRouterGCNamespace            = "GALACTIC_ROUTER_GC_NAMESPACE"
 	EnvRouterGCInterval             = "GALACTIC_ROUTER_GC_INTERVAL"
 	EnvRouterServiceFrontendEnabled = "GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED"
+	// EnvRouterTrafficPolicy runs the node's traffic policy reconciler. Off by
+	// default, because it watches the galactic.datumapis.com CRDs, which a
+	// cluster may not have installed.
+	EnvRouterTrafficPolicy = "GALACTIC_ROUTER_TRAFFIC_POLICY"
 
 	// EnvRouterBMPStations lists the BMP collectors to stream to, as a
 	// comma-separated list of host:port. Empty, the default, disables BMP.
@@ -89,6 +93,9 @@ type RouterConfig struct {
 	GCNamespace            string
 	GCInterval             time.Duration
 	ServiceFrontendEnabled bool
+	// TrafficPolicy runs the node's traffic policy reconciler. It needs the
+	// galactic.datumapis.com CRDs, and a route reflector cannot run it.
+	TrafficPolicy bool
 
 	// BMPStations, BMPPolicy, and BMPStatisticsInterval configure BMP export to
 	// collectors. BMPStations holds each collector as host:port; empty
@@ -115,6 +122,7 @@ func NewRouterConfig() *RouterConfig {
 	v.SetDefault("gc_namespace", DefaultRouterGCNamespace)
 	v.SetDefault("gc_interval", DefaultRouterGCInterval.String())
 	v.SetDefault("service_frontend_enabled", false)
+	v.SetDefault("traffic_policy", false)
 	v.SetDefault("bmp_stations", "")
 	v.SetDefault("bmp_policy", DefaultRouterBMPPolicy)
 	v.SetDefault("bmp_statistics_interval", DefaultRouterBMPStatisticsInterval.String())
@@ -143,6 +151,7 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{"gc-namespace", "gc_namespace"},
 		{"gc-interval", "gc_interval"},
 		{"service-frontend-enabled", "service_frontend_enabled"},
+		{"traffic-policy", "traffic_policy"},
 		{"bmp-stations", "bmp_stations"},
 		{"bmp-policy", "bmp_policy"},
 		{"bmp-statistics-interval", "bmp_statistics_interval"},
@@ -169,6 +178,7 @@ func (c *RouterConfig) readFields() {
 	c.GCNamespace = c.v.GetString("gc_namespace")
 	c.GCInterval = c.v.GetDuration("gc_interval")
 	c.ServiceFrontendEnabled = c.v.GetBool("service_frontend_enabled")
+	c.TrafficPolicy = c.v.GetBool("traffic_policy")
 	c.BMPStations = splitCommaList(c.v.GetString("bmp_stations"))
 	c.BMPPolicy = c.v.GetString("bmp_policy")
 	c.BMPStatisticsInterval = c.v.GetDuration("bmp_statistics_interval")
@@ -188,6 +198,10 @@ func (c *RouterConfig) Validate() error {
 	}
 	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
 		return errors.New("grpc health port must be between 1 and 65535")
+	}
+	if c.TrafficPolicy && c.Reflector {
+		return fmt.Errorf("%s needs a node with tenant interfaces, so a route reflector cannot enable it",
+			EnvRouterTrafficPolicy)
 	}
 	return c.validateBMP()
 }

@@ -1,0 +1,8 @@
+lo 10.255.255.2/32
+lo fc00:0:2::1/128
+bond0 alias dfw-worker2-facing (primary site edge node) -- LACP bond of eth1 + eth3
+bond0 10.1.10.2/24
+bond0 2001:db8:1:10::2/64
+bond1 alias dfw-worker3-facing (backup site edge node) -- LACP bond of eth2 + eth4
+bond1 10.1.13.2/24
+bond1 2001:db8:1:13::2/64

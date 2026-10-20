@@ -19,10 +19,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/sidecarmap"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // Removing what a deleted ingress sidecar pod leaves behind.
@@ -189,11 +189,16 @@ func ingressAdvertisements(
 		return nil, fmt.Errorf("list BGPAdvertisements in namespace %s: %w", namespace, err)
 	}
 
+	routerNames, err := galacticRouterNamesForNode(ctx, k8s, namespace, nodeName)
+	if err != nil {
+		return nil, err
+	}
+
 	segment := crdnames.IngressAdvertisementSegment()
 	var out []ingressAdvertisement
 	for i := range list.Items {
 		a := &list.Items[i]
-		if a.Spec.RouterRef.Name != nodeName || !isIngressAdvertisementName(a.Name, nodeName, segment) {
+		if _, mine := routerNames[a.Spec.RouterRef.Name]; !mine || !isIngressAdvertisementName(a.Name, nodeName, segment) {
 			continue
 		}
 		out = append(out, ingressAdvertisement{

@@ -1,0 +1,88 @@
+# Generated-peer fixtures for the iad lab cluster: one FabricEndpoint
+# per router per link. topology.yaml's FabricTopology generates from them
+# every BGPPeer the cluster's frr.conf files configure. Each link between
+# two lab nodes is its own transport, so a hub peers only with the router
+# at the other end of its own link. The edge nodes reflect for their
+# site's compute node (next-hop-self force on the hub side), and peer with
+# their transit router as external peers. TestLabParity in
+# internal/fabric/routing/topology compiles the generated peers and checks
+# the result matches what importing the frr.conf files compiles to.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: iad-worker2-link-30
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: hub
+spec:
+  routingDomain: lab
+  cell: iad
+  routerRef:
+    name: iad-worker2
+  transport: link-30
+  asn: 65000
+  addresses:
+    ipv4: 10.1.30.1
+    ipv6: 2001:db8:1:30::1
+  source:
+    type: Manual
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: iad-worker-link-30
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: spoke
+spec:
+  routingDomain: lab
+  cell: iad
+  routerRef:
+    name: iad-worker
+  transport: link-30
+  asn: 65000
+  addresses:
+    ipv4: 10.1.30.2
+    ipv6: 2001:db8:1:30::2
+  source:
+    type: Manual
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: iad-worker2-link-31
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: hub
+spec:
+  routingDomain: lab
+  cell: iad
+  routerRef:
+    name: iad-worker2
+  transport: link-31
+  asn: 65000
+  addresses:
+    ipv4: 10.1.31.1
+    ipv6: 2001:db8:1:31::1
+  source:
+    type: Manual
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: iad-worker3-link-31
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: uplink
+spec:
+  routingDomain: lab
+  cell: iad
+  routerRef:
+    name: iad-worker3
+  transport: link-31
+  asn: 65000
+  addresses:
+    ipv4: 10.1.31.2
+    ipv6: 2001:db8:1:31::2
+  source:
+    type: Manual

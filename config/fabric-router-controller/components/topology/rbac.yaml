@@ -1,0 +1,68 @@
+# What fabric-router-controller --topology needs beyond
+# config/fabric-router-controller/rbac.yaml. Every rule matches a
+# kubebuilder:rbac marker in internal/fabric/routing/topology, and every verb
+# is one the code uses; TestTopologyRBACCoversEveryCall checks them against
+# the API server.
+#
+# Reads are cluster-wide, like the rest of the controller's. Every write is
+# a Role in galactic-system, the only namespace --topology-namespace serves
+# by default, so a FabricTopology elsewhere can make the controller write
+# nothing. Peers are created, updated and deleted only when the topology
+# generated them; the code, not RBAC, keeps it off hand-authored peers,
+# which this role could otherwise write. Generated peers carry no owner
+# reference, so nothing here grants the owner's finalizers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fabric-router-controller-topology
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabrictopologies, fabricendpoints]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fabric-router-controller-topology
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fabric-router-controller-topology
+subjects:
+  - kind: ServiceAccount
+    name: fabric-router-controller
+    namespace: galactic-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fabric-router-controller-topology
+  namespace: galactic-system
+rules:
+  # The finalizer that hands a deleted topology's peers to manual control,
+  # added and removed by patch.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabrictopologies]
+    verbs: [patch]
+  # Accepted, ResolvedRefs, Conflicts, ReleaseHeld and Ready, and each
+  # endpoint's Ready and Conflict.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [fabrictopologies/status, fabricendpoints/status]
+    verbs: [patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [bgppeers]
+    verbs: [create, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fabric-router-controller-topology
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fabric-router-controller-topology
+subjects:
+  - kind: ServiceAccount
+    name: fabric-router-controller
+    namespace: galactic-system

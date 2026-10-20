@@ -25,9 +25,9 @@ import (
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // EgressShardIdentity is the identity an egress translation datapath is
@@ -326,7 +326,9 @@ func (r *EgressShardReconciler) program(ctx context.Context, shard *bgpv1alpha1.
 // Block and Node-ID captures the tenant ingress addressed to it and drops what
 // it cannot translate. Every BGPRouter in the cluster is checked, not only this
 // node's: the shard's SID is advertised across the fabric, so a clash with any
-// router misroutes that router's traffic. A router whose locator or Node-ID is
+// router misroutes that router's traffic. Classed routers (the fabric
+// underlay) are checked too: the clash misroutes their traffic just the
+// same, whoever owns the router. A router whose locator or Node-ID is
 // unset or invalid owns no uSID identity and is skipped.
 func (r *EgressShardReconciler) routerLocatorConflict(ctx context.Context, sid netip.Addr) (string, error) {
 	if !sid.Is6() {

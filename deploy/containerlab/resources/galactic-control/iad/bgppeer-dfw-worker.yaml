@@ -1,5 +1,5 @@
 # Reflector-side session toward dfw-worker (dfw compute)
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: BGPPeer
 metadata:
   name: galactic-router-dfw-worker

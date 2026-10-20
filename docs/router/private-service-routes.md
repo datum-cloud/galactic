@@ -23,9 +23,7 @@ or neighbor discovery cannot deliver the VIP to that interface.
 
 Galactic treats an attachment as ready only when its status has
 `observedGeneration` equal to its generation, non-empty `node`, `vpc` and
-`vpcAttachment`, and `Ready` and `Programmed` both `True`. Galactic writes none
-of these. The controllers in
-[datum-cloud/cloud](https://github.com/datum-cloud/cloud) write them, partly
+`vpcAttachment`, and `Ready` and `Programmed` both `True`. The Galactic cell controllers in `internal/cloud/controller` write these, partly
 from the `BGPAdvertisement` that `galactic-router` publishes for the
 attachment. Without them no attachment is ready and no route is programmed.
 

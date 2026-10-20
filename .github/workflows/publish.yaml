@@ -71,6 +71,32 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
+  publish-fabric-router-controller-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.22.0
+    with:
+      image-name: fabric-router-controller
+      dockerfile-path: containers/fabric-router-controller/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
+  publish-galactic-controller-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.22.0
+    with:
+      image-name: galactic-controller
+      dockerfile-path: containers/galactic-controller/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
   publish-galactic-nat-image:
     permissions:
       id-token: write
@@ -128,6 +154,8 @@ jobs:
         publish-fabric-router-image,
         publish-fabric-api-image,
         publish-galactic-nat-image,
+        publish-galactic-controller-image,
+        publish-fabric-router-controller-image,
       ]
     permissions:
       id-token: write
@@ -155,4 +183,8 @@ jobs:
         # so its tag is stamped into each.
         - { path: config/fabric-router/components/fabric-api, name: ghcr.io/datum-cloud/fabric-api, tag: "${{ needs.publish-fabric-api-image.outputs.tag }}" }
         - { path: config/fabric-api/base, name: ghcr.io/datum-cloud/fabric-api, tag: "${{ needs.publish-fabric-api-image.outputs.tag }}" }
+        # config/galactic-controller/base is opt-in too, for the same reason.
+        - { path: config/galactic-controller/base, name: ghcr.io/datum-cloud/galactic-controller, tag: "${{ needs.publish-galactic-controller-image.outputs.tag }}" }
+        - { path: config/galactic-controller/fabric, name: ghcr.io/datum-cloud/galactic-controller, tag: "${{ needs.publish-galactic-controller-image.outputs.tag }}" }
+        - { path: config/fabric-router-controller/base, name: ghcr.io/datum-cloud/fabric-router-controller, tag: "${{ needs.publish-fabric-router-controller-image.outputs.tag }}" }
     secrets: inherit

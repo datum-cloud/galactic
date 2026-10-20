@@ -18,8 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/gateway"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // testRuleUID is the UID the drain and owner-reference tests give their rule,
@@ -29,7 +29,7 @@ const testRuleUID = types.UID("rule-1-uid")
 // testRuleKeyString is testRuleName's key in the engine's desired state.
 const testRuleKeyString = testNamespace + "/" + testRuleName
 
-// advWriteCounter counts BGPAdvertisement creates and updates and NetworkRule
+// advWriteCounter counts BGPAdvertisement creates and updates and NetworkService
 // status writes, the two things a draining rule must never cause.
 type advWriteCounter struct {
 	advWrites  atomic.Int32
@@ -53,7 +53,7 @@ func (w *advWriteCounter) funcs() interceptor.Funcs {
 		SubResourceUpdate: func(
 			ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption,
 		) error {
-			if _, ok := obj.(*bgpv1alpha1.NetworkRule); ok {
+			if _, ok := obj.(*bgpv1alpha1.NetworkService); ok {
 				w.ruleWrites.Add(1)
 			}
 			return c.SubResource(sub).Update(ctx, obj, opts...)
@@ -67,8 +67,8 @@ func (w *advWriteCounter) reset() {
 }
 
 // newFinalizedRule returns testRuleName, accepted, carrying the teardown
-// finalizer and testRuleUID, as NetworkRuleReconciler leaves a live rule.
-func newFinalizedRule() *bgpv1alpha1.NetworkRule {
+// finalizer and testRuleUID, as NetworkServiceReconciler leaves a live rule.
+func newFinalizedRule() *bgpv1alpha1.NetworkService {
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 	acceptRule(rule)
 	rule.UID = testRuleUID
@@ -95,7 +95,7 @@ func TestNetworkGatewayReconciler_DrainsDeletedRuleUntilWithdrawn(t *testing.T) 
 
 	var writes advWriteCounter
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
 			newBackendAttachment("vpc-1"), rule).
 		WithInterceptorFuncs(writes.funcs()).
@@ -125,14 +125,14 @@ func TestNetworkGatewayReconciler_DrainsDeletedRuleUntilWithdrawn(t *testing.T) 
 	reconcile("live")
 	assertLoaded("live", true)
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdvV4), adv); err != nil {
-		t.Fatalf("live: get BGPAdvertisement %s: %v", testRuleAdvV4, err)
+	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdv), adv); err != nil {
+		t.Fatalf("live: get BGPAdvertisement %s: %v", testRuleAdv, err)
 	}
 
 	// The finalizer holds the object, so this only sets its deletion
-	// timestamp, the state NetworkRuleReconciler.reconcileDelete starts from.
+	// timestamp, the state NetworkServiceReconciler.reconcileDelete starts from.
 	if err := fakeClient.Delete(ctx, rule); err != nil {
-		t.Fatalf("delete NetworkRule: %v", err)
+		t.Fatalf("delete NetworkService: %v", err)
 	}
 
 	writes.reset()
@@ -144,7 +144,7 @@ func TestNetworkGatewayReconciler_DrainsDeletedRuleUntilWithdrawn(t *testing.T) 
 		t.Errorf("draining: %d BGPAdvertisement writes, want 0 (a deleting rule is never re-advertised)", got)
 	}
 	if got := writes.ruleWrites.Load(); got != 0 {
-		t.Errorf("draining: %d NetworkRule status writes, want 0 (Programmed is left alone)", got)
+		t.Errorf("draining: %d NetworkService status writes, want 0 (Programmed is left alone)", got)
 	}
 
 	// reconcileDelete withdraws the route.
@@ -159,16 +159,16 @@ func TestNetworkGatewayReconciler_DrainsDeletedRuleUntilWithdrawn(t *testing.T) 
 	}
 
 	// reconcileDelete removes the finalizer and the object goes away.
-	current := &bgpv1alpha1.NetworkRule{}
+	current := &bgpv1alpha1.NetworkService{}
 	if err := fakeClient.Get(ctx, testRuleKey(testRuleName), current); err != nil {
-		t.Fatalf("get NetworkRule: %v", err)
+		t.Fatalf("get NetworkService: %v", err)
 	}
 	current.Finalizers = nil
 	if err := fakeClient.Update(ctx, current); err != nil {
 		t.Fatalf("remove finalizer: %v", err)
 	}
 	if err := fakeClient.Get(ctx, testRuleKey(testRuleName), current); !apierrors.IsNotFound(err) {
-		t.Fatalf("get NetworkRule after finalizer removal: err = %v, want NotFound", err)
+		t.Fatalf("get NetworkService after finalizer removal: err = %v, want NotFound", err)
 	}
 
 	clock.t = clock.t.Add(2 * time.Second)
@@ -184,8 +184,8 @@ func TestNetworkGatewayReconciler_DrainsDeletedRuleUntilWithdrawn(t *testing.T) 
 	if res.RequeueAfter != 0 {
 		t.Errorf("delay over: RequeueAfter = %s, want 0", res.RequeueAfter)
 	}
-	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdvV4), adv); !apierrors.IsNotFound(err) {
-		t.Errorf("BGPAdvertisement %s after drain: err = %v, want NotFound", testRuleAdvV4, err)
+	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdv), adv); !apierrors.IsNotFound(err) {
+		t.Errorf("BGPAdvertisement %s after drain: err = %v, want NotFound", testRuleAdv, err)
 	}
 }
 
@@ -201,7 +201,7 @@ func TestNetworkGatewayReconciler_DrainingRuleKeepsLastLoadedState(t *testing.T)
 	rule := newFinalizedRule()
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
 			newBackendAttachment("vpc-1"), rule).
 		Build()
@@ -219,7 +219,7 @@ func TestNetworkGatewayReconciler_DrainingRuleKeepsLastLoadedState(t *testing.T)
 	}
 
 	if err := fakeClient.Delete(ctx, rule); err != nil {
-		t.Fatalf("delete NetworkRule: %v", err)
+		t.Fatalf("delete NetworkService: %v", err)
 	}
 	if err := fakeClient.Delete(ctx, backendAdv); err != nil {
 		t.Fatalf("delete backend BGPAdvertisement: %v", err)
@@ -254,7 +254,7 @@ func TestApplyBGPAdvertisements_SkipsDeletingRule(t *testing.T) {
 		VIPAddresses: []netip.Addr{netip.MustParseAddr(testVIP)},
 	}
 
-	if err := r.applyBGPAdvertisements(ctx, rule, desired, testRouterName); err != nil {
+	if err := r.applyBGPAdvertisements(ctx, rule, desired, testRouterName, false); err != nil {
 		t.Fatalf("applyBGPAdvertisements: %v", err)
 	}
 	advList := &bgpv1alpha1.BGPAdvertisementList{}
@@ -272,7 +272,7 @@ func TestApplyBGPAdvertisements_SkipsDeletingRule(t *testing.T) {
 func assertRuleOwnerReference(t *testing.T, adv *bgpv1alpha1.BGPAdvertisement) {
 	t.Helper()
 	for _, ref := range adv.OwnerReferences {
-		if ref.Kind != "NetworkRule" || ref.Name != testRuleName {
+		if ref.Kind != "NetworkService" || ref.Name != testRuleName {
 			continue
 		}
 		if ref.UID != testRuleUID {
@@ -289,7 +289,7 @@ func assertRuleOwnerReference(t *testing.T, adv *bgpv1alpha1.BGPAdvertisement) {
 		}
 		return
 	}
-	t.Errorf("BGPAdvertisement %s has no owner reference to NetworkRule %s; got %+v",
+	t.Errorf("BGPAdvertisement %s has no owner reference to NetworkService %s; got %+v",
 		adv.Name, testRuleName, adv.OwnerReferences)
 }
 

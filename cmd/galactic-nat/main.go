@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	networkAPIGroup   = "network.datumapis.com"
+	networkAPIGroup   = "galactic.datumapis.com"
 	networkAPIVersion = "v1alpha1"
 
 	resourceEgressShards      = "egressshards"

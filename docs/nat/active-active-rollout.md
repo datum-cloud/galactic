@@ -25,7 +25,7 @@ are deployed by infra.
       pruning the field.
 - [ ] `galactic-cni`'s ClusterRole grants `get`, `list` and `watch` on
       `egressshards`:
-      `kubectl auth can-i watch egressshards.network.datumapis.com -n galactic-system --as=system:serviceaccount:galactic-system:galactic-cni`
+      `kubectl auth can-i watch egressshards.galactic.datumapis.com -n galactic-system --as=system:serviceaccount:galactic-system:galactic-cni`
       answers `yes`.
 - [ ] Every shard is `Ready` and `Programmed`, and has its own SID locator,
       its own `shardAddressIPv6` and, for NAT64, its own `shardAddressIPv4`.
@@ -60,6 +60,9 @@ are deployed by infra.
       count for every class, `ineligible` is what you expect, and
       `galactic_cni_egress_sweep_errors_total` does not move. Missing pool
       series on a node are a failure, not an idle pool.
+- [ ] On every edge node that runs a shard: its own shard reads `local`,
+      not `unreachable`; every other shard reads `active`; and
+      `galactic_cni_egress_group_routes` is 0 for every class.
 
 ## 3. Prove it
 
@@ -118,3 +121,9 @@ containerlab topology and is the reference for what to check.
 - [ ] Only now, if needed, roll back the `galactic-cni` image to a release
       without hashed mode. Rolling back earlier blackholes every VRF whose
       route still names a group.
+- [ ] If `GALACTIC_CNI_NAT64_PREFIX` was edited while hashed mode was on,
+      return to ordered mode, as above, before rolling the image back to a
+      release that numbers the groups by their position in that list. Such a
+      release republishes each group for whichever class now holds its
+      position, which can send a route's traffic to shards serving another
+      prefix.

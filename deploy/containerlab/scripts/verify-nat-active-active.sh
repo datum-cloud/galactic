@@ -16,7 +16,9 @@
 #       write), galactic-cni allowed to watch EgressShards. A self-test then
 #       blackholes a fresh tenant address and checks the probe fails.
 #    1. Flow hash, pins off: one tenant's TCP and UDP flows use both shards,
-#       over NAT66 and NAT64; ICMP works through both families.
+#       over NAT66 and NAT64; ICMP works through both families. Each shard
+#       node reports its own shard local, not unreachable, the other shard
+#       active, and no tenant route on any group.
 #    2. Source hash, default pins: every flow from one tenant address, TCP,
 #       UDP and ICMP alike, leaves from one shard per family.
 #    3. galactic-cni restart: a download in progress survives it, and every
@@ -103,7 +105,11 @@ sid64() {
 # --- metrics ------------------------------------------------------------------
 
 metric() {
-  docker exec "${COMPUTE}" curl -s --max-time 4 "${CNI_METRICS}" | awk -v m="$1" '$1 == m {print $2}'
+  node_metric "${COMPUTE}" "$1"
+}
+
+node_metric() { # NODE NAME
+  docker exec "$1" curl -s --max-time 4 "${CNI_METRICS}" | awk -v m="$2" '$1 == m {print $2}'
 }
 
 metric_sum() {
@@ -125,9 +131,12 @@ members() { echo "galactic_cni_egress_pool_members{class=\"$1\",state=\"$2\"}"; 
 
 # --- tenants --------------------------------------------------------------------
 
-# Tenant pods on the compute node, as ns/pod.
+# Tenant pods on the compute node, as ns/pod. ns60's VIP backends are left
+# out: the lab enforces traffic policy, and their egress grants only the
+# PublicService path (resources/tenants/policies/public-service/), so they
+# cannot egress through a shard at all.
 mapfile -t TENANTS < <(kc get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.nodeName}{"\n"}{end}' |
-  awk -v n="${COMPUTE}" '$2 == n && $1 ~ /^ns[0-9]+\// {print $1}')
+  awk -v n="${COMPUTE}" '$2 == n && $1 ~ /^ns[0-9]+\// && $1 !~ /^ns60\// {print $1}')
 [ "${#TENANTS[@]}" -ge 3 ] || die "need at least 3 tenant pods on ${COMPUTE}, found ${#TENANTS[@]}"
 FRESH_POD=$(kc -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
 FRESH_POD="ns10/${FRESH_POD}"
@@ -439,14 +448,14 @@ if [ "${V6[${SHARDS[0]}]}" = "${V6[${SHARDS[1]}]}" ] || [ "${V4[${SHARDS[0]}]}" 
   [ "$(sid64 "${SHARDS[0]}")" = "$(sid64 "${SHARDS[1]}")" ]; then
   die "the shards share a SID locator or masquerade address"
 fi
-schema=$(kc get crd egressshards.network.datumapis.com \
+schema=$(kc get crd egressshards.galactic.datumapis.com \
   -o jsonpath='{.spec.versions[?(@.name=="v1alpha1")].schema.openAPIV3Schema.properties.spec.properties.drain.type}')
 [ "${schema}" = boolean ] || die "the EgressShard CRD has no spec.drain; install the network CRD that adds it"
 set_drain "${SHARDS[1]}" true
 [ "$(kc -n galactic-system get egressshard "${SHARDS[1]}" -o jsonpath='{.spec.drain}')" = true ] ||
   die "spec.drain does not persist: the API server pruned it"
 set_drain "${SHARDS[1]}" "${SAVED_DRAIN[${SHARDS[1]}]}"
-[ "$(kc auth can-i watch egressshards.network.datumapis.com -n galactic-system \
+[ "$(kc auth can-i watch egressshards.galactic.datumapis.com -n galactic-system \
   --as=system:serviceaccount:galactic-system:galactic-cni)" = yes ] || die "galactic-cni may not watch EgressShards"
 log "ok   shards distinct and routed back, spec.drain persists, galactic-cni may watch EgressShards"
 
@@ -464,6 +473,18 @@ log "--- 1. hashed, flow hash, pins off ---"
 set_mode hashed flow 0
 wait_metric "$(members nat66 active)" 2 120
 wait_metric "$(members "${NAT64_CLASS}" active)" 2 120
+for s in "${SHARDS[@]}"; do
+  n=${NODE[${s}]}
+  for class in nat66 "${NAT64_CLASS}"; do
+    for want in local=1 unreachable=0 active=1; do
+      got=$(node_metric "${n}" "$(members "${class}" "${want%=*}")")
+      [ "${got}" = "${want#*=}" ] || die "${n} reports ${class} ${want%=*} = ${got:-missing}, want ${want#*=}"
+    done
+    got=$(node_metric "${n}" "galactic_cni_egress_group_routes{class=\"${class}\"}")
+    [ "${got}" = 0 ] || die "${n} reports ${got:-no} ${class} routes on its group, want 0"
+  done
+done
+log "ok   each shard node sees its own shard as local, the other as active, and has no tenant route"
 for kind in tcp6 tcp4 udp6 udp4; do
   case "${kind}" in *6) allowed=("${V6[@]}") ;; *) allowed=("${V4[@]}") ;; esac
   expect "${kind}" "${FRESH_POD}" - 24 "${allowed[@]}"

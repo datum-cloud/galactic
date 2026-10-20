@@ -14,6 +14,8 @@ import (
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
@@ -92,6 +94,15 @@ type AddResult struct {
 	// PriorOwner is the alias (CNI container ID) stamped on the host veth Add
 	// took over, or "" if the link carried none. Meaningful only when Adopted.
 	PriorOwner string
+}
+
+// HostQuarantined reports whether a new interface's host side must be left
+// down for galactic-bgp to bring up, which is the case while the node
+// enforces or audits traffic policy, and when the mode cannot be read. A
+// test override point.
+var HostQuarantined = func() bool {
+	active, err := tpmap.Active(attach.PinDir)
+	return active || err != nil
 }
 
 // Add creates this attachment's veth pair, enslaves the host end to the VPC's
@@ -180,8 +191,13 @@ func Add(vpc, vpcAttachment, ownerID string, mtu int) (res AddResult, _ error) {
 		return res, err
 	}
 
-	if err := netlink.LinkSetUp(hostLink); err != nil {
-		return res, err
+	// While traffic policy is on, the host side stays down until galactic-bgp
+	// has attached and verified every enforcement program and written the
+	// interface's policy row; a down link moves no data either way.
+	if !HostQuarantined() {
+		if err := netlink.LinkSetUp(hostLink); err != nil {
+			return res, err
+		}
 	}
 	if err := netlink.LinkSetUp(guestLink); err != nil {
 		return res, err

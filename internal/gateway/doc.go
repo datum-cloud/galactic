@@ -4,7 +4,7 @@
 
 // Package gateway implements the in-process edge Maglev direct-server-return
 // load-balancing engine. One Engine runs per gateway-role node, converging that
-// node's accepted NetworkRule resources into calls against a pluggable
+// node's accepted NetworkService resources into calls against a pluggable
 // Datapath.
 //
 // It backs onto the edge XDP program directly: no tunnel, no per-tenant

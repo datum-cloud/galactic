@@ -26,7 +26,9 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/hash"
@@ -38,7 +40,7 @@ import (
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/gobgp"
 	"go.datum.net/galactic/internal/serviceroute"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
+	tpnode "go.datum.net/galactic/internal/trafficpolicy/node"
 )
 
 const (
@@ -83,6 +85,7 @@ func runCmd(cfg *config.RouterConfig) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(cloudv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(galacticv1alpha1.AddToScheme(scheme))
 
 	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
@@ -131,7 +134,7 @@ func runCmd(cfg *config.RouterConfig) error {
 	}()
 
 	// Pre-flight RBAC check.
-	checkWatchPermissions(mgr)
+	checkWatchPermissions(mgr, cfg.TrafficPolicy)
 
 	// Open this node's own vip_xlat_table handle for the ServiceVIPBinding
 	// reconciler's tap branch. The datapath program is loaded and attached
@@ -256,7 +259,7 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("setup Node controller: %w", err)
 	}
 
-	// Register the ServiceVIPBinding controller and the NetworkRule binding
+	// Register the ServiceVIPBinding controller and the NetworkService binding
 	// writer that generates its bindings.
 	if err := setupVIPBindingControllers(mgr, nodeName, vipTranslationTable, cfg.GCInterval); err != nil {
 		return err
@@ -276,6 +279,12 @@ func runCmd(cfg *config.RouterConfig) error {
 		}
 	} else {
 		ctrl.Log.Info("route reflector mode: skipping the node-local ServiceRoutePolicy controller")
+	}
+
+	if cfg.TrafficPolicy {
+		if err := setupTrafficPolicyController(mgr, nodeName); err != nil {
+			return err
+		}
 	}
 
 	// Register GC controller for cleaning up orphaned BGP CRDs and VRFs.
@@ -355,8 +364,8 @@ func runGCTicker(
 }
 
 // setupVIPBindingControllers registers the two halves of this node's DSR
-// backend side: NetworkRuleBindingReconciler, which writes a ServiceVIPBinding
-// for every NetworkRule backend whose VPCAttachment is on this node, and
+// backend side: NetworkServiceBindingReconciler, which writes a ServiceVIPBinding
+// for every NetworkService backend whose VPCAttachment is on this node, and
 // ServiceVIPBindingReconciler, which programs vip_xlat_table from those
 // bindings. It also registers NodeDepartureReconciler, which every sweepInterval
 // and on every Node deletion clears the conditions and bindings of nodes that
@@ -372,12 +381,12 @@ func setupVIPBindingControllers(
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup ServiceVIPBinding controller: %w", err)
 	}
-	if err := (&controller.NetworkRuleBindingReconciler{
+	if err := (&controller.NetworkServiceBindingReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		NodeName: nodeName,
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup NetworkRule binding controller: %w", err)
+		return fmt.Errorf("setup NetworkService binding controller: %w", err)
 	}
 	if err := (&controller.NodeDepartureReconciler{
 		Client:    mgr.GetClient(),
@@ -385,6 +394,19 @@ func setupVIPBindingControllers(
 		Interval:  sweepInterval,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup node departure controller: %w", err)
+	}
+	return nil
+}
+
+// setupTrafficPolicyController registers the node's traffic policy
+// reconciler and exports its counters on the manager's metrics endpoint.
+func setupTrafficPolicyController(mgr ctrl.Manager, nodeName string) error {
+	rec := &tpnode.Reconciler{Client: mgr.GetClient(), NodeName: nodeName, PinDir: attach.PinDir}
+	if err := rec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup traffic policy controller: %w", err)
+	}
+	if err := ctrlmetrics.Registry.Register(rec); err != nil {
+		return fmt.Errorf("register traffic policy metrics: %w", err)
 	}
 	return nil
 }
@@ -465,6 +487,8 @@ func newRootCommand() *cobra.Command {
 		"Cleanup interval")
 	cmd.Flags().Bool("service-frontend-enabled", false,
 		"Enable consumer-facing private-service address translation")
+	cmd.Flags().Bool("traffic-policy", false,
+		"Enforce TrafficPolicy on this node's tenant interfaces; needs the galactic.datumapis.com CRDs")
 	cmd.Flags().String("bmp-stations", "",
 		"Comma-separated BMP collectors to stream to, each host:port; empty disables BMP")
 	cmd.Flags().String("bmp-policy", config.DefaultRouterBMPPolicy,
@@ -474,6 +498,6 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 
-	cmd.AddCommand(newVIPCommand())
+	cmd.AddCommand(newVIPCommand(), newPolicyCommand())
 	return cmd
 }

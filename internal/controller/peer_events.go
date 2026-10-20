@@ -14,8 +14,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/model"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // Event reason values this emitter raises, named so callers and tests share one

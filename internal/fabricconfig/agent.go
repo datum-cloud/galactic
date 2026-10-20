@@ -22,6 +22,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
+
+	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 // Event reasons the agent raises, on the source ConfigMap when there is one
@@ -47,6 +49,10 @@ const (
 // cannot succeed until the ConfigMap changes.
 var errRejected = errors.New("configuration rejected")
 
+// ErrConfigMapsRetired is a ConfigMap read refused because the node's
+// ConfigMap path is retired.
+var ErrConfigMapsRetired = errors.New("the ConfigMap path is retired")
+
 // Agent installs and maintains one node's FRR configuration.
 type Agent struct {
 	// Client reads ConfigMaps.
@@ -66,11 +72,21 @@ type Agent struct {
 	// LegacyConfigMap names the shared legacy ConfigMap consulted when the
 	// node has no ConfigMap of its own. Empty disables the fallback.
 	LegacyConfigMap string
+	// ConfigMapsRetired refuses every ConfigMap read and watch without
+	// calling the API.
+	ConfigMapsRetired bool
 
 	// ConfigDir is the FRR configuration directory.
 	ConfigDir string
 	// DefaultsDir holds the image's default daemons and vtysh.conf.
 	DefaultsDir string
+
+	// Lock is the node's FRR writer lock, held for each reload. Nil means no
+	// other writer exists.
+	Lock Locker
+	// Gate is the node's effective configuration source. While it is CRD
+	// the agent writes nothing; nil means always ConfigMap.
+	Gate *SourceGate
 
 	// RetryInterval is the initial delay before retrying a failed attempt;
 	// MaxRetryInterval caps its exponential growth. Zero selects defaults.
@@ -87,6 +103,8 @@ type Agent struct {
 	lastWarning string
 	// warnedLegacy records that the deprecated-source warning was emitted.
 	warnedLegacy bool
+	// gateVersion is the gate version last converged under.
+	gateVersion int64
 }
 
 // Init waits until configuration for the node exists and validates, then
@@ -112,6 +130,104 @@ func (a *Agent) Init(ctx context.Context) error {
 		}
 		delay = min(delay*2, a.maxRetryInterval())
 	}
+}
+
+// InitFrom installs the configuration boot chooses instead of the node's
+// ConfigMap, for a node whose journal records the CRD source. It validates
+// it, writes it with the image defaults beside it, and retries until boot
+// returns one that validates or ctx ends.
+func (a *Agent) InitFrom(ctx context.Context, boot func(context.Context) (config, reason string, err error)) error {
+	delay := a.retryInterval()
+	for {
+		err := a.installBoot(ctx, boot)
+		if err == nil || !retryable(err) {
+			return err
+		}
+		slog.Warn("fabric-router configuration not installed yet; retrying", "error", err, "retryIn", delay)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("install configuration: %w", errors.Join(ctx.Err(), err))
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, a.maxRetryInterval())
+	}
+}
+
+func (a *Agent) installBoot(ctx context.Context, boot func(context.Context) (string, string, error)) error {
+	conf, reason, err := boot(ctx)
+	if err != nil {
+		return err
+	}
+	if err := seedDefaults(a.DefaultsDir, a.ConfigDir, nil); err != nil {
+		return fatal(err)
+	}
+	if err := writeFile(a.ConfigDir, candidateName, conf); err != nil {
+		return fatal(err)
+	}
+	if err := a.FRR.Check(ctx, filepath.Join(a.ConfigDir, candidateName)); err != nil {
+		_ = os.Remove(filepath.Join(a.ConfigDir, candidateName))
+		return fmt.Errorf("%w: %w", errRejected, err)
+	}
+	if err := a.promote(); err != nil {
+		return fatal(err)
+	}
+	slog.Info("installed fabric-router configuration from the activation state", "reason", reason, "hash", Hash(conf))
+	return nil
+}
+
+// InitActivated installs the configuration of a node whose activation
+// path is on, and sets rec to the source it used. A node whose journal
+// records the CRD source starts from what d.BootConfig chooses, and from
+// its ConfigMap while nothing is activated; any other node starts from its
+// ConfigMap. With d.ConfigMapsRetired every node starts from what
+// d.BootConfig chooses, and one it refuses holds FRR off instead of
+// falling back to a ConfigMap.
+func (a *Agent) InitActivated(ctx context.Context, d *DeploymentAgent, rec *BootRecord) error {
+	if !d.ConfigMapsRetired && JournalSource(d.Activator.Journal()) != networkv1alpha1.FabricConfigSourceCRD {
+		return a.Init(ctx)
+	}
+	// d was built moments ago, when its identity was read; a retry reads
+	// it again, in case the API came back.
+	retry := false
+	return a.InitFrom(ctx, func(ctx context.Context) (string, string, error) {
+		if retry && d.NodeUID == "" && d.Resolve != nil {
+			if err := d.Resolve(ctx); err != nil {
+				slog.Warn("could not read this node's identity; trying the checkpoint offline", "error", err)
+			}
+		}
+		retry = true
+		conf, reason, err := d.BootConfig(ctx, d.MachineID)
+		if errors.Is(err, ErrNotActivated) && !d.ConfigMapsRetired {
+			// Enrolled on CRD before anything was activated: the ConfigMap
+			// is all there is to run.
+			*rec = BootRecord{Source: BootConfigMap}
+			conf, reason, err = a.ConfigMapConfig(ctx)
+			rec.Reason = reason
+			return conf, reason, err
+		}
+		*rec = BootRecord{Source: d.Booted, Reason: reason}
+		return conf, reason, err
+	})
+}
+
+// ConfigMapConfig resolves the node's frr.conf from its ConfigMap, for a
+// node that starts from the ConfigMap through InitFrom.
+func (a *Agent) ConfigMapConfig(ctx context.Context) (config, reason string, err error) {
+	perNode, err := a.get(ctx, ConfigMapName(a.NodeName))
+	if err != nil {
+		return "", "", err
+	}
+	var legacy *corev1.ConfigMap
+	if perNode == nil && a.LegacyConfigMap != "" {
+		if legacy, err = a.get(ctx, a.LegacyConfigMap); err != nil {
+			return "", "", err
+		}
+	}
+	src, err := a.resolve(perNode, legacy)
+	if err != nil {
+		return "", "", err
+	}
+	return src.Files[KeyFRRConf], "nothing activated yet; starting from ConfigMap " + src.ConfigMap.Name, nil
 }
 
 // initOnce makes a single attempt to fetch, validate and install the node's
@@ -199,6 +315,7 @@ func (a *Agent) Watch(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-trigger:
+		case <-a.Gate.Changed():
 		case <-retry:
 		}
 		retry = nil
@@ -217,7 +334,36 @@ func (a *Agent) Watch(ctx context.Context) error {
 // configuration resolved from perNode and legacy. It returns an error only for
 // failures worth retrying without a ConfigMap change: a failed reload or a
 // failed file write.
+//
+// It holds the node's FRR writer lock throughout and reads the source gate
+// under it, so it never writes while another writer owns FRR.
 func (a *Agent) converge(ctx context.Context, perNode, legacy *corev1.ConfigMap) error {
+	return withLock(ctx, a.Lock, func() error { return a.convergeLocked(ctx, perNode, legacy) })
+}
+
+func (a *Agent) convergeLocked(ctx context.Context, perNode, legacy *corev1.ConfigMap) error {
+	source, version := a.Gate.Get()
+	if source == networkv1alpha1.FabricConfigSourceCRD {
+		// The deployment agent owns FRR.
+		return nil
+	}
+	if version != a.gateVersion {
+		// FRR ran another writer's configuration since frr.conf was last
+		// applied here, so apply it again even if it did not change, and
+		// from the API rather than a possibly stale informer copy.
+		fresh, err := a.get(ctx, ConfigMapName(a.NodeName))
+		if err != nil {
+			return err
+		}
+		if uid := a.Gate.Handoff(); uid != "" && (fresh == nil || string(fresh.UID) != uid) {
+			// Not the ConfigMap the handoff named: apply nothing.
+			return fmt.Errorf("ConfigMap %s is not the one the handoff named, UID %s", ConfigMapName(a.NodeName), uid)
+		}
+		perNode = fresh
+		a.gateVersion = version
+		delete(a.applied, KeyFRRConf)
+		a.reported = ""
+	}
 	src, err := a.resolve(perNode, legacy)
 	if err != nil {
 		// Already reported by resolve. The running configuration stays.
@@ -353,8 +499,13 @@ func (a *Agent) loadApplied() error {
 	return nil
 }
 
-// get returns the named ConfigMap, or nil when it does not exist.
+// get returns the named ConfigMap, or nil when it does not exist. With the
+// ConfigMap path retired it returns a fatal error wrapping
+// ErrConfigMapsRetired.
 func (a *Agent) get(ctx context.Context, name string) (*corev1.ConfigMap, error) {
+	if a.ConfigMapsRetired {
+		return nil, fatal(fmt.Errorf("get ConfigMap %s/%s: %w", a.Namespace, name, ErrConfigMapsRetired))
+	}
 	cm, err := a.Client.CoreV1().ConfigMaps(a.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil
@@ -366,8 +517,12 @@ func (a *Agent) get(ctx context.Context, name string) (*corev1.ConfigMap, error)
 }
 
 // startInformer starts an informer over the single named ConfigMap, waits for
-// it to sync, and returns its store.
+// it to sync, and returns its store. With the ConfigMap path retired it
+// returns an error wrapping ErrConfigMapsRetired.
 func (a *Agent) startInformer(ctx context.Context, name string, h cache.ResourceEventHandler) (cache.Store, error) {
+	if a.ConfigMapsRetired {
+		return nil, fmt.Errorf("watch ConfigMap %s/%s: %w", a.Namespace, name, ErrConfigMapsRetired)
+	}
 	factory := informers.NewSharedInformerFactoryWithOptions(a.Client, 0,
 		informers.WithNamespace(a.Namespace),
 		informers.WithTweakListOptions(func(o *metav1.ListOptions) {

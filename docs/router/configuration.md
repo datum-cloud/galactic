@@ -15,7 +15,7 @@ and the `EnvRouter*` constants). Always use the exact name from the table
 below.
 
 | Option                   | Environment Variable                      | CLI Flag                    | Default                     |
-|--------------------------|-------------------------------------------|-----------------------------|-----------------------------|
+| ------------------------ | ----------------------------------------- | --------------------------- | --------------------------- |
 | Node name                | `GALACTIC_ROUTER_NODE_NAME`               | `--node-name`               | _(required)_                |
 | Route reflector          | `GALACTIC_ROUTER_REFLECTOR`               | `--reflector`               | `false`                     |
 | BGP listen port          | `GALACTIC_ROUTER_BGP_LISTEN_PORT`         | `--bgp-listen-port`         | `179`                       |
@@ -27,6 +27,7 @@ below.
 | BMP stations             | `GALACTIC_ROUTER_BMP_STATIONS`            | `--bmp-stations`            | _(empty; BMP disabled)_     |
 | BMP policy               | `GALACTIC_ROUTER_BMP_POLICY`              | `--bmp-policy`              | `pre-policy`                |
 | BMP statistics interval  | `GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL` | `--bmp-statistics-interval` | `60s`                       |
+| Traffic policy           | `GALACTIC_ROUTER_TRAFFIC_POLICY`          | `--traffic-policy`          | `false`                     |
 
 ## Required Options
 
@@ -208,6 +209,23 @@ disables them.
 **Type:** duration, in whole seconds
 **Default:** `60s`
 **Valid values:** `0s`–`65535s`
+
+### `--traffic-policy` / `GALACTIC_ROUTER_TRAFFIC_POLICY`
+
+Runs the node's traffic policy reconciler. For every VPCAttachment whose
+`status.node` is this node, it compiles the TrafficPolicy each direction of
+the interface is bound to, publishes it into the uSID datapath, and reports
+what it applied in the TrafficPolicyBinding's `status.nodes`. It also exports
+the policy counters on the metrics port, as
+`galactic_cni_traffic_policy_*`, and enables the `galactic-router policy`
+diagnostics' live lookups.
+
+Off by default, because it watches the `galactic.datumapis.com` CRDs, which a
+cluster may not have installed: an informer for a missing CRD never syncs. A
+route reflector has no tenant interfaces, so `--reflector` with this option is
+a configuration error. Whether the datapath enforces what this publishes is
+galactic-cni's setting, not this one. See
+[the traffic policy design](../enhancements/networking/interface-traffic-policy/README.md).
 
 ## Configuration Precedence
 

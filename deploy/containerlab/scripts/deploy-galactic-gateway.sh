@@ -1,6 +1,6 @@
 #!/bin/bash
 # deploy-galactic-gateway.sh — Install galactic-gateway on every edge node, one
-# NetworkGateway per node, and each site's ns60 NetworkRules
+# NetworkGateway per node, and each site's ns60 NetworkServices
 # (resources/galactic-gateway/). Requires deploy:system
 # (the gateway's RBAC/ServiceAccount), deploy:images (galactic-gateway:latest
 # on every edge node), deploy:galactic-router (each node's BGPRouter, which
@@ -43,7 +43,7 @@ copy_gateway_config() {
 NS60_BINDINGS=4
 
 # GENERATED_BINDINGS selects the ServiceVIPBindings galactic-router writes
-# from the NetworkRules. Any other binding in galactic-system is stale.
+# from the NetworkServices. Any other binding in galactic-system is stale.
 GENERATED_BINDINGS=app.kubernetes.io/managed-by=galactic-router
 
 # wait_bindings NODE COUNT TIMEOUT waits up to TIMEOUT seconds for exactly
@@ -85,7 +85,7 @@ for site in dfw sjc iad; do
   # its accepted rule, so wait for all of them to exist first.
   docker exec "${node}" kubectl -n galactic-system wait networkgateway --all \
     --for=condition=Ready --timeout=120s
-  docker exec "${node}" kubectl -n galactic-system wait networkrule --all \
+  docker exec "${node}" kubectl -n galactic-system wait networkservice --all \
     --for=condition=Accepted --timeout=60s
   wait_bindings "${node}" "${NS60_BINDINGS}" 60
   docker exec "${node}" kubectl -n galactic-system wait servicevipbinding \

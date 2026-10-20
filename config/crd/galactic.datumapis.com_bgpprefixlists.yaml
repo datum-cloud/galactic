@@ -1,0 +1,230 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: bgpprefixlists.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    kind: BGPPrefixList
+    listKind: BGPPrefixListList
+    plural: bgpprefixlists
+    shortNames:
+    - bgppfx
+    singular: bgpprefixlist
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.entries
+      name: ENTRIES
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          BGPPrefixList defines a named list of prefix-match entries used by BGPPolicy
+          terms to filter routes by destination prefix. It is referenced by name from
+          BGPPolicyMatch.prefixListRef.
+
+          A single BGPPrefixList holds entries for either IPv4 or IPv6 — the address
+          family is inferred from the CIDR family of the first entry and validated
+          consistent across all entries via CEL.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: BGPPrefixListSpec defines the desired state of BGPPrefixList.
+            properties:
+              entries:
+                description: Entries is the ordered list of prefix-match entries,
+                  keyed by sequence.
+                items:
+                  description: |-
+                    BGPPrefixListEntry defines a single entry in a named BGP prefix-list.
+                    Entries are evaluated in ascending sequence order.
+
+                    GE and LE bound the matched prefix length. Both are limited by the
+                    entry's family (32 for IPv4, 128 for IPv6), GE may not be shorter than
+                    the prefix's own length, and LE may not be shorter than GE (or the
+                    prefix's length when GE is unset): FRR's own rule, mask length <= ge <= le.
+                    A malformed prefix is reported by the prefix field's rule alone.
+                  properties:
+                    action:
+                      description: Action is the disposition when a route's prefix
+                        matches this entry.
+                      enum:
+                      - permit
+                      - deny
+                      type: string
+                    ge:
+                      description: |-
+                        GE is the minimum prefix-length to match (greater-than-or-equal).
+                        For example, "10.0.0.0/8 ge 16" matches lengths /16 through /32, and
+                        "2607:ed40:8003::/48 ge 49" lengths /49 through /128.
+                        When unset, the prefix-length of Prefix is the lower bound.
+                      format: int32
+                      maximum: 128
+                      minimum: 0
+                      type: integer
+                    le:
+                      description: |-
+                        LE is the maximum prefix-length to match (less-than-or-equal).
+                        For example, "10.0.0.0/8 le 24" matches 10.0.0.0/8 through 10.0.0.0/24.
+                        When unset, the prefix-length of Prefix is the upper bound, unless GE
+                        is set, in which case the family's maximum length is.
+                      format: int32
+                      maximum: 128
+                      minimum: 0
+                      type: integer
+                    prefix:
+                      description: Prefix is the IPv4 or IPv6 CIDR to match against.
+                      maxLength: 43
+                      minLength: 1
+                      type: string
+                      x-kubernetes-validations:
+                      - message: prefix must be a valid IPv4 or IPv6 CIDR
+                        rule: isCIDR(self)
+                    sequence:
+                      description: |-
+                        Sequence is the evaluation order for this entry. Entries with lower
+                        sequence numbers are evaluated first. Must be unique within the list.
+                        The range is FRR's: 1 to 4294967295.
+                      format: int64
+                      maximum: 4294967295
+                      minimum: 1
+                      type: integer
+                  required:
+                  - action
+                  - prefix
+                  - sequence
+                  type: object
+                  x-kubernetes-validations:
+                  - message: ge must not exceed 32 for IPv4 or 128 for IPv6
+                    rule: '!isCIDR(self.prefix) || !has(self.ge) || self.ge <= (cidr(self.prefix).ip().family()
+                      == 4 ? 32 : 128)'
+                  - message: le must not exceed 32 for IPv4 or 128 for IPv6
+                    rule: '!isCIDR(self.prefix) || !has(self.le) || self.le <= (cidr(self.prefix).ip().family()
+                      == 4 ? 32 : 128)'
+                  - message: ge must be at least the prefix length
+                    rule: '!isCIDR(self.prefix) || !has(self.ge) || self.ge >= cidr(self.prefix).prefixLength()'
+                  - message: le must be at least ge, or the prefix length when ge
+                      is unset
+                    rule: '!isCIDR(self.prefix) || !has(self.le) || self.le >= (has(self.ge)
+                      ? self.ge : cidr(self.prefix).prefixLength())'
+                maxItems: 1024
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - sequence
+                x-kubernetes-list-type: map
+              frr:
+                description: FRR holds FRR rendering settings.
+                properties:
+                  name:
+                    description: Name is the FRR object name.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                    type: string
+                type: object
+            required:
+            - entries
+            type: object
+            x-kubernetes-validations:
+            - message: all entries must be the same address family (IPv4 or IPv6)
+              rule: self.entries.all(e, e.prefix.contains(':') == self.entries[0].prefix.contains(':'))
+          status:
+            description: BGPPrefixListStatus defines the observed state of BGPPrefixList.
+            properties:
+              conditions:
+                description: Conditions contains the standard conditions for this
+                  resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  was computed from.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

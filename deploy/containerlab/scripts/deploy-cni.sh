@@ -85,6 +85,11 @@ for site in dfw sjc iad; do
 
   # Multus
   docker exec "${node}" kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/refs/tags/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
+  # Upstream's 50Mi limit OOM-kills the thick daemon when a node starts
+  # several pods at once (each CNI ADD it serves costs memory), and every
+  # pod on that node then waits in ContainerCreating behind the crash loop.
+  docker exec "${node}" kubectl -n kube-system set resources daemonset kube-multus-ds \
+    -c kube-multus --requests=memory=50Mi --limits=memory=256Mi
   docker exec "${node}" kubectl -n kube-system rollout status daemonset kube-multus-ds
 
   # docker cp copies SRC *into* an already-existing DEST directory

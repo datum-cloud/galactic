@@ -7,6 +7,7 @@ package edgeattach
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,6 +20,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/bond"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 func requireRoot(t *testing.T) {
@@ -58,7 +60,7 @@ func TestLoad_PreflightBlocksLoad(t *testing.T) {
 // TestAttach_NilProgramIsError covers Attach's defensive nil-program
 // guard directly, without needing root.
 func TestAttach_NilProgramIsError(t *testing.T) {
-	if _, err := Attach(nil, []string{"eth0"}); err == nil {
+	if _, err := Attach(nil, []string{"eth0"}, xdpmode.Native); err == nil {
 		t.Error("Attach(nil program, ...) error = nil, want an error")
 	}
 }
@@ -66,7 +68,7 @@ func TestAttach_NilProgramIsError(t *testing.T) {
 // TestAttach_NoInterfacesIsError covers Attach's defensive empty-slice
 // guard directly, without needing root or a real program.
 func TestAttach_NoInterfacesIsError(t *testing.T) {
-	if _, err := Attach(&ebpf.Program{}, nil); err == nil {
+	if _, err := Attach(&ebpf.Program{}, nil, xdpmode.Native); err == nil {
 		t.Error("Attach(program, nil) error = nil, want an error")
 	}
 }
@@ -246,7 +248,7 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		links, err := Attach(objs.EdgeLb, []string{ifaceName})
+		links, err := Attach(objs.EdgeLb, []string{ifaceName}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("attach: %w", err)
 		}
@@ -280,7 +282,7 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		links, err := Attach(objs.EdgeLb, []string{ifaceName})
+		links, err := Attach(objs.EdgeLb, []string{ifaceName}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("re-attach after restart: %w", err)
 		}
@@ -363,7 +365,7 @@ func TestAttach_MultipleInterfacesRollsBackOnPartialFailure(t *testing.T) {
 		defer func() { _ = objs.Close() }()
 
 		// --- attach to both real interfaces: two links back. ---
-		links, err := Attach(objs.EdgeLb, []string{iface0Name, iface1Name})
+		links, err := Attach(objs.EdgeLb, []string{iface0Name, iface1Name}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("attach to both interfaces: %w", err)
 		}
@@ -377,7 +379,7 @@ func TestAttach_MultipleInterfacesRollsBackOnPartialFailure(t *testing.T) {
 		// --- attach again, this time with a second name that can never
 		// attach (it doesn't exist): the first interface's attach must be
 		// rolled back, not left dangling. ---
-		if _, err := Attach(objs.EdgeLb, []string{iface0Name, "does-not-exist"}); err == nil {
+		if _, err := Attach(objs.EdgeLb, []string{iface0Name, "does-not-exist"}, xdpmode.Native); err == nil {
 			return errors.New("Attach() with an unresolvable second interface error = nil, want an error")
 		}
 
@@ -385,7 +387,7 @@ func TestAttach_MultipleInterfacesRollsBackOnPartialFailure(t *testing.T) {
 		// fresh solo attach to it succeeds; if it leaked, this fails with
 		// the kernel refusing a second native XDP program on the same
 		// interface.
-		links, err = Attach(objs.EdgeLb, []string{iface0Name})
+		links, err = Attach(objs.EdgeLb, []string{iface0Name}, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf(
 				"re-attach to %q after a rolled-back partial failure: %w "+
@@ -486,7 +488,7 @@ func TestResolveTargetsAndAttach_RealBondDevice(t *testing.T) {
 
 		// Attaching to the resolved slaves is exactly what this design
 		// exists to make work.
-		links, err := Attach(objs.EdgeLb, got)
+		links, err := Attach(objs.EdgeLb, got, xdpmode.Native)
 		if err != nil {
 			return fmt.Errorf("attach to bond slaves %v: %w", got, err)
 		}
@@ -530,5 +532,62 @@ func TestLoad_RemovesTheRetiredChainPin(t *testing.T) {
 	t.Cleanup(func() { _ = objs.Close() })
 	if _, err := os.Stat(chainPin); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("retired xdp_chain pin still present after Load (stat err = %v)", err)
+	}
+}
+
+// TestLoad_UpgradeReplacesOnlyTheGrownDropReasons covers the upgrade that adds
+// IPv4 VIPs: drop_reasons grows by a reason, so its old pin is incompatible
+// and replaced, its counters starting again from zero, while vip_table keeps
+// its shape and, with it, every row, IPv6 ones included.
+func TestLoad_UpgradeReplacesOnlyTheGrownDropReasons(t *testing.T) {
+	requireRoot(t)
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-edge-test-upgrade-%d", os.Getpid()))
+	if err := os.MkdirAll(pinDir, 0o755); err != nil {
+		t.Skipf("bpffs not writable at /sys/fs/bpf: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	first, err := Load(pinDir, nil)
+	if err != nil {
+		t.Fatalf("first Load: %v", err)
+	}
+	key := edgeprog.EdgedsrVipKey{Proto: 6, Port: 0xbb01, Vip: netip.MustParseAddr("2001:db8::100").As16()}
+	if err := first.VipTable.Put(key, edgeprog.EdgedsrVipValue{BackendCount: 1, Generation: 9}); err != nil {
+		t.Fatalf("populate vip_table: %v", err)
+	}
+	_ = first.Close()
+
+	// Stand in for the previous release's drop_reasons, one reason shorter.
+	dropPin := filepath.Join(pinDir, "drop_reasons")
+	if err := os.Remove(dropPin); err != nil {
+		t.Fatalf("remove drop_reasons pin: %v", err)
+	}
+	old, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name: "drop_reasons", Type: ebpf.PerCPUArray, KeySize: 4, ValueSize: 8,
+		MaxEntries: edgeprog.DropReasonCount - 1,
+	})
+	if err != nil {
+		t.Fatalf("create old drop_reasons: %v", err)
+	}
+	if err := old.Pin(dropPin); err != nil {
+		t.Fatalf("pin old drop_reasons: %v", err)
+	}
+	_ = old.Close()
+
+	objs, err := Load(pinDir, nil)
+	if err != nil {
+		t.Fatalf("Load over the old pins: %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	info, err := objs.DropReasons.Info()
+	if err != nil {
+		t.Fatalf("drop_reasons info: %v", err)
+	}
+	if info.MaxEntries != edgeprog.DropReasonCount {
+		t.Errorf("drop_reasons has %d entries, want %d", info.MaxEntries, edgeprog.DropReasonCount)
+	}
+	var got edgeprog.EdgedsrVipValue
+	if err := objs.VipTable.Lookup(key, &got); err != nil || got.Generation != 9 {
+		t.Errorf("vip_table row after the upgrade = %+v, %v; want it kept", got, err)
 	}
 }

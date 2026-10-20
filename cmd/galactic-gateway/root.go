@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -23,14 +24,14 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/gateway"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -120,6 +121,16 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 
+	// IPv4 VIPs need read access to ServiceVIPBindings; without it they stay
+	// off for this process rather than stalling the manager's cache. A check
+	// that cannot be made fails startup instead, so the restart checks again.
+	reviewCtx, cancelReview := context.WithTimeout(ctx, 30*time.Second)
+	ipv4VIPs, err := resolveIPv4VIPs(reviewCtx, mgr.GetClient(), cfg.IPv4VIPs)
+	cancelReview()
+	if err != nil {
+		return err
+	}
+
 	// Load and attach the edge eBPF datapath. Always a real datapath, never a
 	// no-op: configuration validation rejects an empty public interface before
 	// this is reached, and an empty SRv6 address is derived from this node's
@@ -147,7 +158,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 			return err
 		}
 		gwDatapath, err = setupGatewayDatapath(ctx, cfg.PublicInterface, cfg.InternalInterfaces, encapSrc,
-			cfg.XDPAttach, ctrlmetrics.Registry, coverage)
+			cfg.XDPAttach, ipv4VIPs, ctrlmetrics.Registry, coverage)
 		if err != nil {
 			return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 		}
@@ -178,19 +189,20 @@ func runCmd(cfg *config.GatewayConfig) error {
 		NodeName:  nodeName,
 		APIReader: mgr.GetAPIReader(),
 		Disabled:  !cfg.DatapathEnabled,
+		IPv4VIPs:  ipv4VIPs,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
 
 	// The rule reconciler: finalizer-guarded teardown ordering and the Accepted
 	// condition.
-	if err := (&controller.NetworkRuleReconciler{
+	if err := (&controller.NetworkServiceReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		NodeName:  nodeName,
 		APIReader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup NetworkRule controller: %w", err)
+		return fmt.Errorf("setup NetworkService controller: %w", err)
 	}
 
 	if err := mgr.Start(ctx); err != nil {
@@ -274,6 +286,9 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().Bool("gateway-datapath-enabled", true,
 		"Run the edge gateway datapath; false keeps the process up but attaches nothing and withdraws "+
 			"this node's VIP advertisements")
+	cmd.Flags().Bool("gateway-ipv4-vips", false,
+		"Serve IPv4 VIPs: load them over their IPv4 backends and advertise each once its backends' "+
+			"ServiceVIPBindings are Bound")
 	cmd.Flags().String("gateway-proc-sys-path", config.DefaultProcSysPath,
 		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
 			"of the host's /proc/sys/net at <path>/net")

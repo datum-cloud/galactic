@@ -1,0 +1,25 @@
+processor:
+  docPaths: []
+  ignoreTypes:
+    - ".*List$"
+    # The revision's configuration lists every BGP spec by name; walking
+    # those wrappers first would hide the policy types from their sections.
+    - "FabricNamed.*"
+    - "NetworkGateway"
+    - "NetworkGatewaySpec"
+    - "NetworkGatewayStatus"
+    - "NetworkService"
+    - "NetworkServiceProtocol"
+    - "NetworkServiceSpec"
+    - "NetworkServiceStatus"
+    - "NetworkEgressPolicy"
+    - "NetworkEgressPolicySpec"
+    - "NetworkEgressPolicyStatus"
+  ignoreFields: []
+
+render:
+  kubernetes: {}
+  markdown:
+    mediaWidth: 80
+    anchorLink: true
+    tableHideEmpty: true

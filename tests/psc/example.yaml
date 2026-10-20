@@ -1,7 +1,7 @@
 # Apply in a disposable edge API with existing VPCs and attachments.
 # Consumer attachments need access: a or access: b; the shared producer
 # attachment needs role: producer. Use envsubst to fill the variables.
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: ServiceEndpoint
 metadata:
   name: service-a
@@ -17,7 +17,7 @@ spec:
     matchLabels:
       role: producer
 ---
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: ServiceEndpoint
 metadata:
   name: service-b
@@ -31,7 +31,7 @@ spec:
     matchLabels:
       role: producer
 ---
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: ServiceRoutePolicy
 metadata:
   name: access-a
@@ -58,7 +58,7 @@ spec:
     - protocol: tcp
       port: 8443
 ---
-apiVersion: network.datumapis.com/v1alpha1
+apiVersion: galactic.datumapis.com/v1alpha1
 kind: ServiceRoutePolicy
 metadata:
   name: access-b

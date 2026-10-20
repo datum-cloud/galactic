@@ -18,6 +18,7 @@ import (
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
@@ -171,6 +172,15 @@ func Add(vpc, vpcAttachment, ownerID string, mtu int) (res AddResult, _ error) {
 	if err := sysctl.ConfigureTapSysctls(tapName); err != nil {
 		return res, err
 	}
+	// While traffic policy is on, the tap goes back down once its sysctls
+	// exist, for galactic-bgp to bring up after attaching and verifying every
+	// enforcement program. No guest can send yet: the VMM opens the tap only
+	// after this ADD returns.
+	if veth.HostQuarantined() {
+		if err := netlink.LinkSetDown(tapLink); err != nil {
+			return res, fmt.Errorf("quarantine tap %q: %w", tapName, err)
+		}
+	}
 
 	slog.Debug("tap: enslaved to VRF and up", "tap", tapName, "vrf", vrfName)
 	return res, nil
@@ -296,8 +306,9 @@ func repairTap(tapLink netlink.Link, vrfLink netlink.Link, tapName string, mtu i
 		return err
 	}
 
-	// Bring up if down (ensures sysctl entries are populated).
-	if tapLink.Attrs().Flags&net.FlagUp == 0 {
+	// Bring up if down (ensures sysctl entries are populated). While traffic
+	// policy is on, galactic-bgp brings it up instead, after verifying it.
+	if tapLink.Attrs().Flags&net.FlagUp == 0 && !veth.HostQuarantined() {
 		slog.Warn("tap: bringing tap back up during repair", "tap", tapName)
 		if err := netlink.LinkSetUp(tapLink); err != nil {
 			return fmt.Errorf("bring up tap %q: %w", tapName, err)

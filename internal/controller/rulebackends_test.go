@@ -17,9 +17,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // collidingAddrs returns two addresses in fd00:10::/64 whose srv6.BackendSlot
@@ -107,7 +107,7 @@ func TestSelectRuleBackends_DropsConflictingBackends(t *testing.T) {
 	slot := newBackendAttachment(testVPCRef, b.String())
 	slot.Name = "slot"
 
-	sel, err := selectRuleBackends(rule, []*cloudv1alpha1.VPCAttachment{slot, dup, first}, nil)
+	sel, err := selectRuleBackends(rule, []*cloudv1alpha1.VPCAttachment{slot, dup, first}, nil, familyIPv6)
 	if err != nil {
 		t.Fatalf("selectRuleBackends: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestSelectRuleBackends_DropsConflictingBackends(t *testing.T) {
 
 // newSharingRule returns a rule named name with the IPv6 VIP vip, created at
 // second created, selecting newBackendAttachment's attachments in testVPCRef.
-func newSharingRule(name, vip string, created int64) *bgpv1alpha1.NetworkRule {
+func newSharingRule(name, vip string, created int64) *bgpv1alpha1.NetworkService {
 	rule := newTestRule(name, testVPCRef, vip)
 	rule.CreationTimestamp = metav1.NewTime(time.Unix(created, 0))
 	return rule
@@ -140,7 +140,7 @@ func TestRuleBackendOwners(t *testing.T) {
 	tests := []struct {
 		name string
 		// change edits the older rule "a", then the newer rule "b".
-		changeA, changeB func(*bgpv1alpha1.NetworkRule)
+		changeA, changeB func(*bgpv1alpha1.NetworkService)
 		wantOwner        string
 		wantBClaimed     bool
 	}{
@@ -151,41 +151,41 @@ func TestRuleBackendOwners(t *testing.T) {
 		},
 		{
 			name:         "creation time decides before name",
-			changeA:      func(r *bgpv1alpha1.NetworkRule) { r.CreationTimestamp = metav1.NewTime(time.Unix(300, 0)) },
+			changeA:      func(r *bgpv1alpha1.NetworkService) { r.CreationTimestamp = metav1.NewTime(time.Unix(300, 0)) },
 			wantOwner:    "b",
 			wantBClaimed: false,
 		},
 		{
 			name:         "a creation time tie falls to the name",
-			changeB:      func(r *bgpv1alpha1.NetworkRule) { r.CreationTimestamp = metav1.NewTime(time.Unix(100, 0)) },
+			changeB:      func(r *bgpv1alpha1.NetworkService) { r.CreationTimestamp = metav1.NewTime(time.Unix(100, 0)) },
 			wantOwner:    "a",
 			wantBClaimed: true,
 		},
 		{
 			name:      "different backend ports do not collide",
-			changeB:   func(r *bgpv1alpha1.NetworkRule) { r.Spec.BackendPort = testBackendPort + 1 },
+			changeB:   func(r *bgpv1alpha1.NetworkService) { r.Spec.BackendPort = testBackendPort + 1 },
 			wantOwner: "a",
 		},
 		{
 			name:      "different protocols do not collide",
-			changeB:   func(r *bgpv1alpha1.NetworkRule) { r.Spec.Protocol = bgpv1alpha1.NetworkRuleProtocolUDP },
+			changeB:   func(r *bgpv1alpha1.NetworkService) { r.Spec.Protocol = bgpv1alpha1.NetworkServiceProtocolUDP },
 			wantOwner: "a",
 		},
 		{
 			name: "a rule with two IPv6 VIPs claims nothing",
-			changeA: func(r *bgpv1alpha1.NetworkRule) {
+			changeA: func(r *bgpv1alpha1.NetworkService) {
 				r.Spec.VIPAddresses = append(r.Spec.VIPAddresses, "2001:db8:100::34")
 			},
 			wantOwner: "b",
 		},
 		{
 			name:      "a rule with no IPv6 VIP claims nothing",
-			changeA:   func(r *bgpv1alpha1.NetworkRule) { r.Spec.VIPAddresses = []string{testVIP} },
+			changeA:   func(r *bgpv1alpha1.NetworkService) { r.Spec.VIPAddresses = []string{testVIP4} },
 			wantOwner: "b",
 		},
 		{
 			name: "a rule being deleted keeps its claim",
-			changeA: func(r *bgpv1alpha1.NetworkRule) {
+			changeA: func(r *bgpv1alpha1.NetworkService) {
 				now := metav1.NewTime(time.Unix(400, 0))
 				r.DeletionTimestamp = &now
 			},
@@ -205,7 +205,7 @@ func TestRuleBackendOwners(t *testing.T) {
 			}
 			attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment(testVPCRef)}
 			// The list order must not matter: the newer rule comes first.
-			owners := ruleBackendOwners([]bgpv1alpha1.NetworkRule{*b, *a}, attachments)
+			owners := ruleBackendOwners([]bgpv1alpha1.NetworkService{*b, *a}, attachments)
 
 			owner := owners[backendClaimFor(a, ruleBackend{
 				addr: netip.MustParseAddr(testBackendAddr), port: testBackendPort,
@@ -214,7 +214,7 @@ func TestRuleBackendOwners(t *testing.T) {
 				t.Errorf("owner of rule a's backend = %q, want %q", owner.Name, tt.wantOwner)
 			}
 
-			selB, err := selectRuleBackends(b, attachments, owners)
+			selB, err := selectRuleBackends(b, attachments, owners, familyIPv6)
 			if err != nil {
 				t.Fatalf("selectRuleBackends(b): %v", err)
 			}
@@ -226,14 +226,14 @@ func TestRuleBackendOwners(t *testing.T) {
 					t.Errorf("rule b backends = %+v, want none", selB.backends)
 				}
 				msg := selB.claimed[0].String()
-				if !strings.Contains(msg, "[fd00:10::1]:8443") || !strings.Contains(msg, "NetworkRule ns/a") {
-					t.Errorf("claimed message = %q, want it to name the backend and NetworkRule ns/a", msg)
+				if !strings.Contains(msg, "[fd00:10::1]:8443") || !strings.Contains(msg, "NetworkService ns/a") {
+					t.Errorf("claimed message = %q, want it to name the backend and NetworkService ns/a", msg)
 				}
 			} else if len(selB.backends) != 1 {
 				t.Errorf("rule b backends = %+v, want its one backend", selB.backends)
 			}
 
-			selA, err := selectRuleBackends(a, attachments, owners)
+			selA, err := selectRuleBackends(a, attachments, owners, familyIPv6)
 			if err != nil {
 				t.Fatalf("selectRuleBackends(a): %v", err)
 			}
@@ -279,7 +279,7 @@ func TestAttachmentsByVPC_SelectSameBackends(t *testing.T) {
 	for _, vpc := range []string{"vpc-blue", "vpc-green", "vpc-empty"} {
 		t.Run(vpc, func(t *testing.T) {
 			rule := newTestRule(testRuleName, vpc, testVIP)
-			want, err := selectRuleBackends(rule, all, nil)
+			want, err := selectRuleBackends(rule, all, nil, familyIPv6)
 			if err != nil {
 				t.Fatalf("selectRuleBackends over the full list: %v", err)
 			}
@@ -298,7 +298,7 @@ func TestAttachmentsByVPC_SelectSameBackends(t *testing.T) {
 				"indexed list": indexed,
 				"grouped list": byVPC[vpc],
 			} {
-				got, err := selectRuleBackends(rule, candidates, nil)
+				got, err := selectRuleBackends(rule, candidates, nil, familyIPv6)
 				if err != nil {
 					t.Fatalf("selectRuleBackends over the %s: %v", name, err)
 				}

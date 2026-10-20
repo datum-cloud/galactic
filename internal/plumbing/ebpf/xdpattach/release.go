@@ -14,6 +14,7 @@ import (
 	"slices"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 )
 
 // ErrDispatcherInUse is ReleaseIdleDispatcher refusing to detach a dispatcher
@@ -30,11 +31,15 @@ var ErrDispatcherInUse = errors.New("xdpattach: the XDP dispatcher is serving an
 // on the interface, and detaching it would cut its traffic. The live slots are
 // read under the dispatch lock, which every Fill takes too, so no datapath can
 // take a slot between the check and the release.
-func ReleaseIdleDispatcher(ctx context.Context, pinDir string, ifaces []string, own ...xdpdispatch.Slot) error {
+//
+// mode is the host's XDP attach mode. Release detaches a link in either mode.
+func ReleaseIdleDispatcher(ctx context.Context, pinDir string, mode xdpmode.Mode, ifaces []string,
+	own ...xdpdispatch.Slot,
+) error {
 	if _, err := os.Stat(filepath.Join(pinDir, "links")); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	dispatcher, err := xdpdispatch.Open(ctx, pinDir)
+	dispatcher, err := xdpdispatch.Open(ctx, pinDir, mode)
 	if err != nil {
 		return fmt.Errorf("xdpattach: open the node's XDP dispatcher to release it: %w", err)
 	}
@@ -57,11 +62,11 @@ func ReleaseIdleDispatcher(ctx context.Context, pinDir string, ifaces []string, 
 			return fmt.Errorf("xdpattach: find interface %q: %w", name, err)
 		}
 		ifindex := l.Attrs().Index
-		linked, err := dispatcher.Linked(ifindex)
+		pinned, err := dispatcher.Pinned(ifindex)
 		if err != nil {
 			return err
 		}
-		if !linked {
+		if !pinned {
 			continue
 		}
 		if len(others) > 0 {
@@ -86,11 +91,13 @@ func ReleaseIdleDispatcher(ctx context.Context, pinDir string, ifaces []string, 
 // at once rather than once the slots' leases lapse. Every other slot, and the
 // dispatcher itself, are left alone. It does nothing on a node that never ran
 // the dispatcher.
+// It opens the dispatcher for slots only, so it never touches the host's
+// recorded XDP mode.
 func ClearDispatcherSlots(ctx context.Context, pinDir string, slots ...xdpdispatch.Slot) error {
 	if _, err := os.Stat(filepath.Join(pinDir, "links")); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	dispatcher, err := xdpdispatch.Open(ctx, pinDir)
+	dispatcher, err := xdpdispatch.OpenForSlots(ctx, pinDir)
 	if err != nil {
 		return fmt.Errorf("xdpattach: open the node's XDP dispatcher: %w", err)
 	}

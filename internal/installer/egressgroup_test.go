@@ -6,21 +6,25 @@ package installer
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"maps"
 	"net"
 	"net/netip"
 	"reflect"
 	"testing"
 
 	"github.com/cilium/ebpf"
+	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 var (
@@ -122,7 +126,7 @@ func TestEgressShardCandidates(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.class.String(), func(t *testing.T) {
-			eligible, ineligible := egressShardCandidates(shards, tt.class)
+			eligible, ineligible := egressShardCandidates(shards, tt.class, "")
 			if got := candidateNames(t, eligible); !reflect.DeepEqual(got, tt.eligible) {
 				t.Errorf("eligible = %v, want %v", got, tt.eligible)
 			}
@@ -130,6 +134,42 @@ func TestEgressShardCandidates(t *testing.T) {
 				t.Errorf("ineligible = %v, want %v", ineligible, tt.ineligible)
 			}
 		})
+	}
+}
+
+const (
+	// nodeKind is the TargetRef kind an EgressShard targets.
+	nodeKind = "Node"
+	// shardNode is the node the tests' own shard runs on.
+	shardNode = "edge-a"
+)
+
+// TestEgressShardCandidates_Local checks that only the shard targeting this
+// node is local, and that no node name marks none.
+func TestEgressShardCandidates_Local(t *testing.T) {
+	here, there := dual("here", 0x10), dual("there", 0x11)
+	here.Spec.TargetRef = bgpv1alpha1.TargetRef{Kind: nodeKind, Name: shardNode}
+	there.Spec.TargetRef = bgpv1alpha1.TargetRef{Kind: nodeKind, Name: "edge-b"}
+	shards := []bgpv1alpha1.EgressShard{here, there}
+
+	local := func(nodeName string) map[string]bool {
+		eligible, _ := egressShardCandidates(shards, egressroutemap.NAT66Class, nodeName)
+		out := map[string]bool{}
+		for _, c := range eligible {
+			out[c.SID.String()] = c.Local
+		}
+		return out
+	}
+	want := map[string]bool{shardSIDFor(0x10): true, shardSIDFor(0x11): false}
+	if got := local(shardNode); !reflect.DeepEqual(got, want) {
+		t.Errorf("on edge-a: local = %v, want %v", got, want)
+	}
+	none := map[string]bool{shardSIDFor(0x10): false, shardSIDFor(0x11): false}
+	if got := local("compute-a"); !reflect.DeepEqual(got, none) {
+		t.Errorf("on a node with no shard: local = %v, want %v", got, none)
+	}
+	if got := local(""); !reflect.DeepEqual(got, none) {
+		t.Errorf("with no node name: local = %v, want %v", got, none)
 	}
 }
 
@@ -532,4 +572,376 @@ func TestSweepHashed_UnsyncedOrFailingWatch(t *testing.T) {
 	if after := status(t, f.groups, 0); after != before {
 		t.Errorf("a failing watch changed the group: %+v -> %+v", before, after)
 	}
+}
+
+// TestSweepHashed_ShardNode checks a node that runs an egress shard: its own
+// shard is a local member, not an unreachable one, while a remote shard whose
+// SID does not resolve is still unreachable. Neither is alive, so neither
+// takes a tenant from this node.
+func TestSweepHashed_ShardNode(t *testing.T) {
+	f := newFixture(t, testHashed, nil, nil)
+	f.g.nodeName = shardNode
+	here, remote := dual("here", 0x10), dual("remote", 0x11)
+	here.Spec.TargetRef = bgpv1alpha1.TargetRef{Kind: nodeKind, Name: shardNode}
+	remote.Spec.TargetRef = bgpv1alpha1.TargetRef{Kind: nodeKind, Name: "edge-b"}
+	f.g.shards = &fakeLister{shards: []bgpv1alpha1.EgressShard{here, remote}, synced: true}
+
+	resolved := map[string]bool{}
+	restore := egressroutemap.OverrideResolverForTest(func(sid net.IP) (int, net.HardwareAddr, net.HardwareAddr, error) {
+		resolved[sid.String()] = true
+		return 0, nil, nil, errInjected
+	})
+	t.Cleanup(restore)
+
+	if err := f.sweep(t); err != nil {
+		t.Fatal(err)
+	}
+	if resolved[staticSIDFor(0x10)] {
+		t.Error("the local shard's SID was resolved; it has no route over an uplink to find")
+	}
+	members, err := f.groups.Members(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]egressroutemap.ShardState{}
+	for _, m := range members {
+		got[m.SID.String()] = m
+	}
+	if m := got[staticSIDFor(0x10)]; !m.Local || m.Alive {
+		t.Errorf("own shard = %+v, want local and not alive", m)
+	}
+	if m := got[staticSIDFor(0x11)]; m.Local || m.Alive {
+		t.Errorf("unresolvable remote shard = %+v, want unreachable (neither local nor alive)", m)
+	}
+	if s := status(t, f.groups, 0); s.Candidates != 2 || s.Active != 0 {
+		t.Errorf("group = %+v, want two candidates and none active", s)
+	}
+}
+
+var (
+	testP2 = netip.MustParsePrefix("2001:db8:65::/96")
+	testP3 = netip.MustParsePrefix("2001:db8:66::/96")
+	testP4 = netip.MustParsePrefix("2001:db8:67::/96")
+
+	nat64P2 = egressroutemap.NAT64Class(testP2)
+	nat64P3 = egressroutemap.NAT64Class(testP3)
+	nat64P4 = egressroutemap.NAT64Class(testP4)
+)
+
+// classShards is one NAT66-only shard plus one NAT64-only shard per prefix in
+// all, so every class has exactly its own member.
+func classShards(all ...netip.Prefix) []bgpv1alpha1.EgressShard {
+	shards := make([]bgpv1alpha1.EgressShard, 0, 1+len(all))
+	shards = append(shards, shardObject("nat66", shardSIDFor(0x20), "2001:db8:9966::1", "", "", true, true))
+	for i, p := range all {
+		nodeID := uint16(0x30 + i) //nolint:gosec // test
+		shards = append(shards, shardObject(p.String(), shardSIDFor(nodeID), "", "192.0.2.1", p.String(), true, true))
+	}
+	return shards
+}
+
+// restart replaces the fixture's sweep with a fresh process configured for
+// nat64, over the same pinned maps.
+func (f *fixture) restart(nat64 []netip.Prefix, shards []bgpv1alpha1.EgressShard) {
+	f.g = newEgressGroup(testHashed, nil, nat64, "")
+	f.g.shards = &fakeLister{shards: shards, synced: true}
+}
+
+// settle sweeps until a sweep queues no further one.
+func (f *fixture) settle(t *testing.T) {
+	t.Helper()
+	for range 5 {
+		if err := f.sweep(t); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.g.trigger) == 0 {
+			return
+		}
+		<-f.g.trigger
+	}
+	t.Fatal("sweeps kept queueing more sweeps")
+}
+
+// attach writes vrf's routes as CNI ADD does: one sentinel per class, naming
+// the group FindClass gives for it.
+func (f *fixture) attach(t *testing.T, vrf uint32, nat64 []netip.Prefix) {
+	t.Helper()
+	prefixes := make([]*net.IPNet, 0, 1+len(nat64))
+	prefixes = append(prefixes, egressroutemap.DefaultPrefix)
+	for _, p := range nat64 {
+		prefixes = append(prefixes, &net.IPNet{IP: net.IP(p.Addr().AsSlice()), Mask: net.CIDRMask(96, 128)})
+	}
+	for _, prefix := range prefixes {
+		class, _ := egressroutemap.ClassForRoute(prefix)
+		id, s, found, err := f.groups.FindClass(class)
+		if err != nil || !found || !s.Open() {
+			t.Fatalf("FindClass(%s) = %d, %+v, %t, %v; want an open group", class, id, s, found, err)
+		}
+		if err := f.routes.RegisterGroup(vrf, prefix, id, uint16(0x100+vrf)); err != nil { //nolint:gosec // test
+			t.Fatal(err)
+		}
+	}
+}
+
+// routeClasses maps every sentinel's own class to the class of the group it
+// names, failing on any sentinel naming a group published for another class.
+// The test prefixes differ in their address bits, so a key's address is
+// enough to tell its class.
+func (f *fixture) routeClasses(t *testing.T) map[egressroutemap.TranslationClass]int {
+	t.Helper()
+	got := map[egressroutemap.TranslationClass]int{}
+	for key, value := range f.raw.values {
+		if value.LinkIfindex != 0xFFFFFFFF {
+			continue
+		}
+		class := egressroutemap.NAT66Class
+		if key.Addr != [16]byte{} {
+			class = egressroutemap.NAT64Class(netip.PrefixFrom(netip.AddrFrom16(key.Addr), 96))
+		}
+		id := binary.NativeEndian.Uint32(value.Sid[0:4])
+		if s := status(t, f.groups, id); !s.Present || s.Class != class {
+			t.Errorf("VRF %d's %s route names group %d, published for %s", key.TableId, class, id, s.Class)
+		}
+		got[class]++
+	}
+	return got
+}
+
+// enabledClasses maps each enabled group's class to its ID, failing on a class
+// two enabled groups share.
+func (f *fixture) enabledClasses(t *testing.T) map[egressroutemap.TranslationClass]uint32 {
+	t.Helper()
+	got := map[egressroutemap.TranslationClass]uint32{}
+	for id := range uint32(egressroutemap.MaxShardGroups) {
+		s := status(t, f.groups, id)
+		if !s.Enabled {
+			continue
+		}
+		if prev, dup := got[s.Class]; dup {
+			t.Errorf("groups %d and %d both serve %s", prev, id, s.Class)
+		}
+		got[s.Class] = id
+	}
+	return got
+}
+
+// TestSweepHashed_ClassListChanges covers R05: editing the NAT64 prefix list
+// never leaves a route on a group serving another class. A class keeps its
+// group across removal, reorder and restart; a removed class's routes are
+// deleted and its group retired; and a retired group's ID goes to a new class
+// only once nothing names it.
+func TestSweepHashed_ClassListChanges(t *testing.T) {
+	all := classShards(testNSP, testP2, testP3, testP4)
+	start := func(t *testing.T, nat64 []netip.Prefix) *fixture {
+		t.Helper()
+		f := newFixture(t, testHashed, nil, nat64)
+		f.restart(nat64, all)
+		f.settle(t)
+		f.attach(t, 1, nat64)
+		f.attach(t, 2, nat64)
+		return f
+	}
+
+	t.Run("Removal", func(t *testing.T) {
+		f := start(t, []netip.Prefix{testNSP, testP2})
+		before := f.enabledClasses(t)
+		f.restart([]netip.Prefix{testP2}, all)
+		if err := f.sweep(t); err != nil {
+			t.Fatal(err)
+		}
+		routes := f.routeClasses(t)
+		if routes[nat64NSP] != 0 || routes[nat64P2] != 2 {
+			t.Errorf("routes by class after removal = %v, want the NSP's gone and P2's kept", routes)
+		}
+		if s := status(t, f.groups, before[nat64NSP]); !s.Closing {
+			t.Errorf("removed class's group = %+v, want it closing", s)
+		}
+		f.settle(t)
+		after := f.enabledClasses(t)
+		if _, ok := after[nat64NSP]; ok || after[nat64P2] != before[nat64P2] {
+			t.Errorf("enabled groups = %v, want P2 on its old group %d and the NSP retired", after,
+				before[nat64P2])
+		}
+	})
+
+	t.Run("Reorder", func(t *testing.T) {
+		f := start(t, []netip.Prefix{testNSP, testP2, testP3})
+		before := f.enabledClasses(t)
+		f.restart([]netip.Prefix{testP3, testNSP, testP2}, all)
+		f.settle(t)
+		if after := f.enabledClasses(t); !reflect.DeepEqual(after, before) {
+			t.Errorf("groups after reorder = %v, want unchanged %v", after, before)
+		}
+		if routes := f.routeClasses(t); len(routes) != 4 {
+			t.Errorf("routes by class = %v, want all four classes kept", routes)
+		}
+	})
+
+	t.Run("ReplacementWithAFreeGroup", func(t *testing.T) {
+		f := start(t, []netip.Prefix{testNSP, testP2})
+		before := f.enabledClasses(t)
+		f.restart([]netip.Prefix{testNSP, testP3}, all)
+		f.settle(t)
+		after := f.enabledClasses(t)
+		p2, p3 := before[nat64P2], after[nat64P3]
+		if p3 == p2 || after[nat64NSP] != before[nat64NSP] {
+			t.Errorf("groups %v -> %v: P3 must not take P2's group while a free one exists", before, after)
+		}
+		if routes := f.routeClasses(t); routes[nat64P2] != 0 {
+			t.Errorf("routes by class = %v, want P2's removed", routes)
+		}
+		f.attach(t, 3, []netip.Prefix{testNSP, testP3})
+		f.routeClasses(t)
+	})
+
+	t.Run("ReplacementReusesARetiredGroup", func(t *testing.T) {
+		full := []netip.Prefix{testNSP, testP2, testP3}
+		f := start(t, full)
+		before := f.enabledClasses(t)
+		f.restart([]netip.Prefix{testNSP, testP2, testP4}, all)
+		if err := f.sweep(t); err != nil {
+			t.Fatal(err)
+		}
+		if s := status(t, f.groups, before[nat64P3]); s.Class != nat64P3 {
+			t.Errorf("P3's group was handed on in the sweep that retired it: %+v", s)
+		}
+		f.routeClasses(t)
+		f.settle(t)
+		after := f.enabledClasses(t)
+		if after[nat64P4] != before[nat64P3] {
+			t.Errorf("groups %v -> %v: want P4 on P3's retired group once no route names it", before, after)
+		}
+		f.attach(t, 3, []netip.Prefix{testNSP, testP2, testP4})
+		if routes := f.routeClasses(t); routes[nat64P3] != 0 ||
+			routes[nat64P4] != 1 {
+			t.Errorf("routes by class = %v, want no P3 route and VRF 3's P4 route", routes)
+		}
+	})
+
+	t.Run("RetiredGroupHeldByAForeignRoute", func(t *testing.T) {
+		f := start(t, []netip.Prefix{testNSP, testP2, testP3})
+		before := f.enabledClasses(t)
+		p3 := before[nat64P3]
+		p3Net := &net.IPNet{IP: net.IP(testP3.Addr().AsSlice()), Mask: net.CIDRMask(96, 128)}
+		if err := f.routes.RegisterGroup(9, p3Net, p3, 0x199); err != nil {
+			t.Fatal(err)
+		}
+		f.restart([]netip.Prefix{testNSP, testP2, testP4}, all)
+		for range 3 {
+			if err := f.g.sweepWith(context.Background(), f.routes, f.groups, map[uint32]struct{}{9: {}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if s := status(t, f.groups, p3); !s.Enabled || s.Class != nat64P3 {
+			t.Errorf("P3's group = %+v, want it kept for P3 while a foreign route names it", s)
+		}
+		if _, ok := f.enabledClasses(t)[nat64P4]; ok {
+			t.Error("P4 was given a group while every group is held")
+		}
+		f.routeClasses(t)
+	})
+
+	t.Run("UpgradeFromPositionalGroups", func(t *testing.T) {
+		// What the positional layout left after the NSP was removed from
+		// [NAT66, NSP, P2]: group 1 republished for P2 under the NSP's routes,
+		// and group 2 a duplicate P2 group with P2's routes.
+		f := start(t, []netip.Prefix{testNSP, testP2})
+		eligible, _ := egressShardCandidates(all, nat64P2, "")
+		if _, err := f.groups.Apply(1, f.g.policy(nat64P2, 0), eligible); err != nil {
+			t.Fatal(err)
+		}
+		f.restart([]netip.Prefix{testP2}, all)
+		f.settle(t)
+		if routes := f.routeClasses(t); routes[nat64NSP] != 0 || routes[nat64P2] != 2 {
+			t.Errorf("routes by class = %v, want the NSP's removed and P2's kept", routes)
+		}
+		if got := f.enabledClasses(t); got[nat64P2] != 1 || len(got) != 2 {
+			t.Errorf("enabled groups = %v, want NAT66 and one P2 group, the lowest", got)
+		}
+	})
+}
+
+// TestSweepHashed_EmptyMembershipKeepsRoutesOnGroups checks that when no
+// shard can serve any class, hashed mode keeps every route on its class's
+// group, where the datapath drops it as group_empty, rather than falling
+// back to the static shard list, which is not checked for readiness or
+// translation. The routes stay counted against their groups.
+func TestSweepHashed_EmptyMembershipKeepsRoutesOnGroups(t *testing.T) {
+	cases := map[string]func(*fakeLister){
+		"NoShards": func(l *fakeLister) { l.shards = nil },
+		"NoneEligible": func(l *fakeLister) {
+			l.shards[0].Status.Conditions[0].Status = metav1.ConditionFalse
+		},
+	}
+	for name, empty := range cases {
+		t.Run(name, func(t *testing.T) {
+			static := shardSIDFor(0x10)
+			f := newFixture(t, testHashed, []string{static}, []netip.Prefix{testNSP})
+			reg := prometheus.NewRegistry()
+			f.g.ctl = metrics.NewEgressControl(reg)
+			lister := &fakeLister{shards: []bgpv1alpha1.EgressShard{dual("dual", 0x10)}, synced: true}
+			f.g.shards = lister
+
+			base, _ := egressroutemap.BaseShardSID(net.ParseIP(static))
+			for vrf := uint32(1); vrf <= 3; vrf++ {
+				sid := base.As16()
+				sid[9] = byte(0x20 + vrf)
+				if err := f.routes.Register(vrf, egressroutemap.DefaultPrefix, net.IP(sid[:])); err != nil {
+					t.Fatal(err)
+				}
+				if vrf == 1 {
+					if err := f.routes.Register(vrf, testNSPNet, net.IP(sid[:])); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := f.sweep(t); err != nil {
+				t.Fatal(err)
+			}
+			if f.sentinels() != 4 {
+				t.Fatalf("%d routes on groups after the first sweep, want 4", f.sentinels())
+			}
+			before := maps.Clone(f.raw.values)
+
+			empty(lister)
+			if err := f.sweep(t); err != nil {
+				t.Fatal(err)
+			}
+			if !maps.Equal(f.raw.values, before) {
+				t.Errorf("routes changed with no shard to serve them; %d of 4 still on a group", f.sentinels())
+			}
+			for id := range uint32(2) {
+				if s := status(t, f.groups, id); !s.Open() || s.Candidates != 0 {
+					t.Errorf("group %d = %+v, want open with no candidate", id, s)
+				}
+			}
+			want := map[string]float64{egressroutemap.NAT66Class.String(): 3, nat64NSP.String(): 1}
+			if got := groupRoutes(t, reg); !maps.Equal(got, want) {
+				t.Errorf("group_routes = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// groupRoutes reads galactic_cni_egress_group_routes from reg, by class.
+func groupRoutes(t *testing.T, reg *prometheus.Registry) map[string]float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, mf := range families {
+		if mf.GetName() != "galactic_cni_egress_group_routes" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "class" {
+					got[l.GetValue()] = m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return got
 }

@@ -16,7 +16,7 @@ data flow, module reference, known constraints):
 - [agents/ARCHITECTURE-ROUTER.md](agents/ARCHITECTURE-ROUTER.md) — the
   BGP/EVPN control plane (`galactic-router`, embedded GoBGP, GC).
 - [agents/ARCHITECTURE-GATEWAY.md](agents/ARCHITECTURE-GATEWAY.md) — the edge
-  XDP DSR load balancer (`galactic-gateway`, `NetworkGateway`/`NetworkRule`).
+  XDP DSR load balancer (`galactic-gateway`, `NetworkGateway`/`NetworkService`).
 - [agents/ARCHITECTURE-FABRIC-API.md](agents/ARCHITECTURE-FABRIC-API.md) — the
   fabric looking glass (`fabric-api`: the `fabric-router` sidecar, the cell
   gateway, `FabricQuery` execution, mTLS identities).
@@ -40,7 +40,7 @@ data flow, module reference, known constraints):
   consumers receive no guest-visible service route.
 - [gateway/configuration.md](gateway/configuration.md) — `galactic-gateway`
   deployment (node labeling, RBAC, per-node overlay), its config reference,
-  and the `NetworkGateway`/`NetworkRule`/`ServiceVIPBinding` CRD fields.
+  and the `NetworkGateway`/`NetworkService`/`ServiceVIPBinding` CRD fields.
 - [nat/configuration.md](nat/configuration.md) — `galactic-nat` placement
   (edge nodes, sharing the uplinks' XDP hook with the gateway), config
   reference, the `EgressShard` CRD, and the `galactic-cni`-side shard
@@ -51,12 +51,24 @@ data flow, module reference, known constraints):
   identities and rotation, limits, probe source and destination rules, cleanup,
   alerts, and sidecar rollout.
 - [fabric-api/api.md](fabric-api/api.md) — the internal `FabricQuery` contract
-  (`network.datumapis.com/v1alpha1`): spec, target rules, lookup and
+  (`galactic.datumapis.com/v1alpha1`): spec, target rules, lookup and
   observation semantics, conditions, and typed error codes.
 - [fabric-api/load-test.md](fabric-api/load-test.md) — the full-table load test
   that gates AS-path and community searches: method, how to run it
   (`task test:fabric-api-load`), and the results for direct FRR scans versus the
   BMP-fed search index.
+- [traffic-policy/controller.md](traffic-policy/controller.md) —
+  `galactic-controller --role=cell`: the TrafficPolicy webhook, the reserved
+  default policy, binding resolution status, flags and install order.
+- [traffic-policy/rollout.md](traffic-policy/rollout.md) — turning traffic
+  policy on in a cell: install order, writing grants, auditing with the
+  counters before enforcing, and backing out.
+- [traffic-policy/node.md](traffic-policy/node.md) — galactic-router's node
+  side: enabling it, what each binding applies, per-node status, the
+  `galactic_cni_traffic_policy_*` metrics and the `policy explain` and
+  `policy show` diagnostics.
+- [api/galactic.md](api/galactic.md) — the generated `galactic.datumapis.com`
+  API reference (TrafficPolicy, TrafficPolicyBinding).
 - [cni/README.md](cni/README.md) — entry point for the `galactic-cni` docs
   subtree; from there:
   - [cni/environment-variables.md](cni/environment-variables.md) — every
@@ -85,3 +97,6 @@ above for that.
 - [enhancements/networking/latency-aware-routing/README.md](enhancements/networking/latency-aware-routing/README.md)
   — latency-aware SRv6 path selection as a tenant-facing routing policy.
   `status: provisional`, `stage: alpha`.
+- [enhancements/networking/interface-traffic-policy/README.md](enhancements/networking/interface-traffic-policy/README.md)
+  — per-interface ingress and egress traffic policy, deny by default and
+  enforced in the CNI datapath. `status: provisional`, `stage: alpha`.

@@ -26,7 +26,8 @@ const (
 	DropReasonRedirectFailed   uint32 = 8
 	DropReasonReturnHopLimit   uint32 = 9
 	DropReasonICMPRateLimited  uint32 = 10
-	DropReasonCount            uint32 = 11
+	DropReasonIPv4Fragment     uint32 = 11
+	DropReasonCount            uint32 = 12
 )
 
 // DropReasonNames maps each index to a short, stable, metrics-friendly name,
@@ -44,4 +45,5 @@ var DropReasonNames = map[uint32]string{
 	DropReasonRedirectFailed:   "redirect_failed",
 	DropReasonReturnHopLimit:   "return_hop_limit",
 	DropReasonICMPRateLimited:  "icmp_rate_limited",
+	DropReasonIPv4Fragment:     "ipv4_fragment",
 }

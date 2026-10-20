@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -17,10 +18,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/vrf"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -30,7 +31,9 @@ const (
 
 // newAdvClient builds a fake client holding advertisements, so endpoint
 // selection can be exercised without an API server. The counterpart to
-// locatorroute_test.go's newRouterClient, which holds BGPRouters.
+// locatorroute_test.go's newRouterClient, which holds BGPRouters. Each
+// advertisement's router is added too, named after and targeting its node,
+// since advertisements reach a node only through a router targeting it.
 func newAdvClient(t *testing.T, advs ...*bgpv1alpha1.BGPAdvertisement) client.Client {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -38,8 +41,15 @@ func newAdvClient(t *testing.T, advs ...*bgpv1alpha1.BGPAdvertisement) client.Cl
 		t.Fatalf("AddToScheme: %v", err)
 	}
 	b := fake.NewClientBuilder().WithScheme(s)
+	routers := make(map[string]bool)
 	for _, a := range advs {
 		b = b.WithObjects(a)
+		if name := a.Spec.RouterRef.Name; !routers[name] {
+			routers[name] = true
+			r := router(name, testLocator, 1)
+			r.Name = name
+			b = b.WithObjects(r)
+		}
 	}
 	return b.Build()
 }
@@ -518,7 +528,7 @@ func TestSidecarGatewayEndpoints_CarriesEntryPoint(t *testing.T) {
 func TestEnsureSidecarReturnPath_NoAdvertisementsIsQuiet(t *testing.T) {
 	c := newAdvClient(t)
 	if err := ensureSidecarReturnPath(
-		context.Background(), c, testNamespace, testSidecarNode); err != nil {
+		context.Background(), c, testNamespace, testSidecarNode, nil, time.Now); err != nil {
 		t.Errorf("ensureSidecarReturnPath() error = %v, want nil", err)
 	}
 }

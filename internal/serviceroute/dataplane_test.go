@@ -17,9 +17,9 @@ import (
 
 	"github.com/cilium/ebpf"
 
+	api "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/serviceroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
-	api "go.datum.net/network/api/v1alpha1"
 )
 
 type recordingTable struct {
@@ -142,7 +142,7 @@ func localTestIntent() RouteIntent {
 		ConsumerDevice: testConsumerDeviceName,
 		ServiceDevice:  testProducerDeviceName,
 		Ports: []api.ServiceRouteProtocolPort{{
-			Protocol: api.NetworkRuleProtocolTCP,
+			Protocol: api.NetworkServiceProtocolTCP,
 			Port:     443,
 		}},
 	}
