@@ -5,8 +5,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // edgedsr.c implements the XDP ingress datapath for the edge gateway's Maglev
-// direct-server-return load balancer. IPv6-only, plain TCP and UDP, no
-// extension headers.
+// direct-server-return load balancer, for IPv6 and IPv4 VIPs. Plain TCP and
+// UDP; IPv6 without extension headers, IPv4 with or without options.
 //
 // A second program, edge_return, carries the other half of the same connection
 // on a node that also routes for the compute tier; see its own comment further
@@ -26,15 +26,21 @@
 //
 // Packet path:
 //
-//  1. Parse the outer Ethernet and IPv6 header, bounds-checked. Not IPv6, or
-//     unparseable: unclaimed. Every unclaimed packet goes on to the later
+//  1. Parse the outer Ethernet and IP header, bounds-checked. Neither IPv6 nor
+//     a well-formed IPv4 header, or unparseable: unclaimed. Every unclaimed packet goes on to the later
 //     slots of the node's XDP dispatcher (dispatch_next), and past the last
 //     one, or with no dispatcher, XDP_PASS to the kernel stack.
 //  2. Parse the L4 header, TCP or UDP only. Only the ports are read, and
 //     nothing is ever rewritten.
 //  3. Match (proto, destination port, destination address) against vip_table. A
 //     VIP is globally unique by construction, so no tenant dimension is needed.
-//     No match: unclaimed.
+//     An IPv4 address is keyed in its IPv4-mapped form (::ffff:a.b.c.d), which
+//     no IPv6 VIP can take, so the two families share every map without
+//     colliding. No match: unclaimed. An IPv4 fragment to a VIP address is a
+//     counted drop instead: a later fragment carries no ports to hash, so the
+//     fragments of one packet would reach different backends. That drop
+//     covers every port on the address and is counted only in drop_reasons,
+//     since a fragment's port, and so its rule, is unknown.
 //  4. Claimed past this point. Bump vip_stats_table's counters, creating the
 //     row on first match. Stats live in their own map so a control-plane
 //     read-modify-write can never race these per-packet increments.
@@ -43,7 +49,8 @@
 //     Every gateway node computes the same index for the same flow from the
 //     same inputs, which is what makes this safe under anycast: a flow landing
 //     on a different node mid-connection still resolves to the same backend.
-//  6. Push a fresh 40-byte outer IPv6 header addressed to that backend's
+//  6. Push a fresh 40-byte outer IPv6 header, Next Header 41 for an IPv6
+//     packet and 4 for an IPv4 one, addressed to that backend's
 //     worker-node uSID, sourced from this node's encap_config_table entry,
 //     which is simply this node's SRv6-reachable address and is never compared
 //     against anything on a receive path. Resolve the L2 next hop, and leave
@@ -52,8 +59,9 @@
 //     two differ on every gateway that reaches its clients and its compute
 //     nodes over different links, which is this role's normal shape.
 //  7. A packet the route refuses for size, too big once the outer header is
-//     on, is answered with an ICMPv6 Packet Too Big to the client instead of
-//     vanishing; see send_too_big6.
+//     on, is answered with an ICMPv6 Packet Too Big, or for an IPv4 packet
+//     with Don't Fragment set an ICMPv4 Fragmentation Needed, to the client
+//     instead of vanishing; see send_too_big6 and send_frag_needed4.
 //
 // The verifier's bounds-narrowing behavior described at EDGE_BARRIER_VAR
 // applies to the backend-index lookup below, a plain byte read from a map
@@ -95,11 +103,15 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 // Constants.
 // ---------------------------------------------------------------------
 
+#define EDGE_AF_INET 2
 #define EDGE_AF_INET6 10
+#define EDGE_ETH_P_IP 0x0800
 #define EDGE_ETH_P_IPV6 0x86DD
+#define EDGE_IPPROTO_ICMP 1
+#define EDGE_IPPROTO_IPIP 4 // the pushed outer header's Next Header for an IPv4 packet
 #define EDGE_IPPROTO_TCP 6
 #define EDGE_IPPROTO_UDP 17
-#define EDGE_IPPROTO_IPV6 41 // this program's own pushed outer header's Next Header, always
+#define EDGE_IPPROTO_IPV6 41 // the pushed outer header's Next Header for an IPv6 packet
 #define EDGE_IPPROTO_ICMPV6 58
 #define EDGE_ICMPV6_PACKET_TOO_BIG 2
 
@@ -111,6 +123,23 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 // its IPv6 header and first 8 transport bytes, all a sender's stack matches an
 // error on.
 #define EDGE_FRAG_QUOTE6 (EDGE_IP6HDR_LEN + 8)
+
+// EDGE_IP4HDR_LEN is the IPv4 header without options. A Fragmentation Needed
+// quotes it and the first 8 transport bytes, so it is sent only for a packet
+// without options; see send_frag_needed4.
+#define EDGE_IP4HDR_LEN 20
+#define EDGE_FRAG_QUOTE4 (EDGE_IP4HDR_LEN + 8)
+#define EDGE_ICMP_DEST_UNREACH 3
+#define EDGE_ICMP_FRAG_NEEDED 4
+
+// EDGE_IPV4_MIN_MTU is the smallest MTU an IPv4 host must accept (RFC 791). A
+// Fragmentation Needed reporting less is never sent.
+#define EDGE_IPV4_MIN_MTU 68
+
+// IPv4 frag_off bits, host order: Don't Fragment, More Fragments and the
+// offset. A packet with More Fragments or a non-zero offset is a fragment.
+#define EDGE_IP_DF 0x4000
+#define EDGE_IP_FRAGMENT 0x3fff
 
 // EDGE_IPV6_MIN_MTU is the smallest MTU an IPv6 sender ever uses (RFC 8200
 // section 5). A Packet Too Big reporting less cannot help: the sender keeps
@@ -159,6 +188,21 @@ struct edge_ip6hdr {
 	__u8 daddr[16];
 } __attribute__((packed));
 
+// struct edge_iphdr is the fixed part of an IPv4 header. Options, when
+// ver_ihl says there are any, follow it and are carried unchanged.
+struct edge_iphdr {
+	__u8 ver_ihl;
+	__u8 tos;
+	__be16 tot_len;
+	__be16 id;
+	__be16 frag_off;
+	__u8 ttl;
+	__u8 protocol;
+	__be16 check;
+	__u8 saddr[4];
+	__u8 daddr[4];
+} __attribute__((packed));
+
 // Only the ports are ever read, and TCP and UDP place them at the same offset,
 // so one shared struct covers both.
 struct edge_l4ports {
@@ -171,8 +215,9 @@ struct edge_l4ports {
 // ---------------------------------------------------------------------
 
 // struct backend is one load-balancing target. addr and port are carried
-// through as identifying metadata for the control plane; only usid is used, as
-// the encapsulation destination.
+// through as identifying metadata for the control plane, an IPv4 address in its
+// IPv4-mapped form; only usid, always IPv6, is used, as the encapsulation
+// destination.
 struct backend {
 	__u8 addr[16];
 	__be16 port;
@@ -252,7 +297,8 @@ enum edge_drop_reason {
 	DROP_REASON_REDIRECT_FAILED    = 8,
 	DROP_REASON_RETURN_HOP_LIMIT   = 9,
 	DROP_REASON_ICMP_RATE_LIMITED  = 10,
-	DROP_REASON_COUNT              = 11,
+	DROP_REASON_IPV4_FRAGMENT      = 11,
+	DROP_REASON_COUNT              = 12,
 };
 
 // ---------------------------------------------------------------------
@@ -444,6 +490,39 @@ static EDGE_ALWAYS_INLINE __u32 fnv1a_flow(const __u8 addr[16], __be16 port)
 	return h;
 }
 
+// map_v4 writes addr's IPv4-mapped IPv6 form (::ffff:a.b.c.d) into out, the
+// form every map here keys an IPv4 address by.
+static EDGE_ALWAYS_INLINE void map_v4(__u8 out[16], const __u8 addr[4])
+{
+	__builtin_memset(out, 0, 10);
+	out[10] = 0xff;
+	out[11] = 0xff;
+	__builtin_memcpy(&out[12], addr, 4);
+}
+
+// is_v4_mapped reports whether a is in ::ffff:0:0/96, the range IPv4 rows are
+// keyed in. No IPv6 VIP is ever loaded in it, so a native IPv6 packet carrying
+// such an address is never one of this gateway's: without this check it would
+// match an IPv4 VIP's row and be claimed by the IPv6 path.
+static EDGE_ALWAYS_INLINE int is_v4_mapped(const __u8 a[16])
+{
+	__u64 lo = 0;
+	__u16 mid = 0;
+	__builtin_memcpy(&lo, a, 8);
+	__builtin_memcpy(&mid, &a[8], 2);
+	return lo == 0 && mid == 0 && a[10] == 0xff && a[11] == 0xff;
+}
+
+// v4_answerable_source reports whether an ICMPv4 error may be sent to addr.
+// RFC 1122 3.2.2 forbids one to an unspecified, broadcast or multicast source,
+// and a loopback or this-network source cannot be a real client on the wire.
+static EDGE_ALWAYS_INLINE int v4_answerable_source(const __u8 addr[4])
+{
+	if (addr[0] == 0 || addr[0] == 127 || addr[0] >= 224)
+		return 0; // 0/8, 127/8, 224/4 multicast, 240/4 and the broadcast address
+	return 1;
+}
+
 // resolve_fib_and_write_eth and push_outer_header carry the encapsulation
 // mechanics: grow the packet, write a fresh Ethernet and IPv6 header at the
 // front, and resolve the L2 next hop. They are duplicated rather than shared
@@ -497,14 +576,43 @@ static EDGE_ALWAYS_INLINE void count_fib_drop(long fib_rc, struct vip_stats_valu
 		count_claimed_drop(DROP_REASON_FIB_LOOKUP_FAILED, stats);
 }
 
+// resolve_fib4_and_write_eth is resolve_fib_and_write_eth for a plain IPv4
+// packet, which only edge_return forwards and send_frag_needed4 emits; every
+// packet edge_lb sends on is IPv6 once encapsulated.
+static EDGE_ALWAYS_INLINE long resolve_fib4_and_write_eth(void *ctx, __u32 ifindex, const __u8 src[4],
+							   const __u8 dst[4], __u16 tot_len,
+							   struct edge_ethhdr *eth, __u32 *egress_ifindex)
+{
+	struct bpf_fib_lookup fib_params;
+	__builtin_memset(&fib_params, 0, sizeof(fib_params));
+	fib_params.family = EDGE_AF_INET;
+	__builtin_memcpy(&fib_params.ipv4_src, src, 4);
+	__builtin_memcpy(&fib_params.ipv4_dst, dst, 4);
+	fib_params.ifindex = ifindex;
+	fib_params.tot_len = tot_len;
+
+	long fib_rc = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), BPF_FIB_LOOKUP_DIRECT);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS)
+		return fib_rc;
+
+	__builtin_memcpy(eth->h_dest, fib_params.dmac, sizeof(eth->h_dest));
+	__builtin_memcpy(eth->h_source, fib_params.smac, sizeof(eth->h_source));
+	eth->h_proto = __builtin_bswap16(EDGE_ETH_P_IP);
+	*egress_ifindex = fib_params.ifindex;
+	return BPF_FIB_LKUP_RET_SUCCESS;
+}
+
 // Every failure here is a claimed packet this gateway then failed to deliver,
 // so each one counts against the VIP's own dropped_packets as well as its
 // reason bucket -- a gateway that cannot deliver must not read as one that did.
 //
 // A packet the route refuses for size also reports the route's MTU through
 // frag_mtu, so the caller can tell the client; see send_too_big6.
+//
+// outer_payload_len is the whole inner packet's length, header included, and
+// nexthdr says what that packet is: EDGE_IPPROTO_IPV6 or EDGE_IPPROTO_IPIP.
 static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 src[16],
-						 const __u8 dst[16], __be16 inner_payload_len_plus_ip6hdr,
+						 const __u8 dst[16], __be16 outer_payload_len, __u8 nexthdr,
 						 struct vip_stats_value *stats, __u32 *egress_ifindex,
 						 __u16 *frag_mtu)
 {
@@ -531,14 +639,14 @@ static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 s
 	// hop or receiver would reject every packet pushed.
 	__builtin_memset(outer->vtc_flow, 0, sizeof(outer->vtc_flow));
 	outer->vtc_flow[0] = 0x60;
-	outer->payload_len = inner_payload_len_plus_ip6hdr;
-	outer->nexthdr = EDGE_IPPROTO_IPV6;
+	outer->payload_len = outer_payload_len;
+	outer->nexthdr = nexthdr;
 	outer->hop_limit = 64;
 	__builtin_memcpy(outer->saddr, src, 16);
 	__builtin_memcpy(outer->daddr, dst, 16);
 
 	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, src, dst,
-						 (__u16) (sizeof(*outer) + __builtin_bswap16(inner_payload_len_plus_ip6hdr)),
+						 (__u16) (sizeof(*outer) + __builtin_bswap16(outer_payload_len)),
 						 eth, egress_ifindex, frag_mtu);
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		count_fib_drop(fib_rc, stats);
@@ -663,48 +771,104 @@ static EDGE_ALWAYS_INLINE int send_too_big6(struct xdp_md *ctx, __u32 mtu)
 	return leave_via(ctx, egress_ifindex, 0);
 }
 
+// send_frag_needed4 is send_too_big6 for an IPv4 client: an ICMPv4
+// Destination Unreachable, Fragmentation Needed (RFC 1191), sent only when the
+// client set Don't Fragment, since that is the packet a router would have
+// answered the same way. Without Don't Fragment a router would fragment
+// instead, which this program cannot do, so that packet stays a
+// fib_frag_needed drop.
+//
+// The quote is the client's IPv4 header and first 8 transport bytes, so only a
+// header without options is answered; the caller checks. ICMPv4 has no
+// pseudo-header, so the checksum covers the message alone.
+static EDGE_ALWAYS_INLINE int send_frag_needed4(struct xdp_md *ctx, __u32 mtu)
+{
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+	const __u8 *inner = data + sizeof(struct edge_ethhdr) + EDGE_IP6HDR_LEN;
+	if ((void *) (inner + EDGE_FRAG_QUOTE4) > data_end)
+		return XDP_DROP;
+
+	if (!take_icmp_token()) {
+		count_drop(DROP_REASON_ICMP_RATE_LIMITED);
+		return XDP_DROP;
+	}
+
+	__be32 msg[(8 + EDGE_FRAG_QUOTE4) / 4];
+	__builtin_memset(msg, 0, 8);
+	((__u8 *) msg)[0] = EDGE_ICMP_DEST_UNREACH;
+	((__u8 *) msg)[1] = EDGE_ICMP_FRAG_NEEDED;
+	msg[1] = __builtin_bswap32(mtu & 0xffff);
+	__builtin_memcpy(&msg[2], inner, EDGE_FRAG_QUOTE4);
+	{
+		__s64 sum = bpf_csum_diff(0, 0, msg, sizeof(msg), 0);
+		__be16 check = csum_fold_add(0xFFFF, sum);
+		__builtin_memcpy(&((__u8 *) msg)[2], &check, 2);
+	}
+
+	// The client is the quoted packet's source, and the VIP its destination.
+	__u8 client[4];
+	__builtin_memcpy(client, &inner[12], 4);
+	__u8 vip[4];
+	__builtin_memcpy(vip, &inner[16], 4);
+
+	struct edge_iphdr ip;
+	__builtin_memset(&ip, 0, sizeof(ip));
+	ip.ver_ihl = 0x45;
+	ip.tot_len = __builtin_bswap16(EDGE_IP4HDR_LEN + sizeof(msg));
+	ip.ttl = 64;
+	ip.protocol = EDGE_IPPROTO_ICMP;
+	__builtin_memcpy(ip.saddr, vip, 4);
+	__builtin_memcpy(ip.daddr, client, 4);
+	{
+		__s64 sum = bpf_csum_diff(0, 0, (__be32 *) &ip, sizeof(ip), 0);
+		ip.check = csum_fold_add(0xFFFF, sum);
+	}
+
+	int cur = (int) ((long) data_end - (long) data);
+	int want = (int) (sizeof(struct edge_ethhdr) + EDGE_IP4HDR_LEN + sizeof(msg));
+	if (bpf_xdp_adjust_tail(ctx, want - cur) != 0) {
+		count_drop(DROP_REASON_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+	data = (void *) (long) ctx->data;
+	data_end = (void *) (long) ctx->data_end;
+	if (data + sizeof(struct edge_ethhdr) + EDGE_IP4HDR_LEN + sizeof(msg) > data_end) {
+		count_drop(DROP_REASON_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+
+	struct edge_ethhdr *eth = data;
+	__builtin_memcpy((void *) (eth + 1), &ip, sizeof(ip));
+	__builtin_memcpy((__u8 *) (eth + 1) + EDGE_IP4HDR_LEN, msg, sizeof(msg));
+
+	__u32 egress_ifindex = 0;
+	long fib_rc = resolve_fib4_and_write_eth(ctx, ctx->ingress_ifindex, vip, client,
+						  (__u16) (EDGE_IP4HDR_LEN + sizeof(msg)), eth, &egress_ifindex);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		count_fib_drop(fib_rc, 0);
+		return XDP_DROP;
+	}
+	return leave_via(ctx, egress_ifindex, 0);
+}
+
 // ---------------------------------------------------------------------
 // Entry points.
 // ---------------------------------------------------------------------
 
-SEC("xdp")
-int edge_lb(struct xdp_md *ctx)
+// lb_forward sends a claimed packet to the backend rule's Maglev table picks for
+// the client's address and source port, by pushing the outer header and
+// leaving over the interface its route selects. client is 16 bytes, an IPv4
+// address in its IPv4-mapped form, and is read before the push, which
+// invalidates every pointer into the packet. outer_payload_len is the inner
+// packet's whole length and nexthdr its family, as push_outer_header takes
+// them. It returns the verdict, or -1 with frag_mtu set when the route refused
+// the packet for size, for the caller to answer.
+static EDGE_ALWAYS_INLINE int lb_forward(struct xdp_md *ctx, struct vip_value *rule,
+					  struct vip_stats_value *stats, const __u8 client[16],
+					  __be16 sport, __be16 outer_payload_len, __u8 nexthdr,
+					  __u16 *frag_mtu)
 {
-	void *data = (void *) (long) ctx->data;
-	void *data_end = (void *) (long) ctx->data_end;
-
-	struct edge_ethhdr *eth = data;
-	if ((void *) (eth + 1) > data_end)
-		return pass_unclaimed_lb(ctx);
-	if (eth->h_proto != __builtin_bswap16(EDGE_ETH_P_IPV6))
-		return pass_unclaimed_lb(ctx);
-
-	struct edge_ip6hdr *ip6 = (void *) (eth + 1);
-	if ((void *) (ip6 + 1) > data_end)
-		return pass_unclaimed_lb(ctx);
-
-	if (ip6->nexthdr != EDGE_IPPROTO_TCP && ip6->nexthdr != EDGE_IPPROTO_UDP)
-		return pass_unclaimed_lb(ctx);
-
-	struct edge_l4ports *ports = (void *) (ip6 + 1);
-	if ((void *) (ports + 1) > data_end)
-		return pass_unclaimed_lb(ctx);
-
-	struct vip_key vk;
-	__builtin_memset(&vk, 0, sizeof(vk));
-	vk.proto = ip6->nexthdr;
-	vk.port = ports->dest;
-	__builtin_memcpy(vk.vip, ip6->daddr, 16);
-
-	struct vip_value *rule = bpf_map_lookup_elem(&vip_table, &vk);
-	if (!rule)
-		return pass_unclaimed_lb(ctx); // not one of this gateway's VIPs
-
-	// Claimed past this point -- every subsequent failure is a drop, not
-	// a pass-through (this gateway owns this VIP+port+protocol).
-	struct vip_stats_value *stats = stats_row(&vip_stats_table, &vk);
-	count_match(stats, (__u64) ((char *) data_end - (char *) data));
-
 	if (rule->backend_count == 0) {
 		count_claimed_drop(DROP_REASON_EMPTY_BACKEND_LIST, stats);
 		return XDP_DROP;
@@ -717,7 +881,7 @@ int edge_lb(struct xdp_md *ctx)
 	// rejected as unbounded without help. The same barrier-then-clamp technique
 	// the backend index needs is applied here, as an explicit range clamp
 	// rather than a mask, since no bitmask bounds a prime.
-	__u32 slot = fnv1a_flow(ip6->saddr, ports->source) % EDGE_MAGLEV_TABLE_SIZE;
+	__u32 slot = fnv1a_flow(client, sport) % EDGE_MAGLEV_TABLE_SIZE;
 	EDGE_BARRIER_VAR(slot);
 	if (slot >= EDGE_MAGLEV_TABLE_SIZE)
 		slot = EDGE_MAGLEV_TABLE_SIZE - 1;
@@ -742,7 +906,44 @@ int edge_lb(struct xdp_md *ctx)
 	// The inner packet is pushed completely unmodified: no translation and no
 	// checksum touch, the client's packet travelling inside untouched to the
 	// backend, which replies to the client directly.
-	//
+	__u32 egress_ifindex = 0;
+	if (push_outer_header(ctx, cfg->encap_src, b->usid, outer_payload_len, nexthdr, stats,
+			      &egress_ifindex, frag_mtu) != 0)
+		return -1;
+	return leave_via(ctx, egress_ifindex, stats);
+}
+
+static EDGE_ALWAYS_INLINE int edge_lb_v6(struct xdp_md *ctx, struct edge_ethhdr *eth, void *data_end)
+{
+	struct edge_ip6hdr *ip6 = (void *) (eth + 1);
+	if ((void *) (ip6 + 1) > data_end)
+		return pass_unclaimed_lb(ctx);
+
+	if (ip6->nexthdr != EDGE_IPPROTO_TCP && ip6->nexthdr != EDGE_IPPROTO_UDP)
+		return pass_unclaimed_lb(ctx);
+
+	if (is_v4_mapped(ip6->daddr))
+		return pass_unclaimed_lb(ctx);
+
+	struct edge_l4ports *ports = (void *) (ip6 + 1);
+	if ((void *) (ports + 1) > data_end)
+		return pass_unclaimed_lb(ctx);
+
+	struct vip_key vk;
+	__builtin_memset(&vk, 0, sizeof(vk));
+	vk.proto = ip6->nexthdr;
+	vk.port = ports->dest;
+	__builtin_memcpy(vk.vip, ip6->daddr, 16);
+
+	struct vip_value *rule = bpf_map_lookup_elem(&vip_table, &vk);
+	if (!rule)
+		return pass_unclaimed_lb(ctx); // not one of this gateway's VIPs
+
+	// Claimed past this point -- every subsequent failure is a drop, not
+	// a pass-through (this gateway owns this VIP+port+protocol).
+	struct vip_stats_value *stats = stats_row(&vip_stats_table, &vk);
+	count_match(stats, (__u64) ((char *) data_end - (char *) eth));
+
 	// The outer header's payload length must cover the entire inner packet
 	// including its own 40-byte IPv6 header, not just the transport payload the
 	// inner payload_len names. Passing that field directly undercounts the outer
@@ -750,22 +951,124 @@ int edge_lb(struct xdp_md *ctx)
 	// invalid length. usid_ingress's decap reads at fixed offsets and never
 	// validates the length, so this is invisible on that path while any
 	// length-validating hop would reject every packet pushed.
-	__be16 inner_payload_len_plus_ip6hdr =
+	__be16 outer_payload_len =
 		__builtin_bswap16((__u16) sizeof(struct edge_ip6hdr) + __builtin_bswap16(ip6->payload_len));
 
-	__u32 egress_ifindex = 0;
 	__u16 frag_mtu = 0;
-	if (push_outer_header(ctx, cfg->encap_src, b->usid, inner_payload_len_plus_ip6hdr, stats,
-			      &egress_ifindex, &frag_mtu) != 0) {
-		// A fabric route under 1320 bytes cannot carry even a minimum-MTU
-		// packet once encapsulated, so no Packet Too Big would help; the drop
-		// is already counted as fib_frag_needed.
-		if (frag_mtu >= EDGE_IPV6_MIN_MTU + EDGE_IP6HDR_LEN)
-			return send_too_big6(ctx, frag_mtu - EDGE_IP6HDR_LEN);
+	int verdict = lb_forward(ctx, rule, stats, ip6->saddr, ports->source, outer_payload_len,
+				 EDGE_IPPROTO_IPV6, &frag_mtu);
+	if (verdict >= 0)
+		return verdict;
+	// A fabric route under 1320 bytes cannot carry even a minimum-MTU packet
+	// once encapsulated, so no Packet Too Big would help; the drop is already
+	// counted as fib_frag_needed.
+	if (frag_mtu >= EDGE_IPV6_MIN_MTU + EDGE_IP6HDR_LEN)
+		return send_too_big6(ctx, frag_mtu - EDGE_IP6HDR_LEN);
+	return XDP_DROP;
+}
+
+// edge_lb_v4 claims an IPv4 TCP or UDP packet to one of this gateway's IPv4
+// VIPs. Everything that decides whether to claim it is checked first, so a
+// short or malformed header is passed on unclaimed, for the later slots and the
+// kernel to judge, rather than dropped here: the version, a header length of at
+// least 20 bytes, a total length that covers the header and fits the frame,
+// and a whole TCP or UDP header inside that total length. The header checksum
+// is not checked; the packet travels unmodified, and the backend's kernel
+// drops it if it is wrong.
+//
+// Options are carried unchanged, and the transport header is read past them.
+// Bytes past the total length are Ethernet padding, which a short frame
+// carries to reach the minimum size; they are trimmed before the outer header
+// goes on, so its payload length is exactly the inner packet's.
+static EDGE_ALWAYS_INLINE int edge_lb_v4(struct xdp_md *ctx, struct edge_ethhdr *eth, void *data_end)
+{
+	struct edge_iphdr *ip4 = (void *) (eth + 1);
+	if ((void *) (ip4 + 1) > data_end)
+		return pass_unclaimed_lb(ctx);
+	if ((ip4->ver_ihl >> 4) != 4)
+		return pass_unclaimed_lb(ctx);
+	__u32 hlen = (ip4->ver_ihl & 0x0f) << 2;
+	if (hlen < EDGE_IP4HDR_LEN)
+		return pass_unclaimed_lb(ctx);
+	__u32 tot_len = __builtin_bswap16(ip4->tot_len);
+	__u32 frame_l3 = (__u32) ((long) data_end - (long) ip4);
+	if (tot_len < hlen || tot_len > frame_l3)
+		return pass_unclaimed_lb(ctx);
+
+	__u8 proto = ip4->protocol;
+	if (proto != EDGE_IPPROTO_TCP && proto != EDGE_IPPROTO_UDP)
+		return pass_unclaimed_lb(ctx);
+
+	__u8 vip[16];
+	map_v4(vip, ip4->daddr);
+
+	__u16 frag_off = __builtin_bswap16(ip4->frag_off);
+	if (frag_off & EDGE_IP_FRAGMENT) {
+		struct vip_addr_key ak;
+		__builtin_memcpy(ak.vip, vip, 16);
+		if (!bpf_map_lookup_elem(&vip_addr_table, &ak))
+			return pass_unclaimed_lb(ctx);
+		count_drop(DROP_REASON_IPV4_FRAGMENT);
 		return XDP_DROP;
 	}
 
-	return leave_via(ctx, egress_ifindex, stats);
+	__u32 l4min = proto == EDGE_IPPROTO_TCP ? 20 : 8;
+	if (hlen + l4min > tot_len)
+		return pass_unclaimed_lb(ctx);
+	struct edge_l4ports *ports = (void *) ((__u8 *) ip4 + hlen);
+	if ((void *) (ports + 1) > data_end)
+		return pass_unclaimed_lb(ctx);
+
+	struct vip_key vk;
+	__builtin_memset(&vk, 0, sizeof(vk));
+	vk.proto = proto;
+	vk.port = ports->dest;
+	__builtin_memcpy(vk.vip, vip, 16);
+
+	struct vip_value *rule = bpf_map_lookup_elem(&vip_table, &vk);
+	if (!rule)
+		return pass_unclaimed_lb(ctx); // not one of this gateway's VIPs
+
+	struct vip_stats_value *stats = stats_row(&vip_stats_table, &vk);
+	count_match(stats, (__u64) ((char *) data_end - (char *) eth));
+
+	__u8 client[16];
+	map_v4(client, ip4->saddr);
+	__be16 sport = ports->source;
+	int answerable = (frag_off & EDGE_IP_DF) && hlen == EDGE_IP4HDR_LEN &&
+			 v4_answerable_source(ip4->saddr);
+
+	if (frame_l3 > tot_len) {
+		if (bpf_xdp_adjust_tail(ctx, -(int) (frame_l3 - tot_len)) != 0) {
+			count_claimed_drop(DROP_REASON_ADJUST_HEAD_FAILED, stats);
+			return XDP_DROP;
+		}
+	}
+
+	__u16 frag_mtu = 0;
+	int verdict = lb_forward(ctx, rule, stats, client, sport, __builtin_bswap16((__u16) tot_len),
+				 EDGE_IPPROTO_IPIP, &frag_mtu);
+	if (verdict >= 0)
+		return verdict;
+	if (answerable && frag_mtu >= EDGE_IPV4_MIN_MTU + EDGE_IP6HDR_LEN)
+		return send_frag_needed4(ctx, frag_mtu - EDGE_IP6HDR_LEN);
+	return XDP_DROP;
+}
+
+SEC("xdp")
+int edge_lb(struct xdp_md *ctx)
+{
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+
+	struct edge_ethhdr *eth = data;
+	if ((void *) (eth + 1) > data_end)
+		return pass_unclaimed_lb(ctx);
+	if (eth->h_proto == __builtin_bswap16(EDGE_ETH_P_IPV6))
+		return edge_lb_v6(ctx, eth, data_end);
+	if (eth->h_proto == __builtin_bswap16(EDGE_ETH_P_IP))
+		return edge_lb_v4(ctx, eth, data_end);
+	return pass_unclaimed_lb(ctx);
 }
 
 // edge_return forwards the other half of a load-balanced connection: a reply a
@@ -794,20 +1097,12 @@ int edge_lb(struct xdp_md *ctx)
 // so it holds under anycast the same way the forward path does: a site with two
 // edge nodes may take the request through one and the reply through the other,
 // and both hold the same VIP rows.
-SEC("xdp")
-int edge_return(struct xdp_md *ctx)
+static EDGE_ALWAYS_INLINE int edge_return_v6(struct xdp_md *ctx, struct edge_ethhdr *eth, void *data_end)
 {
-	void *data = (void *) (long) ctx->data;
-	void *data_end = (void *) (long) ctx->data_end;
-
-	struct edge_ethhdr *eth = data;
-	if ((void *) (eth + 1) > data_end)
-		return pass_unclaimed_return(ctx);
-	if (eth->h_proto != __builtin_bswap16(EDGE_ETH_P_IPV6))
-		return pass_unclaimed_return(ctx);
-
 	struct edge_ip6hdr *ip6 = (void *) (eth + 1);
 	if ((void *) (ip6 + 1) > data_end)
+		return pass_unclaimed_return(ctx);
+	if (is_v4_mapped(ip6->saddr))
 		return pass_unclaimed_return(ctx);
 
 	struct vip_addr_key ak;
@@ -821,7 +1116,7 @@ int edge_return(struct xdp_md *ctx)
 	// subsequent failure is a counted drop rather than a pass-through that
 	// would meet the connection-tracking drop this program exists to avoid.
 	struct vip_stats_value *stats = stats_row(&vip_return_stats_table, &ak);
-	count_match(stats, (__u64) ((char *) data_end - (char *) data));
+	count_match(stats, (__u64) ((char *) data_end - (char *) eth));
 
 	// Forwarding in XDP means the kernel never sees this packet, so nothing
 	// else decrements the hop limit. Omitting it would forward a looping
@@ -851,6 +1146,71 @@ int edge_return(struct xdp_md *ctx)
 
 	ip6->hop_limit -= 1;
 	return leave_via(ctx, egress_ifindex, stats);
+}
+
+// edge_return_v4 is edge_return_v6 for a reply sourced from an IPv4 VIP. The
+// header is validated as edge_lb_v4 validates it before anything is claimed.
+// Any protocol is accepted and a fragment is forwarded like any other packet,
+// since nothing here reads past the IPv4 header. The TTL is decremented with
+// the header checksum updated incrementally, as the kernel's own forwarding
+// does (RFC 1624): the TTL is the high byte of its 16-bit word, so the word
+// drops by 0x0100 and the checksum rises by the same, end-around carry
+// included.
+static EDGE_ALWAYS_INLINE int edge_return_v4(struct xdp_md *ctx, struct edge_ethhdr *eth, void *data_end)
+{
+	struct edge_iphdr *ip4 = (void *) (eth + 1);
+	if ((void *) (ip4 + 1) > data_end)
+		return pass_unclaimed_return(ctx);
+	if ((ip4->ver_ihl >> 4) != 4)
+		return pass_unclaimed_return(ctx);
+	__u32 hlen = (ip4->ver_ihl & 0x0f) << 2;
+	__u32 tot_len = __builtin_bswap16(ip4->tot_len);
+	if (hlen < EDGE_IP4HDR_LEN || tot_len < hlen ||
+	    tot_len > (__u32) ((long) data_end - (long) ip4))
+		return pass_unclaimed_return(ctx);
+
+	struct vip_addr_key ak;
+	map_v4(ak.vip, ip4->saddr);
+	if (!bpf_map_lookup_elem(&vip_addr_table, &ak))
+		return pass_unclaimed_return(ctx);
+
+	struct vip_stats_value *stats = stats_row(&vip_return_stats_table, &ak);
+	count_match(stats, (__u64) ((char *) data_end - (char *) eth));
+
+	if (ip4->ttl <= 1) {
+		count_claimed_drop(DROP_REASON_RETURN_HOP_LIMIT, stats);
+		return XDP_DROP;
+	}
+
+	__u32 egress_ifindex = 0;
+	long fib_rc = resolve_fib4_and_write_eth(ctx, ctx->ingress_ifindex, ip4->saddr, ip4->daddr,
+						  (__u16) tot_len, eth, &egress_ifindex);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		count_fib_drop(fib_rc, stats);
+		return XDP_DROP;
+	}
+
+	__u32 check = ip4->check;
+	check += __builtin_bswap16(0x0100);
+	ip4->check = (__be16) (check + (check >= 0xFFFF));
+	ip4->ttl -= 1;
+	return leave_via(ctx, egress_ifindex, stats);
+}
+
+SEC("xdp")
+int edge_return(struct xdp_md *ctx)
+{
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+
+	struct edge_ethhdr *eth = data;
+	if ((void *) (eth + 1) > data_end)
+		return pass_unclaimed_return(ctx);
+	if (eth->h_proto == __builtin_bswap16(EDGE_ETH_P_IPV6))
+		return edge_return_v6(ctx, eth, data_end);
+	if (eth->h_proto == __builtin_bswap16(EDGE_ETH_P_IP))
+		return edge_return_v4(ctx, eth, data_end);
+	return pass_unclaimed_return(ctx);
 }
 
 char _license[] SEC("license") = "GPL";

@@ -7,6 +7,7 @@ package edgeattach
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -531,5 +532,62 @@ func TestLoad_RemovesTheRetiredChainPin(t *testing.T) {
 	t.Cleanup(func() { _ = objs.Close() })
 	if _, err := os.Stat(chainPin); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("retired xdp_chain pin still present after Load (stat err = %v)", err)
+	}
+}
+
+// TestLoad_UpgradeReplacesOnlyTheGrownDropReasons covers the upgrade that adds
+// IPv4 VIPs: drop_reasons grows by a reason, so its old pin is incompatible
+// and replaced, its counters starting again from zero, while vip_table keeps
+// its shape and, with it, every row, IPv6 ones included.
+func TestLoad_UpgradeReplacesOnlyTheGrownDropReasons(t *testing.T) {
+	requireRoot(t)
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-edge-test-upgrade-%d", os.Getpid()))
+	if err := os.MkdirAll(pinDir, 0o755); err != nil {
+		t.Skipf("bpffs not writable at /sys/fs/bpf: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	first, err := Load(pinDir, nil)
+	if err != nil {
+		t.Fatalf("first Load: %v", err)
+	}
+	key := edgeprog.EdgedsrVipKey{Proto: 6, Port: 0xbb01, Vip: netip.MustParseAddr("2001:db8::100").As16()}
+	if err := first.VipTable.Put(key, edgeprog.EdgedsrVipValue{BackendCount: 1, Generation: 9}); err != nil {
+		t.Fatalf("populate vip_table: %v", err)
+	}
+	_ = first.Close()
+
+	// Stand in for the previous release's drop_reasons, one reason shorter.
+	dropPin := filepath.Join(pinDir, "drop_reasons")
+	if err := os.Remove(dropPin); err != nil {
+		t.Fatalf("remove drop_reasons pin: %v", err)
+	}
+	old, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name: "drop_reasons", Type: ebpf.PerCPUArray, KeySize: 4, ValueSize: 8,
+		MaxEntries: edgeprog.DropReasonCount - 1,
+	})
+	if err != nil {
+		t.Fatalf("create old drop_reasons: %v", err)
+	}
+	if err := old.Pin(dropPin); err != nil {
+		t.Fatalf("pin old drop_reasons: %v", err)
+	}
+	_ = old.Close()
+
+	objs, err := Load(pinDir, nil)
+	if err != nil {
+		t.Fatalf("Load over the old pins: %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	info, err := objs.DropReasons.Info()
+	if err != nil {
+		t.Fatalf("drop_reasons info: %v", err)
+	}
+	if info.MaxEntries != edgeprog.DropReasonCount {
+		t.Errorf("drop_reasons has %d entries, want %d", info.MaxEntries, edgeprog.DropReasonCount)
+	}
+	var got edgeprog.EdgedsrVipValue
+	if err := objs.VipTable.Lookup(key, &got); err != nil || got.Generation != 9 {
+		t.Errorf("vip_table row after the upgrade = %+v, %v; want it kept", got, err)
 	}
 }

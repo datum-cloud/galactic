@@ -147,7 +147,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 			return err
 		}
 		gwDatapath, err = setupGatewayDatapath(ctx, cfg.PublicInterface, cfg.InternalInterfaces, encapSrc,
-			cfg.XDPAttach, ctrlmetrics.Registry, coverage)
+			cfg.XDPAttach, cfg.IPv4VIPs, ctrlmetrics.Registry, coverage)
 		if err != nil {
 			return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 		}
@@ -178,6 +178,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		NodeName:  nodeName,
 		APIReader: mgr.GetAPIReader(),
 		Disabled:  !cfg.DatapathEnabled,
+		IPv4VIPs:  cfg.IPv4VIPs,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
@@ -274,6 +275,8 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().Bool("gateway-datapath-enabled", true,
 		"Run the edge gateway datapath; false keeps the process up but attaches nothing and withdraws "+
 			"this node's VIP advertisements")
+	cmd.Flags().Bool("gateway-ipv4-vips", false,
+		"Load IPv4 VIPs into the datapath; they are still never advertised until IPv4 backends can answer")
 	cmd.Flags().String("gateway-proc-sys-path", config.DefaultProcSysPath,
 		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
 			"of the host's /proc/sys/net at <path>/net")

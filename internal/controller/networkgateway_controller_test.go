@@ -570,7 +570,7 @@ func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 			}
 			rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
-			dr, unresolved, err := buildDesiredRule(rule, tt.attachments, idx, nil)
+			dr, unresolved, err := buildDesiredRule(rule, tt.attachments, idx, nil, false)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("buildDesiredRule: err = nil, want an error; got %+v", dr)
@@ -606,12 +606,12 @@ func TestBuildDesiredRule_RefusesSecondIPv6VIP(t *testing.T) {
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
 	rule := newTestRule(testRuleName, "vpc-1", "2001:db8:100::32", "2001:db8:100::33", testVIP4)
-	if _, _, err := buildDesiredRule(rule, attachments, idx, nil); err == nil {
+	if _, _, err := buildDesiredRule(rule, attachments, idx, nil, false); err == nil {
 		t.Fatal("buildDesiredRule: err = nil, want an error for two IPv6 VIPs")
 	}
 
 	rule.Spec.VIPAddresses = []string{"2001:db8:100::32", testVIP4}
-	if _, _, err := buildDesiredRule(rule, attachments, idx, nil); err != nil {
+	if _, _, err := buildDesiredRule(rule, attachments, idx, nil, false); err != nil {
 		t.Fatalf("buildDesiredRule with one IPv6 and one IPv4 VIP: %v", err)
 	}
 }
@@ -681,7 +681,7 @@ func TestBuildDesiredRule_SameNodeBackendsGetTheirOwnSlot(t *testing.T) {
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")}
 
-	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), attachments, idx, nil)
+	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), attachments, idx, nil, false)
 	if err != nil {
 		t.Fatalf("buildDesiredRule: %v", err)
 	}
@@ -1664,9 +1664,9 @@ func TestRuleAdvertisementName(t *testing.T) {
 // from node b-c deleted rule a-b's route on node c.
 func TestApplyBGPAdvertisements_DashedNamesStaySeparate(t *testing.T) {
 	scheme := newRuleTestScheme(t)
-	ruleAB := newTestRule("a-b", "vpc-1", "192.0.2.1")
+	ruleAB := newTestRule("a-b", "vpc-1", "2001:db8:a::1")
 	ruleAB.UID = "uid-a-b"
-	ruleA := newTestRule("a", "vpc-1", "192.0.2.2")
+	ruleA := newTestRule("a", "vpc-1", "2001:db8:a::2")
 	ruleA.UID = "uid-a"
 	fakeClient := newIndexedClientBuilder(scheme).WithObjects(ruleAB, ruleA).Build()
 	ctx := context.Background()
@@ -1676,15 +1676,15 @@ func TestApplyBGPAdvertisements_DashedNamesStaySeparate(t *testing.T) {
 	}
 	nodeC := newGatewayReconciler(fakeClient, scheme, nil, "c")
 	nodeBC := newGatewayReconciler(fakeClient, scheme, nil, "b-c")
-	if err := nodeC.applyBGPAdvertisements(ctx, ruleAB, desired("192.0.2.1"), testRouterName); err != nil {
+	if err := nodeC.applyBGPAdvertisements(ctx, ruleAB, desired("2001:db8:a::1"), testRouterName); err != nil {
 		t.Fatalf("apply rule a-b on node c: %v", err)
 	}
-	if err := nodeBC.applyBGPAdvertisements(ctx, ruleA, desired("192.0.2.2"), testRouterName); err != nil {
+	if err := nodeBC.applyBGPAdvertisements(ctx, ruleA, desired("2001:db8:a::2"), testRouterName); err != nil {
 		t.Fatalf("apply rule a on node b-c: %v", err)
 	}
 
 	abOnC := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(ctx, testRuleKey(ruleAdvertisementName("a-b", "c", "v4")), abOnC); err != nil {
+	if err := fakeClient.Get(ctx, testRuleKey(ruleAdvertisementName("a-b", "c", "v6")), abOnC); err != nil {
 		t.Fatalf("get rule a-b's advertisement on node c: %v", err)
 	}
 	if got := abOnC.Labels[networkRuleLabel]; got != "a-b" {
@@ -1693,14 +1693,14 @@ func TestApplyBGPAdvertisements_DashedNamesStaySeparate(t *testing.T) {
 	if got := abOnC.Labels[gatewayNodeLabel]; got != "c" {
 		t.Errorf("rule a-b's advertisement labelled for node %q", got)
 	}
-	if len(abOnC.Spec.Prefixes) != 1 || abOnC.Spec.Prefixes[0] != "192.0.2.1/32" {
-		t.Errorf("rule a-b's advertisement Prefixes = %v, want [192.0.2.1/32]", abOnC.Spec.Prefixes)
+	if len(abOnC.Spec.Prefixes) != 1 || abOnC.Spec.Prefixes[0] != "2001:db8:a::1/128" {
+		t.Errorf("rule a-b's advertisement Prefixes = %v, want [2001:db8:a::1/128]", abOnC.Spec.Prefixes)
 	}
 
 	if err := withdrawRuleAdvertisements(ctx, fakeClient, ruleA, "b-c"); err != nil {
 		t.Fatalf("withdraw rule a from node b-c: %v", err)
 	}
-	err := fakeClient.Get(ctx, testRuleKey(ruleAdvertisementName("a", "b-c", "v4")), &bgpv1alpha1.BGPAdvertisement{})
+	err := fakeClient.Get(ctx, testRuleKey(ruleAdvertisementName("a", "b-c", "v6")), &bgpv1alpha1.BGPAdvertisement{})
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("rule a's advertisement on node b-c: err = %v, want NotFound after withdrawal", err)
 	}

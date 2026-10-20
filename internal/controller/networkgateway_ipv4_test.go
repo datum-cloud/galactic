@@ -190,7 +190,7 @@ func TestBuildDesiredRule_LeavesOutIPv4VIPs(t *testing.T) {
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
 
-	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, testVIP), attachments, idx, nil)
+	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, testVIP), attachments, idx, nil, false)
 	if err != nil {
 		t.Fatalf("dual-stack rule: %v", err)
 	}
@@ -198,12 +198,13 @@ func TestBuildDesiredRule_LeavesOutIPv4VIPs(t *testing.T) {
 		t.Errorf("dual-stack rule VIPs = %v, want only %s", dr.VIPAddresses, testVIP)
 	}
 
-	_, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, "198.51.100.7"), attachments, idx, nil)
+	_, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, "198.51.100.7"), attachments, idx,
+		nil, false)
 	if !errors.Is(err, errNoServedVIP) {
 		t.Errorf("IPv4-only rule: err = %v, want errNoServedVIP", err)
 	}
 
-	_, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, "not-an-ip"), attachments, idx, nil)
+	_, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, "not-an-ip"), attachments, idx, nil, false)
 	if err == nil || errors.Is(err, errNoServedVIP) {
 		t.Errorf("rule with an unparseable VIP: err = %v, want a parse error", err)
 	}
@@ -212,7 +213,7 @@ func TestBuildDesiredRule_LeavesOutIPv4VIPs(t *testing.T) {
 	if !hasIPv4VIP(mapped) {
 		t.Error("hasIPv4VIP missed an IPv4-mapped IPv6 VIP")
 	}
-	dr, _, err = buildDesiredRule(mapped, attachments, idx, nil)
+	dr, _, err = buildDesiredRule(mapped, attachments, idx, nil, false)
 	if err != nil {
 		t.Fatalf("rule with an IPv4-mapped VIP: %v", err)
 	}
@@ -267,5 +268,79 @@ func TestDrainingOutcome_WithholdsIPv4VIPs(t *testing.T) {
 				t.Errorf("draining VIPs = %v, want only %s", o.desired.VIPAddresses, testVIP)
 			}
 		})
+	}
+}
+
+// TestBuildDesiredRule_ServesIPv4WhenEnabled covers the IPv4VIPs switch: IPv4
+// VIPs, plain or IPv4-mapped, load beside the IPv6 one in their plain form,
+// and an IPv4-only rule builds instead of failing.
+func TestBuildDesiredRule_ServesIPv4WhenEnabled(t *testing.T) {
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	idx := &backendSIDIndex{
+		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
+		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
+		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
+	}
+	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
+
+	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP, "::ffff:"+testVIP4), attachments,
+		idx, nil, true)
+	if err != nil {
+		t.Fatalf("dual-stack rule: %v", err)
+	}
+	want := []netip.Addr{netip.MustParseAddr(testVIP), netip.MustParseAddr(testVIP4)}
+	if !slices.Equal(dr.VIPAddresses, want) {
+		t.Errorf("VIPs = %v, want %v", dr.VIPAddresses, want)
+	}
+	if _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4), attachments, idx, nil,
+		true); err != nil {
+		t.Errorf("IPv4-only rule with IPv4 VIPs served: %v", err)
+	}
+}
+
+// TestNetworkGatewayReconciler_LoadsButNeverAdvertisesIPv4 covers a node with
+// IPv4VIPs set: the IPv4 VIP reaches the engine, no -v4 advertisement is made
+// and an old one is withdrawn, and IPv4Served says the address is loaded but
+// not advertised.
+func TestNetworkGatewayReconciler_LoadsButNeverAdvertisesIPv4(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	rule := newTestRule(testRuleName, "vpc-1", testVIP, testVIP4)
+	acceptRule(rule)
+	staleV4 := newNodeAdvertisement(testRuleName, testNodeGWA, "v4")
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+			newBackendAttachment("vpc-1"), rule, staleV4).
+		Build()
+	ctx := context.Background()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	r.IPv4VIPs = true
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	desired := engine.lastDesired.Rules[testNamespace+"/"+testRuleName]
+	if !slices.Contains(desired.VIPAddresses, netip.MustParseAddr(testVIP4)) {
+		t.Errorf("loaded VIPs = %v, want %s among them", desired.VIPAddresses, testVIP4)
+	}
+	err := fakeClient.Get(ctx, testRuleKey(staleV4.Name), &bgpv1alpha1.BGPAdvertisement{})
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("-v4 advertisement: err = %v, want NotFound", err)
+	}
+	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdv), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+		t.Errorf("-v6 advertisement: %v", err)
+	}
+
+	got := &bgpv1alpha1.NetworkService{}
+	if err := fakeClient.Get(ctx, testRuleKey(testRuleName), got); err != nil {
+		t.Fatalf("get NetworkService: %v", err)
+	}
+	ipv4 := meta.FindStatusCondition(got.Status.Conditions, ipv4ServedConditionType(testNodeGWA))
+	if ipv4 == nil || ipv4.Status != metav1.ConditionFalse || ipv4.Reason != reasonIPv4NotAdvertised {
+		t.Errorf("IPv4Served = %+v, want False/%s", ipv4, reasonIPv4NotAdvertised)
 	}
 }

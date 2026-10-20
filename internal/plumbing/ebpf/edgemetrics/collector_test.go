@@ -583,3 +583,29 @@ func TestCollector_SharedAddressKeepsRuleVPCs(t *testing.T) {
 		t.Errorf("return_packets_total{vip=%s} vpc = %q, want empty", vip, got)
 	}
 }
+
+// TestCollector_LabelsIPv4VIPsPlainly covers an IPv4 VIP: the datapath keys it
+// in its IPv4-mapped form, but its rule and return series carry the plain
+// address, and the IPv4 fragment drop reason is exported by name.
+func TestCollector_LabelsIPv4VIPsPlainly(t *testing.T) {
+	table := newFakeVIPTable()
+	vt := edgemap.NewVIPTable(table, newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable())
+	key := edgemap.VIPKey{Proto: 17, VPort: 53, VIP: mustAddr(t, "192.0.2.10")}
+	backend := edgemap.Backend{Addr: mustAddr(t, "10.60.0.5"), Port: 5353, USID: mustAddr(t, "2001:db8:2::1")}
+	if err := vt.Register(key, []edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	c := NewCollector(vt, fakeDropReasons{edgeprog.DropReasonIPv4Fragment: 4}, nil)
+	metrics := collect(t, c)
+
+	if m := findMetric(t, metrics, ruleBackendsDesc, "vip", "192.0.2.10"); m == nil || metricValue(m) != 1 {
+		t.Errorf("rule_backends{vip=192.0.2.10} = %v, want 1", m)
+	}
+	if m := findMetric(t, metrics, returnPacketsDesc, "vip", "192.0.2.10"); m == nil {
+		t.Error("no return series labelled with the plain IPv4 VIP")
+	}
+	if m := findMetric(t, metrics, dropsDesc, "reason", "ipv4_fragment"); m == nil || metricValue(m) != 4 {
+		t.Errorf("drops_total{reason=ipv4_fragment} = %v, want 4", m)
+	}
+}

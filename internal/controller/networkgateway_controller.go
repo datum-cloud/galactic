@@ -104,6 +104,12 @@ type NetworkGatewayReconciler struct {
 	// engine is never driven.
 	Disabled bool
 
+	// IPv4VIPs loads a rule's IPv4 VIPs into the engine alongside its IPv6
+	// ones (config.EnvGatewayIPv4VIPs). They are never advertised either way
+	// until IPv4 backends can answer for them (#705); see
+	// applyBGPAdvertisements.
+	IPv4VIPs bool
+
 	// drain keeps a deleted rule loaded until its route is withdrawn. See
 	// ruleDrainTracker.
 	drain ruleDrainTracker
@@ -154,9 +160,14 @@ const (
 	reasonBackendsUnresolved = "BackendsUnresolved"
 
 	// reasonNoServedVIP is the per-node Programmed reason for a rule whose
-	// every VIP is IPv4, which the datapath cannot load, so nothing is loaded
-	// or advertised for it.
+	// every VIP is IPv4 while IPv4VIPs is off, so nothing is loaded or
+	// advertised for it.
 	reasonNoServedVIP = "NoServedVIP"
+
+	// reasonIPv4NotAdvertised is the per-node IPv4Served reason for a rule
+	// whose IPv4 VIPs this node loaded, with IPv4VIPs set, but does not
+	// advertise yet.
+	reasonIPv4NotAdvertised = "NotAdvertised"
 
 	// reasonUnservedProtocol is the per-node Programmed reason for a rule
 	// whose protocol the datapath does not serve, so nothing is loaded or
@@ -164,9 +175,9 @@ const (
 	reasonUnservedProtocol = "UnservedProtocol"
 
 	// reasonIPv4Unsupported is the per-node IPv4Served reason for a rule with
-	// one or more IPv4 VIPs, which the datapath cannot load. They are left out
-	// of the engine and never advertised, and the rule's IPv6 VIPs serve
-	// without them.
+	// one or more IPv4 VIPs while IPv4VIPs is off. They are left out of the
+	// engine and never advertised, and the rule's IPv6 VIPs serve without
+	// them.
 	reasonIPv4Unsupported = "Unsupported"
 
 	// reasonTerminating is the Ready reason for a NetworkGateway being deleted,
@@ -427,7 +438,7 @@ func (r *NetworkGatewayReconciler) gatherRules(
 			continue
 		}
 
-		dr, unresolved, err := buildDesiredRule(rule, byVPC[rule.Spec.VPCRef], sidIndex, owners)
+		dr, unresolved, err := buildDesiredRule(rule, byVPC[rule.Spec.VPCRef], sidIndex, owners, r.IPv4VIPs)
 		if err != nil {
 			logger.Error(err, "build desired rule; skipping", "networkRule", rule.Name)
 			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err})
@@ -479,7 +490,7 @@ func (r *NetworkGatewayReconciler) drainingOutcome(
 		return ruleOutcome{}, false, nil
 	}
 
-	dr, _, err := buildDesiredRule(rule, attachments, sidIndex, owners)
+	dr, _, err := buildDesiredRule(rule, attachments, sidIndex, owners, r.IPv4VIPs)
 	if err != nil {
 		var ok bool
 		if dr, ok = r.drain.lastLoaded(rule.Namespace + "/" + rule.Name); !ok {
@@ -547,7 +558,8 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 			}
 		}
 
-		if err := r.setRuleConditions(ctx, o.rule, cond, ipv4ServedCondition(r.NodeName, o.rule)); err != nil {
+		ipv4Loaded := r.IPv4VIPs && cond.Status == metav1.ConditionTrue
+		if err := r.setRuleConditions(ctx, o.rule, cond, ipv4ServedCondition(r.NodeName, o.rule, ipv4Loaded)); err != nil {
 			logger.Error(err, "update NetworkService conditions", "networkRule", o.rule.Name)
 			statusErrs = append(statusErrs, fmt.Errorf("networkRule %s status: %w", o.rule.Name, err))
 		}
@@ -666,12 +678,22 @@ func ipv4ServedConditionType(node string) string {
 
 // ipv4ServedCondition returns node's IPv4Served condition for rule, or nil
 // when rule has no IPv4 VIP, in which case the condition is removed. It is
-// always False, whether or not the rule built: IPv4 VIPs are left out of the
-// engine and never advertised, so the condition is what tells the rule's
-// owner that those addresses do not work.
-func ipv4ServedCondition(node string, rule *bgpv1alpha1.NetworkService) *metav1.Condition {
+// always False, since IPv4 VIPs are never advertised yet, so the condition is
+// what tells the rule's owner that those addresses do not work. loaded says
+// whether this node loaded them anyway (IPv4VIPs), which the reason tells
+// apart.
+func ipv4ServedCondition(node string, rule *bgpv1alpha1.NetworkService, loaded bool) *metav1.Condition {
 	if !hasIPv4VIP(rule) {
 		return nil
+	}
+	if loaded {
+		return &metav1.Condition{
+			Type:   ipv4ServedConditionType(node),
+			Status: metav1.ConditionFalse,
+			Reason: reasonIPv4NotAdvertised,
+			Message: fmt.Sprintf("IPv4 VIPs are loaded on node %s but not advertised until IPv4 backends "+
+				"can answer for them (#705)", node),
+		}
 	}
 	return &metav1.Condition{
 		Type:   ipv4ServedConditionType(node),
@@ -800,11 +822,12 @@ func pruneRuleAdvertisements(
 }
 
 // errNoServedVIP is buildDesiredRule's error for a rule whose every VIP is
-// IPv4, leaving nothing the datapath can load.
+// IPv4 while IPv4VIPs is off, leaving nothing to load.
 var errNoServedVIP = errors.New("every VIP is IPv4, and IPv4 VIPs are not served yet (#705)")
 
 // isIPv4VIP reports whether vip is an IPv4 address, written plainly or as an
-// IPv4-mapped IPv6 address. The datapath serves neither form.
+// IPv4-mapped IPv6 address. Both forms load as the plain IPv4 address when
+// IPv4VIPs is on.
 func isIPv4VIP(vip netip.Addr) bool {
 	return vip.Unmap().Is4()
 }
@@ -842,13 +865,13 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
 // fails the rule outright, since that is a spec error rather than a passing
 // state.
 //
-// IPv4 VIPs, plain or IPv4-mapped (isIPv4VIP), are left out because the
-// datapath cannot serve them: loading one would fail the whole rule, and
-// advertising one would draw traffic nothing answers. The rule's IPv6 VIPs
-// serve without them, and a rule with no other VIP fails with errNoServedVIP.
+// IPv4 VIPs, plain or IPv4-mapped (isIPv4VIP), are left out unless serveIPv4
+// is set. Without it the rule's IPv6 VIPs serve without them, and a rule with
+// no other VIP fails with errNoServedVIP. With it they load beside the IPv6
+// ones, though applyBGPAdvertisements still never advertises them.
 func buildDesiredRule(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
-	sidIndex *backendSIDIndex, owners backendOwners,
+	sidIndex *backendSIDIndex, owners backendOwners, serveIPv4 bool,
 ) (dr gateway.DesiredRule, unresolved []string, err error) {
 	port, _, err := rulePorts(rule)
 	if err != nil {
@@ -862,8 +885,13 @@ func buildDesiredRule(
 			return gateway.DesiredRule{}, nil, fmt.Errorf("invalid VIP address %q: %w", v, err)
 		}
 		if isIPv4VIP(addr) {
-			withheld++
-			continue
+			if !serveIPv4 {
+				withheld++
+				continue
+			}
+			// The datapath keys an IPv4 VIP by its plain form and refuses
+			// the IPv4-mapped one, so load the address unmapped.
+			addr = addr.Unmap()
 		}
 		vips = append(vips, addr)
 	}
@@ -972,12 +1000,12 @@ func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName
 
 // applyBGPAdvertisements reconciles the BGPAdvertisements for a single rule,
 // one per non-empty VIP address family, named by ruleAdvertisementName.
-// desired never holds an IPv4 VIP (buildDesiredRule), so no "-v4"
-// advertisement is created, and the prune below withdraws any that exists.
-// Once
-// every one is applied, it deletes any other advertisement this node made for
-// the rule: one for a family whose VIPs are gone, or one under a name from an
-// earlier naming scheme.
+// Only the IPv6 family is advertised: an IPv4 VIP may be loaded when IPv4VIPs
+// is on, but backends cannot answer for it yet (#705), so no "-v4"
+// advertisement is created and the prune below withdraws any that exists.
+// Once every one is applied, it deletes any other advertisement this node made
+// for the rule: one for a family whose VIPs are gone, or one under a name from
+// an earlier naming scheme.
 //
 // The node qualifier is required. This reconciler runs once per gateway node,
 // and under the anycast model every gateway node advertises every accepted
@@ -1011,13 +1039,16 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 	if !rule.DeletionTimestamp.IsZero() {
 		return nil
 	}
-	v4Prefixes, v6Prefixes := prefixesByFamily(desired.VIPAddresses)
+	// IPv4 VIPs are never advertised yet, even when loaded: a backend
+	// cannot answer for one until backend-side translation and a readiness
+	// gate land (#705). Leaving the v4 group out also withdraws, through the
+	// prune below, any -v4 advertisement an earlier release made.
+	_, v6Prefixes := prefixesByFamily(desired.VIPAddresses)
 
 	groups := []struct {
 		suffix   string
 		prefixes []string
 	}{
-		{"v4", v4Prefixes},
 		{"v6", v6Prefixes},
 	}
 
