@@ -18,6 +18,9 @@ import (
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/gateway"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
 // TestNetworkGatewayReconciler_WithholdsIPv4VIPs covers the #705 stopgap: an
@@ -273,28 +276,110 @@ func TestDrainingOutcome_WithholdsIPv4VIPs(t *testing.T) {
 
 // TestBuildDesiredRule_ServesIPv4WhenEnabled covers the IPv4VIPs switch: IPv4
 // VIPs, plain or IPv4-mapped, load beside the IPv6 one in their plain form,
+// each family over its own backends with the slot of its own backend address,
 // and an IPv4-only rule builds instead of failing.
 func TestBuildDesiredRule_ServesIPv4WhenEnabled(t *testing.T) {
-	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
-	idx := &backendSIDIndex{
-		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
-		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
-		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
-	}
-	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
+	idx := newTestSIDIndex()
+	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4)}
 
-	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP, "::ffff:"+testVIP4), attachments,
-		idx, nil, true)
+	dr, unresolved, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP, "::ffff:"+testVIP4),
+		attachments, idx, nil, true)
 	if err != nil {
 		t.Fatalf("dual-stack rule: %v", err)
+	}
+	if len(unresolved) != 0 {
+		t.Errorf("unresolved = %v, want none", unresolved)
 	}
 	want := []netip.Addr{netip.MustParseAddr(testVIP), netip.MustParseAddr(testVIP4)}
 	if !slices.Equal(dr.VIPAddresses, want) {
 		t.Errorf("VIPs = %v, want %v", dr.VIPAddresses, want)
 	}
+	for _, tc := range []struct {
+		family   addrFamily
+		backends []gateway.DesiredBackend
+		addr     string
+	}{
+		{familyIPv6, dr.Backends, testBackendAddr},
+		{familyIPv4, dr.IPv4Backends, testBackendAddr4},
+	} {
+		addr := netip.MustParseAddr(tc.addr)
+		if len(tc.backends) != 1 || tc.backends[0].Address != addr {
+			t.Errorf("%s backends = %+v, want only %s", tc.family, tc.backends, addr)
+			continue
+		}
+		fields, err := uformat.Decode(tc.backends[0].USID)
+		if err != nil {
+			t.Fatalf("decode %s backend uSID: %v", tc.family, err)
+		}
+		if want := srv6.BackendSlot(addr, testBackendPort); fields.Slot != want {
+			t.Errorf("%s backend slot = %#04x, want %#04x, the slot its node keys the binding on",
+				tc.family, fields.Slot, want)
+		}
+	}
+
+	dr, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4), attachments, idx, nil, true)
+	if err != nil {
+		t.Fatalf("IPv4-only rule with IPv4 VIPs served: %v", err)
+	}
+	if len(dr.Backends) != 0 || len(dr.IPv4Backends) != 1 {
+		t.Errorf("IPv4-only rule backends = %+v / %+v, want only the IPv4 one", dr.Backends, dr.IPv4Backends)
+	}
+}
+
+// TestBuildDesiredRule_IPv4FamilyWithoutBackends covers an IPv4 VIP whose
+// selected attachments have no IPv4 address: its VIP is left out and named
+// in unresolved while the IPv6 VIP serves, and a rule with no other VIP
+// fails.
+func TestBuildDesiredRule_IPv4FamilyWithoutBackends(t *testing.T) {
+	idx := newTestSIDIndex()
+	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
+
+	dr, unresolved, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP, testVIP4), attachments,
+		idx, nil, true)
+	if err != nil {
+		t.Fatalf("dual-stack rule: %v", err)
+	}
+	if !slices.Equal(dr.VIPAddresses, []netip.Addr{netip.MustParseAddr(testVIP)}) || len(dr.IPv4Backends) != 0 {
+		t.Errorf("loaded VIPs %v with IPv4 backends %v, want only %s", dr.VIPAddresses, dr.IPv4Backends, testVIP)
+	}
+	if want := "tenant-vpc-1/backend-vpc-1: no IPv4 address"; !slices.Contains(unresolved, want) {
+		t.Errorf("unresolved = %v, want %q among them", unresolved, want)
+	}
+
 	if _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4), attachments, idx, nil,
-		true); err != nil {
-		t.Errorf("IPv4-only rule with IPv4 VIPs served: %v", err)
+		true); err == nil {
+		t.Error("IPv4-only rule with no IPv4 backend: want an error")
+	}
+}
+
+// TestBuildDesiredRule_SecondIPv4VIP covers a rule with two IPv4 VIPs: with
+// IPv4VIPs set it fails like a rule with two IPv6 VIPs, and without it the
+// IPv4 VIPs are left out as always and the IPv6 VIP serves.
+func TestBuildDesiredRule_SecondIPv4VIP(t *testing.T) {
+	idx := newTestSIDIndex()
+	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4)}
+	rule := newTestRule(testRuleName, "vpc-1", testVIP, testVIP4, "198.51.100.7")
+
+	if _, _, err := buildDesiredRule(rule, attachments, idx, nil, true); err == nil {
+		t.Error("IPv4VIPs on: want an error for a second IPv4 VIP")
+	}
+	dr, _, err := buildDesiredRule(rule, attachments, idx, nil, false)
+	if err != nil {
+		t.Fatalf("IPv4VIPs off: %v", err)
+	}
+	if !slices.Equal(dr.VIPAddresses, []netip.Addr{netip.MustParseAddr(testVIP)}) {
+		t.Errorf("IPv4VIPs off: loaded VIPs %v, want only %s", dr.VIPAddresses, testVIP)
+	}
+}
+
+// newTestSIDIndex returns the uSID index newBackendFixtures' objects for
+// vpc-1 build.
+func newTestSIDIndex() *backendSIDIndex {
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	return &backendSIDIndex{
+		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
+		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
+		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
 	}
 }
 
@@ -312,7 +397,7 @@ func TestNetworkGatewayReconciler_LoadsButNeverAdvertisesIPv4(t *testing.T) {
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
 		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
-			newBackendAttachment("vpc-1"), rule, staleV4).
+			newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4), rule, staleV4).
 		Build()
 	ctx := context.Background()
 
@@ -326,6 +411,9 @@ func TestNetworkGatewayReconciler_LoadsButNeverAdvertisesIPv4(t *testing.T) {
 	desired := engine.lastDesired.Rules[testNamespace+"/"+testRuleName]
 	if !slices.Contains(desired.VIPAddresses, netip.MustParseAddr(testVIP4)) {
 		t.Errorf("loaded VIPs = %v, want %s among them", desired.VIPAddresses, testVIP4)
+	}
+	if len(desired.IPv4Backends) != 1 || desired.IPv4Backends[0].Address != netip.MustParseAddr(testBackendAddr4) {
+		t.Errorf("IPv4 backends = %+v, want only %s", desired.IPv4Backends, testBackendAddr4)
 	}
 	err := fakeClient.Get(ctx, testRuleKey(staleV4.Name), &bgpv1alpha1.BGPAdvertisement{})
 	if !apierrors.IsNotFound(err) {

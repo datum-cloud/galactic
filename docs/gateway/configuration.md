@@ -174,14 +174,14 @@ to start while another datapath's slot is live there. See
 [Sharing the XDP hook](../agents/ARCHITECTURE-GATEWAY.md#sharing-the-xdp-hook-xdpdispatch).
 
 `GALACTIC_GATEWAY_IPV4_VIPS=true` loads a rule's IPv4 VIPs into the datapath
-beside its IPv6 ones, and turns on IPv4 forwarding on every public and
-internal interface for the datapath's FIB lookups. That includes the
-host-wide `net.ipv4.ip_forward`, so the node routes IPv4 between all of its
-interfaces while the switch is on. The node still advertises
-no IPv4 VIP: backend nodes cannot answer for one until backend-side
-translation and a readiness gate land (#705), so the switch is for testing
-the datapath, with a route pinned by hand, until then. Leave it off in
-production.
+beside its IPv6 ones, balanced over the rule's IPv4 backends, and turns on
+IPv4 forwarding on every public and internal interface for the datapath's
+FIB lookups. That includes the host-wide `net.ipv4.ip_forward`, so the node
+routes IPv4 between all of its interfaces while the switch is on. The node
+still advertises no IPv4 VIP: admission refuses new ones and nothing yet
+gates advertising one on its backends being bound (#705), so the switch is
+for testing the datapath, with a route pinned by hand, until then. Leave it
+off in production.
 
 `GALACTIC_GATEWAY_DATAPATH_ENABLED=false` keeps the process up and its pod
 ready but loads nothing, empties the gateway's dispatcher slots, and
@@ -505,10 +505,14 @@ advertised, and its `<gateway-node>/Programmed` condition reports
 `InvalidRule`. Its backend nodes keep the bindings they already have and
 report `InvalidRule` on `<backend-node>/BackendsBound`.
 
-A rule may carry at most one IPv6 VIP: a backend node rewrites a reply's
-source back to a single VIP, so a backend cannot answer for a second one. A
-rule with two fails to load on the gateways and reports `InvalidRule` on its
-backend nodes.
+A rule may carry at most one VIP of each family: a backend node rewrites a
+reply's source back to a single VIP of the backend's family, so a backend
+cannot answer for a second one. A rule with two IPv6 VIPs fails to load on
+the gateways and reports `InvalidRule` on its backend nodes. A rule with two
+IPv4 VIPs reports `InvalidRule` on its backend nodes too, which write no
+binding for either IPv4 VIP and keep the IPv4 bindings they had, while its
+IPv6 VIP's bindings stay current. A gateway that loads IPv4 VIPs fails such
+a rule to load; one that does not ignores its IPv4 VIPs as it ignores any.
 
 IPv4 VIPs are not served yet (#705). The gateways never advertise them and
 withdraw any `-v4` advertisement an earlier release made. By default they
@@ -517,8 +521,12 @@ also leave them out of the datapath and report
 gateway with `GALACTIC_GATEWAY_IPV4_VIPS=true` loads them and reports reason
 `NotAdvertised` instead. The rule's IPv6 VIP keeps serving. A rule
 whose every VIP is IPv4 is not loaded, and its `<gateway-node>/Programmed`
-condition reports `NoServedVIP`. The backend nodes translate IPv6 VIPs only
-and write no binding for an IPv4 VIP.
+condition reports `NoServedVIP`. The backend side is in place: an IPv4 VIP's
+backends are the selected attachments' IPv4 addresses, each backend node
+writes a binding for each of them, and its datapath translates the client's
+IPv4 packet to the backend and the reply back to the VIP, leaving the
+client's own IPv4 source as it arrived (see
+[the CNI datapath](../agents/ARCHITECTURE-CNI.md#key-design-decisions)).
 
 For the same reason a backend serves only one rule on a given backend port.
 The node rewrites a reply by its source, the backend's address, port and
@@ -529,12 +537,15 @@ newer rule leaves it out: the gateways send it none of that rule's flows,
 the rule's `<gateway-node>/Programmed` message names it as served by the
 older rule, and its `<backend-node>/BackendsBound` condition reports
 `BackendsClaimed`. A rule left with no backend at all is not loaded. To serve a
-second IPv6 VIP from the same backends, give its rule a different
+second VIP of one family from the same backends, give its rule a different
 `backendPort` the backends also listen on. Deleting the older rule hands the
-backend to the next oldest.
+backend to the next oldest. A backend's IPv4 and IPv6 addresses are separate
+backends here: an IPv6 rule and an IPv4 rule on the same `backendPort` and
+`protocol` each serve their own family's address.
 
-A selected attachment is a backend once its status names a node and its
-interface has an IPv6 address. Two attachments claiming one address, or two
+A selected attachment is a backend of a VIP once its status names a node and
+its interface has an address of the VIP's family; one attachment with both
+is a backend of both VIPs. Two attachments claiming one address, or two
 backends on one node whose slots (below) collide, keep only the first in
 address order; the other is reported as unresolved rather than given flows
 it could not answer. Until then it appears in the rule's
@@ -591,8 +602,8 @@ A `NetworkService` configures the gateway side of DSR. For a backend to
 `ServiceVIPBinding` for each `(VIP, backend)` pair. Nobody writes these by
 hand: `galactic-router` on every node runs `NetworkServiceBindingReconciler`
 (`internal/controller/networkservice_binding_controller.go`), which writes one
-for each IPv6 VIP of each accepted rule and each selected backend whose
-attachment reports that node, and deletes the ones that no longer apply.
+for each VIP of each accepted rule, at most one per family, and each
+selected backend of that VIP's family whose attachment reports that node, and deletes the ones that no longer apply.
 `ServiceVIPBindingReconciler`, in the same process, then programs the
 node's `vip_xlat_table` from it. Example of a generated binding:
 
@@ -668,7 +679,7 @@ Each node summarizes its bindings on the rule as
 reports `Bound`, `False` with reason `BindingsNotBound` naming each that
 does not, `BackendsClaimed` naming each backend on the node an older rule
 serves, or `InvalidRule` if the selector cannot be parsed or the rule
-has more than one IPv6 VIP. A node keeps the bindings it already wrote
+has more than one VIP of a family. A node keeps the bindings it already wrote
 for an invalid rule, so its `vip_xlat_table` rows survive an invalid edit
 until the spec is fixed or the rule is deleted. Only a node that holds
 bindings for the rule reports `InvalidRule`. Every other node writes

@@ -33,7 +33,8 @@ func protoNumber(protocol string) (uint8, error) {
 
 // vipKeysForRule returns the vip_table keys ApplyRule registers for rule, one
 // per VIP address, the map being keyed by protocol, port, and address with the
-// backend list and Maglev table identical across every VIP a rule owns.
+// backend list and Maglev table identical across every VIP of one family a
+// rule owns.
 func vipKeysForRule(rule DesiredRule) ([]edgemap.VIPKey, error) {
 	proto, err := protoNumber(rule.Protocol)
 	if err != nil {
@@ -47,7 +48,8 @@ func vipKeysForRule(rule DesiredRule) ([]edgemap.VIPKey, error) {
 }
 
 // buildMaglevTable builds the ordered backend list and the flattened Maglev
-// lookup table Register expects from rule.Backends:
+// lookup table Register expects from in, the backends of one of rule's VIP
+// families:
 //
 //  1. Reject up front when the backend count exceeds the cap. The CRD already
 //     bounds it, but a silently truncated array is worse than a clear error.
@@ -58,17 +60,17 @@ func vipKeysForRule(rule DesiredRule) ([]edgemap.VIPKey, error) {
 //     fixed-size array.
 //  4. For each slot, resolve the assigned backend and translate it back to its
 //     index through a key-to-index map built from the same sorted list.
-func buildMaglevTable(rule DesiredRule) ([]edgemap.Backend, [edgemap.MaglevTableSize]byte, error) {
+func buildMaglevTable(rule DesiredRule, in []DesiredBackend) ([]edgemap.Backend, [edgemap.MaglevTableSize]byte, error) {
 	var maglevTable [edgemap.MaglevTableSize]byte
 
-	if len(rule.Backends) > edgemap.MaxBackends {
+	if len(in) > edgemap.MaxBackends {
 		return nil, maglevTable, fmt.Errorf(
 			"kerneldatapath: rule %s: %d backends exceeds MaxBackends (%d)",
-			rule.Key, len(rule.Backends), edgemap.MaxBackends)
+			rule.Key, len(in), edgemap.MaxBackends)
 	}
 
-	candidates := make([]maglev.Backend, len(rule.Backends))
-	for i, b := range rule.Backends {
+	candidates := make([]maglev.Backend, len(in))
+	for i, b := range in {
 		candidates[i] = b
 	}
 
@@ -142,9 +144,10 @@ func NewKernelDatapath(objs *edgeprog.EdgedsrObjects, encapSrc netip.Addr) (*Ker
 	}, nil
 }
 
-// ApplyRule registers vip_table entries for rule, one per VIP address sharing
-// its Maglev table, replacing whatever the rule had registered before and
-// pruning any key it no longer owns.
+// ApplyRule registers vip_table entries for rule, one per VIP address, the
+// VIPs of one family sharing a Maglev table over that family's backends,
+// replacing whatever the rule had registered before and pruning any key it no
+// longer owns.
 func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -154,9 +157,21 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 		return err
 	}
 
-	backends, maglevTable, err := buildMaglevTable(rule)
-	if err != nil {
-		return err
+	type family struct {
+		backends []edgemap.Backend
+		table    [edgemap.MaglevTableSize]byte
+	}
+	families := make(map[bool]family, 2)
+	for _, key := range keys {
+		v4 := key.VIP.Is4()
+		if _, ok := families[v4]; ok {
+			continue
+		}
+		backends, maglevTable, err := buildMaglevTable(rule, rule.backendsFor(key.VIP))
+		if err != nil {
+			return err
+		}
+		families[v4] = family{backends: backends, table: maglevTable}
 	}
 
 	// Attribute every key, and every key the rule already owns, before any
@@ -166,7 +181,8 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 	d.setVPCs(d.vipKeysByName[rule.Key], rule.VPCRef)
 
 	for i, key := range keys {
-		if err := d.vipTable.Register(key, backends, maglevTable); err != nil {
+		f := families[key.VIP.Is4()]
+		if err := d.vipTable.Register(key, f.backends, f.table); err != nil {
 			// Record the keys that did land, alongside the ones this rule
 			// already owned, the prune below not having run yet, so
 			// RemoveRule can still find every live entry.

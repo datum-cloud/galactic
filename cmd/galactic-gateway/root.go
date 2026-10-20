@@ -276,7 +276,7 @@ func newRootCommand() *cobra.Command {
 		"Run the edge gateway datapath; false keeps the process up but attaches nothing and withdraws "+
 			"this node's VIP advertisements")
 	cmd.Flags().Bool("gateway-ipv4-vips", false,
-		"Load IPv4 VIPs into the datapath; they are still never advertised until IPv4 backends can answer")
+		"Load IPv4 VIPs into the datapath over their IPv4 backends; they are never advertised yet")
 	cmd.Flags().String("gateway-proc-sys-path", config.DefaultProcSysPath,
 		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
 			"of the host's /proc/sys/net at <path>/net")

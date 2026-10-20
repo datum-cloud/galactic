@@ -65,7 +65,10 @@ const (
 	// reasonBindingsInvalid: the rule's spec cannot be built into bindings: a
 	// second IPv6 VIP, a selector that does not parse, or a protocol or port
 	// the datapath does not serve. Only nodes that serve the rule report it,
-	// and they keep their bindings until the spec is fixed.
+	// and they keep their bindings until the spec is fixed. A second IPv4 VIP
+	// is reported the same way, but invalidates only the IPv4 family: the
+	// IPv6 VIP's bindings are still kept current, and the IPv4 ones kept as
+	// they are.
 	reasonBindingsInvalid = "InvalidRule"
 
 	// reasonBindingsClaimed: at least one backend the rule selects on this
@@ -75,8 +78,11 @@ const (
 )
 
 // NetworkServiceBindingReconciler writes, on its own node, the ServiceVIPBindings
-// that a NetworkService's backends need: one per IPv6 VIP per backend whose
-// VPCAttachment reports this node. It runs in galactic-router on every node.
+// that a NetworkService's backends need: one per translated VIP per backend of
+// that VIP's family whose VPCAttachment reports this node. A rule has at most
+// one IPv6 and one IPv4 VIP translated (ruleTranslatedVIPs); the IPv6 VIP's
+// backends are the selected attachments' IPv6 addresses and the IPv4 VIP's
+// their IPv4 addresses. It runs in galactic-router on every node.
 //
 // It is the only writer of generated bindings, and each node writes only its
 // own, so gateway replicas never race and a gateway rollout never touches
@@ -145,7 +151,7 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, fmt.Errorf("list NetworkServices in %s: %w", rule.Namespace, err)
 	}
 	owners := ruleBackendOwners(rules.Items, attachments)
-	desired, claimed, buildErr := r.desiredBindings(rule, attachments, owners)
+	desired, claimed, ipv4Err, buildErr := r.desiredBindings(rule, attachments, owners)
 	if buildErr != nil {
 		// The spec cannot be built into bindings: a second IPv6 VIP, a
 		// selector that does not parse, or a protocol or port the datapath
@@ -167,8 +173,19 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.applyBindings(ctx, rule, desired); err != nil {
+	// A rule with a second IPv4 VIP keeps its IPv4 bindings as they are, for
+	// the same reason an invalid spec keeps all of them, while its IPv6
+	// bindings follow the spec.
+	kept, err := r.applyBindings(ctx, rule, desired, ipv4Err != nil)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if ipv4Err != nil {
+		served := len(desired) > 0 || len(claimed) > 0 || kept > 0
+		if err := r.publishCondition(ctx, rule, nil, nil, ipv4Err, served); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 	if err := r.publishCondition(ctx, rule, desired, claimed, nil, false); err != nil {
 		return ctrl.Result{}, err
@@ -176,40 +193,41 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 	return ctrl.Result{}, nil
 }
 
-// desiredBindings returns the bindings this node needs for rule: one for its
-// IPv6 VIP per selected backend on this node that owners does not assign to
-// another rule. It also returns the backends on this node it left out for that
-// reason. The datapath translates IPv6 only, so a rule with no IPv6 VIP needs
-// none, and ruleTranslatedVIP refuses a rule with more than one. A protocol or
-// port the datapath does not serve (rulePorts) is an error whatever the VIPs.
+// desiredBindings returns the bindings this node needs for rule: one for each
+// translated VIP (ruleTranslatedVIPs) per selected backend of the VIP's family
+// on this node that owners does not assign to another rule. It also returns the
+// backends on this node it left out for that reason. A rule with no VIP of a
+// family needs no bindings for it. A protocol or port the datapath does not
+// serve (rulePorts), a second IPv6 VIP and a selector that does not parse are
+// errors. A second IPv4 VIP is returned as ipv4Err, with the IPv6 VIP's
+// bindings, since it invalidates the IPv4 family alone.
 func (r *NetworkServiceBindingReconciler) desiredBindings(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
-) ([]*bgpv1alpha1.ServiceVIPBinding, []claimedBackend, error) {
+) (desired []*bgpv1alpha1.ServiceVIPBinding, claimed []claimedBackend, ipv4Err, err error) {
 	if _, _, err := rulePorts(rule); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	vip, ok, err := ruleTranslatedVIP(rule)
-	if err != nil || !ok {
-		return nil, nil, err
-	}
-	sel, err := selectRuleBackends(rule, attachments, owners)
+	vips, err := ruleTranslatedVIPs(rule)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-
-	var out []*bgpv1alpha1.ServiceVIPBinding
-	for _, b := range sel.backends {
-		if b.node == r.NodeName {
-			out = append(out, r.newBinding(rule, vip, b))
+	for _, tv := range vips.valid() {
+		sel, err := selectRuleBackends(rule, attachments, owners, tv.family)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		for _, b := range sel.backends {
+			if b.node == r.NodeName {
+				desired = append(desired, r.newBinding(rule, tv.addr, b))
+			}
+		}
+		for _, c := range sel.claimed {
+			if c.node == r.NodeName {
+				claimed = append(claimed, c)
+			}
 		}
 	}
-	var claimed []claimedBackend
-	for _, c := range sel.claimed {
-		if c.node == r.NodeName {
-			claimed = append(claimed, c)
-		}
-	}
-	return out, claimed, nil
+	return desired, claimed, vips.v4Err, nil
 }
 
 // newBinding builds the binding for one VIP and one backend on this node.
@@ -241,10 +259,12 @@ func (r *NetworkServiceBindingReconciler) newBinding(
 }
 
 // applyBindings creates or updates every binding in desired and deletes this
-// node's other generated bindings for rule.
+// node's other generated bindings for rule. With keepIPv4, an existing binding
+// of an IPv4 VIP is left as it is instead, and the count of those left is
+// returned.
 func (r *NetworkServiceBindingReconciler) applyBindings(
-	ctx context.Context, rule *bgpv1alpha1.NetworkService, desired []*bgpv1alpha1.ServiceVIPBinding,
-) error {
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, desired []*bgpv1alpha1.ServiceVIPBinding, keepIPv4 bool,
+) (kept int, err error) {
 	keep := make(map[string]bool, len(desired))
 	var errs []error
 	for _, want := range desired {
@@ -271,18 +291,29 @@ func (r *NetworkServiceBindingReconciler) applyBindings(
 
 	existing, err := r.nodeBindings(ctx, rule)
 	if err != nil {
-		return errors.Join(append(errs, err)...)
+		return 0, errors.Join(append(errs, err)...)
 	}
 	for i := range existing {
 		binding := &existing[i]
 		if keep[binding.Name] {
 			continue
 		}
+		if keepIPv4 && bindingIsIPv4(binding) {
+			kept++
+			continue
+		}
 		if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
 			errs = append(errs, fmt.Errorf("delete stale ServiceVIPBinding %s: %w", binding.Name, err))
 		}
 	}
-	return errors.Join(errs...)
+	return kept, errors.Join(errs...)
+}
+
+// bindingIsIPv4 reports whether binding's VIP is an IPv4 address, written
+// plainly or IPv4-mapped.
+func bindingIsIPv4(binding *bgpv1alpha1.ServiceVIPBinding) bool {
+	vip, err := netip.ParseAddr(binding.Spec.VIPAddress)
+	return err == nil && familyIPv4.has(vip)
 }
 
 // nodeBindings lists the generated bindings this node wrote for rule.

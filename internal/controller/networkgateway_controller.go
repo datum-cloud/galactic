@@ -105,9 +105,8 @@ type NetworkGatewayReconciler struct {
 	Disabled bool
 
 	// IPv4VIPs loads a rule's IPv4 VIPs into the engine alongside its IPv6
-	// ones (config.EnvGatewayIPv4VIPs). They are never advertised either way
-	// until IPv4 backends can answer for them (#705); see
-	// applyBGPAdvertisements.
+	// ones (config.EnvGatewayIPv4VIPs), over the rule's IPv4 backends. They
+	// are never advertised either way (#705); see applyBGPAdvertisements.
 	IPv4VIPs bool
 
 	// drain keeps a deleted rule loaded until its route is withdrawn. See
@@ -688,11 +687,10 @@ func ipv4ServedCondition(node string, rule *bgpv1alpha1.NetworkService, loaded b
 	}
 	if loaded {
 		return &metav1.Condition{
-			Type:   ipv4ServedConditionType(node),
-			Status: metav1.ConditionFalse,
-			Reason: reasonIPv4NotAdvertised,
-			Message: fmt.Sprintf("IPv4 VIPs are loaded on node %s but not advertised until IPv4 backends "+
-				"can answer for them (#705)", node),
+			Type:    ipv4ServedConditionType(node),
+			Status:  metav1.ConditionFalse,
+			Reason:  reasonIPv4NotAdvertised,
+			Message: fmt.Sprintf("IPv4 VIPs are loaded on node %s but not advertised yet (#705)", node),
 		}
 	}
 	return &metav1.Condition{
@@ -845,11 +843,13 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
 }
 
 // buildDesiredRule converts rule into a gateway.DesiredRule. Its backends are
-// the IPv6 addresses of the VPCAttachments rule's BackendSelector picks from
-// attachments (selectRuleBackends), each resolved through sidIndex to the
-// SRv6 uSID of the node its attachment reports, with that backend's own slot
-// (backendSID), so a node hosting several of the rule's backends can tell which
-// one Maglev chose. There is no kernel VRF or FIB dependency.
+// the addresses of the VPCAttachments rule's BackendSelector picks from
+// attachments (selectRuleBackends), one list per VIP family: the IPv6
+// addresses for the IPv6 VIPs and, when they load, the IPv4 addresses for the
+// IPv4 VIPs. Each is resolved through sidIndex to the SRv6 uSID of the node
+// its attachment reports, with that backend's own slot (backendSID), so a node
+// hosting several of the rule's backends can tell which one Maglev chose.
+// There is no kernel VRF or FIB dependency.
 //
 // A selected attachment that is not a backend yet, a backend owners assigns to
 // another rule, or a backend whose uSID does not resolve, is left out and
@@ -859,16 +859,19 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
 // this, since its BGPAdvertisement is gone until the new pod is attached.
 // Every gateway node resolves from the same API objects and the Maglev table
 // depends only on the backend set, so nodes that see the same objects build
-// the same table. Only when nothing resolves does the rule fail, so it is
-// withdrawn rather than advertised with nothing behind it. An invalid VIP or
-// selector, or a protocol or port the datapath does not serve (rulePorts),
-// fails the rule outright, since that is a spec error rather than a passing
-// state.
+// the same table. A family whose backends all fail is left out, its VIPs
+// unloaded, and only when no family has a backend does the rule fail, so it
+// is withdrawn rather than advertised with nothing behind it. An invalid VIP
+// or selector, a second IPv6 VIP, or a protocol or port the datapath does not
+// serve (rulePorts), fails the rule outright, since that is a spec error
+// rather than a passing state.
 //
 // IPv4 VIPs, plain or IPv4-mapped (isIPv4VIP), are left out unless serveIPv4
 // is set. Without it the rule's IPv6 VIPs serve without them, and a rule with
 // no other VIP fails with errNoServedVIP. With it they load beside the IPv6
-// ones, though applyBGPAdvertisements still never advertises them.
+// ones, over the IPv4 backends, though applyBGPAdvertisements still never
+// advertises them, and a second IPv4 VIP fails the rule like a second IPv6
+// one.
 func buildDesiredRule(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
 	sidIndex *backendSIDIndex, owners backendOwners, serveIPv4 bool,
@@ -877,42 +880,110 @@ func buildDesiredRule(
 	if err != nil {
 		return gateway.DesiredRule{}, nil, err
 	}
-	vips := make([]netip.Addr, 0, len(rule.Spec.VIPAddresses))
+	var v6VIPs, v4VIPs []netip.Addr
 	var withheld int
 	for _, v := range rule.Spec.VIPAddresses {
 		addr, err := netip.ParseAddr(v)
 		if err != nil {
 			return gateway.DesiredRule{}, nil, fmt.Errorf("invalid VIP address %q: %w", v, err)
 		}
-		if isIPv4VIP(addr) {
-			if !serveIPv4 {
-				withheld++
-				continue
-			}
-			// The datapath keys an IPv4 VIP by its plain form and refuses
-			// the IPv4-mapped one, so load the address unmapped.
-			addr = addr.Unmap()
+		if !isIPv4VIP(addr) {
+			v6VIPs = append(v6VIPs, addr)
+			continue
 		}
-		vips = append(vips, addr)
+		if !serveIPv4 {
+			withheld++
+			continue
+		}
+		// The datapath keys an IPv4 VIP by its plain form and refuses the
+		// IPv4-mapped one, so load the address unmapped.
+		v4VIPs = append(v4VIPs, addr.Unmap())
 	}
-	if len(vips) == 0 && withheld > 0 {
+	if len(v6VIPs) == 0 && len(v4VIPs) == 0 && withheld > 0 {
 		return gateway.DesiredRule{}, nil, errNoServedVIP
 	}
 
-	if _, _, err := ruleTranslatedVIP(rule); err != nil {
-		return gateway.DesiredRule{}, nil, err
-	}
-
-	sel, err := selectRuleBackends(rule, attachments, owners)
+	translated, err := ruleTranslatedVIPs(rule)
 	if err != nil {
 		return gateway.DesiredRule{}, nil, err
+	}
+	if len(v4VIPs) > 0 && translated.v4Err != nil {
+		return gateway.DesiredRule{}, nil, translated.v4Err
+	}
+
+	var (
+		vips             []netip.Addr
+		v6Backends       []gateway.DesiredBackend
+		v4Backends       []gateway.DesiredBackend
+		firstFamilyError error
+	)
+	for _, f := range []struct {
+		family   addrFamily
+		vips     []netip.Addr
+		backends *[]gateway.DesiredBackend
+	}{
+		{familyIPv6, v6VIPs, &v6Backends},
+		{familyIPv4, v4VIPs, &v4Backends},
+	} {
+		if len(f.vips) == 0 {
+			continue
+		}
+		backends, familyUnresolved, err := resolveFamilyBackends(rule, attachments, sidIndex, owners, f.family)
+		unresolved = append(unresolved, familyUnresolved...)
+		if err != nil {
+			var selErr *backendSelectionError
+			if !errors.As(err, &selErr) {
+				return gateway.DesiredRule{}, nil, err
+			}
+			if firstFamilyError == nil {
+				firstFamilyError = err
+			}
+			continue
+		}
+		vips = append(vips, f.vips...)
+		*f.backends = backends
+	}
+	if len(vips) == 0 {
+		return gateway.DesiredRule{}, nil, firstFamilyError
+	}
+
+	return gateway.DesiredRule{
+		Key:          rule.Namespace + "/" + rule.Name,
+		VPCRef:       rule.Spec.VPCRef,
+		VIPAddresses: vips,
+		Protocol:     string(rule.Spec.Protocol),
+		Port:         port,
+		Backends:     v6Backends,
+		IPv4Backends: v4Backends,
+	}, unresolved, nil
+}
+
+// backendSelectionError is resolveFamilyBackends' error for a family none of
+// whose selected backends can take a flow. It is not a spec error: the
+// family's VIPs are left unloaded until a backend appears.
+type backendSelectionError struct{ err error }
+
+func (e *backendSelectionError) Error() string { return e.err.Error() }
+func (e *backendSelectionError) Unwrap() error { return e.err }
+
+// resolveFamilyBackends returns rule's backends of family, each resolved to its
+// node's uSID with its slot, and the selected attachments and backends that are
+// not part of it, as status messages. An invalid selector is returned as is.
+// When no backend resolves it returns a *backendSelectionError saying why.
+func resolveFamilyBackends(
+	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
+	sidIndex *backendSIDIndex, owners backendOwners, family addrFamily,
+) (backends []gateway.DesiredBackend, unresolved []string, err error) {
+	sel, err := selectRuleBackends(rule, attachments, owners, family)
+	if err != nil {
+		return nil, nil, err
 	}
 	unresolved = sel.pending
 	for _, c := range sel.claimed {
 		unresolved = append(unresolved, c.String())
 	}
 
-	backends := make([]gateway.DesiredBackend, 0, len(sel.backends))
+	backends = make([]gateway.DesiredBackend, 0, len(sel.backends))
 	var firstResolveErr error
 	for _, b := range sel.backends {
 		usid, err := sidIndex.resolveUSID(b.addr, rule.Spec.VPCRef, b.node)
@@ -928,30 +999,20 @@ func buildDesiredRule(
 		}
 		backends = append(backends, gateway.DesiredBackend{Address: b.addr, Port: b.port, USID: usid})
 	}
-	if len(backends) == 0 {
-		switch {
-		case firstResolveErr != nil:
-			return gateway.DesiredRule{}, nil, fmt.Errorf("none of %d backends resolves: %w", len(unresolved), firstResolveErr)
-		case len(sel.claimed) > 0 && len(sel.pending) == 0:
-			return gateway.DesiredRule{}, nil, fmt.Errorf("every selected backend is served by an older rule: %s",
-				cappedList(unresolved))
-		case len(unresolved) > 0:
-			return gateway.DesiredRule{}, nil, fmt.Errorf("no selected attachment is a backend yet: %s",
-				cappedList(unresolved))
-		default:
-			return gateway.DesiredRule{}, nil, fmt.Errorf("backendSelector matches no VPCAttachment in VPC %s",
-				rule.Spec.VPCRef)
-		}
+	if len(backends) > 0 {
+		return backends, unresolved, nil
 	}
-
-	return gateway.DesiredRule{
-		Key:          rule.Namespace + "/" + rule.Name,
-		VPCRef:       rule.Spec.VPCRef,
-		VIPAddresses: vips,
-		Protocol:     string(rule.Spec.Protocol),
-		Port:         port,
-		Backends:     backends,
-	}, unresolved, nil
+	switch {
+	case firstResolveErr != nil:
+		err = fmt.Errorf("none of %d backends resolves: %w", len(unresolved), firstResolveErr)
+	case len(sel.claimed) > 0 && len(sel.pending) == 0:
+		err = fmt.Errorf("every selected backend is served by an older rule: %s", cappedList(unresolved))
+	case len(unresolved) > 0:
+		err = fmt.Errorf("no selected attachment is a backend yet: %s", cappedList(unresolved))
+	default:
+		err = fmt.Errorf("backendSelector matches no VPCAttachment in VPC %s", rule.Spec.VPCRef)
+	}
+	return nil, unresolved, &backendSelectionError{err: err}
 }
 
 // routerNameForNode returns the name of this node's Galactic-owned
@@ -1001,8 +1062,10 @@ func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName
 // applyBGPAdvertisements reconciles the BGPAdvertisements for a single rule,
 // one per non-empty VIP address family, named by ruleAdvertisementName.
 // Only the IPv6 family is advertised: an IPv4 VIP may be loaded when IPv4VIPs
-// is on, but backends cannot answer for it yet (#705), so no "-v4"
-// advertisement is created and the prune below withdraws any that exists.
+// is on, and its backend nodes translate it, but admission refuses IPv4 VIPs
+// and nothing yet gates advertising one on its backends being bound (#705), so
+// no "-v4" advertisement is created and the prune below withdraws any that
+// exists.
 // Once every one is applied, it deletes any other advertisement this node made
 // for the rule: one for a family whose VIPs are gone, or one under a name from
 // an earlier naming scheme.
@@ -1039,10 +1102,10 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 	if !rule.DeletionTimestamp.IsZero() {
 		return nil
 	}
-	// IPv4 VIPs are never advertised yet, even when loaded: a backend
-	// cannot answer for one until backend-side translation and a readiness
-	// gate land (#705). Leaving the v4 group out also withdraws, through the
-	// prune below, any -v4 advertisement an earlier release made.
+	// IPv4 VIPs are never advertised yet, even when loaded, until admission
+	// takes them and a readiness gate lands (#705). Leaving the v4 group out
+	// also withdraws, through the prune below, any -v4 advertisement an
+	// earlier release made.
 	_, v6Prefixes := prefixesByFamily(desired.VIPAddresses)
 
 	groups := []struct {
