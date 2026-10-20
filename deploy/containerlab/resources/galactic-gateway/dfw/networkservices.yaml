@@ -1,4 +1,6 @@
 # ns60's port 80 over TCP, served by every ns60 backend its selector picks in dfw.
+# Both VIPs reach the same IPv6-only backends: the backend's node translates
+# the IPv4 VIP's flows to IPv6 (verify:gateway-ingress-ipv4).
 apiVersion: galactic.datumapis.com/v1alpha1
 kind: NetworkService
 metadata:
@@ -8,6 +10,7 @@ spec:
   vpcRef: "60"
   vipAddresses:
     - 2001:db8:6060:1::1
+    - 198.51.100.1
   protocol: tcp
   port: 80
   backendSelector:
@@ -16,6 +19,8 @@ spec:
   backendPort: 80
 ---
 # ns60's port 80 over UDP, served by every ns60 backend its selector picks in dfw.
+# Both VIPs reach the same IPv6-only backends: the backend's node translates
+# the IPv4 VIP's flows to IPv6 (verify:gateway-ingress-ipv4).
 apiVersion: galactic.datumapis.com/v1alpha1
 kind: NetworkService
 metadata:
@@ -25,6 +30,7 @@ spec:
   vpcRef: "60"
   vipAddresses:
     - 2001:db8:6060:1::1
+    - 198.51.100.1
   protocol: udp
   port: 80
   backendSelector:

@@ -4,6 +4,12 @@
 # scripts/verify-gateway-ingress.sh tells which backend answered and checks
 # that the client's address arrived unchanged.
 #
+# They are IPv6 only, like every workload, and still serve the site's IPv4
+# VIP: its node translates each IPv4 flow to IPv6, so an IPv4 client arrives
+# as its address under 64:ff9b::/96, and the reply leaves through the
+# default route and is translated back to IPv4 from the VIP
+# (scripts/verify-gateway-ingress-ipv4.sh). Give them no IPv4 address.
+#
 # Both land on the site's one compute node, on purpose: the rules select
 # them through their VPCAttachments (vpcattachments.yaml), and the gateway
 # encodes which backend Maglev chose in the SRv6 destination, so two backends

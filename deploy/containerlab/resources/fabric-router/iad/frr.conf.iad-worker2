@@ -6,6 +6,7 @@ log syslog informational
 # resources/fabric-router/dfw/frr.conf.dfw-worker2 for why each site
 # originates its own, from its own edge nodes only.
 ipv6 route 2001:db8:6060:3::/64 Null0
+ip route 198.51.100.128/26 Null0
 
 # This node's egress shard (resources/galactic-nat/iad/egressshard.yaml),
 # originated into the underlay: its SID's covering /64 and its two masquerade
@@ -76,9 +77,9 @@ router bgp 65000
   network 2001:db8:9966:2::/64
  exit-address-family
  !
- # IPv4 underlay -- this node's /32 loopback, plus its egress shard's
- # NAT64 masquerade address. There is no IPv4 counterpart to the SRv6
- # locator block.
+ # IPv4 underlay -- this node's /32 loopback, its site's IPv4 VIP prefix
+ # and its egress shard's NAT64 masquerade address. There is no IPv4
+ # counterpart to the SRv6 locator block.
  address-family ipv4 unicast
   neighbor 10.1.32.1 activate
   neighbor 10.1.32.1 allowas-in 1
@@ -89,6 +90,8 @@ router bgp 65000
   neighbor 10.1.31.2 next-hop-self force
   neighbor 10.1.31.2 route-reflector-client
   network 10.255.255.5/32
+  # This site's IPv4 ingress VIP prefix, the IPv4 twin of the /64 above.
+  network 198.51.100.128/26
   # This node's egress shard's IPv4 (NAT64) masquerade address. A NAT64
   # reply arrives from an IPv4-only destination, so unlike tenant IPv4 it
   # does not ride inside SRv6 and does need a route in the transit FIB.

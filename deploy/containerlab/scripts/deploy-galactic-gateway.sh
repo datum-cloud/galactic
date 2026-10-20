@@ -39,8 +39,10 @@ copy_gateway_config() {
 "${SCRIPT_DIR}/verify-gateway-ingress.sh" --unpin
 
 # NS60_BINDINGS is how many ServiceVIPBindings each site's backend node
-# writes: one per rule (TCP and UDP) per ns60 backend.
-NS60_BINDINGS=4
+# writes: one per rule (TCP and UDP) per ns60 backend per VIP family. The
+# IPv4 ones appear only once a gateway reports the rule's IPv4 VIP loaded,
+# which it does by default.
+NS60_BINDINGS=8
 
 # GENERATED_BINDINGS selects the ServiceVIPBindings galactic-router writes
 # from the NetworkServices. Any other binding in galactic-system is stale.
