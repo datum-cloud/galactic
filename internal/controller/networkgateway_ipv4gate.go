@@ -46,13 +46,18 @@ func listIPv4Bindings(ctx context.Context, c client.Client, namespace string) (i
 // vip, or "" when it has one. A binding counts only when it is the one
 // b's node writes for rule today (generatedBinding): same name, rule label and
 // spec, so a binding left from an earlier spec, or not yet updated to the
-// current one, does not open the gate.
+// current one, does not open the gate. A binding being deleted does not count
+// either.
 func (idx ipv4Bindings) unbound(rule *bgpv1alpha1.NetworkService, vip netip.Addr, b ruleBackend) string {
 	want := generatedBinding(rule, b.node, vip, b)
 	got, ok := idx[want.Name]
 	switch {
 	case !ok:
 		return "ServiceVIPBinding not created yet"
+	case !got.DeletionTimestamp.IsZero():
+		// Its finalizer is removing its rows, so the backend is about to
+		// stop answering on the VIP whatever its Bound condition says.
+		return "ServiceVIPBinding being deleted"
 	case got.Labels[networkRuleLabel] != rule.Name || got.Spec != want.Spec:
 		return "ServiceVIPBinding not updated to the rule yet"
 	}
@@ -64,8 +69,8 @@ func (idx ipv4Bindings) unbound(rule *bgpv1alpha1.NetworkService, vip netip.Addr
 
 // ipv4BindingReadinessChanged passes ServiceVIPBinding events that can change
 // whether a gateway may balance over or advertise an IPv4 VIP: a create or
-// delete of a generated IPv4 binding, and an update that changes its spec or
-// whether it is Bound. Bindings of IPv6 VIPs are dropped, since the gateway
+// delete of a generated IPv4 binding, and an update that changes its spec,
+// whether it is Bound, or whether it is being deleted. Bindings of IPv6 VIPs are dropped, since the gateway
 // reads only IPv4 ones.
 func ipv4BindingReadinessChanged() predicate.Predicate {
 	relevant := func(obj client.Object) bool {
@@ -83,6 +88,7 @@ func ipv4BindingReadinessChanged() predicate.Predicate {
 				return false
 			}
 			return oldBinding.Generation != newBinding.Generation ||
+				oldBinding.DeletionTimestamp.IsZero() != newBinding.DeletionTimestamp.IsZero() ||
 				!maps.Equal(oldBinding.Labels, newBinding.Labels) ||
 				(bindingUnboundReason(oldBinding) == "") != (bindingUnboundReason(newBinding) == "")
 		},
