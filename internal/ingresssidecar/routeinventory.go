@@ -5,6 +5,7 @@
 package ingresssidecar
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -43,7 +44,11 @@ func listRoutes(tableID uint32) ([]RouteInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	redirects, err := redirectPrefixes(link.Attrs().Index)
+	local, err := vrfLocalAddresses(link.Attrs().Index)
+	if err != nil {
+		return nil, err
+	}
+	redirects, err := redirectPrefixes(link.Attrs().Index, local)
 	if err != nil {
 		return nil, err
 	}
@@ -124,8 +129,14 @@ func mergeRouteInventory(
 
 // redirectPrefixes returns the destination of every route in this pod's main
 // table that leaves through linkIndex, the VRF device ensureRedirectRoute
-// points them at. Nothing else routes main-table traffic into a VRF device.
-func redirectPrefixes(linkIndex int) ([]*net.IPNet, error) {
+// points them at, except a host route to an address in local.
+//
+// ensureGatewayVRFRoute also routes into the VRF device, for the VPC's own
+// gateway address, and no EndpointSlice claims that route. A backend redirect
+// always targets a remote address, never one this VRF holds, since
+// DeriveGatewayAddress draws gateway addresses from a prefix disjoint from
+// tenant address space.
+func redirectPrefixes(linkIndex int, local map[string]struct{}) ([]*net.IPNet, error) {
 	var out []*net.IPNet
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		routes, err := netlink.RouteListFiltered(family,
@@ -135,12 +146,44 @@ func redirectPrefixes(linkIndex int) ([]*net.IPNet, error) {
 			return nil, fmt.Errorf("list main-table redirect routes via ifindex %d: %w", linkIndex, err)
 		}
 		for _, r := range routes {
-			if r.Dst != nil {
-				out = append(out, r.Dst)
+			if r.Dst == nil {
+				continue
 			}
+			if ones, bits := r.Dst.Mask.Size(); ones == bits {
+				if _, ok := local[r.Dst.IP.String()]; ok {
+					continue // the gateway return route, not a backend redirect
+				}
+			}
+			out = append(out, r.Dst)
 		}
 	}
 	return out, nil
+}
+
+// vrfLocalAddresses returns every address assigned to an interface enslaved
+// to the VRF device at vrfIndex.
+func vrfLocalAddresses(vrfIndex int) (map[string]struct{}, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("list links: %w", err)
+	}
+	local := make(map[string]struct{})
+	for _, link := range links {
+		if link.Attrs().MasterIndex != vrfIndex {
+			continue
+		}
+		addrs, err := netlink.AddrList(link, netlink.FAMILY_ALL)
+		if errors.Is(err, unix.ENODEV) {
+			continue // removed since LinkList, so it holds no address
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list addresses on %s: %w", link.Attrs().Name, err)
+		}
+		for _, a := range addrs {
+			local[a.IP.String()] = struct{}{}
+		}
+	}
+	return local, nil
 }
 
 // legacySeg6Routes returns the kernel seg6-encapsulated routes in tableID,
