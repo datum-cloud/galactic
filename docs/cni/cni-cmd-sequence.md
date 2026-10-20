@@ -124,7 +124,9 @@ sequenceDiagram
     Master->>HostGW: hostgw.ConfigureHostGateway(vpc, attachment, ipamResult, guestMAC-or-nil)
     activate HostGW
     HostGW->>HostGW: AddrAdd(gateway) on this attachment's own host iface<br/>(/128 IPv6, /32 IPv4 veth, /25 + NOPREFIXROUTE IPv4 tap)
-    HostGW->>HostGW: RouteAdd(pod subnet) into the (VPC-shared) VRF table
+    opt host iface up (traffic policy off)
+        HostGW->>HostGW: RouteAdd(pod subnet) into the (VPC-shared) VRF table
+    end
     opt guest MAC known (veth only)
         HostGW->>HostGW: NeighSet(pod IP -> guest MAC), permanent
     end
@@ -165,6 +167,8 @@ sequenceDiagram
         deactivate eBPF
     end
     Note over BGP,eBPF: missing srv6Locator or nodeID skips eBPF<br/>registration entirely (registered=false, not an error)
+    BGP->>BGP: activateTrafficPolicy — while policy is on, attach and verify<br/>tp_deliver before the host iface comes up
+    BGP->>HostGW: hostgw.RestoreHostGateway after the host iface is up<br/>(gateway addresses, neighbors, pod-subnet routes; no sweep)
 
     BGP->>BGP: set this container's own netns + subnet annotations
     BGP->>BGP: pruneDeadContainerAnnotations — drop annotations for<br/>any other containerID whose recorded netns no longer exists<br/>(self-heals stale siblings without waiting on GC)
@@ -207,26 +211,36 @@ sequenceDiagram
   persisted to an on-disk, flock-guarded marker file keyed by `containerID`
   under this node's own filesystem, not to a CRD — so `galactic-ipam`'s own
   DEL never needs a Kubernetes round-trip to find what to release.
-- **Host gateway configuration is why `galactic-bgp` never touches the
-  kernel.** `internal/hostgw.ConfigureHostGateway` — called directly by
-  both master plugins, before they print their own result — assigns the
-  gateway address on *this attachment's own* host interface (never the
-  shared VRF device: IPv6 NDP only resolves on the link an address is
-  actually configured on) and installs an explicit pod-subnet route into
-  the VRF table. For veth, it also primes a permanent ARP/NDP neighbor
-  entry for the pod's address, so the eBPF uSID datapath's
-  `bpf_fib_lookup()` always finds one and every packet takes the
-  `bpf_redirect_peer` fast path. Tap has no separate guest-side link in this
-  netns to resolve a MAC from, so no neighbor entry is installed there: the
-  guest's entry is learned dynamically, and the kernel garbage-collects it
-  once it goes stale. When the lookup finds no valid entry
-  (`BPF_FIB_LKUP_RET_NO_NEIGH`), the datapath hands the packet to
-  `bpf_redirect_neigh`, which makes the kernel resolve the address on that
-  interface and recreates the entry. It used to drop the packet instead,
-  which blacked out a VM's inbound traffic until the guest next sent its own
-  solicitation.
-  Once this step returns, `galactic-bgp` has zero kernel-interface
-  dependency of its own — everything it advertises comes from `prevResult`.
+- **Host gateway configuration belongs to the master plugins.**
+  `internal/hostgw.ConfigureHostGateway` — called directly by both master
+  plugins, before they print their own result — assigns the gateway
+  address on *this attachment's own* host interface (never the shared VRF
+  device: IPv6 NDP only resolves on the link an address is actually
+  configured on) and installs an explicit pod-subnet route into the VRF
+  table. The kernel refuses a route through a down interface and flushes a
+  device's routes when it goes down, so while traffic policy holds the
+  host interface down the route is skipped here, and `galactic-bgp` adds
+  it once it has verified enforcement and brought the interface up. For
+  veth, it also primes a permanent ARP/NDP neighbor entry for the pod's
+  address, so the eBPF uSID datapath's `bpf_fib_lookup()` always finds one
+  and every packet takes the `bpf_redirect_peer` fast path. Tap has no
+  separate guest-side link in this netns to resolve a MAC from, so no
+  neighbor entry is installed there: the guest's entry is learned
+  dynamically, and the kernel garbage-collects it once it goes stale. When
+  the lookup finds no valid entry (`BPF_FIB_LKUP_RET_NO_NEIGH`), the
+  datapath hands the packet to `bpf_redirect_neigh`, which makes the
+  kernel resolve the address on that interface and recreates the entry. It
+  used to drop the packet instead, which blacked out a VM's inbound
+  traffic until the guest next sent its own solicitation. Everything
+  `galactic-bgp` advertises comes from `prevResult`. Its only
+  kernel-interface work is the host side's final state: with traffic
+  policy on it brings the interface up after verifying enforcement, and
+  after its last link transition it restores the host gateway
+  (`hostgw.RestoreHostGateway`), since taking a link down drops its
+  routes, its IPv6 addresses and its neighbor entries. That restore adds
+  without sweeping, so routes `galactic-route` added on the link survive.
+  A `galactic-route` termination cannot be installed while traffic policy
+  holds the link down, so terminations are unsupported with policy on.
 - **BGP/SRv6/eBPF publish is retried, not best-effort.** `publishBGPState`
   wraps its Kubernetes operations in `retryK8sOps`, which retries up to two
   additional times (three attempts total) with exponential backoff, but

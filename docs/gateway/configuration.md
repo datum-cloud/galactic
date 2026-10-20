@@ -7,11 +7,8 @@ the design rationale (why DSR, why anycast, why no VRF dependency) see
 this document only covers the "how", not the "why", and cross-links back to
 that doc wherever the mechanics matter.
 
-> Last verified: 2026-09-09 against the current working tree of
-> `cmd/galactic-gateway/`, `internal/config/gateway.go`, `config/galactic-gateway/`,
-> `config/galactic-router/`, and `deploy/containerlab/resources/galactic-gateway/`.
-> The worked example below is the lab's own gateway deployment in that
-> directory.
+> The worked example below is the lab's own gateway deployment in
+> `deploy/containerlab/resources/galactic-gateway/`.
 
 ## What `galactic-gateway` is, and when you need it
 
@@ -186,16 +183,24 @@ three things:
 - It advertises the IPv4 VIP (the rule's `-v4` `BGPAdvertisement`) once the
   readiness gate below holds, and withdraws it as soon as the gate closes.
 
-The switch also lets the gateway read and watch `ServiceVIPBinding`s, so its
-ClusterRole needs `get`, `list` and `watch` on `servicevipbindings` before you
-turn it on (`config/galactic-gateway/rbac.yaml`). Without that access the
-gateway's cache never syncs and the node stops reconciling every rule, IPv6
-included. The startup RBAC check logs the missing permission.
+The gateway reads and watches `ServiceVIPBinding`s for the gate, so its
+ClusterRole needs `get`, `list` and `watch` on `servicevipbindings`
+(`config/galactic-gateway/rbac.yaml`). At startup, with the switch on, the
+gateway checks that it can list and watch them. If the API server denies it,
+the gateway logs an error naming the missing access and runs with IPv4 VIPs
+off: it serves IPv6 as usual, loads and advertises no IPv4 VIP, and every rule
+with an IPv4 VIP reports `Unsupported` for the node. Grant the access and
+restart the pod to turn IPv4 VIPs on. If the check cannot be made at all, for
+example while the API server is unreachable, the gateway retries it for 30
+seconds and then exits, so the restart checks again. It does not turn IPv4 off
+on a failed check, because a node reporting IPv4 unloaded lets backend nodes
+remove their IPv4 bindings once no gateway reports it loaded. Without the
+check, a watch the gateway may not make would keep its cache from syncing, and
+the node would serve no rule at all.
 
-The default is `false` in this release, so an upgrade changes nothing until
-you turn the switch on. A later release turns it on by default. The switch
-stays as a per-node kill switch after that: turning it off withdraws every
-IPv4 VIP the node advertises and unloads them, and leaves IPv6 untouched. See
+The default is `false`. Turning the switch off on a node withdraws every IPv4
+VIP the node advertises and unloads them, and leaves IPv6 untouched, so it
+also serves as a per-node kill switch. See
 [Rolling out and rolling back IPv4 VIPs](#rolling-out-and-rolling-back-ipv4-vips).
 
 `GALACTIC_GATEWAY_DATAPATH_ENABLED=false` keeps the process up and its pod
@@ -545,19 +550,21 @@ A gateway node advertises a rule's IPv4 VIP only while all of these hold:
    whose backend uSID resolves and that no older rule serves for an IPv4 VIP
    on the same `backendPort` and `protocol`.
 4. That backend's `ServiceVIPBinding` for the IPv4 VIP reports `Bound` for
-   its current generation and the rule's current spec.
+   its current generation and the rule's current spec, and is not being
+   deleted.
 
 The node balances the IPv4 VIP only over the eligible backends whose binding
-is `Bound`. A backend whose binding is missing, failed or out of date is left
-out of the Maglev table and named in the node's `<gateway-node>/Programmed`
-message, so no flow reaches a backend that cannot answer it. That way every
-node that advertises the VIP serves it, and every backend it sends a flow to
-can reply. A new backend joins once its binding is `Bound`, without
-withdrawing the VIP. While none of the eligible backends is `Bound`, the node
-still loads the VIP over all of them but does not advertise it: the backend
-nodes write IPv4 bindings only while a gateway reports the VIP loaded, so the
-VIP has to load before any binding can become `Bound`. The node withdraws
-the `-v4` advertisement on the first pass where any condition stops holding,
+is `Bound`. A backend whose binding is missing, failed, out of date or being
+deleted is left out of the Maglev table and named in the node's
+`<gateway-node>/Programmed` message, so no flow reaches a backend that cannot
+answer it. That way every node that advertises the VIP serves it, and every
+backend it sends a flow to can reply. A new backend joins once its binding is
+`Bound`, without withdrawing the VIP. While none of the eligible backends is
+`Bound`, the node still loads the VIP over all of them but does not advertise
+it: the backend nodes write IPv4 bindings only while a gateway reports the VIP
+loaded, so the VIP has to load before any binding can become `Bound`. The node
+withdraws the `-v4` advertisement on the first pass where any condition stops
+holding, even if writing the rule's `-v6` advertisement fails on that pass,
 and the rule's IPv6 VIP and its `-v6` advertisement are not affected.
 
 Each gateway node reports what it did with a rule's IPv4 VIPs as its
@@ -565,7 +572,7 @@ Each gateway node reports what it did with a rule's IPv4 VIPs as its
 
 | Status  | Reason             | Meaning                                                                                                                         |
 | ------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `True`  | `Advertised`       | loaded over backends whose bindings are `Bound`, and advertised                                                                 |
+| `True`  | `Advertised`       | loaded over the eligible backends whose bindings are `Bound`, at least one, and advertised                                      |
 | `False` | `NotAdvertised`    | loaded over `Bound` backends, but the route is not published: no `BGPRouter` targets the node, or the advertisement failed      |
 | `False` | `BindingsNotBound` | loaded over every eligible backend, but none of their bindings is `Bound` yet, so not advertised                                |
 | `False` | `Unsupported`      | `GALACTIC_GATEWAY_IPV4_VIPS` is off, so they are left out of the datapath                                                       |
@@ -586,7 +593,9 @@ whose gateways leave IPv4 VIPs out has no IPv4 bindings or rows. Each gateway
 pass removes the `<node>/Programmed` and `<node>/IPv4Served` conditions of any
 node that no `NetworkGateway` in the namespace targets, so a gateway that left
 without clearing its conditions cannot keep the backend nodes' IPv4 bindings
-alive.
+alive. A node missing from the gateway's cache is confirmed missing with an
+uncached read of the API server first, so a new gateway node's conditions are
+never removed while the cache has yet to see its `NetworkGateway`.
 
 #### What an IPv4 VIP needs
 
@@ -833,20 +842,24 @@ Roll out in this order:
    the VIP once its bindings are `Bound`. Check that node's
    `<gateway-node>/IPv4Served` before moving to the next.
 
-Skew to watch for during the rollout:
+Skew to watch for during the rollout. It fails closed at every step:
 
 - An older gateway leaves IPv4 VIPs out and never advertises them.
-- A `galactic-router` from a release without IPv4 VIPs writes no IPv4
-  binding, so no binding is ever `Bound` and the gate never opens.
+- A `galactic-router` that predates IPv4 bindings writes none, so no binding
+  is ever `Bound` and the gate never opens.
 - A `galactic-router` built from `main` with the native IPv4 path (merged
   2026-10-20, before translation, and possibly running on the staging labs)
-  writes IPv4 bindings with an IPv4 `backendAddress` and rows that rewrite
-  the VIP to that IPv4 address. It reports them `Bound`, so the gate can open.
-  It must not run beside this release's `galactic-cni` while any gateway has
-  the switch on. If it does, the skew fails closed: the CNI drops every
-  packet for such a row and counts it as `vip_ipv4_backend`, rather than
-  delivering untranslated IPv4 to an IPv6-only workload, but the VIP's
-  clients get no answer from that backend.
+  counts only `NotAdvertised` and `Advertised` as loaded. This gateway
+  reports those only once some backend's binding is `Bound`, so on its own
+  that router writes nothing. Beside upgraded backend nodes it can see one,
+  and it then writes bindings with an IPv4 `backendAddress`, and rows that
+  rewrite the VIP to that IPv4 address, which it reports `Bound`. The gateway
+  never balances over them, since they are not the binding it expects, and
+  this release's `galactic-cni` drops any packet that reaches such a row and
+  counts it as `vip_ipv4_backend`, rather than delivering untranslated IPv4
+  to an IPv6-only workload. Do not run that router beside this release's
+  `galactic-cni` while any gateway has the switch on: its backends serve no
+  IPv4 VIP traffic. Rolling the two together, as step 2 says, avoids it.
 - A `galactic-cni` from before translation ignores an IPv4 VIP's
   `vip_xlat_table` rows, so a newer router beside it reports a binding
   `Bound` that cannot translate. That is why step 2 upgrades the CNI first.

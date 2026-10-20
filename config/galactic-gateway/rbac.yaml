@@ -74,7 +74,8 @@ rules:
   # only over backends whose ServiceVIPBinding (written by galactic-router on
   # the backend's node) reports Bound, and advertised only while one does, so
   # the reconciler reads and watches them. Read-only: the gateway never
-  # writes a binding.
+  # writes a binding. Without list and watch here, a gateway with the switch
+  # on logs the missing access at startup and runs with IPv4 VIPs off.
   - apiGroups: ["galactic.datumapis.com"]
     resources:
       - servicevipbindings

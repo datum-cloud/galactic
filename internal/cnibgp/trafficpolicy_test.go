@@ -13,9 +13,11 @@ import (
 	"testing"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
@@ -91,7 +93,7 @@ func TestActivateTrafficPolicyEnforce(t *testing.T) {
 	}
 	_, ipv6, _ := net.ParseCIDR("2001:db8::5/64")
 	ipam := &cniipam.IPAMResult{IPv6Subnet: ipv6}
-	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, ipam); err != nil {
+	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, ipam, nil); err != nil {
 		t.Fatalf("activateTrafficPolicy: %v", err)
 	}
 	if !linkUp(t, host) {
@@ -108,6 +110,124 @@ func TestActivateTrafficPolicyEnforce(t *testing.T) {
 	}
 }
 
+// podRoutes returns the destinations of the unicast routes on host in the
+// test VPC's VRF table, leaving out the ones the kernel adds itself.
+func podRoutes(t *testing.T, host string) map[string]bool {
+	t.Helper()
+	link, err := netlink.LinkByName(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table, err := vrf.TableID(testVPC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL,
+		&netlink.Route{Table: int(table), LinkIndex: link.Attrs().Index},
+		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, r := range routes {
+		if r.Dst != nil && r.Type == unix.RTN_UNICAST && r.Protocol != unix.RTPROT_KERNEL {
+			got[r.Dst.String()] = true
+		}
+	}
+	return got
+}
+
+// TestActivateTrafficPolicyRestoresHostGateway covers the host gateway across
+// activation. A quarantined host side gets its pod-subnet routes, which the
+// kernel refuses on a down link, once activation brings it up. A link
+// quarantined after the master left it up, which drops its routes, its IPv6
+// gateway address and its neighbor entries, gets all of them back. With policy
+// off, a route a later chained plugin added on the link survives activation.
+func TestActivateTrafficPolicyRestoresHostGateway(t *testing.T) {
+	_, ipv6, _ := net.ParseCIDR("2001:db8::5/64")
+	ipv6.IP = net.ParseIP("2001:db8::5")
+	ipam := &cniipam.IPAMResult{
+		IPv6Subnet:  ipv6,
+		IPv6Gateway: net.ParseIP("2001:db8::1"),
+		IPv4Address: net.ParseIP("192.0.2.5"),
+		IPv4Gateway: net.ParseIP("192.0.2.1"),
+	}
+	guestMAC := net.HardwareAddr{0x02, 0, 0, 0, 0, 0x05}
+	_, termination, _ := net.ParseCIDR("198.51.100.0/24")
+	for _, tt := range []struct {
+		name        string
+		mode        uint32
+		quarantined bool
+	}{
+		{"enforced, master left the link down", tpmap.ModeEnforce, true},
+		{"enforced, master left the link up", tpmap.ModeEnforce, false},
+		{"off, with a later plugin's route", tpmap.ModeOff, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pinDir, host, _ := activationFixture(t, tpmap.State{Mode: tt.mode, Capable: true}, tt.quarantined)
+			if err := hostgw.ConfigureHostGateway(testVPC, testAttachment, ipam, guestMAC); err != nil {
+				t.Fatalf("ConfigureHostGateway: %v", err)
+			}
+			if got := podRoutes(t, host); tt.quarantined && len(got) != 0 {
+				t.Errorf("routes on a down link = %v, want none", got)
+			}
+			want := []string{"2001:db8::/64", "192.0.2.5/32"}
+			if tt.mode == tpmap.ModeOff {
+				// Stands in for galactic-route, which runs between the
+				// master and galactic-bgp and adds routes on the same link.
+				table, err := vrf.TableID(testVPC)
+				if err != nil {
+					t.Fatal(err)
+				}
+				link, _ := netlink.LinkByName(host)
+				if err := netlink.RouteAdd(&netlink.Route{
+					Dst: termination, LinkIndex: link.Attrs().Index, Table: int(table),
+				}); err != nil {
+					t.Fatalf("add a later plugin's route: %v", err)
+				}
+				want = append(want, termination.String())
+			}
+			if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, ipam, guestMAC); err != nil {
+				t.Fatalf("activateTrafficPolicy: %v", err)
+			}
+			if !linkUp(t, host) {
+				t.Fatal("host side still down after activation")
+			}
+			got := podRoutes(t, host)
+			for _, dst := range want {
+				if !got[dst] {
+					t.Errorf("route to %s missing after activation; routes %v", dst, got)
+				}
+			}
+			link, _ := netlink.LinkByName(host)
+			addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gateway bool
+			for _, a := range addrs {
+				gateway = gateway || a.IP.Equal(ipam.IPv6Gateway)
+			}
+			if !gateway {
+				t.Errorf("IPv6 gateway %s missing after activation; addresses %v", ipam.IPv6Gateway, addrs)
+			}
+			for _, family := range []int{netlink.FAMILY_V6, netlink.FAMILY_V4} {
+				neighs, err := netlink.NeighList(link.Attrs().Index, family)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var found bool
+				for _, n := range neighs {
+					found = found || (n.State == netlink.NUD_PERMANENT && n.HardwareAddr.String() == guestMAC.String())
+				}
+				if !found {
+					t.Errorf("family %d: permanent neighbor for %s missing after activation; %v", family, guestMAC, neighs)
+				}
+			}
+		})
+	}
+}
+
 // TestActivateTrafficPolicyModeChangedSinceMaster covers both races between
 // the master plugin's reading of the mode and galactic-bgp's: a link left up
 // while policy turned on is quarantined before anything can refuse the ADD,
@@ -117,7 +237,7 @@ func TestActivateTrafficPolicyModeChangedSinceMaster(t *testing.T) {
 	if !linkUp(t, host) {
 		t.Fatal("the master plugin quarantined although the mode was off when it ran")
 	}
-	err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil)
+	err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil, nil)
 	if !errors.Is(err, errNoEnforcement) {
 		t.Fatalf("not capable: err = %v, want errNoEnforcement", err)
 	}
@@ -128,7 +248,7 @@ func TestActivateTrafficPolicyModeChangedSinceMaster(t *testing.T) {
 	if err := maps.SetState(tpmap.State{Mode: tpmap.ModeOff}); err != nil {
 		t.Fatal(err)
 	}
-	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil); err != nil {
+	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil, nil); err != nil {
 		t.Fatalf("mode off: %v", err)
 	}
 	if !linkUp(t, host) {
@@ -149,11 +269,11 @@ func TestActivateTrafficPolicyKeepsTheToken(t *testing.T) {
 		}
 		return row.PolicyToken
 	}
-	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil); err != nil {
+	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	first := tokenOf()
-	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil); err != nil {
+	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := tokenOf(); got != first {

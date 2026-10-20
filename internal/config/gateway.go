@@ -89,7 +89,8 @@ const (
 	// IPv4 VIP over the rule's IPv6 backends, whose nodes translate its
 	// flows, and advertises it once those
 	// backends' ServiceVIPBindings are Bound. Turning it off withdraws every
-	// IPv4 VIP this node advertises.
+	// IPv4 VIP this node advertises. A gateway that cannot list and watch
+	// ServiceVIPBindings runs as if it were off.
 	EnvGatewayIPv4VIPs = "GALACTIC_GATEWAY_IPV4_VIPS"
 
 	// EnvGatewayProcSysPath is the procfs sysctl root the datapath writes its
