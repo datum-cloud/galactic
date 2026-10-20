@@ -574,17 +574,17 @@ Each gateway node reports what it did with a rule's IPv4 VIPs as its
 | `False` | `NotLoaded`        | the switch is on, but the node did not load the rule at all                                                                     |
 
 `Advertised`, `NotAdvertised` and `BindingsNotBound` mean the node has the
-IPv4 VIP loaded. The rule's IPv6 VIP keeps serving in every case. A rule
-whose every VIP is IPv4 is not loaded where none of them can be, and its
+IPv4 VIP loaded. The rule's IPv6 VIP keeps serving in every case. A rule whose
+every VIP is IPv4 is not loaded where none of them can be, and its
 `<gateway-node>/Programmed` condition reports `NoServedVIP` with the switch
 off and `InvalidRule` with it on. An IPv4 VIP's backends are the selected
 attachments' IPv6 addresses, the same ones as the IPv6 VIP's. Each backend
-node writes a binding for each of them, pairing the IPv4 `vipAddress` with
-the IPv6 `backendAddress`, but only while some gateway node reports one of the three loaded
-reasons for the rule, and deletes them once none does, so a cell whose
-gateways leave IPv4 VIPs out has no IPv4 bindings or rows. Each gateway pass
-removes the `<node>/Programmed` and `<node>/IPv4Served` conditions of any node
-that no `NetworkGateway` in the namespace targets, so a gateway that left
+node writes a binding for each of them, pairing the IPv4 `vipAddress` with the
+IPv6 `backendAddress`, but only while some gateway node reports one of the
+three loaded reasons for the rule, and deletes them once none does, so a cell
+whose gateways leave IPv4 VIPs out has no IPv4 bindings or rows. Each gateway
+pass removes the `<node>/Programmed` and `<node>/IPv4Served` conditions of any
+node that no `NetworkGateway` in the namespace targets, so a gateway that left
 without clearing its conditions cannot keep the backend nodes' IPv4 bindings
 alive.
 
@@ -616,8 +616,25 @@ checksum (`vip_udp_no_checksum`), since IPv6 requires one, and an IPv4
 fragment (`vip_ipv4_fragment`), which the gateway never sends. TCP's MSS is
 clamped so a client's segments fit the fabric once the gateway encapsulates
 them. A reply too big for the client's path is not fragmented; the ICMPv4
-error it draws goes to the VIP and the backend never learns of it. See
-[the CNI datapath](../agents/ARCHITECTURE-CNI.md#key-design-decisions).
+error it draws goes to the VIP and the backend never learns of it. The node
+translates as a router does, decrementing the TTL or hop limit, and drops and
+counts a packet that would reach zero (`vip_ttl_exceeded`).
+
+Only a TCP or UDP reply with no extension header is translated. Anything
+else the workload sends to `64:ff9b::/96`, such as an ICMPv6 Destination
+Unreachable or Packet Too Big, a packet with an extension header, or an IPv6
+fragment, leaves as ordinary NAT64 egress from the backend's own address, so
+the client never receives it as traffic from the VIP. In particular a client
+does not see the backend's port unreachable errors, and a large UDP reply the
+backend fragments never reaches it.
+
+Interface traffic policy sees an IPv4 VIP's flows after translation: an
+ingress rule on the backend's attachment matches the client as its
+`64:ff9b::/96` address, IPv6 and TCP or UDP, never as an IPv4 address. A rule
+that allows IPv4 clients by an IPv4 CIDR, or with `ipFamily: IPv4`, does not
+match them; write it for `64:ff9b::<client>/128`, or `64:ff9b::/96` for every
+IPv4 client. See [Traffic policy on the node](../traffic-policy/node.md).
+See [the CNI datapath](../agents/ARCHITECTURE-CNI.md#key-design-decisions).
 
 For the same reason a backend serves only one rule on a given backend port.
 The node rewrites a reply by its source, the backend's address, port and
@@ -636,9 +653,9 @@ and an IPv4 rule on the same backend, `backendPort` and `protocol` both serve
 it, while two rules with IPv4 VIPs there compete like two with IPv6 VIPs.
 
 A selected attachment is a backend of both VIPs once its status names a node
-and its interface has an IPv6 address. Two attachments claiming one address, or two
-backends on one node whose slots (below) collide, keep only the first in
-address order; the other is reported as unresolved rather than given flows
+and its interface has an IPv6 address. Two attachments claiming one address,
+or two backends on one node whose slots (below) collide, keep only the first
+in address order; the other is reported as unresolved rather than given flows
 it could not answer. Until then it appears in the rule's
 `<gateway-node>/Programmed` message with reason `BackendsUnresolved`, as does
 a backend whose node advertises no route for it yet. A rule with no backend
@@ -802,11 +819,12 @@ Roll out in this order:
    server must run Kubernetes 1.30 or later, so that rules stored with two
    VIPs of a family stay editable outside `vipAddresses`.
 2. On every backend node, `galactic-cni`, whose datapath translates IPv4
-   VIPs to IPv6, and then `galactic-router`, which writes their bindings. The
-   order matters: a binding reports `Bound` once its `vip_xlat_table` rows
-   are written, and an earlier `galactic-cni` datapath ignores an IPv4 VIP's
-   rows, so a newer router beside an older CNI reports a binding `Bound` that
-   cannot translate. The gate cannot see the datapath's version.
+   VIPs to IPv6, and then `galactic-router`, which writes their bindings.
+   Roll the two together on each node, and finish every backend node before
+   step 4 turns the switch on anywhere. The order matters: a binding reports
+   `Bound` once its `vip_xlat_table` rows are written, and the gate cannot
+   see either component's version, so a mismatched pair can report a binding
+   `Bound` that does not work (see below).
 3. `galactic-gateway` on every gateway node, with the
    `servicevipbindings` read access in its ClusterRole.
 4. `GALACTIC_GATEWAY_IPV4_VIPS=true`, one gateway node at a time. The backend
@@ -815,16 +833,31 @@ Roll out in this order:
    the VIP once its bindings are `Bound`. Check that node's
    `<gateway-node>/IPv4Served` before moving to the next.
 
-Version skew is safe at every step. An older gateway leaves IPv4 VIPs out and
-never advertises them. An older router writes no IPv4 binding, so no binding
-is ever `Bound` and the gate never opens. An older CNI ignores an IPv4
-VIP's `vip_xlat_table` rows, which is why step 2 upgrades it before the
-router. Before turning the switch on, make sure the backends accept
-`64:ff9b::/96` sources.
-Restarts are safe too: a gateway rebuilds its gate from the API on its first
-pass, and a backend node's router re-verifies its bindings when it restarts,
-so a binding that is no longer `Bound` takes its backend out of the table and,
-if it was the last, closes the gate.
+Skew to watch for during the rollout:
+
+- An older gateway leaves IPv4 VIPs out and never advertises them.
+- A `galactic-router` from a release without IPv4 VIPs writes no IPv4
+  binding, so no binding is ever `Bound` and the gate never opens.
+- A `galactic-router` built from `main` with the native IPv4 path (merged
+  2026-10-20, before translation, and possibly running on the staging labs)
+  writes IPv4 bindings with an IPv4 `backendAddress` and rows that rewrite
+  the VIP to that IPv4 address. It reports them `Bound`, so the gate can open.
+  It must not run beside this release's `galactic-cni` while any gateway has
+  the switch on. If it does, the skew fails closed: the CNI drops every
+  packet for such a row and counts it as `vip_ipv4_backend`, rather than
+  delivering untranslated IPv4 to an IPv6-only workload, but the VIP's
+  clients get no answer from that backend.
+- A `galactic-cni` from before translation ignores an IPv4 VIP's
+  `vip_xlat_table` rows, so a newer router beside it reports a binding
+  `Bound` that cannot translate. That is why step 2 upgrades the CNI first.
+
+Before turning the switch on, make sure the backends accept `64:ff9b::/96`
+sources and that traffic policy allows them (see [What an IPv4 VIP
+needs](#what-an-ipv4-vip-needs)). Restarts are safe too: a gateway rebuilds
+its gate from the API on its first pass, and a backend node's router
+re-verifies its bindings when it restarts, so a binding that is no longer
+`Bound` takes its backend out of the table and, if it was the last, closes the
+gate.
 
 The gateway shares the edge node's XDP dispatcher with the `galactic-nat`
 egress shard, and `edge_lb` runs before the shard's slot. It claims an IPv4
@@ -835,21 +868,31 @@ or the gateway would take that address's NAT64 replies.
 
 To roll back, turn `GALACTIC_GATEWAY_IPV4_VIPS` off on every gateway first.
 Each node withdraws its `-v4` advertisements on its next pass and reports
-`Unsupported`, the backend nodes delete their IPv4 bindings, and the
-bindings' finalizers remove their `vip_xlat_table` rows. Once no IPv4
+`Unsupported`, the backend nodes delete their IPv4 bindings, and the bindings'
+finalizers remove their `vip_xlat_table` rows. Once no IPv4
 `ServiceVIPBinding` is left, downgrade the gateways, then `galactic-router`
-and `galactic-cni`. An earlier `galactic-router` cannot remove an IPv4 VIP's
-ingress row. If one is left, remove it with this release's `galactic-router
-vip xlat remove` before downgrading that node's router. Roll the CRD back last, if at
-all. The earlier CRD refuses IPv4 VIPs, so a rule that holds one keeps
-validating only while its `vipAddresses` is unchanged, and any edit to the
-list must drop the IPv4 VIP.
+and `galactic-cni`. An earlier `galactic-router` can remove neither of an IPv4
+VIP's rows: its `vipxlatmap` refuses the ingress row's IPv4-mapped key, and it
+does not know the egress-translated row's direction. If any is left
+(`galactic-router vip xlat list` shows them), remove the binding's two rows
+with this release's `galactic-router vip xlat remove` before downgrading that
+node's router. Roll the CRD back last, if at all. The earlier CRD refuses IPv4
+VIPs, so a rule that holds one keeps validating only while its `vipAddresses`
+is unchanged, and any edit to the list must drop the IPv4 VIP.
 
-`galactic-cni` adds the `vip_xlat_failed`, `vip_ipv4_fragment` and
-`vip_udp_no_checksum` slots to its `drop_reasons` map, so the upgrade, and a
-downgrade past it, recreate that map and restart every
-`galactic_usid_drops_total` counter from zero on each node. No other
-map changes, and `vip_xlat_table`'s rows survive both.
+Bindings and rows written by the native IPv4 path go away on their own once
+this release's `galactic-router` runs. Its binding writer deletes the
+generated bindings with an IPv4 `backendAddress`, since it writes the IPv6
+backend's binding instead. Until they are gone they report `BindFailed`,
+since an IPv4 `backendAddress` is refused, and their deletion removes no row.
+The periodic `vip_xlat_table` sweep then deletes their rows, which no binding
+claims. Meanwhile the datapath drops their traffic as `vip_ipv4_backend`.
+
+`galactic-cni` adds the `vip_xlat_failed`, `vip_ipv4_fragment`,
+`vip_udp_no_checksum`, `vip_ipv4_backend` and `vip_ttl_exceeded` slots to its
+`drop_reasons` map, so the upgrade, and a downgrade past it, recreate that
+map and restart every `galactic_usid_drops_total` counter from zero on each
+node. No other map changes, and `vip_xlat_table`'s rows survive both.
 
 ## Verifying the deployment
 
