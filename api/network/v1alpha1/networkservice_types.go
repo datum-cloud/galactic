@@ -125,10 +125,9 @@ type NetworkServiceSpec struct {
 	// sends the reply back to the client as IPv4 from the VIP. A gateway node
 	// serves the IPv4 VIP only while it has IPv4 VIPs turned on, and
 	// load-balances it only over the backends whose ServiceVIPBinding for it
-	// reports Bound. It advertises the IPv4 VIP while at
-	// least one such backend exists, and reports the outcome in its
-	// "<node>/IPv4Served" condition. The IPv6 VIP is served independently of
-	// the IPv4 one.
+	// reports Bound. It advertises the IPv4 VIP while at least one such
+	// backend exists, and reports the outcome in its "<node>/IPv4Served"
+	// condition. The IPv6 VIP is served independently of the IPv4 one.
 	//
 	// An existing service whose list breaks these limits keeps validating while
 	// the list is unchanged, since the API server ratchets validation of an
@@ -178,8 +177,8 @@ type NetworkServiceSpec struct {
 	// BackendPort, for both VIPs: its node translates the IPv4 VIP's flows to
 	// and from IPv6, and its IPv4 addresses are never backends. An attachment
 	// with no status.node, or no IPv6 address, is not a backend until it has
-	// both. An empty selector is rejected
-	// rather than read as "every attachment in the VPC".
+	// both. An empty selector is rejected rather than read as "every
+	// attachment in the VPC".
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="(has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions) && size(self.matchExpressions) > 0)",message="backendSelector must not be empty"
 	BackendSelector metav1.LabelSelector `json:"backendSelector"`
