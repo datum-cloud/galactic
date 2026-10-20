@@ -100,3 +100,8 @@ above for that.
 - [enhancements/networking/interface-traffic-policy/README.md](enhancements/networking/interface-traffic-policy/README.md)
   — per-interface ingress and egress traffic policy, deny by default and
   enforced in the CNI datapath. `status: provisional`, `stage: alpha`.
+- [enhancements/networking/edge-gateway-providers/README.md](enhancements/networking/edge-gateway-providers/README.md)
+  — the platform tenant gateway services (native MASQUE, iroh packets, tenant
+  BGP, tailnets) plug into as independently packaged providers: host-owned
+  attachments, fenced writes to shared datapath state and finite forwarding
+  claims. `status: provisional`, `stage: alpha`.
