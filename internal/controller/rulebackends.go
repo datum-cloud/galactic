@@ -25,10 +25,10 @@ import (
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
-// ruleBackend is one backend a NetworkService's BackendSelector picks: one
+// ruleBackend is one backend a NetworkService's BackendSelector picks: one IPv6
 // interface address of one selected VPCAttachment, on the rule's BackendPort.
-// An IPv6 VIP's backends are IPv6 addresses and an IPv4 VIP's IPv4 addresses,
-// since the datapath never translates between the families.
+// Workloads are IPv6 only, so it serves the rule's VIPs of both families: its
+// node translates an IPv4 VIP's flows to and from IPv6.
 //
 // galactic-gateway load-balances to it and galactic-router on node writes its
 // ServiceVIPBinding, and both derive it from the same objects through
@@ -47,8 +47,7 @@ func (b ruleBackend) String() string {
 	return netip.AddrPortFrom(b.addr, b.port).String()
 }
 
-// addrFamily is the address family of a rule's VIP and of the backends that
-// serve it.
+// addrFamily is the address family of a rule's VIP.
 type addrFamily int
 
 const (
@@ -104,7 +103,7 @@ func listVPCAttachments(
 // trigger a pass on every gateway and router.
 //
 // The fields compared here are exactly those ruleCandidateBackends,
-// attachmentAddresses and attachmentEgressKind read: labels (the
+// attachmentIPv6Addresses and attachmentEgressKind read: labels (the
 // selector), status.vpc, status.node, spec.interface.addresses and
 // spec.interface.mode. Namespace and name are immutable. Keep this list in
 // sync with those functions whenever one of them reads another field.
@@ -171,32 +170,32 @@ func groupAttachmentsByVPC(attachments []*cloudv1alpha1.VPCAttachment) map[strin
 	return byVPC
 }
 
-// selectRuleBackends returns the backends of family that rule's
-// BackendSelector picks from attachments, less those owners assigns to another
-// rule. They serve the rule's VIP of that family.
+// selectRuleBackends returns the backends that rule's BackendSelector picks
+// from attachments for its VIP of family, less those whose claim for that
+// family owners assigns to another rule.
 //
 // Only an attachment whose observed VPC equals rule.Spec.VPCRef is a
 // candidate, whatever its labels, so a selector cannot reach another tenant's
-// VPC. A selected attachment with no observed node, or no interface address of
-// family, is pending rather than a backend: a backend node translates a VIP
-// only to an address of its own family. An attachment with several addresses
-// of family contributes each of them. A backend owned by another rule is
-// claimed rather than a backend: its node can translate its replies back to
-// only one rule's VIP.
+// VPC. A selected attachment with no observed node, or no IPv6 interface
+// address, is pending rather than a backend: workloads are IPv6 only, and an
+// IPv4 VIP reaches its backends through translation to IPv6. An attachment
+// with several IPv6 addresses contributes each of them. A backend owned by
+// another rule is claimed rather than a backend: its node can translate its
+// replies back to only one rule's VIP of each family.
 //
 // An invalid selector is a spec error and fails the rule.
 func selectRuleBackends(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
 	family addrFamily,
 ) (ruleSelection, error) {
-	candidates, pending, err := ruleCandidateBackends(rule, attachments, family)
+	candidates, pending, err := ruleCandidateBackends(rule, attachments)
 	if err != nil {
 		return ruleSelection{}, err
 	}
 	sel := ruleSelection{pending: pending}
 	self := client.ObjectKeyFromObject(rule)
 	for _, b := range candidates {
-		if owner, ok := owners[backendClaimFor(rule, b)]; ok && owner != self {
+		if owner, ok := owners[backendClaimFor(rule, b, family)]; ok && owner != self {
 			sel.claimed = append(sel.claimed, claimedBackend{ruleBackend: b, owner: owner})
 			continue
 		}
@@ -205,13 +204,12 @@ func selectRuleBackends(
 	return sel, nil
 }
 
-// ruleCandidateBackends returns every backend of family rule's
-// BackendSelector picks from attachments, whatever other rules select, sorted
-// by address, and the selected attachments that are not backends of family
-// yet, as "namespace/name: reason". See selectRuleBackends for which
-// attachments qualify.
+// ruleCandidateBackends returns every backend rule's BackendSelector picks
+// from attachments, whatever other rules select, sorted by address, and the
+// selected attachments that are not backends yet, as "namespace/name: reason".
+// See selectRuleBackends for which attachments qualify.
 func ruleCandidateBackends(
-	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, family addrFamily,
+	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
 ) (backends []ruleBackend, pending []string, err error) {
 	_, port, err := rulePorts(rule)
 	if err != nil {
@@ -231,9 +229,9 @@ func ruleCandidateBackends(
 			pending = append(pending, key.String()+": status.node not set by datum-cloud/cloud")
 			continue
 		}
-		addrs := attachmentAddresses(attachment, family)
+		addrs := attachmentIPv6Addresses(attachment)
 		if len(addrs) == 0 {
-			pending = append(pending, key.String()+": no "+family.String()+" address")
+			pending = append(pending, key.String()+": no IPv6 address")
 			continue
 		}
 		kind := attachmentEgressKind(attachment.Spec.Interface.Mode)
@@ -286,21 +284,26 @@ func rulePorts(rule *bgpv1alpha1.NetworkService) (port, backendPort uint16, err 
 }
 
 // backendClaim identifies the egress vip_xlat_table row a backend's node
-// writes for a rule: the reply from a backend address and port, over one
-// protocol, in one VPC. The row rewrites the reply's source to one VIP, so
-// only one rule can use a given claim. The address's family is part of the
-// claim: an IPv4 backend and an IPv6 backend on the same port and protocol
-// are two claims, each rewritten to its own family's VIP.
+// writes for a rule's VIP of one family: the reply from a backend address and
+// port, over one protocol, in one VPC. The row rewrites the reply's source to
+// one VIP, so only one rule can use a given claim. The VIP's family is part of
+// the claim: a reply to an IPv4 client, sent to 64:ff9b::/96, takes the IPv4
+// VIP's egress-translated row and any other reply the IPv6 VIP's egress row,
+// so one backend socket can answer for one VIP of each family, from one rule
+// or two.
 type backendClaim struct {
-	vpc      string
-	addr     netip.Addr
-	port     uint16
-	protocol bgpv1alpha1.NetworkServiceProtocol
+	vpc       string
+	addr      netip.Addr
+	port      uint16
+	protocol  bgpv1alpha1.NetworkServiceProtocol
+	vipFamily addrFamily
 }
 
 // backendClaimFor returns the claim backend b of rule makes.
-func backendClaimFor(rule *bgpv1alpha1.NetworkService, b ruleBackend) backendClaim {
-	return backendClaim{vpc: rule.Spec.VPCRef, addr: b.addr, port: b.port, protocol: rule.Spec.Protocol}
+func backendClaimFor(rule *bgpv1alpha1.NetworkService, b ruleBackend, vipFamily addrFamily) backendClaim {
+	return backendClaim{
+		vpc: rule.Spec.VPCRef, addr: b.addr, port: b.port, protocol: rule.Spec.Protocol, vipFamily: vipFamily,
+	}
 }
 
 // backendOwners maps each backend claim to the rule that owns it.
@@ -329,13 +332,13 @@ func ruleBackendOwners(
 		if err != nil {
 			continue
 		}
+		backends, _, err := ruleCandidateBackends(rule, attachments)
+		if err != nil {
+			continue
+		}
 		for _, tv := range vips.valid() {
-			backends, _, err := ruleCandidateBackends(rule, attachments, tv.family)
-			if err != nil {
-				break
-			}
 			for _, b := range backends {
-				claim := backendClaimFor(rule, b)
+				claim := backendClaimFor(rule, b, tv.family)
 				if _, taken := owners[claim]; !taken {
 					owners[claim] = client.ObjectKeyFromObject(rule)
 				}
@@ -431,9 +434,9 @@ func (v ruleVIPs) valid() []translatedVIP {
 
 // ruleTranslatedVIPs returns the VIPs of rule that backend nodes translate, at
 // most one per family. A backend node rewrites a reply's source from the
-// backend's address and port back to a single VIP of the backend's family, so
-// a backend cannot answer for a second VIP of one family and that VIP's flows
-// would be lost. For the same reason a backend serves only one rule on a given
+// backend's address and port back to a single VIP of the family its client
+// uses, so a backend cannot answer for a second VIP of one family and that
+// VIP's flows would be lost. For the same reason a backend serves only one rule on a given
 // backendPort (ruleBackendOwners).
 //
 // A second IPv6 VIP fails the whole rule, returned as the error. A second IPv4
@@ -495,18 +498,17 @@ func ruleBackendSelector(rule *bgpv1alpha1.NetworkService) (labels.Selector, err
 	return selector, nil
 }
 
-// attachmentAddresses returns attachment's interface addresses of family,
-// with their prefix lengths dropped and an IPv4 address in plain form. An entry
-// that does not parse is skipped: the Cloud API validates them, and one bad
-// entry should not hide the others.
-func attachmentAddresses(attachment *cloudv1alpha1.VPCAttachment, family addrFamily) []netip.Addr {
+// attachmentIPv6Addresses returns attachment's IPv6 interface addresses, with
+// their prefix lengths dropped. An entry that does not parse is skipped: the
+// Cloud API validates them, and one bad entry should not hide the others.
+func attachmentIPv6Addresses(attachment *cloudv1alpha1.VPCAttachment) []netip.Addr {
 	var out []netip.Addr
 	for _, a := range attachment.Spec.Interface.Addresses {
 		addr, err := parseInterfaceAddress(string(a))
-		if err != nil || !family.has(addr) {
+		if err != nil || !familyIPv6.has(addr) {
 			continue
 		}
-		out = append(out, addr.Unmap())
+		out = append(out, addr)
 	}
 	return out
 }

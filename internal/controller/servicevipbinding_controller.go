@@ -38,6 +38,10 @@ import (
 // complete before the object is removed from etcd.
 const serviceVIPBindingFinalizer = "galactic.datum.net/servicevipbinding-teardown"
 
+// reasonVIPRowConflict is the Bound reason for a binding an older binding
+// holds one of its vip_xlat_table rows against.
+const reasonVIPRowConflict = "Conflict"
+
 // ipProtoTCP and ipProtoUDP are the IANA wire protocol numbers matching the
 // datapath's own constants, the only two protocols vip_xlat_table's rewrite
 // path applies to.
@@ -65,6 +69,7 @@ type VIPTranslationTable interface {
 		backendAddr net.IP, backendPort uint16, vipAddr net.IP, vipPort uint16) error
 	UnregisterIngress(block uint64, argument, slot uint16, proto uint8, vipAddr net.IP, vipPort uint16) error
 	UnregisterEgress(block uint64, argument uint16, proto uint8, backendAddr net.IP, backendPort uint16) error
+	UnregisterEgressTranslated(block uint64, argument uint16, proto uint8, backendAddr net.IP, backendPort uint16) error
 	UnregisterBinding(slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
 		backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error)
 	UnregisterBindingAt(block uint64, argument, slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
@@ -97,11 +102,23 @@ type VIPTranslationTable interface {
 // replaced, because it still gives the node a locally verifiable answer on the
 // VIP.
 //
+// # IPv4 VIPs
+//
+// Workloads are IPv6 only. A binding's backendAddress is always IPv6, and an
+// IPv4 vipAddress is served through the datapath's stateless translation: its
+// ingress row turns the client's IPv4 packet into an IPv6 one to the backend,
+// from 64:ff9b::<client address>, and its egress-translated row turns the
+// backend's reply to that address back into IPv4 from the VIP. A binding with
+// an IPv4 backendAddress is never programmed.
+//
 // # One owner per row
 //
-// A vip_xlat_table row is keyed by VRF, protocol, address and port, so two
-// bindings on this node can claim the same row: the same VIP and port, or the
-// same backend address and port. The kernel row can only point one way. The
+// A vip_xlat_table row is keyed by VRF, protocol, direction, address and port,
+// so two bindings on this node can claim the same row: the same VIP and port,
+// or the same backend address and port for VIPs of one family. An IPv4 VIP's
+// and an IPv6 VIP's bindings on one backend socket write egress rows of
+// different directions, so they do not collide. The kernel row can only point
+// one way. The
 // oldest live binding claiming a row owns it, by creation time and then name,
 // so the choice does not change from one reconcile to the next. A binding that
 // loses either of its rows writes neither, removes any row it alone held, and
@@ -167,7 +184,7 @@ func (r *ServiceVIPBindingReconciler) reconcileBind(ctx context.Context, binding
 	var conflict *vipRowConflictError
 	if errors.As(bindErr, &conflict) {
 		cond.Status = metav1.ConditionFalse
-		cond.Reason = "Conflict"
+		cond.Reason = reasonVIPRowConflict
 		cond.Message = conflict.Error()
 		// Not retried on a timer: a change to the owning binding requeues
 		// this one through the peer watch in SetupWithManager.
@@ -356,9 +373,9 @@ func (r *ServiceVIPBindingReconciler) applyUnbind(ctx context.Context, binding *
 // from those of another live binding with the same values, so when one exists
 // on this node nothing is removed: that binding owns the rows now.
 //
-// Registration writes rows only for a VIP and backend of one family, so an
-// unparseable address or a mixed pair means there is nothing to remove, which
-// must not block deletion. Every removal is attempted even if an earlier one
+// Registration writes rows only for an IPv6 backend, so an unparseable
+// address or an IPv4 backend means there is nothing to remove, which must not
+// block deletion. Every removal is attempted even if an earlier one
 // fails, and the errors are joined.
 func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
@@ -376,7 +393,7 @@ func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 
 	vipAddr, backendAddr, ok := xlatAddresses(binding)
 	if !ok {
-		logger.Info("vipAddress and backendAddress are not addresses of one family; no vip_xlat_table rows to remove",
+		logger.Info("vipAddress or backendAddress is not one a row is written for; no vip_xlat_table rows to remove",
 			"vipAddress", binding.Spec.VIPAddress, "backendAddress", binding.Spec.BackendAddress)
 		return nil
 	}
@@ -439,9 +456,9 @@ func (r *ServiceVIPBindingReconciler) liveTwin(
 }
 
 // xlatAddresses returns binding's VIP and backend addresses in the form
-// vipxlatmap takes, 4 bytes for IPv4 and 16 for IPv6, an IPv4-mapped address
-// counting as IPv4. It reports false unless both parse and share a family,
-// the only bindings vip_xlat_table holds rows for.
+// vipxlatmap takes, 4 bytes for an IPv4 VIP, an IPv4-mapped one counting as
+// IPv4, and 16 for IPv6. It reports false unless both parse and the backend is
+// IPv6, the only bindings vip_xlat_table holds rows for.
 func xlatAddresses(binding *bgpv1alpha1.ServiceVIPBinding) (vipAddr, backendAddr net.IP, ok bool) {
 	v, err := netip.ParseAddr(binding.Spec.VIPAddress)
 	if err != nil {
@@ -452,7 +469,7 @@ func xlatAddresses(binding *bgpv1alpha1.ServiceVIPBinding) (vipAddr, backendAddr
 		return nil, nil, false
 	}
 	v, b = v.Unmap(), b.Unmap()
-	if v.Is4() != b.Is4() {
+	if b.Is4() {
 		return nil, nil, false
 	}
 	return net.IP(v.AsSlice()), net.IP(b.AsSlice()), true
@@ -461,38 +478,40 @@ func xlatAddresses(binding *bgpv1alpha1.ServiceVIPBinding) (vipAddr, backendAddr
 // unregisterRow removes one vip_xlat_table row.
 func (r *ServiceVIPBindingReconciler) unregisterRow(row vipRow) error {
 	addr := net.IP(row.addr.AsSlice())
-	if row.egress {
-		if err := r.VIPTranslationTable.UnregisterEgress(row.block, row.argument, row.proto, addr, row.port); err != nil {
-			return fmt.Errorf("unregister vip_xlat_table egress row: %w", err)
-		}
-		return nil
+	var err error
+	switch row.direction {
+	case vipxlatmap.DirectionEgress:
+		err = r.VIPTranslationTable.UnregisterEgress(row.block, row.argument, row.proto, addr, row.port)
+	case vipxlatmap.DirectionEgressTranslated:
+		err = r.VIPTranslationTable.UnregisterEgressTranslated(row.block, row.argument, row.proto, addr, row.port)
+	default:
+		err = r.VIPTranslationTable.UnregisterIngress(row.block, row.argument, row.slot, row.proto, addr, row.port)
 	}
-	if err := r.VIPTranslationTable.UnregisterIngress(
-		row.block, row.argument, row.slot, row.proto, addr, row.port); err != nil {
-		return fmt.Errorf("unregister vip_xlat_table ingress row: %w", err)
+	if err != nil {
+		return fmt.Errorf("unregister vip_xlat_table %s row: %w", row.direction, err)
 	}
 	return nil
 }
 
 // vipRow identifies one vip_xlat_table row. addr and port are the VIP's for an
-// ingress row and the backend's for an egress row. slot is the backend slot an
-// ingress row is keyed on, so two backends of one VIP claim different ingress
-// rows; it is always 0 on an egress row.
+// ingress row and the backend's for an egress or egress-translated row. slot
+// is the backend slot an ingress row is keyed on, so two backends of one VIP
+// claim different ingress rows; it is always 0 on the other two.
 type vipRow struct {
-	egress   bool
-	block    uint64
-	argument uint16
-	slot     uint16
-	proto    uint8
-	addr     netip.Addr
-	port     uint16
+	direction vipxlatmap.Direction
+	block     uint64
+	argument  uint16
+	slot      uint16
+	proto     uint8
+	addr      netip.Addr
+	port      uint16
 }
 
 func (r vipRow) String() string {
-	if r.egress {
-		return fmt.Sprintf("egress row for VRF %d %s", r.argument, netip.AddrPortFrom(r.addr, r.port))
+	if r.direction == vipxlatmap.DirectionIngress {
+		return fmt.Sprintf("ingress row for VRF %d slot %#04x %s", r.argument, r.slot, netip.AddrPortFrom(r.addr, r.port))
 	}
-	return fmt.Sprintf("ingress row for VRF %d slot %#04x %s", r.argument, r.slot, netip.AddrPortFrom(r.addr, r.port))
+	return fmt.Sprintf("%s row for VRF %d %s", r.direction, r.argument, netip.AddrPortFrom(r.addr, r.port))
 }
 
 // vipBindingRows is one binding's claim on vip_xlat_table, with the addresses
@@ -533,6 +552,7 @@ func resolveVIPBindingRows(
 
 // parseVIPBindingRows derives the two rows binding claims from its spec alone,
 // with their block and argument left zero for the caller to fill in with at.
+// An IPv4 VIP's egress row is egress-translated. An IPv4 backend is an error.
 func parseVIPBindingRows(binding *bgpv1alpha1.ServiceVIPBinding) (vipBindingRows, error) {
 	vipIP, err := netip.ParseAddr(binding.Spec.VIPAddress)
 	if err != nil {
@@ -544,10 +564,14 @@ func parseVIPBindingRows(binding *bgpv1alpha1.ServiceVIPBinding) (vipBindingRows
 			binding.Spec.BackendAddress, err)
 	}
 	vipIP, backendIP = vipIP.Unmap(), backendIP.Unmap()
-	if vipIP.Is4() != backendIP.Is4() {
+	if backendIP.Is4() {
 		return vipBindingRows{}, fmt.Errorf(
-			"vipAddress %s and backendAddress %s are not of one address family: a VIP is translated only "+
-				"to a backend of its own family", vipIP, backendIP)
+			"backendAddress %s is IPv4: workloads are IPv6 only, and a VIP of either family is served by an "+
+				"IPv6 backend", backendIP)
+	}
+	egress := vipxlatmap.DirectionEgress
+	if vipIP.Is4() {
+		egress = vipxlatmap.DirectionEgressTranslated
 	}
 
 	proto, err := ipProtocolNumber(binding.Spec.Protocol)
@@ -561,8 +585,8 @@ func parseVIPBindingRows(binding *bgpv1alpha1.ServiceVIPBinding) (vipBindingRows
 	slot := srv6.BackendSlot(backendIP, backendPort)
 
 	return vipBindingRows{
-		ingress:     vipRow{slot: slot, proto: proto, addr: vipIP, port: vipPort},
-		egress:      vipRow{egress: true, proto: proto, addr: backendIP, port: backendPort},
+		ingress:     vipRow{direction: vipxlatmap.DirectionIngress, slot: slot, proto: proto, addr: vipIP, port: vipPort},
+		egress:      vipRow{direction: egress, proto: proto, addr: backendIP, port: backendPort},
 		vipAddr:     net.IP(vipIP.AsSlice()),
 		backendAddr: net.IP(backendIP.AsSlice()),
 		vipPort:     vipPort,

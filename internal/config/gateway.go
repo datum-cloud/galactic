@@ -82,13 +82,14 @@ const (
 	// public interface is not required while it is off.
 	EnvGatewayDatapathEnabled = "GALACTIC_GATEWAY_DATAPATH_ENABLED"
 
-	// EnvGatewayIPv4VIPs turns on serving IPv4 VIPs. Optional, defaulting to
-	// false. Off, the gateway leaves every IPv4 VIP out of the datapath and
-	// advertises none. On, it turns on IPv4 forwarding for the FIB lookups
-	// edge_return and the Fragmentation Needed reply make, loads each rule's
-	// IPv4 VIP over the rule's IPv4 backends, and advertises it once those
-	// backends' ServiceVIPBindings are Bound. Turning it off withdraws every
-	// IPv4 VIP this node advertises. A gateway that cannot list and watch
+	// EnvGatewayIPv4VIPs turns on serving IPv4 VIPs. Optional, defaulting
+	// to false. Off, the gateway leaves every IPv4 VIP out of the datapath
+	// and advertises none. On, it turns on IPv4 forwarding for the FIB
+	// lookups edge_return and the Fragmentation Needed reply make, loads
+	// each rule's IPv4 VIP over the rule's IPv6 backends, whose nodes
+	// translate its flows, and advertises it once those backends'
+	// ServiceVIPBindings are Bound. Turning it off withdraws every IPv4 VIP
+	// this node advertises. A gateway that cannot list and watch
 	// ServiceVIPBindings runs as if it were off.
 	EnvGatewayIPv4VIPs = "GALACTIC_GATEWAY_IPV4_VIPS"
 

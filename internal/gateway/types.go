@@ -52,9 +52,11 @@ type DesiredRule struct {
 	Protocol string
 	Port     uint16
 
-	// Backends serve the rule's IPv6 VIPs and IPv4Backends its IPv4 VIPs, each
-	// VIP load-balancing over the backends of its own family. A family with a
-	// VIP has at least one backend.
+	// Backends serve the rule's IPv6 VIPs and IPv4Backends its IPv4 VIPs. Both
+	// are IPv6 backends, the IPv4 VIPs' reached by translation on their nodes,
+	// and usually the same ones; they differ only where another rule owns a
+	// backend's reply row for one family. A family with a VIP has at least one
+	// backend.
 	Backends     []DesiredBackend
 	IPv4Backends []DesiredBackend
 }

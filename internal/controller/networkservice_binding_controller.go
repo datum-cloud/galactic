@@ -78,11 +78,12 @@ const (
 )
 
 // NetworkServiceBindingReconciler writes, on its own node, the ServiceVIPBindings
-// that a NetworkService's backends need: one per translated VIP per backend of
-// that VIP's family whose VPCAttachment reports this node. A rule has at most
-// one IPv6 and one IPv4 VIP translated (ruleTranslatedVIPs); the IPv6 VIP's
-// backends are the selected attachments' IPv6 addresses and the IPv4 VIP's
-// their IPv4 addresses. It runs in galactic-router on every node.
+// that a NetworkService's backends need: one per translated VIP per backend
+// whose VPCAttachment reports this node. A rule has at most one IPv6 and one
+// IPv4 VIP translated (ruleTranslatedVIPs). Workloads are IPv6 only, so both
+// VIPs' backends are the selected attachments' IPv6 addresses, and an IPv4
+// VIP's binding pairs the IPv4 VIP with an IPv6 backendAddress, which its node
+// serves by translation. It runs in galactic-router on every node.
 //
 // The IPv4 VIP gets bindings only while some gateway node reports it loaded
 // (ipv4LoadedOnSomeNode). Until then, and once no node does, it gets none and

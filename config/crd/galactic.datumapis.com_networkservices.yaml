@@ -95,12 +95,12 @@ spec:
                   VPCAttachment object's own labels. Only attachments whose status.vpc
                   equals VPCRef are candidates, whatever their labels, so a selector cannot
                   reach into another tenant's VPC. Each selected attachment contributes the
-                  addresses in its spec.interface.addresses as backends, on BackendPort:
-                  its IPv6 addresses serve the IPv6 VIP and its IPv4 addresses the IPv4
-                  VIP, since a backend node never translates between the families. An
-                  attachment with no status.node, or no address of a VIP's family, is not
-                  a backend of that VIP until it has both. An empty selector is rejected
-                  rather than read as "every attachment in the VPC".
+                  IPv6 addresses in its spec.interface.addresses as backends, on
+                  BackendPort, for both VIPs: its node translates the IPv4 VIP's flows to
+                  and from IPv6, and its IPv4 addresses are never backends. An attachment
+                  with no status.node, or no IPv6 address, is not a backend until it has
+                  both. An empty selector is rejected rather than read as "every
+                  attachment in the VPC".
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -189,18 +189,22 @@ spec:
                   on the gateway nodes: at most one IPv6 and at most one IPv4 address.
 
                   A backend node rewrites a reply's source from the backend's address, port
-                  and protocol back to a single VIP of the backend's family, so a backend
+                  and protocol back to a single VIP of the client's family, so a backend
                   cannot answer for a second VIP of one family. Another VIP of a family
                   needs its own service whose backends listen on a different BackendPort.
                   An IPv4 VIP is written in dotted form; the IPv4-mapped IPv6 form is
                   refused.
 
-                  A gateway node serves the IPv4 VIP only while it has IPv4 VIPs turned on,
-                  and load-balances it only over the selected IPv4 backends whose
-                  ServiceVIPBinding reports Bound. It advertises the IPv4 VIP while at
-                  least one such backend exists, and reports the outcome in its
-                  "<node>/IPv4Served" condition. The IPv6 VIP is served independently of
-                  the IPv4 one.
+                  Workloads are IPv6 only, so both VIPs are served by the selected
+                  attachments' IPv6 addresses. A backend node translates the IPv4 VIP's
+                  flows statelessly: the backend sees an IPv4 client a.b.c.d as
+                  64:ff9b::a.b.c.d (RFC 6052) and replies to that address, and its node
+                  sends the reply back to the client as IPv4 from the VIP. A gateway node
+                  serves the IPv4 VIP only while it has IPv4 VIPs turned on, and
+                  load-balances it only over the backends whose ServiceVIPBinding for it
+                  reports Bound. It advertises the IPv4 VIP while at least one such
+                  backend exists, and reports the outcome in its "<node>/IPv4Served"
+                  condition. The IPv6 VIP is served independently of the IPv4 one.
 
                   An existing service whose list breaks these limits keeps validating while
                   the list is unchanged, since the API server ratchets validation of an

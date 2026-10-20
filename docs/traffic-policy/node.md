@@ -36,6 +36,14 @@ off, galactic-router still publishes and reports, and nothing is enforced.
 A reference to a `default-deny-all` the controller does not own resolves to
 nothing, as on the cell side.
 
+Ingress policy is decided on the packet as it is delivered, after
+decapsulation and any translation. A client of an IPv4 VIP reaches its
+IPv6 backend translated to IPv6, from `64:ff9b::<client address>` (RFC
+6052), so an ingress rule must match that client as an IPv6 source in
+`64:ff9b::/96`. An IPv4 CIDR or an `ipFamily: IPv4` rule never matches an
+IPv4 VIP's flows. See
+[What an IPv4 VIP needs](../gateway/configuration.md#what-an-ipv4-vip-needs).
+
 Each rule keeps its counter row while its name and action stay the same
 within one policy and one interface lifetime, so editing a match does not
 reset its counts. Renaming a rule, flipping its action, binding a different
