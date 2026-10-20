@@ -156,7 +156,7 @@ flags, or a combination of both (CLI flags take precedence), with the
 | Internal interfaces | `GALACTIC_GATEWAY_INTERNAL_INTERFACES` | `--gateway-internal-interfaces` | —           | No            |
 | XDP attach mode     | `GALACTIC_GATEWAY_XDP_ATTACH`          | `--gateway-xdp-attach`          | `dispatch`  | No            |
 | Datapath enabled    | `GALACTIC_GATEWAY_DATAPATH_ENABLED`    | `--gateway-datapath-enabled`    | `true`      | No            |
-| IPv4 VIPs           | `GALACTIC_GATEWAY_IPV4_VIPS`           | `--gateway-ipv4-vips`           | `true`      | No            |
+| IPv4 VIPs           | `GALACTIC_GATEWAY_IPV4_VIPS`           | `--gateway-ipv4-vips`           | `false`     | No            |
 | Procfs sysctl root  | `GALACTIC_GATEWAY_PROC_SYS_PATH`       | `--gateway-proc-sys-path`       | `/proc/sys` | No            |
 | Metrics port        | `GALACTIC_GATEWAY_METRICS_PORT`        | `--metrics-port`                | `8081`      | No            |
 | gRPC health port    | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`    | `--grpc-health-port`            | `5181`      | No            |
@@ -170,13 +170,22 @@ exits. It first detaches an idle dispatcher from its interfaces, and refuses
 to start while another datapath's slot is live there. See
 [Sharing the XDP hook](../agents/ARCHITECTURE-GATEWAY.md#sharing-the-xdp-hook-xdpdispatch).
 
-`GALACTIC_GATEWAY_IPV4_VIPS=true`, the default, serves IPv4 VIPs on this
-node. It does three things:
+`GALACTIC_GATEWAY_IPV4_VIPS=true` serves IPv4 VIPs on this node. It is off by
+default and is set per gateway node. It does three things:
 
 - It turns on IPv4 forwarding on every public and internal interface for the
-  datapath's FIB lookups. That includes the host-wide `net.ipv4.ip_forward`,
-  so the node routes IPv4 between all of its interfaces while the switch is
-  on.
+  datapath's FIB lookups, including the host-wide `net.ipv4.ip_forward`, so
+  the node then routes IPv4 between all of its interfaces. It does so only
+  when the node is about to load its first IPv4 VIP, not at startup, so
+  turning the switch on where no rule has an IPv4 VIP leaves the node's IPv4
+  forwarding as it was. An interface the datapath picks up later, such as a
+  replacement bond member, gets it too. Once on, it stays on until the node
+  reboots, even after the last IPv4 VIP goes or the switch is turned off:
+  `net.ipv4.ip_forward` is host-wide, and turning it back off could cut
+  another datapath on the node. If it cannot be turned on, the pass that
+  would load the IPv4 VIP is not applied at all, the `NetworkGateway`'s
+  `Ready` reads `False` with reason `IPv4ForwardingFailed`, and the pass is
+  retried; the rules the node already serves stay as they were.
 - It loads each rule's IPv4 VIP into the datapath beside its IPv6 VIP,
   balanced over the rule's IPv6 backends, whose nodes translate its flows
   (see [What an IPv4 VIP needs](#what-an-ipv4-vip-needs)).
@@ -198,14 +207,22 @@ remove their IPv4 bindings once no gateway reports it loaded. Without the
 check, a watch the gateway may not make would keep its cache from syncing, and
 the node would serve no rule at all.
 
-The default is `true`, so upgrading a gateway to this release turns IPv4
-VIPs on. Its ClusterRole must grant `get`, `list` and `watch` on
-`servicevipbindings` before the release reaches a cluster. Infra deploys its
-own copy of that ClusterRole, so the grant has to land there first.
-Otherwise each gateway runs with IPv4 VIPs off and reports the missing
-permission, as the paragraph above describes. The switch stays as a
-per-node kill switch: setting it to `false` withdraws every IPv4 VIP the
-node advertises and unloads them, and leaves IPv6 untouched. See
+Before turning the switch on for a gateway node:
+
+- Its ClusterRole must grant `get`, `list` and `watch` on
+  `servicevipbindings`. Infra deploys its own copy of that ClusterRole, so
+  the grant has to land there. Otherwise the gateway runs with IPv4 VIPs
+  off and reports the missing permission, as the paragraph above describes.
+- The underlay must originate the prefix each IPv4 VIP sits in, from the
+  site's edge nodes, as it does each IPv6 VIP's. The gateway's `-v4`
+  advertisement is an EVPN path inside Galactic's own mesh, which the
+  transit never sees. Without the underlay route the node reports
+  `Advertised` while no client off the fabric can reach the VIP. The
+  containerlab lab originates each site's IPv4 VIP `/26` from its edge
+  nodes' `frr.conf`.
+
+Turning the switch back off withdraws every IPv4 VIP the node advertises and
+unloads them, and leaves IPv6 untouched. See
 [Rolling out and rolling back IPv4 VIPs](#rolling-out-and-rolling-back-ipv4-vips).
 
 `GALACTIC_GATEWAY_DATAPATH_ENABLED=false` keeps the process up and its pod
@@ -472,10 +489,10 @@ object.
 
 ### `NetworkGateway` — one per gateway node
 
-| Field                 | Required | Type     | Description                                                                                                                                                                   |
-| --------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                         |
-| `status.conditions`   | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, or `Terminating`. |
+| Field                 | Required | Type     | Description                                                                                                                                                                                                                                                                                                                                     |
+| --------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                                                                                                                                                                                           |
+| `status.conditions`   | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, `IPv4ForwardingFailed` (an IPv4 VIP is due to load but the node's IPv4 forwarding could not be turned on, so nothing in the pass is applied), or `Terminating`. |
 
 There is deliberately **no** self-address or primary-node field on this
 status — DSR has nothing analogous to publish. Create one object per
@@ -835,23 +852,37 @@ Roll out in this order:
 2. On every backend node, `galactic-cni`, whose datapath translates IPv4
    VIPs to IPv6, and then `galactic-router`, which writes their bindings.
    Roll the two together on each node, and finish every backend node before
-   step 4 upgrades any gateway. The order matters: a binding reports `Bound`
+   step 6 turns the switch on anywhere. The order matters: a binding reports `Bound`
    once its `vip_xlat_table` rows are written, and the gate cannot see either
    component's version, so a mismatched pair can report a binding `Bound`
    that does not work (see below).
 3. `get`, `list` and `watch` on `servicevipbindings` in the
    `galactic-gateway` ClusterRole, infra's copy of
-   `config/galactic-gateway/rbac.yaml`. This must land before this release
-   of `galactic-gateway` reaches the cluster, because the release serves
-   IPv4 VIPs by default.
-4. `galactic-gateway`, one gateway node at a time. The switch is on by
-   default, so each upgraded node loads every rule's IPv4 VIP. The backend
+   `config/galactic-gateway/rbac.yaml`.
+4. `galactic-gateway` on every gateway node. With the switch off, its
+   default, an upgraded gateway serves IPv4 VIPs no more than before.
+5. Underlay origination of each IPv4 VIP's prefix from the site's edge
+   nodes, as for the IPv6 VIPs.
+6. `GALACTIC_GATEWAY_IPV4_VIPS=true`, one gateway node at a time. The backend
    nodes write IPv4 bindings once a gateway reports an IPv4 VIP loaded, so
-   this is what brings them in. Each node then advertises the VIP once its
-   bindings are `Bound`. Check that node's `<gateway-node>/IPv4Served`
-   before moving to the next. To upgrade with IPv4 off and turn it on
-   later, set `GALACTIC_GATEWAY_IPV4_VIPS=false` on the gateways for the
-   upgrade, then remove the override one gateway node at a time.
+   turning the switch on is what brings them in. Each node then advertises
+   the VIP once its bindings are `Bound`. Check that node's
+   `<gateway-node>/IPv4Served`, and that a client off the fabric reaches the
+   VIP through it, before moving to the next.
+
+Upgrading `galactic-router` (step 2) before the switch goes on (step 6) is
+the safe order. Until a backend node's binding reports `Bound`, a gateway
+with the switch on loads the rule's IPv4 VIP but reports `BindingsNotBound`
+and advertises nothing, so no IPv4 traffic is drawn to a backend that cannot
+translate it yet.
+
+Two things about the gateway's access check at startup matter when the
+switch goes on. With the switch on, startup waits up to 30 seconds for the
+`servicevipbindings` access review and exits if the review cannot be made,
+so a gateway that starts while the API server is unreachable restarts
+rather than coming up. And the check runs only at startup: a gateway that
+started with the switch on before step 3's grant landed stays with IPv4 VIPs
+off, reporting `Unsupported`, until its pod is restarted.
 
 Skew to watch for during the rollout. It fails closed at every step:
 
@@ -875,7 +906,7 @@ Skew to watch for during the rollout. It fails closed at every step:
   `vip_xlat_table` rows, so a newer router beside it reports a binding
   `Bound` that cannot translate. That is why step 2 upgrades the CNI first.
 
-Before the gateways are upgraded, make sure the backends accept `64:ff9b::/96`
+Before turning the switch on, make sure the backends accept `64:ff9b::/96`
 sources and that traffic policy allows them (see [What an IPv4 VIP
 needs](#what-an-ipv4-vip-needs)). Restarts are safe too: a gateway rebuilds
 its gate from the API on its first pass, and a backend node's router
@@ -890,7 +921,7 @@ other IPv4 packet, NAT64's replies included, to the next slot. An IPv4 VIP
 must therefore never be one of an egress shard's IPv4 masquerade addresses,
 or the gateway would take that address's NAT64 replies.
 
-To roll back, set `GALACTIC_GATEWAY_IPV4_VIPS=false` on every gateway first.
+To roll back, turn `GALACTIC_GATEWAY_IPV4_VIPS` off on every gateway first.
 Each node withdraws its `-v4` advertisements on its next pass and reports
 `Unsupported`, the backend nodes delete their IPv4 bindings, and the bindings'
 finalizers remove their `vip_xlat_table` rows. Once no IPv4

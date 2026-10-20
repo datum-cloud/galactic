@@ -111,6 +111,14 @@ type NetworkGatewayReconciler struct {
 	// applyBGPAdvertisements. Off, no IPv4 VIP is loaded or advertised.
 	IPv4VIPs bool
 
+	// EnsureIPv4Forwarding turns on the IPv4 forwarding the datapath's IPv4
+	// FIB lookups need. Each pass calls it before the engine loads any IPv4
+	// VIP, so a node that serves none never changes its IPv4 forwarding. It
+	// must be idempotent; an error fails the pass before the engine is
+	// driven, so no IPv4 VIP loads, and is not yet advertised, on a node
+	// whose replies to it would be dropped. Nil means nothing to turn on.
+	EnsureIPv4Forwarding func() error
+
 	// drain keeps a deleted rule loaded until its route is withdrawn. See
 	// ruleDrainTracker.
 	drain ruleDrainTracker
@@ -138,6 +146,11 @@ const (
 	// reasonDatapathDisabled is the Ready reason while this node's datapath is
 	// turned off by configuration.
 	reasonDatapathDisabled = "DatapathDisabled"
+
+	// reasonIPv4ForwardingFailed is the Ready reason while this node cannot
+	// turn on the IPv4 forwarding its IPv4 VIPs need, so the pass that would
+	// load them is not applied.
+	reasonIPv4ForwardingFailed = "IPv4ForwardingFailed"
 
 	// reasonProgrammed is the per-node Programmed reason for a rule this
 	// node's engine loaded.
@@ -402,18 +415,8 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	status, err := r.Engine.Reconcile(ctx, desired)
+	status, err := r.reconcileEngine(ctx, gw, desired)
 	if err != nil {
-		gwCopy := gw.DeepCopy()
-		setGatewayCondition(gwCopy, metav1.Condition{
-			Type:    bgpv1alpha1.ConditionTypeReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  "EngineReconcileFailed",
-			Message: err.Error(),
-		})
-		if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
-			logger.Error(updateErr, "update NetworkGateway status after engine reconcile error")
-		}
 		return ctrl.Result{}, err
 	}
 
@@ -453,6 +456,72 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Nothing else is sure to trigger the pass that drops a held rule once
 	// its drain delay ends, so ask for it.
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// reconcileEngine converges the engine on desired, first turning on the IPv4
+// forwarding desired's IPv4 VIPs need (ensureIPv4Forwarding). A failure of
+// either is recorded on gw's Ready condition and returned.
+func (r *NetworkGatewayReconciler) reconcileEngine(
+	ctx context.Context, gw *bgpv1alpha1.NetworkGateway, desired gateway.EngineState,
+) (gateway.EngineStatus, error) {
+	if err := r.ensureIPv4Forwarding(ctx, gw, desired); err != nil {
+		return gateway.EngineStatus{}, err
+	}
+	status, err := r.Engine.Reconcile(ctx, desired)
+	if err != nil {
+		gwCopy := gw.DeepCopy()
+		setGatewayCondition(gwCopy, metav1.Condition{
+			Type:    bgpv1alpha1.ConditionTypeReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  "EngineReconcileFailed",
+			Message: err.Error(),
+		})
+		if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
+			log.FromContext(ctx).Error(updateErr, "update NetworkGateway status after engine reconcile error")
+		}
+		return gateway.EngineStatus{}, err
+	}
+	return status, nil
+}
+
+// ensureIPv4Forwarding turns on this node's IPv4 forwarding before the engine
+// loads desired, when desired holds an IPv4 VIP (EnsureIPv4Forwarding). A
+// failure is recorded on gw's Ready condition and returned, so the caller
+// drives nothing on this pass.
+func (r *NetworkGatewayReconciler) ensureIPv4Forwarding(
+	ctx context.Context, gw *bgpv1alpha1.NetworkGateway, desired gateway.EngineState,
+) error {
+	if !r.IPv4VIPs || r.EnsureIPv4Forwarding == nil || !loadsIPv4VIP(desired) {
+		return nil
+	}
+	err := r.EnsureIPv4Forwarding()
+	if err == nil {
+		return nil
+	}
+	gwCopy := gw.DeepCopy()
+	setGatewayCondition(gwCopy, metav1.Condition{
+		Type:    bgpv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionFalse,
+		Reason:  reasonIPv4ForwardingFailed,
+		Message: err.Error(),
+	})
+	if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
+		log.FromContext(ctx).Error(updateErr, "update NetworkGateway status after IPv4 forwarding error")
+	}
+	return fmt.Errorf("turn on IPv4 forwarding for this node's IPv4 VIPs: %w", err)
+}
+
+// loadsIPv4VIP reports whether desired holds any IPv4 VIP for the engine to
+// load.
+func loadsIPv4VIP(desired gateway.EngineState) bool {
+	for _, rule := range desired.Rules {
+		for _, vip := range rule.VIPAddresses {
+			if vip.Unmap().Is4() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // passIPv4Bindings returns namespace's IPv4 bindings for one pass, which IPv4

@@ -149,6 +149,10 @@ func runCmd(cfg *config.GatewayConfig) error {
 		}
 	})
 	var gwDatapath gateway.Datapath = gateway.NoopDatapath{}
+	var ipv4 *ipv4Forwarding
+	if ipv4VIPs {
+		ipv4 = newIPv4Forwarding()
+	}
 	if cfg.DatapathEnabled {
 		if err := sysctl.SetProcSysPath(cfg.ProcSysPath); err != nil {
 			return err
@@ -158,7 +162,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 			return err
 		}
 		gwDatapath, err = setupGatewayDatapath(ctx, cfg.PublicInterface, cfg.InternalInterfaces, encapSrc,
-			cfg.XDPAttach, ipv4VIPs, ctrlmetrics.Registry, coverage)
+			cfg.XDPAttach, ipv4, ctrlmetrics.Registry, coverage)
 		if err != nil {
 			return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 		}
@@ -190,6 +194,8 @@ func runCmd(cfg *config.GatewayConfig) error {
 		APIReader: mgr.GetAPIReader(),
 		Disabled:  !cfg.DatapathEnabled,
 		IPv4VIPs:  ipv4VIPs,
+		// Forwarding follows need: on only once an IPv4 VIP is about to load.
+		EnsureIPv4Forwarding: ipv4.enable,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
@@ -286,10 +292,9 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().Bool("gateway-datapath-enabled", true,
 		"Run the edge gateway datapath; false keeps the process up but attaches nothing and withdraws "+
 			"this node's VIP advertisements")
-	cmd.Flags().Bool("gateway-ipv4-vips", true,
+	cmd.Flags().Bool("gateway-ipv4-vips", false,
 		"Serve IPv4 VIPs: load them over the rule's IPv6 backends, which translate them, and advertise "+
-			"each once its backends' ServiceVIPBindings are Bound; false withdraws and unloads this node's "+
-			"IPv4 VIPs")
+			"each once its backends' ServiceVIPBindings are Bound")
 	cmd.Flags().String("gateway-proc-sys-path", config.DefaultProcSysPath,
 		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
 			"of the host's /proc/sys/net at <path>/net")

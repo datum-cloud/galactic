@@ -85,7 +85,7 @@ var gatewayDatapathKeepAlive struct {
 // objects are loaded, reading the maps live at every scrape.
 func setupGatewayDatapath(
 	ctx context.Context, publicInterface string, internalInterfaces []string, srv6Address, attachMode string,
-	ipv4VIPs bool, metricsReg prometheus.Registerer, coverage *datapathCoverage,
+	ipv4 *ipv4Forwarding, metricsReg prometheus.Registerer, coverage *datapathCoverage,
 ) (gateway.Datapath, error) {
 	encapSrc, err := netip.ParseAddr(srv6Address)
 	if err != nil {
@@ -148,17 +148,9 @@ func setupGatewayDatapath(
 		}
 	}
 
-	// An IPv4 reply edge_return forwards, and the Fragmentation Needed edge_lb
-	// sends an IPv4 client, take an IPv4 FIB lookup, which the kernel refuses
-	// on an interface without IPv4 forwarding. Only a node serving IPv4 VIPs
-	// needs it, so only that node changes it.
-	if ipv4VIPs {
-		for _, target := range append(slices.Clone(targets), returnTargets...) {
-			if err := sysctl.ConfigureFIBLookupUplinkSysctlsIPv4(target); err != nil {
-				return nil, fmt.Errorf("configure IPv4 forwarding on interface %q: %w", target, err)
-			}
-		}
-	}
+	// IPv4 forwarding is not touched here: ipv4 turns it on when the
+	// reconciler first loads an IPv4 VIP.
+	ipv4.track(append(slices.Clone(targets), returnTargets...))
 
 	var (
 		objs                 *edgeprog.EdgedsrObjects
@@ -222,7 +214,7 @@ func setupGatewayDatapath(
 		missing = append(missing, returnSet.reconcile(ctx, returnTargets)...)
 	}
 	coverage.set(missing)
-	go watchTargets(ctx, publicInterface, internalInterfaces, publicSet, returnSet, coverage)
+	go watchTargets(ctx, publicInterface, internalInterfaces, publicSet, returnSet, coverage, ipv4)
 
 	return datapath, nil
 }
@@ -476,7 +468,7 @@ func (c *datapathCoverage) configure(targets []string) []string {
 // bond in the moment between losing a member and enslaving its replacement,
 // keeps every attachment and skips that pass.
 func watchTargets(ctx context.Context, publicInterface string, internalInterfaces []string,
-	publicSet, returnSet targetSet, coverage *datapathCoverage,
+	publicSet, returnSet targetSet, coverage *datapathCoverage, ipv4 *ipv4Forwarding,
 ) {
 	xdpattach.OnNetlinkChange(ctx, func() {
 		targets, err := edgeattach.ResolveTargets(publicInterface)
@@ -509,6 +501,7 @@ func watchTargets(ctx context.Context, publicInterface string, internalInterface
 			missing = append(missing, uncovered(returnTargets, ready)...)
 		}
 		coverage.set(dedupe(missing))
+		ipv4.track(append(slices.Clone(targets), returnTargets...))
 	})
 }
 
@@ -558,4 +551,75 @@ func closeAll(links []link.Link) {
 	for _, l := range links {
 		_ = l.Close()
 	}
+}
+
+// ipv4Forwarding turns on the IPv4 forwarding sysctls the datapath's IPv4 FIB
+// lookups need (an IPv4 reply edge_return forwards, and the Fragmentation
+// Needed edge_lb sends an IPv4 client), on every resolved target and
+// host-wide, but only once the reconciler is about to load an IPv4 VIP
+// (enable). A node that serves no IPv4 VIP, with the switch on or off, keeps
+// its IPv4 forwarding as it found it, so an upgrade alone does not change it.
+//
+// Once on, it stays on for the life of the process, including after the last
+// IPv4 VIP goes: net.ipv4.ip_forward is host-wide, and turning it back off
+// could cut another datapath on the node that depends on it. The kernel
+// keeps the values across a restart of the process, though not of the node.
+//
+// A nil *ipv4Forwarding, for a node with IPv4 VIPs off, does nothing.
+type ipv4Forwarding struct {
+	mu         sync.Mutex
+	on         bool
+	targets    []string
+	configured map[string]bool
+}
+
+func newIPv4Forwarding() *ipv4Forwarding {
+	return &ipv4Forwarding{configured: map[string]bool{}}
+}
+
+// track records the datapath's currently resolved targets. Once forwarding is
+// on, a target not configured yet, such as a bond member enslaved after
+// startup, gets it now; a failure is logged and retried on the next call.
+func (f *ipv4Forwarding) track(targets []string) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.targets = dedupe(targets)
+	if !f.on {
+		return
+	}
+	if err := f.applyLocked(); err != nil {
+		slog.Error("Cannot turn on IPv4 forwarding on an edge gateway interface; IPv4 VIP replies through it "+
+			"are dropped until it succeeds", "err", err)
+	}
+}
+
+// enable turns IPv4 forwarding on for every tracked target. It is safe to
+// call on every pass: a target already configured is not written again.
+func (f *ipv4Forwarding) enable() error {
+	if f == nil {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.on {
+		slog.Info("Turning on IPv4 forwarding for this node's IPv4 VIPs", "interfaces", f.targets)
+	}
+	f.on = true
+	return f.applyLocked()
+}
+
+func (f *ipv4Forwarding) applyLocked() error {
+	for _, target := range f.targets {
+		if f.configured[target] {
+			continue
+		}
+		if err := sysctl.ConfigureFIBLookupUplinkSysctlsIPv4(target); err != nil {
+			return fmt.Errorf("configure IPv4 forwarding on interface %q: %w", target, err)
+		}
+		f.configured[target] = true
+	}
+	return nil
 }

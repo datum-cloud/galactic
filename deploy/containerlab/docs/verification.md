@@ -221,8 +221,21 @@ IPv4 TCP and UDP from remote-host (`11.1.40.2`) through each gateway node in
 turn. It fails unless the backend saw the client as `64:ff9b::b01:2802`, its
 IPv4 address under `64:ff9b::/96`, the client's capture shows every reply
 coming from the VIP, both backends answer, and no gateway counts a drop, a
-`ctstate INVALID` drop or an egress shard translation. The script's header
-lists every threshold.
+`ctstate INVALID` drop or an egress shard translation. In dfw, the one site
+with two gateways, it also sends one fixed 5-tuple per protocol through each
+gateway in turn and fails unless both draw the same backend, and it fails if
+the gateway that is not pinned counts any of the flows, which is how a pin
+that leaks shows. The script's header lists every threshold.
+
+The binding counts assume IPv4 VIPs are on, which the lab's gateway base
+sets on every gateway (`GALACTIC_GATEWAY_IPV4_VIPS=true`; the default is
+off). A backend node writes a rule's
+IPv4 bindings only while some gateway in its site reports the IPv4 VIP
+loaded, so setting `GALACTIC_GATEWAY_IPV4_VIPS=false` on every gateway of a
+site leaves that site four bindings, and `deploy:galactic-gateway`'s wait and
+`verify:gateway` then fail. sjc and iad each have one gateway, so the
+switch on either one is enough; dfw needs it on both. The IPv4 check fails
+for any gateway node with the switch off, whatever its site.
 
 ```bash
 # NetworkGateways Ready, NetworkServices Accepted, ServiceVIPBindings Bound
