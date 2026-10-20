@@ -285,16 +285,19 @@ that converges this node's whole gateway engine:
    gate's (`networkgateway_ipv4gate.go`): each pass lists the namespace's
    generated IPv4 `ServiceVIPBinding`s once (`listIPv4Bindings`), and
    `resolveFamilyBackends` keeps only the IPv4 backends whose binding is the
-   one `generatedBinding` describes for the rule's current spec and is
-   `Bound` for its current generation (`ipv4Bindings.unbound`), naming the
-   others as unresolved. `-v4` is advertised only then (`ipv4Loaded`). While
-   no backend is Bound, the VIP still loads over every eligible backend but
-   stays unadvertised (`ipv4Unbound`), because `galactic-router` writes
-   IPv4 bindings only while a gateway reports the VIP loaded; leaving it out
-   would mean no binding is ever written. A `ServiceVIPBinding` watch,
-   registered only with the switch on (`ipv4BindingReadinessChanged`), wakes
-   the pass when a binding appears, goes, changes spec or changes whether it
-   is Bound. Each node records the result on the rule as its
+   one `generatedBinding` describes for the rule's current spec, is not being
+   deleted and is `Bound` for its current generation (`ipv4Bindings.unbound`),
+   naming the others as unresolved. `-v4` is advertised only then
+   (`ipv4Loaded`), and a closed gate deletes it before the other families
+   are written (`withdrawIPv4Advertisement`), so a failed `-v6` write never
+   delays it. While no backend is Bound, the VIP still loads over every
+   eligible backend but stays unadvertised (`ipv4Unbound`), because
+   `galactic-router` writes IPv4 bindings only while a gateway reports the
+   VIP loaded; leaving it out would mean no binding is ever written. A
+   `ServiceVIPBinding` watch, registered only with the switch on
+   (`ipv4BindingReadinessChanged`), wakes the pass when a binding appears,
+   goes, changes spec, starts being deleted or changes whether it is Bound.
+   Each node records the result on the rule as its
    own `<node>/Programmed` condition (`Programmed`, `BackendsUnresolved`,
    `LoadFailed`, `InvalidRule`, or `NoServedVIP` for an IPv4-only rule, with
    the error or the unresolved backends in the message), and, for a rule
@@ -306,9 +309,14 @@ that converges this node's whole gateway engine:
    loaded (`ipv4LoadedReasons`), and `galactic-router` writes a rule's IPv4
    bindings only while some node reports one of them. Every pass also
    removes the `Programmed` and `IPv4Served` conditions of any node no
-   `NetworkGateway` in the namespace targets (`removeDepartedNodeConditions`),
-   so a node that left without its conditions being cleared cannot keep a
-   loaded reason, and with it the backend nodes' IPv4 bindings, alive. The type is
+   `NetworkGateway` in the namespace targets (`departedGatewayNodes`,
+   `removeDepartedNodeConditions`), so a node that left without its
+   conditions being cleared cannot keep a loaded reason, and with it the
+   backend nodes' IPv4 bindings, alive. A node the cached list lacks is
+   pruned only once an uncached `APIReader` list confirms it, and that read
+   runs only when the cache suggests a departure, so a lagging cache never
+   strips a new node's conditions. A node writes its conditions only after
+   its own `NetworkGateway` exists, so no window remains. The type is
    node-scoped because
    `NetworkService` status is shared by every gateway node while loading
    is per node; a node writes it only when it changes, and a
@@ -746,7 +754,10 @@ separate pod spec entirely, not part of this manifest.
 `networkgateways`/`networkservices` (+ `/status`) read-write,
 `bgpadvertisements` full CRUD, and read-only `get`/`list`/`watch` on
 `servicevipbindings` (the IPv4 readiness gate; read and watched only with
-`GALACTIC_GATEWAY_IPV4_VIPS` on, and checked at startup only then),
+`GALACTIC_GATEWAY_IPV4_VIPS` on. With the switch on, `resolveIPv4VIPs` checks
+`list` and `watch` at startup and, if either is denied or the check fails,
+logs the missing access and runs the process with IPv4 VIPs off rather than
+let the watch stall the cache and every rule with it),
 `bgprouters` (for `usidresolver.go` — see above), `vpcattachments` in
 `galactic.datumapis.com` (a rule's backends, selected and watched
 cluster-wide) and `bgpvrfinstances`
@@ -1003,7 +1014,7 @@ that tag into `config/galactic-gateway/base`.
 - **The return path is opt-in per node and fails closed at startup, not silently.** `edge_return` attaches only where `GALACTIC_GATEWAY_INTERNAL_INTERFACES` names an interface; a node that needs it and does not set it drops every reply in `KUBE-FORWARD` with nothing to say why, exactly as before this program existed. Where it *is* set, an attach failure is fatal to `setupGatewayDatapath` and the pod crash-loops rather than running with the forward half working and replies dying — the same all-or-nothing choice `edgeattach.Attach` already makes across a bond's slaves.
 - **A backend in another site replies through that site's edge node.** The gateway can pick a backend anywhere its `NetworkService` reaches, and the reply then leaves through the edge node in front of *that* backend, whose own `vip_addr_table` must hold the same anycast VIP or the reply meets the unmodified kernel path and dies. Within one cluster the reconciler guarantees this; across clusters it depends on the same `NetworkService` existing on both sides, which nothing in this repo enforces.
 - **Backends depend on the Galactic cell attachment controller.** `selectRuleBackends` skips a `VPCAttachment` whose `status.vpc` is not the rule's VPC, and keeps a selected one pending until its `status.node` is set. The cell controller writes both fields, `status.node` from the attachment's `BGPAdvertisement`. Without them an attachment with no `status.vpc` is silently unselected, one with `status.vpc` but no `status.node` is pending with `status.node not set by the Galactic cell controller`, and a rule with no other backend never loads; the containerlab lab patches the status by hand (`deploy/containerlab/scripts/publish-attachments.sh`). See #821.
-- **An IPv4 VIP is advertised only behind a switch and a binding gate.** Admission takes one IPv4 and one IPv6 VIP per rule; a rule stored with two of a family before that keeps validating only while its list is unchanged (CRD validation ratcheting, Kubernetes 1.30 and later). With `GALACTIC_GATEWAY_IPV4_VIPS` off, the default in this release, `buildDesiredRule` leaves IPv4 VIPs, plain or IPv4-mapped, out of the engine, no `-v4` advertisement is made, and the node reports `Unsupported`, so no backend node writes IPv4 bindings. With it on, a node advertises a rule's IPv4 VIP only over IPv4 backends whose `ServiceVIPBinding` is Bound for the rule's current spec, and withdraws it on the first pass where none is. The gate trusts `Bound`: a binding reports it once its `vip_xlat_table` rows are written, which an earlier `galactic-cni` datapath ignores for IPv4, so backend nodes must run a `galactic-cni` that translates IPv4 before their `galactic-router` is upgraded. A rule with no IPv4 backend (`NoBackend`) or with more than one IPv4 VIP (`MultipleVIPs`) is never advertised over IPv4 and keeps serving IPv6. One VIP per family, and one rule per backend socket, is a limit of the backend translation, not of the gateway: a backend node rewrites a reply from one backend address, port and protocol back to one VIP, so more VIPs need distinct backend ports. An IPv4 VIP must not be an egress shard's IPv4 masquerade address, since `edge_lb` runs before the shard's dispatcher slot and would take that address's NAT64 replies. See [configuration.md](../gateway/configuration.md#rolling-out-and-rolling-back-ipv4-vips) for the rollout and rollback order.
+- **An IPv4 VIP is advertised only behind a switch and a binding gate.** Admission takes one IPv4 and one IPv6 VIP per rule; a rule stored with two of a family before that keeps validating only while its list is unchanged (CRD validation ratcheting, Kubernetes 1.30 and later). With `GALACTIC_GATEWAY_IPV4_VIPS` off, the default, `buildDesiredRule` leaves IPv4 VIPs, plain or IPv4-mapped, out of the engine, no `-v4` advertisement is made, and the node reports `Unsupported`, so no backend node writes IPv4 bindings. With it on, a node advertises a rule's IPv4 VIP only over IPv4 backends whose `ServiceVIPBinding` is Bound for the rule's current spec, and withdraws it on the first pass where none is. The gate trusts `Bound`: a binding reports it once its `vip_xlat_table` rows are written, which an earlier `galactic-cni` datapath ignores for IPv4, so backend nodes must run a `galactic-cni` that translates IPv4 before their `galactic-router` is upgraded. A rule with no IPv4 backend (`NoBackend`) or with more than one IPv4 VIP (`MultipleVIPs`) is never advertised over IPv4 and keeps serving IPv6. One VIP per family, and one rule per backend socket, is a limit of the backend translation, not of the gateway: a backend node rewrites a reply from one backend address, port and protocol back to one VIP, so more VIPs need distinct backend ports. An IPv4 VIP must not be an egress shard's IPv4 masquerade address, since `edge_lb` runs before the shard's dispatcher slot and would take that address's NAT64 replies. See [configuration.md](../gateway/configuration.md#rolling-out-and-rolling-back-ipv4-vips) for the rollout and rollback order.
 - **`vip_table` has no active GC beyond crash-recovery reconcile.** By design (see Key Design Decisions above) — DSR keeps no flow state to leak in the first place.
 - **Egress is out of this binary's scope, not unimplemented.** Egress translation is a separate, sharded tier (`galactic-nat`, its own binary — see `cmd/galactic-nat` and `internal/controller/egressshard_controller.go`). `NetworkService`/this datapath remain ingress-only: external client → VIP → tenant backend.
 
