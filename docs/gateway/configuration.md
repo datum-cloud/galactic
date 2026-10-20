@@ -185,13 +185,17 @@ three things:
 The gateway reads and watches `ServiceVIPBinding`s for the gate, so its
 ClusterRole needs `get`, `list` and `watch` on `servicevipbindings`
 (`config/galactic-gateway/rbac.yaml`). At startup, with the switch on, the
-gateway checks that it can list and watch them. If it cannot, or the check
-itself fails, it logs an error naming the missing access and runs with IPv4
-VIPs off: it serves IPv6 as usual, loads and advertises no IPv4 VIP, and every
-rule with an IPv4 VIP reports `Unsupported` for the node. Grant the access and
-restart the pod to turn IPv4 VIPs on. Without this check, a watch the gateway
-may not make would keep its cache from syncing, and the node would serve no
-rule at all.
+gateway checks that it can list and watch them. If the API server denies it,
+the gateway logs an error naming the missing access and runs with IPv4 VIPs
+off: it serves IPv6 as usual, loads and advertises no IPv4 VIP, and every rule
+with an IPv4 VIP reports `Unsupported` for the node. Grant the access and
+restart the pod to turn IPv4 VIPs on. If the check cannot be made at all, for
+example while the API server is unreachable, the gateway retries it for 30
+seconds and then exits, so the restart checks again. It does not turn IPv4 off
+on a failed check, because a node reporting IPv4 unloaded lets backend nodes
+remove their IPv4 bindings once no gateway reports it loaded. Without the
+check, a watch the gateway may not make would keep its cache from syncing, and
+the node would serve no rule at all.
 
 The default is `false`. Turning the switch off on a node withdraws every IPv4
 VIP the node advertises and unloads them, and leaves IPv6 untouched, so it
@@ -816,7 +820,7 @@ Each node withdraws its `-v4` advertisements on its next pass and reports
 bindings' finalizers remove their `vip_xlat_table` rows. Once no IPv4
 `ServiceVIPBinding` is left, downgrade the gateways, then `galactic-router`
 and `galactic-cni`. An earlier `galactic-router` cannot remove an IPv4 row.
-If one is left, remove it with this release's `galactic-router vip xlat
+If one is left, remove it with `galactic-router vip xlat
 remove` before downgrading that node's router. Roll the CRD back last, if at
 all. The earlier CRD refuses IPv4 VIPs, so a rule that holds one keeps
 validating only while its `vipAddresses` is unchanged, and any edit to the

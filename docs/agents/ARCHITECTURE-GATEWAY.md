@@ -755,9 +755,10 @@ separate pod spec entirely, not part of this manifest.
 `bgpadvertisements` full CRUD, and read-only `get`/`list`/`watch` on
 `servicevipbindings` (the IPv4 readiness gate; read and watched only with
 `GALACTIC_GATEWAY_IPV4_VIPS` on. With the switch on, `resolveIPv4VIPs` checks
-`list` and `watch` at startup and, if either is denied or the check fails,
-logs the missing access and runs the process with IPv4 VIPs off rather than
-let the watch stall the cache and every rule with it),
+`list` and `watch` at startup and, if either is denied, logs the missing
+access and runs the process with IPv4 VIPs off rather than let the watch
+stall the cache and every rule with it; a check that cannot be made is
+retried for 30 seconds and then fails startup),
 `bgprouters` (for `usidresolver.go` — see above), `vpcattachments` in
 `galactic.datumapis.com` (a rule's backends, selected and watched
 cluster-wide) and `bgpvrfinstances`

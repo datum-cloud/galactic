@@ -9,6 +9,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -22,6 +23,14 @@ import (
 // with reviewErr when it is set.
 func accessReviewClient(
 	t *testing.T, allowed func(verb, resource string) bool, reviewErr error,
+) (client.Client, *[]string) {
+	return failingAccessReviewClient(t, allowed, reviewErr, -1)
+}
+
+// failingAccessReviewClient is accessReviewClient whose first failures access
+// reviews return reviewErr; a negative failures fails every review.
+func failingAccessReviewClient(
+	t *testing.T, allowed func(verb, resource string) bool, reviewErr error, failures int,
 ) (client.Client, *[]string) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -37,7 +46,8 @@ func accessReviewClient(
 			}
 			attrs := review.Spec.ResourceAttributes
 			asked = append(asked, attrs.Verb+" "+attrs.Resource)
-			if reviewErr != nil {
+			if reviewErr != nil && failures != 0 {
+				failures--
 				return reviewErr
 			}
 			review.Status.Allowed = allowed(attrs.Verb, attrs.Resource)
@@ -59,7 +69,9 @@ func TestResolveIPv4VIPs(t *testing.T) {
 		requested bool
 		allowed   func(verb, resource string) bool
 		reviewErr error
+		failures  int
 		want      bool
+		wantErr   bool
 		wantAsked bool
 	}{
 		{name: "NotRequested", allowed: func(string, string) bool { return true }},
@@ -72,15 +84,28 @@ func TestResolveIPv4VIPs(t *testing.T) {
 			allowed: func(verb, _ string) bool { return verb == "list" },
 		},
 		{
-			name: "ReviewFails", requested: true, wantAsked: true,
+			// A review that cannot be made is not a denial: it fails startup
+			// rather than turning IPv4 off.
+			name: "ReviewFails", requested: true, wantErr: true, wantAsked: true,
 			allowed:   func(string, string) bool { return true },
-			reviewErr: errors.New("injected review failure"),
+			reviewErr: errors.New("injected review failure"), failures: -1,
+		},
+		{
+			name: "ReviewFailsThenSucceeds", requested: true, want: true, wantAsked: true,
+			allowed:   func(string, string) bool { return true },
+			reviewErr: errors.New("injected review failure"), failures: 2,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, asked := accessReviewClient(t, tc.allowed, tc.reviewErr)
-			if got := resolveIPv4VIPs(ctx, c, tc.requested); got != tc.want {
-				t.Errorf("resolveIPv4VIPs = %v, want %v", got, tc.want)
+			saved := ipv4ReviewRetry
+			ipv4ReviewRetry = time.Millisecond
+			t.Cleanup(func() { ipv4ReviewRetry = saved })
+			ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+			defer cancel()
+			c, asked := failingAccessReviewClient(t, tc.allowed, tc.reviewErr, tc.failures)
+			got, err := resolveIPv4VIPs(ctx, c, tc.requested)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Errorf("resolveIPv4VIPs = %v, %v; want %v, error %v", got, err, tc.want, tc.wantErr)
 			}
 			if (len(*asked) > 0) != tc.wantAsked {
 				t.Errorf("access reviews = %v, want any: %v", *asked, tc.wantAsked)

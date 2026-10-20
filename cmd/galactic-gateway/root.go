@@ -122,10 +122,14 @@ func runCmd(cfg *config.GatewayConfig) error {
 	checkWatchPermissions(mgr)
 
 	// IPv4 VIPs need read access to ServiceVIPBindings; without it they stay
-	// off for this process rather than stalling the manager's cache.
-	reviewCtx, cancelReview := context.WithTimeout(ctx, 10*time.Second)
-	ipv4VIPs := resolveIPv4VIPs(reviewCtx, mgr.GetClient(), cfg.IPv4VIPs)
+	// off for this process rather than stalling the manager's cache. A check
+	// that cannot be made fails startup instead, so the restart checks again.
+	reviewCtx, cancelReview := context.WithTimeout(ctx, 30*time.Second)
+	ipv4VIPs, err := resolveIPv4VIPs(reviewCtx, mgr.GetClient(), cfg.IPv4VIPs)
 	cancelReview()
+	if err != nil {
+		return err
+	}
 
 	// Load and attach the edge eBPF datapath. Always a real datapath, never a
 	// no-op: configuration validation rejects an empty public interface before

@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -101,12 +102,16 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 	}
 }
 
+// errIPv4AccessDenied is ipv4VIPsAllowed's error when the access reviews
+// complete and deny it, as opposed to a review that could not be made.
+var errIPv4AccessDenied = errors.New("IPv4 VIP access denied")
+
 // ipv4VIPsAllowed reports whether this process may serve IPv4 VIPs: c's
 // identity can list and watch ServiceVIPBindings, which the IPv4 readiness
 // gate reads and watches. Without that access the manager's cache would never
-// sync and the gateway would stop serving every rule, IPv6 included, so the
-// caller turns IPv4 VIPs off instead. An access review that cannot be
-// submitted counts as denied. The error names what is missing.
+// sync and the gateway would stop serving every rule, IPv6 included. A denial
+// wraps errIPv4AccessDenied and names what is missing; any other error means a
+// review could not be made.
 func ipv4VIPsAllowed(ctx context.Context, c client.Client) error {
 	var missing []string
 	for _, verb := range []string{"list", "watch"} {
@@ -128,24 +133,42 @@ func ipv4VIPsAllowed(ctx context.Context, c client.Client) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("the gateway's ClusterRole does not grant %s on %s.%s",
+		return fmt.Errorf("%w: the gateway's ClusterRole does not grant %s on %s.%s", errIPv4AccessDenied,
 			strings.Join(missing, " and "), resourceServiceVIPBinding, networkAPIGroup)
 	}
 	return nil
 }
 
+// ipv4ReviewRetry is how long resolveIPv4VIPs waits between access reviews
+// that could not be made.
+var ipv4ReviewRetry = time.Second
+
 // resolveIPv4VIPs returns whether this process serves IPv4 VIPs: requested,
 // from GALACTIC_GATEWAY_IPV4_VIPS, and allowed by ipv4VIPsAllowed. When access
-// is missing it logs why and returns false, so the node keeps serving IPv6 and
-// advertises no IPv4 VIP.
-func resolveIPv4VIPs(ctx context.Context, c client.Client, requested bool) bool {
+// is denied it logs why and returns false, so the node keeps serving IPv6 and
+// advertises no IPv4 VIP. A review that cannot be made is retried until ctx
+// ends, and then returned as an error rather than read as a denial: turning
+// IPv4 off makes the node report it unloaded, which removes backend IPv4
+// bindings once no gateway reports it loaded, so a brief API server outage
+// while every gateway restarts must not do that.
+func resolveIPv4VIPs(ctx context.Context, c client.Client, requested bool) (bool, error) {
 	if !requested {
-		return false
+		return false, nil
 	}
-	if err := ipv4VIPsAllowed(ctx, c); err != nil {
-		ctrl.Log.WithName("rbac-preflight").Error(err,
-			"IPv4 VIPs turned off on this node: grant get, list and watch on servicevipbindings and restart")
-		return false
+	for {
+		err := ipv4VIPsAllowed(ctx, c)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, errIPv4AccessDenied):
+			ctrl.Log.WithName("rbac-preflight").Error(err,
+				"IPv4 VIPs turned off on this node: grant get, list and watch on servicevipbindings and restart")
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, fmt.Errorf("could not confirm access for IPv4 VIPs: %w", err)
+		case <-time.After(ipv4ReviewRetry):
+		}
 	}
-	return true
 }
