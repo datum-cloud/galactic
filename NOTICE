@@ -7867,7 +7867,7 @@ THE SOFTWARE.
 ## github.com/vishvananda/netlink
 
 * Name: github.com/vishvananda/netlink
-* Version: v1.3.2-0.20261002201547-1d1c62507e3c
+* Version: v1.3.2-0.20261015184244-3fdd74264153
 * License: Apache-2.0
 
 ```
@@ -8303,7 +8303,7 @@ SOFTWARE.
 ## go.datum.net/compute/api/v1alpha
 
 * Name: go.datum.net/compute/api/v1alpha
-* Version: v0.8.0
+* Version: v0.12.11
 * License: AGPL-3.0
 
 ```
@@ -8973,7 +8973,7 @@ For more information on this, and how to apply and follow the GNU AGPL, see
 ## go.datum.net/network-services-operator/api/v1alpha
 
 * Name: go.datum.net/network-services-operator/api/v1alpha
-* Version: v0.27.0
+* Version: v0.32.31
 * License: AGPL-3.0
 
 ```
@@ -9644,7 +9644,7 @@ For more information on this, and how to apply and follow the GNU AGPL, see
 ## go.miloapis.com/ipam/pkg/apis/ipam
 
 * Name: go.miloapis.com/ipam/pkg/apis/ipam
-* Version: v0.4.0
+* Version: v0.5.1
 * License: Unknown
 
 ```
@@ -9654,7 +9654,7 @@ For more information on this, and how to apply and follow the GNU AGPL, see
 ## go.miloapis.com/ipam/pkg/apis/ipam/v1alpha1
 
 * Name: go.miloapis.com/ipam/pkg/apis/ipam/v1alpha1
-* Version: v0.4.0
+* Version: v0.5.1
 * License: Unknown
 
 ```
@@ -9664,7 +9664,7 @@ For more information on this, and how to apply and follow the GNU AGPL, see
 ## go.miloapis.com/ipam/pkg/ipamerrors
 
 * Name: go.miloapis.com/ipam/pkg/ipamerrors
-* Version: v0.4.0
+* Version: v0.5.1
 * License: Unknown
 
 ```
@@ -13699,7 +13699,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## google.golang.org/genproto/googleapis/rpc
 
 * Name: google.golang.org/genproto/googleapis/rpc
-* Version: v0.0.0-20261005182115-fad411399dd8
+* Version: v0.0.0-20261019180522-ce908d29299b
 * License: Apache-2.0
 
 ```
@@ -16662,7 +16662,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## sigs.k8s.io/json
 
 * Name: sigs.k8s.io/json
-* Version: v0.0.0-20250730193827-2d320260d730
+* Version: v0.0.0-20260909141634-11ed52e25bc5
 * License: Apache-2.0
 
 ```
