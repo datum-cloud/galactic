@@ -22,10 +22,10 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
-	github.com/vishvananda/netlink v1.3.2-0.20261002201547-1d1c62507e3c
-	go.datum.net/compute v0.8.0
-	go.datum.net/network-services-operator v0.27.0
-	go.miloapis.com/ipam v0.4.0
+	github.com/vishvananda/netlink v1.3.2-0.20261015184244-3fdd74264153
+	go.datum.net/compute v0.12.11
+	go.datum.net/network-services-operator v0.32.31
+	go.miloapis.com/ipam v0.5.1
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.72.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.47.0
@@ -34,7 +34,7 @@ require (
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
 	golang.org/x/time v0.16.0
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20261005182115-fad411399dd8
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20261019180522-ce908d29299b
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 	k8s.io/api v0.36.3
@@ -43,7 +43,7 @@ require (
 	k8s.io/client-go v0.36.3
 	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
 	sigs.k8s.io/controller-runtime v0.24.1
-	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730
+	sigs.k8s.io/json v0.0.0-20260909141634-11ed52e25bc5
 	sigs.k8s.io/yaml v1.6.0
 )
 
