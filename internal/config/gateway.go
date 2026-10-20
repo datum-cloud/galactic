@@ -87,9 +87,8 @@ const (
 	// of the datapath, as before IPv4 support. On, it loads them and turns on
 	// IPv4 forwarding for the FIB lookups edge_return and the Fragmentation
 	// Needed reply make, and balances each IPv4 VIP over the rule's IPv4
-	// backends, but still never advertises an IPv4 VIP: that waits on
-	// admission and a readiness gate (#705), so an IPv4 VIP draws no traffic
-	// until then except where a route is pinned by hand.
+	// backends, but never advertises an IPv4 VIP, so an IPv4 VIP draws no
+	// traffic except where a route is pinned by hand.
 	EnvGatewayIPv4VIPs = "GALACTIC_GATEWAY_IPV4_VIPS"
 
 	// EnvGatewayProcSysPath is the procfs sysctl root the datapath writes its

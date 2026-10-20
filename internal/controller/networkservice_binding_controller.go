@@ -84,6 +84,13 @@ const (
 // backends are the selected attachments' IPv6 addresses and the IPv4 VIP's
 // their IPv4 addresses. It runs in galactic-router on every node.
 //
+// The IPv4 VIP gets bindings only while some gateway node reports it loaded
+// (ipv4LoadedOnSomeNode). Until then, and once no node does, it gets none and
+// the node deletes the IPv4 bindings it wrote: an IPv4 binding rewrites every
+// reply from its backend port to the VIP and sends it out the fabric uplink,
+// and a veth binding also puts the VIP on the node, neither of which is right
+// for a VIP no gateway serves.
+//
 // It is the only writer of generated bindings, and each node writes only its
 // own, so gateway replicas never race and a gateway rollout never touches
 // them. A binding is owned by its rule, so deleting the rule garbage-collects
@@ -176,7 +183,7 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 	// A rule with a second IPv4 VIP keeps its IPv4 bindings as they are, for
 	// the same reason an invalid spec keeps all of them, while its IPv6
 	// bindings follow the spec.
-	kept, err := r.applyBindings(ctx, rule, desired, ipv4Err != nil)
+	kept, err := r.applyBindings(ctx, rule, desired, ipv4Err != nil && ipv4LoadedOnSomeNode(rule))
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -200,7 +207,8 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 // family needs no bindings for it. A protocol or port the datapath does not
 // serve (rulePorts), a second IPv6 VIP and a selector that does not parse are
 // errors. A second IPv4 VIP is returned as ipv4Err, with the IPv6 VIP's
-// bindings, since it invalidates the IPv4 family alone.
+// bindings, since it invalidates the IPv4 family alone. The IPv4 VIP's
+// bindings are left out unless a gateway node has it loaded.
 func (r *NetworkServiceBindingReconciler) desiredBindings(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
 ) (desired []*bgpv1alpha1.ServiceVIPBinding, claimed []claimedBackend, ipv4Err, err error) {
@@ -211,7 +219,11 @@ func (r *NetworkServiceBindingReconciler) desiredBindings(
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	ipv4Served := ipv4LoadedOnSomeNode(rule)
 	for _, tv := range vips.valid() {
+		if tv.family == familyIPv4 && !ipv4Served {
+			continue
+		}
 		sel, err := selectRuleBackends(rule, attachments, owners, tv.family)
 		if err != nil {
 			return nil, nil, nil, err
@@ -516,8 +528,9 @@ func (r *NetworkServiceBindingReconciler) SetupWithManager(mgr ctrl.Manager) err
 }
 
 // ruleBindingInputsChanged passes NetworkService events that can change the
-// bindings it needs: a create or delete, a spec change, or a change to its
-// Accepted condition.
+// bindings it needs: a create or delete, a spec change, a change to its
+// Accepted condition, or a change in whether some gateway node has its IPv4
+// VIP loaded.
 func ruleBindingInputsChanged() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
@@ -530,7 +543,8 @@ func ruleBindingInputsChanged() predicate.Predicate {
 				return true
 			}
 			return meta.IsStatusConditionTrue(oldRule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) !=
-				meta.IsStatusConditionTrue(newRule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted)
+				meta.IsStatusConditionTrue(newRule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) ||
+				ipv4LoadedOnSomeNode(oldRule) != ipv4LoadedOnSomeNode(newRule)
 		},
 	}
 }
