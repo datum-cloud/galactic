@@ -304,12 +304,11 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 		return fmt.Errorf("ensure egress veth for VRF table %d: %w", tableID, err)
 	}
 
-	// Assign this VPC's return-path gateway address, when one is configured,
-	// to the VRF-slave veth enslaved above. Non-fatal, like
-	// ensureNodeSourceAddress: a missing gateway address degrades the return
-	// path without making the forward path any worse.
+	// Assign the return-path gateway address and install its reply redirect
+	// before this VPC can publish a route. A missing redirect would advertise
+	// a gateway whose VRF-bound Envoy sockets cannot receive replies.
 	if err := ensureGatewayAddress(vpc, inner); err != nil {
-		slog.Warn("ensureEgressDatapath: could not assign this VPC's own gateway address", "vpc", vpc, "err", err)
+		return fmt.Errorf("ensure gateway return path for vpc %s: %w", vpc, err)
 	}
 
 	registry, closer, err := usidmap.OpenPinnedRegistry(ebpfPinDir)
