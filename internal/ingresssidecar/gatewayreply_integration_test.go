@@ -49,7 +49,7 @@ func TestGatewayReplyRedirect_KernelReconcileAndCleanup(t *testing.T) {
 		if err != nil {
 			return fmt.Errorf("look up veth: %w", err)
 		}
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			if err := ensureGatewayReplyRedirect(addr, innerLink); err != nil {
 				return fmt.Errorf("ensure redirect #%d: %w", i+1, err)
 			}

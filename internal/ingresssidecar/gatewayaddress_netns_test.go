@@ -71,6 +71,10 @@ func TestEnsureGatewayAddress_KeepsLocalRouteWhenRepeated(t *testing.T) {
 	const inner = "ivstest"
 
 	err = nsObj.Do(func(_ ns.NetNS) error {
+		eth0 := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: primaryPodInterface}}
+		if err := netlink.LinkAdd(eth0); err != nil {
+			return fmt.Errorf("add pod interface: %w", err)
+		}
 		vrfLink := &netlink.Vrf{
 			LinkAttrs: netlink.LinkAttrs{Name: intf.GenerateInterfaceNameVRF(vpc)},
 			Table:     7,
