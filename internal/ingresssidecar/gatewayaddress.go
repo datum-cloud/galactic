@@ -137,7 +137,10 @@ func ensureGatewayAddress(vpc, inner string) error {
 		}
 	}
 
-	return ensureGatewayVRFRoute(vpc, addr)
+	if err := ensureGatewayVRFRoute(vpc, addr); err != nil {
+		return err
+	}
+	return ensureGatewayReplyRedirect(addr, link)
 }
 
 // hasAddress reports whether link already carries addr.

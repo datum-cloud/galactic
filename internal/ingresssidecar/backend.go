@@ -105,6 +105,9 @@ func (kernelBackend) EnsureVRF(vpc string) (uint32, error) {
 }
 
 func (kernelBackend) RemoveVRF(vpc string) error {
+	if err := removeGatewayReplyRedirect(vpc); err != nil {
+		return fmt.Errorf("remove gateway reply redirect for vpc %s: %w", vpc, err)
+	}
 	tableID, err := vrf.TableID(vpc)
 	if err != nil {
 		return nil // VRF already gone — idempotent, matching vrf.Delete's own stance
