@@ -477,19 +477,13 @@ static EDGE_ALWAYS_INLINE void count_match(struct vip_stats_value *stats, __u64 
 // backend count, which is what makes a backend-set change reassign roughly one
 // flow in N instead of nearly all of them.
 //
-// It is 32-bit FNV-1a over the address and the port's two bytes as they sit on
-// the wire, so bpfel and bpfeb builds agree, then murmur3's fmix32 finalizer.
-// FNV-1a alone takes the port's low byte last, so two ports differing only in
-// that byte hash a fixed multiple of the FNV prime apart, and their slots a
-// fixed distance apart. Maglev fills a table in arithmetic runs, so on some
-// tables those fixed gaps keep landing on one backend, and a client's
-// consecutive source ports all pick it. The finalizer spreads every input bit
-// over the whole hash.
+// It is 32-bit FNV-1a over the 16 address bytes and the port's two bytes in
+// wire order, so bpfel and bpfeb builds agree, then murmur3's fmix32
+// finalizer.
 //
-// Changing this moves established flows to other backends, and every gateway
-// node must run the same hash to keep a flow on one backend under anycast, so
-// nodes on different hashes during a roll can split a flow that changes
-// gateway. FlowHash in flowhash.go mirrors it.
+// Every gateway node must run this same hash: a flow that changes gateway
+// keeps its backend only if both nodes hash it alike. FlowHash in flowhash.go
+// mirrors it and must change with it.
 static EDGE_ALWAYS_INLINE __u32 flow_hash(const __u8 addr[16], __be16 port)
 {
 	__u32 h = 2166136261u;
