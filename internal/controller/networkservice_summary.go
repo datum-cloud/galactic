@@ -94,10 +94,11 @@ type nodeReport struct {
 //
 // Every input is shared state, so every writer computes the same result.
 // Only gateway nodes that report a Programmed condition count: a node that
-// has not reported yet, or whose datapath is turned off, advertises nothing,
-// so it carries none of the rule's traffic. Programmed and Ready say how many
-// registered nodes have not reported. A per-node condition from an older
-// generation counts as not reported.
+// has not reported yet, or whose datapath is turned off, advertises none of
+// the rule's VIPs, so no client is sent to it. It can still receive a reply a
+// backend node sends through it, which Ready does not see. Programmed and
+// Ready say how many registered nodes have not reported. A per-node
+// condition from an older generation counts as not reported.
 //
 // Advertised covers the routes a node published. Whether the IPv4 VIP is
 // served is IPv4Served's alone, and Ready reads it only for a rule with no

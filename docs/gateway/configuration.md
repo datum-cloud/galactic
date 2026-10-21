@@ -639,9 +639,16 @@ condition, or `Accepted`, from an older generation counts as not reported yet.
 
 Only gateway nodes with a `<gateway-node>/Programmed` condition count. A node
 that has not reported, for example one whose datapath is turned off,
-advertises nothing and so carries none of the rule's traffic. The
+advertises none of the rule's VIPs, so clients never reach it. The
 `Programmed` and `Ready` messages say how many registered gateway nodes have
 not reported.
+
+A node with its datapath off can still receive replies. A backend node that
+reaches clients through more than one edge node spreads its replies across
+them, and a node with its datapath off does not claim the ones that reach it,
+so those TCP connections fail. `Ready` stays `True` while this happens. Treat
+a gateway node that has not reported as a reason to check the rule's traffic,
+not as proof that the node carries none of it.
 
 `Ready` leaves out `IPv4Served` while the rule has an IPv6 VIP. IPv4 VIPs are
 off on most gateways, and a rule whose IPv6 VIP serves is not down because its
