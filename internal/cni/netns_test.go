@@ -476,3 +476,60 @@ func TestFlushGuestNetnsConfigThenRetryAddSucceeds(t *testing.T) {
 		t.Fatalf("default route gateway = %v, want %v", gw, testGateway)
 	}
 }
+
+func TestSecondaryInterfacePreservesPrimaryDefault(t *testing.T) {
+	netnsPath, cleanup := createTestNetnsWithDummy(t)
+	defer cleanup()
+	netns, err := ns.GetNS(netnsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer netns.Close()
+	primaryGateway := net.ParseIP("fd00:99::1")
+	err = netns.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return err
+		}
+		defer handle.Close()
+		primary := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "primary"}}
+		if err := handle.LinkAdd(primary); err != nil {
+			return err
+		}
+		if err := handle.LinkSetUp(primary); err != nil {
+			return err
+		}
+		return handle.RouteAdd(&netlink.Route{Gw: primaryGateway, LinkIndex: primary.Attrs().Index, Flags: int(netlink.FLAG_ONLINK)})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := configureInterfaceInNetns(netnsPath, "test-dummy", testIPNet, testGateway, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gateway := defaultRouteVia(t, netnsPath); gateway != nil {
+		t.Fatalf("secondary interface installed default route via %s", gateway)
+	}
+	err = netns.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return err
+		}
+		defer handle.Close()
+		routes, err := handle.RouteList(nil, netlink.FAMILY_V6)
+		if err != nil {
+			return err
+		}
+		for _, route := range routes {
+			if isDefaultRouteDst(route.Dst) && route.Gw.Equal(primaryGateway) {
+				return nil
+			}
+		}
+		return fmt.Errorf("primary default route is missing")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

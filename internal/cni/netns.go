@@ -136,6 +136,15 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 		return fmt.Errorf("default route on %q already points via %s, refusing to add conflicting route via %s",
 			ifName, r.Gw, gateway)
 	}
+	routes, err := handle.RouteList(nil, addrFamily(gateway))
+	if err != nil {
+		return fmt.Errorf("list namespace routes: %w", err)
+	}
+	for _, route := range routes {
+		if isDefaultRouteDst(route.Dst) && route.LinkIndex != link.Attrs().Index {
+			return nil
+		}
+	}
 
 	// The on-link flag: a VPC gateway sits outside the prefix allocated to the
 	// attachment, for either family, so nothing on the interface tells the
