@@ -83,8 +83,9 @@ func gatewayNodeLabelValue(nodeName string) string {
 
 // NetworkServiceReconciler owns the per-object NetworkService lifecycle that
 // NetworkGatewayReconciler's aggregate, list-driven loop is the wrong place
-// for: setting the Accepted condition once gateway nodes exist, and the
-// finalizer-guarded teardown ordering on deletion.
+// for: setting the Accepted condition once gateway nodes exist, the
+// rule-wide summary conditions (summaryConditions), and the finalizer-guarded
+// teardown ordering on deletion.
 //
 // That is a deliberate divergence from the no-op reconcilers elsewhere here,
 // which exist only as watch sources. Those objects have no per-object lifecycle
@@ -110,7 +111,8 @@ type NetworkServiceReconciler struct {
 // again after it found an advertisement its cache had missed.
 const staleAdvertisementRequeue = time.Second
 
-// Reconcile reconciles one NetworkService's finalizer and Accepted condition.
+// Reconcile reconciles one NetworkService's finalizer, Accepted condition and
+// summary conditions.
 // Engine convergence and advertisement wiring for accepted rules happen in
 // NetworkGatewayReconciler, which watches NetworkService and re-lists on every
 // change, so this reconciler never touches the gateway engine.
@@ -145,6 +147,9 @@ func (r *NetworkServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	if err := r.updateAcceptedCondition(ctx, rule); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update Accepted condition for NetworkService %s: %w", req.NamespacedName, err)
+	}
+	if err := updateSummaryConditions(ctx, r.Client, r.APIReader, req.NamespacedName); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update summary conditions for NetworkService %s: %w", req.NamespacedName, err)
 	}
 
 	return ctrl.Result{}, nil
