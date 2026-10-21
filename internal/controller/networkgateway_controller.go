@@ -186,6 +186,24 @@ const (
 	// reports.
 	reasonIPv4NotAdvertised = "NotAdvertised"
 
+	// reasonAdvertised is the per-node Advertised reason, with status True,
+	// for a rule whose BGPAdvertisements this node published.
+	reasonAdvertised = "Advertised"
+
+	// reasonNotProgrammed is the per-node Advertised reason for a rule this
+	// node did not load, so it withdrew the rule's routes.
+	reasonNotProgrammed = "NotProgrammed"
+
+	// reasonAdvertisementPending is the per-node Advertised reason for a rule
+	// whose BGPAdvertisements this node published but galactic-router does not
+	// report advertised yet.
+	reasonAdvertisementPending = "AdvertisementPending"
+
+	// reasonNoRouter is the per-node Advertised reason for a rule this node
+	// loaded but cannot advertise, because no BGPRouter targets the node or
+	// more than one does.
+	reasonNoRouter = "NoRouter"
+
 	// reasonIPv4Advertised is the per-node IPv4Served reason, with status
 	// True, for a rule whose IPv4 VIP this node loaded over only the eligible
 	// backends whose ServiceVIPBinding is Bound, at least one, and advertises.
@@ -750,7 +768,8 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 		// only its Bound backends, at least one (ipv4Loaded), and the rule
 		// loaded.
 		advertiseIPv4 := r.IPv4VIPs && o.ipv4 == ipv4Loaded
-		advertised := false
+		var publishErr error
+		var pending []string
 		switch {
 		case cond.Status != metav1.ConditionTrue:
 			if err := withdrawRuleAdvertisements(ctx, r.Client, o.rule, r.NodeName); err != nil {
@@ -761,13 +780,19 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 			if err := r.applyBGPAdvertisements(ctx, o.rule, o.desired, routerName, advertiseIPv4); err != nil {
 				logger.Error(err, "apply BGPAdvertisements for NetworkService", "networkRule", o.rule.Name)
 				advErrs = append(advErrs, fmt.Errorf("networkRule %s: %w", o.rule.Name, err))
-			} else {
-				advertised = true
+				publishErr = err
+				break
+			}
+			var err error
+			if pending, err = r.uninstalledAdvertisements(ctx, o.rule, o.desired, advertiseIPv4); err != nil {
+				statusErrs = append(statusErrs, fmt.Errorf("networkRule %s: %w", o.rule.Name, err))
 			}
 		}
 
-		ipv4 := ipv4ServedCondition(r.NodeName, o.rule, o.ipv4, cond.Status == metav1.ConditionTrue, advertised)
-		if err := r.setRuleConditions(ctx, o.rule, cond, ipv4, departed); err != nil {
+		published := cond.Status == metav1.ConditionTrue && routerName != "" && publishErr == nil
+		adv := advertisedCondition(r.NodeName, cond.Status == metav1.ConditionTrue, routerName, publishErr, pending)
+		ipv4 := ipv4ServedCondition(r.NodeName, o.rule, o.ipv4, cond.Status == metav1.ConditionTrue, published)
+		if err := r.setRuleConditions(ctx, o.rule, cond, adv, ipv4, departed); err != nil {
 			logger.Error(err, "update NetworkService conditions", "networkRule", o.rule.Name)
 			statusErrs = append(statusErrs, fmt.Errorf("networkRule %s status: %w", o.rule.Name, err))
 		}
@@ -810,6 +835,81 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 			node, loaded, loaded+len(o.unresolved), cappedList(o.unresolved))
 	}
 	return cond
+}
+
+// advertisedCondition returns node's Advertised condition for a rule: True
+// once node published the rule's BGPAdvertisements and galactic-router reports
+// each one advertised, and otherwise False with why. programmed is whether
+// node's engine loaded the rule, routerName the BGPRouter the advertisements
+// hang off ("" when none targets node, or more than one does), publishErr the
+// error from publishing them, and pending the published advertisements not
+// reported advertised yet (uninstalledAdvertisements).
+func advertisedCondition(
+	node string, programmed bool, routerName string, publishErr error, pending []string,
+) metav1.Condition {
+	cond := metav1.Condition{
+		Type:    advertisedConditionType(node),
+		Status:  metav1.ConditionFalse,
+		Reason:  reasonNotProgrammed,
+		Message: "not advertised from node " + node + ": the rule is not loaded there",
+	}
+	switch {
+	case !programmed:
+	case publishErr != nil:
+		cond.Reason = reasonAdvertisementFailed
+		cond.Message = fmt.Sprintf("not advertised from node %s: %v", node, publishErr)
+	case routerName == "":
+		cond.Reason = reasonNoRouter
+		cond.Message = "not advertised from node " + node + ": no single BGPRouter targets the node"
+	case len(pending) > 0:
+		cond.Reason = reasonAdvertisementPending
+		cond.Message = fmt.Sprintf("published from node %s, but galactic-router does not report %s advertised yet",
+			node, cappedList(pending))
+	default:
+		cond.Status, cond.Reason = metav1.ConditionTrue, reasonAdvertised
+		cond.Message = "advertised from node " + node
+	}
+	return cond
+}
+
+// uninstalledAdvertisements returns the names of this node's BGPAdvertisements
+// for rule that applyBGPAdvertisements published from desired, with the
+// IPv4 one only when advertiseIPv4, but that galactic-router does not report
+// advertised for their current generation yet. One missing from the cache
+// counts as not advertised.
+func (r *NetworkGatewayReconciler) uninstalledAdvertisements(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, desired gateway.DesiredRule, advertiseIPv4 bool,
+) ([]string, error) {
+	v4, v6 := prefixesByFamily(desired.VIPAddresses)
+	var families []string
+	if advertiseIPv4 && len(v4) > 0 {
+		families = append(families, "v4")
+	}
+	if len(v6) > 0 {
+		families = append(families, "v6")
+	}
+	var pending []string
+	for _, family := range families {
+		name := ruleAdvertisementName(rule.Name, r.NodeName, family)
+		adv := &bgpv1alpha1.BGPAdvertisement{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: rule.Namespace, Name: name}, adv)
+		switch {
+		case apierrors.IsNotFound(err):
+			pending = append(pending, name)
+		case err != nil:
+			return nil, fmt.Errorf("get BGPAdvertisement %s: %w", name, err)
+		case !advertisementInstalled(adv):
+			pending = append(pending, name)
+		}
+	}
+	return pending, nil
+}
+
+// advertisementInstalled reports whether galactic-router reports adv
+// advertised for its current generation.
+func advertisementInstalled(adv *bgpv1alpha1.BGPAdvertisement) bool {
+	c := meta.FindStatusCondition(adv.Status.Conditions, ConditionAdvertised)
+	return c != nil && c.Status == metav1.ConditionTrue && c.ObservedGeneration == adv.Generation
 }
 
 // cappedList joins the first maxReadyFailures items with ", ", followed by a
@@ -877,6 +977,13 @@ func programmedConditionType(node string) string {
 	return node + "/" + bgpv1alpha1.ConditionTypeProgrammed
 }
 
+// advertisedConditionType returns the NetworkService condition type that
+// records whether node published the rule's routes. Like
+// programmedConditionType, each gateway node owns its own.
+func advertisedConditionType(node string) string {
+	return node + "/" + conditionTypeAdvertised
+}
+
 // ipv4ServedConditionType returns the NetworkService condition type that records
 // whether node serves the rule's IPv4 VIPs. Like programmedConditionType, each
 // gateway node owns its own.
@@ -887,6 +994,11 @@ func ipv4ServedConditionType(node string) string {
 // conditionTypeIPv4Served is the suffix of every node's IPv4Served condition
 // type.
 const conditionTypeIPv4Served = "IPv4Served"
+
+// conditionTypeAdvertised is the suffix of every gateway node's Advertised
+// condition type, and the type of the rule's summary of them
+// (summaryConditions).
+const conditionTypeAdvertised = "Advertised"
 
 // ipv4ServedCondition returns node's IPv4Served condition for rule, or nil
 // when rule has no IPv4 VIP, in which case the condition is removed. Its
@@ -916,7 +1028,7 @@ func ipv4ServedCondition(
 		}
 		reason = reasonIPv4NotAdvertised
 		message = fmt.Sprintf("IPv4 VIP is loaded on node %s but its route is not published: no BGPRouter "+
-			"targets the node or the advertisement failed; the NetworkGateway's Ready condition says which", node)
+			"targets the node or the advertisement failed; the node's Advertised condition says which", node)
 	case ipv4Unbound:
 		reason = reasonIPv4BindingsNotBound
 		message = fmt.Sprintf("IPv4 VIP is loaded on node %s but not advertised: none of its backends' "+
@@ -946,23 +1058,23 @@ func ipv4ServedCondition(
 	}
 }
 
-// setRuleConditions writes programmed and, when non-nil, ipv4 to rule's
-// status in one update, and removes node's IPv4Served condition when ipv4 is
-// nil. In the same update it removes the Programmed and IPv4Served conditions
-// of every node in departed (departedGatewayNodes), so a gateway node that
-// left without its conditions being cleared, for example while no other
-// gateway was running to see its NetworkGateway go, cannot keep a stale
-// IPv4Served condition telling the backend nodes to keep their IPv4 bindings
-// (ipv4LoadedOnSomeNode). It skips the write when nothing changed. Every write fans out to every
-// gateway node through the NetworkService watch, so an unconditional write would
-// never settle.
+// setRuleConditions writes programmed, advertised and, when non-nil, ipv4 to
+// rule's status in one update, and removes node's IPv4Served condition when
+// ipv4 is nil. In the same update it removes the Programmed, Advertised and
+// IPv4Served conditions of every node in departed (departedGatewayNodes), so a
+// gateway node that left without its conditions being cleared, for example
+// while no other gateway was running to see its NetworkGateway go, cannot keep
+// a stale IPv4Served condition telling the backend nodes to keep their IPv4
+// bindings (ipv4LoadedOnSomeNode). It skips the write when nothing changed.
+// Every write fans out to every gateway node through the NetworkService watch,
+// so an unconditional write would never settle.
 //
 // Every gateway node and NetworkServiceReconciler write the same status, so a
 // write retries on conflict against a fresh read. A rule deleted mid-pass
 // has nothing left to record and counts as success.
 func (r *NetworkGatewayReconciler) setRuleConditions(
-	ctx context.Context, rule *bgpv1alpha1.NetworkService, programmed metav1.Condition, ipv4 *metav1.Condition,
-	departed map[string]bool,
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, programmed, advertised metav1.Condition,
+	ipv4 *metav1.Condition, departed map[string]bool,
 ) error {
 	key := client.ObjectKeyFromObject(rule)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -973,6 +1085,9 @@ func (r *NetworkGatewayReconciler) setRuleConditions(
 		c := programmed
 		c.ObservedGeneration = current.Generation
 		changed := meta.SetStatusCondition(&current.Status.Conditions, c)
+		a := advertised
+		a.ObservedGeneration = current.Generation
+		changed = meta.SetStatusCondition(&current.Status.Conditions, a) || changed
 		if ipv4 != nil {
 			c4 := *ipv4
 			c4.ObservedGeneration = current.Generation
@@ -992,10 +1107,10 @@ func (r *NetworkGatewayReconciler) setRuleConditions(
 	return err
 }
 
-// removeDepartedNodeConditions removes from conditions the Programmed and
-// IPv4Served condition of every node in departed, and reports whether it
-// removed any. Other node-scoped conditions, such as a backend node's
-// BackendsBound, are left alone.
+// removeDepartedNodeConditions removes from conditions the Programmed,
+// Advertised and IPv4Served conditions of every node in departed, and reports
+// whether it removed any. Other node-scoped conditions, such as a backend
+// node's BackendsBound, are left alone.
 func removeDepartedNodeConditions(conditions *[]metav1.Condition, departed map[string]bool) bool {
 	var gone []string
 	for _, c := range *conditions {
@@ -1009,18 +1124,19 @@ func removeDepartedNodeConditions(conditions *[]metav1.Condition, departed map[s
 	return len(gone) > 0
 }
 
-// gatewayNodeConditionNode returns the node of a gateway node's Programmed or
-// IPv4Served condition type, and false for any other type.
+// gatewayNodeConditionNode returns the node of a gateway node's Programmed,
+// Advertised or IPv4Served condition type, and false for any other type.
 func gatewayNodeConditionNode(condType string) (string, bool) {
 	node, kind, ok := strings.Cut(condType, "/")
-	if !ok || (kind != bgpv1alpha1.ConditionTypeProgrammed && kind != conditionTypeIPv4Served) {
+	if !ok || (kind != bgpv1alpha1.ConditionTypeProgrammed && kind != conditionTypeAdvertised &&
+		kind != conditionTypeIPv4Served) {
 		return "", false
 	}
 	return node, true
 }
 
-// departedGatewayNodes returns the nodes other than this one whose Programmed
-// or IPv4Served condition some rule in outcomes carries but that no
+// departedGatewayNodes returns the nodes other than this one whose Programmed,
+// Advertised or IPv4Served condition some rule in outcomes carries but that no
 // NetworkGateway in namespace targets. A node missing from the cached
 // NetworkGateway list is confirmed against the API server through APIReader
 // before it counts, so a cache that has not yet seen a new gateway node's
@@ -1059,14 +1175,20 @@ func (r *NetworkGatewayReconciler) departedGatewayNodes(
 	return candidates, nil
 }
 
-// clearNodeRuleConditions removes node's Programmed and IPv4Served
+// clearNodeRuleConditions removes node's Programmed, Advertised and IPv4Served
 // conditions from every NetworkService in namespace, for a node that no longer
-// serves any of them. A write retries on conflict against a fresh read, and a
-// rule deleted mid-pass counts as cleared.
+// serves any of them, and recomputes the rule's summary conditions in the same
+// write: when node was the last gateway node, no reconciler is left to do it.
+// A write retries on conflict against a fresh read, and a rule deleted
+// mid-pass counts as cleared.
 func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, node string) error {
 	list := &bgpv1alpha1.NetworkServiceList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return fmt.Errorf("list NetworkServices to clear node %s conditions: %w", node, err)
+	}
+	nodes, err := gatewayNodeNames(ctx, c, namespace)
+	if err != nil {
+		return fmt.Errorf("list gateway nodes to clear node %s conditions: %w", node, err)
 	}
 	var errs []error
 	for i := range list.Items {
@@ -1077,9 +1199,13 @@ func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, no
 				return err
 			}
 			removed := meta.RemoveStatusCondition(&current.Status.Conditions, programmedConditionType(node))
+			removed = meta.RemoveStatusCondition(&current.Status.Conditions, advertisedConditionType(node)) || removed
 			removed = meta.RemoveStatusCondition(&current.Status.Conditions, ipv4ServedConditionType(node)) || removed
 			if !removed {
 				return nil
+			}
+			if current.DeletionTimestamp.IsZero() {
+				applySummaryConditions(current, nodes)
 			}
 			return c.Status().Update(ctx, current)
 		})
@@ -1703,7 +1829,10 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 //
 // The gateway's own VIP advertisements carry networkRuleLabel and neither
 // field. Their creates come from this reconciler and are dropped, but a delete
-// or a spec edit passes, so the next pass restores what was lost.
+// or a spec edit passes, so the next pass restores what was lost. So does a
+// status write that changes whether galactic-router reports one advertised
+// (installedChanged), which the node's Advertised condition on the rule
+// follows.
 func backendAdvertisementPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool { return locatesBackend(e.Object) },
@@ -1715,13 +1844,24 @@ func backendAdvertisementPredicate() predicate.Predicate {
 				return false
 			}
 			if e.ObjectOld.GetGeneration() == e.ObjectNew.GetGeneration() {
-				return false
+				// A status write matters only when it changes whether a rule
+				// advertisement is installed, which its gateway node reports
+				// on the rule's Advertised condition.
+				return isRuleAdvertisement(e.ObjectNew) && installedChanged(e.ObjectOld, e.ObjectNew)
 			}
 			return locatesBackend(e.ObjectOld) || locatesBackend(e.ObjectNew) ||
 				isRuleAdvertisement(e.ObjectOld) || isRuleAdvertisement(e.ObjectNew)
 		},
 		GenericFunc: func(e event.GenericEvent) bool { return locatesBackend(e.Object) },
 	}
+}
+
+// installedChanged reports whether old and updated, two versions of one
+// BGPAdvertisement, differ in advertisementInstalled.
+func installedChanged(old, updated client.Object) bool {
+	o, ok1 := old.(*bgpv1alpha1.BGPAdvertisement)
+	n, ok2 := updated.(*bgpv1alpha1.BGPAdvertisement)
+	return ok1 && ok2 && advertisementInstalled(o) != advertisementInstalled(n)
 }
 
 // locatesBackend reports whether obj is a BGPAdvertisement buildBackendSIDIndex

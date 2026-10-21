@@ -502,15 +502,15 @@ gateway node, named after that node (see the worked example above).
 
 ### `NetworkService` — internal ingress load-balancing spec
 
-| Field                  | Required | Type                   | Description                                                                                                                                                                                                                                                                                  |
-| ---------------------- | -------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the Galactic cell controller, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                                                                                                       |
-| `spec.vipAddresses`    | Yes      | `[]string` (1–8)       | Ingress VIP addresses this rule provisions: at most one IPv6 and at most one IPv4 address, an IPv4 address in dotted form. See below.                                                                                                                                                        |
-| `spec.protocol`        | Yes      | `tcp` \| `udp`         | IP protocol load-balanced on `vipAddresses`. The API also accepts `sctp`, `esp`, `gre` and `icmp`, but refuses them as not served yet; see below.                                                                                                                                            |
-| `spec.port`            | tcp, udp | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances. Required for a protocol with ports, refused for one without.                                                                                                                                                                         |
-| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`galactic.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends of both VIPs; its IPv4 addresses are never backends. Must not be empty.                                                                |
-| `spec.backendPort`     | tcp, udp | `int32` (1–65535)      | Destination port on every selected backend. Required for a protocol with ports, refused for one without.                                                                                                                                                                                     |
-| `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes exist in the namespace; not an ownership check, see below), `<gateway-node>/Programmed` per gateway node, `<gateway-node>/IPv4Served` per gateway node for a rule with an IPv4 VIP, and `<backend-node>/BackendsBound` per node hosting a backend. |
+| Field                  | Required | Type                   | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------- | -------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the Galactic cell controller, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                                                                                                                                                                                                                                                                                                        |
+| `spec.vipAddresses`    | Yes      | `[]string` (1–8)       | Ingress VIP addresses this rule provisions: at most one IPv6 and at most one IPv4 address, an IPv4 address in dotted form. See below.                                                                                                                                                                                                                                                                                                                                                         |
+| `spec.protocol`        | Yes      | `tcp` \| `udp`         | IP protocol load-balanced on `vipAddresses`. The API also accepts `sctp`, `esp`, `gre` and `icmp`, but refuses them as not served yet; see below.                                                                                                                                                                                                                                                                                                                                             |
+| `spec.port`            | tcp, udp | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances. Required for a protocol with ports, refused for one without.                                                                                                                                                                                                                                                                                                                                                                          |
+| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`galactic.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends of both VIPs; its IPv4 addresses are never backends. Must not be empty.                                                                                                                                                                                                                                                                 |
+| `spec.backendPort`     | tcp, udp | `int32` (1–65535)      | Destination port on every selected backend. Required for a protocol with ports, refused for one without.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes exist in the namespace; not an ownership check, see below); the rule-wide `Programmed`, `Advertised`, `BackendsReady`, `Ready` and, with an IPv4 VIP, `IPv4Served` (see [Reading a rule's status](#reading-a-rules-status)); `<gateway-node>/Programmed` and `<gateway-node>/Advertised` per gateway node, `<gateway-node>/IPv4Served` per gateway node for a rule with an IPv4 VIP, and `<backend-node>/BackendsBound` per node hosting a backend. |
 
 Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkservices.yaml`:
 
@@ -615,12 +615,65 @@ node writes a binding for each of them, pairing the IPv4 `vipAddress` with the
 IPv6 `backendAddress`, but only while some gateway node reports one of the
 three loaded reasons for the rule, and deletes them once none does, so a cell
 whose gateways leave IPv4 VIPs out has no IPv4 bindings or rows. Each gateway
-pass removes the `<node>/Programmed` and `<node>/IPv4Served` conditions of any
-node that no `NetworkGateway` in the namespace targets, so a gateway that left
-without clearing its conditions cannot keep the backend nodes' IPv4 bindings
-alive. A node missing from the gateway's cache is confirmed missing with an
+pass removes the `<node>/Programmed`, `<node>/Advertised` and
+`<node>/IPv4Served` conditions of any node that no `NetworkGateway` in the
+namespace targets, so a gateway that left without clearing its conditions
+cannot keep the backend nodes' IPv4 bindings alive. A node missing from the gateway's cache is confirmed missing with an
 uncached read of the API server first, so a new gateway node's conditions are
 never removed while the cache has yet to see its `NetworkGateway`.
+
+#### Reading a rule's status
+
+Rule-wide conditions say whether a rule serves, without reading
+`NetworkGateway` or knowing which nodes exist. Every gateway node computes them
+from the per-node conditions and writes them only when they change. A per-node
+condition, or `Accepted`, from an older generation counts as not reported yet.
+
+| Condition       | `True` when                                                                                                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Programmed`    | every gateway node that reports on the rule loaded it                                                                                                                                                   |
+| `Advertised`    | every gateway node that loaded the rule published its routes, and `galactic-router` reports each one advertised                                                                                         |
+| `BackendsReady` | every backend node bound its backends, and no gateway node left a backend out because its uSID did not resolve                                                                                          |
+| `IPv4Served`    | every gateway node that loaded the rule serves its IPv4 VIP. Present only on a rule with an IPv4 VIP                                                                                                    |
+| `Ready`         | `Accepted`, `Programmed`, `Advertised` and `BackendsReady` are `True`, and so is `IPv4Served` on a rule whose only VIP is IPv4. Otherwise it carries the reason and message of the first one that isn't |
+
+Only gateway nodes with a `<gateway-node>/Programmed` condition count. A node
+that has not reported, for example one whose datapath is turned off,
+advertises nothing and so carries none of the rule's traffic. The
+`Programmed` and `Ready` messages say how many registered gateway nodes have
+not reported.
+
+`Ready` leaves out `IPv4Served` while the rule has an IPv6 VIP. IPv4 VIPs are
+off on most gateways, and a rule whose IPv6 VIP serves is not down because its
+IPv4 VIP is not served. Read `IPv4Served` to see whether the IPv4 VIP serves.
+
+A condition that is not `True` takes the reason every failing node reports,
+and its message names each failing node with its reason. When the nodes
+disagree, it takes the generic reason in this table instead.
+
+| Reason                 | On                            | What to do                                                                                                                                               |
+| ---------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Pending`              | any                           | Nothing. No node has reported on the current generation yet.                                                                                             |
+| `NoGatewayNodes`       | `Programmed`                  | Platform: no `NetworkGateway` is registered in the namespace.                                                                                            |
+| `InvalidRule`          | `Programmed`, `BackendsReady` | Fix the spec. The message says what could not be built, such as a port or a backend set that resolves to nothing.                                        |
+| `UnservedProtocol`     | `Programmed`                  | Use `tcp` or `udp`.                                                                                                                                      |
+| `NoServedVIP`          | `Programmed`                  | Add an IPv6 VIP, or ask for IPv4 VIPs to be turned on.                                                                                                   |
+| `LoadFailed`           | `Programmed`                  | Platform: the gateway refused the rule, for example over quota. The message carries the error.                                                           |
+| `NotProgrammed`        | `Programmed`, `Advertised`    | Gateway nodes failed for different reasons, or none loaded the rule. Read the message.                                                                   |
+| `AdvertisementFailed`  | `Advertised`                  | Platform: writing the route failed. It is retried.                                                                                                       |
+| `AdvertisementPending` | `Advertised`                  | Wait. The route is written, but `galactic-router` does not report it advertised yet. If it persists, the route's own `BGPAdvertisement` status says why. |
+| `NoRouter`             | `Advertised`                  | Platform: no single `BGPRouter` targets the gateway node.                                                                                                |
+| `<IPv4Served reason>`  | `IPv4Served`                  | The IPv4 VIP is not served. See the `IPv4Served` table above for the reason.                                                                             |
+| `NotAdvertised`        | `Advertised`                  | Gateway nodes failed for different reasons. Read the message.                                                                                            |
+| `NotServed`            | `IPv4Served`                  | Gateway nodes failed for different reasons. Read the message.                                                                                            |
+| `BackendsClaimed`      | `BackendsReady`               | Another rule already serves these backends on the same port. Change `backendPort`, or move the backends off the other rule.                              |
+| `BindingsNotBound`     | `BackendsReady`               | Wait. If it persists, the backend nodes' `BackendsBound` messages name each binding and why it is not bound.                                             |
+| `BackendsUnresolved`   | `BackendsReady`               | A backend's node has no route yet, usually while its pod is recreated. The rule serves through the rest.                                                 |
+| `BackendsNotReady`     | `BackendsReady`               | Nodes reported different backend problems. Read the message.                                                                                             |
+
+`BackendsReady` will also cover a backend cluster that lacks the rule, so
+replies have no path back (#706), and backend health (#704), once they are
+built.
 
 #### What an IPv4 VIP needs
 

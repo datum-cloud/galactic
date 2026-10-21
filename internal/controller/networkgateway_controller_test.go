@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -189,6 +190,24 @@ func assertRuleProgrammed(t *testing.T, c client.Client, status metav1.Condition
 	if cond.Status != status || cond.Reason != reason {
 		t.Errorf("NetworkService %s %s = %s/%s, want %s/%s",
 			name, cond.Type, cond.Status, cond.Reason, status, reason)
+	}
+}
+
+// assertRuleAdvertised fails the test unless testNodeGWA's Advertised
+// condition on testRuleName has the given status and reason.
+func assertRuleAdvertised(t *testing.T, c client.Client, status metav1.ConditionStatus, reason string) {
+	t.Helper()
+	rule := &bgpv1alpha1.NetworkService{}
+	if err := c.Get(context.Background(), testRuleKey(testRuleName), rule); err != nil {
+		t.Fatalf("get NetworkService %s: %v", testRuleName, err)
+	}
+	cond := meta.FindStatusCondition(rule.Status.Conditions, advertisedConditionType(testNodeGWA))
+	if cond == nil {
+		t.Fatalf("NetworkService %s has no %s condition", testRuleName, advertisedConditionType(testNodeGWA))
+	}
+	if cond.Status != status || cond.Reason != reason {
+		t.Errorf("NetworkService %s %s = %s/%s, want %s/%s",
+			testRuleName, cond.Type, cond.Status, cond.Reason, status, reason)
 	}
 }
 
@@ -742,6 +761,7 @@ func TestNetworkGatewayReconciler_SkipsBGPAdvertisementWiringWithoutRouter(t *te
 	if len(advList.Items) != 1 {
 		t.Fatalf("expected only the pre-seeded backend BGPAdvertisement, got %d", len(advList.Items))
 	}
+	assertRuleAdvertised(t, fakeClient, metav1.ConditionFalse, reasonNoRouter)
 }
 
 // TestNetworkGatewayReconciler_CreatesBGPAdvertisement covers the anycast
@@ -904,6 +924,10 @@ func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
 	if !strings.Contains(cond.Message, testRuleName) {
 		t.Errorf("Ready message = %q, want it to name the failing NetworkService %q", cond.Message, testRuleName)
 	}
+	// The failure is on the rule too, so a reader of the rule alone sees it
+	// (#708).
+	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonProgrammed)
+	assertRuleAdvertised(t, fakeClient, metav1.ConditionFalse, reasonAdvertisementFailed)
 }
 
 // TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass is the
@@ -919,7 +943,7 @@ func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) 
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}, &bgpv1alpha1.BGPAdvertisement{}).
 		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule).
 		Build()
 
@@ -944,6 +968,72 @@ func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) 
 		t.Errorf("Ready reason = %q, want %q", cond.Reason, reasonEngineHealthy)
 	}
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonProgrammed)
+	// Published, but no galactic-router has reported the route advertised.
+	assertRuleAdvertised(t, fakeClient, metav1.ConditionFalse, reasonAdvertisementPending)
+
+	markAdvertised(t, fakeClient, testRuleAdv)
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("second Reconcile: unexpected error: %v", err)
+	}
+	assertRuleAdvertised(t, fakeClient, metav1.ConditionTrue, reasonAdvertised)
+}
+
+// markAdvertised sets the named BGPAdvertisement's Advertised condition True
+// for its current generation, as galactic-router does once GoBGP carries it.
+func markAdvertised(t *testing.T, c client.Client, name string) {
+	t.Helper()
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := c.Get(context.Background(), testRuleKey(name), adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s: %v", name, err)
+	}
+	meta.SetStatusCondition(&adv.Status.Conditions, metav1.Condition{
+		Type: ConditionAdvertised, Status: metav1.ConditionTrue, Reason: reasonAdvertised,
+		ObservedGeneration: adv.Generation,
+	})
+	if err := c.Status().Update(context.Background(), adv); err != nil {
+		t.Fatalf("update BGPAdvertisement %s status: %v", name, err)
+	}
+}
+
+// TestBackendAdvertisementPredicate_RuleAdvertisementInstalled checks a
+// status write that changes whether a rule advertisement is installed wakes
+// the gateway, and one that changes nothing else does not.
+func TestBackendAdvertisementPredicate_RuleAdvertisementInstalled(t *testing.T) {
+	old := newNodeAdvertisement(testRuleName, testNodeGWA, "v6")
+	old.Generation = 2
+	installed := old.DeepCopy()
+	meta.SetStatusCondition(&installed.Status.Conditions, metav1.Condition{
+		Type: ConditionAdvertised, Status: metav1.ConditionTrue, Reason: reasonAdvertised, ObservedGeneration: 2,
+	})
+	stale := old.DeepCopy()
+	meta.SetStatusCondition(&stale.Status.Conditions, metav1.Condition{
+		Type: ConditionAdvertised, Status: metav1.ConditionTrue, Reason: reasonAdvertised, ObservedGeneration: 1,
+	})
+	backend := newAdvertisement("backend")
+	backendInstalled := backend.DeepCopy()
+	meta.SetStatusCondition(&backendInstalled.Status.Conditions, metav1.Condition{
+		Type: ConditionAdvertised, Status: metav1.ConditionTrue, Reason: reasonAdvertised,
+	})
+
+	p := backendAdvertisementPredicate()
+	tests := []struct {
+		name     string
+		old, new client.Object
+		want     bool
+	}{
+		{"rule advertisement installed", old, installed, true},
+		{"rule advertisement withdrawn", installed, old, true},
+		{"installed for an older generation only", old, stale, false},
+		{"unrelated status write", installed, installed.DeepCopy(), false},
+		{"backend advertisement status", backend, backendInstalled, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := p.Update(event.UpdateEvent{ObjectOld: tt.old, ObjectNew: tt.new}); got != tt.want {
+				t.Errorf("Update = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 // errLoadQuota is the load failure the #712 regression tests make the fake
@@ -1491,6 +1581,9 @@ func TestNetworkGatewayReconciler_ClearsDepartedNodeProgrammedCondition(t *testi
 		meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
 			Type: programmedConditionType(node), Status: metav1.ConditionTrue, Reason: reasonProgrammed,
 		})
+		meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
+			Type: advertisedConditionType(node), Status: metav1.ConditionTrue, Reason: reasonAdvertised,
+		})
 	}
 
 	fakeClient := newIndexedClientBuilder(scheme).
@@ -1510,6 +1603,9 @@ func TestNetworkGatewayReconciler_ClearsDepartedNodeProgrammedCondition(t *testi
 	}
 	if meta.FindStatusCondition(got.Status.Conditions, programmedConditionType(testNodeGWB)) != nil {
 		t.Errorf("departed node %s's condition is still on NetworkService %s", testNodeGWB, testRuleName)
+	}
+	if meta.FindStatusCondition(got.Status.Conditions, advertisedConditionType(testNodeGWB)) != nil {
+		t.Errorf("departed node %s's Advertised condition is still on NetworkService %s", testNodeGWB, testRuleName)
 	}
 	if meta.FindStatusCondition(got.Status.Conditions, programmedConditionType(testNodeGWA)) == nil {
 		t.Errorf("surviving node %s's condition was removed from NetworkService %s", testNodeGWA, testRuleName)
