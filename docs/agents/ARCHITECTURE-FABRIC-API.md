@@ -77,7 +77,7 @@ Three principles shape everything below:
 
 The binary is separate from the `fabric-router` image, which carries FRR and
 `fabric-config-agent`. The `fabric-api` image is a static Go binary on
-`gcr.io/distroless/static:nonroot` with no FRR, no `vtysh` and no shell, and it
+`scratch` with no FRR, no `vtysh` and no shell, and it
 imports no eBPF packages, so building it needs no clang or `go generate`. The
 same image serves the node sidecar, the gateway Deployment, the janitor
 CronJob, the per-node `certsync` pod and the operator `query` client.
@@ -672,7 +672,7 @@ into both `config/fabric-router/components/fabric-api` and
 published image.
 
 **Container image:** `containers/fabric-api/Dockerfile` — golang builder with
-`CGO_ENABLED=0` → `gcr.io/distroless/static:nonroot`, `ENTRYPOINT
+`CGO_ENABLED=0` → `scratch`, `ENTRYPOINT
 ["/usr/bin/fabric-api"]`. No clang, no `go generate`, and no FRR or shell in the
 image. `task build` also produces `bin/fabric-api` for local use.
 

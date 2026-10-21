@@ -41,7 +41,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
 # the sidecar's user (UID 0, so an added NET_RAW is effective, with group
 # frrvty 102 for the sockets) and drops every other capability; the gateway,
 # janitor and query client run as this image's nonroot user.
-FROM gcr.io/distroless/static:nonroot
+FROM scratch
 WORKDIR /
 COPY --from=builder /workspace/fabric-api /usr/bin/fabric-api
 USER 65532:65532

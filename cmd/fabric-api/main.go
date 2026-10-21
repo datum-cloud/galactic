@@ -21,6 +21,7 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	_ "golang.org/x/crypto/x509roots/fallback"
 
 	"go.datum.net/galactic/internal/metadata"
 )

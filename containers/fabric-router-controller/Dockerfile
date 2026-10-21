@@ -31,7 +31,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -o fabric-router-controller ./cmd/fabric-router-controller
 
 # The controller only talks to the API server, so no shell or host tools.
-FROM gcr.io/distroless/static:nonroot
+FROM scratch
 WORKDIR /
 COPY --from=builder /workspace/fabric-router-controller .
 USER 65532:65532

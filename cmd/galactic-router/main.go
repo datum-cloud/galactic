@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	_ "golang.org/x/crypto/x509roots/fallback"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
