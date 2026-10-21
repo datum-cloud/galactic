@@ -472,21 +472,42 @@ static EDGE_ALWAYS_INLINE void count_match(struct vip_stats_value *stats, __u64 
 	stats->last_seen_ns = bpf_ktime_get_ns();
 }
 
-// fnv1a_flow is a deterministic, stateless hash of a flow's client-facing
+// flow_hash is a deterministic, stateless hash of a flow's client-facing
 // tuple. It feeds Maglev slot selection rather than a direct modulo over the
 // backend count, which is what makes a backend-set change reassign roughly one
 // flow in N instead of nearly all of them.
-static EDGE_ALWAYS_INLINE __u32 fnv1a_flow(const __u8 addr[16], __be16 port)
+//
+// It is 32-bit FNV-1a over the address and the port's two bytes as they sit on
+// the wire, so bpfel and bpfeb builds agree, then murmur3's fmix32 finalizer.
+// FNV-1a alone takes the port's low byte last, so two ports differing only in
+// that byte hash a fixed multiple of the FNV prime apart, and their slots a
+// fixed distance apart. Maglev fills a table in arithmetic runs, so on some
+// tables those fixed gaps keep landing on one backend, and a client's
+// consecutive source ports all pick it. The finalizer spreads every input bit
+// over the whole hash.
+//
+// Changing this moves established flows to other backends, and every gateway
+// node must run the same hash to keep a flow on one backend under anycast, so
+// nodes on different hashes during a roll can split a flow that changes
+// gateway. FlowHash in flowhash.go mirrors it.
+static EDGE_ALWAYS_INLINE __u32 flow_hash(const __u8 addr[16], __be16 port)
 {
 	__u32 h = 2166136261u;
 	for (int i = 0; i < 16; i++) {
 		h ^= addr[i];
 		h *= 16777619u;
 	}
-	h ^= (__u8) (port & 0xff);
+	const __u8 *p = (const __u8 *) &port;
+	h ^= p[0];
 	h *= 16777619u;
-	h ^= (__u8) (port >> 8);
+	h ^= p[1];
 	h *= 16777619u;
+
+	h ^= h >> 16;
+	h *= 0x85ebca6bu;
+	h ^= h >> 13;
+	h *= 0xc2b2ae35u;
+	h ^= h >> 16;
 	return h;
 }
 
@@ -881,7 +902,7 @@ static EDGE_ALWAYS_INLINE int lb_forward(struct xdp_md *ctx, struct vip_value *r
 	// rejected as unbounded without help. The same barrier-then-clamp technique
 	// the backend index needs is applied here, as an explicit range clamp
 	// rather than a mask, since no bitmask bounds a prime.
-	__u32 slot = fnv1a_flow(client, sport) % EDGE_MAGLEV_TABLE_SIZE;
+	__u32 slot = flow_hash(client, sport) % EDGE_MAGLEV_TABLE_SIZE;
 	EDGE_BARRIER_VAR(slot);
 	if (slot >= EDGE_MAGLEV_TABLE_SIZE)
 		slot = EDGE_MAGLEV_TABLE_SIZE - 1;
