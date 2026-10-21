@@ -151,6 +151,8 @@ COPY --from=builder /var/run/galactic-cni /var/run/galactic-cni
 # CNI plugin exercises at runtime.
 FROM docker.io/library/alpine:latest
 
+RUN apk upgrade --no-cache ca-certificates-bundle
+
 # Copy binaries from the production (distroless) image
 COPY --from=production /galactic-cni /galactic-cni
 COPY --from=production /galactic-veth /galactic-veth

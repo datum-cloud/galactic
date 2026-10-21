@@ -39,6 +39,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
 
 FROM quay.io/frrouting/frr:${FRR_VERSION}
 
+RUN apk upgrade --no-cache ca-certificates-bundle
+
 RUN apk add --no-cache \
       tcpdump \
       mtr \
