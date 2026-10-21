@@ -137,7 +137,10 @@ func ensureGatewayAddress(vpc, inner string) error {
 		}
 	}
 
-	return ensureGatewayVRFRoute(vpc, addr)
+	if err := ensureGatewayVRFRoute(vpc, addr); err != nil {
+		return err
+	}
+	return ensureGatewayReplyRedirect(addr, link)
 }
 
 // hasAddress reports whether link already carries addr.
@@ -160,20 +163,10 @@ func hasAddress(link netlink.Link, addr net.IP) (bool, error) {
 	return false, nil
 }
 
-// ensureGatewayVRFRoute pulls traffic for vpc's gateway address into that
-// VPC's VRF, by routing addr at the VRF device in the main table.
-//
-// Assigning the address is not enough to receive on it. It lands on a veth
-// enslaved to the VPC's VRF, so it is local only within that VRF's table,
-// while a reply redirected in by usid_ingress arrives on the pod's primary
-// interface, which is in no VRF. The input lookup then runs in the main table,
-// finds nothing local, and drops the packet silently: Ip6InReceives advances,
-// Ip6InDelivers does not, and no error counter moves.
-//
-// A route at the VRF device makes the VRF driver redirect the lookup into its
-// own table, where the address is local. It belongs in the main table, not the
-// VRF's: a lookup that already entered the VRF table finds the address without
-// it.
+// ensureGatewayVRFRoute routes this pod's gateway address to the VPC's VRF
+// from the main table. Incoming replies on eth0 still need the ingress filter
+// installed by ensureGatewayReplyRedirect to enter the VRF before socket
+// lookup; this route alone cannot deliver to a SO_BINDTODEVICE-bound socket.
 func ensureGatewayVRFRoute(vpc string, addr net.IP) error {
 	vrfName := intf.GenerateInterfaceNameVRF(vpc)
 	vrfLink, err := netlink.LinkByName(vrfName)
