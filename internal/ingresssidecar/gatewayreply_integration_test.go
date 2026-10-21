@@ -22,6 +22,10 @@ func TestGatewayReplyRedirect_KernelReconcileAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	otherAddr, err := DeriveGatewayAddress(prefix, "3", "reply-test")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	nsObj, err := ns.TempNetNS()
 	if err != nil {
@@ -50,16 +54,28 @@ func TestGatewayReplyRedirect_KernelReconcileAndCleanup(t *testing.T) {
 				return fmt.Errorf("ensure redirect #%d: %w", i+1, err)
 			}
 		}
+		if err := ensureGatewayReplyRedirect(otherAddr, innerLink); err != nil {
+			return fmt.Errorf("ensure second VPC redirect: %w", err)
+		}
 		filters, err := gatewayReplyFilters(eth0Link)
 		if err != nil {
 			return err
 		}
-		if len(filters) != 1 || !filters[0].DestIP.Equal(addr) {
-			return fmt.Errorf("filters after repeated ensure = %v, want one for %s", filters, addr)
+		if len(filters) != 2 {
+			return fmt.Errorf("filters after repeated ensure = %v, want one per VPC", filters)
 		}
-		action, ok := filters[0].Actions[0].(*netlink.MirredAction)
+		var owned *netlink.Flower
+		for _, filter := range filters {
+			if filter.DestIP.Equal(addr) {
+				owned = filter
+			}
+		}
+		if owned == nil {
+			return fmt.Errorf("filter for %s missing", addr)
+		}
+		action, ok := owned.Actions[0].(*netlink.MirredAction)
 		if !ok || action.Ifindex != innerLink.Attrs().Index || action.MirredAction != netlink.TCA_INGRESS_REDIR {
-			return fmt.Errorf("reply redirect action = %v, want ingress redirect to %d", filters[0].Actions, innerLink.Attrs().Index)
+			return fmt.Errorf("reply redirect action = %v, want ingress redirect to %d", owned.Actions, innerLink.Attrs().Index)
 		}
 		if err := removeGatewayReplyRedirect(vpc); err != nil {
 			return err
@@ -68,10 +84,13 @@ func TestGatewayReplyRedirect_KernelReconcileAndCleanup(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if len(filters) != 0 {
-			return fmt.Errorf("filters after removal = %v, want none", filters)
+		if len(filters) != 1 || !filters[0].DestIP.Equal(otherAddr) {
+			return fmt.Errorf("filters after removal = %v, want only %s", filters, otherAddr)
 		}
-		return removeGatewayReplyRedirect(vpc)
+		if err := removeGatewayReplyRedirect(vpc); err != nil {
+			return err
+		}
+		return removeGatewayReplyRedirect("3")
 	}); err != nil {
 		t.Fatal(err)
 	}
