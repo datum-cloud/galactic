@@ -30,9 +30,9 @@ func fakeIPv4Sysctls(t *testing.T, ifaces ...string) string {
 	t.Helper()
 	root := t.TempDir()
 	for _, dev := range append([]string{allDevices}, ifaces...) {
-		writeSysctl(t, root, "0", "net", "ipv4", "conf", dev, "forwarding")
+		writeOffSysctl(t, root, "net", "ipv4", "conf", dev, "forwarding")
 	}
-	writeSysctl(t, root, "0", "net", "ipv4", "ip_forward")
+	writeOffSysctl(t, root, "net", "ipv4", "ip_forward")
 	if err := sysctl.SetProcSysPath(root); err != nil {
 		t.Fatal(err)
 	}
@@ -44,13 +44,14 @@ func fakeIPv4Sysctls(t *testing.T, ifaces ...string) string {
 	return root
 }
 
-func writeSysctl(t *testing.T, root, value string, segments ...string) {
+// writeOffSysctl writes a sysctl that reads 0, as a fresh interface has.
+func writeOffSysctl(t *testing.T, root string, segments ...string) {
 	t.Helper()
 	path := filepath.Join(append([]string{root}, segments...)...)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(value+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -119,12 +120,31 @@ func TestIPv4Forwarding_RetriesAfterFailure(t *testing.T) {
 	if err := f.enable(); err == nil || !strings.Contains(err.Error(), testMissing) {
 		t.Fatalf("enable error = %v, want one naming %s, whose sysctl is missing", err, testMissing)
 	}
-	writeSysctl(t, root, "0", "net", "ipv4", "conf", testMissing, "forwarding")
+	writeOffSysctl(t, root, "net", "ipv4", "conf", testMissing, "forwarding")
 	if err := f.enable(); err != nil {
 		t.Fatalf("enable after %s appeared: %v", testMissing, err)
 	}
 	if got := readSysctl(t, root, "net", "ipv4", "conf", testMissing, "forwarding"); got != "1" {
 		t.Errorf("%s forwarding = %s, want 1", testMissing, got)
+	}
+}
+
+// TestIPv4Forwarding_RewritesARecreatedInterface covers an interface that
+// stops resolving and comes back with forwarding off, as a bond member
+// deleted and created again does: it is written again when it returns.
+func TestIPv4Forwarding_RewritesARecreatedInterface(t *testing.T) {
+	root := fakeIPv4Sysctls(t, testIfaceA, testIfaceB)
+	f := newIPv4Forwarding()
+	f.track([]string{testIfaceA, testIfaceB})
+	if err := f.enable(); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+
+	f.track([]string{testIfaceA})
+	writeOffSysctl(t, root, "net", "ipv4", "conf", testIfaceB, "forwarding")
+	f.track([]string{testIfaceA, testIfaceB})
+	if got := readSysctl(t, root, "net", "ipv4", "conf", testIfaceB, "forwarding"); got != "1" {
+		t.Errorf("%s forwarding = %s once recreated and tracked again, want 1", testIfaceB, got)
 	}
 }
 

@@ -182,10 +182,12 @@ default and is set per gateway node. It does three things:
   replacement bond member, gets it too. Once on, it stays on until the node
   reboots, even after the last IPv4 VIP goes or the switch is turned off:
   `net.ipv4.ip_forward` is host-wide, and turning it back off could cut
-  another datapath on the node. If it cannot be turned on, the pass that
-  would load the IPv4 VIP is not applied at all, the `NetworkGateway`'s
-  `Ready` reads `False` with reason `IPv4ForwardingFailed`, and the pass is
-  retried; the rules the node already serves stay as they were.
+  another datapath on the node. If it cannot be turned on, IPv4 fails closed
+  for that pass only: every IPv4 VIP is left out, none is loaded or
+  advertised, and each affected rule's `<gateway-node>/IPv4Served` and the
+  `NetworkGateway`'s `Ready` read `False` with reason `IPv4ForwardingFailed`.
+  IPv6 VIPs are loaded, updated and advertised as usual, and the pass is
+  retried until forwarding can be turned on.
 - It loads each rule's IPv4 VIP into the datapath beside its IPv6 VIP,
   balanced over the rule's IPv6 backends, whose nodes translate its flows
   (see [What an IPv4 VIP needs](#what-an-ipv4-vip-needs)).
@@ -489,10 +491,10 @@ object.
 
 ### `NetworkGateway` — one per gateway node
 
-| Field                 | Required | Type     | Description                                                                                                                                                                                                                                                                                                                                     |
-| --------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                                                                                                                                                                                           |
-| `status.conditions`   | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, `IPv4ForwardingFailed` (an IPv4 VIP is due to load but the node's IPv4 forwarding could not be turned on, so nothing in the pass is applied), or `Terminating`. |
+| Field                 | Required | Type     | Description                                                                                                                                                                                                                                                                                                                                                |
+| --------------------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                                                                                                                                                                                                      |
+| `status.conditions`   | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, `IPv4ForwardingFailed` (an IPv4 VIP is due to load but the node's IPv4 forwarding could not be turned on, so IPv4 VIPs are left out and IPv6 is served), or `Terminating`. |
 
 There is deliberately **no** self-address or primary-node field on this
 status — DSR has nothing analogous to publish. Create one object per
@@ -592,15 +594,16 @@ and the rule's IPv6 VIP and its `-v6` advertisement are not affected.
 Each gateway node reports what it did with a rule's IPv4 VIPs as its
 `<gateway-node>/IPv4Served` condition:
 
-| Status  | Reason             | Meaning                                                                                                                         |
-| ------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `True`  | `Advertised`       | loaded over the eligible backends whose bindings are `Bound`, at least one, and advertised                                      |
-| `False` | `NotAdvertised`    | loaded over `Bound` backends, but the route is not published: no `BGPRouter` targets the node, or the advertisement failed      |
-| `False` | `BindingsNotBound` | loaded over every eligible backend, but none of their bindings is `Bound` yet, so not advertised                                |
-| `False` | `Unsupported`      | `GALACTIC_GATEWAY_IPV4_VIPS` is off, so they are left out of the datapath                                                       |
-| `False` | `NoBackend`        | the switch is on, but no selected attachment has an IPv6 address that is a backend of this IPv4 VIP (none, unresolved, claimed) |
-| `False` | `MultipleVIPs`     | the switch is on, but the rule has more than one IPv4 VIP, so none loads                                                        |
-| `False` | `NotLoaded`        | the switch is on, but the node did not load the rule at all                                                                     |
+| Status  | Reason                 | Meaning                                                                                                                         |
+| ------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `True`  | `Advertised`           | loaded over the eligible backends whose bindings are `Bound`, at least one, and advertised                                      |
+| `False` | `NotAdvertised`        | loaded over `Bound` backends, but the route is not published: no `BGPRouter` targets the node, or the advertisement failed      |
+| `False` | `BindingsNotBound`     | loaded over every eligible backend, but none of their bindings is `Bound` yet, so not advertised                                |
+| `False` | `Unsupported`          | `GALACTIC_GATEWAY_IPV4_VIPS` is off, so they are left out of the datapath                                                       |
+| `False` | `NoBackend`            | the switch is on, but no selected attachment has an IPv6 address that is a backend of this IPv4 VIP (none, unresolved, claimed) |
+| `False` | `MultipleVIPs`         | the switch is on, but the rule has more than one IPv4 VIP, so none loads                                                        |
+| `False` | `NotLoaded`            | the switch is on, but the node did not load the rule at all                                                                     |
+| `False` | `IPv4ForwardingFailed` | the switch is on, but the node's IPv4 forwarding could not be turned on, so they are left out this pass                         |
 
 `Advertised`, `NotAdvertised` and `BindingsNotBound` mean the node has the
 IPv4 VIP loaded. The rule's IPv6 VIP keeps serving in every case. A rule whose
@@ -922,6 +925,8 @@ must therefore never be one of an egress shard's IPv4 masquerade addresses,
 or the gateway would take that address's NAT64 replies.
 
 To roll back, turn `GALACTIC_GATEWAY_IPV4_VIPS` off on every gateway first.
+The IPv4 forwarding the gateway turned on, `net.ipv4.ip_forward` included,
+stays on after the switch goes off, until the node reboots.
 Each node withdraws its `-v4` advertisements on its next pass and reports
 `Unsupported`, the backend nodes delete their IPv4 bindings, and the bindings'
 finalizers remove their `vip_xlat_table` rows. Once no IPv4
