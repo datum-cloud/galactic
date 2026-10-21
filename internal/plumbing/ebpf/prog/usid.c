@@ -4988,9 +4988,10 @@ static USID_ALWAYS_INLINE void count_egress_shard_stat(__u32 stat)
 		*count += 1;
 }
 
-// egress_shard_hash is 32-bit FNV-1a over every byte of key, the hash the
-// gateway's fnv1a_flow uses. load_egress_shard_key zeroes the key first, so
-// fields the hash mode does not use, and the padding, hash as zeros.
+// egress_shard_hash is 32-bit FNV-1a over every byte of key, with no
+// finalizer, unlike the gateway's flow_hash. load_egress_shard_key zeroes the
+// key first, so fields the hash mode does not use, and the padding, hash as
+// zeros.
 // internal/plumbing/ebpf/egressroutemap rebuilds the same bytes to predict a
 // placement.
 static USID_ALWAYS_INLINE __u32 egress_shard_hash(const struct egress_shard_pin_key *key)
