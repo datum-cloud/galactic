@@ -1054,3 +1054,23 @@ func TestRepairAttachmentDatapath_NodeIdentity(t *testing.T) {
 		}
 	})
 }
+
+func TestRepairAttachmentDatapathDelegatedGuestRoute(t *testing.T) {
+	f := newRepairFixture(t)
+	vrf := f.addVRF("G0000000jUV", 10, 7)
+	f.addVRFInstance(crdnames.BGPVRFInstanceName("jU", repairNode), 0x21)
+	f.addHostLink(attachreg.InterfaceTypeVeth, "G0000000jUabcH", 11, vrf)
+	f.routes[7] = append(f.routes[7], netlink.Route{
+		Dst: mustCIDR(t, "fd20:30:ff01::/96"), LinkIndex: 11,
+		Type: unix.RTN_UNICAST, Protocol: unix.RTPROT_BOOT,
+		Gw: net.ParseIP("fd20:30:ff01::"), Flags: int(netlink.FLAG_ONLINK),
+	})
+	result, err := f.run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Rebuilt.LocalEgressRoutes != 1 {
+		t.Fatalf("rebuilt %d routes, want 1", result.Rebuilt.LocalEgressRoutes)
+	}
+	wantPassThrough(t, f.mem, 7, "fd20:30:ff01::/96")
+}

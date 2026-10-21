@@ -303,3 +303,32 @@ func addDummyLink(t *testing.T, name string) netlink.Link {
 	})
 	return link
 }
+
+func TestDelegatedVethSubnetUsesGuestNextHop(t *testing.T) {
+	requireRoot(t)
+	link := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "hgwdns0"}, PeerName: "hgwdns1"}
+	if err := netlink.LinkAdd(link); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = netlink.LinkDel(link) })
+	if err := netlink.LinkSetUp(link); err != nil {
+		t.Fatal(err)
+	}
+	subnet := mustParseCIDR(t, "fd20:0:e::2:0:0/96")
+	const tableID = 251
+	if err := netlink.RouteAdd(&netlink.Route{Dst: subnet, LinkIndex: link.Attrs().Index, Table: tableID}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := installPodSubnetRoute(link, subnet, netlink.FAMILY_V6, tableID, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: tableID}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 1 || !routes[0].Gw.Equal(subnet.IP) || routes[0].Flags&int(netlink.FLAG_ONLINK) == 0 {
+		t.Fatalf("delegated route must use the guest next hop: %+v", routes)
+	}
+}
