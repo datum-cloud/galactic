@@ -108,6 +108,33 @@ func protocolService(name string, protocol networkv1alpha1.NetworkServiceProtoco
 	}
 }
 
+func TestNetworkServiceBackendAddressAdmission(t *testing.T) {
+	c, _ := startProtocolAPI(t)
+	ctx := context.Background()
+	svc := protocolService("address-only", networkv1alpha1.NetworkServiceProtocolTCP, 443, 8443)
+	svc.Spec.BackendSelector = metav1.LabelSelector{}
+	addresses := []string{"fd00:10::1"}
+	svc.Spec.BackendAddresses = &addresses
+	if err := c.Create(ctx, svc); err != nil {
+		t.Fatalf("address-only service must be admitted: %v", err)
+	}
+	addresses = []string{}
+	if err := c.Update(ctx, svc); err != nil {
+		t.Fatalf("explicit empty address list must permit withdrawal: %v", err)
+	}
+	svc.Spec.BackendAddresses = nil
+	if err := c.Update(ctx, svc); err == nil {
+		t.Fatal("service with no selector or address list must be refused")
+	}
+	bad := protocolService("ipv4-backend-address", networkv1alpha1.NetworkServiceProtocolTCP, 443, 8443)
+	bad.Spec.BackendSelector = metav1.LabelSelector{}
+	v4 := []string{"192.0.2.1"}
+	bad.Spec.BackendAddresses = &v4
+	if err := c.Create(ctx, bad); err == nil {
+		t.Fatal("IPv4 backend address must be refused")
+	}
+}
+
 // requireRefusal fails unless err is a schema rejection containing every one
 // of want and none of unwanted.
 func requireRefusal(t *testing.T, err error, want, unwanted []string) {

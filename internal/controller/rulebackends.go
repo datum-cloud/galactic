@@ -219,17 +219,37 @@ func ruleCandidateBackends(
 	if err != nil {
 		return nil, nil, err
 	}
+	var allowed map[netip.Addr]struct{}
+	if rule.Spec.BackendAddresses != nil {
+		allowed = make(map[netip.Addr]struct{}, len(*rule.Spec.BackendAddresses))
+		for _, raw := range *rule.Spec.BackendAddresses {
+			addr, parseErr := netip.ParseAddr(raw)
+			if parseErr != nil || !addr.Is6() || addr.Is4In6() {
+				return nil, nil, fmt.Errorf("invalid IPv6 backend address %q", raw)
+			}
+			allowed[addr] = struct{}{}
+		}
+	}
 
 	for _, attachment := range attachments {
 		if attachment.Status.VPC != rule.Spec.VPCRef || !selector.Matches(labels.Set(attachment.Labels)) {
 			continue
+		}
+		addrs := attachmentIPv6Addresses(attachment)
+		if allowed != nil {
+			addrs = slices.DeleteFunc(addrs, func(addr netip.Addr) bool {
+				_, ok := allowed[addr]
+				return !ok
+			})
+			if len(addrs) == 0 {
+				continue
+			}
 		}
 		key := types.NamespacedName{Namespace: attachment.Namespace, Name: attachment.Name}
 		if attachment.Status.Node == "" {
 			pending = append(pending, key.String()+": status.node not set by datum-cloud/cloud")
 			continue
 		}
-		addrs := attachmentIPv6Addresses(attachment)
 		if len(addrs) == 0 {
 			pending = append(pending, key.String()+": no IPv6 address")
 			continue
@@ -484,12 +504,15 @@ func errTooManyVIPs(family addrFamily, n int) error {
 }
 
 // ruleBackendSelector converts rule's BackendSelector to a labels.Selector.
-// The CRD rejects an empty selector; this rejects one anyway, since an empty
-// selector would otherwise match every attachment in the VPC.
+// An empty selector matches attachments by address only when an explicit
+// BackendAddresses list is present; status.vpc still limits the candidate VPC.
 func ruleBackendSelector(rule *bgpv1alpha1.NetworkService) (labels.Selector, error) {
 	sel := rule.Spec.BackendSelector
 	if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
-		return nil, errors.New("backendSelector is empty")
+		if rule.Spec.BackendAddresses == nil {
+			return nil, errors.New("backendSelector is empty and backendAddresses is unset")
+		}
+		return labels.Everything(), nil
 	}
 	selector, err := metav1.LabelSelectorAsSelector(&sel)
 	if err != nil {
