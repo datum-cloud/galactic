@@ -1037,8 +1037,8 @@ tier structure.
 that tag into `config/galactic-gateway/base`.
 
 **Container image:**
-- `containers/galactic-gateway/Dockerfile` — golang builder →
-  `scratch`, `ENTRYPOINT ["/galactic-gateway"]`.
+- `containers/galactic-gateway/Dockerfile` — golang builder → `scratch`,
+  `ENTRYPOINT ["/galactic-gateway"]`.
   The builder stage additionally installs `clang`/`llvm`/`linux-libc-dev`
   and runs `go generate` for **both** `internal/plumbing/ebpf/prog` (the
   SRv6 uSID TC-BPF program, transitively imported via

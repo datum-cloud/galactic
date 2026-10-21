@@ -51,12 +51,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
     -o galactic-vrf ./cmd/galactic-vrf
 
-# Minimal static-Go-binary image, matching containers/galactic-cni/
-# Dockerfile's production-stage pattern -- §6 of the plan. Unlike
-# galactic-cni's own final image (alpine, for iproute2/nsenter needed by
-# e2e tests), this container never shells out to `ip`: every kernel
-# operation goes through internal/plumbing/vrf and internal/plumbing/srv6's
-# own netlink calls, so scratch is sufficient.
+# Minimal static-Go-binary image. Unlike galactic-cni's own final image
+# (alpine, for iproute2/nsenter needed by e2e tests), this container never
+# shells out to `ip`: every kernel operation goes through
+# internal/plumbing/vrf and internal/plumbing/srv6's own netlink calls, so
+# scratch is sufficient.
 FROM scratch
 
 COPY --from=builder /workspace/galactic-vrf /galactic-vrf
