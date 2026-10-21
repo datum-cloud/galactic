@@ -187,6 +187,7 @@ type NetworkServiceSpec struct {
 	// withdraws all backends and their bindings without broadening selection.
 	// +optional
 	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=45
 	// +kubebuilder:validation:XValidation:rule="self.all(a, isIP(a) && ip(a).family() == 6)",message="backendAddresses must contain IPv6 addresses"
 	// +listType=set
 	BackendAddresses *[]string `json:"backendAddresses,omitempty"`

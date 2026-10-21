@@ -83,6 +83,7 @@ spec:
                   only, still requiring status.vpc to equal VPCRef. An explicit empty list
                   withdraws all backends and their bindings without broadening selection.
                 items:
+                  maxLength: 45
                   type: string
                 maxItems: 64
                 type: array

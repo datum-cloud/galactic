@@ -129,15 +129,15 @@ func TestRuleCandidateBackends_AddressOnlyWithinObservedVPC(t *testing.T) {
 
 	inVPC := newBackendAttachment(testVPCRef, "fd00:10::1")
 	inVPC.Labels = nil
-	otherVPC := newBackendAttachment("other-vpc", "fd00:10::1")
-	otherVPC.Name = "other-vpc"
+	otherVPC := newBackendAttachment(testOtherVPCRef, "fd00:10::1")
+	otherVPC.Name = "outside"
 	unlisted := newBackendAttachment(testVPCRef, "fd00:10::2")
 	unlisted.Name = "unlisted"
 	unlisted.Status.Node = ""
 
 	got, pending, err := ruleCandidateBackends(rule, []*cloudv1alpha1.VPCAttachment{otherVPC, unlisted, inVPC})
 	if err != nil || len(got) != 1 || got[0].attachment.Name != inVPC.Name || len(pending) != 0 {
-		t.Fatalf("address-only selection = %+v, pending %v, %v; want only the attachment in the observed VPC", got, pending, err)
+		t.Fatalf("address-only selection = %+v, pending %v, %v; want only the observed VPC", got, pending, err)
 	}
 	addresses = []string{}
 	got, _, err = ruleCandidateBackends(rule, []*cloudv1alpha1.VPCAttachment{inVPC})
