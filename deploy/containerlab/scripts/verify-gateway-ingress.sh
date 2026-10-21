@@ -149,9 +149,10 @@ request() {
     timeout 5 socat -t2 -T3 - "${addr}" 2>"${work}/socat.err" | head -1 || true
 }
 
-# A random source-port base per run, so the flows are new ones: a port an
-# earlier run used can still be in TIME_WAIT on the client.
-sport=$((20000 + RANDOM % 30000))
+# Each flow's source port is drawn at random (pick_port in lib.sh), so the
+# flows are independent draws of the backend, and new ones: a port an earlier
+# run used can still be in TIME_WAIT on the client.
+sport=0
 work=$(mktemp -d)
 
 checked=0
@@ -185,7 +186,8 @@ for site in "${SITES[@]}"; do
     for proto in tcp udp; do
       answered=0
       for _ in $(seq "${FLOWS}"); do
-        sport=$((sport + 1))
+        pick_port
+        sport=${PORT_PICKED}
         read -r pod peer <<<"$(request "${proto}" "${vip}" "${sport}")"
         peer=${peer#[}
         peer=${peer%]}

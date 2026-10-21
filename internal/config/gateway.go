@@ -84,12 +84,14 @@ const (
 
 	// EnvGatewayIPv4VIPs turns on serving IPv4 VIPs. Optional, defaulting to
 	// false. Off, the gateway leaves every IPv4 VIP out of the datapath and
-	// advertises none. On, it turns on IPv4 forwarding for the FIB lookups
-	// edge_return and the Fragmentation Needed reply make, loads each rule's
-	// IPv4 VIP over the rule's IPv4 backends, and advertises it once those
-	// backends' ServiceVIPBindings are Bound. Turning it off withdraws every
-	// IPv4 VIP this node advertises. A gateway that cannot list and watch
-	// ServiceVIPBindings runs as if it were off.
+	// advertises none. On, it loads each rule's IPv4 VIP over the rule's
+	// IPv6 backends, whose nodes translate its flows, and advertises it once
+	// those backends' ServiceVIPBindings are Bound. The IPv4 forwarding the
+	// FIB lookups of edge_return and the Fragmentation Needed reply need is
+	// turned on only once the first IPv4 VIP is due to load, and then left
+	// on. Turning the switch off withdraws every IPv4 VIP this node
+	// advertises and leaves IPv6 VIPs alone. A gateway that cannot list and
+	// watch ServiceVIPBindings runs as if it were off.
 	EnvGatewayIPv4VIPs = "GALACTIC_GATEWAY_IPV4_VIPS"
 
 	// EnvGatewayProcSysPath is the procfs sysctl root the datapath writes its

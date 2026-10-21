@@ -423,14 +423,15 @@ func TestKernelDatapath_ApplyRuleBuildsMaglevTableOverMultipleBackends(t *testin
 }
 
 // TestKernelDatapath_ApplyRuleBalancesEachFamilyOverItsOwnBackends: a rule's
-// IPv6 VIP is registered over its IPv6 backends and its IPv4 VIP over its IPv4
-// backends, and an IPv4 VIP with no IPv4 backend fails the rule rather than
-// borrowing the IPv6 ones.
+// IPv6 VIP is registered over Backends and its IPv4 VIP over IPv4Backends,
+// IPv6 backends both, which differ where another rule owns one family's claim
+// on a backend, and an IPv4 VIP with no backend of its own fails the rule
+// rather than borrowing the IPv6 VIP's.
 func TestKernelDatapath_ApplyRuleBalancesEachFamilyOverItsOwnBackends(t *testing.T) {
 	d := newTestKernelDatapath()
 	rule := testDesiredRule(t, testKeyA, "2001:db8:1::10", "203.0.113.10")
 	rule.IPv4Backends = []DesiredBackend{
-		{Address: netip.MustParseAddr("10.60.0.5"), Port: 8443, USID: netip.MustParseAddr("2001:db8:2::4a4a")},
+		{Address: netip.MustParseAddr("fd20:60::5"), Port: 8443, USID: netip.MustParseAddr("2001:db8:2::4a4a")},
 	}
 
 	if err := d.ApplyRule(context.Background(), rule); err != nil {
@@ -454,7 +455,7 @@ func TestKernelDatapath_ApplyRuleBalancesEachFamilyOverItsOwnBackends(t *testing
 
 	rule.IPv4Backends = nil
 	if err := d.ApplyRule(context.Background(), rule); err == nil {
-		t.Error("ApplyRule with an IPv4 VIP and no IPv4 backend: want an error, got nil")
+		t.Error("ApplyRule with an IPv4 VIP and no backend for it: want an error, got nil")
 	}
 }
 

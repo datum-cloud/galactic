@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -105,11 +106,19 @@ type NetworkGatewayReconciler struct {
 	Disabled bool
 
 	// IPv4VIPs loads a rule's IPv4 VIPs into the engine alongside its IPv6
-	// ones (config.EnvGatewayIPv4VIPs), over the rule's IPv4 backends, and
-	// advertises one once its backends' ServiceVIPBindings are Bound; see
-	// buildDesiredRule and applyBGPAdvertisements. Off, no IPv4 VIP is loaded
-	// or advertised.
+	// ones (config.EnvGatewayIPv4VIPs), over the rule's IPv6 backends,
+	// whose nodes translate its flows, and advertises one once its
+	// backends' ServiceVIPBindings are Bound; see buildDesiredRule and
+	// applyBGPAdvertisements. Off, no IPv4 VIP is loaded or advertised.
 	IPv4VIPs bool
+
+	// EnsureIPv4Forwarding turns on the IPv4 forwarding the datapath's IPv4
+	// FIB lookups need. Each pass calls it before the engine loads any IPv4
+	// VIP, so a node that serves none never changes its IPv4 forwarding. It
+	// must be idempotent; an error fails the pass before the engine is
+	// driven, so no IPv4 VIP loads, and is not yet advertised, on a node
+	// whose replies to it would be dropped. Nil means nothing to turn on.
+	EnsureIPv4Forwarding func() error
 
 	// drain keeps a deleted rule loaded until its route is withdrawn. See
 	// ruleDrainTracker.
@@ -138,6 +147,11 @@ const (
 	// reasonDatapathDisabled is the Ready reason while this node's datapath is
 	// turned off by configuration.
 	reasonDatapathDisabled = "DatapathDisabled"
+
+	// reasonIPv4ForwardingFailed is the Ready reason, and each affected
+	// rule's IPv4Served reason, while this node cannot turn on the IPv4
+	// forwarding its IPv4 VIPs need, so they are left out and IPv6 is served.
+	reasonIPv4ForwardingFailed = "IPv4ForwardingFailed"
 
 	// reasonProgrammed is the per-node Programmed reason for a rule this
 	// node's engine loaded.
@@ -178,7 +192,7 @@ const (
 	reasonIPv4Advertised = "Advertised"
 
 	// reasonIPv4BindingsNotBound is the per-node IPv4Served reason for a rule
-	// whose IPv4 VIP this node loaded over its eligible IPv4 backends, none
+	// whose IPv4 VIP this node loaded over its eligible backends, none
 	// of whose ServiceVIPBindings is Bound yet, so it is not advertised. The
 	// VIP is loaded so that galactic-router writes those bindings
 	// (ipv4LoadedOnSomeNode).
@@ -186,7 +200,8 @@ const (
 
 	// reasonIPv4NoBackend is the per-node IPv4Served reason for a rule whose
 	// IPv4 VIPs IPv4VIPs would load but none of whose selected attachments has
-	// an IPv4 address that resolves to a backend, so they are left out.
+	// an IPv6 address that resolves to a backend for them, so they are left
+	// out.
 	reasonIPv4NoBackend = "NoBackend"
 
 	// reasonIPv4MultipleVIPs is the per-node IPv4Served reason for a rule
@@ -244,20 +259,24 @@ const (
 	// ipv4Off: IPv4VIPs is off, so they are left out.
 	ipv4Off ipv4Family = iota
 	// ipv4Loaded: they are in the rule's engine state, over only the eligible
-	// IPv4 backends whose ServiceVIPBinding is Bound, at least one, so they
-	// may be advertised.
+	// IPv6 backends whose ServiceVIPBinding for them is Bound, at least one,
+	// so they may be advertised.
 	ipv4Loaded
 	// ipv4Unbound: they are in the rule's engine state, over every eligible
-	// IPv4 backend, none of whose ServiceVIPBindings is Bound yet, so they
+	// backend, none of whose ServiceVIPBindings is Bound yet, so they
 	// are not advertised.
 	ipv4Unbound
-	// ipv4NoBackend: no IPv4 backend resolves, so they are left out.
+	// ipv4NoBackend: no IPv6 backend resolves for them, so they are left out.
 	ipv4NoBackend
 	// ipv4MultipleVIPs: the rule has more than one, so they are left out.
 	ipv4MultipleVIPs
 	// ipv4NotLoaded: the rule failed to build or load before or apart from
 	// its IPv4 VIPs.
 	ipv4NotLoaded
+	// ipv4NoForwarding: they would load, but this node's IPv4 forwarding
+	// could not be turned on, so they are left out for this pass
+	// (ensureIPv4Forwarding).
+	ipv4NoForwarding
 )
 
 // Reconcile reconciles a single NetworkGateway.
@@ -401,19 +420,10 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	status, err := r.Engine.Reconcile(ctx, desired)
+	desired, fwdErr := r.ensureIPv4Forwarding(desired, outcomes)
+	status, err := r.reconcileEngine(ctx, gw, desired)
 	if err != nil {
-		gwCopy := gw.DeepCopy()
-		setGatewayCondition(gwCopy, metav1.Condition{
-			Type:    bgpv1alpha1.ConditionTypeReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  "EngineReconcileFailed",
-			Message: err.Error(),
-		})
-		if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
-			logger.Error(updateErr, "update NetworkGateway status after engine reconcile error")
-		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, errors.Join(fwdErr, err)
 	}
 
 	switch {
@@ -427,7 +437,16 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	gwCopy := gw.DeepCopy()
 	gwCopy.Status.ObservedGeneration = gw.Generation
-	setGatewayCondition(gwCopy, readyConditionFor(status, advErr))
+	ready := readyConditionFor(status, advErr)
+	if fwdErr != nil {
+		ready = metav1.Condition{
+			Type:    bgpv1alpha1.ConditionTypeReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  reasonIPv4ForwardingFailed,
+			Message: fwdErr.Error() + "; IPv4 VIPs are left out until it succeeds, and IPv6 VIPs are served",
+		}
+	}
+	setGatewayCondition(gwCopy, ready)
 	if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
 		logger.Error(updateErr, "update NetworkGateway status")
 	}
@@ -442,16 +461,93 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// status write above so the failure stays visible on the object.
 	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
 		logger.Error(err, "reconcile orphaned vip_table state")
-		return ctrl.Result{}, errors.Join(advErr, ruleStatusErr, sweepErr,
+		return ctrl.Result{}, errors.Join(fwdErr, advErr, ruleStatusErr, sweepErr,
 			fmt.Errorf("reconcile orphaned vip_table state: %w", err))
 	}
 
-	if err := errors.Join(advErr, ruleStatusErr, sweepErr); err != nil {
+	if err := errors.Join(fwdErr, advErr, ruleStatusErr, sweepErr); err != nil {
 		return ctrl.Result{}, err
 	}
 	// Nothing else is sure to trigger the pass that drops a held rule once
 	// its drain delay ends, so ask for it.
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// reconcileEngine converges the engine on desired. A failure is recorded on
+// gw's Ready condition and returned.
+func (r *NetworkGatewayReconciler) reconcileEngine(
+	ctx context.Context, gw *bgpv1alpha1.NetworkGateway, desired gateway.EngineState,
+) (gateway.EngineStatus, error) {
+	status, err := r.Engine.Reconcile(ctx, desired)
+	if err != nil {
+		gwCopy := gw.DeepCopy()
+		setGatewayCondition(gwCopy, metav1.Condition{
+			Type:    bgpv1alpha1.ConditionTypeReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  "EngineReconcileFailed",
+			Message: err.Error(),
+		})
+		if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
+			log.FromContext(ctx).Error(updateErr, "update NetworkGateway status after engine reconcile error")
+		}
+		return gateway.EngineStatus{}, err
+	}
+	return status, nil
+}
+
+// ensureIPv4Forwarding turns on this node's IPv4 forwarding before the engine
+// loads desired, when desired holds an IPv4 VIP (EnsureIPv4Forwarding), and
+// returns the state to load. When it cannot be turned on, IPv4 fails closed
+// for this pass only: every IPv4 VIP and its backends are left out of the
+// returned state, each affected outcome is marked ipv4NoForwarding so its
+// -v4 route is not published, and the error is returned for the caller to
+// report and retry. IPv6 VIPs are loaded and advertised as usual. A rule left
+// with no VIP is dropped from the state and reported as serving none.
+func (r *NetworkGatewayReconciler) ensureIPv4Forwarding(
+	desired gateway.EngineState, outcomes []ruleOutcome,
+) (gateway.EngineState, error) {
+	if !r.IPv4VIPs || r.EnsureIPv4Forwarding == nil || !loadsIPv4VIP(desired) {
+		return desired, nil
+	}
+	fwdErr := r.EnsureIPv4Forwarding()
+	if fwdErr == nil {
+		return desired, nil
+	}
+	fwdErr = fmt.Errorf("turn on IPv4 forwarding for this node's IPv4 VIPs: %w", fwdErr)
+
+	stripped := gateway.EngineState{Rules: make(map[string]gateway.DesiredRule, len(desired.Rules))}
+	for key, rule := range desired.Rules {
+		rule.VIPAddresses = slices.DeleteFunc(slices.Clone(rule.VIPAddresses), isIPv4VIP)
+		rule.IPv4Backends = nil
+		if len(rule.VIPAddresses) > 0 {
+			stripped.Rules[key] = rule
+		}
+	}
+	for i := range outcomes {
+		o := &outcomes[i]
+		if o.ipv4 != ipv4Loaded && o.ipv4 != ipv4Unbound {
+			continue
+		}
+		o.ipv4 = ipv4NoForwarding
+		rule, kept := stripped.Rules[o.desired.Key]
+		if kept {
+			o.desired = rule
+		} else if !o.draining {
+			o.buildErr = fmt.Errorf("%w: %w", errIPv4ForwardingUnavailable, fwdErr)
+		}
+	}
+	return stripped, fwdErr
+}
+
+// loadsIPv4VIP reports whether desired holds any IPv4 VIP for the engine to
+// load.
+func loadsIPv4VIP(desired gateway.EngineState) bool {
+	for _, rule := range desired.Rules {
+		if slices.ContainsFunc(rule.VIPAddresses, isIPv4VIP) {
+			return true
+		}
+	}
+	return false
 }
 
 // passIPv4Bindings returns namespace's IPv4 bindings for one pass, which IPv4
@@ -691,7 +787,7 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 	if o.buildErr != nil {
 		cond.Status, cond.Reason = metav1.ConditionFalse, reasonInvalidRule
 		switch {
-		case errors.Is(o.buildErr, errNoServedVIP):
+		case errors.Is(o.buildErr, errNoServedVIP), errors.Is(o.buildErr, errIPv4ForwardingUnavailable):
 			cond.Reason = reasonNoServedVIP
 		case errors.Is(o.buildErr, errUnservedProtocol):
 			cond.Reason = reasonUnservedProtocol
@@ -823,16 +919,20 @@ func ipv4ServedCondition(
 			"targets the node or the advertisement failed; the NetworkGateway's Ready condition says which", node)
 	case ipv4Unbound:
 		reason = reasonIPv4BindingsNotBound
-		message = fmt.Sprintf("IPv4 VIP is loaded on node %s but not advertised: none of its IPv4 backends' "+
+		message = fmt.Sprintf("IPv4 VIP is loaded on node %s but not advertised: none of its backends' "+
 			"ServiceVIPBindings is Bound yet; the backend nodes' BackendsBound conditions say why", node)
 	case ipv4NoBackend:
 		reason = reasonIPv4NoBackend
-		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: no selected attachment has an IPv4 "+
-			"address that resolves to a backend this rule serves", node)
+		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: no selected attachment has an IPv6 "+
+			"address that resolves to a backend this rule serves for them", node)
 	case ipv4MultipleVIPs:
 		reason = reasonIPv4MultipleVIPs
 		message = fmt.Sprintf("IPv4 VIPs are not loaded or advertised on node %s: the rule has more than "+
 			"one, and a backend node translates only one IPv4 VIP per rule; the IPv6 VIP serves without them", node)
+	case ipv4NoForwarding:
+		reason = reasonIPv4ForwardingFailed
+		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: its IPv4 forwarding could not be turned "+
+			"on; the NetworkGateway's Ready condition says why, and the IPv6 VIP serves without them", node)
 	case ipv4NotLoaded:
 		reason = reasonIPv4NotLoaded
 		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: the rule is not loaded", node)
@@ -1041,6 +1141,11 @@ func pruneRuleAdvertisements(
 // IPv4 while IPv4VIPs is off, leaving nothing to load.
 var errNoServedVIP = errors.New("every VIP is IPv4, and IPv4 VIPs are turned off on this node")
 
+// errIPv4ForwardingUnavailable is the build error of a rule whose every VIP is
+// IPv4 on a pass where this node's IPv4 forwarding could not be turned on, so
+// it serves none of them (ensureIPv4Forwarding).
+var errIPv4ForwardingUnavailable = errors.New("every VIP is IPv4, and this node's IPv4 forwarding is not on")
+
 // isIPv4VIP reports whether vip is an IPv4 address, written plainly or as an
 // IPv4-mapped IPv6 address. Both forms load as the plain IPv4 address when
 // IPv4VIPs is on.
@@ -1061,10 +1166,11 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
 }
 
 // buildDesiredRule converts rule into a gateway.DesiredRule. Its backends are
-// the addresses of the VPCAttachments rule's BackendSelector picks from
-// attachments (selectRuleBackends), one list per VIP family: the IPv6
-// addresses for the IPv6 VIPs and, when they load, the IPv4 addresses for the
-// IPv4 VIPs. Each is resolved through sidIndex to the SRv6 uSID of the node
+// the IPv6 addresses of the VPCAttachments rule's BackendSelector picks from
+// attachments (selectRuleBackends), one list per VIP family, since another
+// rule can own a backend's claim for one family and not the other: Backends
+// for the IPv6 VIPs and, when they load, IPv4Backends for the IPv4 VIPs, whose
+// backend nodes translate them to IPv6. Each is resolved through sidIndex to the SRv6 uSID of the node
 // its attachment reports, with that backend's own slot (backendSID), so a node
 // hosting several of the rule's backends can tell which one Maglev chose.
 // There is no kernel VRF or FIB dependency.
@@ -1087,10 +1193,11 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
 // IPv4 VIPs, plain or IPv4-mapped (isIPv4VIP), are left out unless serveIPv4
 // is set. Without it the rule's IPv6 VIPs serve without them, and a rule with
 // no other VIP fails with errNoServedVIP. With it they load beside the IPv6
-// ones, over the IPv4 backends whose ServiceVIPBinding in bindings is Bound
+// ones, over the IPv6 backends whose ServiceVIPBinding for the IPv4 VIP in
+// bindings is Bound
 // (ipv4Bindings.unbound); the rest are returned in unresolved, so a flow never
 // reaches a backend that cannot answer it. While none is Bound the VIP loads
-// over every eligible IPv4 backend, so that the backend nodes write their
+// over every eligible backend, so that the backend nodes write their
 // bindings, and ipv4 is ipv4Unbound, which keeps it unadvertised. A rule with
 // more than one IPv4 VIP, like one whose IPv4 VIP has no backend, serves its
 // IPv6 VIPs without them. ipv4 says which of these happened to the rule's

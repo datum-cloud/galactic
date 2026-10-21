@@ -209,6 +209,34 @@ deletes any other binding in `galactic-system`, such as the hand-written ones
 an older lab applied. `verify:gateway-ingress` fails unless both backends
 answer.
 
+Each site's rules also carry an IPv4 VIP (`198.51.100.1` in dfw, `.65` in
+sjc, `.129` in iad), in a `/26` the same edge nodes originate into the IPv4
+underlay, and the same backends serve it with no IPv4 address of their own:
+the compute node translates each IPv4 flow to IPv6 and the reply back. Each
+backend node writes a second binding per rule per backend for it, eight per
+site in all. `verify:gateway-ingress-ipv4` first checks that tr4 routes each
+IPv4 VIP, that every IPv4 binding is `Bound` to an IPv6 backend and that
+every gateway reports `<node>/IPv4Served` `True`/`Advertised`. It then sends
+IPv4 TCP and UDP from remote-host (`11.1.40.2`) through each gateway node in
+turn. It fails unless the backend saw the client as `64:ff9b::b01:2802`, its
+IPv4 address under `64:ff9b::/96`, the client's capture shows every reply
+coming from the VIP, both backends answer, and no gateway counts a drop, a
+`ctstate INVALID` drop or an egress shard translation. In dfw, the one site
+with two gateways, it also sends one fixed 5-tuple per protocol through each
+gateway in turn and fails unless both draw the same backend, and it fails if
+the gateway that is not pinned counts any of the flows, which is how a pin
+that leaks shows. The script's header lists every threshold.
+
+The binding counts assume IPv4 VIPs are on, which the lab's gateway base
+sets on every gateway (`GALACTIC_GATEWAY_IPV4_VIPS=true`; the default is
+off). A backend node writes a rule's
+IPv4 bindings only while some gateway in its site reports the IPv4 VIP
+loaded, so setting `GALACTIC_GATEWAY_IPV4_VIPS=false` on every gateway of a
+site leaves that site four bindings, and `deploy:galactic-gateway`'s wait and
+`verify:gateway` then fail. sjc and iad each have one gateway, so the
+switch on either one is enough; dfw needs it on both. The IPv4 check fails
+for any gateway node with the switch off, whatever its site.
+
 ```bash
 # NetworkGateways Ready, NetworkServices Accepted, ServiceVIPBindings Bound
 task verify:gateway
@@ -216,6 +244,10 @@ task verify:gateway
 # TCP and UDP from remote-host to every site's VIP, pinned through each
 # gateway node in turn; checks the replies and the datapath's counters
 task verify:gateway-ingress
+
+# The same over IPv4 to every site's IPv4 VIP; also checks tr4's routes, the
+# IPv4 bindings, IPv4Served, and that every reply comes from the VIP
+task verify:gateway-ingress-ipv4
 
 # Restart dfw-worker2's gateway, then its shard, while the other carries
 # traffic (#710)
@@ -228,6 +260,11 @@ task verify:gateway-detach
 # By hand: one TCP request to dfw's VIP, from the off-fabric host
 echo probe | docker exec -i clab-gvpc-remote-host \
   socat -t2 -T3 - 'TCP6:[2001:db8:6060:1::1]:80'
+
+# The same over IPv4; the backend answers with the client it saw,
+# 64:ff9b::b01:2802 (socat may print it in full)
+echo probe | docker exec -i clab-gvpc-remote-host \
+  socat -t2 -T3 - 'TCP4:198.51.100.1:80'
 
 # The datapath's own account of it, on a gateway node
 docker exec dfw-worker2 curl -s http://localhost:8081/metrics \
@@ -435,5 +472,6 @@ task verify:srv6
 task verify:evpn
 task verify:gateway
 task verify:gateway-ingress
+task verify:gateway-ingress-ipv4
 task verify:gateway-restart
 ```

@@ -118,7 +118,8 @@ func TestNetworkServiceBindingReconciler_WritesBindingForLocalBackend(t *testing
 
 	bindings := listBindings(t, c)
 	if len(bindings) != 1 {
-		t.Fatalf("bindings = %d, want 1 (one IPv6 VIP, one backend; the IPv4 VIP has no IPv4 backend)", len(bindings))
+		t.Fatalf("bindings = %d, want 1 (one backend for the IPv6 VIP; the IPv4 VIP gets none "+
+			"while no gateway has it loaded)", len(bindings))
 	}
 	b := bindings[0]
 	want := bgpv1alpha1.ServiceVIPBindingSpec{

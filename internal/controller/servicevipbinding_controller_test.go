@@ -93,10 +93,11 @@ type unregisterCall struct {
 // fakeRowKey is one row of fakeVIPTable's simulated vip_xlat_table, ignoring
 // the VRF, which every test here shares. slot is 0 on an egress row.
 type fakeRowKey struct {
-	egress bool
-	slot   uint16
-	addr   string
-	port   uint16
+	egress     bool
+	translated bool // an egress-translated row, an IPv4 VIP's
+	slot       uint16
+	addr       string
+	port       uint16
 }
 
 // fakeRowValue is the rewrite target a simulated row holds.
@@ -141,7 +142,8 @@ func (f *fakeVIPTable) RegisterEgress(block uint64, argument uint16, proto uint8
 	backendAddr net.IP, backendPort uint16, vipAddr net.IP, vipPort uint16) error {
 	f.egressCalls = append(f.egressCalls, vipCall{block, argument, proto, backendAddr, backendPort, vipAddr, vipPort})
 	if f.registerErr == nil {
-		f.put(fakeRowKey{egress: true, addr: backendAddr.String(), port: backendPort}, vipAddr, vipPort)
+		f.put(fakeRowKey{egress: true, translated: len(vipAddr) == net.IPv4len, addr: backendAddr.String(),
+			port: backendPort}, vipAddr, vipPort)
 	}
 	return f.registerErr
 }
@@ -166,6 +168,16 @@ func (f *fakeVIPTable) UnregisterEgress(
 	return f.unregisterErr
 }
 
+func (f *fakeVIPTable) UnregisterEgressTranslated(
+	block uint64, argument uint16, proto uint8, backendAddr net.IP, backendPort uint16,
+) error {
+	f.unregEgress = append(f.unregEgress, unregisterCall{block, argument, proto, backendAddr, backendPort})
+	if f.unregisterErr == nil {
+		delete(f.rows, fakeRowKey{egress: true, translated: true, addr: backendAddr.String(), port: backendPort})
+	}
+	return f.unregisterErr
+}
+
 // removeOwnRows deletes the binding's two rows where they still hold its
 // values, as vipxlatmap's removal by value does.
 func (f *fakeVIPTable) removeOwnRows(
@@ -175,7 +187,7 @@ func (f *fakeVIPTable) removeOwnRows(
 	if f.rows[in] == (fakeRowValue{backendAddr.String(), backendPort}) {
 		delete(f.rows, in)
 	}
-	out := fakeRowKey{egress: true, addr: backendAddr.String(), port: backendPort}
+	out := fakeRowKey{egress: true, translated: len(vipAddr) == net.IPv4len, addr: backendAddr.String(), port: backendPort}
 	if f.rows[out] == (fakeRowValue{vipAddr.String(), vipPort}) {
 		delete(f.rows, out)
 	}

@@ -124,3 +124,20 @@ site_kubeconfig() {
   kind get kubeconfig --name "$1" > "${f}"
   echo "${f}"
 }
+
+# pick_port sets PORT_PICKED to a client source port in 20000-59999 that no
+# earlier call in this run returned. The VIP checks draw each flow's port at
+# random rather than counting up: the gateway's flow hash maps consecutive
+# ports to correlated Maglev slots, so a run of consecutive ports often lands
+# on one backend and proves nothing about the spread. It sets a variable
+# rather than printing, so the record of used ports survives the call.
+declare -gA PORTS_USED=()
+pick_port() {
+  local p
+  while :; do
+    p=$((((RANDOM << 15) | RANDOM) % 40000 + 20000))
+    [ -n "${PORTS_USED[${p}]:-}" ] || break
+  done
+  PORTS_USED[${p}]=1
+  PORT_PICKED=${p}
+}
