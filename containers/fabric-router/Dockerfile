@@ -39,7 +39,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
 
 FROM quay.io/frrouting/frr:${FRR_VERSION}
 
-RUN apk upgrade --no-cache ca-certificates-bundle
+RUN set -e; f=/etc/ssl/certs/ca-certificates.crt; m=MIICTjCCAdOgAwIBAgIKPPYHqWhwDtqLhDAKBggqhkjOPQQDAzBrMQswCQYDVQQG; n=$(grep -c 'BEGIN CERTIFICATE' "$f"); awk -v m="$m" '/-----BEGIN CERTIFICATE-----/{b=""; c=1} c{b=b $0 "\n"} !c{print} /-----END CERTIFICATE-----/{if (index(b, m)==0) printf "%s", b; c=0}' "$f" > "$f.new"; test "$(grep -c 'BEGIN CERTIFICATE' "$f.new")" -eq "$((n-1))"; mv "$f.new" "$f"; rm -f /usr/share/ca-certificates/mozilla/emSign_ECC_Root_CA_-_G3.crt
 
 RUN apk add --no-cache \
       tcpdump \

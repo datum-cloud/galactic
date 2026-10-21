@@ -151,7 +151,7 @@ COPY --from=builder /var/run/galactic-cni /var/run/galactic-cni
 # CNI plugin exercises at runtime.
 FROM docker.io/library/alpine:latest
 
-RUN apk upgrade --no-cache ca-certificates-bundle
+RUN set -e; f=/etc/ssl/certs/ca-certificates.crt; m=MIICTjCCAdOgAwIBAgIKPPYHqWhwDtqLhDAKBggqhkjOPQQDAzBrMQswCQYDVQQG; n=$(grep -c 'BEGIN CERTIFICATE' "$f"); awk -v m="$m" '/-----BEGIN CERTIFICATE-----/{b=""; c=1} c{b=b $0 "\n"} !c{print} /-----END CERTIFICATE-----/{if (index(b, m)==0) printf "%s", b; c=0}' "$f" > "$f.new"; test "$(grep -c 'BEGIN CERTIFICATE' "$f.new")" -eq "$((n-1))"; mv "$f.new" "$f"; rm -f /usr/share/ca-certificates/mozilla/emSign_ECC_Root_CA_-_G3.crt
 
 # Copy binaries from the production (distroless) image
 COPY --from=production /galactic-cni /galactic-cni
