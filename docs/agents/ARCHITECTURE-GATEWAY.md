@@ -305,15 +305,24 @@ that converges this node's whole gateway engine:
    as its
    own `<node>/Programmed` condition (`Programmed`, `BackendsUnresolved`,
    `LoadFailed`, `InvalidRule`, or `NoServedVIP` for an IPv4-only rule, with
-   the error or the unresolved backends in the message), and, for a rule
-   with an IPv4 VIP, a `<node>/IPv4Served` condition: `True` with reason
+   the error or the unresolved backends in the message), a
+   `<node>/Advertised` condition (`advertisedCondition`: `True` with
+   `Advertised` once the node published the rule's `BGPAdvertisement`s and
+   `galactic-router` reports each one `Advertised` for its current
+   generation (`uninstalledAdvertisements`), or `False` with
+   `NotProgrammed`, `NoRouter`, `AdvertisementFailed` or
+   `AdvertisementPending`, so a rule's publish failure is on the rule and not
+   only on the node's `NetworkGateway`; a status write that changes whether
+   one of its advertisements is installed wakes the pass, `installedChanged`),
+   and, for a rule with an IPv4 VIP, a
+   `<node>/IPv4Served` condition: `True` with reason
    `Advertised`, or `False` with `NotAdvertised` (loaded over Bound backends
    but the route not published), `BindingsNotBound` (loaded, no backend
    Bound), `Unsupported` (switch off), `NoBackend`, `MultipleVIPs` or
    `NotLoaded` (the rule as a whole is not loaded). The first three mean
    loaded (`ipv4LoadedReasons`), and `galactic-router` writes a rule's IPv4
    bindings only while some node reports one of them. Every pass also
-   removes the `Programmed` and `IPv4Served` conditions of any node no
+   removes the `Programmed`, `Advertised` and `IPv4Served` conditions of any node no
    `NetworkGateway` in the namespace targets (`departedGatewayNodes`,
    `removeDepartedNodeConditions`), so a node that left without its
    conditions being cleared cannot keep a loaded reason, and with it the
@@ -326,7 +335,23 @@ that converges this node's whole gateway engine:
    `NetworkService` status is shared by every gateway node while loading
    is per node; a node writes it only when it changes, and a
    departing, deleted, or disabled node's conditions are removed with its
-   advertisements. The `NetworkGateway`'s `EngineDegraded` message
+   advertisements. `NetworkServiceReconciler` then rolls every node's
+   conditions up into rule-wide ones, `Programmed`, `Advertised`,
+   `BackendsReady`, `IPv4Served` (only on a rule with an IPv4 VIP) and
+   `Ready` (`summaryConditions`,
+   `internal/controller/networkservice_summary.go`), so a client such as the
+   tenant-facing API reads one rule and never `NetworkGateway` (#708). Only
+   gateway nodes reporting a `Programmed` condition for the current
+   generation count, since a node that has not reported advertises nothing.
+   `Ready` reads `IPv4Served` only for a rule with no IPv6 VIP, so a rule
+   whose IPv6 VIP serves is not reported down on gateways with IPv4 VIPs
+   off. The summary is re-read uncached (`APIReader`), so it computes from
+   the write that triggered it.
+   A failing summary takes the reason every failing node shares, or a
+   generic one when they differ. Every input is shared state, so every
+   gateway node computes the same summary and writes it only when it
+   changes; `clearNodeRuleConditions` recomputes it too, for the last
+   gateway node to leave. The `NetworkGateway`'s `EngineDegraded` message
    lists every failed rule. Every rule
    advertisement carries a `networkRuleLabel` label and a plain (not
    controller, no `blockOwnerDeletion`) owner reference to its
