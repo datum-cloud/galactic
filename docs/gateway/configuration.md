@@ -1014,6 +1014,42 @@ claims. Meanwhile the datapath drops their traffic as `vip_ipv4_backend`.
 map and restart every `galactic_usid_drops_total` counter from zero on each
 node. No other map changes, and `vip_xlat_table`'s rows survive both.
 
+### Upgrading past the flow hash change
+
+The release that fixes #958 changes the hash `edge_lb` picks a backend
+with. The old hash sent a client's consecutive source ports to one backend
+far more often than chance. The new one adds a finalizer and spreads them
+like random ports. No map, CRD or configuration changes, but the upgrade
+moves established flows, because the gateway keeps no connection table: a
+flow's backend is whatever the hash picks for it.
+
+What moves, and for how long:
+
+- Once every gateway node runs the new hash, a flow lands on a different
+  backend with odds of (N-1)/N for a rule with N backends, so half of all
+  flows for two backends. Each moved TCP connection is reset by its new
+  backend, and a moved UDP flow reaches a backend holding none of its
+  state.
+- While the DaemonSet rolls, one node at a time (`maxUnavailable: 1`), the
+  old and new nodes pick different backends for the same flow. Each node's
+  restart withdraws and re-advertises its VIPs, so the fabric shifts flows
+  between gateways, and a flow that crosses between an old and a new node
+  can move more than once. This lasts from the first gateway node's
+  restart until the last one serves again.
+- Rolling back to an earlier release moves the same flows again.
+
+No drain keeps a flow on its backend through this change. Draining a
+backend only adds to what moves. To limit the impact:
+
+1. Upgrade during a maintenance window, and tell the owners of services
+   with long-lived connections, such as MQTT or WebSocket clients, to
+   expect one reconnect.
+2. Roll every gateway node in one pass, so the window where nodes disagree
+   is as short as the roll itself.
+3. After the last node serves, check each node's health and VIP counters
+   as [Verifying the deployment](#verifying-the-deployment) describes, and
+   that a client off the fabric reaches every VIP.
+
 ## Verifying the deployment
 
 Confirm the DaemonSet and CRDs exist and are healthy:
