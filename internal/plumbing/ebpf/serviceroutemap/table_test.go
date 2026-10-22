@@ -422,3 +422,39 @@ func TestAuthorizationLeasePinnedReplayAndRenewal(t *testing.T) {
 		})
 	}
 }
+
+func TestPeerNextHopFollowsAttachmentIdentity(t *testing.T) {
+	identities := &memoryTable{}
+	peers := &memoryTable{}
+	tables := &Tables{identities: identities, peers: peers}
+	if err := identities.Put(uint32(42), uint64(7)); err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range []string{"fd20::4", "192.0.2.4"} {
+		if err := tables.SetPeer(42, 7, net.ParseIP(address)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tables.sweepPeers(); err != nil {
+		t.Fatal(err)
+	}
+	if len(peers.entries) != 2 {
+		t.Fatalf("live peer entries = %d, want 2", len(peers.entries))
+	}
+	var v6 servicePeerValue
+	if err := peers.Lookup(servicePeerKey{Ifindex: 42}, &v6); err != nil {
+		t.Fatal(err)
+	}
+	if !net.IP(v6.Address[:]).Equal(net.ParseIP("fd20::4")) {
+		t.Fatalf("IPv6 next hop = %x", v6.Address)
+	}
+	if err := identities.Put(uint32(42), uint64(8)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tables.sweepPeers(); err != nil {
+		t.Fatal(err)
+	}
+	if len(peers.entries) != 0 {
+		t.Fatal("recycled attachment retained next hops")
+	}
+}

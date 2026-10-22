@@ -264,10 +264,10 @@ func TestInitializePreservesPinnedState(t *testing.T) {
 	reverse := &recordingTable{iterateCount: 1}
 	grants := &recordingTable{iterateCount: 1}
 	programmer := &EBPFRouteProgrammer{
-		openMapSetFn: func(string) (*serviceroutemap.Tables, []*ebpf.Map, [7]ebpf.MapID, error) {
+		openMapSetFn: func(string) (*serviceroutemap.Tables, []*ebpf.Map, [8]ebpf.MapID, error) {
 			return serviceroutemap.New(routes, access, reverse, grants,
 					&recordingTable{identityTokens: map[uint32]uint64{}}, &recordingTable{}, &recordingTable{}), nil,
-				[7]ebpf.MapID{1, 2, 3, 4, 5, 6}, nil
+				[8]ebpf.MapID{1, 2, 3, 4, 5, 6}, nil
 		},
 	}
 
@@ -282,7 +282,7 @@ func TestInitializePreservesPinnedState(t *testing.T) {
 
 func TestInitializeDoesNotDisableFinalizedPolicy(t *testing.T) {
 	policyState := &recordingTable{}
-	ids := [7]ebpf.MapID{1, 2, 3, 4, 5, 6}
+	ids := [8]ebpf.MapID{1, 2, 3, 4, 5, 6}
 	programmer := &EBPFRouteProgrammer{
 		tables: serviceroutemap.New(
 			&recordingTable{}, &recordingTable{}, &recordingTable{}, &recordingTable{},
@@ -297,7 +297,7 @@ func TestInitializeDoesNotDisableFinalizedPolicy(t *testing.T) {
 		appliedRefs:      make(map[string][][]appliedEntry),
 		desiredIntents:   make(map[string][]RouteIntent),
 		pendingRollbacks: make(map[string][]appliedEntry),
-		readMapIDsFn:     func(string) ([7]ebpf.MapID, error) { return ids, nil },
+		readMapIDsFn:     func(string) ([8]ebpf.MapID, error) { return ids, nil },
 	}
 	if err := programmer.Initialize(); err != nil {
 		t.Fatalf("first Initialize: %v", err)
@@ -316,9 +316,9 @@ func TestInitializeDoesNotDisableFinalizedPolicy(t *testing.T) {
 func TestInitializeRepairsRecreatedInterface(t *testing.T) {
 	routes, access, grants := &recordingTable{}, &recordingTable{}, &recordingTable{}
 	programmer := testRouteProgrammer(routes, access, grants)
-	programmer.mapIDs = [7]ebpf.MapID{1, 2, 3, 4, 5, 6}
+	programmer.mapIDs = [8]ebpf.MapID{1, 2, 3, 4, 5, 6}
 	programmer.mapIDsValid = true
-	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return programmer.mapIDs, nil }
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	consumerIndex := uint32(10)
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		switch name {
@@ -354,9 +354,9 @@ func TestInitializeRepairsRecreatedInterface(t *testing.T) {
 func TestInitializeRepairsSharedRefsAsCompleteGeneration(t *testing.T) {
 	routes, access, grants := &recordingTable{}, &recordingTable{}, &recordingTable{}
 	programmer := testRouteProgrammer(routes, access, grants)
-	programmer.mapIDs = [7]ebpf.MapID{1, 2, 3, 4, 5, 6}
+	programmer.mapIDs = [8]ebpf.MapID{1, 2, 3, 4, 5, 6}
 	programmer.mapIDsValid = true
-	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return programmer.mapIDs, nil }
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	consumerIndex := uint32(10)
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		switch name {
@@ -406,9 +406,9 @@ func TestInitializeRepairsSharedRefsAsCompleteGeneration(t *testing.T) {
 func TestInitializeRetriesIncompleteGenerationRebuild(t *testing.T) {
 	routes, access, grants := &recordingTable{}, &recordingTable{}, &recordingTable{}
 	programmer := testRouteProgrammer(routes, access, grants)
-	programmer.mapIDs = [7]ebpf.MapID{1, 2, 3, 4, 5, 6}
+	programmer.mapIDs = [8]ebpf.MapID{1, 2, 3, 4, 5, 6}
 	programmer.mapIDsValid = true
-	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return programmer.mapIDs, nil }
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	consumerIndex := uint32(10)
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		if name == testConsumerDeviceName {
@@ -443,9 +443,9 @@ func TestInitializeRetriesIncompleteGenerationRebuild(t *testing.T) {
 func TestRemoveRetryClearsSyncFailure(t *testing.T) {
 	routes := &recordingTable{deleteErr: errors.New("transient delete failure")}
 	programmer := testRouteProgrammer(routes, &recordingTable{}, &recordingTable{})
-	programmer.mapIDs = [7]ebpf.MapID{1, 2, 3, 4, 5, 6}
+	programmer.mapIDs = [8]ebpf.MapID{1, 2, 3, 4, 5, 6}
 	programmer.mapIDsValid = true
-	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return programmer.mapIDs, nil }
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		if name == testConsumerDeviceName {
 			return 10, nil
@@ -473,12 +473,12 @@ func TestRemoveRetryClearsSyncFailure(t *testing.T) {
 func TestMapReplacementClearsStaleMutationFailure(t *testing.T) {
 	routes := &recordingTable{deleteErr: errors.New("transient delete failure")}
 	programmer := testRouteProgrammer(routes, &recordingTable{}, &recordingTable{})
-	oldIDs := [7]ebpf.MapID{1, 2, 3, 4, 5, 6, 7}
-	newIDs := [7]ebpf.MapID{11, 12, 13, 14, 15, 16, 17}
+	oldIDs := [8]ebpf.MapID{1, 2, 3, 4, 5, 6, 7}
+	newIDs := [8]ebpf.MapID{11, 12, 13, 14, 15, 16, 17}
 	currentIDs := oldIDs
 	programmer.mapIDs = oldIDs
 	programmer.mapIDsValid = true
-	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return currentIDs, nil }
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return currentIDs, nil }
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		if name == testConsumerDeviceName {
 			return 10, nil
@@ -502,7 +502,7 @@ func TestMapReplacementClearsStaleMutationFailure(t *testing.T) {
 	newRoutes := &recordingTable{}
 	newPolicyState := &recordingTable{}
 	currentIDs = newIDs
-	programmer.openMapSetFn = func(string) (*serviceroutemap.Tables, []*ebpf.Map, [7]ebpf.MapID, error) {
+	programmer.openMapSetFn = func(string) (*serviceroutemap.Tables, []*ebpf.Map, [8]ebpf.MapID, error) {
 		return serviceroutemap.New(newRoutes, &recordingTable{}, &recordingTable{}, &recordingTable{},
 			&recordingTable{identityTokens: map[uint32]uint64{10: 100, 20: 200}}, newPolicyState,
 			&recordingTable{}), nil, newIDs, nil
@@ -525,10 +525,10 @@ func TestMapReplacementClearsStaleMutationFailure(t *testing.T) {
 func TestInitializeReopensAllMapsWhenGrantMapChanges(t *testing.T) {
 	oldRoutes, oldAccess, oldGrants := &recordingTable{}, &recordingTable{}, &recordingTable{}
 	programmer := testRouteProgrammer(oldRoutes, oldAccess, oldGrants)
-	programmer.mapIDs = [7]ebpf.MapID{1, 2, 3, 4, 5, 6}
+	programmer.mapIDs = [8]ebpf.MapID{1, 2, 3, 4, 5, 6}
 	programmer.mapIDsValid = true
 	currentIDs := programmer.mapIDs
-	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return currentIDs, nil }
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return currentIDs, nil }
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		if name == testConsumerDeviceName {
 			return 10, nil
@@ -543,7 +543,7 @@ func TestInitializeReopensAllMapsWhenGrantMapChanges(t *testing.T) {
 	newRoutes, newAccess, newGrants := &recordingTable{}, &recordingTable{}, &recordingTable{}
 	openCalls := 0
 	currentIDs[3] = 99
-	programmer.openMapSetFn = func(string) (*serviceroutemap.Tables, []*ebpf.Map, [7]ebpf.MapID, error) {
+	programmer.openMapSetFn = func(string) (*serviceroutemap.Tables, []*ebpf.Map, [8]ebpf.MapID, error) {
 		openCalls++
 		return serviceroutemap.New(
 			newRoutes, newAccess, &recordingTable{}, newGrants,
@@ -682,9 +682,9 @@ func leasedTestProgrammer() (*EBPFRouteProgrammer, *persistedPolicyTable, *persi
 	programmer := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
 	programmer.tables = serviceroutemap.New(routes, &persistedPolicyTable{}, &persistedPolicyTable{}, grants,
 		&recordingTable{identityTokens: map[uint32]uint64{10: 100, 20: 200, 42: 420}}, gate, &persistedPolicyTable{})
-	programmer.mapIDs = [7]ebpf.MapID{1, 2, 3, 4, 5, 6, 7}
+	programmer.mapIDs = [8]ebpf.MapID{1, 2, 3, 4, 5, 6, 7}
 	programmer.mapIDsValid = true
-	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return programmer.mapIDs, nil }
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		switch name {
 		case testConsumerDeviceName:
@@ -815,9 +815,9 @@ func TestMapReplayPrunesExpiredAuthorizationAndPreservesStartupGate(t *testing.T
 					t.Fatal(err)
 				}
 			}
-			newIDs := [7]ebpf.MapID{11, 12, 13, 14, 15, 16, 17}
-			programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return newIDs, nil }
-			programmer.openMapSetFn = func(string) (*serviceroutemap.Tables, []*ebpf.Map, [7]ebpf.MapID, error) {
+			newIDs := [8]ebpf.MapID{11, 12, 13, 14, 15, 16, 17}
+			programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return newIDs, nil }
+			programmer.openMapSetFn = func(string) (*serviceroutemap.Tables, []*ebpf.Map, [8]ebpf.MapID, error) {
 				return serviceroutemap.New(newRoutes, &persistedPolicyTable{}, &persistedPolicyTable{},
 					&persistedPolicyTable{}, &recordingTable{identityTokens: map[uint32]uint64{10: 100, 20: 200, 42: 420}},
 					newGate, &persistedPolicyTable{}), nil, newIDs, nil

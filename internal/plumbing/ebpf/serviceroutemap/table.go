@@ -27,6 +27,7 @@ const (
 	attachmentIdentityMapName = "attachment_identity_table"
 	servicePolicyStateMapName = "service_policy_state_table"
 	serviceDenyMapName        = "service_deny_table"
+	servicePeerMapName        = "service_peer_table"
 
 	familyIPv6 = uint8(0)
 	familyIPv4 = uint8(1)
@@ -196,6 +197,7 @@ type Tables struct {
 	identities   usidmap.Table
 	policyState  usidmap.Table
 	deny         usidmap.Table
+	peers        usidmap.Table
 	leaseClockFn func() (time.Time, uint64, error)
 }
 
@@ -248,12 +250,19 @@ func OpenPinned(pinDir string) (*Tables, []*ebpf.Map, error) {
 		}
 		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", serviceDenyMapName, err)
 	}
+	peers, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, servicePeerMapName), nil)
+	if err != nil {
+		for _, opened := range []*ebpf.Map{routes, access, reverse, remoteGrants, identities, policyState, deny} {
+			_ = opened.Close()
+		}
+		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", servicePeerMapName, err)
+	}
 	return New(
 			usidmap.KernelTable{Map: routes}, usidmap.KernelTable{Map: access},
 			usidmap.KernelTable{Map: reverse}, usidmap.KernelTable{Map: remoteGrants}, usidmap.KernelTable{Map: identities},
-			usidmap.KernelTable{Map: policyState}, usidmap.KernelTable{Map: deny},
+			usidmap.KernelTable{Map: policyState}, usidmap.KernelTable{Map: deny}, usidmap.KernelTable{Map: peers},
 		),
-		[]*ebpf.Map{routes, access, reverse, remoteGrants, identities, policyState, deny}, nil
+		[]*ebpf.Map{routes, access, reverse, remoteGrants, identities, policyState, deny, peers}, nil
 }
 
 // New wraps map implementations. Production uses OpenPinned; tests use fakes.
@@ -271,7 +280,69 @@ func New(routes, access, reverse usidmap.Table, remoteGrants ...usidmap.Table) *
 	if len(remoteGrants) > 3 {
 		t.deny = remoteGrants[3]
 	}
+	if len(remoteGrants) > 4 {
+		t.peers = remoteGrants[4]
+	}
 	return t
+}
+
+type servicePeerKey struct {
+	Ifindex uint32
+	Family  uint8
+	Pad     [3]uint8
+}
+
+type servicePeerValue struct {
+	Token   uint64
+	Address [16]uint8
+}
+
+// SetPeer records an attachment's next hop, fenced by its current identity.
+func (t *Tables) SetPeer(ifindex uint32, token uint64, address net.IP) error {
+	if address == nil {
+		return nil
+	}
+	if t.peers == nil {
+		return errors.New("serviceroutemap: service peer table unavailable")
+	}
+	key := servicePeerKey{Ifindex: ifindex}
+	if address.To4() != nil {
+		key.Family = familyIPv4
+	}
+	value := servicePeerValue{Token: token}
+	copy(value.Address[:], addressBytes(address))
+	if err := t.peers.Put(key, value); err != nil {
+		return fmt.Errorf("serviceroutemap: register attachment next hop: %w", err)
+	}
+	return nil
+}
+
+func (t *Tables) sweepPeers() error {
+	if t.peers == nil {
+		return nil
+	}
+	iterator := t.peers.Iterate()
+	var key servicePeerKey
+	var value servicePeerValue
+	var stale []servicePeerKey
+	for iterator.Next(&key, &value) {
+		token, err := t.IdentityToken(key.Ifindex)
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return err
+		}
+		if err != nil || token != value.Token {
+			stale = append(stale, key)
+		}
+	}
+	if err := iterator.Err(); err != nil {
+		return fmt.Errorf("serviceroutemap: iterate attachment next hops: %w", err)
+	}
+	for _, key := range stale {
+		if err := t.peers.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("serviceroutemap: remove attachment next hop: %w", err)
+		}
+	}
+	return nil
 }
 
 // SetPolicyEnabled gates all service authorization while the controller is
@@ -519,6 +590,7 @@ func (t *Tables) SweepPolicy(snapshot PolicySnapshot) error {
 			deleteErrs = append(deleteErrs, fmt.Errorf("serviceroutemap: sweep deny catalog: %w", err))
 		}
 	}
+	deleteErrs = append(deleteErrs, t.sweepPeers())
 	return errors.Join(deleteErrs...)
 }
 

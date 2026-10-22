@@ -1454,6 +1454,27 @@ struct {
 	__type(value, __u64);
 } attachment_identity_table SEC(".maps");
 
+struct service_peer_key {
+	__u32 ifindex;
+	__u8 family;
+	__u8 pad[3];
+};
+
+struct service_peer_value {
+	__u64 token;
+	__u8 address[16];
+};
+
+// One next hop per attachment and family delivers virtual service addresses
+// through the guest's neighbor entry without resolving each virtual address.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 65536);
+	__type(key, struct service_peer_key);
+	__type(value, struct service_peer_value);
+} service_peer_table SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -4537,12 +4558,22 @@ static USID_ALWAYS_INLINE long service_redirect(struct __sk_buff *skb,
 	if (service_decrement_hop(skb, scratch))
 		return TC_ACT_SHOT;
 	__builtin_memset(&scratch->neigh, 0, sizeof(scratch->neigh));
+	struct service_peer_key key = {.ifindex = target_ifindex, .family = scratch->meta_family};
+	struct service_peer_value *peer = bpf_map_lookup_elem(&service_peer_table, &key);
+	if (peer && !service_identity_matches(target_ifindex, peer->token))
+		return TC_ACT_SHOT;
 	if (scratch->meta_family == USID_EGRESS_ROUTE_FAMILY_INET6) {
 		scratch->neigh.nh_family = USID_AF_INET6;
-		__builtin_memcpy(scratch->neigh.ipv6_nh, scratch->dest_addr, 16);
+		if (peer)
+			__builtin_memcpy(scratch->neigh.ipv6_nh, peer->address, 16);
+		else
+			__builtin_memcpy(scratch->neigh.ipv6_nh, scratch->dest_addr, 16);
 	} else {
 		scratch->neigh.nh_family = USID_AF_INET;
-		__builtin_memcpy(&scratch->neigh.ipv4_nh, scratch->dest_addr, 4);
+		if (peer)
+			__builtin_memcpy(&scratch->neigh.ipv4_nh, peer->address, 4);
+		else
+			__builtin_memcpy(&scratch->neigh.ipv4_nh, scratch->dest_addr, 4);
 	}
 	return bpf_redirect_neigh(target_ifindex, &scratch->neigh, sizeof(scratch->neigh), 0);
 }
