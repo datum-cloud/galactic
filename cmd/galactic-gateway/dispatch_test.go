@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -95,7 +96,8 @@ type gatewayProcess struct {
 func startGateway(t *testing.T, d pinDirs) gatewayProcess {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	objs, dispatcher, public, _, leaseDone, err := joinDispatcher(ctx, d.dispatch, d.edge, xdpmode.Native, false, nil)
+	objs, dispatcher, public, _, leaseDone, err := joinDispatcher(ctx, d.dispatch, d.edge, xdpmode.Native,
+		true, false, nil)
 	if err != nil {
 		cancel()
 		t.Fatalf("gateway joinDispatcher: %v", err)
@@ -209,6 +211,51 @@ func TestAttachDirect_RefusesAnUplinkTheShardRunsOn(t *testing.T) {
 	}
 	if got := xdpProgID(t, uplink); got != root {
 		t.Errorf("uplink runs %d after the refusal, want the root %d untouched", got, root)
+	}
+}
+
+// TestJoinDispatcher_ReturnOnly: a gateway restarted with its datapath off
+// empties the load-balancing slot its predecessor left live, so the uplink
+// stops claiming VIP traffic at once, and keeps edge_return on the internal
+// link, so replies a backend node still sends through it are forwarded.
+func TestJoinDispatcher_ReturnOnly(t *testing.T) {
+	d := testPinDirs(t)
+	internal, _ := testUplink(t, "gwro")
+
+	gw := startGateway(t, d)
+	gw.stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	objs, dispatcher, public, ret, leaseDone, err := joinDispatcher(ctx, d.dispatch, d.edge, xdpmode.Native,
+		false, true, nil)
+	if err != nil {
+		cancel()
+		t.Fatalf("return-only joinDispatcher: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		<-leaseDone
+		_ = dispatcher.Close()
+		_ = objs.Close()
+	})
+	if public != nil {
+		t.Errorf("return-only join returned a public set %v, want nil", public)
+	}
+	if ret == nil {
+		t.Fatal("return-only join returned no return set")
+	}
+	if missing := ret.reconcile(ctx, []string{internal}); len(missing) != 0 {
+		t.Errorf("return program missing %v", missing)
+	}
+	live, err := dispatcher.LiveSlots()
+	if err != nil {
+		t.Fatalf("LiveSlots: %v", err)
+	}
+	if slices.Contains(live, xdpdispatch.SlotGatewayLB) {
+		t.Errorf("load-balancing slot still live after a return-only join: %v", live)
+	}
+	if !slices.Contains(live, xdpdispatch.SlotGatewayReturn) {
+		t.Errorf("return slot not live after a return-only join: %v", live)
 	}
 }
 

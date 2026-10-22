@@ -1528,6 +1528,81 @@ func TestNetworkGatewayReconciler_DisabledWithdrawsAndSkipsTheEngine(t *testing.
 	}
 }
 
+// fakeReturnPath records the addresses each sync set.
+type fakeReturnPath struct {
+	synced [][]netip.Addr
+	err    error
+}
+
+func (f *fakeReturnPath) SyncReturnAddrs(addrs []netip.Addr) error {
+	f.synced = append(f.synced, slices.Clone(addrs))
+	return f.err
+}
+
+// TestNetworkGatewayReconciler_DisabledKeepsClaimingReplies: a node with its
+// datapath off still forwards a backend's replies through it, so its return
+// path claims every rule's VIP, IPv4 ones only with IPv4 VIPs on and IPv4
+// forwarding turned on, while the node still withdraws and skips the engine.
+func TestNetworkGatewayReconciler_DisabledKeepsClaimingReplies(t *testing.T) {
+	const otherVIP = "2001:db8:6::6"
+	tests := []struct {
+		name     string
+		ipv4VIPs bool
+		fwdErr   error
+		want     []string
+		wantErr  bool
+	}{
+		{name: "IPv6 only", want: []string{testVIP, otherVIP}},
+		{name: "IPv4 VIPs on", ipv4VIPs: true, want: []string{testVIP4, testVIP, otherVIP}},
+		{
+			name: "IPv4 forwarding fails", ipv4VIPs: true, fwdErr: errors.New("read-only /proc/sys"),
+			want: []string{testVIP, otherVIP}, wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newRuleTestScheme(t)
+			fakeClient := newIndexedClientBuilder(scheme).
+				WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkService{}).
+				WithObjects(newTestGateway(testNodeGWA),
+					newTestRule("dual", testVPCRef, testVIP, testVIP4),
+					newTestRule("shared", testVPCRef, testVIP, "::ffff:"+testVIP4),
+					newTestRule("other", testVPCRef, otherVIP)).
+				Build()
+
+			engine := newFakeGatewayEngine()
+			returnPath := &fakeReturnPath{}
+			r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+			r.Disabled = true
+			r.IPv4VIPs = tc.ipv4VIPs
+			r.ReturnPath = returnPath
+			r.EnsureIPv4Forwarding = func() error { return tc.fwdErr }
+
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Reconcile error = %v, want error %v", err, tc.wantErr)
+			}
+			if engine.reconciled != 0 {
+				t.Errorf("engine reconciled %d times while disabled, want 0", engine.reconciled)
+			}
+			if len(returnPath.synced) != 1 {
+				t.Fatalf("return path synced %d times, want 1", len(returnPath.synced))
+			}
+			var want []netip.Addr
+			for _, s := range tc.want {
+				want = append(want, netip.MustParseAddr(s))
+			}
+			if !slices.Equal(returnPath.synced[0], want) {
+				t.Errorf("return path claims %v, want %v", returnPath.synced[0], want)
+			}
+			cond := gatewayReadyCondition(t, fakeClient)
+			if cond.Status != metav1.ConditionFalse || cond.Reason != reasonDatapathDisabled {
+				t.Errorf("Ready = %v/%q, want False/%q", cond.Status, cond.Reason, reasonDatapathDisabled)
+			}
+		})
+	}
+}
+
 // TestIsNodeAdvertisement_LabelledNamesMatchExactly: a disabled node "edge-1"
 // withdraws its own advertisements on every reconcile, so it must never match
 // another node's advertisement, labelled or not, or a CNI-written one that

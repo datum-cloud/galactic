@@ -149,6 +149,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		}
 	})
 	var gwDatapath gateway.Datapath = gateway.NoopDatapath{}
+	var returnPath controller.ReturnAddrSyncer
 	var ipv4 *ipv4Forwarding
 	if ipv4VIPs {
 		ipv4 = newIPv4Forwarding()
@@ -166,10 +167,20 @@ func runCmd(cfg *config.GatewayConfig) error {
 		if err != nil {
 			return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 		}
+	} else if len(cfg.InternalInterfaces) > 0 {
+		// The reconciler below keeps this node's VIPs withdrawn, so nothing
+		// is load-balanced here, but backend nodes can still send replies
+		// through it, which only edge_return lets past connection tracking.
+		turnOffDatapath(ctx, xdpdispatch.PinDir, xdpdispatch.SlotGatewayLB)
+		rp, err := setupReturnPath(ctx, cfg.InternalInterfaces, cfg.XDPAttach, ipv4, ctrlmetrics.Registry, coverage)
+		if err != nil {
+			return fmt.Errorf("setup edge gateway return path: %w", err)
+		}
+		returnPath = rp
 	} else {
 		// Nothing to attach and nothing to load: the reconciler below keeps
 		// this node's VIPs withdrawn, so no rule reaches this datapath.
-		turnOffDatapath(ctx, xdpdispatch.PinDir)
+		turnOffDatapath(ctx, xdpdispatch.PinDir, xdpdispatch.SlotGatewayLB, xdpdispatch.SlotGatewayReturn)
 	}
 	// Only now is the datapath attached and its rule table reachable. Report
 	// serving from here on, not from process start.
@@ -187,13 +198,14 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// rewrites nothing, so a gateway node has no translation source of its own
 	// to publish.
 	if err := (&controller.NetworkGatewayReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		Engine:    gwEngine,
-		NodeName:  nodeName,
-		APIReader: mgr.GetAPIReader(),
-		Disabled:  !cfg.DatapathEnabled,
-		IPv4VIPs:  ipv4VIPs,
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		Engine:     gwEngine,
+		NodeName:   nodeName,
+		APIReader:  mgr.GetAPIReader(),
+		Disabled:   !cfg.DatapathEnabled,
+		ReturnPath: returnPath,
+		IPv4VIPs:   ipv4VIPs,
 		// Forwarding follows need: on only once an IPv4 VIP is about to load.
 		EnsureIPv4Forwarding: ipv4.enable,
 	}).SetupWithManager(mgr); err != nil {

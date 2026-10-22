@@ -228,10 +228,20 @@ unloads them, and leaves IPv6 untouched. See
 [Rolling out and rolling back IPv4 VIPs](#rolling-out-and-rolling-back-ipv4-vips).
 
 `GALACTIC_GATEWAY_DATAPATH_ENABLED=false` keeps the process up and its pod
-ready but loads nothing, empties the gateway's dispatcher slots, and
-withdraws every one of this node's VIP advertisements. The NetworkGateway's
-`Ready` reads `False` with reason `DatapathDisabled`. The public interface
-is not required while it is off, and no SRv6 address is derived.
+ready, empties the gateway's load-balancing dispatcher slot, and withdraws
+every one of this node's VIP advertisements. The NetworkGateway's `Ready`
+reads `False` with reason `DatapathDisabled`. The public interface is not
+required while it is off, and no SRv6 address is derived.
+
+A node with its datapath off can still carry replies: a backend node sends
+every VIP reply out one uplink, whichever gateway node took the request. So
+with `GALACTIC_GATEWAY_INTERNAL_INTERFACES` set, the node keeps `edge_return`
+on those interfaces and claims replies from every VIP that any NetworkService
+in its namespace lists. IPv4 VIPs are included only with
+`GALACTIC_GATEWAY_IPV4_VIPS` on. With no internal interfaces set it loads
+nothing. Turning the datapath off is therefore not a way to stop a node that
+cannot load XDP programs at all. Take such a node out of the fabric's
+forwarding path instead.
 
 `GALACTIC_GATEWAY_PROC_SYS_PATH` is the procfs root the datapath writes its
 forwarding sysctls under (`net.ipv6.conf.<iface>.forwarding` and
@@ -642,13 +652,6 @@ that has not reported, for example one whose datapath is turned off,
 advertises none of the rule's VIPs, so clients never reach it. The
 `Programmed` and `Ready` messages say how many registered gateway nodes have
 not reported.
-
-A node with its datapath off can still receive replies. A backend node that
-reaches clients through more than one edge node spreads its replies across
-them, and a node with its datapath off does not claim the ones that reach it,
-so those TCP connections fail. `Ready` stays `True` while this happens. Treat
-a gateway node that has not reported as a reason to check the rule's traffic,
-not as proof that the node carries none of it.
 
 `Ready` leaves out `IPv4Served` while the rule has an IPv6 VIP. IPv4 VIPs are
 off on most gateways, and a rule whose IPv6 VIP serves is not down because its

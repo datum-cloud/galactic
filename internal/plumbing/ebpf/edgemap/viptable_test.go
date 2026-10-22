@@ -7,6 +7,7 @@ package edgemap
 import (
 	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -685,5 +686,82 @@ func TestVIPTable_ReconcileSparesAnAddressClaimedAfterTheSnapshot(t *testing.T) 
 	if len(entries) != 1 {
 		t.Errorf("ListReturn returned %d entries, want 1 (an address at or above the cutoff must survive)",
 			len(entries))
+	}
+}
+
+// TestVIPTable_ReplaceReturnAddrs covers a node whose datapath is turned off:
+// it keeps claiming replies from every VIP it is given, IPv4 among them, and
+// holds no rule and no address beyond those.
+func TestVIPTable_ReplaceReturnAddrs(t *testing.T) {
+	stats := newFakeStatsTable()
+	addrs := newFakeAddrTable()
+	returnStats := newFakeReturnStatsTable()
+	vt := NewVIPTable(newFakeTable(), stats, addrs, returnStats)
+
+	served := testKey(t)
+	if err := vt.Register(served, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	wireKey, err := toWireKey(served)
+	if err != nil {
+		t.Fatalf("toWireKey: %v", err)
+	}
+	if err := stats.Put(wireKey, edgeprog.EdgedsrVipStatsValue{Packets: 7}); err != nil {
+		t.Fatalf("seed vip_stats_table row: %v", err)
+	}
+	stale := mustAddr(t, "2001:db8:1::99")
+	staleKey := edgeprog.EdgedsrVipAddrKey{Vip: stale.As16()}
+	if err := addrs.Put(staleKey, edgeprog.EdgedsrVipAddrValue{Generation: 1}); err != nil {
+		t.Fatalf("seed vip_addr_table row: %v", err)
+	}
+	if err := returnStats.Put(staleKey, edgeprog.EdgedsrVipStatsValue{Packets: 3}); err != nil {
+		t.Fatalf("seed vip_return_stats_table row: %v", err)
+	}
+
+	v4 := mustAddr(t, "192.0.2.10")
+	want := []netip.Addr{served.VIP, v4}
+	for pass := range 2 {
+		if err := vt.ReplaceReturnAddrs(want); err != nil {
+			t.Fatalf("pass %d: ReplaceReturnAddrs: %v", pass, err)
+		}
+
+		rules, err := vt.List()
+		if err != nil {
+			t.Fatalf("pass %d: List: %v", pass, err)
+		}
+		if len(rules) != 0 {
+			t.Errorf("pass %d: vip_table holds %d rows, want 0", pass, len(rules))
+		}
+		var leftover edgeprog.EdgedsrVipStatsValue
+		if err := stats.Lookup(wireKey, &leftover); !errors.Is(err, ebpf.ErrKeyNotExist) {
+			t.Errorf("pass %d: vip_stats_table row survived: %+v, err %v", pass, leftover, err)
+		}
+
+		returns, err := vt.ListReturn()
+		if err != nil {
+			t.Fatalf("pass %d: ListReturn: %v", pass, err)
+		}
+		got := make([]netip.Addr, 0, len(returns))
+		for _, r := range returns {
+			got = append(got, r.VIP)
+		}
+		slices.SortFunc(got, netip.Addr.Compare)
+		if !slices.Equal(got, []netip.Addr{v4, served.VIP}) {
+			t.Errorf("pass %d: vip_addr_table holds %v, want %v", pass, got, want)
+		}
+		if err := returnStats.Lookup(staleKey, &leftover); !errors.Is(err, ebpf.ErrKeyNotExist) {
+			t.Errorf("pass %d: stale address kept its counters: %+v, err %v", pass, leftover, err)
+		}
+	}
+
+	if err := vt.ReplaceReturnAddrs(nil); err != nil {
+		t.Fatalf("ReplaceReturnAddrs(nil): %v", err)
+	}
+	returns, err := vt.ListReturn()
+	if err != nil {
+		t.Fatalf("ListReturn: %v", err)
+	}
+	if len(returns) != 0 {
+		t.Errorf("vip_addr_table holds %d rows after replacing with none, want 0", len(returns))
 	}
 }

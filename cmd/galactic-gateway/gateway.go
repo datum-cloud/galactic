@@ -56,6 +56,65 @@ var gatewayDatapathKeepAlive struct {
 // rejects either being empty before this runs, since this binary exists only to
 // run the gateway role.
 //
+// srv6Address is written into the encapsulation config as this node's plain
+// SRv6-reachable source. It is never a translation source and is not what makes
+// the return path work.
+//
+// See installGateway for the attachment itself.
+func setupGatewayDatapath(
+	ctx context.Context, publicInterface string, internalInterfaces []string, srv6Address, attachMode string,
+	ipv4 *ipv4Forwarding, metricsReg prometheus.Registerer, coverage *datapathCoverage,
+) (gateway.Datapath, error) {
+	encapSrc, err := netip.ParseAddr(srv6Address)
+	if err != nil {
+		return nil, fmt.Errorf("parse gateway SRv6 address %q: %w", srv6Address, err)
+	}
+	var datapath *gateway.KernelDatapath
+	err = installGateway(ctx, publicInterface, internalInterfaces, attachMode, ipv4, metricsReg, coverage,
+		func(objs *edgeprog.EdgedsrObjects) (edgemetrics.VPCAttribution, error) {
+			dp, err := gateway.NewKernelDatapath(objs, encapSrc)
+			if err != nil {
+				return nil, fmt.Errorf("construct kernel datapath: %w", err)
+			}
+			datapath = dp
+			return dp, nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	return datapath, nil
+}
+
+// setupReturnPath loads the edge program and attaches only edge_return, to
+// internalInterfaces, for a node whose datapath is turned off. The node
+// load-balances nothing, but a backend node can still send VIP replies through
+// it, and without edge_return the kernel drops every TCP one (see
+// edgedsr.c's edge_return comment). In dispatch mode the gateway's
+// load-balancing slot is emptied and only the return slot is filled and
+// leased. See installGateway for the attachment itself.
+func setupReturnPath(
+	ctx context.Context, internalInterfaces []string, attachMode string, ipv4 *ipv4Forwarding,
+	metricsReg prometheus.Registerer, coverage *datapathCoverage,
+) (*gateway.KernelReturnPath, error) {
+	var returnPath *gateway.KernelReturnPath
+	err := installGateway(ctx, "", internalInterfaces, attachMode, ipv4, metricsReg, coverage,
+		func(objs *edgeprog.EdgedsrObjects) (edgemetrics.VPCAttribution, error) {
+			returnPath = gateway.NewKernelReturnPath(objs)
+			return nil, nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	return returnPath, nil
+}
+
+// installGateway loads the edge program, attaches edge_lb to publicInterface
+// and edge_return to internalInterfaces, and calls build with the loaded
+// objects. An empty publicInterface attaches edge_return alone. build's
+// attribution labels the metrics collector registered on metricsReg, which
+// reads the maps live at every scrape; nil leaves the vpc label empty. A
+// failure in build undoes the attachment.
+//
 // publicInterface is usually attached to directly, but one naming a Linux
 // bonding master is expanded to that bond's slaves instead, native-mode XDP
 // being unable to attach to a bonding master. Every sysctl and every attachment
@@ -76,36 +135,29 @@ var gatewayDatapathKeepAlive struct {
 // connection tracking has no record of the forward half to judge it against
 // (see edgedsr.c's edge_return comment). An empty list attaches nothing and
 // leaves the packet path unchanged.
-//
-// srv6Address is written into the encapsulation config as this node's plain
-// SRv6-reachable source. It is never a translation source and is not what makes
-// the return path work.
-//
-// metricsReg additionally gets a collector registered against it once the
-// objects are loaded, reading the maps live at every scrape.
-func setupGatewayDatapath(
-	ctx context.Context, publicInterface string, internalInterfaces []string, srv6Address, attachMode string,
+func installGateway(
+	ctx context.Context, publicInterface string, internalInterfaces []string, attachMode string,
 	ipv4 *ipv4Forwarding, metricsReg prometheus.Registerer, coverage *datapathCoverage,
-) (gateway.Datapath, error) {
-	encapSrc, err := netip.ParseAddr(srv6Address)
-	if err != nil {
-		return nil, fmt.Errorf("parse gateway SRv6 address %q: %w", srv6Address, err)
-	}
-
-	targets, err := edgeattach.ResolveTargets(publicInterface)
-	if err != nil {
-		return nil, fmt.Errorf("resolve edge gateway public interface %q: %w", publicInterface, err)
+	build func(*edgeprog.EdgedsrObjects) (edgemetrics.VPCAttribution, error),
+) error {
+	withLB := publicInterface != ""
+	var targets []string
+	if withLB {
+		var err error
+		if targets, err = edgeattach.ResolveTargets(publicInterface); err != nil {
+			return fmt.Errorf("resolve edge gateway public interface %q: %w", publicInterface, err)
+		}
 	}
 
 	returnTargets, err := resolveReturnTargets(internalInterfaces)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// edge_return forwards anything sourced from a VIP. On a public uplink an
 	// external client could source a packet from a VIP and have it forwarded
 	// unexamined, so an internal interface may never resolve to a public one.
 	if overlap := publicReturnOverlap(targets, returnTargets); len(overlap) > 0 {
-		return nil, fmt.Errorf("edge gateway internal interfaces %v resolve to %v, which the public interface %q "+
+		return fmt.Errorf("edge gateway internal interfaces %v resolve to %v, which the public interface %q "+
 			"also resolves to; the return program must never run on a public uplink", internalInterfaces,
 			overlap, publicInterface)
 	}
@@ -116,7 +168,7 @@ func setupGatewayDatapath(
 	// mode without it.
 	modeDecision, err := xdpmode.Select(append(slices.Clone(targets), returnTargets...)...)
 	if err != nil {
-		return nil, fmt.Errorf("select the XDP attach mode for this host: %w", err)
+		return fmt.Errorf("select the XDP attach mode for this host: %w", err)
 	}
 	mode := modeDecision.Mode
 	slog.Info("Selected the XDP attach mode for this host", "mode", mode.String(), "reason", modeDecision.Reason)
@@ -134,7 +186,7 @@ func setupGatewayDatapath(
 	// while the process reported healthy.
 	for _, target := range targets {
 		if err := sysctl.ConfigureFIBLookupUplinkSysctls(target); err != nil {
-			return nil, fmt.Errorf("configure IPv6 forwarding on public interface %q: %w", target, err)
+			return fmt.Errorf("configure IPv6 forwarding on public interface %q: %w", target, err)
 		}
 	}
 
@@ -144,7 +196,7 @@ func setupGatewayDatapath(
 	// return path counts a drop per packet.
 	for _, target := range returnTargets {
 		if err := sysctl.ConfigureFIBLookupUplinkSysctls(target); err != nil {
-			return nil, fmt.Errorf("configure IPv6 forwarding on internal interface %q: %w", target, err)
+			return fmt.Errorf("configure IPv6 forwarding on internal interface %q: %w", target, err)
 		}
 	}
 
@@ -167,13 +219,13 @@ func setupGatewayDatapath(
 		lease := xdpdispatch.NewLeaseMetrics(edgemetrics.Namespace)
 		if err := lease.Register(metricsReg); err != nil {
 			stopLeases()
-			return nil, fmt.Errorf("register dispatcher lease metrics: %w", err)
+			return fmt.Errorf("register dispatcher lease metrics: %w", err)
 		}
 		objs, dispatcher, publicSet, returnSet, leaseDone, err = joinDispatcher(leaseCtx, xdpdispatch.PinDir,
-			edgeattach.PinDir, mode, len(returnTargets) > 0, lease)
+			edgeattach.PinDir, mode, withLB, len(returnTargets) > 0, lease)
 		if err != nil {
 			stopLeases()
-			return nil, err
+			return err
 		}
 		abandon = func() {
 			stopLeases()
@@ -188,17 +240,17 @@ func setupGatewayDatapath(
 			returnTargets)
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	datapath, err := gateway.NewKernelDatapath(objs, encapSrc)
+	attribution, err := build(objs)
 	if err != nil {
 		abandon()
-		return nil, fmt.Errorf("construct kernel datapath: %w", err)
+		return err
 	}
-	if err := metricsReg.Register(edgemetrics.NewCollectorFromObjects(objs, datapath)); err != nil {
+	if err := metricsReg.Register(edgemetrics.NewCollectorFromObjects(objs, attribution)); err != nil {
 		abandon()
-		return nil, fmt.Errorf("register edge gateway metrics collector: %w", err)
+		return fmt.Errorf("register edge gateway metrics collector: %w", err)
 	}
 
 	gatewayDatapathKeepAlive.objs = objs
@@ -209,14 +261,17 @@ func setupGatewayDatapath(
 	for _, target := range append(slices.Clone(targets), returnTargets...) {
 		coverage.configured[target] = true
 	}
-	missing := publicSet.reconcile(ctx, targets)
+	var missing []string
+	if publicSet != nil {
+		missing = publicSet.reconcile(ctx, targets)
+	}
 	if returnSet != nil {
 		missing = append(missing, returnSet.reconcile(ctx, returnTargets)...)
 	}
 	coverage.set(missing)
 	go watchTargets(ctx, publicInterface, internalInterfaces, publicSet, returnSet, coverage, ipv4)
 
-	return datapath, nil
+	return nil
 }
 
 // targetSet keeps one of the gateway's programs on a set of interfaces and
@@ -244,7 +299,8 @@ func (s dispatchSet) reconcile(ctx context.Context, targets []string) []string {
 // dispatcher from those targets. A dispatcher still serving the egress shard
 // there is refused rather than taken: detaching it would cut egress.
 // Attachment is all-or-nothing, as it has always been in this mode, and every
-// attach is in mode.
+// attach is in mode. With no targets, edge_lb is attached nowhere and the
+// returned public set is nil.
 func attachDirect(ctx context.Context, dispatchDir, edgeDir string, mode xdpmode.Mode,
 	targets, returnTargets []string,
 ) (
@@ -261,19 +317,26 @@ func attachDirect(ctx context.Context, dispatchDir, edgeDir string, mode xdpmode
 		return nil, nil, nil, fmt.Errorf("load edge gateway eBPF datapath: %w", err)
 	}
 
-	xdpLinks, err := edgeattach.Attach(objs.EdgeLb, targets, mode)
-	if err != nil {
-		_ = objs.Close()
-		return nil, nil, nil, fmt.Errorf("attach edge gateway datapath to public interfaces %v: %w", targets, err)
-	}
-	publicSet, err := xdpattach.NewSet(objs.EdgeLb, targets, xdpLinks, mode)
-	if err != nil {
-		closeAll(xdpLinks)
-		_ = objs.Close()
-		return nil, nil, nil, err
+	var (
+		xdpLinks  []link.Link
+		publicSet targetSet
+	)
+	if len(targets) > 0 {
+		xdpLinks, err = edgeattach.Attach(objs.EdgeLb, targets, mode)
+		if err != nil {
+			_ = objs.Close()
+			return nil, nil, nil, fmt.Errorf("attach edge gateway datapath to public interfaces %v: %w", targets, err)
+		}
+		set, err := xdpattach.NewSet(objs.EdgeLb, targets, xdpLinks, mode)
+		if err != nil {
+			closeAll(xdpLinks)
+			_ = objs.Close()
+			return nil, nil, nil, err
+		}
+		publicSet = directSet{set}
 	}
 	if len(returnTargets) == 0 {
-		return objs, directSet{publicSet}, nil, nil
+		return objs, publicSet, nil, nil
 	}
 
 	returnLinks, err := edgeattach.Attach(objs.EdgeReturn, returnTargets, mode)
@@ -289,19 +352,21 @@ func attachDirect(ctx context.Context, dispatchDir, edgeDir string, mode xdpmode
 		_ = objs.Close()
 		return nil, nil, nil, err
 	}
-	return objs, directSet{publicSet}, directSet{returnSet}, nil
+	return objs, publicSet, directSet{returnSet}, nil
 }
 
 // joinDispatcher opens the node's XDP dispatcher under dispatchDir, loads the
 // programs against its maps, with their own maps pinned under edgeDir, fills
-// the gateway's slots, and renews both slots' leases for the life of ctx. The
+// the gateway's slots, and renews their leases for the life of ctx. The
 // return slot is filled whether or not this node has internal interfaces:
-// without the role on any interface it never runs. Nothing is attached here;
-// the returned sets put the dispatcher on the targets and read coverage back.
-// The returned channel closes once both lease loops have stopped, which a
-// caller waits on before closing the dispatcher. mode is the host's XDP attach
-// mode, which the dispatcher attaches in and migrates its links to.
-func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, mode xdpmode.Mode, withReturn bool,
+// without the role on any interface it never runs. Without withLB the
+// load-balancing slot is emptied instead, leased by nothing, and the returned
+// public set is nil. Nothing is attached here; the returned sets put the
+// dispatcher on the targets and read coverage back. The returned channel
+// closes once every lease loop has stopped, which a caller waits on before
+// closing the dispatcher. mode is the host's XDP attach mode, which the
+// dispatcher attaches in and migrates its links to.
+func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, mode xdpmode.Mode, withLB, withReturn bool,
 	lease *xdpdispatch.LeaseMetrics,
 ) (
 	*edgeprog.EdgedsrObjects, *xdpdispatch.Dispatcher, targetSet, targetSet, <-chan struct{}, error,
@@ -326,19 +391,28 @@ func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, mode xdpmo
 		_ = objs.Close()
 		return fail(err)
 	}
-	err = errors.Join(lock.Fill(xdpdispatch.SlotGatewayLB, objs.EdgeLb),
-		lock.Fill(xdpdispatch.SlotGatewayReturn, objs.EdgeReturn))
+	slots := []xdpdispatch.Slot{xdpdispatch.SlotGatewayReturn}
+	lbErr := lock.Clear(xdpdispatch.SlotGatewayLB)
+	if withLB {
+		slots = append(slots, xdpdispatch.SlotGatewayLB)
+		lbErr = lock.Fill(xdpdispatch.SlotGatewayLB, objs.EdgeLb)
+	}
+	err = errors.Join(lbErr, lock.Fill(xdpdispatch.SlotGatewayReturn, objs.EdgeReturn))
 	lock.Unlock()
 	if err != nil {
 		_ = objs.Close()
 		return fail(fmt.Errorf("install edge gateway datapath in the XDP dispatcher: %w", err))
 	}
 
-	public, err := xdpattach.NewDispatchSet(dispatcher, xdpdispatch.SlotGatewayLB, xdpdispatch.RolePublicLB,
-		objs.EdgeLb)
-	if err != nil {
-		_ = objs.Close()
-		return fail(err)
+	var public targetSet
+	if withLB {
+		ps, err := xdpattach.NewDispatchSet(dispatcher, xdpdispatch.SlotGatewayLB, xdpdispatch.RolePublicLB,
+			objs.EdgeLb)
+		if err != nil {
+			_ = objs.Close()
+			return fail(err)
+		}
+		public = dispatchSet{ps}
 	}
 	var ret targetSet
 	if withReturn {
@@ -354,7 +428,7 @@ func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, mode xdpmo
 	// A lapsed lease shows as missing interfaces within one coverage resync,
 	// since every Reconcile reads the lease back.
 	var leases sync.WaitGroup
-	for _, slot := range []xdpdispatch.Slot{xdpdispatch.SlotGatewayLB, xdpdispatch.SlotGatewayReturn} {
+	for _, slot := range slots {
 		leases.Go(func() {
 			dispatcher.Lease(ctx, slot, lease.Observe(slot, func(err error) {
 				slog.Error("Cannot renew an edge gateway slot's lease in the XDP dispatcher; "+
@@ -368,7 +442,7 @@ func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, mode xdpmo
 		close(leaseDone)
 	}()
 	slog.Info("Edge gateway datapath installed in the XDP dispatcher", "pinDir", dispatchDir, "mode", mode.String())
-	return objs, dispatcher, dispatchSet{public}, ret, leaseDone, nil
+	return objs, dispatcher, public, ret, leaseDone, nil
 }
 
 // publicReturnOverlap returns the return targets that are also public targets.
@@ -382,20 +456,19 @@ func publicReturnOverlap(targets, returnTargets []string) []string {
 	return overlap
 }
 
-// turnOffDatapath turns this node's gateway off. A dispatch-mode predecessor
-// left the gateway's programs in the XDP dispatcher with live leases, so its
-// slots are emptied here and the dispatcher passes their traffic on at once.
-// Every other slot, and the dispatcher itself, are left alone. A failure is
-// logged, not returned: the leases lapse on their own within
-// xdpdispatch.LeaseTTL.
-func turnOffDatapath(ctx context.Context, pinDir string) {
-	if err := xdpattach.ClearDispatcherSlots(ctx, pinDir, xdpdispatch.SlotGatewayLB,
-		xdpdispatch.SlotGatewayReturn); err != nil {
+// turnOffDatapath turns this node's gateway load balancing off. A
+// dispatch-mode predecessor left the gateway's programs in the XDP dispatcher
+// with live leases, so slots are emptied here and the dispatcher passes their
+// traffic on at once. Every other slot, and the dispatcher itself, are left
+// alone. A failure is logged, not returned: the leases lapse on their own
+// within xdpdispatch.LeaseTTL.
+func turnOffDatapath(ctx context.Context, pinDir string, slots ...xdpdispatch.Slot) {
+	if err := xdpattach.ClearDispatcherSlots(ctx, pinDir, slots...); err != nil {
 		slog.Error("Cannot empty the edge gateway's slots in the XDP dispatcher; "+
 			"they stop claiming packets once their leases lapse", "lease", xdpdispatch.LeaseTTL, "err", err)
 	}
-	slog.Info("Edge gateway datapath is turned off; this node attaches nothing and advertises no VIP",
-		"env", config.EnvGatewayDatapathEnabled)
+	slog.Info("Edge gateway datapath is turned off; this node load-balances nothing and advertises no VIP",
+		"env", config.EnvGatewayDatapathEnabled, "slots", slots)
 }
 
 // datapathCoverage is which of the datapath's resolved targets it is not
@@ -464,18 +537,23 @@ func (c *datapathCoverage) configure(targets []string) []string {
 
 // watchTargets re-resolves the public and internal interfaces on every netlink
 // link or route change, until ctx is done, and attaches each set's program to
-// any resolved target it does not hold yet. A resolution failure, such as a
-// bond in the moment between losing a member and enslaving its replacement,
-// keeps every attachment and skips that pass.
+// any resolved target it does not hold yet. A nil set is skipped. A
+// resolution failure, such as a bond in the moment between losing a member and
+// enslaving its replacement, keeps every attachment and skips that pass.
 func watchTargets(ctx context.Context, publicInterface string, internalInterfaces []string,
 	publicSet, returnSet targetSet, coverage *datapathCoverage, ipv4 *ipv4Forwarding,
 ) {
 	xdpattach.OnNetlinkChange(ctx, func() {
-		targets, err := edgeattach.ResolveTargets(publicInterface)
-		if err != nil {
-			slog.Warn("Re-resolve edge gateway public interface failed; keeping current attachments",
-				"interface", publicInterface, "err", err)
-			return
+		var (
+			targets []string
+			err     error
+		)
+		if publicSet != nil {
+			if targets, err = edgeattach.ResolveTargets(publicInterface); err != nil {
+				slog.Warn("Re-resolve edge gateway public interface failed; keeping current attachments",
+					"interface", publicInterface, "err", err)
+				return
+			}
 		}
 		var returnTargets []string
 		if returnSet != nil {
@@ -493,8 +571,11 @@ func watchTargets(ctx context.Context, publicInterface string, internalInterface
 
 		// A target whose forwarding sysctls failed is left out of the set and
 		// counted missing; configure retries it on the next pass.
-		ready := coverage.configure(targets)
-		missing := append(publicSet.reconcile(ctx, ready), uncovered(targets, ready)...)
+		var missing []string
+		if publicSet != nil {
+			ready := coverage.configure(targets)
+			missing = append(publicSet.reconcile(ctx, ready), uncovered(targets, ready)...)
+		}
 		if returnSet != nil {
 			ready := coverage.configure(returnTargets)
 			missing = append(missing, returnSet.reconcile(ctx, ready)...)

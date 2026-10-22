@@ -253,8 +253,9 @@ task verify:gateway-ingress-ipv4
 # traffic (#710)
 task verify:gateway-restart
 
-# Turn dfw-worker2's datapath off; the ingress check must fail, then pass
-# again. Disruptive -- not part of `task verify`
+# Turn dfw-worker2's datapath off; the ingress check through it must fail and
+# the one through dfw-worker3 pass, then the one through it pass again.
+# Disruptive -- not part of `task verify`
 task verify:gateway-detach
 
 # Take dfw-worker2's fabric links down; the ingress check through dfw-worker3
