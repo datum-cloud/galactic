@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,7 +30,13 @@ type memStore struct {
 
 var errTimeout = errors.New("store reply lost")
 
-func newMemStore() *memStore { return &memStore{records: map[string]Record{}} }
+// newMemStore starts with an explicitly released claim so tests of renewal and
+// takeover can establish their first holder without a cold-start quarantine.
+func newMemStore() *memStore {
+	return &memStore{records: map[string]Record{
+		"att": {Key: "att", Released: true, Version: "bootstrap", Incarnation: "bootstrap"},
+	}}
+}
 
 var errUnreachable = errors.New("store unreachable")
 
@@ -261,6 +268,8 @@ func simulate(seeds uint64, p Params, drift float64) (violations, takeovers int)
 			n := nodes[rng.IntN(len(nodes))]
 			active = n
 			switch {
+			case rng.IntN(20) == 0:
+				delete(store.records, "att")
 			case rng.IntN(10) == 0:
 				n.cut = !n.cut
 			case n.lease != nil:
@@ -420,5 +429,103 @@ func TestCeilingWithoutWallClockIsRejected(t *testing.T) {
 	a.Ceiling = time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	if _, err := a.Acquire(context.Background(), "att"); err == nil {
 		t.Fatal("acquire with a ceiling and no wall clock succeeded")
+	}
+}
+
+func TestDeletedClaimWaitsBeforeRecreation(t *testing.T) {
+	ctx := t.Context()
+	store, clock := newMemStore(), &manualClock{}
+	old := newInstance("old", store, clock)
+	lease, err := old.Acquire(ctx, "att")
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(store.records, "att")
+	replacement := newInstance("new", store, clock)
+	if _, err := replacement.Acquire(ctx, "att"); !errors.Is(err, ErrHeld) {
+		t.Fatalf("missing record granted authority: %v", err)
+	}
+	clock.now = params.Duration / 2
+	if !lease.Valid(clock.now) {
+		t.Fatal("test must retain old authority")
+	}
+	if _, err := replacement.Acquire(ctx, "att"); !errors.Is(err, ErrHeld) {
+		t.Fatalf("early takeover: %v", err)
+	}
+	clock.now = params.TakeoverWait()
+	next, err := replacement.Acquire(ctx, "att")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Valid(clock.now) {
+		t.Fatal("dual authority")
+	}
+	if next.Incarnation == lease.Incarnation || next.Incarnation == "" {
+		t.Fatal("record identity reused")
+	}
+	if err := old.Release(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	if store.records["att"].Released {
+		t.Fatal("stale release changed new incarnation")
+	}
+}
+
+func TestRepeatedDeletionRestartsQuarantine(t *testing.T) {
+	ctx := t.Context()
+	store, clock := newMemStore(), &manualClock{}
+	delete(store.records, "att")
+	in := newInstance("holder", store, clock)
+	if _, err := in.Acquire(ctx, "att"); !errors.Is(err, ErrHeld) {
+		t.Fatal(err)
+	}
+	first := store.records["att"].Incarnation
+	clock.now = params.TakeoverWait()
+	delete(store.records, "att")
+	if _, err := in.Acquire(ctx, "att"); !errors.Is(err, ErrHeld) {
+		t.Fatalf("recreated record skipped wait: %v", err)
+	}
+	if store.records["att"].Incarnation == first {
+		t.Fatal("reused incarnation")
+	}
+	clock.now += params.TakeoverWait()
+	if _, err := in.Acquire(ctx, "att"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExpiredLeaseCannotRenew(t *testing.T) {
+	store, clock := newMemStore(), &manualClock{}
+	in := newInstance("holder", store, clock)
+	lease, err := in.Acquire(t.Context(), "att")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := store.records["att"]
+	clock.now = lease.Deadline
+	if _, err := in.Renew(t.Context(), lease); !errors.Is(err, ErrLost) {
+		t.Fatalf("expired renewal: %v", err)
+	}
+	if store.records["att"] != before {
+		t.Fatal("expired renewal mutated record")
+	}
+}
+
+func TestConcurrentAcquire(t *testing.T) {
+	// All calls use one instance, whose mutex also serializes this test store.
+	store := newMemStore()
+	delete(store.records, "att")
+	in := &Instance{ID: "holder", Store: store, Params: params, Clock: func() time.Duration { return 0 }}
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Go(func() {
+			if _, err := in.Acquire(t.Context(), "att"); !errors.Is(err, ErrHeld) {
+				t.Errorf("cold acquire: %v", err)
+			}
+		})
+	}
+	wg.Wait()
+	if len(in.observed) != 1 {
+		t.Fatalf("observations = %d", len(in.observed))
 	}
 }
