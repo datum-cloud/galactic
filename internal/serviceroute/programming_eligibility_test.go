@@ -11,12 +11,18 @@ import (
 	network "go.datum.net/galactic/api/network/v1alpha1"
 )
 
+const (
+	eligibilityNamespace  = "tenant"
+	eligibilityRoleLabel  = "role"
+	eligibilityPolicyName = "policy"
+)
+
 func TestProgrammingPlanKeepsEligibleConsumersIndependent(t *testing.T) {
 	attachment := func(name, node, role string) *cloud.VPCAttachment {
 		return &cloud.VPCAttachment{
 			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "tenant", Name: name, UID: types.UID(name), Generation: 1,
-				Labels: map[string]string{"role": role},
+				Namespace: eligibilityNamespace, Name: name, UID: types.UID(name), Generation: 1,
+				Labels: map[string]string{eligibilityRoleLabel: role},
 			},
 			Status: cloud.VPCAttachmentStatus{
 				ObservedGeneration: 1, Node: node, VPC: "vpc", VPCAttachment: name, HostInterface: name,
@@ -28,15 +34,17 @@ func TestProgrammingPlanKeepsEligibleConsumersIndependent(t *testing.T) {
 		}
 	}
 	policy := &network.ServiceRoutePolicy{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "policy", UID: "policy"},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: eligibilityNamespace, Name: eligibilityPolicyName, UID: eligibilityPolicyName,
+		},
 		Spec: network.ServiceRoutePolicySpec{
-			AttachmentSelector: metav1.LabelSelector{MatchLabels: map[string]string{"role": "consumer"}},
+			AttachmentSelector: metav1.LabelSelector{MatchLabels: map[string]string{eligibilityRoleLabel: "consumer"}},
 		},
 	}
 	endpoint := &network.ServiceEndpoint{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "endpoint", UID: "endpoint"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: eligibilityNamespace, Name: "endpoint", UID: "endpoint"},
 		Spec: network.ServiceEndpointSpec{DeliveryMode: network.ServiceEndpointDeliveryModePreferNodeLocal,
-			AttachmentSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "producer"}}}}
+			AttachmentSelector: &metav1.LabelSelector{MatchLabels: map[string]string{eligibilityRoleLabel: "producer"}}}}
 	healthy := attachment("healthy", "node-a", "consumer")
 	sibling := attachment("sibling", "node-c", "consumer")
 	producer := attachment("producer", "node-b", "producer")
