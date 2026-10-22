@@ -19,9 +19,9 @@ func TestCleanupDrainsFailedApplyRollbackBeforeFinalize(t *testing.T) {
 	routes := &recordingTable{putErr: applyFailure}
 	access := &recordingTable{deleteErr: rollbackFailure}
 	programmer := testRouteProgrammer(routes, access, &recordingTable{})
-	programmer.mapIDs = [7]ebpf.MapID{1, 2, 3, 4, 5, 6, 7}
+	programmer.mapIDs = [8]ebpf.MapID{1, 2, 3, 4, 5, 6, 7}
 	programmer.mapIDsValid = true
-	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return programmer.mapIDs, nil }
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		switch name {
 		case testConsumerDeviceName:
