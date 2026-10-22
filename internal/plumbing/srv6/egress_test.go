@@ -521,3 +521,76 @@ func TestResolvePublicUplink_NoResolvedNeighborFailsLoudly(t *testing.T) {
 		t.Error("ResolvePublicUplink() = nil error with no resolved neighbor, want an error")
 	}
 }
+
+// TestResolvePublicUplink_SkipsAnUplinkWithoutCarrier covers a compute node
+// dual-homed to two edge nodes that loses the first: that uplink keeps its
+// stale neighbor entry but has no carrier, and replies must go out the second.
+func TestResolvePublicUplink_SkipsAnUplinkWithoutCarrier(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		downName = "srv6puptest2"
+		upName   = "srv6puptest3"
+	)
+	downMAC := net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x02}
+	upMAC := net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x03}
+
+	t.Setenv(config.EnvCNIEBPFInterfaces, downName+","+upName)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	var wantIndex int
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		for i, uplink := range []struct {
+			name string
+			mac  net.HardwareAddr
+		}{{downName, downMAC}, {upName, upMAC}} {
+			dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: uplink.name}}
+			if err := netlink.LinkAdd(dummy); err != nil {
+				return fmt.Errorf("add dummy link: %w", err)
+			}
+			link, err := netlink.LinkByName(uplink.name)
+			if err != nil {
+				return fmt.Errorf("look up link: %w", err)
+			}
+			if err := netlink.NeighAdd(&netlink.Neigh{
+				LinkIndex:    link.Attrs().Index,
+				Family:       netlink.FAMILY_V6,
+				State:        netlink.NUD_PERMANENT,
+				IP:           net.ParseIP(fmt.Sprintf("2001:db8:a:%d::1", i)),
+				HardwareAddr: uplink.mac,
+			}); err != nil {
+				return fmt.Errorf("add neighbor: %w", err)
+			}
+			if uplink.name == upName {
+				if err := netlink.LinkSetUp(link); err != nil {
+					return fmt.Errorf("set link up: %w", err)
+				}
+				wantIndex = link.Attrs().Index
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	var gotIndex int
+	var gotDmac net.HardwareAddr
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		var doErr error
+		gotIndex, gotDmac, _, doErr = ResolvePublicUplink()
+		return doErr
+	})
+	if err != nil {
+		t.Fatalf("ResolvePublicUplink: %v", err)
+	}
+	if gotIndex != wantIndex || gotDmac.String() != upMAC.String() {
+		t.Errorf("ResolvePublicUplink() = %d %s, want %d %s (the uplink with carrier)", gotIndex, gotDmac,
+			wantIndex, upMAC)
+	}
+}

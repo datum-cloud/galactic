@@ -632,6 +632,15 @@ tasks:
     cmds:
       - LAB={{.LAB}} ./scripts/verify-gateway-detach.sh
 
+  # Not part of `verify`: cuts dfw-worker2 off the fabric while it runs.
+  # Proves a gateway node that goes away entirely leaves the VIP serving
+  # through the site's other gateway node, which needs dfw-worker to move its
+  # replies off the uplink to the node that went.
+  "verify:gateway-node-loss":
+    desc: Take dfw-worker2's fabric links down, confirm ingress passes through dfw-worker3, then through dfw-worker2 once restored
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-gateway-node-loss.sh
+
   # Switches dfw's galactic-cni to hashed egress mode for its duration and
   # back to ordered mode at the end, so the NAT checks around it, which expect
   # dfw-worker2 to carry dfw's egress, see the lab as they left it. dfw is the

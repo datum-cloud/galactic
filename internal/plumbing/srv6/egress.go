@@ -10,6 +10,7 @@ import (
 	"net"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
@@ -162,11 +163,14 @@ func EgressDefaultRouteDel(tableID uint32) error {
 // toward, regardless of that reply's own destination. See struct
 // public_uplink_value in usid.c for how the datapath uses them.
 //
-// The interface comes from attach.ResolveInterfaces, so this cannot disagree
+// The interfaces come from attach.ResolveInterfaces, so this cannot disagree
 // with where the datapath is attached. A fabric uplink is point to point and
 // has exactly one real neighbor, so this takes the first resolved IPv6
-// neighbor on it instead of doing a destination-specific route lookup.
-// Returns an error when no neighbor has resolved yet.
+// neighbor on it instead of doing a destination-specific route lookup. On a
+// node with several uplinks, such as a compute node dual-homed to two edge
+// nodes, it takes the first in that order that has carrier and a resolved
+// neighbor, so a reply is never sent toward an edge node that is gone.
+// Returns an error when no uplink qualifies.
 func ResolvePublicUplink() (linkIndex int, dmac, smac net.HardwareAddr, err error) {
 	names, err := attach.ResolveInterfaces()
 	if err != nil {
@@ -176,27 +180,45 @@ func ResolvePublicUplink() (linkIndex int, dmac, smac net.HardwareAddr, err erro
 		return 0, nil, nil, errors.New("attach.ResolveInterfaces returned no interfaces")
 	}
 
-	link, err := netlink.LinkByName(names[0])
+	var errs []error
+	for _, name := range names {
+		linkIndex, dmac, smac, err := resolveUplinkNeighbor(name)
+		if err == nil {
+			return linkIndex, dmac, smac, nil
+		}
+		errs = append(errs, err)
+	}
+	return 0, nil, nil, errors.Join(errs...)
+}
+
+// resolveUplinkNeighbor returns name's link index, its first resolved
+// non-multicast IPv6 neighbor's MAC and its own MAC, or an error when the link
+// has no carrier or no such neighbor.
+func resolveUplinkNeighbor(name string) (linkIndex int, dmac, smac net.HardwareAddr, err error) {
+	link, err := netlink.LinkByName(name)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("look up interface %q: %w", names[0], err)
+		return 0, nil, nil, fmt.Errorf("look up interface %q: %w", name, err)
+	}
+	if link.Attrs().RawFlags&unix.IFF_LOWER_UP == 0 {
+		return 0, nil, nil, fmt.Errorf("%s (an SRv6/underlay-facing interface) has no carrier", name)
 	}
 	smac = link.Attrs().HardwareAddr
 	linkIndex = link.Attrs().Index
 
 	neighs, err := netlink.NeighList(linkIndex, netlink.FAMILY_V6)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("list neighbors on %s: %w", names[0], err)
+		return 0, nil, nil, fmt.Errorf("list neighbors on %s: %w", name, err)
 	}
 	for _, n := range neighs {
 		// Every IPv6 interface auto-populates a permanent, already-resolved
 		// multicast neighbor entry for its group memberships, whether or not
 		// any real next hop was ever discovered. Skipping multicast leaves
 		// only the genuine neighbor.
-		if len(n.HardwareAddr) == 6 && n.IP != nil && !n.IP.IsMulticast() {
+		if len(n.HardwareAddr) == 6 && n.IP != nil && !n.IP.IsMulticast() && n.State&netlink.NUD_FAILED == 0 {
 			return linkIndex, n.HardwareAddr, smac, nil
 		}
 	}
 	return 0, nil, nil, fmt.Errorf(
-		"no resolved neighbor found on %s (the SRv6/underlay-facing interface) -- the underlay hasn't converged yet",
-		names[0])
+		"no resolved neighbor found on %s (an SRv6/underlay-facing interface) -- the underlay hasn't converged yet",
+		name)
 }

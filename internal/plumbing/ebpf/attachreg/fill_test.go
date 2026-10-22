@@ -240,6 +240,58 @@ func TestFillNode_NotConfiguredWritesNothing(t *testing.T) {
 	}
 }
 
+// TestFillNode_PublicUplinkFollowsTheResolvedUplink checks a backend node's
+// reply next hop moves when its uplink changes, such as a dual-homed node
+// losing the edge node behind its first uplink, is left alone while it
+// matches, and survives a pass that resolves nothing.
+func TestFillNode_PublicUplinkFollowsTheResolvedUplink(t *testing.T) {
+	m := newMemMaps(true)
+	node := Node{Locator: "2001:db8:1::/48", NodeID: 5}
+	first := net.HardwareAddr{0xaa, 0, 0, 0, 0, 0x01}
+	second := net.HardwareAddr{0xaa, 0, 0, 0, 0, 0x02}
+	smac := net.HardwareAddr{0xbb, 0, 0, 0, 0, 0x01}
+	resolveTo := func(index int, dmac net.HardwareAddr, err error) UplinkResolver {
+		return func() (int, net.HardwareAddr, net.HardwareAddr, error) { return index, dmac, smac, err }
+	}
+	steps := []struct {
+		name        string
+		resolve     UplinkResolver
+		wantWritten int
+		wantIndex   int
+		wantDmac    net.HardwareAddr
+		wantErr     bool
+	}{
+		{name: "first uplink", resolve: resolveTo(3, first, nil), wantWritten: 1, wantIndex: 3, wantDmac: first},
+		{name: "unchanged", resolve: resolveTo(3, first, nil), wantIndex: 3, wantDmac: first},
+		{name: "first uplink lost", resolve: resolveTo(4, second, nil), wantWritten: 1, wantIndex: 4, wantDmac: second},
+		{
+			name: "nothing resolves", resolve: resolveTo(0, nil, errors.New("no carrier")),
+			wantIndex: 4, wantDmac: second, wantErr: true,
+		},
+	}
+	for _, step := range steps {
+		written, uplinkErr, err := m.FillNode(node, step.resolve)
+		if err != nil {
+			t.Fatalf("%s: FillNode: %v", step.name, err)
+		}
+		if (uplinkErr != nil) != step.wantErr {
+			t.Errorf("%s: uplinkErr = %v, want error %v", step.name, uplinkErr, step.wantErr)
+		}
+		if written.PublicUplink != step.wantWritten {
+			t.Errorf("%s: wrote public_uplink_table %d times, want %d", step.name, written.PublicUplink,
+				step.wantWritten)
+		}
+		index, dmac, _, ok, err := m.PublicUplink.Get()
+		if err != nil || !ok {
+			t.Fatalf("%s: public_uplink_table Get = ok %v, err %v", step.name, ok, err)
+		}
+		if index != step.wantIndex || dmac.String() != step.wantDmac.String() {
+			t.Errorf("%s: public_uplink_table = %d %s, want %d %s", step.name, index, dmac, step.wantIndex,
+				step.wantDmac)
+		}
+	}
+}
+
 // memCounterTable is memTable as a usidmap.CounterTable, creating a row only
 // when it is absent.
 type memCounterTable struct{ memTable }

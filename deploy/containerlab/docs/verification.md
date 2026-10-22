@@ -257,6 +257,11 @@ task verify:gateway-restart
 # again. Disruptive -- not part of `task verify`
 task verify:gateway-detach
 
+# Take dfw-worker2's fabric links down; the ingress check through dfw-worker3
+# must pass, then the one through dfw-worker2 once the links are back.
+# Disruptive -- not part of `task verify`
+task verify:gateway-node-loss
+
 # By hand: one TCP request to dfw's VIP, from the off-fabric host
 echo probe | docker exec -i clab-gvpc-remote-host \
   socat -t2 -T3 - 'TCP6:[2001:db8:6060:1::1]:80'

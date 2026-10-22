@@ -477,8 +477,9 @@ const publicUplinkKey = uint32(0)
 
 // Set writes this node's fabric-uplink next hop. linkIndex is the interface to
 // redirect out of, and dmac and smac the Ethernet addressing to reach that next
-// hop, both exactly 6 bytes. Called once at datapath registration time, the same
-// lifecycle as NodeSourceAddress.Set.
+// hop, both exactly 6 bytes. Called at datapath registration time, the same
+// lifecycle as NodeSourceAddress.Set; Update rewrites it as the uplink
+// changes.
 //
 // linkIndex 0 is rejected: usid_egress reads it as "not configured yet" and
 // falls through to egress_route_table rather than redirect out a nonexistent
@@ -498,6 +499,24 @@ func (p *PublicUplink) Set(linkIndex int, dmac, smac net.HardwareAddr) error {
 		return fmt.Errorf("egressroutemap: public_uplink_table: set: %w", err)
 	}
 	return nil
+}
+
+// Update writes this node's fabric-uplink next hop as Set does, unless it
+// already holds exactly that, and reports whether it wrote. A node whose
+// uplink loses its carrier or neighbor calls it with the next hop it resolves
+// now.
+func (p *PublicUplink) Update(linkIndex int, dmac, smac net.HardwareAddr) (changed bool, err error) {
+	cur, curDmac, curSmac, ok, err := p.Get()
+	if err != nil {
+		return false, err
+	}
+	if ok && cur == linkIndex && bytes.Equal(curDmac, dmac) && bytes.Equal(curSmac, smac) {
+		return false, nil
+	}
+	if err := p.Set(linkIndex, dmac, smac); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Get reads this node's registered fabric-uplink next hop and reports whether
