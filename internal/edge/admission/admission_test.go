@@ -7,6 +7,9 @@ package admission
 import (
 	"net/netip"
 	"testing"
+	"time"
+
+	authenticationv1 "k8s.io/api/authentication/v1"
 )
 
 const (
@@ -14,107 +17,235 @@ const (
 	connectIP    = "connect-ip"
 	contractV1   = "v1alpha1"
 	unapproved   = "unapproved"
-	prodVPC      = "prod"
+	prodVPC      = "vpc-uid-prod"
+	grantUID     = "grant-uid-1"
+	providerNS   = "edge-connect-ip"
+	providerSA   = "connect-ip"
+	podA         = "pod-uid-a"
+	podB         = "pod-uid-b"
+	maxSkew      = 2 * time.Second
+	configGroup  = "connect.galactic.datumapis.com"
+	configKind   = "ConnectIPConfig"
+	socketAccess = "SocketAccess"
+	otherName    = "other"
 )
 
-var packetV1 = Capability{Name: packetAccess, Version: "v1"}
+var (
+	packetV1 = Capability{Name: packetAccess, Version: "v1"}
+	epoch    = time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	callerA  = Identity{ServiceAccount: ServiceAccount{Namespace: providerNS, Name: providerSA}, PodUID: podA}
+)
 
 func registry() map[string]Provider {
 	return map[string]Provider{
 		connectIP: {
 			Name: connectIP, Approved: true, ContractVersions: []string{contractV1},
-			Capabilities: []Capability{packetV1},
-			ConfigGroup:  "connect.galactic.datumapis.com", ConfigKind: "ConnectIPConfig",
+			Capabilities:    []Capability{packetV1},
+			ServiceAccounts: []ServiceAccount{callerA.ServiceAccount},
+			ConfigGroup:     configGroup, ConfigKind: configKind,
 		},
 		unapproved: {
 			Name: unapproved, ContractVersions: []string{contractV1}, Capabilities: []Capability{packetV1},
-			ConfigGroup: "x.example.com", ConfigKind: "XConfig",
+			ServiceAccounts: []ServiceAccount{callerA.ServiceAccount},
+			ConfigGroup:     "x.example.com", ConfigKind: "XConfig",
 		},
 	}
 }
 
-var grants = []Grant{{
-	VPC: prodVPC, Capabilities: []string{packetAccess},
-	Prefixes: []netip.Prefix{netip.MustParsePrefix("fd00:5::/48")},
-}}
+func grant() Grant {
+	return Grant{
+		UID: grantUID, Generation: 3, Provider: connectIP, VPC: prodVPC,
+		Capabilities: []string{packetAccess},
+		Prefixes:     []netip.Prefix{netip.MustParsePrefix("fd00:5::/48")},
+		ValidUntil:   epoch.Add(time.Hour),
+	}
+}
+
+func grants(gs ...Grant) map[string]Grant {
+	m := map[string]Grant{}
+	for _, g := range gs {
+		m[g.UID] = g
+	}
+	return m
+}
 
 func request() Request {
 	return Request{
+		Identity: callerA, PodUID: podA,
 		Provider: connectIP, ContractVersion: contractV1, Capabilities: []Capability{packetV1},
-		VPC: prodVPC, Prefixes: []netip.Prefix{netip.MustParsePrefix("fd00:5:0:1::/64")},
-		ConfigGroup: "connect.galactic.datumapis.com", ConfigKind: "ConnectIPConfig",
+		Grant: GrantRef{UID: grantUID, Generation: 3},
+		VPC:   prodVPC, Prefixes: []netip.Prefix{netip.MustParsePrefix("fd00:5:0:1::/64")},
+		ConfigGroup: configGroup, ConfigKind: configKind,
 	}
 }
 
 func TestAdmit(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*Request)
+		mutate func(*Request, *Grant)
+		now    time.Time
 		want   Reason
 	}{
-		{"Admitted", func(*Request) {}, ""},
-		{"UnknownProvider", func(r *Request) { r.Provider = "missing" }, UnknownProvider},
-		{"UnapprovedProvider", func(r *Request) {
+		{"Admitted", func(*Request, *Grant) {}, epoch, ""},
+		{"NoIdentity", func(r *Request, _ *Grant) { r.Identity = Identity{} }, epoch, Unauthenticated},
+		{"IdentityWithoutPod", func(r *Request, _ *Grant) { r.Identity.PodUID = "" }, epoch, Unauthenticated},
+		{"AssertsAnotherPod", func(r *Request, _ *Grant) { r.PodUID = podB }, epoch, IdentityMismatch},
+		{"NoAssertedPod", func(r *Request, _ *Grant) { r.PodUID = "" }, epoch, ""},
+		{"ServiceAccountNotTheProviders", func(r *Request, _ *Grant) {
+			r.Identity.ServiceAccount.Name = otherName
+		}, epoch, IdentityNotAuthorized},
+		{"ServiceAccountInAnotherNamespace", func(r *Request, _ *Grant) {
+			r.Identity.ServiceAccount.Namespace = "tenant"
+		}, epoch, IdentityNotAuthorized},
+		{"UnknownProvider", func(r *Request, _ *Grant) { r.Provider = "missing" }, epoch, UnknownProvider},
+		{"UnapprovedProvider", func(r *Request, _ *Grant) {
 			r.Provider, r.ConfigGroup, r.ConfigKind = unapproved, "x.example.com", "XConfig"
-		}, ProviderNotApproved},
-		{"UnsupportedContractVersion", func(r *Request) { r.ContractVersion = "v2" }, UnsupportedContractVersion},
-		{"UnsupportedCapabilityVersion", func(r *Request) {
+		}, epoch, ProviderNotApproved},
+		{"UnsupportedContractVersion", func(r *Request, _ *Grant) {
+			r.ContractVersion = "v2"
+		}, epoch, UnsupportedContractVersion},
+		{"UnsupportedCapabilityVersion", func(r *Request, _ *Grant) {
 			r.Capabilities = []Capability{{Name: packetAccess, Version: "v2"}}
-		}, UnsupportedCapability},
-		{"CapabilityTheProviderLacks", func(r *Request) {
+		}, epoch, UnsupportedCapability},
+		{"CapabilityTheProviderLacks", func(r *Request, _ *Grant) {
 			r.Capabilities = []Capability{{Name: "RouteExchange", Version: "v1"}}
-		}, UnsupportedCapability},
-		{"ForeignConfigurationKind", func(r *Request) { r.ConfigKind = "TailnetBinding" }, InvalidConfiguration},
-		{"VPCNotGranted", func(r *Request) { r.VPC = "other" }, VPCNotGranted},
-		{"PrefixOutsideGrant", func(r *Request) {
+		}, epoch, UnsupportedCapability},
+		{"ForeignConfigurationKind", func(r *Request, _ *Grant) {
+			r.ConfigKind = "TailnetBinding"
+		}, epoch, InvalidConfiguration},
+		{"NoGrantNamed", func(r *Request, _ *Grant) { r.Grant = GrantRef{} }, epoch, InvalidRequest},
+		{"UnknownGrant", func(r *Request, _ *Grant) { r.Grant.UID = "missing" }, epoch, GrantRevoked},
+		{"GrantBeingDeleted", func(_ *Request, g *Grant) { g.Revoked = true }, epoch, GrantRevoked},
+		{"StaleGrantReplayed", func(_ *Request, g *Grant) { g.Generation = 4 }, epoch, StaleGrant},
+		{"GrantAheadOfCache", func(r *Request, _ *Grant) { r.Grant.Generation = 4 }, epoch, StaleGrant},
+		{"GrantExpired", func(*Request, *Grant) {}, epoch.Add(2 * time.Hour), GrantExpired},
+		{"GrantInsideSkew", func(*Request, *Grant) {}, epoch.Add(time.Hour - maxSkew), GrantExpired},
+		{"GrantJustOutsideSkew", func(*Request, *Grant) {}, epoch.Add(time.Hour - maxSkew - time.Nanosecond), ""},
+		{"GrantWithoutExpiry", func(_ *Request, g *Grant) { g.ValidUntil = time.Time{} }, epoch.Add(1000 * time.Hour), ""},
+		{"GrantForAnotherProvider", func(_ *Request, g *Grant) { g.Provider = "tailnet" }, epoch, ProviderNotGranted},
+		{"VPCNotGranted", func(r *Request, _ *Grant) { r.VPC = otherName }, epoch, VPCNotGranted},
+		{"CapabilityNotGranted", func(_ *Request, g *Grant) {
+			g.Capabilities = []string{socketAccess}
+		}, epoch, CapabilityNotGranted},
+		{"PrefixOutsideGrant", func(r *Request, _ *Grant) {
 			r.Prefixes = []netip.Prefix{netip.MustParsePrefix("fd00:6::/64")}
-		}, PrefixNotGranted},
-		{"NoCapability", func(r *Request) { r.Capabilities = nil }, InvalidRequest},
-		{"DuplicateCapability", func(r *Request) { r.Capabilities = []Capability{packetV1, packetV1} }, InvalidRequest},
-		{"PrefixWithHostBits", func(r *Request) {
-			r.Prefixes = []netip.Prefix{netip.MustParsePrefix("fd00:5::1/64")}
-		}, InvalidRequest},
-		{"PrefixWiderThanGrant", func(r *Request) {
+		}, epoch, PrefixNotGranted},
+		{"PrefixWiderThanGrant", func(r *Request, _ *Grant) {
 			r.Prefixes = []netip.Prefix{netip.MustParsePrefix("fd00::/16")}
-		}, PrefixNotGranted},
+		}, epoch, PrefixNotGranted},
+		{"NoCapability", func(r *Request, _ *Grant) { r.Capabilities = nil }, epoch, InvalidRequest},
+		{"DuplicateCapability", func(r *Request, _ *Grant) {
+			r.Capabilities = []Capability{packetV1, packetV1}
+		}, epoch, InvalidRequest},
+		{"PrefixWithHostBits", func(r *Request, _ *Grant) {
+			r.Prefixes = []netip.Prefix{netip.MustParsePrefix("fd00:5::1/64")}
+		}, epoch, InvalidRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := request()
-			tt.mutate(&req)
-			d := Admit(registry(), grants, req)
-			if d.Admitted != (tt.want == "") || d.Reason != tt.want {
+			req, g := request(), grant()
+			tt.mutate(&req, &g)
+			d := Admit(registry(), grants(g), req, tt.now, maxSkew)
+			if d.Admitted != (tt.want == "") || d.Reason != tt.want || (d.Authorization != nil) != d.Admitted {
 				t.Fatalf("Admit = %+v, want reason %q", d, tt.want)
 			}
 		})
 	}
 }
 
-func TestGrantsForOneVPCAddUp(t *testing.T) {
-	split := []Grant{
-		{VPC: prodVPC, Capabilities: []string{"SocketAccess"}},
-		{VPC: prodVPC, Capabilities: []string{packetAccess}},
-		{VPC: prodVPC, Prefixes: []netip.Prefix{netip.MustParsePrefix("fd00:5::/48")}},
-	}
-	if d := Admit(registry(), split, request()); !d.Admitted {
-		t.Fatalf("Admit with split grants = %+v, want admitted", d)
+func TestGrantNamedByAnotherGrantsUID(t *testing.T) {
+	// A request cannot borrow another tenant's grant by naming it: the
+	// grant's own provider, VPC and prefixes still bound it.
+	other := grant()
+	other.UID, other.VPC = "grant-uid-2", "vpc-uid-other"
+	req := request()
+	req.Grant.UID = other.UID
+	if d := Admit(registry(), grants(grant(), other), req, epoch, maxSkew); d.Reason != VPCNotGranted {
+		t.Fatalf("Admit = %+v, want VPCNotGranted", d)
 	}
 }
 
 func TestRegistryKeyMustMatchProviderName(t *testing.T) {
 	providers := registry()
 	p := providers[connectIP]
-	p.Name = "other"
+	p.Name = otherName
 	providers[connectIP] = p
-	if d := Admit(providers, grants, request()); d.Reason != UnknownProvider {
+	if d := Admit(providers, grants(grant()), request(), epoch, maxSkew); d.Reason != UnknownProvider {
 		t.Fatalf("Admit with a mismatched registry entry = %+v, want UnknownProvider", d)
 	}
 }
 
-func TestCapabilityNotGranted(t *testing.T) {
-	g := []Grant{{VPC: prodVPC, Capabilities: []string{"SocketAccess"}}}
-	if d := Admit(registry(), g, request()); d.Reason != CapabilityNotGranted {
-		t.Fatalf("Admit = %+v, want CapabilityNotGranted", d)
+func TestGrantMapKeyMustMatchUID(t *testing.T) {
+	g := grant()
+	g.UID = "forged"
+	if d := Admit(registry(), map[string]Grant{grantUID: g}, request(), epoch, maxSkew); d.Reason != GrantRevoked {
+		t.Fatalf("Admit with a mismatched grant entry = %+v, want GrantRevoked", d)
+	}
+}
+
+func TestAuthorizationIsImmutable(t *testing.T) {
+	req := request()
+	d := Admit(registry(), grants(grant()), req, epoch, maxSkew)
+	if !d.Admitted {
+		t.Fatalf("Admit = %+v", d)
+	}
+	z := d.Authorization
+	req.Prefixes[0] = netip.MustParsePrefix("fd00:6::/64")
+	req.Capabilities[0].Name = socketAccess
+	z.Prefixes()[0] = netip.MustParsePrefix("fd00:7::/64")
+	z.Capabilities()[0].Name = socketAccess
+	if got := z.Prefixes()[0]; got != netip.MustParsePrefix("fd00:5:0:1::/64") {
+		t.Fatalf("Prefixes changed to %s", got)
+	}
+	if got := z.Capabilities()[0]; got != packetV1 {
+		t.Fatalf("Capabilities changed to %+v", got)
+	}
+	if z.Identity() != callerA || z.Provider() != connectIP || z.VPC() != prodVPC ||
+		z.Grant() != (GrantRef{UID: grantUID, Generation: 3}) {
+		t.Fatalf("Authorization = %+v", z.req)
+	}
+	if want := epoch.Add(time.Hour); !z.Ceiling().Equal(want) {
+		t.Fatalf("Ceiling = %s, want %s", z.Ceiling(), want)
+	}
+	if want := epoch.Add(time.Hour - maxSkew); !z.NotAfter().Equal(want) {
+		t.Fatalf("NotAfter = %s, want %s", z.NotAfter(), want)
+	}
+}
+
+func TestIdentityFromUserInfo(t *testing.T) {
+	bound := authenticationv1.UserInfo{
+		Username: "system:serviceaccount:" + providerNS + ":" + providerSA,
+		Extra:    map[string]authenticationv1.ExtraValue{PodUIDExtra: {podA}},
+	}
+	id, err := IdentityFromUserInfo(bound)
+	if err != nil || id != callerA {
+		t.Fatalf("IdentityFromUserInfo = %+v, %v; want %+v", id, err, callerA)
+	}
+	tests := []struct {
+		name string
+		u    authenticationv1.UserInfo
+	}{
+		{"User", authenticationv1.UserInfo{Username: "alice@example.com",
+			Extra: map[string]authenticationv1.ExtraValue{PodUIDExtra: {podA}}}},
+		{"Node", authenticationv1.UserInfo{Username: "system:node:worker-1",
+			Extra: map[string]authenticationv1.ExtraValue{PodUIDExtra: {podA}}}},
+		{"UnboundToken", authenticationv1.UserInfo{Username: bound.Username}},
+		{"EmptyPodUID", authenticationv1.UserInfo{Username: bound.Username,
+			Extra: map[string]authenticationv1.ExtraValue{PodUIDExtra: {""}}}},
+		{"TwoPodUIDs", authenticationv1.UserInfo{Username: bound.Username,
+			Extra: map[string]authenticationv1.ExtraValue{PodUIDExtra: {podA, podB}}}},
+		{"NoName", authenticationv1.UserInfo{Username: "system:serviceaccount:" + providerNS + ":",
+			Extra: bound.Extra}},
+		{"NoNamespace", authenticationv1.UserInfo{Username: "system:serviceaccount::" + providerSA,
+			Extra: bound.Extra}},
+		{"ExtraSegment", authenticationv1.UserInfo{Username: bound.Username + ":x", Extra: bound.Extra}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if id, err := IdentityFromUserInfo(tt.u); err == nil {
+				t.Fatalf("IdentityFromUserInfo = %+v, want an error", id)
+			}
+		})
 	}
 }
 

@@ -1,0 +1,156 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: edgeproviders.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    categories:
+      - galactic
+    kind: EdgeProvider
+    listKind: EdgeProviderList
+    plural: edgeproviders
+    singular: edgeprovider
+  scope: Cluster
+  versions:
+    - additionalPrinterColumns:
+        - jsonPath: .status.approved
+          name: Approved
+          type: boolean
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |-
+            EdgeProvider registers a Galactic Edge provider: the contract and
+            capability versions it implements, the ServiceAccounts that act for it, and
+            the kind of its own configuration.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: |-
+                EdgeProviderSpec is what a provider implements and which identities speak
+                for it. It grants no tenant authority.
+              properties:
+                capabilities:
+                  description: Capabilities are the capability versions it implements.
+                  items:
+                    description: |-
+                      EdgeCapability is a capability a provider implements, at one version, such
+                      as PacketAccess v1.
+                    properties:
+                      name:
+                        description: Name is the capability's name.
+                        enum:
+                          - SocketAccess
+                          - PacketAccess
+                          - PrefixReachability
+                        type: string
+                      version:
+                        description: Version is the capability's version.
+                        pattern: ^v[1-9][0-9]*$
+                        type: string
+                    required:
+                      - name
+                      - version
+                    type: object
+                  maxItems: 16
+                  minItems: 1
+                  type: array
+                  x-kubernetes-list-type: atomic
+                configuration:
+                  description: |-
+                    Configuration is the kind of the provider's own per-service
+                    configuration.
+                  properties:
+                    group:
+                      description: Group is the resource's API group.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    kind:
+                      description: Kind is the resource's kind.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                  required:
+                    - group
+                    - kind
+                  type: object
+                contractVersions:
+                  description: ContractVersions are the provider contract versions it speaks.
+                  items:
+                    pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$
+                    type: string
+                  maxItems: 4
+                  minItems: 1
+                  type: array
+                  x-kubernetes-list-type: set
+                serviceAccounts:
+                  description: |-
+                    ServiceAccounts are the only identities whose bound tokens act for the
+                    provider. A request from any other identity is refused.
+                  items:
+                    description: ServiceAccountReference names one ServiceAccount.
+                    properties:
+                      name:
+                        description: Name is the ServiceAccount's name.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: Namespace is the ServiceAccount's namespace.
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                    required:
+                      - name
+                      - namespace
+                    type: object
+                  maxItems: 16
+                  minItems: 1
+                  type: array
+                  x-kubernetes-list-type: atomic
+              required:
+                - capabilities
+                - configuration
+                - contractVersions
+                - serviceAccounts
+              type: object
+            status:
+              description: EdgeProviderStatus records the operator's approval.
+              properties:
+                approved:
+                  description: |-
+                    Approved is set by the operator's approval. No provider identity may
+                    write it. An unapproved provider is refused admission, and clearing it
+                    revokes every authorization issued to the provider.
+                  type: boolean
+              type: object
+          required:
+            - spec
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}

@@ -8,10 +8,14 @@
 
 Package v1alpha1 contains Galactic's own API, galactic.datumapis.com/v1alpha1:
 TrafficPolicy and TrafficPolicyBinding, the per-interface ingress and
-egress policy the CNI datapath enforces. See
-docs/enhancements/networking/interface-traffic-policy for the design.
+egress policy the CNI datapath enforces (see
+docs/enhancements/networking/interface-traffic-policy), and EdgeProvider
+and EdgeService, the Galactic Edge provider registration and tenant grant
+(see docs/enhancements/networking/galactic-edge).
 
 ### Resource Types
+- [EdgeProvider](#edgeprovider)
+- [EdgeService](#edgeservice)
 - [TrafficPolicy](#trafficpolicy)
 - [TrafficPolicyBinding](#trafficpolicybinding)
 
@@ -56,6 +60,24 @@ _Appears in:_
 | `Failed` | StateFailed means installing the desired policy failed.<br /> |
 
 
+#### ConfigurationKind
+
+
+
+ConfigurationKind names the provider-owned resource its services' own
+configuration is written in.
+
+
+
+_Appears in:_
+- [EdgeProviderSpec](#edgeproviderspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `group` _string_ | Group is the resource's API group. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `kind` _string_ | Kind is the resource's kind. |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+
+
 
 
 #### DirectionStatus
@@ -73,6 +95,180 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `policy` _[PolicyIdentity](#policyidentity)_ | Policy is the resolved policy, absent while the reference is<br />unresolved. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions include Resolved. |  | MaxItems: 8 <br /> |
+
+
+#### EdgeCapability
+
+
+
+EdgeCapability is a capability a provider implements, at one version, such
+as PacketAccess v1.
+
+
+
+_Appears in:_
+- [EdgeProviderSpec](#edgeproviderspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the capability's name. |  | Enum: [SocketAccess PacketAccess PrefixReachability] <br /> |
+| `version` _string_ | Version is the capability's version. |  | Pattern: `^v[1-9][0-9]*$` <br /> |
+
+
+#### EdgeProvider
+
+
+
+EdgeProvider registers a Galactic Edge provider: the contract and
+capability versions it implements, the ServiceAccounts that act for it, and
+the kind of its own configuration.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `EdgeProvider` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[EdgeProviderSpec](#edgeproviderspec)_ |  |  |  |
+| `status` _[EdgeProviderStatus](#edgeproviderstatus)_ |  |  |  |
+
+
+#### EdgeProviderReference
+
+
+
+EdgeProviderReference names an EdgeProvider.
+
+
+
+_Appears in:_
+- [EdgeServiceSpec](#edgeservicespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the EdgeProvider's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+
+
+#### EdgeProviderSpec
+
+
+
+EdgeProviderSpec is what a provider implements and which identities speak
+for it. It grants no tenant authority.
+
+
+
+_Appears in:_
+- [EdgeProvider](#edgeprovider)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `contractVersions` _string array_ | ContractVersions are the provider contract versions it speaks. |  | MaxItems: 4 <br />MinItems: 1 <br />items:Pattern: ^v[0-9]+((alpha\|beta)[0-9]+)?$ <br /> |
+| `capabilities` _[EdgeCapability](#edgecapability) array_ | Capabilities are the capability versions it implements. |  | MaxItems: 16 <br />MinItems: 1 <br /> |
+| `serviceAccounts` _[ServiceAccountReference](#serviceaccountreference) array_ | ServiceAccounts are the only identities whose bound tokens act for the<br />provider. A request from any other identity is refused. |  | MaxItems: 16 <br />MinItems: 1 <br /> |
+| `configuration` _[ConfigurationKind](#configurationkind)_ | Configuration is the kind of the provider's own per-service<br />configuration. |  |  |
+
+
+#### EdgeProviderStatus
+
+
+
+EdgeProviderStatus records the operator's approval.
+
+
+
+_Appears in:_
+- [EdgeProvider](#edgeprovider)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `approved` _boolean_ | Approved is set by the operator's approval. No provider identity may<br />write it. An unapproved provider is refused admission, and clearing it<br />revokes every authorization issued to the provider. |  |  |
+
+
+#### EdgeService
+
+
+
+EdgeService grants one Galactic Edge provider the use of one VPC: the
+capabilities it may use there and the prefixes it may request. It lives in
+the VPC's namespace and is written by the platform authority, never by the
+provider. Changing the spec revokes every authorization issued under the
+previous generation; deleting it revokes them all.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `EdgeService` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[EdgeServiceSpec](#edgeservicespec)_ |  |  |  |
+| `status` _[EdgeServiceStatus](#edgeservicestatus)_ |  |  |  |
+
+
+#### EdgeServiceSpec
+
+
+
+EdgeServiceSpec is a tenant's grant to one provider in one VPC.
+
+
+
+_Appears in:_
+- [EdgeService](#edgeservice)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `providerRef` _[EdgeProviderReference](#edgeproviderreference)_ | ProviderRef is the only provider the grant authorizes. |  |  |
+| `vpcRef` _[EdgeVPCReference](#edgevpcreference)_ | VPCRef is the only VPC the grant authorizes. |  |  |
+| `capabilities` _string array_ | Capabilities are the capability names the provider may use in the VPC. |  | MaxItems: 3 <br />MinItems: 1 <br />items:Enum: [SocketAccess PacketAccess PrefixReachability] <br /> |
+| `prefixes` _string array_ | Prefixes bound the prefixes the provider may request in the VPC. Each<br />is a masked CIDR. |  | MaxItems: 64 <br />items:MaxLength: 43 <br /> |
+| `validUntil` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ValidUntil, when set, is the wall-clock time after which the grant<br />authorizes nothing. Admission refuses it, and revokes what it issued,<br />once fewer than the cell's maximum clock skew remain. |  |  |
+
+
+#### EdgeServiceStatus
+
+
+
+EdgeServiceStatus reports the grant's admission state.
+
+
+
+_Appears in:_
+- [EdgeService](#edgeservice)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the generation Conditions describe. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions include Admitted. |  | MaxItems: 8 <br /> |
+
+
+#### EdgeVPCReference
+
+
+
+EdgeVPCReference names a VPC in the service's own namespace. UID pins the
+grant to one VPC object, so a VPC deleted and recreated under the same name
+is not granted.
+
+
+
+_Appears in:_
+- [EdgeServiceSpec](#edgeservicespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the VPC's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `uid` _string_ | UID is the VPC's metadata.uid. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
 
 
 #### ForwardingPath
@@ -243,6 +439,23 @@ _Appears in:_
 | --- | --- |
 | `Allow` | ActionAllow forwards the packet.<br /> |
 | `Deny` | ActionDeny drops the packet. No ICMP error is sent.<br /> |
+
+
+#### ServiceAccountReference
+
+
+
+ServiceAccountReference names one ServiceAccount.
+
+
+
+_Appears in:_
+- [EdgeProviderSpec](#edgeproviderspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `namespace` _string_ | Namespace is the ServiceAccount's namespace. |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+| `name` _string_ | Name is the ServiceAccount's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
 
 
 #### TrafficPolicy
