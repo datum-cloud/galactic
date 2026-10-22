@@ -23,6 +23,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20261015184244-3fdd74264153
+	github.com/vishvananda/netns v0.0.5
 	go.datum.net/compute v0.12.11
 	go.datum.net/network-services-operator v0.32.31
 	go.miloapis.com/ipam v0.5.1
@@ -101,7 +102,6 @@ require (
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.miloapis.com/locations v0.0.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
