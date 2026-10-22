@@ -204,7 +204,7 @@ sequenceDiagram
     Note over L,R: Late old-owner cleanup cannot remove the replacement route
 ```
 
-The sequence shows required ordering, not a chosen lease algorithm. Numeric forwarding-expiry, revocation, and local-withdrawal bounds, including their clock and failure assumptions, must be resolved in the [contract milestone (#993)](https://github.com/datum-cloud/galactic/issues/993). Remote route convergence is measured separately. Stale remote routes may cause packet loss, but must not restore expired local forwarding authority.
+The sequence shows required ordering, not a chosen lease algorithm. Numeric forwarding-expiry, revocation, and local-withdrawal bounds, including their clock and failure assumptions, are set in the [provider contract](contract.md#timing-and-failure-bounds). Remote route convergence is measured separately. Stale remote routes may cause packet loss, but must not restore expired local forwarding authority.
 
 On restart, cached state is evidence for reconciliation, not permission to resume forwarding. Revalidate authority before reopening the attachment.
 

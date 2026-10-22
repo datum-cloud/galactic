@@ -104,3 +104,4 @@ above for that.
   — per-interface ingress and egress traffic policy, deny by default and
   enforced in the CNI datapath. `status: provisional`, `stage: alpha`.
 - [enhancements/networking/galactic-edge/README.md](enhancements/networking/galactic-edge/README.md) — proposed shared foundation for authorized provider attachments, tenant isolation, and exclusive forwarding ownership.
+- [enhancements/networking/galactic-edge/contract.md](enhancements/networking/galactic-edge/contract.md) — proposed provider contract: resources, writers, lifecycle, timing bounds and the failure-test matrix.
