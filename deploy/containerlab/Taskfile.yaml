@@ -431,6 +431,7 @@ tasks:
       - task: "verify:gateway"
       - task: "verify:gateway-ingress"
       - task: "verify:gateway-ingress-ipv4"
+      - task: "verify:gateway-backend-health"
       - task: "verify:gateway-restart"
       - task: "verify:nat-sharding"
       - task: "verify:nat-egress"
@@ -615,6 +616,16 @@ tasks:
     desc: IPv4 TCP and UDP from the off-fabric host to each site's IPv4 VIP, through every gateway node
     cmds:
       - LAB={{.LAB}} ./scripts/verify-gateway-ingress-ipv4.sh
+
+  # dfw's VIP drops a backend whose listener stops while its pod stays up,
+  # on both gateway nodes and with no operator action, keeps it out across a
+  # galactic-router and a galactic-gateway restart, and takes it back once it
+  # listens again. Fixed client ports must map to the same backend through
+  # both gateways, and back where they were after recovery.
+  "verify:gateway-backend-health":
+    desc: Stop one dfw backend's listener and check both gateways drop it, then restore it
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-gateway-backend-health.sh
 
   # #710: the gateway and the egress shard share each edge node's uplinks
   # through its XDP dispatcher, so restarting either must leave the other's

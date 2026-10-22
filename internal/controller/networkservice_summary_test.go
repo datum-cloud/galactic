@@ -299,6 +299,35 @@ func TestSummaryConditions(t *testing.T) {
 			},
 		},
 		{
+			name: "a gateway node left Unhealthy backends out",
+			conditions: with(serving,
+				cond(programmedConditionType(testNodeGWA), metav1.ConditionTrue, reasonBackendsUnhealthy)),
+			gatewayNodes: nodes,
+			want: map[string]want{
+				bgpv1alpha1.ConditionTypeProgrammed: {metav1.ConditionTrue, reasonProgrammed},
+				conditionTypeBackendsReady:          {metav1.ConditionFalse, reasonBackendsUnhealthy},
+				bgpv1alpha1.ConditionTypeReady:      {metav1.ConditionFalse, reasonBackendsUnhealthy},
+			},
+		},
+		{
+			name: "every backend is Unhealthy",
+			conditions: with(serving,
+				cond(programmedConditionType(testNodeGWA), metav1.ConditionTrue, reasonNoHealthyBackends)),
+			gatewayNodes: nodes,
+			want: map[string]want{
+				conditionTypeBackendsReady: {metav1.ConditionFalse, reasonNoHealthyBackends},
+			},
+		},
+		{
+			name: "a gateway node cannot apply health checks",
+			conditions: with(serving,
+				cond(programmedConditionType(testNodeGWA), metav1.ConditionTrue, reasonHealthChecksNotApplied)),
+			gatewayNodes: nodes,
+			want: map[string]want{
+				conditionTypeBackendsReady: {metav1.ConditionFalse, reasonHealthChecksNotApplied},
+			},
+		},
+		{
 			name:         "no backend node has reported",
 			conditions:   without(serving, backendsBoundConditionType(testBackendNode)),
 			gatewayNodes: nodes,

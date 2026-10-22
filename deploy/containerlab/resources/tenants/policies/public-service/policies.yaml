@@ -1,7 +1,9 @@
 # ns60's VIP backends: they receive the gateways' public service traffic and
-# answer it, and nothing else (verify:gateway-ingress). verify:traffic-policy
-# inserts a temporary deny ahead of allow-service to prove a denial on this
-# path, then restores this policy.
+# answer it, and the TCP health probes their own node sends from its host-side
+# link-local address, and nothing else (verify:gateway-ingress,
+# verify:gateway-backend-health). verify:traffic-policy inserts a temporary
+# deny ahead of allow-service to prove a denial on this path, then restores
+# this policy.
 apiVersion: galactic.datumapis.com/v1alpha1
 kind: TrafficPolicy
 metadata:
@@ -12,6 +14,13 @@ spec:
       action: Allow
       match:
         path: PublicService
+    - name: allow-health-probe-replies
+      action: Allow
+      match:
+        path: Private
+        protocol: TCP
+        destinationCIDRs: ["fe80::/10"]
+        sourcePorts: [{start: 80, end: 80}]
 ---
 apiVersion: galactic.datumapis.com/v1alpha1
 kind: TrafficPolicy
@@ -23,3 +32,10 @@ spec:
       action: Allow
       match:
         path: PublicService
+    - name: allow-health-probe
+      action: Allow
+      match:
+        path: Private
+        protocol: TCP
+        sourceCIDRs: ["fe80::/10"]
+        destinationPorts: [{start: 80, end: 80}]

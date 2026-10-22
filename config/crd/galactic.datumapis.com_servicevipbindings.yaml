@@ -237,6 +237,51 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              health:
+                description: |-
+                  Health is the health decision for this binding's backend, set by
+                  galactic-router on the backend's node while the owning NetworkService
+                  has a healthCheck, and cleared once it has none. Every binding of one
+                  backend carries the same decision.
+                properties:
+                  attachmentUID:
+                    description: |-
+                      AttachmentUID is the UID of the VPCAttachment that held the backend's
+                      address when the decision was made.
+                    type: string
+                  lastTransitionTime:
+                    description: LastTransitionTime is when State last changed.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is the last probe error, when there is one.
+                    maxLength: 1024
+                    type: string
+                  port:
+                    description: Port is the TCP port that was probed.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  reason:
+                    description: Reason is ProbeSucceeded, ProbeFailed, Pending or
+                      ProbeUnavailable.
+                    maxLength: 64
+                    type: string
+                  state:
+                    description: State is the decision.
+                    enum:
+                    - Healthy
+                    - Unhealthy
+                    - Unknown
+                    type: string
+                required:
+                - attachmentUID
+                - lastTransitionTime
+                - port
+                - reason
+                - state
+                type: object
               observedGeneration:
                 description: ObservedGeneration is the .metadata.generation this status
                   was computed from.

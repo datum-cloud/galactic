@@ -36,6 +36,9 @@ import (
 // to a node that has no binding planned for it.
 type ruleBackend struct {
 	attachment types.NamespacedName
+	// uid is the attachment's UID, which a published health decision must
+	// name to apply to this backend.
+	uid        types.UID
 	node       string
 	addr       netip.Addr
 	port       uint16
@@ -238,6 +241,7 @@ func ruleCandidateBackends(
 		for _, addr := range addrs {
 			backends = append(backends, ruleBackend{
 				attachment: key,
+				uid:        attachment.UID,
 				node:       attachment.Status.Node,
 				addr:       addr,
 				port:       port,

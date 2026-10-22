@@ -276,3 +276,34 @@ func TestUsidEgress_VIPXlatRunsBeforeNPTv6(t *testing.T) {
 		t.Errorf("non-VIP traffic src = %s, want %s (NPTv6)", src, want)
 	}
 }
+
+// TestUsidEgress_LinkLocalDestinationSkipsVIPXlatAndNPTv6: a backend's reply
+// from its bound port to a link-local destination, such as a host-side health
+// probe's, reaches the kernel with its own source, in a VRF with NPTv6 too.
+func TestUsidEgress_LinkLocalDestinationSkipsVIPXlatAndNPTv6(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	block, argument := uint64(0xFEEDFA), uint16(0x503)
+	setUpEgressRouteAttachment(t, objs, block, argument, 16)
+	putNPTv6(t, objs, block, argument)
+	if err := objs.PublicUplinkTable.Put(uint32(0), UsidPublicUplinkValue{LinkIfindex: 1}); err != nil {
+		t.Fatalf("populate public_uplink_table: %v", err)
+	}
+
+	const port = 80
+	backend := netip.MustParseAddr("fd01:203:405:1::1234")
+	putVIPEgressRow(t, objs, block, argument, backend, netip.MustParseAddr("2001:db8:6060::1"), port)
+
+	prober := netip.MustParseAddr("fe80::a060:bbff:fe37:4f09")
+	pkt := buildPlainV6PacketWithL4Ports(t, backend, prober, port, 43210)
+	ret, out, err := objs.UsidEgress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	const saddrOffset = ethHeaderLen + 8
+	src, _ := netip.AddrFromSlice(out[saddrOffset : saddrOffset+16])
+	if ret != tcActUnspec || src != backend {
+		t.Errorf("reply to %s: verdict=%d src=%s, want TC_ACT_UNSPEC (%d) from %s", prober, ret, src, tcActUnspec, backend)
+	}
+}

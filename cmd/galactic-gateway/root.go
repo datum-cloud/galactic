@@ -121,11 +121,17 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 
-	// IPv4 VIPs need read access to ServiceVIPBindings; without it they stay
-	// off for this process rather than stalling the manager's cache. A check
-	// that cannot be made fails startup instead, so the restart checks again.
+	// IPv4 VIPs and backend health need read access to ServiceVIPBindings;
+	// without it they stay off for this process rather than stalling the
+	// manager's cache. A check that cannot be made fails startup instead, so
+	// the restart checks again.
 	reviewCtx, cancelReview := context.WithTimeout(ctx, 30*time.Second)
 	ipv4VIPs, err := resolveIPv4VIPs(reviewCtx, mgr.GetClient(), cfg.IPv4VIPs)
+	if err != nil {
+		cancelReview()
+		return err
+	}
+	backendHealth, err := resolveBackendHealth(reviewCtx, mgr.GetClient(), cfg.BackendHealth)
 	cancelReview()
 	if err != nil {
 		return err
@@ -198,14 +204,15 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// rewrites nothing, so a gateway node has no translation source of its own
 	// to publish.
 	if err := (&controller.NetworkGatewayReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Engine:     gwEngine,
-		NodeName:   nodeName,
-		APIReader:  mgr.GetAPIReader(),
-		Disabled:   !cfg.DatapathEnabled,
-		ReturnPath: returnPath,
-		IPv4VIPs:   ipv4VIPs,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Engine:        gwEngine,
+		NodeName:      nodeName,
+		APIReader:     mgr.GetAPIReader(),
+		Disabled:      !cfg.DatapathEnabled,
+		ReturnPath:    returnPath,
+		IPv4VIPs:      ipv4VIPs,
+		BackendHealth: backendHealth,
 		// Forwarding follows need: on only once an IPv4 VIP is about to load.
 		EnsureIPv4Forwarding: ipv4.enable,
 	}).SetupWithManager(mgr); err != nil {
@@ -307,6 +314,9 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().Bool("gateway-ipv4-vips", false,
 		"Serve IPv4 VIPs: load them over the rule's IPv6 backends, which translate them, and advertise "+
 			"each once its backends' ServiceVIPBindings are Bound")
+	cmd.Flags().Bool("gateway-backend-health", false,
+		"Leave a backend its node reports Unhealthy out of the rule's Maglev table, once every gateway "+
+			"in the namespace does the same")
 	cmd.Flags().String("gateway-proc-sys-path", config.DefaultProcSysPath,
 		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
 			"of the host's /proc/sys/net at <path>/net")

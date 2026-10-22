@@ -21,3 +21,9 @@ spec:
             # it needs (verify:gateway-ingress-ipv4).
             - name: GALACTIC_GATEWAY_IPV4_VIPS
               value: "true"
+            # Off by default. Every lab gateway takes a backend its node
+            # reports Unhealthy out of ns60's services, which carry a
+            # healthCheck (verify:gateway-backend-health). The same binding
+            # access as IPv4 VIPs covers it.
+            - name: GALACTIC_GATEWAY_BACKEND_HEALTH
+              value: "true"

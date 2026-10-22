@@ -55,6 +55,15 @@ type NetworkGatewayStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// BackendHealthFiltering reports that this node's gateway can leave a
+	// backend reported Unhealthy out of a NetworkService's Maglev table.
+	// Every gateway in the namespace applies health only while every
+	// NetworkGateway there reports it, so all of them build the same table.
+	// The gateway sets it on every status write; a gateway that cannot apply
+	// health, an older one included, writes its status without it.
+	// +optional
+	BackendHealthFiltering bool `json:"backendHealthFiltering,omitempty"`
 }
 
 // NetworkGatewayList is a list of NetworkGateway resources.

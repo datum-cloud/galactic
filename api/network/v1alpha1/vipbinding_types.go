@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // ServiceVIPBinding drives one worker node's backend-side half of the
@@ -141,6 +142,66 @@ type ServiceVIPBindingStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Health is the health decision for this binding's backend, set by
+	// galactic-router on the backend's node while the owning NetworkService
+	// has a healthCheck, and cleared once it has none. Every binding of one
+	// backend carries the same decision.
+	// +optional
+	Health *ServiceVIPBindingHealth `json:"health,omitempty"`
+}
+
+// BackendHealthState is a backend's health decision.
+//
+// +kubebuilder:validation:Enum=Healthy;Unhealthy;Unknown
+type BackendHealthState string
+
+const (
+	// BackendHealthHealthy: the last HealthyThreshold probes succeeded.
+	BackendHealthHealthy BackendHealthState = "Healthy"
+
+	// BackendHealthUnhealthy: the last UnhealthyThreshold probes failed. Only
+	// this state takes a backend out of the gateways' Maglev tables.
+	BackendHealthUnhealthy BackendHealthState = "Unhealthy"
+
+	// BackendHealthUnknown: too few probes have completed to decide, or the
+	// probe cannot run on the backend's node.
+	BackendHealthUnknown BackendHealthState = "Unknown"
+)
+
+// ServiceVIPBindingHealth is the health decision for a binding's backend. A
+// decision describes one backend: the VPCAttachment with AttachmentUID, probed
+// on Port. A reader treats a decision whose attachment UID or port does not
+// match the backend it is checking as Unknown.
+type ServiceVIPBindingHealth struct {
+	// State is the decision.
+	// +kubebuilder:validation:Required
+	State BackendHealthState `json:"state"`
+
+	// Reason is ProbeSucceeded, ProbeFailed, Pending or ProbeUnavailable.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=64
+	Reason string `json:"reason"`
+
+	// Message is the last probe error, when there is one.
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	Message string `json:"message,omitempty"`
+
+	// AttachmentUID is the UID of the VPCAttachment that held the backend's
+	// address when the decision was made.
+	// +kubebuilder:validation:Required
+	AttachmentUID types.UID `json:"attachmentUID"`
+
+	// Port is the TCP port that was probed.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
+
+	// LastTransitionTime is when State last changed.
+	// +kubebuilder:validation:Required
+	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
 }
 
 // ServiceVIPBindingList is a list of ServiceVIPBinding resources.

@@ -440,7 +440,7 @@ func TestIPv4BindingReadinessChanged(t *testing.T) {
 	now := metav1.Now()
 	deleting.DeletionTimestamp = &now
 
-	p := ipv4BindingReadinessChanged()
+	p := bindingReadinessChanged(false)
 	for _, tc := range []struct {
 		name string
 		got  bool

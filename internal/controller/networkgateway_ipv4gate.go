@@ -17,15 +17,15 @@ import (
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
-// ipv4Bindings holds the generated ServiceVIPBindings of IPv4 VIPs in one
-// namespace, by name. The gateway reads them to decide which backends a rule's
-// IPv4 VIP may be balanced over and whether it may be advertised.
-type ipv4Bindings map[string]*bgpv1alpha1.ServiceVIPBinding
+// serviceBindings holds the generated ServiceVIPBindings in one namespace, by
+// name. The gateway reads them to decide which backends a rule's IPv4 VIP may
+// be balanced over and whether it may be advertised, and which backends their
+// nodes report Unhealthy.
+type serviceBindings map[string]*bgpv1alpha1.ServiceVIPBinding
 
-// listIPv4Bindings returns the generated ServiceVIPBindings of IPv4 VIPs in
-// namespace. Bindings for IPv6 VIPs, and bindings galactic-router did not
-// write, are left out.
-func listIPv4Bindings(ctx context.Context, c client.Client, namespace string) (ipv4Bindings, error) {
+// listServiceBindings returns the generated ServiceVIPBindings in namespace.
+// Bindings galactic-router did not write are left out.
+func listServiceBindings(ctx context.Context, c client.Client, namespace string) (serviceBindings, error) {
 	list := &bgpv1alpha1.ServiceVIPBindingList{}
 	if err := c.List(ctx, list,
 		client.InNamespace(namespace),
@@ -33,11 +33,9 @@ func listIPv4Bindings(ctx context.Context, c client.Client, namespace string) (i
 	); err != nil {
 		return nil, fmt.Errorf("list ServiceVIPBindings in %s: %w", namespace, err)
 	}
-	out := make(ipv4Bindings, len(list.Items))
+	out := make(serviceBindings, len(list.Items))
 	for i := range list.Items {
-		if bindingIsIPv4(&list.Items[i]) {
-			out[list.Items[i].Name] = &list.Items[i]
-		}
+		out[list.Items[i].Name] = &list.Items[i]
 	}
 	return out, nil
 }
@@ -48,7 +46,7 @@ func listIPv4Bindings(ctx context.Context, c client.Client, namespace string) (i
 // b's IPv6 address: same name, rule label and spec, so a binding left from an
 // earlier spec, or not yet updated to the current one, does not open the gate.
 // A binding being deleted does not count either.
-func (idx ipv4Bindings) unbound(rule *bgpv1alpha1.NetworkService, vip netip.Addr, b ruleBackend) string {
+func (idx serviceBindings) unbound(rule *bgpv1alpha1.NetworkService, vip netip.Addr, b ruleBackend) string {
 	want := generatedBinding(rule, b.node, vip, b)
 	got, ok := idx[want.Name]
 	switch {
@@ -67,15 +65,17 @@ func (idx ipv4Bindings) unbound(rule *bgpv1alpha1.NetworkService, vip netip.Addr
 	return ""
 }
 
-// ipv4BindingReadinessChanged passes ServiceVIPBinding events that can change
-// whether a gateway may balance over or advertise an IPv4 VIP: a create or
-// delete of a generated IPv4 binding, and an update that changes its spec,
-// whether it is Bound, or whether it is being deleted. Bindings of IPv6 VIPs are dropped, since the gateway
-// reads only IPv4 ones.
-func ipv4BindingReadinessChanged() predicate.Predicate {
+// bindingReadinessChanged passes ServiceVIPBinding events that can change
+// which backends a gateway balances a rule over or whether it advertises an
+// IPv4 VIP: a create or delete of a generated binding, and an update that
+// changes its spec, labels, whether it is Bound, whether it is being deleted,
+// or its status.health. Only bindings of IPv4 VIPs pass unless health is set,
+// since without backend health the gateway reads no other.
+func bindingReadinessChanged(health bool) predicate.Predicate {
 	relevant := func(obj client.Object) bool {
 		binding, ok := obj.(*bgpv1alpha1.ServiceVIPBinding)
-		return ok && binding.Labels[bindingManagedByLabel] == bindingManagedByValue && bindingIsIPv4(binding)
+		return ok && binding.Labels[bindingManagedByLabel] == bindingManagedByValue &&
+			(health || bindingIsIPv4(binding))
 	}
 	return predicate.Funcs{
 		CreateFunc:  func(e event.CreateEvent) bool { return relevant(e.Object) },
@@ -90,7 +90,8 @@ func ipv4BindingReadinessChanged() predicate.Predicate {
 			return oldBinding.Generation != newBinding.Generation ||
 				oldBinding.DeletionTimestamp.IsZero() != newBinding.DeletionTimestamp.IsZero() ||
 				!maps.Equal(oldBinding.Labels, newBinding.Labels) ||
-				(bindingUnboundReason(oldBinding) == "") != (bindingUnboundReason(newBinding) == "")
+				(bindingUnboundReason(oldBinding) == "") != (bindingUnboundReason(newBinding) == "") ||
+				!healthEqual(oldBinding.Status.Health, newBinding.Status.Health)
 		},
 	}
 }

@@ -151,6 +151,70 @@ spec:
                 - message: backendSelector must not be empty
                   rule: (has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions)
                     && size(self.matchExpressions) > 0)
+              healthCheck:
+                description: |-
+                  HealthCheck turns on health checks for the service's backends. Each
+                  backend's own node opens a TCP connection to it on the health check
+                  port, from the link-local address of the backend's host-side interface,
+                  and publishes a decision in status.health of the backend's
+                  ServiceVIPBindings. The gateway nodes take a backend whose decision is
+                  Unhealthy out of the service's Maglev table, and keep every backend
+                  when all of them are Unhealthy. Unset, no backend is probed and every
+                  one stays in the table.
+
+                  Where interface traffic policy is enforced, the backend's policy must
+                  allow TCP from fe80::/10 to the health check port on the Private path,
+                  and the replies back.
+                properties:
+                  healthyThreshold:
+                    default: 3
+                    description: |-
+                      HealthyThreshold is the number of consecutive successful probes that
+                      make a backend Healthy.
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  intervalSeconds:
+                    default: 5
+                    description: IntervalSeconds is the time between two probes of
+                      one backend.
+                    format: int32
+                    maximum: 300
+                    minimum: 1
+                    type: integer
+                  port:
+                    description: |-
+                      Port is the TCP port probed on every backend, 1-65535. Unset, it is the
+                      service's backendPort. A udp service must set it to a TCP port its
+                      backends listen on, since a UDP datagram draws no reply a generic
+                      probe can expect.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  timeoutSeconds:
+                    default: 2
+                    description: |-
+                      TimeoutSeconds is how long a probe waits for the handshake. It must not
+                      exceed IntervalSeconds.
+                    format: int32
+                    maximum: 60
+                    minimum: 1
+                    type: integer
+                  unhealthyThreshold:
+                    default: 3
+                    description: |-
+                      UnhealthyThreshold is the number of consecutive failed probes that
+                      make a backend Unhealthy.
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: timeoutSeconds must not exceed intervalSeconds
+                  rule: self.timeoutSeconds <= self.intervalSeconds
               port:
                 description: |-
                   Port is the ingress port on VIPAddresses that this service load-balances,
@@ -272,6 +336,9 @@ spec:
             - message: backendPort must not be set for esp, gre and icmp, which have
                 no ports
               rule: '!(self.protocol in [''esp'', ''gre'', ''icmp'']) || !has(self.backendPort)'
+            - message: 'healthCheck.port is required for udp: a health check probes
+                a TCP port'
+              rule: self.protocol != 'udp' || !has(self.healthCheck) || has(self.healthCheck.port)
           status:
             description: NetworkServiceStatus defines the observed state of a NetworkService.
             properties:

@@ -17,6 +17,8 @@ spec:
     matchLabels:
       app: backend
   backendPort: 80
+  # Each backend's node probes it on backendPort (verify:gateway-backend-health).
+  healthCheck: {}
 ---
 # ns60's port 80 over UDP, served by every ns60 backend its selector picks in sjc.
 # Both VIPs reach the same IPv6-only backends: the backend's node translates
@@ -37,3 +39,6 @@ spec:
     matchLabels:
       app: backend
   backendPort: 80
+  # A UDP service names a TCP port to probe: the backends answer TCP on 80 too.
+  healthCheck:
+    port: 80

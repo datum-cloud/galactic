@@ -117,6 +117,12 @@ type NetworkGatewayReconciler struct {
 	// applyBGPAdvertisements. Off, no IPv4 VIP is loaded or advertised.
 	IPv4VIPs bool
 
+	// BackendHealth leaves a backend its node reports Unhealthy out of a rule
+	// with a healthCheck (config.EnvGatewayBackendHealth), while every
+	// NetworkGateway in the namespace reports BackendHealthFiltering, which
+	// this node then reports too; see passHealthGate.
+	BackendHealth bool
+
 	// EnsureIPv4Forwarding turns on the IPv4 forwarding the datapath's IPv4
 	// FIB lookups need. Each pass calls it before the engine loads any IPv4
 	// VIP, so a node that serves none never changes its IPv4 forwarding. It
@@ -379,6 +385,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		r.drain.reset()
 		gwCopy := gw.DeepCopy()
+		gwCopy.Status.BackendHealthFiltering = r.BackendHealth
 		setGatewayCondition(gwCopy, metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
 			Status:  metav1.ConditionFalse,
@@ -398,6 +405,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			r.syncReturnPath(ctx, gw.Namespace),
 		)
 		gwCopy := gw.DeepCopy()
+		gwCopy.Status.BackendHealthFiltering = r.BackendHealth
 		gwCopy.Status.ObservedGeneration = gw.Generation
 		setGatewayCondition(gwCopy, metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
@@ -460,6 +468,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	advErr, ruleStatusErr := r.publishRuleOutcomes(ctx, gw.Namespace, outcomes, status, routerName)
 
 	gwCopy := gw.DeepCopy()
+	gwCopy.Status.BackendHealthFiltering = r.BackendHealth
 	gwCopy.Status.ObservedGeneration = gw.Generation
 	ready := readyConditionFor(status, advErr)
 	if fwdErr != nil {
@@ -553,6 +562,7 @@ func (r *NetworkGatewayReconciler) reconcileEngine(
 	status, err := r.Engine.Reconcile(ctx, desired)
 	if err != nil {
 		gwCopy := gw.DeepCopy()
+		gwCopy.Status.BackendHealthFiltering = r.BackendHealth
 		setGatewayCondition(gwCopy, metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
 			Status:  metav1.ConditionFalse,
@@ -622,22 +632,24 @@ func loadsIPv4VIP(desired gateway.EngineState) bool {
 	return false
 }
 
-// passIPv4Bindings returns namespace's IPv4 bindings for one pass, which IPv4
-// VIPs are balanced over and advertised by, or nil while IPv4VIPs is off, when
-// nothing reads them.
-func (r *NetworkGatewayReconciler) passIPv4Bindings(ctx context.Context, namespace string) (ipv4Bindings, error) {
-	if !r.IPv4VIPs {
+// passBindings returns namespace's generated bindings for one pass, which IPv4
+// VIPs are balanced over and advertised by and backend health is read from,
+// or nil while IPv4VIPs and BackendHealth are both off, when nothing reads
+// them.
+func (r *NetworkGatewayReconciler) passBindings(ctx context.Context, namespace string) (serviceBindings, error) {
+	if !r.IPv4VIPs && !r.BackendHealth {
 		return nil, nil
 	}
-	return listIPv4Bindings(ctx, r.Client, namespace)
+	return listServiceBindings(ctx, r.Client, namespace)
 }
 
 // gatherRules builds this pass's engine state and rule outcomes from rules,
 // every NetworkService in namespace, and settles the drain tracker against it.
 // attachments holds every VPCAttachment in the cluster; each rule selects from
-// those in its own VPC (groupAttachmentsByVPC). It reads the namespace's IPv4
-// bindings once, while IPv4VIPs is on (passIPv4Bindings). It returns how long
-// until a held rule's drain delay ends, or zero.
+// those in its own VPC (groupAttachmentsByVPC). It reads the namespace's
+// generated bindings once, while IPv4VIPs or BackendHealth is on
+// (passBindings), and whether health applies (passHealthGate). It returns how
+// long until a held rule's drain delay ends, or zero.
 func (r *NetworkGatewayReconciler) gatherRules(
 	ctx context.Context, namespace string, rules []bgpv1alpha1.NetworkService,
 	attachments []*cloudv1alpha1.VPCAttachment, sidIndex *backendSIDIndex,
@@ -645,7 +657,11 @@ func (r *NetworkGatewayReconciler) gatherRules(
 	logger := log.FromContext(ctx)
 	desired := gateway.EngineState{Rules: make(map[string]gateway.DesiredRule)}
 
-	bindings, err := r.passIPv4Bindings(ctx, namespace)
+	bindings, err := r.passBindings(ctx, namespace)
+	if err != nil {
+		return desired, nil, 0, err
+	}
+	health, err := r.passHealthGate(ctx, namespace)
 	if err != nil {
 		return desired, nil, 0, err
 	}
@@ -676,7 +692,8 @@ func (r *NetworkGatewayReconciler) gatherRules(
 			// the Programmed condition alone. Once they are gone, the drain
 			// tracker keeps it for ruleDrainDelay so the withdrawal can reach
 			// every peer before the datapath drops it.
-			o, draining, err := r.drainingOutcome(ctx, rule, byVPC[rule.Spec.VPCRef], sidIndex, owners, bindings)
+			o, draining, err := r.drainingOutcome(ctx, rule, byVPC[rule.Spec.VPCRef], sidIndex, owners, bindings,
+				health)
 			if err != nil {
 				return desired, nil, 0, err
 			}
@@ -696,8 +713,8 @@ func (r *NetworkGatewayReconciler) gatherRules(
 			continue
 		}
 
-		dr, unresolved, ipv4, err := buildDesiredRule(rule, byVPC[rule.Spec.VPCRef], sidIndex, owners, r.IPv4VIPs,
-			bindings)
+		dr, unresolved, ipv4, rh, err := buildDesiredRule(rule, byVPC[rule.Spec.VPCRef], sidIndex, owners, r.IPv4VIPs,
+			bindings, health)
 		if err != nil {
 			logger.Error(err, "build desired rule; skipping", "networkRule", rule.Name)
 			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err, ipv4: ipv4})
@@ -706,8 +723,13 @@ func (r *NetworkGatewayReconciler) gatherRules(
 		if len(unresolved) > 0 {
 			logger.Info("loading rule without unresolved backends", "networkRule", rule.Name, "unresolved", unresolved)
 		}
+		if len(rh.unhealthy) > 0 {
+			logger.Info("loading rule without unhealthy backends", "networkRule", rule.Name, "unhealthy", rh.unhealthy)
+		}
 		desired.Rules[dr.Key] = dr
-		outcomes = append(outcomes, ruleOutcome{rule: rule, desired: dr, unresolved: unresolved, ipv4: ipv4})
+		outcomes = append(outcomes, ruleOutcome{
+			rule: rule, desired: dr, unresolved: unresolved, ipv4: ipv4, health: rh,
+		})
 	}
 
 	return desired, outcomes, r.drain.settle(r.clock(), namespace, desired.Rules, live), nil
@@ -729,11 +751,10 @@ func (r *NetworkGatewayReconciler) clock() time.Time {
 // The rule is rebuilt as usual. If it no longer builds, for example because
 // its backends were deleted with it, the rule as this node last loaded it is
 // kept instead. If this node never loaded it, there is nothing to keep.
-// attachments and bindings are the candidates for rule's backends and their
-// IPv4 bindings, as for buildDesiredRule.
+// attachments, bindings and health are as for buildDesiredRule.
 func (r *NetworkGatewayReconciler) drainingOutcome(
 	ctx context.Context, rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
-	sidIndex *backendSIDIndex, owners backendOwners, bindings ipv4Bindings,
+	sidIndex *backendSIDIndex, owners backendOwners, bindings serviceBindings, health healthGate,
 ) (ruleOutcome, bool, error) {
 	if !controllerutil.ContainsFinalizer(rule, networkRuleFinalizer) {
 		return ruleOutcome{}, false, nil
@@ -750,7 +771,7 @@ func (r *NetworkGatewayReconciler) drainingOutcome(
 		return ruleOutcome{}, false, nil
 	}
 
-	dr, _, _, err := buildDesiredRule(rule, attachments, sidIndex, owners, r.IPv4VIPs, bindings)
+	dr, _, _, _, err := buildDesiredRule(rule, attachments, sidIndex, owners, r.IPv4VIPs, bindings, health)
 	if err != nil {
 		var ok bool
 		if dr, ok = r.drain.lastLoaded(rule.Namespace + "/" + rule.Name); !ok {
@@ -772,6 +793,9 @@ type ruleOutcome struct {
 	// ipv4 is what became of the rule's IPv4 VIPs, for its IPv4Served
 	// condition.
 	ipv4 ipv4Family
+
+	// health is what backend health did to the rule's backends.
+	health ruleHealth
 
 	// draining marks a deleting rule kept loaded until its route is
 	// withdrawn. Nothing is advertised or written to its status.
@@ -882,12 +906,37 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 		cond.Message = fmt.Sprintf("not loaded on node %s: %s", node, loadErr)
 		return cond
 	}
-	if len(o.unresolved) > 0 {
-		loaded := len(o.desired.Backends) + len(o.desired.IPv4Backends)
-		cond.Reason = reasonBackendsUnresolved
-		cond.Message = fmt.Sprintf("loaded on node %s with %d of %d backends; unresolved: %s",
-			node, loaded, loaded+len(o.unresolved), cappedList(o.unresolved))
+	loaded := len(o.desired.Backends) + len(o.desired.IPv4Backends)
+	left := len(o.unresolved)
+	if !o.health.noneHealthy {
+		left += len(o.health.unhealthy)
 	}
+	var details []string
+	if len(o.unresolved) > 0 {
+		details = append(details, "unresolved: "+cappedList(o.unresolved))
+	}
+	switch {
+	case o.health.noneHealthy:
+		details = append(details, "every backend is Unhealthy, so all are kept: "+cappedList(o.health.unhealthy))
+	case len(o.health.unhealthy) > 0:
+		details = append(details, "unhealthy: "+cappedList(o.health.unhealthy))
+	case o.health.notApplied != "":
+		details = append(details, "health checks not applied: "+o.health.notApplied)
+	}
+	switch {
+	case len(o.unresolved) > 0:
+		cond.Reason = reasonBackendsUnresolved
+	case o.health.noneHealthy:
+		cond.Reason = reasonNoHealthyBackends
+	case len(o.health.unhealthy) > 0:
+		cond.Reason = reasonBackendsUnhealthy
+	case o.health.notApplied != "":
+		cond.Reason = reasonHealthChecksNotApplied
+	default:
+		return cond
+	}
+	cond.Message = fmt.Sprintf("loaded on node %s with %d of %d backends; %s",
+		node, loaded, loaded+left, strings.Join(details, "; "))
 	return cond
 }
 
@@ -1374,32 +1423,38 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
 // is set. Without it the rule's IPv6 VIPs serve without them, and a rule with
 // no other VIP fails with errNoServedVIP. With it they load beside the IPv6
 // ones, over the IPv6 backends whose ServiceVIPBinding for the IPv4 VIP in
-// bindings is Bound
-// (ipv4Bindings.unbound); the rest are returned in unresolved, so a flow never
-// reaches a backend that cannot answer it. While none is Bound the VIP loads
-// over every eligible backend, so that the backend nodes write their
-// bindings, and ipv4 is ipv4Unbound, which keeps it unadvertised. A rule with
-// more than one IPv4 VIP, like one whose IPv4 VIP has no backend, serves its
-// IPv6 VIPs without them. ipv4 says which of these happened to the rule's
-// IPv4 VIPs; see ipv4Family.
+// bindings is Bound (serviceBindings.unbound); the rest are returned in
+// unresolved, so a flow never reaches a backend that cannot answer it. While
+// none is Bound the VIP loads over every eligible backend, so that the backend
+// nodes write their bindings, and ipv4 is ipv4Unbound, which keeps it
+// unadvertised. A rule with more than one IPv4 VIP, like one whose IPv4 VIP has
+// no backend, serves its IPv6 VIPs without them. ipv4 says which of these
+// happened to the rule's IPv4 VIPs; see ipv4Family.
+//
+// For a rule with a healthCheck, while health applies, each family then leaves
+// out the backends whose binding for that family's VIP reports them Unhealthy
+// (serviceBindings.unhealthy), unless that is every one of them: a family
+// whose backends are all Unhealthy keeps them all, since an empty table would
+// drop every flow. rh says what health did. A family still waiting for its
+// first Bound binding is not filtered.
 func buildDesiredRule(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
-	sidIndex *backendSIDIndex, owners backendOwners, serveIPv4 bool, bindings ipv4Bindings,
-) (dr gateway.DesiredRule, unresolved []string, ipv4 ipv4Family, err error) {
+	sidIndex *backendSIDIndex, owners backendOwners, serveIPv4 bool, bindings serviceBindings, health healthGate,
+) (dr gateway.DesiredRule, unresolved []string, ipv4 ipv4Family, rh ruleHealth, err error) {
 	ipv4 = ipv4Off
 	if serveIPv4 {
 		ipv4 = ipv4NotLoaded
 	}
 	port, _, err := rulePorts(rule)
 	if err != nil {
-		return gateway.DesiredRule{}, nil, ipv4, err
+		return gateway.DesiredRule{}, nil, ipv4, rh, err
 	}
 	var v6VIPs, v4VIPs []netip.Addr
 	var withheld int
 	for _, v := range rule.Spec.VIPAddresses {
 		addr, err := netip.ParseAddr(v)
 		if err != nil {
-			return gateway.DesiredRule{}, nil, ipv4, fmt.Errorf("invalid VIP address %q: %w", v, err)
+			return gateway.DesiredRule{}, nil, ipv4, rh, fmt.Errorf("invalid VIP address %q: %w", v, err)
 		}
 		if !isIPv4VIP(addr) {
 			v6VIPs = append(v6VIPs, addr)
@@ -1414,12 +1469,12 @@ func buildDesiredRule(
 		v4VIPs = append(v4VIPs, addr.Unmap())
 	}
 	if len(v6VIPs) == 0 && len(v4VIPs) == 0 && withheld > 0 {
-		return gateway.DesiredRule{}, nil, ipv4, errNoServedVIP
+		return gateway.DesiredRule{}, nil, ipv4, rh, errNoServedVIP
 	}
 
 	translated, err := ruleTranslatedVIPs(rule)
 	if err != nil {
-		return gateway.DesiredRule{}, nil, ipv4, err
+		return gateway.DesiredRule{}, nil, ipv4, rh, err
 	}
 	var firstFamilyError error
 	if len(v4VIPs) > 0 && translated.v4Err != nil {
@@ -1444,18 +1499,23 @@ func buildDesiredRule(
 		if len(f.vips) == 0 {
 			continue
 		}
+		vip := f.vips[0]
 		var unbound func(ruleBackend) string
 		if f.family == familyIPv4 {
-			vip := f.vips[0]
 			unbound = func(b ruleBackend) string { return bindings.unbound(rule, vip, b) }
 		}
-		backends, familyUnresolved, noneBound, err := resolveFamilyBackends(
-			rule, attachments, sidIndex, owners, f.family, unbound)
-		unresolved = append(unresolved, familyUnresolved...)
+		var unhealthy func(ruleBackend) bool
+		if rule.Spec.HealthCheck != nil && health.apply {
+			unhealthy = func(b ruleBackend) bool { return bindings.unhealthy(rule, vip, b) }
+		}
+		fam, err := resolveFamilyBackends(rule, attachments, sidIndex, owners, f.family, unbound, unhealthy)
+		unresolved = append(unresolved, fam.unresolved...)
+		rh.unhealthy = append(rh.unhealthy, fam.unhealthy...)
+		rh.noneHealthy = rh.noneHealthy || fam.noneHealthy
 		if err != nil {
 			var selErr *backendSelectionError
 			if !errors.As(err, &selErr) {
-				return gateway.DesiredRule{}, nil, ipv4, err
+				return gateway.DesiredRule{}, nil, ipv4, rh, err
 			}
 			if firstFamilyError == nil {
 				firstFamilyError = err
@@ -1466,17 +1526,21 @@ func buildDesiredRule(
 			continue
 		}
 		vips = append(vips, f.vips...)
-		*f.backends = backends
+		*f.backends = fam.backends
 		if f.family == familyIPv4 {
 			ipv4 = ipv4Loaded
-			if noneBound {
+			if fam.noneBound {
 				ipv4 = ipv4Unbound
 			}
 		}
 	}
 	if len(vips) == 0 {
-		return gateway.DesiredRule{}, nil, ipv4, firstFamilyError
+		return gateway.DesiredRule{}, nil, ipv4, rh, firstFamilyError
 	}
+	if rule.Spec.HealthCheck != nil && !health.apply {
+		rh.notApplied = health.why
+	}
+	sort.Strings(rh.unhealthy)
 
 	return gateway.DesiredRule{
 		Key:          rule.Namespace + "/" + rule.Name,
@@ -1487,7 +1551,7 @@ func buildDesiredRule(
 		Affinity:     string(rule.Spec.SessionAffinity),
 		Backends:     v6Backends,
 		IPv4Backends: v4Backends,
-	}, unresolved, ipv4, nil
+	}, unresolved, ipv4, rh, nil
 }
 
 // backendSelectionError is resolveFamilyBackends' error for a family none of
@@ -1498,6 +1562,27 @@ type backendSelectionError struct{ err error }
 func (e *backendSelectionError) Error() string { return e.err.Error() }
 func (e *backendSelectionError) Unwrap() error { return e.err }
 
+// familyBackends is what resolveFamilyBackends returns for one VIP family.
+type familyBackends struct {
+	// backends are the family's Maglev input.
+	backends []gateway.DesiredBackend
+
+	// unresolved lists the selected attachments and backends left out, as
+	// status messages.
+	unresolved []string
+
+	// noneBound is set when no resolved backend's binding is Bound yet, so
+	// backends holds every resolved backend.
+	noneBound bool
+
+	// unhealthy lists the backends left out as Unhealthy, as "address:port".
+	unhealthy []string
+
+	// noneHealthy is set when every candidate backend is Unhealthy, so
+	// backends keeps them all.
+	noneHealthy bool
+}
+
 // resolveFamilyBackends returns rule's backends of family, each resolved to its
 // node's uSID with its slot, and the selected attachments and backends that are
 // not part of it, as status messages. An invalid selector is returned as is.
@@ -1507,21 +1592,32 @@ func (e *backendSelectionError) Unwrap() error { return e.err }
 // Bound, or "" when it is. Only Bound backends are returned then, and the rest
 // join unresolved; while none is Bound, every resolved backend is returned and
 // noneBound is set.
+//
+// A non-nil unhealthy reports whether a backend is Unhealthy. Those backends
+// are left out and listed in unhealthy, unless every remaining backend is
+// Unhealthy, when all are kept and noneHealthy is set. It does not apply while
+// noneBound is set.
 func resolveFamilyBackends(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
 	sidIndex *backendSIDIndex, owners backendOwners, family addrFamily, unbound func(ruleBackend) string,
-) (backends []gateway.DesiredBackend, unresolved []string, noneBound bool, err error) {
+	unhealthy func(ruleBackend) bool,
+) (familyBackends, error) {
 	sel, err := selectRuleBackends(rule, attachments, owners, family)
 	if err != nil {
-		return nil, nil, false, err
+		return familyBackends{}, err
 	}
-	unresolved = sel.pending
+	var out familyBackends
+	out.unresolved = sel.pending
 	for _, c := range sel.claimed {
-		unresolved = append(unresolved, c.String())
+		out.unresolved = append(out.unresolved, c.String())
 	}
 
-	backends = make([]gateway.DesiredBackend, 0, len(sel.backends))
-	bound := make([]gateway.DesiredBackend, 0, len(sel.backends))
+	type resolved struct {
+		rb ruleBackend
+		db gateway.DesiredBackend
+	}
+	all := make([]resolved, 0, len(sel.backends))
+	bound := make([]resolved, 0, len(sel.backends))
 	var held []string
 	var firstResolveErr error
 	for _, b := range sel.backends {
@@ -1533,11 +1629,11 @@ func resolveFamilyBackends(
 			if firstResolveErr == nil {
 				firstResolveErr = fmt.Errorf("resolve backend %s: %w", b, err)
 			}
-			unresolved = append(unresolved, b.String())
+			out.unresolved = append(out.unresolved, b.String())
 			continue
 		}
-		backend := gateway.DesiredBackend{Address: b.addr, Port: b.port, USID: usid}
-		backends = append(backends, backend)
+		r := resolved{rb: b, db: gateway.DesiredBackend{Address: b.addr, Port: b.port, USID: usid}}
+		all = append(all, r)
 		if unbound == nil {
 			continue
 		}
@@ -1545,29 +1641,51 @@ func resolveFamilyBackends(
 			held = append(held, b.String()+": "+why)
 			continue
 		}
-		bound = append(bound, backend)
+		bound = append(bound, r)
 	}
-	if len(backends) > 0 {
+	if len(all) > 0 {
+		candidates := all
 		switch {
 		case unbound == nil:
-			return backends, unresolved, false, nil
 		case len(bound) > 0:
-			return bound, append(unresolved, held...), false, nil
+			candidates = bound
+			out.unresolved = append(out.unresolved, held...)
 		default:
-			return backends, unresolved, true, nil
+			out.noneBound = true
+			unhealthy = nil
 		}
+		if unhealthy != nil {
+			healthy := make([]resolved, 0, len(candidates))
+			for _, c := range candidates {
+				if unhealthy(c.rb) {
+					out.unhealthy = append(out.unhealthy, c.rb.String())
+					continue
+				}
+				healthy = append(healthy, c)
+			}
+			if len(healthy) == 0 {
+				out.noneHealthy = true
+			} else {
+				candidates = healthy
+			}
+		}
+		out.backends = make([]gateway.DesiredBackend, 0, len(candidates))
+		for _, c := range candidates {
+			out.backends = append(out.backends, c.db)
+		}
+		return out, nil
 	}
 	switch {
 	case firstResolveErr != nil:
-		err = fmt.Errorf("none of %d backends resolves: %w", len(unresolved), firstResolveErr)
+		err = fmt.Errorf("none of %d backends resolves: %w", len(out.unresolved), firstResolveErr)
 	case len(sel.claimed) > 0 && len(sel.pending) == 0:
-		err = fmt.Errorf("every selected backend is served by an older rule: %s", cappedList(unresolved))
-	case len(unresolved) > 0:
-		err = fmt.Errorf("no selected attachment is a backend yet: %s", cappedList(unresolved))
+		err = fmt.Errorf("every selected backend is served by an older rule: %s", cappedList(out.unresolved))
+	case len(out.unresolved) > 0:
+		err = fmt.Errorf("no selected attachment is a backend yet: %s", cappedList(out.unresolved))
 	default:
 		err = fmt.Errorf("backendSelector matches no VPCAttachment in VPC %s", rule.Spec.VPCRef)
 	}
-	return nil, unresolved, false, &backendSelectionError{err: err}
+	return familyBackends{unresolved: out.unresolved}, &backendSelectionError{err: err}
 }
 
 // routerNameForNode returns the name of this node's Galactic-owned
@@ -1858,17 +1976,31 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 			builder.WithPredicates(vpcAttachmentBackendChanged()),
 		)
-	if r.IPv4VIPs {
+	if r.IPv4VIPs || r.BackendHealth {
 		// A rule's IPv4 VIP is balanced over, and advertised for, only the
-		// backends whose bindings are Bound, so a binding appearing, going,
-		// changing or becoming Bound or not opens or closes the gate. Bindings
-		// live in the gateways' namespace. Without IPv4VIPs nothing reads them,
-		// and the gateway needs no access to them.
+		// backends whose bindings are Bound, and a rule with a healthCheck
+		// over only the backends no binding reports Unhealthy, so a binding
+		// appearing, going, changing, becoming Bound or not, or changing its
+		// health changes some rule. Bindings live in the gateways' namespace.
+		// With neither IPv4VIPs nor BackendHealth nothing reads them, and the
+		// gateway needs no access to them.
 		b = b.Watches(&bgpv1alpha1.ServiceVIPBinding{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "ServiceVIPBinding", obj.GetName())
 			}),
-			builder.WithPredicates(ipv4BindingReadinessChanged()),
+			builder.WithPredicates(bindingReadinessChanged(r.BackendHealth)),
+		)
+	}
+	if r.BackendHealth {
+		// Health applies only while every NetworkGateway in the namespace
+		// reports BackendHealthFiltering, so a gateway appearing, going, or
+		// changing that report re-queues every gateway in the namespace, not
+		// only its own node's.
+		b = b.Watches(&bgpv1alpha1.NetworkGateway{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "NetworkGateway", obj.GetName())
+			}),
+			builder.WithPredicates(gatewayHealthFilteringChanged()),
 		)
 	}
 	return b.Named("networkgateway").Complete(r)

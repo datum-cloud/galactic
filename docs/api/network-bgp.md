@@ -1474,6 +1474,25 @@ _Appears in:_
 | `monitors` _[BMPMonitor](#bmpmonitor) array_ | Monitors lists the RIBs streamed. |  | MaxItems: 6 <br />MinItems: 1 <br /> |
 
 
+#### BackendHealthState
+
+_Underlying type:_ _string_
+
+BackendHealthState is a backend's health decision.
+
+_Validation:_
+- Enum: [Healthy Unhealthy Unknown]
+
+_Appears in:_
+- [ServiceVIPBindingHealth](#servicevipbindinghealth)
+
+| Field | Description |
+| --- | --- |
+| `Healthy` | BackendHealthHealthy: the last HealthyThreshold probes succeeded.<br /> |
+| `Unhealthy` | BackendHealthUnhealthy: the last UnhealthyThreshold probes failed. Only<br />this state takes a backend out of the gateways' Maglev tables.<br /> |
+| `Unknown` | BackendHealthUnknown: too few probes have completed to decide, or the<br />probe cannot run on the backend's node.<br /> |
+
+
 #### Community
 
 _Underlying type:_ _string_
@@ -3610,6 +3629,30 @@ _Appears in:_
 | `tap` | ServiceVIPBindingEgressKindTap selects the transparent tap-boundary<br />translation mechanism.<br /> |
 
 
+#### ServiceVIPBindingHealth
+
+
+
+ServiceVIPBindingHealth is the health decision for a binding's backend. A
+decision describes one backend: the VPCAttachment with AttachmentUID, probed
+on Port. A reader treats a decision whose attachment UID or port does not
+match the backend it is checking as Unknown.
+
+
+
+_Appears in:_
+- [ServiceVIPBindingStatus](#servicevipbindingstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `state` _[BackendHealthState](#backendhealthstate)_ | State is the decision. |  | Enum: [Healthy Unhealthy Unknown] <br />Required: \{\} <br /> |
+| `reason` _string_ | Reason is ProbeSucceeded, ProbeFailed, Pending or ProbeUnavailable. |  | MaxLength: 64 <br />Required: \{\} <br /> |
+| `message` _string_ | Message is the last probe error, when there is one. |  | MaxLength: 1024 <br /> |
+| `attachmentUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | AttachmentUID is the UID of the VPCAttachment that held the backend's<br />address when the decision was made. |  | Required: \{\} <br /> |
+| `port` _integer_ | Port is the TCP port that was probed. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
+| `lastTransitionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | LastTransitionTime is when State last changed. |  | Required: \{\} <br /> |
+
+
 #### ServiceVIPBindingSpec
 
 
@@ -3647,6 +3690,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource,<br />including Bound (set True once internal/plumbing/vip.Verify or the<br />equivalent tap-translation-table check confirms the backend is<br />actually reachable on VIPAddress, not merely that the bind/table-write<br />call itself returned nil). |  |  |
+| `health` _[ServiceVIPBindingHealth](#servicevipbindinghealth)_ | Health is the health decision for this binding's backend, set by<br />galactic-router on the backend's node while the owning NetworkService<br />has a healthCheck, and cleared once it has none. Every binding of one<br />backend carries the same decision. |  |  |
 
 
 #### StandardCommunityAction

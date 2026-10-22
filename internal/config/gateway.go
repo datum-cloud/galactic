@@ -97,6 +97,16 @@ const (
 	// watch ServiceVIPBindings runs as if it were off.
 	EnvGatewayIPv4VIPs = "GALACTIC_GATEWAY_IPV4_VIPS"
 
+	// EnvGatewayBackendHealth turns on taking unhealthy backends out of the
+	// Maglev table. Optional, defaulting to false. On, the gateway reads the
+	// health galactic-router publishes on each ServiceVIPBinding and, for a
+	// NetworkService with a healthCheck, leaves a backend reported Unhealthy
+	// out of the rule's table, keeping every backend when all are Unhealthy.
+	// It applies health only while every NetworkGateway in its namespace
+	// reports doing so, so every gateway builds the same table. A gateway that
+	// cannot list and watch ServiceVIPBindings runs as if it were off.
+	EnvGatewayBackendHealth = "GALACTIC_GATEWAY_BACKEND_HEALTH"
+
 	// EnvGatewayProcSysPath is the procfs sysctl root the datapath writes its
 	// interfaces' forwarding sysctls under. Optional, defaulting to
 	// DefaultProcSysPath. An unprivileged pod gets /proc/sys read-only, so the
@@ -146,6 +156,9 @@ type GatewayConfig struct {
 	// IPv4VIPs is EnvGatewayIPv4VIPs.
 	IPv4VIPs bool
 
+	// BackendHealth is EnvGatewayBackendHealth.
+	BackendHealth bool
+
 	// ProcSysPath is EnvGatewayProcSysPath.
 	ProcSysPath string
 }
@@ -166,6 +179,7 @@ func NewGatewayConfig() *GatewayConfig {
 	v.SetDefault("xdp_attach", GatewayXDPAttachDispatch)
 	v.SetDefault("datapath_enabled", true)
 	v.SetDefault("ipv4_vips", false)
+	v.SetDefault("backend_health", false)
 	v.SetDefault("proc_sys_path", DefaultProcSysPath)
 
 	cfg := &GatewayConfig{
@@ -192,6 +206,7 @@ func (c *GatewayConfig) BindFlags(flags *pflag.FlagSet) {
 		{"gateway-xdp-attach", "xdp_attach"},
 		{"gateway-datapath-enabled", "datapath_enabled"},
 		{"gateway-ipv4-vips", "ipv4_vips"},
+		{"gateway-backend-health", "backend_health"},
 		{"gateway-proc-sys-path", "proc_sys_path"},
 	}
 	for _, b := range bindings {
@@ -216,6 +231,7 @@ func (c *GatewayConfig) readFields() {
 	c.XDPAttach = c.v.GetString("xdp_attach")
 	c.DatapathEnabled = c.v.GetBool("datapath_enabled")
 	c.IPv4VIPs = c.v.GetBool("ipv4_vips")
+	c.BackendHealth = c.v.GetBool("backend_health")
 	c.ProcSysPath = c.v.GetString("proc_sys_path")
 }
 

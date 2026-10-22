@@ -534,6 +534,7 @@ task deploy
 | `verify:gateway`                 | Check every NetworkGateway is Ready, every NetworkService Accepted, every generated ServiceVIPBinding Bound                                 |
 | `verify:gateway-ingress`         | TCP and UDP from the off-fabric host to each site's VIP, through every gateway node in turn                                                 |
 | `verify:gateway-ingress-ipv4`    | IPv4 TCP and UDP to each site's IPv4 VIP through every gateway node, translated to the IPv6-only backends                                   |
+| `verify:gateway-backend-health`  | Stops a dfw backend's listener; both gateways must drop it, keep it out across restarts, and take it back once it listens                   |
 | `verify:gateway-node-loss`       | Take dfw-worker2's fabric links down: ingress through dfw-worker3 must pass, then through dfw-worker2 once restored (not in `verify`)       |
 | `verify:gateway-restart`         | Restart dfw-worker2's gateway and shard in turn while the other carries traffic (#710)                                                      |
 | `verify:gateway-detach`          | Turn dfw-worker2's gateway datapath off: ingress through it must fail and through dfw-worker3 pass, then through it pass (not in `verify`)  |

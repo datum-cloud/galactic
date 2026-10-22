@@ -41,6 +41,9 @@ data flow, module reference, known constraints):
 - [gateway/configuration.md](gateway/configuration.md) — `galactic-gateway`
   deployment (node labeling, RBAC, per-node overlay), its config reference,
   and the `NetworkGateway`/`NetworkService`/`ServiceVIPBinding` CRD fields.
+- [gateway/backend-health.md](gateway/backend-health.md) — how a
+  `NetworkService`'s backends are health-checked and an unhealthy one is
+  taken out of every gateway node's Maglev table.
 - [nat/configuration.md](nat/configuration.md) — `galactic-nat` placement
   (edge nodes, sharing the uplinks' XDP hook with the gateway), config
   reference, the `EgressShard` CRD, and the `galactic-cni`-side shard
