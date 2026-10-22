@@ -163,7 +163,7 @@ func TestHostAttachmentFixture(t *testing.T) {
 		{"ReleaseRemovesOnlyItsOwnState", f.testReleaseRemovesOnlyItsOwnState},
 		{"SharedPrefixInOneVPCIsRefused", f.testSharedPrefixInOneVPCIsRefused},
 		{"TakenTUNNameIsRefused", f.testTakenTUNNameIsRefused},
-		{"UnstampedPairIsAdopted", f.testUnstampedPairIsAdopted},
+		{"VerifiedUnstampedPairIsRecovered", f.testVerifiedUnstampedPairIsRecovered},
 		{"ForwardingDriftIsRepaired", f.testForwardingDriftIsRepaired},
 		{"ReplacedSandboxIsRejected", f.testReplacedSandboxIsRejected},
 	} {
@@ -426,13 +426,12 @@ func (f *edgeFixture) testTakenTUNNameIsRefused(t *testing.T) {
 	}
 }
 
-func (f *edgeFixture) testUnstampedPairIsAdopted(t *testing.T) {
+func (f *edgeFixture) testVerifiedUnstampedPairIsRecovered(t *testing.T) {
 	pod := newPod(t, f.host, "mgmt-pod7", 7)
 	h := pod.open(t)
 	a := f.atts["pod2/A"]
 	a.ID, a.HostLink, a.Address = "uid-pod7-a", "p7a", netip.MustParseAddr("fd00:aa::7")
-	// What a call that died between creating the pair and stamping it
-	// leaves behind.
+	// An existing workload pair must never be adopted by name or peer index.
 	pod.do(t, func() error {
 		return netlink.LinkAdd(&netlink.Veth{
 			LinkAttrs: netlink.LinkAttrs{Name: a.PodLink}, PeerName: a.HostLink,
@@ -440,10 +439,12 @@ func (f *edgeFixture) testUnstampedPairIsAdopted(t *testing.T) {
 		})
 	})
 	if _, err := Provision(f.hostH, h, a); err != nil {
-		t.Fatalf("provision over an unstamped pair: %v", err)
+		t.Fatalf("verified recovery: %v", err)
 	}
-	t.Cleanup(func() { _ = Release(f.hostH, h, a) })
-	expectIdentity(t, pod, vrfA, wlDst, "workload-A")
+	if err := Release(f.hostH, h, a); err != nil {
+		t.Fatal(err)
+	}
+
 }
 
 func (f *edgeFixture) testForwardingDriftIsRepaired(t *testing.T) {

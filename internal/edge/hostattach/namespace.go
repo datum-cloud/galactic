@@ -96,6 +96,16 @@ func (n *Namespace) do(fn func() error) error {
 // thread cannot be switched back, it stays locked so the Go runtime retires it
 // instead of reusing a thread left in the wrong namespace.
 func runInNamespace(target netns.NsHandle, fn func() error) error {
+	return runInNamespaceWith(target, fn, netns.Set)
+}
+
+func runInNamespaceWith(target netns.NsHandle, fn func() error, set func(netns.NsHandle) error) error {
+	result := make(chan error, 1)
+	go func() { result <- runOnNamespaceThread(target, fn, set) }()
+	return <-result
+}
+
+func runOnNamespaceThread(target netns.NsHandle, fn func() error, set func(netns.NsHandle) error) error {
 	runtime.LockOSThread()
 	origin, err := netns.Get()
 	if err != nil {
@@ -103,12 +113,12 @@ func runInNamespace(target netns.NsHandle, fn func() error) error {
 		return fmt.Errorf("hostattach: read current network namespace: %w", err)
 	}
 	defer func() { _ = origin.Close() }()
-	if err := netns.Set(target); err != nil {
+	if err := set(target); err != nil {
 		runtime.UnlockOSThread()
 		return fmt.Errorf("hostattach: enter network namespace: %w", err)
 	}
 	fnErr := fn()
-	if err := netns.Set(origin); err != nil {
+	if err := set(origin); err != nil {
 		return errors.Join(fnErr, fmt.Errorf("hostattach: restore network namespace: %w", err))
 	}
 	runtime.UnlockOSThread()

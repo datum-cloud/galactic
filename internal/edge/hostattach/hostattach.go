@@ -4,7 +4,14 @@
 
 // Package hostattach provisions host-owned VPC attachments for pods that
 // consume a VPC through a socket or a packet device rather than as an ordinary
-// CNI workload.
+// CNI workload. Only IPv6 attachment addresses and prefixes are supported.
+//
+// Callers must derive the attachment ID, host VRF, namespace, address and prefix
+// grants from authenticated, authorized gVPC state, and serialize mutations with
+// other host writers. This package is privileged plumbing, not admission or
+// source-address policy. Before exposing a consumer, install host traffic policy
+// and the consumer's delegated-source enforcement; policy test fixtures alone
+// do not provide that integration. A pod must not have authority over host links.
 //
 // An attachment is a veth pair between the pod and the node. Its host end is
 // enslaved to the canonical host VRF of the VPC, the same VRF every ordinary
@@ -54,7 +61,10 @@ var (
 // replacement reusing the same name, owns it.
 var ErrNotOwned = errors.New("hostattach: link belongs to another attachment")
 
-// Attachment is the desired state of one pod's attachment to one VPC.
+// Attachment is authenticated desired state for one pod's attachment to a gVPC.
+// Identity, namespace, address, VRFs, link names and TUN configuration are
+// immutable for an ID; release and create a new ID to change them. Prefixes
+// may change and are reconciled exactly on the dedicated host and TUN links.
 type Attachment struct {
 	// ID identifies the attachment instance. It is stamped on the host link
 	// as its alias, and Release and Provision refuse to act on a link that
@@ -109,8 +119,8 @@ type Result struct {
 
 func (a Attachment) validate() error {
 	switch {
-	case a.ID == "":
-		return errors.New("hostattach: attachment ID is required")
+	case a.ID == "" || len(ownerAlias(a.ID)) > 255:
+		return errors.New("hostattach: attachment ID must be nonempty and fit the link alias")
 	case a.HostVRF == "" || a.HostLink == "" || a.PodVRF == "" || a.PodLink == "":
 		return errors.New("hostattach: VRF and link names are required")
 	case a.PodTable == 0:
@@ -121,8 +131,11 @@ func (a Attachment) validate() error {
 		return errors.New("hostattach: TUN name is required")
 	}
 	for _, p := range a.Prefixes {
-		if !p.IsValid() || !p.Addr().Is6() || p.Bits() == 0 || p != p.Masked() {
+		if !p.IsValid() || !p.Addr().Is6() || p.Addr().Is4In6() || p.Bits() == 0 || p != p.Masked() {
 			return fmt.Errorf("hostattach: prefix %s must be a masked, non-default IPv6 prefix", p)
+		}
+		if p.Contains(a.Address) {
+			return fmt.Errorf("hostattach: prefix %s contains attachment address %s", p, a.Address)
 		}
 	}
 	return nil
@@ -134,8 +147,12 @@ func (a Attachment) validate() error {
 // Both namespaces are verified before anything changes and again after, so a
 // sandbox replaced during provisioning is reported rather than silently
 // half-configured; the handles pin the original namespaces, so no change can
-// land in the replacement. A host link that already exists must carry a.ID.
-func Provision(host, pod *Namespace, a Attachment) (Result, error) {
+// land in the replacement. An unstamped host link requires proof of its actual
+// peer namespace before adoption. On later failure the owned host link is disabled
+// and remains discoverable for retry or release. Callers must persist authorized
+// intent before Provision; a crash before stamping requires that intent and the
+// actual peer namespace to recover, never inference from an unstamped link name.
+func Provision(host, pod *Namespace, a Attachment) (result Result, provisionErr error) {
 	if err := a.validate(); err != nil {
 		return Result{}, err
 	}
@@ -160,10 +177,26 @@ func Provision(host, pod *Namespace, a Attachment) (Result, error) {
 	if err := ensurePodVRF(podH, a.PodVRF, a.PodTable); err != nil {
 		return Result{}, err
 	}
-	hostLink, podLink, err := ensureVeth(hostH, podH, host, a)
+	hostLink, podLink, err := ensureVeth(hostH, podH, host, pod, a)
 	if err != nil {
 		return Result{}, err
 	}
+	// A partial attempt is discoverable by alias but must not remain active.
+	defer func() {
+		if provisionErr == nil {
+			return
+		}
+		current, err := hostH.LinkByName(a.HostLink)
+		if err != nil {
+			provisionErr = errors.Join(provisionErr, err)
+			return
+		}
+		if current.Attrs().Alias != ownerAlias(a.ID) || current.Attrs().Index != hostLink.Attrs().Index {
+			provisionErr = errors.Join(provisionErr, ErrNotOwned)
+			return
+		}
+		provisionErr = errors.Join(provisionErr, hostH.LinkSetDown(current))
+	}()
 	if err := configureHostLink(hostH, hostLink, a, hostTable, podLink.Attrs().HardwareAddr); err != nil {
 		return Result{}, err
 	}
@@ -251,57 +284,63 @@ func ensurePodVRF(h *netlink.Handle, name string, table uint32) error {
 	return h.LinkSetUp(link)
 }
 
-// ensureVeth creates the veth pair from inside the pod, so the pod end can be
-// given a fixed ifindex, with the peer placed straight into the host
-// namespace. An existing pair is accepted only if both ends are veths, the
-// host end's peer is the expected pod link, and the host end carries a.ID or
-// no owner at all: an unstamped pair is what a call that failed between
-// creating the pair and stamping it leaves behind, and the pod end sits in
-// the verified pod namespace under the expected name.
-func ensureVeth(hostH, podH *netlink.Handle, host *Namespace, a Attachment) (netlink.Link, netlink.Link, error) {
+// ensureVeth accepts an existing pair only when ownership and its actual peer
+// namespace match. Unstamped crash remnants require the same namespace proof
+// before stamping; matching namespace-local indexes alone is never authority.
+func ensureVeth(hostH, podH *netlink.Handle, host, pod *Namespace, a Attachment) (netlink.Link, netlink.Link, error) {
 	hostLink, hostErr := hostH.LinkByName(a.HostLink)
 	podLink, podErr := podH.LinkByName(a.PodLink)
-	switch {
-	case hostErr == nil && podErr == nil:
-		if owner := hostLink.Attrs().Alias; owner != a.ID && owner != "" {
-			return nil, nil, fmt.Errorf("%w: host link %q has owner %q", ErrNotOwned, a.HostLink, owner)
+	if hostErr != nil && !linkMissing(hostErr) {
+		return nil, nil, hostErr
+	}
+	if podErr != nil && !linkMissing(podErr) {
+		return nil, nil, podErr
+	}
+	if hostErr != nil && podErr != nil {
+		veth := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: a.PodLink, Index: a.PodIndex},
+			PeerName: a.HostLink, PeerNamespace: netlink.NsFd(int(host.fd))}
+		if err := podH.LinkAdd(veth); err != nil {
+			return nil, nil, fmt.Errorf("hostattach: create veth: %w", err)
 		}
-		if hostLink.Type() != "veth" || podLink.Type() != "veth" ||
-			hostLink.Attrs().ParentIndex != podLink.Attrs().Index {
-			return nil, nil, fmt.Errorf("hostattach: host link %q is not a veth paired with pod link %q", a.HostLink, a.PodLink)
+		hostLink, hostErr = hostH.LinkByName(a.HostLink)
+		podLink, podErr = podH.LinkByName(a.PodLink)
+	}
+	if hostErr != nil || podErr != nil {
+		return nil, nil, fmt.Errorf("%w: incomplete veth pair", ErrNotOwned)
+	}
+	if err := verifyPair(hostH, pod, hostLink, podLink, a); err != nil {
+		return nil, nil, err
+	}
+	if hostLink.Attrs().Alias == "" {
+		if err := hostH.LinkSetAlias(hostLink, ownerAlias(a.ID)); err != nil {
+			return nil, nil, err
 		}
-		if hostLink.Attrs().Alias == "" {
-			if err := hostH.LinkSetAlias(hostLink, a.ID); err != nil {
-				return nil, nil, fmt.Errorf("hostattach: stamp owner on host link %q: %w", a.HostLink, err)
-			}
-		}
-		return hostLink, podLink, nil
-	case hostErr == nil:
-		return nil, nil, fmt.Errorf("%w: host link %q exists without pod link %q", ErrNotOwned, a.HostLink, a.PodLink)
-	case podErr == nil:
-		return nil, nil, fmt.Errorf("hostattach: pod link %q exists without host link %q", a.PodLink, a.HostLink)
-	}
-	veth := &netlink.Veth{
-		LinkAttrs:     netlink.LinkAttrs{Name: a.PodLink, Index: a.PodIndex},
-		PeerName:      a.HostLink,
-		PeerNamespace: netlink.NsFd(int(host.fd)),
-	}
-	if err := podH.LinkAdd(veth); err != nil {
-		return nil, nil, fmt.Errorf("hostattach: create veth %s/%s: %w", a.PodLink, a.HostLink, err)
-	}
-	hostLink, err := hostH.LinkByName(a.HostLink)
-	if err != nil {
-		return nil, nil, fmt.Errorf("hostattach: look up new host link %q: %w", a.HostLink, err)
-	}
-	if err := hostH.LinkSetAlias(hostLink, a.ID); err != nil {
-		_ = hostH.LinkDel(hostLink)
-		return nil, nil, fmt.Errorf("hostattach: stamp owner on host link %q: %w", a.HostLink, err)
-	}
-	podLink, err = podH.LinkByName(a.PodLink)
-	if err != nil {
-		return nil, nil, fmt.Errorf("hostattach: look up new pod link %q: %w", a.PodLink, err)
 	}
 	return hostLink, podLink, nil
+}
+
+func verifyPair(hostH *netlink.Handle, pod *Namespace, hostLink, podLink netlink.Link, a Attachment) error {
+	owner := hostLink.Attrs().Alias
+	if owner != "" && owner != ownerAlias(a.ID) {
+		return fmt.Errorf("%w: host link %q", ErrNotOwned, a.HostLink)
+	}
+	if err := pod.Verify(); err != nil {
+		return err
+	}
+	nsID, err := hostH.GetNetNsIdByFd(int(pod.fd))
+	if err != nil {
+		return fmt.Errorf("hostattach: resolve peer namespace: %w", err)
+	}
+	if hostLink.Type() != vethType || podLink.Type() != vethType || nsID < 0 || hostLink.Attrs().NetNsID != nsID ||
+		hostLink.Attrs().ParentIndex != podLink.Attrs().Index || podLink.Attrs().ParentIndex != hostLink.Attrs().Index {
+		return fmt.Errorf("%w: host link %q is not paired with the verified pod", ErrNotOwned, a.HostLink)
+	}
+	return nil
+}
+
+func linkMissing(err error) bool {
+	var missing netlink.LinkNotFoundError
+	return errors.As(err, &missing)
 }
 
 func linkLocal(addr netip.Addr) *netlink.Addr {
@@ -372,6 +411,9 @@ func configureHostLink(
 		routes = append(routes, &netlink.Route{
 			LinkIndex: idx, Table: int(table), Dst: prefixNet(p), Gw: a.Address.AsSlice(),
 		})
+	}
+	if err := pruneRoutes(h, link.Attrs().Index, table, hostPrefixes(a)); err != nil {
+		return err
 	}
 	for _, r := range routes {
 		if err := checkRouteOwner(h, r); err != nil {
@@ -446,22 +488,11 @@ func ensureTUN(h *netlink.Handle, pod *Namespace, a Attachment) error {
 		if _, ok := existing.(*netlink.Tuntap); !ok {
 			return fmt.Errorf("%w: pod link %q is a %s, not a TUN", ErrNotOwned, a.TUN.Name, existing.Type())
 		}
-		if owner := existing.Attrs().Alias; owner != a.ID && owner != "" {
+		if owner := existing.Attrs().Alias; owner != ownerAlias(a.ID) {
 			return fmt.Errorf("%w: TUN %q has owner %q", ErrNotOwned, a.TUN.Name, owner)
 		}
 	} else {
-		err := pod.do(func() error {
-			if err := netlink.LinkAdd(&netlink.Tuntap{
-				LinkAttrs: netlink.LinkAttrs{Name: a.TUN.Name},
-				Mode:      netlink.TUNTAP_MODE_TUN,
-				Flags:     netlink.TUNTAP_NO_PI | netlink.TUNTAP_ONE_QUEUE,
-				Owner:     a.TUN.Owner,
-				Group:     a.TUN.Group,
-			}); err != nil {
-				return fmt.Errorf("hostattach: create TUN %q: %w", a.TUN.Name, err)
-			}
-			return nil
-		})
+		err := pod.do(func() error { return createTUN(a) })
 		if err != nil {
 			return err
 		}
@@ -473,7 +504,7 @@ func ensureTUN(h *netlink.Handle, pod *Namespace, a Attachment) error {
 	if err != nil {
 		return fmt.Errorf("hostattach: look up TUN %q: %w", a.TUN.Name, err)
 	}
-	if err := h.LinkSetAlias(tun, a.ID); err != nil {
+	if err := h.LinkSetAlias(tun, ownerAlias(a.ID)); err != nil {
 		return fmt.Errorf("hostattach: stamp owner on TUN %q: %w", a.TUN.Name, err)
 	}
 	vrfLink, err := h.LinkByName(a.PodVRF)
@@ -485,6 +516,9 @@ func ensureTUN(h *netlink.Handle, pod *Namespace, a Attachment) error {
 	}
 	if err := h.LinkSetUp(tun); err != nil {
 		return fmt.Errorf("hostattach: set TUN %q up: %w", a.TUN.Name, err)
+	}
+	if err := pruneRoutes(h, tun.Attrs().Index, a.PodTable, a.Prefixes); err != nil {
+		return err
 	}
 	for _, p := range a.Prefixes {
 		r := &netlink.Route{LinkIndex: tun.Attrs().Index, Table: int(a.PodTable), Dst: prefixNet(p)}
@@ -515,18 +549,39 @@ func enableSysctl(key string) error {
 // The pod VRF is left in place: it belongs to the pod, which may route other
 // traffic through it, and goes away with the pod's namespace.
 func Release(host, pod *Namespace, a Attachment) error {
+	if a.ID == "" {
+		return ErrNotOwned
+	}
+	if err := host.Verify(); err != nil {
+		return err
+	}
 	hostH, err := host.netlink()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = hostH.Close() }()
 	if link, err := hostH.LinkByName(a.HostLink); err == nil {
-		if link.Attrs().Alias != a.ID {
+		if link.Attrs().Alias == "" {
+			podH, err := pod.netlink()
+			if err != nil {
+				return err
+			}
+			defer func() { _ = podH.Close() }()
+			peer, err := podH.LinkByName(a.PodLink)
+			if err != nil {
+				return fmt.Errorf("%w: missing verified peer", ErrNotOwned)
+			}
+			if err := verifyPair(hostH, pod, link, peer, a); err != nil {
+				return err
+			}
+		} else if link.Attrs().Alias != ownerAlias(a.ID) {
 			return fmt.Errorf("%w: host link %q has owner %q", ErrNotOwned, a.HostLink, link.Attrs().Alias)
 		}
 		if err := hostH.LinkDel(link); err != nil {
 			return fmt.Errorf("hostattach: delete host link %q: %w", a.HostLink, err)
 		}
+	} else if !linkMissing(err) {
+		return err
 	}
 	if a.TUN == nil || pod.Verify() != nil {
 		// A replaced sandbox's devices went with its namespace.
@@ -539,13 +594,46 @@ func Release(host, pod *Namespace, a Attachment) error {
 	defer func() { _ = podH.Close() }()
 	tun, err := podH.LinkByName(a.TUN.Name)
 	if err != nil {
-		return nil //nolint:nilerr // absent device is the released state
+		if linkMissing(err) {
+			return nil
+		}
+		return err
 	}
-	if tun.Attrs().Alias != a.ID {
+	if tun.Attrs().Alias != ownerAlias(a.ID) {
 		return fmt.Errorf("%w: TUN %q has owner %q", ErrNotOwned, a.TUN.Name, tun.Attrs().Alias)
 	}
 	if err := podH.LinkDel(tun); err != nil {
 		return fmt.Errorf("hostattach: delete TUN %q: %w", a.TUN.Name, err)
 	}
 	return nil
+}
+
+// createTUN stamps a nonpersistent, exclusively created device before making it
+// persistent. A crash before stamping closes its descriptor and removes it.
+func createTUN(a Attachment) error {
+	tun := &netlink.Tuntap{
+		LinkAttrs: netlink.LinkAttrs{Name: a.TUN.Name}, Mode: netlink.TUNTAP_MODE_TUN,
+		Flags: netlink.TUNTAP_NO_PI | netlink.TUNTAP_ONE_QUEUE | netlink.TUNTAP_TUN_EXCL,
+		Owner: a.TUN.Owner, Group: a.TUN.Group, NonPersist: true, Queues: 1,
+	}
+	if err := netlink.LinkAdd(tun); err != nil {
+		return fmt.Errorf("hostattach: create TUN: %w", err)
+	}
+	defer func() {
+		for _, fd := range tun.Fds {
+			_ = fd.Close()
+		}
+	}()
+	if err := netlink.LinkSetAlias(tun, ownerAlias(a.ID)); err != nil {
+		return fmt.Errorf("hostattach: stamp TUN: %w", err)
+	}
+	raw, err := tun.Fds[0].SyscallConn()
+	if err != nil {
+		return err
+	}
+	var persistErr error
+	if err := raw.Control(func(fd uintptr) { persistErr = unix.IoctlSetInt(int(fd), unix.TUNSETPERSIST, 1) }); err != nil {
+		return err
+	}
+	return persistErr
 }

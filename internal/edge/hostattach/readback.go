@@ -51,8 +51,8 @@ func Readback(host, pod *Namespace, a Attachment) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDrift, err)
 	}
-	if hostLink.Attrs().Alias != a.ID {
-		add("host link %q has owner %q, want %q", a.HostLink, hostLink.Attrs().Alias, a.ID)
+	if hostLink.Attrs().Alias != ownerAlias(a.ID) {
+		add("host link %q has owner %q, want %q", a.HostLink, hostLink.Attrs().Alias, ownerAlias(a.ID))
 	}
 	podLink, err := checkLink(podH, a.PodLink, a.PodVRF, add)
 	if err != nil {
@@ -68,6 +68,7 @@ func Readback(host, pod *Namespace, a Attachment) error {
 	checkNeigh(podH, podLink, hostLinkLocal, hostLink.Attrs().HardwareAddr, add)
 
 	hostIdx := hostLink.Attrs().Index
+	checkExtraRoutes(hostH, hostIdx, hostTable, hostPrefixes(a), add)
 	checkRoute(hostH, hostTable, netip.PrefixFrom(a.Address, 128), hostIdx, netip.Addr{}, add)
 	for _, p := range a.Prefixes {
 		checkRoute(hostH, hostTable, p, hostIdx, a.Address, add)
@@ -79,6 +80,10 @@ func Readback(host, pod *Namespace, a Attachment) error {
 	if a.TUN != nil {
 		tun, err := checkLink(podH, a.TUN.Name, a.PodVRF, add)
 		if err == nil {
+			checkExtraRoutes(podH, tun.Attrs().Index, a.PodTable, a.Prefixes, add)
+			if tun.Attrs().Alias != ownerAlias(a.ID) {
+				add("TUN ownership does not match attachment")
+			}
 			if t, ok := tun.(*netlink.Tuntap); ok && (t.Owner != a.TUN.Owner || t.Group != a.TUN.Group) {
 				add("TUN %q owner %d:%d, want %d:%d", a.TUN.Name, t.Owner, t.Group, a.TUN.Owner, a.TUN.Group)
 			}
@@ -224,4 +229,15 @@ func sameDst(got *net.IPNet, want netip.Prefix) bool {
 	}
 	ones, _ := got.Mask.Size()
 	return netip.PrefixFrom(addr.Unmap(), ones) == want
+}
+
+func checkExtraRoutes(h *netlink.Handle, index int, table uint32, want []netip.Prefix, add func(string, ...any)) {
+	extras, err := extraRoutes(h, index, table, want)
+	if err != nil {
+		add("%v", err)
+		return
+	}
+	for _, r := range extras {
+		add("unexpected route %s in table %d through ifindex %d", r.Dst, table, index)
+	}
 }
