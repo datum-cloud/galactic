@@ -1128,6 +1128,10 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	datapathRepairSem := make(chan struct{}, 1)
 	startDatapathRepair(ctx, datapathRepairSem, ebpfState)
 
+	// Move DSR replies off an uplink the moment it loses carrier or its
+	// neighbor, rather than at the next repair pass.
+	startPublicUplinkWatch(ctx, ebpfState)
+
 	// Serve Prometheus metrics at the conventional /metrics scrape path.
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", m.Handler())

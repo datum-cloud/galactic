@@ -208,13 +208,15 @@ func (c Counts) LogAttrs() []any {
 type UplinkResolver func() (linkIndex int, dmac, smac net.HardwareAddr, err error)
 
 // FillNode writes this node's own rows that are missing: locator_table and
-// function_table for node's Block, node_src_addr_table, and
-// public_uplink_table. A node with no SRv6 identity writes nothing.
+// function_table for node's Block, and node_src_addr_table. It also rewrites
+// public_uplink_table whenever the uplink it resolves differs from the one
+// stored, so a reply never stays pinned to an uplink that lost its carrier or
+// neighbor. A node with no SRv6 identity writes nothing.
 //
 // uplinkErr reports a public uplink that could not be resolved, which needs a
 // converged underlay neighbor and is retried by the next fill rather than
-// treated as a failure. err reports every other failure; each row is attempted
-// regardless.
+// treated as a failure; the stored row is kept. err reports every other
+// failure; each row is attempted regardless.
 func (m *Maps) FillNode(node Node, resolveUplink UplinkResolver) (written Counts, uplinkErr, err error) {
 	if !node.Configured() {
 		return Counts{}, nil, nil
@@ -256,16 +258,12 @@ func (m *Maps) FillNode(node Node, resolveUplink UplinkResolver) (written Counts
 		}
 	}
 
-	if _, _, _, ok, err := m.PublicUplink.Get(); err != nil {
+	if linkIndex, dmac, smac, err := resolveUplink(); err != nil {
+		uplinkErr = fmt.Errorf("resolve public uplink: %w", err)
+	} else if changed, err := m.PublicUplink.Update(linkIndex, dmac, smac); err != nil {
 		errs = append(errs, err)
-	} else if !ok {
-		if linkIndex, dmac, smac, err := resolveUplink(); err != nil {
-			uplinkErr = fmt.Errorf("resolve public uplink: %w", err)
-		} else if err := m.PublicUplink.Set(linkIndex, dmac, smac); err != nil {
-			errs = append(errs, err)
-		} else {
-			written.PublicUplink++
-		}
+	} else if changed {
+		written.PublicUplink++
 	}
 
 	return written, uplinkErr, errors.Join(errs...)
