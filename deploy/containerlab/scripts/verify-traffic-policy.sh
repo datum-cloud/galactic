@@ -196,6 +196,13 @@ spec:
       action: Allow
       match:
         path: PublicService
+    - name: allow-health-probe
+      action: Allow
+      match:
+        path: Private
+        protocol: TCP
+        sourceCIDRs: ["fe80::/10"]
+        destinationPorts: [{start: 80, end: 80}]
 EOF
 if ! wait_policy_applied dfw ns60 lab-ingress; then
   fail "dfw did not install ns60's edited lab-ingress"
