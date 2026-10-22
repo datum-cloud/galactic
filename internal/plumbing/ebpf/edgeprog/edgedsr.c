@@ -45,7 +45,8 @@
 //     row on first match. Stats live in their own map so a control-plane
 //     read-modify-write can never race these per-packet increments.
 //  5. An empty backend list is a counted drop. Otherwise hash the client's
-//     address and port and index the precomputed Maglev table to get a backend.
+//     address, with its port or protocol as the rule's affinity selects, and
+//     index the precomputed Maglev table to get a backend.
 //     Every gateway node computes the same index for the same flow from the
 //     same inputs, which is what makes this safe under anycast: a flow landing
 //     on a different node mid-connection still resolves to the same backend.
@@ -168,6 +169,13 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 // a deployment's measured disruption on backend-set changes needs tighter.
 #define EDGE_MAGLEV_TABLE_SIZE 1021
 
+// EDGE_AFFINITY_* are vip_value.affinity's values, selecting what flow_hash
+// hashes besides the client's address. Zero is the default, so a value whose
+// affinity byte the control plane left zero hashes by address and port.
+#define EDGE_AFFINITY_NONE 0 // address and source port
+#define EDGE_AFFINITY_CLIENT_IP 1 // address only
+#define EDGE_AFFINITY_CLIENT_IP_PROTO 2 // address and L4 protocol
+
 // ---------------------------------------------------------------------
 // Minimal, self-contained header structs, byte-exact to the wire formats, with
 // one external header dependency.
@@ -235,7 +243,11 @@ struct vip_key {
 
 // struct vip_value is vip_table's value: the backend set for one VIP, port, and
 // protocol, plus a precomputed Maglev table mapping each slot to an index into
-// backends. generation is a monotonic reading stamped by the control plane on
+// backends, and the session affinity that selects flow_hash's inputs (one of
+// EDGE_AFFINITY_*). affinity sits in the alignment gap before generation and
+// adds nothing to the value's size. Keep it there: a size change makes every
+// pinned vip_table incompatible, and edgeattach recreates it empty.
+// generation is a monotonic reading stamped by the control plane on
 // every registration, backing the crash-safe reconcile cutoff, and is never
 // read here.
 //
@@ -245,6 +257,7 @@ struct vip_value {
 	__u32 backend_count;
 	struct backend backends[EDGE_MAX_BACKENDS];
 	__u8 maglev_table[EDGE_MAGLEV_TABLE_SIZE];
+	__u8 affinity;
 	__u64 generation;
 };
 
@@ -477,25 +490,34 @@ static EDGE_ALWAYS_INLINE void count_match(struct vip_stats_value *stats, __u64 
 // backend count, which is what makes a backend-set change reassign roughly one
 // flow in N instead of nearly all of them.
 //
-// It is 32-bit FNV-1a over the 16 address bytes and the port's two bytes in
-// wire order, so bpfel and bpfeb builds agree, then murmur3's fmix32
-// finalizer.
+// It is 32-bit FNV-1a over the 16 address bytes, then, by affinity, the port's
+// two bytes in wire order (EDGE_AFFINITY_NONE), nothing (CLIENT_IP) or the L4
+// protocol number (CLIENT_IP_PROTO), then murmur3's fmix32 finalizer. Wire
+// order keeps bpfel and bpfeb builds in agreement. An affinity value this
+// program does not know hashes as EDGE_AFFINITY_NONE; the control plane never
+// writes one.
 //
 // Every gateway node must run this same hash: a flow that changes gateway
 // keeps its backend only if both nodes hash it alike. FlowHash in flowhash.go
 // mirrors it and must change with it.
-static EDGE_ALWAYS_INLINE __u32 flow_hash(const __u8 addr[16], __be16 port)
+static EDGE_ALWAYS_INLINE __u32 flow_hash(const __u8 addr[16], __u8 affinity, __u8 proto,
+					  __be16 port)
 {
 	__u32 h = 2166136261u;
 	for (int i = 0; i < 16; i++) {
 		h ^= addr[i];
 		h *= 16777619u;
 	}
-	const __u8 *p = (const __u8 *) &port;
-	h ^= p[0];
-	h *= 16777619u;
-	h ^= p[1];
-	h *= 16777619u;
+	if (affinity == EDGE_AFFINITY_CLIENT_IP_PROTO) {
+		h ^= proto;
+		h *= 16777619u;
+	} else if (affinity != EDGE_AFFINITY_CLIENT_IP) {
+		const __u8 *p = (const __u8 *) &port;
+		h ^= p[0];
+		h *= 16777619u;
+		h ^= p[1];
+		h *= 16777619u;
+	}
 
 	h ^= h >> 16;
 	h *= 0x85ebca6bu;
@@ -881,8 +903,8 @@ static EDGE_ALWAYS_INLINE int send_frag_needed4(struct xdp_md *ctx, __u32 mtu)
 // the packet for size, for the caller to answer.
 static EDGE_ALWAYS_INLINE int lb_forward(struct xdp_md *ctx, struct vip_value *rule,
 					  struct vip_stats_value *stats, const __u8 client[16],
-					  __be16 sport, __be16 outer_payload_len, __u8 nexthdr,
-					  __u16 *frag_mtu)
+					  __u8 proto, __be16 sport, __be16 outer_payload_len,
+					  __u8 nexthdr, __u16 *frag_mtu)
 {
 	if (rule->backend_count == 0) {
 		count_claimed_drop(DROP_REASON_EMPTY_BACKEND_LIST, stats);
@@ -896,7 +918,7 @@ static EDGE_ALWAYS_INLINE int lb_forward(struct xdp_md *ctx, struct vip_value *r
 	// rejected as unbounded without help. The same barrier-then-clamp technique
 	// the backend index needs is applied here, as an explicit range clamp
 	// rather than a mask, since no bitmask bounds a prime.
-	__u32 slot = flow_hash(client, sport) % EDGE_MAGLEV_TABLE_SIZE;
+	__u32 slot = flow_hash(client, rule->affinity, proto, sport) % EDGE_MAGLEV_TABLE_SIZE;
 	EDGE_BARRIER_VAR(slot);
 	if (slot >= EDGE_MAGLEV_TABLE_SIZE)
 		slot = EDGE_MAGLEV_TABLE_SIZE - 1;
@@ -970,7 +992,7 @@ static EDGE_ALWAYS_INLINE int edge_lb_v6(struct xdp_md *ctx, struct edge_ethhdr 
 		__builtin_bswap16((__u16) sizeof(struct edge_ip6hdr) + __builtin_bswap16(ip6->payload_len));
 
 	__u16 frag_mtu = 0;
-	int verdict = lb_forward(ctx, rule, stats, ip6->saddr, ports->source, outer_payload_len,
+	int verdict = lb_forward(ctx, rule, stats, ip6->saddr, vk.proto, ports->source, outer_payload_len,
 				 EDGE_IPPROTO_IPV6, &frag_mtu);
 	if (verdict >= 0)
 		return verdict;
@@ -1061,7 +1083,7 @@ static EDGE_ALWAYS_INLINE int edge_lb_v4(struct xdp_md *ctx, struct edge_ethhdr 
 	}
 
 	__u16 frag_mtu = 0;
-	int verdict = lb_forward(ctx, rule, stats, client, sport, __builtin_bswap16((__u16) tot_len),
+	int verdict = lb_forward(ctx, rule, stats, client, vk.proto, sport, __builtin_bswap16((__u16) tot_len),
 				 EDGE_IPPROTO_IPIP, &frag_mtu);
 	if (verdict >= 0)
 		return verdict;

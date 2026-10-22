@@ -39,6 +39,33 @@ const (
 	NetworkServiceProtocolICMP NetworkServiceProtocol = "icmp"
 )
 
+// NetworkServiceSessionAffinity selects which parts of a flow a gateway hashes
+// to pick its backend. Every gateway node hashes a service the same way, so a
+// flow keeps its backend when it moves between nodes. Affinity is stateless:
+// it holds only while the backend set is unchanged, and each change to that
+// set moves about 1/N of clients, N being the number of backends.
+//
+// +kubebuilder:validation:Enum=None;ClientIP;ClientIPAndProtocol
+type NetworkServiceSessionAffinity string
+
+const (
+	// NetworkServiceSessionAffinityNone hashes the client's address and source
+	// port, so each connection is balanced on its own.
+	NetworkServiceSessionAffinityNone NetworkServiceSessionAffinity = "None"
+
+	// NetworkServiceSessionAffinityClientIP hashes the client's address only,
+	// so every connection from one address reaches the same backend, whatever
+	// its port, protocol or service among the services sharing that backend
+	// set.
+	NetworkServiceSessionAffinityClientIP NetworkServiceSessionAffinity = "ClientIP"
+
+	// NetworkServiceSessionAffinityClientIPAndProtocol hashes the client's
+	// address and the IP protocol, so every connection from one address over
+	// one protocol reaches the same backend, among the services sharing that
+	// backend set.
+	NetworkServiceSessionAffinityClientIPAndProtocol NetworkServiceSessionAffinity = "ClientIPAndProtocol"
+)
+
 // Ownership reasons for the Accepted condition on NetworkService and
 // NetworkEgressPolicy, reserved for an admission check that verifies the
 // requester is authorized for the VPC resources the object references. No such
@@ -196,6 +223,18 @@ type NetworkServiceSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	BackendPort int32 `json:"backendPort,omitempty"`
+
+	// SessionAffinity selects which connections from one client share a
+	// backend: None, the default, balances each connection on its own;
+	// ClientIP pins a client address to one backend; ClientIPAndProtocol pins
+	// a client address and protocol to one. Two services pin a client to the
+	// same backend only if both set the same affinity and select the same
+	// backend addresses. A change takes effect on every gateway node without a
+	// restart, and rehashes every connection of the service, so most open
+	// connections reach a different backend afterwards.
+	// +optional
+	// +kubebuilder:default=None
+	SessionAffinity NetworkServiceSessionAffinity `json:"sessionAffinity,omitempty"`
 }
 
 // NetworkServiceStatus defines the observed state of a NetworkService.

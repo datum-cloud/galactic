@@ -33,7 +33,7 @@ func TestFlowHash_ConsecutivePortsSpreadAcrossBackends(t *testing.T) {
 	r := rand.New(rand.NewPCG(958, 1))
 
 	pick := func(table *[edgemap.MaglevTableSize]byte, addr [16]byte, port uint16) byte {
-		return table[edgeprog.FlowHash(addr, port)%edgemap.MaglevTableSize]
+		return table[edgeprog.FlowHash(addr, edgeprog.AffinityNone, 0, port)%edgemap.MaglevTableSize]
 	}
 	oneBackend := func(table *[edgemap.MaglevTableSize]byte, addr [16]byte, port func(int) uint16) bool {
 		first := pick(table, addr, port(0))

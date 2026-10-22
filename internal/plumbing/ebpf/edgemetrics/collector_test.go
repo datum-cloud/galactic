@@ -327,7 +327,8 @@ func TestCollector_CollectsRuleCounters(t *testing.T) {
 		Port: 8443,
 		USID: mustAddr(t, "2001:db8:2::1"),
 	}
-	if err := vt.Register(key, []edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone,
+		[]edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -385,7 +386,7 @@ func TestCollector_OmitsSecondsSinceLastPacketWhenNeverSeen(t *testing.T) {
 	table := newFakeVIPTable()
 	vt := edgemap.NewVIPTable(table, newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable())
 	key := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "2001:db8:1::10")}
-	if err := vt.Register(key, []edgemap.Backend{{
+	if err := vt.Register(key, edgeprog.AffinityNone, []edgemap.Backend{{
 		Addr: mustAddr(t, "fd00:10:1::20"), Port: 8443, USID: mustAddr(t, "2001:db8:2::1"),
 	}}, [edgemap.MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -453,7 +454,8 @@ func TestCollector_CollectsReturnCounters(t *testing.T) {
 		Port: 80,
 		USID: mustAddr(t, "2001:db8:ff01:1:e003::"),
 	}
-	if err := vt.Register(key, []edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone,
+		[]edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -515,7 +517,8 @@ func TestCollector_LabelsSeriesWithOwningVPC(t *testing.T) {
 		Addr: mustAddr(t, "fd00:10:1::20"), Port: 8443, USID: mustAddr(t, "2001:db8:2::1"),
 	}
 	for _, key := range []edgemap.VIPKey{owned, unowned} {
-		if err := vt.Register(key, []edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
+		if err := vt.Register(key, edgeprog.AffinityNone,
+			[]edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
 			t.Fatalf("Register(%+v): %v", key, err)
 		}
 	}
@@ -563,7 +566,8 @@ func TestCollector_SharedAddressKeepsRuleVPCs(t *testing.T) {
 		Addr: mustAddr(t, "fd00:10:1::20"), Port: 8443, USID: mustAddr(t, "2001:db8:2::1"),
 	}
 	for _, key := range []edgemap.VIPKey{https, dns} {
-		if err := vt.Register(key, []edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
+		if err := vt.Register(key, edgeprog.AffinityNone,
+			[]edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
 			t.Fatalf("Register(%+v): %v", key, err)
 		}
 	}
@@ -592,7 +596,8 @@ func TestCollector_LabelsIPv4VIPsPlainly(t *testing.T) {
 	vt := edgemap.NewVIPTable(table, newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable())
 	key := edgemap.VIPKey{Proto: 17, VPort: 53, VIP: mustAddr(t, "192.0.2.10")}
 	backend := edgemap.Backend{Addr: mustAddr(t, "10.60.0.5"), Port: 5353, USID: mustAddr(t, "2001:db8:2::1")}
-	if err := vt.Register(key, []edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone,
+		[]edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 

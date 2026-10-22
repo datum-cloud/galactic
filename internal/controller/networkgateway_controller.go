@@ -1484,6 +1484,7 @@ func buildDesiredRule(
 		VIPAddresses: vips,
 		Protocol:     string(rule.Spec.Protocol),
 		Port:         port,
+		Affinity:     string(rule.Spec.SessionAffinity),
 		Backends:     v6Backends,
 		IPv4Backends: v4Backends,
 	}, unresolved, ipv4, nil
