@@ -13,6 +13,12 @@
 // update returns (maybe_wait_bpf_programs in kernel/bpf/syscall.c), so once
 // Publish returns, counter rows only the old snapshot referenced can be
 // reused. See docs/enhancements/networking/interface-traffic-policy.
+//
+// Maps opened from a pin directory also pin each snapshot they publish under
+// its tp_snapshots subdirectory. Reading a snapshot back needs a handle to its
+// inner map, and the kernel hands one out by map ID only to CAP_SYS_ADMIN; a
+// pin can be opened by any process with access to the bpffs, so
+// galactic-router can adopt the snapshots bound before it restarted.
 package tpmap
 
 import (
@@ -79,6 +85,15 @@ var SnapshotSpec = ebpf.MapSpec{
 	MaxEntries: galacticv1alpha1.MaxCompiledEntries + 1,
 }
 
+// snapshotPinDir is the subdirectory of the pin directory that holds one pin
+// per bound snapshot.
+const snapshotPinDir = "tp_snapshots"
+
+// ErrSnapshotUnreadable reports a bound snapshot that has no matching pin and
+// whose inner map this process may not open by ID, such as one bound by a
+// datapath writer that did not pin it.
+var ErrSnapshotUnreadable = errors.New("bound snapshot is unreadable")
+
 // Maps are the traffic policy maps of a loaded or pinned uSID datapath.
 type Maps struct {
 	State            *ebpf.Map
@@ -91,6 +106,10 @@ type Maps struct {
 	// Unattributed and AccountingErrorCounts are the node-level counters.
 	Unattributed          *ebpf.Map
 	AccountingErrorCounts *ebpf.Map
+
+	// pinDir is where the maps are pinned; empty for maps that are not, whose
+	// snapshots are not pinned either.
+	pinDir string
 }
 
 // FromObjects returns the traffic policy maps of objs.
@@ -149,7 +168,7 @@ func (m *Maps) GetState() (State, error) {
 // OpenPinned opens the traffic policy maps pinned under pinDir, as a CNI
 // plugin does; Close releases them.
 func OpenPinned(pinDir string) (*Maps, error) {
-	m := &Maps{}
+	m := &Maps{pinDir: pinDir}
 	for _, p := range []struct {
 		name string
 		dst  **ebpf.Map
@@ -350,23 +369,101 @@ func (m *Maps) PublishSnapshot(ifindex, dir uint32, snap Snapshot) error {
 			return fmt.Errorf("write snapshot entry %d: %w", i, err)
 		}
 	}
-	if err := m.Bindings.Put(prog.UsidTpBindingKey{Ifindex: ifindex, Direction: dir}, inner); err != nil {
+	key := prog.UsidTpBindingKey{Ifindex: ifindex, Direction: dir}
+	tmp, err := m.pinTemp(key, inner)
+	if err != nil {
+		return err
+	}
+	if err := m.Bindings.Put(key, inner); err != nil {
+		if tmp != "" {
+			_ = os.Remove(tmp)
+		}
 		return fmt.Errorf("bind snapshot to ifindex %d direction %d: %w", ifindex, dir, err)
+	}
+	if tmp != "" {
+		// The snapshot is bound either way. A missing or stale pin only makes
+		// it unreadable, which ReadSnapshot reports, so it is not an error here.
+		if err := os.Rename(tmp, m.snapshotPin(key)); err != nil {
+			_ = os.Remove(tmp)
+			_ = os.Remove(m.snapshotPin(key))
+		}
 	}
 	return nil
 }
 
+// pinTemp pins inner under a temporary name in the snapshot pin directory,
+// returning "" for maps without a pin directory. Renaming it over the key's
+// pin once bound replaces the previous snapshot's pin in one step.
+func (m *Maps) pinTemp(key prog.UsidTpBindingKey, inner *ebpf.Map) (string, error) {
+	if m.pinDir == "" {
+		return "", nil
+	}
+	dir := filepath.Join(m.pinDir, snapshotPinDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create snapshot pin directory: %w", err)
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("read random pin name: %w", err)
+	}
+	// bpffs refuses any name containing a dot.
+	tmp := filepath.Join(dir, fmt.Sprintf("tmp-%d-%d-%x", key.Ifindex, key.Direction, b))
+	if err := inner.Pin(tmp); err != nil {
+		return "", fmt.Errorf("pin snapshot of ifindex %d direction %d: %w", key.Ifindex, key.Direction, err)
+	}
+	return tmp, nil
+}
+
+// snapshotPin is the path of key's snapshot pin.
+func (m *Maps) snapshotPin(key prog.UsidTpBindingKey) string {
+	return filepath.Join(m.pinDir, snapshotPinDir, fmt.Sprintf("%d-%d", key.Ifindex, key.Direction))
+}
+
+// openSnapshot opens the inner map bound with id: from key's pin when it is
+// that map, otherwise by ID, which the kernel allows only with CAP_SYS_ADMIN
+// and reports as ErrSnapshotUnreadable without it.
+func (m *Maps) openSnapshot(key prog.UsidTpBindingKey, id ebpf.MapID) (*ebpf.Map, error) {
+	if m.pinDir != "" {
+		pinned, err := ebpf.LoadPinnedMap(m.snapshotPin(key), nil)
+		if err == nil {
+			if info, err := pinned.Info(); err == nil {
+				if pinnedID, ok := info.ID(); ok && pinnedID == id {
+					return pinned, nil
+				}
+			}
+			_ = pinned.Close()
+		}
+	}
+	inner, err := ebpf.NewMapFromID(id)
+	if errors.Is(err, os.ErrPermission) {
+		return nil, fmt.Errorf("%w: ifindex %d direction %d has no matching pin: %w", ErrSnapshotUnreadable,
+			key.Ifindex, key.Direction, err)
+	}
+	return inner, err
+}
+
 // ReadSnapshot reads ifindex's snapshot in dir, reporting false when none is
 // bound. Entries carry only each entry's Rule, which names its counter row,
-// and its flags; Raw holds every entry in full.
+// and its flags; Raw holds every entry in full. A bound snapshot this process
+// cannot open returns an error wrapping ErrSnapshotUnreadable.
 func (m *Maps) ReadSnapshot(ifindex, dir uint32) (Snapshot, bool, error) {
-	var inner *ebpf.Map
-	err := m.Bindings.Lookup(prog.UsidTpBindingKey{Ifindex: ifindex, Direction: dir}, &inner)
+	key := prog.UsidTpBindingKey{Ifindex: ifindex, Direction: dir}
+	// A map-of-maps lookup read into a uint32 is the inner map's ID; reading
+	// it into an *ebpf.Map would open it by ID.
+	var id uint32
+	err := m.Bindings.Lookup(key, &id)
 	if errors.Is(err, ebpf.ErrKeyNotExist) || errors.Is(err, os.ErrNotExist) {
 		return Snapshot{}, false, nil
 	}
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("look up binding of ifindex %d direction %d: %w", ifindex, dir, err)
+	}
+	inner, err := m.openSnapshot(key, ebpf.MapID(id))
+	if errors.Is(err, os.ErrNotExist) {
+		return Snapshot{}, false, nil // unbound since it was looked up
+	}
+	if err != nil {
+		return Snapshot{}, false, err
 	}
 	defer inner.Close() //nolint:errcheck // read-only handle
 	var header prog.UsidTpHeader
@@ -395,14 +492,13 @@ func (m *Maps) ReadSnapshot(ifindex, dir uint32) (Snapshot, bool, error) {
 // BoundKeys lists every bound interface direction.
 func (m *Maps) BoundKeys() ([]prog.UsidTpBindingKey, error) {
 	var (
-		key   prog.UsidTpBindingKey
-		inner *ebpf.Map
-		out   []prog.UsidTpBindingKey
+		key prog.UsidTpBindingKey
+		id  uint32 // the inner map's ID, read without opening it
+		out []prog.UsidTpBindingKey
 	)
 	it := m.Bindings.Iterate()
-	for it.Next(&key, &inner) {
+	for it.Next(&key, &id) {
 		out = append(out, key)
-		_ = inner.Close()
 	}
 	if err := it.Err(); err != nil {
 		return nil, fmt.Errorf("iterate tp_binding_table: %w", err)
@@ -459,13 +555,26 @@ func sumPerCPU(m *ebpf.Map, key any) (packets, bytes uint64, err error) {
 	return packets, bytes, nil
 }
 
-// Invalidate removes ifindex's snapshot in dir, so it denies as
+// Invalidate removes ifindex's snapshot in dir, and its pin, so it denies as
 // policy_unavailable. It needs no allocation, so it works when publishing a
 // replacement cannot.
 func (m *Maps) Invalidate(ifindex, dir uint32) error {
-	err := m.Bindings.Delete(prog.UsidTpBindingKey{Ifindex: ifindex, Direction: dir})
+	key := prog.UsidTpBindingKey{Ifindex: ifindex, Direction: dir}
+	err := m.Bindings.Delete(key)
 	if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("unbind ifindex %d direction %d: %w", ifindex, dir, err)
+	}
+	if m.pinDir == "" {
+		return nil
+	}
+	// Checked first so a caller whose bpffs mount is read-only, and that never
+	// pins, is not refused for a pin that does not exist.
+	pin := m.snapshotPin(key)
+	if _, err := os.Lstat(pin); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err := os.Remove(pin); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("unpin snapshot of ifindex %d direction %d: %w", ifindex, dir, err)
 	}
 	return nil
 }

@@ -189,7 +189,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (*statusUp
 	log := ctrl.LoggerFrom(ctx)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if err := r.open(); err != nil {
+	if err := r.open(ctx); err != nil {
 		// The datapath pins its maps when galactic-cni loads it, which may be
 		// after this process starts.
 		log.Info("traffic policy maps are not available yet", "error", err.Error())
@@ -467,8 +467,12 @@ func (r *Reconciler) drop(ctx context.Context, ifindex uint32, att types.Namespa
 // bound, adopting them, on the first reconcile; it retries until the
 // datapath has pinned its maps. Nothing is kept unless every bound snapshot
 // was read, since a row left unreserved could be handed to another rule
-// while a bound snapshot still counts into it.
-func (r *Reconciler) open() error {
+// while a bound snapshot still counts into it. The one exception is a
+// snapshot this process cannot read at all (tpmap.ErrSnapshotUnreadable), such
+// as one bound before snapshots were pinned: it is adopted as empty, so it
+// stays bound until its attachment's reconcile replaces it or the sweep
+// unbinds it, and its rows may count another rule's packets until then.
+func (r *Reconciler) open(ctx context.Context) error {
 	if r.maps != nil {
 		return nil
 	}
@@ -486,7 +490,7 @@ func (r *Reconciler) open() error {
 	}
 	alloc := tpmap.NewCounterAllocator(rows)
 	adopted := map[bindingKey]tpmap.Snapshot{}
-	if err := readBound(maps, alloc, adopted); err != nil {
+	if err := readBound(ctx, maps, alloc, adopted); err != nil {
 		if r.openMaps == nil {
 			maps.Close()
 		}
@@ -499,13 +503,21 @@ func (r *Reconciler) open() error {
 	return nil
 }
 
-func readBound(maps *tpmap.Maps, alloc *tpmap.CounterAllocator, adopted map[bindingKey]tpmap.Snapshot) error {
+func readBound(ctx context.Context, maps *tpmap.Maps, alloc *tpmap.CounterAllocator,
+	adopted map[bindingKey]tpmap.Snapshot,
+) error {
 	keys, err := maps.BoundKeys()
 	if err != nil {
 		return err
 	}
 	for _, k := range keys {
 		snap, ok, err := maps.ReadSnapshot(k.Ifindex, k.Direction)
+		if errors.Is(err, tpmap.ErrSnapshotUnreadable) {
+			ctrl.LoggerFrom(ctx).Info("adopting an unreadable traffic policy snapshot as empty until it is republished",
+				"ifindex", k.Ifindex, "direction", k.Direction, "error", err.Error())
+			adopted[bindingKey{k.Ifindex, k.Direction}] = tpmap.Snapshot{}
+			continue
+		}
 		if err != nil {
 			return err
 		}

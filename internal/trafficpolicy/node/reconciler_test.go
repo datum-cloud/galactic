@@ -36,6 +36,7 @@ import (
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	"go.datum.net/galactic/internal/captest"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/trafficpolicy"
@@ -331,6 +332,7 @@ func TestReconciler(t *testing.T) {
 	p := stepInsertRule(t, f, r, httpRow)
 	r = stepRestart(t, f, httpRow)
 	stepRenameRule(t, f, r, httpRow)
+	stepRestartUnreadable(t, f)
 	r = stepRebindFailure(t, f)
 	stepMissingPolicy(t, f, r, p)
 	stepNodeMove(t, f, r)
@@ -497,6 +499,53 @@ func stepRestart(t *testing.T, f *fixture, httpRow uint32) *Reconciler {
 	}
 	r.alloc.Free(200)
 	return r
+}
+
+// stepRestartUnreadable: a reconciler restarted without CAP_SYS_ADMIN, as
+// galactic-router runs, over snapshots it cannot read (f.maps pins none)
+// still opens the maps, republishes the attachment's snapshots with the
+// same policy, and sweeps one no attachment claims.
+func stepRestartUnreadable(t *testing.T, f *fixture) {
+	t.Helper()
+	before, _ := f.snapshot(t, tpmap.DirEgress)
+	entries, err := trafficpolicy.Compile(trafficpolicy.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.maps.Publish(foreignIfindex, tpmap.DirEgress, 1, 300, entries); err != nil {
+		t.Fatal(err)
+	}
+	r := f.reconciler()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNS, Name: testAtt}}
+	captest.WithoutSysAdmin(t, func() {
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Errorf("reconcile: %v", err)
+		}
+	})
+	if r.maps == nil {
+		t.Fatal("the restarted reconciler did not open the maps")
+	}
+	if got := r.state[f.egressKey()]; got == nil {
+		t.Fatalf("after restart, egress state = %+v", got)
+	}
+	after, ok := f.snapshot(t, tpmap.DirEgress)
+	if !ok || after.Generation != before.Generation || after.PolicyUID != before.PolicyUID {
+		t.Errorf("egress snapshot = %+v, want policy generation %d republished", after, before.Generation)
+	}
+	foreign := bindingKey{foreignIfindex, tpmap.DirEgress}
+	if _, ok := r.adopted[foreign]; !ok || len(r.adopted) != 1 {
+		t.Fatalf("adopted = %v, want only the unclaimed snapshot", r.adopted)
+	}
+
+	r.openedAt = r.openedAt.Add(-2 * resync)
+	captest.WithoutSysAdmin(t, func() {
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Errorf("reconcile: %v", err)
+		}
+	})
+	if _, ok, _ := f.maps.ReadSnapshot(foreignIfindex, tpmap.DirEgress); ok {
+		t.Error("the unclaimed snapshot is still bound after a resync")
+	}
 }
 
 // stepRenameRule: renaming a rule starts a new series on a fresh, zeroed
