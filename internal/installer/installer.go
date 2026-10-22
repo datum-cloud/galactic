@@ -562,7 +562,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	// wiring below inert.
 	if objs, ok := datapath.(*prog.UsidObjects); ok {
 		state.objs = objs
-		state.trafficPolicy = startTrafficPolicy(objs, policyCfg)
+		state.trafficPolicy = startTrafficPolicy(objs, attach.PinDir, policyCfg)
 		state.mssClamp = newMSSClampState(objs.MssClampTable, objs.EncapMtuTable)
 		state.mssClamp.reconcile()
 		state.egressGroup.counters = objs.EgressShardCounters

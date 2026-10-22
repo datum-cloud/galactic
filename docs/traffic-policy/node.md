@@ -57,6 +57,22 @@ compiled differently is republished, starting its rules from zero. A
 snapshot on an interface no attachment claims within one resync is unbound,
 and its rows are freed.
 
+To read a snapshot back, galactic-router pins each one it publishes under
+`tp_snapshots/` in the datapath's pin directory, beside the policy maps, and
+galactic-cni removes the pin when it unbinds the snapshot. On its first
+reconcile and at most once every five minutes after, galactic-router removes
+any pin that holds no bound snapshot, such as one left by a publish that an
+interface's removal or a restart interrupted. Until then, such a pin holds its
+snapshot's memory. The kernel opens a map
+by ID only for `CAP_SYS_ADMIN`, which galactic-router does not have (it runs
+with `NET_ADMIN` and `BPF`), so a snapshot without a matching pin, such as
+one bound by a release that did not pin, cannot be read. galactic-router
+adopts it as empty and logs it: it stays bound, so traffic keeps its
+current verdict, until the next reconcile republishes it with fresh counter
+rows or the sweep unbinds it. Until then its rules can count into rows
+another snapshot was given, so those counters can over-count for that
+window; verdicts are unaffected.
+
 A rebind that cannot be installed, such as one that runs out of counter
 rows, unbinds the direction rather than keeping the old policy's grants,
 and reports `Failed`. A failed update of the same policy keeps its last

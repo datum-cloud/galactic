@@ -46,6 +46,15 @@ Check every node of the cell:
   which the cloud operator writes. An attachment without them is never bound
   on any node, and denies everything once enforced.
 
+`galactic-router` needs `NET_ADMIN` and `BPF`, as `config/galactic-router/`
+grants, and not `CAP_SYS_ADMIN`: it reads back the snapshots it bound before
+a restart from their pins (see
+[Traffic policy on the node](node.md#what-it-applies)). The first restart
+after upgrading from a release that did not pin snapshots republishes every
+snapshot bound on the node, so their rule counters start again from zero.
+Until each one is republished, its rules can count into rows another snapshot
+was given.
+
 ## Steps
 
 1. **Install the cell controller.** Apply `config/galactic-controller/` (its
