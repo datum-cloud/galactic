@@ -378,6 +378,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
+| `backendHealthFiltering` _boolean_ | BackendHealthFiltering reports that this node's gateway can leave a<br />backend reported Unhealthy out of a NetworkService's Maglev table.<br />Every gateway in the namespace applies health only while every<br />NetworkGateway there reports it, so all of them build the same table.<br />The gateway sets it on every status write; a gateway that cannot apply<br />health, an older one included, writes its status without it. |  |  |
 
 
 #### NetworkService
