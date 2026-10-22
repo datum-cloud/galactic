@@ -860,6 +860,9 @@ func TestPersistentDataplaneHasNoExpiry(t *testing.T) {
 
 func TestInitializeWithdrawsMissingInterfaceAndRecovers(t *testing.T) {
 	programmer := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
+	programmer.mapIDs = [8]ebpf.MapID{1, 2, 3, 4, 5, 6}
+	programmer.mapIDsValid = true
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	missing := false
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		if name == testConsumerDeviceName && missing {
@@ -902,6 +905,9 @@ func TestInitializeWithdrawsMissingInterfaceAndRecovers(t *testing.T) {
 
 func TestMissingInterfaceDoesNotBlockOtherRoutes(t *testing.T) {
 	programmer := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
+	programmer.mapIDs = [8]ebpf.MapID{1, 2, 3, 4, 5, 6}
+	programmer.mapIDsValid = true
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	missing := false
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		switch name {
@@ -939,6 +945,9 @@ func TestMissingInterfaceDoesNotBlockOtherRoutes(t *testing.T) {
 
 func TestRepairPropagatesInterfaceLookupErrors(t *testing.T) {
 	programmer := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
+	programmer.mapIDs = [8]ebpf.MapID{1, 2, 3, 4, 5, 6}
+	programmer.mapIDsValid = true
+	programmer.readMapIDsFn = func(string) ([8]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	lookupErr := errors.New("netlink unavailable")
 	programmer.targetIndexFn = func(string) (uint32, error) { return 0, lookupErr }
 	programmer.desiredIntents["test"] = []RouteIntent{localTestIntent()}
