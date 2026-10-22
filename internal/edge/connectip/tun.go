@@ -23,40 +23,46 @@ const tunQueueLen = 256
 
 // TUNBackend is a PacketBackend for one VPC that exchanges packets with a
 // Linux TUN device. Packets from clients are written to the device, and
-// packets read from the device are delivered to the session whose assigned
-// address matches their destination.
+// packets read from the device are delivered to the session whose delegated
+// /96 contains their destination. The caller must wrap this packet adapter
+// with attachment/claim validation and independent forwarding expiry.
 type TUNBackend struct {
 	vpc string
 	dev *os.File
 
 	mu       sync.Mutex
-	sessions map[netip.Addr]*tunSession
+	closed   bool
+	sessions map[netip.Prefix]*tunSession
 
 	readerDone chan struct{}
 }
 
-// OpenTUN attaches to the TUN device name, creating it when it does not exist,
-// and returns a backend serving vpc. The device is opened without packet
-// information headers, so every read and write is one bare IP packet.
-func OpenTUN(name, vpc string) (*TUNBackend, error) {
-	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, fmt.Errorf("could not open /dev/net/tun: %w", err)
+// NewTUNBackend takes ownership of an already provisioned, nonblocking TUN
+// descriptor without packet-information headers. The provisioner owns namespace,
+// link and route setup; this backend only performs packet I/O for one gVPC.
+func NewTUNBackend(dev *os.File, vpc string) (*TUNBackend, error) {
+	if dev == nil || vpc == "" {
+		return nil, errors.New("TUN descriptor and gVPC are required")
 	}
-	ifr, err := unix.NewIfreq(name)
+	raw, err := dev.SyscallConn()
 	if err != nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("could not build request for %q: %w", name, err)
+		return nil, fmt.Errorf("could not access TUN descriptor: %w", err)
 	}
-	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
-	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("could not attach to TUN device %q: %w", name, err)
+	var flags int
+	var flagErr error
+	if err := raw.Control(func(fd uintptr) { flags, flagErr = unix.FcntlInt(fd, unix.F_GETFL, 0) }); err != nil {
+		return nil, fmt.Errorf("could not inspect TUN descriptor: %w", err)
+	}
+	if flagErr != nil {
+		return nil, fmt.Errorf("could not read TUN flags: %w", flagErr)
+	}
+	if flags&unix.O_NONBLOCK == 0 {
+		return nil, errors.New("TUN descriptor must be nonblocking")
 	}
 	b := &TUNBackend{
 		vpc:        vpc,
-		dev:        os.NewFile(uintptr(fd), "/dev/net/tun"),
-		sessions:   map[netip.Addr]*tunSession{},
+		dev:        dev,
+		sessions:   map[netip.Prefix]*tunSession{},
 		readerDone: make(chan struct{}),
 	}
 	go b.readLoop()
@@ -70,19 +76,26 @@ func (b *TUNBackend) Close() error {
 	return err
 }
 
-// Open registers a session for info.Address. It returns an error when info
-// is for another VPC or the address already has a session.
+// Open registers a session for a masked /96. It rejects another gVPC,
+// an invalid prefix or a prefix already bound to a session.
 func (b *TUNBackend) Open(_ context.Context, info SessionInfo) (BackendSession, error) {
+	if !info.Prefix.IsValid() || !info.Prefix.Addr().Is6() || info.Prefix.Addr().Is4In6() ||
+		info.Prefix.Bits() != 96 || info.Prefix != info.Prefix.Masked() {
+		return nil, errors.New("invalid connector prefix")
+	}
 	if info.VPC != b.vpc {
 		return nil, fmt.Errorf("TUN backend serves VPC %q, not %q", b.vpc, info.VPC)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, dup := b.sessions[info.Address]; dup {
-		return nil, fmt.Errorf("address %s already has a session", info.Address)
+	if b.closed {
+		return nil, errors.New("TUN backend closed")
 	}
-	s := &tunSession{backend: b, addr: info.Address, in: make(chan []byte, tunQueueLen), closed: make(chan struct{})}
-	b.sessions[info.Address] = s
+	if _, dup := b.sessions[info.Prefix]; dup {
+		return nil, fmt.Errorf("prefix %s already has a session", info.Prefix)
+	}
+	s := &tunSession{backend: b, prefix: info.Prefix, in: make(chan []byte, tunQueueLen), closed: make(chan struct{})}
+	b.sessions[info.Prefix] = s
 	return s, nil
 }
 
@@ -100,7 +113,7 @@ func (b *TUNBackend) readLoop() {
 			continue
 		}
 		b.mu.Lock()
-		s := b.sessions[dst]
+		s := b.sessions[netip.PrefixFrom(dst, 96).Masked()]
 		b.mu.Unlock()
 		if s == nil {
 			continue
@@ -115,6 +128,7 @@ func (b *TUNBackend) readLoop() {
 func (b *TUNBackend) closeSessions() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.closed = true
 	for addr, s := range b.sessions {
 		s.closeOnce.Do(func() { close(s.closed) })
 		delete(b.sessions, addr)
@@ -123,15 +137,34 @@ func (b *TUNBackend) closeSessions() {
 
 type tunSession struct {
 	backend   *TUNBackend
-	addr      netip.Addr
+	prefix    netip.Prefix
 	in        chan []byte
 	closed    chan struct{}
 	closeOnce sync.Once
 }
 
 func (s *tunSession) WritePacket(pkt []byte) error {
-	if _, err := s.backend.dev.Write(pkt); err != nil {
-		return fmt.Errorf("could not write to TUN device: %w", err)
+	// Serialize session release with a single nonblocking write. A full device
+	// fails this request instead of blocking shutdown or another connector.
+	s.backend.mu.Lock()
+	defer s.backend.mu.Unlock()
+	if s.backend.closed || s.backend.sessions[s.prefix] != s {
+		return errors.New("session closed")
+	}
+	raw, err := s.backend.dev.SyscallConn()
+	if err != nil {
+		return fmt.Errorf("could not access TUN descriptor: %w", err)
+	}
+	var writeErr error
+	var n int
+	if err := raw.Control(func(fd uintptr) { n, writeErr = unix.Write(int(fd), pkt) }); err != nil {
+		return fmt.Errorf("could not access TUN descriptor: %w", err)
+	}
+	if writeErr != nil {
+		return fmt.Errorf("could not write to TUN device: %w", writeErr)
+	}
+	if n != len(pkt) {
+		return errors.New("short TUN write")
 	}
 	return nil
 }
@@ -151,8 +184,8 @@ func (s *tunSession) Close() error {
 	s.closeOnce.Do(func() { close(s.closed) })
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
-	if s.backend.sessions[s.addr] == s {
-		delete(s.backend.sessions, s.addr)
+	if s.backend.sessions[s.prefix] == s {
+		delete(s.backend.sessions, s.prefix)
 	}
 	return nil
 }

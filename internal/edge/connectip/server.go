@@ -7,7 +7,6 @@ package connectip
 import (
 	"cmp"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -18,7 +17,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	connectip "github.com/quic-go/connect-ip-go"
 	"github.com/quic-go/quic-go"
@@ -52,21 +50,6 @@ const (
 	maxPacketSize = 65535
 )
 
-// Principal is an authenticated caller and the VPCs it may connect to.
-type Principal struct {
-	Name string
-	VPCs []string
-}
-
-// VPC is a network clients can be admitted to.
-type VPC struct {
-	Name string
-	// Pool is the IPv6 prefix client addresses are assigned from.
-	Pool netip.Prefix
-	// Routes are the prefixes advertised to every client of the VPC.
-	Routes []netip.Prefix
-}
-
 // Config configures a Server.
 type Config struct {
 	// Authority is the host[:port] clients send as :authority.
@@ -76,30 +59,21 @@ type Config struct {
 	// QUICConfig is optional; datagrams are always enabled. When nil, the
 	// initial packet size is DefaultInitialPacketSize.
 	QUICConfig *quic.Config
-	// Credentials maps a bearer token to its principal.
-	Credentials map[string]Principal
-	VPCs        []VPC
-	Backend     PacketBackend
+	// Admission authenticates requests and supplies an authorized prefix lease.
+	Admission Admission
+	Backend   PacketBackend
 	// Logger is optional and defaults to slog.Default().
 	Logger *slog.Logger
 }
 
-type vpcState struct {
-	pool   *addressPool
-	routes []connectip.IPRoute
-}
-
 // Server terminates CONNECT-IP requests over HTTP/3.
 type Server struct {
-	template    *uritemplate.Template
-	credentials map[[sha256.Size]byte]Principal
-	vpcs        map[string]*vpcState
-	backend     PacketBackend
-	log         *slog.Logger
-	h3          *http3.Server
-	proxy       connectip.Proxy
-
-	nextID atomic.Uint64
+	template  *uritemplate.Template
+	admission Admission
+	backend   PacketBackend
+	log       *slog.Logger
+	h3        *http3.Server
+	proxy     connectip.Proxy
 
 	mu       sync.Mutex
 	closed   bool
@@ -109,8 +83,7 @@ type Server struct {
 type quicConnKey struct{}
 
 // NewServer validates cfg and returns a Server. It returns an error when the
-// authority, TLS config or backend is missing, or when a VPC is duplicated,
-// has an invalid pool, or has invalid or overlapping routes.
+// authority, TLS config, admission authority or backend is missing.
 func NewServer(cfg Config) (*Server, error) {
 	if cfg.Authority == "" {
 		return nil, errors.New("authority is required")
@@ -118,31 +91,15 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.TLSConfig == nil {
 		return nil, errors.New("TLS config is required")
 	}
+	if cfg.Admission == nil {
+		return nil, errors.New("admission is required")
+	}
 	if cfg.Backend == nil {
 		return nil, errors.New("backend is required")
 	}
 	template, err := uritemplate.New("https://" + cfg.Authority + TemplatePath)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse URI template: %w", err)
-	}
-
-	vpcs := make(map[string]*vpcState, len(cfg.VPCs))
-	for _, v := range cfg.VPCs {
-		if v.Name == "" {
-			return nil, errors.New("VPC name is required")
-		}
-		if _, dup := vpcs[v.Name]; dup {
-			return nil, fmt.Errorf("VPC %q is defined twice", v.Name)
-		}
-		pool, err := newAddressPool(v.Pool)
-		if err != nil {
-			return nil, fmt.Errorf("VPC %q: %w", v.Name, err)
-		}
-		routes, err := routeRanges(v.Routes)
-		if err != nil {
-			return nil, fmt.Errorf("VPC %q: %w", v.Name, err)
-		}
-		vpcs[v.Name] = &vpcState{pool: pool, routes: routes}
 	}
 
 	log := cfg.Logger
@@ -155,16 +112,11 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	quicConf.EnableDatagrams = true
 
-	credentials := make(map[[sha256.Size]byte]Principal, len(cfg.Credentials))
-	for token, p := range cfg.Credentials {
-		credentials[sha256.Sum256([]byte(token))] = p
-	}
 	s := &Server{
-		template:    template,
-		credentials: credentials,
-		vpcs:        vpcs,
-		backend:     cfg.Backend,
-		log:         log,
+		template:  template,
+		admission: cfg.Admission,
+		backend:   cfg.Backend,
+		log:       log,
 	}
 	s.h3 = &http3.Server{
 		Handler:         s,
@@ -216,7 +168,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, http.StatusNotFound, "unknown path", nil)
 		return
 	}
-	principal, ok := s.authenticate(r)
+	token, ok := bearerToken(r)
 	if !ok {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		s.reject(w, http.StatusUnauthorized, "missing or unknown credential", nil)
@@ -227,31 +179,63 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, http.StatusBadRequest, "request must name exactly one VPC", nil)
 		return
 	}
-	vpc, ok := s.vpcs[vpcName]
-	if !ok || !slices.Contains(principal.VPCs, vpcName) {
-		s.reject(w, http.StatusForbidden, "VPC not granted", nil)
-		return
-	}
 	if err := probeInnerMTU(r); err != nil {
 		s.reject(w, http.StatusServiceUnavailable, "path cannot carry the minimum inner MTU", err)
 		return
 	}
-	addr, err := vpc.pool.allocate()
-	if err != nil {
-		s.reject(w, http.StatusServiceUnavailable, "no client address available", err)
-		return
-	}
-	defer vpc.pool.release(addr)
-
 	if !s.startSession() {
 		s.reject(w, http.StatusServiceUnavailable, "server is closing", nil)
 		return
 	}
 	defer s.sessions.Done()
 
-	info := SessionInfo{ID: s.nextID.Add(1), Principal: principal.Name, VPC: vpcName, Address: addr}
-	log := s.log.With("session", info.ID, "principal", info.Principal, "vpc", info.VPC, "address", addr)
-	sess, err := s.backend.Open(r.Context(), info)
+	lease, err := s.admission.Admit(r.Context(), token, vpcName)
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, ErrUnauthenticated) {
+			status = http.StatusUnauthorized
+			w.Header().Set("WWW-Authenticate", "Bearer")
+		} else if errors.Is(err, ErrForbidden) {
+			status = http.StatusForbidden
+		}
+		s.reject(w, status, "admission rejected", err)
+		return
+	}
+	if lease == nil {
+		s.reject(w, http.StatusServiceUnavailable, "missing admission lease", nil)
+		return
+	}
+	defer func() {
+		if err := lease.Close(); err != nil {
+			s.log.Warn("could not release admission lease", "error", err)
+		}
+	}()
+	info := lease.Info()
+	routes, err := routeRanges(lease.Routes())
+	if err != nil || !validGrant(info, vpcName) || lease.Done() == nil {
+		s.reject(w, http.StatusServiceUnavailable, "invalid admission grant", err)
+		return
+	}
+	select {
+	case <-lease.Done():
+		s.reject(w, http.StatusServiceUnavailable, "admission expired", nil)
+		return
+	default:
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-lease.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() { cancel(); <-watchDone }()
+	log := s.log.With("session", info.ID, "principal", info.Principal, "vpc", info.VPC, "prefix", info.Prefix)
+	sess, err := s.backend.Open(ctx, info)
 	if err != nil {
 		s.reject(w, http.StatusServiceUnavailable, "backend unavailable", err)
 		return
@@ -262,6 +246,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	if err := ctx.Err(); err != nil {
+		s.reject(w, http.StatusServiceUnavailable, "admission expired during setup", err)
+		return
+	}
 	conn, err := s.proxy.Proxy(w, preq)
 	if err != nil {
 		log.Warn("could not accept request", "error", err)
@@ -272,17 +260,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			log.Debug("could not close CONNECT-IP stream cleanly", "error", err)
 		}
 	}()
-	assigned := netip.PrefixFrom(addr, addr.BitLen())
+	// Expiry must also unblock capsule writes before packet workers start.
+	stopExpiry := context.AfterFunc(ctx, func() {
+		if err := conn.Close(); err != nil {
+			log.Debug("could not close expired tunnel", "error", err)
+		}
+	})
+	defer stopExpiry()
+	assigned := info.Prefix
 	if err := conn.AssignAddresses([]netip.Prefix{assigned}); err != nil {
 		log.Warn("could not assign address", "error", err)
 		return
 	}
-	if err := conn.AdvertiseRoute(vpc.routes); err != nil {
+	if err := conn.AdvertiseRoute(routes); err != nil {
 		log.Warn("could not advertise routes", "error", err)
 		return
 	}
 	log.Info("CONNECT-IP request accepted")
-	s.proxySession(r.Context(), log, conn, sess, assigned)
+	s.proxySession(ctx, log, conn, sess, assigned)
 	log.Info("CONNECT-IP request ended")
 }
 
@@ -350,12 +345,15 @@ func (s *Server) proxySession(
 	if err := conn.Close(); err != nil {
 		log.Debug("could not close CONNECT-IP stream cleanly", "error", err)
 	}
+	if err := sess.Close(); err != nil {
+		log.Warn("could not stop backend session", "error", err)
+	}
 	wg.Wait()
 }
 
 // answerAddressRequests answers every ADDRESS_REQUEST with the request's one
-// assigned address: the first IPv6 request receives it, every other request is
-// rejected, and the address stays assigned either way. It returns when the
+// assigned prefix: the first IPv6 request receives it, every other request is
+// rejected, and the prefix stays assigned either way. It returns when the
 // stream closes or ctx is done.
 func answerAddressRequests(ctx context.Context, log *slog.Logger, conn *connectip.Conn, assigned netip.Prefix) {
 	for {
@@ -387,26 +385,25 @@ func (s *Server) reject(w http.ResponseWriter, status int, reason string, err er
 	w.WriteHeader(status)
 }
 
-// authenticate returns the principal of the request's single bearer
-// credential.
-func (s *Server) authenticate(r *http.Request) (Principal, bool) {
+// bearerToken extracts exactly one nonempty bearer credential.
+func bearerToken(r *http.Request) (string, bool) {
 	values := r.Header.Values("Authorization")
 	if len(values) != 1 {
-		return Principal{}, false
+		return "", false
 	}
 	scheme, token, found := strings.Cut(values[0], " ")
 	if !found || !strings.EqualFold(scheme, "Bearer") {
-		return Principal{}, false
+		return "", false
 	}
 	token = strings.TrimSpace(token)
-	if token == "" {
-		return Principal{}, false
-	}
-	// Tokens are held by digest, so the lookup's timing depends on the
-	// digest of what was presented, not on how much of a valid token it
-	// shares.
-	p, ok := s.credentials[sha256.Sum256([]byte(token))]
-	return p, ok
+	return token, token != ""
+}
+
+func validGrant(info SessionInfo, vpc string) bool {
+	p := info.Prefix
+	return info.VPC == vpc && info.Principal != "" && info.Connector != "" && info.Attachment != "" &&
+		info.Claim != "" && info.Epoch != 0 && p.IsValid() && p.Addr().Is6() && !p.Addr().Is4In6() &&
+		p.Bits() == 96 && p == p.Masked()
 }
 
 // requestedVPC returns the single VPC named by the request.

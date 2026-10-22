@@ -41,34 +41,18 @@ const (
 	vpcGreen = "green"
 	vpcRed   = "red"
 
-	tokenAlice = "test-token-alice"
-	tokenBob   = "test-token-bob"
+	principalAlice = "alice"
+	tokenAlice     = "test-token-alice"
+	tokenBob       = "test-token-bob"
 )
 
 var (
-	testPool   = netip.MustParsePrefix("fd00:a::100/120")
-	testRoute  = netip.MustParsePrefix("fd00:a::/64")
-	testTarget = netip.MustParseAddr("fd00:a::1")
-	// firstClient is the address the pool hands out first.
-	firstClient = netip.MustParseAddr("fd00:a::101")
+	firstPrefix = netip.MustParsePrefix("fd00:a::1:0:0/96")
+	testRoute   = netip.MustParsePrefix("fd00:a::/64")
+	testTarget  = netip.MustParseAddr("fd00:a::1")
+	// firstClient is one address within the delegated prefix.
+	firstClient = netip.MustParseAddr("fd00:a::1:0:1")
 )
-
-// testVPCs returns VPCs vpcBlue and vpcGreen, which deliberately share a pool and
-// routes, and vpcRed, which nobody is granted.
-func testVPCs() []VPC {
-	return []VPC{
-		{Name: vpcBlue, Pool: testPool, Routes: []netip.Prefix{testRoute}},
-		{Name: vpcGreen, Pool: testPool, Routes: []netip.Prefix{testRoute}},
-		{Name: vpcRed, Pool: testPool, Routes: []netip.Prefix{testRoute}},
-	}
-}
-
-func testCredentials() map[string]Principal {
-	return map[string]Principal{
-		tokenAlice: {Name: "alice", VPCs: []string{vpcBlue, vpcGreen}},
-		tokenBob:   {Name: "bob", VPCs: []string{vpcGreen}},
-	}
-}
 
 type testEnv struct {
 	server   *Server
@@ -89,12 +73,11 @@ func startServer(t *testing.T, mutate func(*Config)) *testEnv {
 	cert, roots := selfSignedCert(t)
 	backend := newMemoryBackend()
 	cfg := Config{
-		Authority:   pconn.LocalAddr().String(),
-		TLSConfig:   &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13},
-		Credentials: testCredentials(),
-		VPCs:        testVPCs(),
-		Backend:     backend,
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Authority: pconn.LocalAddr().String(),
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13},
+		Admission: newTestAdmission(),
+		Backend:   backend,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -227,14 +210,14 @@ func accepted(t *testing.T, conn *connectip.Conn, rsp *http.Response, err error)
 	if err != nil {
 		t.Fatalf("ReceiveAddressAssignment: %v", err)
 	}
-	if len(assigned) != 1 || assigned[0].IPPrefix.Bits() != 128 {
-		t.Fatalf("assignment = %v, want one /128", assigned)
+	if len(assigned) != 1 || assigned[0].IPPrefix.Bits() != 96 {
+		t.Fatalf("assignment = %v, want one /96", assigned)
 	}
 	routes, err := conn.Routes(ctx)
 	if err != nil {
 		t.Fatalf("Routes: %v", err)
 	}
-	return &session{conn: conn, address: assigned[0].IPPrefix.Addr(), routes: routes}
+	return &session{conn: conn, address: assigned[0].IPPrefix.Addr().Next(), routes: routes}
 }
 
 func newClientConn(t *testing.T, qconn *quic.Conn) *connectip.ClientConn {

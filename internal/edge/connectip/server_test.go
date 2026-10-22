@@ -70,7 +70,10 @@ func TestEchoThroughIndependentClient(t *testing.T) {
 		t.Errorf("routes = %v, want %v", s.routes, wantRoutes)
 	}
 	sess := env.backend.nextOpened(t)
-	want := SessionInfo{ID: sess.info.ID, Principal: "alice", VPC: vpcBlue, Address: firstClient}
+	want := SessionInfo{
+		ID: sess.info.ID, Principal: principalAlice, VPC: vpcBlue, Prefix: firstPrefix,
+		Connector: "connector-1", Attachment: "attachment-blue", Claim: "claim-1", Epoch: 1,
+	}
 	if sess.info != want {
 		t.Errorf("backend session = %+v, want %+v", sess.info, want)
 	}
@@ -100,8 +103,8 @@ func TestEchoThroughIndependentClient(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReceiveAddressAssignment: %v", err)
 		}
-		if len(assigned) != 1 || assigned[0].IPPrefix != netip.PrefixFrom(firstClient, 128) {
-			t.Fatalf("assignment = %v, want %s/128", assigned, firstClient)
+		if len(assigned) != 1 || assigned[0].IPPrefix != firstPrefix {
+			t.Fatalf("assignment = %v, want %s/96", assigned, firstClient)
 		}
 		ping(t, s, 8, 128)
 	})
@@ -407,47 +410,6 @@ func TestNoIrohDependency(t *testing.T) {
 		if lower := strings.ToLower(m); strings.Contains(lower, "iroh") || strings.Contains(lower, "n0-computer") {
 			t.Errorf("package depends on module %s", m)
 		}
-	}
-}
-
-func TestAddressPool(t *testing.T) {
-	tests := []struct {
-		name      string
-		prefix    string
-		want      []string
-		wantError bool
-	}{
-		{"FirstAddressSkipped", "2001:db8::/126", []string{"2001:db8::1", "2001:db8::2", "2001:db8::3"}, false},
-		{"Slash127", "2001:db8::/127", []string{"2001:db8::1"}, false},
-		{"Slash128", "2001:db8::1/128", nil, true},
-		{"IPv4", "192.0.2.0/24", nil, true},
-		{"HostBits", "2001:db8::1/64", nil, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pool, err := newAddressPool(netip.MustParsePrefix(tt.prefix))
-			if (err != nil) != tt.wantError {
-				t.Fatalf("newAddressPool error = %v, wantError = %v", err, tt.wantError)
-			}
-			if tt.wantError {
-				return
-			}
-			var got []string
-			for {
-				a, err := pool.allocate()
-				if errors.Is(err, errPoolExhausted) {
-					break
-				}
-				got = append(got, a.String())
-			}
-			if !slices.Equal(got, tt.want) {
-				t.Fatalf("allocated %v, want %v", got, tt.want)
-			}
-			pool.release(netip.MustParseAddr(tt.want[0]))
-			if a, err := pool.allocate(); err != nil || a.String() != tt.want[0] {
-				t.Fatalf("after release allocate = %v, %v; want %s", a, err, tt.want[0])
-			}
-		})
 	}
 }
 

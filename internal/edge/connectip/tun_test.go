@@ -45,7 +45,7 @@ func newNetnsTUN(t *testing.T) (ns.NetNS, *TUNBackend) {
 	var backend *TUNBackend
 	err = netns.Do(func(ns.NetNS) error {
 		var err error
-		if backend, err = OpenTUN("cip0", vpcBlue); err != nil {
+		if backend, err = openTestTUN("cip0", vpcBlue); err != nil {
 			return err
 		}
 		link, err := netlink.LinkByName("cip0")
@@ -86,8 +86,91 @@ func TestTUNBackendReachesKernel(t *testing.T) {
 	}
 	ping(t, s, 43, MinInnerMTU)
 
-	other := SessionInfo{VPC: vpcGreen, Address: netip.MustParseAddr("fd00:a::102")}
+	other := SessionInfo{VPC: vpcGreen, Prefix: firstPrefix}
 	if _, err := backend.Open(context.Background(), other); err == nil {
 		t.Error("TUN backend opened a session for another VPC")
+	}
+}
+
+func openTestTUN(name, vpc string) (*TUNBackend, error) {
+	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	ifr, err := unix.NewIfreq(name)
+	if err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
+	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	return NewTUNBackend(os.NewFile(uintptr(fd), "/dev/net/tun"), vpc)
+}
+
+// TestTUNPrefixDemultiplexing uses a datagram descriptor to exercise backend
+// dispatch without host privileges; the netns test separately proves TUN I/O.
+func TestTUNPrefixDemultiplexing(t *testing.T) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := os.NewFile(uintptr(fds[0]), "backend")
+	peer := os.NewFile(uintptr(fds[1]), "peer")
+	defer func() { _ = peer.Close() }()
+	backend, err := NewTUNBackend(dev, vpcBlue)
+	if err != nil {
+		_ = dev.Close()
+		t.Fatal(err)
+	}
+	defer func() { _ = backend.Close() }()
+	info := SessionInfo{VPC: vpcBlue, Prefix: firstPrefix}
+	first, err := backend.Open(t.Context(), info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Open(t.Context(), info); err == nil {
+		t.Fatal("duplicate prefix accepted")
+	}
+	for _, addr := range []string{"fd00:a::1:0:1", "fd00:a::1:1234:5678", "fd00:a::1:ffff:ffff"} {
+		dst := netip.MustParseAddr(addr)
+		pkt := echoRequest(t, testTarget, dst, 1, 128)
+		if _, err := peer.Write(pkt); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+		buf := make([]byte, maxPacketSize)
+		n, err := first.ReadPacket(ctx, buf)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := parseICMPv6(t, buf[:n]); got.dst != dst {
+			t.Fatalf("destination = %s, want %s", got.dst, dst)
+		}
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := backend.Open(t.Context(), info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.WritePacket(echoRequest(t, firstClient, testTarget, 2, 128)); err == nil {
+		t.Fatal("closed session wrote a packet")
+	}
+	pkt := echoRequest(t, testTarget, firstClient, 3, 128)
+	if _, err := peer.Write(pkt); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	defer cancel()
+	if _, err := replacement.ReadPacket(ctx, make([]byte, maxPacketSize)); err != nil {
+		t.Fatal(err)
 	}
 }
