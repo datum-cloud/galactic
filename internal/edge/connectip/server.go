@@ -1,0 +1,482 @@
+// Copyright 2026 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package connectip
+
+import (
+	"cmp"
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/netip"
+	"slices"
+	"strings"
+	"sync"
+
+	connectip "github.com/quic-go/connect-ip-go"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/yosida95/uritemplate/v3"
+)
+
+const (
+	// TemplatePath is the :path of every CONNECT-IP request the server
+	// accepts.
+	TemplatePath = "/.well-known/masque/ip/*/*/"
+	// VPCHeader names the request header that selects the request's VPC.
+	VPCHeader = "Galactic-VPC"
+
+	// MinInnerMTU is the smallest inner packet every accepted request must be
+	// able to carry toward the client.
+	MinInnerMTU = 1280
+
+	// DefaultInitialPacketSize is the QUIC packet size the server starts with
+	// when Config.QUICConfig is nil. It leaves room for a MinInnerMTU packet
+	// plus QUIC, HTTP Datagram and context ID overhead.
+	DefaultInitialPacketSize = 1350
+
+	connectIPProtocol = "connect-ip"
+
+	// probeContextID is a proxy-allocated context ID that is never
+	// registered, so a client drops a datagram carrying it.
+	probeContextID = 1
+
+	maxPacketSize = 65535
+)
+
+// Config configures a Server.
+type Config struct {
+	// Authority is the host[:port] clients send as :authority.
+	Authority string
+	// TLSConfig holds the server certificate.
+	TLSConfig *tls.Config
+	// QUICConfig is optional; datagrams are always enabled. When nil, the
+	// initial packet size is DefaultInitialPacketSize.
+	QUICConfig *quic.Config
+	// Admission authenticates requests and supplies an authorized prefix lease.
+	Admission Admission
+	Backend   PacketBackend
+	// Logger is optional and defaults to slog.Default().
+	Logger *slog.Logger
+}
+
+// Server terminates CONNECT-IP requests over HTTP/3.
+type Server struct {
+	template  *uritemplate.Template
+	admission Admission
+	backend   PacketBackend
+	log       *slog.Logger
+	h3        *http3.Server
+	proxy     connectip.Proxy
+
+	mu       sync.Mutex
+	closed   bool
+	sessions sync.WaitGroup
+}
+
+type quicConnKey struct{}
+
+// NewServer validates cfg and returns a Server. It returns an error when the
+// authority, TLS config, admission authority or backend is missing.
+func NewServer(cfg Config) (*Server, error) {
+	if cfg.Authority == "" {
+		return nil, errors.New("authority is required")
+	}
+	if cfg.TLSConfig == nil {
+		return nil, errors.New("TLS config is required")
+	}
+	if cfg.Admission == nil {
+		return nil, errors.New("admission is required")
+	}
+	if cfg.Backend == nil {
+		return nil, errors.New("backend is required")
+	}
+	template, err := uritemplate.New("https://" + cfg.Authority + TemplatePath)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse URI template: %w", err)
+	}
+
+	log := cfg.Logger
+	if log == nil {
+		log = slog.Default()
+	}
+	quicConf := &quic.Config{InitialPacketSize: DefaultInitialPacketSize}
+	if cfg.QUICConfig != nil {
+		quicConf = cfg.QUICConfig.Clone()
+	}
+	quicConf.EnableDatagrams = true
+
+	s := &Server{
+		template:  template,
+		admission: cfg.Admission,
+		backend:   cfg.Backend,
+		log:       log,
+	}
+	s.h3 = &http3.Server{
+		Handler:         s,
+		EnableDatagrams: true,
+		TLSConfig:       http3.ConfigureTLSConfig(cfg.TLSConfig),
+		QUICConfig:      quicConf,
+		Logger:          log,
+		ConnContext: func(ctx context.Context, c *quic.Conn) context.Context {
+			return context.WithValue(ctx, quicConnKey{}, c)
+		},
+	}
+	return s, nil
+}
+
+// Serve serves HTTP/3 on conn until the server is closed.
+func (s *Server) Serve(conn net.PacketConn) error {
+	return s.h3.Serve(conn)
+}
+
+// Close closes every listener and connection and waits for every session to
+// end.
+func (s *Server) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	err := s.h3.Close()
+	s.sessions.Wait()
+	return err
+}
+
+// ServeHTTP admits a CONNECT-IP request and, once admitted, proxies its
+// packets until the request or its connection ends.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// The connect-ip upgrade token implies the Capsule Protocol, so RFC 9484
+	// does not require clients to send Capsule-Protocol, but the parser does.
+	if _, ok := r.Header[http3.CapsuleProtocolHeader]; !ok && r.Proto == connectIPProtocol {
+		r.Header.Set(http3.CapsuleProtocolHeader, "?1")
+	}
+	preq, err := connectip.ParseProxyRequest(r, s.template)
+	if err != nil {
+		status := http.StatusBadRequest
+		if perr, ok := errors.AsType[*connectip.ProxyRequestParseError](err); ok {
+			status = perr.HTTPStatus
+		}
+		s.reject(w, status, "invalid CONNECT-IP request", err)
+		return
+	}
+	if r.URL.Path != TemplatePath {
+		s.reject(w, http.StatusNotFound, "unknown path", nil)
+		return
+	}
+	token, ok := bearerToken(r)
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		s.reject(w, http.StatusUnauthorized, "missing or unknown credential", nil)
+		return
+	}
+	vpcName, ok := requestedVPC(r)
+	if !ok {
+		s.reject(w, http.StatusBadRequest, "request must name exactly one VPC", nil)
+		return
+	}
+	if err := probeInnerMTU(r); err != nil {
+		s.reject(w, http.StatusServiceUnavailable, "path cannot carry the minimum inner MTU", err)
+		return
+	}
+	if !s.startSession() {
+		s.reject(w, http.StatusServiceUnavailable, "server is closing", nil)
+		return
+	}
+	defer s.sessions.Done()
+
+	lease, err := s.admission.Admit(r.Context(), token, vpcName)
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, ErrUnauthenticated) {
+			status = http.StatusUnauthorized
+			w.Header().Set("WWW-Authenticate", "Bearer")
+		} else if errors.Is(err, ErrForbidden) {
+			status = http.StatusForbidden
+		}
+		s.reject(w, status, "admission rejected", err)
+		return
+	}
+	if lease == nil {
+		s.reject(w, http.StatusServiceUnavailable, "missing admission lease", nil)
+		return
+	}
+	defer func() {
+		if err := lease.Close(); err != nil {
+			s.log.Warn("could not release admission lease", "error", err)
+		}
+	}()
+	info := lease.Info()
+	routes, err := routeRanges(lease.Routes())
+	if err != nil || !validGrant(info, vpcName) || lease.Done() == nil {
+		s.reject(w, http.StatusServiceUnavailable, "invalid admission grant", err)
+		return
+	}
+	select {
+	case <-lease.Done():
+		s.reject(w, http.StatusServiceUnavailable, "admission expired", nil)
+		return
+	default:
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-lease.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() { cancel(); <-watchDone }()
+	log := s.log.With("session", info.ID, "principal", info.Principal, "vpc", info.VPC, "prefix", info.Prefix)
+	sess, err := s.backend.Open(ctx, info)
+	if err != nil {
+		s.reject(w, http.StatusServiceUnavailable, "backend unavailable", err)
+		return
+	}
+	defer func() {
+		if err := sess.Close(); err != nil {
+			log.Warn("could not close backend session", "error", err)
+		}
+	}()
+
+	if err := ctx.Err(); err != nil {
+		s.reject(w, http.StatusServiceUnavailable, "admission expired during setup", err)
+		return
+	}
+	conn, err := s.proxy.Proxy(w, preq)
+	if err != nil {
+		log.Warn("could not accept request", "error", err)
+		return
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Debug("could not close CONNECT-IP stream cleanly", "error", err)
+		}
+	}()
+	// Expiry must also unblock capsule writes before packet workers start.
+	stopExpiry := context.AfterFunc(ctx, func() {
+		if err := conn.Close(); err != nil {
+			log.Debug("could not close expired tunnel", "error", err)
+		}
+	})
+	defer stopExpiry()
+	assigned := info.Prefix
+	if err := conn.AssignAddresses([]netip.Prefix{assigned}); err != nil {
+		log.Warn("could not assign address", "error", err)
+		return
+	}
+	if err := conn.AdvertiseRoute(routes); err != nil {
+		log.Warn("could not advertise routes", "error", err)
+		return
+	}
+	log.Info("CONNECT-IP request accepted")
+	s.proxySession(ctx, log, conn, sess, assigned)
+	log.Info("CONNECT-IP request ended")
+}
+
+// startSession registers a session with Close, or returns false once the
+// server is closing.
+func (s *Server) startSession() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.sessions.Add(1)
+	return true
+}
+
+// proxySession forwards packets in both directions and answers address
+// requests until any of them stops, which happens when the request stream or
+// its connection ends.
+func (s *Server) proxySession(
+	ctx context.Context, log *slog.Logger, conn *connectip.Conn, sess BackendSession, assigned netip.Prefix,
+) {
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		defer cancel()
+		answerAddressRequests(ctx, log, conn, assigned)
+	})
+	wg.Go(func() {
+		defer cancel()
+		buf := make([]byte, maxPacketSize)
+		for {
+			n, err := conn.ReadPacket(buf)
+			if err != nil {
+				return
+			}
+			if err := sess.WritePacket(buf[:n]); err != nil {
+				log.Warn("could not write packet to backend", "error", err)
+				return
+			}
+		}
+	})
+	wg.Go(func() {
+		defer cancel()
+		buf := make([]byte, maxPacketSize)
+		for {
+			n, err := sess.ReadPacket(ctx, buf)
+			if err != nil {
+				return
+			}
+			icmp, err := conn.WritePacket(buf[:n])
+			if err != nil {
+				return
+			}
+			if icmp == nil {
+				continue
+			}
+			if err := sess.WritePacket(icmp); err != nil {
+				log.Warn("could not return ICMP error to backend", "error", err)
+				return
+			}
+		}
+	})
+	<-ctx.Done()
+	// ReadPacket only returns once the stream's receive side is closed.
+	if err := conn.Close(); err != nil {
+		log.Debug("could not close CONNECT-IP stream cleanly", "error", err)
+	}
+	if err := sess.Close(); err != nil {
+		log.Warn("could not stop backend session", "error", err)
+	}
+	wg.Wait()
+}
+
+// answerAddressRequests answers every ADDRESS_REQUEST with the request's one
+// assigned prefix: the first IPv6 request receives it, every other request is
+// rejected, and the prefix stays assigned either way. It returns when the
+// stream closes or ctx is done.
+func answerAddressRequests(ctx context.Context, log *slog.Logger, conn *connectip.Conn, assigned netip.Prefix) {
+	for {
+		req, err := conn.ReceiveAddressRequest(ctx)
+		if err != nil {
+			return
+		}
+		answers := make([]netip.Prefix, len(req.Prefixes))
+		var given bool
+		for i, p := range req.Prefixes {
+			if !given && p.Addr().Is6() {
+				answers[i] = assigned
+				given = true
+			}
+		}
+		var additional []netip.Prefix
+		if !given {
+			additional = []netip.Prefix{assigned}
+		}
+		if err := req.Respond(answers, additional); err != nil {
+			log.Warn("could not answer address request", "error", err)
+			return
+		}
+	}
+}
+
+func (s *Server) reject(w http.ResponseWriter, status int, reason string, err error) {
+	s.log.Info("CONNECT-IP request rejected", "status", status, "reason", reason, "error", err)
+	w.WriteHeader(status)
+}
+
+// bearerToken extracts exactly one nonempty bearer credential.
+func bearerToken(r *http.Request) (string, bool) {
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 {
+		return "", false
+	}
+	scheme, token, found := strings.Cut(values[0], " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	token = strings.TrimSpace(token)
+	return token, token != ""
+}
+
+func validGrant(info SessionInfo, vpc string) bool {
+	p := info.Prefix
+	return info.VPC == vpc && info.Principal != "" && info.Connector != "" && info.Attachment != "" &&
+		info.Claim != "" && info.Epoch != 0 && p.IsValid() && p.Addr().Is6() && !p.Addr().Is4In6() &&
+		p.Bits() == 96 && p == p.Masked()
+}
+
+// requestedVPC returns the single VPC named by the request.
+func requestedVPC(r *http.Request) (string, bool) {
+	values := r.Header.Values(VPCHeader)
+	if len(values) != 1 || strings.Contains(values[0], ",") {
+		return "", false
+	}
+	name := strings.TrimSpace(values[0])
+	return name, name != ""
+}
+
+// probeInnerMTU sends the client a datagram on the request's stream that is as
+// large as a MinInnerMTU packet in context 0, but in an unregistered context
+// so the client drops it. It returns an error when the QUIC connection cannot
+// currently send a datagram of that size.
+func probeInnerMTU(r *http.Request) error {
+	conn, ok := r.Context().Value(quicConnKey{}).(*quic.Conn)
+	if !ok {
+		return errors.New("request has no QUIC connection")
+	}
+	body, ok := r.Body.(interface{ StreamID() quic.StreamID })
+	if !ok {
+		return errors.New("request has no stream ID")
+	}
+	probe := quicvarint.Append(nil, uint64(body.StreamID()/4))
+	probe = quicvarint.Append(probe, probeContextID)
+	probe = append(probe, make([]byte, MinInnerMTU)...)
+	if err := conn.SendDatagram(probe); err != nil {
+		if tooLarge, ok := errors.AsType[*quic.DatagramTooLargeError](err); ok {
+			return fmt.Errorf("datagram of %d bytes exceeds the current maximum of %d bytes",
+				len(probe), tooLarge.MaxDatagramPayloadSize)
+		}
+		return fmt.Errorf("could not send MTU probe: %w", err)
+	}
+	return nil
+}
+
+// routeRanges converts prefixes into a route advertisement sorted as RFC 9484
+// requires. It returns an error for an invalid or overlapping prefix.
+func routeRanges(prefixes []netip.Prefix) ([]connectip.IPRoute, error) {
+	sorted := slices.Clone(prefixes)
+	for i, p := range sorted {
+		if !p.IsValid() {
+			return nil, fmt.Errorf("route %d is invalid", i)
+		}
+		sorted[i] = p.Masked()
+	}
+	slices.SortFunc(sorted, func(a, b netip.Prefix) int {
+		return cmp.Or(cmp.Compare(a.Addr().BitLen(), b.Addr().BitLen()), a.Addr().Compare(b.Addr()))
+	})
+	routes := make([]connectip.IPRoute, 0, len(sorted))
+	for i, p := range sorted {
+		if i > 0 && sorted[i-1].Overlaps(p) {
+			return nil, fmt.Errorf("routes %s and %s overlap", sorted[i-1], p)
+		}
+		routes = append(routes, connectip.IPRoute{StartIP: p.Addr(), EndIP: lastAddr(p)})
+	}
+	return routes, nil
+}
+
+// lastAddr returns the highest address in the masked prefix p.
+func lastAddr(p netip.Prefix) netip.Addr {
+	b := p.Addr().As16()
+	offset := 0
+	if p.Addr().Is4() {
+		offset = 96
+	}
+	for bit := offset + p.Bits(); bit < 128; bit++ {
+		b[bit/8] |= 0x80 >> (bit % 8)
+	}
+	if p.Addr().Is4() {
+		return netip.AddrFrom4([4]byte(b[12:]))
+	}
+	return netip.AddrFrom16(b)
+}
