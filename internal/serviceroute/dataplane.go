@@ -464,10 +464,21 @@ func (p *EBPFRouteProgrammer) closeHandles() {
 	p.mapIDsValid = false
 }
 
+// Missing links withdraw their entries while preserving intent for recreation.
+// Other lookup errors cannot prove that an interface has disappeared.
+func (p *EBPFRouteProgrammer) recoverableEntries(intent RouteIntent) ([]appliedEntry, error) {
+	entries, err := p.entries(intent)
+	var missing netlink.LinkNotFoundError
+	if errors.As(err, &missing) {
+		return []appliedEntry{}, nil
+	}
+	return entries, err
+}
+
 func (p *EBPFRouteProgrammer) rebuildDesired() error {
 	for _, key := range sortedIntentKeys(p.desiredIntents) {
 		for _, intent := range p.desiredIntents[key] {
-			entries, err := p.entries(intent)
+			entries, err := p.recoverableEntries(intent)
 			if err != nil {
 				return fmt.Errorf("re-derive service route state %s: %w", key, err)
 			}
@@ -495,7 +506,7 @@ func (p *EBPFRouteProgrammer) repairDesired() error {
 			continue
 		}
 		for index, intent := range intents {
-			fresh, err := p.entries(intent)
+			fresh, err := p.recoverableEntries(intent)
 			if err != nil {
 				return fmt.Errorf("re-derive service route state %s: %w", key, err)
 			}

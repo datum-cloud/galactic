@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/vishvananda/netlink"
 
 	api "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/serviceroutemap"
@@ -854,5 +855,94 @@ func TestPersistentDataplaneHasNoExpiry(t *testing.T) {
 	}
 	if err := programmer.Remove(intent); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInitializeWithdrawsMissingInterfaceAndRecovers(t *testing.T) {
+	programmer := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
+	missing := false
+	programmer.targetIndexFn = func(name string) (uint32, error) {
+		if name == testConsumerDeviceName && missing {
+			return 0, netlink.LinkNotFoundError{}
+		}
+		if name == testConsumerDeviceName {
+			return 10, nil
+		}
+		return 20, nil
+	}
+	intent := localTestIntent()
+	if err := programmer.Apply(intent); err != nil {
+		t.Fatal(err)
+	}
+	missing = true
+	if err := programmer.Initialize(); err != nil {
+		t.Fatalf("withdraw missing link: %v", err)
+	}
+	if len(programmer.routeRefs) != 0 || len(programmer.accessRefs) != 0 {
+		t.Fatal("missing interface retained programmed routes or access")
+	}
+	if len(programmer.desiredIntents[intentKey(intent)]) != 1 {
+		t.Fatal("lost recoverable intent")
+	}
+	missing = false
+	if err := programmer.Initialize(); err != nil {
+		t.Fatalf("recover recreated link: %v", err)
+	}
+	if len(programmer.routeRefs) == 0 {
+		t.Fatal("recreated interface did not recover routes")
+	}
+	missing = true
+	if err := programmer.Remove(intent); err != nil {
+		t.Fatalf("remove missing link: %v", err)
+	}
+	if len(programmer.desiredIntents) != 0 {
+		t.Fatal("removed intent retained for replay")
+	}
+}
+
+func TestMissingInterfaceDoesNotBlockOtherRoutes(t *testing.T) {
+	programmer := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
+	missing := false
+	programmer.targetIndexFn = func(name string) (uint32, error) {
+		switch name {
+		case testConsumerDeviceName:
+			if missing {
+				return 0, netlink.LinkNotFoundError{}
+			}
+			return 10, nil
+		case testOtherConsumerDevice:
+			return 11, nil
+		default:
+			return 20, nil
+		}
+	}
+	intent := localTestIntent()
+	if err := programmer.Apply(intent); err != nil {
+		t.Fatal(err)
+	}
+	missing = true
+	other := localTestIntent()
+	other.ConsumerDevice = testOtherConsumerDevice
+	if err := programmer.Apply(other); err != nil {
+		t.Fatalf("unrelated route blocked: %v", err)
+	}
+	if len(programmer.routeRefs) != 1 {
+		t.Fatalf("routes = %d, want only live route", len(programmer.routeRefs))
+	}
+	if err := programmer.Remove(intent); err != nil {
+		t.Fatal(err)
+	}
+	if len(programmer.appliedRefs[intentKey(other)]) != 1 {
+		t.Fatal("unrelated route lost during cleanup")
+	}
+}
+
+func TestRepairPropagatesInterfaceLookupErrors(t *testing.T) {
+	programmer := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
+	lookupErr := errors.New("netlink unavailable")
+	programmer.targetIndexFn = func(string) (uint32, error) { return 0, lookupErr }
+	programmer.desiredIntents["test"] = []RouteIntent{localTestIntent()}
+	if err := programmer.Initialize(); !errors.Is(err, lookupErr) {
+		t.Fatalf("Initialize = %v, want lookup error", err)
 	}
 }
