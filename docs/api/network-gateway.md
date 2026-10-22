@@ -435,6 +435,29 @@ _Appears in:_
 | `icmp` | NetworkServiceProtocolICMP matches ICMP traffic: ICMPv6 (IP protocol 58)<br />on an IPv6 VIP and ICMP (IP protocol 1) on an IPv4 VIP. It has no ports.<br />It is declared but not served yet.<br /> |
 
 
+#### NetworkServiceSessionAffinity
+
+_Underlying type:_ _string_
+
+NetworkServiceSessionAffinity selects which parts of a flow a gateway hashes
+to pick its backend. Every gateway node hashes a service the same way, so a
+flow keeps its backend when it moves between nodes. Affinity is stateless:
+it holds only while the backend set is unchanged, and each change to that
+set moves about 1/N of clients, N being the number of backends.
+
+_Validation:_
+- Enum: [None ClientIP ClientIPAndProtocol]
+
+_Appears in:_
+- [NetworkServiceSpec](#networkservicespec)
+
+| Field | Description |
+| --- | --- |
+| `None` | NetworkServiceSessionAffinityNone hashes the client's address and source<br />port, so each connection is balanced on its own.<br /> |
+| `ClientIP` | NetworkServiceSessionAffinityClientIP hashes the client's address only,<br />so every connection from one address reaches the same backend, whatever<br />its port, protocol or service among the services sharing that backend<br />set.<br /> |
+| `ClientIPAndProtocol` | NetworkServiceSessionAffinityClientIPAndProtocol hashes the client's<br />address and the IP protocol, so every connection from one address over<br />one protocol reaches the same backend, among the services sharing that<br />backend set.<br /> |
+
+
 #### NetworkServiceSpec
 
 
@@ -455,6 +478,7 @@ _Appears in:_
 | `port` _integer_ | Port is the ingress port on VIPAddresses that this service load-balances,<br />1-65535. It is required for a protocol with ports (tcp, udp and sctp)<br />and must be unset for one without (esp, gre and icmp). Zero means unset<br />and is omitted when encoding, and an explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 | `backendSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | BackendSelector selects the VPCAttachments (galactic.datumapis.com/v1alpha1,<br />in any namespace) that serve this service, matched against each<br />VPCAttachment object's own labels. Only attachments whose status.vpc<br />equals VPCRef are candidates, whatever their labels, so a selector cannot<br />reach into another tenant's VPC. Each selected attachment contributes the<br />IPv6 addresses in its spec.interface.addresses as backends, on<br />BackendPort, for both VIPs: its node translates the IPv4 VIP's flows to<br />and from IPv6, and its IPv4 addresses are never backends. An attachment<br />with no status.node, or no IPv6 address, is not a backend until it has<br />both. An empty selector is rejected rather than read as "every<br />attachment in the VPC". |  | Required: \{\} <br /> |
 | `backendPort` _integer_ | BackendPort is the destination port on every selected backend, 1-65535.<br />Like Port, it is required for tcp, udp and sctp and must be unset for<br />esp, gre and icmp. Zero means unset and is omitted when encoding, and an<br />explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `sessionAffinity` _[NetworkServiceSessionAffinity](#networkservicesessionaffinity)_ | SessionAffinity selects which connections from one client share a<br />backend: None, the default, balances each connection on its own;<br />ClientIP pins a client address to one backend; ClientIPAndProtocol pins<br />a client address and protocol to one. Two services pin a client to the<br />same backend only if both set the same affinity and select the same<br />backend addresses. A change takes effect on every gateway node without a<br />restart, and rehashes every connection of the service, so most open<br />connections reach a different backend afterwards. | None | Enum: [None ClientIP ClientIPAndProtocol] <br /> |
 
 
 #### NetworkServiceStatus

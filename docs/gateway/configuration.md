@@ -520,6 +520,7 @@ gateway node, named after that node (see the worked example above).
 | `spec.port`            | tcp, udp | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances. Required for a protocol with ports, refused for one without.                                                                                                                                                                                                                                                                                                                                                                          |
 | `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`galactic.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends of both VIPs; its IPv4 addresses are never backends. Must not be empty.                                                                                                                                                                                                                                                                 |
 | `spec.backendPort`     | tcp, udp | `int32` (1–65535)      | Destination port on every selected backend. Required for a protocol with ports, refused for one without.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `spec.sessionAffinity` | No       | `string` enum          | `None` (default), `ClientIP` or `ClientIPAndProtocol`: which connections from one client share a backend. See [Session affinity](#session-affinity).                                                                                                                                                                                                                                                                                                                                          |
 | `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes exist in the namespace; not an ownership check, see below); the rule-wide `Programmed`, `Advertised`, `BackendsReady`, `Ready` and, with an IPv4 VIP, `IPv4Served` (see [Reading a rule's status](#reading-a-rules-status)); `<gateway-node>/Programmed` and `<gateway-node>/Advertised` per gateway node, `<gateway-node>/IPv4Served` per gateway node for a rule with an IPv4 VIP, and `<backend-node>/BackendsBound` per node hosting a backend. |
 
 Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkservices.yaml`:
@@ -631,6 +632,38 @@ namespace targets, so a gateway that left without clearing its conditions
 cannot keep the backend nodes' IPv4 bindings alive. A node missing from the gateway's cache is confirmed missing with an
 uncached read of the API server first, so a new gateway node's conditions are
 never removed while the cache has yet to see its `NetworkGateway`.
+
+#### Session affinity
+
+`spec.sessionAffinity` selects what a gateway hashes, besides the client's
+address, to pick a backend:
+
+| Value                 | Hashed                      | Connections from one client that share a backend        |
+| --------------------- | --------------------------- | ------------------------------------------------------- |
+| `None` (default)      | Address and source port     | None: each connection is balanced on its own            |
+| `ClientIP`            | Address                     | All, whatever their port, protocol or service           |
+| `ClientIPAndProtocol` | Address and the IP protocol | Those over one protocol, whatever their port or service |
+
+Affinity keeps no state. Every gateway node hashes the same inputs over the
+same Maglev table, so a client's flows reach the same backend whichever node
+receives them. Under `ClientIP` and `ClientIPAndProtocol` the table depends
+only on the backends' addresses, so services that set the same affinity and
+select the same backend addresses pin a client to the same backend, even with
+different `port`s and `backendPort`s. A rule's IPv4 and IPv6 VIPs are
+separate tables over each family's backends, and a client's IPv4 and IPv6
+addresses are different clients.
+
+Affinity holds only while the backend set is unchanged. Adding or removing a
+backend moves about 1 in N clients to another backend, N being the number of
+backends, and each moved TCP connection is reset by its new backend. Clients
+behind one NAT address share a backend under either client-IP mode.
+
+A change to `sessionAffinity` takes effect on every gateway node at the next
+reconcile, with no restart. It rehashes every connection of the service, so a
+connection reaches a different backend afterwards with odds of (N-1)/N; change
+it when the service can take that. Set it only once every gateway node runs a
+release that serves it: a gateway without affinity support ignores the field
+and balances by source port, so nodes would disagree on a client's backend.
 
 #### Reading a rule's status
 

@@ -185,6 +185,22 @@ spec:
                 - message: 'protocol is not served yet: the gateway datapath serves
                     tcp and udp only'
                   rule: self in ['tcp', 'udp']
+              sessionAffinity:
+                default: None
+                description: |-
+                  SessionAffinity selects which connections from one client share a
+                  backend: None, the default, balances each connection on its own;
+                  ClientIP pins a client address to one backend; ClientIPAndProtocol pins
+                  a client address and protocol to one. Two services pin a client to the
+                  same backend only if both set the same affinity and select the same
+                  backend addresses. A change takes effect on every gateway node without a
+                  restart, and rehashes every connection of the service, so most open
+                  connections reach a different backend afterwards.
+                enum:
+                - None
+                - ClientIP
+                - ClientIPAndProtocol
+                type: string
               vipAddresses:
                 description: |-
                   VIPAddresses is the list of ingress VIP addresses this service provisions

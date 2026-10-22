@@ -71,6 +71,9 @@ type VIPEntry struct {
 	// builder returns them. A caller reading it back must not mutate it.
 	MaglevTable [MaglevTableSize]byte
 
+	// Affinity is the edgeprog Affinity value this entry was registered with.
+	Affinity uint8
+
 	// Generation is this table's monotonic-clock reading when Register last
 	// wrote this entry. See the package doc comment.
 	Generation uint64
@@ -197,15 +200,21 @@ func toWireBackends(backends []Backend) ([MaxBackends]edgeprog.EdgedsrBackend, e
 }
 
 // Register writes, or overwrites, the vip_table entry for key, mapping it to
-// backends and maglevTable and stamping it with the current generation. Each
-// slot of maglevTable must be an index into backends, in the same order.
-// Rejects an empty or over-capacity backend list before writing.
+// backends and maglevTable under affinity, one of edgeprog's Affinity values,
+// and stamping it with the current generation. Each slot of maglevTable must be
+// an index into backends, in the same order. Rejects an unknown affinity and an
+// empty or over-capacity backend list before writing.
 //
 // A blind overwrite rather than a read-modify-write, because it never touches
 // the statistics map and so has nothing to race against the datapath's
 // per-packet increments. Keeping the counters in a map this method has no
 // reason to read closes that race rather than narrowing it.
-func (t *VIPTable) Register(key VIPKey, backends []Backend, maglevTable [MaglevTableSize]byte) error {
+func (t *VIPTable) Register(key VIPKey, affinity uint8, backends []Backend, maglevTable [MaglevTableSize]byte) error {
+	switch affinity {
+	case edgeprog.AffinityNone, edgeprog.AffinityClientIP, edgeprog.AffinityClientIPAndProtocol:
+	default:
+		return fmt.Errorf("edgemap: vip_table: register %+v: unknown affinity %d", key, affinity)
+	}
 	if len(backends) == 0 {
 		return fmt.Errorf("edgemap: vip_table: register %+v: at least one backend is required", key)
 	}
@@ -227,6 +236,7 @@ func (t *VIPTable) Register(key VIPKey, backends []Backend, maglevTable [MaglevT
 		BackendCount: uint32(len(backends)),
 		Backends:     wireBackends,
 		MaglevTable:  maglevTable,
+		Affinity:     affinity,
 		Generation:   t.clock(),
 	}
 	if err := t.table.Put(wireKey, value); err != nil {
@@ -428,6 +438,7 @@ func fromWireValue(key VIPKey, value edgeprog.EdgedsrVipValue, stats edgeprog.Ed
 		VIPKey:         key,
 		Backends:       backends,
 		MaglevTable:    value.MaglevTable,
+		Affinity:       value.Affinity,
 		Generation:     value.Generation,
 		Packets:        stats.Packets,
 		Bytes:          stats.Bytes,

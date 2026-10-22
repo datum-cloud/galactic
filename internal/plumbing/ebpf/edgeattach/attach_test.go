@@ -591,3 +591,55 @@ func TestLoad_UpgradeReplacesOnlyTheGrownDropReasons(t *testing.T) {
 		t.Errorf("vip_table row after the upgrade = %+v, %v; want it kept", got, err)
 	}
 }
+
+// TestLoad_KeepsPinnedVipTableWithZeroedAffinity: vip_value's affinity byte
+// sits in the alignment gap before generation, so a pinned vip_table of
+// 3216-byte values with that gap zeroed stays compatible. Load keeps it and
+// every row, which reads as AffinityNone.
+func TestLoad_KeepsPinnedVipTableWithZeroedAffinity(t *testing.T) {
+	requireRoot(t)
+	const previousValueSize = 3216
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-edge-test-affinity-%d", os.Getpid()))
+	if err := os.MkdirAll(pinDir, 0o755); err != nil {
+		t.Skipf("bpffs not writable at /sys/fs/bpf: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	spec, err := edgeprog.LoadEdgedsr()
+	if err != nil {
+		t.Fatalf("LoadEdgedsr: %v", err)
+	}
+	oldSpec := spec.Maps["vip_table"].Copy()
+	oldSpec.ValueSize = previousValueSize
+	oldSpec.Key, oldSpec.Value = nil, nil
+	oldSpec.Pinning = ebpf.PinNone
+	old, err := ebpf.NewMap(oldSpec)
+	if err != nil {
+		t.Fatalf("create previous vip_table: %v", err)
+	}
+	key := edgeprog.EdgedsrVipKey{Proto: 6, Port: 0xbb01, Vip: netip.MustParseAddr("2001:db8::100").As16()}
+	row := make([]byte, previousValueSize)
+	row[0] = 1                   // backend_count, little-endian
+	row[previousValueSize-8] = 9 // generation, little-endian
+	if err := old.Put(key, row); err != nil {
+		t.Fatalf("write previous vip_table row: %v", err)
+	}
+	if err := old.Pin(filepath.Join(pinDir, "vip_table")); err != nil {
+		t.Fatalf("pin previous vip_table: %v", err)
+	}
+	_ = old.Close()
+
+	objs, err := Load(pinDir, nil)
+	if err != nil {
+		t.Fatalf("Load over the previous vip_table: %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	var got edgeprog.EdgedsrVipValue
+	if err := objs.VipTable.Lookup(key, &got); err != nil {
+		t.Fatalf("vip_table row after the upgrade: %v; want it kept", err)
+	}
+	if got.BackendCount != 1 || got.Generation != 9 || got.Affinity != edgeprog.AffinityNone {
+		t.Errorf("vip_table row after the upgrade = count %d, generation %d, affinity %d; want 1, 9, %d",
+			got.BackendCount, got.Generation, got.Affinity, edgeprog.AffinityNone)
+	}
+}

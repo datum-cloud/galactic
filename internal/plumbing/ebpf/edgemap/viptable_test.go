@@ -139,7 +139,7 @@ func TestVIPTable_RegisterGetRoundTrip(t *testing.T) {
 	vt := newTestVIPTable()
 	key, backend := testKey(t), testBackend(t)
 
-	if err := vt.Register(key, []Backend{backend}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{backend}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestVIPTable_RegisterStoresMaglevTable(t *testing.T) {
 	maglevTable[0] = 5
 	maglevTable[1020] = 9
 
-	if err := vt.Register(key, []Backend{backend}, maglevTable); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{backend}, maglevTable); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -176,9 +176,38 @@ func TestVIPTable_RegisterStoresMaglevTable(t *testing.T) {
 	}
 }
 
+func TestVIPTable_RegisterStoresAffinity(t *testing.T) {
+	vt := newTestVIPTable()
+	key, backend := testKey(t), testBackend(t)
+
+	affinities := []uint8{edgeprog.AffinityClientIP, edgeprog.AffinityClientIPAndProtocol, edgeprog.AffinityNone}
+	for _, affinity := range affinities {
+		if err := vt.Register(key, affinity, []Backend{backend}, [MaglevTableSize]byte{}); err != nil {
+			t.Fatalf("Register(affinity %d): %v", affinity, err)
+		}
+		got, ok, err := vt.Get(key)
+		if err != nil || !ok {
+			t.Fatalf("Get: ok=%v err=%v", ok, err)
+		}
+		if got.Affinity != affinity {
+			t.Errorf("Get: Affinity = %d, want %d", got.Affinity, affinity)
+		}
+	}
+}
+
+func TestVIPTable_RegisterRejectsUnknownAffinity(t *testing.T) {
+	vt := newTestVIPTable()
+	if err := vt.Register(testKey(t), 3, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err == nil {
+		t.Error("Register with affinity 3: want error, got nil")
+	}
+	if _, ok, err := vt.Get(testKey(t)); err != nil || ok {
+		t.Errorf("Get after a refused Register: ok=%v err=%v, want no entry", ok, err)
+	}
+}
+
 func TestVIPTable_RegisterRejectsEmptyBackends(t *testing.T) {
 	vt := newTestVIPTable()
-	if err := vt.Register(testKey(t), nil, [MaglevTableSize]byte{}); err == nil {
+	if err := vt.Register(testKey(t), edgeprog.AffinityNone, nil, [MaglevTableSize]byte{}); err == nil {
 		t.Error("Register with no backends: want error, got nil")
 	}
 }
@@ -189,7 +218,7 @@ func TestVIPTable_RegisterRejectsTooManyBackends(t *testing.T) {
 	for i := range backends {
 		backends[i] = testBackend(t)
 	}
-	if err := vt.Register(testKey(t), backends, [MaglevTableSize]byte{}); err == nil {
+	if err := vt.Register(testKey(t), edgeprog.AffinityNone, backends, [MaglevTableSize]byte{}); err == nil {
 		t.Error("Register with MaxBackends+1 backends: want error, got nil")
 	}
 }
@@ -200,12 +229,12 @@ func TestVIPTable_RegisterRejectsIPv4MappedAddresses(t *testing.T) {
 
 	backend := testBackend(t)
 	backend.Addr = mapped
-	if err := vt.Register(testKey(t), []Backend{backend}, [MaglevTableSize]byte{}); err == nil {
+	if err := vt.Register(testKey(t), edgeprog.AffinityNone, []Backend{backend}, [MaglevTableSize]byte{}); err == nil {
 		t.Error("Register with an IPv4-mapped backend address: want error, got nil")
 	}
 	key := testKey(t)
 	key.VIP = mapped
-	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err == nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err == nil {
 		t.Error("Register with an IPv4-mapped VIP: want error, got nil")
 	}
 }
@@ -220,7 +249,7 @@ func TestVIPTable_IPv4RoundTrip(t *testing.T) {
 	backend := testBackend(t)
 	backend.Addr = mustAddr(t, "10.60.0.5")
 
-	if err := vt.Register(key, []Backend{backend}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{backend}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -252,7 +281,7 @@ func TestVIPTable_IPv4AndIPv6RowsDoNotCollide(t *testing.T) {
 	vt := newTestVIPTable()
 	v6, v4 := testKey(t), VIPKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "192.0.2.10")}
 	for _, k := range []VIPKey{v6, v4} {
-		if err := vt.Register(k, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+		if err := vt.Register(k, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 			t.Fatalf("Register %s: %v", k.VIP, err)
 		}
 	}
@@ -278,7 +307,7 @@ func TestVIPTable_UnregisterIsIdempotent(t *testing.T) {
 	if err := vt.Unregister(key); err != nil {
 		t.Fatalf("Unregister on an absent key: %v, want nil", err)
 	}
-	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if err := vt.Unregister(key); err != nil {
@@ -308,10 +337,10 @@ func TestVIPTable_List(t *testing.T) {
 	key1 := testKey(t)
 	key2 := VIPKey{Proto: 17, VPort: 53, VIP: mustAddr(t, "2001:db8:1::11")}
 
-	if err := vt.Register(key1, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key1, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register key1: %v", err)
 	}
-	if err := vt.Register(key2, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key2, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register key2: %v", err)
 	}
 
@@ -333,10 +362,11 @@ func TestVIPTable_ReconcileRemovesStaleNotLive(t *testing.T) {
 	staleKey := VIPKey{Proto: 17, VPort: 53, VIP: mustAddr(t, "2001:db8:1::11")}
 
 	fakeClock = 100
-	if err := vt.Register(liveKey, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(liveKey, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register liveKey: %v", err)
 	}
-	if err := vt.Register(staleKey, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(staleKey, edgeprog.AffinityNone,
+		[]Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register staleKey: %v", err)
 	}
 
@@ -378,7 +408,8 @@ func TestVIPTable_ReconcileSparesRecentGeneration(t *testing.T) {
 
 	fakeClock = 50 // written AFTER the cutoff snapshot was taken
 	recentKey := testKey(t)
-	if err := vt.Register(recentKey, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(recentKey, edgeprog.AffinityNone,
+		[]Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -400,10 +431,10 @@ func TestVIPTable_RegisterOverwritesExistingKey(t *testing.T) {
 	b1 := testBackend(t)
 	b2 := Backend{Addr: mustAddr(t, "fd00:10:1::99"), Port: 9999, USID: mustAddr(t, "2001:db8:2::2")}
 
-	if err := vt.Register(key, []Backend{b1}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{b1}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
-	if err := vt.Register(key, []Backend{b2}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{b2}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("second Register: %v", err)
 	}
 
@@ -428,7 +459,7 @@ func TestVIPTable_RegisterPreservesHitCounters(t *testing.T) {
 	vt := NewVIPTable(newFakeTable(), statsTable, newFakeAddrTable(), newFakeReturnStatsTable())
 	key := testKey(t)
 
-	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
 
@@ -450,7 +481,7 @@ func TestVIPTable_RegisterPreservesHitCounters(t *testing.T) {
 	// Re-register with a different backend, exactly as a later
 	// convergence pass would (e.g. a backend Pod rescheduled).
 	b2 := Backend{Addr: mustAddr(t, "fd00:10:1::99"), Port: 9999, USID: mustAddr(t, "2001:db8:2::2")}
-	if err := vt.Register(key, []Backend{b2}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{b2}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("second Register: %v", err)
 	}
 
@@ -487,11 +518,11 @@ func TestVIPTable_RegisterNeverTouchesStatsTable(t *testing.T) {
 	vt := NewVIPTable(newFakeTable(), statsTable, newFakeAddrTable(), newFakeReturnStatsTable())
 	key := testKey(t)
 
-	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
 	b2 := Backend{Addr: mustAddr(t, "fd00:10:1::99"), Port: 9999, USID: mustAddr(t, "2001:db8:2::2")}
-	if err := vt.Register(key, []Backend{b2}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{b2}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("second Register (re-registration): %v", err)
 	}
 
@@ -513,7 +544,7 @@ func TestVIPTable_UnregisterDeletesStatsRow(t *testing.T) {
 	vt := NewVIPTable(newFakeTable(), statsTable, newFakeAddrTable(), newFakeReturnStatsTable())
 	key := testKey(t)
 
-	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	wireKey, err := toWireKey(key)
@@ -540,7 +571,7 @@ func TestVIPTable_RegisterOnFreshKeyStartsCountersAtZero(t *testing.T) {
 	vt := newTestVIPTable()
 	key := testKey(t)
 
-	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -579,7 +610,7 @@ func TestVIPTable_RegisterClaimsTheVIPAddress(t *testing.T) {
 	vt := NewVIPTable(newFakeTable(), newFakeStatsTable(), addrs, newFakeReturnStatsTable())
 
 	key := testKey(t)
-	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(key, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -608,7 +639,7 @@ func TestVIPTable_UnregisterKeepsAnAddressAnotherRuleStillUses(t *testing.T) {
 	https := VIPKey{Proto: 6, VPort: 443, VIP: vip}
 	http := VIPKey{Proto: 6, VPort: 80, VIP: vip}
 	for _, key := range []VIPKey{https, http} {
-		if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+		if err := vt.Register(key, edgeprog.AffinityNone, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 			t.Fatalf("Register %+v: %v", key, err)
 		}
 	}
@@ -699,7 +730,8 @@ func TestVIPTable_ReplaceReturnAddrs(t *testing.T) {
 	vt := NewVIPTable(newFakeTable(), stats, addrs, returnStats)
 
 	served := testKey(t)
-	if err := vt.Register(served, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+	if err := vt.Register(served, edgeprog.AffinityNone,
+		[]Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	wireKey, err := toWireKey(served)

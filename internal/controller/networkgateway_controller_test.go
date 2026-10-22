@@ -1984,3 +1984,33 @@ func TestNetworkGatewayReconciler_KeepsAdvertisementForRuleMissingFromCache(t *t
 		t.Errorf("BGPAdvertisement %s for a live rule was removed: %v", own.Name, err)
 	}
 }
+
+// TestBuildDesiredRule_CarriesSessionAffinity: the service's sessionAffinity
+// reaches the engine as written, an unset one as empty, which the datapath
+// treats as None.
+func TestBuildDesiredRule_CarriesSessionAffinity(t *testing.T) {
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	idx := &backendSIDIndex{
+		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
+		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
+		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
+	}
+	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
+
+	for _, affinity := range []bgpv1alpha1.NetworkServiceSessionAffinity{
+		"",
+		bgpv1alpha1.NetworkServiceSessionAffinityNone,
+		bgpv1alpha1.NetworkServiceSessionAffinityClientIP,
+		bgpv1alpha1.NetworkServiceSessionAffinityClientIPAndProtocol,
+	} {
+		rule := newTestRule(testRuleName, "vpc-1", testVIP)
+		rule.Spec.SessionAffinity = affinity
+		dr, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil)
+		if err != nil {
+			t.Fatalf("affinity %q: %v", affinity, err)
+		}
+		if dr.Affinity != string(affinity) {
+			t.Errorf("affinity %q: DesiredRule.Affinity = %q", affinity, dr.Affinity)
+		}
+	}
+}

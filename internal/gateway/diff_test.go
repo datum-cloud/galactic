@@ -100,6 +100,7 @@ func TestRulesEqual(t *testing.T) {
 		{"port changed", clone(func(r *DesiredRule) { r.Port = 443 }), false},
 		{"protocol changed", clone(func(r *DesiredRule) { r.Protocol = "" }), false},
 		{"VPC changed", clone(func(r *DesiredRule) { r.VPCRef = "other" }), false},
+		{"affinity changed", clone(func(r *DesiredRule) { r.Affinity = affinityClientIP }), false},
 		{"IPv4 VIP backend added", clone(func(r *DesiredRule) {
 			r.IPv4Backends = []DesiredBackend{{Address: netip.MustParseAddr("fd20:60::5"), Port: 8080, USID: usidA}}
 		}), false},

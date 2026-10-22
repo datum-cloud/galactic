@@ -9,6 +9,17 @@ import (
 	"net/netip"
 )
 
+// DesiredRule.Protocol and DesiredRule.Affinity values, the CRD's enum
+// strings.
+const (
+	protocolTCP = "tcp"
+	protocolUDP = "udp"
+
+	affinityNone                = "None"
+	affinityClientIP            = "ClientIP"
+	affinityClientIPAndProtocol = "ClientIPAndProtocol"
+)
+
 // DesiredBackend is one backend endpoint a rule load-balances to. It mirrors
 // the CRD's backend plus one field the CRD does not carry: the SRv6 uSID of the
 // worker node the backend is reachable through. The controller resolves that
@@ -51,6 +62,14 @@ type DesiredRule struct {
 	// galactic.datumapis.com/v1alpha1's NetworkServiceProtocol enum values.
 	Protocol string
 	Port     uint16
+
+	// Affinity is "None", "ClientIP" or "ClientIPAndProtocol", matching
+	// galactic.datumapis.com/v1alpha1's NetworkServiceSessionAffinity enum
+	// values; empty means "None". It selects what the datapath hashes besides
+	// the client's address, and under either client-IP mode keys the Maglev
+	// table by backend address alone, so services over the same backend
+	// addresses pin a client to the same one.
+	Affinity string
 
 	// Backends serve the rule's IPv6 VIPs and IPv4Backends its IPv4 VIPs. Both
 	// are IPv6 backends, the IPv4 VIPs' reached by translation on their nodes,

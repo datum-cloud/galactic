@@ -22,13 +22,41 @@ import (
 // and this is the one place the two representations meet.
 func protoNumber(protocol string) (uint8, error) {
 	switch protocol {
-	case "tcp":
+	case protocolTCP:
 		return 6, nil
-	case "udp":
+	case protocolUDP:
 		return 17, nil
 	default:
 		return 0, fmt.Errorf("kerneldatapath: unsupported protocol %q (want \"tcp\" or \"udp\")", protocol)
 	}
+}
+
+// affinityNumber maps a rule's affinity string to the edgeprog Affinity value
+// vip_table stores, an empty string meaning "None", and rejects anything else.
+func affinityNumber(affinity string) (uint8, error) {
+	switch affinity {
+	case "", affinityNone:
+		return edgeprog.AffinityNone, nil
+	case affinityClientIP:
+		return edgeprog.AffinityClientIP, nil
+	case affinityClientIPAndProtocol:
+		return edgeprog.AffinityClientIPAndProtocol, nil
+	default:
+		return 0, fmt.Errorf(
+			"kerneldatapath: unsupported affinity %q (want \"None\", \"ClientIP\" or \"ClientIPAndProtocol\")", affinity)
+	}
+}
+
+// addressKeyed is a DesiredBackend whose Maglev key is its address alone. A
+// rule with a client-IP affinity builds its table from these, so its table
+// depends only on its backends' addresses, and another rule over the same
+// addresses, whatever their ports, gets the same table and so pins a client to
+// the same backend.
+type addressKeyed struct{ DesiredBackend }
+
+// Key implements maglev.Backend.
+func (b addressKeyed) Key() string {
+	return b.Address.String()
 }
 
 // vipKeysForRule returns the vip_table keys ApplyRule registers for rule, one
@@ -54,7 +82,9 @@ func vipKeysForRule(rule DesiredRule) ([]edgemap.VIPKey, error) {
 //  1. Reject up front when the backend count exceeds the cap. The CRD already
 //     bounds it, but a silently truncated array is worse than a clear error.
 //  2. Build a Maglev table over the backends, each of which supplies its own
-//     key.
+//     key: its address and port, or under a client-IP affinity its address
+//     alone (see addressKeyed). The latter refuses two backends sharing an
+//     address.
 //  3. The table returns its backend set sorted by key, and that order becomes
 //     each backend's index into the returned slice, and so into the map value's
 //     fixed-size array.
@@ -69,9 +99,17 @@ func buildMaglevTable(rule DesiredRule, in []DesiredBackend) ([]edgemap.Backend,
 			rule.Key, len(in), edgemap.MaxBackends)
 	}
 
+	affinity, err := affinityNumber(rule.Affinity)
+	if err != nil {
+		return nil, maglevTable, fmt.Errorf("kerneldatapath: rule %s: %w", rule.Key, err)
+	}
 	candidates := make([]maglev.Backend, len(in))
 	for i, b := range in {
-		candidates[i] = b
+		if affinity == edgeprog.AffinityNone {
+			candidates[i] = b
+		} else {
+			candidates[i] = addressKeyed{b}
+		}
 	}
 
 	table, err := maglev.New(candidates, edgemap.MaglevTableSize)
@@ -83,7 +121,13 @@ func buildMaglevTable(rule DesiredRule, in []DesiredBackend) ([]edgemap.Backend,
 	backends := make([]edgemap.Backend, len(sorted))
 	indexByKey := make(map[string]int, len(sorted))
 	for i, b := range sorted {
-		db := b.(DesiredBackend) // every candidate above was built from a DesiredBackend
+		var db DesiredBackend
+		switch c := b.(type) { // every candidate above is one of these
+		case DesiredBackend:
+			db = c
+		case addressKeyed:
+			db = c.DesiredBackend
+		}
 		backends[i] = edgemap.Backend{Addr: db.Address, Port: db.Port, USID: db.USID}
 		indexByKey[b.Key()] = i
 	}
@@ -156,6 +200,10 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 	if err != nil {
 		return err
 	}
+	affinity, err := affinityNumber(rule.Affinity)
+	if err != nil {
+		return fmt.Errorf("kerneldatapath: rule %s: %w", rule.Key, err)
+	}
 
 	type family struct {
 		backends []edgemap.Backend
@@ -182,7 +230,7 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 
 	for i, key := range keys {
 		f := families[key.VIP.Is4()]
-		if err := d.vipTable.Register(key, f.backends, f.table); err != nil {
+		if err := d.vipTable.Register(key, affinity, f.backends, f.table); err != nil {
 			// Record the keys that did land, alongside the ones this rule
 			// already owned, the prune below not having run yet, so
 			// RemoveRule can still find every live entry.

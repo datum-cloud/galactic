@@ -425,15 +425,24 @@ forward half, so it has exactly one branch, not two. Replies are
    `vip_stats_table`'s hit counters (packets/bytes/last-seen), lazily
    creating the row on first match. An empty backend list drops
    (`DROP_REASON_EMPTY_BACKEND_LIST`).
-4. **Maglev lookup.** Hash the client's own `(address, port)` and look up
-   the precomputed Maglev table (`vip_table`'s own `maglev_table` field,
-   populated by the Go control plane's `internal/maglev.Table` — see
-   `edgemap`'s doc comment) to get a backend index, deterministically and
-   statelessly: every gateway node computes the identical index for the
-   identical flow from the identical `(VIP, backend list)` input, which is
-   what makes this design safe under anycast/ECMP — a flow's packets
-   landing on a different gateway node mid-connection still resolve to the
-   same backend.
+4. **Maglev lookup.** Hash the client's address with what the entry's
+   `affinity` byte selects (`EDGE_AFFINITY_*`, from
+   `NetworkService.spec.sessionAffinity`): its source port under `None`,
+   nothing more under `ClientIP`, its L4 protocol under
+   `ClientIPAndProtocol`. Look up the precomputed Maglev table
+   (`vip_table`'s own `maglev_table` field, populated by the Go control
+   plane's `internal/maglev.Table` — see `edgemap`'s doc comment) to get a
+   backend index, deterministically and statelessly: every gateway node
+   computes the identical index for the identical flow from the identical
+   `(VIP, backend list)` input, which is what makes this design safe under
+   anycast/ECMP — a flow's packets landing on a different gateway node
+   mid-connection still resolve to the same backend. Under either client-IP
+   affinity `KernelDatapath` keys the table by backend address alone rather
+   than address and port, so services over the same backend addresses on
+   different backend ports build the same table and pin a client to the
+   same backend. `affinity` occupies padding before `generation`, so it adds
+   nothing to `vip_value`'s size, and a zero byte reads as `None`. See
+   [configuration.md](../gateway/configuration.md#session-affinity).
 5. **Push** a fresh 40-byte outer IPv6 header addressed to the chosen
    backend's own worker-node SRv6 uSID (`vip_table`'s per-backend field,
    resolved by the Go control plane the same way any other cross-node SRv6
