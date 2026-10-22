@@ -190,3 +190,59 @@ func TestReplayExcludesFabricAdvertisements(t *testing.T) {
 		}
 	}
 }
+
+func TestWithdrawnAdvertisementClearsDeliveryStatus(t *testing.T) {
+	f := newOwnershipFixture(t, false)
+	f.reconcile(t, f.tenantAdv)
+	if err := f.client.Delete(context.Background(), f.tenantAdv); err != nil {
+		t.Fatal(err)
+	}
+	// Replaying attachments also discovers withdrawals missed while the controller was offline.
+	var attachment cloudv1alpha1.VPCAttachment
+	if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(f.attachment), &attachment); err != nil {
+		t.Fatal(err)
+	}
+	requests := advertisementForAttachment(context.Background(), &attachment)
+	if len(requests) != 1 || requests[0].Name != f.tenantAdv.Name {
+		t.Fatalf("withdrawal requests = %v", requests)
+	}
+	if _, err := f.reconciler.Reconcile(context.Background(), requests[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(f.attachment), &attachment); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(attachment.Status.Conditions, cloudv1alpha1.ConditionTypeProgrammed)
+	if condition == nil || condition.Status != metav1.ConditionFalse || attachment.Status.Node != "" || attachment.Status.HostInterface != "" {
+		t.Fatalf("withdrawn attachment status = %+v", attachment.Status)
+	}
+	var iface networkingv1alpha.NetworkInterface
+	if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(f.iface), &iface); err != nil {
+		t.Fatal(err)
+	}
+	if !meta.IsStatusConditionFalse(iface.Status.Conditions, networkingv1alpha.NetworkInterfaceProgrammed) {
+		t.Fatalf("withdrawn interface status = %+v", iface.Status)
+	}
+}
+
+func TestWithdrawalPreservesReplacementAdvertisement(t *testing.T) {
+	f := newOwnershipFixture(t, false)
+	f.reconcile(t, f.tenantAdv)
+	replacement := f.tenantAdv.DeepCopy()
+	replacement.Name += "-replacement"
+	replacement.ResourceVersion = ""
+	if err := f.client.Create(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.Delete(context.Background(), f.tenantAdv); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t, f.tenantAdv)
+	var attachment cloudv1alpha1.VPCAttachment
+	if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(f.attachment), &attachment); err != nil {
+		t.Fatal(err)
+	}
+	if !meta.IsStatusConditionTrue(attachment.Status.Conditions, cloudv1alpha1.ConditionTypeProgrammed) || attachment.Status.Node == "" {
+		t.Fatalf("replacement lost delivery status: %+v", attachment.Status)
+	}
+}

@@ -458,3 +458,19 @@ func TestServiceGrantGenerationCompatibility(t *testing.T) {
 		})
 	}
 }
+
+func TestAttachmentNextHopUsesGuestAddress(t *testing.T) {
+	attachment := &cloudv1alpha1.VPCAttachment{}
+	attachment.Status.PodSubnet = "fd20::4:0:0/96"
+	got := attachmentNextHop(attachment, net.ParseIP("fd70::53"))
+	if !got.Equal(net.ParseIP("fd20::4:0:0")) {
+		t.Fatalf("next hop = %v", got)
+	}
+	if got := attachmentNextHop(attachment, net.ParseIP("192.0.2.53")); got != nil {
+		t.Fatalf("wrong-family next hop = %v", got)
+	}
+	attachment.Status.PodSubnet = ""
+	if got := attachmentNextHop(attachment, net.ParseIP("fd70::53")); got != nil {
+		t.Fatalf("missing subnet next hop = %v", got)
+	}
+}

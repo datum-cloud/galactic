@@ -94,6 +94,15 @@ func TestTranslatedAPIAdmission(t *testing.T) {
 			p.Spec.Authorization = nil
 		}, false},
 		{"translated", func(*networkv1alpha1.ServiceRoutePolicy) {}, false},
+		{"persistent", func(p *networkv1alpha1.ServiceRoutePolicy) {
+			p.Spec.Authorization = &networkv1alpha1.ServiceRouteAuthorization{Persistent: true}
+		}, false},
+		{"persistent-with-deadline", func(p *networkv1alpha1.ServiceRoutePolicy) {
+			p.Spec.Authorization.Persistent = true
+		}, true},
+		{"missing-deadline", func(p *networkv1alpha1.ServiceRoutePolicy) {
+			p.Spec.Authorization = &networkv1alpha1.ServiceRouteAuthorization{}
+		}, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p := policy(tt.name)

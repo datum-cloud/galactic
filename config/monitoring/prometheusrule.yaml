@@ -496,6 +496,20 @@ spec:
               {{ $labels.kind }} routes it holds a best path for, so this node cannot reach those prefixes.
               The router's "route install failed" log lines name each prefix and the error, usually a SID
               with no route over an SRv6 uplink or an unresolved neighbor.
+        - alert: GalacticServiceRouteProgrammingFailing
+          expr: sum without (operation, result) (increase(galactic_service_route_route_operations_total{job="galactic-router",result="error"}[10m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Private service routing on {{ $labels.node }} keeps failing"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticservicerouteprogrammingfailing"
+            description: >-
+              Private service routes have repeatedly failed to apply or remove on {{ $labels.node }}.
+              Consumers can lose access even when the router Pod is ready and policies are accepted.
+              Check the router's service policy errors, attachment host interfaces, and node programming acknowledgments.
         - alert: GalacticRouterMetricsDown
           expr: up{job=~"galactic-router|galactic-router-rr"} == 0
           for: 5m

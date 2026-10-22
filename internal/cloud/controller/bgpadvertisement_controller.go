@@ -64,6 +64,9 @@ type BGPAdvertisementReconciler struct {
 func (r *BGPAdvertisementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var advertisement bgpv1alpha1.BGPAdvertisement
 	if err := r.Get(ctx, req.NamespacedName, &advertisement); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, r.clearWithdrawnAdvertisement(ctx, req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -121,6 +124,72 @@ func (r *BGPAdvertisementReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// clearWithdrawnAdvertisement removes delivery status only when no tenant
+// advertisement can certify the attachment, including after a node move.
+func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Context, key types.NamespacedName) error {
+	vpc, attachmentID, ok := galactic.SplitAdvertisementName(key.Name)
+	if !ok || key.Namespace != galactic.SystemNamespace {
+		return nil
+	}
+	identity := galactic.AdvertisementName(vpc, attachmentID)
+	var advertisements bgpv1alpha1.BGPAdvertisementList
+	if err := r.List(ctx, &advertisements, client.InNamespace(key.Namespace),
+		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
+		return fmt.Errorf("list replacement advertisements: %w", err)
+	}
+	for i := range advertisements.Items {
+		advertisement := &advertisements.Items[i]
+		router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
+		if err != nil {
+			return err
+		}
+		if router == nil || bgpv1alpha1.IsLegacyOwned(router) {
+			return nil
+		}
+	}
+	var attachments cloudv1alpha1.VPCAttachmentList
+	if err := r.List(ctx, &attachments, client.MatchingFields{IndexVPCAttachmentIdentity: identity}); err != nil {
+		return fmt.Errorf("list withdrawn attachments: %w", err)
+	}
+	for i := range attachments.Items {
+		attachment := &attachments.Items[i]
+		if attachment.Status.Node == "" || key.Name != identity+"-"+attachment.Status.Node {
+			continue
+		}
+		attachment.Status.Node = ""
+		attachment.Status.HostInterface = ""
+		attachment.Status.VRFInterface = ""
+		attachment.Status.PodSubnet = ""
+		programmed := metav1.Condition{
+			Type: cloudv1alpha1.ConditionTypeProgrammed, Status: metav1.ConditionFalse,
+			Reason: "AdvertisementWithdrawn", Message: "the attachment has no network advertisement",
+			ObservedGeneration: attachment.Generation,
+		}
+		meta.SetStatusCondition(&attachment.Status.Conditions, programmed)
+		if err := r.projectOntoInterface(ctx, attachment, programmed); err != nil {
+			return err
+		}
+		if err := r.Status().Update(ctx, attachment); err != nil {
+			return fmt.Errorf("clear withdrawn attachment %s: %w", client.ObjectKeyFromObject(attachment), err)
+		}
+	}
+	return nil
+}
+
+func advertisementForAttachment(_ context.Context, obj client.Object) []reconcile.Request {
+	attachment, ok := obj.(*cloudv1alpha1.VPCAttachment)
+	if !ok || attachment.Status.Node == "" {
+		return nil
+	}
+	identity := galactic.AdvertisementName(attachment.Status.VPC, attachment.Status.VPCAttachment)
+	if identity == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Namespace: galactic.SystemNamespace, Name: identity + "-" + attachment.Status.Node,
+	}}}
 }
 
 // projectOntoInterface closes the Programmed condition NSO deliberately leaves
@@ -279,6 +348,14 @@ func programmedCondition(advertisement *bgpv1alpha1.BGPAdvertisement) metav1.Con
 func (r *BGPAdvertisementReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.BGPAdvertisement{}).
+		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(advertisementForAttachment),
+			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+				oldAttachment, oldOK := e.ObjectOld.(*cloudv1alpha1.VPCAttachment)
+				newAttachment, newOK := e.ObjectNew.(*cloudv1alpha1.VPCAttachment)
+				return oldOK && newOK && (oldAttachment.Status.Node != newAttachment.Status.Node ||
+					oldAttachment.Status.VPC != newAttachment.Status.VPC ||
+					oldAttachment.Status.VPCAttachment != newAttachment.Status.VPCAttachment)
+			}})).
 		Watches(&networkingv1alpha.NetworkInterface{},
 			handler.EnqueueRequestsFromMapFunc(r.advertisementForInterface),
 			builder.WithPredicates(predicate.Funcs{

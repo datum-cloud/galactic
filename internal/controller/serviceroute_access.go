@@ -31,7 +31,13 @@ func (r *ServiceRoutePolicyReconciler) validateAuthorization(policy *networkv1al
 		return nil
 	}
 	if policy.Spec.Authorization == nil {
-		return errors.New("frontend translation requires authorization.validUntil")
+		return errors.New("frontend translation requires access authorization")
+	}
+	if policy.Spec.Authorization.Persistent {
+		if !policy.Spec.Authorization.ValidUntil.IsZero() {
+			return errors.New("persistent access must omit validUntil")
+		}
+		return nil
 	}
 	deadline := policy.Spec.Authorization.ValidUntil.Time
 	now := r.now()

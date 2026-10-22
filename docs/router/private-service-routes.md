@@ -75,16 +75,25 @@ The publishing controller supplies the producer address in `ServiceEndpoint`;
 `ServiceRoutePolicy.spec.frontend.address` supplies the consumer address.
 Both addresses must use the same IP family. Ports are not translated.
 
-A translated policy must pin the consumer VPC by name and UID and include an
-`authorization.validUntil` deadline within the next two minutes. Selected
-attachments must match that VPC's allocated network identity. Kernel checks
-stop new requests and established replies when the authorization expires, even
-if the controller or its API is unavailable. Renew authorization explicitly to
-restore access.
+A translated policy pins the consumer VPC by name and UID. Selected attachments
+must match that VPC's allocated network identity. Persistent access remains
+active during control plane outages and ends when the policy is withdrawn or
+the VPC lifetime changes.
+
+```yaml
+spec:
+  authorization:
+    # Keep connectivity until an explicit policy or VPC lifetime change.
+    persistent: true
+```
+
+Time-bounded access sets `authorization.validUntil` within the next two minutes
+and omits `persistent`. Kernel checks enforce its deadline on requests and
+established replies. Persistent access must omit the deadline.
 
 Policies claiming the same frontend address, protocol, and port on one consumer
 attachment are rejected together. Separate VPC attachments can reuse that tuple.
-The publisher owns authorization renewal and service health; Galactic enforces
+The publisher owns access policy and service health; Galactic enforces
 network access and forwards packets. It does not interpret DNS records or zones.
 
 ## Node programming reports
@@ -95,8 +104,9 @@ and input digest. It expires within 60 seconds or when authorization expires,
 whichever comes first. Consumer and producer nodes report independently for
 remote delivery.
 
-Controllers using these reports must require the current topology digest and
-all required nodes. `Accepted=True` means the policy is valid; it does not prove
+Controllers require the current topology digest and all required nodes to
+establish a new path. Expired reports indicate unknown observation health; they
+do not revoke a persistent path. `Accepted=True` means the policy is valid; it does not prove
 that forwarding is installed. Reports cover network programming, not the
 health of the producer application. Startup withdraws previous local readiness
 before rebuilding the node's state.

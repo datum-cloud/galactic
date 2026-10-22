@@ -389,7 +389,8 @@ Service owners withdraw unhealthy producers. Networking integration deletes
 access when the consumer or service is deleted. Galactic removes obsolete
 programming and reconciles current lifetimes after restart. Recreated VPCs and
 endpoints must not inherit previous grants. The current route policy has no
-authorization lease; rollout requires a bounded revocation policy.
+authorization policy. Persistent access requires explicit revocation; bounded
+access requires a renewed deadline.
 
 ### Data plane
 
@@ -443,7 +444,7 @@ networking integration maps that frontend to an authorized service-side
 destination for the network's DNS context. Galactic enforces the private path;
 DNS interprets the destination and isolates zones and answers.
 
-DNS contexts, record publication, health-aware discovery, and resolver leases
+DNS contexts, record publication, health-aware discovery, and resolver access
 belong to the [DNS component design](https://github.com/datum-cloud/dns-operator/blob/docs/internal-dns-architecture/docs/architecture/internal-dns/README.md).
 The generic private-service path does not interpret DNS resources.
 

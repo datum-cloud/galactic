@@ -146,8 +146,7 @@ type ServiceRoutePolicySpec struct {
 	// +optional
 	Frontend *ServiceRouteFrontend `json:"frontend,omitempty"`
 
-	// Authorization bounds translated access independently of application leases.
-	// Only trusted networking integration may renew this deadline.
+	// Authorization defines the lifetime of translated service access.
 	// +optional
 	Authorization *ServiceRouteAuthorization `json:"authorization,omitempty"`
 
@@ -169,11 +168,17 @@ type ServiceRoutePolicySpec struct {
 	Region string `json:"region,omitempty"`
 }
 
-// ServiceRouteAuthorization bounds one network authorization episode.
+// ServiceRouteAuthorization defines persistent or time-bounded access.
+// +kubebuilder:validation:XValidation:rule="has(self.persistent) && self.persistent ? !has(self.validUntil) : has(self.validUntil)",message="persistent access must omit validUntil; bounded access requires validUntil"
 type ServiceRouteAuthorization struct {
+	// Persistent retains access until policy withdrawal or VPC lifetime replacement.
+	// +optional
+	Persistent bool `json:"persistent,omitempty"`
+
 	// ValidUntil is the absolute UTC deadline for requests and existing replies.
 	// Node controllers reject deadlines more than two minutes in the future.
-	ValidUntil metav1.Time `json:"validUntil"`
+	// +optional
+	ValidUntil metav1.Time `json:"validUntil,omitempty"`
 }
 
 // ServiceRouteVPCReference identifies one immutable Cloud API VPC lifetime.

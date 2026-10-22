@@ -41,6 +41,8 @@ type RouteIntent struct {
 	Frontend                *net.IPNet
 	ConsumerDevice          string
 	ServiceDevice           string
+	ConsumerNextHop         net.IP
+	ServiceNextHop          net.IP
 	ServiceSID              net.IP
 	ConsumerSID             net.IP
 	GrantID                 ServiceGrantID
@@ -143,6 +145,7 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 					Attachment: consumerKey, ProducerAttachment: producerKey, Kind: RouteIntentLocal,
 					Service: cloneIPNet(service), Frontend: cloneIPNet(frontend), ConsumerDevice: consumer.Status.HostInterface,
 					ServiceDevice: producer.Status.HostInterface, Ports: clonePorts(ports),
+					ConsumerNextHop: attachmentNextHop(consumer, service.IP), ServiceNextHop: attachmentNextHop(producer, service.IP),
 				})
 			}
 			continue
@@ -164,6 +167,7 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 				Attachment: consumerKey, ProducerAttachment: producerKey, Kind: RouteIntentRemoteConsumer,
 				Service: cloneIPNet(service), Frontend: cloneIPNet(frontend), ConsumerDevice: consumer.Status.HostInterface,
 				ServiceSID: cloneIP(serviceSID), GrantID: grantID, Ports: clonePorts(ports),
+				ConsumerNextHop: attachmentNextHop(consumer, service.IP),
 			})
 		}
 		if producer.Status.Node == localNode {
@@ -176,6 +180,7 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 				Attachment: consumerKey, ProducerAttachment: producerKey, Kind: RouteIntentRemoteProducer,
 				Service: cloneIPNet(service), Frontend: cloneIPNet(frontend), ServiceDevice: producer.Status.HostInterface,
 				ConsumerSID: cloneIP(consumerSID), GrantID: grantID, Ports: clonePorts(ports),
+				ServiceNextHop: attachmentNextHop(producer, service.IP),
 			})
 		}
 	}
@@ -187,6 +192,15 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 		return intents[i].Kind < intents[j].Kind
 	})
 	return intents, nil
+}
+
+// attachmentNextHop returns the guest address for a routed attachment subnet.
+func attachmentNextHop(attachment *cloudv1alpha1.VPCAttachment, service net.IP) net.IP {
+	ip, _, err := net.ParseCIDR(attachment.Status.PodSubnet)
+	if err != nil || (ip.To4() == nil) != (service.To4() == nil) {
+		return nil
+	}
+	return ip
 }
 
 func validateProducerTopology(endpoint *networkv1alpha1.ServiceEndpoint,
@@ -371,7 +385,7 @@ func consumerMatchesVPC(policy *networkv1alpha1.ServiceRoutePolicy,
 }
 
 func setIntentAuthorization(policy *networkv1alpha1.ServiceRoutePolicy, intents []RouteIntent) {
-	if policy.Spec.Frontend == nil || policy.Spec.Authorization == nil {
+	if policy.Spec.Frontend == nil || policy.Spec.Authorization == nil || policy.Spec.Authorization.Persistent {
 		return
 	}
 	for i := range intents {

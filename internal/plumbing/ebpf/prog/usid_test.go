@@ -1567,6 +1567,21 @@ func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
 	if got := sumPerCPU(t, objs.DropReasons, 40); got != 0 {
 		t.Errorf("drop_reasons[service_route_denied] = %d, want 0", got)
 	}
+	peerKey := UsidServicePeerKey{Ifindex: loopback, Family: egressRouteFamilyINET6}
+	peer := UsidServicePeerValue{Token: 99, Address: netip.MustParseAddr("fd20::4").As16()}
+	if err := objs.ServicePeerTable.Put(peerKey, peer); err != nil {
+		t.Fatal(err)
+	}
+	if ret, _, err := objs.UsidServiceEgress.Test(pkt); err != nil || ret != tcActShot {
+		t.Fatalf("stale attachment next hop verdict = %d, err = %v; want drop", ret, err)
+	}
+	peer.Token = 1
+	if err := objs.ServicePeerTable.Put(peerKey, peer); err != nil {
+		t.Fatal(err)
+	}
+	if ret, _, err := objs.UsidServiceEgress.Test(pkt); err != nil || ret != tcActRedirect {
+		t.Fatalf("current attachment next hop verdict = %d, err = %v; want redirect", ret, err)
+	}
 	// Simulate deletion and immediate kernel ifindex reuse. The stale route and
 	// access keys still match ifindex 1, but their old incarnation token must
 	// not authorize the replacement interface.

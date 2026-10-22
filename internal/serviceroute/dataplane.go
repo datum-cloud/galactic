@@ -111,7 +111,7 @@ type EBPFRouteProgrammer struct {
 	mu                     sync.Mutex
 	tables                 *serviceroutemap.Tables
 	mapHandles             []*ebpf.Map
-	mapIDs                 [7]ebpf.MapID
+	mapIDs                 [8]ebpf.MapID
 	mapIDsValid            bool
 	routeRefs              map[string]routeState
 	accessRefs             map[accessKey]accessState
@@ -128,8 +128,8 @@ type EBPFRouteProgrammer struct {
 
 	// These hooks keep map replacement and interface recreation tests
 	// deterministic without requiring a privileged kernel eBPF setup.
-	openMapSetFn  func(string) (*serviceroutemap.Tables, []*ebpf.Map, [7]ebpf.MapID, error)
-	readMapIDsFn  func(string) ([7]ebpf.MapID, error)
+	openMapSetFn  func(string) (*serviceroutemap.Tables, []*ebpf.Map, [8]ebpf.MapID, error)
+	readMapIDsFn  func(string) ([8]ebpf.MapID, error)
 	targetIndexFn func(string) (uint32, error)
 }
 
@@ -388,6 +388,7 @@ var serviceRouteMapNames = [...]string{
 	"attachment_identity_table",
 	"service_policy_state_table",
 	"service_deny_table",
+	"service_peer_table",
 }
 
 func (p *EBPFRouteProgrammer) mapSetChanged() (bool, error) {
@@ -401,32 +402,32 @@ func (p *EBPFRouteProgrammer) mapSetChanged() (bool, error) {
 	return ids != p.mapIDs, nil
 }
 
-func (p *EBPFRouteProgrammer) openMapSet(pinDir string) (*serviceroutemap.Tables, []*ebpf.Map, [7]ebpf.MapID, error) {
+func (p *EBPFRouteProgrammer) openMapSet(pinDir string) (*serviceroutemap.Tables, []*ebpf.Map, [8]ebpf.MapID, error) {
 	if p.openMapSetFn != nil {
 		return p.openMapSetFn(pinDir)
 	}
 	tables, handles, err := serviceroutemap.OpenPinned(pinDir)
 	if err != nil {
-		return nil, nil, [7]ebpf.MapID{}, err
+		return nil, nil, [8]ebpf.MapID{}, err
 	}
-	var ids [7]ebpf.MapID
+	var ids [8]ebpf.MapID
 	for index, handle := range handles {
 		ids[index], err = kernelMapID(handle)
 		if err != nil {
 			for _, opened := range handles {
 				_ = opened.Close()
 			}
-			return nil, nil, [7]ebpf.MapID{}, err
+			return nil, nil, [8]ebpf.MapID{}, err
 		}
 	}
 	return tables, handles, ids, nil
 }
 
-func (p *EBPFRouteProgrammer) readMapIDs(pinDir string) ([7]ebpf.MapID, error) {
+func (p *EBPFRouteProgrammer) readMapIDs(pinDir string) ([8]ebpf.MapID, error) {
 	if p.readMapIDsFn != nil {
 		return p.readMapIDsFn(pinDir)
 	}
-	var ids [7]ebpf.MapID
+	var ids [8]ebpf.MapID
 	for index, name := range serviceRouteMapNames {
 		current, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, name), nil)
 		if err != nil {
@@ -459,14 +460,25 @@ func (p *EBPFRouteProgrammer) closeHandles() {
 	}
 	p.mapHandles = nil
 	p.tables = nil
-	p.mapIDs = [7]ebpf.MapID{}
+	p.mapIDs = [8]ebpf.MapID{}
 	p.mapIDsValid = false
+}
+
+// Missing links withdraw their entries while preserving intent for recreation.
+// Other lookup errors cannot prove that an interface has disappeared.
+func (p *EBPFRouteProgrammer) recoverableEntries(intent RouteIntent) ([]appliedEntry, error) {
+	entries, err := p.entries(intent)
+	var missing netlink.LinkNotFoundError
+	if errors.As(err, &missing) {
+		return []appliedEntry{}, nil
+	}
+	return entries, err
 }
 
 func (p *EBPFRouteProgrammer) rebuildDesired() error {
 	for _, key := range sortedIntentKeys(p.desiredIntents) {
 		for _, intent := range p.desiredIntents[key] {
-			entries, err := p.entries(intent)
+			entries, err := p.recoverableEntries(intent)
 			if err != nil {
 				return fmt.Errorf("re-derive service route state %s: %w", key, err)
 			}
@@ -494,7 +506,7 @@ func (p *EBPFRouteProgrammer) repairDesired() error {
 			continue
 		}
 		for index, intent := range intents {
-			fresh, err := p.entries(intent)
+			fresh, err := p.recoverableEntries(intent)
 			if err != nil {
 				return fmt.Errorf("re-derive service route state %s: %w", key, err)
 			}
@@ -657,6 +669,9 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 		if err != nil {
 			return nil, err
 		}
+		if err := p.tables.SetPeer(serviceIfindex, producerToken, intent.ServiceNextHop); err != nil {
+			return nil, err
+		}
 		// Producer-side source marker for fragments, whose missing transport
 		// tuple cannot be matched against an individual grant.
 		entries = append(entries, appliedEntry{access: &accessRef{
@@ -688,6 +703,9 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 	if err != nil {
 		return nil, err
 	}
+	if err := p.tables.SetPeer(consumerIfindex, consumerToken, intent.ConsumerNextHop); err != nil {
+		return nil, err
+	}
 	// A protocol/port-zero marker makes malformed or non-TCP/UDP traffic to a
 	// configured service fail closed without conflating distinct real tuples.
 	entries = append(entries, appliedEntry{access: &accessRef{
@@ -713,6 +731,9 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 		}
 		producerToken, err = p.tables.IdentityToken(targetIfindex)
 		if err != nil {
+			return nil, err
+		}
+		if err := p.tables.SetPeer(targetIfindex, producerToken, intent.ServiceNextHop); err != nil {
 			return nil, err
 		}
 		// Local replies need the same address-only producer marker. Its
@@ -1014,6 +1035,7 @@ func intentKey(intent RouteIntent) string {
 	fmt.Fprintf(&builder, "%s|%s|%s|%s|%s|%s|%s|%s|%s|%x",
 		intent.Attachment, intent.ProducerAttachment, intent.Kind, intent.Service, intent.Frontend, intent.ConsumerDevice,
 		intent.ServiceDevice, intent.ServiceSID, intent.ConsumerSID, intent.GrantID)
+	fmt.Fprintf(&builder, "|peers:%s,%s", intent.ConsumerNextHop, intent.ServiceNextHop)
 	fmt.Fprintf(&builder, "|lease:%d", authorizationUnixNano(intent.AuthorizationValidUntil))
 	for _, port := range intent.Ports {
 		fmt.Fprintf(&builder, "|%s:%d", port.Protocol, port.Port)
@@ -1035,6 +1057,8 @@ func cloneRouteIntent(intent RouteIntent) RouteIntent {
 	}
 	cloned.ServiceSID = append(net.IP(nil), intent.ServiceSID...)
 	cloned.ConsumerSID = append(net.IP(nil), intent.ConsumerSID...)
+	cloned.ConsumerNextHop = append(net.IP(nil), intent.ConsumerNextHop...)
+	cloned.ServiceNextHop = append(net.IP(nil), intent.ServiceNextHop...)
 	cloned.Ports = append([]api.ServiceRouteProtocolPort(nil), intent.Ports...)
 	return cloned
 }

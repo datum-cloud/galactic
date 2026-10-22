@@ -574,7 +574,7 @@ _Appears in:_
 
 
 
-ServiceRouteAuthorization bounds one network authorization episode.
+ServiceRouteAuthorization defines persistent or time-bounded access.
 
 
 
@@ -583,6 +583,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `persistent` _boolean_ | Persistent retains access until policy withdrawal or VPC lifetime replacement. |  |  |
 | `validUntil` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ValidUntil is the absolute UTC deadline for requests and existing replies.<br />Node controllers reject deadlines more than two minutes in the future. |  |  |
 
 
@@ -662,7 +663,7 @@ _Appears in:_
 | `serviceRef` _[ServiceEndpointReference](#serviceendpointreference)_ | ServiceRef identifies the ServiceEndpoint in this namespace. |  | Required: \{\} <br /> |
 | `consumerVPCRef` _[ServiceRouteVPCReference](#serviceroutevpcreference)_ | ConsumerVPCRef pins authorization to the immutable lifetime of the VPC<br />selected by AttachmentSelector. Galactic resolves the name through the<br />Cloud API and requires both the live name and UID to match. |  |  |
 | `frontend` _[ServiceRouteFrontend](#serviceroutefrontend)_ | Frontend is the address presented inside the consumer VPC. When set,<br />Galactic translates it to the ServiceEndpoint address and restores it on<br />replies. |  |  |
-| `authorization` _[ServiceRouteAuthorization](#servicerouteauthorization)_ | Authorization bounds translated access independently of application leases.<br />Only trusted networking integration may renew this deadline. |  |  |
+| `authorization` _[ServiceRouteAuthorization](#servicerouteauthorization)_ | Authorization defines the lifetime of translated service access. |  |  |
 | `attachmentSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | AttachmentSelector selects eligible VPC attachments by authoritative<br />labels. Labels that grant access to platform services must be assigned by<br />the network control plane, not by tenants. |  | Required: \{\} <br /> |
 | `protocolPorts` _[ServiceRouteProtocolPort](#servicerouteprotocolport) array_ | ProtocolPorts limits the traffic that the route is intended to carry.<br />An empty list means the endpoint's declared port and protocol are used. |  |  |
 | `region` _string_ | Region limits selected attachments to a region. An empty value means the<br />policy applies in every region where the endpoint is available. |  |  |

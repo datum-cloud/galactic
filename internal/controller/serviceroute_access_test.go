@@ -321,3 +321,59 @@ func TestConflictingPoliciesFailClosedAndRecover(t *testing.T) {
 		})
 	}
 }
+
+func TestPersistentAuthorizationRequiresNoDeadline(t *testing.T) {
+	r := &ServiceRoutePolicyReconciler{}
+	p := &networkv1alpha1.ServiceRoutePolicy{Spec: networkv1alpha1.ServiceRoutePolicySpec{
+		Frontend:      &networkv1alpha1.ServiceRouteFrontend{},
+		Authorization: &networkv1alpha1.ServiceRouteAuthorization{Persistent: true},
+	}}
+	if err := r.validateAuthorization(p); err != nil {
+		t.Fatal(err)
+	}
+	p.Spec.Authorization.ValidUntil = metav1.NewTime(time.Now().Add(time.Minute))
+	if err := r.validateAuthorization(p); err == nil {
+		t.Fatal("persistent authorization accepted a deadline")
+	}
+}
+
+func TestPersistentPathSurvivesControllerOutageAndWithdraws(t *testing.T) {
+	r, p, _ := pscFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	r.Now = func() time.Time { return now }
+	p.Spec.Authorization = &networkv1alpha1.ServiceRouteAuthorization{Persistent: true}
+	if err := r.Update(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	key := types.NamespacedName{Namespace: p.Namespace, Name: p.Name}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Applied) == 0 {
+		t.Fatal("persistent path requires authorization renewal")
+	}
+	for _, intents := range r.Applied {
+		for _, intent := range intents {
+			if !intent.AuthorizationValidUntil.IsZero() {
+				t.Fatal("persistent path has a dataplane deadline")
+			}
+		}
+	}
+	if err := r.Get(ctx, key, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Applied) != 0 {
+		t.Fatal("withdrawn policy retained forwarding")
+	}
+}

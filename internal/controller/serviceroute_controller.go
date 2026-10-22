@@ -188,7 +188,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		all = append(all, &attachments.Items[i])
 	}
 	if policy.Spec.Frontend != nil {
-		inputDigest = serviceProgrammingDigest(policy, endpoint, all, vpcIdentity)
+		inputDigest = serviceProgrammingDigest(policy, endpoint, all, vpcIdentity, r.NodeName)
 	}
 	conflicts, conflictErr := r.conflictingPolicies(ctx, all)
 	if conflictErr != nil {

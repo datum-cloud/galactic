@@ -557,7 +557,8 @@ func (c routeCache) get(tableID uint32) ([]netlink.Route, error) {
 // localAddressing recovers what CNI ADD registered as link's local prefixes and
 // gateways from the kernel. The guest prefixes are the pod-subnet routes the
 // master plugin installs in the VRF's table out link: unicast, not
-// kernel-generated, with no gateway and not link-scoped. The master plugin
+// kernel-generated, and not link-scoped. Delegated veth prefixes use their
+// guest address as an on-link next hop. The master plugin
 // installs one only for a family with a gateway, so a family without one is
 // missing here; discoverAttachments adds it from the BGPAdvertisement. The
 // gateways are link's own addresses that are not link-local, each also a host
@@ -610,9 +611,10 @@ func setGateway(gw *attachreg.Gateways, ip net.IP) {
 }
 
 // isPodSubnetRoute reports whether r is a pod-subnet route out ifindex, as
-// opposed to a kernel-generated route or a termination route with a gateway or
-// link scope.
+// opposed to a kernel-generated route or a termination route. A delegated
+// prefix can use its first address as an on-link guest next hop.
 func isPodSubnetRoute(r *netlink.Route, ifindex int) bool {
-	return r.Dst != nil && r.LinkIndex == ifindex && r.Gw == nil && len(r.MultiPath) == 0 &&
+	return r.Dst != nil && r.LinkIndex == ifindex && (r.Gw == nil ||
+		(r.Gw.Equal(r.Dst.IP) && r.Flags&int(netlink.FLAG_ONLINK) != 0)) && len(r.MultiPath) == 0 &&
 		r.Type == unix.RTN_UNICAST && r.Protocol != unix.RTPROT_KERNEL && r.Scope != netlink.SCOPE_LINK
 }

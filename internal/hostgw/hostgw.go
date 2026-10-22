@@ -225,6 +225,10 @@ func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tab
 		LinkIndex: hostLink.Attrs().Index,
 		Table:     tableID,
 	}
+	if ones, bits := subnet.Mask.Size(); hostLink.Type() == "veth" && bits == 128 && ones < bits {
+		desiredRoute.Gw = subnet.IP
+		desiredRoute.Flags = int(netlink.FLAG_ONLINK)
+	}
 
 	existingRoutes, err := netlink.RouteListFiltered(
 		family,
@@ -241,6 +245,14 @@ func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tab
 			continue
 		}
 		if r.Dst.String() == desiredRoute.Dst.String() {
+			if r.LinkIndex == desiredRoute.LinkIndex && r.Gw == nil && desiredRoute.Gw != nil &&
+				isPodSubnetRouteCandidate(&r) && len(r.MultiPath) == 0 {
+				if err := netlink.RouteReplace(desiredRoute); err != nil {
+					return fmt.Errorf("route delegated subnet through guest address: %w", err)
+				}
+				alreadyPresent = true
+				continue
+			}
 			if routeConflicts(&r, desiredRoute) {
 				return fmt.Errorf(
 					"existing route %v to %s conflicts with desired route %v",

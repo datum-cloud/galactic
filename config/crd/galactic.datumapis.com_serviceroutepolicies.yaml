@@ -105,19 +105,25 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               authorization:
-                description: |-
-                  Authorization bounds translated access independently of application leases.
-                  Only trusted networking integration may renew this deadline.
+                description: Authorization defines the lifetime of translated service
+                  access.
                 properties:
+                  persistent:
+                    description: Persistent retains access until policy withdrawal
+                      or VPC lifetime replacement.
+                    type: boolean
                   validUntil:
                     description: |-
                       ValidUntil is the absolute UTC deadline for requests and existing replies.
                       Node controllers reject deadlines more than two minutes in the future.
                     format: date-time
                     type: string
-                required:
-                - validUntil
                 type: object
+                x-kubernetes-validations:
+                - message: persistent access must omit validUntil; bounded access
+                    requires validUntil
+                  rule: 'has(self.persistent) && self.persistent ? !has(self.validUntil)
+                    : has(self.validUntil)'
               consumerVPCRef:
                 description: |-
                   ConsumerVPCRef pins authorization to the immutable lifetime of the VPC

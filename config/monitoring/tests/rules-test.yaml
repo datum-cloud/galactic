@@ -2289,3 +2289,33 @@ tests:
                 galactic-nat on dfw-worker2 has failed to renew its nat slot's lease in the XDP
                 dispatcher more than twice in every 5-minute window for 5 minutes. Once the lease expires the
                 dispatcher skips the slot and tenant traffic leaves untranslated. The shard's log names the error.
+
+  # Repeated failures alert; a rollout burst and idle or disabled routing do not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_service_route_route_operations_total{job="galactic-router",node="failing",operation="apply",result="error"}'
+        values: "0+1x60"
+      - series: 'galactic_service_route_route_operations_total{job="galactic-router",node="recovering",operation="apply",result="error"}'
+        values: "0+1x5 5x55"
+      - series: 'galactic_service_route_route_operations_total{job="galactic-router",node="idle",operation="apply",result="error"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticServiceRouteProgrammingFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: GalacticServiceRouteProgrammingFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-router
+              node: failing
+            exp_annotations:
+              summary: "Private service routing on failing keeps failing"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticservicerouteprogrammingfailing"
+              description: >-
+                Private service routes have repeatedly failed to apply or remove on failing.
+                Consumers can lose access even when the router Pod is ready and policies are accepted.
+                Check the router's service policy errors, attachment host interfaces, and node programming acknowledgments.
