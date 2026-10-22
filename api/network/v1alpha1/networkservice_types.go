@@ -131,6 +131,7 @@ type NetworkService struct {
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['tcp', 'udp', 'sctp']) || has(self.backendPort)",message="backendPort is required for tcp, udp and sctp"
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.port)",message="port must not be set for esp, gre and icmp, which have no ports"
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.backendPort)",message="backendPort must not be set for esp, gre and icmp, which have no ports"
+// +kubebuilder:validation:XValidation:rule="self.protocol != 'udp' || !has(self.healthCheck) || has(self.healthCheck.port)",message="healthCheck.port is required for udp: a health check probes a TCP port"
 type NetworkServiceSpec struct {
 	// VPCRef is the opaque identifier of the target VPC this service applies
 	// to. This repo does not own the VPC API and does not validate the
@@ -235,6 +236,71 @@ type NetworkServiceSpec struct {
 	// +optional
 	// +kubebuilder:default=None
 	SessionAffinity NetworkServiceSessionAffinity `json:"sessionAffinity,omitempty"`
+
+	// HealthCheck turns on health checks for the service's backends. Each
+	// backend's own node opens a TCP connection to it on the health check
+	// port, from the link-local address of the backend's host-side interface,
+	// and publishes a decision in status.health of the backend's
+	// ServiceVIPBindings. The gateway nodes take a backend whose decision is
+	// Unhealthy out of the service's Maglev table, and keep every backend
+	// when all of them are Unhealthy. Unset, no backend is probed and every
+	// one stays in the table.
+	//
+	// Where interface traffic policy is enforced, the backend's policy must
+	// allow TCP from fe80::/10 to the health check port on the Private path,
+	// and the replies back.
+	// +optional
+	HealthCheck *NetworkServiceHealthCheck `json:"healthCheck,omitempty"`
+}
+
+// NetworkServiceHealthCheck configures the TCP health check of a
+// NetworkService's backends. A probe succeeds when the TCP handshake completes
+// within TimeoutSeconds, and fails when the connection is refused, reset or
+// times out. A backend's decision changes after UnhealthyThreshold consecutive
+// failures or HealthyThreshold consecutive successes, so a backend that
+// alternates between the two keeps its current decision.
+//
+// +kubebuilder:validation:XValidation:rule="self.timeoutSeconds <= self.intervalSeconds",message="timeoutSeconds must not exceed intervalSeconds"
+type NetworkServiceHealthCheck struct {
+	// Port is the TCP port probed on every backend, 1-65535. Unset, it is the
+	// service's backendPort. A udp service must set it to a TCP port its
+	// backends listen on, since a UDP datagram draws no reply a generic
+	// probe can expect.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port,omitempty"`
+
+	// IntervalSeconds is the time between two probes of one backend.
+	// +optional
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=300
+	IntervalSeconds int32 `json:"intervalSeconds,omitempty"`
+
+	// TimeoutSeconds is how long a probe waits for the handshake. It must not
+	// exceed IntervalSeconds.
+	// +optional
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=60
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+
+	// UnhealthyThreshold is the number of consecutive failed probes that
+	// make a backend Unhealthy.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	UnhealthyThreshold int32 `json:"unhealthyThreshold,omitempty"`
+
+	// HealthyThreshold is the number of consecutive successful probes that
+	// make a backend Healthy.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	HealthyThreshold int32 `json:"healthyThreshold,omitempty"`
 }
 
 // NetworkServiceStatus defines the observed state of a NetworkService.
