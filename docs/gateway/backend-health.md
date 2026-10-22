@@ -1,8 +1,10 @@
 # Backend health checks
 
 > [!NOTE]
-> This document describes the intended design. Nothing below is implemented
-> yet unless a section says so.
+> The uSID carve-out, the API, and `galactic-router`'s probing and publishing
+> are implemented. The gateway side, everything from
+> [Every backend unhealthy](#every-backend-unhealthy) on that a gateway
+> does with a decision, is the intended design and not implemented yet.
 
 A `NetworkService` balances flows over the backends its `backendSelector`
 picks. A backend that resolves and advertises but has stopped serving keeps
