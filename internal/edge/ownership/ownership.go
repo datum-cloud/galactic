@@ -24,6 +24,20 @@
 // A commit whose mutation fails, or whose process dies mid-mutation, leaves
 // the scope in the same resync-required state, because a partly applied
 // change cannot be assumed either done or undone.
+//
+// Owner IDs must be unique to a writer incarnation; process restarts use new IDs
+// and the fence/adopt barrier. Reusing an ID lets an old process obtain current
+// tickets. All writers share the same durable state and lock files, which must
+// outlive every writer and outstanding ticket. Never delete, replace or restore
+// that directory while writers are alive: generations and flock inodes would no
+// longer fence them. Recovery from state loss requires stopping all writers and
+// reconciling host state before establishing a fresh authority.
+//
+// Mutations are synchronous and bounded by their callers. Every side effect must
+// finish before the callback returns; detached work runs outside the fence.
+// A hung callback holds the lock and blocks Fence indefinitely. A timeout must
+// never release that lock while a mutation can still run; process supervision
+// and independent forwarding expiry provide recovery and packet safety.
 package ownership
 
 import (
@@ -143,7 +157,8 @@ func (a *Authority) Begin(scope, owner string) (Ticket, error) {
 //
 // mutate must not call the authority for the same scope: the lock is a file
 // lock, which conflicts across open files even within one process, so such a
-// call deadlocks.
+// call deadlocks. It must complete all writes synchronously before returning;
+// callers must bound operations and must not leave asynchronous writes running.
 func (a *Authority) Commit(t Ticket, mutate func() error) (Ticket, error) {
 	return a.commit(t, false, mutate)
 }
@@ -156,6 +171,9 @@ func (a *Authority) CommitSnapshot(t Ticket, mutate func() error) (Ticket, error
 }
 
 func (a *Authority) commit(t Ticket, snapshot bool, mutate func() error) (Ticket, error) {
+	if t.Owner == "" {
+		return Ticket{}, ErrNoOwner
+	}
 	var next Ticket
 	err := a.lockedStaged(t.Scope, func(r *Record, persist func() error) error {
 		if err := checkOwner(t.Scope, t.Owner, *r); err != nil {

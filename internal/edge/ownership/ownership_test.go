@@ -6,6 +6,7 @@ package ownership
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -341,5 +342,27 @@ func TestEmptyOwnerIsRefused(t *testing.T) {
 	}
 	if !r.Transitioning || r.Owner != "cni" {
 		t.Fatalf("record after refused adoption = %+v, want still transitioning from cni", r)
+	}
+}
+
+func TestZeroOwnerTicketCannotCommitUnclaimedScope(t *testing.T) {
+	for _, snapshot := range []bool{false, true} {
+		t.Run(fmt.Sprintf("snapshot=%t", snapshot), func(t *testing.T) {
+			a, err := New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = a.commit(Ticket{Scope: "unclaimed"}, snapshot, mustNotRun(t))
+			if !errors.Is(err, ErrNoOwner) {
+				t.Fatalf("zero owner commit = %v, want ErrNoOwner", err)
+			}
+			record, err := a.Read("unclaimed")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record != (Record{}) {
+				t.Fatalf("rejected commit changed record: %+v", record)
+			}
+		})
 	}
 }
