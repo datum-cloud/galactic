@@ -75,10 +75,10 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 			continue
 		}
 		relevant[types.NamespacedName{Namespace: a.Namespace, Name: a.Name}] = true
-		selected++
 		if a.DeletionTimestamp != nil || !ready[types.NamespacedName{Namespace: a.Namespace, Name: a.Name}] {
-			return plan, fmt.Errorf("consumer attachment %s/%s is not ready", a.Namespace, a.Name)
+			continue
 		}
+		selected++
 		p := chooseProducer(endpoint.Spec.DeliveryMode, a.Status.Node, producers)
 		if p == nil {
 			return plan, fmt.Errorf("consumer attachment %s/%s has no eligible producer", a.Namespace, a.Name)
