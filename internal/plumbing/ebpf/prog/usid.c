@@ -5354,6 +5354,30 @@ int usid_egress(struct __sk_buff *skb)
 		if ((void *) (ip6 + 1) > data_end)
 			return tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE) ? TC_ACT_SHOT : TC_ACT_UNSPEC;
 
+		// Multicast and link-local destinations go to the kernel untouched,
+		// before the VIP rewrite and NPTv6 as well as egress_route_table. A
+		// VIP's client is never link-local, and a link-local packet never
+		// leaves the link, so neither rewrite applies. A host-side TCP probe
+		// of a backend's VIP port, sourced from the host interface's
+		// link-local address, depends on this: its reply leaves from the
+		// backend's bound address and port, which the VIP row would
+		// otherwise rewrite and send out the fabric uplink.
+		//
+		// The ::/0 egress route matches these destinations like any other,
+		// so without this a pod's Neighbor Discovery for its own default
+		// gateway would be redirected toward a NAT66 shard instead of
+		// reaching the host-side NDP handling that must answer it. The
+		// container's gateway neighbor entry then goes to FAILED and every
+		// packet through it dies with a locally synthesized unreachable,
+		// never sending anything this program's drop counters could see.
+		// The kernel's own routing handles these scopes the same way.
+		if (ip6->daddr[0] == 0xFF || (ip6->daddr[0] == 0xFE && (ip6->daddr[1] & 0xC0) == 0x80)) {
+			count_drop(DROP_REASON_TRACE_MULTICAST_LL_BAIL);
+			if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
+				return TC_ACT_SHOT;
+			return TC_ACT_UNSPEC;
+		}
+
 		// The VIP lookup runs before NPTv6, keyed on the backend's own source
 		// address, the one its binding registered. A VIP hit replaces the source
 		// outright and skips NPTv6; everything else gets NPTv6 as before.
@@ -5465,32 +5489,7 @@ int usid_egress(struct __sk_buff *skb)
 		if (npt && !vip_hit)
 			apply_nptv6(ip6->saddr, npt, 1 /* outbound: ULA -> public */);
 
-		// Multicast and link-local destinations must never be matched against
-		// egress_route_table, however broad a registered entry is, and in
-		// particular not by the ::/0 default, which as a literal catch-all
-		// matches them like anything else.
-		//
-		// Without this carve-out, a pod's Neighbor Discovery traffic for
-		// resolving its own default gateway is caught by that default and
-		// redirected toward a NAT66 shard instead of reaching the host-side
-		// NDP handling that must answer it. The container's gateway neighbor
-		// entry then goes to FAILED and every packet through it dies with a
-		// locally synthesized unreachable, never sending anything this
-		// program's drop counters could see.
-		//
-		// The kernel's own routing has an equivalent carve-out by construction,
-		// link-local and multicast destinations always being handled by
-		// local-scope routing rather than an application's default route. This
-		// replicates it, since nothing else in this program's routing model
-		// does.
-		if (ip6->daddr[0] == 0xFF || (ip6->daddr[0] == 0xFE && (ip6->daddr[1] & 0xC0) == 0x80)) {
-			count_drop(DROP_REASON_TRACE_MULTICAST_LL_BAIL);
-			if (tp_decide(skb->ifindex, TP_DIR_EGRESS, TP_PATH_PRIVATE))
-				return TC_ACT_SHOT;
-			return TC_ACT_UNSPEC;
-		}
-
-		// The carve-out above only catches Neighbor Discovery by destination
+		// The multicast and link-local carve-out above only catches Neighbor Discovery by destination
 		// scope, but a reply to a solicitation is unicast to whatever address
 		// asked, and this VRF's gateways are ULA, not link-local. That reply
 		// is exactly the traffic the comment above warns about: neither
