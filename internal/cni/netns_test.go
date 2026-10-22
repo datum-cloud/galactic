@@ -5,6 +5,7 @@
 package cni
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -59,7 +60,7 @@ func createTestNetnsWithDummy(t *testing.T) (netnsPath string, cleanup func()) {
 		if err != nil {
 			return err
 		}
-		defer handle.Close() //nolint:errcheck // best-effort cleanup
+		defer func() { _ = handle.Close() }() //nolint:errcheck // best-effort cleanup
 
 		dummy := &netlink.Dummy{
 			LinkAttrs: netlink.LinkAttrs{Name: "test-dummy"},
@@ -84,7 +85,7 @@ func createTestNetnsWithDummy(t *testing.T) (netnsPath string, cleanup func()) {
 			if err != nil {
 				return err
 			}
-			defer handle.Close() //nolint:errcheck // best-effort cleanup
+			defer func() { _ = handle.Close() }() //nolint:errcheck // best-effort cleanup
 			link, err := handle.LinkByName("test-dummy")
 			if err != nil {
 				return nil // already gone
@@ -162,7 +163,7 @@ func TestCleanupContainerNetnsVeth(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		defer handle.Close() //nolint:errcheck // best-effort cleanup
+		defer func() { _ = handle.Close() }() //nolint:errcheck // best-effort cleanup
 
 		veth := &netlink.Veth{
 			LinkAttrs: netlink.LinkAttrs{Name: guestVethName},
@@ -193,7 +194,7 @@ func TestCleanupContainerNetnsVeth(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		defer handle.Close() //nolint:errcheck // best-effort cleanup
+		defer func() { _ = handle.Close() }() //nolint:errcheck // best-effort cleanup
 		for _, name := range []string{guestVethName, peerVethName} {
 			if _, err := handle.LinkByName(name); err == nil {
 				return fmt.Errorf("interface %q still exists after cleanup", name)
@@ -234,7 +235,7 @@ func defaultRouteVia(t *testing.T, netnsPath string) net.IP {
 		if err != nil {
 			return err
 		}
-		defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
+		defer func() { _ = handle.Close() }() //nolint:errcheck // netlink cleanup on teardown
 
 		link, err := handle.LinkByName("test-dummy")
 		if err != nil {
@@ -318,7 +319,7 @@ func TestConfigureInterfaceInNetnsAddAfterDel(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
+		defer func() { _ = handle.Close() }() //nolint:errcheck // netlink cleanup on teardown
 
 		link, err := handle.LinkByName("test-dummy")
 		if err != nil {
@@ -407,7 +408,7 @@ func TestFlushGuestNetnsConfigRemovesAddressAndRoute(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
+		defer func() { _ = handle.Close() }() //nolint:errcheck // netlink cleanup on teardown
 
 		link, err := handle.LinkByName("test-dummy")
 		if err != nil {
@@ -484,14 +485,14 @@ func TestSecondaryInterfacePreservesPrimaryDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer netns.Close()
+	defer func() { _ = netns.Close() }()
 	primaryGateway := net.ParseIP("fd00:99::1")
 	err = netns.Do(func(_ ns.NetNS) error {
 		handle, err := netlink.NewHandle()
 		if err != nil {
 			return err
 		}
-		defer handle.Close()
+		defer func() { _ = handle.Close() }()
 		primary := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "primary"}}
 		if err := handle.LinkAdd(primary); err != nil {
 			return err
@@ -499,7 +500,9 @@ func TestSecondaryInterfacePreservesPrimaryDefault(t *testing.T) {
 		if err := handle.LinkSetUp(primary); err != nil {
 			return err
 		}
-		return handle.RouteAdd(&netlink.Route{Gw: primaryGateway, LinkIndex: primary.Attrs().Index, Flags: int(netlink.FLAG_ONLINK)})
+		return handle.RouteAdd(&netlink.Route{
+			Gw: primaryGateway, LinkIndex: primary.Attrs().Index, Flags: int(netlink.FLAG_ONLINK),
+		})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -517,7 +520,7 @@ func TestSecondaryInterfacePreservesPrimaryDefault(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		defer handle.Close()
+		defer func() { _ = handle.Close() }()
 		routes, err := handle.RouteList(nil, netlink.FAMILY_V6)
 		if err != nil {
 			return err
@@ -527,7 +530,7 @@ func TestSecondaryInterfacePreservesPrimaryDefault(t *testing.T) {
 				return nil
 			}
 		}
-		return fmt.Errorf("primary default route is missing")
+		return errors.New("primary default route is missing")
 	})
 	if err != nil {
 		t.Fatal(err)

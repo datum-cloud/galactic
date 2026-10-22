@@ -319,7 +319,7 @@ func TestDelegatedVethSubnetUsesGuestNextHop(t *testing.T) {
 	if err := netlink.RouteAdd(&netlink.Route{Dst: subnet, LinkIndex: link.Attrs().Index, Table: tableID}); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := installPodSubnetRoute(link, subnet, netlink.FAMILY_V6, tableID, true); err != nil {
 			t.Fatal(err)
 		}
