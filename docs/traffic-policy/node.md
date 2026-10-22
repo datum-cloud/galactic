@@ -59,7 +59,10 @@ and its rows are freed.
 
 To read a snapshot back, galactic-router pins each one it publishes under
 `tp_snapshots/` in the datapath's pin directory, beside the policy maps, and
-the CNI plugins remove the pin when they unbind it. The kernel opens a map
+galactic-cni removes the pin when it unbinds the snapshot. On its first
+reconcile and at most once every five minutes after, galactic-router removes
+any pin that holds no bound snapshot, such as one left by a publish that an
+interface's removal or a restart interrupted. The kernel opens a map
 by ID only for `CAP_SYS_ADMIN`, which galactic-router does not have (it runs
 with `NET_ADMIN` and `BPF`), so a snapshot without a matching pin, such as
 one bound by a release that did not pin, cannot be read. galactic-router

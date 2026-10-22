@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cilium/ebpf"
+
 	"go.datum.net/galactic/internal/captest"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/trafficpolicy"
@@ -148,6 +150,59 @@ func TestUnbindingRemovesPin(t *testing.T) {
 	}
 	if pins := snapshotPins(t, dir); len(pins) != 0 {
 		t.Errorf("after RemovePinnedInterface: pins = %v, want none", pins)
+	}
+	// galactic-cni removes a vanished interface through the objects it loaded.
+	publishRules(t, m, `[{"name":"a","action":"Allow"}]`, 0)
+	if err := FromPinnedObjects(f.objs, dir).RemoveInterface(ifindex); err != nil {
+		t.Fatal(err)
+	}
+	if pins := snapshotPins(t, dir); len(pins) != 0 {
+		t.Errorf("after RemoveInterface on the loaded objects: pins = %v, want none", pins)
+	}
+}
+
+// TestSweepPins: without CAP_SYS_ADMIN, the sweep keeps the pin of a bound
+// snapshot and removes a temporary pin, the pin of an unbound key, and a pin
+// whose key is bound to another map.
+func TestSweepPins(t *testing.T) {
+	f := newFixture(t, ModeAudit)
+	f.iface(t)
+	m, dir := f.pinned(t)
+	const other uint32 = 2
+	publishRules(t, m, `[{"name":"a","action":"Allow"}]`, 0)
+	if err := m.Publish(ifindex, DirIngress, token, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Publish(other, DirEgress, token, 2, nil); err != nil {
+		t.Fatal(err)
+	}
+	// f.maps manages no pins, so these leave an unbound and a stale pin.
+	if err := f.maps.Invalidate(ifindex, DirIngress); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.maps.Publish(other, DirEgress, token, 3, nil); err != nil {
+		t.Fatal(err)
+	}
+	leftover, err := ebpf.NewMap(&SnapshotSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leftover.Close() //nolint:errcheck // test handle
+	if err := leftover.Pin(filepath.Join(dir, snapshotPinDir, "tmp-1-1-0123456789abcdef")); err != nil {
+		t.Fatal(err)
+	}
+	if pins := snapshotPins(t, dir); len(pins) != 4 {
+		t.Fatalf("pins before the sweep = %v, want 4", pins)
+	}
+
+	captest.WithoutSysAdmin(t, func() {
+		if err := m.SweepPins(); err != nil {
+			t.Errorf("SweepPins: %v", err)
+		}
+	})
+	want := fmt.Sprintf("%d-%d", ifindex, DirEgress)
+	if pins := snapshotPins(t, dir); len(pins) != 1 || pins[0] != want {
+		t.Errorf("pins after the sweep = %v, want only %s", pins, want)
 	}
 }
 

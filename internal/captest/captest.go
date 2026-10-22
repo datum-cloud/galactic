@@ -19,8 +19,9 @@ import (
 // WithoutSysAdmin runs fn on an OS thread whose effective capabilities lack
 // CAP_SYS_ADMIN, as galactic-router's container does, and waits for it.
 // Capabilities are per thread, so fn must make its system calls from its own
-// goroutine; and since fn does not run on the test goroutine, it reports
-// failures with t.Error rather than t.Fatal. The thread exits with fn, so the
+// goroutine: a goroutine fn starts runs on other threads, with the full set.
+// Since fn does not run on the test goroutine, it reports failures with
+// t.Error rather than t.Fatal. The thread exits with fn, so the
 // rest of the test keeps the full set.
 func WithoutSysAdmin(t *testing.T, fn func()) {
 	t.Helper()

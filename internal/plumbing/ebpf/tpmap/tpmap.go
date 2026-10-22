@@ -127,6 +127,14 @@ func FromObjects(objs *prog.UsidObjects) *Maps {
 	}
 }
 
+// FromPinnedObjects returns the traffic policy maps of objs, which the caller
+// pinned under pinDir, so the maps manage snapshot pins as OpenPinned's do.
+func FromPinnedObjects(objs *prog.UsidObjects, pinDir string) *Maps {
+	m := FromObjects(objs)
+	m.pinDir = pinDir
+	return m
+}
+
 // State is tp_state: the node's enforcement mode and what the datapath needs
 // to apply it.
 type State struct {
@@ -423,23 +431,98 @@ func (m *Maps) snapshotPin(key prog.UsidTpBindingKey) string {
 // that map, otherwise by ID, which the kernel allows only with CAP_SYS_ADMIN
 // and reports as ErrSnapshotUnreadable without it.
 func (m *Maps) openSnapshot(key prog.UsidTpBindingKey, id ebpf.MapID) (*ebpf.Map, error) {
+	pinErr := errors.New("snapshot pins are not managed")
 	if m.pinDir != "" {
-		pinned, err := ebpf.LoadPinnedMap(m.snapshotPin(key), nil)
-		if err == nil {
-			if info, err := pinned.Info(); err == nil {
-				if pinnedID, ok := info.ID(); ok && pinnedID == id {
-					return pinned, nil
-				}
-			}
-			_ = pinned.Close()
+		var pinned *ebpf.Map
+		if pinned, pinErr = m.loadPin(m.snapshotPin(key), id); pinErr == nil {
+			return pinned, nil
 		}
 	}
 	inner, err := ebpf.NewMapFromID(id)
 	if errors.Is(err, os.ErrPermission) {
-		return nil, fmt.Errorf("%w: ifindex %d direction %d has no matching pin: %w", ErrSnapshotUnreadable,
-			key.Ifindex, key.Direction, err)
+		// pinErr is formatted, not wrapped: a missing pin must not read as
+		// os.ErrNotExist, which callers take for an unbound snapshot.
+		return nil, fmt.Errorf("%w: ifindex %d direction %d: open pin: %s; open by ID: %w", ErrSnapshotUnreadable,
+			key.Ifindex, key.Direction, pinErr.Error(), err)
 	}
 	return inner, err
+}
+
+// errPinMismatch reports a pin that holds a map other than the bound one.
+var errPinMismatch = errors.New("pin holds a map other than the bound snapshot")
+
+// loadPin opens the map pinned at path if its ID is id.
+func (m *Maps) loadPin(path string, id ebpf.MapID) (*ebpf.Map, error) {
+	pinned, err := ebpf.LoadPinnedMap(path, nil)
+	if err != nil {
+		return nil, err
+	}
+	info, err := pinned.Info()
+	if err != nil {
+		_ = pinned.Close()
+		return nil, fmt.Errorf("read pinned map info: %w", err)
+	}
+	if pinnedID, ok := info.ID(); !ok || pinnedID != id {
+		_ = pinned.Close()
+		return nil, errPinMismatch
+	}
+	return pinned, nil
+}
+
+// SweepPins removes every snapshot pin that holds no bound snapshot: a
+// temporary pin a publish left behind, and a key's pin whose binding is gone
+// or holds another map, as when an interface's DEL unbinds it while a publish
+// for it is still renaming its pin. Only the snapshot publisher may call it,
+// and never during one of its own publishes, whose temporary pin it would
+// remove. A pin whose binding cannot be read, or that cannot be opened, is
+// kept.
+func (m *Maps) SweepPins() error {
+	if m.pinDir == "" {
+		return nil
+	}
+	dir := filepath.Join(m.pinDir, snapshotPinDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("list snapshot pins: %w", err)
+	}
+	var errs []error
+	for _, e := range entries {
+		if m.pinBound(e.Name()) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove snapshot pin %s: %w", e.Name(), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// pinBound reports whether the snapshot pin name is its key's bound snapshot.
+func (m *Maps) pinBound(name string) bool {
+	var key prog.UsidTpBindingKey
+	if _, err := fmt.Sscanf(name, "%d-%d", &key.Ifindex, &key.Direction); err != nil ||
+		name != fmt.Sprintf("%d-%d", key.Ifindex, key.Direction) {
+		return false // a temporary pin, or nothing this package wrote
+	}
+	var id uint32
+	err := m.Bindings.Lookup(key, &id)
+	if errors.Is(err, ebpf.ErrKeyNotExist) || errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	pinned, err := m.loadPin(filepath.Join(m.pinDir, snapshotPinDir, name), ebpf.MapID(id))
+	if err != nil {
+		// Only a pin of another map is stale. One that failed to open, such
+		// as for want of a file descriptor, may be the bound snapshot's.
+		return !errors.Is(err, errPinMismatch) && !errors.Is(err, os.ErrNotExist)
+	}
+	_ = pinned.Close()
+	return true
 }
 
 // ReadSnapshot reads ifindex's snapshot in dir, reporting false when none is
@@ -460,7 +543,10 @@ func (m *Maps) ReadSnapshot(ifindex, dir uint32) (Snapshot, bool, error) {
 	}
 	inner, err := m.openSnapshot(key, ebpf.MapID(id))
 	if errors.Is(err, os.ErrNotExist) {
-		return Snapshot{}, false, nil // unbound since it was looked up
+		// Unbound since it was looked up. Only an open by ID tells: without
+		// CAP_SYS_ADMIN the kernel refuses before it finds the map gone, so
+		// that case returns ErrSnapshotUnreadable instead.
+		return Snapshot{}, false, nil
 	}
 	if err != nil {
 		return Snapshot{}, false, err

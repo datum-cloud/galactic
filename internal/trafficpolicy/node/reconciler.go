@@ -113,6 +113,7 @@ type Reconciler struct {
 	adopted  map[bindingKey]tpmap.Snapshot // bound before a restart, not yet reconciled
 	ifaces   map[types.NamespacedName]iface
 	openedAt time.Time
+	sweptAt  time.Time // the last snapshot pin sweep
 
 	// openMaps opens the datapath's maps, and counterRows sizes the row
 	// allocator, zero meaning the whole of tp_rule_counters; tests set both.
@@ -196,6 +197,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (*statusUp
 		return nil, ctrl.Result{RequeueAfter: pendingRetry}, nil
 	}
 	r.sweepAdopted(ctx)
+	r.sweepPins(ctx)
 
 	var att cloudv1alpha1.VPCAttachment
 	if err := r.Client.Get(ctx, req.NamespacedName, &att); err != nil {
@@ -553,6 +555,21 @@ func (r *Reconciler) freeAdopted(key bindingKey) {
 		}
 	}
 	delete(r.adopted, key)
+}
+
+// sweepPins removes snapshot pins left holding no bound snapshot, on the
+// first reconcile and once a resync after: those a publish left behind when
+// galactic-router stopped during it, or when an interface's DEL unbound the
+// snapshot while it was being pinned. It runs under r.mu, so never during one
+// of this reconciler's publishes.
+func (r *Reconciler) sweepPins(ctx context.Context) {
+	if time.Since(r.sweptAt) < resync {
+		return
+	}
+	r.sweptAt = time.Now()
+	if err := r.maps.SweepPins(); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "remove stale traffic policy snapshot pins")
+	}
 }
 
 // sweepAdopted unbinds the snapshots bound before a restart that no

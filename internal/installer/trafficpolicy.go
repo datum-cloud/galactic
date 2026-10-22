@@ -39,9 +39,9 @@ var trafficPolicyModes = map[string]uint32{
 // startTrafficPolicy runs the traffic policy preflight and writes the node's
 // mode. The NAT locators start unsynced, so until setNATLocators runs an
 // encapsulating route's path is unknown and a rule naming a path denies it.
-func startTrafficPolicy(objs *prog.UsidObjects, cfg config.TrafficPolicyConfig) *trafficPolicyState {
+func startTrafficPolicy(objs *prog.UsidObjects, pinDir string, cfg config.TrafficPolicyConfig) *trafficPolicyState {
 	s := &trafficPolicyState{
-		maps:  tpmap.FromObjects(objs),
+		maps:  tpmap.FromPinnedObjects(objs, pinDir),
 		state: tpmap.State{Mode: trafficPolicyModes[cfg.Mode], Mark: cfg.Mark, Capable: true},
 	}
 	if err := preflight.CheckTrafficPolicy(cfg.KernelCheck); err != nil {
