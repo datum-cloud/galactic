@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 
@@ -52,7 +53,7 @@ func (r *ServiceRoutePolicyReconciler) setNodeProgramming(
 				found = true
 			}
 		}
-		if !found && !ready {
+		if !found && !ready && digest == "" {
 			return nil
 		}
 		if !found {
@@ -66,10 +67,10 @@ func (r *ServiceRoutePolicyReconciler) setNodeProgramming(
 }
 
 func serviceProgrammingDigest(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
-	attachments []*cloudv1alpha1.VPCAttachment, vpcIdentity string,
+	attachments []*cloudv1alpha1.VPCAttachment, vpcIdentity, nodeName string,
 ) string {
 	plan, err := serviceroute.ProgrammingPlan(policy, endpoint, attachments, vpcIdentity)
-	if err != nil {
+	if err != nil || !slices.Contains(plan.Nodes, nodeName) {
 		return ""
 	}
 	return plan.InputDigest

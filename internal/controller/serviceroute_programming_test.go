@@ -159,3 +159,46 @@ func TestDisablingFrontendWithdrawsNodeAcknowledgment(t *testing.T) {
 		t.Fatal("disabled node retained programming proof")
 	}
 }
+
+func TestInitialProgrammingFailureReportsUnreadyNode(t *testing.T) {
+	r, p, _ := pscFixture(t)
+	r.Programmer = &retryRouteProgrammer{failApply: 1}
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: p.Namespace, Name: p.Name}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err == nil {
+		t.Fatal("expected programming failure")
+	}
+	current := &networkv1alpha1.ServiceRoutePolicy{}
+	if err := r.Get(ctx, key, current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Status.Nodes) != 1 || current.Status.Nodes[0].Ready || current.Status.Nodes[0].InputDigest == "" {
+		t.Fatalf("missing initial failure report: %+v", current.Status.Nodes)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, key, current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Status.Nodes) != 1 || !current.Status.Nodes[0].Ready {
+		t.Fatalf("missing recovery report: %+v", current.Status.Nodes)
+	}
+}
+
+func TestUninvolvedNodeDoesNotPublishProgrammingReport(t *testing.T) {
+	r, p, _ := pscFixture(t)
+	r.NodeName = "uninvolved"
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: p.Namespace, Name: p.Name}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	current := &networkv1alpha1.ServiceRoutePolicy{}
+	if err := r.Get(ctx, key, current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Status.Nodes) != 0 {
+		t.Fatalf("uninvolved node published a report: %+v", current.Status.Nodes)
+	}
+}
