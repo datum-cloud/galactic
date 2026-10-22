@@ -220,14 +220,14 @@ existence-implies-enabled, not a per-flow rule — because the destination
 of an egress flow is an arbitrary internet address, not a pre-configured
 backend list.
 
-It is namespaced (deployed to galactic-system) and tenant-writable; like
-NetworkService's vpcRef, vpcRef/vpcAttachmentRef are opaque string identifiers
-because this kind carries identifiers from the VPC API in
-api/cloud/v1alpha1 without a Kubernetes object reference. An admission webhook (implemented by the consuming controller) must
-verify the requester is authorized for vpcRef/vpcAttachmentRef before a
-policy is accepted — see the Accepted condition.
+It is namespaced (deployed to galactic-system), and RBAC on the namespace
+decides who may write it. Like NetworkService's vpcRef, vpcRef and
+vpcAttachmentRef are opaque string identifiers because this kind carries
+identifiers from the VPC API in api/cloud/v1alpha1 without a Kubernetes
+object reference. Galactic does not check that the writer is authorized for
+them, and nothing in this repository sets the Accepted condition.
 
-Presence of an accepted NetworkEgressPolicy resolves only *enablement*
+Presence of a NetworkEgressPolicy resolves only *enablement*
 (should this tenant's VRF get an egress route toward the shared
 translation tier at all) — unlike this type's original design (superseded), there is
 no single "assigned gateway node" to compute or pin: any EgressShard may
@@ -268,8 +268,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `vpcRef` _string_ | VPCRef is the opaque identifier of the target VPC this policy applies<br />to. This repo does not own the VPC API and does not validate the<br />identifier beyond non-emptiness; the admission webhook of the<br />consuming controller is responsible for verifying the requester is<br />authorized for this VPC before the policy is accepted. |  | MinLength: 1 <br />Required: \{\} <br /> |
-| `vpcAttachmentRef` _string_ | VPCAttachmentRef is the opaque identifier of the target<br />VPCAttachment this policy applies to. Like VPCRef, this is an opaque<br />string reference validated by the admission webhook, not by this API. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `vpcRef` _string_ | VPCRef is the opaque identifier of the target VPC this policy applies<br />to. This repo does not own the VPC API and does not validate the<br />identifier beyond non-emptiness, or check that the writer is<br />authorized for this VPC. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `vpcAttachmentRef` _string_ | VPCAttachmentRef is the opaque identifier of the target<br />VPCAttachment this policy applies to. Like VPCRef, this is an opaque<br />string reference that this API checks only for non-emptiness. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
 #### NetworkEgressPolicyStatus
@@ -287,7 +287,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource,<br />including Accepted (see AcceptedReasonOwnershipVerified /<br />AcceptedReasonOwnershipDenied in rule_types.go, reused as-is here). |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. Nothing<br />in this repository sets them. Accepted, when set, uses the ownership<br />reasons shared with NetworkService (see AcceptedReasonOwnershipVerified). |  |  |
 
 
 #### NetworkGateway
@@ -368,11 +368,13 @@ _Appears in:_
 NetworkService defines ingress load-balancing for a single tenant VPC, served
 by every NetworkGateway node identically (anycast Direct Server Return —
 see NetworkGateway's doc comment). It is namespaced (deployed to
-galactic-system) and tenant-writable; vpcRef is an opaque string identifier
-because this kind carries identifiers from the VPC API in
-api/cloud/v1alpha1 without a Kubernetes object reference. An admission webhook (implemented by the consuming controller) must
-verify the requester is authorized for vpcRef before a service is accepted —
-see the Accepted condition.
+galactic-system) and written by the platform API that serves tenants, which
+verifies the tenant owns vpcRef before it writes the service; RBAC on the
+namespace decides who else may write it. vpcRef is an opaque string
+identifier because this kind carries identifiers from the VPC API in
+api/cloud/v1alpha1 without a Kubernetes object reference. Accepted is set
+once a gateway node is registered in the namespace and is not an ownership
+check.
 
 Unlike the earlier Full-NAT design this type originally described, there
 is no primary/secondary gateway node for a service: every NetworkGateway
@@ -447,7 +449,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `vpcRef` _string_ | VPCRef is the opaque identifier of the target VPC this service applies<br />to. This repo does not own the VPC API and does not validate the<br />identifier beyond non-emptiness; the admission webhook of the<br />consuming controller is responsible for verifying the requester is<br />authorized for this VPC before the service is accepted. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `vpcRef` _string_ | VPCRef is the opaque identifier of the target VPC this service applies<br />to. This repo does not own the VPC API and does not validate the<br />identifier beyond non-emptiness. The platform API that serves tenants<br />verifies the tenant owns this VPC before it writes the service. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `vipAddresses` _string array_ | VIPAddresses is the list of ingress VIP addresses this service provisions<br />on the gateway nodes: at most one IPv6 and at most one IPv4 address.<br />A backend node rewrites a reply's source from the backend's address, port<br />and protocol back to a single VIP of the client's family, so a backend<br />cannot answer for a second VIP of one family. Another VIP of a family<br />needs its own service whose backends listen on a different BackendPort.<br />An IPv4 VIP is written in dotted form; the IPv4-mapped IPv6 form is<br />refused.<br />Workloads are IPv6 only, so both VIPs are served by the selected<br />attachments' IPv6 addresses. A backend node translates the IPv4 VIP's<br />flows statelessly: the backend sees an IPv4 client a.b.c.d as<br />64:ff9b::a.b.c.d (RFC 6052) and replies to that address, and its node<br />sends the reply back to the client as IPv4 from the VIP. A gateway node<br />serves the IPv4 VIP only while it has IPv4 VIPs turned on, and<br />load-balances it only over the backends whose ServiceVIPBinding for it<br />reports Bound. It advertises the IPv4 VIP while at least one such<br />backend exists, and reports the outcome in its "<node>/IPv4Served"<br />condition. The IPv6 VIP is served independently of the IPv4 one.<br />An existing service whose list breaks these limits keeps validating while<br />the list is unchanged, since the API server ratchets validation of an<br />unchanged field on Kubernetes 1.30 and later; any edit to the list must<br />bring it within them, and an older API server refuses any update to such<br />a service. |  | MaxItems: 8 <br />MinItems: 1 <br />Required: \{\} <br />items:MaxLength: 45 <br /> |
 | `protocol` _[NetworkServiceProtocol](#networkserviceprotocol)_ | Protocol is the IP protocol this service load-balances on VIPAddresses.<br />The API admits tcp, udp, sctp, esp, gre and icmp, and the gateway<br />datapath serves tcp and udp. A service with any other admitted value is<br />refused with a message saying its protocol is not served yet. sctp has<br />ports and needs Port and BackendPort. esp, gre and icmp have no ports<br />and must set neither; a backend for them is chosen from the client and<br />VIP addresses alone. The set of values is open-ended, so a client must<br />accept and preserve a value it does not recognise, as<br />NetworkServiceProtocol describes. |  | Enum: [tcp udp sctp esp gre icmp] <br />Required: \{\} <br /> |
 | `port` _integer_ | Port is the ingress port on VIPAddresses that this service load-balances,<br />1-65535. It is required for a protocol with ports (tcp, udp and sctp)<br />and must be unset for one without (esp, gre and icmp). Zero means unset<br />and is omitted when encoding, and an explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
