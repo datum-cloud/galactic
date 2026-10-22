@@ -369,7 +369,9 @@ func runGCTicker(
 // ServiceVIPBindingReconciler, which programs vip_xlat_table from those
 // bindings. It also registers NodeDepartureReconciler, which every sweepInterval
 // and on every Node deletion clears the conditions and bindings of nodes that
-// no longer exist.
+// no longer exist, and BackendHealthReconciler, which probes this node's
+// backends of NetworkServices with a healthCheck and publishes each one's
+// health on its bindings.
 func setupVIPBindingControllers(
 	mgr ctrl.Manager, nodeName string, table controller.VIPTranslationTable, sweepInterval time.Duration,
 ) error {
@@ -394,6 +396,12 @@ func setupVIPBindingControllers(
 		Interval:  sweepInterval,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup node departure controller: %w", err)
+	}
+	if err := (&controller.BackendHealthReconciler{
+		Client:   mgr.GetClient(),
+		NodeName: nodeName,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup backend health controller: %w", err)
 	}
 	return nil
 }

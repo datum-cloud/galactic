@@ -71,6 +71,25 @@ _Appears in:_
 
 
 
+#### BackendHealthState
+
+_Underlying type:_ _string_
+
+BackendHealthState is a backend's health decision.
+
+_Validation:_
+- Enum: [Healthy Unhealthy Unknown]
+
+_Appears in:_
+- [ServiceVIPBindingHealth](#servicevipbindinghealth)
+
+| Field | Description |
+| --- | --- |
+| `Healthy` | BackendHealthHealthy: the last HealthyThreshold probes succeeded.<br /> |
+| `Unhealthy` | BackendHealthUnhealthy: the last UnhealthyThreshold probes failed. Only<br />this state takes a backend out of the gateways' Maglev tables.<br /> |
+| `Unknown` | BackendHealthUnknown: too few probes have completed to decide, or the<br />probe cannot run on the backend's node.<br /> |
+
+
 #### EgressShard
 
 
@@ -405,6 +424,31 @@ selection.
 | `status` _[NetworkServiceStatus](#networkservicestatus)_ |  |  |  |
 
 
+#### NetworkServiceHealthCheck
+
+
+
+NetworkServiceHealthCheck configures the TCP health check of a
+NetworkService's backends. A probe succeeds when the TCP handshake completes
+within TimeoutSeconds, and fails when the connection is refused, reset or
+times out. A backend's decision changes after UnhealthyThreshold consecutive
+failures or HealthyThreshold consecutive successes, so a backend that
+alternates between the two keeps its current decision.
+
+
+
+_Appears in:_
+- [NetworkServiceSpec](#networkservicespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `port` _integer_ | Port is the TCP port probed on every backend, 1-65535. Unset, it is the<br />service's backendPort. A udp service must set it to a TCP port its<br />backends listen on, since a UDP datagram draws no reply a generic<br />probe can expect. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `intervalSeconds` _integer_ | IntervalSeconds is the time between two probes of one backend. | 5 | Maximum: 300 <br />Minimum: 1 <br /> |
+| `timeoutSeconds` _integer_ | TimeoutSeconds is how long a probe waits for the handshake. It must not<br />exceed IntervalSeconds. | 2 | Maximum: 60 <br />Minimum: 1 <br /> |
+| `unhealthyThreshold` _integer_ | UnhealthyThreshold is the number of consecutive failed probes that<br />make a backend Unhealthy. | 3 | Maximum: 10 <br />Minimum: 1 <br /> |
+| `healthyThreshold` _integer_ | HealthyThreshold is the number of consecutive successful probes that<br />make a backend Healthy. | 3 | Maximum: 10 <br />Minimum: 1 <br /> |
+
+
 #### NetworkServiceProtocol
 
 _Underlying type:_ _string_
@@ -479,6 +523,7 @@ _Appears in:_
 | `backendSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | BackendSelector selects the VPCAttachments (galactic.datumapis.com/v1alpha1,<br />in any namespace) that serve this service, matched against each<br />VPCAttachment object's own labels. Only attachments whose status.vpc<br />equals VPCRef are candidates, whatever their labels, so a selector cannot<br />reach into another tenant's VPC. Each selected attachment contributes the<br />IPv6 addresses in its spec.interface.addresses as backends, on<br />BackendPort, for both VIPs: its node translates the IPv4 VIP's flows to<br />and from IPv6, and its IPv4 addresses are never backends. An attachment<br />with no status.node, or no IPv6 address, is not a backend until it has<br />both. An empty selector is rejected rather than read as "every<br />attachment in the VPC". |  | Required: \{\} <br /> |
 | `backendPort` _integer_ | BackendPort is the destination port on every selected backend, 1-65535.<br />Like Port, it is required for tcp, udp and sctp and must be unset for<br />esp, gre and icmp. Zero means unset and is omitted when encoding, and an<br />explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 | `sessionAffinity` _[NetworkServiceSessionAffinity](#networkservicesessionaffinity)_ | SessionAffinity selects which connections from one client share a<br />backend: None, the default, balances each connection on its own;<br />ClientIP pins a client address to one backend; ClientIPAndProtocol pins<br />a client address and protocol to one. Two services pin a client to the<br />same backend only if both set the same affinity and select the same<br />backend addresses. A change takes effect on every gateway node without a<br />restart, and rehashes every connection of the service, so most open<br />connections reach a different backend afterwards. | None | Enum: [None ClientIP ClientIPAndProtocol] <br /> |
+| `healthCheck` _[NetworkServiceHealthCheck](#networkservicehealthcheck)_ | HealthCheck turns on health checks for the service's backends. Each<br />backend's own node opens a TCP connection to it on the health check<br />port, from the link-local address of the backend's host-side interface,<br />and publishes a decision in status.health of the backend's<br />ServiceVIPBindings. The gateway nodes take a backend whose decision is<br />Unhealthy out of the service's Maglev table, and keep every backend<br />when all of them are Unhealthy. Unset, no backend is probed and every<br />one stays in the table.<br />Where interface traffic policy is enforced, the backend's policy must<br />allow TCP from fe80::/10 to the health check port on the Private path,<br />and the replies back. |  |  |
 
 
 #### NetworkServiceStatus
@@ -817,6 +862,30 @@ _Appears in:_
 | `tap` | ServiceVIPBindingEgressKindTap selects the transparent tap-boundary<br />translation mechanism.<br /> |
 
 
+#### ServiceVIPBindingHealth
+
+
+
+ServiceVIPBindingHealth is the health decision for a binding's backend. A
+decision describes one backend: the VPCAttachment with AttachmentUID, probed
+on Port. A reader treats a decision whose attachment UID or port does not
+match the backend it is checking as Unknown.
+
+
+
+_Appears in:_
+- [ServiceVIPBindingStatus](#servicevipbindingstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `state` _[BackendHealthState](#backendhealthstate)_ | State is the decision. |  | Enum: [Healthy Unhealthy Unknown] <br />Required: \{\} <br /> |
+| `reason` _string_ | Reason is ProbeSucceeded, ProbeFailed, Pending or ProbeUnavailable. |  | MaxLength: 64 <br />Required: \{\} <br /> |
+| `message` _string_ | Message is the last probe error, when there is one. |  | MaxLength: 1024 <br /> |
+| `attachmentUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | AttachmentUID is the UID of the VPCAttachment that held the backend's<br />address when the decision was made. |  | Required: \{\} <br /> |
+| `port` _integer_ | Port is the TCP port that was probed. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
+| `lastTransitionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | LastTransitionTime is when State last changed. |  | Required: \{\} <br /> |
+
+
 #### ServiceVIPBindingSpec
 
 
@@ -855,6 +924,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource,<br />including Bound (set True once internal/plumbing/vip.Verify or the<br />equivalent tap-translation-table check confirms the backend is<br />actually reachable on VIPAddress, not merely that the bind/table-write<br />call itself returned nil). |  |  |
+| `health` _[ServiceVIPBindingHealth](#servicevipbindinghealth)_ | Health is the health decision for this binding's backend, set by<br />galactic-router on the backend's node while the owning NetworkService<br />has a healthCheck, and cleared once it has none. Every binding of one<br />backend carries the same decision. |  |  |
 
 
 #### TargetRef
