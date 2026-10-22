@@ -70,11 +70,9 @@ const (
 // backend selection never needs a single "owning" node the way Full-NAT's
 // SNAT-source model did.
 //
-// Backends are not listed. BackendSelector picks the VPCAttachments that
-// serve the service, so the backend set follows attachments as they are
-// created, deleted or moved to another node, and galactic-router on each
-// node generates the ServiceVIPBinding its backends need from the same
-// selection.
+// BackendSelector and optional BackendAddresses select VPCAttachments in the
+// service's observed VPC. Address-only selection does not require a label.
+// galactic-router generates ServiceVIPBindings from the same selection.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -98,6 +96,7 @@ type NetworkService struct {
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['tcp', 'udp', 'sctp']) || has(self.backendPort)",message="backendPort is required for tcp, udp and sctp"
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.port)",message="port must not be set for esp, gre and icmp, which have no ports"
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.backendPort)",message="backendPort must not be set for esp, gre and icmp, which have no ports"
+// +kubebuilder:validation:XValidation:rule="has(self.backendAddresses) || (has(self.backendSelector) && ((has(self.backendSelector.matchLabels) && size(self.backendSelector.matchLabels) > 0) || (has(self.backendSelector.matchExpressions) && size(self.backendSelector.matchExpressions) > 0)))",message="a nonempty backendSelector or backendAddresses is required"
 type NetworkServiceSpec struct {
 	// VPCRef is the opaque identifier of the target VPC this service applies
 	// to. This repo does not own the VPC API and does not validate the
@@ -177,11 +176,21 @@ type NetworkServiceSpec struct {
 	// BackendPort, for both VIPs: its node translates the IPv4 VIP's flows to
 	// and from IPv6, and its IPv4 addresses are never backends. An attachment
 	// with no status.node, or no IPv6 address, is not a backend until it has
-	// both. An empty selector is rejected rather than read as "every
-	// attachment in the VPC".
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:XValidation:rule="(has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions) && size(self.matchExpressions) > 0)",message="backendSelector must not be empty"
-	BackendSelector metav1.LabelSelector `json:"backendSelector"`
+	// both. An empty selector is accepted only with BackendAddresses and then
+	// matches all attachments in this service's observed VPC.
+	// +optional
+	BackendSelector metav1.LabelSelector `json:"backendSelector,omitempty"`
+
+	// BackendAddresses restricts selected attachments to these IPv6 backend
+	// addresses. When set without a selector, it matches attachments by address
+	// only, still requiring status.vpc to equal VPCRef. An explicit empty list
+	// withdraws all backends and their bindings without broadening selection.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=45
+	// +kubebuilder:validation:XValidation:rule="self.all(a, isIP(a) && ip(a).family() == 6)",message="backendAddresses must contain IPv6 addresses"
+	// +listType=set
+	BackendAddresses *[]string `json:"backendAddresses,omitempty"`
 
 	// BackendPort is the destination port on every selected backend, 1-65535.
 	// Like Port, it is required for tcp, udp and sctp and must be unset for

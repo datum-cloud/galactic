@@ -32,16 +32,22 @@ func newTestService() *NetworkService {
 // copy: mutations to slices in the copy must not affect the original.
 func TestNetworkServiceDeepCopy(t *testing.T) {
 	orig := newTestService()
+	addresses := []string{"fd00:10::1"}
+	orig.Spec.BackendAddresses = &addresses
 	dup := orig.DeepCopy()
 
 	dup.Spec.VIPAddresses[0] = "2001:db8:1::20"
 	dup.Spec.BackendSelector.MatchLabels["app"] = "api"
+	(*dup.Spec.BackendAddresses)[0] = "fd00:10::2"
 
 	if orig.Spec.VIPAddresses[0] != "2001:db8:1::10" {
 		t.Errorf("VIPAddresses[0] mutated: got %q", orig.Spec.VIPAddresses[0])
 	}
 	if orig.Spec.BackendSelector.MatchLabels["app"] != "web" {
 		t.Errorf("BackendSelector.MatchLabels mutated: got %v", orig.Spec.BackendSelector.MatchLabels)
+	}
+	if (*orig.Spec.BackendAddresses)[0] != "fd00:10::1" {
+		t.Errorf("BackendAddresses mutated: got %v", *orig.Spec.BackendAddresses)
 	}
 }
 
@@ -145,6 +151,24 @@ func TestNetworkServiceBackendFieldNames(t *testing.T) {
 	}
 	if _, ok := m["backends"]; ok {
 		t.Errorf("unexpected \"backends\" key: %v", m)
+	}
+}
+
+func TestNetworkServiceExplicitEmptyBackendAddresses(t *testing.T) {
+	svc := newTestService()
+	svc.Spec.BackendSelector = metav1.LabelSelector{}
+	addresses := []string{}
+	svc.Spec.BackendAddresses = &addresses
+	data, err := json.Marshal(svc.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"backendAddresses":[]`) {
+		t.Fatalf("explicit empty list lost during encoding: %s", data)
+	}
+	var got NetworkServiceSpec
+	if err := json.Unmarshal(data, &got); err != nil || got.BackendAddresses == nil || len(*got.BackendAddresses) != 0 {
+		t.Fatalf("explicit empty list lost during decoding: %+v, %v", got.BackendAddresses, err)
 	}
 }
 

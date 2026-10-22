@@ -1509,6 +1509,10 @@ func resolveFamilyBackends(
 		err = fmt.Errorf("every selected backend is served by an older rule: %s", cappedList(unresolved))
 	case len(unresolved) > 0:
 		err = fmt.Errorf("no selected attachment is a backend yet: %s", cappedList(unresolved))
+	case rule.Spec.BackendAddresses != nil && len(*rule.Spec.BackendAddresses) == 0:
+		err = errors.New("backendAddresses is empty")
+	case rule.Spec.BackendAddresses != nil:
+		err = fmt.Errorf("backendAddresses match no selected VPCAttachment in VPC %s", rule.Spec.VPCRef)
 	default:
 		err = fmt.Errorf("backendSelector matches no VPCAttachment in VPC %s", rule.Spec.VPCRef)
 	}

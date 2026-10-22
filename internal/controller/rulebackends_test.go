@@ -121,6 +121,35 @@ func TestSelectRuleBackends_DropsConflictingBackends(t *testing.T) {
 	}
 }
 
+func TestRuleCandidateBackends_AddressOnlyWithinObservedVPC(t *testing.T) {
+	rule := newTestRule(testRuleName, testVPCRef, testVIP)
+	rule.Spec.BackendSelector = metav1.LabelSelector{}
+	addresses := []string{"fd00:10::1"}
+	rule.Spec.BackendAddresses = &addresses
+
+	inVPC := newBackendAttachment(testVPCRef, "fd00:10::1")
+	inVPC.Labels = nil
+	otherVPC := newBackendAttachment(testOtherVPCRef, "fd00:10::1")
+	otherVPC.Name = "outside"
+	unlisted := newBackendAttachment(testVPCRef, "fd00:10::2")
+	unlisted.Name = "unlisted"
+	unlisted.Status.Node = ""
+
+	got, pending, err := ruleCandidateBackends(rule, []*cloudv1alpha1.VPCAttachment{otherVPC, unlisted, inVPC})
+	if err != nil || len(got) != 1 || got[0].attachment.Name != inVPC.Name || len(pending) != 0 {
+		t.Fatalf("address-only selection = %+v, pending %v, %v; want only the observed VPC", got, pending, err)
+	}
+	addresses = []string{}
+	got, _, err = ruleCandidateBackends(rule, []*cloudv1alpha1.VPCAttachment{inVPC})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("explicit empty list = %+v, %v; want no backends", got, err)
+	}
+	rule.Spec.BackendAddresses = nil
+	if _, _, err = ruleCandidateBackends(rule, []*cloudv1alpha1.VPCAttachment{inVPC}); err == nil {
+		t.Fatal("empty selector without backendAddresses must fail closed")
+	}
+}
+
 // newSharingRule returns a rule named name with the IPv6 VIP vip, created at
 // second created, selecting newBackendAttachment's attachments in testVPCRef.
 func newSharingRule(name, vip string, created int64) *bgpv1alpha1.NetworkService {
