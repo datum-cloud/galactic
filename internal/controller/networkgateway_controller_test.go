@@ -589,7 +589,7 @@ func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 			}
 			rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
-			dr, unresolved, _, err := buildDesiredRule(rule, tt.attachments, idx, nil, false, nil)
+			dr, unresolved, _, _, err := buildDesiredRule(rule, tt.attachments, idx, nil, false, nil, healthGate{})
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("buildDesiredRule: err = nil, want an error; got %+v", dr)
@@ -625,12 +625,12 @@ func TestBuildDesiredRule_RefusesSecondIPv6VIP(t *testing.T) {
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
 	rule := newTestRule(testRuleName, "vpc-1", "2001:db8:100::32", "2001:db8:100::33", testVIP4)
-	if _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil); err == nil {
+	if _, _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil, healthGate{}); err == nil {
 		t.Fatal("buildDesiredRule: err = nil, want an error for two IPv6 VIPs")
 	}
 
 	rule.Spec.VIPAddresses = []string{"2001:db8:100::32", testVIP4}
-	if _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil); err != nil {
+	if _, _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil, healthGate{}); err != nil {
 		t.Fatalf("buildDesiredRule with one IPv6 and one IPv4 VIP: %v", err)
 	}
 }
@@ -700,7 +700,8 @@ func TestBuildDesiredRule_SameNodeBackendsGetTheirOwnSlot(t *testing.T) {
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")}
 
-	dr, _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), attachments, idx, nil, false, nil)
+	dr, _, _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), attachments, idx, nil, false, nil,
+		healthGate{})
 	if err != nil {
 		t.Fatalf("buildDesiredRule: %v", err)
 	}
@@ -2005,7 +2006,7 @@ func TestBuildDesiredRule_CarriesSessionAffinity(t *testing.T) {
 	} {
 		rule := newTestRule(testRuleName, "vpc-1", testVIP)
 		rule.Spec.SessionAffinity = affinity
-		dr, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil)
+		dr, _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil, healthGate{})
 		if err != nil {
 			t.Fatalf("affinity %q: %v", affinity, err)
 		}

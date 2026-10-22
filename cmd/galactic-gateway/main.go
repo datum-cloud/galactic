@@ -152,6 +152,22 @@ var ipv4ReviewRetry = time.Second
 // bindings once no gateway reports it loaded, so a brief API server outage
 // while every gateway restarts must not do that.
 func resolveIPv4VIPs(ctx context.Context, c client.Client, requested bool) (bool, error) {
+	return resolveBindingReader(ctx, c, requested, "IPv4 VIPs")
+}
+
+// resolveBackendHealth returns whether this process applies backend health:
+// requested, from GALACTIC_GATEWAY_BACKEND_HEALTH, and allowed by
+// ipv4VIPsAllowed's check of ServiceVIPBinding access, which reading health
+// needs as much as IPv4 VIPs do. It behaves as resolveIPv4VIPs does.
+func resolveBackendHealth(ctx context.Context, c client.Client, requested bool) (bool, error) {
+	return resolveBindingReader(ctx, c, requested, "backend health")
+}
+
+// resolveBindingReader returns whether feature, which reads ServiceVIPBindings,
+// is on: requested and allowed by ipv4VIPsAllowed. A denial is logged and
+// turns it off; a review that cannot be made is retried until ctx ends and
+// then returned as an error.
+func resolveBindingReader(ctx context.Context, c client.Client, requested bool, feature string) (bool, error) {
 	if !requested {
 		return false, nil
 	}
@@ -162,12 +178,12 @@ func resolveIPv4VIPs(ctx context.Context, c client.Client, requested bool) (bool
 			return true, nil
 		case errors.Is(err, errIPv4AccessDenied):
 			ctrl.Log.WithName("rbac-preflight").Error(err,
-				"IPv4 VIPs turned off on this node: grant get, list and watch on servicevipbindings and restart")
+				feature+" turned off on this node: grant get, list and watch on servicevipbindings and restart")
 			return false, nil
 		}
 		select {
 		case <-ctx.Done():
-			return false, fmt.Errorf("could not confirm access for IPv4 VIPs: %w", err)
+			return false, fmt.Errorf("could not confirm access for %s: %w", feature, err)
 		case <-time.After(ipv4ReviewRetry):
 		}
 	}

@@ -245,3 +245,28 @@ func TestGatewayConfigIPv4VIPs(t *testing.T) {
 		t.Error("IPv4VIPs = false with the flag set to true over the env")
 	}
 }
+
+// TestGatewayConfigBackendHealth covers the backend health switch: off by
+// default, on from the environment, and on from the flag over the
+// environment.
+func TestGatewayConfigBackendHealth(t *testing.T) {
+	if NewGatewayConfig().BackendHealth {
+		t.Error("BackendHealth = true by default, want false")
+	}
+	t.Setenv(EnvGatewayBackendHealth, "true")
+	if !NewGatewayConfig().BackendHealth {
+		t.Error("BackendHealth = false with the env set to true")
+	}
+
+	t.Setenv(EnvGatewayBackendHealth, "false")
+	cfg := NewGatewayConfig()
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.Bool("gateway-backend-health", false, "")
+	if err := flags.Parse([]string{"--gateway-backend-health=true"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BindFlags(flags)
+	if !cfg.BackendHealth {
+		t.Error("BackendHealth = false with the flag set to true over the env")
+	}
+}

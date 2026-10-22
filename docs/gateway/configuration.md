@@ -157,6 +157,7 @@ flags, or a combination of both (CLI flags take precedence), with the
 | XDP attach mode     | `GALACTIC_GATEWAY_XDP_ATTACH`          | `--gateway-xdp-attach`          | `dispatch`  | No            |
 | Datapath enabled    | `GALACTIC_GATEWAY_DATAPATH_ENABLED`    | `--gateway-datapath-enabled`    | `true`      | No            |
 | IPv4 VIPs           | `GALACTIC_GATEWAY_IPV4_VIPS`           | `--gateway-ipv4-vips`           | `false`     | No            |
+| Backend health      | `GALACTIC_GATEWAY_BACKEND_HEALTH`      | `--gateway-backend-health`      | `false`     | No            |
 | Procfs sysctl root  | `GALACTIC_GATEWAY_PROC_SYS_PATH`       | `--gateway-proc-sys-path`       | `/proc/sys` | No            |
 | Metrics port        | `GALACTIC_GATEWAY_METRICS_PORT`        | `--metrics-port`                | `8081`      | No            |
 | gRPC health port    | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`    | `--grpc-health-port`            | `5181`      | No            |
@@ -226,6 +227,17 @@ Before turning the switch on for a gateway node:
 Turning the switch back off withdraws every IPv4 VIP the node advertises and
 unloads them, and leaves IPv6 untouched. See
 [Rolling out and rolling back IPv4 VIPs](#rolling-out-and-rolling-back-ipv4-vips).
+
+`GALACTIC_GATEWAY_BACKEND_HEALTH=true` lets this node take a backend its node
+reports `Unhealthy` out of a `NetworkService`'s Maglev table. It applies only
+to a service with `spec.healthCheck`, and only while every `NetworkGateway` in
+the namespace reports `status.backendHealthFiltering: true`, which each node
+sets when the switch is on. A single node without it, not yet upgraded, rolled
+back or with the switch off, turns health off on every node, so they keep
+building the same table. Health is read from `ServiceVIPBinding`s, so the
+switch needs the same `servicevipbindings` access, and the same startup check,
+as IPv4 VIPs above: without the access the node runs with the switch off and
+logs why. See [Backend health checks](backend-health.md).
 
 `GALACTIC_GATEWAY_DATAPATH_ENABLED=false` keeps the process up and its pod
 ready, empties the gateway's load-balancing dispatcher slot, and withdraws
@@ -501,10 +513,11 @@ object.
 
 ### `NetworkGateway` — one per gateway node
 
-| Field                 | Required | Type     | Description                                                                                                                                                                                                                                                                                                                                                |
-| --------------------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                                                                                                                                                                                                      |
-| `status.conditions`   | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, `IPv4ForwardingFailed` (an IPv4 VIP is due to load but the node's IPv4 forwarding could not be turned on, so IPv4 VIPs are left out and IPv6 is served), or `Terminating`. |
+| Field                           | Required | Type     | Description                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.targetRef.name`           | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                                                                                                                                                                                                      |
+| `status.conditions`             | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, `IPv4ForwardingFailed` (an IPv4 VIP is due to load but the node's IPv4 forwarding could not be turned on, so IPv4 VIPs are left out and IPv6 is served), or `Terminating`. |
+| `status.backendHealthFiltering` | —        | `bool`   | `true` while this node can take `Unhealthy` backends out of a rule's Maglev table (`GALACTIC_GATEWAY_BACKEND_HEALTH`). Health applies only while every `NetworkGateway` in the namespace reports it.                                                                                                                                                       |
 
 There is deliberately **no** self-address or primary-node field on this
 status — DSR has nothing analogous to publish. Create one object per
@@ -521,6 +534,7 @@ gateway node, named after that node (see the worked example above).
 | `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`galactic.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends of both VIPs; its IPv4 addresses are never backends. Must not be empty.                                                                                                                                                                                                                                                                 |
 | `spec.backendPort`     | tcp, udp | `int32` (1–65535)      | Destination port on every selected backend. Required for a protocol with ports, refused for one without.                                                                                                                                                                                                                                                                                                                                                                                      |
 | `spec.sessionAffinity` | No       | `string` enum          | `None` (default), `ClientIP` or `ClientIPAndProtocol`: which connections from one client share a backend. See [Session affinity](#session-affinity).                                                                                                                                                                                                                                                                                                                                          |
+| `spec.healthCheck`     | No       | object                 | Turns on TCP health checks of the backends: `port` (default `backendPort`, required for `udp`), `intervalSeconds` (5), `timeoutSeconds` (2), `unhealthyThreshold` (3), `healthyThreshold` (3). See [Backend health checks](backend-health.md).                                                                                                                                                                                                                                                |
 | `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes exist in the namespace; not an ownership check, see below); the rule-wide `Programmed`, `Advertised`, `BackendsReady`, `Ready` and, with an IPv4 VIP, `IPv4Served` (see [Reading a rule's status](#reading-a-rules-status)); `<gateway-node>/Programmed` and `<gateway-node>/Advertised` per gateway node, `<gateway-node>/IPv4Served` per gateway node for a rule with an IPv4 VIP, and `<backend-node>/BackendsBound` per node hosting a backend. |
 
 Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkservices.yaml`:
@@ -672,13 +686,13 @@ Rule-wide conditions say whether a rule serves, without reading
 from the per-node conditions and writes them only when they change. A per-node
 condition, or `Accepted`, from an older generation counts as not reported yet.
 
-| Condition       | `True` when                                                                                                                                                                                             |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Programmed`    | every gateway node that reports on the rule loaded it                                                                                                                                                   |
-| `Advertised`    | every gateway node that loaded the rule published its routes, and `galactic-router` reports each one advertised                                                                                         |
-| `BackendsReady` | every backend node bound its backends, and no gateway node left a backend out because its uSID did not resolve                                                                                          |
-| `IPv4Served`    | every gateway node that loaded the rule serves its IPv4 VIP. Present only on a rule with an IPv4 VIP                                                                                                    |
-| `Ready`         | `Accepted`, `Programmed`, `Advertised` and `BackendsReady` are `True`, and so is `IPv4Served` on a rule whose only VIP is IPv4. Otherwise it carries the reason and message of the first one that isn't |
+| Condition       | `True` when                                                                                                                                                                                                                                   |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Programmed`    | every gateway node that reports on the rule loaded it                                                                                                                                                                                         |
+| `Advertised`    | every gateway node that loaded the rule published its routes, and `galactic-router` reports each one advertised                                                                                                                               |
+| `BackendsReady` | every backend node bound its backends, and no gateway node left a backend out because its uSID did not resolve or its node reports it `Unhealthy`, kept every backend because all are `Unhealthy`, or could not apply the rule's health check |
+| `IPv4Served`    | every gateway node that loaded the rule serves its IPv4 VIP. Present only on a rule with an IPv4 VIP                                                                                                                                          |
+| `Ready`         | `Accepted`, `Programmed`, `Advertised` and `BackendsReady` are `True`, and so is `IPv4Served` on a rule whose only VIP is IPv4. Otherwise it carries the reason and message of the first one that isn't                                       |
 
 Only gateway nodes with a `<gateway-node>/Programmed` condition count. A node
 that has not reported, for example one whose datapath is turned off,
@@ -694,29 +708,31 @@ A condition that is not `True` takes the reason every failing node reports,
 and its message names each failing node with its reason. When the nodes
 disagree, it takes the generic reason in this table instead.
 
-| Reason                 | On                            | What to do                                                                                                                                               |
-| ---------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Pending`              | any                           | Nothing. No node has reported on the current generation yet.                                                                                             |
-| `NoGatewayNodes`       | `Programmed`                  | Platform: no `NetworkGateway` is registered in the namespace.                                                                                            |
-| `InvalidRule`          | `Programmed`, `BackendsReady` | Fix the spec. The message says what could not be built, such as a port or a backend set that resolves to nothing.                                        |
-| `UnservedProtocol`     | `Programmed`                  | Use `tcp` or `udp`.                                                                                                                                      |
-| `NoServedVIP`          | `Programmed`                  | Add an IPv6 VIP, or ask for IPv4 VIPs to be turned on.                                                                                                   |
-| `LoadFailed`           | `Programmed`                  | Platform: the gateway refused the rule, for example over quota. The message carries the error.                                                           |
-| `NotProgrammed`        | `Programmed`, `Advertised`    | Gateway nodes failed for different reasons, or none loaded the rule. Read the message.                                                                   |
-| `AdvertisementFailed`  | `Advertised`                  | Platform: writing the route failed. It is retried.                                                                                                       |
-| `AdvertisementPending` | `Advertised`                  | Wait. The route is written, but `galactic-router` does not report it advertised yet. If it persists, the route's own `BGPAdvertisement` status says why. |
-| `NoRouter`             | `Advertised`                  | Platform: no single `BGPRouter` targets the gateway node.                                                                                                |
-| `<IPv4Served reason>`  | `IPv4Served`                  | The IPv4 VIP is not served. See the `IPv4Served` table above for the reason.                                                                             |
-| `NotAdvertised`        | `Advertised`                  | Gateway nodes failed for different reasons. Read the message.                                                                                            |
-| `NotServed`            | `IPv4Served`                  | Gateway nodes failed for different reasons. Read the message.                                                                                            |
-| `BackendsClaimed`      | `BackendsReady`               | Another rule already serves these backends on the same port. Change `backendPort`, or move the backends off the other rule.                              |
-| `BindingsNotBound`     | `BackendsReady`               | Wait. If it persists, the backend nodes' `BackendsBound` messages name each binding and why it is not bound.                                             |
-| `BackendsUnresolved`   | `BackendsReady`               | A backend's node has no route yet, usually while its pod is recreated. The rule serves through the rest.                                                 |
-| `BackendsNotReady`     | `BackendsReady`               | Nodes reported different backend problems. Read the message.                                                                                             |
+| Reason                   | On                            | What to do                                                                                                                                               |
+| ------------------------ | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Pending`                | any                           | Nothing. No node has reported on the current generation yet.                                                                                             |
+| `NoGatewayNodes`         | `Programmed`                  | Platform: no `NetworkGateway` is registered in the namespace.                                                                                            |
+| `InvalidRule`            | `Programmed`, `BackendsReady` | Fix the spec. The message says what could not be built, such as a port or a backend set that resolves to nothing.                                        |
+| `UnservedProtocol`       | `Programmed`                  | Use `tcp` or `udp`.                                                                                                                                      |
+| `NoServedVIP`            | `Programmed`                  | Add an IPv6 VIP, or ask for IPv4 VIPs to be turned on.                                                                                                   |
+| `LoadFailed`             | `Programmed`                  | Platform: the gateway refused the rule, for example over quota. The message carries the error.                                                           |
+| `NotProgrammed`          | `Programmed`, `Advertised`    | Gateway nodes failed for different reasons, or none loaded the rule. Read the message.                                                                   |
+| `AdvertisementFailed`    | `Advertised`                  | Platform: writing the route failed. It is retried.                                                                                                       |
+| `AdvertisementPending`   | `Advertised`                  | Wait. The route is written, but `galactic-router` does not report it advertised yet. If it persists, the route's own `BGPAdvertisement` status says why. |
+| `NoRouter`               | `Advertised`                  | Platform: no single `BGPRouter` targets the gateway node.                                                                                                |
+| `<IPv4Served reason>`    | `IPv4Served`                  | The IPv4 VIP is not served. See the `IPv4Served` table above for the reason.                                                                             |
+| `NotAdvertised`          | `Advertised`                  | Gateway nodes failed for different reasons. Read the message.                                                                                            |
+| `NotServed`              | `IPv4Served`                  | Gateway nodes failed for different reasons. Read the message.                                                                                            |
+| `BackendsClaimed`        | `BackendsReady`               | Another rule already serves these backends on the same port. Change `backendPort`, or move the backends off the other rule.                              |
+| `BindingsNotBound`       | `BackendsReady`               | Wait. If it persists, the backend nodes' `BackendsBound` messages name each binding and why it is not bound.                                             |
+| `BackendsUnresolved`     | `BackendsReady`               | A backend's node has no route yet, usually while its pod is recreated. The rule serves through the rest.                                                 |
+| `BackendsUnhealthy`      | `BackendsReady`               | Backends failed their health check and are out of the table; the message names them. Fix the backends. The rule serves through the rest.                 |
+| `NoHealthyBackends`      | `BackendsReady`               | Every backend fails its health check, so all of them are kept. Check the backends, and that traffic policy allows the probe.                             |
+| `HealthChecksNotApplied` | `BackendsReady`               | Platform: some gateway node does not apply health, so none does. The message names the nodes.                                                            |
+| `BackendsNotReady`       | `BackendsReady`               | Nodes reported different backend problems. Read the message.                                                                                             |
 
 `BackendsReady` will also cover a backend cluster that lacks the rule, so
-replies have no path back (#706), and backend health (#704), once they are
-built.
+replies have no path back (#706), once that is built.
 
 #### What an IPv4 VIP needs
 
@@ -927,6 +943,26 @@ nothing and removes a condition left from when it served the rule, since
 the gateways already report the error in their `Programmed` conditions. A
 rule can be `Programmed` on every gateway and still fail to reach a
 backend; this condition is where that shows.
+
+For a rule with `spec.healthCheck`, the same node also probes each backend and
+writes the result to `status.health` of the backend's bindings:
+
+```yaml
+status:
+  health:
+    state: Unhealthy # Healthy, Unhealthy or Unknown
+    reason: ProbeFailed # ProbeSucceeded, ProbeFailed, Pending or ProbeUnavailable
+    message: dial tcp6 [fe80::a060:bbff:fe37:4f09%G00000006060aH]:0->[fd20:60:ff01:a::100]:80: connect: connection refused
+    attachmentUID: 6d0f6f9e-0c4e-4b6d-9a4c-1c2f3e4d5a6b
+    port: 80
+    lastTransitionTime: "2026-10-22T18:00:00Z"
+```
+
+`state` is the damped decision, not the last probe. It is written only when it
+changes, and every binding of one backend carries the same one. A gateway
+reads it only while `attachmentUID` and `port` match the backend's current
+attachment and the rule's health check port. See
+[Backend health checks](backend-health.md).
 
 A node's own `galactic-router` is the only one that clears its condition,
 deletes its bindings and removes the teardown finalizer from bindings

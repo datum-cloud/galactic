@@ -727,6 +727,7 @@ normal while ingress traffic quietly stopped being intercepted at all.
 | `GALACTIC_GATEWAY_METRICS_PORT`     | No       | `8081`  | Prometheus metrics port                                                                                                                                                                                                             |
 | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT` | No       | `5181`  | gRPC health check port                                                                                                                                                                                                              |
 | `GALACTIC_GATEWAY_IPV4_VIPS`        | No       | `false` | Serves IPv4 VIPs: turns on IPv4 forwarding on every target once its first IPv4 VIP is due to load, loads each rule's IPv4 VIP over its IPv6 backends, which translate it, and advertises it once their bindings are Bound           |
+| `GALACTIC_GATEWAY_BACKEND_HEALTH`   | No       | `false` | Leaves a backend reported `Unhealthy` out of a rule with a `healthCheck`, while every `NetworkGateway` in the namespace reports `backendHealthFiltering`; needs the same `servicevipbindings` access as IPv4 VIPs                   |
 
 Both required fields are enforced by `GatewayConfig.Validate` at
 startup, not deferred to a later, less obvious kernel-datapath error — a
@@ -800,13 +801,15 @@ separate pod spec entirely, not part of this manifest.
 `NetworkGatewayReconciler`/`NetworkServiceReconciler` touch:
 `networkgateways`/`networkservices` (+ `/status`) read-write,
 `bgpadvertisements` full CRUD, and read-only `get`/`list`/`watch` on
-`servicevipbindings` (the IPv4 readiness gate; read and watched only with
-`GALACTIC_GATEWAY_IPV4_VIPS` on. With the switch on, `resolveIPv4VIPs` checks
-`list` and `watch` at startup and, if either is denied, logs the missing
-access and runs the process with IPv4 VIPs off rather than let the watch
-stall the cache and every rule with it; a check that cannot be made is
-retried for 30 seconds and then fails startup. Infra's copy of this
-ClusterRole must carry the grant before the switch is turned on),
+`servicevipbindings` (the IPv4 readiness gate and backend health; read and
+watched only with `GALACTIC_GATEWAY_IPV4_VIPS` or
+`GALACTIC_GATEWAY_BACKEND_HEALTH` on. With either switch on,
+`resolveIPv4VIPs` or `resolveBackendHealth` checks `list` and `watch` at
+startup and, if either is denied, logs the missing access and runs the
+process with that switch off rather than let the watch stall the cache and
+every rule with it; a check that cannot be made is retried for 30 seconds and
+then fails startup. Infra's copy of this ClusterRole must carry the grant
+before either switch is turned on),
 `bgprouters` (for `usidresolver.go` — see above), `vpcattachments` in
 `galactic.datumapis.com` (a rule's backends, selected and watched
 cluster-wide) and `bgpvrfinstances`
@@ -929,8 +932,28 @@ pod on that node is not a supported configuration.
   Maglev table depends only on the backend set. A per-node cache of the
   last resolved uSID was rejected: a restarted gateway starts with an
   empty cache, so nodes would disagree for longer, and traffic would keep
-  going to a pod that no longer exists. Dropping a backend because it is
-  unhealthy is #704.
+  going to a pod that no longer exists.
+- **An unhealthy backend leaves the table on a decision every gateway reads,
+  not one each gateway makes.** For a `NetworkService` with
+  `spec.healthCheck`, `galactic-router` on each backend's own node probes it
+  (TCP over the backend's host-side interface, from its link-local address)
+  and publishes one damped decision in `status.health` of the backend's
+  `ServiceVIPBinding`s. With `GALACTIC_GATEWAY_BACKEND_HEALTH` on,
+  `buildDesiredRule` leaves out a backend whose binding reports it
+  `Unhealthy` for its current attachment UID and the rule's health check port
+  (`serviceBindings.unhealthy`), keeps every backend of a family when all are
+  `Unhealthy`, and keeps the VIP advertised. `Unknown` and a missing or
+  stale decision keep a backend in, so turning checks on never shrinks a pool
+  before the first probes finish. Health applies only while every
+  `NetworkGateway` in the namespace reports `status.backendHealthFiltering`
+  (`passHealthGate`): it is a typed status field, so an older gateway's
+  status write drops it, and a single gateway that does not filter turns
+  filtering off everywhere rather than building a different table. Gateways
+  probing for themselves was rejected: with DSR they never see a backend's
+  replies, and per-gateway results would give each gateway its own table. The
+  datapath is unchanged. Removing a backend also moves a few slots between
+  the remaining backends, and recovery reverses it; see
+  [backend-health.md](../gateway/backend-health.md#flow-disruption).
 - **SRv6 encap-source address is derived, not published.**
   `GALACTIC_GATEWAY_SRV6_ADDRESS` defaults to the node's locator address,
   derived once at startup from its own `BGPRouter` (#707), rather than a

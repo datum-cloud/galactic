@@ -1,11 +1,5 @@
 # Backend health checks
 
-> [!NOTE]
-> The uSID carve-out, the API, and `galactic-router`'s probing and publishing
-> are implemented. The gateway side, everything from
-> [Every backend unhealthy](#every-backend-unhealthy) on that a gateway
-> does with a decision, is the intended design and not implemented yet.
-
 A `NetworkService` balances flows over the backends its `backendSelector`
 picks. A backend that resolves and advertises but has stopped serving keeps
 its slots in the Maglev table, so every flow hashed to it fails. Health checks
@@ -212,14 +206,16 @@ is outside this design.
 ### Mixed versions
 
 A gateway that predates health checks would ignore `status.health` and keep
-an unhealthy backend that the other gateways drop. To prevent that, each
-gateway reports `status.backendHealthFiltering: true` on its own
-`NetworkGateway`, and a gateway applies health only while every
-`NetworkGateway` in the namespace reports it. An older gateway never writes the
-field, and its status update removes it, so a single older gateway, whether
-not yet upgraded or rolled back, turns filtering off on all of them.
+an unhealthy backend that the other gateways drop. To prevent that, a gateway
+with `GALACTIC_GATEWAY_BACKEND_HEALTH` on reports
+`status.backendHealthFiltering: true` on its own `NetworkGateway`, and applies
+health only while every `NetworkGateway` in the namespace reports it. An older
+gateway never writes the field, and its status update removes it, so a single
+gateway that does not filter, whether not yet upgraded, rolled back or with the
+switch off, turns filtering off on all of them.
 
-The rule's status says when filtering is off for this reason.
+The rule's status says when filtering is off for this reason
+(`HealthChecksNotApplied`).
 
 ## API
 
@@ -262,8 +258,10 @@ problem, as it reports `BackendsUnresolved`.
    fails.
 3. Upgrade `galactic-router` on every node. It probes only services with a
    health check, so this changes nothing yet.
-4. Upgrade `galactic-gateway` on every gateway node. Filtering starts once the
-   last one reports `backendHealthFiltering`.
+4. Upgrade `galactic-gateway` on every gateway node, with
+   `GALACTIC_GATEWAY_BACKEND_HEALTH=true` and a ClusterRole that grants
+   `get`, `list` and `watch` on `servicevipbindings`. Filtering starts once
+   the last one reports `backendHealthFiltering`.
 5. Set `spec.healthCheck` on a service, and allow the probes in its traffic
    policy where policy is enforced.
 
@@ -271,8 +269,9 @@ To turn health checks off for one service, remove `spec.healthCheck`. The
 routers clear `status.health` and stop probing, and the gateways put every
 backend back.
 
-To roll back, downgrade the gateways first: the first downgraded gateway turns
-filtering off on all of them. Then downgrade the routers, then `galactic-cni`.
+To roll back, turn `GALACTIC_GATEWAY_BACKEND_HEALTH` off on any gateway, or
+downgrade the gateways, first: the first gateway that stops reporting
+`backendHealthFiltering` turns filtering off on all of them. Then downgrade the routers, then `galactic-cni`.
 A router downgraded first drops `status.health` from its bindings on its next
 status write, which returns its backends to the table. `galactic-cni`
 downgraded while gateways still filter makes every probe on its node's

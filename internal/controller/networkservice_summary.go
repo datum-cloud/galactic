@@ -57,6 +57,16 @@ const (
 	reasonReady = "Ready"
 )
 
+// backendProblemReasons are the Programmed reasons, all reported with status
+// True, that say a gateway node loaded the rule but not over every backend as
+// intended.
+var backendProblemReasons = map[string]bool{
+	reasonBackendsUnresolved:     true,
+	reasonBackendsUnhealthy:      true,
+	reasonNoHealthyBackends:      true,
+	reasonHealthChecksNotApplied: true,
+}
+
 // vipFamilies records which address families a rule's VIPs cover.
 type vipFamilies struct {
 	ipv4, ipv6 bool
@@ -265,11 +275,12 @@ func ipv4ServedSummary(current func(string) *metav1.Condition, programmed []stri
 
 // backendsReadyCondition summarizes the backend side of a rule: every backend
 // node's BackendsBound condition, and whether any gateway node in programmed
-// left backends out because their uSID did not resolve.
+// left backends out because their uSID did not resolve, left them out or kept
+// them all because their nodes report them Unhealthy, or could not apply the
+// rule's health check.
 //
-// Two inputs are planned and not written yet: whether every cluster holding a
-// backend has the rule, so replies have a path back (#706), and backend health
-// (#704). Each adds failing reports here.
+// One input is planned and not written yet: whether every cluster holding a
+// backend has the rule, so replies have a path back (#706).
 func backendsReadyCondition(conditions []metav1.Condition, generation int64, programmed []string) metav1.Condition {
 	cond := metav1.Condition{Type: conditionTypeBackendsReady}
 
@@ -291,8 +302,8 @@ func backendsReadyCondition(conditions []metav1.Condition, generation int64, pro
 	}
 	for _, n := range programmed {
 		c := meta.FindStatusCondition(conditions, programmedConditionType(n))
-		if c != nil && c.Reason == reasonBackendsUnresolved {
-			problems = append(problems, nodeReport{n, reasonBackendsUnresolved})
+		if c != nil && backendProblemReasons[c.Reason] {
+			problems = append(problems, nodeReport{n, c.Reason})
 		}
 	}
 	sort.Slice(problems, func(i, j int) bool {
