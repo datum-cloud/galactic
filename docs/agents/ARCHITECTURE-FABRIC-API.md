@@ -76,11 +76,11 @@ Three principles shape everything below:
   unsupported FRR version makes it report "diagnostics unavailable", not fail.
 
 The binary is separate from the `fabric-router` image, which carries FRR and
-`fabric-config-agent`. The `fabric-api` image is a static Go binary on
-`gcr.io/distroless/static:nonroot` with no FRR, no `vtysh` and no shell, and it
-imports no eBPF packages, so building it needs no clang or `go generate`. The
-same image serves the node sidecar, the gateway Deployment, the janitor
-CronJob, the per-node `certsync` pod and the operator `query` client.
+`fabric-config-agent`. The `fabric-api` image is a static Go binary on `scratch`
+with no FRR, no `vtysh` and no shell, and it imports no eBPF packages, so
+building it needs no clang or `go generate`. The same image serves the node
+sidecar, the gateway Deployment, the janitor CronJob, the per-node `certsync`
+pod and the operator `query` client.
 
 ---
 
@@ -672,9 +672,9 @@ into both `config/fabric-router/components/fabric-api` and
 published image.
 
 **Container image:** `containers/fabric-api/Dockerfile` — golang builder with
-`CGO_ENABLED=0` → `gcr.io/distroless/static:nonroot`, `ENTRYPOINT
-["/usr/bin/fabric-api"]`. No clang, no `go generate`, and no FRR or shell in the
-image. `task build` also produces `bin/fabric-api` for local use.
+`CGO_ENABLED=0` → `scratch`, `ENTRYPOINT ["/usr/bin/fabric-api"]`. No clang, no
+`go generate`, and no FRR or shell in the image. `task build` also produces
+`bin/fabric-api` for local use.
 
 Because the sidecar lives in the `fabric-router` pod, changing the `fabric-api`
 tag changes the DaemonSet pod template and the rolling update recreates the whole

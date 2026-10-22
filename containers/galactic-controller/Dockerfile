@@ -31,7 +31,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -o galactic-controller ./cmd/galactic-controller
 
 # The controller only talks to the API server, so no shell or host tools.
-FROM gcr.io/distroless/static:nonroot
+FROM scratch
 WORKDIR /
 COPY --from=builder /workspace/galactic-controller .
 USER 65532:65532

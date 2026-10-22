@@ -51,19 +51,20 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
     -o galactic-vrf ./cmd/galactic-vrf
 
-# Minimal static-Go-binary image, matching containers/galactic-cni/
-# Dockerfile's production-stage pattern -- §6 of the plan. Unlike
-# galactic-cni's own final image (alpine, for iproute2/nsenter needed by
-# e2e tests), this container never shells out to `ip`: every kernel
-# operation goes through internal/plumbing/vrf and internal/plumbing/srv6's
-# own netlink calls, so distroless is sufficient.
-FROM gcr.io/distroless/static:nonroot
+# Minimal static-Go-binary image. Unlike galactic-cni's own final image
+# (alpine, for iproute2/nsenter needed by e2e tests), this container never
+# shells out to `ip`: every kernel operation goes through
+# internal/plumbing/vrf and internal/plumbing/srv6's own netlink calls, so
+# scratch is sufficient.
+FROM scratch
 
 COPY --from=builder /workspace/galactic-vrf /galactic-vrf
 
 # CAP_NET_ADMIN only, never privileged -- per PR #851's explicit privilege
 # split (this sidecar creates VRF devices/routes; Envoy only binds to them).
 # The capability itself is granted by the pod's securityContext, not here;
-# USER is left at distroless:nonroot's default (65532:65532) since
-# CAP_NET_ADMIN does not require running as root.
+# USER is set to 65532:65532 since CAP_NET_ADMIN does not require running as
+# root.
+USER 65532:65532
+
 ENTRYPOINT ["/galactic-vrf"]

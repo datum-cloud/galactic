@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	_ "golang.org/x/crypto/x509roots/fallback"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/yaml"
 

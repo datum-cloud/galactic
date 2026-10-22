@@ -59,12 +59,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
     -o galactic-nat ./cmd/galactic-nat
 
-# Use distroless as minimal base image to package the binary. galactic-nat
+# Use scratch as minimal base image to package the binary. galactic-nat
 # drives its eBPF/XDP and EgressShard CRD state through the cilium/ebpf and
 # controller-runtime Go libraries directly, never shells out to `ip` or any
 # other host CLI tool, so no shell is required in the final image.
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM scratch
 WORKDIR /
 COPY --from=builder /workspace/galactic-nat .
 USER 65532:65532

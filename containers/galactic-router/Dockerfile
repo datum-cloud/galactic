@@ -46,12 +46,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
     -o galactic-router ./cmd/galactic-router
 
-# Use distroless as minimal base image to package the binary. galactic-router
+# Use scratch as minimal base image to package the binary. galactic-router
 # drives all VRF/SRv6/route/BGP state through the netlink and GoBGP Go
 # libraries directly, never shells out to `ip` or any other host CLI tool, so
 # no shell is required in the final image.
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM scratch
 WORKDIR /
 COPY --from=builder /workspace/galactic-router .
 USER 65532:65532
