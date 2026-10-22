@@ -105,6 +105,11 @@ type NetworkGatewayReconciler struct {
 	// engine is never driven.
 	Disabled bool
 
+	// ReturnPath, set only with Disabled, keeps the node forwarding replies
+	// from every rule's VIPs while it serves none: a backend node can still
+	// send replies through it. Nil means the node has no return program.
+	ReturnPath ReturnAddrSyncer
+
 	// IPv4VIPs loads a rule's IPv4 VIPs into the engine alongside its IPv6
 	// ones (config.EnvGatewayIPv4VIPs), over the rule's IPv6 backends,
 	// whose nodes translate its flows, and advertises one once its
@@ -390,6 +395,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		withdrawErr := errors.Join(
 			withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName),
 			clearNodeRuleConditions(ctx, r.Client, gw.Namespace, r.NodeName),
+			r.syncReturnPath(ctx, gw.Namespace),
 		)
 		gwCopy := gw.DeepCopy()
 		gwCopy.Status.ObservedGeneration = gw.Generation
@@ -489,6 +495,54 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Nothing else is sure to trigger the pass that drops a held rule once
 	// its drain delay ends, so ask for it.
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// ReturnAddrSyncer sets the VIP addresses a node's return program claims
+// replies from. gateway.KernelReturnPath is the real implementation.
+type ReturnAddrSyncer interface {
+	SyncReturnAddrs(addrs []netip.Addr) error
+}
+
+// syncReturnPath points r.ReturnPath at every VIP address the namespace's
+// rules list, whatever their state: a rule another gateway node serves can
+// send replies through this one, and claiming an address carries no traffic
+// to the node. IPv4 VIPs are included only with IPv4VIPs on, once IPv4
+// forwarding is, since edge_return's IPv4 FIB lookup needs it; an IPv4 VIP
+// that cannot be claimed is left out and the error returned.
+func (r *NetworkGatewayReconciler) syncReturnPath(ctx context.Context, namespace string) error {
+	if r.ReturnPath == nil {
+		return nil
+	}
+	rules := &bgpv1alpha1.NetworkServiceList{}
+	if err := r.List(ctx, rules, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("list NetworkServices for the return path: %w", err)
+	}
+	var v6, v4 []netip.Addr
+	for i := range rules.Items {
+		for _, v := range rules.Items[i].Spec.VIPAddresses {
+			addr, err := netip.ParseAddr(v)
+			switch {
+			case err != nil:
+			case !isIPv4VIP(addr):
+				v6 = append(v6, addr)
+			case r.IPv4VIPs:
+				v4 = append(v4, addr.Unmap())
+			}
+		}
+	}
+	var fwdErr error
+	if len(v4) > 0 && r.EnsureIPv4Forwarding != nil {
+		if err := r.EnsureIPv4Forwarding(); err != nil {
+			fwdErr = fmt.Errorf("turn on IPv4 forwarding for the return path; IPv4 VIP replies are not claimed: %w", err)
+			v4 = nil
+		}
+	}
+	addrs := append(v6, v4...)
+	slices.SortFunc(addrs, netip.Addr.Compare)
+	if err := r.ReturnPath.SyncReturnAddrs(slices.Compact(addrs)); err != nil {
+		return errors.Join(fwdErr, fmt.Errorf("sync the return path's VIP addresses: %w", err))
+	}
+	return fwdErr
 }
 
 // reconcileEngine converges the engine on desired. A failure is recorded on

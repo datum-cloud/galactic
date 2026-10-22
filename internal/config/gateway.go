@@ -74,11 +74,14 @@ const (
 	// slot is live, since taking the hook would cut that datapath's traffic.
 	EnvGatewayXDPAttach = "GALACTIC_GATEWAY_XDP_ATTACH"
 
-	// EnvGatewayDatapathEnabled turns the gateway's datapath on or off.
-	// Optional, defaulting to true. Off, the process stays up and healthy but
-	// attaches nothing, empties its dispatcher slots, and withdraws this
-	// node's VIP advertisements, so no traffic is drawn to a node that will not
-	// load-balance it. Every other datapath on the node keeps running. The
+	// EnvGatewayDatapathEnabled turns the gateway's load balancing on or off.
+	// Optional, defaulting to true. Off, the process stays up and healthy,
+	// empties its load-balancing dispatcher slot, and withdraws this node's
+	// VIP advertisements, so no traffic is drawn to a node that will not
+	// load-balance it. A backend node can still send VIP replies through it,
+	// so with EnvGatewayInternalInterfaces set it keeps edge_return on those
+	// interfaces, claiming replies from every rule's VIPs; with none set it
+	// attaches nothing. Every other datapath on the node keeps running. The
 	// public interface is not required while it is off.
 	EnvGatewayDatapathEnabled = "GALACTIC_GATEWAY_DATAPATH_ENABLED"
 

@@ -626,9 +626,10 @@ tasks:
 
   # Not part of `verify`: dfw-worker2 serves no VIP while it runs. Proves
   # verify:gateway-ingress fails when a gateway's XDP program is off its
-  # uplinks.
+  # uplinks, and that dfw-worker3 keeps serving meanwhile even though
+  # dfw-worker's replies still cross dfw-worker2.
   "verify:gateway-detach":
-    desc: Turn dfw-worker2's gateway datapath off and confirm the ingress check fails, then passes again
+    desc: Turn dfw-worker2's gateway datapath off, confirm ingress fails through it and passes through dfw-worker3, then passes again
     cmds:
       - LAB={{.LAB}} ./scripts/verify-gateway-detach.sh
 

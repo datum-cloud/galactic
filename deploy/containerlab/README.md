@@ -535,7 +535,7 @@ task deploy
 | `verify:gateway-ingress`         | TCP and UDP from the off-fabric host to each site's VIP, through every gateway node in turn                                                 |
 | `verify:gateway-ingress-ipv4`    | IPv4 TCP and UDP to each site's IPv4 VIP through every gateway node, translated to the IPv6-only backends                                   |
 | `verify:gateway-restart`         | Restart dfw-worker2's gateway and shard in turn while the other carries traffic (#710)                                                      |
-| `verify:gateway-detach`          | Turn dfw-worker2's gateway datapath off: the ingress check must fail, then pass (not in `verify`)                                           |
+| `verify:gateway-detach`          | Turn dfw-worker2's gateway datapath off: ingress through it must fail and through dfw-worker3 pass, then through it pass (not in `verify`)  |
 | `verify:nat-datapath`            | Full egress round trip to the off-fabric host, IPv6 (NAT66) and IPv4 (NAT64)                                                                |
 | `verify:nat-return-route`        | Prove a reply from outside the fabric reaches each shard's masquerade addresses                                                             |
 | `verify:nat-local`               | Prove each site's tenants egress through that site's own edge shard                                                                         |

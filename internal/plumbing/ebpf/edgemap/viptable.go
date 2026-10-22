@@ -319,6 +319,60 @@ func (t *VIPTable) Unregister(key VIPKey) error {
 	return nil
 }
 
+// ReplaceReturnAddrs makes vip_addr_table hold exactly addrs and empties
+// vip_table, for a node whose datapath is turned off: it load-balances no rule
+// but still forwards the replies its compute-facing links carry.
+//
+// Every address in addrs is claimed before anything is removed, so a reply
+// from a VIP present before and after is never left unclaimed. Each vip_table
+// row goes with its counters, so no rule series outlives the rules this node
+// stopped serving. An address no longer in addrs is released with its
+// counters.
+func (t *VIPTable) ReplaceReturnAddrs(addrs []netip.Addr) error {
+	want := make(map[netip.Addr]struct{}, len(addrs))
+	generation := t.clock()
+	var errs []error
+	for _, vip := range addrs {
+		want[vip] = struct{}{}
+		if err := t.claimAddr(vip, generation); err != nil {
+			errs = append(errs, fmt.Errorf("edgemap: vip_addr_table: replace: %w", err))
+		}
+	}
+
+	entries, err := t.List()
+	if err != nil {
+		return errors.Join(append(errs, fmt.Errorf("edgemap: vip_addr_table: replace: %w", err))...)
+	}
+	for _, e := range entries {
+		wireKey, err := toWireKey(e.VIPKey)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("edgemap: vip_table: replace: %+v: %w", e.VIPKey, err))
+			continue
+		}
+		if err := t.table.Delete(wireKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, fmt.Errorf("edgemap: vip_table: replace: delete %+v: %w", e.VIPKey, err))
+		}
+		if err := t.stats.Delete(wireKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, fmt.Errorf("edgemap: vip_table: replace: delete %+v vip_stats_table row: %w",
+				e.VIPKey, err))
+		}
+	}
+
+	returns, err := t.ListReturn()
+	if err != nil {
+		return errors.Join(append(errs, fmt.Errorf("edgemap: vip_addr_table: replace: %w", err))...)
+	}
+	for _, r := range returns {
+		if _, ok := want[r.VIP]; ok {
+			continue
+		}
+		if err := t.releaseAddr(r.VIP); err != nil {
+			errs = append(errs, fmt.Errorf("edgemap: vip_addr_table: replace: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // ListReturn returns every vip_addr_table row joined with its counters, in
 // unspecified order. A row with no counters yet reads back as zero rather than
 // an error, as with vip_stats_table.
