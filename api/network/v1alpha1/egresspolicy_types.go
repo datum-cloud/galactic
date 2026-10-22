@@ -12,14 +12,14 @@ import (
 // of an egress flow is an arbitrary internet address, not a pre-configured
 // backend list.
 //
-// It is namespaced (deployed to galactic-system) and tenant-writable; like
-// NetworkService's vpcRef, vpcRef/vpcAttachmentRef are opaque string identifiers
-// because this kind carries identifiers from the VPC API in
-// api/cloud/v1alpha1 without a Kubernetes object reference. An admission webhook (implemented by the consuming controller) must
-// verify the requester is authorized for vpcRef/vpcAttachmentRef before a
-// policy is accepted — see the Accepted condition.
+// It is namespaced (deployed to galactic-system), and RBAC on the namespace
+// decides who may write it. Like NetworkService's vpcRef, vpcRef and
+// vpcAttachmentRef are opaque string identifiers because this kind carries
+// identifiers from the VPC API in api/cloud/v1alpha1 without a Kubernetes
+// object reference. Galactic does not check that the writer is authorized for
+// them, and nothing in this repository sets the Accepted condition.
 //
-// Presence of an accepted NetworkEgressPolicy resolves only *enablement*
+// Presence of a NetworkEgressPolicy resolves only *enablement*
 // (should this tenant's VRF get an egress route toward the shared
 // translation tier at all) — unlike this type's original design (superseded), there is
 // no single "assigned gateway node" to compute or pin: any EgressShard may
@@ -50,16 +50,15 @@ type NetworkEgressPolicy struct {
 type NetworkEgressPolicySpec struct {
 	// VPCRef is the opaque identifier of the target VPC this policy applies
 	// to. This repo does not own the VPC API and does not validate the
-	// identifier beyond non-emptiness; the admission webhook of the
-	// consuming controller is responsible for verifying the requester is
-	// authorized for this VPC before the policy is accepted.
+	// identifier beyond non-emptiness, or check that the writer is
+	// authorized for this VPC.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	VPCRef string `json:"vpcRef"`
 
 	// VPCAttachmentRef is the opaque identifier of the target
 	// VPCAttachment this policy applies to. Like VPCRef, this is an opaque
-	// string reference validated by the admission webhook, not by this API.
+	// string reference that this API checks only for non-emptiness.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	VPCAttachmentRef string `json:"vpcAttachmentRef"`
@@ -72,9 +71,9 @@ type NetworkEgressPolicyStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Conditions contains the standard conditions for this resource,
-	// including Accepted (see AcceptedReasonOwnershipVerified /
-	// AcceptedReasonOwnershipDenied in rule_types.go, reused as-is here).
+	// Conditions contains the standard conditions for this resource. Nothing
+	// in this repository sets them. Accepted, when set, uses the ownership
+	// reasons shared with NetworkService (see AcceptedReasonOwnershipVerified).
 	//
 	// +listType=map
 	// +listMapKey=type

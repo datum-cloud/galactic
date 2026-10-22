@@ -39,28 +39,34 @@ const (
 	NetworkServiceProtocolICMP NetworkServiceProtocol = "icmp"
 )
 
-// Accepted reasons — used as Accepted.Reason on NetworkService (and reused by
-// NetworkEgressPolicy), set by the admission webhook that verifies the
-// requester is authorized for the VPC resources the object references.
+// Ownership reasons for the Accepted condition on NetworkService and
+// NetworkEgressPolicy, reserved for an admission check that verifies the
+// requester is authorized for the VPC resources the object references. No such
+// check runs in this repository and nothing sets these reasons. On a
+// NetworkService, Accepted reports only that a gateway node is registered in
+// its namespace.
 const (
-	// AcceptedReasonOwnershipVerified indicates admission verified the
-	// requester is authorized for the VPC resources the object references.
+	// AcceptedReasonOwnershipVerified is reserved for an admission check that
+	// found the requester authorized for the VPC resources the object
+	// references.
 	AcceptedReasonOwnershipVerified string = "OwnershipVerified"
 
-	// AcceptedReasonOwnershipDenied indicates admission rejected the object
-	// because the requester is not authorized for the VPC resources it
-	// references.
+	// AcceptedReasonOwnershipDenied is reserved for an admission check that
+	// rejected the object because the requester is not authorized for the VPC
+	// resources it references.
 	AcceptedReasonOwnershipDenied string = "OwnershipDenied"
 )
 
 // NetworkService defines ingress load-balancing for a single tenant VPC, served
 // by every NetworkGateway node identically (anycast Direct Server Return —
 // see NetworkGateway's doc comment). It is namespaced (deployed to
-// galactic-system) and tenant-writable; vpcRef is an opaque string identifier
-// because this kind carries identifiers from the VPC API in
-// api/cloud/v1alpha1 without a Kubernetes object reference. An admission webhook (implemented by the consuming controller) must
-// verify the requester is authorized for vpcRef before a service is accepted —
-// see the Accepted condition.
+// galactic-system) and written by the platform API that serves tenants, which
+// verifies the tenant owns vpcRef before it writes the service; RBAC on the
+// namespace decides who else may write it. vpcRef is an opaque string
+// identifier because this kind carries identifiers from the VPC API in
+// api/cloud/v1alpha1 without a Kubernetes object reference. Accepted is set
+// once a gateway node is registered in the namespace and is not an ownership
+// check.
 //
 // Unlike the earlier Full-NAT design this type originally described, there
 // is no primary/secondary gateway node for a service: every NetworkGateway
@@ -101,9 +107,8 @@ type NetworkService struct {
 type NetworkServiceSpec struct {
 	// VPCRef is the opaque identifier of the target VPC this service applies
 	// to. This repo does not own the VPC API and does not validate the
-	// identifier beyond non-emptiness; the admission webhook of the
-	// consuming controller is responsible for verifying the requester is
-	// authorized for this VPC before the service is accepted.
+	// identifier beyond non-emptiness. The platform API that serves tenants
+	// verifies the tenant owns this VPC before it writes the service.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	VPCRef string `json:"vpcRef"`

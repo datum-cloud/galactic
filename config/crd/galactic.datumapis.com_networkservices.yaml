@@ -36,11 +36,13 @@ spec:
           NetworkService defines ingress load-balancing for a single tenant VPC, served
           by every NetworkGateway node identically (anycast Direct Server Return —
           see NetworkGateway's doc comment). It is namespaced (deployed to
-          galactic-system) and tenant-writable; vpcRef is an opaque string identifier
-          because this kind carries identifiers from the VPC API in
-          api/cloud/v1alpha1 without a Kubernetes object reference. An admission webhook (implemented by the consuming controller) must
-          verify the requester is authorized for vpcRef before a service is accepted —
-          see the Accepted condition.
+          galactic-system) and written by the platform API that serves tenants, which
+          verifies the tenant owns vpcRef before it writes the service; RBAC on the
+          namespace decides who else may write it. vpcRef is an opaque string
+          identifier because this kind carries identifiers from the VPC API in
+          api/cloud/v1alpha1 without a Kubernetes object reference. Accepted is set
+          once a gateway node is registered in the namespace and is not an ownership
+          check.
 
           Unlike the earlier Full-NAT design this type originally described, there
           is no primary/secondary gateway node for a service: every NetworkGateway
@@ -234,9 +236,8 @@ spec:
                 description: |-
                   VPCRef is the opaque identifier of the target VPC this service applies
                   to. This repo does not own the VPC API and does not validate the
-                  identifier beyond non-emptiness; the admission webhook of the
-                  consuming controller is responsible for verifying the requester is
-                  authorized for this VPC before the service is accepted.
+                  identifier beyond non-emptiness. The platform API that serves tenants
+                  verifies the tenant owns this VPC before it writes the service.
                 minLength: 1
                 type: string
             required:
