@@ -1,25 +1,40 @@
 package serviceroute
 
 import (
-	cloud "go.datum.net/galactic/api/cloud/v1alpha1"
-	network "go.datum.net/galactic/api/network/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"reflect"
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+
+	cloud "go.datum.net/galactic/api/cloud/v1alpha1"
+	network "go.datum.net/galactic/api/network/v1alpha1"
 )
 
 func TestProgrammingPlanKeepsEligibleConsumersIndependent(t *testing.T) {
 	attachment := func(name, node, role string) *cloud.VPCAttachment {
 		return &cloud.VPCAttachment{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: name, UID: types.UID(name), Generation: 1, Labels: map[string]string{"role": role}},
-			Status: cloud.VPCAttachmentStatus{ObservedGeneration: 1, Node: node, VPC: "vpc", VPCAttachment: name, HostInterface: name,
-				Conditions: []metav1.Condition{{Type: cloud.ConditionTypeReady, Status: metav1.ConditionTrue}, {Type: cloud.ConditionTypeProgrammed, Status: metav1.ConditionTrue}}},
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "tenant", Name: name, UID: types.UID(name), Generation: 1,
+				Labels: map[string]string{"role": role},
+			},
+			Status: cloud.VPCAttachmentStatus{
+				ObservedGeneration: 1, Node: node, VPC: "vpc", VPCAttachment: name, HostInterface: name,
+				Conditions: []metav1.Condition{
+					{Type: cloud.ConditionTypeReady, Status: metav1.ConditionTrue},
+					{Type: cloud.ConditionTypeProgrammed, Status: metav1.ConditionTrue},
+				},
+			},
 		}
 	}
-	policy := &network.ServiceRoutePolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "policy", UID: "policy"},
-		Spec: network.ServiceRoutePolicySpec{AttachmentSelector: metav1.LabelSelector{MatchLabels: map[string]string{"role": "consumer"}}}}
-	endpoint := &network.ServiceEndpoint{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "endpoint", UID: "endpoint"},
+	policy := &network.ServiceRoutePolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "policy", UID: "policy"},
+		Spec: network.ServiceRoutePolicySpec{
+			AttachmentSelector: metav1.LabelSelector{MatchLabels: map[string]string{"role": "consumer"}},
+		},
+	}
+	endpoint := &network.ServiceEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "endpoint", UID: "endpoint"},
 		Spec: network.ServiceEndpointSpec{DeliveryMode: network.ServiceEndpointDeliveryModePreferNodeLocal,
 			AttachmentSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "producer"}}}}
 	healthy := attachment("healthy", "node-a", "consumer")
