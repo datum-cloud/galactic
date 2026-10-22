@@ -62,7 +62,8 @@ To read a snapshot back, galactic-router pins each one it publishes under
 galactic-cni removes the pin when it unbinds the snapshot. On its first
 reconcile and at most once every five minutes after, galactic-router removes
 any pin that holds no bound snapshot, such as one left by a publish that an
-interface's removal or a restart interrupted. The kernel opens a map
+interface's removal or a restart interrupted. Until then, such a pin holds its
+snapshot's memory. The kernel opens a map
 by ID only for `CAP_SYS_ADMIN`, which galactic-router does not have (it runs
 with `NET_ADMIN` and `BPF`), so a snapshot without a matching pin, such as
 one bound by a release that did not pin, cannot be read. galactic-router

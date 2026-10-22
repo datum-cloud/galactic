@@ -52,6 +52,8 @@ a restart from their pins (see
 [Traffic policy on the node](node.md#what-it-applies)). The first restart
 after upgrading from a release that did not pin snapshots republishes every
 snapshot bound on the node, so their rule counters start again from zero.
+Until each one is republished, its rules can count into rows another snapshot
+was given.
 
 ## Steps
 
