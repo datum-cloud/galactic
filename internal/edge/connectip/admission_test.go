@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 )
 
 // testAdmission is a process-local fixture, not a production claim authority.
@@ -59,6 +60,23 @@ func (a *testAdmission) Admit(_ context.Context, token, vpc string) (Lease, erro
 		return lease, nil
 	}
 	return nil, errors.New("test prefix pool exhausted")
+}
+
+// waitReleased waits until the lease for info's prefix in its gVPC is
+// released.
+func (a *testAdmission) waitReleased(t *testing.T, info SessionInfo) {
+	t.Helper()
+	deadline := time.Now().Add(testTimeout)
+	for time.Now().Before(deadline) {
+		a.mu.Lock()
+		_, held := a.leases[info.VPC][info.Prefix]
+		a.mu.Unlock()
+		if !held {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("lease %s in %s was not released", info.Prefix, info.VPC)
 }
 
 type testLease struct {
