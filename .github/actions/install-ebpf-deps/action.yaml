@@ -11,6 +11,19 @@ description: >-
 runs:
   using: composite
   steps:
+    # The packages come from GitHub's regional Ubuntu mirror, which has
+    # delivered them slowly enough (a few hundred kB/s) that a job spent its
+    # whole timeout-minutes downloading them. The per-request timeouts below
+    # cannot catch a mirror that is slow rather than stalled, so the .deb
+    # files are cached across runs, keyed by the runner image, which fixes
+    # the package versions apt resolves. A miss downloads them as before.
+    - name: Restore the clang/llvm package cache
+      id: cache
+      uses: actions/cache/restore@v6
+      with:
+        path: ~/.cache/ebpf-deps-apt
+        key: ebpf-deps-apt-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('.github/actions/install-ebpf-deps/action.yaml') }}
+
     # Pinned to an explicit versioned package (clang-18/llvm-18) rather than
     # the unversioned clang/llvm meta-packages, matching ci.yaml's
     # workflow-level BPF2GO_CC pin -- keeps the BPF object bytes (BTF, debug
@@ -32,5 +45,25 @@ runs:
         # finally kills it -- burning the whole budget on jobs #424/#425
         # both hit. These bound each attempt and retry instead, so a bad
         # mirror fails in seconds rather than minutes.
+        #
+        # Dir::Cache::Archives points apt at the restored cache, so packages
+        # already there are installed without downloading them; the
+        # directory is handed back to the runner user for the cache save.
+        archives="$HOME/.cache/ebpf-deps-apt"
+        mkdir -p "$archives/partial"
         sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
-        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y clang-18 llvm-18 linux-libc-dev
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 \
+          -o Dir::Cache::Archives="$archives" -o APT::Keep-Downloaded-Packages=true \
+          install -y clang-18 llvm-18 linux-libc-dev
+        sudo rm -rf "$archives/partial" "$archives/lock"
+        sudo chown -R "$(id -u):$(id -g)" "$archives"
+
+    # Jobs that miss the cache in parallel all try to save the same key; one
+    # wins and the rest only warn, so a failed save never fails the job.
+    - name: Save the clang/llvm package cache
+      if: steps.cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v6
+      with:
+        path: ~/.cache/ebpf-deps-apt
+        key: ${{ steps.cache.outputs.cache-primary-key }}
