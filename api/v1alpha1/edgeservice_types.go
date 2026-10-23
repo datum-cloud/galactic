@@ -38,6 +38,7 @@ type EdgeVPCReference struct {
 // +kubebuilder:validation:XValidation:rule="self.providerRef == oldSelf.providerRef",message="providerRef is immutable"
 // +kubebuilder:validation:XValidation:rule="self.vpcRef.uid == oldSelf.vpcRef.uid",message="vpcRef.uid is immutable"
 // +kubebuilder:validation:XValidation:rule="self.capabilities == oldSelf.capabilities",message="capabilities are immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.clientPool) || (has(self.clientPool) && self.clientPool == oldSelf.clientPool)",message="clientPool cannot change or be removed once set"
 type EdgeServiceSpec struct {
 	// ProviderRef is the only provider the grant authorizes.
 	// +required
@@ -69,6 +70,43 @@ type EdgeServiceSpec struct {
 	// once fewer than the cell's maximum clock skew remain.
 	// +optional
 	ValidUntil *metav1.Time `json:"validUntil,omitempty"`
+
+	// ClientPool is the IPv6 range, inside the VPC, that attachments take
+	// their addresses from: a masked CIDR from /64 to /120. At most 1024 of
+	// its addresses are allocated, whatever its size. Pools of services
+	// granting the same VPC must not overlap; galactic-controller refuses
+	// the attachments of the later of two overlapping services. Without a
+	// pool, the service admits no attachment. A pool can be added to a
+	// service that has none, and is fixed from then on.
+	// +optional
+	// +kubebuilder:validation:MaxLength=43
+	// +kubebuilder:validation:XValidation:rule="isCIDR(self) && cidr(self).ip().family() == 6 && cidr(self) == cidr(self).masked() && cidr(self).prefixLength() >= 64 && cidr(self).prefixLength() <= 120",message="clientPool must be a masked IPv6 CIDR from /64 to /120"
+	ClientPool string `json:"clientPool,omitempty"`
+
+	// DrainSeconds is how long an attachment the foundation revokes keeps
+	// its resources before they are released. Unset means 30.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=300
+	DrainSeconds *int32 `json:"drainSeconds,omitempty"`
+}
+
+// EdgeAllocation is one client pool address and the attachment holding it.
+type EdgeAllocation struct {
+	// Address is the allocated IPv6 address.
+	// +required
+	// +kubebuilder:validation:MaxLength=39
+	Address string `json:"address"`
+
+	// Attachment is the holding EdgeAttachment's namespace and name.
+	// +required
+	// +kubebuilder:validation:MaxLength=317
+	Attachment string `json:"attachment"`
+
+	// AttachmentUID is the holding EdgeAttachment's metadata.uid.
+	// +required
+	// +kubebuilder:validation:MaxLength=36
+	AttachmentUID string `json:"attachmentUID"`
 }
 
 // EdgeServiceStatus reports the grant's admission state.
@@ -83,6 +121,16 @@ type EdgeServiceStatus struct {
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=8
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Allocations are the client pool addresses held by attachments. Core
+	// writes them with a resourceVersion precondition, so two writers never
+	// hand out one address, and removes one only after the attachment's node
+	// has released it.
+	// +optional
+	// +listType=map
+	// +listMapKey=address
+	// +kubebuilder:validation:MaxItems=1024
+	Allocations []EdgeAllocation `json:"allocations,omitempty"`
 }
 
 // EdgeService grants one Galactic Edge provider the use of one VPC: the
