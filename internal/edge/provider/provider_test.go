@@ -44,3 +44,15 @@ func TestLeaseRecordRoundTrip(t *testing.T) {
 		t.Error("an epoch past leaseTransitions' range was accepted")
 	}
 }
+
+// TestInstanceName: an instance's name is ei- and the pod UID, the name the
+// galactic-edge-provider policy requires.
+func TestInstanceName(t *testing.T) {
+	const uid = "0f3c9a1e-6b2d-4e8f-9a7c-1d2e3f4a5b6c"
+	if got := InstanceName(uid); got != "ei-"+uid {
+		t.Errorf("InstanceName(%q) = %q, want ei-%s", uid, got, uid)
+	}
+	if inst := NewInstance("ns", "p", "pod", uid, "node", "boot"); inst.Name != InstanceName(uid) {
+		t.Errorf("NewInstance named %q, want %q", inst.Name, InstanceName(uid))
+	}
+}

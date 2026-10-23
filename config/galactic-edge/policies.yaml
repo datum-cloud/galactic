@@ -11,16 +11,18 @@
 # ServiceAccounts to objects naming the provider, and objects naming the
 # provider to its ServiceAccounts: in the object's namespace, as the pod the
 # object names, and an instance only for the node that pod runs on. An
-# instance's lease is a Lease labeled galactic.datumapis.com/edge-provider
-# and annotated with its pod; only that pod writes it, and the provider's
-# ServiceAccounts write no other Lease. A route is held to the pod its claim
-# names: a pod may claim a route for itself, never for another pod, and only
-# the claiming pod may release, rewrite or delete its claim; another pod of
-# the provider may only take it over with a new epoch, which
-# galactic-controller accepts once the holder is fenced. A provider's deletes
-# are held to the same rules; another ServiceAccount's delete is left to
-# RBAC, so namespace deletion and garbage collection proceed. An unapproved
-# provider has no RoleBinding, so RBAC refuses it first.
+# instance and its lease are created only under the name derived from their
+# pod, so one pod cannot take another's first. An instance's lease is a
+# Lease labeled galactic.datumapis.com/edge-provider and annotated with its
+# pod; only that pod writes it, and the provider's ServiceAccounts write no
+# other Lease. A route is held to the pod its claim names: a pod may claim a
+# route for itself, never for another pod, and only the claiming pod may
+# release, rewrite or delete its claim; another pod of the provider may only
+# take it over with a new epoch, which galactic-controller accepts once the
+# holder is fenced. A provider's deletes are held to the same rules; another
+# ServiceAccount's delete is left to RBAC, so namespace deletion and garbage
+# collection proceed. An unapproved provider has no RoleBinding, so RBAC
+# refuses it first.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -101,6 +103,15 @@ spec:
         ('authentication.kubernetes.io/pod-uid' in request.userInfo.extra &&
         request.userInfo.extra['authentication.kubernetes.io/pod-uid'] == [variables.pod])
       message: a provider pod writes only objects naming the pod its token was issued for
+    # An instance and its lease are named for their pod (provider.InstanceName),
+    # so no pod can take another pod's name before it.
+    - expression: >-
+        !(variables.writer && variables.target) || request.operation != 'CREATE' ||
+        !(request.resource.resource in ['edgeinstances', 'leases']) ||
+        object.metadata.name == 'ei-' + variables.pod
+      messageExpression: >-
+        'an instance and its lease must be named ei-' + variables.pod +
+        ' for the pod they name, not ' + object.metadata.name
     - expression: >-
         !(variables.writer && variables.target) || variables.ownsOld ||
         (request.operation == 'UPDATE' && has(object.spec.claim) &&

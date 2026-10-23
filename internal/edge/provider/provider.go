@@ -42,8 +42,15 @@ import (
 	"go.datum.net/galactic/internal/edge/claim"
 )
 
-// InstanceName is the derived name of a pod's EdgeInstance.
-func InstanceName(podUID string) string { return "ei-" + digest(podUID) }
+// InstanceName is the derived name of a pod's EdgeInstance and its Lease.
+// The galactic-edge-provider admission policy computes the same name from
+// the pod UID and refuses a provider pod's create of either under any other.
+func InstanceName(podUID string) string { return "ei-" + podUID }
+
+// ErrNameTaken is returned when the derived name of a pod's EdgeInstance or
+// Lease is held by an object that names another pod. Retrying cannot
+// succeed until that object is deleted, so it also wraps claim.ErrLost.
+var ErrNameTaken = fmt.Errorf("%w: provider: name held by another pod's object", claim.ErrLost)
 
 // RouteName is the derived name of the EdgeRoute for prefix in the VPC with
 // vpcUID.
@@ -79,7 +86,9 @@ type InstanceStore struct {
 	Now func() time.Time
 }
 
-// Get implements claim.Store.
+// Get implements claim.Store. A Lease that is not bound to the instance of
+// the same name returns ErrNameTaken, so the caller never waits on it, unless
+// it was an earlier instance's of the same pod (see checkBound).
 func (s InstanceStore) Get(ctx context.Context, key string) (claim.Record, error) {
 	var l coordinationv1.Lease
 	if err := s.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: key}, &l); err != nil {
@@ -88,7 +97,34 @@ func (s InstanceStore) Get(ctx context.Context, key string) (claim.Record, error
 		}
 		return claim.Record{}, err
 	}
+	var inst galacticv1alpha1.EdgeInstance
+	if err := s.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: key}, &inst); err != nil {
+		if apierrors.IsNotFound(err) {
+			return claim.Record{}, fmt.Errorf("%w: EdgeInstance %s/%s no longer exists", claim.ErrLost, s.Namespace, key)
+		}
+		return claim.Record{}, err
+	}
+	if err := checkBound(&l, &inst); err != nil {
+		return claim.Record{}, err
+	}
 	return record(&l)
+}
+
+// checkBound returns nil when l is inst's lease. A Lease naming inst's pod
+// and provider but owned by an earlier instance of the same name is
+// claim.ErrConflict: the garbage collector deletes it with its owner, after
+// which the lease can be created. Any other Lease returns ErrNameTaken.
+func checkBound(l *coordinationv1.Lease, inst *galacticv1alpha1.EdgeInstance) error {
+	if bound(l, inst) {
+		return nil
+	}
+	pod := l.Annotations[galacticv1alpha1.EdgeLeasePodUIDAnnotation]
+	if pod == inst.Spec.PodUID && l.Labels[galacticv1alpha1.EdgeLeaseProviderLabel] == inst.Spec.ProviderRef.Name {
+		return fmt.Errorf("%w: Lease %s/%s belongs to an earlier instance of this name and awaits deletion",
+			claim.ErrConflict, l.Namespace, l.Name)
+	}
+	return fmt.Errorf("%w: Lease %s/%s is not bound to its instance; it names pod %q", ErrNameTaken,
+		l.Namespace, l.Name, pod)
 }
 
 // Create implements claim.Store: it writes r as the first lease of an
@@ -122,6 +158,19 @@ func (s InstanceStore) Create(ctx context.Context, r claim.Record) (claim.Record
 	maps.Copy(l.Annotations, protocolAnnotations(r))
 	switch err := s.Client.Create(ctx, l); {
 	case apierrors.IsAlreadyExists(err):
+		// Another write of this instance's lease is a race to retry, as is
+		// an earlier instance's lease awaiting deletion; a Lease bound to
+		// anything else holds the name for good.
+		var cur coordinationv1.Lease
+		if err := s.Client.Get(ctx, client.ObjectKeyFromObject(l), &cur); err != nil {
+			if apierrors.IsNotFound(err) {
+				return claim.Record{}, claim.ErrConflict
+			}
+			return claim.Record{}, err
+		}
+		if err := checkBound(&cur, &inst); err != nil {
+			return claim.Record{}, err
+		}
 		return claim.Record{}, claim.ErrConflict
 	case err != nil:
 		return claim.Record{}, err
@@ -244,9 +293,7 @@ func ReadLease(ctx context.Context, reader client.Reader, inst *galacticv1alpha1
 	case err != nil:
 		return claim.Record{}, false, err
 	}
-	owned := slices.ContainsFunc(l.OwnerReferences, func(o metav1.OwnerReference) bool { return o.UID == inst.UID })
-	if !owned || l.Labels[galacticv1alpha1.EdgeLeaseProviderLabel] != inst.Spec.ProviderRef.Name ||
-		l.Annotations[galacticv1alpha1.EdgeLeasePodUIDAnnotation] != inst.Spec.PodUID {
+	if !bound(&l, inst) {
 		return claim.Record{}, false, nil
 	}
 	r, err := record(&l)
@@ -254,6 +301,14 @@ func ReadLease(ctx context.Context, reader client.Reader, inst *galacticv1alpha1
 		return claim.Record{}, false, nil
 	}
 	return r, true, nil
+}
+
+// bound reports whether l is inst's lease: owned by inst, labeled with
+// inst's provider and annotated with inst's pod.
+func bound(l *coordinationv1.Lease, inst *galacticv1alpha1.EdgeInstance) bool {
+	owned := slices.ContainsFunc(l.OwnerReferences, func(o metav1.OwnerReference) bool { return o.UID == inst.UID })
+	return owned && l.Labels[galacticv1alpha1.EdgeLeaseProviderLabel] == inst.Spec.ProviderRef.Name &&
+		l.Annotations[galacticv1alpha1.EdgeLeasePodUIDAnnotation] == inst.Spec.PodUID
 }
 
 // Fence takes the lease r away from its holder: it moves the Lease named
@@ -302,6 +357,31 @@ func NewInstance(namespace, provider, podName, podUID, node, bootID string) *gal
 			PodName:     podName, PodUID: podUID, NodeName: node, BootID: bootID,
 		},
 	}
+}
+
+// CreateInstance creates inst, as NewInstance returns it, and returns the
+// stored object. When an instance of that name already exists it is read
+// back: one naming the same pod is returned, so a retried create succeeds,
+// and one naming another pod returns ErrNameTaken. c must read from the API
+// server, not a cache.
+func CreateInstance(ctx context.Context, c client.Client, inst *galacticv1alpha1.EdgeInstance,
+) (*galacticv1alpha1.EdgeInstance, error) {
+	err := c.Create(ctx, inst)
+	if err == nil {
+		return inst, nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
+		return nil, err
+	}
+	var cur galacticv1alpha1.EdgeInstance
+	if err := c.Get(ctx, client.ObjectKeyFromObject(inst), &cur); err != nil {
+		return nil, err
+	}
+	if cur.Spec.PodUID != inst.Spec.PodUID || cur.Spec.ProviderRef != inst.Spec.ProviderRef {
+		return nil, fmt.Errorf("%w: EdgeInstance %s/%s names pod %q of provider %q", ErrNameTaken,
+			cur.Namespace, cur.Name, cur.Spec.PodUID, cur.Spec.ProviderRef.Name)
+	}
+	return &cur, nil
 }
 
 // NewRoute returns a route for prefix in the VPC with vpcUID, with a new
