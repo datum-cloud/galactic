@@ -70,6 +70,28 @@ spec:
                   minItems: 1
                   type: array
                   x-kubernetes-list-type: set
+                clientPool:
+                  description: |-
+                    ClientPool is the IPv6 range, inside the VPC, that attachments take
+                    their addresses from: a masked CIDR from /64 to /120. At most 1024 of
+                    its addresses are allocated, whatever its size. Pools of services
+                    granting the same VPC must not overlap; galactic-controller refuses
+                    the attachments of the later of two overlapping services. Without a
+                    pool, the service admits no attachment. A pool can be added to a
+                    service that has none, and is fixed from then on.
+                  maxLength: 43
+                  type: string
+                  x-kubernetes-validations:
+                    - message: clientPool must be a masked IPv6 CIDR from /64 to /120
+                      rule: isCIDR(self) && cidr(self).ip().family() == 6 && cidr(self) == cidr(self).masked() && cidr(self).prefixLength() >= 64 && cidr(self).prefixLength() <= 120
+                drainSeconds:
+                  description: |-
+                    DrainSeconds is how long an attachment the foundation revokes keeps
+                    its resources before they are released. Unset means 30.
+                  format: int32
+                  maximum: 300
+                  minimum: 0
+                  type: integer
                 prefixes:
                   description: |-
                     Prefixes bound the prefixes the provider may request in the VPC. Each
@@ -130,9 +152,42 @@ spec:
                   rule: self.vpcRef.uid == oldSelf.vpcRef.uid
                 - message: capabilities are immutable
                   rule: self.capabilities == oldSelf.capabilities
+                - message: clientPool cannot change or be removed once set
+                  rule: '!has(oldSelf.clientPool) || (has(self.clientPool) && self.clientPool == oldSelf.clientPool)'
             status:
               description: EdgeServiceStatus reports the grant's admission state.
               properties:
+                allocations:
+                  description: |-
+                    Allocations are the client pool addresses held by attachments. Core
+                    writes them with a resourceVersion precondition, so two writers never
+                    hand out one address, and removes one only after the attachment's node
+                    has released it.
+                  items:
+                    description: EdgeAllocation is one client pool address and the attachment holding it.
+                    properties:
+                      address:
+                        description: Address is the allocated IPv6 address.
+                        maxLength: 39
+                        type: string
+                      attachment:
+                        description: Attachment is the holding EdgeAttachment's namespace and name.
+                        maxLength: 317
+                        type: string
+                      attachmentUID:
+                        description: AttachmentUID is the holding EdgeAttachment's metadata.uid.
+                        maxLength: 36
+                        type: string
+                    required:
+                      - address
+                      - attachment
+                      - attachmentUID
+                    type: object
+                  maxItems: 1024
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - address
+                  x-kubernetes-list-type: map
                 conditions:
                   description: Conditions include Admitted.
                   items:

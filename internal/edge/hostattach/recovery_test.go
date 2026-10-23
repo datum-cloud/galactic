@@ -154,3 +154,67 @@ func TestRestoreFailureDoesNotPoisonCaller(t *testing.T) {
 		t.Fatal("namespace work ran on or changed the caller thread")
 	}
 }
+
+// TestReleaseWithoutPod releases a stamped attachment whose pod namespace
+// can no longer be found, and refuses an unstamped link it cannot prove.
+func TestReleaseWithoutPod(t *testing.T) {
+	requireRoot(t)
+	host := newHost(t, vpcA)
+	hostH := host.open(t)
+	pod := newTestNS(t)
+	podH := pod.open(t)
+	a := recoveryAttachment()
+	if _, err := Provision(hostH, podH, a); err != nil {
+		t.Fatal(err)
+	}
+	other := a
+	other.ID = "other"
+	if err := Release(hostH, nil, other); !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("release of another ID without pod = %v", err)
+	}
+	if err := Release(hostH, nil, a); err != nil {
+		t.Fatalf("release without pod: %v", err)
+	}
+	if entries, err := List(hostH); err != nil || len(entries) != 0 {
+		t.Fatalf("after release: %+v, %v", entries, err)
+	}
+	unstamped := recoveryAttachment()
+	pod.do(t, func() error {
+		return netlink.LinkAdd(&netlink.Veth{
+			LinkAttrs: netlink.LinkAttrs{Name: unstamped.PodLink},
+			PeerName:  unstamped.HostLink, PeerNamespace: netlink.NsFd(int(host.Fd())),
+		})
+	})
+	if err := Release(hostH, nil, unstamped); !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("release of unstamped link without pod = %v", err)
+	}
+}
+
+// TestStalePeerIsReported provisions an attachment into a second namespace
+// while its link still pairs with the first, as after a sandbox replacement.
+func TestStalePeerIsReported(t *testing.T) {
+	requireRoot(t)
+	host := newHost(t, vpcA)
+	hostH := host.open(t)
+	first, second := newTestNS(t), newTestNS(t)
+	firstH, secondH := first.open(t), second.open(t)
+	a := recoveryAttachment()
+	if _, err := Provision(hostH, firstH, a); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Provision(hostH, secondH, a)
+	if !errors.Is(err, ErrStalePeer) || !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("provision into a new namespace = %v", err)
+	}
+	other := a
+	other.ID = "other"
+	if _, err := Provision(hostH, secondH, other); errors.Is(err, ErrStalePeer) || !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("another ID's provision = %v", err)
+	}
+	if err := Release(hostH, nil, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Provision(hostH, secondH, a); err != nil {
+		t.Fatalf("provision after releasing the stale link: %v", err)
+	}
+}

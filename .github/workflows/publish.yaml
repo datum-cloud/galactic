@@ -110,6 +110,19 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
+  publish-galactic-edge-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.22.0
+    with:
+      image-name: galactic-edge
+      dockerfile-path: containers/galactic-edge/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
   # galactic-vrf, the #855 ingress sidecar, deliberately has no entry in
   # publish-kustomize-bundles below: it has no config/galactic-vrf base to
   # stamp an image into yet (the #856 deployment contract is still open).
@@ -154,6 +167,7 @@ jobs:
         publish-fabric-router-image,
         publish-fabric-api-image,
         publish-galactic-nat-image,
+        publish-galactic-edge-image,
         publish-galactic-controller-image,
         publish-fabric-router-controller-image,
       ]
@@ -183,6 +197,9 @@ jobs:
         # so its tag is stamped into each.
         - { path: config/fabric-router/components/fabric-api, name: ghcr.io/datum-cloud/fabric-api, tag: "${{ needs.publish-fabric-api-image.outputs.tag }}" }
         - { path: config/fabric-api/base, name: ghcr.io/datum-cloud/fabric-api, tag: "${{ needs.publish-fabric-api-image.outputs.tag }}" }
+        # config/galactic-edge/base is opt-in and needs a per-cell MTU, like
+        # config/galactic-nat/base.
+        - { path: config/galactic-edge/base, name: ghcr.io/datum-cloud/galactic-edge, tag: "${{ needs.publish-galactic-edge-image.outputs.tag }}" }
         # config/galactic-controller/base is opt-in too, for the same reason.
         - { path: config/galactic-controller/base, name: ghcr.io/datum-cloud/galactic-controller, tag: "${{ needs.publish-galactic-controller-image.outputs.tag }}" }
         - { path: config/galactic-controller/fabric, name: ghcr.io/datum-cloud/galactic-controller, tag: "${{ needs.publish-galactic-controller-image.outputs.tag }}" }

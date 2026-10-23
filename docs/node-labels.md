@@ -20,6 +20,7 @@ for everything else about a given binary.
 | `galactic.datumapis.com/node=edge`        | `galactic-vrf` (ingress sidecar pods); hosts `galactic-gateway`/`galactic-nat` | primary role enum       |
 | `galactic.datumapis.com/gateway=enabled`  | `galactic-gateway`, on a `node=edge` node only                                 | opt-in flag (edge only) |
 | `galactic.datumapis.com/nat=enabled`      | `galactic-nat`, on a `node=edge` node only                                     | opt-in flag (edge only) |
+| `galactic.datumapis.com/edge=enabled`     | `galactic-edge`, on a `node=edge` node only                                    | opt-in flag (edge only) |
 | `galactic.datumapis.com/galactic=router`  | `galactic-cni`, `galactic-router` (plain/tenant mode)                          | mode enum               |
 | `galactic.datumapis.com/galactic=control` | `galactic-router-rr`                                                           | mode enum               |
 | `galactic.datumapis.com/fabric=router`    | `fabric-router` (plain mode)                                                   | mode enum               |
@@ -202,6 +203,15 @@ their own slot of the node's shared, pinned XDP dispatcher, and either can
 restart without detaching the other (see
 [docs/nat/configuration.md](nat/configuration.md)). Compute nodes reach their
 site's shards over SRv6 (`GALACTIC_CNI_EGRESS_SHARD_SIDS`).
+
+### `galactic.datumapis.com/edge=enabled`
+
+Runs `galactic-edge`, the Galactic Edge node agent
+(`config/galactic-edge/base/daemonset.yaml`), which programs and releases the
+host side of every `EdgeAttachment` admitted to the node. Opt-in, never
+automatic, and independent of `gateway` and `nat`. The node must also carry
+`galactic.datumapis.com/node=edge`, and `galactic=router`: an attachment joins
+its VPC's canonical host VRF and uSID entry, which `galactic-cni` creates.
 
 ### `galactic.datumapis.com/galactic=router`
 

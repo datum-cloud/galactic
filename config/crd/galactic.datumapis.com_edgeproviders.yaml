@@ -109,7 +109,8 @@ spec:
                 serviceAccounts:
                   description: |-
                     ServiceAccounts are the only identities whose bound tokens act for the
-                    provider. A request from any other identity is refused.
+                    provider. A request from any other identity is refused. The
+                    foundation's own identities cannot be listed.
                   items:
                     description: ServiceAccountReference names one ServiceAccount.
                     properties:
@@ -131,6 +132,9 @@ spec:
                   minItems: 1
                   type: array
                   x-kubernetes-list-type: atomic
+                  x-kubernetes-validations:
+                    - message: the foundation's ServiceAccounts cannot act for a provider
+                      rule: self.all(sa, !(sa.namespace == 'galactic-system' && sa.name in ['galactic-controller', 'galactic-edge']))
               required:
                 - capabilities
                 - configuration

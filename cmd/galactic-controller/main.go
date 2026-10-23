@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-logr/logr"
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
@@ -37,6 +38,8 @@ import (
 	cloudcontroller "go.datum.net/galactic/internal/cloud/controller"
 	"go.datum.net/galactic/internal/cloud/galactic"
 	cloudwebhook "go.datum.net/galactic/internal/cloud/webhook"
+	"go.datum.net/galactic/internal/edge/admission"
+	edgeattachment "go.datum.net/galactic/internal/edge/attachment"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/trafficpolicy/cell"
 	"go.datum.net/galactic/internal/trafficpolicy/webhook"
@@ -62,6 +65,8 @@ type options struct {
 	platformProject    string
 	ipamKubeconfig     string
 	hubKubeconfig      string
+	edge               bool
+	edgeMaxSkew        time.Duration
 }
 
 func main() {
@@ -99,6 +104,11 @@ func newRootCommand() *cobra.Command {
 	f.StringVar(&o.platformProject, "platform-project", "", "Fabric role: platform project for IPAM")
 	f.StringVar(&o.ipamKubeconfig, "ipam-kubeconfig", "", "Fabric role: IPAM cluster kubeconfig")
 	f.StringVar(&o.hubKubeconfig, "hub-kubeconfig", "", "Fabric role: federation hub kubeconfig")
+	f.BoolVar(&o.edge, "edge", false, "Cell role: admit, allocate and drain Galactic Edge attachments "+
+		"(requires the edge CRDs and config/galactic-edge applied first; a deleted attachment is held "+
+		"until galactic-edge on its node reports it released, or the node is removed)")
+	f.DurationVar(&o.edgeMaxSkew, "edge-max-skew", 2*time.Second,
+		"Cell role: maximum wall-clock error of any node; an EdgeService stops admitting this long before its validUntil")
 	return cmd
 }
 
@@ -148,6 +158,14 @@ func run(parent context.Context, o *options) error {
 	}
 	if err := SetupCloud(mgr); err != nil {
 		return err
+	}
+	if o.edge {
+		if err := edgeattachment.Setup(mgr, &edgeattachment.Reconciler{
+			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(),
+			Authority: admission.NewAuthority(o.edgeMaxSkew), MaxSkew: o.edgeMaxSkew,
+		}); err != nil {
+			return fmt.Errorf("set up edge attachments: %w", err)
+		}
 	}
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return err
