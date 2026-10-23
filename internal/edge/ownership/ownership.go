@@ -114,6 +114,8 @@ const DefaultDir = "/var/lib/galactic-edge/ownership"
 func VPCScope(vpc string) string {
 	if trimmed := strings.TrimLeft(vpc, "0"); trimmed != "" {
 		vpc = trimmed
+	} else if vpc != "" {
+		vpc = "0"
 	}
 	return "vpc-" + vpc
 }

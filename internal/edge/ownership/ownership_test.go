@@ -350,6 +350,20 @@ func TestOpenRequiresExistingDirectory(t *testing.T) {
 	}
 }
 
+func TestVPCScopeIgnoresPadding(t *testing.T) {
+	for _, tc := range []struct{ a, b string }{
+		{"00000000a", "a"},
+		{"000", "0"},
+	} {
+		if VPCScope(tc.a) != VPCScope(tc.b) {
+			t.Errorf("VPCScope(%q) = %q, VPCScope(%q) = %q; want one scope", tc.a, VPCScope(tc.a), tc.b, VPCScope(tc.b))
+		}
+	}
+	if VPCScope("a") == VPCScope("0a0") {
+		t.Error("distinct VPCs share a scope")
+	}
+}
+
 func TestOnlyTheOwnerBegins(t *testing.T) {
 	a, _ := owned(t)
 	if _, err := a.Begin(scope, "router"); !errors.Is(err, ErrNotOwner) {
