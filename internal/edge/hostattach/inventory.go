@@ -18,6 +18,19 @@ const vethType = "veth"
 
 func ownerAlias(id string) string { return aliasPrefix + id }
 
+// LinkID is the ID galactic-edge stamps on an attachment's links: the VPC
+// identifier and the EdgeAttachment's UID. The UID makes a recreated
+// attachment a different owner; the VPC names the ownership scope a link
+// belongs to, and tells maintenance which VPC a link with no attachment left
+// still uses.
+func LinkID(vpc, uid string) string { return vpc + "." + uid }
+
+// ParseLinkID splits an ID LinkID made. ok is false for any other ID.
+func ParseLinkID(id string) (vpc, uid string, ok bool) {
+	vpc, uid, ok = strings.Cut(id, ".")
+	return vpc, uid, ok && vpc != "" && uid != ""
+}
+
 // ObservedAttachment identifies an owned host link, including partial attempts.
 // It is observed kernel state, not a substitute for authorized durable intent.
 type ObservedAttachment struct {

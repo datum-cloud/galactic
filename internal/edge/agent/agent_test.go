@@ -344,6 +344,54 @@ func TestProgrammingDisabled(t *testing.T) {
 	}
 }
 
+// TestMaintenanceWriteKeepsScope runs a write by a writer that does not own
+// the scope, as garbage collection does, between two passes: the agent's
+// ticket from before it is refused, and the agent takes a fresh one and keeps
+// the scope instead of giving it up.
+func TestMaintenanceWriteKeepsScope(t *testing.T) {
+	f := newFixture(t)
+	a := f.agent()
+	f.pod(pod1UID)
+	f.attach("a", attA, pod1UID, vpcA, addr, false)
+	f.reconcile(a)
+	f.programmed("a")
+	index := f.hostLink("a").Attrs().Index
+
+	auth, err := ownership.Open(f.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(mutate func() error) error {
+		return auth.Exclusive(ownership.VPCScope(vpcA), func() error { return nil }, mutate)
+	}
+	if err := write(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(a)
+	f.programmed("a")
+	if got := f.hostLink("a").Attrs().Index; got != index {
+		t.Errorf("attachment link recreated after a maintenance write: %d -> %d", index, got)
+	}
+	rec, err := auth.Read(ownership.VPCScope(vpcA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Owner != a.Owner || rec.Pending {
+		t.Fatalf("scope after the agent's next pass = %+v, want owned by %q and not pending", rec, a.Owner)
+	}
+
+	// A maintenance write that failed part way leaves the scope requiring a
+	// snapshot, which the agent's next pass is.
+	if err := write(func() error { return errors.New("partial") }); err == nil {
+		t.Fatal("failed exclusive write reported success")
+	}
+	f.reconcile(a)
+	f.programmed("a")
+	if rec, err = auth.Read(ownership.VPCScope(vpcA)); err != nil || rec.Pending {
+		t.Fatalf("scope after the agent's snapshot = %+v, %v; want not pending", rec, err)
+	}
+}
+
 // TestFailedReleaseIsRetried fails a release, first in the datapath and then
 // in the runtime: the attachment is not reported Released, its link and
 // datapath rows stay, and a later pass finishes the release.
@@ -412,7 +460,7 @@ func TestScopeOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := auth.Claim("vpc-"+vpcB, "galactic-cni/test"); err != nil {
+	if _, err := auth.Claim(ownership.VPCScope(vpcB), "galactic-cni/test"); err != nil {
 		t.Fatal(err)
 	}
 	f.attach("b", attB, pod1UID, vpcB, addr, false)
@@ -423,7 +471,7 @@ func TestScopeOwnership(t *testing.T) {
 		c.Reason != ReasonOwnershipUnavailable {
 		t.Fatalf("attachment in another writer's scope reported %+v", c)
 	}
-	if rec, _ := auth.Read("vpc-" + vpcB); rec.Owner != "galactic-cni/test" || rec.Transitioning {
+	if rec, _ := auth.Read(ownership.VPCScope(vpcB)); rec.Owner != "galactic-cni/test" || rec.Transitioning {
 		t.Fatalf("another writer's scope was taken: %+v", rec)
 	}
 }

@@ -112,3 +112,74 @@ func TestStaleWriterCannotOverwriteAdoptedRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestStaleWriterCannotUndoMaintenance applies an exclusive write to real
+// kernel state: the owner prepared to restore a route, then garbage
+// collection removed it under the scope's lock. The owner's resumed commit
+// is refused, and the route stays removed until the owner reads the state
+// again.
+func TestStaleWriterCannotUndoMaintenance(t *testing.T) {
+	requireRoot(t)
+	netns, err := testutils.NewNS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = netns.Close()
+		_ = testutils.UnmountNS(netns)
+	})
+	const table = 100
+	dst := &net.IPNet{IP: net.ParseIP("fd00:6::"), Mask: net.CIDRMask(48, 128)}
+	var link int
+	route := func() *netlink.Route { return &netlink.Route{LinkIndex: link, Table: table, Dst: dst} }
+	if err := netns.Do(func(ns.NetNS) error {
+		d := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "owner0"}}
+		if err := netlink.LinkAdd(d); err != nil {
+			return err
+		}
+		if err := netlink.LinkSetUp(d); err != nil {
+			return err
+		}
+		l, err := netlink.LinkByName("owner0")
+		if err != nil {
+			return err
+		}
+		link = l.Attrs().Index
+		return netlink.RouteReplace(route())
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a := newAuthority(t)
+	tk, err := a.Claim(scope, "galactic-edge/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tk, err = a.CommitSnapshot(tk, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Exclusive(scope, noCheck, func() error {
+		return netns.Do(func(ns.NetNS) error { return netlink.RouteDel(route()) })
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restore := func() error {
+		return netns.Do(func(ns.NetNS) error { return netlink.RouteReplace(route()) })
+	}
+	if _, err := a.Commit(tk, restore); !errors.Is(err, ErrStale) {
+		t.Fatalf("resumed stale write = %v, want ErrStale", err)
+	}
+	if err := netns.Do(func(ns.NetNS) error {
+		routes, err := netlink.RouteListFiltered(unix.AF_INET6,
+			&netlink.Route{Table: table, Dst: dst}, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_DST)
+		if err != nil {
+			return err
+		}
+		if len(routes) != 0 {
+			t.Errorf("routes for %s after the stale write = %+v, want none", dst, routes)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

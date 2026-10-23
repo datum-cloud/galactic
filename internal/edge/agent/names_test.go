@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	"go.datum.net/galactic/internal/edge/hostattach"
 )
 
 func TestDesiredNames(t *testing.T) {
@@ -39,9 +40,9 @@ func TestDesiredNames(t *testing.T) {
 	if a.PodTable < podTableBase || a.PodTable >= podTableBase+podTableSpan {
 		t.Errorf("pod table %#x outside its range", a.PodTable)
 	}
-	vpc, uid, ok := parseID(a.ID)
+	vpc, uid, ok := hostattach.ParseLinkID(a.ID)
 	if !ok || vpc != "abc" || uid != string(att.UID) {
-		t.Errorf("parseID(%q) = %q, %q, %t", a.ID, vpc, uid, ok)
+		t.Errorf("hostattach.ParseLinkID(%q) = %q, %q, %t", a.ID, vpc, uid, ok)
 	}
 	again, _ := desired(att, 1500)
 	if again.HostLink != a.HostLink || again.PodTable != a.PodTable {
@@ -51,8 +52,8 @@ func TestDesiredNames(t *testing.T) {
 	if other, _ := desired(att, 1500); other.HostLink == a.HostLink || other.ID == a.ID {
 		t.Error("a recreated attachment reuses its predecessor's names")
 	}
-	if _, _, ok := parseID("legacy-id"); ok {
-		t.Error("parseID accepted an ID without a VPC")
+	if _, _, ok := hostattach.ParseLinkID("legacy-id"); ok {
+		t.Error("ParseLinkID accepted an ID without a VPC")
 	}
 }
 

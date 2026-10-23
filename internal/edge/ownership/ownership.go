@@ -25,6 +25,11 @@
 // the scope in the same resync-required state, because a partly applied
 // change cannot be assumed either done or undone.
 //
+// A writer that does not own a scope, such as garbage collection, writes it
+// with Exclusive: under the same lock, never while ownership moves, without
+// taking ownership, and making every outstanding ticket stale, so the owner
+// prepares its next change from the state that write left.
+//
 // Owner IDs must be unique to a writer incarnation; process restarts use new IDs
 // and the fence/adopt barrier. Reusing an ID lets an old process obtain current
 // tickets. All writers share the same durable state and lock files, which must
@@ -47,6 +52,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -99,10 +105,37 @@ type Authority struct {
 	dir string
 }
 
+// DefaultDir is the host directory every writer on a node shares.
+const DefaultDir = "/var/lib/galactic-edge/ownership"
+
+// VPCScope is the scope of one VPC's canonical host VRF and its shared
+// datapath state on the node. vpc is the VPC's base62 identifier, with or
+// without the zero padding of a VRF interface name; both name one scope.
+func VPCScope(vpc string) string {
+	if trimmed := strings.TrimLeft(vpc, "0"); trimmed != "" {
+		vpc = trimmed
+	}
+	return "vpc-" + vpc
+}
+
 // New returns an authority over dir, creating it if needed.
 func New(dir string) (*Authority, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("ownership: create %s: %w", dir, err)
+	}
+	return &Authority{dir: dir}, nil
+}
+
+// Open returns an authority over dir, which must already exist. Writers that
+// share a directory another process or the host provides use it, so a missing
+// mount fails instead of fencing against a private, empty directory.
+func Open(dir string) (*Authority, error) {
+	st, err := os.Stat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("ownership: %w", err)
+	}
+	if !st.IsDir() {
+		return nil, fmt.Errorf("ownership: %s is not a directory", dir)
 	}
 	return &Authority{dir: dir}, nil
 }
@@ -202,6 +235,44 @@ func (a *Authority) commit(t Ticket, snapshot bool, mutate func() error) (Ticket
 		return nil
 	})
 	return next, err
+}
+
+// Exclusive runs check and then mutate with the scope's lock held, on behalf
+// of a writer that does not own the scope, such as garbage collection.
+//
+// check reads what decides whether to write, and must not write: what it reads
+// under the lock is current. If it fails, Exclusive returns its error and
+// leaves the scope's record as it was. Otherwise mutate runs. Exclusive changes
+// no owner, but advances the revision, so every ticket issued before it is
+// stale: an owner that prepared a change before this write must read the
+// state again. If mutate fails, the owner's next commit must be a snapshot.
+//
+// A scope between Fence and Adopt is ErrTransitioning: no writer begins while
+// ownership moves.
+//
+// The same rules as Commit apply to check and mutate: neither may call the
+// authority for the same scope, and mutate must finish every write before it
+// returns.
+func (a *Authority) Exclusive(scope string, check, mutate func() error) error {
+	return a.lockedStaged(scope, func(r *Record, persist func() error) error {
+		if r.Transitioning {
+			return ErrTransitioning
+		}
+		if err := check(); err != nil {
+			return err
+		}
+		pending := r.Pending
+		r.Pending = true
+		if err := persist(); err != nil {
+			return err
+		}
+		if err := mutate(); err != nil {
+			return err
+		}
+		r.Pending = pending
+		r.Revision++
+		return persist()
+	})
 }
 
 // Fence starts a transfer: it marks the scope transitioning and advances its

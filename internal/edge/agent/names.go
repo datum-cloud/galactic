@@ -32,18 +32,6 @@ const (
 	podTableSpan = 0x01000000
 )
 
-// attachmentID is the ID hostattach stamps on an attachment's links: the VPC
-// identifier and the EdgeAttachment's UID. The UID makes a recreated
-// attachment a different owner; the VPC lets a link with no attachment left
-// be released under its own scope.
-func attachmentID(vpc, uid string) string { return vpc + "." + uid }
-
-// parseID splits an ID attachmentID made. ok is false for any other alias.
-func parseID(id string) (vpc, uid string, ok bool) {
-	vpc, uid, ok = strings.Cut(id, ".")
-	return vpc, uid, ok && vpc != "" && uid != ""
-}
-
 // handle derives a short base62 handle and a pod table from the UID.
 func handle(uid string) (string, uint32) {
 	sum := sha256.Sum256([]byte(uid))
@@ -66,7 +54,7 @@ func desired(att *galacticv1alpha1.EdgeAttachment, mtu int) (hostattach.Attachme
 	}
 	h, table := handle(string(att.UID))
 	a := hostattach.Attachment{
-		ID:       attachmentID(att.Status.VPC, string(att.UID)),
+		ID:       hostattach.LinkID(att.Status.VPC, string(att.UID)),
 		HostVRF:  intf.GenerateInterfaceNameVRF(att.Status.VPC),
 		HostLink: fmt.Sprintf("E%09s%s", att.Status.VPC, h),
 		PodVRF:   "gv" + h,
