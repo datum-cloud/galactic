@@ -7,6 +7,8 @@ package v1alpha1_test
 import (
 	"context"
 	"fmt"
+	"math"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +21,11 @@ const (
 	testPool         = "fd00:5::/120"
 	edgeProviderName = "connect-ip"
 	packetAccess     = "PacketAccess"
+	edgeVPCUID       = "11111111-2222-3333-4444-555555555555"
+	ipv4Prefix       = "192.0.2.0/24"
+	otherValue       = "other"
+	secondPod        = "pod-2"
+	testBootID       = "boot"
 )
 
 func edgeService(name string) *galacticv1alpha1.EdgeService {
@@ -26,9 +33,9 @@ func edgeService(name string) *galacticv1alpha1.EdgeService {
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
 		Spec: galacticv1alpha1.EdgeServiceSpec{
 			ProviderRef:  galacticv1alpha1.EdgeProviderReference{Name: edgeProviderName},
-			VPCRef:       galacticv1alpha1.EdgeVPCReference{Name: "prod", UID: "11111111-2222-3333-4444-555555555555"},
+			VPCRef:       galacticv1alpha1.EdgeVPCReference{Name: "prod", UID: edgeVPCUID},
 			Capabilities: []string{packetAccess},
-			Prefixes:     []string{"fd00:5::/48", "192.0.2.0/24"},
+			Prefixes:     []string{"fd00:5::/48", ipv4Prefix},
 		},
 	}
 }
@@ -80,7 +87,7 @@ func TestEdgeSchema(t *testing.T) {
 		{"NoCapability", func(s *galacticv1alpha1.EdgeService) { s.Spec.Capabilities = nil }, false},
 		{"NoVPCUID", func(s *galacticv1alpha1.EdgeService) { s.Spec.VPCRef.UID = "" }, false},
 		{"ClientPool", func(s *galacticv1alpha1.EdgeService) { s.Spec.ClientPool = testPool }, true},
-		{"ClientPoolIPv4", func(s *galacticv1alpha1.EdgeService) { s.Spec.ClientPool = "192.0.2.0/24" }, false},
+		{"ClientPoolIPv4", func(s *galacticv1alpha1.EdgeService) { s.Spec.ClientPool = ipv4Prefix }, false},
 		{"ClientPoolTooSmall", func(s *galacticv1alpha1.EdgeService) { s.Spec.ClientPool = "fd00:5::/121" }, false},
 		{"ClientPoolHostBits", func(s *galacticv1alpha1.EdgeService) { s.Spec.ClientPool = "fd00:5::1/120" }, false},
 		{"DrainTooLong", func(s *galacticv1alpha1.EdgeService) {
@@ -161,7 +168,7 @@ func edgeAttachment(name string) *galacticv1alpha1.EdgeAttachment {
 		Spec: galacticv1alpha1.EdgeAttachmentSpec{
 			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: edgeProviderName},
 			ServiceRef: galacticv1alpha1.EdgeServiceReference{
-				Namespace: "tenant", Name: "svc", UID: "11111111-2222-3333-4444-555555555555",
+				Namespace: "tenant", Name: "svc", UID: edgeVPCUID,
 			},
 			InstanceRef:     galacticv1alpha1.EdgeInstanceReference{Name: "inst"},
 			PodUID:          "99999999-2222-3333-4444-555555555555",
@@ -213,14 +220,186 @@ func TestEdgeAttachmentSchema(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "inst", Namespace: testNamespace},
 		Spec: galacticv1alpha1.EdgeInstanceSpec{
 			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: edgeProviderName},
-			PodName:     "p", PodUID: "u", NodeName: "n",
+			PodName:     "p", PodUID: "u", NodeName: "n", BootID: testBootID,
 		},
 	}
 	if err := c.Create(ctx, inst); err != nil {
 		t.Fatal(err)
 	}
-	inst.Spec.NodeName = "other"
+	inst.Spec.NodeName = otherValue
 	if err := c.Update(ctx, inst); err == nil {
 		t.Error("instance spec changed")
+	}
+}
+
+func TestEdgeRouteSchema(t *testing.T) {
+	c, _ := startAPIServer(t)
+	ctx := context.Background()
+
+	route := func(name, prefix string) *galacticv1alpha1.EdgeRoute {
+		return &galacticv1alpha1.EdgeRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Spec: galacticv1alpha1.EdgeRouteSpec{
+				ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: edgeProviderName},
+				VPCUID:      edgeVPCUID, Prefix: prefix, Incarnation: "inc",
+			},
+		}
+	}
+	// The name and the index key are derived from the prefix, so one prefix
+	// has one spelling.
+	for _, bad := range []string{ipv4Prefix, "fd00:5::1/48", "::/0", "fd00:5::", "fd00:0005::/64", "FD00:5::/64",
+		"fd00:5:0:0::/64"} {
+		if err := c.Create(ctx, route("bad", bad)); err == nil {
+			t.Errorf("route prefix %q accepted", bad)
+		}
+	}
+	r := route("r", "fd00:5::/64")
+	if err := c.Create(ctx, r); err != nil {
+		t.Fatalf("valid EdgeRoute refused: %v", err)
+	}
+	claim := galacticv1alpha1.EdgeRouteClaim{
+		Attachment: "a1", HolderPodUID: "pod-1", HolderInstance: "i1", InstanceEpoch: 1, Epoch: 1,
+	}
+	r.Spec.Claim = &claim
+	if err := c.Update(ctx, r); err != nil {
+		t.Fatalf("first claim refused: %v", err)
+	}
+
+	update := func(what string, ok bool, mutate func(*galacticv1alpha1.EdgeRoute)) {
+		t.Helper()
+		var cur galacticv1alpha1.EdgeRoute
+		if err := c.Get(ctx, client.ObjectKeyFromObject(r), &cur); err != nil {
+			t.Fatal(err)
+		}
+		mutate(&cur)
+		err := c.Update(ctx, &cur)
+		if ok && err != nil {
+			t.Errorf("%s refused: %v", what, err)
+		}
+		if !ok && err == nil {
+			t.Errorf("%s accepted", what)
+		}
+	}
+	update("prefix change", false, func(r *galacticv1alpha1.EdgeRoute) { r.Spec.Prefix = "fd00:6::/64" })
+	update("incarnation change", false, func(r *galacticv1alpha1.EdgeRoute) { r.Spec.Incarnation = otherValue })
+	update("claim removal", false, func(r *galacticv1alpha1.EdgeRoute) { r.Spec.Claim = nil })
+	update("new holder at the same epoch", false, func(r *galacticv1alpha1.EdgeRoute) {
+		r.Spec.Claim.Attachment, r.Spec.Claim.HolderPodUID = "a2", secondPod
+	})
+	update("new instance epoch at the same claim epoch", false, func(r *galacticv1alpha1.EdgeRoute) {
+		r.Spec.Claim.InstanceEpoch = 2
+	})
+	update("release", true, func(r *galacticv1alpha1.EdgeRoute) { r.Spec.Claim.Released = true })
+	update("lower epoch", false, func(r *galacticv1alpha1.EdgeRoute) {
+		r.Spec.Claim = &galacticv1alpha1.EdgeRouteClaim{
+			Attachment: "a2", HolderPodUID: secondPod, HolderInstance: "i2", InstanceEpoch: 1, Epoch: 1,
+		}
+	})
+	update("takeover at the next epoch", true, func(r *galacticv1alpha1.EdgeRoute) {
+		r.Spec.Claim = &galacticv1alpha1.EdgeRouteClaim{
+			Attachment: "a2", HolderPodUID: secondPod, HolderInstance: "i2", InstanceEpoch: 1, Epoch: 2,
+		}
+	})
+	closeAt := func(what string, ok bool, epoch int64) {
+		t.Helper()
+		var cur galacticv1alpha1.EdgeRoute
+		if err := c.Get(ctx, client.ObjectKeyFromObject(r), &cur); err != nil {
+			t.Fatal(err)
+		}
+		cur.Status.ClosedEpoch = epoch
+		if err := c.Status().Update(ctx, &cur); (err == nil) != ok {
+			t.Errorf("%s: %v", what, err)
+		}
+	}
+	closeAt("closing epoch 2", true, 2)
+	closeAt("lowering closedEpoch", false, 1)
+	closeAt("clearing closedEpoch", false, 0)
+
+	idx := &galacticv1alpha1.EdgeRouteIndex{
+		ObjectMeta: metav1.ObjectMeta{Name: edgeVPCUID, Namespace: testNamespace},
+		Spec:       galacticv1alpha1.EdgeRouteIndexSpec{VPCUID: edgeVPCUID},
+	}
+	if err := c.Create(ctx, idx); err != nil {
+		t.Fatalf("valid EdgeRouteIndex refused: %v", err)
+	}
+	idx.Spec.VPCUID = otherValue
+	if err := c.Update(ctx, idx); err == nil {
+		t.Error("EdgeRouteIndex vpcUID changed")
+	}
+
+	inst := &galacticv1alpha1.EdgeInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "leased", Namespace: testNamespace},
+		Spec: galacticv1alpha1.EdgeInstanceSpec{
+			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: edgeProviderName},
+			PodName:     "p", PodUID: "u", NodeName: "n",
+		},
+	}
+	if err := c.Create(ctx, inst); err == nil {
+		t.Error("EdgeInstance without a boot ID accepted")
+	}
+	inst.Spec.BootID = testBootID
+	if err := c.Create(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEdgeClaimOrdering: the API server keeps a released claim released
+// until a new epoch.
+func TestEdgeClaimOrdering(t *testing.T) {
+	c, _ := startAPIServer(t)
+	ctx := context.Background()
+	r := &galacticv1alpha1.EdgeRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "released", Namespace: testNamespace},
+		Spec: galacticv1alpha1.EdgeRouteSpec{
+			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: edgeProviderName},
+			VPCUID:      edgeVPCUID, Prefix: "fd00:7::/64", Incarnation: "inc",
+			Claim: &galacticv1alpha1.EdgeRouteClaim{Attachment: "a1", HolderPodUID: "pod-1", HolderInstance: "i1",
+				InstanceEpoch: 1, Epoch: 1, Released: true},
+		},
+	}
+	if err := c.Create(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	r.Spec.Claim.Released = false
+	if err := c.Update(ctx, r); err == nil {
+		t.Error("a released claim was unreleased at the same epoch")
+	}
+}
+
+// maxIndexRoutes is EdgeRouteIndexSpec.Routes' MaxItems.
+const maxIndexRoutes = 1024
+
+// TestEdgeRouteIndexFitsItsLimit: an index holding its maximum number of
+// entries, each at every field's maximum length, is stored and updated, so
+// the entry cap keeps an index within the API server's and etcd's request
+// limits.
+func TestEdgeRouteIndexFitsItsLimit(t *testing.T) {
+	c, _ := startAPIServer(t)
+	ctx := context.Background()
+	idx := &galacticv1alpha1.EdgeRouteIndex{
+		ObjectMeta: metav1.ObjectMeta{Name: edgeVPCUID, Namespace: testNamespace},
+		Spec:       galacticv1alpha1.EdgeRouteIndexSpec{VPCUID: edgeVPCUID},
+	}
+	namespaced := func(fill string) string { return strings.Repeat("r", 63) + "/" + strings.Repeat(fill, 253) }
+	for i := range maxIndexRoutes {
+		idx.Spec.Routes = append(idx.Spec.Routes, galacticv1alpha1.EdgeRouteIndexEntry{
+			Prefix: fmt.Sprintf("fd00:%x:%x:ffff:ffff:ffff:ffff:ff00/120", i>>8, i&0xff),
+			Route:  namespaced("n"), RouteUID: strings.Repeat("u", 36), Epoch: math.MaxInt64,
+			AttachmentUID: strings.Repeat("a", 36), Instance: namespaced("i"),
+			InstanceIncarnation: strings.Repeat("c", 64), InstanceEpoch: math.MaxInt64,
+			Node: strings.Repeat("o", 253), Removing: strings.Repeat("x", 64),
+		})
+	}
+	if err := c.Create(ctx, idx); err != nil {
+		t.Fatalf("full index refused: %v", err)
+	}
+	idx.Spec.Rebuilt = true
+	if err := c.Update(ctx, idx); err != nil {
+		t.Fatalf("full index update refused: %v", err)
+	}
+	idx.Spec.Routes = append(idx.Spec.Routes, idx.Spec.Routes[0])
+	idx.Spec.Routes[len(idx.Spec.Routes)-1].Prefix = "fd00:ffff::/64"
+	if err := c.Update(ctx, idx); err == nil {
+		t.Fatal("index past its limit accepted")
 	}
 }

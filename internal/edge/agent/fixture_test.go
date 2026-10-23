@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kruntime "k8s.io/apimachinery/pkg/runtime"
@@ -27,6 +29,7 @@ import (
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/plumbing/ebpf/forwardgatemap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
@@ -142,19 +145,22 @@ func (r *resolver) set(podUID, path string) {
 	r.paths[podUID] = path
 }
 
-// datapath records registrations by ifindex.
+// datapath records registrations by ifindex, and marks each registered link
+// gated in gates as the pinned datapath does.
 type datapath struct {
 	sync.Mutex
 	rows         map[uint32]uint32
 	unregistered []uint32
 	// failUnregister fails the next Unregister calls.
 	failUnregister int
+	gates          *gates
 }
 
-func (d *datapath) Register(vrfTable, ifindex uint32, _ string) error {
+func (d *datapath) Register(vrfTable, ifindex uint32, _ string, addr netip.Addr) error {
 	d.Lock()
 	defer d.Unlock()
 	d.rows[ifindex] = vrfTable
+	d.gates.setLink(ifindex, addr)
 	return nil
 }
 
@@ -167,7 +173,108 @@ func (d *datapath) Unregister(ifindex uint32) error {
 	}
 	delete(d.rows, ifindex)
 	d.unregistered = append(d.unregistered, ifindex)
+	d.gates.deleteGates(ifindex)
 	return nil
+}
+
+func (d *datapath) Forget(ifindex uint32) error {
+	d.gates.deleteLink(ifindex)
+	return nil
+}
+
+// gates is an in-memory forwarding gate.
+type gates struct {
+	sync.Mutex
+	links map[uint32]netip.Addr
+	rows  map[uint32]map[netip.Prefix]forwardgatemap.Gate
+	// fail fails every call while set.
+	fail error
+}
+
+func newGates() *gates {
+	return &gates{links: map[uint32]netip.Addr{}, rows: map[uint32]map[netip.Prefix]forwardgatemap.Gate{}}
+}
+
+func (g *gates) setLink(ifindex uint32, addr netip.Addr) {
+	g.Lock()
+	defer g.Unlock()
+	g.links[ifindex] = addr
+}
+
+func (g *gates) deleteGates(ifindex uint32) {
+	g.Lock()
+	defer g.Unlock()
+	delete(g.rows, ifindex)
+}
+
+func (g *gates) Links() (map[uint32]netip.Addr, error) {
+	g.Lock()
+	defer g.Unlock()
+	out := map[uint32]netip.Addr{}
+	for k, v := range g.links {
+		out[k] = v
+	}
+	return out, g.fail
+}
+
+func (g *gates) DeleteLink(ifindex uint32) error {
+	g.deleteLink(ifindex)
+	return nil
+}
+
+func (g *gates) deleteLink(ifindex uint32) {
+	g.Lock()
+	defer g.Unlock()
+	delete(g.links, ifindex)
+	delete(g.rows, ifindex)
+}
+
+func (g *gates) Link(ifindex uint32) (netip.Addr, bool, error) {
+	g.Lock()
+	defer g.Unlock()
+	a, ok := g.links[ifindex]
+	return a, ok, g.fail
+}
+
+func (g *gates) Gates(ifindex uint32) (map[netip.Prefix]forwardgatemap.Gate, error) {
+	g.Lock()
+	defer g.Unlock()
+	out := map[netip.Prefix]forwardgatemap.Gate{}
+	for p, r := range g.rows[ifindex] {
+		out[p] = r
+	}
+	return out, g.fail
+}
+
+func (g *gates) Set(ifindex uint32, prefix netip.Prefix, r forwardgatemap.Gate) error {
+	g.Lock()
+	defer g.Unlock()
+	if g.fail != nil {
+		return g.fail
+	}
+	if g.rows[ifindex] == nil {
+		g.rows[ifindex] = map[netip.Prefix]forwardgatemap.Gate{}
+	}
+	g.rows[ifindex][prefix] = r
+	return nil
+}
+
+func (g *gates) Delete(ifindex uint32, prefix netip.Prefix) error {
+	g.Lock()
+	defer g.Unlock()
+	if g.fail != nil {
+		return g.fail
+	}
+	delete(g.rows[ifindex], prefix)
+	return nil
+}
+
+// row returns the gate of prefix on ifindex.
+func (g *gates) row(ifindex int, prefix netip.Prefix) (forwardgatemap.Gate, bool) {
+	g.Lock()
+	defer g.Unlock()
+	r, ok := g.rows[uint32(ifindex)][prefix]
+	return r, ok
 }
 
 func (d *datapath) table(ifindex int) (uint32, bool) {
@@ -184,8 +291,12 @@ type fixture struct {
 	client   client.Client
 	pods     *resolver
 	dp       *datapath
+	gates    *gates
 	stateDir string
 	seq      int
+	// boot is the node's CLOCK_BOOTTIME, advanced by hand.
+	boot time.Duration
+	wall time.Time
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -193,8 +304,10 @@ func newFixture(t *testing.T) *fixture {
 	requireRoot(t)
 	f := &fixture{
 		t: t, host: newNS(t), pods: &resolver{paths: map[string]string{}},
-		dp: &datapath{rows: map[uint32]uint32{}}, stateDir: t.TempDir(),
+		gates: newGates(), stateDir: t.TempDir(),
+		boot: time.Hour, wall: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC),
 	}
+	f.dp = &datapath{rows: map[uint32]uint32{}, gates: f.gates}
 	in(t, f.host, func() error {
 		for vpc, table := range vrfTables {
 			vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: intf.GenerateInterfaceNameVRF(vpc)}, Table: table}
@@ -216,8 +329,12 @@ func newFixture(t *testing.T) *fixture {
 	if err := galacticv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	f.client = fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&galacticv1alpha1.EdgeAttachment{}).Build()
+		WithStatusSubresource(&galacticv1alpha1.EdgeAttachment{}, &galacticv1alpha1.EdgeRoute{},
+			&galacticv1alpha1.EdgeInstance{}, &galacticv1alpha1.EdgeProvider{}).Build()
 	return f
 }
 
@@ -232,6 +349,8 @@ func (f *fixture) agent() *Agent {
 	return &Agent{
 		Client: f.client, NodeName: node, Owner: NewOwner(node, time.Unix(int64(f.seq), 0), "test"),
 		Ownership: auth, Host: f.hostNS, Namespaces: f.pods, Datapath: f.dp, MTU: mtu,
+		APIReader: f.client, Gates: f.gates, Params: gateParams, BootID: bootID,
+		BootClock: func() time.Duration { return f.boot }, Now: func() time.Time { return f.wall },
 	}
 }
 
@@ -248,7 +367,7 @@ func (f *fixture) attach(name, uid, podUID, vpc, addr string, packet bool) *gala
 	f.t.Helper()
 	a := &galacticv1alpha1.EdgeAttachment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: "edge", UID: types.UID(uid),
+			Name: name, Namespace: edgeNS, UID: types.UID(uid),
 			Finalizers: []string{galacticv1alpha1.EdgeAttachmentFinalizer},
 		},
 		Spec: galacticv1alpha1.EdgeAttachmentSpec{PodUID: podUID},
@@ -270,7 +389,7 @@ func (f *fixture) attach(name, uid, podUID, vpc, addr string, packet bool) *gala
 func (f *fixture) get(name string) *galacticv1alpha1.EdgeAttachment {
 	f.t.Helper()
 	var a galacticv1alpha1.EdgeAttachment
-	if err := f.client.Get(context.Background(), client.ObjectKey{Namespace: "edge", Name: name}, &a); err != nil {
+	if err := f.client.Get(context.Background(), client.ObjectKey{Namespace: edgeNS, Name: name}, &a); err != nil {
 		f.t.Fatal(err)
 	}
 	return &a

@@ -37,8 +37,8 @@
 // Callers must stop forwarding at the deadline independently of API progress.
 // An API outage longer than Duration therefore stops service traffic. Renew
 // cannot revive an expired lease; reacquisition follows the takeover protocol.
-// There are no production timing defaults: every participant must be configured
-// with the same reviewed Duration, MaxDrift and Margin and enforce their bounds.
+// Every participant must use the same Duration, MaxDrift and Margin: a
+// Galactic Edge cell's are internal/edge/timing.Params.
 package claim
 
 import (
@@ -79,6 +79,11 @@ type Record struct {
 	// Sequence advances on every renewal, so a live holder always changes
 	// the record within one Duration.
 	Sequence uint64
+	// RenewStart is the holder's Clock reading taken before it sent the
+	// acquisition or renewal that wrote the record. A reader on the same
+	// clock, such as an agent on the holder's node, can bound the holder's
+	// validity from it without trusting the holder's deadline.
+	RenewStart time.Duration
 	// Released reports that the holder of Epoch stopped forwarding and gave
 	// the claim up.
 	Released bool
@@ -255,7 +260,8 @@ func (in *Instance) Acquire(ctx context.Context, key string) (Lease, error) {
 	if !r.Released && !in.waited(r, in.Clock()) {
 		return Lease{}, fmt.Errorf("%w: %q holds epoch %d", ErrHeld, r.Holder, r.Epoch)
 	}
-	next := Record{Key: key, Holder: in.ID, Epoch: r.Epoch + 1, Incarnation: r.Incarnation, Version: r.Version}
+	next := Record{Key: key, Holder: in.ID, Epoch: r.Epoch + 1, Incarnation: r.Incarnation,
+		RenewStart: start, Version: r.Version}
 	updated, err := in.Store.Update(ctx, next)
 	if err != nil {
 		return Lease{}, err
@@ -302,7 +308,7 @@ func (in *Instance) Renew(ctx context.Context, l Lease) (Lease, error) {
 		return Lease{}, err
 	}
 	next := Record{Key: l.Key, Holder: l.Holder, Epoch: l.Epoch, Incarnation: l.Incarnation,
-		Sequence: l.sequence + 1, Version: l.version}
+		Sequence: l.sequence + 1, RenewStart: start, Version: l.version}
 	updated, err := in.Store.Update(ctx, next)
 	if errors.Is(err, ErrConflict) {
 		current, getErr := in.Store.Get(ctx, l.Key)

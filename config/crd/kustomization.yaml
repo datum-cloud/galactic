@@ -14,6 +14,8 @@ resources:
   - galactic.datumapis.com_edgeattachments.yaml
   - galactic.datumapis.com_edgeinstances.yaml
   - galactic.datumapis.com_edgeproviders.yaml
+  - galactic.datumapis.com_edgerouteindices.yaml
+  - galactic.datumapis.com_edgeroutes.yaml
   - galactic.datumapis.com_edgeservices.yaml
   - galactic.datumapis.com_egressshards.yaml
   - galactic.datumapis.com_fabricendpoints.yaml

@@ -1318,6 +1318,81 @@ struct {
 	__type(value, __u32); // enum egress_kind
 } ifindex_egress_kind_table SEC(".maps");
 
+// The Galactic Edge forwarding gate. An edge attachment's host link carries
+// traffic only for the attachment's own address, which it holds for its
+// lifetime, and for the prefixes its provider instance currently holds a
+// forwarding claim on. galactic-edge writes one edge_link_table row per host
+// link and one edge_gate_table row per accepted prefix on it, holding the
+// CLOCK_BOOTTIME instant the claim's lease expires. The datapath compares that
+// deadline with bpf_ktime_get_boot_ns on every packet, so a gate closes on
+// time with no userspace progress: a stalled provider, agent or API server
+// cannot keep a prefix forwarding past its lease.
+//
+// The gate applies at all three places a packet crosses a host link:
+// usid_egress checks the source of what the pod sends, and usid_ingress and
+// tp_deliver check the destination of what reaches it, by bpf_redirect_peer
+// and by the kernel respectively. Link-local and link-scope multicast
+// destinations, and link-local or unspecified sources sent to them, stay on
+// the link and pass.
+// An interface with no edge_link_table row is not an edge link and is never
+// gated.
+
+// struct edge_link_value is an edge host link's own attachment address.
+struct edge_link_value {
+	__u8 addr[16];
+};
+
+// struct edge_gate_key is an LPM key over the host link's ifindex and an IPv6
+// prefix: prefixlen counts the ifindex's 32 bits plus the prefix length, so a
+// lookup with the full 160 bits finds the longest prefix on that link alone.
+struct edge_gate_key {
+	__u32 prefixlen;
+	__u32 ifindex;
+	__u8 addr[16];
+};
+
+// struct edge_gate_value is one accepted prefix's gate: forwarding stops at
+// deadline_ns on bpf_ktime_get_boot_ns's clock. renew_start_ns is the
+// renewal the deadline came from and epoch the accepted claim epoch; the
+// datapath reads neither, galactic-edge uses them to extend only from a newer
+// renewal than the one already applied, across its own restarts.
+struct edge_gate_value {
+	__u64 deadline_ns;
+	__u64 renew_start_ns;
+	__u64 epoch;
+};
+
+// enum edge_gate_stat indexes edge_gate_stats: packets each check dropped
+// because no unexpired gate covered the address.
+enum edge_gate_stat {
+	EDGE_GATE_STAT_INGRESS_CLOSED = 0,
+	EDGE_GATE_STAT_EGRESS_CLOSED = 1,
+	EDGE_GATE_STAT_DELIVER_CLOSED = 2,
+	__EDGE_GATE_STAT_MAX,
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u32); // host link ifindex
+	__type(value, struct edge_link_value);
+} edge_link_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 16384);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, struct edge_gate_key);
+	__type(value, struct edge_gate_value);
+} edge_gate_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, __EDGE_GATE_STAT_MAX);
+	__type(key, __u32);
+	__type(value, __u64);
+} edge_gate_stats SEC(".maps");
+
 // nptv6_table: one row per VRF with NPTv6 configured, keyed like vrf_table.
 // usid_ingress already holds that key locally, and usid_egress resolves it
 // through ifindex_vrf_table.
@@ -2690,6 +2765,86 @@ static USID_ALWAYS_INLINE __u32 tp_ingress_mark(void)
 // every drop after step 6's vrf_table match, that is, every drop of a packet
 // already claimed by a specific tenant. It also counts the drop in direction
 // for vrf_key in vrf_traffic_counters.
+// edge_addr_on_link reports whether a is link-local (fe80::/10), an
+// interface- or link-scope multicast group (ffx1::/16, ffx2::/16, whatever
+// the flags) or unspecified: an address whose traffic never leaves the link.
+static USID_ALWAYS_INLINE int edge_addr_on_link(const __u8 *a)
+{
+	if (a[0] == 0xfe && (a[1] & 0xc0) == 0x80)
+		return 1;
+	if (a[0] == 0xff && ((a[1] & 0x0f) == 0x01 || (a[1] & 0x0f) == 0x02))
+		return 1;
+	__u64 hi, lo;
+
+	__builtin_memcpy(&hi, a, sizeof(hi));
+	__builtin_memcpy(&lo, a + 8, sizeof(lo));
+	return hi == 0 && lo == 0;
+}
+
+// edge_gate_open reports whether addr may cross edge host link ifindex: the
+// link's own address, or a prefix whose gate deadline is still ahead. stat is
+// counted when it may not.
+static USID_ALWAYS_INLINE int edge_gate_open(__u32 ifindex, struct edge_link_value *link, const __u8 *addr, __u32 stat)
+{
+	__u64 a_hi, a_lo, l_hi, l_lo;
+
+	__builtin_memcpy(&a_hi, addr, sizeof(a_hi));
+	__builtin_memcpy(&a_lo, addr + 8, sizeof(a_lo));
+	__builtin_memcpy(&l_hi, link->addr, sizeof(l_hi));
+	__builtin_memcpy(&l_lo, link->addr + 8, sizeof(l_lo));
+	if (a_hi == l_hi && a_lo == l_lo)
+		return 1;
+
+	struct edge_gate_key key = { .prefixlen = 32 + 128, .ifindex = ifindex };
+
+	__builtin_memcpy(key.addr, addr, sizeof(key.addr));
+	struct edge_gate_value *gate = bpf_map_lookup_elem(&edge_gate_table, &key);
+
+	if (gate && bpf_ktime_get_boot_ns() < gate->deadline_ns)
+		return 1;
+	__u64 *count = bpf_map_lookup_elem(&edge_gate_stats, &stat);
+
+	if (count)
+		*count += 1;
+	return 0;
+}
+
+// edge_gate_packet reports whether the packet at data, an Ethernet frame on
+// edge host link ifindex, may cross it: by its destination when dst is set,
+// otherwise by its source. An IPv4 packet, or one too short to read, never
+// may: an edge attachment is IPv6 only.
+static USID_ALWAYS_INLINE int edge_gate_packet(__u32 ifindex, struct edge_link_value *link, void *data, void *data_end,
+					       int dst, __u32 stat)
+{
+	struct usid_ethhdr *eth = data;
+	struct usid_ip6hdr *ip6 = (void *) (eth + 1);
+
+	if ((void *) (ip6 + 1) > data_end || eth->h_proto != __builtin_bswap16(USID_ETH_P_IPV6)) {
+		__u64 *count = bpf_map_lookup_elem(&edge_gate_stats, &stat);
+
+		if (count)
+			*count += 1;
+		return 0;
+	}
+	if (edge_addr_on_link(ip6->daddr) && (dst || edge_addr_on_link(ip6->saddr)))
+		return 1;
+	return edge_gate_open(ifindex, link, dst ? ip6->daddr : ip6->saddr, stat);
+}
+
+// edge_gate_skb reports whether the Ethernet frame at skb->data may cross
+// host link ifindex, as edge_gate_packet decides, or 1 when ifindex is not
+// an edge link. A global function rather than an inlined one: the verifier
+// checks it once on its own, instead of on every path into each program that
+// calls it, which the gate's branches would otherwise multiply.
+__attribute__((noinline)) int edge_gate_skb(struct __sk_buff *skb, __u32 ifindex, __u32 dst, __u32 stat)
+{
+	struct edge_link_value *link = bpf_map_lookup_elem(&edge_link_table, &ifindex);
+
+	if (!link)
+		return 1;
+	return edge_gate_packet(ifindex, link, (void *) (long) skb->data, (void *) (long) skb->data_end, dst, stat);
+}
+
 static USID_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct vrf_value *vrf, __u64 vrf_key, __u32 direction)
 {
 	count_drop(reason);
@@ -4318,6 +4473,16 @@ int usid_ingress(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
+	// An edge host link takes only its own address and its open gates. The
+	// destination is read from the packet, translated already: the lookup
+	// above replaced fib_params' with the next hop, and a prefix behind an
+	// edge attachment is routed via the attachment's own address, which the
+	// gate always passes.
+	if (!edge_gate_skb(skb, fib_params.ifindex, 1, EDGE_GATE_STAT_INGRESS_CLOSED)) {
+		__sync_fetch_and_add(&vrf->dropped_packets, 1);
+		return TC_ACT_SHOT;
+	}
+
 	if (service_tunnel) {
 		int authorization = service_ingress_authorize(skb, new_eth->h_proto, fib_params.ifindex,
 							      service_scratch);
@@ -5294,6 +5459,11 @@ int usid_egress(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC; // no attachment registered on this ifindex at all
 	}
 	count_drop(DROP_REASON_TRACE_IFINDEX_HIT);
+
+	// An edge host link sends only from its own address and its open gates,
+	// checked before any rewrite touches the source.
+	if (!edge_gate_skb(skb, ifindex, 0, EDGE_GATE_STAT_EGRESS_CLOSED))
+		return TC_ACT_SHOT;
 	__u64 vrf_key = (iv->block << 12) | iv->argument;
 	struct vrf_value *vrf = bpf_map_lookup_elem(&vrf_table, &vrf_key);
 	if (!vrf) {
@@ -5795,8 +5965,8 @@ int usid_egress(struct __sk_buff *skb)
 	return redirect_rc;
 }
 
-// tp_deliver is a managed interface's ingress traffic policy check for
-// everything the host transmits to it: same-node delivery through the kernel
+// tp_deliver is a managed interface's ingress traffic policy check, and an
+// edge host link's forwarding gate, for everything the host transmits to it: same-node delivery through the kernel
 // VRF, local private service delivery, a Packet Too Big usid_egress sends
 // back, host-generated traffic, and the ingress sidecar. Attached at the
 // host-side interface's tc egress. A packet usid_ingress already decided
@@ -5804,6 +5974,16 @@ int usid_egress(struct __sk_buff *skb)
 SEC("tc")
 int tp_deliver(struct __sk_buff *skb)
 {
+	__u32 edge_ifindex = skb->ifindex;
+	struct edge_link_value *edge_link = bpf_map_lookup_elem(&edge_link_table, &edge_ifindex);
+
+	if (edge_link) {
+		if (bpf_skb_pull_data(skb, sizeof(struct usid_ethhdr) + sizeof(struct usid_ip6hdr)))
+			return TC_ACT_SHOT;
+		if (!edge_gate_skb(skb, edge_ifindex, 1, EDGE_GATE_STAT_DELIVER_CLOSED))
+			return TC_ACT_SHOT;
+	}
+
 	__u32 mark = tp_ingress_mark();
 
 	if (mark && (skb->mark & mark) == mark) {

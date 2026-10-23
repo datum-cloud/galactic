@@ -26,6 +26,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -40,6 +41,8 @@ import (
 	cloudwebhook "go.datum.net/galactic/internal/cloud/webhook"
 	"go.datum.net/galactic/internal/edge/admission"
 	edgeattachment "go.datum.net/galactic/internal/edge/attachment"
+	edgeroute "go.datum.net/galactic/internal/edge/route"
+	"go.datum.net/galactic/internal/edge/timing"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/trafficpolicy/cell"
 	"go.datum.net/galactic/internal/trafficpolicy/webhook"
@@ -104,11 +107,12 @@ func newRootCommand() *cobra.Command {
 	f.StringVar(&o.platformProject, "platform-project", "", "Fabric role: platform project for IPAM")
 	f.StringVar(&o.ipamKubeconfig, "ipam-kubeconfig", "", "Fabric role: IPAM cluster kubeconfig")
 	f.StringVar(&o.hubKubeconfig, "hub-kubeconfig", "", "Fabric role: federation hub kubeconfig")
-	f.BoolVar(&o.edge, "edge", false, "Cell role: admit, allocate and drain Galactic Edge attachments "+
-		"(requires the edge CRDs and config/galactic-edge applied first; a deleted attachment is held "+
-		"until galactic-edge on its node reports it released, or the node is removed)")
+	f.BoolVar(&o.edge, "edge", false, "Cell role: admit, allocate and drain Galactic Edge attachments, and "+
+		"accept and revoke their route claims (requires the edge CRDs and config/galactic-edge applied first; "+
+		"a deleted attachment is held until galactic-edge on its node reports it released, or the node is removed)")
 	f.DurationVar(&o.edgeMaxSkew, "edge-max-skew", 2*time.Second,
-		"Cell role: maximum wall-clock error of any node; an EdgeService stops admitting this long before its validUntil")
+		"Cell role: maximum wall-clock error of any node; an EdgeService stops admitting this long before its "+
+			"validUntil. It must equal galactic-edge's --max-skew")
 	return cmd
 }
 
@@ -138,8 +142,13 @@ func run(parent context.Context, o *options) error {
 	utilruntime.Must(nadv1.AddToScheme(scheme))
 	utilruntime.Must(computev1alpha.AddToScheme(scheme))
 
+	var cacheOpts cache.Options
+	if o.edge {
+		cacheOpts.ByObject = edgeroute.LeaseCache()
+	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                        scheme,
+		Cache:                         cacheOpts,
 		Metrics:                       metricsserver.Options{BindAddress: o.metricsAddress},
 		HealthProbeBindAddress:        o.healthAddress,
 		LeaderElection:                o.leaderElect,
@@ -165,6 +174,11 @@ func run(parent context.Context, o *options) error {
 			Authority: admission.NewAuthority(o.edgeMaxSkew), MaxSkew: o.edgeMaxSkew,
 		}); err != nil {
 			return fmt.Errorf("set up edge attachments: %w", err)
+		}
+		params := timing.Params
+		params.MaxSkew = o.edgeMaxSkew
+		if err := edgeroute.Setup(mgr, params, timing.BootClock); err != nil {
+			return fmt.Errorf("set up edge routes: %w", err)
 		}
 	}
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
