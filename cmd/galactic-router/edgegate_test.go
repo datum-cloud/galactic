@@ -210,7 +210,8 @@ func TestEdgeGateWatchDeadline(t *testing.T) {
 
 // TestEdgeGateReopens: a gate map missing when the router starts, or one
 // whose read fails, closes every edge route and is opened again, at most
-// every gateReopen, so the router picks the gate up without a restart.
+// every gateReopen, so the router picks the gate up without a restart. A
+// closed gate is never reopened.
 func TestEdgeGateReopens(t *testing.T) {
 	prefix := netip.MustParsePrefix("fd00:10:0:f::/80")
 	table := &fakeGates{ifindex: 7, addr: netip.MustParseAddr("fd00:10:0:e::1"),
@@ -243,13 +244,24 @@ func TestEdgeGateReopens(t *testing.T) {
 	if !g.Open(adv) || opens != 2 {
 		t.Fatalf("map pinned later: not picked up (%d attempts)", opens)
 	}
+	// The map read for a while before it failed.
+	wall = wall.Add(10 * gateReopen)
 	table.err = errors.New("map replaced")
 	if g.Open(adv) {
 		t.Fatal("open after a failed read")
 	}
 	table.err = nil
-	wall = wall.Add(gateReopen)
+	wall = wall.Add(gateReopen - time.Millisecond)
+	if g.Open(adv) || opens != 2 {
+		t.Fatalf("reopened %d times within gateReopen of a failed read", opens-2)
+	}
+	wall = wall.Add(time.Millisecond)
 	if !g.Open(adv) || opens != 3 {
 		t.Fatalf("map not reopened after a failed read (%d attempts)", opens)
+	}
+	g.Close()
+	wall = wall.Add(gateReopen)
+	if g.Open(adv) || opens != 3 {
+		t.Fatalf("gate open or reopened after Close (%d attempts)", opens)
 	}
 }

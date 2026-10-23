@@ -47,8 +47,10 @@ const gateReopen = time.Second
 //
 // The gate map is opened on first use and opened again, at most every
 // gateReopen, while it is missing or after a read fails, so a router started
-// before the uSID datapath, or one whose maps were pinned again, picks the
-// gate up without a restart. Until then every edge route is closed.
+// before the uSID datapath picks the gate up without a restart. Until then
+// every edge route is closed. A map unpinned and replaced while open is not
+// noticed until a read fails: its gates expire and every route it holds
+// closes, never the other way.
 type edgeGate struct {
 	// openTable opens the pinned gate map.
 	openTable func() (gateTable, error)
@@ -63,6 +65,7 @@ type edgeGate struct {
 	table    gateTable
 	lastOpen time.Time
 	failed   bool
+	closed   bool
 }
 
 var _ reconcile.EdgeGate = (*edgeGate)(nil)
@@ -87,6 +90,9 @@ func (g *edgeGate) Open(adv *bgpv1alpha1.BGPAdvertisement) bool {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
 	if g.table == nil {
 		if now := g.now(); now.Sub(g.lastOpen) >= gateReopen {
 			g.lastOpen = now
@@ -104,8 +110,9 @@ func (g *edgeGate) Open(adv *bgpv1alpha1.BGPAdvertisement) bool {
 	}
 	open, err := g.table.Open(uint32(index), addr, prefix, g.clock())
 	if err != nil {
+		// Reopened no sooner than a missing map would be.
 		_ = g.table.Close()
-		g.table = nil
+		g.table, g.lastOpen = nil, g.now()
 		g.unavailable(err)
 		return false
 	}
@@ -122,10 +129,11 @@ func (g *edgeGate) unavailable(err error) {
 	}
 }
 
-// Close releases the gate map.
+// Close releases the gate map. Every edge route is closed from then on.
 func (g *edgeGate) Close() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.closed = true
 	if g.table != nil {
 		_ = g.table.Close()
 		g.table = nil

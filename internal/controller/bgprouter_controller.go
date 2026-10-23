@@ -11,6 +11,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -169,6 +170,9 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			logger.Error(updateErr, "update observedGeneration (no-op reconcile)")
 		}
 		r.updatePeerStatuses(ctx, router, runtimeStatus)
+		// A Galactic Edge advertisement left out by a closed gate does not
+		// move the hash, so it is reported here too.
+		r.updateAdvertisementStatuses(ctx, router, runtimeStatus)
 		return ctrl.Result{RequeueAfter: peerStatusRequeue}, nil
 	}
 
@@ -367,7 +371,8 @@ func peersForRouter(
 	return targetPeers, nil
 }
 
-// updateAdvertisementStatuses updates BGPAdvertisement status.
+// updateAdvertisementStatuses updates the status of the router's
+// BGPAdvertisements from rs, writing only those whose status changed.
 func (r *BGPRouterReconciler) updateAdvertisementStatuses(
 	ctx context.Context, router *bgpv1alpha1.BGPRouter,
 	rs model.RuntimeStatus,
@@ -416,6 +421,9 @@ func (r *BGPRouterReconciler) updateAdvertisementStatuses(
 			Reason:  reasonAccepted,
 			Message: "Advertisement accepted",
 		})
+		if equality.Semantic.DeepEqual(adv.Status, advCopy.Status) {
+			continue
+		}
 		if updateErr := r.Status().Update(ctx, advCopy); updateErr != nil {
 			logger.Error(updateErr, "update BGPAdvertisement status", "advertisement", adv.Name)
 		}

@@ -251,6 +251,8 @@ The advertisement names that node's router, the VRF's ID and export route target
 
 `galactic-router` advertises an edge route's advertisement only while the forwarding gate it names is open on its node: the named host link is the edge link of the named address and holds an unexpired gate for exactly the prefix. It reads the gate from the pinned map whenever it builds its desired state, and polls it every 250 ms so a deadline passing withdraws the prefix with no API event. Without the pinned map it advertises none, and opens the map again at most every second until it can read it. An advertisement it leaves out is reported `Advertised` False with reason `GateClosed`. Publication never widens what the gate allows: a prefix whose gate closes is withdrawn locally even if core is cut off and still publishes it.
 
+Core's write access to `BGPAdvertisement` is a Role in `galactic-system`. Kubernetes RBAC cannot scope it by label, so the Role covers every advertisement there, though core reads and writes only those labeled `galactic.datumapis.com/edge-route`.
+
 ### Reaping
 
 Core deletes what no live pod can still use:
