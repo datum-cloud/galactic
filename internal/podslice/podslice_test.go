@@ -365,3 +365,30 @@ func TestDeleteRewrittenBetweenReadAndDelete(t *testing.T) {
 	}
 	checkPublished(t, got, testNewSandbox)
 }
+
+// TestPublishLosesCreateToRestore covers the repair creating the slice between
+// Publish's read and its create: Publish retries and takes the slice over.
+func TestPublishLosesCreateToRestore(t *testing.T) {
+	base := fakeClient(testPod())
+	restored := false
+	k8s := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if !restored {
+				restored = true
+				if _, err := Restore(ctx, c, testPod(), testEndpoint("")); err != nil {
+					t.Fatalf("concurrent Restore() = %v, want nil", err)
+				}
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+
+	if err := Publish(context.Background(), k8s, testPodNamespace, testPodName, testEndpoint(testNewSandbox)); err != nil {
+		t.Fatalf("Publish() = %v, want nil after losing the create", err)
+	}
+	got, err := getSlice(t, base)
+	if err != nil {
+		t.Fatalf("get EndpointSlice: %v", err)
+	}
+	checkPublished(t, got, testNewSandbox)
+}

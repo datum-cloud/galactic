@@ -49,15 +49,28 @@ type Endpoint struct {
 // reclaims the slice of a pod that is deleted without a DEL removing it.
 // An existing slice of that name without the tenant identifier label is
 // refused rather than overwritten, since this package did not write it.
+//
+// A create that loses to a concurrent Restore is retried once as an update,
+// so ADD overwrites the repaired slice rather than failing.
 func Publish(ctx context.Context, k8s client.Client, namespace, podName string, ep Endpoint) error {
 	pod := &corev1.Pod{}
 	if err := k8s.Get(ctx, client.ObjectKey{Name: podName, Namespace: namespace}, pod); err != nil {
 		return fmt.Errorf("get owning Pod %s/%s: %w", namespace, podName, err)
 	}
 
-	name := crdnames.EndpointSliceName(podName)
+	err := publish(ctx, k8s, pod, ep)
+	if apierrors.IsAlreadyExists(err) {
+		err = publish(ctx, k8s, pod, ep)
+	}
+	return err
+}
+
+// publish is one read-then-write attempt of Publish. A create that finds the
+// slice already there returns an error apierrors.IsAlreadyExists matches.
+func publish(ctx context.Context, k8s client.Client, pod *corev1.Pod, ep Endpoint) error {
+	name := crdnames.EndpointSliceName(pod.Name)
 	slice := &discoveryv1.EndpointSlice{}
-	getErr := k8s.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, slice)
+	getErr := k8s.Get(ctx, client.ObjectKey{Name: name, Namespace: pod.Namespace}, slice)
 	switch {
 	case getErr == nil:
 		// Defensive against a naming collision: the slice name is a
@@ -66,12 +79,12 @@ func Publish(ctx context.Context, k8s client.Client, namespace, podName string, 
 		if _, ok := slice.Labels[crdnames.LabelTenantID]; !ok {
 			return fmt.Errorf(
 				"EndpointSlice %s/%s already exists without a %s label — refusing to overwrite an object this plugin doesn't own",
-				namespace, name, crdnames.LabelTenantID)
+				pod.Namespace, name, crdnames.LabelTenantID)
 		}
 	case apierrors.IsNotFound(getErr):
-		slice = &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+		slice = &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: pod.Namespace}}
 	default:
-		return fmt.Errorf("get EndpointSlice %s/%s: %w", namespace, name, getErr)
+		return fmt.Errorf("get EndpointSlice %s/%s: %w", pod.Namespace, name, getErr)
 	}
 
 	if _, err := controllerutil.CreateOrUpdate(ctx, k8s, slice, func() error {

@@ -52,7 +52,8 @@ type bgpAttachment struct {
 
 // repairEndpointSlicesOnTick starts one repairEndpointSlices pass off Run's
 // goroutine, unless a pass already holds sem, in which case that pass covers
-// this tick.
+// this tick. A pass gets one tick interval, so a hung API call cannot hold sem
+// and stop every later pass.
 func repairEndpointSlicesOnTick(ctx context.Context, sem chan struct{}, st ebpfDatapathState) {
 	if st.k8sClient == nil {
 		return
@@ -61,7 +62,9 @@ func repairEndpointSlicesOnTick(ctx context.Context, sem chan struct{}, st ebpfD
 	case sem <- struct{}{}:
 		go func() {
 			defer func() { <-sem }()
-			result, err := repairEndpointSlices(ctx, st.k8sClient, st.namespace, st.nodeName)
+			passCtx, cancel := context.WithTimeout(ctx, ebpfGCSweepInterval)
+			defer cancel()
+			result, err := repairEndpointSlices(passCtx, st.k8sClient, st.namespace, st.nodeName)
 			st.endpointSliceRepair.Pass(result.Restored, err != nil)
 			attrs := []any{"restored", result.Restored, "skipped", result.Skipped}
 			switch {
@@ -244,8 +247,9 @@ func lastGalacticIPv6Attachment(
 	return nil, nil, nil
 }
 
-// firstIPv6 returns the first IPv6 address in ips, which Multus records with
-// or without a prefix length.
+// firstIPv6 returns the first global IPv6 address in ips, which Multus
+// records with or without a prefix length. Link-local addresses are skipped,
+// as they are never the address IPAM assigned.
 func firstIPv6(ips []string) net.IP {
 	for _, s := range ips {
 		addr, err := netip.ParseAddr(s)
@@ -256,7 +260,7 @@ func firstIPv6(ips []string) net.IP {
 			}
 			addr = p.Addr()
 		}
-		if addr.Is6() && !addr.Is4In6() {
+		if addr.Is6() && !addr.Is4In6() && !addr.IsLinkLocalUnicast() {
 			return net.IP(addr.AsSlice())
 		}
 	}
@@ -264,14 +268,17 @@ func firstIPv6(ips []string) net.IP {
 }
 
 // galacticBGPStanza reads the galactic-bgp stanza of the definition at key,
-// or nil when the definition chains none. A stanza naming no namespace uses
-// defaultNamespace, as galactic-bgp does.
+// or nil when the definition chains none or no longer exists. A stanza naming
+// no namespace uses defaultNamespace, as galactic-bgp does.
 func galacticBGPStanza(
 	ctx context.Context, k8s client.Client, key client.ObjectKey, defaultNamespace string,
 ) (*bgpAttachment, error) {
 	nad := &unstructured.Unstructured{}
 	nad.SetGroupVersionKind(nadGVK)
 	if err := k8s.Get(ctx, key, nad); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("get NetworkAttachmentDefinition %s: %w", key, err)
 	}
 	configStr, _, err := unstructured.NestedString(nad.Object, "spec", "config")

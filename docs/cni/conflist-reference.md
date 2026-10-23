@@ -292,18 +292,20 @@ CHECK verifies the EndpointSlice still exists with the expected address and
 annotations.
 
 `galactic-cni run` recreates a missing EndpointSlice every 5 minutes, on the
-same tick as its eBPF map sweeps (`internal/installer/endpointslice_repair.go`).
-For each Running pod on its node, it reads the Multus
-`k8s.v1.cni.cncf.io/network-status` annotation, takes the last entry whose
-NetworkAttachmentDefinition chains `galactic-bgp` and carries an IPv6 address,
-and creates the slice from that definition's `vpc`, `vpcattachment` and
-`namespace`, with the SID computed from the node's `BGPRouter` and the VPC's
-`BGPVRFInstance`. It only creates: an existing slice is never rewritten. A
-recreated slice has no `sandbox-id` annotation until the pod's next ADD. A pod
-whose definition, `BGPRouter` or `BGPVRFInstance` cannot be read is skipped,
-logged and retried on the next tick.
-`galactic_endpointslice_repair_restored_total` counts the slices recreated, and
-`galactic_endpointslice_repair_failures_total` the passes that failed.
+same tick as its eBPF map sweeps
+(`internal/installer/endpointslice_repair.go`). For each Running pod on its
+node, it reads the Multus `k8s.v1.cni.cncf.io/network-status` annotation,
+takes the last entry whose NetworkAttachmentDefinition chains `galactic-bgp`
+and carries an IPv6 address, and creates the slice from that definition's
+`vpc`, `vpcattachment` and `namespace`, with the SID computed from the node's
+`BGPRouter` and the VPC's `BGPVRFInstance`. It only creates: an existing slice
+is never rewritten, and an ADD that loses its create to the repair retries as
+an update. A recreated slice has no `sandbox-id` annotation until the pod's
+next ADD. An attachment whose definition no longer exists is passed over for
+the pod's earlier one. A pod whose definition, `BGPRouter` or `BGPVRFInstance`
+cannot be read is skipped, logged and retried on the next tick.
+`galactic_endpointslice_repair_restored_total` counts the slices recreated,
+and `galactic_endpointslice_repair_failures_total` the passes that failed.
 
 Both the pod's name and its namespace are parsed from `K8S_POD_NAME`/
 `K8S_POD_NAMESPACE` in `CNI_ARGS` (`internal/nadpatch.ParsePodName`/

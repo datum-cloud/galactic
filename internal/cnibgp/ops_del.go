@@ -24,7 +24,7 @@ import (
 //
 // The EndpointSlice is a deliberate divergence: it is one per pod and never
 // shared with another attachment. It is still shared across a pod's sandboxes,
-// so DEL deletes it only when this sandbox wrote it (see podslice.Delete).
+// so DEL deletes it only when this sandbox wrote it.
 // Deletion is best-effort, and any failure, including failing to build a
 // client at all, is logged while DEL still returns success: an API hiccup
 // during teardown must not block the pod from going away. The owner reference

@@ -210,7 +210,6 @@ func TestRepairEndpointSlicesSkipsUnresolvableAttachments(t *testing.T) {
 		name string
 		objs []client.Object
 	}{
-		{name: "definition missing", objs: repairIdentity()},
 		{name: "no BGPRouter for the node", objs: []client.Object{galacticNAD()}},
 		{name: "no BGPVRFInstance for the VPC", objs: []client.Object{
 			router(repairNode, repairLocator, repairNodeID), galacticNAD(),
@@ -251,5 +250,41 @@ func TestRepairEndpointSlicesNoSRv6Identity(t *testing.T) {
 	}
 	if slice.Endpoints[0].Addresses[0] != repairPodAddr {
 		t.Errorf("address = %q, want %q (prefix length stripped)", slice.Endpoints[0].Addresses[0], repairPodAddr)
+	}
+}
+
+// TestRepairEndpointSlicesPassesOverDeletedDefinition covers a pod whose last
+// attachment names a definition that has since been deleted: the earlier
+// galactic attachment still gets its slice.
+func TestRepairEndpointSlicesPassesOverDeletedDefinition(t *testing.T) {
+	gone := nadv1.NetworkStatus{Name: repairPodNS + "/gone", IPs: []string{"fd00:20::5"}}
+	pod := repairPod("web-0", repairNode, corev1.PodRunning, galacticStatus(repairPodAddr), gone)
+	k8s := repairClient(t, append(repairIdentity(), galacticNAD(), pod)...)
+
+	result, err := repairEndpointSlices(context.Background(), k8s, testNamespace, repairNode)
+	if err != nil || result.Restored != 1 || result.Skipped != 0 {
+		t.Fatalf("repairEndpointSlices() = (%+v, %v), want 1 restored, 0 skipped", result, err)
+	}
+	slice, _ := getRepairSlice(t, k8s, "web-0")
+	if slice.Endpoints[0].Addresses[0] != repairPodAddr {
+		t.Errorf("address = %q, want the galactic attachment's %q", slice.Endpoints[0].Addresses[0], repairPodAddr)
+	}
+}
+
+func TestFirstIPv6(t *testing.T) {
+	cases := []struct {
+		ips  []string
+		want string
+	}{
+		{ips: []string{"192.0.2.5", "fe80::1", repairPodAddr}, want: repairPodAddr},
+		{ips: []string{"fe80::1/64"}},
+		{ips: []string{"::ffff:192.0.2.5"}},
+		{ips: []string{"not-an-ip", repairPodAddr + "/64"}, want: repairPodAddr},
+	}
+	for _, tc := range cases {
+		got := firstIPv6(tc.ips)
+		if (got == nil && tc.want != "") || (got != nil && got.String() != tc.want) {
+			t.Errorf("firstIPv6(%v) = %v, want %q", tc.ips, got, tc.want)
+		}
 	}
 }
