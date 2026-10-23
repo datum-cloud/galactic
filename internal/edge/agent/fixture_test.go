@@ -231,7 +231,7 @@ func (f *fixture) agent() *Agent {
 	}
 	return &Agent{
 		Client: f.client, NodeName: node, Owner: NewOwner(node, time.Unix(int64(f.seq), 0), "test"),
-		Ownership: auth, Host: f.hostNS, Namespaces: f.pods, Datapath: f.dp, MTU: mtu, Program: true,
+		Ownership: auth, Host: f.hostNS, Namespaces: f.pods, Datapath: f.dp, MTU: mtu,
 	}
 }
 

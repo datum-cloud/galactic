@@ -62,6 +62,12 @@ rules:
       - vpcs
       - vpcattachments
     verbs: ["get", "list", "watch"]
+  # GC keeps a VPC's VRF and BGPVRFInstance while an edge attachment on
+  # this node uses it (internal/edge/maintenance), read uncached.
+  - apiGroups: ["galactic.datumapis.com"]
+    resources:
+      - edgeattachments
+    verbs: ["get", "list"]
   # The traffic policy reconciler (GALACTIC_ROUTER_TRAFFIC_POLICY) reads
   # policies and bindings and applies this node's entry in each binding's
   # status.nodes. It never writes either resource itself.

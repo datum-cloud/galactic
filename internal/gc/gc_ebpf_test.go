@@ -6,6 +6,7 @@ package gc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -17,7 +18,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/nptv6map"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
@@ -412,5 +415,94 @@ func TestSweepEBPFNPTv6Table_RegistersLiveRemovesStale(t *testing.T) {
 	}
 	if _, ok, err := table.Get(block, staleArgument); err != nil || ok {
 		t.Errorf("stale entry after sweep: ok=%v err=%v, want ok=false (must be removed)", ok, err)
+	}
+}
+
+// TestSweepEBPFVRFTable_KeepsEdgeAttachmentEntry leaves an edge attachment's
+// host link as the only user of a vrf_table entry, with no BGPVRFInstance
+// naming it: the entry stays while the link does, and is reclaimed once the
+// link is released. A sweep that cannot list the links removes nothing.
+func TestSweepEBPFVRFTable_KeepsEdgeAttachmentEntry(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		namespace  = "default"
+		nodeName   = "node-a"
+		edgeIndex  = 4242
+		edgeVRFID  = uint16(30)
+		otherVRFID = uint16(31)
+	)
+	router := &bgpv1alpha1.BGPRouter{
+		ObjectMeta: metav1.ObjectMeta{Name: "router-a", Namespace: namespace},
+		Spec: bgpv1alpha1.BGPRouterSpec{
+			TargetRef:   bgpv1alpha1.TargetRef{Kind: targetKindNode, Name: nodeName},
+			LocalASN:    65000,
+			SRv6Locator: testLocator,
+			NodeID:      5,
+		},
+	}
+	k8s := fake.NewClientBuilder().WithScheme(gcTestScheme(t)).WithObjects(router).Build()
+
+	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-gcsweep-edge-test-%d", os.Getpid())
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+	loaderObjs, err := attach.Load(pinDir)
+	if err != nil {
+		t.Fatalf("attach.Load: %v", err)
+	}
+	t.Cleanup(func() { _ = loaderObjs.Close() })
+	reg, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	if err != nil {
+		t.Fatalf("OpenPinnedRegistry: %v", err)
+	}
+	defer func() { _ = closer.Close() }()
+	ifindexTable, ifindexCloser, err := ifindexvrfmap.OpenPinned(pinDir)
+	if err != nil {
+		t.Fatalf("OpenPinned ifindex_vrf_table: %v", err)
+	}
+	defer func() { _ = ifindexCloser.Close() }()
+
+	block, err := blockFromLocator(t)
+	if err != nil {
+		t.Fatalf("derive block: %v", err)
+	}
+	for _, arg := range []uint16{edgeVRFID, otherVRFID} {
+		if err := reg.VRF.Register(block, arg, 0x300000+uint32(arg), usidmap.EgressKindVeth); err != nil {
+			t.Fatalf("seed entry %d: %v", arg, err)
+		}
+	}
+	if err := ifindexTable.Register(edgeIndex, block, edgeVRFID); err != nil {
+		t.Fatalf("seed edge link row: %v", err)
+	}
+
+	orig := listEdgeLinksFn
+	t.Cleanup(func() { listEdgeLinksFn = orig })
+	setLinks := func(links []hostattach.ObservedAttachment, err error) {
+		listEdgeLinksFn = func() ([]hostattach.ObservedAttachment, error) { return links, err }
+	}
+	present := func(arg uint16) bool {
+		t.Helper()
+		_, ok, err := reg.VRF.Get(block, arg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+
+	setLinks(nil, errors.New("netlink"))
+	if res := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir); res.Errors != 1 ||
+		res.EBPFVRFEntriesRemoved != 0 || !present(edgeVRFID) || !present(otherVRFID) {
+		t.Fatalf("sweep without the edge links = %+v; want an error and nothing removed", res)
+	}
+
+	setLinks([]hostattach.ObservedAttachment{{ID: hostattach.LinkID("a", "uid"), HostIndex: edgeIndex}}, nil)
+	res := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir)
+	if res.Errors != 0 || res.EBPFVRFEntriesRemoved != 1 || !present(edgeVRFID) || present(otherVRFID) {
+		t.Fatalf("sweep with an edge link = %+v; want only the unused entry removed", res)
+	}
+
+	setLinks(nil, nil)
+	res = SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir)
+	if res.Errors != 0 || res.EBPFVRFEntriesRemoved != 1 || present(edgeVRFID) {
+		t.Fatalf("sweep after the edge link is released = %+v; want its entry removed", res)
 	}
 }

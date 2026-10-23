@@ -47,7 +47,6 @@ import (
 const (
 	ReasonProgrammed           = "Programmed"
 	ReasonReleased             = "Released"
-	ReasonMaintenanceNotFenced = "MaintenanceNotFenced"
 	ReasonNamespaceUnavailable = "NamespaceUnavailable"
 	ReasonNamespaceReplaced    = "NamespaceReplaced"
 	ReasonProvisionFailed      = "ProvisionFailed"
@@ -88,10 +87,6 @@ type Agent struct {
 	Datapath Datapath
 	// MTU of every attachment link; at least the fabric's tenant MTU.
 	MTU int
-	// Program enables creating host state. Until every other writer of the
-	// shared state commits through Ownership, the agent only releases and
-	// reports MaintenanceNotFenced.
-	Program bool
 
 	// tickets holds this process's next ticket for each scope it owns.
 	tickets map[string]ownership.Ticket
@@ -150,7 +145,7 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 		}
 	}
 	for _, l := range links {
-		if vpc, _, ok := parseID(l.ID); ok {
+		if vpc, _, ok := hostattach.ParseLinkID(l.ID); ok {
 			scopes[vpc] = true
 		}
 	}
@@ -193,9 +188,8 @@ func (a *Agent) resolve(ctx context.Context, podUID string) podNS {
 // and programs every live attachment, in one snapshot commit.
 func (a *Agent) reconcileScope(vpc string, active, releasing []*galacticv1alpha1.EdgeAttachment,
 	pods map[string]podNS) ([]outcome, error) {
-	scope := "vpc-" + vpc
-	t, err := a.ticket(scope)
-	if err != nil {
+	scope := ownership.VPCScope(vpc)
+	unavailable := func(err error) ([]outcome, error) {
 		out := make([]outcome, 0, len(active))
 		for _, att := range active {
 			out = append(out, outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
@@ -203,16 +197,36 @@ func (a *Agent) reconcileScope(vpc string, active, releasing []*galacticv1alpha1
 		}
 		return out, err
 	}
+	t, err := a.ticket(scope)
+	if err != nil {
+		return unavailable(err)
+	}
 	var out []outcome
-	next, err := a.Ownership.CommitSnapshot(t, func() error {
-		var err error
-		out, err = a.applyScope(vpc, active, releasing, pods)
-		return err
-	})
+	snapshot := func(t ownership.Ticket) (ownership.Ticket, error) {
+		return a.Ownership.CommitSnapshot(t, func() error {
+			var err error
+			out, err = a.applyScope(vpc, active, releasing, pods)
+			return err
+		})
+	}
+	next, err := snapshot(t)
+	if errors.Is(err, ownership.ErrStale) {
+		// A writer that does not own the scope, such as garbage collection,
+		// wrote it since this process's last commit. The scope is still this
+		// process's, and the refused snapshot never ran, so it runs again
+		// from a fresh ticket.
+		delete(a.tickets, scope)
+		if t, err = a.ticket(scope); err != nil {
+			return unavailable(err)
+		}
+		next, err = snapshot(t)
+	}
 	if err != nil {
 		delete(a.tickets, scope)
-		if !errors.Is(err, ownership.ErrStale) && !errors.Is(err, ownership.ErrNotOwner) &&
-			!errors.Is(err, ownership.ErrTransitioning) {
+		if errors.Is(err, ownership.ErrStale) {
+			return nil, fmt.Errorf("commit: %w", err)
+		}
+		if !errors.Is(err, ownership.ErrNotOwner) && !errors.Is(err, ownership.ErrTransitioning) {
 			// The snapshot ran but did not complete, so nothing it did is
 			// confirmed: report only its failures, and the next pass, a
 			// snapshot again, settles the rest.
@@ -314,14 +328,14 @@ func (a *Agent) applyScope(vpc string, active, releasing []*galacticv1alpha1.Edg
 	}
 	links := map[string]hostattach.ObservedAttachment{}
 	for _, l := range all {
-		if v, _, ok := parseID(l.ID); ok && v == vpc {
+		if v, _, ok := hostattach.ParseLinkID(l.ID); ok && v == vpc {
 			links[l.ID] = l
 		}
 	}
 	var out []outcome
 	var errs []error
 	for _, att := range releasing {
-		id := attachmentID(att.Status.VPC, string(att.UID))
+		id := hostattach.LinkID(att.Status.VPC, string(att.UID))
 		err := a.release(att, links[id], pods[att.Spec.PodUID])
 		delete(links, id)
 		if err != nil {
@@ -331,7 +345,7 @@ func (a *Agent) applyScope(vpc string, active, releasing []*galacticv1alpha1.Edg
 		out = append(out, released(att))
 	}
 	for _, att := range active {
-		delete(links, attachmentID(att.Status.VPC, string(att.UID)))
+		delete(links, hostattach.LinkID(att.Status.VPC, string(att.UID)))
 	}
 	// What is left carries the scope's stamp but no attachment wants it:
 	// its attachment is gone altogether.
@@ -406,10 +420,6 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS) outcome 
 	fail := func(reason string, err error) outcome {
 		return outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
 			status: metav1.ConditionFalse, reason: reason, message: err.Error()}
-	}
-	if !a.Program {
-		return fail(ReasonMaintenanceNotFenced, errors.New("programming is disabled until every writer of the "+
-			"node's shared datapath state commits through the ownership fence"))
 	}
 	spec, err := desired(att, a.MTU)
 	if err != nil {

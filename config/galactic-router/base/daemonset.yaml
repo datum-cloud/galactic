@@ -154,6 +154,13 @@ spec:
             # DaemonSet regardless of this mount's presence.
             - name: cni-state
               mountPath: /var/lib/cni
+            # The node's write fence, shared with galactic-edge
+            # (internal/edge/ownership). GC deletes a VPC's VRF and
+            # BGPVRFInstance only under that VPC's fence, after checking no
+            # edge attachment uses it. Without this mount GC reclaims
+            # neither.
+            - name: edge-ownership
+              mountPath: /var/lib/galactic-edge/ownership
       volumes:
         - name: netns
           hostPath:
@@ -162,6 +169,11 @@ spec:
         - name: cni-state
           hostPath:
             path: /var/lib/cni
+            type: DirectoryOrCreate
+        # Never delete or restore this directory while a writer is alive.
+        - name: edge-ownership
+          hostPath:
+            path: /var/lib/galactic-edge/ownership
             type: DirectoryOrCreate
         - name: bpf-fs
           # The host's bpffs mount, same convention/tradeoff

@@ -46,6 +46,9 @@ func owned(t *testing.T) (*Authority, Ticket) {
 	return a, tk
 }
 
+// noCheck is an Exclusive check that always lets the write go ahead.
+func noCheck() error { return nil }
+
 func mustNotRun(t *testing.T) func() error {
 	return func() error {
 		t.Error("mutation ran for a refused commit")
@@ -188,6 +191,176 @@ func TestFailedMutationRequiresSnapshot(t *testing.T) {
 	}
 	if _, err := a.CommitSnapshot(tk, func() error { return nil }); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestExclusiveWriteStalesOwnerTickets(t *testing.T) {
+	a, tk := owned(t)
+	ran := false
+	if err := a.Exclusive(scope, noCheck, func() error { ran = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("exclusive mutation did not run")
+	}
+	// The owner prepared this change before the maintenance write landed.
+	if _, err := a.Commit(tk, mustNotRun(t)); !errors.Is(err, ErrStale) {
+		t.Fatalf("commit of a ticket issued before an exclusive write = %v, want ErrStale", err)
+	}
+	rec, err := a.Read(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Owner != "cni" || rec.Transitioning || rec.Pending {
+		t.Fatalf("record after exclusive write = %+v, want owner kept, not transitioning or pending", rec)
+	}
+	next, err := a.Begin(scope, "cni")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Commit(next, func() error { return nil }); err != nil {
+		t.Fatalf("owner commit from a fresh ticket = %v", err)
+	}
+}
+
+func TestExclusiveWriteLeavesScopeUnowned(t *testing.T) {
+	a := newAuthority(t)
+	if err := a.Exclusive(scope, noCheck, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	tk, err := a.Claim(scope, "edge")
+	if err != nil {
+		t.Fatalf("claim after an exclusive write = %v", err)
+	}
+	if !tk.Resync {
+		t.Fatal("first claim did not require a snapshot")
+	}
+}
+
+func TestFailedExclusiveWriteRequiresSnapshot(t *testing.T) {
+	a, _ := owned(t)
+	if err := a.Exclusive(scope, noCheck, func() error { return errors.New("netlink: partial") }); err == nil {
+		t.Fatal("failed exclusive mutation reported success")
+	}
+	tk, err := a.Begin(scope, "cni")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tk.Resync {
+		t.Fatal("scope does not require a snapshot after a failed exclusive mutation")
+	}
+	if _, err := a.Commit(tk, mustNotRun(t)); !errors.Is(err, ErrResyncRequired) {
+		t.Fatalf("incremental commit after failure = %v, want ErrResyncRequired", err)
+	}
+}
+
+func TestExclusiveWriteWaitsForCommitInProgress(t *testing.T) {
+	a, tk := owned(t)
+	inside, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.Commit(tk, func() error {
+			close(inside)
+			<-release
+			return nil
+		})
+		done <- err
+	}()
+	<-inside
+	var finished atomic.Bool
+	excl := make(chan error, 1)
+	go func() {
+		excl <- a.Exclusive(scope, noCheck, func() error {
+			if !finished.Load() {
+				return errors.New("exclusive write ran during the owner's commit")
+			}
+			return nil
+		})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	finished.Store(true)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-excl; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRefusedCheckLeavesRecord(t *testing.T) {
+	a, tk := owned(t)
+	refused := errors.New("in use")
+	if err := a.Exclusive(scope, func() error { return refused }, mustNotRun(t)); !errors.Is(err, refused) {
+		t.Fatalf("exclusive write with a failed check = %v, want the check's error", err)
+	}
+	// Nothing was written, so the owner's ticket is still current.
+	if _, err := a.Commit(tk, func() error { return nil }); err != nil {
+		t.Fatalf("owner commit after a refused exclusive write = %v", err)
+	}
+}
+
+func TestExclusiveWriteWaitsForAdopt(t *testing.T) {
+	a, _ := owned(t)
+	gen, err := a.Fence(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := func() error {
+		t.Error("check ran while ownership moved")
+		return nil
+	}
+	if err := a.Exclusive(scope, checked, mustNotRun(t)); !errors.Is(err, ErrTransitioning) {
+		t.Fatalf("exclusive write during a transfer = %v, want ErrTransitioning", err)
+	}
+	if _, err := a.Adopt(scope, "edge", gen); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Exclusive(scope, noCheck, func() error { return nil }); err != nil {
+		t.Fatalf("exclusive write after Adopt = %v", err)
+	}
+}
+
+func TestOpenRequiresExistingDirectory(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent")
+	if _, err := Open(missing); err == nil {
+		t.Fatal("open of a missing directory succeeded")
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("open created %s", missing)
+	}
+	dir := t.TempDir()
+	owner, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk, err := owner.Claim(scope, "edge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shared.Exclusive(scope, noCheck, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.CommitSnapshot(tk, mustNotRun(t)); !errors.Is(err, ErrStale) {
+		t.Fatalf("owner commit after another authority's exclusive write = %v, want ErrStale", err)
+	}
+}
+
+func TestVPCScopeIgnoresPadding(t *testing.T) {
+	for _, tc := range []struct{ a, b string }{
+		{"00000000a", "a"},
+		{"000", "0"},
+	} {
+		if VPCScope(tc.a) != VPCScope(tc.b) {
+			t.Errorf("VPCScope(%q) = %q, VPCScope(%q) = %q; want one scope", tc.a, VPCScope(tc.a), tc.b, VPCScope(tc.b))
+		}
+	}
+	if VPCScope("a") == VPCScope("0a0") {
+		t.Error("distinct VPCs share a scope")
 	}
 }
 
