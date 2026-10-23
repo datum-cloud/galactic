@@ -9,6 +9,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -80,6 +81,28 @@ func TestVPCs(t *testing.T) {
 	}
 	if keys := slices.Sorted(maps.Keys(got)); !slices.Equal(keys, []string{"a", "d"}) {
 		t.Fatalf("VPCs = %v, want [a d]: this node's unreleased attachments and its stamped links", keys)
+	}
+}
+
+// TestAllZeroVPCIsOneScope uses an all-zero VPC identifier, padded on one side
+// and not on the other: the guard and the write fence treat them as one VPC.
+func TestAllZeroVPCIsOneScope(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).
+		WithObjects(attachment("zero", node, "0", false)).Build()
+	g := newGuard(t, c)
+	got, err := g.VPCs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got[strings.TrimPrefix(ownership.VPCScope("000000000"), "vpc-")]; !ok {
+		t.Fatalf("VPCs = %v, want the padded all-zero VPC's scope key", got)
+	}
+	err = g.Reclaim(context.Background(), "000000000", func() error {
+		t.Error("reclaim ran for a VPC an attachment uses")
+		return nil
+	})
+	if !errors.Is(err, ErrInUse) {
+		t.Fatalf("Reclaim of the padded all-zero VPC = %v, want ErrInUse", err)
 	}
 }
 
