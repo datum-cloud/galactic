@@ -209,6 +209,15 @@ func TestRecreatedLease(t *testing.T) {
 	if _, ok, err := ReadLease(ctx, c, recreated); ok || err != nil {
 		t.Fatalf("the deleted instance's Lease read as the recreated one's: %v", err)
 	}
+	// Until the old Lease goes, it is a conflict to retry, not a name
+	// another pod holds.
+	if _, err := store.Get(ctx, inst.Name); !errors.Is(err, claim.ErrConflict) || errors.Is(err, ErrNameTaken) {
+		t.Fatalf("get of the deleted instance's Lease: %v, want ErrConflict", err)
+	}
+	if _, err := store.Create(ctx, claim.Record{Key: inst.Name}); !errors.Is(err, claim.ErrConflict) ||
+		errors.Is(err, ErrNameTaken) {
+		t.Fatalf("create over the deleted instance's Lease: %v, want ErrConflict", err)
+	}
 	// envtest runs no garbage collector.
 	stale := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: inst.Name}}
 	if err := c.Delete(ctx, stale); err != nil {
@@ -224,6 +233,52 @@ func TestRecreatedLease(t *testing.T) {
 	old.Holder, old.Released = "p1", false
 	if _, err := store.Update(ctx, old); !errors.Is(err, claim.ErrConflict) {
 		t.Fatalf("update of a recreated Lease from the old version: %v, want ErrConflict", err)
+	}
+}
+
+// TestNameTaken: an instance or lease name held by an object naming another
+// pod is refused as ErrNameTaken, which acquisition does not retry, while a
+// retried create of the pod's own instance succeeds.
+func TestNameTaken(t *testing.T) {
+	c := startAPI(t)
+	ctx := context.Background()
+
+	squatted := NewInstance(ns, "connect-ip", "pod-u2", "u2", "edge-1", "boot")
+	squatted.Name = InstanceName("u1")
+	if err := c.Create(ctx, squatted); err != nil {
+		t.Fatal(err)
+	}
+	_, err := CreateInstance(ctx, c, NewInstance(ns, "connect-ip", "pod-u1", "u1", "edge-1", "boot"))
+	if !errors.Is(err, ErrNameTaken) || !errors.Is(err, claim.ErrLost) {
+		t.Fatalf("create under a name another pod's instance holds: %v, want ErrNameTaken", err)
+	}
+
+	inst, err := CreateInstance(ctx, c, NewInstance(ns, "connect-ip", "pod-u3", "u3", "edge-1", "boot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := CreateInstance(ctx, c, NewInstance(ns, "connect-ip", "pod-u3", "u3", "edge-1", "boot"))
+	if err != nil || again.UID != inst.UID {
+		t.Fatalf("retried create of the pod's own instance: %v", err)
+	}
+
+	f := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: ns, Name: inst.Name,
+		Labels: map[string]string{galacticv1alpha1.EdgeLeaseProviderLabel: "connect-ip"},
+		Annotations: map[string]string{galacticv1alpha1.EdgeLeasePodUIDAnnotation: "u4",
+			galacticv1alpha1.EdgeLeaseRenewStartAnnotation: "1", galacticv1alpha1.EdgeLeaseSequenceAnnotation: "0",
+			galacticv1alpha1.EdgeLeaseReleasedAnnotation: "false"},
+	}}
+	if err := c.Create(ctx, f); err != nil {
+		t.Fatal(err)
+	}
+	store := InstanceStore{Client: c, Namespace: ns}
+	if _, err := store.Create(ctx, claim.Record{Key: inst.Name}); !errors.Is(err, ErrNameTaken) {
+		t.Errorf("lease create under a name another pod's Lease holds: %v, want ErrNameTaken", err)
+	}
+	holder := &claim.Instance{ID: "p3", Store: store, Clock: (&clock{now: time.Hour}).read, Params: params}
+	if _, err := holder.Acquire(ctx, inst.Name); !errors.Is(err, ErrNameTaken) || !errors.Is(err, claim.ErrLost) {
+		t.Errorf("acquire of a lease another pod's Lease holds: %v, want ErrNameTaken, not ErrHeld", err)
 	}
 }
 

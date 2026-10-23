@@ -224,7 +224,9 @@ EdgeInstance is one running Galactic Edge provider pod. Its attachments
 name it, and the foundation checks it against the pod it names before
 admitting them. Routes name it with its lease's incarnation and epoch, and
 their forwarding gates stay open only while that lease is renewed. Its name
-is derived from the pod UID, so a retried create lands on the same object.
+is ei- followed by the pod UID, so a retried create lands on the same
+object; a ValidatingAdmissionPolicy refuses a provider pod's create of an
+instance or lease under any other name.
 
 
 

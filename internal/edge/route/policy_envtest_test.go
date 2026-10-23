@@ -7,11 +7,13 @@ package route
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
@@ -246,6 +248,40 @@ func TestLeasePolicies(t *testing.T) {
 			Kind: "EdgeInstance", Name: "forged", UID: b.inst.UID}},
 	}}
 	expect("a pod creating a lease for another pod", false, podA.Create(ctx, forged))
+
+	// A pod creates its instance and lease only under its own name, so it
+	// cannot take a name another pod has yet to use.
+	victim := provider.InstanceName("victim-pod-uid")
+	squat := provider.NewInstance(providerNS, providerName, "a", string(a.pod.UID), nodeA, "boot")
+	squat.Name = victim
+	err := podA.Create(ctx, squat)
+	expect("a pod creating an instance under another pod's name", false, err)
+	if err != nil && !strings.Contains(err.Error(), "must be named "+a.inst.Name+" for the pod they name, not "+victim) {
+		t.Errorf("instance name refusal does not name the conflict: %v", err)
+	}
+	squatLease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: providerNS, Name: victim,
+		Labels: map[string]string{galacticv1alpha1.EdgeLeaseProviderLabel: providerName},
+		Annotations: map[string]string{galacticv1alpha1.EdgeLeasePodUIDAnnotation: string(a.pod.UID),
+			galacticv1alpha1.EdgeLeaseRenewStartAnnotation: "1", galacticv1alpha1.EdgeLeaseSequenceAnnotation: "0",
+			galacticv1alpha1.EdgeLeaseReleasedAnnotation: "false"},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: galacticv1alpha1.GroupVersion.String(),
+			Kind: "EdgeInstance", Name: victim, UID: a.inst.UID}},
+	}}
+	expect("a pod creating a lease under another pod's name", false, podA.Create(ctx, squatLease))
+	own := &podHolder{pod: &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: providerNS},
+		Spec: corev1.PodSpec{NodeName: nodeA, ServiceAccountName: providerName,
+			Containers: []corev1.Container{{Name: "p", Image: "p"}}},
+	}}
+	f.create(own.pod)
+	podC := f.providerPod(own)
+	_, err = provider.CreateInstance(ctx, podC,
+		provider.NewInstance(providerNS, providerName, "c", string(own.pod.UID), nodeA, "boot"))
+	expect("a pod creating its own instance", true, err)
+	_, err = provider.InstanceStore{Client: podC, Namespace: providerNS}.Create(ctx,
+		claim.Record{Key: provider.InstanceName(string(own.pod.UID))})
+	expect("a pod creating its own lease", true, err)
 	expect("a pod writing a Lease that is not an instance's", false, podA.Create(ctx, &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{Namespace: providerNS, Name: "leader-election"}}))
 	const otherElection = "other-election"

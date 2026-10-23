@@ -20,6 +20,7 @@ import (
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/admission"
+	edgeprovider "go.datum.net/galactic/internal/edge/provider"
 )
 
 // nodeNameExtra is the user-info extra key carrying a bound token's Node.
@@ -99,7 +100,7 @@ func TestPolicies(t *testing.T) {
 		t.Fatalf("a pod could not create its own attachment: %v", err)
 	}
 	elsewhere := &galacticv1alpha1.EdgeInstance{
-		ObjectMeta: metav1.ObjectMeta{Name: "elsewhere", Namespace: providerNS},
+		ObjectMeta: metav1.ObjectMeta{Name: edgeprovider.InstanceName(string(p1.UID)), Namespace: providerNS},
 		Spec: galacticv1alpha1.EdgeInstanceSpec{
 			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: providerSA},
 			PodName:     "p1", PodUID: string(p1.UID), NodeName: "edge-2", BootID: "boot",
