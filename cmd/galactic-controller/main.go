@@ -112,7 +112,7 @@ func newRootCommand() *cobra.Command {
 		"a deleted attachment is held until galactic-edge on its node reports it released, or the node is removed)")
 	f.DurationVar(&o.edgeMaxSkew, "edge-max-skew", 2*time.Second,
 		"Cell role: maximum wall-clock error of any node; an EdgeService stops admitting this long before its "+
-			"validUntil. It must equal the node agent's maximum skew")
+			"validUntil. It must equal galactic-edge's --max-skew")
 	return cmd
 }
 

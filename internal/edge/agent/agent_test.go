@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -19,6 +20,7 @@ import (
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/plumbing/ebpf/forwardgatemap"
 )
 
 const (
@@ -107,6 +109,7 @@ func TestAttachDetach(t *testing.T) {
 	// Detach: deleting releases the host state and the datapath rows of
 	// exactly the deleted attachments.
 	ctx := context.Background()
+	registered := len(f.dp.unregistered)
 	for _, n := range []string{"a", "p"} {
 		if err := f.client.Delete(ctx, f.get(n)); err != nil {
 			t.Fatal(err)
@@ -121,11 +124,54 @@ func TestAttachDetach(t *testing.T) {
 	if l := f.links(); len(l) != 1 || l[0].HostIndex != linkB {
 		t.Fatalf("links after detach %+v, want only b's", l)
 	}
-	if slices.Contains(f.dp.unregistered, uint32(linkB)) {
+	if slices.Contains(f.dp.unregistered[registered:], uint32(linkB)) {
 		t.Error("b's datapath rows removed")
 	}
 	if _, ok := f.dp.table(linkA); ok {
 		t.Error("a's datapath rows left behind")
+	}
+}
+
+// TestNewLinkClearsStaleRows: a link the agent creates is registered with no
+// rows left on its ifindex by a link a pod's deletion took with it, whatever
+// number the kernel gives it, while a link it finds already registered, as
+// after a restart, keeps its gates.
+func TestNewLinkClearsStaleRows(t *testing.T) {
+	f := newFixture(t)
+	stale := netip.MustParsePrefix("fd00:dead::/64")
+	const seeded = 512
+	for i := uint32(1); i <= seeded; i++ {
+		f.gates.setLink(i, netip.MustParseAddr("fd00:dead::1"))
+		if err := f.gates.Set(i, stale, forwardgatemap.Gate{Deadline: time.Hour, Epoch: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := f.agent()
+	f.pod(pod1UID)
+	f.attach("a", attA, pod1UID, vpcA, addr, false)
+	f.reconcile(a)
+	f.programmed("a")
+	index := f.hostLink("a").Attrs().Index
+	if index > seeded {
+		t.Fatalf("host link got ifindex %d, past the %d seeded", index, seeded)
+	}
+	if _, ok := f.gates.row(index, stale); ok {
+		t.Fatalf("new link %d inherited a stale gate", index)
+	}
+	if got, ok, _ := f.gates.Link(uint32(index)); !ok || got != netip.MustParseAddr(addr) {
+		t.Fatalf("new link %d registered with address %v (%t), want %s", index, got, ok, addr)
+	}
+	if _, ok := f.gates.row(seeded, stale); !ok && index != seeded {
+		t.Fatal("an ifindex no link holds lost its rows outside the sweep")
+	}
+
+	live := netip.MustParsePrefix("fd00:aa:0:f::/64")
+	if err := f.gates.Set(uint32(index), live, forwardgatemap.Gate{Deadline: time.Hour, Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(f.agent())
+	if _, ok := f.gates.row(index, live); !ok {
+		t.Fatal("a restarted agent dropped a live gate of a link it found")
 	}
 }
 
@@ -287,6 +333,7 @@ func TestStaleDeletionPreservesReplacement(t *testing.T) {
 	f.attach("old", attA, pod1UID, vpcA, addr, false)
 	f.reconcile(a)
 	oldIndex := f.hostLink("old").Attrs().Index
+	before := len(f.dp.unregistered)
 
 	if err := f.client.Delete(context.Background(), f.get("old")); err != nil {
 		t.Fatal(err)
@@ -301,8 +348,14 @@ func TestStaleDeletionPreservesReplacement(t *testing.T) {
 	if _, ok := f.dp.table(newIndex); !ok {
 		t.Error("replacement's datapath rows removed")
 	}
-	if !slices.Equal(f.dp.unregistered, []uint32{uint32(oldIndex)}) {
-		t.Errorf("unregistered %v, want only the old link %d", f.dp.unregistered, oldIndex)
+	// The replacement's number is cleared once, before its new link is
+	// registered; the old attachment's release removes only its own.
+	got := slices.Clone(f.dp.unregistered[before:])
+	slices.Sort(got)
+	want := []uint32{uint32(oldIndex), uint32(newIndex)}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("unregistered %v, want the old link %d and the new link's clear %d", got, oldIndex, newIndex)
 	}
 	in(t, f.host, func() error {
 		_, err := netlink.LinkByIndex(workload)
