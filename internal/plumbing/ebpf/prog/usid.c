@@ -2831,6 +2831,20 @@ static USID_ALWAYS_INLINE int edge_gate_packet(__u32 ifindex, struct edge_link_v
 	return edge_gate_open(ifindex, link, dst ? ip6->daddr : ip6->saddr, stat);
 }
 
+// edge_gate_skb reports whether the Ethernet frame at skb->data may cross
+// host link ifindex, as edge_gate_packet decides, or 1 when ifindex is not
+// an edge link. A global function rather than an inlined one: the verifier
+// checks it once on its own, instead of on every path into each program that
+// calls it, which the gate's branches would otherwise multiply.
+__attribute__((noinline)) int edge_gate_skb(struct __sk_buff *skb, __u32 ifindex, __u32 dst, __u32 stat)
+{
+	struct edge_link_value *link = bpf_map_lookup_elem(&edge_link_table, &ifindex);
+
+	if (!link)
+		return 1;
+	return edge_gate_packet(ifindex, link, (void *) (long) skb->data, (void *) (long) skb->data_end, dst, stat);
+}
+
 static USID_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct vrf_value *vrf, __u64 vrf_key, __u32 direction)
 {
 	count_drop(reason);
@@ -4409,23 +4423,6 @@ int usid_ingress(struct __sk_buff *skb)
 	fib_params.ifindex = skb->ingress_ifindex;
 	fib_params.tbid = vrf_table_id;
 
-	// The destination the edge forwarding gate checks, kept before the
-	// lookup below replaces fib_params' destination with the next hop: a
-	// prefix behind an edge attachment is routed via the attachment's own
-	// address, which the gate always passes.
-	__u8 edge_dst[16];
-
-	if (inner_version == 6) {
-		__builtin_memcpy(edge_dst, fib_params.ipv6_dst, sizeof(edge_dst));
-	} else {
-		// An IPv4 destination: an edge attachment never holds one, and no
-		// gate row matches its mapped form.
-		__builtin_memset(edge_dst, 0, sizeof(edge_dst));
-		edge_dst[10] = 0xff;
-		edge_dst[11] = 0xff;
-		__builtin_memcpy(edge_dst + 12, &fib_params.ipv4_dst, 4);
-	}
-
 	// Step 8: bpf_fib_lookup against the resolved Linux VRF table, an ordinary
 	// FIB lookup scoped to that table exactly as the kernel's stock End.DT46
 	// does, reached through a dynamic Argument-keyed lookup rather than a
@@ -4476,12 +4473,12 @@ int usid_ingress(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	// An edge host link takes only its own address and its open gates, for
-	// the packet's own destination, after translation.
-	__u32 edge_ifindex = fib_params.ifindex;
-	struct edge_link_value *edge_link = bpf_map_lookup_elem(&edge_link_table, &edge_ifindex);
-
-	if (edge_link && !edge_gate_open(edge_ifindex, edge_link, edge_dst, EDGE_GATE_STAT_INGRESS_CLOSED)) {
+	// An edge host link takes only its own address and its open gates. The
+	// destination is read from the packet, translated already: the lookup
+	// above replaced fib_params' with the next hop, and a prefix behind an
+	// edge attachment is routed via the attachment's own address, which the
+	// gate always passes.
+	if (!edge_gate_skb(skb, fib_params.ifindex, 1, EDGE_GATE_STAT_INGRESS_CLOSED)) {
 		__sync_fetch_and_add(&vrf->dropped_packets, 1);
 		return TC_ACT_SHOT;
 	}
@@ -5465,9 +5462,7 @@ int usid_egress(struct __sk_buff *skb)
 
 	// An edge host link sends only from its own address and its open gates,
 	// checked before any rewrite touches the source.
-	struct edge_link_value *edge_link = bpf_map_lookup_elem(&edge_link_table, &ifindex);
-
-	if (edge_link && !edge_gate_packet(ifindex, edge_link, data, data_end, 0, EDGE_GATE_STAT_EGRESS_CLOSED))
+	if (!edge_gate_skb(skb, ifindex, 0, EDGE_GATE_STAT_EGRESS_CLOSED))
 		return TC_ACT_SHOT;
 	__u64 vrf_key = (iv->block << 12) | iv->argument;
 	struct vrf_value *vrf = bpf_map_lookup_elem(&vrf_table, &vrf_key);
@@ -5985,8 +5980,7 @@ int tp_deliver(struct __sk_buff *skb)
 	if (edge_link) {
 		if (bpf_skb_pull_data(skb, sizeof(struct usid_ethhdr) + sizeof(struct usid_ip6hdr)))
 			return TC_ACT_SHOT;
-		if (!edge_gate_packet(edge_ifindex, edge_link, (void *) (long) skb->data, (void *) (long) skb->data_end, 1,
-				      EDGE_GATE_STAT_DELIVER_CLOSED))
+		if (!edge_gate_skb(skb, edge_ifindex, 1, EDGE_GATE_STAT_DELIVER_CLOSED))
 			return TC_ACT_SHOT;
 	}
 
