@@ -102,7 +102,7 @@ func TestPolicies(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "elsewhere", Namespace: providerNS},
 		Spec: galacticv1alpha1.EdgeInstanceSpec{
 			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: providerSA},
-			PodName:     "p1", PodUID: string(p1.UID), NodeName: "edge-2",
+			PodName:     "p1", PodUID: string(p1.UID), NodeName: "edge-2", BootID: "boot",
 		},
 	}
 	if err := pod1.Create(ctx, elsewhere); err == nil {
