@@ -21,6 +21,7 @@ the fabric-api gateway are Deployments, scraped per pod.
 | Tenant egress pool      | `galactic-cni`                                            | `galactic_cni_egress_*`                                       | 9180           | `galactic-cni`                           |
 | VPC ingress             | `galactic-vrf`                                            | `galactic_ingress_sidecar_*`                                  | 9182 (default) | none shipped                             |
 | VPC ingress return path | `galactic-cni` (`credential-refresh`)                     | `galactic_sidecar_return_*`                                   | 9180           | `galactic-cni`                           |
+| VPC ingress backends    | `galactic-cni` (`credential-refresh`)                     | `galactic_endpointslice_repair_*`                             | 9180           | `galactic-cni`                           |
 | Edge load balancer      | `galactic-gateway`                                        | `galactic_edge_*`, controller-runtime                         | 8081           | none shipped                             |
 | Tenant routing (GoBGP)  | `galactic-router`, `galactic-router-rr`                   | `galactic_router_*`, controller-runtime                       | 9179           | `galactic-router` / `galactic-router-rr` |
 | Private service routes  | `galactic-router` (plain mode only)                       | `galactic_service_route_*`                                    | 9179           | `galactic-router`                        |
@@ -583,6 +584,28 @@ min_over_time(galactic_sidecar_return_endpoints{state="pending"}[10m]) > 0
 
 # Return path pass stalled (passes run every 30s)
 time() - galactic_sidecar_return_last_completed_timestamp_seconds > 300
+```
+
+### Backend EndpointSlice repair — `galactic_endpointslice_repair_*`
+
+`galactic-cni` recreates the per-pod EndpointSlice of any Running pod on its
+node that has a galactic IPv6 attachment but no slice, every 5 minutes (see
+[conflist-reference.md](cni/conflist-reference.md#endpointslice-publish-http-ingress-backend-discovery)).
+The HTTP ingress sidecar finds a VPC backend only through that slice, so each
+recreated slice is a pod whose HTTP ingress was down until the pass.
+
+| Metric                                         | Type    | Labels | Meaning                                                                        |
+| ---------------------------------------------- | ------- | ------ | ------------------------------------------------------------------------------ |
+| `galactic_endpointslice_repair_restored_total` | counter | none   | Missing EndpointSlices the repair recreated                                    |
+| `galactic_endpointslice_repair_failures_total` | counter | none   | Passes that could not list the node's pods, or read or create an EndpointSlice |
+
+A pod the pass cannot resolve (no NetworkAttachmentDefinition, `BGPRouter` or
+`BGPVRFInstance`) is logged and retried on the next pass, not counted as a
+failure.
+
+```promql
+# Slices going missing on a node: something removed them while their pods ran
+increase(galactic_endpointslice_repair_restored_total[1h]) > 0
 ```
 
 ## Edge load balancer — `galactic_edge_*`

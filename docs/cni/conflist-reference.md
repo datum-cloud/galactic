@@ -274,15 +274,38 @@ EndpointSlice carries:
 - Annotation `galactic.datum.net/srv6-sid`: the computed SRv6 uSID
   (`internal/plumbing/srv6.ComputeSID`) routing to this pod's VRF — absent
   when this node's `BGPRouter` has no `srv6Locator`/`nodeID` configured.
+- Annotation `galactic.datum.net/sandbox-id`: the container ID of the pod
+  sandbox whose ADD wrote the slice.
 - `metadata.ownerReferences`: the owning Pod, so the Kubernetes garbage
   collector reclaims it if this plugin's own DEL is never run (a
-  force-deleted pod). CNI DEL deletes it explicitly and unconditionally on
-  the normal path — unlike the BGP CRDs, an EndpointSlice is 1:1 with
-  exactly one pod and is never shared with a sibling attachment, so DEL
-  deleting it immediately is safe.
+  force-deleted pod).
+
+CNI DEL deletes the EndpointSlice only when its `sandbox-id` annotation names
+the sandbox being torn down, with a UID and resourceVersion precondition on
+the delete. A pod keeps its name and often its UID across sandboxes, as when
+the kubelet rebuilds every sandbox after a node reboot, and the runtime can
+tear down the previous sandbox after the replacement's ADD. A slice naming
+another sandbox, or none, is left in place, and the owner reference removes it
+when the pod is deleted.
 
 CHECK verifies the EndpointSlice still exists with the expected address and
 annotations.
+
+`galactic-cni run` recreates a missing EndpointSlice every 5 minutes, on the
+same tick as its eBPF map sweeps
+(`internal/installer/endpointslice_repair.go`). For each Running pod on its
+node, it reads the Multus `k8s.v1.cni.cncf.io/network-status` annotation,
+takes the last entry whose NetworkAttachmentDefinition chains `galactic-bgp`
+and carries an IPv6 address, and creates the slice from that definition's
+`vpc`, `vpcattachment` and `namespace`, with the SID computed from the node's
+`BGPRouter` and the VPC's `BGPVRFInstance`. It only creates: an existing slice
+is never rewritten, and an ADD that loses its create to the repair retries as
+an update. A recreated slice has no `sandbox-id` annotation until the pod's
+next ADD. An attachment whose definition no longer exists is passed over for
+the pod's earlier one. A pod whose definition, `BGPRouter` or `BGPVRFInstance`
+cannot be read is skipped, logged and retried on the next tick.
+`galactic_endpointslice_repair_restored_total` counts the slices recreated,
+and `galactic_endpointslice_repair_failures_total` the passes that failed.
 
 Both the pod's name and its namespace are parsed from `K8S_POD_NAME`/
 `K8S_POD_NAMESPACE` in `CNI_ARGS` (`internal/nadpatch.ParsePodName`/

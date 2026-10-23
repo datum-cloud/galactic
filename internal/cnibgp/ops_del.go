@@ -13,6 +13,7 @@ import (
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 
 	"go.datum.net/galactic/internal/nadpatch"
+	"go.datum.net/galactic/internal/podslice"
 )
 
 // cmdDel deletes the per-pod EndpointSlice the ADD path published, then falls
@@ -22,10 +23,12 @@ import (
 // concurrent ADD during a restart; that cleanup stays garbage collection's job.
 //
 // The EndpointSlice is a deliberate divergence: it is one per pod and never
-// shared, so there is no live sibling to endanger. Deletion is best-effort, and
-// any failure, including failing to build a client at all, is logged while DEL
-// still returns success: an API hiccup during teardown must not block the pod
-// from going away. The owner reference is the backstop for exactly that case.
+// shared with another attachment. It is still shared across a pod's sandboxes,
+// so DEL deletes it only when this sandbox wrote it.
+// Deletion is best-effort, and any failure, including failing to build a
+// client at all, is logged while DEL still returns success: an API hiccup
+// during teardown must not block the pod from going away. The owner reference
+// is the backstop for exactly that case.
 func cmdDel(args *skel.CmdArgs) error {
 	// DEL is idempotent per the CNI spec and always returns success, even when
 	// the config fails to parse. Parsing exists only to log the identifiers when
@@ -71,9 +74,15 @@ func deleteEndpointSliceBestEffort(args *skel.CmdArgs) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer cancel()
-	if err := deleteEndpointSlice(ctx, k8sClient, podNamespace, podName); err != nil {
+	deleted, err := podslice.Delete(ctx, k8sClient, podNamespace, podName, args.ContainerID)
+	if err != nil {
 		slog.Error("DEL: failed to delete EndpointSlice, cleanup deferred to GC",
 			"err", err, "containerID", args.ContainerID, "podName", podName, "namespace", podNamespace)
+		return
+	}
+	if !deleted {
+		slog.Info("DEL: EndpointSlice absent or written by another sandbox, left in place",
+			"containerID", args.ContainerID, "podName", podName, "namespace", podNamespace)
 		return
 	}
 	slog.Info("DEL: EndpointSlice deleted", "containerID", args.ContainerID, "podName", podName, "namespace", podNamespace)

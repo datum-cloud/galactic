@@ -127,7 +127,7 @@ func RepairAttachmentDatapath(
 		return result, nil
 	}
 
-	node, routerName, found, err := nodeSRv6Identity(ctx, k8s, cfg.Namespace, cfg.NodeName)
+	node, routerName, found, err := NodeSRv6Identity(ctx, k8s, cfg.Namespace, cfg.NodeName)
 	if err != nil {
 		return result, err
 	}
@@ -274,12 +274,12 @@ func stillAttached(a discoveredAttachment) bool {
 	return link.Attrs().Name == a.name && link.Attrs().MasterIndex == a.masterIndex
 }
 
-// nodeSRv6Identity returns the SRv6 identity of nodeName's BGPRouter and the
+// NodeSRv6Identity returns the SRv6 identity of nodeName's BGPRouter and the
 // router's name. found is false when no router targets the node. A router
 // with no SRv6 locator or node ID is found with an unconfigured Node, for
 // which CNI ADD registers nothing either. More than one router targeting the
 // node is an error, as it is for CNI ADD.
-func nodeSRv6Identity(
+func NodeSRv6Identity(
 	ctx context.Context, k8s client.Client, namespace, nodeName string,
 ) (node attachreg.Node, routerName string, found bool, err error) {
 	routers, err := routersForNode(ctx, k8s, namespace, nodeName)

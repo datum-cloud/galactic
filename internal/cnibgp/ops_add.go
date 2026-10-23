@@ -14,6 +14,7 @@ import (
 
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/podslice"
 )
 
 // cmdAdd is this plugin's ADD: the last in the chain, publishing SRv6, BGP, and
@@ -101,10 +102,13 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 				"publish EndpointSlice: no K8S_POD_NAME/K8S_POD_NAMESPACE in CNI_ARGS %q", args.Args)
 		}
 		esCtx, esCancel := context.WithTimeout(context.Background(), cniTimeout)
-		esErr := publishEndpointSlice(
-			esCtx, k8sClient, podNamespace, podName, pluginConf.VPC, pluginConf.VPCAttachment,
-			ipamResult.IPv6Subnet.IP, result.sid,
-		)
+		esErr := podslice.Publish(esCtx, k8sClient, podNamespace, podName, podslice.Endpoint{
+			VPC:           pluginConf.VPC,
+			VPCAttachment: pluginConf.VPCAttachment,
+			Addr:          ipamResult.IPv6Subnet.IP,
+			SID:           result.sid,
+			SandboxID:     args.ContainerID,
+		})
 		esCancel()
 		if esErr != nil {
 			return fmt.Errorf("publish EndpointSlice: %w", esErr)

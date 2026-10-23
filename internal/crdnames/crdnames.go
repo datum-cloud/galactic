@@ -80,6 +80,14 @@ const AnnotationNoAddressingValue = "true"
 // configured.
 const AnnotationSID = "galactic.datum.net/srv6-sid"
 
+// AnnotationSandboxID is the per-pod EndpointSlice annotation holding the
+// container ID of the pod sandbox whose CNI ADD last wrote the slice. CNI DEL
+// deletes the slice only when this names the sandbox being torn down, so a
+// late DEL for a pod's previous sandbox never removes the slice its
+// replacement wrote. Absent on a slice the node-side repair recreated, which
+// no DEL deletes; the owner reference to the pod reclaims it instead.
+const AnnotationSandboxID = "galactic.datum.net/sandbox-id"
+
 // LabelTenantID is the per-pod EndpointSlice label carrying the
 // TenantIdentifier value, which is how the HTTP ingress extension server finds
 // the EndpointSlices for a VPC attachment. A label rather than only an
