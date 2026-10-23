@@ -9,7 +9,11 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 
+	"github.com/cilium/ebpf"
+
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
@@ -23,7 +27,7 @@ var ErrVRFNotRegistered = errors.New("eBPF registration: VRF has no uSID entry o
 // canonical VRF, such as a Galactic Edge attachment's, with the uSID
 // datapath under that VRF's own uSID entry: it allocates no Argument. It
 // writes the link's ifindex_vrf_table and ifindex_egress_kind_table rows and
-// attaches usid_egress to it. Where the VRF has more than one entry, the
+// attaches usid_egress to its tc ingress and tp_deliver to its tc egress. Where the VRF has more than one entry, the
 // lowest Argument is used, so every call picks the same one.
 func RegisterHostLink(pinDir string, vrfTableID uint32, ifindex uint32, ifname string) error {
 	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
@@ -60,6 +64,16 @@ func RegisterHostLink(pinDir string, vrfTableID uint32, ifindex uint32, ifname s
 	}
 	if err := attachUsidEgress(pinDir, ifname); err != nil {
 		return fmt.Errorf("attach eBPF usid_egress to host interface %q: %w", ifname, err)
+	}
+	// tp_deliver checks what the kernel itself transmits to the link: the
+	// traffic policy, and an edge link's forwarding gate.
+	program, err := ebpf.LoadPinnedProgram(filepath.Join(pinDir, attach.TpDeliverPinName), nil)
+	if err != nil {
+		return fmt.Errorf("load pinned tp_deliver: %w", err)
+	}
+	defer func() { _ = program.Close() }()
+	if err := attach.AttachDeliver(program, ifname); err != nil {
+		return fmt.Errorf("attach eBPF tp_deliver to host interface %q: %w", ifname, err)
 	}
 	return nil
 }

@@ -226,7 +226,7 @@ func (f *fixture) pod(name string) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{Name: "inst-" + name, Namespace: providerNS},
 		Spec: galacticv1alpha1.EdgeInstanceSpec{
 			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: providerSA},
-			PodName:     name, PodUID: string(p.UID), NodeName: edgeNode,
+			PodName:     name, PodUID: string(p.UID), NodeName: edgeNode, BootID: "boot",
 		},
 	})
 	return p

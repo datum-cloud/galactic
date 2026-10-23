@@ -5,7 +5,9 @@
 // Command galactic-edge is the Galactic Edge node agent. It runs on each edge
 // node, programs the host state of every EdgeAttachment galactic-controller
 // has admitted and allocated to the node, and releases it when the attachment
-// is deleted. It is the only process that changes host state for an edge
+// is deleted. It keeps each attachment's forwarding gate: the prefixes of the
+// routes accepted for the attachment, open only until the holder's lease
+// deadline. It is the only process that changes host state for an edge
 // attachment.
 package main
 
@@ -18,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,6 +37,7 @@ import (
 	"go.datum.net/galactic/internal/edge/agent"
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/edge/timing"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 )
@@ -48,6 +52,8 @@ type options struct {
 	procSys         string
 	metricsAddress  string
 	healthAddress   string
+	maxSkew         time.Duration
+	bootIDPath      string
 }
 
 func main() {
@@ -80,6 +86,10 @@ func newRootCommand() *cobra.Command {
 			"through the write fence. For test environments only; without it the agent releases but never programs")
 	f.StringVar(&o.procSys, "proc-sys-path", "/proc/sys",
 		"Writable procfs sysctl directory, for the forwarding sysctl of a packet device's pod")
+	f.DurationVar(&o.maxSkew, "max-skew", timing.Params.MaxSkew,
+		"Maximum wall-clock error of any node; a gate closes this long before its grant's validUntil. "+
+			"It must equal galactic-controller's --edge-max-skew")
+	f.StringVar(&o.bootIDPath, "boot-id-path", "/proc/sys/kernel/random/boot_id", "File holding this boot's ID")
 	f.StringVar(&o.metricsAddress, "metrics-bind-address", ":9186", "Address serving /metrics")
 	f.StringVar(&o.healthAddress, "health-probe-bind-address", ":9187", "Address serving /healthz and /readyz")
 	return cmd
@@ -108,6 +118,15 @@ func run(parent context.Context, o *options) error {
 	}
 	auth, err := ownership.New(o.ownershipDir)
 	if err != nil {
+		return err
+	}
+	bootID, err := os.ReadFile(o.bootIDPath)
+	if err != nil {
+		return fmt.Errorf("read boot ID: %w", err)
+	}
+	params := timing.Params
+	params.MaxSkew = o.maxSkew
+	if err := params.Validate(); err != nil {
 		return err
 	}
 	// The agent runs in the host network namespace; /proc/self/ns/net is the
@@ -143,6 +162,10 @@ func run(parent context.Context, o *options) error {
 		Datapath:   agent.PinnedDatapath{PinDir: o.pinDir},
 		MTU:        o.mtu,
 		Program:    o.programUnfenced,
+		APIReader:  mgr.GetAPIReader(),
+		Gates:      agent.PinnedGates{PinDir: o.pinDir},
+		Params:     params,
+		BootID:     strings.TrimSpace(string(bootID)),
 	}
 	if err := a.SetupWithManager(mgr); err != nil {
 		return err

@@ -18,9 +18,12 @@
 //
 // Each VPC on the node is one ownership scope (internal/edge/ownership). A
 // process takes over the scopes its predecessors held with Fence and Adopt,
-// and writes each scope only inside a snapshot commit of its complete state,
-// so a write prepared by an earlier process, or before another writer's
-// commit, never lands.
+// and writes each scope only inside a commit, so a write prepared by an
+// earlier process, or before another writer's commit, never lands.
+//
+// The agent also keeps each host link's forwarding gate (Gate): which
+// prefixes beyond the attachment's own address the link carries, and until
+// when. A link's host routes carry exactly its open gates' prefixes.
 package agent
 
 import (
@@ -29,6 +32,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -39,8 +43,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	"go.datum.net/galactic/internal/edge/claim"
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/edge/timing"
 )
 
 // Condition reasons the agent sets.
@@ -63,10 +69,16 @@ const ownerPrefix = "galactic-edge/"
 // Datapath registers attachment host links with the node's uSID datapath.
 type Datapath interface {
 	// Register registers the host link with ifindex, enslaved to the VRF
-	// with routing table vrfTable.
-	Register(vrfTable, ifindex uint32, ifname string) error
-	// Unregister removes every row Register wrote for ifindex.
+	// with routing table vrfTable, as an edge link whose own address is
+	// addr: it carries nothing else until a gate opens for it. The link is
+	// gated before any program that forwards its traffic is attached.
+	Register(vrfTable, ifindex uint32, ifname string, addr netip.Addr) error
+	// Unregister closes ifindex's gates and removes every row Register
+	// wrote for it except the gate's link row, so the link carries nothing
+	// beyond its own address until it is gone.
 	Unregister(ifindex uint32) error
+	// Forget removes ifindex's gate link row, once the link is deleted.
+	Forget(ifindex uint32) error
 }
 
 // Agent reconciles the host state of the attachments on one node.
@@ -93,6 +105,25 @@ type Agent struct {
 	// reports MaintenanceNotFenced.
 	Program bool
 
+	// APIReader reads every input of a gate decision from the API server.
+	APIReader ctrl.Reader
+	// Gates is the node's forwarding gate. Nil opens no gate, so no link
+	// carries more than its own address.
+	Gates GateTable
+	// Params is the cell's claim timing; it must be every provider's and
+	// galactic-controller's.
+	Params claim.Params
+	// BootID is the node's current boot ID. Instances of another boot are
+	// never applied: their renewal starts are on another clock.
+	BootID string
+	// BootClock reads CLOCK_BOOTTIME, the gates' clock. Nil means
+	// timing.BootClock.
+	BootClock claim.Clock
+	// Now is the wall clock, for grant expiry. Nil means time.Now.
+	Now func() time.Time
+
+	// mu serializes passes: they share tickets.
+	mu sync.Mutex
 	// tickets holds this process's next ticket for each scope it owns.
 	tickets map[string]ownership.Ticket
 	// lost holds the scopes another writer took from this process.
@@ -108,12 +139,17 @@ type outcome struct {
 	reason    string
 	message   string
 	spec      *hostattach.Attachment
+	// conflict reports a failure on host state another attachment still
+	// holds, such as a prefix route a previous holder has not yet pruned.
+	conflict bool
 }
 
 // Reconcile runs one pass over every attachment on the node and every link
 // the kernel holds for one. It is safe to run at any time and any number of
 // times.
 func (a *Agent) Reconcile(ctx context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	var list galacticv1alpha1.EdgeAttachmentList
 	if err := a.Client.List(ctx, &list); err != nil {
 		return fmt.Errorf("list EdgeAttachments: %w", err)
@@ -330,8 +366,11 @@ func (a *Agent) applyScope(vpc string, active, releasing []*galacticv1alpha1.Edg
 		}
 		out = append(out, released(att))
 	}
+	current := map[string]hostattach.ObservedAttachment{}
 	for _, att := range active {
-		delete(links, attachmentID(att.Status.VPC, string(att.UID)))
+		id := attachmentID(att.Status.VPC, string(att.UID))
+		current[id] = links[id]
+		delete(links, id)
 	}
 	// What is left carries the scope's stamp but no attachment wants it:
 	// its attachment is gone altogether.
@@ -340,8 +379,20 @@ func (a *Agent) applyScope(vpc string, active, releasing []*galacticv1alpha1.Edg
 			errs = append(errs, fmt.Errorf("release orphaned link %s: %w", id, err))
 		}
 	}
+	// An attachment whose route another one still holds, such as a prefix
+	// moving between two attachments of the VPC, is programmed again once
+	// every other attachment has pruned what its gates no longer carry.
+	var retry []int
 	for _, att := range active {
-		out = append(out, a.program(att, pods[att.Spec.PodUID]))
+		o := a.program(att, pods[att.Spec.PodUID], current[attachmentID(att.Status.VPC, string(att.UID))])
+		if o.conflict {
+			retry = append(retry, len(out))
+		}
+		out = append(out, o)
+	}
+	for _, i := range retry {
+		att := out[i].att
+		out[i] = a.program(att, pods[att.Spec.PodUID], current[attachmentID(att.Status.VPC, string(att.UID))])
 	}
 	return out, errors.Join(errs...)
 }
@@ -380,7 +431,18 @@ func (a *Agent) release(att *galacticv1alpha1.EdgeAttachment, link hostattach.Ob
 			defer func() { _ = h.Close() }()
 		}
 	}
-	return hostattach.Release(a.Host, podH, spec)
+	if err := hostattach.Release(a.Host, podH, spec); err != nil {
+		return err
+	}
+	return a.forget(link)
+}
+
+// forget removes a released link's gate link row.
+func (a *Agent) forget(link hostattach.ObservedAttachment) error {
+	if link.HostIndex == 0 {
+		return nil
+	}
+	return a.Datapath.Forget(uint32(link.HostIndex))
 }
 
 // releaseLink releases the attachment's own host link, and its datapath
@@ -390,19 +452,27 @@ func (a *Agent) releaseLink(spec hostattach.Attachment) error {
 	if err != nil {
 		return err
 	}
+	var own hostattach.ObservedAttachment
 	for _, l := range links {
 		if l.ID == spec.ID {
+			own = l
 			if err := a.Datapath.Unregister(uint32(l.HostIndex)); err != nil {
 				return err
 			}
 		}
 	}
-	return hostattach.Release(a.Host, nil, spec)
+	if err := hostattach.Release(a.Host, nil, spec); err != nil {
+		return err
+	}
+	return a.forget(own)
 }
 
 // program provisions one live attachment, reads it back and registers its
-// host link with the datapath.
-func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS) outcome {
+// host link with the datapath. The host routes carry the prefixes whose gates
+// are open on the link as it was found, so a prefix is routed to the link
+// only once the link is registered and gated; a link created now carries
+// none until the next pass.
+func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hostattach.ObservedAttachment) outcome {
 	fail := func(reason string, err error) outcome {
 		return outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
 			status: metav1.ConditionFalse, reason: reason, message: err.Error()}
@@ -415,6 +485,9 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS) outcome 
 	if err != nil {
 		return fail(ReasonProvisionFailed, err)
 	}
+	if link.ID == spec.ID {
+		spec.Prefixes = a.openPrefixes(link, att.Status.Address)
+	}
 	if ns.err != nil {
 		return fail(ReasonNamespaceUnavailable, ns.err)
 	}
@@ -426,7 +499,9 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS) outcome 
 	res, err := hostattach.Provision(a.Host, pod, spec)
 	if errors.Is(err, hostattach.ErrStalePeer) {
 		// The pod's sandbox was replaced: the link to the old one is this
-		// attachment's own, so it is released and provisioned again.
+		// attachment's own, so it is released and provisioned again, with
+		// no gates until the new link is registered.
+		spec.Prefixes = nil
 		if err = a.releaseLink(spec); err == nil {
 			res, err = hostattach.Provision(a.Host, pod, spec)
 		}
@@ -435,12 +510,14 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS) outcome 
 	case errors.Is(err, hostattach.ErrNamespaceReplaced):
 		return fail(ReasonNamespaceReplaced, err)
 	case err != nil:
-		return fail(ReasonProvisionFailed, err)
+		o := fail(ReasonProvisionFailed, err)
+		o.conflict = errors.Is(err, hostattach.ErrNotOwned)
+		return o
 	}
 	if err := hostattach.Readback(a.Host, pod, spec); err != nil {
 		return fail(ReasonReadbackFailed, err)
 	}
-	if err := a.Datapath.Register(res.HostTable, uint32(res.HostIndex), spec.HostLink); err != nil {
+	if err := a.Datapath.Register(res.HostTable, uint32(res.HostIndex), spec.HostLink, spec.Address); err != nil {
 		return fail(ReasonDatapathFailed, err)
 	}
 	return outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed, status: metav1.ConditionTrue,
@@ -478,3 +555,17 @@ func (a *Agent) report(ctx context.Context, o outcome) error {
 // Resync is how often the agent reconciles without an event, to repair host
 // state that drifted under it.
 const Resync = time.Minute
+
+func (a *Agent) bootClock() time.Duration {
+	if a.BootClock != nil {
+		return a.BootClock()
+	}
+	return timing.BootClock()
+}
+
+func (a *Agent) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
+}

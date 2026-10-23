@@ -2,7 +2,10 @@
 # galactic-controller --edge binds it per provider (RoleBinding
 # galactic-edge-provider-<provider>) and removes the binding when approval
 # is withdrawn. A provider cannot update or patch an attachment, so it
-# cannot remove the finalizer that holds it until its node releases it.
+# cannot remove the finalizer that holds it until its node releases it. It
+# writes its instance's lease (status) and its routes' claims (spec) by
+# compare-and-swap, and cannot write a route's status: only
+# galactic-controller accepts a claim.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -11,6 +14,12 @@ rules:
   - apiGroups: [galactic.datumapis.com]
     resources: [edgeinstances]
     verbs: [get, list, watch, create, delete]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeinstances/status]
+    verbs: [get, update, patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeroutes]
+    verbs: [get, list, watch, create, update, delete]
   - apiGroups: [galactic.datumapis.com]
     resources: [edgeattachments]
     verbs: [get, list, watch, create, delete]
@@ -33,7 +42,7 @@ rules:
   # condition are in EdgeService status; the finalizer, drain deletion and
   # lifecycle conditions are on EdgeAttachment.
   - apiGroups: [galactic.datumapis.com]
-    resources: [edgeproviders, edgeservices, edgeinstances, vpcs]
+    resources: [edgeproviders, edgeservices, vpcs]
     verbs: [get, list, watch]
   - apiGroups: [galactic.datumapis.com]
     resources: [edgeservices/status]
@@ -63,6 +72,18 @@ rules:
   - apiGroups: [galactic.datumapis.com]
     resources: [edgeattachments]
     verbs: [get, list, watch, update, patch, delete]
+  # Route acceptance: the accepted holder and conditions in EdgeRoute
+  # status, every VPC's EdgeRouteIndex, and reaping routes and instances
+  # no live pod can use.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeroutes, edgeinstances]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeroutes/status]
+    verbs: [get, update, patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgerouteindices]
+    verbs: [get, list, watch, create, update, patch]
   - apiGroups: [galactic.datumapis.com]
     resources: [edgeattachments/status]
     verbs: [get, patch]

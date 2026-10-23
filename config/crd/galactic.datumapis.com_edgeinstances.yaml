@@ -22,6 +22,9 @@ spec:
         - jsonPath: .spec.nodeName
           name: Node
           type: string
+        - jsonPath: .status.lease.epoch
+          name: Epoch
+          type: integer
         - jsonPath: .metadata.creationTimestamp
           name: Age
           type: date
@@ -29,10 +32,11 @@ spec:
       schema:
         openAPIV3Schema:
           description: |-
-            EdgeInstance is one running Galactic Edge provider pod. Its attachments
-            name it, and the foundation checks it against the pod it names before
-            admitting them. Its name is derived from the pod UID, so a retried create
-            lands on the same object.
+            EdgeInstance is one running Galactic Edge provider pod and its liveness
+            lease. Its attachments name it, and the foundation checks it against the
+            pod it names before admitting them. Routes name it with its lease epoch;
+            their forwarding gates stay open only while the lease is renewed. Its name
+            is derived from the pod UID, so a retried create lands on the same object.
           properties:
             apiVersion:
               description: |-
@@ -57,6 +61,15 @@ spec:
                 writes it at create; a ValidatingAdmissionPolicy requires podUID to be the
                 pod its token was issued for.
               properties:
+                bootID:
+                  description: |-
+                    BootID is the node's boot ID (/proc/sys/kernel/random/boot_id) when
+                    the instance was created. The lease's renewStart is on that boot's
+                    CLOCK_BOOTTIME, so galactic-edge applies no renewal of an instance
+                    whose boot ID is not the node's current one.
+                  maxLength: 36
+                  minLength: 1
+                  type: string
                 nodeName:
                   description: NodeName is the node the pod runs on.
                   maxLength: 253
@@ -86,6 +99,7 @@ spec:
                     - name
                   type: object
               required:
+                - bootID
                 - nodeName
                 - podName
                 - podUID
@@ -94,9 +108,60 @@ spec:
               x-kubernetes-validations:
                 - message: spec is immutable
                   rule: self == oldSelf
+            status:
+              description: EdgeInstanceStatus holds the instance's lease.
+              properties:
+                lease:
+                  description: |-
+                    Lease is the instance's liveness lease. Unset until the instance
+                    first writes it.
+                  properties:
+                    epoch:
+                      description: Epoch advances when a holder acquires the lease, never on renewal.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    holder:
+                      description: |-
+                        Holder identifies the provider process holding the lease, new for
+                        every process start. Empty while nobody holds it.
+                      maxLength: 128
+                      type: string
+                    incarnation:
+                      description: |-
+                        Incarnation identifies this lease record across its deletion and
+                        recreation. Routes accept the instance only at the incarnation and
+                        epoch they name.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    released:
+                      description: |-
+                        Released reports that the holder of Epoch stopped forwarding and gave
+                        the lease up.
+                      type: boolean
+                    renewStart:
+                      description: |-
+                        RenewStart is the holder's CLOCK_BOOTTIME reading, in nanoseconds,
+                        taken before it sent the acquisition or renewal that wrote this
+                        record. The lease is valid until RenewStart plus the cell's lease
+                        duration on that clock.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    sequence:
+                      description: Sequence advances on every renewal.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                  required:
+                    - incarnation
+                  type: object
+              type: object
           required:
             - spec
           type: object
       served: true
       storage: true
-      subresources: {}
+      subresources:
+        status: {}

@@ -2,7 +2,10 @@
 # galactic-edge-attachment-status (policies.yaml) limits those writes to its
 # own node's attachments and to the Programmed and Released conditions and
 # device names. It never creates, updates or deletes an attachment, so it
-# cannot remove the finalizer that holds one until it reports Released.
+# cannot remove the finalizer that holds one until it reports Released. It
+# reads routes, instances, services and providers to decide each forwarding
+# gate, and writes only a route's closedEpoch, which
+# galactic-edge-route-status limits to routes accepted on its own node.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -13,6 +16,12 @@ rules:
     verbs: [get, list, watch]
   - apiGroups: [galactic.datumapis.com]
     resources: [edgeattachments/status]
+    verbs: [get, patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeroutes, edgeinstances, edgeservices, edgeproviders]
+    verbs: [get, list, watch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeroutes/status]
     verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

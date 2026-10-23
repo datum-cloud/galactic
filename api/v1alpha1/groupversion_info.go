@@ -7,8 +7,10 @@
 // egress policy the CNI datapath enforces (see
 // docs/enhancements/networking/interface-traffic-policy), and EdgeProvider
 // and EdgeService, the Galactic Edge provider registration and tenant grant,
-// and EdgeInstance and EdgeAttachment, a provider pod and its connection to a
-// granted VPC (see docs/enhancements/networking/galactic-edge).
+// EdgeInstance and EdgeAttachment, a provider pod and its connection to a
+// granted VPC, and EdgeRoute and EdgeRouteIndex, a prefix's forwarding claim
+// and the record of every claim accepted in a VPC (see
+// docs/enhancements/networking/galactic-edge).
 // +kubebuilder:object:generate=true
 // +groupName=galactic.datumapis.com
 package v1alpha1
@@ -38,6 +40,8 @@ func addKnownTypes(s *runtime.Scheme) error {
 		&EdgeService{}, &EdgeServiceList{},
 		&EdgeInstance{}, &EdgeInstanceList{},
 		&EdgeAttachment{}, &EdgeAttachmentList{},
+		&EdgeRoute{}, &EdgeRouteList{},
+		&EdgeRouteIndex{}, &EdgeRouteIndexList{},
 	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil
