@@ -147,7 +147,8 @@ func TestMultiplexedRequestsStayInTheirVPC(t *testing.T) {
 }
 
 func TestCancelledRequestLeavesSiblingRunning(t *testing.T) {
-	env := startServer(t, nil)
+	authority := newTestAdmission()
+	env := startServer(t, func(c *Config) { c.Admission = authority })
 	cc := newClientConn(t, env.dialQUIC(t))
 
 	blue := open(t, cc, env.newRequest(t, authHeaders(tokenAlice, vpcBlue)))
@@ -169,7 +170,9 @@ func TestCancelledRequestLeavesSiblingRunning(t *testing.T) {
 		t.Fatal("green session closed when only blue was cancelled")
 	}
 
-	// The cancelled request's address returns to the pool.
+	// The cancelled request's address returns to the pool once its handler
+	// releases the lease, which it does after closing the backend session.
+	authority.waitReleased(t, blueSess.info)
 	again := open(t, cc, env.newRequest(t, authHeaders(tokenAlice, vpcBlue)))
 	if again.address != blue.address {
 		t.Errorf("reopened blue got %s, want released %s", again.address, blue.address)
