@@ -52,6 +52,23 @@ func List(host *Namespace) ([]ObservedAttachment, error) {
 		return nil, err
 	}
 	defer func() { _ = h.Close() }()
+	return listOwned(h)
+}
+
+// ListHost is List over the caller's own network namespace. Its netlink
+// socket is opened in place rather than by entering a namespace, so it needs
+// no CAP_SYS_ADMIN: a process that holds only CAP_NET_ADMIN, such as
+// galactic-router, can call it from the host's namespace.
+func ListHost() ([]ObservedAttachment, error) {
+	h, err := netlink.NewHandle()
+	if err != nil {
+		return nil, fmt.Errorf("hostattach: netlink handle in the current network namespace: %w", err)
+	}
+	defer func() { _ = h.Close() }()
+	return listOwned(h)
+}
+
+func listOwned(h *netlink.Handle) ([]ObservedAttachment, error) {
 	links, err := h.LinkList()
 	if err != nil {
 		return nil, fmt.Errorf("hostattach: list owned links: %w", err)

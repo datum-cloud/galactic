@@ -66,14 +66,7 @@ func NewGuard(reader client.Reader, nodeName, ownershipDir string) (*Guard, erro
 	}
 	return &Guard{
 		Reader: reader, NodeName: nodeName, Ownership: auth,
-		HostLinks: func() ([]hostattach.ObservedAttachment, error) {
-			host, err := hostattach.OpenNamespace("/proc/self/ns/net")
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = host.Close() }()
-			return hostattach.List(host)
-		},
+		HostLinks: hostattach.ListHost,
 	}, nil
 }
 
