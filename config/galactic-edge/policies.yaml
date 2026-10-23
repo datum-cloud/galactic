@@ -10,11 +10,17 @@
 # the provider's ServiceAccounts. A binding holds the provider's own
 # ServiceAccounts to objects naming the provider, and objects naming the
 # provider to its ServiceAccounts: in the object's namespace, as the pod the
-# object names, and an instance only for the node that pod runs on. A
-# provider's deletes are held to the same rules; another ServiceAccount's
-# delete is left to RBAC, so namespace deletion and garbage collection
-# proceed. An unapproved provider has no RoleBinding, so RBAC refuses it
-# first.
+# object names, and an instance only for the node that pod runs on. An
+# instance's lease is a Lease labeled galactic.datumapis.com/edge-provider
+# and annotated with its pod; only that pod writes it, and the provider's
+# ServiceAccounts write no other Lease. A route is held to the pod its claim
+# names: a pod may claim a route for itself, never for another pod, and only
+# the claiming pod may release, rewrite or delete its claim; another pod of
+# the provider may only take it over with a new epoch, which
+# galactic-controller accepts once the holder is fenced. A provider's deletes
+# are held to the same rules; another ServiceAccount's delete is left to
+# RBAC, so namespace deletion and garbage collection proceed. An unapproved
+# provider has no RoleBinding, so RBAC refuses it first.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -29,7 +35,11 @@ spec:
       - apiGroups: [galactic.datumapis.com]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE, DELETE]
-        resources: [edgeinstances, edgeattachments, edgeattachments/status]
+        resources: [edgeinstances, edgeattachments, edgeattachments/status, edgeroutes]
+      - apiGroups: [coordination.k8s.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [leases]
   # Every ServiceAccount but the foundation's own is checked; a person's
   # access is RBAC's alone, so an operator can still clear a stuck object.
   # The foundation's identities are in galactic-system, which this file
@@ -49,9 +59,29 @@ spec:
       expression: >-
         params.spec.serviceAccounts.exists(sa,
         request.userInfo.username == 'system:serviceaccount:' + sa.namespace + ':' + sa.name)
-    # The object names this provider.
+    # The object names this provider: a lease by its label, so an unlabeled
+    # Lease names none and a provider's ServiceAccounts cannot write it.
     - name: target
-      expression: variables.obj.spec.providerRef.name == params.metadata.name
+      expression: >-
+        request.resource.resource == 'leases' ?
+        variables.obj.metadata.?labels[?'galactic.datumapis.com/edge-provider'].orValue('') == params.metadata.name :
+        variables.obj.spec.providerRef.name == params.metadata.name
+    # The pod the object names: a lease's annotated pod, a route's claiming
+    # pod, or none for an unclaimed route.
+    - name: pod
+      expression: >-
+        request.resource.resource == 'leases' ?
+        variables.obj.metadata.?annotations[?'galactic.datumapis.com/edge-pod-uid'].orValue('') :
+        request.resource.resource != 'edgeroutes' ? variables.obj.spec.podUID :
+        has(variables.obj.spec.claim) ? variables.obj.spec.claim.holderPodUID : ''
+    # Whether the caller is the pod holding the route's claim before the
+    # write; true for any other kind and for an unclaimed route.
+    - name: ownsOld
+      expression: >-
+        request.resource.resource != 'edgeroutes' || request.operation == 'CREATE' ||
+        !has(oldObject.spec.claim) ||
+        ('authentication.kubernetes.io/pod-uid' in request.userInfo.extra &&
+        request.userInfo.extra['authentication.kubernetes.io/pod-uid'] == [oldObject.spec.claim.holderPodUID])
   validations:
     # Only the provider's ServiceAccounts create or change its objects, and
     # they touch no other provider's. Any other ServiceAccount's delete,
@@ -67,9 +97,16 @@ spec:
       message: a provider writes only in its own ServiceAccount's namespace
     - expression: >-
         !(variables.writer && variables.target) ||
+        (variables.pod == '' && request.operation in ['CREATE', 'DELETE']) ||
         ('authentication.kubernetes.io/pod-uid' in request.userInfo.extra &&
-        request.userInfo.extra['authentication.kubernetes.io/pod-uid'] == [variables.obj.spec.podUID])
+        request.userInfo.extra['authentication.kubernetes.io/pod-uid'] == [variables.pod])
       message: a provider pod writes only objects naming the pod its token was issued for
+    - expression: >-
+        !(variables.writer && variables.target) || variables.ownsOld ||
+        (request.operation == 'UPDATE' && has(object.spec.claim) &&
+        !(has(object.spec.claim.released) && object.spec.claim.released) &&
+        object.spec.claim.epoch > oldObject.spec.claim.epoch)
+      message: a pod changes another pod's route claim only by claiming a new epoch for itself
     - expression: >-
         !variables.target || request.operation != 'CREATE' || request.resource.resource != 'edgeinstances' ||
         ('authentication.kubernetes.io/node-name' in request.userInfo.extra &&
@@ -169,4 +206,151 @@ metadata:
   name: galactic-edge-controller-rolebindings
 spec:
   policyName: galactic-edge-controller-rolebindings
+  validationActions: [Deny]
+---
+# galactic-edge writes only a route's closedEpoch, never lowers it or sets it
+# past the accepted epoch, and only for a route accepted on its own node; no
+# provider writes route status. Core (galactic-controller) is not
+# restricted.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: galactic-edge-route-status
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [galactic.datumapis.com]
+        apiVersions: ["*"]
+        operations: [UPDATE]
+        resources: [edgeroutes/status]
+  matchConditions:
+    - name: not-core
+      expression: >-
+        request.userInfo.username.startsWith('system:serviceaccount:') &&
+        request.userInfo.username != 'system:serviceaccount:galactic-system:galactic-controller'
+  validations:
+    - expression: request.userInfo.username == 'system:serviceaccount:galactic-system:galactic-edge'
+      message: only galactic-controller and galactic-edge write route status
+    - expression: >-
+        'authentication.kubernetes.io/node-name' in request.userInfo.extra &&
+        request.userInfo.extra['authentication.kubernetes.io/node-name'] == [oldObject.?status.?accepted.?node.orValue('')]
+      message: galactic-edge writes only routes accepted on its own node
+    - expression: >-
+        object.?status.?accepted == oldObject.?status.?accepted &&
+        object.?status.?conditions.orValue([]) == oldObject.?status.?conditions.orValue([])
+      message: galactic-edge changes only closedEpoch
+    - expression: >-
+        object.?status.?closedEpoch.orValue(0) >= oldObject.?status.?closedEpoch.orValue(0) &&
+        object.?status.?closedEpoch.orValue(0) <= oldObject.?status.?accepted.?epoch.orValue(0)
+      message: closedEpoch never decreases and never passes the accepted epoch
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: galactic-edge-route-status
+spec:
+  policyName: galactic-edge-route-status
+  validationActions: [Deny]
+---
+# An instance's lease follows the forwarding claim's ordering whoever writes
+# it: its labels, pod and owner never change, its epoch (leaseTransitions)
+# never decreases, a released lease stays released until a new epoch, and
+# its protocol annotations stay well formed. Its incarnation is its UID,
+# which never changes. Readers ignore a Lease without the label, so only
+# labeled Leases, before or after the write, are checked.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: galactic-edge-lease
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [coordination.k8s.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [leases]
+  matchConditions:
+    - name: edge-lease
+      expression: >-
+        'galactic.datumapis.com/edge-provider' in object.metadata.?labels.orValue({}) ||
+        (oldObject != null && 'galactic.datumapis.com/edge-provider' in oldObject.metadata.?labels.orValue({}))
+  variables:
+    - name: annotations
+      expression: object.metadata.?annotations.orValue({})
+    - name: epoch
+      expression: object.spec.?leaseTransitions.orValue(0)
+    - name: oldEpoch
+      expression: "oldObject == null ? 0 : oldObject.spec.?leaseTransitions.orValue(0)"
+  validations:
+    - expression: >-
+        variables.annotations[?'galactic.datumapis.com/edge-pod-uid'].orValue('') != '' &&
+        object.metadata.?ownerReferences.orValue([]).exists(o, o.kind == 'EdgeInstance' &&
+        o.apiVersion.startsWith('galactic.datumapis.com/') && o.name == object.metadata.name)
+      message: an instance lease names its pod and is owned by the EdgeInstance of its name
+    - expression: >-
+        variables.annotations[?'galactic.datumapis.com/edge-renew-start'].orValue('').matches('^[0-9]{1,19}$') &&
+        variables.annotations[?'galactic.datumapis.com/edge-sequence'].orValue('').matches('^[0-9]{1,20}$') &&
+        variables.annotations[?'galactic.datumapis.com/edge-released'].orValue('') in ['true', 'false']
+      message: renew-start and sequence are decimal integers and released is true or false
+    - expression: >-
+        oldObject == null ||
+        (object.metadata.?labels[?'galactic.datumapis.com/edge-provider'] ==
+        oldObject.metadata.?labels[?'galactic.datumapis.com/edge-provider'] &&
+        variables.annotations[?'galactic.datumapis.com/edge-pod-uid'] ==
+        oldObject.metadata.?annotations.orValue({})[?'galactic.datumapis.com/edge-pod-uid'] &&
+        object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([]))
+      message: an instance lease keeps its provider label, pod and owner
+    - expression: variables.epoch >= variables.oldEpoch
+      message: leaseTransitions never decreases
+    - expression: >-
+        oldObject == null || variables.epoch > variables.oldEpoch ||
+        oldObject.metadata.?annotations.orValue({})[?'galactic.datumapis.com/edge-released'].orValue('') != 'true' ||
+        variables.annotations[?'galactic.datumapis.com/edge-released'].orValue('') == 'true'
+      message: a released lease stays released until a new epoch
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: galactic-edge-lease
+spec:
+  policyName: galactic-edge-lease
+  validationActions: [Deny]
+---
+# galactic-controller's role may update any Lease, but outside its own
+# namespace, where its leader election runs, it writes a Lease only to fence
+# an instance lease before a takeover: an update of a Lease carrying the
+# provider label that moves it to the next epoch with no holder.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: galactic-edge-controller-lease
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [coordination.k8s.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [leases]
+  matchConditions:
+    - name: controller
+      expression: request.userInfo.username == 'system:serviceaccount:galactic-system:galactic-controller'
+    - name: outside-own-namespace
+      expression: request.namespace != 'galactic-system'
+  validations:
+    - expression: >-
+        request.operation == 'UPDATE' &&
+        'galactic.datumapis.com/edge-provider' in oldObject.metadata.?labels.orValue({}) &&
+        object.spec.?holderIdentity.orValue('') == '' &&
+        object.spec.?leaseTransitions.orValue(0) == oldObject.spec.?leaseTransitions.orValue(0) + 1
+      message: galactic-controller writes a Lease outside its namespace only to fence an instance lease
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: galactic-edge-controller-lease
+spec:
+  policyName: galactic-edge-controller-lease
   validationActions: [Deny]
