@@ -1,0 +1,4 @@
+# The node agent DaemonSet; see ../kustomization.yaml for why it is not
+# applied as-is. An overlay sets --mtu to the fabric's tenant MTU.
+resources:
+  - daemonset.yaml

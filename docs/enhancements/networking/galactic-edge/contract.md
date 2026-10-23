@@ -285,7 +285,7 @@ The revocation bound works like this. `galactic-edge` extends a gate only after 
 
 ## Foundation resources and their writers
 
-Foundation-owned host state is what `galactic-edge` creates for an attachment, plus the shared state it writes into. Nothing uses `internal/edge/ownership` yet. Every writer below must commit through it, and must leave edge attachments alone, before any scope is adopted. Until then, `galactic-edge` refuses to program a scope (#996).
+Foundation-owned host state is what `galactic-edge` creates for an attachment, plus the shared state it writes into. Only `galactic-edge` commits through `internal/edge/ownership` today, one scope per gVPC on the node. Every writer below must commit through it, and must leave edge attachments alone, before any scope is adopted. Until then, `galactic-edge` programs nothing unless it is started with `--program-unfenced`, which is for test environments only; it still releases (#996). No lab or end-to-end environment runs it yet.
 
 ### Owned by `galactic-edge`
 
@@ -384,7 +384,7 @@ Results record the commit, the environment, measured timings per row and packet 
 
 These need an answer before the milestone named:
 
-- **Namespace acquisition (#995).** `galactic-edge` finds the provider pod's network namespace through the node's CRI socket and verifies the pod UID before `hostattach.Provision`. This needs proof on the target platform, whose CRI socket path and permissions are deployment values that differ from Kind's.
+- **Namespace acquisition (#1002).** `galactic-edge` finds the provider pod's network namespace through the node's CRI socket, from containerd's verbose sandbox status, and checks the sandbox's pod UID before `hostattach.Provision`. This needs proof on the target platform, whose CRI socket path and permissions are deployment values that differ from Kind's.
 - **Capacity limits (#994).** The per-cell limits for providers, instances, attachments and routes come from the scale measurements in #1002. Until then admission keeps 10% of each shared eBPF map free, so a draining attachment and its replacement can hold rows at the same time, and refuses requests beyond that.
 - **Hold time on edge sessions (#998).** The timers that keep the hold time at or under 9 s are deployment values: this repository's lab sets its own, and datum-cloud/infra sets production's.
 - **Remote convergence target (#998).** The 5 s target is checked against the lab's route reflector topology, then against production's.
