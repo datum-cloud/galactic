@@ -815,14 +815,7 @@ func instanceVPC(links []*netlink.Vrf, nodeName, instName string) string {
 
 // listEdgeLinksFn lists the host links galactic-edge stamped for its
 // attachments; a variable so tests can substitute fabricated links.
-var listEdgeLinksFn = func() ([]hostattach.ObservedAttachment, error) {
-	host, err := hostattach.OpenNamespace("/proc/self/ns/net")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = host.Close() }()
-	return hostattach.List(host)
-}
+var listEdgeLinksFn = hostattach.ListHost
 
 // edgeLinkVRFKeys returns the vrf_table key each Galactic Edge host link on
 // the node resolves to through its ifindex_vrf_table row.
