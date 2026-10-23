@@ -47,7 +47,6 @@ import (
 const (
 	ReasonProgrammed           = "Programmed"
 	ReasonReleased             = "Released"
-	ReasonMaintenanceNotFenced = "MaintenanceNotFenced"
 	ReasonNamespaceUnavailable = "NamespaceUnavailable"
 	ReasonNamespaceReplaced    = "NamespaceReplaced"
 	ReasonProvisionFailed      = "ProvisionFailed"
@@ -88,10 +87,6 @@ type Agent struct {
 	Datapath Datapath
 	// MTU of every attachment link; at least the fabric's tenant MTU.
 	MTU int
-	// Program enables creating host state. Until every other writer of the
-	// shared state commits through Ownership, the agent only releases and
-	// reports MaintenanceNotFenced.
-	Program bool
 
 	// tickets holds this process's next ticket for each scope it owns.
 	tickets map[string]ownership.Ticket
@@ -425,10 +420,6 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS) outcome 
 	fail := func(reason string, err error) outcome {
 		return outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
 			status: metav1.ConditionFalse, reason: reason, message: err.Error()}
-	}
-	if !a.Program {
-		return fail(ReasonMaintenanceNotFenced, errors.New("programming is disabled until every writer of the "+
-			"node's shared datapath state commits through the ownership fence"))
 	}
 	spec, err := desired(att, a.MTU)
 	if err != nil {

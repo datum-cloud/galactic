@@ -318,32 +318,6 @@ func TestStaleDeletionPreservesReplacement(t *testing.T) {
 	}
 }
 
-// TestProgrammingDisabled refuses to program until the maintenance writers
-// are fenced, but still releases.
-func TestProgrammingDisabled(t *testing.T) {
-	f := newFixture(t)
-	a := f.agent()
-	f.pod(pod1UID)
-	f.attach("a", attA, pod1UID, vpcA, addr, false)
-	f.reconcile(a)
-	f.programmed("a")
-
-	disabled := f.agent()
-	disabled.Program = false
-	f.attach("b", attB, pod1UID, vpcB, addr, false)
-	f.reconcile(disabled)
-	if c := f.condition("b", galacticv1alpha1.EdgeAttachmentProgrammed); c.Reason != ReasonMaintenanceNotFenced {
-		t.Fatalf("disabled agent reported %+v", c)
-	}
-	if err := f.client.Delete(context.Background(), f.get("a")); err != nil {
-		t.Fatal(err)
-	}
-	f.reconcile(disabled)
-	if l := f.links(); len(l) != 0 {
-		t.Fatalf("disabled agent left links: %+v", l)
-	}
-}
-
 // TestMaintenanceWriteKeepsScope runs a write by a writer that does not own
 // the scope, as garbage collection does, between two passes: the agent's
 // ticket from before it is refused, and the agent takes a fresh one and keeps

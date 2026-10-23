@@ -39,15 +39,14 @@ import (
 )
 
 type options struct {
-	nodeName        string
-	mtu             int
-	pinDir          string
-	ownershipDir    string
-	criEndpoint     string
-	programUnfenced bool
-	procSys         string
-	metricsAddress  string
-	healthAddress   string
+	nodeName       string
+	mtu            int
+	pinDir         string
+	ownershipDir   string
+	criEndpoint    string
+	procSys        string
+	metricsAddress string
+	healthAddress  string
 }
 
 func main() {
@@ -71,13 +70,10 @@ func newRootCommand() *cobra.Command {
 	f.StringVar(&o.nodeName, "node-name", os.Getenv("NODE_NAME"), "This node's name (env NODE_NAME)")
 	f.IntVar(&o.mtu, "mtu", 0, "MTU of every attachment link: at least the fabric's tenant MTU (required)")
 	f.StringVar(&o.pinDir, "pin-dir", attach.PinDir, "Directory the uSID datapath's maps and programs are pinned in")
-	f.StringVar(&o.ownershipDir, "ownership-dir", "/var/lib/galactic-edge/ownership",
+	f.StringVar(&o.ownershipDir, "ownership-dir", ownership.DefaultDir,
 		"Host directory of the node's write-fence records; it must outlive every writer")
 	f.StringVar(&o.criEndpoint, "cri-endpoint", "unix:///run/containerd/containerd.sock",
 		"Container runtime (CRI) endpoint used to find provider pods' network namespaces")
-	f.BoolVar(&o.programUnfenced, "program-unfenced", false,
-		"Program attachments although the node's other writers of shared datapath state do not yet commit "+
-			"through the write fence. For test environments only; without it the agent releases but never programs")
 	f.StringVar(&o.procSys, "proc-sys-path", "/proc/sys",
 		"Writable procfs sysctl directory, for the forwarding sysctl of a packet device's pod")
 	f.StringVar(&o.metricsAddress, "metrics-bind-address", ":9186", "Address serving /metrics")
@@ -142,7 +138,6 @@ func run(parent context.Context, o *options) error {
 		Namespaces: pods,
 		Datapath:   agent.PinnedDatapath{PinDir: o.pinDir},
 		MTU:        o.mtu,
-		Program:    o.programUnfenced,
 	}
 	if err := a.SetupWithManager(mgr); err != nil {
 		return err
@@ -156,7 +151,7 @@ func run(parent context.Context, o *options) error {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return err
 	}
-	slog.Info("starting galactic-edge", "node", o.nodeName, "owner", a.Owner, "program", a.Program,
+	slog.Info("starting galactic-edge", "node", o.nodeName, "owner", a.Owner,
 		"version", metadata.Version)
 	return mgr.Start(ctx)
 }
