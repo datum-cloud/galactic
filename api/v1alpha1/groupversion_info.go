@@ -6,8 +6,9 @@
 // TrafficPolicy and TrafficPolicyBinding, the per-interface ingress and
 // egress policy the CNI datapath enforces (see
 // docs/enhancements/networking/interface-traffic-policy), and EdgeProvider
-// and EdgeService, the Galactic Edge provider registration and tenant grant
-// (see docs/enhancements/networking/galactic-edge).
+// and EdgeService, the Galactic Edge provider registration and tenant grant,
+// and EdgeInstance and EdgeAttachment, a provider pod and its connection to a
+// granted VPC (see docs/enhancements/networking/galactic-edge).
 // +kubebuilder:object:generate=true
 // +groupName=galactic.datumapis.com
 package v1alpha1
@@ -35,6 +36,8 @@ func addKnownTypes(s *runtime.Scheme) error {
 		&TrafficPolicyBinding{}, &TrafficPolicyBindingList{},
 		&EdgeProvider{}, &EdgeProviderList{},
 		&EdgeService{}, &EdgeServiceList{},
+		&EdgeInstance{}, &EdgeInstanceList{},
+		&EdgeAttachment{}, &EdgeAttachmentList{},
 	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil

@@ -1,0 +1,19 @@
+# galactic-edge's cell-wide prerequisites: its ServiceAccount and RBAC, the
+# galactic-edge-provider ClusterRole and the Galactic Edge
+# ValidatingAdmissionPolicies, safe and idempotent to apply in any cell that
+# has the edge CRDs (config/crd). The policies bind every provider write to
+# the pod its token was issued for, and every galactic-edge status write to
+# its own node; galactic-controller --edge binds the provider policy and
+# role per approved provider.
+#
+# Deliberately NOT included: base/, the node agent DaemonSet. It needs a
+# per-cell MTU, and it programs nothing until started with
+# --program-unfenced, which only the lab and tests may set until every
+# other writer of a node's shared datapath state commits through the
+# write fence (#996).
+#
+# Not part of the root config/kustomization.yaml: Galactic Edge is opt-in.
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - policies.yaml

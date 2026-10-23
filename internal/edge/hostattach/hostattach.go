@@ -65,6 +65,12 @@ var (
 // replacement reusing the same name, owns it.
 var ErrNotOwned = errors.New("hostattach: link belongs to another attachment")
 
+// ErrStalePeer is returned, with ErrNotOwned, when the host link carries this
+// attachment's ID but its peer is not in the given pod namespace: the pod's
+// sandbox was replaced while the old one still exists. The link is the
+// attachment's own, so its owner may Release it and provision again.
+var ErrStalePeer = errors.New("hostattach: host link is paired with another namespace")
+
 // Attachment is authenticated desired state for one pod's attachment to a gVPC.
 // Identity, namespace, address, VRFs, link names and TUN configuration are
 // immutable for an ID; release and create a new ID to change them. Prefixes
@@ -327,10 +333,17 @@ func ensureVeth(hostH, podH *netlink.Handle, host, pod *Namespace, a Attachment)
 		hostLink, hostErr = hostH.LinkByName(a.HostLink)
 		podLink, podErr = podH.LinkByName(a.PodLink)
 	}
+	own := hostErr == nil && hostLink.Attrs().Alias == ownerAlias(a.ID)
 	if hostErr != nil || podErr != nil {
+		if own {
+			return nil, nil, fmt.Errorf("%w: %w: no peer in the pod", ErrNotOwned, ErrStalePeer)
+		}
 		return nil, nil, fmt.Errorf("%w: incomplete veth pair", ErrNotOwned)
 	}
 	if err := verifyPair(hostH, pod, hostLink, podLink, a); err != nil {
+		if own && errors.Is(err, ErrNotOwned) {
+			return nil, nil, fmt.Errorf("%w: %w", err, ErrStalePeer)
+		}
 		return nil, nil, err
 	}
 	if hostLink.Attrs().Alias == "" {
@@ -581,8 +594,14 @@ func ensureTUN(h *netlink.Handle, pod *Namespace, a Attachment) error {
 // link and its TUN device.
 const podForwarding = "net/ipv6/conf/all/forwarding"
 
+// SysctlRoot is the procfs sysctl directory per-namespace sysctls are
+// written through. A container whose own /proc/sys is read-only points it at
+// a writable mount of the host's: net sysctls resolve to the writing
+// thread's network namespace whichever procfs mount is used.
+var SysctlRoot = "/proc/sys"
+
 func enableSysctl(key string) error {
-	path := filepath.Join("/proc/sys", key)
+	path := filepath.Join(SysctlRoot, key)
 	if err := os.WriteFile(path, []byte("1"), 0o644); err != nil { //nolint:gosec // procfs sysctl, fixed key
 		return fmt.Errorf("hostattach: write %s: %w", path, err)
 	}
@@ -596,6 +615,10 @@ func enableSysctl(key string) error {
 //
 // The pod VRF is left in place: it belongs to the pod, which may route other
 // traffic through it, and goes away with the pod's namespace.
+//
+// A nil pod releases only a stamped host link: it is for an attachment whose
+// pod namespace is gone or can no longer be found. A TUN device left in a
+// live pod is then not removed; with its host link gone it carries nothing.
 func Release(host, pod *Namespace, a Attachment) error {
 	if a.ID == "" {
 		return ErrNotOwned
@@ -610,6 +633,9 @@ func Release(host, pod *Namespace, a Attachment) error {
 	defer func() { _ = hostH.Close() }()
 	if link, err := hostH.LinkByName(a.HostLink); err == nil {
 		if link.Attrs().Alias == "" {
+			if pod == nil {
+				return fmt.Errorf("%w: unstamped host link %q and no pod namespace", ErrNotOwned, a.HostLink)
+			}
 			podH, err := pod.netlink()
 			if err != nil {
 				return err
@@ -631,7 +657,7 @@ func Release(host, pod *Namespace, a Attachment) error {
 	} else if !linkMissing(err) {
 		return err
 	}
-	if a.TUN == nil || pod.Verify() != nil {
+	if a.TUN == nil || pod == nil || pod.Verify() != nil {
 		// A replaced sandbox's devices went with its namespace.
 		return nil
 	}

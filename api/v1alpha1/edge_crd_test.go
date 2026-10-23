@@ -55,6 +55,14 @@ func TestEdgeSchema(t *testing.T) {
 	if err := c.Create(ctx, noSA); err == nil {
 		t.Fatal("EdgeProvider without ServiceAccounts accepted")
 	}
+	foundation := provider.DeepCopy()
+	foundation.ObjectMeta = metav1.ObjectMeta{Name: "foundation"}
+	foundation.Spec.ServiceAccounts = []galacticv1alpha1.ServiceAccountReference{
+		{Namespace: "galactic-system", Name: "galactic-edge"},
+	}
+	if err := c.Create(ctx, foundation); err == nil {
+		t.Fatal("EdgeProvider listing galactic-edge's ServiceAccount accepted")
+	}
 
 	creates := []struct {
 		name   string
@@ -69,6 +77,14 @@ func TestEdgeSchema(t *testing.T) {
 		}, false},
 		{"NoCapability", func(s *galacticv1alpha1.EdgeService) { s.Spec.Capabilities = nil }, false},
 		{"NoVPCUID", func(s *galacticv1alpha1.EdgeService) { s.Spec.VPCRef.UID = "" }, false},
+		{"ClientPool", func(s *galacticv1alpha1.EdgeService) { s.Spec.ClientPool = "fd00:5::/120" }, true},
+		{"ClientPoolIPv4", func(s *galacticv1alpha1.EdgeService) { s.Spec.ClientPool = "192.0.2.0/24" }, false},
+		{"ClientPoolTooSmall", func(s *galacticv1alpha1.EdgeService) { s.Spec.ClientPool = "fd00:5::/121" }, false},
+		{"ClientPoolHostBits", func(s *galacticv1alpha1.EdgeService) { s.Spec.ClientPool = "fd00:5::1/120" }, false},
+		{"DrainTooLong", func(s *galacticv1alpha1.EdgeService) {
+			d := int32(301)
+			s.Spec.DrainSeconds = &d
+		}, false},
 	}
 	for i, tt := range creates {
 		t.Run("Create"+tt.name, func(t *testing.T) {
@@ -97,6 +113,7 @@ func TestEdgeSchema(t *testing.T) {
 		{"Capabilities", func(s *galacticv1alpha1.EdgeService) {
 			s.Spec.Capabilities = []string{packetAccess, "SocketAccess"}
 		}, false},
+		{"ClientPool", func(s *galacticv1alpha1.EdgeService) { s.Spec.ClientPool = "fd00:5::/120" }, false},
 	}
 	for i, tt := range updates {
 		t.Run("Update"+tt.name, func(t *testing.T) {
@@ -114,5 +131,75 @@ func TestEdgeSchema(t *testing.T) {
 				t.Fatalf("spec update kept generation %d; admission relies on it changing", gen)
 			}
 		})
+	}
+}
+
+func edgeAttachment(name string) *galacticv1alpha1.EdgeAttachment {
+	return &galacticv1alpha1.EdgeAttachment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Spec: galacticv1alpha1.EdgeAttachmentSpec{
+			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: edgeProviderName},
+			ServiceRef: galacticv1alpha1.EdgeServiceReference{
+				Namespace: "tenant", Name: "svc", UID: "11111111-2222-3333-4444-555555555555",
+			},
+			InstanceRef:     galacticv1alpha1.EdgeInstanceReference{Name: "inst"},
+			PodUID:          "99999999-2222-3333-4444-555555555555",
+			ContractVersion: galacticv1alpha1.GroupVersion.Version,
+			Capabilities:    []galacticv1alpha1.EdgeCapability{{Name: packetAccess, Version: "v1"}},
+			PacketDevice:    &galacticv1alpha1.EdgePacketDevice{Owner: 1000, Group: 1000},
+		},
+	}
+}
+
+func TestEdgeAttachmentSchema(t *testing.T) {
+	c, _ := startAPIServer(t)
+	ctx := context.Background()
+	creates := []struct {
+		name   string
+		mutate func(*galacticv1alpha1.EdgeAttachment)
+		ok     bool
+	}{
+		{"Valid", func(*galacticv1alpha1.EdgeAttachment) {}, true},
+		{"PacketAccessWithoutDevice", func(a *galacticv1alpha1.EdgeAttachment) { a.Spec.PacketDevice = nil }, false},
+		{"DeviceWithoutPacketAccess", func(a *galacticv1alpha1.EdgeAttachment) {
+			a.Spec.Capabilities = []galacticv1alpha1.EdgeCapability{{Name: "SocketAccess", Version: "v1"}}
+		}, false},
+		{"PrefixReachability", func(a *galacticv1alpha1.EdgeAttachment) {
+			a.Spec.Capabilities = append(a.Spec.Capabilities,
+				galacticv1alpha1.EdgeCapability{Name: "PrefixReachability", Version: "v1"})
+		}, false},
+		{"NoPodUID", func(a *galacticv1alpha1.EdgeAttachment) { a.Spec.PodUID = "" }, false},
+	}
+	for i, tt := range creates {
+		t.Run("Create"+tt.name, func(t *testing.T) {
+			a := edgeAttachment(fmt.Sprintf("create-%d", i))
+			tt.mutate(a)
+			if err := c.Create(ctx, a); (err == nil) != tt.ok {
+				t.Fatalf("Create: err = %v, want ok %t", err, tt.ok)
+			}
+		})
+	}
+	a := edgeAttachment("immutable")
+	if err := c.Create(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	a.Spec.PodUID = "00000000-2222-3333-4444-555555555555"
+	if err := c.Update(ctx, a); err == nil {
+		t.Error("attachment spec changed")
+	}
+
+	inst := &galacticv1alpha1.EdgeInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "inst", Namespace: testNamespace},
+		Spec: galacticv1alpha1.EdgeInstanceSpec{
+			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: edgeProviderName},
+			PodName:     "p", PodUID: "u", NodeName: "n",
+		},
+	}
+	if err := c.Create(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	inst.Spec.NodeName = "other"
+	if err := c.Update(ctx, inst); err == nil {
+		t.Error("instance spec changed")
 	}
 }

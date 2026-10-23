@@ -10,10 +10,13 @@ Package v1alpha1 contains Galactic's own API, galactic.datumapis.com/v1alpha1:
 TrafficPolicy and TrafficPolicyBinding, the per-interface ingress and
 egress policy the CNI datapath enforces (see
 docs/enhancements/networking/interface-traffic-policy), and EdgeProvider
-and EdgeService, the Galactic Edge provider registration and tenant grant
-(see docs/enhancements/networking/galactic-edge).
+and EdgeService, the Galactic Edge provider registration and tenant grant,
+and EdgeInstance and EdgeAttachment, a provider pod and its connection to a
+granted VPC (see docs/enhancements/networking/galactic-edge).
 
 ### Resource Types
+- [EdgeAttachment](#edgeattachment)
+- [EdgeInstance](#edgeinstance)
 - [EdgeProvider](#edgeprovider)
 - [EdgeService](#edgeservice)
 - [TrafficPolicy](#trafficpolicy)
@@ -97,6 +100,99 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions include Resolved. |  | MaxItems: 8 <br /> |
 
 
+#### EdgeAllocation
+
+
+
+EdgeAllocation is one client pool address and the attachment holding it.
+
+
+
+_Appears in:_
+- [EdgeServiceStatus](#edgeservicestatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `address` _string_ | Address is the allocated IPv6 address. |  | MaxLength: 39 <br /> |
+| `attachment` _string_ | Attachment is the holding EdgeAttachment's namespace and name. |  | MaxLength: 317 <br /> |
+| `attachmentUID` _string_ | AttachmentUID is the holding EdgeAttachment's metadata.uid. |  | MaxLength: 36 <br /> |
+
+
+#### EdgeAttachment
+
+
+
+EdgeAttachment is one provider instance's isolated connection to the VPC
+its EdgeService grants: an address from the service's client pool, a link
+from the pod into the VPC's host VRF on the pod's node and, with
+PacketAccess, a TUN device. It lives in the provider's namespace. Its name
+is derived from the service and pod UIDs, so a retried create lands on the
+same object.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `EdgeAttachment` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[EdgeAttachmentSpec](#edgeattachmentspec)_ |  |  |  |
+| `status` _[EdgeAttachmentStatus](#edgeattachmentstatus)_ |  |  |  |
+
+
+#### EdgeAttachmentSpec
+
+
+
+EdgeAttachmentSpec is an instance's request for one isolated connection to
+its service's VPC. The instance writes it at create; a
+ValidatingAdmissionPolicy requires podUID to be the pod its token was
+issued for.
+
+
+
+_Appears in:_
+- [EdgeAttachment](#edgeattachment)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `providerRef` _[EdgeProviderReference](#edgeproviderreference)_ | ProviderRef is the provider the requesting instance runs. It must be<br />the service's and the instance's provider. The provider's admission<br />binding checks the writer against it. |  |  |
+| `serviceRef` _[EdgeServiceReference](#edgeservicereference)_ | ServiceRef is the EdgeService granting the VPC. |  |  |
+| `instanceRef` _[EdgeInstanceReference](#edgeinstancereference)_ | InstanceRef is the requesting EdgeInstance. |  |  |
+| `podUID` _string_ | PodUID is the requesting pod's metadata.uid. It must equal the<br />instance's. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
+| `contractVersion` _string_ | ContractVersion is the provider contract version the request is<br />written to. |  | MaxLength: 16 <br />MinLength: 1 <br /> |
+| `capabilities` _[EdgeCapability](#edgecapability) array_ | Capabilities are the capability versions the attachment uses:<br />SocketAccess, PacketAccess or both. |  | MaxItems: 2 <br />MinItems: 1 <br /> |
+| `packetDevice` _[EdgePacketDevice](#edgepacketdevice)_ | PacketDevice owns the TUN device. Required with PacketAccess. |  |  |
+
+
+#### EdgeAttachmentStatus
+
+
+
+EdgeAttachmentStatus is the attachment's lifecycle. A field is written only
+by the writer named on it.
+
+
+
+_Appears in:_
+- [EdgeAttachment](#edgeattachment)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Admitted, Allocated, Draining (core), Programmed,<br />Released (node) and Ready (provider). |  | MaxItems: 8 <br /> |
+| `nodeName` _string_ | NodeName is the node that programs the attachment, from its instance.<br />Set by core at admission. |  | MaxLength: 253 <br /> |
+| `vpc` _string_ | VPC is the base62 identifier of the service's VPC. Set by core at<br />admission. |  | MaxLength: 16 <br /> |
+| `address` _string_ | Address is the attachment's IPv6 address in the VPC, from the<br />service's client pool. Set by core at allocation. |  | MaxLength: 39 <br /> |
+| `drainDeadline` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | DrainDeadline is when core deletes an attachment it is draining. |  |  |
+| `hostLink` _string_ | HostLink is the host end of the attachment's link. Set by the node. |  | MaxLength: 15 <br /> |
+| `podVRF` _string_ | PodVRF is the VRF in the provider pod that the provider binds its<br />sockets to. Set by the node. |  | MaxLength: 15 <br /> |
+| `packetDevice` _string_ | PacketDevice is the TUN device in the provider pod. Set by the node<br />for a PacketAccess attachment. |  | MaxLength: 15 <br /> |
+
+
 #### EdgeCapability
 
 
@@ -107,12 +203,91 @@ as PacketAccess v1.
 
 
 _Appears in:_
+- [EdgeAttachmentSpec](#edgeattachmentspec)
 - [EdgeProviderSpec](#edgeproviderspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the capability's name. |  | Enum: [SocketAccess PacketAccess PrefixReachability] <br /> |
 | `version` _string_ | Version is the capability's version. |  | Pattern: `^v[1-9][0-9]*$` <br /> |
+
+
+#### EdgeInstance
+
+
+
+EdgeInstance is one running Galactic Edge provider pod. Its attachments
+name it, and the foundation checks it against the pod it names before
+admitting them. Its name is derived from the pod UID, so a retried create
+lands on the same object.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `EdgeInstance` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[EdgeInstanceSpec](#edgeinstancespec)_ |  |  |  |
+
+
+#### EdgeInstanceReference
+
+
+
+EdgeInstanceReference names an EdgeInstance in the attachment's namespace.
+
+
+
+_Appears in:_
+- [EdgeAttachmentSpec](#edgeattachmentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the EdgeInstance's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+
+
+#### EdgeInstanceSpec
+
+
+
+EdgeInstanceSpec identifies the provider pod an instance runs in. The pod
+writes it at create; a ValidatingAdmissionPolicy requires podUID to be the
+pod its token was issued for.
+
+
+
+_Appears in:_
+- [EdgeInstance](#edgeinstance)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `providerRef` _[EdgeProviderReference](#edgeproviderreference)_ | ProviderRef is the provider the instance runs. The provider's<br />admission binding checks the writer against it. |  |  |
+| `podName` _string_ | PodName is the provider pod's name, in the instance's namespace. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `podUID` _string_ | PodUID is the provider pod's metadata.uid. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
+| `nodeName` _string_ | NodeName is the node the pod runs on. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+
+
+#### EdgePacketDevice
+
+
+
+EdgePacketDevice is the owner of a PacketAccess attachment's TUN device,
+the user and group the provider opens it as without CAP_NET_ADMIN.
+
+
+
+_Appears in:_
+- [EdgeAttachmentSpec](#edgeattachmentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `owner` _integer_ | Owner is the user ID allowed to open the device. |  | Maximum: 4.294967294e+09 <br />Minimum: 0 <br /> |
+| `group` _integer_ | Group is the group ID allowed to open the device. |  | Maximum: 4.294967294e+09 <br />Minimum: 0 <br /> |
 
 
 #### EdgeProvider
@@ -147,6 +322,8 @@ EdgeProviderReference names an EdgeProvider.
 
 
 _Appears in:_
+- [EdgeAttachmentSpec](#edgeattachmentspec)
+- [EdgeInstanceSpec](#edgeinstancespec)
 - [EdgeServiceSpec](#edgeservicespec)
 
 | Field | Description | Default | Validation |
@@ -215,6 +392,26 @@ previous generation; deleting it revokes them all.
 | `status` _[EdgeServiceStatus](#edgeservicestatus)_ |  |  |  |
 
 
+#### EdgeServiceReference
+
+
+
+EdgeServiceReference names an EdgeService by namespace, name and UID. The
+UID pins the attachment to one grant object, so a service deleted and
+recreated under the same name does not inherit it.
+
+
+
+_Appears in:_
+- [EdgeAttachmentSpec](#edgeattachmentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `namespace` _string_ | Namespace is the EdgeService's namespace, its VPC's namespace. |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+| `name` _string_ | Name is the EdgeService's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `uid` _string_ | UID is the EdgeService's metadata.uid. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
+
+
 #### EdgeServiceSpec
 
 
@@ -233,6 +430,8 @@ _Appears in:_
 | `capabilities` _string array_ | Capabilities are the capability names the provider may use in the VPC. |  | MaxItems: 3 <br />MinItems: 1 <br />items:Enum: [SocketAccess PacketAccess PrefixReachability] <br /> |
 | `prefixes` _string array_ | Prefixes bound the prefixes the provider may request in the VPC. Each<br />is a masked CIDR. |  | MaxItems: 64 <br />items:MaxLength: 43 <br /> |
 | `validUntil` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ValidUntil, when set, is the wall-clock time after which the grant<br />authorizes nothing. Admission refuses it, and revokes what it issued,<br />once fewer than the cell's maximum clock skew remain. |  |  |
+| `clientPool` _string_ | ClientPool is the IPv6 range, inside the VPC, that attachments take<br />their addresses from: a masked CIDR from /64 to /120. Pools of services<br />granting the same VPC must not overlap. Without one, the service<br />admits no attachment. |  | MaxLength: 43 <br /> |
+| `drainSeconds` _integer_ | DrainSeconds is how long an attachment the foundation revokes keeps<br />its resources before they are released. Unset means 30. |  | Maximum: 300 <br />Minimum: 0 <br /> |
 
 
 #### EdgeServiceStatus
@@ -250,6 +449,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the generation Conditions describe. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions include Admitted. |  | MaxItems: 8 <br /> |
+| `allocations` _[EdgeAllocation](#edgeallocation) array_ | Allocations are the client pool addresses held by attachments. Core<br />writes them with a resourceVersion precondition, so two writers never<br />hand out one address, and removes one only after the attachment's node<br />has released it. |  | MaxItems: 1024 <br /> |
 
 
 #### EdgeVPCReference

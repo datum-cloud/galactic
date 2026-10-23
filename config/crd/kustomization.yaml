@@ -11,6 +11,8 @@ resources:
   - galactic.datumapis.com_bgprouters.yaml
   - galactic.datumapis.com_bgpstaticroutes.yaml
   - galactic.datumapis.com_bgpvrfinstances.yaml
+  - galactic.datumapis.com_edgeattachments.yaml
+  - galactic.datumapis.com_edgeinstances.yaml
   - galactic.datumapis.com_edgeproviders.yaml
   - galactic.datumapis.com_edgeservices.yaml
   - galactic.datumapis.com_egressshards.yaml

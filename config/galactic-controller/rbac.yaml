@@ -43,6 +43,47 @@ rules:
   - apiGroups: [""]
     resources: [namespaces]
     verbs: [get, list, watch]
+  # Galactic Edge (--edge): admission reads providers, grants, instances,
+  # pods, VPCs and nodes; allocation and the Admitted condition are in
+  # EdgeService status; the finalizer, drain deletion and lifecycle
+  # conditions are on EdgeAttachment.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeproviders, edgeservices, edgeinstances, vpcs]
+    verbs: [get, list, watch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeservices/status]
+    verbs: [get, update, patch]
+  # Per approved provider: a binding of the galactic-edge-provider policy
+  # and RoleBindings of the galactic-edge-provider ClusterRole, both owned
+  # by the EdgeProvider.
+  # The finalizer on EdgeProvider withdraws them before it goes; the
+  # galactic-edge-controller-rolebindings policy (config/galactic-edge)
+  # holds the RoleBinding writes to the provider role.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeproviders]
+    verbs: [update, patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeproviders/finalizers]
+    verbs: [update]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingadmissionpolicybindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    verbs: [bind]
+    resourceNames: [galactic-edge-provider]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeattachments]
+    verbs: [get, list, watch, update, patch, delete]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeattachments/status]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
   # events.k8s.io for the provisioning-conflict events; core events for the
   # leader election records controller-runtime writes.
   - apiGroups: [events.k8s.io, ""]

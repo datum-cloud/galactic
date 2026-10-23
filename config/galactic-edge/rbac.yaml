@@ -1,0 +1,49 @@
+# The node agent reads every EdgeAttachment and writes only status;
+# galactic-edge-attachment-status (policies.yaml) limits those writes to its
+# own node's attachments and to the Programmed and Released conditions and
+# device names. It never creates, updates or deletes an attachment, so it
+# cannot remove the finalizer that holds one until it reports Released.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: galactic-edge
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeattachments]
+    verbs: [get, list, watch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeattachments/status]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: galactic-edge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: galactic-edge
+subjects:
+  - kind: ServiceAccount
+    name: galactic-edge
+    namespace: galactic-system
+---
+# What an approved provider's ServiceAccounts may do in their own namespace.
+# galactic-controller --edge binds it per provider (RoleBinding
+# galactic-edge-provider-<provider>) and removes the binding when approval
+# is withdrawn. A provider cannot update or patch an attachment, so it
+# cannot remove the finalizer that holds it until its node releases it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: galactic-edge-provider
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeinstances]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeattachments]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeattachments/status]
+    verbs: [get, update, patch]

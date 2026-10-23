@@ -1,0 +1,102 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: edgeinstances.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    categories:
+      - galactic
+    kind: EdgeInstance
+    listKind: EdgeInstanceList
+    plural: edgeinstances
+    singular: edgeinstance
+  scope: Namespaced
+  versions:
+    - additionalPrinterColumns:
+        - jsonPath: .spec.podName
+          name: Pod
+          type: string
+        - jsonPath: .spec.nodeName
+          name: Node
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |-
+            EdgeInstance is one running Galactic Edge provider pod. Its attachments
+            name it, and the foundation checks it against the pod it names before
+            admitting them. Its name is derived from the pod UID, so a retried create
+            lands on the same object.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: |-
+                EdgeInstanceSpec identifies the provider pod an instance runs in. The pod
+                writes it at create; a ValidatingAdmissionPolicy requires podUID to be the
+                pod its token was issued for.
+              properties:
+                nodeName:
+                  description: NodeName is the node the pod runs on.
+                  maxLength: 253
+                  minLength: 1
+                  type: string
+                podName:
+                  description: PodName is the provider pod's name, in the instance's namespace.
+                  maxLength: 253
+                  minLength: 1
+                  type: string
+                podUID:
+                  description: PodUID is the provider pod's metadata.uid.
+                  maxLength: 36
+                  minLength: 1
+                  type: string
+                providerRef:
+                  description: |-
+                    ProviderRef is the provider the instance runs. The provider's
+                    admission binding checks the writer against it.
+                  properties:
+                    name:
+                      description: Name is the EdgeProvider's name.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                    - name
+                  type: object
+              required:
+                - nodeName
+                - podName
+                - podUID
+                - providerRef
+              type: object
+              x-kubernetes-validations:
+                - message: spec is immutable
+                  rule: self == oldSelf
+          required:
+            - spec
+          type: object
+      served: true
+      storage: true
+      subresources: {}

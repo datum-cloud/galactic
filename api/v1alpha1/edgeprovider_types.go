@@ -72,11 +72,13 @@ type EdgeProviderSpec struct {
 	Capabilities []EdgeCapability `json:"capabilities"`
 
 	// ServiceAccounts are the only identities whose bound tokens act for the
-	// provider. A request from any other identity is refused.
+	// provider. A request from any other identity is refused. The
+	// foundation's own identities cannot be listed.
 	// +required
 	// +listType=atomic
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(sa, !(sa.namespace == 'galactic-system' && sa.name in ['galactic-controller', 'galactic-edge']))",message="the foundation's ServiceAccounts cannot act for a provider"
 	ServiceAccounts []ServiceAccountReference `json:"serviceAccounts"`
 
 	// Configuration is the kind of the provider's own per-service
