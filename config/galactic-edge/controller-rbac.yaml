@@ -1,0 +1,84 @@
+# What an approved provider's ServiceAccounts may do in their own namespace.
+# galactic-controller --edge binds it per provider (RoleBinding
+# galactic-edge-provider-<provider>) and removes the binding when approval
+# is withdrawn. A provider cannot update or patch an attachment, so it
+# cannot remove the finalizer that holds it until its node releases it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: galactic-edge-provider
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeinstances]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeattachments]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeattachments/status]
+    verbs: [get, update, patch]
+---
+# galactic-controller --edge: what the edge controllers need beyond the
+# controller's own role (config/galactic-controller). It is applied only
+# with the rest of this directory, so a cell that never enables --edge
+# grants none of it, and the galactic-edge-controller-rolebindings policy
+# that bounds its RoleBinding writes is always applied with it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: galactic-controller-edge
+rules:
+  # Admission reads providers, grants, instances, VPCs and nodes (pods
+  # come from the controller's own role); allocation and the Admitted
+  # condition are in EdgeService status; the finalizer, drain deletion and
+  # lifecycle conditions are on EdgeAttachment.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeproviders, edgeservices, edgeinstances, vpcs]
+    verbs: [get, list, watch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeservices/status]
+    verbs: [get, update, patch]
+  # Per approved provider: a binding of the galactic-edge-provider policy
+  # and RoleBindings of the galactic-edge-provider ClusterRole, both owned
+  # by the EdgeProvider.
+  # The finalizer on EdgeProvider withdraws them before it goes; the
+  # galactic-edge-controller-rolebindings policy (config/galactic-edge)
+  # holds the RoleBinding writes to the provider role.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeproviders]
+    verbs: [update, patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeproviders/finalizers]
+    verbs: [update]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingadmissionpolicybindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    verbs: [bind]
+    resourceNames: [galactic-edge-provider]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeattachments]
+    verbs: [get, list, watch, update, patch, delete]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeattachments/status]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: galactic-controller-edge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: galactic-controller-edge
+subjects:
+  - kind: ServiceAccount
+    name: galactic-controller
+    namespace: galactic-system

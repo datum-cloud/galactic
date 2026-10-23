@@ -1,0 +1,13 @@
+# Galactic Edge's cell-wide prerequisites, safe and idempotent to apply in
+# any cell that has the edge CRDs (config/crd): the edge role
+# galactic-controller --edge needs, the galactic-edge-provider ClusterRole,
+# and the Galactic Edge ValidatingAdmissionPolicies. The policies bind every
+# provider write to the pod its token was issued for, every galactic-edge
+# status write to its own node, and galactic-controller's RoleBinding writes
+# to the provider role; galactic-controller --edge binds the provider policy
+# and role per approved provider. Apply this before enabling --edge.
+#
+# Not part of the root config/kustomization.yaml: Galactic Edge is opt-in.
+resources:
+  - controller-rbac.yaml
+  - policies.yaml

@@ -1,0 +1,172 @@
+# The Galactic Edge contract trusts a provider only as the pod its bound
+# ServiceAccount token was issued for, and galactic-edge only as the node
+# it runs on. RBAC cannot express either, so these policies do. Bound
+# tokens carry the pod UID and Node in the request's user extras
+# (Kubernetes 1.32 or later); a token without them is refused.
+#
+# galactic-edge-provider has one binding per approved EdgeProvider, which
+# galactic-controller --edge creates with the provider as its parameter,
+# together with RoleBindings of the galactic-edge-provider ClusterRole for
+# the provider's ServiceAccounts. A binding holds the provider's own
+# ServiceAccounts to objects naming the provider, and objects naming the
+# provider to its ServiceAccounts: in the object's namespace, as the pod the
+# object names, and an instance only for the node that pod runs on. A
+# provider's deletes are held to the same rules; another ServiceAccount's
+# delete is left to RBAC, so namespace deletion and garbage collection
+# proceed. An unapproved provider has no RoleBinding, so RBAC refuses it
+# first.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: galactic-edge-provider
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: galactic.datumapis.com/v1alpha1
+    kind: EdgeProvider
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [galactic.datumapis.com]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [edgeinstances, edgeattachments, edgeattachments/status]
+  # Every ServiceAccount but the foundation's own is checked; a person's
+  # access is RBAC's alone, so an operator can still clear a stuck object.
+  # The foundation's identities are in galactic-system, which this file
+  # fixes: kustomize does not rewrite names inside expressions.
+  matchConditions:
+    - name: workload
+      expression: >-
+        request.userInfo.username.startsWith('system:serviceaccount:') &&
+        !(request.userInfo.username in [
+          'system:serviceaccount:galactic-system:galactic-controller',
+          'system:serviceaccount:galactic-system:galactic-edge'])
+  variables:
+    - name: obj
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+    # The writer is one of this provider's ServiceAccounts.
+    - name: writer
+      expression: >-
+        params.spec.serviceAccounts.exists(sa,
+        request.userInfo.username == 'system:serviceaccount:' + sa.namespace + ':' + sa.name)
+    # The object names this provider.
+    - name: target
+      expression: variables.obj.spec.providerRef.name == params.metadata.name
+  validations:
+    # Only the provider's ServiceAccounts create or change its objects, and
+    # they touch no other provider's. Any other ServiceAccount's delete,
+    # such as the namespace controller's or the garbage collector's, is
+    # RBAC's to decide.
+    - expression: >-
+        request.operation == 'DELETE' ? (!variables.writer || variables.target) :
+        variables.writer == variables.target
+      message: a provider's ServiceAccounts write only that provider's objects, and only they create or change them
+    - expression: >-
+        !(variables.writer && variables.target) ||
+        request.userInfo.username.startsWith('system:serviceaccount:' + variables.obj.metadata.namespace + ':')
+      message: a provider writes only in its own ServiceAccount's namespace
+    - expression: >-
+        !(variables.writer && variables.target) ||
+        ('authentication.kubernetes.io/pod-uid' in request.userInfo.extra &&
+        request.userInfo.extra['authentication.kubernetes.io/pod-uid'] == [variables.obj.spec.podUID])
+      message: a provider pod writes only objects naming the pod its token was issued for
+    - expression: >-
+        !variables.target || request.operation != 'CREATE' || request.resource.resource != 'edgeinstances' ||
+        ('authentication.kubernetes.io/node-name' in request.userInfo.extra &&
+        request.userInfo.extra['authentication.kubernetes.io/node-name'] == [object.spec.nodeName])
+      message: spec.nodeName must be the node the caller's pod runs on
+---
+# Each status writer changes only its own part: a provider pod only the
+# Ready condition of its own attachments, galactic-edge only the
+# Programmed and Released conditions and the device names of attachments
+# on its own node. Core (galactic-controller) is not restricted.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: galactic-edge-attachment-status
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [galactic.datumapis.com]
+        apiVersions: ["*"]
+        operations: [UPDATE]
+        resources: [edgeattachments/status]
+  matchConditions:
+    - name: not-core
+      expression: >-
+        request.userInfo.username.startsWith('system:serviceaccount:') &&
+        request.userInfo.username != 'system:serviceaccount:galactic-system:galactic-controller'
+  variables:
+    - name: node
+      expression: request.userInfo.username == 'system:serviceaccount:galactic-system:galactic-edge'
+    - name: own
+      expression: "variables.node ? ['Programmed', 'Released'] : ['Ready']"
+  validations:
+    - expression: >-
+        variables.node ?
+        ('authentication.kubernetes.io/node-name' in request.userInfo.extra &&
+        request.userInfo.extra['authentication.kubernetes.io/node-name'] == [oldObject.?status.?nodeName.orValue('')]) :
+        ('authentication.kubernetes.io/pod-uid' in request.userInfo.extra &&
+        request.userInfo.extra['authentication.kubernetes.io/pod-uid'] == [object.spec.podUID])
+      message: a status writer may write only its own pod's or its own node's attachments
+    - expression: >-
+        object.?status.?conditions.orValue([]).filter(c, !(c.type in variables.own)) ==
+        oldObject.?status.?conditions.orValue([]).filter(c, !(c.type in variables.own))
+      message: the caller may change only its own conditions
+    - expression: >-
+        object.?status.?nodeName == oldObject.?status.?nodeName &&
+        object.?status.?vpc == oldObject.?status.?vpc &&
+        object.?status.?address == oldObject.?status.?address &&
+        object.?status.?drainDeadline == oldObject.?status.?drainDeadline
+      message: nodeName, vpc, address and drainDeadline are written only by galactic-controller
+    - expression: >-
+        variables.node || (
+        object.?status.?hostLink == oldObject.?status.?hostLink &&
+        object.?status.?podVRF == oldObject.?status.?podVRF &&
+        object.?status.?packetDevice == oldObject.?status.?packetDevice)
+      message: hostLink, podVRF and packetDevice are written only by galactic-edge
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: galactic-edge-attachment-status
+spec:
+  policyName: galactic-edge-attachment-status
+  validationActions: [Deny]
+---
+# galactic-controller writes RoleBindings only for providers: this holds it
+# to RoleBindings of the galactic-edge-provider ClusterRole, so it cannot
+# rebind another role. Admission policies are not consulted for policy
+# bindings themselves, so its write access to those is limited by RBAC
+# alone.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: galactic-edge-controller-rolebindings
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [rbac.authorization.k8s.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [rolebindings]
+  matchConditions:
+    - name: controller
+      expression: request.userInfo.username == 'system:serviceaccount:galactic-system:galactic-controller'
+  variables:
+    - name: obj
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+  validations:
+    - expression: >-
+        variables.obj.roleRef.kind == 'ClusterRole' && variables.obj.roleRef.name == 'galactic-edge-provider'
+      message: galactic-controller writes only the Galactic Edge provider RoleBindings
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: galactic-edge-controller-rolebindings
+spec:
+  policyName: galactic-edge-controller-rolebindings
+  validationActions: [Deny]
