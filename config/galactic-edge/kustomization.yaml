@@ -9,9 +9,10 @@
 # approved provider. Apply this before enabling --edge.
 #
 # Deliberately NOT included: base/, the node agent DaemonSet. It needs a
-# per-cell MTU. Deploy it only where galactic-router runs with the
-# edge-ownership mount (config/galactic-router/base), so garbage collection
-# keeps the VRFs edge attachments use.
+# per-cell MTU. Deploy it only where galactic-router from the same release
+# or later already runs with the edge-ownership mount
+# (config/galactic-router/base): an older router's garbage collection deletes
+# the VRFs edge attachments use, and nothing in the agent detects that.
 #
 # Not part of the root config/kustomization.yaml: Galactic Edge is opt-in.
 resources:
