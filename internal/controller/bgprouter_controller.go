@@ -18,9 +18,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/model"
@@ -42,6 +44,10 @@ const peerStatusRequeue = 30 * time.Second
 // reconciler's Accepted-condition updates below.
 const reasonAccepted = "Accepted"
 
+// ReasonGateClosed is the Advertised reason of a Galactic Edge route's
+// advertisement this node leaves out because its forwarding gate is closed.
+const ReasonGateClosed = "GateClosed"
+
 // BGPRouterReconciler reconciles BGPRouter resources.
 type BGPRouterReconciler struct {
 	client.Client
@@ -50,6 +56,10 @@ type BGPRouterReconciler struct {
 	RuntimeManager galacticruntime.RuntimeManager
 	Hasher         func(model.DesiredRouter) (string, error)
 	NodeName       string
+	// Wake, when set, reconciles the BGPRouter each event names: what the
+	// desired router is built from changed outside the API, such as a
+	// forwarding gate opening or closing.
+	Wake <-chan event.GenericEvent
 }
 
 // Reconcile reconciles a single BGPRouter.
@@ -389,6 +399,16 @@ func (r *BGPRouterReconciler) updateAdvertisementStatuses(
 				Reason:  "Advertised",
 				Message: "Prefixes are being advertised",
 			})
+		} else if reconcile.IsEdgeAdvertisement(adv) && !r.Reconciler.EdgeGateOpen(adv) {
+			// Left out of the desired router because its forwarding
+			// gate is not open on this node.
+			advCopy.Status.AdvertisedPrefixes = 0
+			setAdvertisementCondition(advCopy, metav1.Condition{
+				Type:    ConditionAdvertised,
+				Status:  metav1.ConditionFalse,
+				Reason:  ReasonGateClosed,
+				Message: "the forwarding gate for the prefix is not open on this node",
+			})
 		}
 		setAdvertisementCondition(advCopy, metav1.Condition{
 			Type:    ConditionReady,
@@ -537,7 +557,11 @@ func nptv6ConfiguredCondition(spec *bgpv1alpha1.NPTv6Spec) metav1.Condition {
 
 // SetupWithManager registers the BGPRouterReconciler with the manager.
 func (r *BGPRouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr)
+	if r.Wake != nil {
+		b = b.WatchesRawSource(source.Channel(r.Wake, &handler.EnqueueRequestForObject{}))
+	}
+	return b.
 		For(&bgpv1alpha1.BGPRouter{}).
 		Watches(&bgpv1alpha1.BGPPeer{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {

@@ -202,6 +202,12 @@ func runCmd(cfg *config.RouterConfig) error {
 	// Create reconciler.
 	rec := reconcile.New(mgr.GetClient(), nodeName, bgpLocalAddr)
 
+	wake, closeGates, err := setupEdgeGate(mgr, rec, nodeName, cfg.Reflector)
+	if err != nil {
+		return err
+	}
+	defer closeGates()
+
 	// Register BGPRouter controller.
 	if err := (&controller.BGPRouterReconciler{
 		Client:         mgr.GetClient(),
@@ -210,6 +216,7 @@ func runCmd(cfg *config.RouterConfig) error {
 		RuntimeManager: runtimeMgr,
 		Hasher:         hash.DesiredRouter,
 		NodeName:       nodeName,
+		Wake:           wake,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup BGPRouter controller: %w", err)
 	}

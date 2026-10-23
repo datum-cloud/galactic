@@ -9,6 +9,10 @@ spec:
     name: galactic-control
   peerASN: 65000
   address: "fc00:0:b::1"
+  # An edge node's session: when its galactic-router stops, the reflector
+  # withdraws the node's Galactic Edge routes within the 9 s hold time.
+  holdTime: 9s
+  keepaliveTime: 3s
   addressFamilies:
     - afi: l2vpn
       safi: evpn

@@ -498,7 +498,7 @@ func TestControllerAsGalacticController(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Setup(mgr, short, timing.BootClock); err != nil {
+	if err := Setup(mgr, short, timing.BootClock, bgpNamespace); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

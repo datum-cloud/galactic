@@ -177,7 +177,7 @@ func run(parent context.Context, o *options) error {
 		}
 		params := timing.Params
 		params.MaxSkew = o.edgeMaxSkew
-		if err := edgeroute.Setup(mgr, params, timing.BootClock); err != nil {
+		if err := edgeroute.Setup(mgr, params, timing.BootClock, galactic.SystemNamespace); err != nil {
 			return fmt.Errorf("set up edge routes: %w", err)
 		}
 	}

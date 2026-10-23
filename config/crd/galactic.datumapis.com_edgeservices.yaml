@@ -95,7 +95,9 @@ spec:
                 prefixes:
                   description: |-
                     Prefixes bound the prefixes the provider may request in the VPC. Each
-                    is a masked CIDR.
+                    is a masked CIDR. Grants of services granting the same VPC must not
+                    overlap: galactic-controller refuses the attachments and routes of the
+                    later of two services whose prefixes overlap.
                   items:
                     maxLength: 43
                     type: string

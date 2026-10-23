@@ -10,10 +10,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
@@ -132,6 +134,12 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("edge-attachment").
 		For(&galacticv1alpha1.EdgeAttachment{}).
 		Watches(&galacticv1alpha1.EdgeService{}, byField(indexServiceUID, uid)).
+		// Granted prefixes are exclusive in a VPC, so a change to one
+		// service's grant decides the other services' there.
+		Watches(&galacticv1alpha1.EdgeService{}, viaServices(func(s *galacticv1alpha1.EdgeService, o client.Object) bool {
+			other, ok := o.(*galacticv1alpha1.EdgeService)
+			return ok && s.UID != other.UID && s.Spec.VPCRef.UID == other.Spec.VPCRef.UID
+		}), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&galacticv1alpha1.EdgeInstance{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, o client.Object) []reconcile.Request {
 				var list galacticv1alpha1.EdgeAttachmentList

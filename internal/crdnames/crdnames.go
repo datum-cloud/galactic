@@ -99,6 +99,34 @@ const LabelTenantID = "galactic.datum.net/tenant-id"
 // the label that drives discovery.
 const AnnotationTenantID = LabelTenantID
 
+// Labels and annotations of the BGPAdvertisement galactic-controller
+// publishes for one accepted Galactic Edge route (EdgeAdvertisementName).
+// galactic-router advertises one only while the forwarding gate it names is
+// open on its node: the host link AnnotationEdgeHostLink, while it is the
+// edge link of address AnnotationEdgeAddress, holds an unexpired gate for the
+// advertised prefix.
+const (
+	// LabelEdgeRoute is the route's metadata.uid. Its presence marks the
+	// advertisement as an edge route's.
+	LabelEdgeRoute = "galactic.datumapis.com/edge-route"
+	// LabelEdgeEpoch is the accepted claim epoch the advertisement is for.
+	LabelEdgeEpoch = "galactic.datumapis.com/edge-epoch"
+	// AnnotationEdgeRoute is the route's namespace and name.
+	AnnotationEdgeRoute = "galactic.datumapis.com/edge-route"
+	// AnnotationEdgeHostLink is the accepted attachment's host link.
+	AnnotationEdgeHostLink = "galactic.datumapis.com/edge-host-link"
+	// AnnotationEdgeAddress is the accepted attachment's own address.
+	AnnotationEdgeAddress = "galactic.datumapis.com/edge-address"
+)
+
+// EdgeAdvertisementName returns the name of the BGPAdvertisement for the
+// Galactic Edge route with metadata.uid routeUID. One route has one
+// advertisement, which follows its accepted holder; a route recreated under
+// the same name has a new UID and so a new advertisement.
+func EdgeAdvertisementName(routeUID string) string {
+	return "edge-" + routeUID
+}
+
 // containerIDLen is how many characters of a container ID appear in an
 // annotation key. Kubernetes limits the name part of an annotation key to 63
 // bytes, and the longest prefix here is 22 bytes, leaving 41 for the suffix.

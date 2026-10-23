@@ -107,8 +107,10 @@ type EdgeAttachmentSpec struct {
 }
 
 // Condition types of an EdgeAttachment. Core (galactic-controller) sets
-// Admitted, Allocated and Draining; the node agent (galactic-edge) sets
-// Programmed and Released; the provider sets only Ready.
+// Admitted, Allocated, Draining and Published; the node agent (galactic-edge)
+// sets Programmed and Released; the provider sets only Ready. Published is
+// True while at least one route accepted on the attachment is published (see
+// EdgeRoutePublished).
 const (
 	EdgeAttachmentAdmitted   = "Admitted"
 	EdgeAttachmentAllocated  = "Allocated"
@@ -116,6 +118,7 @@ const (
 	EdgeAttachmentProgrammed = "Programmed"
 	EdgeAttachmentReleased   = "Released"
 	EdgeAttachmentReady      = "Ready"
+	EdgeAttachmentPublished  = "Published"
 )
 
 // EdgeAttachmentFinalizer holds an attachment until its node confirms its
@@ -125,8 +128,8 @@ const EdgeAttachmentFinalizer = "galactic.datumapis.com/edge-attachment"
 // EdgeAttachmentStatus is the attachment's lifecycle. A field is written only
 // by the writer named on it.
 type EdgeAttachmentStatus struct {
-	// Conditions are Admitted, Allocated, Draining (core), Programmed,
-	// Released (node) and Ready (provider).
+	// Conditions are Admitted, Allocated, Draining, Published (core),
+	// Programmed, Released (node) and Ready (provider).
 	// +optional
 	// +listType=map
 	// +listMapKey=type

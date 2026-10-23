@@ -268,8 +268,9 @@ func (r *Reconciler) admit(ctx context.Context, att *galacticv1alpha1.EdgeAttach
 }
 
 // checkVPC returns the base62 identifier of the service's VPC once its
-// client pool is usable: inside the VPC and overlapping no other service's
-// pool in the same VPC.
+// client pool is usable, inside the VPC and overlapping no earlier service's
+// pool in the same VPC, and its granted prefixes overlap no earlier service's
+// in the same VPC.
 func checkVPC(ctx context.Context, reader client.Reader, svc *galacticv1alpha1.EdgeService) (string, *refusal, error) {
 	var vpc cloudv1alpha1.VPC
 	switch err := reader.Get(ctx, client.ObjectKey{Namespace: svc.Namespace, Name: svc.Spec.VPCRef.Name}, &vpc); {
@@ -312,23 +313,18 @@ func checkVPC(ctx context.Context, reader client.Reader, svc *galacticv1alpha1.E
 		}
 		// The older service keeps its pool, so creating an overlapping one
 		// never revokes attachments already admitted.
-		if !earlier(o, svc) {
+		if !admission.Earlier(o, svc) {
 			continue
 		}
 		if p, err := parsePool(o.Spec.ClientPool); err == nil && overlaps(p, pool) {
 			return "", refuse(ReasonPoolConflict, "client pool %s overlaps EdgeService %s's %s", pool, o.Name, p), nil
 		}
 	}
-	return vpc.Status.VPC, nil, nil
-}
-
-// earlier reports whether a was created before b, by creation time and then
-// UID, so every reconciler orders two services the same way.
-func earlier(a, b *galacticv1alpha1.EdgeService) bool {
-	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
-		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	if o, mine, theirs := admission.GrantConflict(svc, others.Items); o != nil {
+		return "", refuse(string(admission.PrefixConflict), "granted prefix %s overlaps EdgeService %s's %s",
+			mine, o.Name, theirs), nil
 	}
-	return a.UID < b.UID
+	return vpc.Status.VPC, nil, nil
 }
 
 // track keeps one Authority authorization per attachment, decided on the
@@ -426,7 +422,11 @@ func (r *Reconciler) allocate(ctx context.Context, att *galacticv1alpha1.EdgeAtt
 			if allocations, err = r.liveAllocations(ctx, allocations); err != nil {
 				return err
 			}
-			next, err := nextFree(pool, allocations)
+			routed, err := r.routedPrefixes(ctx, &cur)
+			if err != nil {
+				return err
+			}
+			next, err := nextFree(pool, allocations, routed)
 			if errors.Is(err, errPoolExhausted) {
 				ref = refuse(ReasonPoolExhausted, "client pool %s has no free address", pool)
 				return nil
@@ -460,6 +460,29 @@ func (r *Reconciler) allocate(ctx context.Context, att *galacticv1alpha1.EdgeAtt
 		setCondition(s, galacticv1alpha1.EdgeAttachmentAllocated, metav1.ConditionTrue, ReasonAllocated,
 			fmt.Sprintf("address %s on node %s", addr, node))
 	})
+}
+
+// routedPrefixes returns every prefix in the service's VPC's EdgeRouteIndex,
+// read uncached: those of accepted routes and of routes whose holder may
+// still forward. An allocation can still race a route accepted after this
+// read; the route controller then revokes the route, since it refuses any
+// route that covers another attachment's address.
+func (r *Reconciler) routedPrefixes(ctx context.Context, svc *galacticv1alpha1.EdgeService) ([]netip.Prefix, error) {
+	var idx galacticv1alpha1.EdgeRouteIndex
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: svc.Namespace, Name: svc.Spec.VPCRef.UID}, &idx)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	out := make([]netip.Prefix, 0, len(idx.Spec.Routes))
+	for _, e := range idx.Spec.Routes {
+		if p, err := netip.ParsePrefix(e.Prefix); err == nil {
+			out = append(out, p.Masked())
+		}
+	}
+	return out, nil
 }
 
 // liveAllocations returns allocations less those whose attachment no longer

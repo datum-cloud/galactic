@@ -127,7 +127,10 @@ spec:
                   description: |-
                     Prefix is the IPv6 prefix forwarded, a masked CIDR. It must be inside
                     the service's granted prefixes and must not overlap another route of
-                    the VPC.
+                    the VPC, a workload subnet of the VPC or another service's client
+                    pool, or contain another attachment's address. It may lie inside its
+                    own service's client pool, which no attachment is then allocated an
+                    address from.
                   maxLength: 43
                   type: string
                   x-kubernetes-validations:
@@ -241,7 +244,9 @@ spec:
                   minimum: 0
                   type: integer
                 conditions:
-                  description: Conditions are Accepted and Claimed, set by galactic-controller.
+                  description: |-
+                    Conditions are Accepted, Claimed and Published, set by
+                    galactic-controller.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:
