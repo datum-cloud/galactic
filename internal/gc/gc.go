@@ -66,6 +66,25 @@ type EdgeUsers interface {
 	Reclaim(ctx context.Context, vpc string, reclaim func() error) error
 }
 
+// passEdgeUsers answers VPCs once for a whole GC pass, so both collection
+// phases share one cluster-wide read of edge attachments. Reclaim is not
+// cached: it reads again under the fence for every delete.
+type passEdgeUsers struct {
+	EdgeUsers
+	read bool
+	vpcs map[string]struct{}
+	err  error
+}
+
+// VPCs returns the first answer of the pass.
+func (p *passEdgeUsers) VPCs(ctx context.Context) (map[string]struct{}, error) {
+	if !p.read {
+		p.vpcs, p.err = p.EdgeUsers.VPCs(ctx)
+		p.read = true
+	}
+	return p.vpcs, p.err
+}
+
 // CleanupResult tracks the outcome of a GC pass.
 type CleanupResult struct {
 	OrphanedCRDsRemoved int
@@ -1043,6 +1062,7 @@ func buildNPTv6Mapping(spec *bgpv1alpha1.NPTv6Spec) (nptv6.Mapping, error) {
 // uses on this node.
 func RunGC(ctx context.Context, k8s client.Client, namespace, nodeName string, edge EdgeUsers) CleanupResult {
 	var result CleanupResult
+	edge = &passEdgeUsers{EdgeUsers: edge}
 
 	// Phase 1: Remove orphaned BGP CRDs.
 	orphans, err := CollectOrphanedCRDs(ctx, k8s, namespace, nodeName, edge)

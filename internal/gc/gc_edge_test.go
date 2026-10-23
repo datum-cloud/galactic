@@ -36,9 +36,12 @@ type edgeUsers struct {
 	vpcs      map[string]struct{}
 	err       error
 	reclaimed []string
+	// reads counts VPCs calls.
+	reads int
 }
 
 func (e *edgeUsers) VPCs(context.Context) (map[string]struct{}, error) {
+	e.reads++
 	if e.err != nil {
 		return nil, e.err
 	}
@@ -222,5 +225,19 @@ func TestInUseVRFIsNotRemoved(t *testing.T) {
 	res = RemoveOrphanedVRFs(context.Background(), []string{intf.GenerateInterfaceNameVRF("a")}, unknown)
 	if res.Errors != 1 {
 		t.Fatalf("remove without a fence = %+v, want one error", res)
+	}
+}
+
+// TestRunGCReadsEdgeUseOnce runs a whole pass: its two collection phases share
+// one read of the VPCs edge attachments use.
+func TestRunGCReadsEdgeUseOnce(t *testing.T) {
+	withFakeLinks(t, vrfLinks("a"), nil)
+	edge := using("a")
+	res := RunGC(context.Background(), edgeTestClient(t, "a"), edgeTestNamespace, edgeTestNode, edge)
+	if res.Errors != 0 {
+		t.Fatalf("RunGC = %+v, want no errors", res)
+	}
+	if edge.reads != 1 {
+		t.Fatalf("edge use read %d times in one pass, want 1", edge.reads)
 	}
 }

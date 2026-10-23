@@ -121,12 +121,10 @@ func (g *Guard) VPCs(ctx context.Context) (map[string]struct{}, error) {
 }
 
 // canonical drops the zero padding of a VRF interface name from a base62 VPC
-// identifier, the form garbage collection reads VPCs in.
+// identifier, the form garbage collection reads VPCs in, exactly as the VPC's
+// write-fence scope does.
 func canonical(vpc string) string {
-	if trimmed := strings.TrimLeft(vpc, "0"); trimmed != "" {
-		return trimmed
-	}
-	return vpc
+	return strings.TrimPrefix(ownership.VPCScope(vpc), "vpc-")
 }
 
 // Reclaim runs reclaim, which removes vpc's shared state, with vpc's write
