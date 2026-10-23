@@ -6,6 +6,7 @@ package cnibgp
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 
@@ -17,6 +18,24 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
+
+const (
+	testPodName      = "web-0"
+	testPodNamespace = "default"
+	testPodAddr      = "fd00::1"
+
+	// testStaleTenantID stands in for a value some earlier ADD wrote.
+	testStaleTenantID = "stale-tenant"
+)
+
+func mustParseAddr(t *testing.T) net.IP {
+	t.Helper()
+	ip := net.ParseIP(testPodAddr)
+	if ip == nil {
+		t.Fatalf("net.ParseIP(%q) failed", testPodAddr)
+	}
+	return ip
+}
 
 func withNodeName(t *testing.T, nodeName string) {
 	t.Helper()

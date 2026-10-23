@@ -25,6 +25,9 @@ type Metrics struct {
 	Egress *EgressControl
 	// SidecarReturn is the ingress sidecar's host-side return path.
 	SidecarReturn *SidecarReturn
+	// EndpointSliceRepair counts the per-pod EndpointSlices galactic-cni's
+	// repair pass recreated and the passes that failed.
+	EndpointSliceRepair *EndpointSliceRepair
 }
 
 // New builds a Metrics with the event counters already registered. Call
@@ -36,6 +39,7 @@ func New() *Metrics {
 	events.MustRegister(reg)
 	return &Metrics{
 		Registry: reg, Events: events, Egress: NewEgressControl(reg), SidecarReturn: NewSidecarReturn(reg),
+		EndpointSliceRepair: NewEndpointSliceRepair(reg),
 	}
 }
 

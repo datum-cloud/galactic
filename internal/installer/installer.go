@@ -518,6 +518,10 @@ type ebpfDatapathState struct {
 	// sidecarReturn records each sidecar return sweep. Nil records nothing.
 	sidecarReturn *metrics.SidecarReturn
 
+	// endpointSliceRepair records each EndpointSlice repair pass. Nil records
+	// nothing.
+	endpointSliceRepair *metrics.EndpointSliceRepair
+
 	// trafficPolicy owns the node's traffic policy mode and NAT locators. Nil
 	// when the datapath is a test fake.
 	trafficPolicy *trafficPolicyState
@@ -554,6 +558,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	}
 	state.egressGroup.ctl = m.Egress
 	state.sidecarReturn = m.SidecarReturn
+	state.endpointSliceRepair = m.EndpointSliceRepair
 	m.Egress.SetMode(string(egressCfg.Mode), string(config.EgressModeOrdered), string(config.EgressModeHashed))
 	watcher.OnChange(rewriteEBPFInterfaces)
 
@@ -599,6 +604,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	state.egressGroup = newEgressGroup(egressCfg, loadEgressShardSIDs(hostConf.EgressShardSIDs), nat64, attach.PinDir)
 	state.egressGroup.ctl = m.Egress
 	state.sidecarReturn = m.SidecarReturn
+	state.endpointSliceRepair = m.EndpointSliceRepair
 	// Ordered mode routes only to the configured shards, so their locators
 	// are the complete set. Hashed mode adds the cluster's EgressShards once
 	// its watch has listed them.
@@ -1221,6 +1227,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	// arriving during one is dropped instead of piling up behind it.
 	tapNeighSem := make(chan struct{}, 1)
 	sidecarReturnSem := make(chan struct{}, 1)
+	endpointSliceRepairSem := make(chan struct{}, 1)
 
 	egressRouteRefreshTicker := time.NewTicker(egressRouteRefreshInterval)
 	defer egressRouteRefreshTicker.Stop()
@@ -1273,6 +1280,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// not matter: the sweep reaps only keys no live CRD names,
 			// and the repair writes keys for live CRDs only.
 			repairDatapathOnTick(ctx, datapathRepairSem, ebpfState)
+			repairEndpointSlicesOnTick(ctx, endpointSliceRepairSem, ebpfState)
 			result := gc.SweepEBPFVRFTable(ctx, ebpfState.k8sClient, ebpfState.namespace, ebpfState.nodeName, attach.PinDir)
 			logEBPFVRFSweepResult(result)
 
