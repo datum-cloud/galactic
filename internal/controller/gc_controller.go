@@ -26,6 +26,9 @@ type GCReconciler struct {
 	Namespace string
 	NodeName  string
 	Interval  time.Duration
+	// Edge keeps the pass off the VPCs Galactic Edge attachments use on
+	// this node.
+	Edge gc.EdgeUsers
 }
 
 // Reconcile runs a GC pass at the configured interval. It does not watch any
@@ -37,7 +40,7 @@ func (r *GCReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Resu
 	}
 
 	k8s := r.Client
-	result := gc.RunGC(ctx, k8s, r.Namespace, r.NodeName)
+	result := gc.RunGC(ctx, k8s, r.Namespace, r.NodeName, r.Edge)
 
 	if result.Errors > 0 {
 		slog.Info("GC: completed with errors",
@@ -66,7 +69,7 @@ func (r *GCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // RunGC runs a single garbage collection pass in the given context.
 // This is the public API for triggering GC from outside the reconciler.
 func (r *GCReconciler) RunGC(ctx context.Context) gc.CleanupResult {
-	return gc.RunGC(ctx, r.Client, r.Namespace, r.NodeName)
+	return gc.RunGC(ctx, r.Client, r.Namespace, r.NodeName, r.Edge)
 }
 
 // GCRequest returns a reconcile.Request that triggers the GC reconciler.

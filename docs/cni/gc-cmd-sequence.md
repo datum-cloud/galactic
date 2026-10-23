@@ -63,12 +63,13 @@ sequenceDiagram
     participant K8s
     participant Netns as /var/run/netns
     participant Kernel as kernel VRF interfaces
+    participant Edge as maintenance.Guard<br/>(edge write fence)
 
     Note over Ticker,GCR: On startup, root.go waits for the manager's<br/>informer cache to sync, then runs one pass<br/>immediately before the ticker's first tick
 
     Ticker->>GCR: tick
     activate GCR
-    GCR->>GC: RunGC(ctx, k8s, namespace, nodeName)
+    GCR->>GC: RunGC(ctx, k8s, namespace, nodeName, edge)
     activate GC
 
     Note over GC: Phase 1 — orphaned CRDs
@@ -93,21 +94,34 @@ sequenceDiagram
         end
     end
 
-    GC->>K8s: List BGPVRFInstances in namespace
-    loop each BGPVRFInstance owned by one of routerNames
-        alt this VPC has no surviving BGPAdvertisement
-            GC->>GC: record BGPVRFInstance as orphaned
+    GC->>Edge: VPCs() — VPCs edge attachments use on this node
+    alt edge use unknown
+        GC->>GC: record no BGPVRFInstance this pass
+    else known
+        GC->>K8s: List BGPVRFInstances in namespace
+        loop each BGPVRFInstance owned by one of routerNames
+            alt no surviving BGPAdvertisement and no edge attachment for this VPC
+                GC->>GC: record BGPVRFInstance as orphaned
+            end
         end
     end
 
     loop each orphaned CRD
-        GC->>K8s: Delete (best-effort — errors logged, sweep continues)
+        alt BGPAdvertisement
+            GC->>K8s: Delete (best-effort — errors logged, sweep continues)
+        else BGPVRFInstance whose VRF is gone
+            GC->>K8s: Delete — no edge attachment can use a VPC with no VRF
+        else BGPVRFInstance
+            GC->>Edge: Reclaim(vpc of its VRF) — under the VPC's fence, check edge use again
+            Edge->>K8s: Delete, only if no edge attachment uses the VPC
+        end
     end
 
     Note over GC: Phase 2 — orphaned kernel VRFs
     GC->>Kernel: list VRF interfaces on this node
     GC->>K8s: List BGPRouters, then BGPAdvertisements again (post-deletion)
     GC->>GC: activeVPCs = VPCs with a surviving BGPAdvertisement owned by this node
+    GC->>Edge: VPCs() — added to activeVPCs; unknown skips Phase 2
 
     loop each kernel VRF interface
         GC->>GC: resolve VPC from interface name<br/>(current "G{vpc}V" shape or legacy "G{vpc}{att}V" shape)
@@ -119,10 +133,13 @@ sequenceDiagram
     end
 
     loop each orphaned VRF
-        alt current-shape name
-            GC->>Kernel: vrf.Delete(vpc) — rebuilds and removes the current interface
+        GC->>Edge: Reclaim(vpc) — under the VPC's fence, check edge use again
+        alt an edge attachment uses the VPC
+            Edge-->>GC: ErrInUse, VRF kept
+        else current-shape name
+            Edge->>Kernel: vrf.Delete(vpc) — rebuilds and removes the current interface
         else legacy pre-rename shape
-            GC->>Kernel: delete the interface actually observed, by name
+            Edge->>Kernel: delete the interface actually observed, by name
         end
     end
 
@@ -207,6 +224,20 @@ sequenceDiagram
   never aborts the rest of the sweep — one stuck resource doesn't block
   reclaiming everything else found orphaned in the same pass. The next tick
   tries the failed one again.
+- **Edge attachments keep their VPC's VRF and `BGPVRFInstance`.** A Galactic
+  Edge attachment joins its VPC's canonical host VRF and writes no
+  `BGPAdvertisement`, so `maintenance.Guard` (`internal/edge/maintenance`)
+  counts a VPC as used while an `EdgeAttachment` on this node is not
+  `Released`, read uncached, or a host link stamped
+  `galactic-edge:hostattach:` for it remains. Each delete runs inside
+  `Reclaim`, which takes the VPC's write fence (`internal/edge/ownership`,
+  `/var/lib/galactic-edge/ownership`) that `galactic-edge` holds while it
+  programs, checks again and deletes only if nothing uses the VPC. An
+  attachment admitted after collection therefore keeps the VRF, and a change
+  `galactic-edge` prepared before the delete is refused and prepared again.
+  If the guard cannot answer, because the fence directory is not mounted,
+  `edgeattachments` cannot be listed or the links cannot be read, GC deletes
+  no VRF or `BGPVRFInstance` that pass and counts an error.
 - **The very first pass waits for the cache to sync.** `root.go` calls
   `mgr.GetCache().WaitForCacheSync(ctx)` before the initial `RunGC` — an
   empty, not-yet-populated `BGPAdvertisement`/`BGPRouter` list would
@@ -303,6 +334,11 @@ sequenceDiagram
   map yet, or `/sys/fs/bpf` may be in a restrictive mode this process can't
   stat. Either way, `SweepEBPFVRFTable` returns cleanly with nothing done —
   it isn't this function's job to diagnose why the pin isn't there yet.
+- **Edge attachment links keep their entry.** A Galactic Edge host link
+  reuses its VPC's entry (`attachreg.RegisterHostLink`) and has no
+  `BGPVRFInstance` of its own, so every entry a link stamped
+  `galactic-edge:hostattach:` resolves to through its `ifindex_vrf_table` row
+  is live. A sweep that cannot list those links removes nothing that tick.
 - **CRD field validation happens inline, per instance.** A `BGPVRFInstance`
   whose router has no `srv6Locator` (not eBPF-relevant at all), an
   unparseable locator, or a `VRFID` outside the valid Argument range is

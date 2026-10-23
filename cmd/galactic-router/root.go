@@ -31,6 +31,9 @@ import (
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
+	"go.datum.net/galactic/internal/edge/maintenance"
+	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/hash"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
@@ -287,13 +290,23 @@ func runCmd(cfg *config.RouterConfig) error {
 		}
 	}
 
-	// Register GC controller for cleaning up orphaned BGP CRDs and VRFs.
+	// Register GC controller for cleaning up orphaned BGP CRDs and VRFs. It
+	// shares the node's write fence with galactic-edge; without it, GC
+	// reclaims no VRF or BGPVRFInstance, but routing runs on.
+	var edgeUsers gc.EdgeUsers
+	if guard, err := maintenance.NewGuard(mgr.GetAPIReader(), nodeName, ownership.DefaultDir); err != nil {
+		ctrl.Log.Error(err, "edge write fence unavailable: GC will reclaim no VRF or BGPVRFInstance")
+		edgeUsers = maintenance.Unavailable{Err: err}
+	} else {
+		edgeUsers = guard
+	}
 	gcRec := &controller.GCReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Namespace: cfg.GCNamespace,
 		NodeName:  nodeName,
 		Interval:  cfg.GCInterval,
+		Edge:      edgeUsers,
 	}
 	if err := gcRec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup GC controller: %w", err)
