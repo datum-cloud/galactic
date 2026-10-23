@@ -63,6 +63,48 @@ func GrantFromAPI(s *galacticv1alpha1.EdgeService) (Grant, error) {
 	return g, nil
 }
 
+// Earlier reports whether service a was created before b, by creation time
+// and then UID, so every reconciler orders two services the same way. Of two
+// services whose client pools or granted prefixes overlap in one VPC, the
+// earlier keeps them.
+func Earlier(a, b *galacticv1alpha1.EdgeService) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	}
+	return a.UID < b.UID
+}
+
+// GrantConflict returns an earlier service of others, granting svc's VPC,
+// whose granted prefixes overlap svc's, with the two overlapping prefixes.
+// Grants are exclusive within a VPC: the later of two overlapping services
+// may route none of its prefixes. A service whose own grant does not parse
+// conflicts with nothing; it is refused for that instead.
+func GrantConflict(svc *galacticv1alpha1.EdgeService, others []galacticv1alpha1.EdgeService,
+) (*galacticv1alpha1.EdgeService, netip.Prefix, netip.Prefix) {
+	mine, err := GrantFromAPI(svc)
+	if err != nil {
+		return nil, netip.Prefix{}, netip.Prefix{}
+	}
+	for i := range others {
+		o := &others[i]
+		if o.UID == svc.UID || o.Spec.VPCRef.UID != svc.Spec.VPCRef.UID || !Earlier(o, svc) {
+			continue
+		}
+		theirs, err := GrantFromAPI(o)
+		if err != nil {
+			continue
+		}
+		for _, p := range mine.Prefixes {
+			for _, q := range theirs.Prefixes {
+				if p.Overlaps(q) {
+					return o, p, q
+				}
+			}
+		}
+	}
+	return nil, netip.Prefix{}, netip.Prefix{}
+}
+
 // ProviderSource keeps an Authority's providers in step with the cell's
 // EdgeProviders.
 type ProviderSource struct {

@@ -202,6 +202,24 @@ func (t *Table) Gates(ifindex uint32) (map[netip.Prefix]Gate, error) {
 	return out, nil
 }
 
+// Open reports whether ifindex is the edge link whose own address is addr
+// and holds a gate for exactly prefix whose deadline is after now, on
+// CLOCK_BOOTTIME. A wider or narrower gate on the link does not count: the
+// trie's own lookup is a longest-prefix match, so the rows are compared
+// exactly.
+func (t *Table) Open(ifindex uint32, addr netip.Addr, prefix netip.Prefix, now time.Duration) (bool, error) {
+	own, ok, err := t.Link(ifindex)
+	if err != nil || !ok || own != addr {
+		return false, err
+	}
+	rows, err := t.Gates(ifindex)
+	if err != nil {
+		return false, err
+	}
+	g, ok := rows[prefix]
+	return ok && g.Deadline > now, nil
+}
+
 // Links returns every edge link's ifindex and own address.
 func (t *Table) Links() (map[uint32]netip.Addr, error) {
 	out := map[uint32]netip.Addr{}

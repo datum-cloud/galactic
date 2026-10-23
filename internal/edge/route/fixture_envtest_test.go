@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/claim"
 	"go.datum.net/galactic/internal/edge/provider"
@@ -43,6 +44,8 @@ const (
 	nodeA        = "edge-1"
 	nodeB        = "edge-2"
 	vpcID        = "000000abc"
+
+	bgpNamespace = "galactic-system"
 
 	socketAccess = "SocketAccess"
 	grantPrefix  = "fd00:10:0:f::/64"
@@ -110,6 +113,7 @@ func startAPI(t *testing.T) *fixture {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(galacticv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(cloudv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
 	admin, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +164,8 @@ func startAPI(t *testing.T) *fixture {
 		},
 	}
 	f.create(f.svc)
-	f.routes = &Reconciler{Client: admin, APIReader: admin, Params: params, Clock: f.clock.read, Now: f.now}
+	f.routes = &Reconciler{Client: admin, APIReader: admin, Params: params, Clock: f.clock.read, Now: f.now,
+		BGPNamespace: bgpNamespace}
 	f.index = &IndexReconciler{Client: admin, APIReader: admin, Params: params, Clock: f.clock.read}
 	f.reaper = &InstanceReaper{Client: admin, APIReader: admin, Params: params, Clock: f.clock.read}
 	return f
@@ -209,6 +214,12 @@ type podHolder struct {
 // admitted, allocated, programmed and ready.
 func (f *fixture) newHolder(name, node, address string) *podHolder {
 	f.t.Helper()
+	return f.newHolderIn(f.svc, name, node, address)
+}
+
+// newHolderIn is newHolder with an attachment under svc.
+func (f *fixture) newHolderIn(svc *galacticv1alpha1.EdgeService, name, node, address string) *podHolder {
+	f.t.Helper()
 	ctx := context.Background()
 	h := &podHolder{}
 	h.pod = &corev1.Pod{
@@ -229,7 +240,7 @@ func (f *fixture) newHolder(name, node, address string) *podHolder {
 		Spec: galacticv1alpha1.EdgeAttachmentSpec{
 			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: providerName},
 			ServiceRef: galacticv1alpha1.EdgeServiceReference{
-				Namespace: tenantNS, Name: f.svc.Name, UID: string(f.svc.UID),
+				Namespace: tenantNS, Name: svc.Name, UID: string(svc.UID),
 			},
 			InstanceRef:     galacticv1alpha1.EdgeInstanceReference{Name: h.inst.Name},
 			PodUID:          string(h.pod.UID),

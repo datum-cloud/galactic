@@ -44,6 +44,7 @@ const (
 	CapabilityNotGranted       Reason = "CapabilityNotGranted"
 	VPCNotGranted              Reason = "VPCNotGranted"
 	PrefixNotGranted           Reason = "PrefixNotGranted"
+	PrefixConflict             Reason = "PrefixConflict"
 	InvalidConfiguration       Reason = "InvalidConfiguration"
 	InvalidRequest             Reason = "InvalidRequest"
 )

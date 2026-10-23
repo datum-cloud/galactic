@@ -96,6 +96,11 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, watch]
+  # Publication reads each VPC's BGPVRFInstance on the accepted holder's
+  # node for the router, VRF ID and route target to advertise under.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [bgpvrfinstances]
+    verbs: [get, list, watch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -105,6 +110,32 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: galactic-controller-edge
+subjects:
+  - kind: ServiceAccount
+    name: galactic-controller
+    namespace: galactic-system
+---
+# Route publication: one BGPAdvertisement per accepted route, written only
+# where the cell's BGP objects live.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: galactic-controller-edge-publication
+  namespace: galactic-system
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [bgpadvertisements]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: galactic-controller-edge-publication
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: galactic-controller-edge-publication
 subjects:
   - kind: ServiceAccount
     name: galactic-controller

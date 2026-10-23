@@ -187,7 +187,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Admitted, Allocated, Draining (core), Programmed,<br />Released (node) and Ready (provider). |  | MaxItems: 8 <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Admitted, Allocated, Draining, Published (core),<br />Programmed, Released (node) and Ready (provider). |  | MaxItems: 8 <br /> |
 | `nodeName` _string_ | NodeName is the node that programs the attachment, from its instance.<br />Set by core at admission. |  | MaxLength: 253 <br /> |
 | `vpc` _string_ | VPC is the base62 identifier of the service's VPC. Set by core at<br />admission. |  | MaxLength: 16 <br /> |
 | `address` _string_ | Address is the attachment's IPv6 address in the VPC, from the<br />service's client pool. Set by core at allocation. |  | MaxLength: 39 <br /> |
@@ -536,7 +536,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `providerRef` _[EdgeProviderReference](#edgeproviderreference)_ | ProviderRef is the provider of the instances that claim the route. |  |  |
 | `vpcUID` _string_ | VPCUID is the metadata.uid of the VPC the prefix is in. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
-| `prefix` _string_ | Prefix is the IPv6 prefix forwarded, a masked CIDR. It must be inside<br />the service's granted prefixes and must not overlap another route of<br />the VPC. |  | MaxLength: 43 <br /> |
+| `prefix` _string_ | Prefix is the IPv6 prefix forwarded, a masked CIDR. It must be inside<br />the service's granted prefixes and must not overlap another route of<br />the VPC, a workload subnet of the VPC or another service's client<br />pool, or contain another attachment's address. It may lie inside its<br />own service's client pool, which no attachment is then allocated an<br />address from. |  | MaxLength: 43 <br /> |
 | `incarnation` _string_ | Incarnation identifies this route object across its deletion and<br />recreation, set once at create. A recreated route has a new one, so no<br />acceptance of the old object applies to it. |  | MaxLength: 64 <br />MinLength: 1 <br /> |
 | `claim` _[EdgeRouteClaim](#edgerouteclaim)_ | Claim is the current claim on the route. |  |  |
 
@@ -555,7 +555,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Accepted and Claimed, set by galactic-controller. |  | MaxItems: 8 <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Accepted, Claimed and Published, set by<br />galactic-controller. |  | MaxItems: 8 <br /> |
 | `accepted` _[EdgeRouteHolder](#edgerouteholder)_ | Accepted is the holder galactic-controller last accepted, written only<br />after the route is committed to its VPC's EdgeRouteIndex. It stays<br />after a revocation, with Accepted False, so the node can confirm the<br />holder's gate closed. |  |  |
 | `closedEpoch` _integer_ | ClosedEpoch is the highest accepted epoch whose forwarding gate the<br />accepted holder's node confirmed closed. Only galactic-edge on that<br />node writes it, and it never decreases. |  | Minimum: 0 <br /> |
 
@@ -621,7 +621,7 @@ _Appears in:_
 | `providerRef` _[EdgeProviderReference](#edgeproviderreference)_ | ProviderRef is the only provider the grant authorizes. |  |  |
 | `vpcRef` _[EdgeVPCReference](#edgevpcreference)_ | VPCRef is the only VPC the grant authorizes. |  |  |
 | `capabilities` _string array_ | Capabilities are the capability names the provider may use in the VPC. |  | MaxItems: 3 <br />MinItems: 1 <br />items:Enum: [SocketAccess PacketAccess PrefixReachability] <br /> |
-| `prefixes` _string array_ | Prefixes bound the prefixes the provider may request in the VPC. Each<br />is a masked CIDR. |  | MaxItems: 64 <br />items:MaxLength: 43 <br /> |
+| `prefixes` _string array_ | Prefixes bound the prefixes the provider may request in the VPC. Each<br />is a masked CIDR. Grants of services granting the same VPC must not<br />overlap: galactic-controller refuses the attachments and routes of the<br />later of two services whose prefixes overlap. |  | MaxItems: 64 <br />items:MaxLength: 43 <br /> |
 | `validUntil` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ValidUntil, when set, is the wall-clock time after which the grant<br />authorizes nothing. Admission refuses it, and revokes what it issued,<br />once fewer than the cell's maximum clock skew remain. |  |  |
 | `clientPool` _string_ | ClientPool is the IPv6 range, inside the VPC, that attachments take<br />their addresses from: a masked CIDR from /64 to /120. At most 1024 of<br />its addresses are allocated, whatever its size. Pools of services<br />granting the same VPC must not overlap; galactic-controller refuses<br />the attachments of the later of two overlapping services. Without a<br />pool, the service admits no attachment. A pool can be added to a<br />service that has none, and is fixed from then on. |  | MaxLength: 43 <br /> |
 | `drainSeconds` _integer_ | DrainSeconds is how long an attachment the foundation revokes keeps<br />its resources before they are released. Unset means 30. |  | Maximum: 300 <br />Minimum: 0 <br /> |

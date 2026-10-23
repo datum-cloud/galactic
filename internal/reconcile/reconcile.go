@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/model"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
@@ -29,11 +30,37 @@ import (
 // working whose routers may not set a node ID.
 const legacySRv6SIDAnnotation = "galactic.datum.net/srv6-sid"
 
+// EdgeGate decides whether this node may advertise a Galactic Edge route's
+// BGPAdvertisement now: whether the forwarding gate it names is open here.
+type EdgeGate interface {
+	Open(adv *bgpv1alpha1.BGPAdvertisement) bool
+}
+
 // Reconciler assembles DesiredRouter values from BGP CRDs.
 type Reconciler struct {
 	client       client.Client
 	nodeName     string
 	localAddress string
+	edgeGate     EdgeGate
+}
+
+// SetEdgeGate sets the gate Galactic Edge route advertisements are checked
+// against. Without one, none is advertised.
+func (r *Reconciler) SetEdgeGate(g EdgeGate) {
+	r.edgeGate = g
+}
+
+// EdgeGateOpen reports whether this node may advertise the Galactic Edge
+// route advertisement adv now: a gate is set and holds adv's prefix open.
+func (r *Reconciler) EdgeGateOpen(adv *bgpv1alpha1.BGPAdvertisement) bool {
+	return r.edgeGate != nil && r.edgeGate.Open(adv)
+}
+
+// IsEdgeAdvertisement reports whether adv is a Galactic Edge route's, which
+// is advertised only while its forwarding gate is open on the node.
+func IsEdgeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement) bool {
+	_, ok := adv.Labels[crdnames.LabelEdgeRoute]
+	return ok
 }
 
 // New returns a Reconciler for the given node and local BGP address.
@@ -136,8 +163,14 @@ func (r *Reconciler) BuildDesiredRouter(
 		Policies:        policies,
 	}
 
-	// Build advertisements.
+	// Build advertisements. A Galactic Edge route's is left out unless its
+	// forwarding gate is open on this node, read from the pinned gate map on
+	// every build, so a restarted router or one cut off from the API
+	// server never advertises a prefix its node does not forward.
 	for _, adv := range advList.Items {
+		if IsEdgeAdvertisement(&adv) && !r.EdgeGateOpen(&adv) {
+			continue
+		}
 		if err := validateAFI(adv.Spec.AddressFamily); err != nil {
 			return nil, fmt.Errorf("BGPAdvertisement %s/%s invalid address family: %w", namespace, adv.Name, err)
 		}

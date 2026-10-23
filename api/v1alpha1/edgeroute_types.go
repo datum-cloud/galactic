@@ -73,7 +73,10 @@ type EdgeRouteSpec struct {
 
 	// Prefix is the IPv6 prefix forwarded, a masked CIDR. It must be inside
 	// the service's granted prefixes and must not overlap another route of
-	// the VPC.
+	// the VPC, a workload subnet of the VPC or another service's client
+	// pool, or contain another attachment's address. It may lie inside its
+	// own service's client pool, which no attachment is then allocated an
+	// address from.
 	// +required
 	// +kubebuilder:validation:MaxLength=43
 	// +kubebuilder:validation:XValidation:rule="isCIDR(self) && cidr(self).ip().family() == 6 && cidr(self) == cidr(self).masked() && cidr(self).prefixLength() > 0 && string(cidr(self)) == self",message="prefix must be a masked, non-default IPv6 CIDR in canonical form"
@@ -146,17 +149,22 @@ type EdgeRouteHolder struct {
 // accepted holder: True while it may forward, False once it is revoked, after
 // which only a new claim epoch is accepted. Claimed is about the claim in
 // spec: True once it is the accepted holder, False with the reason while it
-// is refused or waits for the previous holder to be fenced.
+// is refused or waits for the previous holder to be fenced. Published is True
+// while the accepted holder's node advertises the prefix to the VPC: its
+// forwarding gate is open and its galactic-router holds the path. It says
+// nothing about remote routers having converged.
 const (
-	EdgeRouteAccepted = "Accepted"
-	EdgeRouteClaimed  = "Claimed"
+	EdgeRouteAccepted  = "Accepted"
+	EdgeRouteClaimed   = "Claimed"
+	EdgeRoutePublished = "Published"
 )
 
 // EdgeRouteStatus is the route's acceptance and the fencing of its accepted
 // holder.
 // +kubebuilder:validation:XValidation:rule="self.?closedEpoch.orValue(0) >= oldSelf.?closedEpoch.orValue(0)",message="closedEpoch never decreases"
 type EdgeRouteStatus struct {
-	// Conditions are Accepted and Claimed, set by galactic-controller.
+	// Conditions are Accepted, Claimed and Published, set by
+	// galactic-controller.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

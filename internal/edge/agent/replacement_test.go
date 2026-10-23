@@ -40,6 +40,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/claim"
 	"go.datum.net/galactic/internal/edge/hostattach"
@@ -164,6 +165,7 @@ func startE2E(t *testing.T) *e2e {
 	utilruntime.Must(clientgoscheme.AddToScheme(e.scheme))
 	utilruntime.Must(galacticv1alpha1.AddToScheme(e.scheme))
 	utilruntime.Must(cloudv1alpha1.AddToScheme(e.scheme))
+	utilruntime.Must(bgpv1alpha1.AddToScheme(e.scheme))
 	if e.admin, err = client.New(e.cfg, client.Options{Scheme: e.scheme}); err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +234,7 @@ func startE2E(t *testing.T) *e2e {
 	}
 	t.Cleanup(func() { _ = e.gates.Close() })
 
-	e.run(func(mgr ctrl.Manager) error { return route.Setup(mgr, e2eParams, timing.BootClock) })
+	e.run(func(mgr ctrl.Manager) error { return route.Setup(mgr, e2eParams, timing.BootClock, "galactic-system") })
 	e.reader = &switchReader{}
 	e.stop = e.startAgent(1)
 	return e

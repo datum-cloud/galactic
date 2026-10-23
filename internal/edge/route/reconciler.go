@@ -66,6 +66,10 @@ type Reconciler struct {
 	Clock claim.Clock
 	// Now is the wall clock, for grant expiry. Nil means time.Now.
 	Now func() time.Time
+	// BGPNamespace is where the cell's BGP objects live: the BGPVRFInstance
+	// of each VPC on each node, and the BGPAdvertisement published for each
+	// accepted route.
+	BGPNamespace string
 
 	mu sync.Mutex
 	// observed holds the instance lease versions this leader is waiting on,
@@ -85,23 +89,54 @@ func (r *Reconciler) now() time.Time {
 	return time.Now()
 }
 
-// Reconcile implements reconcile.Reconciler for EdgeRoutes.
+// Reconcile implements reconcile.Reconciler for EdgeRoutes: it decides the
+// route's claim, then publishes or withdraws its advertisement from the
+// result. A route that is gone has every advertisement withdrawn.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var rt galacticv1alpha1.EdgeRoute
-	if err := r.APIReader.Get(ctx, req.NamespacedName, &rt); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-	if reaped, err := r.reap(ctx, &rt); reaped || err != nil {
+	switch err := r.APIReader.Get(ctx, req.NamespacedName, &rt); {
+	case apierrors.IsNotFound(err):
+		return ctrl.Result{}, r.withdrawGone(ctx, req.NamespacedName)
+	case err != nil:
 		return ctrl.Result{}, err
 	}
+	if reaped, err := r.reap(ctx, &rt); reaped || err != nil {
+		if err == nil {
+			err = r.withdrawGone(ctx, req.NamespacedName)
+		}
+		return ctrl.Result{}, err
+	}
+	res, err := r.decide(ctx, &rt)
+	if err != nil || res == (ctrl.Result{Requeue: true}) {
+		// A pass that lost a write race decides again before publishing.
+		return res, err
+	}
+	if err := r.publish(ctx, &rt); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	return res, nil
+}
+
+// decide accepts, refuses or revokes the route's claim.
+func (r *Reconciler) decide(ctx context.Context, rt *galacticv1alpha1.EdgeRoute) (ctrl.Result, error) {
 	acc := rt.Status.Accepted
 	if acc != nil && meta.IsStatusConditionTrue(rt.Status.Conditions, galacticv1alpha1.EdgeRouteAccepted) {
-		_, ref, err := CheckAuthority(ctx, r.APIReader, &rt, HolderOfAccepted(acc), r.now(), r.Params.MaxSkew)
+		auth, ref, err := CheckAuthority(ctx, r.APIReader, rt, HolderOfAccepted(acc), r.now(), r.Params.MaxSkew)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		if ref == nil {
+			// A subnet, pool or grant created after acceptance revokes the
+			// route: workload subnets take precedence over provider routes.
+			if ref, err = Conflict(ctx, r.APIReader, auth.Service, auth.Attachment, auth.Prefix); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if ref != nil {
-			return ctrl.Result{}, r.setStatus(ctx, &rt, func(s *galacticv1alpha1.EdgeRouteStatus) {
+			return ctrl.Result{}, r.setStatus(ctx, rt, func(s *galacticv1alpha1.EdgeRouteStatus) {
 				setCondition(s, galacticv1alpha1.EdgeRouteAccepted, metav1.ConditionFalse, ReasonRevoked,
 					fmt.Sprintf("epoch %d revoked: %s: %s", acc.Epoch, ref.Reason, ref.Message))
 			})
@@ -115,7 +150,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	case acc != nil && c.Epoch <= acc.Epoch:
 		// The claim is the accepted one, released or not. A revoked holder
 		// must claim a new epoch to be accepted again.
-		return ctrl.Result{}, r.setStatus(ctx, &rt, func(s *galacticv1alpha1.EdgeRouteStatus) {
+		return ctrl.Result{}, r.setStatus(ctx, rt, func(s *galacticv1alpha1.EdgeRouteStatus) {
 			if meta.IsStatusConditionTrue(s.Conditions, galacticv1alpha1.EdgeRouteAccepted) {
 				setCondition(s, galacticv1alpha1.EdgeRouteClaimed, metav1.ConditionTrue, ReasonAccepted,
 					fmt.Sprintf("epoch %d is the accepted claim", acc.Epoch))
@@ -127,7 +162,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	case c.Released:
 		return ctrl.Result{}, nil
 	}
-	return r.accept(ctx, &rt)
+	return r.accept(ctx, rt)
 }
 
 // accept decides the route's pending claim and, when its previous holder is
@@ -143,6 +178,12 @@ func (r *Reconciler) accept(ctx context.Context, rt *galacticv1alpha1.EdgeRoute)
 	auth, ref, err := Check(ctx, r.APIReader, rt, HolderOfClaim(c), r.now(), r.Params.MaxSkew)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if ref == nil {
+		ref, err = Conflict(ctx, r.APIReader, auth.Service, auth.Attachment, auth.Prefix)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if ref != nil {
 		return pending(ref.Reason, ref.Message, refusedRetry)

@@ -56,10 +56,14 @@ func allocationFor(allocations []galacticv1alpha1.EdgeAllocation, uid string) (s
 	return "", false
 }
 
-// nextFree returns the lowest address of pool that allocations do not hold,
-// skipping the pool's first address, the Subnet-Router anycast address of a
-// /64 (RFC 4291 section 2.6.1).
-func nextFree(pool netip.Prefix, allocations []galacticv1alpha1.EdgeAllocation) (netip.Addr, error) {
+// nextFree returns the lowest address of pool that allocations do not hold
+// and no prefix of routed contains, skipping the pool's first address, the
+// Subnet-Router anycast address of a /64 (RFC 4291 section 2.6.1). routed are
+// the prefixes routes hold in the pool's VPC: a provider may route a
+// delegated prefix inside its own pool, and an address under it would reach
+// the route's holder rather than the attachment.
+func nextFree(pool netip.Prefix, allocations []galacticv1alpha1.EdgeAllocation, routed []netip.Prefix,
+) (netip.Addr, error) {
 	if len(allocations) >= maxAllocations {
 		return netip.Addr{}, errPoolExhausted
 	}
@@ -69,12 +73,40 @@ func nextFree(pool netip.Prefix, allocations []galacticv1alpha1.EdgeAllocation) 
 			held[addr] = true
 		}
 	}
-	for addr := pool.Addr().Next(); addr.IsValid() && pool.Contains(addr); addr = addr.Next() {
+	addr := pool.Addr().Next()
+	for addr.IsValid() && pool.Contains(addr) {
+		// Jumps past a routed prefix rather than stepping through it,
+		// which in a /64 pool may be 2^64 addresses.
+		if p, ok := containing(routed, addr); ok {
+			addr = lastAddr(p).Next()
+			continue
+		}
 		if !held[addr] {
 			return addr, nil
 		}
+		addr = addr.Next()
 	}
 	return netip.Addr{}, errPoolExhausted
+}
+
+// containing returns the widest prefix of routed that contains addr.
+func containing(routed []netip.Prefix, addr netip.Addr) (netip.Prefix, bool) {
+	var out netip.Prefix
+	for _, p := range routed {
+		if p.Contains(addr) && (!out.IsValid() || p.Bits() < out.Bits()) {
+			out = p
+		}
+	}
+	return out, out.IsValid()
+}
+
+// lastAddr returns the highest address of p.
+func lastAddr(p netip.Prefix) netip.Addr {
+	b := p.Masked().Addr().As16()
+	for i := p.Bits(); i < 128; i++ {
+		b[i/8] |= 0x80 >> (i % 8)
+	}
+	return netip.AddrFrom16(b)
 }
 
 // withAllocation returns allocations plus one for address and the attachment,

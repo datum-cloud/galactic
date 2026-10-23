@@ -98,6 +98,7 @@ func TestForwardingGateDatapath(t *testing.T) {
 		if err := ping(f.wlXA, siteHost, 128); err != nil {
 			t.Fatalf("same-node workload to the site through an open gate: %v", err)
 		}
+		testOpenGate(t, f, gates, link, att.Address, open.Deadline)
 	})
 
 	t.Run("SpoofedSource", func(t *testing.T) { testSpoofedSource(t, f, stats) })
@@ -141,6 +142,43 @@ func TestForwardingGateDatapath(t *testing.T) {
 			t.Fatalf("forwarding stopped %v after the renewal, well before its deadline", lastOK-start)
 		}
 	})
+}
+
+// testOpenGate: under an open gate on link every address of the site prefix
+// answers a remote and a same-node workload, the reply coming back through
+// the gate's egress check, and the gate reads open exactly for the link's
+// own address and the gated prefix until its deadline, as galactic-router
+// reads it before advertising the prefix.
+func testOpenGate(t *testing.T, f *datapathFixture, gates *forwardgatemap.Table, link uint32, own netip.Addr,
+	deadline time.Duration) {
+	for _, dst := range []string{"fd00:5::9", "fd00:5:0:1::1", "fd00:5:0:ffff:ffff:ffff:ffff:fffe"} {
+		before := f.tunA.echoes.Load()
+		for where, w := range map[string]testNS{"remote": f.wlYA, "same-node": f.wlXA} {
+			if err := ping(w, netip.MustParseAddr(dst), 128); err != nil {
+				t.Fatalf("%s workload to %s through an open gate: %v", where, dst, err)
+			}
+		}
+		if got := f.tunA.echoes.Load() - before; got != 2 {
+			t.Fatalf("site answered %d of 2 requests to %s", got, dst)
+		}
+	}
+	now := timing.BootClock()
+	for _, tc := range []struct {
+		addr   netip.Addr
+		prefix netip.Prefix
+		want   bool
+	}{
+		{own, sitePrefix, true},
+		{own, netip.MustParsePrefix("fd00:5::/64"), false},
+		{netip.MustParseAddr("fd00:10:0:e::99"), sitePrefix, false},
+	} {
+		if got, err := gates.Open(link, tc.addr, tc.prefix, now); err != nil || got != tc.want {
+			t.Errorf("Open(%s, %s) = %t, %v; want %t", tc.addr, tc.prefix, got, err, tc.want)
+		}
+	}
+	if got, err := gates.Open(link, own, sitePrefix, deadline); err != nil || got {
+		t.Errorf("Open at the deadline = %t, %v; want closed", got, err)
+	}
 }
 
 // testSpoofedSource has the pod forward what its site sends from a source

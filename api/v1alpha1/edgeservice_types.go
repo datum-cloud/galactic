@@ -57,7 +57,9 @@ type EdgeServiceSpec struct {
 	Capabilities []string `json:"capabilities"`
 
 	// Prefixes bound the prefixes the provider may request in the VPC. Each
-	// is a masked CIDR.
+	// is a masked CIDR. Grants of services granting the same VPC must not
+	// overlap: galactic-controller refuses the attachments and routes of the
+	// later of two services whose prefixes overlap.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=64

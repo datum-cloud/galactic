@@ -7,6 +7,7 @@ package route
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -20,7 +21,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/edge/claim"
 )
 
@@ -51,10 +55,11 @@ func LeaseCache() map[client.Object]cache.ByObject {
 	return map[client.Object]cache.ByObject{&coordinationv1.Lease{}: {Label: labels.NewSelector().Add(*req)}}
 }
 
-// Setup registers the route reconciler, the index reconciler and the
-// instance reaper with mgr. They run on the leader only, and share Params
-// and Clock.
-func Setup(mgr ctrl.Manager, params claim.Params, clock claim.Clock) error {
+// Setup registers the route reconciler, the index reconciler, the instance
+// reaper and the attachment publication reconciler with mgr. They run on the
+// leader only, and share Params and Clock. bgpNamespace is where the cell's
+// BGP objects live.
+func Setup(mgr ctrl.Manager, params claim.Params, clock claim.Clock, bgpNamespace string) error {
 	if err := params.Validate(); err != nil {
 		return err
 	}
@@ -65,8 +70,12 @@ func Setup(mgr ctrl.Manager, params claim.Params, clock claim.Clock) error {
 	if err := (&IndexReconciler{Client: c, APIReader: reader, Params: params, Clock: clock}).setup(mgr); err != nil {
 		return fmt.Errorf("set up EdgeRouteIndex reconciler: %w", err)
 	}
-	if err := (&Reconciler{Client: c, APIReader: reader, Params: params, Clock: clock}).setup(mgr); err != nil {
+	if err := (&Reconciler{Client: c, APIReader: reader, Params: params, Clock: clock,
+		BGPNamespace: bgpNamespace}).setup(mgr); err != nil {
 		return fmt.Errorf("set up EdgeRoute reconciler: %w", err)
+	}
+	if err := (&PublicationReconciler{Client: c}).setup(mgr); err != nil {
+		return fmt.Errorf("set up EdgeAttachment publication reconciler: %w", err)
 	}
 	return nil
 }
@@ -131,6 +140,34 @@ func (r *Reconciler) setup(mgr ctrl.Manager) error {
 		})
 	}
 	name := func(o client.Object) string { return o.GetName() }
+	// An advertisement's route, from its annotation: its router's report
+	// decides the route's Published condition, and one whose route is gone
+	// is withdrawn.
+	toRoute := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
+		if _, ok := o.GetLabels()[crdnames.LabelEdgeRoute]; !ok {
+			return nil
+		}
+		ns, n, ok := strings.Cut(o.GetAnnotations()[crdnames.AnnotationEdgeRoute], "/")
+		if !ok {
+			return nil
+		}
+		return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: ns, Name: n}}}
+	})
+	// A VPC's VRF on a node is what a route accepted there is published
+	// into.
+	toNodeRoutes := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
+		var list galacticv1alpha1.EdgeRouteList
+		if err := c.List(ctx, &list); err != nil {
+			return nil
+		}
+		var out []reconcile.Request
+		for i := range list.Items {
+			if a := list.Items[i].Status.Accepted; a != nil && strings.HasSuffix(o.GetName(), "-"+a.Node) {
+				out = append(out, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+			}
+		}
+		return out
+	})
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("edge-route").
 		For(&galacticv1alpha1.EdgeRoute{}).
@@ -146,6 +183,21 @@ func (r *Reconciler) setup(mgr ctrl.Manager) error {
 			return ""
 		}, false)).
 		Watches(&galacticv1alpha1.EdgeProvider{}, byField(indexProvider, name, false)).
+		// A workload subnet created over an accepted route revokes it.
+		Watches(&cloudv1alpha1.VPCAttachment{}, byField(indexVPC, func(o client.Object) string {
+			va, ok := o.(*cloudv1alpha1.VPCAttachment)
+			if !ok {
+				return ""
+			}
+			var vpc cloudv1alpha1.VPC
+			if err := c.Get(context.Background(), client.ObjectKey{Namespace: va.Namespace, Name: va.Spec.VPC.Name},
+				&vpc); err != nil {
+				return ""
+			}
+			return string(vpc.UID)
+		}, false)).
+		Watches(&bgpv1alpha1.BGPAdvertisement{}, toRoute).
+		Watches(&bgpv1alpha1.BGPVRFInstance{}, toNodeRoutes).
 		Watches(&galacticv1alpha1.EdgeRouteIndex{}, byField(indexVPC, func(o client.Object) string {
 			if idx, ok := o.(*galacticv1alpha1.EdgeRouteIndex); ok {
 				return idx.Spec.VPCUID

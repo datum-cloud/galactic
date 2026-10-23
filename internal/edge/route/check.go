@@ -30,7 +30,7 @@ const (
 	ReasonAttachmentNotLive = "AttachmentNotLive"
 	ReasonInstanceMissing   = "InstanceNotFound"
 	ReasonLeaseNotHeld      = "LeaseNotHeld"
-	ReasonPrefixConflict    = "PrefixConflict"
+	ReasonPrefixConflict    = string(admission.PrefixConflict)
 	ReasonInvalidPrefix     = "InvalidPrefix"
 	ReasonIndexRebuilt      = "IndexRebuilt"
 	ReasonRevoked           = "Revoked"
