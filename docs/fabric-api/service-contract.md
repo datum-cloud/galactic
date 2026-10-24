@@ -105,7 +105,8 @@ again on execution; policy changes may reject a previously advertised request.
 
 Use the minimum of request expiration, transport deadline, and certificate
 expiration. A client should supply a 30 s deadline unless it needs a longer
-bounded allowance for discovery and delivery; there is no implicit deadline extension. Reject
+bounded allowance for discovery and delivery. There is no implicit deadline
+extension. Reject
 oversized/unknown enum inputs, controls, ambiguous identifiers, and unsupported
 operations before reserving work. Normalize numeric targets exactly once and
 pass the canonical value to nodes. Do not resolve DNS in the backend.
@@ -146,14 +147,17 @@ sidecar, usable address, running container, or certificate. Select one usable
 pod per router deterministically: newest creation time, then pod name. Retain
 other candidates only as diagnostic metadata; duplicate pods do not increase
 expected coverage. Unscheduled pods have no router identity and are reported
-as an inventory warning count. Nodes with no fabric-router pod are outside
+in the snapshot field `unscheduled_pod_count` (zero when none). Nodes with no
+fabric-router pod are outside
 this inventory; coverage must not claim all physical routers in the cell.
 
 Apply explicit `nodes` selection before the fan-out cap; otherwise use sorted
 node names. The snapshot records every unique router as selected or omitted,
 with a reason (`NotRequested`, `NoSidecar`, `PodTerminating`, `PodNotRunning`,
 `SidecarNotRunning`, `NoHostIP`, `NoCertificatePod`, or `NodeBudget`). A selected
-router includes its frozen pod UID. Do not expose dial addresses or certificate
+router includes its frozen pod UID. An explicit selection takes precedence:
+routers outside it have reason `NotRequested`, regardless of their availability.
+Do not expose dial addresses or certificate
 pod names to the service. Cap the inventory at 256 unique routers and 64 KiB
 serialized snapshot; fail with `InventoryTooLarge` rather than silently
 truncating membership. This does not change legacy FabricQuery discovery.
@@ -185,9 +189,12 @@ and a terminal reason: `Succeeded`, `PartialResults`, `ExecutionFailed`,
 `NoNodesAvailable`, `DeadlineExceeded`, `Cancelled`, `OwnershipLost`, or
 `OutputLimitExceeded`. Cancellation/deadline/ownership/output-limit reasons take
 precedence. Otherwise no selected routers gives `NoNodesAvailable`; zero
-successful gives `ExecutionFailed`; any failed, omitted, or truncated result
-gives `PartialResults`; the remainder is `Succeeded`. Empty inventory has all
-counts zero and `NoNodesAvailable`.
+successful gives `ExecutionFailed`; any failed or truncated result, or any
+omission other than `NotRequested`, gives `PartialResults`; the remainder is
+`Succeeded`. Keep `NotRequested` routers in expected and omitted counts: a
+successful explicit subset can have nonzero omissions without claiming that
+every router in the cell was queried. Empty inventory has all counts zero and
+`NoNodesAvailable`.
 
 Packet loss, unreachable ICMP replies, and silent hops are successful diagnostic
 observations. `truncated=true` also remains a successful observation, but warns
@@ -216,10 +223,10 @@ not echo target addresses, credentials, or raw FRR text into routine logs.
 | `InvalidQuery`, `DestinationNotAllowed`                                    | INVALID_ARGUMENT                         | Correct the request.                                             |
 | `VersionUnsupported`, `QueryTypeUnavailable`, `ServiceDisabled`            | FAILED_PRECONDITION                      | Refresh capabilities/configuration.                              |
 | `Throttled`, `QueueFull`, `NodeBusy`                                       | RESOURCE_EXHAUSTED                       | Include RetryInfo; new authorized attempt only.                  |
-| `InventoryTooLarge`, `ResponseTooLarge`                                    | RESOURCE_EXHAUSTED                       | Lower scope/output or change configuration; not a rate throttle. |
+| `InventoryTooLarge`, `ResponseTooLarge`, `OutputLimitExceeded`             | RESOURCE_EXHAUSTED                       | Lower scope/output or change configuration; not a rate throttle. |
 | `DuplicateRequest`, `DuplicateConflict`                                    | ALREADY_EXISTS                           | Do not replay or treat this as a saved result.                   |
 | `LimiterUnavailable`, `OwnershipLost`, `NodeUnreachable`, `FRRUnavailable` | UNAVAILABLE                              | Resolve availability; outcome may be unknown.                    |
-| `DeadlineExceeded`                                                         | DEADLINE_EXCEEDED                        | No automatic retry.                                              |
+| `DeadlineExceeded`, `QueueTimeout`                                         | DEADLINE_EXCEEDED                        | No automatic retry.                                              |
 | `Cancelled`                                                                | CANCELLED                                | No automatic retry.                                              |
 | `ProbeSourceUnavailable`, `FRRVersionUnsupported`                          | FAILED_PRECONDITION                      | Repair node capability.                                          |
 | `MalformedResponse`, `Internal`, `ProbeFailed`                             | INTERNAL                                 | Investigate backend; no automatic retry.                         |
@@ -229,6 +236,11 @@ translate only the service-level deadline into `DeadlineExceeded`. After the
 snapshot, operational failures should be outcomes/complete where delivery is
 possible; the table's transport status applies when no stream can be delivered.
 Unknown reasons must be rendered as backend failures, not packet loss.
+`ResponseTooLarge` describes a single response that cannot fit its budget;
+`OutputLimitExceeded` describes exhaustion of the service stream budget.
+`OwnershipLost` and `OutputLimitExceeded` deliberately have both transport
+status mappings and terminal stream reasons, depending on whether a complete
+event can still be delivered.
 
 For throttling include `google.rpc.RetryInfo.retry_delay` and bounded ErrorInfo
 metadata `scope` (cell/project/destination/queue) and `execution_started=false`.
@@ -293,8 +305,11 @@ with the recovery hold, prevent simultaneous old/new-epoch execution.
 ### Charging and scheduling
 
 Apply request admission token buckets after authentication and shape validation
-but before discovery; each token-admitted RunDiagnostic consumes one cell and one project request
-token atomically, even if later validation, discovery, or dispatch fails. If
+but before discovery. First debit one cell and one project request token
+atomically, then check/register the attempt key. A token-admitted duplicate
+consumes both request tokens and returns `DuplicateRequest` or
+`DuplicateConflict` without reserving node jobs or packets. Later validation,
+discovery, or dispatch failures do not refund request tokens. If
 either bucket is short, reject without debiting either; never go into negative
 credit. Register the attempt key before discovery and before accepting jobs;
 all later failures retain its tombstone through expiration.
@@ -310,7 +325,10 @@ service request for the same project use the same fairness key. A project may
 hold at most two node slots; direct operator principals have the same cap.
 The shared executor has eight slots total. Keep the existing two-slot ceiling
 for legacy expensive queries, which this service cannot submit. Queue admission
-counts reserved snapshot-delivery slots toward the same limits.
+counts reserved snapshot-delivery slots toward the same limits. Live-stream
+caps do not reserve node-job capacity: a second 32-router stream from a project
+whose first stream still occupies its queue is refused with `QueueFull`.
+FabricQuery work for that project contributes to the same queue limit.
 
 Immediately before dispatch of each probe node job, atomically reserve its
 worst-case packet count from cell, project (when present), and destination
@@ -408,7 +426,8 @@ all cross-field constraints hold.
 Check that each packet burst can fund at least one maximum-cost node job (20),
 all rates are positive, burst/rate is at most 120 s, project caps do not exceed
 cell caps, node time fits request lifetime, and output reserves cover the
-maximum selected-router count. These defaults can fund 32 traceroute node jobs, but the per-project slot
+maximum selected-router count. These defaults can fund 32 traceroute node
+jobs, but the per-project slot
 cap and 10 s queue deadline can produce failed outcomes even in a lightly
 loaded cell. A fan-out ceiling is not a completion guarantee. Consumers should
 select a smaller router subset when complete long-running probe coverage is
@@ -432,7 +451,11 @@ Do not reset a node permit deadline on retries or transport reconnection.
 
 Deadlines cover discovery, admission, queueing, execution, and delivery. Freeze
 each node deadline at enqueue: minimum of request expiration and now + 30 s;
-its queue wait also ends at 10 s. A permit may only shorten that deadline.
+its queue wait also ends at 10 s. When the queue timer expires first, emit
+a router failure with reason `QueueTimeout`, not `QueueFull` or `Throttled`;
+`QueueFull` is admission refusal before enqueue. If the enclosing request
+deadline expires first or simultaneously, use `DeadlineExceeded` instead.
+A permit may only shorten that deadline.
 Stop scheduling and cancel node contexts on cancellation, stream failure,
 shutdown, service disable, deadline, or loss of ownership. Disabling service
 cancels existing service work and rejects new runs; legacy diagnostics remain
@@ -446,7 +469,8 @@ because a consumer stopped reading. Use a transport implementation that can
 abort a blocked write; timing only the producer's select is insufficient.
 Each selected node job may temporarily hold one 144 KiB encoded outcome during
 handoff, even after releasing execution credit. Cap service job goroutines at
-16 × 32 = 512: at most 72 MiB of encoded producer payload plus 4.5 MiB in
+16 × 32 = 512, a conservative ceiling even when queue limits admit fewer:
+at most 72 MiB of encoded producer payload plus 4.5 MiB in
 completion queues. Require implementations to account for decoded protobuf
 allocations separately and measure peak RSS; these are not total process RSS
 bounds. Cap incoming diagnostic RPCs at 32 per replica, follower forwarding
@@ -514,7 +538,7 @@ A mixed result stream (one JSON object per protobuf event):
 
 ```json
 [
-  {"requestId":"b74e19ee-926f-43dc-b03d-c29550a827ab","sequence":1,"snapshot":{"snapshotId":"snap-1","capturedAt":"2026-10-24T12:00:00Z","resourceVersion":"100","routers":[{"node":"router-a","podUid":"pod-a","selected":true},{"node":"router-b","podUid":"pod-b","selected":true},{"node":"router-c","selected":false,"omittedReason":"NoCertificatePod"}]}},
+  {"requestId":"b74e19ee-926f-43dc-b03d-c29550a827ab","sequence":1,"snapshot":{"snapshotId":"snap-1","capturedAt":"2026-10-24T12:00:00Z","resourceVersion":"100","unscheduledPodCount":0,"routers":[{"node":"router-a","podUid":"pod-a","selected":true},{"node":"router-b","podUid":"pod-b","selected":true},{"node":"router-c","selected":false,"omittedReason":"NoCertificatePod"}]}},
   {"requestId":"b74e19ee-926f-43dc-b03d-c29550a827ab","sequence":2,"outcome":{"node":"router-a","podUid":"pod-a","completedAt":"2026-10-24T12:00:03Z","observation":{"node":"router-a","routerId":"192.0.2.1","asn":64512,"sampleTime":"2026-10-24T12:00:00Z","duration":"3s","ping":{"source":"192.0.2.1","destination":"1.1.1.1","sent":3,"received":0,"replies":[{"sequence":1,"timeout":true},{"sequence":2,"timeout":true},{"sequence":3,"timeout":true}]}}}},
   {"requestId":"b74e19ee-926f-43dc-b03d-c29550a827ab","sequence":3,"outcome":{"node":"router-b","podUid":"pod-b","completedAt":"2026-10-24T12:00:04Z","failure":{"reason":"NodeUnreachable","message":"Router did not answer"}}},
   {"requestId":"b74e19ee-926f-43dc-b03d-c29550a827ab","sequence":4,"complete":{"snapshotId":"snap-1","finishedAt":"2026-10-24T12:00:04Z","expected":3,"successful":1,"failed":1,"omitted":1,"truncatedRouters":0,"reason":"PartialResults"}}
@@ -524,6 +548,25 @@ A mixed result stream (one JSON object per protobuf event):
 Here 100% loss is one successful observation. If delivery stops after sequence
 2, the consumer knows one success, one omission and one unresolved selected
 router; it must not invent sequence 4 or retry router-b automatically.
+
+For a separate request selecting only router-a from the same three-router
+inventory, mark router-b and router-c `NotRequested`, even if router-c has no
+certificate. If router-a succeeds without truncation, the terminal coverage
+fields are:
+
+```json
+{
+  "expected": 3,
+  "successful": 1,
+  "failed": 0,
+  "omitted": 2,
+  "truncatedRouters": 0,
+  "reason": "Succeeded"
+}
+```
+
+This success describes the requested subset. If router-c was requested but
+omitted for `NoCertificatePod`, the reason would instead be `PartialResults`.
 
 A pre-execution throttle uses a gRPC status with standard details:
 
@@ -586,25 +629,25 @@ Every row is required. #1042 supplies specifications and examples; later owners
 supply executable tests and measured evidence. No row is satisfied by this
 proposal, readiness checks, or skipped tests alone.
 
-| ID / owner  | Scenario                                                                                          | Required evidence                                                                                                  |
-| ----------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| A1 / #1043  | Valid service; missing, expired, wrong-role, wrong-cell credentials; rotated CA/cert              | Only allowed same-cell service methods succeed, including reused connections and streams.                          |
-| A2 / #1043  | Forged project/forward headers, direct forward RPC, second-hop forward                            | Rejected before execution; trusted typed attribution survives one authenticated forward.                           |
-| A3 / #1044  | All four diagnostics and both supported families                                                  | Typed results decode with an independently built public-API client; no internal imports.                           |
-| A4 / #1044  | One fast and one blocked router                                                                   | Fast outcome delivered while the other is pending; one outcome per selected router.                                |
-| A5 / #1044  | Duplicate pods, missing sidecar/cert, explicit subset, fan-out cap, empty inventory, >256 routers | Deterministic fixed membership; exact coverage arithmetic; explicit overflow failure.                              |
-| A6 / #1044  | Loss, silent hops, no route, truncated paths, zebra failure                                       | Observations remain distinguishable from backend failure; truncation affects terminal reason.                      |
-| A7 / #1044  | Old/new client, unsupported feature/enum/major                                                    | No accidental authorization or silent semantic downgrade; published descriptor fixtures decode.                    |
-| A8 / #1045  | Bursts and sustained competing projects, including FabricQuery sharing a project                  | Measured admission/node-slot ceilings, FIFO/round robin progress, per-project caps, bounded queues.                |
-| A9 / #1045  | Ping/trace fan-out, mixed projects and addresses in one destination prefix                        | Reservations obey every B+rT envelope; actual emitted packets obey B+r(T+32); no refunds/retry bypass.             |
-| A10 / #1045 | Operator gateway, direct-node operator, FabricQuery and service probes combined                   | All contribute to aggregate cell/destination ceilings; direct exceptions do not bypass charging.                   |
-| A11 / #1045 | Replica changes, lost buckets, saturated key maps, failed API reads                               | Single authority, 125 s hold, empty-bucket restart, no debt eviction, no unbounded fallback.                       |
-| A12 / #1046 | Cancel during discovery/queue/execute; shutdown/disable; blackholed connection                    | Timings measured from specified triggers; no work continues past node deadline + 2 s.                              |
-| A13 / #1046 | Consumer stops reading; maximum-sized outcomes on all streams                                     | Send/enqueue aborts and resource release meet bounds; output/buffers/goroutines stay bounded.                      |
-| A14 / #1046 | Old owner API-isolated or paused then resumed; node restart; forwarded stream lost                | Expired/stale permits rejected, old work drains, no replacement replay or duplicate permit execution.              |
-| A15 / #1047 | Invalid limits, config changes, clock-health failure, logging/metrics capture                     | Invalid configuration refused; recovery applied; no payload leakage or unbounded metric labels.                    |
-| A16 / #1048 | Legacy operator/FabricQuery regression and upgrade/rollback                                       | Existing schemas/results remain usable; documented new probe throttling/availability behavior verified.            |
-| A17 / #1048 | Real routers, independent client, combined failure and load suite                                 | Pinned artifacts, workload, clocks, limits, resource/packet captures and cleanup instructions permit reproduction. |
+| ID / owner  | Scenario                                                                                          | Required evidence                                                                                                                          |
+| ----------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| A1 / #1043  | Valid service; missing, expired, wrong-role, wrong-cell credentials; rotated CA/cert              | Only allowed same-cell service methods succeed, including reused connections and streams.                                                  |
+| A2 / #1043  | Forged project/forward headers, direct forward RPC, second-hop forward                            | Rejected before execution; trusted typed attribution survives one authenticated forward.                                                   |
+| A3 / #1044  | All four diagnostics and both supported families                                                  | Typed results decode with an independently built public-API client; no internal imports.                                                   |
+| A4 / #1044  | One fast and one blocked router                                                                   | Fast outcome delivered while the other is pending; one outcome per selected router.                                                        |
+| A5 / #1044  | Duplicate pods, missing sidecar/cert, explicit subset, fan-out cap, empty inventory, >256 routers | Fixed membership and exact counts; successful explicit subsets retain NotRequested omissions; unscheduled pod count and overflow verified. |
+| A6 / #1044  | Loss, silent hops, no route, truncated paths, zebra failure                                       | Observations remain distinguishable from backend failure; truncation affects terminal reason.                                              |
+| A7 / #1044  | Old/new client, unsupported feature/enum/major                                                    | No accidental authorization or silent semantic downgrade; published descriptor fixtures decode.                                            |
+| A8 / #1045  | Bursts and sustained competing projects, including FabricQuery sharing a project                  | Measured admission/node-slot ceilings, FIFO/round robin progress, per-project caps, bounded queues.                                        |
+| A9 / #1045  | Ping/trace fan-out, mixed projects and addresses in one destination prefix                        | Reservations obey every B+rT envelope; actual emitted packets obey B+r(T+32); no refunds/retry bypass.                                     |
+| A10 / #1045 | Operator gateway, direct-node operator, FabricQuery and service probes combined                   | All contribute to aggregate cell/destination ceilings; direct exceptions do not bypass charging.                                           |
+| A11 / #1045 | Replica changes, lost buckets, saturated key maps, failed API reads                               | Single authority, 125 s hold, empty-bucket restart, no debt eviction, no unbounded fallback.                                               |
+| A12 / #1046 | Cancel during discovery/queue/execute; shutdown/disable; blackholed connection                    | Timings measured from specified triggers; no work continues past node deadline + 2 s.                                                      |
+| A13 / #1046 | Consumer stops reading; maximum-sized outcomes on all streams                                     | Send/enqueue aborts and resource release meet bounds; output/buffers/goroutines stay bounded.                                              |
+| A14 / #1046 | Old owner API-isolated or paused then resumed; node restart; forwarded stream lost                | Expired/stale permits rejected, old work drains, no replacement replay or duplicate permit execution.                                      |
+| A15 / #1047 | Invalid limits, config changes, clock-health failure, logging/metrics capture                     | Invalid configuration refused; recovery applied; no payload leakage or unbounded metric labels.                                            |
+| A16 / #1048 | Legacy operator/FabricQuery regression and upgrade/rollback                                       | Existing schemas/results remain usable; documented new probe throttling/availability behavior verified.                                    |
+| A17 / #1048 | Real routers, independent client, combined failure and load suite                                 | Pinned artifacts, workload, clocks, limits, resource/packet captures and cleanup instructions permit reproduction.                         |
 
 Qualification records p50/p95/max delivery and cancellation times, peak RSS,
 goroutines, queue depth, bytes buffered, emitted packet counts, and limiter
