@@ -11,7 +11,8 @@
 //	edgeprobe send -to [addr]:port -interval 20ms -duration 30s
 //	    sends numbered UDP datagrams and prints each reply: {"t","seq","from","reply"}
 //	edgeprobe sniff -iface link -port 7777 -duration 30s
-//	    prints each IPv6 UDP datagram to port on link: {"t","src","dst"}
+//	    prints each IPv6 UDP datagram to port on link: {"t","src","dst"},
+//	    then {"t","end"} when the capture ends
 package main
 
 import (
@@ -119,7 +120,10 @@ func sniff(args []string) error {
 	if err != nil {
 		return err
 	}
-	proto := htons(unix.ETH_P_IPV6)
+	// ETH_P_ALL: a device's transmit path, which is how the kernel hands
+	// a packet to a TUN device's reader, is copied only to sockets bound
+	// to every protocol.
+	proto := htons(unix.ETH_P_ALL)
 	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM, int(proto))
 	if err != nil {
 		return err
@@ -143,7 +147,9 @@ func sniff(args []string) error {
 			continue
 		}
 		if err != nil {
-			return err
+			// The device went away, as when its pod is deleted: the
+			// capture ends there.
+			return out.Encode(map[string]any{"t": boottime(), "end": true, "error": err.Error()})
 		}
 		t := boottime()
 		p := buf[:n]
@@ -155,7 +161,7 @@ func sniff(args []string) error {
 		dst, _ := netip.AddrFromSlice(p[24:40])
 		_ = out.Encode(map[string]any{"t": t, "src": src.String(), "dst": dst.String()})
 	}
-	return nil
+	return out.Encode(map[string]any{"t": boottime(), "end": true})
 }
 
 func htons(v uint16) uint16 { return v<<8 | v>>8 }

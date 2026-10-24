@@ -238,7 +238,12 @@ type event struct {
 	Src   string        `json:"src"`
 	Dst   string        `json:"dst"`
 	Sent  int           `json:"sent"`
+	End   bool          `json:"end"`
 }
+
+// last reports whether e marks the end of a probe's window: a send probe's
+// count or a capture's end.
+func (e event) last() bool { return e.End || e.Sent > 0 }
 
 // probeRun is an edgeprobe running in a pod's network namespace.
 type probeRun struct {

@@ -20,6 +20,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -302,13 +303,16 @@ func (l *lab) waitProviderPod(t *testing.T, namespace, name, node string) *corev
 // gracefully.
 func (l *lab) stopProvider(t *testing.T, namespace, name string) {
 	t.Helper()
-	d := &appsv1.Deployment{}
 	key := client.ObjectKey{Namespace: namespace, Name: "edge-provider-" + name}
-	if err := l.c.Get(context.Background(), key, d); err != nil {
-		t.Fatal(err)
-	}
-	d.Spec.Replicas = ptr.To[int32](0)
-	if err := l.c.Update(context.Background(), d); err != nil {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		d := &appsv1.Deployment{}
+		if err := l.c.Get(context.Background(), key, d); err != nil {
+			return err
+		}
+		d.Spec.Replicas = ptr.To[int32](0)
+		return l.c.Update(context.Background(), d)
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 }
