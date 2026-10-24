@@ -501,8 +501,12 @@ func (r *tunResponder) run() {
 		reply[40] = 129
 		binary.BigEndian.PutUint16(reply[42:44], 0)
 		binary.BigEndian.PutUint16(reply[42:44], icmp6Checksum(reply))
-		if _, err := r.f.Write(reply); err == nil {
-			r.echoes.Add(1)
+		// Counted before the reply is written: a test reads the count
+		// once its ping returns, which can be before this goroutine runs
+		// again after the write.
+		r.echoes.Add(1)
+		if _, err := r.f.Write(reply); err != nil {
+			r.echoes.Add(^uint64(0))
 		}
 	}
 }
