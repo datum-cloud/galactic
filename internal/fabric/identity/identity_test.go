@@ -23,6 +23,7 @@ func TestParseRoundTrip(t *testing.T) {
 		Gateway("dfw"),
 		Node("dfw", "galactic-system", "fabric-router-abc12"),
 		Operator("dfw", "lab-verify"),
+		Service("dfw", "looking-glass"),
 	} {
 		got, err := Parse(id.URI())
 		if err != nil || got != id {
@@ -38,6 +39,9 @@ func TestParseRoundTrip(t *testing.T) {
 		"spiffe://fabric-api.datumapis.com/cell/dfw/gateway?x=1",
 		"https://fabric-api.datumapis.com/cell/dfw/gateway",
 		"spiffe://fabric-api.datumapis.com/cell/../gateway",
+		"spiffe://fabric-api.datumapis.com/cell/dfw/service",
+		"spiffe://fabric-api.datumapis.com/cell/dfw/service/a/b",
+		"spiffe://fabric-api.datumapis.com/cell/dfw/service/Looking-Glass",
 	} {
 		if _, err := Parse(bad); err == nil {
 			t.Errorf("Parse(%q) succeeded", bad)

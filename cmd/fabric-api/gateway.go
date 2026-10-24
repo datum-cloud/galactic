@@ -16,7 +16,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,11 +28,9 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	fabricapi "go.datum.net/galactic/internal/fabric/api/v1alpha1"
 	"go.datum.net/galactic/internal/fabric/gateway"
 	"go.datum.net/galactic/internal/fabric/identity"
-	"go.datum.net/galactic/internal/fabric/node"
 	"go.datum.net/galactic/internal/fabric/query"
 	"go.datum.net/galactic/internal/metadata"
 )
@@ -51,6 +48,7 @@ type gatewayOptions struct {
 	maxNodeResponseBytes          int
 	maxInFlight                   int
 	retention, cleanupGrace       time.Duration
+	serviceIdentities             []string
 }
 
 func newGatewayCommand() *cobra.Command {
@@ -93,6 +91,9 @@ func newGatewayCommand() *cobra.Command {
 		"Retention the stale-object count assumes; keep equal to the janitor's --retention")
 	f.DurationVar(&o.cleanupGrace, "cleanup-grace", gateway.DefaultCleanupGrace,
 		"Cleanup grace the stale-object count assumes; keep equal to the janitor's --grace")
+	f.StringSliceVar(&o.serviceIdentities, "service-identities", nil,
+		"Names of the Looking Glass service identities (spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>) "+
+			"allowed to call this cell's gateway; empty allows none")
 	return cmd
 }
 
@@ -115,6 +116,10 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	certsSel, err := labels.Parse(o.certsSelector)
 	if err != nil {
 		return fmt.Errorf("--certs-selector: %w", err)
+	}
+	allowlist, err := gateway.ParseAllowlist(o.serviceIdentities)
+	if err != nil {
+		return fmt.Errorf("--service-identities: %w", err)
 	}
 	ctx, stop := signalContext(parent)
 	defer stop()
@@ -226,15 +231,13 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 		Cell:        o.cell,
 		DialOptions: []grpc.DialOption{clientStats()},
 	}
-	auth := &node.Authorizer{Methods: gateway.DebugMethods, Credentials: creds}
-	gs := grpc.NewServer(
-		grpc.Creds(credentials.NewTLS(creds.ServerConfig(gateway.AllowedDebugCaller))),
-		grpc.ChainUnaryInterceptor(auth.Unary()),
-		grpc.ChainStreamInterceptor(auth.Stream()),
-		grpc.MaxRecvMsgSize(64<<10),
-		serverStats(),
-	)
-	fabricv1.RegisterFabricGatewayServiceServer(gs, debug)
+	service := &gateway.Service{
+		Cell:      o.cell,
+		Allowlist: allowlist,
+		Elected:   debug.Elected,
+		Leader:    debug,
+	}
+	gs := gateway.NewServer(creds, allowlist, debug, service, grpc.MaxRecvMsgSize(64<<10), serverStats())
 	debugAddr := fmt.Sprintf(":%d", o.debugPort)
 	if o.podIP != "" {
 		debugAddr = net.JoinHostPort(o.podIP, strconv.Itoa(o.debugPort))

@@ -59,6 +59,20 @@ const (
 	NodeUnreachable Code = "NodeUnreachable"
 	// Internal is an unexpected failure.
 	Internal Code = "Internal"
+
+	// VersionUnsupported means the Looking Glass service request names an
+	// API major version this gateway does not serve.
+	VersionUnsupported Code = "VersionUnsupported"
+	// ServiceDisabled means the cell does not execute Looking Glass service
+	// diagnostics.
+	ServiceDisabled Code = "ServiceDisabled"
+	// OwnershipLost means this gateway replica does not own the cell's
+	// execution, e.g. a forwarded request reached a replica that no longer
+	// leads.
+	OwnershipLost Code = "OwnershipLost"
+	// DeadlineExceeded means a Looking Glass service request's absolute
+	// expiration or deadline has passed.
+	DeadlineExceeded Code = "DeadlineExceeded"
 )
 
 // grpcCodes maps each code to the gRPC status code it travels as.
@@ -80,6 +94,10 @@ var grpcCodes = map[Code]codes.Code{
 	WrongNode:              codes.FailedPrecondition,
 	Unauthorized:           codes.PermissionDenied,
 	Internal:               codes.Internal,
+	VersionUnsupported:     codes.FailedPrecondition,
+	ServiceDisabled:        codes.FailedPrecondition,
+	OwnershipLost:          codes.Unavailable,
+	DeadlineExceeded:       codes.DeadlineExceeded,
 }
 
 // MetadataQueryCode is the ErrorInfo metadata key carrying the query

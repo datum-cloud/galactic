@@ -29,7 +29,8 @@ resume semantics; customer requests have no such persistence or replay.
 
 Today, `api/fabric/v1/fabric.proto` exposes only unary methods;
 `internal/fabric/gateway/runner.go` collects all outcomes before returning;
-`identity/identity.go` recognizes gateway, node, and operator roles only.
+the gateway authenticates service identities and validates their requests
+(#1043) but answers a valid `RunDiagnostic` with `ServiceDisabled`.
 The executor has local concurrency/queue limits and project round robin; nodes
 pace packets locally. None establishes the new service or aggregate guarantees.
 The existing discovery returns pod candidates, including duplicates, rather than

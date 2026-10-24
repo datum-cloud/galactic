@@ -21,6 +21,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	forwardv1 "go.datum.net/galactic/api/fabric/forward/v1"
+	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/errcode"
 	"go.datum.net/galactic/internal/fabric/identity"
@@ -33,25 +35,23 @@ import (
 // identity.
 const operatorHeader = "x-fabric-api-operator"
 
-// DebugMethods is the debug server's per-role method table. Operators call
-// it directly; the gateway identity appears only on calls a follower
-// forwards to the leader.
-var DebugMethods = map[identity.Role]map[string]bool{
+// GatewayMethods is the gateway server's per-role method table. Operators
+// call the debug service directly and service identities the Looking Glass
+// service; the gateway identity appears only on calls a follower forwards to
+// the leader. No role may call another role's methods.
+var GatewayMethods = map[identity.Role]map[string]bool{
 	identity.RoleOperator: {
 		fabricv1.FabricGatewayService_Query_FullMethodName:     true,
 		fabricv1.FabricGatewayService_ListNodes_FullMethodName: true,
 	},
 	identity.RoleGateway: {
-		fabricv1.FabricGatewayService_Query_FullMethodName: true,
+		fabricv1.FabricGatewayService_Query_FullMethodName:        true,
+		forwardv1.ForwardService_ForwardDiagnostic_FullMethodName: true,
 	},
-}
-
-// AllowedDebugCaller is the debug server's handshake check.
-func AllowedDebugCaller(id identity.ID) error {
-	if id.Role == identity.RoleOperator || id.Role == identity.RoleGateway {
-		return nil
-	}
-	return errcode.Status(errcode.Unauthorized, "identity "+id.URI()+" may not call the fabric-api gateway")
+	identity.RoleService: {
+		servicev1.LookingGlassService_GetCapabilities_FullMethodName: true,
+		servicev1.LookingGlassService_RunDiagnostic_FullMethodName:   true,
+	},
 }
 
 // Debug implements the operator debug service. Only the leader executes;
@@ -172,16 +172,22 @@ func (d *Debug) operator(ctx context.Context) (string, error) {
 func (d *Debug) forward(
 	ctx context.Context, operator string, req *fabricv1.QueryRequest,
 ) (*fabricv1.QueryResponse, error) {
-	addr, err := d.leaderAddress(ctx)
-	if err != nil {
-		return nil, errcode.Status(errcode.NodeUnreachable, "no leader is elected: "+err.Error())
-	}
-	conn, err := d.conn(addr)
+	conn, err := d.LeaderConn(ctx)
 	if err != nil {
 		return nil, errcode.Status(errcode.NodeUnreachable, err.Error())
 	}
 	ctx = metadata.AppendToOutgoingContext(ctx, operatorHeader, operator)
 	return fabricv1.NewFabricGatewayServiceClient(conn).Query(ctx, req)
+}
+
+// LeaderConn returns a connection to the elected leader, authenticated with
+// this replica's gateway identity. Calls on it are never retried.
+func (d *Debug) LeaderConn(ctx context.Context) (*grpc.ClientConn, error) {
+	addr, err := d.leaderAddress(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("no leader is elected: %w", err)
+	}
+	return d.conn(addr)
 }
 
 func (d *Debug) conn(addr string) (*grpc.ClientConn, error) {
@@ -190,6 +196,9 @@ func (d *Debug) conn(addr string) (*grpc.ClientConn, error) {
 	}
 	opts := append([]grpc.DialOption{
 		grpc.WithTransportCredentials(credentials.NewTLS(d.Credentials.ClientConfig(identity.Gateway(d.Cell)))),
+		// A forwarded call may already have run on the leader, so it is
+		// never replayed, not even transparently.
+		grpc.WithDisableRetry(),
 	}, d.DialOptions...)
 	c, err := grpc.NewClient(addr, opts...)
 	if err != nil {

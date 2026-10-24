@@ -10,13 +10,16 @@
 //	spiffe://fabric-api.datumapis.com/cell/<cell>/gateway
 //	spiffe://fabric-api.datumapis.com/cell/<cell>/ns/<namespace>/pod/<pod>
 //	spiffe://fabric-api.datumapis.com/cell/<cell>/operator/<name>
+//	spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>
 //
 // The first is the cell gateway's client identity. The second is a node
 // sidecar's server identity: it names the pod rather than the node because
 // cert-manager's csi-driver can template a pod's name but not its node's, and
 // the gateway binds pod to node through the API when it snapshots the cell's
-// fabric-router pods. The third is an operator debug client. The trust
-// bundle is per cell, so the cell segment is checked as well as the chain.
+// fabric-router pods. The third is an operator debug client. The fourth is a
+// Looking Glass service client, which may call only the gateway's service
+// methods. The trust bundle is per cell, so the cell segment is checked as
+// well as the chain.
 package identity
 
 import (
@@ -38,6 +41,7 @@ const (
 	RoleGateway  Role = "gateway"
 	RoleNode     Role = "node"
 	RoleOperator Role = "operator"
+	RoleService  Role = "service"
 )
 
 // ID is a parsed fabric-api identity.
@@ -45,7 +49,8 @@ type ID struct {
 	Cell string
 	Role Role
 	// Namespace and Name are the pod for RoleNode; Name is the operator for
-	// RoleOperator; both are empty for RoleGateway.
+	// RoleOperator and the service for RoleService; both are empty for
+	// RoleGateway.
 	Namespace string
 	Name      string
 }
@@ -64,6 +69,9 @@ func Node(cell, namespace, pod string) ID {
 // Operator returns an operator identity in cell.
 func Operator(cell, name string) ID { return ID{Cell: cell, Role: RoleOperator, Name: name} }
 
+// Service returns a Looking Glass service identity in cell.
+func Service(cell, name string) ID { return ID{Cell: cell, Role: RoleService, Name: name} }
+
 // URI renders the identity as its URI SAN.
 func (id ID) URI() string {
 	base := "spiffe://" + TrustDomain + "/cell/" + id.Cell
@@ -74,6 +82,8 @@ func (id ID) URI() string {
 		return base + "/ns/" + id.Namespace + "/pod/" + id.Name
 	case RoleOperator:
 		return base + "/operator/" + id.Name
+	case RoleService:
+		return base + "/service/" + id.Name
 	}
 	return base
 }
@@ -106,8 +116,10 @@ func Parse(s string) (ID, error) {
 		id.Role, id.Namespace, id.Name = RoleNode, rest[1], rest[3]
 	case len(rest) == 2 && rest[0] == string(RoleOperator):
 		id.Role, id.Name = RoleOperator, rest[1]
+	case len(rest) == 2 && rest[0] == string(RoleService):
+		id.Role, id.Name = RoleService, rest[1]
 	default:
-		return ID{}, fmt.Errorf("%q is not a gateway, node or operator identity", s)
+		return ID{}, fmt.Errorf("%q is not a gateway, node, operator or service identity", s)
 	}
 	return id, nil
 }
