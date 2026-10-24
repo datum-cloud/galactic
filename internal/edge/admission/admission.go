@@ -49,6 +49,11 @@ const (
 	InvalidRequest             Reason = "InvalidRequest"
 )
 
+// SupportedContractVersions are the provider contract versions this core
+// implements: the current version and, once there is one, the version before
+// it. Admission refuses any other version, whatever a provider declares.
+var SupportedContractVersions = []string{"v1alpha1"}
+
 // Capability is a typed capability at a version, such as PacketAccess v1.
 type Capability struct {
 	Name    string
@@ -156,6 +161,9 @@ func Admit(providers map[string]Provider, grants map[string]Grant, req Request,
 	case !slices.Contains(p.ServiceAccounts, req.Identity.ServiceAccount):
 		return refuse(IdentityNotAuthorized, "%s does not act for provider %q",
 			req.Identity.ServiceAccount, req.Provider)
+	case !slices.Contains(SupportedContractVersions, req.ContractVersion):
+		return refuse(UnsupportedContractVersion, "core supports contract versions %v, not %q",
+			SupportedContractVersions, req.ContractVersion)
 	case !slices.Contains(p.ContractVersions, req.ContractVersion):
 		return refuse(UnsupportedContractVersion, "provider %q supports contract versions %v, not %q",
 			req.Provider, p.ContractVersions, req.ContractVersion)

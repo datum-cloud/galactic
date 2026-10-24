@@ -6,6 +6,7 @@ package admission
 
 import (
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -150,6 +151,26 @@ func TestAdmit(t *testing.T) {
 				t.Fatalf("Admit = %+v, want reason %q", d, tt.want)
 			}
 		})
+	}
+}
+
+func TestAdmitContractVersions(t *testing.T) {
+	// A version the provider declares is still refused unless core
+	// implements it, and every version core implements is admitted.
+	providers := registry()
+	p := providers[connectIP]
+	p.ContractVersions = append(slices.Clone(SupportedContractVersions), "v1alpha9")
+	providers[connectIP] = p
+	for _, v := range p.ContractVersions {
+		req := request()
+		req.ContractVersion = v
+		d := Admit(providers, grants(grant()), req, epoch, maxSkew)
+		if want := slices.Contains(SupportedContractVersions, v); d.Admitted != want {
+			t.Errorf("Admit(%q) = %+v, want admitted %v", v, d, want)
+		}
+		if !d.Admitted && d.Reason != UnsupportedContractVersion {
+			t.Errorf("Admit(%q) reason = %q, want UnsupportedContractVersion", v, d.Reason)
+		}
 	}
 }
 
