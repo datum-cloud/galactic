@@ -1,5 +1,10 @@
 # FabricQuery API Reference
 
+The proposed [Looking Glass service contract](service-contract.md) defines the
+separate customer-service API, coverage, aggregate limits, and failure bounds
+for #1042. It is a future implementation contract; the interfaces and settings
+documented on this page remain the current baseline.
+
 `FabricQuery` is the internal contract between the federation hub and a cell's
 fabric-api gateway: one object per public looking-glass query per resolved cell.
 This page documents its spec, status, validation, semantics and error codes. For

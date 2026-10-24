@@ -1,5 +1,10 @@
 # Architecture — fabric-api
 
+The proposed [Looking Glass service contract](../fabric-api/service-contract.md) defines the
+separate customer-service API, coverage, aggregate limits, and failure bounds
+for #1042. It is a future implementation contract; the interfaces and settings
+documented on this page remain the current baseline.
+
 > The fabric looking glass: a single `fabric-api` binary that answers
 > bounded, asynchronous diagnostics about `fabric-router`'s FRR state. Its
 > `node` subcommand runs as a sidecar in each `fabric-router` pod and reads
