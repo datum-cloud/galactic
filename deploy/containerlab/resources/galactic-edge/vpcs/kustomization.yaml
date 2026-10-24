@@ -1,0 +1,10 @@
+# The VPC objects of the tenants Galactic Edge serves in the lab. In
+# production datum-cloud/cloud creates them and writes their fabric
+# identifier; scripts/deploy-galactic-edge.sh writes status.vpc to each
+# tenant's NAD vpc, as scripts/publish-attachments.sh does for attachments.
+#
+# Both VPCs hold fd00:ed9e::/32, the edge address space: their services'
+# client pools and prefixes are identical, so the conformance suite can
+# check that overlapping tenants stay apart.
+resources:
+  - vpcs.yaml

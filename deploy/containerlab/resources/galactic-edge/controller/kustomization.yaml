@@ -1,0 +1,13 @@
+# The lab's galactic-controller --role=cell (resources/galactic-controller)
+# with Galactic Edge's control plane turned on. scripts/deploy-galactic-edge.sh
+# applies config/galactic-edge, whose RBAC and policies --edge needs, first.
+resources:
+  - ../../galactic-controller
+patches:
+  - target:
+      kind: Deployment
+      name: galactic-controller
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --edge

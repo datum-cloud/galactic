@@ -1,0 +1,19 @@
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: VPC
+metadata:
+  name: "10"
+  namespace: ns10
+spec:
+  networks:
+    - fd20:10::/32
+    - fd00:ed9e::/32
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: VPC
+metadata:
+  name: "20"
+  namespace: ns20
+spec:
+  networks:
+    - fd20:20::/32
+    - fd00:ed9e::/32

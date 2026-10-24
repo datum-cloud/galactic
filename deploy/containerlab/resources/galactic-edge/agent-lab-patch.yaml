@@ -1,0 +1,11 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-edge
+spec:
+  template:
+    spec:
+      containers:
+        - name: galactic-edge
+          image: galactic-edge:latest
+          imagePullPolicy: Never

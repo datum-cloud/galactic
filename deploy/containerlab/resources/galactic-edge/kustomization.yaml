@@ -1,0 +1,10 @@
+# The lab's galactic-edge node agent: config/galactic-edge/base, copied in
+# as agent/ by scripts/deploy-galactic-edge.sh, with the lab image. The
+# base's --mtu=1500 is the lab's tenant MTU, so it is left as it is.
+resources:
+  - agent
+patches:
+  - path: agent-lab-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-edge

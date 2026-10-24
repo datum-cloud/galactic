@@ -1,3 +1,4 @@
 resources:
   - ../base
   - nad.yaml
+  - edge-clients.yaml

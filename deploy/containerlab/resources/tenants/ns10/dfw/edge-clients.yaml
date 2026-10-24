@@ -1,0 +1,188 @@
+# Galactic Edge conformance clients (tests/edgeconformance): one
+# workload of this VPC on each dfw node, each on its own attachment. The
+# ones on the edge nodes also keep the VPC's host VRF there, which an edge
+# attachment joins and never creates.
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: edge-client-1
+  namespace: ns10
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "edge-client-1",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "10",
+          "vpcattachment": "e1",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "ipv6_subnet": "fd20:10:e1::/48",
+            "address_families": ["ipv6"]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "10",
+          "vpcattachment": "e1",
+          "namespace": "galactic-system"
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-client-1
+  namespace: ns10
+  labels:
+    app: edge-client-1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge-client-1
+  template:
+    metadata:
+      labels:
+        app: edge-client-1
+      annotations:
+        v1.multus-cni.io/default-network: ns10/edge-client-1
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker
+      containers:
+        - name: netshoot
+          image: ghcr.io/datum-cloud/galactic-debug:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: edge-client-2
+  namespace: ns10
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "edge-client-2",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "10",
+          "vpcattachment": "e2",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "ipv6_subnet": "fd20:10:e2::/48",
+            "address_families": ["ipv6"]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "10",
+          "vpcattachment": "e2",
+          "namespace": "galactic-system"
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-client-2
+  namespace: ns10
+  labels:
+    app: edge-client-2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge-client-2
+  template:
+    metadata:
+      labels:
+        app: edge-client-2
+      annotations:
+        v1.multus-cni.io/default-network: ns10/edge-client-2
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker2
+      # The lab's edge nodes are tainted for the egress shards.
+      tolerations:
+        - key: galactic.datumapis.com/nat
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: netshoot
+          image: ghcr.io/datum-cloud/galactic-debug:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: edge-client-3
+  namespace: ns10
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "edge-client-3",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "10",
+          "vpcattachment": "e3",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "ipv6_subnet": "fd20:10:e3::/48",
+            "address_families": ["ipv6"]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "10",
+          "vpcattachment": "e3",
+          "namespace": "galactic-system"
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-client-3
+  namespace: ns10
+  labels:
+    app: edge-client-3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge-client-3
+  template:
+    metadata:
+      labels:
+        app: edge-client-3
+      annotations:
+        v1.multus-cni.io/default-network: ns10/edge-client-3
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker3
+      # The lab's edge nodes are tainted for the egress shards.
+      tolerations:
+        - key: galactic.datumapis.com/nat
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: netshoot
+          image: ghcr.io/datum-cloud/galactic-debug:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]

@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: tun-device-plugin
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: tun-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tun-device-plugin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tun-device-plugin
+    spec:
+      priorityClassName: system-node-critical
+      nodeSelector:
+        galactic.datumapis.com/edge: enabled
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: generic-device-plugin
+          # 0.2.0
+          image: ghcr.io/squat/generic-device-plugin@sha256:66c8d5c270eb2b721f1064c549b9b7898152a6d2f0163380a5d37dc7636c20ff
+          args:
+            # The resource provider pods request: devic.es/tun.
+            - --domain=devic.es
+            # Every provider pod on a node may hold the device at once:
+            # each opens only the TUN devices it owns.
+            - --device
+            - '{"name": "tun", "groups": [{"count": 1000, "paths": [{"path": "/dev/net/tun"}]}]}'
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: dev
+              mountPath: /dev
+      volumes:
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: dev
+          hostPath:
+            path: /dev
