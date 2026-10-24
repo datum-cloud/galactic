@@ -305,8 +305,9 @@ registers:
   replica, using `--retention` and `--cleanup-grace` (keep them equal to the
   janitor's);
 - the operator debug gRPC server (`gateway.Debug`) on port 9346 (every address
-  unless `--debug-bind-address` is set), authorized per role by
-  `node.AuthInterceptor(gateway.DebugMethods)`.
+  unless `--debug-bind-address` is set), authorized per role from
+  `gateway.DebugMethods` by a `node.Authorizer` that re-verifies the caller's
+  certificate on every unary and streaming call.
 
 Metrics are registered on controller-runtime's registry and served on `:9347`
 along with its own; `/healthz` and `/readyz` are plain pings on `:8081`.
@@ -403,7 +404,7 @@ access and gets no token.
 | `internal/fabric/node` (`server.go`)        | `Execute` pipeline, `Info`, FRR identity refresh, expensive-query breaker, probe policy and budgets                                                                                                                | Semaphores, limiter, breaker, last-read FRR state |
 | `internal/fabric/node` (`dedup.go`)         | Duplicate-suppression cache keyed by `(requestID, node, operation)`, bounded in entries and bytes                                                                                                                  | In-memory cache                                   |
 | `internal/fabric/node` (`shape.go`)         | Per-node shaping: path and community caps, response fit                                                                                                                                                            | No                                                |
-| `internal/fabric/node` (`auth.go`)          | `AuthInterceptor`: identity from the handshake, per-role method table, call logging                                                                                                                                | No                                                |
+| `internal/fabric/node` (`auth.go`)          | `Authorizer` (unary and stream) and `AuthInterceptor`: identity from the handshake, optional per-call re-verification capped at certificate expiry, per-role method table, call logging                            | No                                                |
 | `internal/fabric/gateway` (`reconciler.go`) | `FabricQuery` lifecycle: validation, snapshot, start marker, terminal status, conditions, coverage, shrink to budget                                                                                               | In-flight executions (memory)                     |
 | `internal/fabric/gateway` (`runner.go`)     | `Pool` (one mTLS connection per sidecar, pinned to its certs pod's identity), `Runner` fan-out, per-node deadline, cheap-read retry                                                                                | Connections                                       |
 | `internal/fabric/gateway` (`executor.go`)   | Cell-wide slots with an expensive sub-budget and per-project round-robin queue                                                                                                                                     | Queue state                                       |

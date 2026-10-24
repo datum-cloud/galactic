@@ -298,6 +298,11 @@ How an identity is checked:
   debug service an operator may call `Query` and `ListNodes`, and the gateway
   identity may call only `Query` (the form in which a follower forwards to the
   leader). Anything else is `Unauthorized`.
+- On every gateway RPC, unary or streaming, the gateway verifies the caller's
+  certificate again against its current bundle and clock, so a connection opened
+  by a certificate that has since expired, or whose CA has left the bundle, is
+  refused with `UNAUTHENTICATED`. A call's context ends when the caller's
+  certificate expires.
 
 The csi volume attributes in the `fabric-api-certs` DaemonSet (volume
 `fabric-api-csi`) and the gateway Deployment:

@@ -35,23 +35,24 @@ type Credentials struct {
 	// issued to the fabric-api-certs pod on its node, whose name the sidecar
 	// does not know; the gateway pins the exact identity when it dials.
 	AcceptAnyNode bool
+	// Now, when set, replaces the wall clock for certificate validity.
+	Now func() time.Time
 
-	mu      sync.RWMutex
-	cert    *tls.Certificate
-	leaf    *x509.Certificate
-	roots   *x509.CertPool
-	err     error
-	digest  [32]byte
-	onLoad  []func(leaf *x509.Certificate)
-	nowFunc func() time.Time
+	mu     sync.RWMutex
+	cert   *tls.Certificate
+	leaf   *x509.Certificate
+	roots  *x509.CertPool
+	err    error
+	digest [32]byte
+	onLoad []func(leaf *x509.Certificate)
 }
 
 // ErrNotLoaded is reported before credentials have ever loaded.
 var ErrNotLoaded = errors.New("credentials not loaded")
 
 func (c *Credentials) now() time.Time {
-	if c.nowFunc != nil {
-		return c.nowFunc()
+	if c.Now != nil {
+		return c.Now()
 	}
 	return time.Now()
 }
@@ -298,6 +299,20 @@ func (c *Credentials) ClientConfigAny(want ...ID) *tls.Config {
 			return fmt.Errorf("server identity %s is not the expected %v", id, want)
 		},
 	}
+}
+
+// VerifyClient checks a client's certificate chain from cs against the
+// current trust bundle, its validity at the current time, and this cell, and
+// returns its identity. A server calls it on every RPC, because a handshake
+// verifies a connection only once: a certificate that has since expired, or
+// whose CA has left the bundle, must not keep authorizing calls on a
+// connection it opened.
+func (c *Credentials) VerifyClient(cs tls.ConnectionState) (ID, error) {
+	raw := make([][]byte, 0, len(cs.PeerCertificates))
+	for _, cert := range cs.PeerCertificates {
+		raw = append(raw, cert.Raw)
+	}
+	return c.verify(raw, x509.ExtKeyUsageClientAuth)
 }
 
 // PeerID returns the identity verified during the handshake of cs. It

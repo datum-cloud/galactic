@@ -226,9 +226,11 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 		Cell:        o.cell,
 		DialOptions: []grpc.DialOption{clientStats()},
 	}
+	auth := &node.Authorizer{Methods: gateway.DebugMethods, Credentials: creds}
 	gs := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(creds.ServerConfig(gateway.AllowedDebugCaller))),
-		grpc.ChainUnaryInterceptor(node.AuthInterceptor(gateway.DebugMethods)),
+		grpc.ChainUnaryInterceptor(auth.Unary()),
+		grpc.ChainStreamInterceptor(auth.Stream()),
 		grpc.MaxRecvMsgSize(64<<10),
 		serverStats(),
 	)
