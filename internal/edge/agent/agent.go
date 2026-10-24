@@ -48,6 +48,7 @@ import (
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/timing"
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 // Condition reasons the agent sets.
@@ -81,6 +82,10 @@ type Datapath interface {
 	Unregister(ifindex uint32) error
 	// Forget removes ifindex's gate link row, once the link is deleted.
 	Forget(ifindex uint32) error
+	// SyncRoutes makes the destinations the workloads of the VRF with
+	// routing table vrfTable reach on this node's edge links exactly want,
+	// so the VRF's default route to the egress shards never takes them.
+	SyncRoutes(vrfTable uint32, want []netip.Prefix) error
 }
 
 // Agent reconciles the host state of the attachments on one node.
@@ -415,7 +420,41 @@ func (a *Agent) applyScope(vpc string, active, releasing []*galacticv1alpha1.Edg
 		att := out[i].att
 		out[i] = a.program(att, pods[att.Spec.PodUID], current[hostattach.LinkID(att.Status.VPC, string(att.UID))])
 	}
+	if err := a.syncRoutes(vpc); err != nil {
+		errs = append(errs, fmt.Errorf("sync local routes: %w", err))
+	}
 	return out, errors.Join(errs...)
+}
+
+// syncRoutes routes the VPC's workloads on this node to its edge links: each
+// registered link's own address and the prefixes whose gates are open on it,
+// the destinations the link's host routes carry. A VPC whose VRF is gone has
+// no workload here to route.
+func (a *Agent) syncRoutes(vpc string) error {
+	table, ok, err := hostattach.VRFTable(a.Host, intf.GenerateInterfaceNameVRF(vpc))
+	if err != nil || !ok {
+		return err
+	}
+	links, err := hostattach.List(a.Host)
+	if err != nil {
+		return err
+	}
+	var want []netip.Prefix
+	for _, l := range links {
+		if v, _, ok := hostattach.ParseLinkID(l.ID); !ok || v != vpc || l.HostIndex == 0 || a.Gates == nil {
+			continue
+		}
+		addr, registered, err := a.Gates.Link(uint32(l.HostIndex))
+		if err != nil {
+			return err
+		}
+		if !registered {
+			continue
+		}
+		want = append(want, netip.PrefixFrom(addr, addr.BitLen()))
+		want = append(want, a.openPrefixes(l, addr.String())...)
+	}
+	return a.Datapath.SyncRoutes(table, want)
 }
 
 func released(att *galacticv1alpha1.EdgeAttachment) outcome {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/cilium/ebpf"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
@@ -179,4 +181,61 @@ func UnregisterHostLink(pinDir string, ifindex uint32) error {
 		return fmt.Errorf("unregister eBPF rows of ifindex %d: %w", ifindex, err)
 	}
 	return nil
+}
+
+// SyncHostLinkRoutes makes the pass-through entries egressroutemap.PassThroughEdge
+// owns in Linux VRF table vrfTableID, in the egress_route_table pinned under
+// pinDir, exactly want. A caller passes the address of every edge host link in
+// the VRF and every prefix whose forwarding gate is open on one of them. Absent
+// from the table, a workload of the VRF on this node would match the VRF's
+// ::/0 shard route for them, since galactic-router installs no route for its
+// own node's advertisements, and its packets would leave as public egress. As
+// pass-through entries they reach the kernel, which routes them to the host
+// link, where tp_deliver applies the link's gates.
+//
+// A wanted prefix that already has a pass-through entry of another owner is
+// left as it is: it already reaches the kernel, and its owner removes it. Only
+// this owner's entries are removed. An encapsulating entry for a wanted prefix,
+// which only a holder on another node can have left, is replaced; galactic-router
+// may still remove or replace that entry when it withdraws the remote route,
+// and the next sync, at most a resync period later, writes it again.
+func SyncHostLinkRoutes(pinDir string, vrfTableID uint32, want []netip.Prefix) error {
+	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
+	if err != nil {
+		return fmt.Errorf("open pinned egress_route_table: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+	return syncHostLinkRoutesIn(table, vrfTableID, want)
+}
+
+func syncHostLinkRoutesIn(table *egressroutemap.EgressRouteTable, vrfTableID uint32, want []netip.Prefix) error {
+	entries, err := table.Entries(vrfTableID)
+	if err != nil {
+		return err
+	}
+	wanted := map[netip.Prefix]bool{}
+	var errs []error
+	for _, p := range want {
+		p = p.Masked()
+		wanted[p] = true
+		if e, ok := entries[p]; ok && e.PassThrough && e.Owner != egressroutemap.PassThroughEdge {
+			continue
+		}
+		if err := table.RegisterPassThroughAs(vrfTableID, prefixIPNet(p), egressroutemap.PassThroughEdge); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for p, e := range entries {
+		if wanted[p] || !e.PassThrough || e.Owner != egressroutemap.PassThroughEdge {
+			continue
+		}
+		if _, err := table.UnregisterPassThroughAs(vrfTableID, prefixIPNet(p), egressroutemap.PassThroughEdge); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func prefixIPNet(p netip.Prefix) *net.IPNet {
+	return &net.IPNet{IP: p.Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), p.Addr().BitLen())}
 }

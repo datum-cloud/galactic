@@ -662,7 +662,11 @@ struct egress_route_key {
 // Such an entry is installed for every attachment's IPAM-assigned prefix at CNI
 // ADD time. Without it, two attachments sharing a VRF on one node have the
 // connected route between them hijacked by the ::/0 default, the same shape as
-// the multicast carve-out below but for ordinary unicast peers.
+// the multicast carve-out below but for ordinary unicast peers. galactic-edge
+// installs one for each edge attachment's address and each prefix whose
+// forwarding gate is open on its host link, for the same reason. A
+// pass-through entry's sid is never read here; its first byte names the
+// writer that owns the entry (egressroutemap.PassThroughOwner).
 struct egress_route_value {
 	__u8 sid[16];
 	__u32 link_ifindex;
@@ -5764,8 +5768,9 @@ int usid_egress(struct __sk_buff *skb)
 	// a genuine miss, before touching node_src_addr_table or doing any encap
 	// work.
 	//
-	// Every pass-through prefix is a guest prefix or gateway address of an
-	// attachment in this same Linux VRF, and this node keeps one VRF, and one
+	// Every pass-through prefix is a guest prefix or gateway address of a
+	// workload attachment, or the address or an open prefix of an edge
+	// attachment, in this same Linux VRF, and this node keeps one VRF, and one
 	// vrf_table row, per VPC. So a packet for anything but this attachment's
 	// own gateway is another attachment's on this node: it leaves the sender's
 	// VRF and arrives in the receiver's, which is the same row, and no other

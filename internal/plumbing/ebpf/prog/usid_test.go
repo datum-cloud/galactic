@@ -2009,28 +2009,32 @@ func TestUsidEgress_PassThroughEntryDefersToKernel(t *testing.T) {
 	); err != nil {
 		t.Fatalf("populate egress_route_table default entry: %v", err)
 	}
-	// The sibling attachment's own /96, registered pass-through: an
-	// all-zero value, link_ifindex included.
-	if err := objs.EgressRouteTable.Put(
-		egressRouteKey(tableID, egressRouteFamilyINET6, dst, 96),
-		UsidEgressRouteValue{},
-	); err != nil {
-		t.Fatalf("populate egress_route_table pass-through entry: %v", err)
-	}
+	// The sibling attachment's own /96, registered pass-through: a zero
+	// link_ifindex, with its owner (egressroutemap.PassThroughOwner) in the
+	// first SID byte. Every owner's entry must defer alike: a workload's (0)
+	// and an edge attachment's (1).
+	for _, owner := range []byte{0, 1} {
+		var value UsidEgressRouteValue
+		value.Sid[0] = owner
+		if err := objs.EgressRouteTable.Put(egressRouteKey(tableID, egressRouteFamilyINET6, dst, 96), value); err != nil {
+			t.Fatalf("populate egress_route_table pass-through entry: %v", err)
+		}
 
-	pkt := buildPacketWithV6Addrs(t,
-		netip.MustParseAddr("fd20:30:ff01::100:0"), dst,
-		netip.MustParseAddr("fd20:30:ff01::100:0"), dst)
+		pkt := buildPacketWithV6Addrs(t,
+			netip.MustParseAddr("fd20:30:ff01::100:0"), dst,
+			netip.MustParseAddr("fd20:30:ff01::100:0"), dst)
 
-	ret, out, err := objs.UsidEgress.Test(pkt)
-	if err != nil {
-		t.Fatalf("program test-run: %v", err)
-	}
-	if ret != tcActUnspec {
-		t.Errorf("verdict = %d, want TC_ACT_UNSPEC (%d) -- a pass-through hit must defer to the kernel", ret, tcActUnspec)
-	}
-	if string(out) != string(pkt) {
-		t.Errorf("packet mutated on a pass-through entry hit:\n in: % x\nout: % x", pkt, out)
+		ret, out, err := objs.UsidEgress.Test(pkt)
+		if err != nil {
+			t.Fatalf("program test-run: %v", err)
+		}
+		if ret != tcActUnspec {
+			t.Errorf("owner %d: verdict = %d, want TC_ACT_UNSPEC (%d) -- a pass-through hit must defer to the kernel",
+				owner, ret, tcActUnspec)
+		}
+		if string(out) != string(pkt) {
+			t.Errorf("owner %d: packet mutated on a pass-through entry hit:\n in: % x\nout: % x", owner, pkt, out)
+		}
 	}
 }
 

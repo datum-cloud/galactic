@@ -79,6 +79,11 @@ func (d PinnedDatapath) Forget(ifindex uint32) error {
 	return gates.DeleteLink(ifindex)
 }
 
+// SyncRoutes implements Datapath (attachreg.SyncHostLinkRoutes).
+func (d PinnedDatapath) SyncRoutes(vrfTable uint32, want []netip.Prefix) error {
+	return attachreg.SyncHostLinkRoutes(d.PinDir, vrfTable, want)
+}
+
 // PinnedGates is the node's forwarding gate, opened from PinDir for every
 // call, so a map the datapath's loader recreated is never written through a
 // stale handle.

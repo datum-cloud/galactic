@@ -514,7 +514,10 @@ func (a *Agent) SweepGates(ctx context.Context) error {
 }
 
 // openPrefixes returns the prefixes with an open gate on the attachment's
-// registered host link: the prefixes its host routes carry.
+// registered host link: the prefixes its host routes carry. A gate for the
+// link's own address alone, which a provider claims to publish the address,
+// is left out: the link's own route already carries it, and a second route
+// for it would replace that one.
 func (a *Agent) openPrefixes(link hostattach.ObservedAttachment, address string) []netip.Prefix {
 	if a.Gates == nil || link.HostIndex == 0 {
 		return nil
@@ -529,8 +532,9 @@ func (a *Agent) openPrefixes(link hostattach.ObservedAttachment, address string)
 	}
 	now := a.bootClock()
 	var out []netip.Prefix
+	own := netip.PrefixFrom(addr, addr.BitLen())
 	for p, g := range rows {
-		if g.Deadline > now {
+		if g.Deadline > now && p != own {
 			out = append(out, p)
 		}
 	}

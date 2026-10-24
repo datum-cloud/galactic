@@ -246,6 +246,7 @@ func TestGateFollowsRenewals(t *testing.T) {
 	if got := f.routeVia(vrfTables[vpcA], sitePrefix.Addr().String()); got != link {
 		t.Fatalf("open prefix routed via %d, want the attachment's link %d", got, link)
 	}
+	f.expectLocal(vpcA, addr+"/128", sitePrefix.String())
 
 	// The same renewal, or an older one, extends nothing.
 	f.boot += 5 * time.Second
@@ -277,6 +278,29 @@ func TestGateFollowsRenewals(t *testing.T) {
 	if _, _, err := a.GateRoute(context.Background(), client.ObjectKey{Namespace: edgeNS, Name: routeName}); err == nil {
 		t.Fatal("fenced agent wrote a gate")
 	}
+}
+
+// TestGateForOwnAddress: an open gate for the attachment's own address, as a
+// provider claims to publish the address, adds no host route of its own,
+// which would replace the link's route to the address and fail readback.
+func TestGateForOwnAddress(t *testing.T) {
+	f := newFixture(t)
+	a := f.agent()
+	f.pod(pod1UID)
+	f.attach("a", attA, pod1UID, vpcA, addr, false)
+	f.reconcile(a)
+	f.programmed("a")
+	link := f.hostLink("a").Attrs().Index
+	own := netip.MustParsePrefix(addr + "/128")
+	if err := f.gates.Set(uint32(link), own, forwardgatemap.Gate{Deadline: f.boot + time.Minute, Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(a)
+	f.programmed("a")
+	if got := f.routeVia(vrfTables[vpcA], addr); got != link {
+		t.Errorf("own address routed via %d, want the attachment's link %d", got, link)
+	}
+	f.expectLocal(vpcA, own.String())
 }
 
 // TestGateExpiry is the node half of failure-matrix rows 10, 11, 14 and 15:
@@ -318,6 +342,7 @@ func TestGateExpiry(t *testing.T) {
 	if got := f.routeVia(vrfTables[vpcA], sitePrefix.Addr().String()); got != 0 {
 		t.Fatalf("closed prefix still routed via %d", got)
 	}
+	f.expectLocal(vpcA, addr+"/128")
 
 	// The provider claims again at a new epoch, which core accepts at once
 	// for the same attachment: the gate opens from a fresh renewal.
