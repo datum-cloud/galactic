@@ -130,8 +130,8 @@ EdgeAttachment is one provider instance's isolated connection to the VPC
 its EdgeService grants: an address from the service's client pool, a link
 from the pod into the VPC's host VRF on the pod's node and, with
 PacketAccess, a TUN device. It lives in the provider's namespace. Its name
-is derived from the service and pod UIDs, so a retried create lands on the
-same object.
+is ea- followed by the pod UID, a hyphen and the service UID, so a retried
+create lands on the same object and no pod can take another pod's name.
 
 
 

@@ -12,7 +12,8 @@
 # provider to its ServiceAccounts: in the object's namespace, as the pod the
 # object names, and an instance only for the node that pod runs on. An
 # instance and its lease are created only under the name derived from their
-# pod, so one pod cannot take another's first. An instance's lease is a
+# pod, and an attachment only under the name derived from its pod and
+# service, so one pod cannot take another's first. An instance's lease is a
 # Lease labeled galactic.datumapis.com/edge-provider and annotated with its
 # pod; only that pod writes it, and the provider's ServiceAccounts write no
 # other Lease. A route is held to the pod its claim names: a pod may claim a
@@ -112,6 +113,14 @@ spec:
       messageExpression: >-
         'an instance and its lease must be named ei-' + variables.pod +
         ' for the pod they name, not ' + object.metadata.name
+    # An attachment is named for its pod and service (provider.AttachmentName).
+    - expression: >-
+        !(variables.writer && variables.target) || request.operation != 'CREATE' ||
+        request.resource.resource != 'edgeattachments' ||
+        object.metadata.name == 'ea-' + variables.pod + '-' + object.spec.serviceRef.uid
+      messageExpression: >-
+        'an attachment must be named ea-' + variables.pod + '-' + object.spec.serviceRef.uid +
+        ' for the pod and service it names, not ' + object.metadata.name
     - expression: >-
         !(variables.writer && variables.target) || variables.ownsOld ||
         (request.operation == 'UPDATE' && has(object.spec.claim) &&

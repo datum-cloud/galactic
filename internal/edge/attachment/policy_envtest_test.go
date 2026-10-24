@@ -7,6 +7,7 @@ package attachment
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -96,7 +97,17 @@ func TestPolicies(t *testing.T) {
 	if err := pod1.Create(ctx, unbound); err == nil {
 		t.Error("a provider's pod created an object naming another provider")
 	}
-	if err := pod1.Create(ctx, attachmentFor("own", svc, p1)); err != nil {
+	own := edgeprovider.AttachmentName(string(svc.UID), string(p1.UID))
+	if err := pod1.Create(ctx, attachmentFor("own", svc, p1)); err == nil {
+		t.Error("a pod created an attachment under a name not derived from its pod and service")
+	}
+	// Another pod cannot take p1's name first, and is told the name it must use.
+	err := pod2.Create(ctx, attachmentFor(own, svc, p2))
+	want := "an attachment must be named " + edgeprovider.AttachmentName(string(svc.UID), string(p2.UID))
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("a pod's create under another pod's attachment name: %v, want a refusal naming %q", err, want)
+	}
+	if err := pod1.Create(ctx, attachmentFor(own, svc, p1)); err != nil {
 		t.Fatalf("a pod could not create its own attachment: %v", err)
 	}
 	elsewhere := &galacticv1alpha1.EdgeInstance{
@@ -111,7 +122,7 @@ func TestPolicies(t *testing.T) {
 	}
 
 	// Core's view: admitted and allocated on edgeNode.
-	a := f.get("own")
+	a := f.get(own)
 	a.Status.NodeName, a.Status.VPC, a.Status.Address = edgeNode, vpcID, "fd00:10:0:e::1"
 	meta.SetStatusCondition(&a.Status.Conditions, metav1.Condition{
 		Type: galacticv1alpha1.EdgeAttachmentAdmitted, Status: metav1.ConditionTrue, Reason: ReasonAdmitted,
@@ -133,7 +144,7 @@ func TestPolicies(t *testing.T) {
 			})
 		}
 	}
-	if err := pod2.Delete(ctx, f.get("own")); err == nil {
+	if err := pod2.Delete(ctx, f.get(own)); err == nil {
 		t.Fatal("a pod deleted another pod's attachment")
 	}
 	for _, w := range []write{
@@ -169,7 +180,7 @@ func TestPolicies(t *testing.T) {
 		}, false},
 	} {
 		t.Run(w.name, func(t *testing.T) {
-			a := f.get("own")
+			a := f.get(own)
 			w.mutate(a)
 			err := w.c.Status().Update(ctx, a)
 			if w.allow && err != nil {
@@ -180,7 +191,7 @@ func TestPolicies(t *testing.T) {
 			}
 		})
 	}
-	if err := pod1.Delete(ctx, f.get("own")); err != nil {
+	if err := pod1.Delete(ctx, f.get(own)); err != nil {
 		t.Errorf("a pod could not delete its own attachment: %v", err)
 	}
 	// Kubernetes' own controllers delete a provider's objects when their
@@ -228,10 +239,15 @@ func TestProviderBindings(t *testing.T) {
 	if len(rb.Subjects) != 1 || rb.Subjects[0].Name != providerSA || rb.RoleRef.Name != ProviderClusterRole {
 		t.Errorf("RoleBinding %+v", rb)
 	}
-	n := 0
 	created := func(c client.Client) bool {
-		n++
-		return c.Create(ctx, attachmentFor(fmt.Sprintf("a-%d", n), svc, p1)) == nil
+		a := attachmentFor(edgeprovider.AttachmentName(string(svc.UID), string(p1.UID)), svc, p1)
+		if c.Create(ctx, a) != nil {
+			return false
+		}
+		if err := f.admin.Delete(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		return true
 	}
 	eventually(t, "provider writes its own attachment", func() bool { return created(provider) })
 	if created(other) {
