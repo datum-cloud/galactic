@@ -29,6 +29,9 @@ const (
 	configKind   = "ConnectIPConfig"
 	socketAccess = "SocketAccess"
 	otherName    = "other"
+	// routeExchange is a capability the provider declares but core does
+	// not implement.
+	routeExchange = "RouteExchange"
 )
 
 var (
@@ -41,7 +44,7 @@ func registry() map[string]Provider {
 	return map[string]Provider{
 		connectIP: {
 			Name: connectIP, Approved: true, ContractVersions: []string{contractV1},
-			Capabilities:    []Capability{packetV1},
+			Capabilities:    []Capability{packetV1, {Name: routeExchange, Version: "v1"}},
 			ServiceAccounts: []ServiceAccount{callerA.ServiceAccount},
 			ConfigGroup:     configGroup, ConfigKind: configKind,
 		},
@@ -112,8 +115,9 @@ func TestAdmit(t *testing.T) {
 			r.Capabilities = []Capability{{Name: socketAccess, Version: "v1"}}
 			g.Capabilities = append(g.Capabilities, socketAccess)
 		}, epoch, UnsupportedCapability},
-		{"CapabilityCoreLacks", func(r *Request, _ *Grant) {
-			r.Capabilities = []Capability{{Name: "RouteExchange", Version: "v1"}}
+		{"CapabilityCoreLacks", func(r *Request, g *Grant) {
+			r.Capabilities = []Capability{{Name: routeExchange, Version: "v1"}}
+			g.Capabilities = append(g.Capabilities, routeExchange)
 		}, epoch, UnsupportedCapability},
 		{"ForeignConfigurationKind", func(r *Request, _ *Grant) {
 			r.ConfigKind = "TailnetBinding"
@@ -180,10 +184,17 @@ func TestAdmitContractVersions(t *testing.T) {
 
 func TestAdmitCapabilityVersions(t *testing.T) {
 	// A capability version the provider declares is still refused unless
-	// core implements it, and every version core implements is admitted.
+	// core implements it, and every version the provider contract lists as
+	// implemented is admitted. The list is spelled out rather than read from
+	// supportedCapabilities so that dropping a version from it fails here.
+	implemented := []Capability{
+		{Name: socketAccess, Version: "v1"},
+		{Name: packetAccess, Version: "v1"},
+		{Name: "PrefixReachability", Version: "v1"},
+	}
 	providers := registry()
 	p := providers[connectIP]
-	p.Capabilities = append(slices.Clone(supportedCapabilities), Capability{Name: packetAccess, Version: "v9"})
+	p.Capabilities = append(slices.Clone(implemented), Capability{Name: packetAccess, Version: "v9"})
 	providers[connectIP] = p
 	g := grant()
 	g.Capabilities = nil
@@ -196,7 +207,7 @@ func TestAdmitCapabilityVersions(t *testing.T) {
 		req := request()
 		req.Capabilities = []Capability{c}
 		d := Admit(providers, grants(g), req, epoch, maxSkew)
-		if want := slices.Contains(supportedCapabilities, c); d.Admitted != want {
+		if want := slices.Contains(implemented, c); d.Admitted != want {
 			t.Errorf("Admit(%v) = %+v, want admitted %v", c, d, want)
 		}
 		if !d.Admitted && d.Reason != UnsupportedCapability {
