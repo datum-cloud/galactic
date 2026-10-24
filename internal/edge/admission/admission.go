@@ -62,6 +62,12 @@ var supportedCapabilities = []Capability{
 	{Name: "PrefixReachability", Version: "v1"},
 }
 
+// CoreImplements reports whether this core implements capability c at its
+// version.
+func CoreImplements(c Capability) bool {
+	return slices.Contains(supportedCapabilities, c)
+}
+
 // Capability is a typed capability at a version, such as PacketAccess v1.
 type Capability struct {
 	Name    string
@@ -180,7 +186,7 @@ func Admit(providers map[string]Provider, grants map[string]Grant, req Request,
 			req.Provider, p.ConfigGroup, p.ConfigKind, req.ConfigGroup, req.ConfigKind)
 	}
 	for _, c := range req.Capabilities {
-		if !slices.Contains(supportedCapabilities, c) {
+		if !CoreImplements(c) {
 			return refuse(UnsupportedCapability, "core does not implement %s %s", c.Name, c.Version)
 		}
 		if !slices.Contains(p.Capabilities, c) {

@@ -430,6 +430,54 @@ func TestRefusals(t *testing.T) {
 	}
 }
 
+// TestUnsupportedCapabilityVersion: a route is refused when its provider
+// lists PrefixReachability only at a version core does not implement,
+// accepted when the provider also lists one core implements, and revoked when
+// the provider drops that version again.
+func TestUnsupportedCapabilityVersion(t *testing.T) {
+	f := startAPI(t)
+	ctx := context.Background()
+	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
+	f.newRoute("r", prefixA)
+	setPrefixReachability := func(versions ...string) {
+		t.Helper()
+		var p galacticv1alpha1.EdgeProvider
+		if err := f.admin.Get(ctx, client.ObjectKey{Name: providerName}, &p); err != nil {
+			t.Fatal(err)
+		}
+		p.Spec.Capabilities = []galacticv1alpha1.EdgeCapability{{Name: socketAccess, Version: "v1"}}
+		for _, v := range versions {
+			p.Spec.Capabilities = append(p.Spec.Capabilities,
+				galacticv1alpha1.EdgeCapability{Name: PrefixReachability, Version: v})
+		}
+		if err := f.admin.Update(ctx, &p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	setPrefixReachability("v9")
+	f.claim("r", a)
+	f.reconcile("r")
+	if got := f.claimReason("r"); got != string(admission.UnsupportedCapability) {
+		t.Fatalf("provider with PrefixReachability v9 only: %s, want %s", got, admission.UnsupportedCapability)
+	}
+
+	setPrefixReachability("v9", "v1")
+	f.reconcile("r")
+	f.clock.advance(params.TakeoverWait())
+	f.reconcile("r")
+	f.expectAccepted("r", a, 1)
+
+	setPrefixReachability("v9")
+	f.reconcile("r")
+	rt := f.route("r")
+	c := meta.FindStatusCondition(rt.Status.Conditions, galacticv1alpha1.EdgeRouteAccepted)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonRevoked ||
+		!strings.Contains(c.Message, string(admission.UnsupportedCapability)) {
+		t.Fatalf("accepted route after its provider dropped PrefixReachability v1: %s", conditions(rt))
+	}
+}
+
 // TestReaping: an instance whose pod is gone is deleted the takeover
 // interval after the leader first saw its record unchanged, and a route
 // whose attachment and instance are gone is deleted.

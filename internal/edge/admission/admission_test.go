@@ -32,6 +32,8 @@ const (
 	// routeExchange is a capability the provider declares but core does
 	// not implement.
 	routeExchange = "RouteExchange"
+
+	prefixReachability = "PrefixReachability"
 )
 
 var (
@@ -190,7 +192,7 @@ func TestAdmitCapabilityVersions(t *testing.T) {
 	implemented := []Capability{
 		{Name: socketAccess, Version: "v1"},
 		{Name: packetAccess, Version: "v1"},
-		{Name: "PrefixReachability", Version: "v1"},
+		{Name: prefixReachability, Version: "v1"},
 	}
 	providers := registry()
 	p := providers[connectIP]
@@ -212,6 +214,23 @@ func TestAdmitCapabilityVersions(t *testing.T) {
 		}
 		if !d.Admitted && d.Reason != UnsupportedCapability {
 			t.Errorf("Admit(%v) reason = %q, want UnsupportedCapability", c, d.Reason)
+		}
+	}
+}
+
+func TestCoreImplements(t *testing.T) {
+	for _, tc := range []struct {
+		c    Capability
+		want bool
+	}{
+		{Capability{Name: socketAccess, Version: "v1"}, true},
+		{Capability{Name: packetAccess, Version: "v1"}, true},
+		{Capability{Name: prefixReachability, Version: "v1"}, true},
+		{Capability{Name: prefixReachability, Version: "v9"}, false},
+		{Capability{Name: routeExchange, Version: "v1"}, false},
+	} {
+		if got := CoreImplements(tc.c); got != tc.want {
+			t.Errorf("CoreImplements(%v) = %v, want %v", tc.c, got, tc.want)
 		}
 	}
 }
