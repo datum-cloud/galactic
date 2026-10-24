@@ -127,6 +127,16 @@ EOF
     echo "--- Loading image into cluster"
     kind load docker-image "$IMG" --name "$CLUSTER_NAME"
 
+    echo "--- Copying the hostattach test binary onto Kind node(s)"
+    # TestEdgeAgentCreatesTUN runs it inside the shipped galactic-edge
+    # container spec, mounted from the node; the agent's own image has no
+    # test entry point.
+    CGO_ENABLED=0 go test -c -o bin/e2e/hostattach.test ./internal/edge/hostattach
+    for node in $(kind get nodes --name "$CLUSTER_NAME"); do
+      docker exec "$node" mkdir -p /opt/galactic-e2e
+      docker cp bin/e2e/hostattach.test "$node":/opt/galactic-e2e/hostattach.test
+    done
+
     echo "--- Running e2e tests"
     IMG="$IMG" NODE_NAME="$E2E_NODE" go test -v -timeout 10m ./tests/e2e/...
     ;;
