@@ -429,7 +429,10 @@ func (a *Agent) applyScope(vpc string, active, releasing []*galacticv1alpha1.Edg
 // syncRoutes routes the VPC's workloads on this node to its edge links: each
 // registered link's own address and the prefixes whose gates are open on it,
 // the destinations the link's host routes carry. A VPC whose VRF is gone has
-// no workload here to route.
+// no workload here to route, and no table ID to sync against. Its rows cannot
+// outlive the VRF: maintenance's Guard.Reclaim refuses to delete the VRF while
+// an attachment is not Released, and the agent reports Released only after a
+// snapshot pass that ran this with an empty want while the VRF still existed.
 func (a *Agent) syncRoutes(vpc string) error {
 	table, ok, err := hostattach.VRFTable(a.Host, intf.GenerateInterfaceNameVRF(vpc))
 	if err != nil || !ok {
