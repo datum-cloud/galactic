@@ -56,6 +56,8 @@ tasks:
     deps: [golangci-lint, yamlfmt, yaml-ext, build:ebpf]
     cmds:
       - '{{.GOLANGCI_LINT}} run'
+      # examples/edge-provider is its own module, which the root run skips.
+      - cd examples/edge-provider && {{.GOLANGCI_LINT}} run --config ../../.golangci.yaml
       - '{{.YAMLFMT}} -lint'
 
   lint-fix:
@@ -189,6 +191,15 @@ tasks:
     deps: [build:ebpf]
     cmds:
       - bash scripts/ci.sh unittest
+      - task: test:edge-provider
+
+  test:edge-provider:
+    desc: Build, vet and unit-test the reference edge provider (examples/edge-provider, its own module)
+    dir: examples/edge-provider
+    cmds:
+      - go build ./...
+      - go vet ./...
+      - go test -race ./...
 
   test:unit-root:
     desc: Re-run just the requireRoot(t)-gated unit tests, as root

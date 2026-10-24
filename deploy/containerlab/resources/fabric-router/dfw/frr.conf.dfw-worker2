@@ -64,6 +64,10 @@ ip route 198.51.100.0/26 Null0
 # instead, it would leave the site still carrying a tenant's private source
 # address.
 ipv6 route 2001:db8:ff01:2002::/64 Null0
+# This node's tenant-delivery locator (Node-ID 0x1002): Galactic Edge
+# attachments on this node receive their VPC's traffic at it, which the
+# site /48 the compute node originates would otherwise swallow.
+ipv6 route 2001:db8:ff01:1002::/64 Null0
 ipv6 route 2001:db8:9966:1::/64 Null0
 ip route 192.0.2.1/32 Null0
 
@@ -108,6 +112,8 @@ router bgp 65000
   # This node's egress shard's SID /64 and IPv6 masquerade address -- see
   # this file's own comment above.
   network 2001:db8:ff01:2002::/64
+  # This node's tenant-delivery locator -- see the static above.
+  network 2001:db8:ff01:1002::/64
   network 2001:db8:9966:1::/64
  exit-address-family
  !

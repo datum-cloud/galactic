@@ -50,6 +50,8 @@ All resources are in `galactic.datumapis.com/v1alpha1`. Object names that carry 
 
 `EdgeInstance`, its `Lease`, `EdgeAttachment` and `EdgeRoute` live in the provider's namespace. `EdgeService` and `EdgeRouteIndex` live in the namespace of the gVPC they reference.
 
+Core finds a route by its spec, never by its name. A route's name only has to be the same in every instance of one provider, so that they contend for a prefix through one object; the hash is the provider's choice.
+
 ### Fields and writers
 
 A field not listed is read-only to everyone but the control plane that owns the resource. "Core" is `galactic-controller --role=cell`; "node" is `galactic-edge` on the attachment's node.
@@ -79,7 +81,12 @@ A field not listed is read-only to everyone but the control plane that owns the 
 
 ## Provider interface
 
-A provider integrates in five steps, all through its own ServiceAccount.
+A provider integrates in five steps, all through its own ServiceAccount. Its cell must also give it two things outside these resources:
+
+- **The packet device.** Kubernetes gives no unprivileged pod `/dev/net/tun`, and a provider has no hostPath or capability to reach it, so a cell that offers `PacketAccess` runs a device plugin that hands the device out as a resource, and a packet-access provider pod requests it.
+- **The host VRF.** An attachment joins its gVPC's canonical host VRF on its node, which only CNI ADD creates, so a workload of the gVPC must run on the provider's node.
+
+[examples/edge-provider](../../../../examples/edge-provider) is a provider built only on this contract, with the deployment it needs.
 
 1. **Register.** The operator creates the `EdgeProvider` and approves it. Registration grants no tenant authority (`internal/edge/admission/admission.go:10`).
 2. **Start an instance.** Each provider process creates its pod's `EdgeInstance`, takes over its lease and renews it every 5 s. The holder ID is new for every process start, so a restarted container cannot continue its predecessor's lease (`internal/edge/claim/claim.go:226`).
@@ -430,7 +437,7 @@ Each row is an acceptance test. The pass condition is fixed here, before anythin
 | 24  | Drain                                | Drain a service with active traffic                                                                                 | No new routes accepted; forwarding ends ≤ `drainSeconds`; resources released                                                                                                                                          | Lab              | #995         |
 | 25  | Independent provider                 | Run rows 1 to 24 and their lettered rows with a provider built outside the core                                     | All pass with no change to core source, schema, image or deployment                                                                                                                                                   | Talos            | #1000, #1002 |
 
-Results record the commit, the environment, measured timings per row and packet captures for rows 6, 12 and 13.
+Results record the commit, the environment, measured timings per row and packet captures for rows 6, 12 and 13. `tests/edgeconformance` runs the rows the containerlab lab can host with the reference provider (`task verify:edge-conformance`).
 
 ## Open items
 

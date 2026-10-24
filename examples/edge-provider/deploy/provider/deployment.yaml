@@ -1,0 +1,78 @@
+# One provider instance per pod. A pod needs nothing from its node: no host
+# namespace, hostPath, NET_ADMIN or BPF. galactic-edge creates the pod's
+# attachment links and packet device in the pod's own network namespace.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-provider
+  labels:
+    app.kubernetes.io/name: edge-provider
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: edge-provider
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: edge-provider
+    spec:
+      serviceAccountName: edge-provider
+      # SIGTERM stops forwarding, releases the routes and deletes the
+      # attachments; the provider gives that 20 seconds.
+      terminationGracePeriodSeconds: 30
+      # Only nodes that run galactic-edge can program an attachment.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - edge
+                  - key: galactic.datumapis.com/edge
+                    operator: In
+                    values:
+                      - enabled
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: edge-provider
+          image: edge-provider:latest
+          args:
+            - --config=/etc/edge-provider/config.yaml
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/edge-provider
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: edge-provider-config

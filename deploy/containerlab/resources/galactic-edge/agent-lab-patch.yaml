@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-edge
+spec:
+  template:
+    spec:
+      containers:
+        - name: galactic-edge
+          image: galactic-edge:latest
+          imagePullPolicy: Never
+          # The agent creates each packet-access attachment's TUN device
+          # through /dev/net/tun, which config/galactic-edge/base does not
+          # give its container. The lab hands it the device through the
+          # same device plugin provider pods use until #1064 is fixed.
+          resources:
+            limits:
+              devic.es/tun: "1"

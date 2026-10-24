@@ -24,6 +24,8 @@ tasks:
       - "build:galactic-nat"
       - "build:galactic-gateway"
       - "build:galactic-controller"
+      - "build:galactic-edge"
+      - "build:edge-provider"
       - "build:fabric-router-controller"
       - "build:remote-host"
 
@@ -69,6 +71,16 @@ tasks:
     cmds:
       - docker build --network=host -t galactic-controller:latest -f ../../containers/galactic-controller/Dockerfile ../..
 
+  "build:galactic-edge":
+    desc: Build the galactic-edge node agent image
+    cmds:
+      - docker build --network=host -t galactic-edge:latest -f ../../containers/galactic-edge/Dockerfile ../..
+
+  "build:edge-provider":
+    desc: Build the reference edge provider image (examples/edge-provider)
+    cmds:
+      - docker build --network=host -t edge-provider:latest -f ../../examples/edge-provider/Dockerfile ../..
+
   "build:fabric-router-controller":
     desc: Build the fabric-router-controller image (typed fabric routing)
     cmds:
@@ -112,6 +124,10 @@ tasks:
       # backends, which deploy:scenarios creates.
       - task: "deploy:galactic-gateway"
       - task: "deploy:fabric-api"
+      # After deploy:galactic-router, whose edge-ownership mount keeps GC
+      # off the VRFs edge attachments join, and the scenarios, whose
+      # tenants the edge services grant.
+      - task: "deploy:galactic-edge"
 
   "deploy:clusters":
     desc: Create Kind clusters
@@ -252,6 +268,8 @@ tasks:
       # Egress shards and gateways: one each per edge node.
       NAT_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
       GATEWAY_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
+      # Galactic Edge runs on dfw's edge nodes (deploy:galactic-edge).
+      EDGE_NODES: "dfw-worker2 dfw-worker3"
     cmds:
       - |
         set -e
@@ -274,6 +292,8 @@ tasks:
         # The cell controller schedules on any untainted worker.
         load galactic-controller:latest {{.FABRIC_NODES}}
         load fabric-router-controller:latest {{.FABRIC_NODES}}
+        load galactic-edge:latest {{.EDGE_NODES}}
+        load edge-provider:latest {{.EDGE_NODES}}
 
   "deploy:system":
     desc: Install CRDs, namespace, and RBAC
@@ -362,6 +382,11 @@ tasks:
     desc: Install galactic-gateway on every edge node, with each site's VIP rules
     cmds:
       - ./scripts/deploy-galactic-gateway.sh
+
+  "deploy:galactic-edge":
+    desc: Run Galactic Edge on dfw's edge nodes (node agent, galactic-controller --edge, VPC objects)
+    cmds:
+      - ./scripts/deploy-galactic-edge.sh
 
   "deploy:scenarios":
     desc: Deploy all VPC test scenarios
@@ -1196,6 +1221,16 @@ tasks:
     desc: Verify every tenant binding is installed and each path forwards what it grants and drops what it does not
     cmds:
       - ./scripts/verify-traffic-policy.sh
+
+  # Not part of verify: it takes about 30 minutes, stops and restarts
+  # galactic-edge and galactic-router on dfw's edge nodes, and briefly
+  # breaks ns10's edge reachability on purpose. Results, captures and a
+  # summary land in bin/edge-conformance/ at the repository root.
+  "verify:edge-conformance":
+    desc: Run the Galactic Edge provider conformance suite against dfw with the reference provider
+    dir: ../..
+    cmds:
+      - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig go test -count=1 -v -timeout 90m -run TestConformance ./tests/edgeconformance/
 
   "verify:ns10":
     desc: Verify ns10 ping (IPv6-only, 3-site mesh)
