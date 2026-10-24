@@ -146,10 +146,13 @@ func sniff(args []string) error {
 		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
 			continue
 		}
-		if err != nil {
+		if errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENETDOWN) {
 			// The device went away, as when its pod is deleted: the
 			// capture ends there.
 			return out.Encode(map[string]any{"t": boottime(), "end": true, "error": err.Error()})
+		}
+		if err != nil {
+			return err
 		}
 		t := boottime()
 		p := buf[:n]

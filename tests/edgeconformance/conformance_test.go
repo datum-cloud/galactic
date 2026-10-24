@@ -1069,10 +1069,13 @@ func rowFrozen(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 	a.refresh(t, l)
 	// The frozen pod never recovers: it is replaced whatever the outcome,
 	// so later rows start from a serving instance.
-	hung := a.pod
+	hung, hungAtt := a.pod, a.att.Name
 	defer func() {
 		_ = l.c.Delete(context.Background(), hung)
 		a.refresh(t, l)
+		if a.att.Name == hungAtt {
+			t.Errorf("the replacement reused the hung pod's attachment %s", hungAtt)
+		}
 		l.waitAccepted(t, a.tn.namespace, a.vpcUID, pa, a.att.Name, 2*time.Minute)
 	}()
 	// SIGUSR1: the provider stops renewing and writing to the API but keeps
