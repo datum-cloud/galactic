@@ -90,7 +90,7 @@ A provider integrates in five steps, all through its own ServiceAccount.
 ### Compatibility
 
 - A request names one contract version and one version per capability. An unsupported version is refused before allocation with `UnsupportedContractVersion` or `UnsupportedCapability`.
-- A core release supports the current contract version and the one before it (`admission.SupportedContractVersions`). Admission refuses any other version with `UnsupportedContractVersion`, even one the `EdgeProvider` lists. Dropping a version requires that no `EdgeProvider` still lists it as its only version.
+- A core release supports the current contract version and the one before it. Admission refuses any other version with `UnsupportedContractVersion`, even one the `EdgeProvider` lists. Dropping a version requires that no `EdgeProvider` still lists it as its only version.
 - Adding a capability adds a new name; it never changes what an existing version means.
 
 ### Authorization context

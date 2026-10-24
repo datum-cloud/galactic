@@ -159,13 +159,13 @@ func TestAdmitContractVersions(t *testing.T) {
 	// implements it, and every version core implements is admitted.
 	providers := registry()
 	p := providers[connectIP]
-	p.ContractVersions = append(slices.Clone(SupportedContractVersions), "v1alpha9")
+	p.ContractVersions = append(slices.Clone(supportedContractVersions), "v1alpha9")
 	providers[connectIP] = p
 	for _, v := range p.ContractVersions {
 		req := request()
 		req.ContractVersion = v
 		d := Admit(providers, grants(grant()), req, epoch, maxSkew)
-		if want := slices.Contains(SupportedContractVersions, v); d.Admitted != want {
+		if want := slices.Contains(supportedContractVersions, v); d.Admitted != want {
 			t.Errorf("Admit(%q) = %+v, want admitted %v", v, d, want)
 		}
 		if !d.Admitted && d.Reason != UnsupportedContractVersion {
