@@ -302,7 +302,7 @@ How an identity is checked:
   certificate again against its current bundle and clock, so a connection opened
   by a certificate that has since expired, or whose CA has left the bundle, is
   refused with `UNAUTHENTICATED`. A call's context ends when the caller's
-  certificate expires.
+  certificate expires, after which a stream sends and receives nothing more.
 
 The csi volume attributes in the `fabric-api-certs` DaemonSet (volume
 `fabric-api-csi`) and the gateway Deployment:

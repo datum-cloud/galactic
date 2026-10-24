@@ -73,9 +73,13 @@ type Authorizer struct {
 	// Methods maps each role to the full method names it may call.
 	Methods map[identity.Role]map[string]bool
 	// Credentials, when set, re-verifies the peer's chain against the
-	// current trust bundle, its validity and its cell on every call, and
-	// ends each call's context when the peer's certificate expires. Without
-	// it the handshake's verification stands for the connection's life.
+	// current trust bundle, its validity and its cell on every call, refusing
+	// a failure as UNAUTHENTICATED like a failed handshake, and ends each
+	// call's context when the peer's certificate expires; a stream then
+	// refuses every further send and receive. A handler must still watch its
+	// context: a send or receive already blocked in the transport is not
+	// interrupted. Without Credentials the handshake's verification stands
+	// for the connection's life.
 	Credentials *identity.Credentials
 	// Allow, when set, is checked on every call after the method table,
 	// e.g. an allowlist of identities.
@@ -174,13 +178,28 @@ func logCall(attrs []any, err error) {
 	}
 }
 
-// callerStream is a server stream whose context carries the caller.
+// callerStream is a server stream whose context carries the caller and
+// which refuses to send or receive once that context has ended.
 type callerStream struct {
 	grpc.ServerStream
 	ctx context.Context
 }
 
 func (s *callerStream) Context() context.Context { return s.ctx }
+
+func (s *callerStream) SendMsg(m any) error {
+	if err := s.ctx.Err(); err != nil {
+		return status.FromContextError(err).Err()
+	}
+	return s.ServerStream.SendMsg(m)
+}
+
+func (s *callerStream) RecvMsg(m any) error {
+	if err := s.ctx.Err(); err != nil {
+		return status.FromContextError(err).Err()
+	}
+	return s.ServerStream.RecvMsg(m)
+}
 
 func peerIdentity(ctx context.Context) (identity.ID, error) {
 	state, err := peerTLS(ctx)

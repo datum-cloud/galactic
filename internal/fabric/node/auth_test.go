@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,6 +19,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
@@ -158,5 +161,62 @@ func TestAuthorizer(t *testing.T) {
 	_, err = a.Unary()(t.Context(), nil, &grpc.UnaryServerInfo{FullMethod: testMethod}, reached)
 	if status.Code(err) != codes.Unauthenticated {
 		t.Errorf("no peer: %v", err)
+	}
+}
+
+// TestAuthorizerEndsStreamAtExpiry runs a real server stream whose handler
+// waits on its context, and checks that the stream ends when the caller's
+// certificate expires.
+func TestAuthorizerEndsStreamAtExpiry(t *testing.T) {
+	dir := t.TempDir()
+	ca := testpki.NewCA(t, "dfw")
+	gwID := identity.Gateway("dfw")
+	server := creds(t, ca, dir, gwID)
+	opID := identity.Operator("dfw", "alice")
+	notAfter := time.Now().Add(3 * time.Second)
+	f := ca.Issue(t, filepath.Join(dir, "short"), testpki.Options{URIs: []string{opID.URI()}, NotAfter: notAfter})
+	client := &identity.Credentials{CertFile: f.Cert, KeyFile: f.Key, CAFile: f.CA, Self: opID}
+	if err := client.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	watchOnly := map[string]bool{grpc_health_v1.Health_Watch_FullMethodName: true}
+	a := &Authorizer{Methods: map[identity.Role]map[string]bool{identity.RoleOperator: watchOnly}, Credentials: server}
+	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(server.ServerConfig(func(identity.ID) error { return nil }))),
+		grpc.ChainStreamInterceptor(a.Stream()),
+	)
+	grpc_health_v1.RegisterHealthServer(srv, health.NewServer())
+	var lc net.ListenConfig
+	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(srv.Stop)
+	conn, err := grpc.NewClient(l.Addr().String(),
+		grpc.WithTransportCredentials(credentials.NewTLS(client.ClientConfig(gwID))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	watch, err := grpc_health_v1.NewHealthClient(conn).Watch(ctx, &grpc_health_v1.HealthCheckRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := watch.Recv(); err != nil {
+		t.Fatalf("first status: %v", err)
+	}
+	// The handler sends nothing more, so the stream ends only when the
+	// caller's certificate does.
+	_, err = watch.Recv()
+	if err == nil || ctx.Err() != nil {
+		t.Fatalf("stream did not end at certificate expiry: %v", err)
+	}
+	if now := time.Now(); now.Before(notAfter.Truncate(time.Second)) {
+		t.Errorf("stream ended at %v, before the certificate's expiry %v", now, notAfter)
 	}
 }
