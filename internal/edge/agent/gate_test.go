@@ -303,6 +303,70 @@ func TestGateForOwnAddress(t *testing.T) {
 	f.expectLocal(vpcA, own.String())
 }
 
+// TestHeldPrefixStaysLocal: a prefix accepted on this node stays a local
+// route of its attachment whether or not its gate is open, so a closed gate
+// never hands same-node traffic to the VPC's shard route. It stops being one
+// once the holder releases it, the route is accepted on another node, or the
+// route is deleted, and each change asks for the pass that syncs it.
+func TestHeldPrefixStaysLocal(t *testing.T) {
+	f := newFixture(t)
+	f.grant()
+	a := f.agent()
+	h := f.holder()
+	f.reconcile(a)
+	f.expectLocal(vpcA, addr+"/128")
+	ctx := context.Background()
+	held := func(why string) {
+		t.Helper()
+		if !f.gate(a) {
+			t.Errorf("%s: no pass asked for", why)
+		}
+		f.reconcile(a)
+		if f.gate(a) {
+			t.Errorf("%s: another pass asked for once synced", why)
+		}
+	}
+
+	// Accepted with no live renewal: the gate never opens, and the prefix
+	// is local all the same.
+	f.boot += gateParams.Duration
+	f.accept(h, 1)
+	held("accepted")
+	if g, ok := f.gateRow(h); ok && g.Deadline > f.boot {
+		t.Fatalf("gate %+v opened with no live renewal", g)
+	}
+	f.expectLocal(vpcA, addr+"/128", sitePrefix.String())
+
+	rt := f.routeObj()
+	rt.Spec.Claim.Released = true
+	if err := f.client.Update(ctx, rt); err != nil {
+		t.Fatal(err)
+	}
+	held("released")
+	f.expectLocal(vpcA, addr+"/128")
+
+	f.accept(h, 2)
+	held("accepted again")
+	f.expectLocal(vpcA, addr+"/128", sitePrefix.String())
+
+	rt = f.routeObj()
+	rt.Status.Accepted.Node = "other-node"
+	if err := f.client.Status().Update(ctx, rt); err != nil {
+		t.Fatal(err)
+	}
+	held("moved")
+	f.expectLocal(vpcA, addr+"/128")
+
+	f.accept(h, 3)
+	held("moved back")
+	f.expectLocal(vpcA, addr+"/128", sitePrefix.String())
+	if err := f.client.Delete(ctx, f.routeObj()); err != nil {
+		t.Fatal(err)
+	}
+	held("deleted")
+	f.expectLocal(vpcA, addr+"/128")
+}
+
 // TestGateExpiry is the node half of failure-matrix rows 10, 11, 14 and 15:
 // a holder that stops renewing, or a stalled agent, leaves the gate to close
 // at its deadline. The agent then records it closed, removes it once
@@ -342,7 +406,10 @@ func TestGateExpiry(t *testing.T) {
 	if got := f.routeVia(vrfTables[vpcA], sitePrefix.Addr().String()); got != 0 {
 		t.Fatalf("closed prefix still routed via %d", got)
 	}
-	f.expectLocal(vpcA, addr+"/128")
+	// The route is still accepted here, so the closed prefix stays local:
+	// same-node workloads find no host route for it and never the VPC's
+	// shard route.
+	f.expectLocal(vpcA, addr+"/128", sitePrefix.String())
 
 	// The provider claims again at a new epoch, which core accepts at once
 	// for the same attachment: the gate opens from a fresh renewal.

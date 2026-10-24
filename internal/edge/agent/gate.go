@@ -109,9 +109,11 @@ type verdict struct {
 // closed until the route's closedEpoch records it, then removed; an epoch at
 // or below closedEpoch is never opened again.
 //
-// It reports whether the route's prefix opened or closed on its link, so the
-// caller can provision or prune the link's host routes, and when the gate
-// next needs deciding: before its deadline.
+// It reports whether the route's prefix opened or closed on its link, or
+// became or stopped being held by its attachment, so the caller can run the
+// attachment pass that provisions or prunes the link's host routes and syncs
+// its local routes, and when the gate next needs deciding: before its
+// deadline.
 func (a *Agent) GateRoute(ctx context.Context, key ctrl.ObjectKey) (bool, time.Duration, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -120,15 +122,17 @@ func (a *Agent) GateRoute(ctx context.Context, key ctrl.ObjectKey) (bool, time.D
 	}
 	var cached galacticv1alpha1.EdgeRoute
 	if err := a.Client.Get(ctx, key, &cached); err != nil {
-		return false, 0, ctrl.IgnoreNotFound(err)
-	}
-	acc := cached.Status.Accepted
-	if acc == nil || acc.Node != a.NodeName {
-		return false, 0, nil
+		// A deleted route's prefix is unknown here: any kept local route
+		// may have been its.
+		return apierrors.IsNotFound(err) && a.keepsLocal(nil), 0, ctrl.IgnoreNotFound(err)
 	}
 	prefix, err := netip.ParsePrefix(cached.Spec.Prefix)
 	if err != nil {
 		return false, 0, nil
+	}
+	acc := cached.Status.Accepted
+	if acc == nil || acc.Node != a.NodeName {
+		return a.keepsLocal(&prefix), 0, nil
 	}
 	links, err := a.gateLinks()
 	if err != nil {
@@ -140,7 +144,7 @@ func (a *Agent) GateRoute(ctx context.Context, key ctrl.ObjectKey) (bool, time.D
 		row, hasRow = l.rows[prefix]
 	}
 	v := a.decide(ctx, &cached, row, hasRow, l != nil)
-	changed := false
+	changed := a.localStale(l, acc.AttachmentUID, &cached, prefix)
 	if l != nil && (v.set != nil && (!hasRow || *v.set != row) || v.remove && hasRow) {
 		// Host routes follow open gates, and a gate that expired on its own
 		// may still have its routes until the attachment pass prunes them:
@@ -156,7 +160,7 @@ func (a *Agent) GateRoute(ctx context.Context, key ctrl.ObjectKey) (bool, time.D
 			}
 			return false, 0, err
 		}
-		changed = wasRouted != isOpen
+		changed = changed || wasRouted != isOpen
 		if wasRouted && !isOpen && v.cause != "" {
 			corr := diag.ForRoute(&cached)
 			corr.Node = a.NodeName
@@ -174,6 +178,33 @@ func (a *Agent) GateRoute(ctx context.Context, key ctrl.ObjectKey) (bool, time.D
 		return changed, time.Second, nil
 	}
 	return changed, a.nextDecision(v, row, hasRow), nil
+}
+
+// localStale reports whether the last sync of l's VPC kept prefix as a local
+// route of attachment uid other than while rt holds it, so the attachment
+// pass must sync again. The link's own address is always a local route.
+func (a *Agent) localStale(l *gateLink, uid string, rt *galacticv1alpha1.EdgeRoute, prefix netip.Prefix) bool {
+	if l == nil {
+		return false
+	}
+	addr, ok, err := a.Gates.Link(l.index)
+	if err != nil || !ok || netip.PrefixFrom(addr, addr.BitLen()) == prefix.Masked() {
+		return false
+	}
+	return holds(rt, a.NodeName) != a.local[l.vpc][uid][prefix.Masked()]
+}
+
+// keepsLocal reports whether the last sync of any VPC kept prefix, or with
+// nil any prefix, as a local route of an attachment beyond its own address.
+func (a *Agent) keepsLocal(prefix *netip.Prefix) bool {
+	for _, atts := range a.local {
+		for _, kept := range atts {
+			if prefix == nil && len(kept) > 0 || prefix != nil && kept[prefix.Masked()] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // nextDecision is how long until the route's gate needs deciding again:

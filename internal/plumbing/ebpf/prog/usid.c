@@ -663,8 +663,8 @@ struct egress_route_key {
 // ADD time. Without it, two attachments sharing a VRF on one node have the
 // connected route between them hijacked by the ::/0 default, the same shape as
 // the multicast carve-out below but for ordinary unicast peers. galactic-edge
-// installs one for each edge attachment's address and each prefix whose
-// forwarding gate is open on its host link, for the same reason. A
+// installs one for each edge attachment's address and each prefix of a route
+// the attachment holds, for the same reason. A
 // pass-through entry's sid is never read here; its first byte names the
 // writer that owns the entry (egressroutemap.PassThroughOwner).
 struct egress_route_value {

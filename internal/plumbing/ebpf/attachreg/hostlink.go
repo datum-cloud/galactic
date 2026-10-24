@@ -186,19 +186,20 @@ func UnregisterHostLink(pinDir string, ifindex uint32) error {
 // SyncHostLinkRoutes makes the pass-through entries egressroutemap.PassThroughEdge
 // owns in Linux VRF table vrfTableID, in the egress_route_table pinned under
 // pinDir, exactly want. A caller passes the address of every edge host link in
-// the VRF and every prefix whose forwarding gate is open on one of them. Absent
-// from the table, a workload of the VRF on this node would match the VRF's
-// ::/0 shard route for them, since galactic-router installs no route for its
-// own node's advertisements, and its packets would leave as public egress. As
-// pass-through entries they reach the kernel, which routes them to the host
-// link, where tp_deliver applies the link's gates.
+// the VRF and every prefix of a route one of them holds, open gate or not.
+// Absent from the table, a workload of the VRF on this node would match the
+// VRF's ::/0 shard route for them, since galactic-router installs no route for
+// its own node's advertisements, and its packets would leave as public egress.
+// As pass-through entries they reach the kernel, which routes an open prefix
+// to the host link, where tp_deliver applies the link's gates, and drops a
+// closed one, which has no host route, at the VRF's unreachable default.
 //
 // A wanted prefix that already has a pass-through entry of another owner is
 // left as it is: it already reaches the kernel, and its owner removes it. Only
 // this owner's entries are removed. An encapsulating entry for a wanted prefix,
-// which only a holder on another node can have left, is replaced; galactic-router
-// may still remove or replace that entry when it withdraws the remote route,
-// and the next sync, at most a resync period later, writes it again.
+// which only a holder on another node can have left, is replaced, and
+// galactic-router's withdrawal of that remote route (srv6.RouteEgressDel)
+// keeps this owner's entry.
 func SyncHostLinkRoutes(pinDir string, vrfTableID uint32, want []netip.Prefix) error {
 	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
 	if err != nil {
