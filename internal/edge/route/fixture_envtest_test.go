@@ -34,6 +34,8 @@ import (
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/claim"
+	"go.datum.net/galactic/internal/edge/diag"
+	"go.datum.net/galactic/internal/edge/diag/diagtest"
 	"go.datum.net/galactic/internal/edge/provider"
 )
 
@@ -90,6 +92,8 @@ type fixture struct {
 	routes *Reconciler
 	index  *IndexReconciler
 	reaper *InstanceReaper
+	// events are what the route reconciler's diagnostics recorded.
+	events *diagtest.Recorder
 }
 
 func startAPI(t *testing.T) *fixture {
@@ -164,8 +168,10 @@ func startAPI(t *testing.T) *fixture {
 		},
 	}
 	f.create(f.svc)
+	var rec *diag.Recorder
+	rec, f.events, _ = diagtest.New("core")
 	f.routes = &Reconciler{Client: admin, APIReader: admin, Params: params, Clock: f.clock.read, Now: f.now,
-		BGPNamespace: bgpNamespace}
+		BGPNamespace: bgpNamespace, Diag: rec}
 	f.index = &IndexReconciler{Client: admin, APIReader: admin, Params: params, Clock: f.clock.read}
 	f.reaper = &InstanceReaper{Client: admin, APIReader: admin, Params: params, Clock: f.clock.read}
 	return f

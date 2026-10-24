@@ -2,8 +2,9 @@
 # fabric-config-agent), on fabric routing through the API
 # (fabric-router-controller's deployments, releases and compile results), on
 # galactic-router's BMP export and route installs, on the galactic-nat egress
-# shards' session tables, masquerade ports and uplink NICs, and on the
-# fabric-api looking glass's gateway and node sidecars. A BGP session that drops is also streamed to the BMP collector as
+# shards' session tables, masquerade ports and uplink NICs, on the
+# fabric-api looking glass's gateway and node sidecars, and on the Galactic
+# Edge foundation's attachments, services and node agents. A BGP session that drops is also streamed to the BMP collector as
 # a Peer Down carrying the reason and any NOTIFICATION; these rules are the
 # Prometheus-side signal for the same events, so an alert does not depend on
 # the collector or the log pipeline behind it.
@@ -1138,3 +1139,90 @@ spec:
             description: >-
               Prometheus cannot scrape {{ $labels.job }} on {{ $labels.pod }}, so the other fabric-api alerts cannot
               fire for it.
+    # The Galactic Edge foundation: galactic-controller --edge (job
+    # galactic-controller, port 9184) exports attachment, route and service
+    # state from every replica's cache, so the state rules take the max over
+    # replicas; galactic-edge (job galactic-edge, port 9186) exports each
+    # node's gates, lost scopes and cleanup failures. A refused admission is a
+    # tenant or provider decision and alerts nothing; these rules fire on
+    # what the foundation itself has stopped doing. docs/edge/troubleshooting.md
+    # in this repository walks each stage.
+    - name: galactic-edge
+      rules:
+        # Admitted and allocated, but not programmed on its node.
+        - alert: GalacticEdgeAttachmentNotProgrammed
+          expr: >-
+            max by (provider, reason) (galactic_edge_foundation_attachments{job="galactic-controller",state="Programming"}) > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Edge attachments of {{ $labels.provider }} are not programmed ({{ $labels.reason }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgeattachmentnotprogrammed"
+            description: >-
+              {{ $value }} attachments of provider {{ $labels.provider }} have been admitted and allocated for 15
+              minutes without their node programming them, reason {{ $labels.reason }}. Their providers have no
+              tenant connectivity. The Programming Warning Events on the attachments name the node, pod and error.
+        # A service whose traffic policy does not resolve leaves its
+        # attachments forwarding nothing but neighbor discovery.
+        - alert: GalacticEdgeServicePolicyUnresolved
+          expr: >-
+            max by (provider, reason) (galactic_edge_foundation_services{job="galactic-controller",policy="Unresolved"}) > 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Edge services of {{ $labels.provider }} have no resolvable traffic policy"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgeservicepolicyunresolved"
+            description: >-
+              {{ $value }} EdgeServices of provider {{ $labels.provider }} have reported TrafficPolicyResolved
+              False ({{ $labels.reason }}) for 10 minutes. Their attachments carry nothing but neighbor discovery.
+              The Policy Warning Event on each service names the missing or invalid policy.
+        # Another writer took a VPC scope from this process: it no longer
+        # programs or releases anything there until it restarts.
+        - alert: GalacticEdgeScopeLost
+          expr: galactic_edge_foundation_scopes_lost{job="galactic-edge"} > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "galactic-edge on {{ $labels.node }} lost {{ $value }} VPC ownership scopes"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgescopelost"
+            description: >-
+              Another writer has taken {{ $value }} VPC scopes from galactic-edge on {{ $labels.node }}, which no
+              longer programs or releases attachments in them. Its scope-ownership health check fails, so the
+              kubelet restarts it; this alert means the restart has not resolved it.
+        # Releases and gate sweeps that keep failing leave host state behind.
+        - alert: GalacticEdgeCleanupFailing
+          expr: increase(galactic_edge_foundation_cleanup_failures_total{job="galactic-edge"}[15m]) > 2
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "galactic-edge on {{ $labels.node }} keeps failing to release host state"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgecleanupfailing"
+            description: >-
+              galactic-edge on {{ $labels.node }} has failed more than twice in every 15-minute window for 15 minutes
+              to release an attachment's host state or sweep expired gates. Deleted attachments stay held by their
+              finalizer and their addresses stay allocated. The agent's log names the error.
+        - alert: GalacticEdgeMetricsDown
+          expr: up{job=~"galactic-edge|galactic-controller"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $labels.job }} metrics on {{ $labels.pod }} cannot be scraped"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgemetricsdown"
+            description: >-
+              Prometheus cannot scrape {{ $labels.job }} on {{ $labels.pod }}, so the other Galactic Edge alerts
+              cannot fire for it.

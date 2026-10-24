@@ -44,6 +44,7 @@ import (
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/claim"
+	"go.datum.net/galactic/internal/edge/diag"
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/timing"
@@ -118,6 +119,8 @@ type Agent struct {
 	BootClock claim.Clock
 	// Now is the wall clock, for grant expiry. Nil means time.Now.
 	Now func() time.Time
+	// Diag records programming failures, closed gates and failed cleanup.
+	Diag *diag.Recorder
 
 	// mu serializes passes: they share tickets.
 	mu sync.Mutex
@@ -378,6 +381,7 @@ func (a *Agent) applyScope(vpc string, active, releasing []*galacticv1alpha1.Edg
 		delete(links, id)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("release %s/%s: %w", att.Namespace, att.Name, err))
+			a.Diag.CleanupFailed()
 			continue
 		}
 		out = append(out, released(att))
@@ -393,6 +397,7 @@ func (a *Agent) applyScope(vpc string, active, releasing []*galacticv1alpha1.Edg
 	for id, l := range links {
 		if err := a.release(nil, l, podNS{}); err != nil {
 			errs = append(errs, fmt.Errorf("release orphaned link %s: %w", id, err))
+			a.Diag.CleanupFailed()
 		}
 	}
 	// An attachment whose route another one still holds, such as a prefix
@@ -556,6 +561,8 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 func (a *Agent) report(ctx context.Context, o outcome) error {
 	att := o.att
 	before := att.DeepCopy()
+	entered := o.status == metav1.ConditionFalse &&
+		diag.EnteredFailure(before.Status.Conditions, o.condition, o.reason)
 	meta.SetStatusCondition(&att.Status.Conditions, metav1.Condition{
 		Type: o.condition, Status: o.status, Reason: o.reason, Message: o.message,
 	})
@@ -575,6 +582,9 @@ func (a *Agent) report(ctx context.Context, o outcome) error {
 	if err != nil {
 		key := types.NamespacedName{Namespace: att.Namespace, Name: att.Name}
 		return fmt.Errorf("report %s on %s: %w", o.condition, key, err)
+	}
+	if entered {
+		a.Diag.Failure(att, diag.StageProgramming, o.reason, o.message, diag.ForAttachment(att))
 	}
 	return nil
 }

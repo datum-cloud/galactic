@@ -5,7 +5,9 @@
 # cannot remove the finalizer that holds one until it reports Released. It
 # reads routes, instances and their leases, services and providers to decide
 # each forwarding gate, and writes only a route's closedEpoch, which
-# galactic-edge-route-status limits to routes accepted on its own node.
+# galactic-edge-route-status limits to routes accepted on its own node. It
+# records a Warning Event on an attachment it fails to program and on a route
+# whose open forwarding gate it closes.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -26,6 +28,9 @@ rules:
   - apiGroups: [galactic.datumapis.com]
     resources: [edgeroutes/status]
     verbs: [get, patch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

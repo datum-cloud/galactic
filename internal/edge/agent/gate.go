@@ -17,7 +17,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	"go.datum.net/galactic/internal/edge/admission"
 	"go.datum.net/galactic/internal/edge/claim"
+	"go.datum.net/galactic/internal/edge/diag"
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/provider"
@@ -85,6 +87,9 @@ type verdict struct {
 	remove bool
 	// closed is the accepted epoch to record closed once the gate is.
 	closed int64
+	// cause is why the gate closes or is removed (diag.Cause*); empty when
+	// it is kept or opened.
+	cause string
 }
 
 // GateRoute decides the forwarding gate of one route accepted on this node
@@ -152,6 +157,12 @@ func (a *Agent) GateRoute(ctx context.Context, key ctrl.ObjectKey) (bool, time.D
 			return false, 0, err
 		}
 		changed = wasRouted != isOpen
+		if wasRouted && !isOpen && v.cause != "" {
+			corr := diag.ForRoute(&cached)
+			corr.Node = a.NodeName
+			a.Diag.GateClosed(&cached, v.cause, fmt.Sprintf("forwarding gate for %s at epoch %d closed: %s",
+				prefix, acc.Epoch, v.cause), corr)
+		}
 	}
 	if v.closed != 0 {
 		if err := a.recordIfClosed(ctx, &cached, l, prefix, v.closed); err != nil {
@@ -233,7 +244,7 @@ func (a *Agent) decide(ctx context.Context, cached *galacticv1alpha1.EdgeRoute, 
 	var rt galacticv1alpha1.EdgeRoute
 	switch err := a.APIReader.Get(ctx, ctrl.ObjectKeyFromObject(cached), &rt); {
 	case apierrors.IsNotFound(err):
-		return verdict{remove: true}
+		return verdict{remove: true, cause: diag.CauseRouteGone}
 	case err != nil:
 		return keep
 	}
@@ -241,28 +252,30 @@ func (a *Agent) decide(ctx context.Context, cached *galacticv1alpha1.EdgeRoute, 
 	if acc == nil || acc.Node != a.NodeName || rt.UID != cached.UID ||
 		acc.AttachmentUID != cached.Status.Accepted.AttachmentUID || rt.Spec.Prefix != cached.Spec.Prefix {
 		// Moved since the cache saw it; this link's row is no longer its.
-		return verdict{remove: true}
+		return verdict{remove: true, cause: diag.CauseHolderMoved}
 	}
 	if acc.Epoch <= rt.Status.ClosedEpoch {
 		// Closed and recorded: never opened again.
-		return verdict{remove: true}
+		return verdict{remove: true, cause: diag.CauseRevoked}
 	}
 	nowBoot := a.bootClock()
-	closeGate := verdict{closed: acc.Epoch}
-	if hasRow {
-		// Kept closed, not removed, until closedEpoch records it, so a
-		// restart cannot mistake the epoch for one never opened.
-		closeGate.set = &forwardgatemap.Gate{RenewStart: row.RenewStart, Epoch: uint64(acc.Epoch)}
+	closeGate := func(cause string) verdict {
+		v := verdict{closed: acc.Epoch, cause: cause}
+		if hasRow {
+			// Kept closed, not removed, until closedEpoch records it, so a
+			// restart cannot mistake the epoch for one never opened.
+			v.set = &forwardgatemap.Gate{RenewStart: row.RenewStart, Epoch: uint64(acc.Epoch)}
+		}
+		return v
 	}
-	if a.ended(&rt, &inst, apierrors.IsNotFound(instErr), row, hasRow, nowBoot) {
-		return closeGate
-	}
+	ended := a.ended(&rt, &inst, apierrors.IsNotFound(instErr), row, hasRow, nowBoot)
 	auth, ref, err := route.Check(ctx, a.APIReader, &rt, route.HolderOfAccepted(acc), a.now(), a.Params.MaxSkew)
+	if cause := closeCause(ended, ref, err); cause != "" {
+		return closeGate(cause)
+	}
 	switch {
 	case err != nil:
 		return keep
-	case ref != nil:
-		return closeGate
 	case !linked:
 		// No registered link yet: nothing to open.
 		return keep
@@ -278,7 +291,7 @@ func (a *Agent) decide(ctx context.Context, cached *galacticv1alpha1.EdgeRoute, 
 	if !auth.NotAfter.IsZero() {
 		ceiling := nowBoot + auth.NotAfter.Sub(a.now())
 		if ceiling <= nowBoot {
-			return closeGate
+			return closeGate(diag.CauseGrantCeiling)
 		}
 		deadline = min(deadline, ceiling)
 	}
@@ -293,17 +306,42 @@ func (a *Agent) decide(ctx context.Context, cached *galacticv1alpha1.EdgeRoute, 
 	return keep
 }
 
-// ended reports whether the accepted holder's gate must close whatever its
-// authority: core revoked it, the holder released it, its deadline passed,
-// or its instance is gone or of another boot or node.
+// closeCause is why the gate must close, or empty: ended, from ended, when
+// the gate must close whatever its authority, else the authority check's
+// refusal. A gate that expired because its deadline was capped at the grant's
+// ceiling expires when the grant does, so an expiry the check explains is
+// reported as the authority that ended, not as a renewal that stopped. A
+// failed check closes nothing ended does not.
+func closeCause(ended string, ref *route.Refusal, err error) string {
+	switch {
+	case ended != "" && ended != diag.CauseExpired:
+		return ended
+	case err != nil || ref == nil:
+		return ended
+	case ref.Reason == string(admission.GrantExpired):
+		return diag.CauseGrantCeiling
+	}
+	return diag.CauseAuthorityEnded
+}
+
+// ended returns why the accepted holder's gate must close whatever its
+// authority, or empty: core revoked it, the holder released it, its deadline
+// passed, or its instance is gone or of another boot or node.
 func (a *Agent) ended(rt *galacticv1alpha1.EdgeRoute, inst *galacticv1alpha1.EdgeInstance, instGone bool,
-	row forwardgatemap.Gate, hasRow bool, nowBoot time.Duration) bool {
+	row forwardgatemap.Gate, hasRow bool, nowBoot time.Duration) string {
 	acc := rt.Status.Accepted
 	c := rt.Spec.Claim
-	return !meta.IsStatusConditionTrue(rt.Status.Conditions, galacticv1alpha1.EdgeRouteAccepted) ||
-		(c != nil && c.Epoch == acc.Epoch && c.Released) ||
-		(hasRow && row.Epoch == uint64(acc.Epoch) && row.Deadline <= nowBoot) ||
-		instGone || inst.Spec.BootID != a.BootID || inst.Spec.NodeName != a.NodeName
+	switch {
+	case !meta.IsStatusConditionTrue(rt.Status.Conditions, galacticv1alpha1.EdgeRouteAccepted):
+		return diag.CauseRevoked
+	case c != nil && c.Epoch == acc.Epoch && c.Released:
+		return diag.CauseReleased
+	case hasRow && row.Epoch == uint64(acc.Epoch) && row.Deadline <= nowBoot:
+		return diag.CauseExpired
+	case instGone || inst.Spec.BootID != a.BootID || inst.Spec.NodeName != a.NodeName:
+		return diag.CauseInstanceGone
+	}
+	return ""
 }
 
 // commitGate writes one gate verdict in a commit of the link's VPC scope.

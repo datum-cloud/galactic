@@ -52,15 +52,25 @@ func TestGrantConflict(t *testing.T) {
 // grant sets the service's granted prefixes.
 func (f *fixture) grant(svc *galacticv1alpha1.EdgeService, prefixes ...string) {
 	f.t.Helper()
+	f.updateService(svc, func(s *galacticv1alpha1.EdgeService) { s.Spec.Prefixes = prefixes })
+}
+
+// updateService applies mutate to the service's latest version and writes it,
+// reading again when the controller's own status write got there first. It
+// returns the service as written.
+func (f *fixture) updateService(svc *galacticv1alpha1.EdgeService,
+	mutate func(*galacticv1alpha1.EdgeService)) *galacticv1alpha1.EdgeService {
+	f.t.Helper()
 	ctx := context.Background()
+	var s galacticv1alpha1.EdgeService
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var s galacticv1alpha1.EdgeService
 		if err := f.admin.Get(ctx, client.ObjectKeyFromObject(svc), &s); err != nil {
 			return err
 		}
-		s.Spec.Prefixes = prefixes
+		mutate(&s)
 		return f.admin.Update(ctx, &s)
 	}); err != nil {
 		f.t.Fatal(err)
 	}
+	return &s
 }

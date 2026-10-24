@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	"go.datum.net/galactic/internal/edge/diag"
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/forwardgatemap"
 )
@@ -201,6 +203,21 @@ func TestRegisterBeforeLinkUp(t *testing.T) {
 	if c := f.condition("a", galacticv1alpha1.EdgeAttachmentProgrammed); c == nil ||
 		c.Status != metav1.ConditionFalse || c.Reason != ReasonDatapathFailed {
 		t.Fatalf("Programmed after a failed registration = %+v, want False/%s", c, ReasonDatapathFailed)
+	}
+	f.reconcile(a)
+	failed := f.events.Find(diag.StageProgramming, ReasonDatapathFailed)
+	if len(failed) != 1 || !strings.Contains(failed[0].Note, "enforcement unavailable") {
+		t.Fatalf("programming failure events %+v, want one naming the error", failed)
+	}
+	att := f.get("a")
+	corr := failed[0].Correlation()
+	if corr["attachment"] != att.Namespace+"/a" || corr["attachmentUID"] != string(att.UID) ||
+		corr["podUID"] != pod1UID || corr["node"] != node {
+		t.Fatalf("programming failure correlation %v", corr)
+	}
+	if got := f.counter("galactic_edge_foundation_failures_total",
+		map[string]string{"stage": "Programming", "reason": ReasonDatapathFailed}); got != 1 {
+		t.Fatalf("programming failures counted %v, want 1", got)
 	}
 	links := f.links()
 	if len(links) != 1 {
@@ -505,6 +522,10 @@ func TestFailedReleaseIsRetried(t *testing.T) {
 	}
 	if c := f.condition("a", galacticv1alpha1.EdgeAttachmentReleased); c != nil {
 		t.Fatalf("released without reaching the pod's runtime: %+v", c)
+	}
+
+	if got := f.counter("galactic_edge_foundation_cleanup_failures_total", nil); got != 2 {
+		t.Fatalf("cleanup failures counted %v, want 2", got)
 	}
 
 	f.pods.down = false

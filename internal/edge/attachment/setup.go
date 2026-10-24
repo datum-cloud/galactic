@@ -48,7 +48,7 @@ func Setup(mgr ctrl.Manager, r *Reconciler) error {
 		return fmt.Errorf("set up EdgeService source: %w", err)
 	}
 	if err := (&ServiceReconciler{
-		Client: mgr.GetClient(), APIReader: r.APIReader, MaxSkew: r.MaxSkew, Now: r.Now,
+		Client: mgr.GetClient(), APIReader: r.APIReader, MaxSkew: r.MaxSkew, Now: r.Now, Diag: r.Diag,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up EdgeService reconciler: %w", err)
 	}

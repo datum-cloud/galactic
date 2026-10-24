@@ -1,0 +1,22 @@
+# Scrapes each edge node's galactic-edge metrics port (metrics, 9186), which
+# serves the node's forwarding gates by state, the datapath's closed-gate drop
+# counters, gate closures by cause, programming and cleanup failures and lost
+# ownership scopes. The pod uses hostNetwork, so its pod IP is the node's own.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: galactic-edge
+  labels:
+    app.kubernetes.io/name: galactic-edge
+spec:
+  # job="galactic-edge", which the alert rules match on.
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-edge
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

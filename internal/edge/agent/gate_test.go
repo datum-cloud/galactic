@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strconv"
 	"testing"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/claim"
+	"go.datum.net/galactic/internal/edge/diag"
+	"go.datum.net/galactic/internal/edge/diag/diagtest"
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/provider"
 	"go.datum.net/galactic/internal/edge/route"
@@ -298,6 +301,7 @@ func TestGateExpiry(t *testing.T) {
 	if g, ok := f.gateRow(h); !ok || g.Deadline != 0 || g.Epoch != 1 {
 		t.Fatalf("expired gate %+v (%t), want it kept closed", g, ok)
 	}
+	f.expectClosure(diag.CauseExpired, 1)
 	if got := f.routeObj().Status.ClosedEpoch; got != 1 {
 		t.Fatalf("closedEpoch %d after expiry, want 1", got)
 	}
@@ -327,6 +331,8 @@ func TestGateExpiry(t *testing.T) {
 // not this one, or the attachment stops being ready.
 func TestGateClosesOnRevocation(t *testing.T) {
 	ctx := context.Background()
+	causes := map[string]string{"revoked": diag.CauseRevoked, "released": diag.CauseReleased,
+		"other boot": diag.CauseInstanceGone, "not ready": diag.CauseAuthorityEnded}
 	for name, revoke := range map[string]func(*fixture, *holder){
 		"revoked": func(f *fixture, _ *holder) {
 			rt := f.routeObj()
@@ -385,6 +391,7 @@ func TestGateClosesOnRevocation(t *testing.T) {
 			if got := f.routeObj().Status.ClosedEpoch; got != 1 {
 				t.Fatalf("closedEpoch %d, want 1", got)
 			}
+			f.expectClosure(causes[name], 1)
 		})
 	}
 }
@@ -419,6 +426,31 @@ func TestGateCeiling(t *testing.T) {
 	f.gate(a)
 	if g, _ := f.gateRow(h); g.Deadline != 0 {
 		t.Fatalf("gate %+v at the ceiling, want closed", g)
+	}
+	f.expectClosure(diag.CauseGrantCeiling, 1)
+}
+
+// expectClosure checks the agent recorded exactly one closure of the route's
+// gate, for cause, as an Ownership Event on the route naming its holder,
+// node and epoch, and counted it.
+func (f *fixture) expectClosure(cause string, epoch int64) {
+	f.t.Helper()
+	var closed []diagtest.Event
+	for _, e := range f.events.Events() {
+		if e.Action == string(diag.StageOwnership) {
+			closed = append(closed, e)
+		}
+	}
+	if len(closed) != 1 || closed[0].Reason != cause || closed[0].Name != routeName {
+		f.t.Fatalf("gate closure events %+v, want one for %s", closed, cause)
+	}
+	corr := closed[0].Correlation()
+	if corr["route"] != edgeNS+"/"+routeName || corr["prefix"] != sitePrefix.String() || corr["node"] != node ||
+		corr["epoch"] != strconv.FormatInt(epoch, 10) || corr["provider"] != providerName || corr["attachmentUID"] == "" {
+		f.t.Fatalf("gate closure correlation %v", corr)
+	}
+	if got := f.counter("galactic_edge_foundation_gate_closures_total", map[string]string{"cause": cause}); got != 1 {
+		f.t.Fatalf("gate closures counted %v for %s, want 1", got, cause)
 	}
 }
 

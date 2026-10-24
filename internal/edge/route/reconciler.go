@@ -39,6 +39,7 @@ import (
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/claim"
+	"go.datum.net/galactic/internal/edge/diag"
 	"go.datum.net/galactic/internal/edge/provider"
 )
 
@@ -70,6 +71,8 @@ type Reconciler struct {
 	// of each VPC on each node, and the BGPAdvertisement published for each
 	// accepted route.
 	BGPNamespace string
+	// Diag records claims refused and accepted holders revoked.
+	Diag *diag.Recorder
 
 	mu sync.Mutex
 	// observed holds the instance lease versions this leader is waiting on,
@@ -136,10 +139,14 @@ func (r *Reconciler) decide(ctx context.Context, rt *galacticv1alpha1.EdgeRoute)
 			}
 		}
 		if ref != nil {
-			return ctrl.Result{}, r.setStatus(ctx, rt, func(s *galacticv1alpha1.EdgeRouteStatus) {
-				setCondition(s, galacticv1alpha1.EdgeRouteAccepted, metav1.ConditionFalse, ReasonRevoked,
-					fmt.Sprintf("epoch %d revoked: %s: %s", acc.Epoch, ref.Reason, ref.Message))
-			})
+			msg := fmt.Sprintf("epoch %d revoked: %s: %s", acc.Epoch, ref.Reason, ref.Message)
+			if err := r.setStatus(ctx, rt, func(s *galacticv1alpha1.EdgeRouteStatus) {
+				setCondition(s, galacticv1alpha1.EdgeRouteAccepted, metav1.ConditionFalse, ReasonRevoked, msg)
+			}); err != nil {
+				return ctrl.Result{}, err
+			}
+			r.Diag.Failure(rt, diag.StageRoute, ref.Reason, msg, diag.ForRoute(rt))
+			return ctrl.Result{}, nil
 		}
 	}
 
@@ -170,9 +177,16 @@ func (r *Reconciler) decide(ctx context.Context, rt *galacticv1alpha1.EdgeRoute)
 func (r *Reconciler) accept(ctx context.Context, rt *galacticv1alpha1.EdgeRoute) (ctrl.Result, error) {
 	c := rt.Spec.Claim
 	pending := func(reason, message string, after time.Duration) (ctrl.Result, error) {
+		// Waiting to fence the previous holder is the claim's normal path,
+		// not a failure.
+		refused := reason != ReasonWaiting && reason != ReasonIndexRebuilt &&
+			diag.EnteredFailure(rt.Status.Conditions, galacticv1alpha1.EdgeRouteClaimed, reason)
 		err := r.setStatus(ctx, rt, func(s *galacticv1alpha1.EdgeRouteStatus) {
 			setCondition(s, galacticv1alpha1.EdgeRouteClaimed, metav1.ConditionFalse, reason, message)
 		})
+		if err == nil && refused {
+			r.Diag.Failure(rt, diag.StageRoute, reason, message, diag.ForRoute(rt))
+		}
 		return ctrl.Result{RequeueAfter: after}, err
 	}
 	auth, ref, err := Check(ctx, r.APIReader, rt, HolderOfClaim(c), r.now(), r.Params.MaxSkew)

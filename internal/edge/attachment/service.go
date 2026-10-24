@@ -23,6 +23,7 @@ import (
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/admission"
+	"go.datum.net/galactic/internal/edge/diag"
 	"go.datum.net/galactic/internal/trafficpolicy/cell"
 )
 
@@ -47,6 +48,8 @@ type ServiceReconciler struct {
 	MaxSkew time.Duration
 	// Now is the wall clock. Nil means time.Now.
 	Now func() time.Time
+	// Diag records the service entering a refused or unresolved state.
+	Diag *diag.Recorder
 }
 
 // Reconcile implements reconcile.Reconciler.
@@ -79,7 +82,15 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	changed := svc.Status.ObservedGeneration != svc.Generation
+	var entered []metav1.Condition
 	for _, cond := range []metav1.Condition{cond, policy} {
+		// A transient refusal shares its reason with a definite one, so a new
+		// message also counts as a new failure.
+		prev := meta.FindStatusCondition(svc.Status.Conditions, cond.Type)
+		if cond.Status == metav1.ConditionFalse &&
+			(diag.EnteredFailure(svc.Status.Conditions, cond.Type, cond.Reason) || prev.Message != cond.Message) {
+			entered = append(entered, cond)
+		}
 		c := meta.FindStatusCondition(svc.Status.Conditions, cond.Type)
 		changed = changed || c == nil || c.Status != cond.Status || c.Reason != cond.Reason ||
 			c.Message != cond.Message || c.ObservedGeneration != cond.ObservedGeneration
@@ -93,6 +104,18 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update EdgeService %s status: %w", req.NamespacedName, err)
 		}
+	}
+	corr := diag.Correlation{Provider: svc.Spec.ProviderRef.Name, Service: svc.Namespace + "/" + svc.Name,
+		ServiceUID: string(svc.UID), ServiceGeneration: svc.Generation}
+	for _, c := range entered {
+		stage := diag.StageAdmission
+		if c.Type == ConditionServiceTrafficPolicy {
+			stage = diag.StagePolicy
+		}
+		if c.Type == ConditionServiceAdmitted && ref != nil && ref.transient {
+			continue
+		}
+		r.Diag.Failure(&svc, stage, c.Reason, c.Message, corr)
 	}
 	switch {
 	case ref != nil && ref.transient:

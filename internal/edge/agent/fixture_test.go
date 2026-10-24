@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -27,6 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	"go.datum.net/galactic/internal/edge/diag"
+	"go.datum.net/galactic/internal/edge/diag/diagtest"
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/forwardgatemap"
@@ -307,6 +310,11 @@ type fixture struct {
 	// boot is the node's CLOCK_BOOTTIME, advanced by hand.
 	boot time.Duration
 	wall time.Time
+	// diag is every agent's diagnostics, recording into events and
+	// metrics.
+	diag    *diag.Recorder
+	events  *diagtest.Recorder
+	metrics *prometheus.Registry
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -318,6 +326,7 @@ func newFixture(t *testing.T) *fixture {
 		boot: time.Hour, wall: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC),
 	}
 	f.dp = &datapath{rows: map[uint32]uint32{}, gates: f.gates}
+	f.diag, f.events, f.metrics = diagtest.New("node")
 	in(t, f.host, func() error {
 		for vpc, table := range vrfTables {
 			vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: intf.GenerateInterfaceNameVRF(vpc)}, Table: table}
@@ -361,7 +370,34 @@ func (f *fixture) agent() *Agent {
 		Ownership: auth, Host: f.hostNS, Namespaces: f.pods, Datapath: f.dp, MTU: mtu,
 		APIReader: f.client, Gates: f.gates, Params: gateParams, BootID: bootID,
 		BootClock: func() time.Duration { return f.boot }, Now: func() time.Time { return f.wall },
+		Diag: f.diag,
 	}
+}
+
+// counter returns the value of the node's counter name with labels.
+func (f *fixture) counter(name string, labels map[string]string) float64 {
+	f.t.Helper()
+	families, err := f.metrics.Gather()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	for _, fam := range families {
+		if fam.GetName() != name {
+			continue
+		}
+		for _, m := range fam.GetMetric() {
+			match := true
+			for _, l := range m.GetLabel() {
+				if v, ok := labels[l.GetName()]; ok && v != l.GetValue() {
+					match = false
+				}
+			}
+			if match {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
 }
 
 // pod creates a provider pod namespace and makes it resolvable.

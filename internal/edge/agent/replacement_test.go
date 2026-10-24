@@ -234,7 +234,9 @@ func startE2E(t *testing.T) *e2e {
 	}
 	t.Cleanup(func() { _ = e.gates.Close() })
 
-	e.run(func(mgr ctrl.Manager) error { return route.Setup(mgr, e2eParams, timing.BootClock, "galactic-system") })
+	e.run(func(mgr ctrl.Manager) error {
+		return route.Setup(mgr, e2eParams, timing.BootClock, "galactic-system", nil)
+	})
 	e.reader = &switchReader{}
 	e.stop = e.startAgent(1)
 	return e

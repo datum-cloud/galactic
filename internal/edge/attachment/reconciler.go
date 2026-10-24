@@ -38,6 +38,7 @@ import (
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/admission"
+	"go.datum.net/galactic/internal/edge/diag"
 )
 
 // Condition reasons the reconciler sets beyond admission's own.
@@ -81,6 +82,9 @@ type Reconciler struct {
 	MaxSkew time.Duration
 	// Now is the wall clock. Nil means time.Now.
 	Now func() time.Time
+	// Diag records attachments refused admission or allocation, and admitted
+	// attachments whose authority ended.
+	Diag *diag.Recorder
 
 	mu    sync.Mutex
 	auths map[types.NamespacedName]*admission.Authorization
@@ -152,14 +156,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		// Keep the admitted state: only a definite refusal revokes it.
 		return ctrl.Result{RequeueAfter: transientRetry}, nil
 	}
+	cond, stage := galacticv1alpha1.EdgeAttachmentAdmitted, diag.StageAdmission
+	if ref.reason == ReasonPoolExhausted {
+		cond, stage = galacticv1alpha1.EdgeAttachmentAllocated, diag.StageAllocation
+	}
+	// A transient refusal writes its reason too, and may share it with a
+	// later definite one, so a new message also counts as a new failure.
+	entered := diag.EnteredFailure(att.Status.Conditions, cond, ref.reason)
+	if prev := meta.FindStatusCondition(att.Status.Conditions, cond); prev != nil && prev.Message != ref.message {
+		entered = true
+	}
 	if err := r.setStatus(ctx, &att, func(s *galacticv1alpha1.EdgeAttachmentStatus) {
-		cond := galacticv1alpha1.EdgeAttachmentAdmitted
-		if ref.reason == ReasonPoolExhausted {
-			cond = galacticv1alpha1.EdgeAttachmentAllocated
-		}
 		setCondition(s, cond, metav1.ConditionFalse, ref.reason, ref.message)
 	}); err != nil {
 		return ctrl.Result{}, err
+	}
+	if entered && !ref.transient {
+		r.Diag.Failure(&att, stage, ref.reason, ref.message, correlation(&att, svc))
 	}
 	if ref.transient {
 		return ctrl.Result{RequeueAfter: transientRetry}, nil
@@ -531,6 +544,9 @@ func (r *Reconciler) startDrain(ctx context.Context, att *galacticv1alpha1.EdgeA
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
+	r.Diag.Failure(att, diag.StageAdmission, ref.reason,
+		fmt.Sprintf("authority ended, draining until %s: %s", deadline.UTC().Format(time.RFC3339), ref.message),
+		correlation(att, svc))
 	return r.drain(ctx, att)
 }
 
@@ -608,6 +624,16 @@ func (r *Reconciler) setStatus(ctx context.Context, att *galacticv1alpha1.EdgeAt
 		return fmt.Errorf("update EdgeAttachment %s/%s status: %w", att.Namespace, att.Name, err)
 	}
 	return nil
+}
+
+// correlation is att's correlation, with the generation of svc when svc is
+// the service att names.
+func correlation(att *galacticv1alpha1.EdgeAttachment, svc *galacticv1alpha1.EdgeService) diag.Correlation {
+	c := diag.ForAttachment(att)
+	if svc != nil && string(svc.UID) == att.Spec.ServiceRef.UID {
+		c.ServiceGeneration = svc.Generation
+	}
+	return c
 }
 
 func setCondition(s *galacticv1alpha1.EdgeAttachmentStatus, t string, status metav1.ConditionStatus,
