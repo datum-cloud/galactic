@@ -287,6 +287,32 @@ func verifyBoth(host, pod *Namespace) error {
 	return pod.Verify()
 }
 
+// VRFTable returns the routing table of host's VRF name, and false when
+// there is no link of that name.
+func VRFTable(host *Namespace, name string) (uint32, bool, error) {
+	if err := host.Verify(); err != nil {
+		return 0, false, err
+	}
+	h, err := host.netlink()
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = h.Close() }()
+	link, err := h.LinkByName(name)
+	var notFound netlink.LinkNotFoundError
+	switch {
+	case errors.As(err, &notFound):
+		return 0, false, nil
+	case err != nil:
+		return 0, false, fmt.Errorf("hostattach: look up VRF %q: %w", name, err)
+	}
+	v, ok := link.(*netlink.Vrf)
+	if !ok {
+		return 0, false, fmt.Errorf("hostattach: %q is a %s, not a VRF", name, link.Type())
+	}
+	return v.Table, true, nil
+}
+
 func vrfTable(h *netlink.Handle, name string) (uint32, error) {
 	link, err := h.LinkByName(name)
 	if err != nil {

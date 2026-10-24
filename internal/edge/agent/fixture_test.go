@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -161,6 +162,8 @@ type datapath struct {
 	// onRegister, when set, is called with each link Register is called for.
 	onRegister func(ifindex uint32)
 	gates      *gates
+	// routes is what SyncRoutes last made each VRF table's local routes.
+	routes map[uint32][]netip.Prefix
 }
 
 func (d *datapath) Register(vrfTable, ifindex uint32, _ string, addr netip.Addr) error {
@@ -193,6 +196,37 @@ func (d *datapath) Unregister(ifindex uint32) error {
 func (d *datapath) Forget(ifindex uint32) error {
 	d.gates.deleteLink(ifindex)
 	return nil
+}
+
+func (d *datapath) SyncRoutes(vrfTable uint32, want []netip.Prefix) error {
+	d.Lock()
+	defer d.Unlock()
+	d.routes[vrfTable] = slices.Clone(want)
+	return nil
+}
+
+// expectLocal fails unless the workloads of vpc reach exactly want on the
+// node's edge links, as SyncRoutes last left its VRF table.
+func (f *fixture) expectLocal(vpc string, want ...string) {
+	f.t.Helper()
+	wanted := make([]netip.Prefix, 0, len(want))
+	for _, w := range want {
+		wanted = append(wanted, netip.MustParsePrefix(w))
+	}
+	slices.SortFunc(wanted, func(x, y netip.Prefix) int { return x.Addr().Compare(y.Addr()) })
+	if got := f.dp.localRoutes(vrfTables[vpc]); !slices.Equal(got, wanted) {
+		f.t.Errorf("VPC %s local routes %v, want %v", vpc, got, wanted)
+	}
+}
+
+// localRoutes returns the local routes SyncRoutes last made vrfTable's,
+// sorted.
+func (d *datapath) localRoutes(vrfTable uint32) []netip.Prefix {
+	d.Lock()
+	defer d.Unlock()
+	out := slices.Clone(d.routes[vrfTable])
+	slices.SortFunc(out, func(x, y netip.Prefix) int { return x.Addr().Compare(y.Addr()) })
+	return out
 }
 
 // gates is an in-memory forwarding gate.
@@ -325,7 +359,7 @@ func newFixture(t *testing.T) *fixture {
 		gates: newGates(), stateDir: t.TempDir(),
 		boot: time.Hour, wall: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC),
 	}
-	f.dp = &datapath{rows: map[uint32]uint32{}, gates: f.gates}
+	f.dp = &datapath{rows: map[uint32]uint32{}, gates: f.gates, routes: map[uint32][]netip.Prefix{}}
 	f.diag, f.events, f.metrics = diagtest.New("node")
 	in(t, f.host, func() error {
 		for vpc, table := range vrfTables {

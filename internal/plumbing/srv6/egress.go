@@ -56,13 +56,18 @@ func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 
 // RouteEgressDel removes the egress_route_table entry for prefix from Linux
 // VRF table tableID. The counterpart to RouteEgressAdd.
+//
+// It keeps a pass-through entry galactic-edge owns: the prefix is then held
+// by an edge attachment on this node, and withdrawing another node's route
+// for it, as when the prefix moves here, must not hand the VRF's workloads
+// on this node to its ::/0 shard route.
 func RouteEgressDel(prefix *net.IPNet, tableID uint32) error {
 	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
 	if err != nil {
 		return fmt.Errorf("srv6: RouteEgressDel: %w", err)
 	}
 	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
-	return table.Unregister(tableID, prefix)
+	return table.UnregisterUnlessPassThroughAs(tableID, prefix, egressroutemap.PassThroughEdge)
 }
 
 // EgressDefaultRouteAdd installs egress_route_table's default (::/0) entry for

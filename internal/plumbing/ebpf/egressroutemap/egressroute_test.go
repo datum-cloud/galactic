@@ -409,3 +409,61 @@ func TestEgressRouteTable_PrefixesListsExactEntriesByTable(t *testing.T) {
 		t.Errorf("Prefixes() = %v, want %v", all, want)
 	}
 }
+
+// TestEgressRouteTable_PassThroughOwners: an owner's pass-through entries are
+// listed with that owner and removed only by it, and an encapsulating entry
+// is never removed as a pass-through.
+func TestEgressRouteTable_PassThroughOwners(t *testing.T) {
+	stubResolveLinkAndL2(t)
+	tbl := NewEgressRouteTable(newFakeTable())
+	cni, edge, encap := mustCIDR(t, "fd20::/64"), mustCIDR(t, "fd00:aa::1/128"), mustCIDR(t, "fd00:bb::/64")
+	if err := tbl.RegisterPassThrough(7, cni); err != nil {
+		t.Fatal(err)
+	}
+	if err := tbl.RegisterPassThroughAs(7, edge, PassThroughEdge); err != nil {
+		t.Fatal(err)
+	}
+	if err := tbl.Register(7, encap, net.ParseIP("2001:db8:ff01:9:e001::")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tbl.RegisterPassThroughAs(8, edge, PassThroughEdge); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := tbl.Entries(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[netip.Prefix]Entry{
+		netip.MustParsePrefix("fd20::/64"):      {PassThrough: true, Owner: PassThroughCNI},
+		netip.MustParsePrefix("fd00:aa::1/128"): {PassThrough: true, Owner: PassThroughEdge},
+		netip.MustParsePrefix("fd00:bb::/64"):   {PassThrough: false},
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("Entries(7) = %v, want %d entries", entries, len(want))
+	}
+	for p, w := range want {
+		got, ok := entries[p]
+		if !ok || got.PassThrough != w.PassThrough || (w.PassThrough && got.Owner != w.Owner) {
+			t.Errorf("Entries(7)[%s] = %+v (%t), want %+v", p, got, ok, w)
+		}
+	}
+
+	for _, p := range []*net.IPNet{cni, encap} {
+		if removed, err := tbl.UnregisterPassThroughAs(7, p, PassThroughEdge); err != nil || removed {
+			t.Errorf("UnregisterPassThroughAs(7, %s, edge) = %t, %v; want another owner's entry kept", p, removed, err)
+		}
+	}
+	if removed, err := tbl.UnregisterPassThroughAs(7, edge, PassThroughEdge); err != nil || !removed {
+		t.Fatalf("UnregisterPassThroughAs(7, %s, edge) = %t, %v; want removed", edge, removed, err)
+	}
+	if removed, err := tbl.UnregisterPassThroughAs(7, edge, PassThroughEdge); err != nil || removed {
+		t.Errorf("second UnregisterPassThroughAs = %t, %v; want nothing left to remove", removed, err)
+	}
+	if entries, _ = tbl.Entries(7); len(entries) != 2 {
+		t.Errorf("Entries(7) after removal = %v, want the CNI and encapsulating entries", entries)
+	}
+	if entries, _ = tbl.Entries(8); len(entries) != 1 {
+		t.Errorf("Entries(8) = %v, want the other table's entry kept", entries)
+	}
+}

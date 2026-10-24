@@ -329,15 +329,114 @@ func (t *EgressRouteTable) Register(tableID uint32, prefix *net.IPNet, sid net.I
 // Nothing is resolved here, unlike Register: a pass-through entry carries no
 // SID and is never encapsulated toward.
 func (t *EgressRouteTable) RegisterPassThrough(tableID uint32, prefix *net.IPNet) error {
+	return t.RegisterPassThroughAs(tableID, prefix, PassThroughCNI)
+}
+
+// PassThroughOwner names the writer of a pass-through entry. It is kept in the
+// entry's first SID byte, which usid_egress never reads for a pass-through, so
+// a writer can find and remove its own entries without touching another's.
+type PassThroughOwner byte
+
+const (
+	// PassThroughCNI owns the entries RegisterPassThrough writes: a
+	// workload attachment's prefixes and gateways.
+	PassThroughCNI PassThroughOwner = 0
+	// PassThroughEdge owns the entries galactic-edge writes: an edge
+	// attachment's address, and each prefix of a route the attachment
+	// holds. galactic-router's withdrawals keep them
+	// (UnregisterUnlessPassThroughAs).
+	PassThroughEdge PassThroughOwner = 1
+)
+
+// RegisterPassThroughAs is RegisterPassThrough for an entry owner owns.
+func (t *EgressRouteTable) RegisterPassThroughAs(tableID uint32, prefix *net.IPNet, owner PassThroughOwner) error {
 	key, err := buildKey(tableID, prefix)
 	if err != nil {
 		return fmt.Errorf("egressroutemap: egress_route_table: register pass-through: %w", err)
 	}
-	if err := t.table.Put(key, prog.UsidEgressRouteValue{}); err != nil {
+	var value prog.UsidEgressRouteValue
+	value.Sid[0] = byte(owner)
+	if err := t.table.Put(key, value); err != nil {
 		return fmt.Errorf("egressroutemap: egress_route_table: register pass-through table=%d prefix=%s: %w",
 			tableID, prefix, err)
 	}
 	return nil
+}
+
+// UnregisterPassThroughAs removes the entry for (tableID, prefix) only while
+// it is a pass-through entry owner owns, and reports whether it removed one.
+// It reads the entry just before deleting it, so an encapsulating entry
+// another writer installed for the same prefix since the caller last looked is
+// kept; one installed between that read and the delete is not, as the map
+// offers no compare-and-delete.
+func (t *EgressRouteTable) UnregisterPassThroughAs(
+	tableID uint32, prefix *net.IPNet, owner PassThroughOwner,
+) (bool, error) {
+	key, err := buildKey(tableID, prefix)
+	if err != nil {
+		return false, fmt.Errorf("egressroutemap: egress_route_table: unregister pass-through: %w", err)
+	}
+	// A lookup bounded by the key's own length answers with the exact entry
+	// when there is one. Otherwise it answers with a shorter entry, and the
+	// delete below then finds no entry of the key's own.
+	var value prog.UsidEgressRouteValue
+	if err := t.table.Lookup(key, &value); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("egressroutemap: egress_route_table: unregister pass-through table=%d prefix=%s: %w",
+			tableID, prefix, err)
+	}
+	if value.LinkIfindex != 0 || PassThroughOwner(value.Sid[0]) != owner {
+		return false, nil
+	}
+	if err := t.table.Delete(key); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("egressroutemap: egress_route_table: unregister pass-through table=%d prefix=%s: %w",
+			tableID, prefix, err)
+	}
+	return true, nil
+}
+
+// Entries returns every entry of Linux VRF table tableID by its exact prefix,
+// with whether it is a pass-through entry and, if so, its owner. It walks the
+// whole map, every table's entries, once.
+func (t *EgressRouteTable) Entries(tableID uint32) (map[netip.Prefix]Entry, error) {
+	entries := map[netip.Prefix]Entry{}
+	var (
+		key   prog.UsidEgressRouteKey
+		value prog.UsidEgressRouteValue
+	)
+	iter := t.table.Iterate()
+	for iter.Next(&key, &value) {
+		if key.TableId != tableID {
+			continue
+		}
+		ipnet := keyPrefix(key)
+		addr, ok := netip.AddrFromSlice(ipnet.IP)
+		if !ok {
+			continue
+		}
+		ones, _ := ipnet.Mask.Size()
+		entries[netip.PrefixFrom(addr.Unmap(), ones)] = Entry{
+			Owner: PassThroughOwner(value.Sid[0]), PassThrough: value.LinkIfindex == 0,
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("egressroutemap: egress_route_table: list table %d: %w", tableID, err)
+	}
+	return entries, nil
+}
+
+// Entry describes one egress_route_table entry for Entries.
+type Entry struct {
+	// PassThrough is false for an entry that encapsulates.
+	PassThrough bool
+	// Owner is the pass-through entry's owner; meaningless when PassThrough
+	// is false.
+	Owner PassThroughOwner
 }
 
 // Lookup reads the entry egress_route_table resolves (tableID, prefix) to and
@@ -384,6 +483,30 @@ func (t *EgressRouteTable) Prefixes() (map[uint32]map[string]struct{}, error) {
 		return nil, fmt.Errorf("egressroutemap: egress_route_table: list prefixes: %w", err)
 	}
 	return byTable, nil
+}
+
+// UnregisterUnlessPassThroughAs is Unregister, except that it keeps a
+// pass-through entry owner owns. The map's lookup is longest-prefix, so a
+// pass-through answer is either the key's own entry or a shorter one; in the
+// second case the key has no entry to remove. It reads the entry just before
+// deleting it, so an owner's entry written between that read and the delete
+// is removed, as the map offers no compare-and-delete.
+func (t *EgressRouteTable) UnregisterUnlessPassThroughAs(tableID uint32, prefix *net.IPNet,
+	owner PassThroughOwner) error {
+	key, err := buildKey(tableID, prefix)
+	if err != nil {
+		return fmt.Errorf("egressroutemap: egress_route_table: unregister: %w", err)
+	}
+	var value prog.UsidEgressRouteValue
+	switch err := t.table.Lookup(key, &value); {
+	case errors.Is(err, ebpf.ErrKeyNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("egressroutemap: egress_route_table: unregister table=%d prefix=%s: %w", tableID, prefix, err)
+	case value.LinkIfindex == 0 && PassThroughOwner(value.Sid[0]) == owner:
+		return nil
+	}
+	return t.Unregister(tableID, prefix)
 }
 
 // Unregister removes egress_route_table's entry for (tableID, prefix). An entry
