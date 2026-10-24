@@ -1,5 +1,10 @@
 # fabric-api Deployment & Configuration
 
+The proposed [Looking Glass service contract](service-contract.md) defines the
+separate customer-service API, coverage, aggregate limits, and failure bounds
+for #1042. It is a future implementation contract; the interfaces and settings
+documented on this page remain the current baseline.
+
 This is a how-to and reference guide for deploying and configuring
 `fabric-api`, the looking glass over `fabric-router`'s FRR state. For the
 design rationale (why a sidecar, why pod identities, why the budgets are what
