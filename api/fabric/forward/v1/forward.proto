@@ -1,0 +1,43 @@
+// Copyright 2026 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// The gateway-to-gateway forwarding contract for the Looking Glass service.
+// It is internal to galactic: only a cell's gateway identity may call it, and
+// a follower replica uses it to hand a request it has already authenticated
+// and validated to the elected leader. Consumers of the Looking Glass service
+// never call it.
+
+syntax = "proto3";
+
+package fabric.forward.v1;
+
+import "fabric/service/v1/service.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "go.datum.net/galactic/api/fabric/forward/v1;forwardv1";
+
+// ForwardService runs on each cell's fabric-api gateway.
+service ForwardService {
+  // ForwardDiagnostic runs a RunDiagnostic request a follower received on
+  // the leader. A replica that is not the leader refuses it, so a request
+  // is forwarded at most once.
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  rpc ForwardDiagnostic(ForwardDiagnosticRequest) returns (stream fabric.service.v1.DiagnosticEvent);
+}
+
+// ForwardDiagnosticRequest is the typed envelope of a forwarded request. Its
+// cell, project and request IDs are those of request.
+message ForwardDiagnosticRequest {
+  // service is the URI SAN of the service identity that called the follower.
+  string service = 1;
+  // request is the validated request, its query in canonical form.
+  fabric.service.v1.RunDiagnosticRequest request = 2;
+  // received_at is when the follower first received the request; the
+  // 120 s expiration bound is measured from it.
+  google.protobuf.Timestamp received_at = 3;
+  // deadline is the absolute deadline the follower computed. The leader
+  // never extends it.
+  google.protobuf.Timestamp deadline = 4;
+}
