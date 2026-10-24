@@ -1,0 +1,23 @@
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: EdgeProvider
+metadata:
+  name: example-echo
+spec:
+  contractVersions:
+    - v1alpha1
+  capabilities:
+    - name: SocketAccess
+      version: v1
+    - name: PacketAccess
+      version: v1
+    - name: PrefixReachability
+      version: v1
+  serviceAccounts:
+    - namespace: edge-echo
+      name: edge-provider
+  # The provider takes its per-service configuration from its own
+  # configuration file (config.yaml), not from an API kind; this names that
+  # format for admission's check.
+  configuration:
+    group: examples.galactic.datumapis.com
+    kind: EchoConfig

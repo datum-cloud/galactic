@@ -1,0 +1,7 @@
+# The provider's half: its ServiceAccount and Deployment. An overlay sets the
+# namespace, the EdgeProvider name the pods run as (config.yaml's
+# provider), and the services in config.yaml, which it generates as the
+# edge-provider-config ConfigMap.
+resources:
+  - serviceaccount.yaml
+  - deployment.yaml
