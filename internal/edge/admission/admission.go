@@ -54,6 +54,14 @@ const (
 // it. Admission refuses any other version, whatever a provider declares.
 var supportedContractVersions = []string{"v1alpha1"}
 
+// supportedCapabilities are the capability versions this core implements.
+// Admission refuses any other version, whatever a provider declares.
+var supportedCapabilities = []Capability{
+	{Name: "SocketAccess", Version: "v1"},
+	{Name: "PacketAccess", Version: "v1"},
+	{Name: "PrefixReachability", Version: "v1"},
+}
+
 // Capability is a typed capability at a version, such as PacketAccess v1.
 type Capability struct {
 	Name    string
@@ -172,6 +180,9 @@ func Admit(providers map[string]Provider, grants map[string]Grant, req Request,
 			req.Provider, p.ConfigGroup, p.ConfigKind, req.ConfigGroup, req.ConfigKind)
 	}
 	for _, c := range req.Capabilities {
+		if !slices.Contains(supportedCapabilities, c) {
+			return refuse(UnsupportedCapability, "core does not implement %s %s", c.Name, c.Version)
+		}
 		if !slices.Contains(p.Capabilities, c) {
 			return refuse(UnsupportedCapability, "provider %q does not implement %s %s", req.Provider, c.Name, c.Version)
 		}
