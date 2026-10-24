@@ -69,8 +69,10 @@ const ownerPrefix = "galactic-edge/"
 type Datapath interface {
 	// Register registers the host link with ifindex, enslaved to the VRF
 	// with routing table vrfTable, as an edge link whose own address is
-	// addr: it carries nothing else until a gate opens for it. The link is
-	// gated before any program that forwards its traffic is attached.
+	// addr: it carries nothing else until a gate opens for it, and nothing
+	// its traffic policy does not allow. The link is gated before any
+	// program that forwards its traffic is attached. It is called while a
+	// new link is still down.
 	Register(vrfTable, ifindex uint32, ifname string, addr netip.Addr) error
 	// Unregister closes ifindex's gates and removes every row Register
 	// wrote for it except the gate's link row, so the link carries nothing
@@ -481,11 +483,11 @@ func (a *Agent) releaseLink(spec hostattach.Attachment) error {
 	return a.forget(own)
 }
 
-// program provisions one live attachment, reads it back and registers its
-// host link with the datapath. The host routes carry the prefixes whose gates
-// are open on the link as it was found, so a prefix is routed to the link
-// only once the link is registered and gated; a link created now carries
-// none until the next pass.
+// program provisions one live attachment, registering its host link with the
+// datapath before the link comes up, and reads it back. The host routes carry
+// the prefixes whose gates are open on the link as it was found, so a prefix
+// is routed to the link only once the link is registered and gated; a link
+// created now carries none until the next pass.
 func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hostattach.ObservedAttachment) outcome {
 	fail := func(reason string, err error) outcome {
 		return outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
@@ -506,8 +508,22 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 		return fail(ReasonNamespaceUnavailable, err)
 	}
 	defer func() { _ = pod.Close() }()
-	res, err := hostattach.Provision(a.Host, pod, spec)
 	fresh := link.ID != spec.ID
+	var datapathErr error
+	register := func(res hostattach.Result) error {
+		// A link created now may reuse the ifindex of a link a pod's
+		// deletion took with it, whose rows, gates included, nothing has
+		// removed yet: they are cleared before the new link is registered,
+		// so it never carries another attachment's prefixes or policy.
+		if fresh || res.HostIndex != link.HostIndex {
+			datapathErr = a.Datapath.Unregister(uint32(res.HostIndex))
+		}
+		if datapathErr == nil {
+			datapathErr = a.Datapath.Register(res.HostTable, uint32(res.HostIndex), spec.HostLink, spec.Address)
+		}
+		return datapathErr
+	}
+	_, err = hostattach.ProvisionRegistered(a.Host, pod, spec, register)
 	if errors.Is(err, hostattach.ErrStalePeer) {
 		// The pod's sandbox was replaced: the link to the old one is this
 		// attachment's own, so it is released and provisioned again, with
@@ -515,10 +531,12 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 		spec.Prefixes = nil
 		fresh = true
 		if err = a.releaseLink(spec); err == nil {
-			res, err = hostattach.Provision(a.Host, pod, spec)
+			_, err = hostattach.ProvisionRegistered(a.Host, pod, spec, register)
 		}
 	}
 	switch {
+	case datapathErr != nil:
+		return fail(ReasonDatapathFailed, err)
 	case errors.Is(err, hostattach.ErrNamespaceReplaced):
 		return fail(ReasonNamespaceReplaced, err)
 	case err != nil:
@@ -528,18 +546,6 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 	}
 	if err := hostattach.Readback(a.Host, pod, spec); err != nil {
 		return fail(ReasonReadbackFailed, err)
-	}
-	// A link created now may reuse the ifindex of a link a pod's deletion
-	// took with it, whose rows, gates included, nothing has removed yet:
-	// they are cleared before the new link is registered, so it never
-	// carries another attachment's prefixes.
-	if fresh || res.HostIndex != link.HostIndex {
-		if err := a.Datapath.Unregister(uint32(res.HostIndex)); err != nil {
-			return fail(ReasonDatapathFailed, err)
-		}
-	}
-	if err := a.Datapath.Register(res.HostTable, uint32(res.HostIndex), spec.HostLink, spec.Address); err != nil {
-		return fail(ReasonDatapathFailed, err)
 	}
 	return outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed, status: metav1.ConditionTrue,
 		reason: ReasonProgrammed, message: fmt.Sprintf("host link %s in %s", spec.HostLink, spec.HostVRF), spec: &spec}

@@ -3,10 +3,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package node is galactic-router's traffic policy reconciler: for every
-// VPCAttachment on this node, it compiles the policy each direction of its
-// interface is bound to and publishes it into the uSID datapath, keeps
-// each rule's counter row across updates, reports what it applied in the
-// binding's per-node status, and exports the counters.
+// VPCAttachment and EdgeAttachment on this node, it compiles the policy each
+// direction of its interface is bound to and publishes it into the uSID
+// datapath, keeps each rule's counter row across updates, reports what it
+// applied in a VPCAttachment binding's per-node status, and exports the
+// counters.
 package node
 
 import (
@@ -73,9 +74,17 @@ type ruleKey struct {
 	allow bool
 }
 
+// subject is an attachment whose interface the reconciler enforces: a
+// VPCAttachment, or an EdgeAttachment when edge is set. The two kinds may
+// share a namespace and name.
+type subject struct {
+	edge bool
+	types.NamespacedName
+}
+
 // applied is what is installed for one interface direction.
 type applied struct {
-	attachment types.NamespacedName
+	attachment subject
 	labels     interfaceLabels
 	token      uint64
 	policy     galacticv1alpha1.PolicyIdentity
@@ -99,8 +108,9 @@ type bindingKey struct {
 	dir     uint32
 }
 
-// Reconciler is galactic-router's traffic policy reconciler. Each request
-// names a VPCAttachment.
+// Reconciler is galactic-router's traffic policy reconciler. Each request of
+// its VPCAttachment controller names a VPCAttachment, and each of its
+// EdgeAttachment controller an EdgeAttachment.
 type Reconciler struct {
 	Client   client.Client
 	NodeName string
@@ -111,7 +121,7 @@ type Reconciler struct {
 	alloc    *tpmap.CounterAllocator
 	state    map[bindingKey]*applied
 	adopted  map[bindingKey]tpmap.Snapshot // bound before a restart, not yet reconciled
-	ifaces   map[types.NamespacedName]iface
+	ifaces   map[subject]iface
 	openedAt time.Time
 	sweptAt  time.Time // the last snapshot pin sweep
 
@@ -121,7 +131,8 @@ type Reconciler struct {
 	counterRows uint32
 }
 
-// SetupWithManager registers the reconciler and its collector.
+// SetupWithManager registers the reconciler's VPCAttachment and
+// EdgeAttachment controllers.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &galacticv1alpha1.TrafficPolicyBinding{},
 		policyRefIndex, func(o client.Object) []string {
@@ -152,12 +163,15 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		return out
 	})
-	return ctrl.NewControllerManagedBy(mgr).
+	if err := ctrl.NewControllerManagedBy(mgr).
 		Named("traffic-policy-node").
 		For(&cloudv1alpha1.VPCAttachment{}).
 		Watches(&galacticv1alpha1.TrafficPolicyBinding{}, sameName).
 		Watches(&galacticv1alpha1.TrafficPolicy{}, byPolicy).
-		Complete(r)
+		Complete(r); err != nil {
+		return err
+	}
+	return r.setupEdge(mgr)
 }
 
 // Reconcile implements reconcile.Reconciler. It changes the datapath under
@@ -199,40 +213,25 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (*statusUp
 	r.sweepAdopted(ctx)
 	r.sweepPins(ctx)
 
+	key := subject{NamespacedName: req.NamespacedName}
 	var att cloudv1alpha1.VPCAttachment
 	if err := r.Client.Get(ctx, req.NamespacedName, &att); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return nil, ctrl.Result{}, err
 		}
-		r.forget(ctx, req.NamespacedName)
+		r.forget(ctx, key)
 		return removeStatus, ctrl.Result{}, nil
 	}
 	if att.Status.Node != r.NodeName || att.Status.HostInterface == "" {
-		r.forget(ctx, req.NamespacedName)
+		r.forget(ctx, key)
 		return removeStatus, ctrl.Result{}, nil
 	}
-	link, err := netlink.LinkByName(att.Status.HostInterface)
+	ifindex, row, pending, err := r.interfaceRow(ctx, key, att.Status.HostInterface)
 	if err != nil {
-		var notFound netlink.LinkNotFoundError
-		if !errors.As(err, &notFound) {
-			// Keep what is installed through a transient failure.
-			return nil, ctrl.Result{}, fmt.Errorf("find host interface %q: %w", att.Status.HostInterface, err)
-		}
-		r.forget(ctx, req.NamespacedName)
-		return pendingStatus("the interface is not on this node yet"), ctrl.Result{RequeueAfter: pendingRetry}, nil
+		return nil, ctrl.Result{}, err
 	}
-	ifindex := uint32(link.Attrs().Index) //nolint:gosec // a kernel ifindex
-	var row prog.UsidTpIfaceValue
-	if err := r.maps.Interfaces.Lookup(ifindex, &row); err != nil {
-		if !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil, ctrl.Result{}, fmt.Errorf("read tp_iface_table[%d]: %w", ifindex, err)
-		}
-		// CNI ADD has not written the row yet; the interface denies as
-		// policy_unavailable meanwhile.
-		return pendingStatus("the interface's datapath state is not ready"), ctrl.Result{RequeueAfter: pendingRetry}, nil
-	}
-	if prev, ok := r.ifaces[req.NamespacedName]; ok && prev.ifindex != ifindex {
-		r.drop(ctx, prev.ifindex, req.NamespacedName)
+	if pending != "" {
+		return pendingStatus(pending), ctrl.Result{RequeueAfter: pendingRetry}, nil
 	}
 
 	var binding galacticv1alpha1.TrafficPolicyBinding
@@ -247,7 +246,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (*statusUp
 		namespace: att.Namespace, vpc: att.Spec.VPC.Name, attachment: att.Name,
 		iface: att.Spec.Interface.Name, ifaceUID: string(att.UID),
 	}
-	r.ifaces[req.NamespacedName] = iface{ifindex: ifindex, token: row.PolicyToken, labels: labels}
+	r.ifaces[key] = iface{ifindex: ifindex, token: row.PolicyToken, labels: labels}
 
 	var results [2]galacticv1alpha1.AppliedPolicy
 	var errs []error
@@ -256,7 +255,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (*statusUp
 		if bindingFound {
 			ref = d.ref(&binding.Spec)
 		}
-		res, err := r.reconcileDirection(ctx, bindingKey{ifindex, d.dir}, req.NamespacedName, labels,
+		res, err := r.reconcileDirection(ctx, bindingKey{ifindex, d.dir}, key, labels,
 			row.PolicyToken, att.Namespace, ref)
 		res.ObservedGeneration = binding.Generation
 		results[i] = res
@@ -271,9 +270,40 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (*statusUp
 	return update, ctrl.Result{RequeueAfter: resync}, errors.Join(errs...)
 }
 
+// interfaceRow finds the link named name and the policy row its installer
+// wrote for it. A non-empty pending says which of the two does not exist
+// yet; the interface denies as policy_unavailable meanwhile. What key had
+// installed on another ifindex, before its link was replaced or removed, is
+// dropped.
+func (r *Reconciler) interfaceRow(ctx context.Context, key subject, name string) (
+	ifindex uint32, row prog.UsidTpIfaceValue, pending string, err error,
+) {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if !errors.As(err, &notFound) {
+			// Keep what is installed through a transient failure.
+			return 0, row, "", fmt.Errorf("find host interface %q: %w", name, err)
+		}
+		r.forget(ctx, key)
+		return 0, row, "the interface is not on this node yet", nil
+	}
+	ifindex = uint32(link.Attrs().Index) //nolint:gosec // a kernel ifindex
+	if err := r.maps.Interfaces.Lookup(ifindex, &row); err != nil {
+		if !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, row, "", fmt.Errorf("read tp_iface_table[%d]: %w", ifindex, err)
+		}
+		return 0, row, "the interface's datapath state is not ready", nil
+	}
+	if prev, ok := r.ifaces[key]; ok && prev.ifindex != ifindex {
+		_ = r.drop(ctx, prev.ifindex, key) // logged; the old ifindex no longer carries key's traffic
+	}
+	return ifindex, row, "", nil
+}
+
 // reconcileDirection resolves, compiles and publishes one direction, and
 // returns what the node now applies there.
-func (r *Reconciler) reconcileDirection(ctx context.Context, key bindingKey, att types.NamespacedName,
+func (r *Reconciler) reconcileDirection(ctx context.Context, key bindingKey, att subject,
 	labels interfaceLabels, token uint64, ns string, ref *galacticv1alpha1.LocalPolicyReference,
 ) (galacticv1alpha1.AppliedPolicy, error) {
 	identity, model, unresolved, invalid, err := r.resolve(ctx, ns, ref)
@@ -356,7 +386,7 @@ func (r *Reconciler) resolve(ctx context.Context, ns string, ref *galacticv1alph
 // kernel has stopped every program that could still count into them. On
 // failure nothing it allocated stays allocated and the bound snapshot is
 // unchanged.
-func (r *Reconciler) publish(key bindingKey, att types.NamespacedName, labels interfaceLabels, token uint64,
+func (r *Reconciler) publish(key bindingKey, att subject, labels interfaceLabels, token uint64,
 	identity galacticv1alpha1.PolicyIdentity, model trafficpolicy.Policy,
 ) error {
 	prev := r.state[key]
@@ -440,11 +470,11 @@ func (r *Reconciler) invalidate(key bindingKey) error {
 	return nil
 }
 
-// forget drops what this node installed for an attachment that left it.
-// CNI DEL removes the interface's datapath state.
-func (r *Reconciler) forget(ctx context.Context, att types.NamespacedName) {
+// forget drops what this node installed for an attachment that left it. Its
+// installer removes the interface's datapath state.
+func (r *Reconciler) forget(ctx context.Context, att subject) {
 	if i, ok := r.ifaces[att]; ok {
-		r.drop(ctx, i.ifindex, att)
+		_ = r.drop(ctx, i.ifindex, att) // logged; its installer removes the interface's state
 		delete(r.ifaces, att)
 	}
 }
@@ -452,8 +482,10 @@ func (r *Reconciler) forget(ctx context.Context, att types.NamespacedName) {
 // drop unbinds att's directions on ifindex so their rows can be freed. A
 // direction another attachment now holds, after the ifindex was reused, is
 // left alone. A direction that cannot be unbound keeps its rows, and Collect
-// stops exporting it because att no longer owns the ifindex.
-func (r *Reconciler) drop(ctx context.Context, ifindex uint32, att types.NamespacedName) {
+// stops exporting it because att no longer owns the ifindex; the failures are
+// logged and returned.
+func (r *Reconciler) drop(ctx context.Context, ifindex uint32, att subject) error {
+	var errs []error
 	for _, d := range directions {
 		key := bindingKey{ifindex, d.dir}
 		if a := r.state[key]; a != nil && a.attachment != att {
@@ -461,8 +493,10 @@ func (r *Reconciler) drop(ctx context.Context, ifindex uint32, att types.Namespa
 		}
 		if err := r.invalidate(key); err != nil {
 			ctrl.LoggerFrom(ctx).Error(err, "unbind traffic policy", "ifindex", ifindex, "direction", d.name)
+			errs = append(errs, fmt.Errorf("%s: %w", d.name, err))
 		}
 	}
+	return errors.Join(errs...)
 }
 
 // open loads the pinned maps and reserves the rows of every snapshot already
@@ -500,7 +534,7 @@ func (r *Reconciler) open(ctx context.Context) error {
 	}
 	r.maps, r.alloc, r.adopted = maps, alloc, adopted
 	r.state = map[bindingKey]*applied{}
-	r.ifaces = map[types.NamespacedName]iface{}
+	r.ifaces = map[subject]iface{}
 	r.openedAt = time.Now()
 	return nil
 }
@@ -574,7 +608,7 @@ func (r *Reconciler) sweepPins(ctx context.Context) {
 
 // sweepAdopted unbinds the snapshots bound before a restart that no
 // attachment has claimed within a full resync, such as one whose
-// VPCAttachment was deleted while galactic-router was down, so their rows
+// attachment was deleted while galactic-router was down, so their rows
 // are not held forever. Their interfaces deny as policy_unavailable. An
 // interface this node has reconciled is never swept: a direction whose
 // reconcile keeps failing keeps what it had.
@@ -651,7 +685,7 @@ func RuleRows(entries []trafficpolicy.Entry, snap tpmap.Snapshot, rules int) ([]
 // adopt takes over a snapshot bound before a restart when it holds exactly
 // what the policy now desired compiles to, so its counters continue. A rule
 // that compiles to no entries counts nothing and gets a fresh row.
-func (r *Reconciler) adopt(key bindingKey, att types.NamespacedName, labels interfaceLabels, token uint64,
+func (r *Reconciler) adopt(key bindingKey, att subject, labels interfaceLabels, token uint64,
 	identity galacticv1alpha1.PolicyIdentity, model trafficpolicy.Policy,
 ) bool {
 	snap, ok := r.adopted[key]

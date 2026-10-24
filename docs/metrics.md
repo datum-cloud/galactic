@@ -686,7 +686,10 @@ export them. See [traffic-policy/node.md](traffic-policy/node.md).
 - `reason` is one of `no_match`, `policy_unavailable`, `parse_error` or
   `classification_error`; `accounting_errors_total` uses
   `missing_rule_counter`.
-- `interface_uid` is the VPCAttachment UID. `policy_uid` is the policy's
+- `interface_uid` is the VPCAttachment UID. For a Galactic Edge
+  attachment, `namespace`, `attachment` and `interface_uid` are the
+  EdgeAttachment's, `vpc` is its EdgeService's VPC and `interface` is its
+  host link. `policy_uid` is the policy's
   UID, or `builtin:default-deny-all:v1` for a direction with no reference,
   which gets the built-in default. Its deny-all rule is a rule hit, not a
   fallback, so the default stays visible per interface and direction.

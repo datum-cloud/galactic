@@ -9,9 +9,10 @@
 // Callers must derive the attachment ID, host VRF, namespace, address and prefix
 // grants from authenticated, authorized gVPC state, and serialize mutations with
 // other host writers. This package is privileged plumbing, not admission or
-// source-address policy. Before exposing a consumer, install host traffic policy
-// and the consumer's delegated-source enforcement; policy test fixtures alone
-// do not provide that integration. A pod must not have authority over host links.
+// source-address policy. Install host traffic policy and the consumer's
+// delegated-source enforcement through ProvisionRegistered's register, so they
+// are in place before the host link first comes up. A pod must not have
+// authority over host links.
 //
 // An attachment is a veth pair between the pod and the node. Its host end is
 // enslaved to the canonical host VRF of the VPC, the same VRF every ordinary
@@ -179,7 +180,19 @@ func (a Attachment) validate() error {
 // and remains discoverable for retry or release. Callers must persist authorized
 // intent before Provision; a crash before stamping requires that intent and the
 // actual peer namespace to recover, never inference from an unstamped link name.
-func Provision(host, pod *Namespace, a Attachment) (result Result, provisionErr error) {
+func Provision(host, pod *Namespace, a Attachment) (Result, error) {
+	return ProvisionRegistered(host, pod, a, nil)
+}
+
+// ProvisionRegistered is Provision with register called once the host link is
+// enslaved and addressed but before it is brought up, with the link's host
+// ifindex and canonical table. A link that is down carries nothing, so what
+// register installs on it, such as the node's datapath and its traffic policy
+// enforcement, is in place before the first packet. A link that is already up
+// stays up while register runs. If register fails, Provision fails and the
+// host link is left down.
+func ProvisionRegistered(host, pod *Namespace, a Attachment, register func(Result) error,
+) (result Result, provisionErr error) {
 	if err := a.validate(); err != nil {
 		return Result{}, err
 	}
@@ -224,7 +237,14 @@ func Provision(host, pod *Namespace, a Attachment) (result Result, provisionErr 
 		}
 		provisionErr = errors.Join(provisionErr, hostH.LinkSetDown(current))
 	}()
-	if err := configureHostLink(hostH, hostLink, a, hostTable, podLink.Attrs().HardwareAddr); err != nil {
+	res := Result{HostIndex: hostLink.Attrs().Index, HostTable: hostTable, PodIndex: podLink.Attrs().Index}
+	beforeUp := func() error {
+		if register == nil {
+			return nil
+		}
+		return register(res)
+	}
+	if err := configureHostLink(hostH, hostLink, a, hostTable, podLink.Attrs().HardwareAddr, beforeUp); err != nil {
 		return Result{}, err
 	}
 	if err := configurePodLink(podH, podLink, a, hostLink.Attrs().HardwareAddr); err != nil {
@@ -238,7 +258,6 @@ func Provision(host, pod *Namespace, a Attachment) (result Result, provisionErr 
 	if err := verifyBoth(host, pod); err != nil {
 		return Result{}, err
 	}
-	res := Result{HostIndex: hostLink.Attrs().Index, HostTable: hostTable, PodIndex: podLink.Attrs().Index}
 	return res, settle(host, pod, a)
 }
 
@@ -430,10 +449,11 @@ func prefixNet(p netip.Prefix) *net.IPNet {
 	return &net.IPNet{IP: p.Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), p.Addr().BitLen())}
 }
 
-// configureHostLink enslaves the host end to the canonical VRF and routes the
-// attachment address and its prefixes to it through one permanent neighbor.
+// configureHostLink enslaves the host end to the canonical VRF, calls beforeUp,
+// brings the link up and routes the attachment address and its prefixes to it
+// through one permanent neighbor.
 func configureHostLink(
-	h *netlink.Handle, link netlink.Link, a Attachment, table uint32, podMAC net.HardwareAddr,
+	h *netlink.Handle, link netlink.Link, a Attachment, table uint32, podMAC net.HardwareAddr, beforeUp func() error,
 ) error {
 	vrfLink, err := h.LinkByName(a.HostVRF)
 	if err != nil {
@@ -447,6 +467,9 @@ func configureHostLink(
 	}
 	if err := ensureAddr(h, link, linkLocal(hostLinkLocal)); err != nil {
 		return fmt.Errorf("hostattach: address host link %q: %w", a.HostLink, err)
+	}
+	if err := beforeUp(); err != nil {
+		return err
 	}
 	if err := h.LinkSetUp(link); err != nil {
 		return fmt.Errorf("hostattach: set host link %q up: %w", a.HostLink, err)

@@ -253,7 +253,7 @@ func newDatapathFixture(t *testing.T) *datapathFixture {
 		}
 	}
 	f.atts[pod1A] = att(vpcA, vrfA, dpSocketAtt, "a0", podTable, podIndex, "fd00:aa::1")
-	f.atts["pod1/B"] = att(vpcB, vrfB, dpSocketAtt, "b0", podTable+1, podIndex+1, "fd00:aa::1")
+	f.atts[pod1B] = att(vpcB, vrfB, dpSocketAtt, "b0", podTable+1, podIndex+1, "fd00:aa::1")
 	for key, v := range map[string][2]string{pod3A: {vpcA, vrfA}, pod4B: {vpcB, vrfB}} {
 		a := att(v[0], v[1], dpPacketAtt, "a0", podTable, podIndex, "fd00:aa::3")
 		a.Prefixes = []netip.Prefix{sitePrefix}
@@ -263,7 +263,7 @@ func newDatapathFixture(t *testing.T) *datapathFixture {
 	// VPC A's site is behind a session that carries less than the tenant
 	// MTU, so the pod's own forwarding must report Packet Too Big.
 	f.atts[pod3A].TUN.MTU = siteMTU
-	for _, key := range []string{pod1A, "pod1/B", pod3A, pod4B} {
+	for _, key := range []string{pod1A, pod1B, pod3A, pod4B} {
 		a := f.atts[key]
 		res, err := Provision(f.xH, f.handles[key[:4]], a)
 		if err != nil {

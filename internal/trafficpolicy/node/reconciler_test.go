@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -133,7 +134,7 @@ func TestSweepKeepsReconciledInterfaces(t *testing.T) {
 	key := bindingKey{7, tpmap.DirEgress}
 	r := &Reconciler{
 		adopted:  map[bindingKey]tpmap.Snapshot{key: {}},
-		ifaces:   map[types.NamespacedName]iface{{Namespace: testNS, Name: testAtt}: {ifindex: 7}},
+		ifaces:   map[subject]iface{{NamespacedName: types.NamespacedName{Namespace: testNS, Name: testAtt}}: {ifindex: 7}},
 		openedAt: time.Now().Add(-2 * resync),
 	}
 	r.sweepAdopted(context.Background()) // would need maps to unbind anything
@@ -155,6 +156,7 @@ func requireRoot(t *testing.T) {
 // fixture is a real API server, the uSID datapath's maps, and a dummy
 // interface standing in for a tenant interface.
 type fixture struct {
+	cfg     *rest.Config
 	c       client.Client
 	patches atomic.Int32 // status patches through c
 	maps    *tpmap.Maps
@@ -200,7 +202,7 @@ func newFixture(t *testing.T) *fixture {
 
 	suffix := make([]byte, 4)
 	_, _ = rand.Read(suffix)
-	f := &fixture{maps: tpmap.FromObjects(&objs), link: "tpt" + hex.EncodeToString(suffix)}
+	f := &fixture{cfg: cfg, maps: tpmap.FromObjects(&objs), link: "tpt" + hex.EncodeToString(suffix)}
 	f.c = interceptor.NewClient(direct, interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch,
 			opts ...client.SubResourcePatchOption,
@@ -675,7 +677,7 @@ func stepAttachmentDeleted(t *testing.T, f *fixture, r *Reconciler) {
 		t.Fatal(err)
 	}
 	f.reconcile(t, r)
-	if _, ok := r.ifaces[types.NamespacedName{Namespace: testNS, Name: testAtt}]; ok {
+	if _, ok := r.ifaces[subject{NamespacedName: types.NamespacedName{Namespace: testNS, Name: testAtt}}]; ok {
 		t.Error("the deleted attachment is still tracked")
 	}
 }

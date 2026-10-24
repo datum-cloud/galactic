@@ -4,7 +4,8 @@
 VPCAttachment whose `status.node` is its node, it compiles the TrafficPolicy
 each direction of the interface is bound to, publishes it into the uSID
 datapath, reports what it applied in the TrafficPolicyBinding's
-`status.nodes`, and exports the policy counters. The cell side, which
+`status.nodes`, and exports the policy counters. It does the same for every
+Galactic Edge attachment on its node (see [Edge attachments](#edge-attachments)). The cell side, which
 validates policies and resolves bindings, is
 [galactic-controller](controller.md); the design is in
 [the traffic policy proposal](../enhancements/networking/interface-traffic-policy/README.md).
@@ -17,7 +18,8 @@ DaemonSet, never on the route reflector, which refuses it. Install first:
 1. the `galactic.datumapis.com` CRDs (`config/crd/`), since an informer for
    a missing CRD never syncs;
 2. the ClusterRole in `config/galactic-router/rbac.yaml`, which grants read
-   access to policies and bindings and `patch` on the bindings' status.
+   access to policies, bindings, EdgeAttachments and EdgeServices and
+   `patch` on the bindings' status.
 
 Whether the datapath enforces, audits or ignores what galactic-router
 publishes is galactic-cni's setting, `GALACTIC_CNI_TRAFFIC_POLICY`. With it
@@ -77,6 +79,42 @@ A rebind that cannot be installed, such as one that runs out of counter
 rows, unbinds the direction rather than keeping the old policy's grants,
 and reports `Failed`. A failed update of the same policy keeps its last
 snapshot. Status is written only when this node's entry changes.
+
+## Edge attachments
+
+An EdgeAttachment's host link is enforced like a workload's interface.
+`galactic-edge` writes the link's policy row and attaches the enforcement
+programs before the link comes up, and `galactic-router` binds the policy
+the attachment's EdgeService selects in `spec.trafficPolicy`:
+
+```yaml
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: EdgeService
+metadata:
+  name: connect
+  namespace: tenant
+spec:
+  # providerRef, vpcRef, capabilities, ...
+  trafficPolicy:
+    ingressPolicyRef: {name: from-vpc} # traffic delivered to the provider
+    egressPolicyRef: {name: to-vpc} # traffic the provider sends into the VPC
+```
+
+Both references resolve in the service's namespace, never in the provider's
+namespace where the attachment lives, so a provider cannot choose its own
+policy. The table above applies, with the service's `trafficPolicy` in
+place of a binding. In addition, galactic-router binds nothing, and unbinds
+both directions, while the attachment is not `Admitted` or its service is
+gone, being deleted, replaced or granting another provider; the link then
+denies everything as `policy_unavailable`. A change to the service or to a
+referenced policy is republished to the attachments on the node.
+
+galactic-router writes no status for an edge attachment. galactic-controller
+reports whether the references resolve in the service's
+`TrafficPolicyResolved` condition, with reason `Default` while both
+directions take the built-in default and its attachments carry nothing, and
+the counters below show what each direction applies. Their `namespace` and `attachment` labels name the
+EdgeAttachment, `vpc` the service's VPC, and `interface` the host link.
 
 ## Status
 

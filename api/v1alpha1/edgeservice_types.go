@@ -91,6 +91,15 @@ type EdgeServiceSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=300
 	DrainSeconds *int32 `json:"drainSeconds,omitempty"`
+
+	// TrafficPolicy names the TrafficPolicy, in the service's namespace, for
+	// each direction of every attachment the service admits. Ingress is
+	// traffic delivered to the provider from the VPC; egress is traffic the
+	// provider sends into the VPC. An omitted reference selects the built-in
+	// default, which denies everything in that direction. A change applies
+	// to active attachments.
+	// +optional
+	TrafficPolicy *TrafficPolicyBindingSpec `json:"trafficPolicy,omitempty"`
 }
 
 // EdgeAllocation is one client pool address and the attachment holding it.
@@ -117,7 +126,7 @@ type EdgeServiceStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Conditions include Admitted.
+	// Conditions include Admitted and TrafficPolicyResolved.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

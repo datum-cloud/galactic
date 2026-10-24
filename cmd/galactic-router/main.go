@@ -88,6 +88,14 @@ func checkWatchPermissions(mgr ctrl.Manager, trafficPolicy bool) {
 			struct{ group, version, resource, namespace string }{
 				group: galacticv1alpha1.GroupVersion.Group, version: galacticv1alpha1.GroupVersion.Version,
 				resource: "trafficpolicybindings",
+			},
+			struct{ group, version, resource, namespace string }{
+				group: galacticv1alpha1.GroupVersion.Group, version: galacticv1alpha1.GroupVersion.Version,
+				resource: "edgeattachments",
+			},
+			struct{ group, version, resource, namespace string }{
+				group: galacticv1alpha1.GroupVersion.Group, version: galacticv1alpha1.GroupVersion.Version,
+				resource: "edgeservices",
 			})
 	}
 

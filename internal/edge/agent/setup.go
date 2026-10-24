@@ -33,7 +33,8 @@ type PinnedDatapath struct{ PinDir string }
 
 // Register implements Datapath: the link's gate row first, so the link
 // carries only its own address from the moment usid_egress and tp_deliver
-// are attached to it.
+// are attached to it, then its traffic policy row and programs
+// (attachreg.RegisterHostLink).
 func (d PinnedDatapath) Register(vrfTable, ifindex uint32, ifname string, addr netip.Addr) error {
 	gates, err := forwardgatemap.OpenPinned(d.PinDir)
 	if err != nil {
@@ -43,7 +44,7 @@ func (d PinnedDatapath) Register(vrfTable, ifindex uint32, ifname string, addr n
 	if err := gates.SetLink(ifindex, addr); err != nil {
 		return err
 	}
-	return attachreg.RegisterHostLink(d.PinDir, vrfTable, ifindex, ifname)
+	return attachreg.RegisterHostLink(d.PinDir, vrfTable, ifindex, ifname, addr)
 }
 
 // Unregister implements Datapath: the link's gates first, then its rows. The
