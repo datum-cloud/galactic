@@ -285,3 +285,16 @@ type failing struct{ client.Client }
 func (failing) Update(context.Context, client.Object, ...client.UpdateOption) error {
 	return apierrors.NewServiceUnavailable("unreachable")
 }
+
+func TestFrozenKeepsAnswering(t *testing.T) {
+	f := newFixture(t)
+	f.serve()
+	// A frozen instance stands in for one that ignores its lease: its
+	// packet device keeps answering past the deadline, so only the
+	// foundation can stop its forwarding.
+	f.p.frozen.Store(true)
+	f.now = f.p.lease.Deadline + time.Second
+	if !f.allow() {
+		t.Fatal("a frozen instance stopped answering at its deadline")
+	}
+}

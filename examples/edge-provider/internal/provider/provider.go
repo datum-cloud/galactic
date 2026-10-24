@@ -82,10 +82,16 @@ type Provider struct {
 	// devices read it on every packet, so they stop answering at the
 	// deadline even while the reconcile loop waits on the API.
 	deadline atomic.Int64
+	// frozen is set once freeze closes; the packet devices then answer
+	// whatever the lease says.
+	frozen atomic.Bool
 }
 
-// forwarding reports whether the lease allows forwarding now.
-func (p *Provider) forwarding() bool { return int64(p.Clock()) < p.deadline.Load() }
+// forwarding reports whether the packet devices answer now: while the lease
+// allows it, or always once the instance is frozen.
+func (p *Provider) forwarding() bool {
+	return p.frozen.Load() || int64(p.Clock()) < p.deadline.Load()
+}
 
 // setLease records l as held, or nothing held when l is nil.
 func (p *Provider) setLease(l *lease.Lease) {
@@ -112,9 +118,9 @@ type service struct {
 
 // Run registers the instance and reconciles until ctx is done, then shuts
 // down within the shutdown context's deadline. Closing freeze stops every
-// API write and renewal while the data planes keep answering, as a provider
-// whose control loop hung would; Run then waits for ctx without shutting
-// down.
+// API write and renewal while the data planes keep answering, past the
+// lease's deadline too, as a provider that hung and ignores its lease
+// would; Run then waits for ctx without shutting down.
 func (p *Provider) Run(ctx context.Context, shutdown func() (context.Context, context.CancelFunc),
 	freeze <-chan struct{}) error {
 	if p.Echo == nil {
@@ -145,7 +151,8 @@ func (p *Provider) Run(ctx context.Context, shutdown func() (context.Context, co
 			defer cancel()
 			return p.shutdown(sctx)
 		case <-freeze:
-			p.Log.Warn("frozen: no further renewals or API writes; data planes keep answering")
+			p.frozen.Store(true)
+			p.Log.Warn("frozen: no further renewals or API writes; data planes keep answering past the lease")
 			<-ctx.Done()
 			return nil
 		case <-t.C:

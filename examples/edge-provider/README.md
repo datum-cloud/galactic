@@ -22,7 +22,8 @@ For each `EdgeService` it is configured with, it:
 Every UDP reply starts with `<provider>/<pod>/<service>`, so a client can tell
 which instance answered. On SIGTERM it stops forwarding, then releases its
 routes, deletes its attachments and releases its lease. SIGUSR1 freezes it: it
-stops renewing and writing to the API while its data planes keep answering.
+stops renewing and writing to the API while its data planes keep answering,
+past its lease's deadline too.
 The conformance suite uses that to show that `galactic-edge` stops forwarding
 on its own.
 

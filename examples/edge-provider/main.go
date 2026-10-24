@@ -14,9 +14,9 @@
 //
 // SIGTERM stops forwarding and releases its claims, attachments and lease.
 // SIGUSR1 freezes it: it stops renewing its lease and writing to the API,
-// while its data planes keep answering, as a provider whose control loop
-// hung would. Conformance tests use it to show galactic-edge stops
-// forwarding on its own.
+// while its data planes keep answering, even past the lease's deadline, as
+// a provider that hung and ignores its lease would. Conformance tests use
+// it to show galactic-edge stops forwarding on its own.
 package main
 
 import (
