@@ -71,7 +71,7 @@ func TestPoolAndGrantConflict(t *testing.T) {
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
 	b := f.newHolder("b", nodeB, "fd00:10:0:e::90")
 	f.update(f.svc, func(s *galacticv1alpha1.EdgeService) {
-		s.Spec.Prefixes = []string{grantPrefix, "fd00:10:0:e::/120"}
+		s.Spec.Prefixes = []string{grantPrefix, clientPool}
 	})
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var s galacticv1alpha1.EdgeService
@@ -125,6 +125,39 @@ func TestPoolAndGrantConflict(t *testing.T) {
 	}
 	f.reconcile("d")
 	f.expectAccepted("d", a, 1)
+}
+
+// TestOwnAddressRefused is failure-matrix row 7d: a route containing its
+// holder attachment's own address, covering or exact, is refused with
+// InvalidPrefix and never accepted or indexed, while another prefix of the
+// same holder is accepted.
+func TestOwnAddressRefused(t *testing.T) {
+	f := startAPI(t)
+	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
+	f.update(f.svc, func(s *galacticv1alpha1.EdgeService) {
+		s.Spec.Prefixes = []string{grantPrefix, clientPool}
+	})
+	f.newRoute("r", prefixA)
+	f.claim("r", a)
+	f.clearRebuilt()
+	f.expectAccepted("r", a, 1)
+
+	for name, prefix := range map[string]string{"cover": clientPool, "exact": "fd00:10:0:e::1/128"} {
+		f.newRoute(name, prefix)
+		f.claim(name, a)
+		f.reconcile(name)
+		rt := f.route(name)
+		c := meta.FindStatusCondition(rt.Status.Conditions, galacticv1alpha1.EdgeRouteClaimed)
+		if c == nil || c.Reason != ReasonInvalidPrefix || !strings.Contains(c.Message, "own address") {
+			t.Fatalf("route %s over the holder's address: %s", prefix, conditions(rt))
+		}
+		if att, _ := f.accepted(name); att != "" {
+			t.Fatalf("route %s over the holder's address accepted for %s", prefix, att)
+		}
+	}
+	if e := f.indexEntries(); len(e) != 1 || e[0].Prefix != prefixA {
+		t.Fatalf("index holds %+v, want only route r", e)
+	}
 }
 
 // subnet creates a workload attachment of the fixture's VPC with podSubnet.

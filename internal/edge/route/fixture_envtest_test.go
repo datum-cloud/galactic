@@ -51,6 +51,7 @@ const (
 
 	socketAccess = "SocketAccess"
 	grantPrefix  = "fd00:10:0:f::/64"
+	clientPool   = "fd00:10:0:e::/120"
 )
 
 var repoRoot = filepath.Join("..", "..", "..")
@@ -164,7 +165,7 @@ func startAPI(t *testing.T) *fixture {
 			VPCRef:       galacticv1alpha1.EdgeVPCReference{Name: "prod", UID: string(f.vpc.UID)},
 			Capabilities: []string{socketAccess, PrefixReachability},
 			Prefixes:     []string{grantPrefix},
-			ClientPool:   "fd00:10:0:e::/120",
+			ClientPool:   clientPool,
 		},
 	}
 	f.create(f.svc)
