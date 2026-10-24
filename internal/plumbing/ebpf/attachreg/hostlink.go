@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"os"
 	"path/filepath"
 
@@ -15,6 +16,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
@@ -23,14 +25,27 @@ import (
 // uSID entry on this node: no workload of its VPC has registered it.
 var ErrVRFNotRegistered = errors.New("eBPF registration: VRF has no uSID entry on this node")
 
+// ErrNoEnforcement is returned by RegisterHostLink on a node that enforces or
+// audits traffic policy but failed the kernel's traffic policy preflight.
+var ErrNoEnforcement = errors.New("traffic policy is on but this node cannot enforce it")
+
 // RegisterHostLink registers a host link that is enslaved to an existing
 // canonical VRF, such as a Galactic Edge attachment's, with the uSID
 // datapath under that VRF's own uSID entry: it allocates no Argument. It
-// writes the link's ifindex_vrf_table and ifindex_egress_kind_table rows and
-// attaches usid_egress to its tc ingress and tp_deliver to its tc egress.
-// Where the VRF has more than one entry, the lowest Argument is used, so
-// every call picks the same one.
-func RegisterHostLink(pinDir string, vrfTableID uint32, ifindex uint32, ifname string) error {
+// writes the link's traffic policy row, with addr as its only address, and
+// its ifindex_vrf_table and ifindex_egress_kind_table rows, then attaches
+// usid_egress to its tc ingress and tp_deliver to its tc egress. Where the
+// VRF has more than one entry, the lowest Argument is used, so every call
+// picks the same one.
+//
+// The policy row carries a new policy token unless the link already has
+// one, so a repeated registration keeps the snapshots galactic-router bound
+// to it. Until galactic-router binds them, the link denies everything while
+// the node enforces. On such a node, RegisterHostLink refuses a kernel that
+// failed the preflight (ErrNoEnforcement) and reads every enforcement program
+// back from the link before returning, so a caller that brings the link up
+// only after it returns never carries an unchecked packet.
+func RegisterHostLink(pinDir string, vrfTableID uint32, ifindex uint32, ifname string, addr netip.Addr) error {
 	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
 		return fmt.Errorf("open pinned eBPF uSID maps: %w", err)
@@ -50,6 +65,10 @@ func RegisterHostLink(pinDir string, vrfTableID uint32, ifindex uint32, ifname s
 	}
 	if !found {
 		return fmt.Errorf("%w: table %d", ErrVRFNotRegistered, vrfTableID)
+	}
+	active, err := putHostLinkPolicy(pinDir, ifindex, addr)
+	if err != nil {
+		return err
 	}
 
 	table, tableCloser, err := ifindexvrfmap.OpenPinned(pinDir)
@@ -75,6 +94,60 @@ func RegisterHostLink(pinDir string, vrfTableID uint32, ifindex uint32, ifname s
 	defer func() { _ = program.Close() }()
 	if err := attach.AttachDeliver(program, ifname); err != nil {
 		return fmt.Errorf("attach eBPF tp_deliver to host interface %q: %w", ifname, err)
+	}
+	if active {
+		return verifyEnforcement(ifname)
+	}
+	return nil
+}
+
+// putHostLinkPolicy writes ifindex's traffic policy row and addr as its
+// address, and reports whether the node enforces or audits.
+func putHostLinkPolicy(pinDir string, ifindex uint32, addr netip.Addr) (bool, error) {
+	maps, err := tpmap.OpenPinned(pinDir)
+	if err != nil {
+		return true, fmt.Errorf("open pinned traffic policy maps: %w", err)
+	}
+	defer maps.Close()
+	state, err := maps.GetState()
+	if err != nil {
+		return true, err
+	}
+	active := state.Mode != tpmap.ModeOff
+	if active && !state.Capable {
+		return true, fmt.Errorf("%w: the kernel failed the traffic policy preflight", ErrNoEnforcement)
+	}
+	var row prog.UsidTpIfaceValue
+	token := uint64(0)
+	if err := maps.Interfaces.Lookup(ifindex, &row); err == nil && row.Kind == tpmap.KindTenant {
+		token = row.PolicyToken
+	}
+	if token == 0 {
+		if token, err = tpmap.NewPolicyToken(); err != nil {
+			return active, err
+		}
+	}
+	if err := maps.PutInterface(ifindex, token, tpmap.KindTenant); err != nil {
+		return active, err
+	}
+	return active, maps.PutInterfaceAddr(ifindex, addr)
+}
+
+// verifyEnforcement reads usid_egress and tp_deliver back from ifname's tc
+// hooks.
+func verifyEnforcement(ifname string) error {
+	ok, err := attach.HasDeliver(ifname)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("tp_deliver is not attached to %s", ifname)
+	}
+	if ok, err = attach.HasEgressChain(ifname); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("the egress programs are not attached to %s", ifname)
 	}
 	return nil
 }

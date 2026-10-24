@@ -175,6 +175,57 @@ func TestNewLinkClearsStaleRows(t *testing.T) {
 	}
 }
 
+// TestRegisterBeforeLinkUp registers a new host link with the datapath while
+// it is still down, so no packet crosses it before its traffic policy and
+// gate are in place, and leaves it down when registration fails.
+func TestRegisterBeforeLinkUp(t *testing.T) {
+	f := newFixture(t)
+	a := f.agent()
+	f.pod(pod1UID)
+	up := map[uint32]bool{}
+	f.dp.onRegister = func(ifindex uint32) {
+		in(t, f.host, func() error {
+			l, err := netlink.LinkByIndex(int(ifindex))
+			if err != nil {
+				return err
+			}
+			if _, seen := up[ifindex]; !seen {
+				up[ifindex] = l.Attrs().Flags&net.FlagUp != 0
+			}
+			return nil
+		})
+	}
+	f.dp.failRegister = errors.New("enforcement unavailable")
+	f.attach("a", attA, pod1UID, vpcA, addr, false)
+	f.reconcile(a)
+	if c := f.condition("a", galacticv1alpha1.EdgeAttachmentProgrammed); c == nil ||
+		c.Status != metav1.ConditionFalse || c.Reason != ReasonDatapathFailed {
+		t.Fatalf("Programmed after a failed registration = %+v, want False/%s", c, ReasonDatapathFailed)
+	}
+	links := f.links()
+	if len(links) != 1 {
+		t.Fatalf("links after a failed registration = %+v, want the attachment's", links)
+	}
+	in(t, f.host, func() error {
+		l, err := netlink.LinkByIndex(links[0].HostIndex)
+		if err == nil && l.Attrs().Flags&net.FlagUp != 0 {
+			err = errors.New("the host link is up although its registration failed")
+		}
+		return err
+	})
+
+	f.dp.failRegister = nil
+	f.reconcile(a)
+	f.programmed("a")
+	index := uint32(f.hostLink("a").Attrs().Index) //nolint:gosec // a kernel ifindex
+	if wasUp, ok := up[index]; !ok || wasUp {
+		t.Fatalf("host link %d up at its first registration: %v (registered %v)", index, wasUp, ok)
+	}
+	if l := f.hostLink("a"); l.Attrs().Flags&net.FlagUp == 0 {
+		t.Fatal("the host link is down after a successful registration")
+	}
+}
+
 // TestRestartAndFencing restarts the agent with live attachments: the new
 // process takes the scopes over and keeps every link, and the old process,
 // fenced, can no longer write.

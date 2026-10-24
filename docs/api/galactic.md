@@ -625,6 +625,7 @@ _Appears in:_
 | `validUntil` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ValidUntil, when set, is the wall-clock time after which the grant<br />authorizes nothing. Admission refuses it, and revokes what it issued,<br />once fewer than the cell's maximum clock skew remain. |  |  |
 | `clientPool` _string_ | ClientPool is the IPv6 range, inside the VPC, that attachments take<br />their addresses from: a masked CIDR from /64 to /120. At most 1024 of<br />its addresses are allocated, whatever its size. Pools of services<br />granting the same VPC must not overlap; galactic-controller refuses<br />the attachments of the later of two overlapping services. Without a<br />pool, the service admits no attachment. A pool can be added to a<br />service that has none, and is fixed from then on. |  | MaxLength: 43 <br /> |
 | `drainSeconds` _integer_ | DrainSeconds is how long an attachment the foundation revokes keeps<br />its resources before they are released. Unset means 30. |  | Maximum: 300 <br />Minimum: 0 <br /> |
+| `trafficPolicy` _[TrafficPolicyBindingSpec](#trafficpolicybindingspec)_ | TrafficPolicy names the TrafficPolicy, in the service's namespace, for<br />each direction of every attachment the service admits. Ingress is<br />traffic delivered to the provider from the VPC; egress is traffic the<br />provider sends into the VPC. An omitted reference selects the built-in<br />default, which denies everything in that direction. A change applies<br />to active attachments. |  |  |
 
 
 #### EdgeServiceStatus
@@ -641,7 +642,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the generation Conditions describe. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions include Admitted. |  | MaxItems: 8 <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions include Admitted and TrafficPolicyResolved. |  | MaxItems: 8 <br /> |
 | `allocations` _[EdgeAllocation](#edgeallocation) array_ | Allocations are the client pool addresses held by attachments. Core<br />writes them with a resourceVersion precondition, so two writers never<br />hand out one address, and removes one only after the attachment's node<br />has released it. |  | MaxItems: 1024 <br /> |
 
 
@@ -908,6 +909,7 @@ rule denies everything, for that direction alone.
 
 
 _Appears in:_
+- [EdgeServiceSpec](#edgeservicespec)
 - [TrafficPolicyBinding](#trafficpolicybinding)
 
 | Field | Description | Default | Validation |

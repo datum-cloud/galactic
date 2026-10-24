@@ -44,7 +44,13 @@ Check every node of the cell:
   cloud operator's VPCAttachment CRD installed;
 - publishes `status.node` and `status.hostInterface` on every VPCAttachment,
   which the cloud operator writes. An attachment without them is never bound
-  on any node, and denies everything once enforced.
+  on any node, and denies everything once enforced;
+- grants `galactic-router` read access to EdgeAttachments and EdgeServices,
+  which `config/galactic-router/rbac.yaml` includes, even in a cell without
+  Galactic Edge. Without it galactic-router's edge attachment controller
+  never syncs and galactic-router does not start. On an edge node, every
+  edge attachment denies everything once enforced until its EdgeService
+  selects a policy (see [Edge attachments](node.md#edge-attachments)).
 
 `galactic-router` needs `NET_ADMIN` and `BPF`, as `config/galactic-router/`
 grants, and not `CAP_SYS_ADMIN`: it reads back the snapshots it bound before

@@ -70,11 +70,15 @@ rules:
     verbs: ["get", "list"]
   # The traffic policy reconciler (GALACTIC_ROUTER_TRAFFIC_POLICY) reads
   # policies and bindings and applies this node's entry in each binding's
-  # status.nodes. It never writes either resource itself.
+  # status.nodes. It never writes either resource itself. It also enforces
+  # the policy each edge attachment's EdgeService selects, so it watches
+  # both.
   - apiGroups: ["galactic.datumapis.com"]
     resources:
       - trafficpolicies
       - trafficpolicybindings
+      - edgeattachments
+      - edgeservices
     verbs: ["get", "list", "watch"]
   - apiGroups: ["galactic.datumapis.com"]
     resources:

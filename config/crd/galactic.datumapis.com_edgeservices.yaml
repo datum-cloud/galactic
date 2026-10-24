@@ -118,6 +118,40 @@ spec:
                   required:
                     - name
                   type: object
+                trafficPolicy:
+                  description: |-
+                    TrafficPolicy names the TrafficPolicy, in the service's namespace, for
+                    each direction of every attachment the service admits. Ingress is
+                    traffic delivered to the provider from the VPC; egress is traffic the
+                    provider sends into the VPC. An omitted reference selects the built-in
+                    default, which denies everything in that direction. A change applies
+                    to active attachments.
+                  properties:
+                    egressPolicyRef:
+                      description: EgressPolicyRef is the policy for traffic the workload sends.
+                      properties:
+                        name:
+                          description: Name is the TrafficPolicy's name.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                          type: string
+                      required:
+                        - name
+                      type: object
+                    ingressPolicyRef:
+                      description: IngressPolicyRef is the policy for traffic delivered to the workload.
+                      properties:
+                        name:
+                          description: Name is the TrafficPolicy's name.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                          type: string
+                      required:
+                        - name
+                      type: object
+                  type: object
                 validUntil:
                   description: |-
                     ValidUntil, when set, is the wall-clock time after which the grant
@@ -191,7 +225,7 @@ spec:
                     - address
                   x-kubernetes-list-type: map
                 conditions:
-                  description: Conditions include Admitted.
+                  description: Conditions include Admitted and TrafficPolicyResolved.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:

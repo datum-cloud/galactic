@@ -153,12 +153,22 @@ type datapath struct {
 	unregistered []uint32
 	// failUnregister fails the next Unregister calls.
 	failUnregister int
-	gates          *gates
+	// failRegister fails every Register call while set.
+	failRegister error
+	// onRegister, when set, is called with each link Register is called for.
+	onRegister func(ifindex uint32)
+	gates      *gates
 }
 
 func (d *datapath) Register(vrfTable, ifindex uint32, _ string, addr netip.Addr) error {
 	d.Lock()
 	defer d.Unlock()
+	if d.onRegister != nil {
+		d.onRegister(ifindex)
+	}
+	if d.failRegister != nil {
+		return d.failRegister
+	}
 	d.rows[ifindex] = vrfTable
 	d.gates.setLink(ifindex, addr)
 	return nil

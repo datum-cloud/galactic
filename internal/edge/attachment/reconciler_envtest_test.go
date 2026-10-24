@@ -542,3 +542,58 @@ func TestExpiredGrantDrains(t *testing.T) {
 		return a != nil && !a.DeletionTimestamp.IsZero()
 	})
 }
+
+// TestServiceTrafficPolicy reports on each EdgeService whether its traffic
+// policy references resolve, follows the referenced policy's creation, and
+// shows that changing the policy of an active attachment's service
+// re-admits it in place rather than draining it.
+func TestServiceTrafficPolicy(t *testing.T) {
+	f := startFixture(t)
+	ctx := context.Background()
+	svc := f.service("svc-tp", poolA, 30)
+	resolved := func(status metav1.ConditionStatus, reason, message string) {
+		t.Helper()
+		eventually(t, fmt.Sprintf("TrafficPolicyResolved=%s %s", status, reason), func() bool {
+			var s galacticv1alpha1.EdgeService
+			if err := f.admin.Get(ctx, client.ObjectKeyFromObject(svc), &s); err != nil {
+				return false
+			}
+			c := meta.FindStatusCondition(s.Status.Conditions, ConditionServiceTrafficPolicy)
+			return c != nil && c.Status == status && c.Reason == reason && strings.Contains(c.Message, message) &&
+				c.ObservedGeneration == s.Generation
+		})
+	}
+	resolved(metav1.ConditionTrue, "Default", "ingress: no reference: the built-in default denies everything")
+
+	f.create(attachmentFor("a1", svc, f.pod("p1")))
+	a := f.waitCondition("a1", galacticv1alpha1.EdgeAttachmentAllocated, metav1.ConditionTrue, ReasonAllocated)
+
+	var s galacticv1alpha1.EdgeService
+	if err := f.admin.Get(ctx, client.ObjectKeyFromObject(svc), &s); err != nil {
+		t.Fatal(err)
+	}
+	s.Spec.TrafficPolicy = &galacticv1alpha1.TrafficPolicyBindingSpec{
+		IngressPolicyRef: &galacticv1alpha1.LocalPolicyReference{Name: "web"},
+	}
+	if err := f.admin.Update(ctx, &s); err != nil {
+		t.Fatal(err)
+	}
+	resolved(metav1.ConditionFalse, "NotFound", "ingress: TrafficPolicy web does not exist")
+
+	web := &galacticv1alpha1.TrafficPolicy{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: tenantNS}}
+	web.Spec.Rules = []galacticv1alpha1.TrafficRule{{Name: "all", Action: galacticv1alpha1.ActionAllow}}
+	f.create(web)
+	resolved(metav1.ConditionTrue, "Resolved", "ingress: resolved to TrafficPolicy web")
+
+	eventually(t, "re-admission under the new generation", func() bool {
+		c := meta.FindStatusCondition(f.get("a1").Status.Conditions, galacticv1alpha1.EdgeAttachmentAdmitted)
+		return c != nil && strings.Contains(c.Message, fmt.Sprintf("generation %d", s.Generation))
+	})
+	got := f.get("a1")
+	if c := meta.FindStatusCondition(got.Status.Conditions, galacticv1alpha1.EdgeAttachmentDraining); c != nil {
+		t.Errorf("a policy change drained the attachment: %+v", c)
+	}
+	if got.Status.Address != a.Status.Address {
+		t.Errorf("a policy change moved the attachment from %s to %s", a.Status.Address, got.Status.Address)
+	}
+}

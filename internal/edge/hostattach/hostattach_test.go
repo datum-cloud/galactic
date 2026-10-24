@@ -27,6 +27,7 @@ const (
 	podIndex = 42
 
 	pod1A = "pod1/A"
+	pod1B = "pod1/B"
 	pod3A = "pod3/A"
 
 	// uplinkName is the node's underlay interface and tunName every packet
@@ -94,10 +95,10 @@ func newEdgeFixture(t *testing.T) *edgeFixture {
 		}
 	}
 	f.atts[pod1A] = att("uid-pod1-a", vrfA, "p1a", "a0", "fd00:aa::1")
-	f.atts["pod1/B"] = att("uid-pod1-b", vrfB, "p1b", "b0", "fd00:aa::1")
-	pod1B := f.atts["pod1/B"]
-	pod1B.PodTable, pod1B.PodIndex = podTable+1, podIndex+1
-	f.atts["pod1/B"] = pod1B
+	f.atts[pod1B] = att("uid-pod1-b", vrfB, "p1b", "b0", "fd00:aa::1")
+	b := f.atts[pod1B]
+	b.PodTable, b.PodIndex = podTable+1, podIndex+1
+	f.atts[pod1B] = b
 	f.atts["pod2/A"] = att("uid-pod2-a", vrfA, "p2a", "a0", "fd00:aa::2")
 	for key, vrfName := range map[string]string{pod3A: vrfA, pod4B: vrfB} {
 		a := att("uid-"+key, vrfName, "p"+key[3:4]+"t", "a0", "fd00:aa::3")
@@ -105,7 +106,7 @@ func newEdgeFixture(t *testing.T) *edgeFixture {
 		a.TUN = &TUN{Name: tunName, Owner: 65534, Group: 65534}
 		f.atts[key] = a
 	}
-	for _, key := range []string{pod1A, "pod1/B", "pod2/A", pod3A, pod4B} {
+	for _, key := range []string{pod1A, pod1B, "pod2/A", pod3A, pod4B} {
 		res, err := Provision(f.hostH, f.handles[key[:4]], f.atts[key])
 		if err != nil {
 			t.Fatalf("provision %s: %v", key, err)
