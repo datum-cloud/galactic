@@ -97,6 +97,15 @@ func TestGRPCOverMTLS(t *testing.T) {
 		t.Error("a node identity was allowed to call another node")
 	}
 
+	// A Looking Glass service identity may call neither node method.
+	svc := dial(creds(t, ca, dir, identity.Service("dfw", "looking-glass")), nodeID)
+	if _, err := svc.Info(ctx, &fabricv1.InfoRequest{}); err == nil {
+		t.Error("a service identity was allowed to call Info")
+	}
+	if _, err := svc.Execute(ctx, request(query.Query{Type: query.TypeBGPSummary})); err == nil {
+		t.Error("a service identity was allowed to call Execute")
+	}
+
 	// The gateway refuses a server presenting the wrong pod identity.
 	wrong := dial(creds(t, ca, dir, identity.Gateway("dfw")), identity.Node("dfw", "galactic-system", "fabric-router-z"))
 	if _, err := wrong.Info(ctx, &fabricv1.InfoRequest{}); err == nil {

@@ -263,11 +263,12 @@ and does not bypass the gateway's identity checks.
 Every certificate carries exactly one URI SAN in the trust domain
 `fabric-api.datumapis.com`:
 
-| Identity | URI SAN                                                                  | Issued to                              | Key usages                |
-| -------- | ------------------------------------------------------------------------ | -------------------------------------- | ------------------------- |
-| gateway  | `spiffe://fabric-api.datumapis.com/cell/<cell>/gateway`                  | The gateway Deployment (both replicas) | `client auth,server auth` |
-| node     | `spiffe://fabric-api.datumapis.com/cell/<cell>/ns/<namespace>/pod/<pod>` | Each node's `fabric-api-certs` pod     | `server auth`             |
-| operator | `spiffe://fabric-api.datumapis.com/cell/<cell>/operator/<name>`          | A person or tool calling directly      | `client auth`             |
+| Identity | URI SAN                                                                  | Issued to                                 | Key usages                |
+| -------- | ------------------------------------------------------------------------ | ----------------------------------------- | ------------------------- |
+| gateway  | `spiffe://fabric-api.datumapis.com/cell/<cell>/gateway`                  | The gateway Deployment (both replicas)    | `client auth,server auth` |
+| node     | `spiffe://fabric-api.datumapis.com/cell/<cell>/ns/<namespace>/pod/<pod>` | Each node's `fabric-api-certs` pod        | `server auth`             |
+| operator | `spiffe://fabric-api.datumapis.com/cell/<cell>/operator/<name>`          | A person or tool calling directly         | `client auth`             |
+| service  | `spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>`           | The customer-facing Looking Glass service | `client auth`             |
 
 The node identity names a **pod**, not the node: the csi-driver can template a
 pod's name and namespace (`${POD_NAME}`, `${POD_NAMESPACE}`) but not its node's
@@ -298,6 +299,18 @@ How an identity is checked:
   debug service an operator may call `Query` and `ListNodes`, and the gateway
   identity may call only `Query` (the form in which a follower forwards to the
   leader). Anything else is `Unauthorized`.
+- The gateway also accepts a service identity whose name is in
+  `--service-identities`. A service may call only the Looking Glass service's
+  `GetCapabilities` and `RunDiagnostic`, never `Query`, `ListNodes` or a node.
+  The gateway identity may call the gateway-only `ForwardDiagnostic`, with which
+  a follower hands a request to the leader; no other identity may.
+- On every gateway RPC, unary or streaming, the gateway verifies the caller's
+  certificate again against its current bundle and clock, so a connection opened
+  by a certificate that has since expired, or whose CA has left the bundle, is
+  refused with `UNAUTHENTICATED`. A call's context ends when the caller's
+  certificate expires, after which a stream sends and receives nothing more.
+  Metadata keys starting `x-fabric-api-` are dropped from every call the
+  gateway identity did not make.
 
 The csi volume attributes in the `fabric-api-certs` DaemonSet (volume
 `fabric-api-csi`) and the gateway Deployment:
@@ -351,6 +364,23 @@ spec:
 
 An operator certificate can reach any node and the gateway in its cell, so treat
 who may request one as an access decision.
+
+### Service certificates
+
+The customer-facing Looking Glass service gets one certificate per cell it calls,
+from that cell's `fabric-api` Issuer, with URI SAN
+`spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>` and usage
+`client auth`, issued like an operator certificate. The gateway accepts it only
+when `<name>` is in its `--service-identities` list. The project and request
+IDs in a `RunDiagnostic` request are trusted because that identity is
+authenticated: issuing a service certificate grants the right to attribute
+diagnostics to any project, so treat it as an access decision too. The
+service presents the certificate on its gRPC connection to the gateway's
+`debug` port and, to rotate without a restart, reloads the files as cert-manager
+renews them; the gateway accepts the overlapping-bundle rotation below. The
+service contract is [service-contract.md](service-contract.md). The gateway
+does not execute service diagnostics: it answers a valid `RunDiagnostic`
+with `ServiceDisabled`.
 
 ### Rotation
 
@@ -476,6 +506,7 @@ FRR, so it follows [Rollout](#rollout).
 | `--max-in-flight`                     |                                      | `256`                                                  | Queries executing at once; more wait for a requeue                                                                                                                        |
 | `--retention`                         |                                      | `1h`                                                   | Retention the stale-object count assumes; keep equal to the janitor's `--retention`                                                                                       |
 | `--cleanup-grace`                     |                                      | `15m`                                                  | Cleanup grace the stale-object count assumes; keep equal to the janitor's `--grace`                                                                                       |
+| `--service-identities`                |                                      |                                                        | Comma-separated names of the Looking Glass service identities allowed to call this gateway. Empty allows none                                                             |
 
 `--max-nodes`, `--max-object-bytes` and `--max-node-response-bytes` can only lower
 their ceilings: zero or a value above the ceiling selects the ceiling. The

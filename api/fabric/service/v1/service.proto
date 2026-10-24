@@ -1,0 +1,81 @@
+// Copyright 2026 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// The Looking Glass service contract: the API an authorized customer-facing
+// service calls on a cell's fabric-api gateway to run bounded diagnostics on
+// the cell's fabric routers. docs/fabric-api/service-contract.md is the
+// normative description of every field and of the stream grammar.
+//
+// Only a cell-scoped service identity
+// (spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>) named in the
+// gateway's allowlist may call it. The project and request attribution in a
+// request is trusted only because that identity is authenticated; the fields
+// alone authorize nothing. Every failure is a gRPC status carrying a
+// google.rpc.ErrorInfo whose reason is a typed error code (domain
+// fabric-api.datumapis.com).
+
+syntax = "proto3";
+
+package fabric.service.v1;
+
+import "fabric/v1/fabric.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "go.datum.net/galactic/api/fabric/service/v1;servicev1";
+
+// LookingGlassService runs on each cell's fabric-api gateway.
+service LookingGlassService {
+  // GetCapabilities reports the cell's service policy. It probes no router
+  // and reserves no capacity.
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  // RunDiagnostic runs one diagnostic and streams its events.
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  rpc RunDiagnostic(RunDiagnosticRequest) returns (stream DiagnosticEvent);
+}
+
+message GetCapabilitiesRequest {
+  // cell must be the cell of the caller's identity and of the gateway.
+  string cell = 1;
+  // api_major must be 1.
+  uint32 api_major = 2;
+}
+
+message GetCapabilitiesResponse {
+  string cell = 1;
+  uint32 api_major = 2;
+  // enabled reports whether the cell executes service diagnostics.
+  bool enabled = 3;
+}
+
+message RunDiagnosticRequest {
+  // api_major must be 1.
+  uint32 api_major = 1;
+  // cell must be the cell of the caller's identity and of the gateway.
+  string cell = 2;
+  // project_id is the canonical project UID the service attributes this
+  // request to: ASCII [A-Za-z0-9._:-], 1 to 128 bytes.
+  string project_id = 3;
+  // request_id is a lowercase UUID identifying this backend attempt.
+  string request_id = 4;
+  // expires_at is the absolute expiration, in the future and at most 120 s
+  // after the gateway first receives the request.
+  google.protobuf.Timestamp expires_at = 5;
+  // query is a RouteLookup, BGPSummary, Ping or Traceroute; a probe target
+  // must be a numeric address.
+  fabric.v1.Query query = 6;
+  // nodes optionally selects at most 32 unique routers by node name.
+  repeated string nodes = 7;
+  // budgets optionally lowers the advertised result limits.
+  fabric.v1.Budgets budgets = 8;
+  // required_features names the capabilities the caller needs.
+  repeated string required_features = 9;
+}
+
+// DiagnosticEvent is one event of a RunDiagnostic stream.
+message DiagnosticEvent {
+  string request_id = 1;
+  // sequence is consecutive, starting at 1.
+  uint64 sequence = 2;
+}

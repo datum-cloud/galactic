@@ -47,11 +47,7 @@ const testLeaseName = "fabric-api-gateway"
 
 func serveDebug(t *testing.T, d *Debug, creds *identity.Credentials) string {
 	t.Helper()
-	srv := grpc.NewServer(
-		grpc.Creds(credentials.NewTLS(creds.ServerConfig(AllowedDebugCaller))),
-		grpc.ChainUnaryInterceptor(node.AuthInterceptor(DebugMethods)),
-	)
-	fabricv1.RegisterFabricGatewayServiceServer(srv, d)
+	srv := NewServer(creds, Allowlist{}, d, &Service{Cell: testSite, Elected: d.Elected})
 	var lc net.ListenConfig
 	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
