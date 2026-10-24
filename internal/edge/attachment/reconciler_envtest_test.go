@@ -23,6 +23,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -317,7 +318,6 @@ func (f *fixture) nodeReleases(name string) {
 
 func TestAdmitAndAllocate(t *testing.T) {
 	f := startFixture(t)
-	ctx := context.Background()
 	svc := f.service("svc-a", poolA, 30)
 	p1, p2 := f.pod("p1"), f.pod("p2")
 	f.create(attachmentFor("a1", svc, p1))
@@ -345,14 +345,9 @@ func TestAdmitAndAllocate(t *testing.T) {
 
 	// Repeated reconciliation, triggered by a service change, keeps every
 	// allocation where it is.
-	var s galacticv1alpha1.EdgeService
-	if err := f.admin.Get(ctx, client.ObjectKeyFromObject(svc), &s); err != nil {
-		t.Fatal(err)
-	}
-	s.Spec.Prefixes = []string{"fd00:10:0:f::/64"}
-	if err := f.admin.Update(ctx, &s); err != nil {
-		t.Fatal(err)
-	}
+	s := f.updateService(svc, func(s *galacticv1alpha1.EdgeService) {
+		s.Spec.Prefixes = []string{"fd00:10:0:f::/64"}
+	})
 	eventually(t, "re-admission under the new generation", func() bool {
 		c := meta.FindStatusCondition(f.get("a1").Status.Conditions, galacticv1alpha1.EdgeAttachmentAdmitted)
 		return c != nil && strings.Contains(c.Message, fmt.Sprintf("generation %d", s.Generation))
@@ -530,21 +525,13 @@ func TestDrainAndRelease(t *testing.T) {
 
 func TestExpiredGrantDrains(t *testing.T) {
 	f := startFixture(t)
-	ctx := context.Background()
 	svc := f.service("svc-a", poolA, 0)
 	p := f.pod("p1")
 	f.create(attachmentFor("a1", svc, p))
 	f.waitCondition("a1", galacticv1alpha1.EdgeAttachmentAllocated, metav1.ConditionTrue, "")
 
-	var s galacticv1alpha1.EdgeService
-	if err := f.admin.Get(ctx, client.ObjectKeyFromObject(svc), &s); err != nil {
-		t.Fatal(err)
-	}
 	until := metav1.NewTime(time.Now().Add(3 * time.Second))
-	s.Spec.ValidUntil = &until
-	if err := f.admin.Update(ctx, &s); err != nil {
-		t.Fatal(err)
-	}
+	f.updateService(svc, func(s *galacticv1alpha1.EdgeService) { s.Spec.ValidUntil = &until })
 	f.waitCondition("a1", galacticv1alpha1.EdgeAttachmentDraining, metav1.ConditionTrue, string(admission.GrantExpired))
 	eventually(t, "expired attachment deleted", func() bool {
 		a := f.get("a1")
@@ -577,16 +564,11 @@ func TestServiceTrafficPolicy(t *testing.T) {
 	f.create(attachmentFor("a1", svc, f.pod("p1")))
 	a := f.waitCondition("a1", galacticv1alpha1.EdgeAttachmentAllocated, metav1.ConditionTrue, ReasonAllocated)
 
-	var s galacticv1alpha1.EdgeService
-	if err := f.admin.Get(ctx, client.ObjectKeyFromObject(svc), &s); err != nil {
-		t.Fatal(err)
-	}
-	s.Spec.TrafficPolicy = &galacticv1alpha1.TrafficPolicyBindingSpec{
-		IngressPolicyRef: &galacticv1alpha1.LocalPolicyReference{Name: "web"},
-	}
-	if err := f.admin.Update(ctx, &s); err != nil {
-		t.Fatal(err)
-	}
+	s := f.updateService(svc, func(s *galacticv1alpha1.EdgeService) {
+		s.Spec.TrafficPolicy = &galacticv1alpha1.TrafficPolicyBindingSpec{
+			IngressPolicyRef: &galacticv1alpha1.LocalPolicyReference{Name: "web"},
+		}
+	})
 	resolved(metav1.ConditionFalse, "NotFound", "ingress: TrafficPolicy web does not exist")
 
 	web := &galacticv1alpha1.TrafficPolicy{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: tenantNS}}
@@ -625,9 +607,11 @@ func TestFailureDiagnostics(t *testing.T) {
 	f.waitCondition("no-instance", galacticv1alpha1.EdgeAttachmentAdmitted, metav1.ConditionFalse, ReasonInstanceMissing)
 	// Decided again on every change: still one transition.
 	for i := range 3 {
-		a := f.get("no-instance")
-		a.Annotations = map[string]string{"touch": strconv.Itoa(i)}
-		if err := f.admin.Update(ctx, a); err != nil {
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			a := f.get("no-instance")
+			a.Annotations = map[string]string{"touch": strconv.Itoa(i)}
+			return f.admin.Update(ctx, a)
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -663,16 +647,11 @@ func TestFailureDiagnostics(t *testing.T) {
 
 	// A service whose policy reference does not resolve: one Policy Event
 	// on the service.
-	var s galacticv1alpha1.EdgeService
-	if err := f.admin.Get(ctx, client.ObjectKeyFromObject(svc), &s); err != nil {
-		t.Fatal(err)
-	}
-	s.Spec.TrafficPolicy = &galacticv1alpha1.TrafficPolicyBindingSpec{
-		IngressPolicyRef: &galacticv1alpha1.LocalPolicyReference{Name: "absent"},
-	}
-	if err := f.admin.Update(ctx, &s); err != nil {
-		t.Fatal(err)
-	}
+	s := f.updateService(svc, func(s *galacticv1alpha1.EdgeService) {
+		s.Spec.TrafficPolicy = &galacticv1alpha1.TrafficPolicyBindingSpec{
+			IngressPolicyRef: &galacticv1alpha1.LocalPolicyReference{Name: "absent"},
+		}
+	})
 	eventually(t, "policy denial event", func() bool { return len(f.events.Find(diag.StagePolicy, "NotFound")) == 1 })
 	policy := f.events.Find(diag.StagePolicy, "NotFound")[0]
 	if policy.Name != "svc-a" || !strings.Contains(policy.Note, "TrafficPolicy absent does not exist") {
