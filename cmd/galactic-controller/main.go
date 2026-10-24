@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -41,6 +42,7 @@ import (
 	cloudwebhook "go.datum.net/galactic/internal/cloud/webhook"
 	"go.datum.net/galactic/internal/edge/admission"
 	edgeattachment "go.datum.net/galactic/internal/edge/attachment"
+	edgediag "go.datum.net/galactic/internal/edge/diag"
 	edgeroute "go.datum.net/galactic/internal/edge/route"
 	"go.datum.net/galactic/internal/edge/timing"
 	"go.datum.net/galactic/internal/metadata"
@@ -169,15 +171,22 @@ func run(parent context.Context, o *options) error {
 		return err
 	}
 	if o.edge {
+		rec := &edgediag.Recorder{
+			Events:  mgr.GetEventRecorder("galactic-controller"),
+			Metrics: edgediag.NewMetrics(ctrlmetrics.Registry, "core"),
+		}
+		if err := ctrlmetrics.Registry.Register(&edgediag.StateCollector{Reader: mgr.GetClient()}); err != nil {
+			return fmt.Errorf("register edge state metrics: %w", err)
+		}
 		if err := edgeattachment.Setup(mgr, &edgeattachment.Reconciler{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(),
-			Authority: admission.NewAuthority(o.edgeMaxSkew), MaxSkew: o.edgeMaxSkew,
+			Authority: admission.NewAuthority(o.edgeMaxSkew), MaxSkew: o.edgeMaxSkew, Diag: rec,
 		}); err != nil {
 			return fmt.Errorf("set up edge attachments: %w", err)
 		}
 		params := timing.Params
 		params.MaxSkew = o.edgeMaxSkew
-		if err := edgeroute.Setup(mgr, params, timing.BootClock, galactic.SystemNamespace); err != nil {
+		if err := edgeroute.Setup(mgr, params, timing.BootClock, galactic.SystemNamespace, rec); err != nil {
 			return fmt.Errorf("set up edge routes: %w", err)
 		}
 	}

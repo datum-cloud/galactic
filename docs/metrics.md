@@ -26,7 +26,9 @@ the fabric-api gateway are Deployments, scraped per pod.
 | Tenant routing (GoBGP)  | `galactic-router`, `galactic-router-rr`                   | `galactic_router_*`, controller-runtime                       | 9179           | `galactic-router` / `galactic-router-rr` |
 | Private service routes  | `galactic-router` (plain mode only)                       | `galactic_service_route_*`                                    | 9179           | `galactic-router`                        |
 | Traffic policy          | `galactic-router` with `GALACTIC_ROUTER_TRAFFIC_POLICY`   | `galactic_cni_traffic_policy_*`                               | 9179           | `galactic-router`                        |
-| Traffic policy webhook  | `galactic-controller`                                     | controller-runtime only                                       | 9184           | none shipped                             |
+| Traffic policy webhook  | `galactic-controller`                                     | controller-runtime                                            | 9184           | `galactic-controller`                    |
+| Galactic Edge (core)    | `galactic-controller --role=cell --edge`                  | `galactic_edge_foundation_*`                                  | 9184           | `galactic-controller`                    |
+| Galactic Edge (node)    | `galactic-edge`                                           | `galactic_edge_foundation_*`, controller-runtime              | 9186           | `galactic-edge`                          |
 | Underlay routing (FRR)  | `fabric-router` `frr-exporter` sidecar                    | `frr_*`                                                       | 9342           | `fabric-router`                          |
 | Underlay config         | `fabric-router` `fabric-config-agent`                     | `fabric_router_*`                                             | 9343           | `fabric-config-agent`                    |
 | Fabric routing (API)    | `fabric-router-controller`                                | `galactic_fabric_routing_*` (leader only), controller-runtime | 9185           | `fabric-router-controller`               |
@@ -36,9 +38,9 @@ the fabric-api gateway are Deployments, scraped per pod.
 
 `config/monitoring/` ships PodMonitors for `galactic-cni`,
 `galactic-router`, `fabric-router` (including the opt-in fabric-api
-sidecar), `fabric-router-controller`, the fabric-api gateway and
-`galactic-nat`. Scraping `galactic-vrf`, `galactic-gateway` or
-`galactic-controller` needs a scrape object of your own. Copy the shipped
+sidecar), `fabric-router-controller`, the fabric-api gateway,
+`galactic-nat`, `galactic-controller` and `galactic-edge`. Scraping
+`galactic-vrf` or `galactic-gateway` needs a scrape object of your own. Copy the shipped
 PodMonitors' relabeling of `__meta_kubernetes_pod_node_name` into `node`:
 every galactic metric is per node, and `node` is the label you group and
 alert by. `fabric-router-controller`'s fleet series name the node each
@@ -46,7 +48,7 @@ deployment or router targets themselves, and their `namespace` is the
 object's, which its PodMonitor keeps with `honorLabels`.
 
 The eBPF-backed metrics (`galactic_usid_*`, `galactic_cni_egress_shard_*`,
-`galactic_edge_*`, `galactic_nat_*`) are read from BPF maps at scrape time,
+`galactic_edge_*`, `galactic_edge_foundation_gate_drops_total`, `galactic_nat_*`) are read from BPF maps at scrape time,
 and a pod restart that reloads the program resets them. Always use
 `rate()` / `increase()`, never raw counter values.
 
@@ -662,6 +664,56 @@ sum by (node, reason) (rate(galactic_edge_drops_total[5m])) > 0
 sum by (node, rule) (increase(galactic_edge_control_plane_drops_total[1h])) > 0
 ```
 
+## Galactic Edge foundation — `galactic_edge_foundation_*`
+
+The attachment lifecycle and forwarding claims of the Galactic Edge
+foundation (`config/galactic-edge/`), distinct from the edge load
+balancer's `galactic_edge_*` above. Core's series come from
+`galactic-controller --role=cell --edge`; every replica reads its cache at
+scrape time, so aggregate them with `max`. Node series come from
+`galactic-edge` on each edge node. No label names an attachment, pod,
+route, prefix or address: `provider` is an approved `EdgeProvider`'s name
+or `unknown`, and `reason` is a condition reason or `Other`. Find the
+objects behind a series with the Events and `kubectl` queries in
+[the troubleshooting guide](edge/troubleshooting.md).
+
+| Metric                                            | Type    | Source | Labels                                   | Meaning                                                                                                 |
+| ------------------------------------------------- | ------- | ------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `galactic_edge_foundation_attachments`            | gauge   | core   | `provider`, `state`, `reason`            | Attachments by the first lifecycle stage they have not passed, and the condition reason holding them    |
+| `galactic_edge_foundation_routes`                 | gauge   | core   | `provider`, `state`, `reason`            | Routes by claim state, and the condition reason holding them                                            |
+| `galactic_edge_foundation_services`               | gauge   | core   | `provider`, `policy`, `reason`           | Services whose traffic policy is `Resolved` or `Unresolved`, with the reason when unresolved            |
+| `galactic_edge_foundation_state_collect_errors`   | gauge   | core   | none                                     | Kinds the last scrape could not list and left out                                                       |
+| `galactic_edge_foundation_failures_total`         | counter | both   | `component`, `stage`, `reason`           | Transitions into a failed stage, counted once per transition, not per retry. Each also records an Event |
+| `galactic_edge_foundation_gate_closures_total`    | counter | node   | `component`, `cause`                     | Open forwarding gates the agent closed, by cause. Each also records an Event on the route               |
+| `galactic_edge_foundation_cleanup_failures_total` | counter | node   | `component`                              | Host state releases and gate sweeps that failed and are retried                                         |
+| `galactic_edge_foundation_links`                  | gauge   | node   | none                                     | Host links registered with the node's forwarding gate                                                   |
+| `galactic_edge_foundation_gates`                  | gauge   | node   | `state` (`open`, `expired`, `closed`)    | Gates on the node. `expired` passed its deadline before the agent closed it                             |
+| `galactic_edge_foundation_gate_drops_total`       | counter | node   | `check` (`ingress`, `egress`, `deliver`) | Packets dropped on an edge link because no open gate covered the address                                |
+| `galactic_edge_foundation_scopes_lost`            | gauge   | node   | none                                     | VPC ownership scopes another writer took from this process                                              |
+| `galactic_edge_foundation_node_collect_errors`    | gauge   | node   | none                                     | Gate table reads the last scrape could not make                                                         |
+
+- Attachment `state`, in lifecycle order: `Admission`, `Allocation`,
+  `Programming`, `Ready`, `Active`, then `Draining` and `Releasing`.
+  `reason` is `Pending` while the stage's condition is unset, and
+  `NotReady` for `Ready`, whose own reason the provider writes.
+- Route `state`: `Unclaimed`, `Pending`, `Accepted` (with the `Published`
+  condition's reason), `Published`, `Revoked` or `Released`.
+- `stage`: `Admission`, `Allocation`, `Programming`, `Policy`, `Route`.
+- `cause`: `Expired` (no renewal extended the gate), `Released`,
+  `Revoked`, `InstanceGone`, `AuthorityEnded`, `GrantCeiling`,
+  `RouteGone` or `HolderMoved`.
+- Packet drops by traffic policy on an edge link are
+  `galactic_cni_traffic_policy_*` from `galactic-router`, labeled with the
+  attachment.
+
+```promql
+# Attachments the foundation has admitted but not yet programmed, per provider
+max by (provider, reason) (galactic_edge_foundation_attachments{state="Programming"})
+
+# Gates closing because providers stop renewing
+sum by (node) (increase(galactic_edge_foundation_gate_closures_total{cause="Expired"}[1h]))
+```
+
 ## Traffic policy — `galactic_cni_traffic_policy_*`
 
 Interface traffic policy decisions in the uSID datapath. The counters live in
@@ -1023,7 +1075,8 @@ its operator reference in
 unit-tested with `task test:alerts`) covers routing, fabric routing through
 the API, the NAT session table
 and ports, the egress shards' state, drop ratio and uplinks, the compute
-nodes' egress shard groups, and the fabric-api looking glass. Every alert
+nodes' egress shard groups, the fabric-api looking glass and the Galactic
+Edge foundation. Every alert
 carries `service: galactic`, `team: connect` and a `runbook_url`.
 
 | Alert                                | Fires when                                                                | For | Severity |
@@ -1080,3 +1133,8 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | FabricAPICredentialsMissing          | `fabric_api_credentials_loaded == 0`                                      | 15m | warning  |
 | FabricAPISearchIndexUnsynced         | search index holds routes but is not synced with bgpd                     | 15m | warning  |
 | FabricAPIMetricsDown                 | `fabric-api-node` or `fabric-api-gateway` scrape down                     | 10m | warning  |
+| GalacticEdgeAttachmentNotProgrammed  | admitted and allocated attachments not programmed by their node           | 15m | warning  |
+| GalacticEdgeServicePolicyUnresolved  | an `EdgeService`'s `TrafficPolicyResolved` is False                       | 10m | warning  |
+| GalacticEdgeScopeLost                | `galactic_edge_foundation_scopes_lost > 0`                                | 5m  | warning  |
+| GalacticEdgeCleanupFailing           | more than two cleanup failures in every 15-minute window                  | 15m | warning  |
+| GalacticEdgeMetricsDown              | `galactic-edge` or `galactic-controller` scrape down                      | 5m  | warning  |

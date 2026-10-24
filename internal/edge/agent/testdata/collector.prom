@@ -1,0 +1,19 @@
+# HELP galactic_edge_foundation_gate_drops_total Packets the datapath dropped on an edge link because no open gate covered the address, by check: ingress (from the provider), egress (towards the provider) or deliver (local delivery).
+# TYPE galactic_edge_foundation_gate_drops_total counter
+galactic_edge_foundation_gate_drops_total{check="deliver"} 1
+galactic_edge_foundation_gate_drops_total{check="egress"} 2
+galactic_edge_foundation_gate_drops_total{check="ingress"} 3
+# HELP galactic_edge_foundation_gates Forwarding gates on the node's edge links, by state: open (deadline ahead), expired (deadline passed, not yet closed by the agent) or closed (kept until the route records it closed).
+# TYPE galactic_edge_foundation_gates gauge
+galactic_edge_foundation_gates{state="closed"} 16
+galactic_edge_foundation_gates{state="expired"} 17
+galactic_edge_foundation_gates{state="open"} 17
+# HELP galactic_edge_foundation_links Edge attachment host links registered with the node's forwarding gate.
+# TYPE galactic_edge_foundation_links gauge
+galactic_edge_foundation_links 50
+# HELP galactic_edge_foundation_node_collect_errors Reads of the node's forwarding gate the last scrape could not make, rather than reporting zero.
+# TYPE galactic_edge_foundation_node_collect_errors gauge
+galactic_edge_foundation_node_collect_errors 0
+# HELP galactic_edge_foundation_scopes_lost VPC ownership scopes another writer took from this process, which no longer programs or releases there.
+# TYPE galactic_edge_foundation_scopes_lost gauge
+galactic_edge_foundation_scopes_lost 1

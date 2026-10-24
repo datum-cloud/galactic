@@ -226,6 +226,7 @@ func (a *Agent) SetupWithManager(mgr ctrl.Manager) error {
 			case <-t.C:
 				if err := a.SweepGates(ctx); err != nil {
 					ctrl.LoggerFrom(ctx).Error(err, "sweep expired forwarding gates")
+					a.Diag.CleanupFailed()
 				}
 			}
 		}

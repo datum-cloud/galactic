@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -31,6 +33,8 @@ import (
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/admission"
+	"go.datum.net/galactic/internal/edge/diag"
+	"go.datum.net/galactic/internal/edge/diag/diagtest"
 )
 
 const (
@@ -57,6 +61,9 @@ type fixture struct {
 	scheme *runtime.Scheme
 	admin  client.Client
 	vpc    *cloudv1alpha1.VPC
+	// events and metrics are what the controller's diagnostics recorded.
+	events  *diagtest.Recorder
+	metrics *prometheus.Registry
 }
 
 func startFixture(t *testing.T) *fixture {
@@ -136,10 +143,12 @@ func startAPI(t *testing.T) *fixture {
 // startController runs every core reconciler as galactic-controller, with
 // exactly the permissions the shipped RBAC grants.
 func (f *fixture) startController() {
+	var rec *diag.Recorder
+	rec, f.events, f.metrics = diagtest.New("core")
 	f.run(func(mgr ctrl.Manager) error {
 		return Setup(mgr, &Reconciler{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(),
-			Authority: admission.NewAuthority(2 * time.Second), MaxSkew: 2 * time.Second,
+			Authority: admission.NewAuthority(2 * time.Second), MaxSkew: 2 * time.Second, Diag: rec,
 		})
 	})
 }
@@ -596,4 +605,119 @@ func TestServiceTrafficPolicy(t *testing.T) {
 	if got.Status.Address != a.Status.Address {
 		t.Errorf("a policy change moved the attachment from %s to %s", a.Status.Address, got.Status.Address)
 	}
+}
+
+// TestFailureDiagnostics is the core half of the foundation's diagnostics:
+// an admission denial, an admitted attachment's authority ending and an
+// unresolved traffic policy each emit one Warning Event naming the stage,
+// the reason and the provider, service, attachment and pod involved, and
+// count once in galactic_edge_foundation_failures_total however often the refusal is
+// decided again.
+func TestFailureDiagnostics(t *testing.T) {
+	f := startFixture(t)
+	ctx := context.Background()
+	svc := f.service("svc-a", poolA, 1)
+	p1, p2 := f.pod("p1"), f.pod("p2")
+
+	orphan := attachmentFor("no-instance", svc, p1)
+	orphan.Spec.InstanceRef.Name = "no-such-instance"
+	f.create(orphan)
+	f.waitCondition("no-instance", galacticv1alpha1.EdgeAttachmentAdmitted, metav1.ConditionFalse, ReasonInstanceMissing)
+	// Decided again on every change: still one transition.
+	for i := range 3 {
+		a := f.get("no-instance")
+		a.Annotations = map[string]string{"touch": strconv.Itoa(i)}
+		if err := f.admin.Update(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(time.Second)
+	denied := f.events.Find(diag.StageAdmission, ReasonInstanceMissing)
+	if len(denied) != 1 {
+		t.Fatalf("admission denial events %+v, want exactly 1", denied)
+	}
+	a := f.get("no-instance")
+	expectCorrelation(t, denied[0], map[string]string{
+		corrProvider: providerSA, "service": tenantNS + "/svc-a", "serviceUID": string(svc.UID),
+		"attachment": a.Namespace + "/no-instance", "attachmentUID": string(a.UID), "podUID": string(p1.UID),
+	})
+	if denied[0].Name != "no-instance" || denied[0].Type != corev1.EventTypeWarning {
+		t.Errorf("denial event %+v", denied[0])
+	}
+	expectFailures(t, f.metrics, "Admission", ReasonInstanceMissing, 1)
+
+	// An admitted attachment whose pod goes away drains: one Event names
+	// the reason and the drain deadline.
+	f.create(attachmentFor("revoked", svc, p2))
+	f.waitCondition("revoked", galacticv1alpha1.EdgeAttachmentAllocated, metav1.ConditionTrue, "")
+	if err := f.admin.Delete(ctx, p2, client.GracePeriodSeconds(0)); err != nil {
+		t.Fatal(err)
+	}
+	f.waitCondition("revoked", galacticv1alpha1.EdgeAttachmentDraining, metav1.ConditionTrue, ReasonPodMissing)
+	drained := f.events.Find(diag.StageAdmission, ReasonPodMissing)
+	if len(drained) != 1 || !strings.Contains(drained[0].Note, "draining until") {
+		t.Fatalf("drain events %+v, want one naming its deadline", drained)
+	}
+	expectCorrelation(t, drained[0], map[string]string{"attachment": a.Namespace + "/revoked",
+		"podUID": string(p2.UID), "node": edgeNode, "serviceGeneration": strconv.FormatInt(svc.Generation, 10)})
+
+	// A service whose policy reference does not resolve: one Policy Event
+	// on the service.
+	var s galacticv1alpha1.EdgeService
+	if err := f.admin.Get(ctx, client.ObjectKeyFromObject(svc), &s); err != nil {
+		t.Fatal(err)
+	}
+	s.Spec.TrafficPolicy = &galacticv1alpha1.TrafficPolicyBindingSpec{
+		IngressPolicyRef: &galacticv1alpha1.LocalPolicyReference{Name: "absent"},
+	}
+	if err := f.admin.Update(ctx, &s); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "policy denial event", func() bool { return len(f.events.Find(diag.StagePolicy, "NotFound")) == 1 })
+	policy := f.events.Find(diag.StagePolicy, "NotFound")[0]
+	if policy.Name != "svc-a" || !strings.Contains(policy.Note, "TrafficPolicy absent does not exist") {
+		t.Errorf("policy event %+v", policy)
+	}
+	expectCorrelation(t, policy, map[string]string{corrProvider: providerSA, "service": tenantNS + "/svc-a",
+		"serviceGeneration": strconv.FormatInt(s.Generation, 10)})
+	expectFailures(t, f.metrics, "Policy", "NotFound", 1)
+}
+
+// corrProvider is the provider's key in an Event's correlation.
+const corrProvider = "provider"
+
+func expectCorrelation(t *testing.T, e diagtest.Event, want map[string]string) {
+	t.Helper()
+	got := e.Correlation()
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s event correlation %s=%q, want %q (note %q)", e.Reason, k, got[k], v, e.Note)
+		}
+	}
+}
+
+func expectFailures(t *testing.T, reg *prometheus.Registry, stage, reason string, want float64) {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() != "galactic_edge_foundation_failures_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["stage"] == stage && labels["reason"] == reason {
+				if got := m.GetCounter().GetValue(); got != want {
+					t.Errorf("failures{stage=%s,reason=%s} = %v, want %v", stage, reason, got, want)
+				}
+				return
+			}
+		}
+	}
+	t.Errorf("no failures{stage=%s,reason=%s} series", stage, reason)
 }

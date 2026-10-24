@@ -88,6 +88,9 @@ data flow, module reference, known constraints):
 - [metrics.md](metrics.md) — every Prometheus metric for the VPC dataplane,
   VPC ingress, routing and NAT: labels, label values and the shipped alerts,
   with PromQL for dashboards and monitors.
+- [edge/troubleshooting.md](edge/troubleshooting.md) — finding the lifecycle
+  stage a Galactic Edge attachment or route stopped at, the objects involved
+  and a prefix's current owner, from conditions, Events and metrics.
 
 ## Proposals and exploratory design
 

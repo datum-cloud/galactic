@@ -26,6 +26,7 @@ import (
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/edge/claim"
+	"go.datum.net/galactic/internal/edge/diag"
 )
 
 // Field indexes on EdgeRoute, mapping each input's events back to the routes
@@ -59,7 +60,7 @@ func LeaseCache() map[client.Object]cache.ByObject {
 // reaper and the attachment publication reconciler with mgr. They run on the
 // leader only, and share Params and Clock. bgpNamespace is where the cell's
 // BGP objects live.
-func Setup(mgr ctrl.Manager, params claim.Params, clock claim.Clock, bgpNamespace string) error {
+func Setup(mgr ctrl.Manager, params claim.Params, clock claim.Clock, bgpNamespace string, rec *diag.Recorder) error {
 	if err := params.Validate(); err != nil {
 		return err
 	}
@@ -71,7 +72,7 @@ func Setup(mgr ctrl.Manager, params claim.Params, clock claim.Clock, bgpNamespac
 		return fmt.Errorf("set up EdgeRouteIndex reconciler: %w", err)
 	}
 	if err := (&Reconciler{Client: c, APIReader: reader, Params: params, Clock: clock,
-		BGPNamespace: bgpNamespace}).setup(mgr); err != nil {
+		BGPNamespace: bgpNamespace, Diag: rec}).setup(mgr); err != nil {
 		return fmt.Errorf("set up EdgeRoute reconciler: %w", err)
 	}
 	if err := (&PublicationReconciler{Client: c}).setup(mgr); err != nil {

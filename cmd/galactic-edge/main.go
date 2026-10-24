@@ -33,10 +33,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/agent"
+	"go.datum.net/galactic/internal/edge/diag"
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/route"
@@ -166,6 +168,13 @@ func run(parent context.Context, o *options) error {
 		Gates:      agent.PinnedGates{PinDir: o.pinDir},
 		Params:     params,
 		BootID:     strings.TrimSpace(string(bootID)),
+		Diag: &diag.Recorder{
+			Events:  mgr.GetEventRecorder("galactic-edge"),
+			Metrics: diag.NewMetrics(ctrlmetrics.Registry, "node"),
+		},
+	}
+	if err := ctrlmetrics.Registry.Register(agent.Collector{Agent: a}); err != nil {
+		return fmt.Errorf("register edge node metrics: %w", err)
 	}
 	if err := a.SetupWithManager(mgr); err != nil {
 		return err

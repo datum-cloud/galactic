@@ -2319,3 +2319,143 @@ tests:
                 Private service routes have repeatedly failed to apply or remove on failing.
                 Consumers can lose access even when the router Pod is ready and policies are accepted.
                 Check the router's service policy errors, attachment host interfaces, and node programming acknowledgments.
+
+  # Attachments stuck in Programming fire per provider and reason, the max of
+  # both replicas; a short Pending blip and Active attachments do not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-0",provider="alpha",state="Programming",reason="NamespaceUnavailable"}'
+        values: "3x40"
+      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-1",provider="alpha",state="Programming",reason="NamespaceUnavailable"}'
+        values: "2x40"
+      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-0",provider="beta",state="Programming",reason="Pending"}'
+        values: "1x4 0x36"
+      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-0",provider="beta",state="Active",reason=""}'
+        values: "9x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticEdgeAttachmentNotProgrammed
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: GalacticEdgeAttachmentNotProgrammed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              provider: alpha
+              reason: NamespaceUnavailable
+            exp_annotations:
+              summary: "Edge attachments of alpha are not programmed (NamespaceUnavailable)"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgeattachmentnotprogrammed"
+              description: >-
+                3 attachments of provider alpha have been admitted and allocated for 15
+                minutes without their node programming them, reason NamespaceUnavailable. Their providers have no
+                tenant connectivity. The Programming Warning Events on the attachments name the node, pod and error.
+
+  # An unresolved service policy fires after 10m; a resolved one does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_edge_foundation_services{job="galactic-controller",pod="gc-0",provider="alpha",policy="Unresolved",reason="NotFound"}'
+        values: "1x30"
+      - series: 'galactic_edge_foundation_services{job="galactic-controller",pod="gc-0",provider="beta",policy="Resolved",reason=""}'
+        values: "4x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GalacticEdgeServicePolicyUnresolved
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GalacticEdgeServicePolicyUnresolved
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              provider: alpha
+              reason: NotFound
+            exp_annotations:
+              summary: "Edge services of alpha have no resolvable traffic policy"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgeservicepolicyunresolved"
+              description: >-
+                1 EdgeServices of provider alpha have reported TrafficPolicyResolved
+                False (NotFound) for 10 minutes. Their attachments carry nothing but neighbor discovery.
+                The Policy Warning Event on each service names the missing or invalid policy.
+
+  # A lost scope that persists fires; one a restart clears does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_edge_foundation_scopes_lost{job="galactic-edge",node="edge-1"}'
+        values: "0x2 1x20"
+      - series: 'galactic_edge_foundation_scopes_lost{job="galactic-edge",node="edge-2"}'
+        values: "0x2 1x4 0x16"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GalacticEdgeScopeLost
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-edge
+              node: edge-1
+            exp_annotations:
+              summary: "galactic-edge on edge-1 lost 1 VPC ownership scopes"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgescopelost"
+              description: >-
+                Another writer has taken 1 VPC scopes from galactic-edge on edge-1, which no
+                longer programs or releases attachments in them. Its scope-ownership health check fails, so the
+                kubelet restarts it; this alert means the restart has not resolved it.
+
+  # Cleanup failing in every window fires; a single failed pass does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_edge_foundation_cleanup_failures_total{job="galactic-edge",node="edge-1"}'
+        values: "0+1x80"
+      - series: 'galactic_edge_foundation_cleanup_failures_total{job="galactic-edge",node="edge-2"}'
+        values: "0x5 1x75"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticEdgeCleanupFailing
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: GalacticEdgeCleanupFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-edge
+              node: edge-1
+            exp_annotations:
+              summary: "galactic-edge on edge-1 keeps failing to release host state"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgecleanupfailing"
+              description: >-
+                galactic-edge on edge-1 has failed more than twice in every 15-minute window for 15 minutes
+                to release an attachment's host state or sweep expired gates. Deleted attachments stay held by their
+                finalizer and their addresses stay allocated. The agent's log names the error.
+
+  # Either job's scrape down fires; other jobs do not.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="galactic-edge",pod="galactic-edge-abcde"}'
+        values: "0x20"
+      - series: 'up{job="galactic-controller",pod="gc-0"}'
+        values: "1x20"
+      - series: 'up{job="galactic-nat",pod="galactic-nat-xyz"}'
+        values: "0x20"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: GalacticEdgeMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-edge
+              pod: galactic-edge-abcde
+            exp_annotations:
+              summary: "galactic-edge metrics on galactic-edge-abcde cannot be scraped"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgemetricsdown"
+              description: >-
+                Prometheus cannot scrape galactic-edge on galactic-edge-abcde, so the other Galactic Edge alerts
+                cannot fire for it.

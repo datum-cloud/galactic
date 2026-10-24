@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,8 @@ import (
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/admission"
 	"go.datum.net/galactic/internal/edge/claim"
+	"go.datum.net/galactic/internal/edge/diag"
+	"go.datum.net/galactic/internal/edge/diag/diagtest"
 	"go.datum.net/galactic/internal/edge/provider"
 	"go.datum.net/galactic/internal/edge/timing"
 )
@@ -498,7 +501,7 @@ func TestControllerAsGalacticController(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Setup(mgr, short, timing.BootClock, bgpNamespace); err != nil {
+	if err := Setup(mgr, short, timing.BootClock, bgpNamespace, nil); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -841,5 +844,68 @@ func TestAbandonedEntryWaitsForEarlierHolder(t *testing.T) {
 	reindex()
 	if e := f.indexEntries(); len(e) != 0 {
 		t.Fatalf("abandoned entry stayed %+v", e)
+	}
+}
+
+// TestRouteDiagnostics: a claim refused for an overlapping prefix and an
+// accepted holder revoked each emit one Warning Event at the Route stage,
+// naming the provider, route, prefix and epoch, however often decided; a
+// claim waiting to fence the previous holder emits none.
+func TestRouteDiagnostics(t *testing.T) {
+	f := startAPI(t)
+	ctx := context.Background()
+	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
+	f.newRoute("r", prefixA)
+	f.claim("r", a)
+	f.reconcile("r")
+	if got := f.claimReason("r"); got != ReasonIndexRebuilt {
+		t.Fatalf("first claim: %s", got)
+	}
+	if got := f.events.Events(); len(got) != 0 {
+		t.Fatalf("waiting claim emitted %+v", got)
+	}
+	f.clearRebuilt()
+	f.expectAccepted("r", a, 1)
+
+	f.newRoute("o", "fd00:10:0:f::/112")
+	f.claim("o", b)
+	f.reconcile("o")
+	f.reconcile("o")
+	refused := f.events.Find(diag.StageRoute, ReasonPrefixConflict)
+	if len(refused) != 1 {
+		t.Fatalf("refusal events %+v, want 1", refused)
+	}
+	corr := refused[0].Correlation()
+	o := f.route("o")
+	for k, v := range map[string]string{"provider": o.Spec.ProviderRef.Name, "route": o.Namespace + "/o",
+		"prefix": "fd00:10:0:f::/112", "epoch": "1"} {
+		if corr[k] != v {
+			t.Errorf("refusal correlation %s=%q, want %q (%q)", k, corr[k], v, refused[0].Note)
+		}
+	}
+
+	var svc galacticv1alpha1.EdgeService
+	if err := f.admin.Get(ctx, client.ObjectKeyFromObject(f.svc), &svc); err != nil {
+		t.Fatal(err)
+	}
+	svc.Spec.Prefixes = []string{"fd00:10:0:d::/64"}
+	if err := f.admin.Update(ctx, &svc); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile("r")
+	f.reconcile("r")
+	var revoked []diagtest.Event
+	for _, e := range f.events.Events() {
+		if e.Name == "r" && e.Action == string(diag.StageRoute) {
+			revoked = append(revoked, e)
+		}
+	}
+	if len(revoked) != 1 || !strings.Contains(revoked[0].Note, "epoch 1 revoked") {
+		t.Fatalf("revocation events %+v, want 1", revoked)
+	}
+	corr = revoked[0].Correlation()
+	if corr["attachment"] != a.att.Namespace+"/"+a.att.Name || corr["attachmentUID"] != string(a.att.UID) ||
+		corr["node"] != nodeA || corr["epoch"] != "1" {
+		t.Errorf("revocation correlation %v", corr)
 	}
 }

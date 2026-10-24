@@ -1,0 +1,20 @@
+# Scrapes galactic-controller --role=cell's metrics port (metrics, 9184). With
+# --edge it serves the Galactic Edge foundation's state, read from its cache
+# by every replica: attachments, routes and services by provider, state and
+# reason, and core's admission, allocation, policy and route failures. Rules
+# aggregate the replicas with max.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: galactic-controller
+  labels:
+    app.kubernetes.io/name: galactic-controller
+spec:
+  # job="galactic-controller", which the alert rules match on.
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-controller
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
