@@ -7,6 +7,8 @@
 //   - A Kind cluster named "galactic-e2e" (or $CLUSTER_NAME) is already running.
 //   - The image "galactic-cni:e2e" (or $IMG) has already been loaded into the cluster.
 //   - kubectl is on PATH and its context points at that cluster.
+//   - Every node holds the static internal/edge/hostattach test binary at
+//     /opt/galactic-e2e/hostattach.test.
 //
 // These preconditions are set up by the e2etest target in scripts/ci.sh.
 package e2e_test

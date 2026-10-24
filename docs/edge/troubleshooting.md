@@ -126,6 +126,21 @@ and closed gates, and `galactic_edge_foundation_gate_drops_total` counts packets
 dropped for want of an open gate. Each gate the agent closes while open
 records an `Ownership` Event on the route whose reason is the cause.
 
+#### Node requirements
+
+The agent creates a `PacketAccess` attachment's TUN device from its own
+container, through the node's `/dev/net/tun`, which the DaemonSet mounts as a
+`CharDevice` hostPath volume. The node needs:
+
+- The kernel's `tun` driver, with its device node at `/dev/net/tun`. Without
+  it the agent pod does not start, and its Events report the failed
+  hostPath check for `/dev/net/tun`.
+- A container runtime that lets unprivileged containers open character device
+  `10:200`. runc allows it by default in every release except 1.2.0 to 1.2.3.
+  A runtime that refuses it fails each `PacketAccess` attachment with
+  `Programmed` False, reason `ProvisionFailed`, and a `hostattach: create TUN`
+  message reporting the denied open.
+
 ## Telling failures apart
 
 | What happened                 | Where it shows                                                                                                                                                          | What sets it apart                                                                                               |

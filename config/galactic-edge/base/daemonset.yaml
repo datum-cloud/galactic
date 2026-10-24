@@ -104,6 +104,11 @@ spec:
               mountPropagation: HostToContainer
             - name: proc-sys
               mountPath: /host/proc/sys
+            # Opened to create a PacketAccess attachment's TUN device; the
+            # runtime must also allow character device 10:200
+            # (docs/edge/troubleshooting.md#node-requirements).
+            - name: tun
+              mountPath: /dev/net/tun
       volumes:
         - name: bpffs
           hostPath:
@@ -127,3 +132,9 @@ spec:
           hostPath:
             path: /proc/sys
             type: Directory
+        # CharDevice: the agent does not start on a node without the tun
+        # driver, rather than failing every PacketAccess attachment later.
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
