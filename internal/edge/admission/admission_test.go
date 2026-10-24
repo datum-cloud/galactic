@@ -108,7 +108,11 @@ func TestAdmit(t *testing.T) {
 		{"UnsupportedCapabilityVersion", func(r *Request, _ *Grant) {
 			r.Capabilities = []Capability{{Name: packetAccess, Version: "v2"}}
 		}, epoch, UnsupportedCapability},
-		{"CapabilityTheProviderLacks", func(r *Request, _ *Grant) {
+		{"CapabilityTheProviderLacks", func(r *Request, g *Grant) {
+			r.Capabilities = []Capability{{Name: socketAccess, Version: "v1"}}
+			g.Capabilities = append(g.Capabilities, socketAccess)
+		}, epoch, UnsupportedCapability},
+		{"CapabilityCoreLacks", func(r *Request, _ *Grant) {
 			r.Capabilities = []Capability{{Name: "RouteExchange", Version: "v1"}}
 		}, epoch, UnsupportedCapability},
 		{"ForeignConfigurationKind", func(r *Request, _ *Grant) {
@@ -170,6 +174,33 @@ func TestAdmitContractVersions(t *testing.T) {
 		}
 		if !d.Admitted && d.Reason != UnsupportedContractVersion {
 			t.Errorf("Admit(%q) reason = %q, want UnsupportedContractVersion", v, d.Reason)
+		}
+	}
+}
+
+func TestAdmitCapabilityVersions(t *testing.T) {
+	// A capability version the provider declares is still refused unless
+	// core implements it, and every version core implements is admitted.
+	providers := registry()
+	p := providers[connectIP]
+	p.Capabilities = append(slices.Clone(supportedCapabilities), Capability{Name: packetAccess, Version: "v9"})
+	providers[connectIP] = p
+	g := grant()
+	g.Capabilities = nil
+	for _, c := range p.Capabilities {
+		if !slices.Contains(g.Capabilities, c.Name) {
+			g.Capabilities = append(g.Capabilities, c.Name)
+		}
+	}
+	for _, c := range p.Capabilities {
+		req := request()
+		req.Capabilities = []Capability{c}
+		d := Admit(providers, grants(g), req, epoch, maxSkew)
+		if want := slices.Contains(supportedCapabilities, c); d.Admitted != want {
+			t.Errorf("Admit(%v) = %+v, want admitted %v", c, d, want)
+		}
+		if !d.Admitted && d.Reason != UnsupportedCapability {
+			t.Errorf("Admit(%v) reason = %q, want UnsupportedCapability", c, d.Reason)
 		}
 	}
 }
