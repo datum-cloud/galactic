@@ -47,9 +47,16 @@ import (
 // the pod UID and refuses a provider pod's create of either under any other.
 func InstanceName(podUID string) string { return "ei-" + podUID }
 
-// ErrNameTaken is returned when the derived name of a pod's EdgeInstance or
-// Lease is held by an object that names another pod. Retrying cannot
-// succeed until that object is deleted, so it also wraps claim.ErrLost.
+// AttachmentName is the derived name of a pod's EdgeAttachment to the
+// EdgeService with serviceUID. The galactic-edge-provider admission policy
+// computes the same name from the attachment's pod and service UIDs and
+// refuses a provider pod's create under any other.
+func AttachmentName(serviceUID, podUID string) string { return "ea-" + podUID + "-" + serviceUID }
+
+// ErrNameTaken is returned when the derived name of a pod's EdgeInstance,
+// Lease or EdgeAttachment is held by an object that names another pod, or
+// for an attachment another service. Retrying cannot succeed until that
+// object is deleted, so it also wraps claim.ErrLost.
 var ErrNameTaken = fmt.Errorf("%w: provider: name held by another pod's object", claim.ErrLost)
 
 // RouteName is the derived name of the EdgeRoute for prefix in the VPC with
@@ -380,6 +387,32 @@ func CreateInstance(ctx context.Context, c client.Client, inst *galacticv1alpha1
 	if cur.Spec.PodUID != inst.Spec.PodUID || cur.Spec.ProviderRef != inst.Spec.ProviderRef {
 		return nil, fmt.Errorf("%w: EdgeInstance %s/%s names pod %q of provider %q", ErrNameTaken,
 			cur.Namespace, cur.Name, cur.Spec.PodUID, cur.Spec.ProviderRef.Name)
+	}
+	return &cur, nil
+}
+
+// CreateAttachment creates att, named by AttachmentName, and returns the
+// stored object. When an attachment of that name already exists it is read
+// back: one naming the same pod, service and provider is returned, so a
+// retried create succeeds, and any other returns ErrNameTaken. c must read
+// from the API server, not a cache.
+func CreateAttachment(ctx context.Context, c client.Client, att *galacticv1alpha1.EdgeAttachment,
+) (*galacticv1alpha1.EdgeAttachment, error) {
+	err := c.Create(ctx, att)
+	if err == nil {
+		return att, nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
+		return nil, err
+	}
+	var cur galacticv1alpha1.EdgeAttachment
+	if err := c.Get(ctx, client.ObjectKeyFromObject(att), &cur); err != nil {
+		return nil, err
+	}
+	if cur.Spec.PodUID != att.Spec.PodUID || cur.Spec.ServiceRef.UID != att.Spec.ServiceRef.UID ||
+		cur.Spec.ProviderRef != att.Spec.ProviderRef {
+		return nil, fmt.Errorf("%w: EdgeAttachment %s/%s names pod %q of provider %q and service %q", ErrNameTaken,
+			cur.Namespace, cur.Name, cur.Spec.PodUID, cur.Spec.ProviderRef.Name, cur.Spec.ServiceRef.UID)
 	}
 	return &cur, nil
 }

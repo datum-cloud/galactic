@@ -38,15 +38,15 @@ This document is the contract the [Galactic Edge foundation](README.md) is built
 
 All resources are in `galactic.datumapis.com/v1alpha1`. Object names that carry identity are derived, so a retried create lands on the same object.
 
-| Kind             | Scope     | Name                         | Purpose                                                                     |
-| ---------------- | --------- | ---------------------------- | --------------------------------------------------------------------------- |
-| `EdgeProvider`   | Cluster   | Operator's choice            | Registration: contract and capability versions, ServiceAccounts, privilege. |
-| `EdgeService`    | Namespace | Platform authority's choice  | Grant: one provider, one gVPC, prefixes, client pool, validity.             |
-| `EdgeInstance`   | Namespace | `ei-` + pod UID              | One running provider process.                                               |
-| `Lease`          | Namespace | The instance's name          | The instance's liveness lease, a `coordination.k8s.io/v1` Lease it owns.    |
-| `EdgeAttachment` | Namespace | `hash(service UID, pod UID)` | One instance's isolated connection to the service's gVPC.                   |
-| `EdgeRoute`      | Namespace | `hash(gVPC UID, prefix)`     | One prefix's forwarding claim and publication.                              |
-| `EdgeRouteIndex` | Namespace | gVPC UID                     | Core's record of every accepted route in one gVPC; serializes acceptance.   |
+| Kind             | Scope     | Name                                | Purpose                                                                     |
+| ---------------- | --------- | ----------------------------------- | --------------------------------------------------------------------------- |
+| `EdgeProvider`   | Cluster   | Operator's choice                   | Registration: contract and capability versions, ServiceAccounts, privilege. |
+| `EdgeService`    | Namespace | Platform authority's choice         | Grant: one provider, one gVPC, prefixes, client pool, validity.             |
+| `EdgeInstance`   | Namespace | `ei-` + pod UID                     | One running provider process.                                               |
+| `Lease`          | Namespace | The instance's name                 | The instance's liveness lease, a `coordination.k8s.io/v1` Lease it owns.    |
+| `EdgeAttachment` | Namespace | `ea-` + pod UID + `-` + service UID | One instance's isolated connection to the service's gVPC.                   |
+| `EdgeRoute`      | Namespace | `hash(gVPC UID, prefix)`            | One prefix's forwarding claim and publication.                              |
+| `EdgeRouteIndex` | Namespace | gVPC UID                            | Core's record of every accepted route in one gVPC; serializes acceptance.   |
 
 `EdgeInstance`, its `Lease`, `EdgeAttachment` and `EdgeRoute` live in the provider's namespace. `EdgeService` and `EdgeRouteIndex` live in the namespace of the gVPC they reference.
 
@@ -83,7 +83,7 @@ A provider integrates in five steps, all through its own ServiceAccount.
 
 1. **Register.** The operator creates the `EdgeProvider` and approves it. Registration grants no tenant authority (`internal/edge/admission/admission.go:10`).
 2. **Start an instance.** Each provider process creates its pod's `EdgeInstance`, takes over its lease and renews it every 5 s. The holder ID is new for every process start, so a restarted container cannot continue its predecessor's lease (`internal/edge/claim/claim.go:226`).
-3. **Request an attachment.** The instance creates `EdgeAttachment` for an `EdgeService` that names its provider. Core runs `admission.Admit` (`internal/edge/admission/admission.go:91`) before allocating anything, and refuses with the reasons defined there. #994 adds what `Admit` does not check today: capacity (`CapacityExhausted`) and identity conflicts on create (`IdentityConflict`). A service whose granted prefixes overlap an earlier service's in the same gVPC admits nothing (`PrefixConflict`). The instance waits for `Programmed`, opens the packet device or binds its sockets to the pod VRF named in status, then sets `Ready`.
+3. **Request an attachment.** The instance creates `EdgeAttachment` for an `EdgeService` that names its provider. It names the attachment for its pod and the service (`provider.AttachmentName`), which admission requires, and treats an existing attachment of that name that names another pod or service as a conflict to report, not one to retry (`provider.CreateAttachment` returns `provider.ErrNameTaken`). Core runs `admission.Admit` (`internal/edge/admission/admission.go:91`) before allocating anything, and refuses with the reasons defined there. #994 adds what `Admit` does not check today: capacity (`CapacityExhausted`) and identity conflicts on create (`IdentityConflict`). A service whose granted prefixes overlap an earlier service's in the same gVPC admits nothing (`PrefixConflict`). The instance waits for `Programmed`, opens the packet device or binds its sockets to the pod VRF named in status, then sets `Ready`.
 4. **Request reachability.** For each prefix it serves, the instance creates or takes over the `EdgeRoute`, naming its own attachment. Core accepts it only if the prefix is inside the service's grant (`PrefixNotGranted`), overlaps no other route or subnet in the gVPC (`PrefixConflict`, see [Prefix conflicts](#prefix-conflicts)), and the attachment is `Ready` and belongs to the writing pod.
 5. **Drain and release.** The instance deletes its `EdgeRoute`s and `EdgeAttachment`s, or sets `released` on a claim after it has stopped forwarding. Core drains the same way when a service, grant or node goes away.
 

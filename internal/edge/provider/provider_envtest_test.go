@@ -28,7 +28,10 @@ import (
 	"go.datum.net/galactic/internal/edge/claim"
 )
 
-const ns = "edge"
+const (
+	ns           = "edge"
+	providerName = "connect-ip"
+)
 
 var params = claim.Params{Duration: 15 * time.Second, MaxDrift: 0.001, Margin: 500 * time.Millisecond}
 
@@ -82,7 +85,7 @@ func (c *clock) advance(d time.Duration) {
 
 func newInstance(t *testing.T, c client.Client, podUID string) *galacticv1alpha1.EdgeInstance {
 	t.Helper()
-	inst := NewInstance(ns, "connect-ip", "pod-"+podUID, podUID, "edge-1", "boot")
+	inst := NewInstance(ns, providerName, "pod-"+podUID, podUID, "edge-1", "boot")
 	if err := c.Create(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +130,7 @@ func TestInstanceLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !metav1.IsControlledBy(&ql, inst) || ql.Spec.HolderIdentity != nil ||
-		ql.Labels[galacticv1alpha1.EdgeLeaseProviderLabel] != "connect-ip" {
+		ql.Labels[galacticv1alpha1.EdgeLeaseProviderLabel] != providerName {
 		t.Fatalf("quarantine Lease %+v", ql)
 	}
 	if q := lease(t, c, inst.Name); q.Holder != "" || q.Incarnation != string(ql.UID) {
@@ -243,28 +246,28 @@ func TestNameTaken(t *testing.T) {
 	c := startAPI(t)
 	ctx := context.Background()
 
-	squatted := NewInstance(ns, "connect-ip", "pod-u2", "u2", "edge-1", "boot")
+	squatted := NewInstance(ns, providerName, "pod-u2", "u2", "edge-1", "boot")
 	squatted.Name = InstanceName("u1")
 	if err := c.Create(ctx, squatted); err != nil {
 		t.Fatal(err)
 	}
-	_, err := CreateInstance(ctx, c, NewInstance(ns, "connect-ip", "pod-u1", "u1", "edge-1", "boot"))
+	_, err := CreateInstance(ctx, c, NewInstance(ns, providerName, "pod-u1", "u1", "edge-1", "boot"))
 	if !errors.Is(err, ErrNameTaken) || !errors.Is(err, claim.ErrLost) {
 		t.Fatalf("create under a name another pod's instance holds: %v, want ErrNameTaken", err)
 	}
 
-	inst, err := CreateInstance(ctx, c, NewInstance(ns, "connect-ip", "pod-u3", "u3", "edge-1", "boot"))
+	inst, err := CreateInstance(ctx, c, NewInstance(ns, providerName, "pod-u3", "u3", "edge-1", "boot"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := CreateInstance(ctx, c, NewInstance(ns, "connect-ip", "pod-u3", "u3", "edge-1", "boot"))
+	again, err := CreateInstance(ctx, c, NewInstance(ns, providerName, "pod-u3", "u3", "edge-1", "boot"))
 	if err != nil || again.UID != inst.UID {
 		t.Fatalf("retried create of the pod's own instance: %v", err)
 	}
 
 	f := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
 		Namespace: ns, Name: inst.Name,
-		Labels: map[string]string{galacticv1alpha1.EdgeLeaseProviderLabel: "connect-ip"},
+		Labels: map[string]string{galacticv1alpha1.EdgeLeaseProviderLabel: providerName},
 		Annotations: map[string]string{galacticv1alpha1.EdgeLeasePodUIDAnnotation: "u4",
 			galacticv1alpha1.EdgeLeaseRenewStartAnnotation: "1", galacticv1alpha1.EdgeLeaseSequenceAnnotation: "0",
 			galacticv1alpha1.EdgeLeaseReleasedAnnotation: "false"},
@@ -279,6 +282,55 @@ func TestNameTaken(t *testing.T) {
 	holder := &claim.Instance{ID: "p3", Store: store, Clock: (&clock{now: time.Hour}).read, Params: params}
 	if _, err := holder.Acquire(ctx, inst.Name); !errors.Is(err, ErrNameTaken) || !errors.Is(err, claim.ErrLost) {
 		t.Errorf("acquire of a lease another pod's Lease holds: %v, want ErrNameTaken, not ErrHeld", err)
+	}
+}
+
+// attachment returns the attachment of the pod with podUID to the service
+// with serviceUID, under its derived name.
+func attachment(serviceUID, podUID string) *galacticv1alpha1.EdgeAttachment {
+	return &galacticv1alpha1.EdgeAttachment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: AttachmentName(serviceUID, podUID)},
+		Spec: galacticv1alpha1.EdgeAttachmentSpec{
+			ProviderRef:     galacticv1alpha1.EdgeProviderReference{Name: providerName},
+			ServiceRef:      galacticv1alpha1.EdgeServiceReference{Namespace: "tenant", Name: "svc", UID: serviceUID},
+			InstanceRef:     galacticv1alpha1.EdgeInstanceReference{Name: InstanceName(podUID)},
+			PodUID:          podUID,
+			ContractVersion: "v1alpha1",
+			Capabilities:    []galacticv1alpha1.EdgeCapability{{Name: "SocketAccess", Version: "v1"}},
+		},
+	}
+}
+
+// TestAttachmentNameTaken: an attachment name held by an object naming
+// another pod or service is refused as ErrNameTaken, which a caller does
+// not retry, while a retried create of the pod's own attachment succeeds.
+func TestAttachmentNameTaken(t *testing.T) {
+	c := startAPI(t)
+	ctx := context.Background()
+
+	otherPod := attachment("s1", "u2")
+	otherPod.Name = AttachmentName("s1", "u1")
+	otherService := attachment("s2", "u1")
+	otherService.Name = AttachmentName("s3", "u1")
+	for _, squatted := range []*galacticv1alpha1.EdgeAttachment{otherPod, otherService} {
+		if err := c.Create(ctx, squatted); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, a := range []*galacticv1alpha1.EdgeAttachment{attachment("s1", "u1"), attachment("s3", "u1")} {
+		_, err := CreateAttachment(ctx, c, a)
+		if !errors.Is(err, ErrNameTaken) || !errors.Is(err, claim.ErrLost) {
+			t.Errorf("create of %s, held by another pod's or service's attachment: %v, want ErrNameTaken", a.Name, err)
+		}
+	}
+
+	own, err := CreateAttachment(ctx, c, attachment("s1", "u3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := CreateAttachment(ctx, c, attachment("s1", "u3"))
+	if err != nil || again.UID != own.UID {
+		t.Fatalf("retried create of the pod's own attachment: %v", err)
 	}
 }
 
@@ -338,7 +390,7 @@ func TestRouteClaim(t *testing.T) {
 	c := startAPI(t)
 	ctx := context.Background()
 	prefix := netip.MustParsePrefix("fd00:5::/64")
-	rt := NewRoute(ns, "connect-ip", "vpc-uid", prefix)
+	rt := NewRoute(ns, providerName, "vpc-uid", prefix)
 	if rt.Name != RouteName("vpc-uid", netip.MustParsePrefix("fd00:5::1/64")) {
 		t.Fatalf("route name %s is not derived from the masked prefix", rt.Name)
 	}
