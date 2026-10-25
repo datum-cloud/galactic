@@ -616,4 +616,6 @@ task verify  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
   `install.sh` requires rebuilding the node image (`task build:node`).
 - Cilium itself is installed with `ipv4.enabled=false` (the clusters are `ipFamily: ipv6`), so the
   IPv4 addresses FRR puts on `lo` and the fabric links are underlay-only and invisible to the cluster network.
+- Cilium reaches each site's API server at `<site>-control-plane:6443` (`k8sServiceHost`), not through the
+  `kubernetes` Service it load-balances, so a site recovers by itself after its API server restarts.
 - iad-worker3, the EVPN route reflector, peers with tr3 as AS 65000 like every other worker — its reflector role is an overlay concern only, invisible to the underlay.
