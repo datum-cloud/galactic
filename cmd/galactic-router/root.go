@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -147,31 +148,30 @@ func runCmd(cfg *config.RouterConfig) error {
 	// map's own lifetime.
 	//
 	// A missing pin is not fatal. It means this node's datapath has not loaded
-	// yet, or never will on a control-role node with no CNI attach point. It
-	// matters only once a tap-kind binding is reconciled here, at which point
-	// the reconciler reports a clear error rather than silently doing nothing.
-	// Veth bindings work regardless.
+	// yet, which is normal right after the node boots, or never will on a
+	// control-role node with no CNI attach point. The handle is retried each
+	// time a binding needs it, so a pin that appears later is picked up without
+	// a restart, and until then the reconciler reports a clear error rather
+	// than silently doing nothing.
 	//
 	// The same handle backs the GC ticker's vip_xlat_table sweep, which is
 	// skipped while the pin is missing.
-	var (
-		vipTranslationTable controller.VIPTranslationTable
-		vipXlatSweeper      *controller.VIPXlatSweeper
-	)
-	vipXlatTable, vipXlatCloser, vipXlatErr := vipxlatmap.OpenPinnedVipXlatTable(attach.PinDir)
-	switch {
-	case vipXlatErr != nil && cfg.Reflector:
-		// A route reflector never runs galactic-cni, so the pin is never
-		// created there. That is expected, not an error.
-		ctrl.Log.Info("vip_xlat_table not available on this route reflector; tap-kind VIP bindings are not served here",
-			"error", vipXlatErr.Error())
-	case vipXlatErr != nil:
-		ctrl.Log.Error(vipXlatErr, "vip_xlat_table not available on this node; "+
-			"tap-kind ServiceVIPBinding objects will fail to bind until the eBPF uSID datapath is loaded")
-	default:
-		vipTranslationTable = vipXlatTable
-		vipXlatSweeper = &controller.VIPXlatSweeper{Client: mgr.GetClient(), NodeName: nodeName, Table: vipXlatTable}
-		defer vipXlatCloser.Close() //nolint:errcheck // best-effort close of our own fd at shutdown
+	vipXlat := &controller.PinnedVIPTranslationTable{
+		Open: func() (*vipxlatmap.VipXlatTable, io.Closer, error) {
+			return vipxlatmap.OpenPinnedVipXlatTable(attach.PinDir)
+		},
+	}
+	defer vipXlat.Close() //nolint:errcheck // best-effort close of our own fd at shutdown
+	if _, err := vipXlat.Table(); err != nil {
+		if cfg.Reflector {
+			// A route reflector never runs galactic-cni, so the pin is never
+			// created there. That is expected, not an error.
+			ctrl.Log.Info("vip_xlat_table not available on this route reflector; tap-kind VIP bindings are not served here",
+				"error", err.Error())
+		} else {
+			ctrl.Log.Error(err, "vip_xlat_table not available on this node yet; "+
+				"tap-kind ServiceVIPBinding objects retry opening it until the eBPF uSID datapath is loaded")
+		}
 	}
 
 	// Register field indexes.
@@ -271,7 +271,7 @@ func runCmd(cfg *config.RouterConfig) error {
 
 	// Register the ServiceVIPBinding controller and the NetworkService binding
 	// writer that generates its bindings.
-	if err := setupVIPBindingControllers(mgr, nodeName, vipTranslationTable, cfg.GCInterval); err != nil {
+	if err := setupVIPBindingControllers(mgr, nodeName, vipXlat, cfg.GCInterval); err != nil {
 		return err
 	}
 
@@ -319,7 +319,8 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("setup GC controller: %w", err)
 	}
 
-	go runGCTicker(ctx, mgr, cfg.GCInterval, gcRec, vipXlatSweeper)
+	go runGCTicker(ctx, mgr, cfg.GCInterval, gcRec,
+		&controller.VIPXlatSweeper{Client: mgr.GetClient(), NodeName: nodeName}, vipXlat)
 
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
@@ -354,12 +355,14 @@ func runCmd(cfg *config.RouterConfig) error {
 // cancelled. The first pass waits for informer caches to sync, so it does not
 // see an empty advertisement list and delete live VRFs.
 //
-// vipXlatSweeper, nil when vip_xlat_table is not open, runs only on ticks,
-// never in that first pass, so the ServiceVIPBinding reconciler re-registers
-// every live binding before the first sweep.
+// vipXlatSweeper runs only on ticks, never in that first pass, so the
+// ServiceVIPBinding reconciler re-registers every live binding before the
+// first sweep. It sweeps vipXlat's table, and skips a tick while that table
+// cannot be opened.
 func runGCTicker(
 	ctx context.Context, mgr ctrl.Manager, interval time.Duration,
 	gcRec *controller.GCReconciler, vipXlatSweeper *controller.VIPXlatSweeper,
+	vipXlat *controller.PinnedVIPTranslationTable,
 ) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -376,7 +379,8 @@ func runGCTicker(
 			return
 		case <-ticker.C:
 			gcRec.RunGC(ctx)
-			if vipXlatSweeper != nil {
+			if table, err := vipXlat.Table(); err == nil {
+				vipXlatSweeper.Table = table
 				vipXlatSweeper.Sweep(ctx)
 			}
 		}
