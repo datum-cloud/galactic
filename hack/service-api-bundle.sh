@@ -9,8 +9,13 @@
 #   fabric-service-v1.pb    a descriptor set of the service with every import
 #   README.md               the Go module version and how to generate a client
 #
+# Before packing, it decodes every fixture in api/fabric/service/v1/testdata
+# against the descriptor set alone and re-encodes it, failing when any field
+# is lost or unknown, so a bundle that cannot decode the contract's examples
+# is never published.
+#
 # Usage: service-api-bundle.sh VERSION OUT_DIR
-# Run from the repository root; requires buf.
+# Run from the repository root; requires buf and python3.
 set -euo pipefail
 
 version=${1:?usage: service-api-bundle.sh VERSION OUT_DIR}
@@ -29,6 +34,42 @@ mkdir -p "$stage/proto" "$out"
 
 (cd api && buf export --path fabric/service/v1 -o "$stage/proto")
 (cd api && buf build --path fabric/service/v1 --as-file-descriptor-set -o "$stage/fabric-service-v1.pb")
+
+# roundtrip TYPE FILE decodes FILE as fabric.service.v1.TYPE through the
+# descriptor set and back to JSON, and fails unless both decode to the same
+# values. Protobuf JSON omits defaults and writes 64-bit integers as strings,
+# so both sides drop defaults and read digit strings as numbers first.
+fixtures=api/fabric/service/v1/testdata
+descriptor="$stage/fabric-service-v1.pb#format=binpb"
+roundtrip() {
+  buf convert "$descriptor" --type "fabric.service.v1.$1" --from "$2#format=json" \
+    --to "$work/fixture.binpb"
+  buf convert "$descriptor" --type "fabric.service.v1.$1" --from "$work/fixture.binpb" \
+    --to "$work/fixture.json"
+  python3 - "$2" "$work/fixture.json" <<'PY'
+import json, sys
+
+def strip(v):
+    if isinstance(v, dict):
+        v = {k: strip(x) for k, x in v.items()}
+        return {k: x for k, x in v.items() if x not in (0, False, "", [], {}, None)}
+    if isinstance(v, list):
+        return [strip(x) for x in v]
+    if isinstance(v, str) and v.isdigit():
+        return int(v)
+    return v
+
+want, got = (strip(json.load(open(f))) for f in sys.argv[1:])
+if want != got:
+    sys.exit(f"{sys.argv[1]} does not survive the descriptor set:\nwant {want}\ngot  {got}")
+PY
+}
+roundtrip RunDiagnosticRequest "$fixtures/request.json"
+roundtrip GetCapabilitiesResponse "$fixtures/capabilities.json"
+while IFS= read -r event; do
+  printf '%s\n' "$event" >"$work/event.json"
+  roundtrip DiagnosticEvent "$work/event.json"
+done <"$fixtures/stream.jsonl"
 
 cat >"$stage/README.md" <<README
 # Looking Glass service API ${version}
