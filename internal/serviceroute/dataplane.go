@@ -84,6 +84,25 @@ type appliedEntry struct {
 	access *accessRef
 	grant  *grantRef
 	deny   *denyRef
+	set    *setRef
+}
+
+// setRef is a LocalSet route's producer set, under the route's key.
+type setRef struct {
+	ingressIfindex uint32
+	address        string
+	protocol       uint8
+	port           uint16
+	count          int
+	members        [serviceroutemap.MaxProducers]serviceroutemap.ProducerMember
+}
+
+// setState is every applied ref of one producer set key, oldest first. The
+// newest one is in the map: an intent that replaces another is applied before
+// the old one is removed, so its set must win, and removing the newer one
+// first puts the older one back.
+type setState struct {
+	refs []setRef
 }
 
 type grantRef struct {
@@ -118,6 +137,7 @@ type EBPFRouteProgrammer struct {
 	accessRefs             map[accessKey]accessState
 	denyRefs               map[denyKey]denyState
 	grantRefs              map[grantRef]int
+	setRefs                map[string]setState
 	appliedRefs            map[string][][]appliedEntry
 	desiredIntents         map[string][]RouteIntent
 	pendingRollbacks       map[string][]appliedEntry
@@ -303,6 +323,16 @@ func (p *EBPFRouteProgrammer) finalizeLocked() error {
 			IngressIfindex: deny.ingressIfindex, Address: net.ParseIP(deny.address),
 		})
 	}
+	for _, state := range p.setRefs {
+		if len(state.refs) == 0 {
+			continue
+		}
+		ref := state.refs[len(state.refs)-1]
+		snapshot.ProducerSets = append(snapshot.ProducerSets, serviceroutemap.RouteIdentity{
+			IngressIfindex: ref.ingressIfindex, Address: net.ParseIP(ref.address),
+			Protocol: ref.protocol, Port: ref.port,
+		})
+	}
 	for grant, count := range p.grantRefs {
 		if count == 0 {
 			continue
@@ -348,6 +378,7 @@ func (p *EBPFRouteProgrammer) ensureOpen() error {
 	p.accessRefs = make(map[accessKey]accessState)
 	p.denyRefs = make(map[denyKey]denyState)
 	p.grantRefs = make(map[grantRef]int)
+	p.setRefs = make(map[string]setState)
 	p.appliedRefs = make(map[string][][]appliedEntry)
 	p.pendingRollbacks = make(map[string][]appliedEntry)
 	p.failedMutations = make(map[string]struct{})
@@ -552,6 +583,7 @@ func (p *EBPFRouteProgrammer) repairDesired() error {
 	p.accessRefs = make(map[accessKey]accessState)
 	p.denyRefs = make(map[denyKey]denyState)
 	p.grantRefs = make(map[grantRef]int)
+	p.setRefs = make(map[string]setState)
 	p.appliedRefs = make(map[string][][]appliedEntry)
 	p.pendingRollbacks = make(map[string][]appliedEntry)
 	p.failedMutations = make(map[string]struct{})
@@ -729,12 +761,21 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 	var targetIfindex uint32
 	var producerToken uint64
 	var targetSID [16]byte
-	if intent.Kind == RouteIntentRemoteConsumer {
+	var set *setRef
+	switch intent.Kind {
+	case RouteIntentLocalSet:
+		var producerEntries []appliedEntry
+		set, producerEntries, err = p.producerSet(intent)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, producerEntries...)
+	case RouteIntentRemoteConsumer:
 		targetSID, err = ipv6Bytes(intent.ServiceSID)
 		if err != nil {
 			return nil, err
 		}
-	} else {
+	default:
 		targetIfindex, err = p.target(intent.ServiceDevice)
 		if err != nil {
 			return nil, fmt.Errorf("resolve service interface %q: %w", intent.ServiceDevice, err)
@@ -767,6 +808,14 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 			ingressIfindex: consumerIfindex, address: frontendIP.String(), protocol: protocol, port: uint16(port.Port),
 			attachmentToken: consumerToken,
 		}})
+		// The set goes in before the route that reads it, and so comes out
+		// after it.
+		if set != nil {
+			portSet := *set
+			portSet.ingressIfindex, portSet.address = consumerIfindex, frontendIP.String()
+			portSet.protocol, portSet.port = protocol, uint16(port.Port)
+			entries = append(entries, appliedEntry{set: &portSet})
+		}
 		ref := routeRef{ingressIfindex: consumerIfindex, address: frontendIP.String(),
 			backendAddress: serviceIP.String(), mode: intent.Kind,
 			protocol: protocol, port: uint16(port.Port), grantID: intent.GrantID,
@@ -775,6 +824,47 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 		entries = append(entries, appliedEntry{route: &ref})
 	}
 	return entries, nil
+}
+
+// producerSet resolves a LocalSet intent's producers to their interfaces and
+// identity tokens. It returns the set, without its route key, and each
+// producer's reply markers.
+func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []appliedEntry, error) {
+	if !p.tables.ProducerSetsAvailable() {
+		return nil, nil, ErrProducerSetsUnavailable
+	}
+	if len(intent.Producers) == 0 || len(intent.Producers) > serviceroutemap.MaxProducers {
+		return nil, nil, fmt.Errorf("service route producer set has %d members, want 1-%d",
+			len(intent.Producers), serviceroutemap.MaxProducers)
+	}
+	serviceIP := intent.Service.IP.String()
+	set := &setRef{count: len(intent.Producers)}
+	entries := make([]appliedEntry, 0, 2*len(intent.Producers))
+	for i, producer := range intent.Producers {
+		ifindex, err := p.target(producer.Device)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve service interface %q: %w", producer.Device, err)
+		}
+		token, err := p.tables.IdentityToken(ifindex)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := p.tables.SetPeer(ifindex, token, producer.NextHop); err != nil {
+			return nil, nil, err
+		}
+		set.members[i] = serviceroutemap.ProducerMember{Ifindex: ifindex, Token: token, Eligible: !producer.Draining}
+		entries = append(entries,
+			appliedEntry{access: &accessRef{
+				ingressIfindex: ifindex, address: serviceIP, attachmentToken: token,
+				markerDirections: serviceroutemap.MarkerReply,
+			}},
+			appliedEntry{deny: &denyRef{
+				ingressIfindex: ifindex, address: serviceIP, attachmentToken: token,
+				markerDirections: serviceroutemap.MarkerReply,
+			}},
+		)
+	}
+	return set, entries, nil
 }
 
 func ipv6Bytes(ip net.IP) ([16]byte, error) {
@@ -825,6 +915,18 @@ func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
 		p.accessRefs[key] = state
 		return nil
 	}
+	if entry.set != nil {
+		key := setRefKey(*entry.set)
+		state := p.setRefs[key]
+		if len(state.refs) == 0 || state.refs[len(state.refs)-1] != *entry.set {
+			if err := p.writeSet(*entry.set); err != nil {
+				return err
+			}
+		}
+		state.refs = append(state.refs, *entry.set)
+		p.setRefs[key] = state
+		return nil
+	}
 	if entry.deny != nil {
 		key := denyRefKey(*entry.deny)
 		state := p.denyRefs[key]
@@ -852,12 +954,17 @@ func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
 		return nil
 	}
 	var err error
-	if entry.route.mode == RouteIntentRemoteConsumer {
+	switch entry.route.mode {
+	case RouteIntentLocalSet:
+		err = p.tables.RegisterLocalSetRoute(entry.route.ingressIfindex, net.ParseIP(entry.route.address),
+			net.ParseIP(entry.route.backendAddress), entry.route.protocol, entry.route.port,
+			entry.route.consumerToken, authorizationTime(entry.route.authorizationValidUntil))
+	case RouteIntentRemoteConsumer:
 		err = p.tables.RegisterRemoteRoute(entry.route.ingressIfindex, net.ParseIP(entry.route.address),
 			net.ParseIP(entry.route.backendAddress),
 			[16]byte(entry.route.grantID), entry.route.protocol, entry.route.port, net.IP(entry.route.targetSID[:]),
 			entry.route.consumerToken, authorizationTime(entry.route.authorizationValidUntil))
-	} else {
+	default:
 		err = p.tables.RegisterRoute(entry.route.ingressIfindex, net.ParseIP(entry.route.address),
 			net.ParseIP(entry.route.backendAddress),
 			entry.route.protocol, entry.route.port, entry.route.targetIfindex,
@@ -871,6 +978,9 @@ func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
 }
 
 func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
+	if entry.set != nil {
+		return p.releaseSet(*entry.set)
+	}
 	if entry.grant != nil {
 		count := p.grantRefs[*entry.grant]
 		if count > 1 {
@@ -947,6 +1057,50 @@ func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
 	}
 	delete(p.routeRefs, key)
 	return nil
+}
+
+func (p *EBPFRouteProgrammer) releaseSet(ref setRef) error {
+	key := setRefKey(ref)
+	state, ok := p.setRefs[key]
+	if !ok {
+		return nil
+	}
+	index := -1
+	for i := len(state.refs) - 1; i >= 0; i-- {
+		if state.refs[i] == ref {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return nil
+	}
+	if len(state.refs) == 1 {
+		if err := p.tables.UnregisterProducerSet(ref.ingressIfindex, net.ParseIP(ref.address),
+			ref.protocol, ref.port); err != nil {
+			return err
+		}
+		delete(p.setRefs, key)
+		return nil
+	}
+	top := state.refs[len(state.refs)-1]
+	remaining := append(append([]setRef(nil), state.refs[:index]...), state.refs[index+1:]...)
+	if next := remaining[len(remaining)-1]; next != top {
+		if err := p.writeSet(next); err != nil {
+			return err
+		}
+	}
+	p.setRefs[key] = setState{refs: remaining}
+	return nil
+}
+
+func (p *EBPFRouteProgrammer) writeSet(ref setRef) error {
+	return p.tables.RegisterProducerSet(ref.ingressIfindex, net.ParseIP(ref.address), ref.protocol, ref.port,
+		ref.members[:ref.count])
+}
+
+func setRefKey(ref setRef) string {
+	return fmt.Sprintf("%d|%s|%d|%d", ref.ingressIfindex, ref.address, ref.protocol, ref.port)
 }
 
 func protocolNumber(protocol api.NetworkServiceProtocol) (uint8, error) {
@@ -1050,6 +1204,10 @@ func intentKey(intent RouteIntent) string {
 	for _, port := range intent.Ports {
 		fmt.Fprintf(&builder, "|%s:%d", port.Protocol, port.Port)
 	}
+	for _, producer := range intent.Producers {
+		fmt.Fprintf(&builder, "|producer:%s,%s,%s,%t",
+			producer.Attachment, producer.Device, producer.NextHop, producer.Draining)
+	}
 	return builder.String()
 }
 
@@ -1070,6 +1228,13 @@ func cloneRouteIntent(intent RouteIntent) RouteIntent {
 	cloned.ConsumerNextHop = append(net.IP(nil), intent.ConsumerNextHop...)
 	cloned.ServiceNextHop = append(net.IP(nil), intent.ServiceNextHop...)
 	cloned.Ports = append([]api.ServiceRouteProtocolPort(nil), intent.Ports...)
+	if intent.Producers != nil {
+		cloned.Producers = make([]ProducerTarget, len(intent.Producers))
+		for i, producer := range intent.Producers {
+			cloned.Producers[i] = producer
+			cloned.Producers[i].NextHop = append(net.IP(nil), producer.NextHop...)
+		}
+	}
 	return cloned
 }
 

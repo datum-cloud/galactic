@@ -456,7 +456,7 @@ func setupServiceRouteController(
 		ctrl.Log.Error(err, "service route eBPF maps are not available yet; initialization will retry on reconcile")
 	}
 
-	return (&controller.ServiceRoutePolicyReconciler{
+	if err := (&controller.ServiceRoutePolicyReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		NodeName:        nodeName,
@@ -465,7 +465,17 @@ func setupServiceRouteController(
 		Metrics:         serviceRouteMetrics,
 		FrontendEnabled: frontendEnabled,
 		Applied:         make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
-	}).SetupWithManager(mgr)
+	}).SetupWithManager(mgr); err != nil {
+		return err
+	}
+	if err := (&controller.ServiceProducerHealthReconciler{
+		Client:   mgr.GetClient(),
+		NodeName: nodeName,
+		Metrics:  serviceRouteMetrics,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup service producer health controller: %w", err)
+	}
+	return nil
 }
 
 // newRootCommand builds the root cobra command with all flags and the
