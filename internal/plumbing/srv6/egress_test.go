@@ -7,6 +7,7 @@ package srv6
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"testing"
 
@@ -285,6 +286,42 @@ func TestRouteEgressDel_RemovesInstalledEntry(t *testing.T) {
 		t.Fatalf("lookup after delete: %v", err)
 	} else if ok {
 		t.Error("entry still present after RouteEgressDel")
+	}
+}
+
+// TestRouteEgressDel_KeepsEdgePassThrough: withdrawing a remote route keeps
+// the pass-through entry galactic-edge holds for the same prefix, and a
+// remote route more specific than one is still removed.
+func TestRouteEgressDel_KeepsEdgePassThrough(t *testing.T) {
+	requireRoot(t)
+	testPinDir := setUpTestPinDir(t)
+	entryTable, closer, err := egressroutemap.OpenPinnedEgressRouteTable(testPinDir)
+	if err != nil {
+		t.Fatalf("open pinned egress_route_table: %v", err)
+	}
+	defer func() { _ = closer.Close() }()
+
+	const table = 102
+	_, held, _ := net.ParseCIDR("fd00:5::/48")
+	_, inside, _ := net.ParseCIDR("fd00:5::9/128")
+	if err := entryTable.RegisterPassThroughAs(table, held, egressroutemap.PassThroughEdge); err != nil {
+		t.Fatal(err)
+	}
+	if err := entryTable.RegisterPassThrough(table, inside); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []*net.IPNet{held, inside} {
+		if err := RouteEgressDel(p, table); err != nil {
+			t.Fatalf("RouteEgressDel(%s): %v", p, err)
+		}
+	}
+	entries, err := entryTable.Entries(table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := egressroutemap.Entry{PassThrough: true, Owner: egressroutemap.PassThroughEdge}
+	if len(entries) != 1 || entries[netip.MustParsePrefix(held.String())] != want {
+		t.Errorf("entries after RouteEgressDel %v, want only the edge entry for %s", entries, held)
 	}
 }
 

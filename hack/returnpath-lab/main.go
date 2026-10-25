@@ -1111,7 +1111,9 @@ func egressRoute(cfg config, _ derived) error {
 		fmt.Printf("  A reply to that address is NOT SRv6-encapsulated from this node.\n")
 		return nil
 	}
-	if sid == nil || sid.IsUnspecified() {
+	// A pass-through entry carries nothing in its SID but its owner, in the
+	// first byte (egressroutemap.PassThroughOwner).
+	if sid == nil || net.IP(append([]byte{0}, sid[1:]...)).IsUnspecified() {
 		fmt.Printf("  HIT, local pass-through (no SID): not encapsulated.\n")
 		return nil
 	}

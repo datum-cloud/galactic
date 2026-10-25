@@ -89,6 +89,9 @@ func TestAttachDetach(t *testing.T) {
 	if got := f.routeVia(vrfTables[vpcB], addr); got != linkB {
 		t.Errorf("VPC B routes %s via ifindex %d, want its own attachment %d", addr, got, linkB)
 	}
+	// Each VPC's workloads on the node reach its own attachments' addresses.
+	f.expectLocal(vpcA, addr+"/128", "fd00:aa::2/128")
+	f.expectLocal(vpcB, addr+"/128")
 
 	// Repeated passes change nothing: no link is recreated, no status is
 	// rewritten.
@@ -132,6 +135,8 @@ func TestAttachDetach(t *testing.T) {
 	if _, ok := f.dp.table(linkA); ok {
 		t.Error("a's datapath rows left behind")
 	}
+	f.expectLocal(vpcA)
+	f.expectLocal(vpcB, addr+"/128")
 }
 
 // TestNewLinkClearsStaleRows: a link the agent creates is registered with no

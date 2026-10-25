@@ -48,6 +48,7 @@ import (
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/timing"
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 // Condition reasons the agent sets.
@@ -81,6 +82,10 @@ type Datapath interface {
 	Unregister(ifindex uint32) error
 	// Forget removes ifindex's gate link row, once the link is deleted.
 	Forget(ifindex uint32) error
+	// SyncRoutes makes the destinations the workloads of the VRF with
+	// routing table vrfTable reach on this node's edge links exactly want,
+	// so the VRF's default route to the egress shards never takes them.
+	SyncRoutes(vrfTable uint32, want []netip.Prefix) error
 }
 
 // Agent reconciles the host state of the attachments on one node.
@@ -129,6 +134,12 @@ type Agent struct {
 	// lost holds the scopes another writer took from this process.
 	lostMu sync.Mutex
 	lost   map[string]bool
+	// held is, for the pass under way, each attachment's prefixes from
+	// routes still accepted on this node, by attachment UID.
+	held map[string][]netip.Prefix
+	// local is, by VPC, each attachment's prefixes beyond its own address
+	// that the last sync of the VPC's local routes kept, by attachment UID.
+	local map[string]map[string]map[netip.Prefix]bool
 }
 
 // outcome is the status the agent reports for one attachment after a pass.
@@ -154,6 +165,11 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 	if err := a.Client.List(ctx, &list); err != nil {
 		return fmt.Errorf("list EdgeAttachments: %w", err)
 	}
+	held, err := a.heldPrefixes(ctx)
+	if err != nil {
+		return err
+	}
+	a.held = held
 	active := map[string][]*galacticv1alpha1.EdgeAttachment{}
 	releasing := map[string][]*galacticv1alpha1.EdgeAttachment{}
 	pods := map[string]podNS{}
@@ -415,7 +431,98 @@ func (a *Agent) applyScope(vpc string, active, releasing []*galacticv1alpha1.Edg
 		att := out[i].att
 		out[i] = a.program(att, pods[att.Spec.PodUID], current[hostattach.LinkID(att.Status.VPC, string(att.UID))])
 	}
+	if err := a.syncRoutes(vpc); err != nil {
+		errs = append(errs, fmt.Errorf("sync local routes: %w", err))
+	}
 	return out, errors.Join(errs...)
+}
+
+// heldPrefixes returns, by attachment UID, the prefix of every route
+// accepted on this node whose holder has not released it at the accepted
+// epoch, whether or not its gate is open.
+func (a *Agent) heldPrefixes(ctx context.Context) (map[string][]netip.Prefix, error) {
+	if a.Gates == nil {
+		return nil, nil
+	}
+	var routes galacticv1alpha1.EdgeRouteList
+	if err := a.Client.List(ctx, &routes); err != nil {
+		return nil, fmt.Errorf("list EdgeRoutes: %w", err)
+	}
+	held := map[string][]netip.Prefix{}
+	for i := range routes.Items {
+		rt := &routes.Items[i]
+		p, err := netip.ParsePrefix(rt.Spec.Prefix)
+		if err != nil || !holds(rt, a.NodeName) {
+			continue
+		}
+		held[rt.Status.Accepted.AttachmentUID] = append(held[rt.Status.Accepted.AttachmentUID], p.Masked())
+	}
+	return held, nil
+}
+
+// holds reports whether rt is accepted on node and its holder has not
+// released it at the accepted epoch. A revoked route still holds: its
+// accepted holder stays until another is accepted or the route is deleted.
+func holds(rt *galacticv1alpha1.EdgeRoute, node string) bool {
+	acc := rt.Status.Accepted
+	if acc == nil || acc.Node != node {
+		return false
+	}
+	c := rt.Spec.Claim
+	return c == nil || c.Epoch != acc.Epoch || !c.Released
+}
+
+// syncRoutes routes the VPC's workloads on this node to its edge links: each
+// registered link's own address, the prefixes whose gates are open on it, and
+// every other prefix of a route its attachment holds. A held prefix whose gate
+// is closed has no host route, so the kernel finds the VRF's unreachable
+// default for it and drops it, rather than usid_egress sending it to the
+// VPC's ::/0 shard route as public egress. A VPC whose VRF is gone has no
+// workload here to route, and no table ID to sync against. Its rows cannot
+// outlive the VRF: maintenance's Guard.Reclaim refuses to delete the VRF while
+// an attachment is not Released, and the agent reports Released only after a
+// snapshot pass that ran this with an empty want while the VRF still existed.
+func (a *Agent) syncRoutes(vpc string) error {
+	table, ok, err := hostattach.VRFTable(a.Host, intf.GenerateInterfaceNameVRF(vpc))
+	if err != nil || !ok {
+		return err
+	}
+	links, err := hostattach.List(a.Host)
+	if err != nil {
+		return err
+	}
+	var want []netip.Prefix
+	local := map[string]map[netip.Prefix]bool{}
+	for _, l := range links {
+		v, uid, ok := hostattach.ParseLinkID(l.ID)
+		if !ok || v != vpc || l.HostIndex == 0 || a.Gates == nil {
+			continue
+		}
+		addr, registered, err := a.Gates.Link(uint32(l.HostIndex))
+		if err != nil {
+			return err
+		}
+		if !registered {
+			continue
+		}
+		own := netip.PrefixFrom(addr, addr.BitLen())
+		want = append(want, own)
+		local[uid] = map[netip.Prefix]bool{}
+		for _, p := range append(a.openPrefixes(l, addr.String()), a.held[uid]...) {
+			if p != own && !local[uid][p] {
+				local[uid][p] = true
+				want = append(want, p)
+			}
+		}
+	}
+	if err := a.Datapath.SyncRoutes(table, want); err != nil {
+		return err
+	}
+	if a.local == nil {
+		a.local = map[string]map[string]map[netip.Prefix]bool{}
+	}
+	a.local[vpc] = local
+	return nil
 }
 
 func released(att *galacticv1alpha1.EdgeAttachment) outcome {
