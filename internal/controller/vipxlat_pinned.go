@@ -16,15 +16,10 @@ import (
 )
 
 // PinnedVIPTranslationTable is a VIPTranslationTable over this node's pinned
-// vip_xlat_table that opens the pin when it is first needed rather than once at
-// startup.
-//
-// galactic-cni pins the map when it loads the uSID datapath, and on a node that
-// has just booted galactic-router can start first. A handle opened only at
-// startup would then stay missing for the life of the process, failing every
-// ServiceVIPBinding on the node until galactic-router restarted. Every call
-// that finds the table not yet open tries again, so the first reconcile after
-// the pin appears opens it, and the handle is kept from then on.
+// vip_xlat_table that opens the pin on first use. galactic-cni creates the pin,
+// so it can be missing when galactic-router starts. Every call that finds the
+// table not yet open tries again, and the first successful open is kept until
+// Close.
 //
 // Safe for concurrent use.
 type PinnedVIPTranslationTable struct {

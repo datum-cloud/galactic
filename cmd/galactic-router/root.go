@@ -357,8 +357,8 @@ func runCmd(cfg *config.RouterConfig) error {
 //
 // vipXlatSweeper runs only on ticks, never in that first pass, so the
 // ServiceVIPBinding reconciler re-registers every live binding before the
-// first sweep. It sweeps vipXlat's table, and skips a tick while that table
-// cannot be opened.
+// first sweep. Each tick sweeps vipXlat's table with a copy of
+// vipXlatSweeper, and skips the sweep while that table cannot be opened.
 func runGCTicker(
 	ctx context.Context, mgr ctrl.Manager, interval time.Duration,
 	gcRec *controller.GCReconciler, vipXlatSweeper *controller.VIPXlatSweeper,
@@ -380,8 +380,9 @@ func runGCTicker(
 		case <-ticker.C:
 			gcRec.RunGC(ctx)
 			if table, err := vipXlat.Table(); err == nil {
-				vipXlatSweeper.Table = table
-				vipXlatSweeper.Sweep(ctx)
+				sweeper := *vipXlatSweeper
+				sweeper.Table = table
+				sweeper.Sweep(ctx)
 			}
 		}
 	}
