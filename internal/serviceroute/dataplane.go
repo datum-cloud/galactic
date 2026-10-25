@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -111,7 +112,7 @@ type EBPFRouteProgrammer struct {
 	mu                     sync.Mutex
 	tables                 *serviceroutemap.Tables
 	mapHandles             []*ebpf.Map
-	mapIDs                 [8]ebpf.MapID
+	mapIDs                 mapSetIDs
 	mapIDsValid            bool
 	routeRefs              map[string]routeState
 	accessRefs             map[accessKey]accessState
@@ -128,8 +129,8 @@ type EBPFRouteProgrammer struct {
 
 	// These hooks keep map replacement and interface recreation tests
 	// deterministic without requiring a privileged kernel eBPF setup.
-	openMapSetFn  func(string) (*serviceroutemap.Tables, []*ebpf.Map, [8]ebpf.MapID, error)
-	readMapIDsFn  func(string) ([8]ebpf.MapID, error)
+	openMapSetFn  func(string) (*serviceroutemap.Tables, []*ebpf.Map, mapSetIDs, error)
+	readMapIDsFn  func(string) (mapSetIDs, error)
 	targetIndexFn func(string) (uint32, error)
 }
 
@@ -389,7 +390,13 @@ var serviceRouteMapNames = [...]string{
 	"service_policy_state_table",
 	"service_deny_table",
 	"service_peer_table",
+	serviceroutemap.ServiceProducerSetMapName,
 }
+
+// mapSetIDs holds the kernel IDs of serviceRouteMapNames, in that order. The
+// producer set map's ID is zero while the datapath has none, so its creation
+// reads as a map set change and reopens every map.
+type mapSetIDs [len(serviceRouteMapNames)]ebpf.MapID
 
 func (p *EBPFRouteProgrammer) mapSetChanged() (bool, error) {
 	if !p.mapIDsValid {
@@ -402,34 +409,37 @@ func (p *EBPFRouteProgrammer) mapSetChanged() (bool, error) {
 	return ids != p.mapIDs, nil
 }
 
-func (p *EBPFRouteProgrammer) openMapSet(pinDir string) (*serviceroutemap.Tables, []*ebpf.Map, [8]ebpf.MapID, error) {
+func (p *EBPFRouteProgrammer) openMapSet(pinDir string) (*serviceroutemap.Tables, []*ebpf.Map, mapSetIDs, error) {
 	if p.openMapSetFn != nil {
 		return p.openMapSetFn(pinDir)
 	}
 	tables, handles, err := serviceroutemap.OpenPinned(pinDir)
 	if err != nil {
-		return nil, nil, [8]ebpf.MapID{}, err
+		return nil, nil, mapSetIDs{}, err
 	}
-	var ids [8]ebpf.MapID
+	var ids mapSetIDs
 	for index, handle := range handles {
 		ids[index], err = kernelMapID(handle)
 		if err != nil {
 			for _, opened := range handles {
 				_ = opened.Close()
 			}
-			return nil, nil, [8]ebpf.MapID{}, err
+			return nil, nil, mapSetIDs{}, err
 		}
 	}
 	return tables, handles, ids, nil
 }
 
-func (p *EBPFRouteProgrammer) readMapIDs(pinDir string) ([8]ebpf.MapID, error) {
+func (p *EBPFRouteProgrammer) readMapIDs(pinDir string) (mapSetIDs, error) {
 	if p.readMapIDsFn != nil {
 		return p.readMapIDsFn(pinDir)
 	}
-	var ids [8]ebpf.MapID
+	var ids mapSetIDs
 	for index, name := range serviceRouteMapNames {
 		current, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, name), nil)
+		if err != nil && name == serviceroutemap.ServiceProducerSetMapName && errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return ids, fmt.Errorf("open current %s map: %w", name, err)
 		}
@@ -460,7 +470,7 @@ func (p *EBPFRouteProgrammer) closeHandles() {
 	}
 	p.mapHandles = nil
 	p.tables = nil
-	p.mapIDs = [8]ebpf.MapID{}
+	p.mapIDs = mapSetIDs{}
 	p.mapIDsValid = false
 }
 
