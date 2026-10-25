@@ -71,9 +71,12 @@ type egressGroup struct {
 	cfg        config.EgressGroupConfig
 	staticSIDs []net.IP
 
-	// natLocators, when set, receives every configured and cluster shard SID
-	// once the EgressShard watch has listed the cluster, for traffic policy's
-	// path classification.
+	// natLocators, when set, receives on every sweep the SID of every shard
+	// this node can egress through, for traffic policy's path
+	// classification: the configured shards, every member of a published
+	// group, and the cluster's EgressShards once the watch has listed them.
+	// The first two cover every path usid_egress can take, so classification
+	// works before the watch syncs, and while it cannot start.
 	natLocators func([]net.IP)
 	pinDir      string
 	trigger     chan struct{}
@@ -236,6 +239,9 @@ func (g *egressGroup) sweepWith(
 	foreignTableIDs map[uint32]struct{},
 ) error {
 	if groups == nil {
+		if g.natLocators != nil {
+			g.natLocators(g.staticSIDs)
+		}
 		_, err := g.refresh(table, foreignTableIDs, g.staticSIDs, nil)
 		return err
 	}
@@ -345,8 +351,17 @@ func (g *egressGroup) sweepHashed(
 		}
 	}
 
-	if synced && g.natLocators != nil {
-		g.natLocators(append(append([]net.IP(nil), recognized...), shardSIDs(shards)...))
+	if g.natLocators != nil {
+		var listed []bgpv1alpha1.EgressShard
+		if synced {
+			listed = shards
+		}
+		if sids, err := g.knownShardSIDs(groups, listed); err != nil {
+			slog.Error("Failed to read the egress shard groups; traffic policy's NAT locators are not updated",
+				"err", err)
+		} else {
+			g.natLocators(sids)
+		}
 	}
 
 	refsKnown := g.refs != nil
@@ -931,6 +946,26 @@ func isUplink(ifindex int) bool {
 	}
 	_, ok := uplinks[ifindex]
 	return ok
+}
+
+// knownShardSIDs is every shard SID usid_egress can send this node's tenants
+// to: the configured shards, every member of a published group, and shards,
+// the cluster's EgressShards when the watch has listed them. It fails when a
+// group cannot be read, rather than report an incomplete set.
+func (g *egressGroup) knownShardSIDs(
+	groups *egressroutemap.ShardGroupTable, shards []bgpv1alpha1.EgressShard,
+) ([]net.IP, error) {
+	sids := append(append([]net.IP(nil), g.staticSIDs...), shardSIDs(shards)...)
+	for id := range uint32(egressroutemap.MaxShardGroups) {
+		members, err := groups.Members(id)
+		if err != nil {
+			return nil, fmt.Errorf("read egress shard group %d members: %w", id, err)
+		}
+		for _, m := range members {
+			sids = append(sids, net.IP(m.SID.AsSlice()))
+		}
+	}
+	return sids, nil
 }
 
 // shardSIDs are the parseable status.shardSIDs of shards, whatever their
