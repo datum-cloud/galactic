@@ -102,7 +102,7 @@ tasks:
     vars:
       VERSION: '{{.VERSION | default "dev"}}'
     cmds:
-      - hack/service-api-bundle.sh {{.VERSION}} dist
+      - hack/service-api-bundle.sh "{{.VERSION}}" dist
 
   generate:crd:
     desc: Regenerate all Galactic API deepcopy code and CRDs (requires controller-gen)

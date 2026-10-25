@@ -518,9 +518,11 @@ includes upstream revocation detection or federation latency.
 
 ## Wire examples
 
-The JSON below uses protobuf JSON field spelling for the proposed messages;
-timestamps and UUIDs are illustrative. #1044 must validate these fixtures with
-the generated descriptor and publish the finalized schema alongside them.
+The JSON below uses protobuf JSON field spelling for the `fabric.service.v1`
+messages; timestamps and UUIDs are illustrative. The request and the mixed
+result stream are fixtures in `api/fabric/service/v1/testdata`, beside a
+capabilities response; the release bundle's build decodes them against its own
+descriptor set, and a test decodes them with only the published packages.
 A request received at 12:00:00 with the following expiration has 30 s remaining:
 
 ```json
@@ -531,9 +533,13 @@ A request received at 12:00:00 with the following expiration has 30 s remaining:
   "requestId": "b74e19ee-926f-43dc-b03d-c29550a827ab",
   "expiresAt": "2026-10-24T12:00:30Z",
   "query": {"type": "QUERY_TYPE_PING", "target": "1.1.1.1", "addressFamily": "ADDRESS_FAMILY_IPV4"},
-  "requiredFeatures": ["router-outcomes", "terminal-coverage", "aggregate-probe-budgets"]
+  "requiredFeatures": ["router-outcomes", "terminal-coverage"]
 }
 ```
+
+A request that also lists `aggregate-probe-budgets` is refused with
+`VersionUnsupported` until the gateway enforces aggregate probe budgets (#1045);
+a v1 service is advertised as enabled only once all three features are served.
 
 A mixed result stream (one JSON object per protobuf event):
 
@@ -590,16 +596,12 @@ release asset named `fabric-service-api-<version>.tar.gz`, containing
 `proto/` sources and imports, `fabric-service-v1.pb` (descriptor set with imports),
 and `README.md` with the matching Go module version and generation instructions.
 Publish `SHA256SUMS` alongside it. The `publish-service-api` job of
-`.github/workflows/publish.yaml` attaches both to each published release;
-`task build:service-api VERSION=<version>` builds them locally. The `proto/`
+`.github/workflows/publish.yaml` attaches both to each published release, and
+CI builds and verifies the same bundle on every pull request;
+`task build:service-api VERSION=<version>` builds it locally. The `proto/`
 directory omits the `google/protobuf` well-known types, which every protobuf
-toolchain ships; the descriptor set includes them. The wire examples below are
-fixtures in `api/fabric/service/v1/testdata`, decoded by a test that imports
-only the published packages; the request fixture does not require
-`aggregate-probe-budgets`, which the gateway refuses until #1045.
-Commit generated Go artifacts using
-`task generate:proto`;
-never hand-edit them. Consumers pin a release tag or commit of
+toolchain ships; the descriptor set includes them. Commit generated Go artifacts
+using `task generate:proto`; never hand-edit them. Consumers pin a release tag or commit of
 `go.datum.net/galactic`, import only `api/fabric/service/v1`, `api/fabric/v1`, and
 standard protobuf/gRPC packages, or generate another language client from the
 published descriptor/source bundle. No internal canonicalizer, error parser,
