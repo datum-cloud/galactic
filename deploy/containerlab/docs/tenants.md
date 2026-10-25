@@ -19,7 +19,8 @@ reachability across sites.
 
 The lab enforces interface traffic policy, so each tenant also binds every
 attachment to a policy set in both directions (`resources/tenants/<ns>/policy/`,
-see `resources/tenants/policies/README.md`), and `deploy:nsNN` publishes each
+or `policy/<site>/` for a site with attachments the others lack, see
+`resources/tenants/policies/README.md`), and `deploy:nsNN` publishes each
 attachment's status after its pods start (`scripts/publish-attachments.sh`). A
 pod's interface forwards nothing until then.
 

@@ -40,9 +40,11 @@ XFER_BYTES=3000000
 rc=0
 fail() { echo "  FAIL $*" >&2; rc=1; }
 
+# running_pod SITE NS names NS's running tenant workload, not the other pods
+# sharing the namespace, such as dfw's edge conformance clients.
 running_pod() {
   docker exec "$(control_plane "$1")" kubectl -n "$2" get pods \
-    --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}'
+    -l app=private --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}'
 }
 
 in_pod() {

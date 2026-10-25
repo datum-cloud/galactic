@@ -18,7 +18,7 @@
 #    1. Flow hash, pins off: one tenant's TCP and UDP flows use both shards,
 #       over NAT66 and NAT64; ICMP works through both families. Each shard
 #       node reports its own shard local, not unreachable, the other shard
-#       active, and no tenant route on any group.
+#       active, and one route on the group per tenant VRF it hosts.
 #    2. Source hash, default pins: every flow from one tenant address, TCP,
 #       UDP and ICMP alike, leaves from one shard per family.
 #    3. galactic-cni restart: a download in progress survives it, and every
@@ -365,7 +365,8 @@ frr() { # SHARD vtysh-args...
   local node pod
   node=${NODE[$1]}
   shift
-  pod=$(kc -n galactic-system get pods -o wide | awk -v n="${node}" '/fabric-router/ && $7 == n {print $1}')
+  pod=$(kc -n galactic-system get pods -l app.kubernetes.io/name=fabric-router \
+    --field-selector "spec.nodeName=${node}" -o jsonpath='{.items[0].metadata.name}')
   kc -n galactic-system exec "${pod}" -c frr -- vtysh "$@"
 }
 originate() { # SHARD yes|no
@@ -480,11 +481,15 @@ for s in "${SHARDS[@]}"; do
       got=$(node_metric "${n}" "$(members "${class}" "${want%=*}")")
       [ "${got}" = "${want#*=}" ] || die "${n} reports ${class} ${want%=*} = ${got:-missing}, want ${want#*=}"
     done
+    # One route per tenant VRF on the node: dfw's shard nodes host edge
+    # conformance clients, whose VRFs egress through the group like any other.
+    links=$(docker exec "${n}" ip -br link show type vrf) || die "cannot list ${n}'s VRFs"
+    vrfs=$(grep -c '^G' <<<"${links}" || true)
     got=$(node_metric "${n}" "galactic_cni_egress_group_routes{class=\"${class}\"}")
-    [ "${got}" = 0 ] || die "${n} reports ${got:-no} ${class} routes on its group, want 0"
+    [ "${got}" = "${vrfs}" ] || die "${n} reports ${got:-no} ${class} routes on its group, want ${vrfs}, one per tenant VRF"
   done
 done
-log "ok   each shard node sees its own shard as local, the other as active, and has no tenant route"
+log "ok   each shard node sees its own shard as local, the other as active, and one group route per tenant VRF"
 for kind in tcp6 tcp4 udp6 udp4; do
   case "${kind}" in *6) allowed=("${V6[@]}") ;; *) allowed=("${V4[@]}") ;; esac
   expect "${kind}" "${FRESH_POD}" - 24 "${allowed[@]}"

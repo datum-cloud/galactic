@@ -1,6 +1,8 @@
 #!/bin/bash
 # deploy-tenant-policy.sh — apply a tenant's traffic policies and bindings
-# (resources/tenants/<namespace>/policy/) to the given sites.
+# (resources/tenants/<namespace>/policy/) to the given sites. A site with
+# its own policy/<site>/ overlay, for attachments only that site has, gets
+# that overlay instead.
 #
 # The lab enforces traffic policy, so a tenant's interfaces deny everything
 # until these are bound and galactic-router publishes them. Runs before the
@@ -28,7 +30,9 @@ for site in "$@"; do
   # The policy sets each tenant's policy/ kustomization pulls in.
   copy_to "${node}" tenants/policies
   copy_to "${node}" "tenants/${NS}/policy"
-  apply_k "${node}" "/galactic/resources/tenants/${NS}/policy/"
+  dir="tenants/${NS}/policy"
+  [ -d "${SCRIPT_DIR}/../resources/${dir}/${site}" ] && dir="${dir}/${site}"
+  apply_k "${node}" "/galactic/resources/${dir}/"
 done
 
 echo "Done."
