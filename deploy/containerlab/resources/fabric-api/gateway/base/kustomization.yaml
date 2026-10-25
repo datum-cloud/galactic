@@ -1,5 +1,6 @@
 # Lab overlay of config/fabric-api/base: the locally built image, never
-# pulled. Each site's overlay adds its ConfigMap and certificate SAN.
+# pulled. Each site's overlay adds its certificate SAN; its ConfigMap comes
+# with the site's fabric-router overlay.
 resources:
   - ../../../../../../config/fabric-api/base
 patches:

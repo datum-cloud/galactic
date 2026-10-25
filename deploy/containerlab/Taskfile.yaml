@@ -526,8 +526,14 @@ tasks:
 
   "verify:fabric-api":
     desc: Verify the fabric-api looking glass on every fabric node, directly and through FabricQuery
+    deps: ["verify:fabric-api-config"]
     cmds:
       - ./scripts/verify-fabric-api.sh
+
+  "verify:fabric-api-config":
+    desc: Verify each site's fabric-router overlay renders the fabric-api ConfigMap the node sidecar reads
+    cmds:
+      - ./scripts/verify-fabric-api-config.sh
 
   "verify:fabric-api-bootstrap":
     desc: Verify a fabric-router pod starts and FRR converges while fabric-api has no certificate

@@ -22,3 +22,12 @@ configMapGenerator:
   - name: fabric-router.sjc-worker2
     files:
       - frr.conf=frr.conf.sjc-worker2
+  # The fabric-api node sidecar reads site and cell from this ConfigMap once,
+  # at start, so it ships with the DaemonSet. The gateway (deploy:fabric-api)
+  # reads it too. The lab's cell, site and member cluster name are all the
+  # site name.
+  - name: fabric-api
+    literals:
+      - site=sjc
+      - cell=sjc
+      - cluster-name=sjc

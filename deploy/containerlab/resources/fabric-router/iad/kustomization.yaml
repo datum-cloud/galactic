@@ -25,3 +25,12 @@ configMapGenerator:
   - name: fabric-router.iad-worker3
     files:
       - frr.conf=frr.conf.iad-worker3
+  # The fabric-api node sidecar reads site and cell from this ConfigMap once,
+  # at start, so it ships with the DaemonSet. The gateway (deploy:fabric-api)
+  # reads it too. The lab's cell, site and member cluster name are all the
+  # site name.
+  - name: fabric-api
+    literals:
+      - site=iad
+      - cell=iad
+      - cluster-name=iad

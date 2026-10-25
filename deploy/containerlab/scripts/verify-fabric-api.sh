@@ -105,7 +105,10 @@ wait_info() {
 for site in dfw iad sjc; do
   setup_site "${site}"
   read -r node pod hostip _ < <(node_targets | sort | head -n1)
-  info=$(wait_info "${node}" "${pod}" "${hostip}")
+  if ! info=$(wait_info "${node}" "${pod}" "${hostip}"); then
+    echo "FAIL ${node}: Info: ${info}"
+    exit 1
+  fi
   LOOP4[${site}]=$(jq -r '.probeSources[] | select(contains(":") | not)' <<<"${info}" | head -n1)
   LOOP6[${site}]=$(jq -r '.probeSources[] | select(contains(":"))' <<<"${info}" | head -n1)
   echo "${site} targets: ${node} ${LOOP4[${site}]} ${LOOP6[${site}]}"
