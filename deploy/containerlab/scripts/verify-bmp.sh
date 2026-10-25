@@ -39,7 +39,10 @@ fi
 # is currently up. GoBMP does not export which router sent a message, but a
 # session's address pair is unique to the router holding it. The local address
 # is GoBMP's router_ip, which both Peer Up and Peer Down carry; local_ip is
-# only on a Peer Up.
+# only on a Peer Up. A router streaming its Loc-RIB also sends a Peer Up for
+# its Loc-RIB instance peer (RFC 9069), which has no remote end, so GoBMP logs
+# it with is_loc_rib set and no remote_ip; those records name no session and
+# are skipped.
 #
 # A router sends its Peer Ups once, when its BMP session opens, and GoBMP logs
 # every route-monitoring message after them, so on a lab that has run for a
@@ -97,7 +100,7 @@ for raw in sys.stdin:
         m = json.loads(line)
     except ValueError:
         continue
-    if m.get("msg_type") == want:
+    if m.get("msg_type") == want and not m["msg_data"].get("is_loc_rib"):
         d = m["msg_data"]
         last[(d["router_ip"], d["remote_ip"])] = d["action"]
 for (local, remote), action in sorted(last.items()):
