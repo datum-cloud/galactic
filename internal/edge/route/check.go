@@ -94,9 +94,10 @@ type Authorized struct {
 // attachment is the claiming pod's, admitted, allocated, ready and neither
 // draining nor deleted; its service grants the route's VPC, the prefix and
 // PrefixReachability to the route's provider, which is approved and
-// implements it, and has not expired; and the instance is the pod's, on the
-// attachment's node, holding its lease at h's epoch. reader must read from
-// the API server, so a revocation recorded before the call is seen.
+// implements it at a version core implements, and has not expired; and the
+// instance is the pod's, on the attachment's node, holding its lease at h's
+// epoch. reader must read from the API server, so a revocation recorded
+// before the call is seen.
 func Check(ctx context.Context, reader client.Reader, rt *galacticv1alpha1.EdgeRoute, h Holder, now time.Time,
 	maxSkew time.Duration) (*Authorized, *Refusal, error) {
 	return check(ctx, reader, rt, h, now, maxSkew, true)
@@ -235,7 +236,7 @@ func checkGrant(ctx context.Context, reader client.Reader, rt *galacticv1alpha1.
 }
 
 // checkProvider reads the route's provider: approved and implementing
-// PrefixReachability.
+// PrefixReachability at a version core implements.
 func checkProvider(ctx context.Context, reader client.Reader, rt *galacticv1alpha1.EdgeRoute) (*Refusal, error) {
 	var prov galacticv1alpha1.EdgeProvider
 	switch err := reader.Get(ctx, client.ObjectKey{Name: rt.Spec.ProviderRef.Name}, &prov); {
@@ -246,10 +247,10 @@ func checkProvider(ctx context.Context, reader client.Reader, rt *galacticv1alph
 	case !prov.Status.Approved || !prov.DeletionTimestamp.IsZero():
 		return refuse(string(admission.ProviderNotApproved), "EdgeProvider %s is not approved", prov.Name), nil
 	case !slices.ContainsFunc(prov.Spec.Capabilities, func(c galacticv1alpha1.EdgeCapability) bool {
-		return c.Name == PrefixReachability
+		return c.Name == PrefixReachability && admission.CoreImplements(admission.Capability(c))
 	}):
-		return refuse(string(admission.UnsupportedCapability), "EdgeProvider %s does not implement %s",
-			prov.Name, PrefixReachability), nil
+		return refuse(string(admission.UnsupportedCapability),
+			"EdgeProvider %s does not implement %s at a version core implements", prov.Name, PrefixReachability), nil
 	}
 	return nil, nil
 }

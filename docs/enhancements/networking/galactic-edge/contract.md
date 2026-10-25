@@ -98,7 +98,7 @@ A provider integrates in five steps, all through its own ServiceAccount. Its cel
 
 - A request names one contract version and one version per capability. An unsupported version is refused before allocation with `UnsupportedContractVersion` or `UnsupportedCapability`.
 - A core release supports the current contract version and the one before it. Admission refuses any other version with `UnsupportedContractVersion`, even one the `EdgeProvider` lists. Dropping a version requires that no `EdgeProvider` still lists it as its only version.
-- A core release implements the capability versions listed under [Decisions](#decisions). Admission refuses any other capability version with `UnsupportedCapability`, even one the `EdgeProvider` lists.
+- A core release implements the capability versions listed under [Decisions](#decisions). Admission refuses any other capability version with `UnsupportedCapability`, even one the `EdgeProvider` lists. Core refuses or revokes an `EdgeRoute` with `UnsupportedCapability` unless its `EdgeProvider` lists `PrefixReachability` at a version core implements.
 - Adding a capability adds a new name; it never changes what an existing version means.
 
 ### Authorization context
