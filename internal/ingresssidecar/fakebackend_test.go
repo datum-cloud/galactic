@@ -45,8 +45,10 @@ type fakeBackend struct {
 	// pruneRemoved is how many rows PruneDatapath reports removing, even when
 	// failPrune is set, as a prune failing part way through does.
 	pruneRemoved int
-	// failListVRFs fails Inventory's first step.
-	failListVRFs error
+	// failListVRFs fails Inventory's first step, and failListRoutes its
+	// per-VRF route listing, as a missing pinned eBPF map does.
+	failListVRFs   error
+	failListRoutes error
 
 	// rowsMissing, if set, is the set of VRF tables whose rows
 	// DatapathRowsPresent reports absent, standing in for another writer
@@ -147,6 +149,9 @@ func (f *fakeBackend) ListVRFs() ([]VRFInfo, error) {
 func (f *fakeBackend) ListRoutes(tableID uint32) ([]RouteInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failListRoutes != nil {
+		return nil, f.failListRoutes
+	}
 	var infos []RouteInfo
 	prefixStr := fmt.Sprintf("%d/", tableID)
 	for key, rec := range f.routes {

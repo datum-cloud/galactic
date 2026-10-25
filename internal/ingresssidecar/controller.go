@@ -105,6 +105,10 @@ var (
 //
 // The prune runs only after a successful inventory. A failed one can leave a
 // VRF in this pod untracked, and pruning then would remove its live rows.
+// A failed inventory is retried before each sweep until it succeeds, and the
+// prune follows it. On a node that has just booted, the sidecar can start
+// before galactic-cni pins the shared eBPF maps the inventory reads, and that
+// failure lasts only until they appear.
 //
 // Only a failed EndpointSlice list holds the sweep back, retried with backoff:
 // running Inventory without the seed would reopen the race SeedFromAPI closes.
@@ -136,41 +140,63 @@ func RunStartup(ctx context.Context, reader client.Reader, store *Store, interva
 	}
 
 	metrics.setStage(StageInventory, StatusRunning)
-	err := store.Inventory(ctx, time.Now())
+	adopted := adoptHostState(ctx, store, metrics)
 	if ctx.Err() != nil {
 		return
 	}
-	metrics.attempt(StageInventory, err)
-	if err != nil {
-		slog.Error("ingresssidecar: startup inventory", "error", err)
-		metrics.setStage(StagePrune, StatusSkipped)
-	} else {
-		metrics.setStage(StagePrune, StatusRunning)
-		removed, err := store.PruneForeignDatapath()
-		metrics.pruned(removed)
-		if ctx.Err() != nil {
-			return
-		}
-		metrics.attempt(StagePrune, err)
-		if err != nil {
-			// Not retried: the rows it leaves only hold map slots until the
-			// next sidecar pod's startup prune, or until the host's installer
-			// judges every sidecar on this node gone.
-			slog.Error("ingresssidecar: startup prune", "error", err)
-		}
-	}
 	metrics.startupComplete()
-	RunSweeper(ctx, store, interval, metrics)
+	runSweeps(ctx, store, interval, metrics, adopted)
 }
 
-// RunSweeper blocks, sweeping the store on a fixed interval until ctx is done.
+// adoptHostState takes the store's inventory of host state and, if that
+// succeeds, removes the eBPF map rows an earlier sidecar pod left behind,
+// reporting both stages to metrics. It reports whether the inventory
+// succeeded; a prune failure does not count against it.
+//
+// Inventory is safe to repeat: anything a failed attempt already seeded is
+// known to the store, and a later attempt leaves it alone.
+//
+// A retry leaves the inventory stage reporting failed while it runs, rather
+// than running, so a stage that keeps failing reads failed on every scrape.
+func adoptHostState(ctx context.Context, store *Store, metrics *LifecycleMetrics) bool {
+	err := store.Inventory(ctx, time.Now())
+	if ctx.Err() != nil {
+		return false
+	}
+	metrics.attempt(StageInventory, err)
+	if err != nil {
+		slog.Error("ingresssidecar: startup inventory; retrying before the next sweep", "error", err)
+		metrics.setStage(StagePrune, StatusSkipped)
+		return false
+	}
+
+	metrics.setStage(StagePrune, StatusRunning)
+	removed, err := store.PruneForeignDatapath()
+	metrics.pruned(removed)
+	if ctx.Err() != nil {
+		return true
+	}
+	metrics.attempt(StagePrune, err)
+	if err != nil {
+		// Not retried: the rows it leaves only hold map slots until the
+		// next sidecar pod's startup prune, or until the host's installer
+		// judges every sidecar on this node gone.
+		slog.Error("ingresssidecar: startup prune", "error", err)
+	}
+	return true
+}
+
+// runSweeps blocks, sweeping the store on a fixed interval until ctx is done.
 // It is what actually acts on expired teardown grace periods, and has to be
 // polling-driven rather than reactive: VRF teardown is an aggregate condition
-// over many routes, not one watched object's transition.
+// over many routes, not one watched object's transition. Until adopted is
+// true, each tick first retries adoptHostState.
 //
-// Callers must not start it until the API seed and the store's inventory pass
+// Callers must not start it until the API seed and a first inventory attempt
 // have both run. metrics, which may be nil, records each completed sweep.
-func RunSweeper(ctx context.Context, store *Store, interval time.Duration, metrics *LifecycleMetrics) {
+func runSweeps(ctx context.Context, store *Store, interval time.Duration, metrics *LifecycleMetrics,
+	adopted bool,
+) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -178,9 +204,15 @@ func RunSweeper(ctx context.Context, store *Store, interval time.Duration, metri
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			start := metrics.sweepStart()
-			store.Sweep(ctx, time.Now())
-			metrics.sweepDone(start)
 		}
+		if !adopted {
+			adopted = adoptHostState(ctx, store, metrics)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		start := metrics.sweepStart()
+		store.Sweep(ctx, time.Now())
+		metrics.sweepDone(start)
 	}
 }

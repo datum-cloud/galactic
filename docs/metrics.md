@@ -289,13 +289,16 @@ gauges above cannot tell a working sidecar from a stuck one. Startup runs
 three stages in order: list the selected EndpointSlices and apply them
 (`seed`, retried until the list succeeds), adopt existing host state
 (`inventory`), and remove an earlier pod's rows from the shared eBPF maps
-(`prune`, skipped after a failed inventory). Neither inventory nor prune is
-retried, and the sweep starts either way.
+(`prune`, skipped after a failed inventory). The sweep starts after the first
+inventory attempt either way. A failed inventory is retried before each sweep
+until it succeeds, and the prune runs once it does: on a node that has just
+booted, the inventory fails until galactic-cni pins the shared eBPF maps. The
+prune is not retried.
 
 | Metric                                                            | Type      | Labels            | Meaning                                                                                                                                                     |
 | ----------------------------------------------------------------- | --------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `galactic_ingress_sidecar_startup_stage_status`                   | gauge     | `stage`, `status` | 1 for each stage's current status, 0 for its others. `stage`: `seed`, `inventory`, `prune`. `status`: `pending`, `running`, `complete`, `failed`, `skipped` |
-| `galactic_ingress_sidecar_startup_attempts_total`                 | counter   | `stage`, `result` | Completed stage attempts, `result` `success` or `error`. Only the seed is retried                                                                           |
+| `galactic_ingress_sidecar_startup_attempts_total`                 | counter   | `stage`, `result` | Completed stage attempts, `result` `success` or `error`. The prune is not retried                                                                           |
 | `galactic_ingress_sidecar_startup_complete`                       | gauge     | none              | 1 once the seed succeeded, inventory and prune were handled, and the sweep started. A failed inventory or prune still reports 1                             |
 | `galactic_ingress_sidecar_sweep_last_completed_timestamp_seconds` | gauge     | none              | Unix time the last sweep finished, whatever its operations' results; 0 before the first                                                                     |
 | `galactic_ingress_sidecar_sweep_duration_seconds`                 | histogram | none              | Each sweep, including waiting for the store's lock (1ms to 120s). One overrunning its interval absorbs the ticks it missed                                  |
@@ -320,7 +323,8 @@ min_over_time(galactic_ingress_sidecar_vrf_teardown_pending[1h]) > 0
 galactic_ingress_sidecar_startup_complete == 0
   and on (instance, job) (time() - process_start_time_seconds > 120)
 
-# A stage that ended badly: the inventory failed, or the prune failed or was skipped
+# A stage that ended badly: the inventory is still failing, or the prune failed
+# or was skipped
 galactic_ingress_sidecar_startup_stage_status{status=~"failed|skipped"} == 1
 
 # Sweep stalled: the last sweep finished more than three intervals ago.

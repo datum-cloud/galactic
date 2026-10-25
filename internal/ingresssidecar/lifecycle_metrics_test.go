@@ -216,7 +216,8 @@ func TestRunStartupReportsSeedRetries(t *testing.T) {
 }
 
 // TestRunStartupReportsInventoryFailure: a failed inventory is reported, the
-// prune is skipped rather than pending, and the sweep still starts.
+// prune is skipped rather than pending, and startup completes so the sweep
+// starts without waiting for a retry.
 func TestRunStartupReportsInventoryFailure(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
 	backend := newFakeBackend()
@@ -240,6 +241,70 @@ func TestRunStartupReportsInventoryFailure(t *testing.T) {
 	defer backend.mu.Unlock()
 	if len(backend.pruned) != 0 {
 		t.Error("the prune ran after a failed inventory")
+	}
+}
+
+// TestRunStartupRetriesFailedInventory: an inventory that fails because the
+// shared eBPF maps are not pinned yet, as on a node that has just booted, is
+// retried before the next sweep, reading failed rather than running between
+// attempts. Once it succeeds the prune runs and keeps the inventoried VRF, and
+// the VRF the failed attempt already seeded is counted once.
+func TestRunStartupRetriesFailedInventory(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
+	backend := newFakeBackend()
+	backend.seedRoute("existing", 9, mustPrefix(t, "fd00::9"), net.ParseIP("fd00:99::9"))
+	backend.failListRoutes = errTest
+	storeMetrics := NewMetrics()
+	store := NewStore(backend, time.Hour, storeMetrics)
+	m, reg := newLifecycleRegistry(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunStartup(ctx, c, store, 5*time.Millisecond, m)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	waitFor(t, "two failed inventory attempts", func() bool {
+		return attempts(t, reg, StageInventory, ResultError) >= 2
+	})
+	stageIs(t, reg, StageInventory, StatusFailed)
+	if v := sample(t, reg, "galactic_ingress_sidecar_startup_complete"); v != 1 {
+		t.Errorf("startup_complete = %v while inventory retries, want 1", v)
+	}
+	backend.mu.Lock()
+	pruned := len(backend.pruned)
+	backend.failListRoutes = nil
+	backend.mu.Unlock()
+	if pruned != 0 {
+		t.Fatalf("the prune ran %d times before the inventory succeeded, want 0", pruned)
+	}
+
+	waitFor(t, "inventory complete", func() bool {
+		return attempts(t, reg, StageInventory, ResultSuccess) == 1
+	})
+	waitFor(t, "prune complete", func() bool {
+		return attempts(t, reg, StagePrune, ResultSuccess) == 1
+	})
+	stageIs(t, reg, StageInventory, StatusComplete)
+	stageIs(t, reg, StagePrune, StatusComplete)
+
+	backend.mu.Lock()
+	if len(backend.pruned) != 1 {
+		t.Errorf("prune ran %d times, want 1", len(backend.pruned))
+	} else if _, ok := backend.pruned[0][9]; !ok {
+		t.Errorf("keep = %v, want it to hold the inventoried VRF's table 9", backend.pruned[0])
+	}
+	backend.mu.Unlock()
+	if v := testutil.ToFloat64(storeMetrics.VRFActive); v != 1 {
+		t.Errorf("vrf_active = %v, want 1", v)
+	}
+	if v := testutil.ToFloat64(storeMetrics.RouteActive); v != 1 {
+		t.Errorf("route_active = %v, want 1", v)
 	}
 }
 
@@ -332,15 +397,15 @@ galactic_ingress_sidecar_sweep_duration_seconds_count 1
 	}
 }
 
-// TestRunSweeperRecordsEverySweep: the real sweep loop records sweeps.
-func TestRunSweeperRecordsEverySweep(t *testing.T) {
+// TestRunSweepsRecordsEverySweep: the real sweep loop records sweeps.
+func TestRunSweepsRecordsEverySweep(t *testing.T) {
 	m, reg := newLifecycleRegistry(t)
 	store := NewStore(newFakeBackend(), time.Hour, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunSweeper(ctx, store, time.Millisecond, m)
+		runSweeps(ctx, store, time.Millisecond, m, true)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -372,7 +437,7 @@ func TestScrapeDuringBlockedSweep(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunSweeper(ctx, store, time.Millisecond, m)
+		runSweeps(ctx, store, time.Millisecond, m, true)
 	}()
 	t.Cleanup(func() {
 		cancel()

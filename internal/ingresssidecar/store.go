@@ -791,9 +791,11 @@ func (s *Store) removeRouteLocked(r *routeState, tableID uint32) error {
 // Inventory seeds Store with every managed VRF device, and its installed
 // routes, already present on the host at process start.
 //
-// Call it once, after every EndpointSlice existing at boot has been through
+// Call it after every EndpointSlice existing at boot has been through
 // SetDesired, and before the first Sweep. Anything already known by then is
-// left alone, its claim having been made by that seeding.
+// left alone, its claim having been made by that seeding. A call that fails
+// can be repeated, after Sweeps have run: what it seeded before failing is
+// then known, and left alone the same way.
 //
 // Anything Inventory itself has to seed is by construction missing that claim:
 // either genuinely orphaned while this sidecar was down, or belonging to a slice
