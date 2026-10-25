@@ -231,9 +231,8 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 		Cell:        o.cell,
 		DialOptions: []grpc.DialOption{clientStats()},
 	}
-	// Customer execution stays off until its admission limits and
-	// execution ownership checks exist; the service only authenticates,
-	// validates and reports capabilities.
+	// Enabled is deliberately unset: the service authenticates, validates
+	// and reports capabilities, and refuses execution with ServiceDisabled.
 	service := &gateway.Service{
 		Cell:      o.cell,
 		Allowlist: allowlist,
