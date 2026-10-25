@@ -155,16 +155,19 @@ lives in `root.go`'s `runCmd`:
 5. RBAC pre-flight: `checkWatchPermissions` (in `main.go`) issues a
    `SelfSubjectAccessReview` for every watched resource type and logs an actionable
    error if watch RBAC is missing (informer caches would otherwise silently never sync).
-6. Open this node's own `vip_xlat_table` handle (`vipxlatmap.OpenPinnedVipXlatTable`)
-   for `ServiceVIPBindingReconciler`'s tap-kind branch — a missing pin (no
-   eBPF uSID datapath loaded on this node yet) is logged, not fatal, and
-   only matters once a tap-kind `ServiceVIPBinding` is actually reconciled.
-   A route reflector never runs `galactic-cni`, so the pin never exists
-   there and the reflector logs its absence at Info rather than as an error.
-   The handle is opened once. When a `galactic-cni` upgrade changes the map's
-   layout, `attach.Load` unpins and recreates the map, and this process keeps
-   writing to the old one until it restarts, so restart `galactic-router`
-   after `galactic-cni` has rolled out such a change.
+6. Open this node's own `vip_xlat_table` handle (`controller.PinnedVIPTranslationTable`
+   over `vipxlatmap.OpenPinnedVipXlatTable`) for `ServiceVIPBindingReconciler`
+   and the GC ticker's `vip_xlat_table` sweep. A missing pin (no eBPF uSID
+   datapath loaded on this node yet) is logged, not fatal. Each binding
+   reconcile and each sweep tick retries the open until it succeeds, so on a
+   node that has just booted, where `galactic-router` can start before
+   `galactic-cni` pins the map, bindings bind once the pin appears without a
+   restart. A route reflector never runs `galactic-cni`, so the pin never
+   exists there and the reflector logs its absence at Info rather than as an
+   error. Once open, the handle is kept. When a `galactic-cni` upgrade changes
+   the map's layout, `attach.Load` unpins and recreates the map, and this
+   process keeps writing to the old one until it restarts, so restart
+   `galactic-router` after `galactic-cni` has rolled out such a change.
 7. Register field indexes: BGPPeer→secret, BGPPeer→router, BGPPolicy→router,
    BGPAdvertisement→router, BGPVRFInstance→router, BGPRouter→node,
    VPCAttachment→`status.vpc`.
