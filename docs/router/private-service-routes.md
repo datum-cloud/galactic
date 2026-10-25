@@ -112,14 +112,29 @@ finish while new ones go to the other producers.
 
 When the consumer's node has no producer, `PreferNodeLocal` sends the consumer
 to one remote producer, the first by namespace and name that its node has not
-reported `Unhealthy`, through the SRv6 service tunnel as with `Single`.
+reported `Unhealthy`, through the SRv6 service tunnel as with `Single`. A
+remote consumer therefore does not spread. While a health change reaches the
+consumer's node and the producer's node at different moments, the two can
+briefly disagree on that producer, and its requests are refused until they
+agree.
+
+A TCP connection keeps its producer only while its pin lasts. A pin ends after
+300 seconds without traffic, the same idle limit replies already have, or when
+the node evicts it under load or reloads the datapath. A packet of an
+established connection with no pin goes to the producer its hash picks among
+the current eligible ones, so if that set changed since the connection opened,
+the connection resets. Changing an endpoint between `Single` and `Spread`
+replaces its routes, which can drop a request in flight and moves existing TCP
+connections.
 
 Spread needs a `galactic-cni` whose datapath has the producer set map. A
 `galactic-router` that finds the map missing refuses the endpoint's Spread
 routes on that node, retrying, and keeps every other route working. Roll out
-`galactic-cni` before setting `Spread`, and set endpoints back to `Single`
-before rolling `galactic-router` back to a version without Spread, which
-refuses an endpoint with several producers on one node.
+`galactic-cni` before setting `Spread`. Before rolling back either
+`galactic-router` or `galactic-cni` to a version without Spread, set every
+endpoint back to `Single`: an older router refuses an endpoint with several
+producers on one node, and an older datapath drops the Spread routes a newer
+router still writes, since the producer set map's pin outlives the rollback.
 
 ## No consumer-visible route
 
