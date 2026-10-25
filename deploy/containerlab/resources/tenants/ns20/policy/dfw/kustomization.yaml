@@ -1,0 +1,6 @@
+# ns20's traffic policy in dfw: the shared set plus a binding for each edge
+# conformance client, whose attachments only dfw has (../../dfw/edge-clients.yaml).
+namespace: ns20
+resources:
+  - ../base
+  - edge-clients.yaml

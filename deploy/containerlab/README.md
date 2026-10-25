@@ -572,7 +572,8 @@ in `resources/galactic-cni/shared/`), while production defaults to `off`. A
 tenant interface therefore forwards nothing until galactic-router publishes
 its bindings, so each `deploy:nsNN` task applies the tenant's policies and
 bindings (`scripts/deploy-tenant-policy.sh`, from
-`resources/tenants/<ns>/policy/`), deploys its pods, then publishes every
+`resources/tenants/<ns>/policy/`, or `policy/<site>/` where a site has
+attachments the others lack), deploys its pods, then publishes every
 attachment's status, including the host interface the bindings attach to
 (`scripts/publish-attachments.sh`, which needs `jq` on the host). The policy
 sets in `resources/tenants/policies/` grant each tenant only the paths its

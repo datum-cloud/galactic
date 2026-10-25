@@ -104,9 +104,12 @@ func TestLabPoliciesAreValid(t *testing.T) {
 	}
 }
 
-// TestLabTenantsAreBound: every galactic attachment a lab tenant defines has
-// a binding in that tenant's policy/, naming policies its set defines, so no
-// lab tenant comes up denying everything.
+// TestLabTenantsAreBound: at every site a lab tenant deploys to, every
+// galactic attachment it defines there has a binding in the policy that site
+// applies (policy/<site>/ where it exists, else policy/), naming policies its
+// set defines, and no binding names an attachment the site lacks, so no lab
+// tenant comes up denying everything and no binding waits on an interface that
+// never appears.
 func TestLabTenantsAreBound(t *testing.T) {
 	sets := labPolicies(t)
 	tenants, err := filepath.Glob(filepath.Join(labTenants, "ns*"))
@@ -115,49 +118,90 @@ func TestLabTenantsAreBound(t *testing.T) {
 	}
 	for _, dir := range tenants {
 		ns := filepath.Base(dir)
-		set := policySet(t, filepath.Join(dir, "policy", "kustomization.yaml"))
-		policies, ok := sets[set]
-		if !ok {
-			t.Errorf("%s: policy/ uses set %q, which does not exist", ns, set)
-			continue
+		sites, err := filepath.Glob(filepath.Join(dir, "*", "kustomization.yaml"))
+		if err != nil {
+			t.Fatal(err)
 		}
-		bound := map[string]bool{}
-		for _, doc := range yamlDocs(t, filepath.Join(dir, "policy", "bindings.yaml")) {
-			var b galacticv1alpha1.TrafficPolicyBinding
-			if err := yaml.UnmarshalStrict(doc, &b); err != nil {
-				t.Fatalf("%s: %v", ns, err)
-			}
-			bound[b.Name] = true
-			for _, ref := range []*galacticv1alpha1.LocalPolicyReference{b.Spec.IngressPolicyRef, b.Spec.EgressPolicyRef} {
-				if ref == nil {
-					t.Errorf("%s/%s: a direction is unbound, so it denies everything", ns, b.Name)
-				} else if _, ok := policies[ref.Name]; !ok {
-					t.Errorf("%s/%s: names %q, which set %s does not define", ns, b.Name, ref.Name, set)
-				}
+		overlays, err := filepath.Glob(filepath.Join(dir, "policy", "*", "kustomization.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range overlays {
+			site := filepath.Base(filepath.Dir(o))
+			if _, err := os.Stat(filepath.Join(dir, site, "kustomization.yaml")); site != "base" && err != nil {
+				t.Errorf("%s: policy/%s names no site the tenant deploys to", ns, site)
 			}
 		}
-		nads := map[string]bool{}
-		for _, nad := range galacticNADs(t, dir) {
-			nads[nad] = true
-			if !bound[nad] {
-				t.Errorf("%s: attachment %s has no binding in policy/bindings.yaml", ns, nad)
+		for _, k := range sites {
+			site := filepath.Base(filepath.Dir(k))
+			if site == "base" || site == "policy" {
+				continue
 			}
-		}
-		for name := range bound {
-			if !nads[name] {
-				t.Errorf("%s: binding %s names no attachment the tenant defines", ns, name)
+			policyDir := filepath.Join(dir, "policy", site)
+			if _, err := os.Stat(policyDir); err != nil {
+				policyDir = filepath.Join(dir, "policy")
 			}
+			checkSiteBound(t, sets, ns+"/"+site, policyDir,
+				galacticNADs(t, filepath.Join(dir, "base"), filepath.Join(dir, site)))
 		}
 	}
 }
 
-// policySet is the policy set a tenant's policy/kustomization.yaml pulls in.
-// It fails unless the kustomization also applies bindings.yaml.
-func policySet(t *testing.T, path string) string {
+// checkSiteBound checks one tenant site: the bindings policyDir applies against
+// the galactic attachments the site defines.
+func checkSiteBound(
+	t *testing.T, sets map[string]map[string]galacticv1alpha1.TrafficPolicy, where, policyDir string, attachments []string,
+) {
+	t.Helper()
+	set, files := policyResources(t, policyDir)
+	policies, ok := sets[set]
+	if !ok {
+		t.Errorf("%s: %s uses set %q, which does not exist", where, policyDir, set)
+		return
+	}
+	if len(files) == 0 {
+		t.Errorf("%s: %s applies no bindings", where, policyDir)
+	}
+	bound := map[string]bool{}
+	for _, f := range files {
+		for _, doc := range yamlDocs(t, f) {
+			var b galacticv1alpha1.TrafficPolicyBinding
+			if err := yaml.UnmarshalStrict(doc, &b); err != nil {
+				t.Fatalf("%s: %v", f, err)
+			}
+			bound[b.Name] = true
+			for _, ref := range []*galacticv1alpha1.LocalPolicyReference{b.Spec.IngressPolicyRef, b.Spec.EgressPolicyRef} {
+				if ref == nil {
+					t.Errorf("%s/%s: a direction is unbound, so it denies everything", where, b.Name)
+				} else if _, ok := policies[ref.Name]; !ok {
+					t.Errorf("%s/%s: names %q, which set %s does not define", where, b.Name, ref.Name, set)
+				}
+			}
+		}
+	}
+	defined := map[string]bool{}
+	for _, nad := range attachments {
+		defined[nad] = true
+		if !bound[nad] {
+			t.Errorf("%s: attachment %s has no binding in %s", where, nad, policyDir)
+		}
+	}
+	for name := range bound {
+		if !defined[name] {
+			t.Errorf("%s: binding %s names no attachment the site defines", where, name)
+		}
+	}
+}
+
+// policyResources follows a tenant's policy kustomization through its local
+// directories and returns the policy set it pulls in and every bindings file
+// it applies. It fails unless it finds exactly one set.
+func policyResources(t *testing.T, dir string) (string, []string) {
 	t.Helper()
 	var k struct {
 		Resources []string `json:"resources"`
 	}
+	path := filepath.Join(dir, "kustomization.yaml")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -166,28 +210,41 @@ func policySet(t *testing.T, path string) string {
 		t.Fatalf("%s: %v", path, err)
 	}
 	set := ""
-	bindings := false
+	var files []string
 	for _, r := range k.Resources {
 		switch {
 		case strings.Contains(r, "policies/"):
+			if set != "" {
+				t.Fatalf("%s pulls in two policy sets", path)
+			}
 			set = filepath.Base(r)
-		case r == "bindings.yaml":
-			bindings = true
+		case strings.HasSuffix(r, ".yaml"):
+			files = append(files, filepath.Join(dir, r))
+		default:
+			s, f := policyResources(t, filepath.Join(dir, r))
+			if set != "" && s != "" {
+				t.Fatalf("%s pulls in two policy sets", path)
+			}
+			if s != "" {
+				set = s
+			}
+			files = append(files, f...)
 		}
 	}
-	if set == "" || !bindings {
-		t.Fatalf("%s must pull in one policy set and bindings.yaml, has %v", path, k.Resources)
-	}
-	return set
+	return set, files
 }
 
-// galacticNADs names every NetworkAttachmentDefinition under a tenant's site
-// directories whose chain runs galactic-veth or galactic-tap.
-func galacticNADs(t *testing.T, dir string) []string {
+// galacticNADs names every NetworkAttachmentDefinition in dirs whose chain
+// runs galactic-veth or galactic-tap.
+func galacticNADs(t *testing.T, dirs ...string) []string {
 	t.Helper()
-	files, err := filepath.Glob(filepath.Join(dir, "*", "*.yaml"))
-	if err != nil {
-		t.Fatal(err)
+	var files []string
+	for _, dir := range dirs {
+		f, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f...)
 	}
 	seen := map[string]bool{}
 	var out []string
