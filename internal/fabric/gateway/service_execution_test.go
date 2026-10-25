@@ -24,6 +24,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
@@ -117,9 +118,13 @@ func failAnswer(code errcode.Code) routerAnswer {
 	}
 }
 
-// blockAnswer blocks until release closes or the call's context ends.
-func blockAnswer(name string, release <-chan struct{}) routerAnswer {
+// blockAnswer blocks until release closes or the call's context ends. It
+// signals started, when not nil, once the call is running.
+func blockAnswer(name string, release <-chan struct{}, started chan<- struct{}) routerAnswer {
 	return func(ctx context.Context, _ *fabricv1.ExecuteRequest) (*fabricv1.Observation, error) {
+		if started != nil {
+			started <- struct{}{}
+		}
 		select {
 		case <-release:
 			return pingObservation(name, 3), nil
@@ -306,20 +311,24 @@ func omitted(snap *servicev1.Snapshot) map[string]string {
 
 func TestServiceStreamsFinishedRoutersFirst(t *testing.T) {
 	release := make(chan struct{})
-	nodes := &routerNodes{answers: map[string]routerAnswer{routerA: blockAnswer(routerA, release)}}
+	started := make(chan struct{}, 1)
+	nodes := &routerNodes{answers: map[string]routerAnswer{routerA: blockAnswer(routerA, release, started)}}
 	svc := newService(t, routerPods(routerA, routerB), nodes, 8)
 	events, done := run(t, svc, validRequest(time.Now()), 0)
 
 	if snap := next(t, events).GetSnapshot(); len(snap.GetRouters()) != 2 {
 		t.Fatalf("snapshot = %v", snap)
 	}
-	// router-b's outcome arrives while router-a, first by name, still runs.
+	// router-b's outcome arrives while router-a, first by name, is running
+	// and cannot finish until release closes.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("router-a never started")
+	}
 	fast := next(t, events).GetOutcome()
 	if fast.GetNode() != routerB || fast.GetObservation() == nil {
 		t.Fatalf("first outcome = %v", fast)
-	}
-	if nodes.total() != 2 {
-		t.Fatal("router-a is not running")
 	}
 	close(release)
 	if slow := next(t, events).GetOutcome(); slow.GetNode() != routerA || slow.GetObservation() == nil {
@@ -505,6 +514,33 @@ func TestServiceRefusesBeforeSnapshot(t *testing.T) {
 	}
 }
 
+// A request that expires or is cancelled while the router inventory is
+// being read fails with its own reason, not as a backend failure.
+func TestServiceDiscoveryCutShort(t *testing.T) {
+	svc := newService(t, nil, &routerNodes{}, 8)
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	svc.Discoverer.Reader = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+			<-ctx.Done()
+			return fmt.Errorf("list: %w", ctx.Err())
+		},
+	}).Build()
+
+	req := validRequest(time.Now())
+	req.ExpiresAt = timestamppb.New(time.Now().Add(200 * time.Millisecond))
+	if events, err := collect(t, svc, req); errcode.Of(err) != errcode.DeadlineExceeded || len(events) != 0 {
+		t.Errorf("expired during discovery: %v, %d events", err, len(events))
+	}
+
+	ctx, cancel := context.WithCancel(node.WithCaller(t.Context(), identity.Service(testSite, testService)))
+	stream := &chanStream{ctx: ctx, events: make(chan *servicev1.DiagnosticEvent, 1)}
+	time.AfterFunc(100*time.Millisecond, cancel)
+	if err := svc.RunDiagnostic(validRequest(time.Now()), stream); errcode.Of(err) != errcode.Cancelled {
+		t.Errorf("cancelled during discovery: %v", err)
+	}
+}
+
 // Packet loss, silent hops, an empty route lookup and a zebra failure are
 // observations, not router failures.
 func TestServiceObservationsAreNotFailures(t *testing.T) {
@@ -555,12 +591,13 @@ func TestServiceDeadlineAndQueue(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	nodes := &routerNodes{answers: map[string]routerAnswer{
-		routerA: blockAnswer(routerA, release), routerB: blockAnswer(routerB, release),
+		routerA: blockAnswer(routerA, release, nil), routerB: blockAnswer(routerB, release, nil),
 	}}
 	svc := newService(t, routerPods(routerA, routerB), nodes, 1)
 	svc.Runner.Executor = NewExecutor(1, 1, 0)
 	req := validRequest(time.Now())
-	req.ExpiresAt = timestamppb.New(time.Now().Add(time.Second))
+	// The queue bound is 200 ms; the expiration leaves seconds of margin.
+	req.ExpiresAt = timestamppb.New(time.Now().Add(3 * time.Second))
 	events, err := collect(t, svc, req)
 	if err != nil {
 		t.Fatal(err)

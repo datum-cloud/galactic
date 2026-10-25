@@ -557,6 +557,12 @@ func (s *Service) execute(
 		if _, ok := status.FromError(err); ok {
 			return err
 		}
+		switch {
+		case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+			return errcode.Status(errcode.DeadlineExceeded, "request's deadline passed during router discovery")
+		case runCtx.Err() != nil:
+			return errcode.Status(errcode.Cancelled, "request was cancelled during router discovery")
+		}
 		return errcode.Status(errcode.Internal, "router discovery failed")
 	}
 	snapshot := snapshotEvent(inv)
