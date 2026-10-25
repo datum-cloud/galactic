@@ -39,7 +39,7 @@ non_global_drops() {
 for site in "${SITES[@]}"; do
   cp=$(control_plane "${site}")
   shard=${FIRST_SHARD[${site}]}
-  pod=$(docker exec "${cp}" kubectl -n ns10 get pods \
+  pod=$(docker exec "${cp}" kubectl -n ns10 get pods -l app=private \
     --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
   echo "--- ${site}: ${pod} through ${shard} ---"
   before=$(non_global_drops "${shard}")

@@ -138,7 +138,12 @@ members() { echo "galactic_cni_egress_pool_members{class=\"$1\",state=\"$2\"}"; 
 mapfile -t TENANTS < <(kc get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.nodeName}{"\n"}{end}' |
   awk -v n="${COMPUTE}" '$2 == n && $1 ~ /^ns[0-9]+\// && $1 !~ /^ns60\// {print $1}')
 [ "${#TENANTS[@]}" -ge 3 ] || die "need at least 3 tenant pods on ${COMPUTE}, found ${#TENANTS[@]}"
-FRESH_POD=$(kc -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
+# An ns10 pod on the compute node carries the fresh addresses. Step 2 needs a
+# tenant on the other shard from this pod; with ns10's private workload here,
+# every tenant in the lab lands on one shard, so this is another ns10 pod.
+FRESH_POD=$(kc -n ns10 get pods -l 'app!=private' --field-selector "spec.nodeName=${COMPUTE}" \
+  -o jsonpath='{.items[0].metadata.name}')
+[ -n "${FRESH_POD}" ] || die "no ns10 pod besides its private workload on ${COMPUTE}"
 FRESH_POD="ns10/${FRESH_POD}"
 
 pod_exec() {

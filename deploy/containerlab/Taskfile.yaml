@@ -788,7 +788,7 @@ tasks:
         docker exec clab-gvpc-remote-host timeout 16 tcpdump -i eth1 -nn -e -c 2 \
           "ip6 and src ${shard}" >/tmp/nat-egress.txt 2>&1 &
         sleep 2
-        pod=$(docker exec dfw-control-plane kubectl -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
+        pod=$(docker exec dfw-control-plane kubectl -n ns10 get pods -l app=private -o jsonpath='{.items[0].metadata.name}')
         docker exec dfw-control-plane kubectl -n ns10 exec "${pod}" -- \
           timeout 6 bash -c 'for i in 1 2; do nc -w1 2001:db8:1:40::2 80 </dev/null; done' \
           >/dev/null 2>&1 || true
@@ -1001,7 +1001,7 @@ tasks:
       - |
         set -e
         cp={{.SENDER_SITE}}-control-plane
-        pod=$(docker exec ${cp} kubectl -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
+        pod=$(docker exec ${cp} kubectl -n ns10 get pods -l app=private -o jsonpath='{.items[0].metadata.name}')
         shard6=$(docker exec {{.SHARD_SITE}}-control-plane kubectl -n galactic-system \
           get egressshard {{.SHARD_NODE}}-egress -o jsonpath='{.status.shardAddressIPv6}')
         shard4=$(docker exec {{.SHARD_SITE}}-control-plane kubectl -n galactic-system \
@@ -1094,7 +1094,7 @@ tasks:
             'ip6 and dst 2001:db8:1:40::2 and tcp dst port 80' >/tmp/nat-local.txt 2>&1 &
           dumper=$!
           sleep 2
-          pod=$(docker exec ${cp} kubectl -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
+          pod=$(docker exec ${cp} kubectl -n ns10 get pods -l app=private -o jsonpath='{.items[0].metadata.name}')
           docker exec ${cp} kubectl -n ns10 exec "${pod}" -- \
             timeout 6 bash -c 'nc -w2 2001:db8:1:40::2 80 </dev/null' >/dev/null 2>&1 || true
           wait ${dumper} || true
