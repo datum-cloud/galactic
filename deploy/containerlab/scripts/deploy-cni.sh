@@ -58,6 +58,10 @@ for site in dfw sjc iad; do
   # node silently kept serving the old config instead of applying the fix
   # above. `set -e` inside the inner script plus install-or-upgrade makes
   # reruns actually idempotent.
+  # k8sServiceHost/k8sServicePort point the agent at the API server directly.
+  # Without them it uses the kubernetes Service, which Cilium itself
+  # load-balances, so an API server restart can leave the site unable to
+  # reconnect.
   docker exec "${node}" bash -c "
     set -e
     curl -sL https://github.com/cilium/cilium-cli/releases/download/${CILIUM_VERSION}/cilium-linux-${ARCH}.tar.gz | tar xz -C /usr/local/bin
@@ -72,6 +76,8 @@ for site in dfw sjc iad; do
       --set ipam.operator.clusterPoolIPv6MaskSize=${CILIUM_POD_CIDR_V6_MASK_SIZE} \
       --set cni.exclusive=false \
       --set kubeProxyReplacement=true \
+      --set k8sServiceHost=${node} \
+      --set k8sServicePort=6443 \
       --set tunnelProtocol=vxlan \
       --wait --wait-duration 5m
     cilium status --wait
