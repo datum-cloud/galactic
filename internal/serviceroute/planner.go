@@ -26,6 +26,7 @@ type RouteIntentKind string
 
 const (
 	RouteIntentLocal          RouteIntentKind = "Local"
+	RouteIntentLocalSet       RouteIntentKind = "LocalSet"
 	RouteIntentRemoteConsumer RouteIntentKind = "RemoteConsumer"
 	RouteIntentRemoteProducer RouteIntentKind = "RemoteProducer"
 )
@@ -48,7 +49,26 @@ type RouteIntent struct {
 	GrantID                 ServiceGrantID
 	AuthorizationValidUntil time.Time
 	Ports                   []networkv1alpha1.ServiceRouteProtocolPort
+	// Producers holds every producer on the consumer's node for a
+	// RouteIntentLocalSet intent, ordered by attachment name. It is empty for
+	// every other kind.
+	Producers []ProducerTarget
 }
+
+// ProducerTarget is one member of a LocalSet intent's producer set.
+type ProducerTarget struct {
+	Attachment types.NamespacedName
+	Device     string
+	NextHop    net.IP
+	// Draining keeps the producer's existing flows and replies but gives it
+	// no new flow.
+	Draining bool
+}
+
+// ErrProducerSetsUnavailable is returned for a LocalSet intent while the
+// node's datapath predates LocalSet routes. Every other intent still applies.
+var ErrProducerSetsUnavailable = errors.New(
+	"node's eBPF datapath has no producer set map; LocalSet routes need a newer galactic-cni")
 
 type RouteProgrammer interface {
 	Initialize() error
@@ -69,8 +89,11 @@ type DependencyNotReadyError struct{ Err error }
 func (e *DependencyNotReadyError) Error() string { return e.Err.Error() }
 func (e *DependencyNotReadyError) Unwrap() error { return e.Err }
 
-// Compile deterministically picks one ready producer for every selected
-// consumer and emits only intent halves owned by localNode.
+// Compile deterministically picks the ready producers for every selected
+// consumer and emits only intent halves owned by localNode. A Single endpoint
+// gets one producer per consumer; a Spread endpoint gets every producer on the
+// consumer's node as one LocalSet intent, or one remote producer when its node
+// has none and DeliveryMode allows it.
 func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment, localNode string, resolveSID SIDResolver,
 ) ([]RouteIntent, error) {
@@ -123,6 +146,7 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 	if err := validateProducerTopology(endpoint, producers); err != nil {
 		return nil, err
 	}
+	unhealthy := unhealthyProducers(endpoint, producers)
 
 	consumers := readyAttachments(attachments)
 	intents := make([]RouteIntent, 0, len(consumers))
@@ -133,11 +157,22 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 		if !consumerMatchesVPC(policy, consumer, consumerVPCIdentity) {
 			continue
 		}
-		producer := chooseProducer(endpoint.Spec.DeliveryMode, consumer.Status.Node, producers)
+		local, producer := selectProducers(endpoint, consumer.Status.Node, producers, unhealthy)
+		consumerKey := types.NamespacedName{Namespace: consumer.Namespace, Name: consumer.Name}
+		if len(local) != 0 {
+			if consumer.Status.Node == localNode {
+				intents = append(intents, RouteIntent{
+					Attachment: consumerKey, Kind: RouteIntentLocalSet,
+					Service: cloneIPNet(service), Frontend: cloneIPNet(frontend), ConsumerDevice: consumer.Status.HostInterface,
+					Ports: clonePorts(ports), ConsumerNextHop: attachmentNextHop(consumer, service.IP),
+					Producers: producerTargets(local, unhealthy, service.IP),
+				})
+			}
+			continue
+		}
 		if producer == nil {
 			continue
 		}
-		consumerKey := types.NamespacedName{Namespace: consumer.Namespace, Name: consumer.Name}
 		producerKey := types.NamespacedName{Namespace: producer.Namespace, Name: producer.Name}
 		if producer.Status.Node == consumer.Status.Node {
 			if consumer.Status.Node == localNode {
@@ -203,9 +238,24 @@ func attachmentNextHop(attachment *cloudv1alpha1.VPCAttachment, service net.IP) 
 	return ip
 }
 
+// validateProducerTopology refuses a Single endpoint with two ready producers
+// in one node and VPC, which its one-target route cannot tell apart, and a
+// Spread endpoint with more producers on one node than a producer set holds.
 func validateProducerTopology(endpoint *networkv1alpha1.ServiceEndpoint,
 	producers []*cloudv1alpha1.VPCAttachment,
 ) error {
+	if spread(endpoint) {
+		perNode := make(map[string]int, len(producers))
+		for _, producer := range producers {
+			perNode[producer.Status.Node]++
+			if perNode[producer.Status.Node] > networkv1alpha1.ServiceEndpointMaxProducersPerNode {
+				return fmt.Errorf("service endpoint %s/%s selects more than %d ready producer attachments on node %q",
+					endpoint.Namespace, endpoint.Name, networkv1alpha1.ServiceEndpointMaxProducersPerNode,
+					producer.Status.Node)
+			}
+		}
+		return nil
+	}
 	type producerLocation struct {
 		node string
 		vpc  string
@@ -226,6 +276,14 @@ func validateProducerTopology(endpoint *networkv1alpha1.ServiceEndpoint,
 		seen[location] = producer
 	}
 	return nil
+}
+
+// Producers returns the endpoint's ready producer attachments, ordered by
+// namespace and name.
+func Producers(endpoint *networkv1alpha1.ServiceEndpoint,
+	attachments []*cloudv1alpha1.VPCAttachment,
+) ([]*cloudv1alpha1.VPCAttachment, error) {
+	return producerCandidates(endpoint, attachments)
 }
 
 func producerCandidates(endpoint *networkv1alpha1.ServiceEndpoint,
@@ -279,6 +337,41 @@ func readyAttachments(attachments []*cloudv1alpha1.VPCAttachment) []*cloudv1alph
 	return ready
 }
 
+func spread(endpoint *networkv1alpha1.ServiceEndpoint) bool {
+	return endpoint.Spec.Distribution == networkv1alpha1.ServiceEndpointDistributionSpread
+}
+
+// selectProducers returns, for a Spread endpoint, every producer on
+// consumerNode as local. Otherwise, or when consumerNode has none, it returns
+// the one producer a consumer there is sent to, or nil. A Spread endpoint's
+// remote producer is the first one not Unhealthy, or the first one when all
+// are.
+func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumerNode string,
+	producers []*cloudv1alpha1.VPCAttachment, unhealthy map[types.UID]bool,
+) (local []*cloudv1alpha1.VPCAttachment, remote *cloudv1alpha1.VPCAttachment) {
+	if spread(endpoint) {
+		for _, producer := range producers {
+			if producer.Status.Node == consumerNode {
+				local = append(local, producer)
+			}
+		}
+		if len(local) != 0 {
+			return local, nil
+		}
+		if endpoint.Spec.DeliveryMode != networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal ||
+			len(producers) == 0 {
+			return nil, nil
+		}
+		for _, producer := range producers {
+			if !unhealthy[producer.UID] {
+				return nil, producer
+			}
+		}
+		return nil, producers[0]
+	}
+	return nil, chooseProducer(endpoint.Spec.DeliveryMode, consumerNode, producers)
+}
+
 func chooseProducer(mode networkv1alpha1.ServiceEndpointDeliveryMode, consumerNode string,
 	producers []*cloudv1alpha1.VPCAttachment,
 ) *cloudv1alpha1.VPCAttachment {
@@ -291,6 +384,56 @@ func chooseProducer(mode networkv1alpha1.ServiceEndpointDeliveryMode, consumerNo
 		return producers[0]
 	}
 	return nil
+}
+
+// unhealthyProducers returns the UIDs of a Spread endpoint's producers whose
+// status entry, written by their own node for that same attachment, says
+// Unhealthy. A producer with no current entry is not in it.
+func unhealthyProducers(endpoint *networkv1alpha1.ServiceEndpoint,
+	producers []*cloudv1alpha1.VPCAttachment,
+) map[types.UID]bool {
+	if !spread(endpoint) {
+		return nil
+	}
+	reported := make(map[types.NamespacedName]networkv1alpha1.ServiceEndpointProducerStatus,
+		len(endpoint.Status.Producers))
+	for _, entry := range endpoint.Status.Producers {
+		reported[types.NamespacedName{Namespace: entry.Namespace, Name: entry.Name}] = entry
+	}
+	unhealthy := make(map[types.UID]bool)
+	for _, producer := range producers {
+		entry, ok := reported[types.NamespacedName{Namespace: producer.Namespace, Name: producer.Name}]
+		if ok && entry.AttachmentUID == producer.UID && entry.Node == producer.Status.Node &&
+			entry.State == networkv1alpha1.BackendHealthUnhealthy {
+			unhealthy[producer.UID] = true
+		}
+	}
+	return unhealthy
+}
+
+// producerTargets builds a LocalSet intent's members. Unhealthy producers
+// drain, unless every one of them is Unhealthy: then all stay eligible, since
+// an empty set would drop every new flow.
+func producerTargets(local []*cloudv1alpha1.VPCAttachment, unhealthy map[types.UID]bool,
+	service net.IP,
+) []ProducerTarget {
+	allUnhealthy := true
+	for _, producer := range local {
+		if !unhealthy[producer.UID] {
+			allUnhealthy = false
+			break
+		}
+	}
+	targets := make([]ProducerTarget, 0, len(local))
+	for _, producer := range local {
+		targets = append(targets, ProducerTarget{
+			Attachment: types.NamespacedName{Namespace: producer.Namespace, Name: producer.Name},
+			Device:     producer.Status.HostInterface,
+			NextHop:    attachmentNextHop(producer, service),
+			Draining:   unhealthy[producer.UID] && !allUnhealthy,
+		})
+	}
+	return targets
 }
 
 func servicePorts(policy *networkv1alpha1.ServiceRoutePolicy,

@@ -136,6 +136,7 @@ static long (*bpf_redirect_neigh)(__u32 ifindex, struct bpf_redir_neigh *params,
 
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 static __u64 (*bpf_ktime_get_boot_ns)(void) = (void *) BPF_FUNC_ktime_get_boot_ns;
+static __u32 (*bpf_get_prandom_u32)(void) = (void *) BPF_FUNC_get_prandom_u32;
 
 // vip_xlat_table's rewrite is a genuine address and port substitution with no
 // checksum-neutral shortcut, so it needs the incremental L4 checksum update any
@@ -914,6 +915,11 @@ struct service_route_value {
 
 #define SERVICE_ROUTE_MODE_LOCAL 1
 #define SERVICE_ROUTE_MODE_REMOTE 2
+// A LocalSet route delivers to one of the producers its
+// service_producer_set_table row lists; its target_ifindex and producer_token
+// are zero.
+#define SERVICE_ROUTE_MODE_LOCAL_SET 3
+#define SERVICE_PRODUCER_SET_MAX 16
 #define SERVICE_TUNNEL_VERSION 1
 #define SERVICE_TUNNEL_REQUEST 1
 #define SERVICE_TUNNEL_REPLY 2
@@ -987,6 +993,35 @@ struct service_reverse_value {
 	__u8 grant_id[16];
 	__u8 return_sid[16];
 	__u8 frontend_addr[16];
+	__u64 last_seen_ns;
+};
+
+// service_producer_member is one producer of a LocalSet route, fenced by its
+// attachment identity token like a single-target route's producer.
+struct service_producer_member {
+	__u32 ifindex;
+	__u8 pad[4];
+	__u64 token;
+};
+
+// service_producer_set_value lists a LocalSet route's producers. eligible
+// holds, in its first eligible_count bytes, the indexes into members of the
+// producers that take new flows. A member left out of eligible drains: its
+// pinned TCP flows and its replies still pass.
+struct service_producer_set_value {
+	__u32 count;
+	__u32 eligible_count;
+	__u8 eligible[SERVICE_PRODUCER_SET_MAX];
+	struct service_producer_member members[SERVICE_PRODUCER_SET_MAX];
+};
+
+// service_flow_value pins one consumer TCP flow, keyed by its forward tuple as
+// a service_reverse_key on the consumer interface, to the producer of a
+// LocalSet route that took its first packet.
+struct service_flow_value {
+	__u32 producer_ifindex;
+	__u8 pad[4];
+	__u64 producer_token;
 	__u64 last_seen_ns;
 };
 
@@ -1517,6 +1552,29 @@ struct {
 	__type(key, struct service_route_key);
 	__type(value, struct service_route_value);
 } service_route_table SEC(".maps");
+
+// One producer set per LocalSet route, under the route's own key. Only
+// userspace writes it.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 32768);
+	__type(key, struct service_route_key);
+	__type(value, struct service_producer_set_value);
+} service_producer_set_table SEC(".maps");
+
+// TCP flow pins for LocalSet routes. Bounded LRU flow state, like
+// service_reverse_table: a pin only chooses among the route's current
+// members, so a stale one grants nothing. An LRU map is always preallocated,
+// and galactic-cni's memory cgroup pays for it, so it holds a quarter of the
+// reverse table's flows; an evicted pin's next packet takes the producer its
+// hash picks, the same one while the set is unchanged.
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 32768);
+	__type(key, struct service_reverse_key);
+	__type(value, struct service_flow_value);
+} service_flow_table SEC(".maps");
 
 // attachment_identity_table binds service authorization to an interface
 // incarnation, not merely its recyclable kernel ifindex. CNI ADD overwrites
@@ -3899,6 +3957,11 @@ __attribute__((noinline)) int send_too_big(struct __sk_buff *skb, __u32 ip_versi
 static USID_ALWAYS_INLINE int parse_service_packet(struct __sk_buff *skb, __be16 h_proto,
 						    struct service_fib_scratch_value *scratch);
 static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_value *s);
+static USID_NOINLINE int service_select_producer(struct service_fib_scratch_value *s, __u32 ifindex,
+						 __u32 *target_ifindex, __u64 *producer_token);
+static USID_ALWAYS_INLINE int service_local_route_has_producer(const struct service_route_key *key,
+							       const struct service_route_value *route,
+							       __u32 producer_ifindex, __u64 producer_token);
 static USID_ALWAYS_INLINE int service_identity_matches(__u32 ifindex, __u64 expected);
 static USID_ALWAYS_INLINE int service_policy_enabled(void);
 static USID_ALWAYS_INLINE int service_id_equal(const __u8 a[16], const __u8 b[16])
@@ -4838,10 +4901,9 @@ static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_valu
 		__builtin_memcpy(s->route.addr, old->frontend_addr, 16);
 		struct service_route_value *old_route = bpf_map_lookup_elem(&service_route_table, &s->route);
 		if (!old_route || (old_route->authorization_deadline_ns && bpf_ktime_get_boot_ns() >= old_route->authorization_deadline_ns) ||
-            old_route->mode != SERVICE_ROUTE_MODE_LOCAL ||
-		    old_route->target_ifindex != s->reverse.ingress_ifindex ||
+		    !service_local_route_has_producer(&s->route, old_route, s->reverse.ingress_ifindex,
+						      old->producer_token) ||
 		    old_route->consumer_token != old->consumer_token ||
-		    old_route->producer_token != old->producer_token ||
 		    !service_identity_matches(old->consumer_ifindex, old->consumer_token) ||
 		    !service_identity_matches(s->reverse.ingress_ifindex, old->producer_token)) {
 			bpf_map_delete_elem(&service_reverse_table, &s->reverse);
@@ -4869,6 +4931,117 @@ static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_valu
 	if (!same_owner)
 		return -1;
 	return bpf_map_update_elem(&service_reverse_table, &s->reverse, &s->reverse_value, BPF_EXIST);
+}
+
+// service_local_route_has_producer reports whether route, found under key,
+// delivers locally to producer_ifindex as producer_token: its one target, or
+// any member of its producer set, draining ones included.
+static USID_ALWAYS_INLINE int service_local_route_has_producer(const struct service_route_key *key,
+							       const struct service_route_value *route,
+							       __u32 producer_ifindex, __u64 producer_token)
+{
+	if (route->mode == SERVICE_ROUTE_MODE_LOCAL)
+		return route->target_ifindex == producer_ifindex && route->producer_token == producer_token;
+	if (route->mode != SERVICE_ROUTE_MODE_LOCAL_SET)
+		return 0;
+	struct service_producer_set_value *set = bpf_map_lookup_elem(&service_producer_set_table, key);
+	if (!set)
+		return 0;
+	__u32 count = set->count;
+#pragma unroll
+	for (int i = 0; i < SERVICE_PRODUCER_SET_MAX; i++) {
+		if ((__u32) i < count && set->members[i].ifindex == producer_ifindex &&
+		    set->members[i].token == producer_token)
+			return 1;
+	}
+	return 0;
+}
+
+// service_flow_hash is 32-bit FNV-1a over a flow's forward tuple.
+static USID_ALWAYS_INLINE __u32 service_flow_hash(const struct service_reverse_key *key)
+{
+	const __u8 *p = (const __u8 *) key;
+	__u32 h = 2166136261u;
+
+#pragma unroll
+	for (int i = 0; i < (int) sizeof(*key); i++) {
+		h ^= p[i];
+		h *= 16777619u;
+	}
+	return h;
+}
+
+// service_select_producer picks the producer of the LocalSet route under
+// s->route for the packet s describes, arriving on ifindex. A TCP packet keeps
+// the producer its flow is pinned to while that producer is still a member,
+// draining or not; otherwise, and for a new TCP flow, it takes an eligible
+// producer by the flow's hash and pins it. A UDP packet takes an eligible
+// producer at random, so the requests of one socket spread too. A member
+// whose interface identity no longer matches its token is never kept or
+// pinned, so a flow retried while the router repairs the set is not held to
+// it. It returns nonzero when the route has no producer set, no eligible
+// producer, or picked a member with a stale identity. It overwrites
+// s->reverse.
+static USID_NOINLINE int service_select_producer(struct service_fib_scratch_value *s, __u32 ifindex,
+						 __u32 *target_ifindex, __u64 *producer_token)
+{
+	struct service_producer_set_value *set = bpf_map_lookup_elem(&service_producer_set_table, &s->route);
+	if (!set)
+		return -1;
+	__u32 count = set->count;
+	if (count == 0 || count > SERVICE_PRODUCER_SET_MAX)
+		return -1;
+	__u64 now = bpf_ktime_get_ns();
+	int tcp = s->protocol == USID_IPPROTO_TCP;
+	if (tcp) {
+		__builtin_memset(&s->reverse, 0, sizeof(s->reverse));
+		s->reverse.ingress_ifindex = ifindex;
+		s->reverse.family = s->meta_family;
+		s->reverse.protocol = s->protocol;
+		s->reverse.source_port = s->source_port;
+		s->reverse.dest_port = s->dest_port;
+		__builtin_memcpy(s->reverse.source_addr, s->source_addr, 16);
+		__builtin_memcpy(s->reverse.dest_addr, s->dest_addr, 16);
+		struct service_flow_value *pin = bpf_map_lookup_elem(&service_flow_table, &s->reverse);
+		if (pin && now - pin->last_seen_ns <= SERVICE_FLOW_TIMEOUT_NS) {
+#pragma unroll
+			for (int i = 0; i < SERVICE_PRODUCER_SET_MAX; i++) {
+				if ((__u32) i < count && set->members[i].ifindex == pin->producer_ifindex &&
+				    set->members[i].token == pin->producer_token &&
+				    service_identity_matches(set->members[i].ifindex, set->members[i].token)) {
+					pin->last_seen_ns = now;
+					*target_ifindex = set->members[i].ifindex;
+					*producer_token = set->members[i].token;
+					return 0;
+				}
+			}
+		}
+	}
+	__u32 eligible = set->eligible_count;
+	if (eligible == 0 || eligible > count)
+		return -1;
+	__u32 slot = (tcp ? service_flow_hash(&s->reverse) : bpf_get_prandom_u32()) % eligible;
+	// The compiler knows slot < 16 and drops a plain mask, which the verifier
+	// needs to bound the map value offsets.
+	USID_BARRIER_VAR(slot);
+	__u32 index = set->eligible[slot & (SERVICE_PRODUCER_SET_MAX - 1)];
+	if (index >= count)
+		return -1;
+	USID_BARRIER_VAR(index);
+	struct service_producer_member *member = &set->members[index & (SERVICE_PRODUCER_SET_MAX - 1)];
+	if (!service_identity_matches(member->ifindex, member->token))
+		return -1;
+	*target_ifindex = member->ifindex;
+	*producer_token = member->token;
+	if (tcp) {
+		struct service_flow_value value = {
+			.producer_ifindex = member->ifindex,
+			.producer_token = member->token,
+			.last_seen_ns = now,
+		};
+		bpf_map_update_elem(&service_flow_table, &s->reverse, &value, BPF_ANY);
+	}
+	return 0;
 }
 
 static USID_ALWAYS_INLINE int service_identity_matches(__u32 ifindex, __u64 expected)
@@ -5062,9 +5235,8 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 		struct service_route_value *reply_route = bpf_map_lookup_elem(&service_route_table, &s->route);
 		if (!access || access->attachment_token != reverse->consumer_token || !reply_route ||
 		    (reply_route->authorization_deadline_ns && bpf_ktime_get_boot_ns() >= reply_route->authorization_deadline_ns) ||
-            reply_route->mode != SERVICE_ROUTE_MODE_LOCAL || reply_route->target_ifindex != ifindex ||
-		    reply_route->consumer_token != reverse->consumer_token ||
-		    reply_route->producer_token != reverse->producer_token) {
+		    !service_local_route_has_producer(&s->route, reply_route, ifindex, reverse->producer_token) ||
+		    reply_route->consumer_token != reverse->consumer_token) {
 			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 			return TC_ACT_SHOT;
 		}
@@ -5147,6 +5319,14 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 		return rc == TC_ACT_REDIRECT ? rc : TC_ACT_SHOT;
 	}
 	__u32 target_ifindex = route->target_ifindex;
+	__u64 producer_token = route->producer_token;
+	if (route->mode == SERVICE_ROUTE_MODE_LOCAL_SET) {
+		if (service_select_producer(s, ifindex, &target_ifindex, &producer_token) ||
+		    !service_identity_matches(target_ifindex, producer_token)) {
+			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+			return TC_ACT_SHOT;
+		}
+	}
 	USID_BARRIER_VAR(target_ifindex);
 	__builtin_memset(&s->reverse, 0, sizeof(s->reverse));
 	s->reverse.ingress_ifindex = target_ifindex;
@@ -5160,7 +5340,7 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	s->reverse_value.consumer_ifindex = ifindex;
 	s->reverse_value.mode = SERVICE_ROUTE_MODE_LOCAL;
 	s->reverse_value.consumer_token = route->consumer_token;
-	s->reverse_value.producer_token = route->producer_token;
+	s->reverse_value.producer_token = producer_token;
 	__builtin_memcpy(s->reverse_value.frontend_addr, frontend_addr, 16);
 	if (service_install_reverse(s)) {
 		count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);

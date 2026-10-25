@@ -138,7 +138,8 @@ spec:
             readOnlyRootFilesystem: true
           # The kernel charges eBPF map memory to the cgroup of the process
           # that creates the map, and this container creates the uSID
-          # datapath's maps (about 67Mi) on a node that has none pinned.
+          # datapath's maps (about 63Mi on 12 CPUs) on a node that has none
+          # pinned.
           # TestUsid_MapMemoryFitsGalacticCNILimit fails when the maps plus
           # the process outgrow this limit -- see config/galactic-cni/README.md.
           resources:

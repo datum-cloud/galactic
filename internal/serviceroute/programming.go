@@ -48,6 +48,7 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 	if err := validateProducerTopology(endpoint, producers); err != nil {
 		return plan, err
 	}
+	unhealthy := unhealthyProducers(endpoint, producers)
 	ready := map[types.NamespacedName]bool{}
 	for _, a := range readyAttachments(attachments) {
 		ready[types.NamespacedName{Namespace: a.Namespace, Name: a.Name}] = a.Status.HostInterface != ""
@@ -79,7 +80,10 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 			continue
 		}
 		selected++
-		p := chooseProducer(endpoint.Spec.DeliveryMode, a.Status.Node, producers)
+		local, p := selectProducers(endpoint, a.Status.Node, producers, unhealthy)
+		if len(local) != 0 {
+			p = local[0]
+		}
 		if p == nil {
 			return plan, fmt.Errorf("consumer attachment %s/%s has no eligible producer", a.Namespace, a.Name)
 		}

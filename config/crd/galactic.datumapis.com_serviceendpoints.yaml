@@ -23,6 +23,9 @@ spec:
     - jsonPath: .spec.port
       name: PORT
       type: integer
+    - jsonPath: .spec.distribution
+      name: DISTRIBUTION
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
@@ -86,8 +89,8 @@ spec:
                 description: |-
                   AttachmentSelector selects the Cloud API VPCAttachments that host replicas
                   of this endpoint. Labels used here must be assigned by the platform service
-                  controller, not by tenants. The dataplane selects one ready replica for
-                  each consumer according to DeliveryMode.
+                  controller, not by tenants. The dataplane selects ready replicas for each
+                  consumer according to DeliveryMode and Distribution.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -145,6 +148,83 @@ spec:
                 - NodeLocal
                 - PreferNodeLocal
                 type: string
+              distribution:
+                description: |-
+                  Distribution says how a consumer's traffic reaches the producers on
+                  its own node. Single, the default, allows one ready producer per node
+                  and VPC and sends every consumer on that node to it; an endpoint that
+                  selects more is refused. Spread sends new flows to any producer on the
+                  consumer's node that its health check has not found Unhealthy: each
+                  TCP connection stays with the producer that received its first packet,
+                  and each UDP datagram picks a producer of its own, which suits
+                  request/response protocols such as DNS but not ones that need a UDP
+                  flow to stay on one producer. An Unhealthy producer keeps its existing
+                  TCP connections and replies, and gets new flows again once it is
+                  Healthy. When every producer on a node is Unhealthy, all of them stay
+                  eligible. A node may hold at most 16 producers of a Spread endpoint.
+                enum:
+                - Single
+                - Spread
+                type: string
+              healthCheck:
+                description: |-
+                  HealthCheck configures the TCP health check of a Spread endpoint's
+                  producers. Each producer's own node probes it and publishes the
+                  decision in status.producers. Required when Distribution is Spread and
+                  refused otherwise.
+
+                  Where interface traffic policy is enforced, the producer's policy must
+                  allow TCP from fe80::/10 to the health check port on the Private path,
+                  and the replies back.
+                properties:
+                  healthyThreshold:
+                    default: 3
+                    description: |-
+                      HealthyThreshold is the number of consecutive successful probes that
+                      make a producer Healthy.
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  intervalSeconds:
+                    default: 5
+                    description: IntervalSeconds is the time between two probes of
+                      one producer.
+                    format: int32
+                    maximum: 300
+                    minimum: 1
+                    type: integer
+                  port:
+                    description: |-
+                      Port is the TCP port probed on every producer, 1-65535. Unset, it is
+                      the endpoint's port, which must then be a tcp port. A udp endpoint must
+                      set it to a TCP port its producers listen on.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  timeoutSeconds:
+                    default: 2
+                    description: |-
+                      TimeoutSeconds is how long a probe waits for the handshake. It must not
+                      exceed IntervalSeconds.
+                    format: int32
+                    maximum: 60
+                    minimum: 1
+                    type: integer
+                  unhealthyThreshold:
+                    default: 3
+                    description: |-
+                      UnhealthyThreshold is the number of consecutive failed probes that
+                      make a producer Unhealthy.
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: timeoutSeconds must not exceed intervalSeconds
+                  rule: self.timeoutSeconds <= self.intervalSeconds
               port:
                 description: Port is the service port.
                 format: int32
@@ -179,7 +259,93 @@ spec:
             - message: exactly one of attachmentRef or attachmentSelector must be
                 set
               rule: has(self.attachmentRef) != has(self.attachmentSelector)
+            - message: healthCheck must be set when distribution is Spread, and only
+                then
+              rule: (has(self.distribution) && self.distribution == 'Spread') == has(self.healthCheck)
+            - message: a udp endpoint's healthCheck must set port
+              rule: '!has(self.healthCheck) || has(self.healthCheck.port) || self.protocol
+                == ''tcp'''
+          status:
+            description: ServiceEndpointStatus reports what the nodes observe of an
+              endpoint.
+            properties:
+              producers:
+                description: |-
+                  Producers holds the health decision of every producer of a Spread
+                  endpoint. Each node writes the entries of the producers on that node,
+                  under its own field manager, and removes them when the producer stops
+                  being selected. An entry whose attachmentUID no longer matches the
+                  attachment of that name describes an earlier attachment and is ignored.
+                items:
+                  description: ServiceEndpointProducerStatus is one producer's health
+                    decision.
+                  properties:
+                    attachmentUID:
+                      description: AttachmentUID is the UID of the VPCAttachment that
+                        was probed.
+                      type: string
+                    lastTransitionTime:
+                      description: LastTransitionTime is when State last changed.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is the last probe error, when there is
+                        one.
+                      maxLength: 1024
+                      type: string
+                    name:
+                      description: Name is the producer VPCAttachment's name.
+                      minLength: 1
+                      type: string
+                    namespace:
+                      description: Namespace is the producer VPCAttachment's namespace.
+                      minLength: 1
+                      type: string
+                    node:
+                      description: Node is the node that hosts the producer and probes
+                        it.
+                      minLength: 1
+                      type: string
+                    port:
+                      description: Port is the TCP port that was probed.
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    reason:
+                      description: Reason is ProbeSucceeded, ProbeFailed, Pending
+                        or ProbeUnavailable.
+                      maxLength: 64
+                      type: string
+                    state:
+                      description: |-
+                        State is the decision. Healthy and Unknown producers receive new
+                        flows; Unhealthy ones do not, unless every producer on the node is
+                        Unhealthy.
+                      enum:
+                      - Healthy
+                      - Unhealthy
+                      - Unknown
+                      type: string
+                  required:
+                  - attachmentUID
+                  - lastTransitionTime
+                  - name
+                  - namespace
+                  - node
+                  - port
+                  - reason
+                  - state
+                  type: object
+                maxItems: 4096
+                type: array
+                x-kubernetes-list-map-keys:
+                - namespace
+                - name
+                x-kubernetes-list-type: map
+            type: object
         type: object
     served: true
     storage: true
-    subresources: {}
+    subresources:
+      status: {}

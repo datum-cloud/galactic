@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/bits"
 	"net"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -28,6 +29,9 @@ const (
 	servicePolicyStateMapName = "service_policy_state_table"
 	serviceDenyMapName        = "service_deny_table"
 	servicePeerMapName        = "service_peer_table"
+	// ServiceProducerSetMapName is the producer set map of LocalSet routes.
+	// A datapath older than LocalSet routes has no pin of this name.
+	ServiceProducerSetMapName = "service_producer_set_table"
 
 	familyIPv6 = uint8(0)
 	familyIPv4 = uint8(1)
@@ -53,9 +57,34 @@ type serviceRouteValue struct {
 }
 
 const (
-	routeModeLocal  = uint8(1)
-	routeModeRemote = uint8(2)
+	routeModeLocal    = uint8(1)
+	routeModeRemote   = uint8(2)
+	routeModeLocalSet = uint8(3)
 )
+
+// MaxProducers is the most members a LocalSet route's producer set holds.
+const MaxProducers = 16
+
+type serviceProducerMember struct {
+	Ifindex uint32
+	Pad     [4]uint8
+	Token   uint64
+}
+
+type serviceProducerSetValue struct {
+	Count         uint32
+	EligibleCount uint32
+	Eligible      [MaxProducers]uint8
+	Members       [MaxProducers]serviceProducerMember
+}
+
+// ProducerMember is one producer of a LocalSet route: its host-side
+// interface, that interface's identity token, and whether it takes new flows.
+type ProducerMember struct {
+	Ifindex  uint32
+	Token    uint64
+	Eligible bool
+}
 
 type serviceRouteKey struct {
 	IngressIfindex uint32
@@ -182,7 +211,9 @@ type RemoteGrantIdentity struct {
 // PolicySnapshot contains the policy-map identities in a complete desired
 // controller snapshot. Values are rewritten before the sweep.
 type PolicySnapshot struct {
-	Routes       []RouteIdentity
+	Routes []RouteIdentity
+	// ProducerSets names the LocalSet routes whose producer sets stay.
+	ProducerSets []RouteIdentity
 	Access       []AccessIdentity
 	RemoteGrants []RemoteGrantIdentity
 	Deny         []DenyIdentity
@@ -198,6 +229,7 @@ type Tables struct {
 	policyState  usidmap.Table
 	deny         usidmap.Table
 	peers        usidmap.Table
+	producerSets usidmap.Table
 	leaseClockFn func() (time.Time, uint64, error)
 }
 
@@ -257,12 +289,113 @@ func OpenPinned(pinDir string) (*Tables, []*ebpf.Map, error) {
 		}
 		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", servicePeerMapName, err)
 	}
-	return New(
-			usidmap.KernelTable{Map: routes}, usidmap.KernelTable{Map: access},
-			usidmap.KernelTable{Map: reverse}, usidmap.KernelTable{Map: remoteGrants}, usidmap.KernelTable{Map: identities},
-			usidmap.KernelTable{Map: policyState}, usidmap.KernelTable{Map: deny}, usidmap.KernelTable{Map: peers},
-		),
-		[]*ebpf.Map{routes, access, reverse, remoteGrants, identities, policyState, deny, peers}, nil
+	tables := New(
+		usidmap.KernelTable{Map: routes}, usidmap.KernelTable{Map: access},
+		usidmap.KernelTable{Map: reverse}, usidmap.KernelTable{Map: remoteGrants}, usidmap.KernelTable{Map: identities},
+		usidmap.KernelTable{Map: policyState}, usidmap.KernelTable{Map: deny}, usidmap.KernelTable{Map: peers},
+	)
+	handles := []*ebpf.Map{routes, access, reverse, remoteGrants, identities, policyState, deny, peers}
+	// A datapath that predates LocalSet routes has no producer set map. Its
+	// absence leaves every other route working; RegisterProducerSet refuses.
+	producerSets, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, ServiceProducerSetMapName), nil)
+	switch {
+	case err == nil:
+		tables.producerSets = usidmap.KernelTable{Map: producerSets}
+		handles = append(handles, producerSets)
+	case !errors.Is(err, os.ErrNotExist):
+		for _, opened := range handles {
+			_ = opened.Close()
+		}
+		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", ServiceProducerSetMapName, err)
+	}
+	return tables, handles, nil
+}
+
+// WithProducerSets sets the producer set map of tables built by New, for
+// tests.
+func (t *Tables) WithProducerSets(producerSets usidmap.Table) *Tables {
+	t.producerSets = producerSets
+	return t
+}
+
+// ProducerSetsAvailable reports whether the datapath has a producer set map,
+// which LocalSet routes need.
+func (t *Tables) ProducerSetsAvailable() bool { return t.producerSets != nil }
+
+// RegisterLocalSetRoute installs or replaces a service forwarding entry that
+// delivers to the producer set registered under the same key.
+func (t *Tables) RegisterLocalSetRoute(ingressIfindex uint32, address, backendAddress net.IP, protocol uint8,
+	port uint16, consumerToken uint64, authorization ...time.Time,
+) error {
+	if t.producerSets == nil {
+		return errors.New("serviceroutemap: producer set table unavailable")
+	}
+	key, err := routeKey(ingressIfindex, address, protocol, port)
+	if err != nil {
+		return err
+	}
+	value := serviceRouteValue{Mode: routeModeLocalSet, ConsumerToken: consumerToken}
+	copy(value.BackendAddress[:], addressBytes(backendAddress))
+	if err := t.authorizeRoute(key, &value, authorization); err != nil {
+		return err
+	}
+	if err := t.routes.Put(key, value); err != nil {
+		return fmt.Errorf("serviceroutemap: register local set route ifindex=%d address=%s: %w",
+			ingressIfindex, address, err)
+	}
+	return nil
+}
+
+// RegisterProducerSet installs or replaces the producer set of the LocalSet
+// route with the same key. A set needs at least one eligible member.
+func (t *Tables) RegisterProducerSet(ingressIfindex uint32, address net.IP, protocol uint8, port uint16,
+	members []ProducerMember,
+) error {
+	if t.producerSets == nil {
+		return errors.New("serviceroutemap: producer set table unavailable")
+	}
+	if len(members) == 0 || len(members) > MaxProducers {
+		return fmt.Errorf("serviceroutemap: producer set has %d members, want 1-%d", len(members), MaxProducers)
+	}
+	key, err := routeKey(ingressIfindex, address, protocol, port)
+	if err != nil {
+		return err
+	}
+	value := serviceProducerSetValue{Count: uint32(len(members))}
+	for i, member := range members {
+		if member.Ifindex == 0 || member.Token == 0 {
+			return fmt.Errorf("serviceroutemap: producer set member %d has no interface identity", i)
+		}
+		value.Members[i] = serviceProducerMember{Ifindex: member.Ifindex, Token: member.Token}
+		if member.Eligible {
+			value.Eligible[value.EligibleCount] = uint8(i)
+			value.EligibleCount++
+		}
+	}
+	if value.EligibleCount == 0 {
+		return errors.New("serviceroutemap: producer set has no eligible member")
+	}
+	if err := t.producerSets.Put(key, value); err != nil {
+		return fmt.Errorf("serviceroutemap: register producer set ifindex=%d address=%s: %w",
+			ingressIfindex, address, err)
+	}
+	return nil
+}
+
+// UnregisterProducerSet removes a producer set if it exists.
+func (t *Tables) UnregisterProducerSet(ingressIfindex uint32, address net.IP, protocol uint8, port uint16) error {
+	if t.producerSets == nil {
+		return nil
+	}
+	key, err := routeKey(ingressIfindex, address, protocol, port)
+	if err != nil {
+		return err
+	}
+	if err := t.producerSets.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("serviceroutemap: unregister producer set ifindex=%d address=%s: %w",
+			ingressIfindex, address, err)
+	}
+	return nil
 }
 
 // New wraps map implementations. Production uses OpenPinned; tests use fakes.
@@ -463,6 +596,28 @@ func (t *Tables) Clear() error {
 			return fmt.Errorf("serviceroutemap: clear deny catalog: %w", err)
 		}
 	}
+	return t.clearProducerSets()
+}
+
+func (t *Tables) clearProducerSets() error {
+	if t.producerSets == nil {
+		return nil
+	}
+	var keys []serviceRouteKey
+	iterator := t.producerSets.Iterate()
+	var key serviceRouteKey
+	var value serviceProducerSetValue
+	for iterator.Next(&key, &value) {
+		keys = append(keys, key)
+	}
+	if err := iterator.Err(); err != nil {
+		return fmt.Errorf("serviceroutemap: iterate producer sets: %w", err)
+	}
+	for _, key := range keys {
+		if err := t.producerSets.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("serviceroutemap: clear producer set: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -501,6 +656,14 @@ func (t *Tables) SweepPolicy(snapshot PolicySnapshot) error {
 			return err
 		}
 		desiredGrants[key] = struct{}{}
+	}
+	desiredSets := make(map[serviceRouteKey]struct{}, len(snapshot.ProducerSets))
+	for _, set := range snapshot.ProducerSets {
+		key, err := routeKey(set.IngressIfindex, set.Address, set.Protocol, set.Port)
+		if err != nil {
+			return err
+		}
+		desiredSets[key] = struct{}{}
 	}
 	desiredDeny := make(map[serviceDenyKey]struct{}, len(snapshot.Deny))
 	for _, deny := range snapshot.Deny {
@@ -551,6 +714,20 @@ func (t *Tables) SweepPolicy(snapshot PolicySnapshot) error {
 			return fmt.Errorf("serviceroutemap: iterate remote grants for sweep: %w", err)
 		}
 	}
+	var staleSets []serviceRouteKey
+	if t.producerSets != nil {
+		iterator := t.producerSets.Iterate()
+		var key serviceRouteKey
+		var value serviceProducerSetValue
+		for iterator.Next(&key, &value) {
+			if _, desired := desiredSets[key]; !desired {
+				staleSets = append(staleSets, key)
+			}
+		}
+		if err := iterator.Err(); err != nil {
+			return fmt.Errorf("serviceroutemap: iterate producer sets for sweep: %w", err)
+		}
+	}
 	var staleDeny []serviceDenyKey
 	if t.deny != nil {
 		iterator := t.deny.Iterate()
@@ -583,6 +760,11 @@ func (t *Tables) SweepPolicy(snapshot PolicySnapshot) error {
 	for _, key := range staleRoutes {
 		if err := t.routes.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			deleteErrs = append(deleteErrs, fmt.Errorf("serviceroutemap: sweep route: %w", err))
+		}
+	}
+	for _, key := range staleSets {
+		if err := t.producerSets.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			deleteErrs = append(deleteErrs, fmt.Errorf("serviceroutemap: sweep producer set: %w", err))
 		}
 	}
 	for _, key := range staleDeny {

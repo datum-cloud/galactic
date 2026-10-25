@@ -877,6 +877,7 @@ labels, so the series stay bounded.
 | `galactic_service_route_reconcile_duration_seconds` | histogram | none                                                           | Time per reconcile (default buckets)                      |
 | `galactic_service_route_route_operations_total`     | counter   | `operation` (`apply`, `remove`), `result` (`success`, `error`) | Datapath writes and removals                              |
 | `galactic_service_route_programmed_routes`          | gauge     | none                                                           | Attachment-scoped service paths the controller now tracks |
+| `galactic_service_route_producers`                  | gauge     | `state` (`Healthy`, `Unhealthy`, `Unknown`)                    | Producers of `Spread` endpoints this node probes          |
 
 Datapath drops on these paths are the `service_route_*` reasons of
 `galactic_usid_drops_total`.

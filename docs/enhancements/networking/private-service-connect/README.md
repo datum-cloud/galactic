@@ -335,14 +335,19 @@ in the edge API. It derives current desired programming through these steps:
 1. Resolve `serviceRef`, validate the service tuple and placement, and resolve
    the pinned consumer VPC name and UID.
 2. Select producer attachments with current-generation `Ready` and `Programmed`
-   status, a node, allocated network identities, and a host interface. Service
-   owners must ensure selected producers are also healthy for the declared tuple.
+   status, a node, allocated network identities, and a host interface. For a
+   `Single` endpoint, service owners must ensure selected producers are also
+   healthy for the declared tuple; a `Spread` endpoint's producers are probed
+   by their nodes.
 3. Select consumer attachments through protected labels and verify their live
    VPC membership and programmed attachment identity.
-4. Choose one producer for each consumer. Prefer a local producer; `NodeLocal`
-   leaves the consumer without a path if none is available. `PreferNodeLocal`
-   permits a ready remote producer. Selection uses a deterministic attachment
-   ordering, not round-robin balancing or application health probes.
+4. Choose producers for each consumer. A `Single` endpoint gets one, chosen by
+   a deterministic attachment ordering, preferring a local producer. A `Spread`
+   endpoint gets every producer on the consumer's node as one set: new flows go
+   to the ones its health check has not found `Unhealthy`, each TCP connection
+   stays with its first producer, and each UDP datagram picks its own. In both,
+   `NodeLocal` leaves the consumer without a path if no local producer is
+   available, and `PreferNodeLocal` permits one ready remote producer.
 5. Program this node's consumer and producer paths. Remote paths require both
    sides' trusted attachment identities, matching service grants, and return
    routing. Grants bind the policy, endpoint, and attachment lifetimes to the
@@ -355,9 +360,12 @@ policy intent invalid. A missing endpoint or mismatched VPC identity invalidates
 the contract and requires stale access to be removed. An unresolved remote path
 prevents that node from serving even if the shared policy remains accepted.
 
-Service owners withdraw unhealthy producers through the endpoint's selection
-contract. Galactic's attachment readiness checks establish network eligibility;
-they do not substitute for service health.
+Service owners of a `Single` endpoint withdraw unhealthy producers through the
+endpoint's selection contract. Galactic's attachment readiness checks establish
+network eligibility; they do not substitute for service health. A `Spread`
+endpoint's producers are probed over TCP by their own node, which publishes
+each decision in the endpoint's `status.producers`; see
+[Private service routes](../../../router/private-service-routes.md#several-producers-on-one-node).
 
 ### Status and lifecycle
 
@@ -421,8 +429,10 @@ sequenceDiagram
 
 `NodeLocal` requires a producer on the consumer's node. `PreferNodeLocal` uses
 a local producer when available and otherwise selects a ready remote producer.
-Selection is deterministic. The current direct-endpoint path rejects multiple
-ready producers in the same node and VPC because it cannot distinguish them.
+A `Single` endpoint's selection is deterministic, and it rejects multiple ready
+producers in the same node and VPC because its one-target route cannot
+distinguish them. A `Spread` endpoint routes to a set of up to 16 producers on
+the consumer's node instead.
 
 Overlapping consumer addresses remain scoped to their attachments. Remote
 delivery requires matching platform-programmed service grants. Tenant-supplied

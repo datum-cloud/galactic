@@ -618,6 +618,36 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 		desired[intent.Attachment] = intent
 	}
 
+	// A LocalSet intent whose producers or their health changed is replaced
+	// in place: the new one goes in before the old one comes out, so the
+	// consumer's route never disappears and the flows of producers that stay
+	// keep going.
+	for attachment, existing := range current {
+		next, ok := desired[attachment]
+		if !ok || existing.Kind != serviceroute.RouteIntentLocalSet || next.Kind != serviceroute.RouteIntentLocalSet ||
+			reflect.DeepEqual(existing, next) {
+			continue
+		}
+		if err := r.Programmer.Apply(next); err != nil {
+			// The two cannot coexist, for example because the route's
+			// authorization changed too. Fall back to the replacement below.
+			r.Metrics.ObserveOperation("apply", err)
+			if cleanupErr := r.Programmer.Cleanup(next); cleanupErr != nil {
+				return errors.Join(err, &serviceRoutePolicyCleanupError{err: cleanupErr})
+			}
+			continue
+		}
+		r.Metrics.ObserveOperation("apply", nil)
+		if err := r.Programmer.Remove(existing); err != nil {
+			r.Metrics.ObserveOperation("remove", err)
+			// Take the new intent back out so the programmer again holds only
+			// what Applied records.
+			return errors.Join(&serviceRoutePolicyCleanupError{err: err}, r.Programmer.Remove(next))
+		}
+		r.Metrics.ObserveOperation("remove", nil)
+		current[attachment] = next
+	}
+
 	// Revoke obsolete or changed intents first. Each successful operation is
 	// reflected in Applied immediately, so a later failure leaves an accurate,
 	// retryable snapshot rather than leaking untracked kernel state.

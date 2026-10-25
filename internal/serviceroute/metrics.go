@@ -20,6 +20,7 @@ type Metrics struct {
 	reconcileTime   prometheus.Histogram
 	operations      *prometheus.CounterVec
 	programmed      prometheus.Gauge
+	producers       *prometheus.GaugeVec
 }
 
 // NewMetrics creates the service-route metrics. Call MustRegister once during
@@ -48,12 +49,18 @@ func NewMetrics() *Metrics {
 			Name:      "programmed_routes",
 			Help:      "Number of attachment-scoped eBPF service paths currently tracked by the controller.",
 		}),
+		producers: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Name:      "producers",
+			Help: "Producers of Spread ServiceEndpoints on this node, by health state. " +
+				"Each endpoint's status.producers names them.",
+		}, []string{"state"}),
 	}
 }
 
 // MustRegister registers all metrics owned by this package.
 func (m *Metrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.reconciliations, m.reconcileTime, m.operations, m.programmed)
+	reg.MustRegister(m.reconciliations, m.reconcileTime, m.operations, m.programmed, m.producers)
 }
 
 func (m *Metrics) ObserveReconcile(result string, duration time.Duration) {
@@ -78,5 +85,16 @@ func (m *Metrics) ObserveOperation(operation string, err error) {
 func (m *Metrics) SetProgrammedRoutes(count int) {
 	if m != nil {
 		m.programmed.Set(float64(count))
+	}
+}
+
+// SetProducers records how many producers this node probes in each health
+// state. A state missing from counts is set to zero.
+func (m *Metrics) SetProducers(counts map[string]int) {
+	if m == nil {
+		return
+	}
+	for _, state := range []string{"Healthy", "Unhealthy", "Unknown"} {
+		m.producers.WithLabelValues(state).Set(float64(counts[state]))
 	}
 }

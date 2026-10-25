@@ -1484,6 +1484,7 @@ _Validation:_
 - Enum: [Healthy Unhealthy Unknown]
 
 _Appears in:_
+- [ServiceEndpointProducerStatus](#serviceendpointproducerstatus)
 - [ServiceVIPBindingHealth](#servicevipbindinghealth)
 
 | Field | Description |
@@ -3333,6 +3334,7 @@ that owns the service is responsible for its health and implementation.
 | `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[ServiceEndpointSpec](#serviceendpointspec)_ |  |  |  |
+| `status` _[ServiceEndpointStatus](#serviceendpointstatus)_ |  |  |  |
 
 
 #### ServiceEndpointAttachmentReference
@@ -3371,6 +3373,76 @@ _Appears in:_
 | `PreferNodeLocal` | ServiceEndpointDeliveryModePreferNodeLocal selects a backing attachment on<br />the consumer's node when possible and otherwise tunnels to a ready remote<br />attachment while preserving the consumer source address.<br /> |
 
 
+#### ServiceEndpointDistribution
+
+_Underlying type:_ _string_
+
+ServiceEndpointDistribution selects how traffic spreads across the
+producers on one node.
+
+
+
+_Appears in:_
+- [ServiceEndpointSpec](#serviceendpointspec)
+
+| Field | Description |
+| --- | --- |
+| `Single` | ServiceEndpointDistributionSingle sends every consumer on a node to the<br />one ready producer there.<br /> |
+| `Spread` | ServiceEndpointDistributionSpread spreads flows across the healthy<br />producers on the consumer's node.<br /> |
+
+
+#### ServiceEndpointHealthCheck
+
+
+
+ServiceEndpointHealthCheck configures the TCP health check of an endpoint's
+producers. A probe opens a TCP connection to the endpoint's address on Port
+through the producer's host-side interface, from that interface's
+link-local address. It succeeds when the handshake completes within
+TimeoutSeconds, and fails when the connection is refused, reset or times
+out. A producer's decision changes after UnhealthyThreshold consecutive
+failures or HealthyThreshold consecutive successes. A crashed producer
+therefore stops receiving new flows within IntervalSeconds ×
+UnhealthyThreshold, plus TimeoutSeconds.
+
+
+
+_Appears in:_
+- [ServiceEndpointSpec](#serviceendpointspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `port` _integer_ | Port is the TCP port probed on every producer, 1-65535. Unset, it is<br />the endpoint's port, which must then be a tcp port. A udp endpoint must<br />set it to a TCP port its producers listen on. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `intervalSeconds` _integer_ | IntervalSeconds is the time between two probes of one producer. | 5 | Maximum: 300 <br />Minimum: 1 <br /> |
+| `timeoutSeconds` _integer_ | TimeoutSeconds is how long a probe waits for the handshake. It must not<br />exceed IntervalSeconds. | 2 | Maximum: 60 <br />Minimum: 1 <br /> |
+| `unhealthyThreshold` _integer_ | UnhealthyThreshold is the number of consecutive failed probes that<br />make a producer Unhealthy. | 3 | Maximum: 10 <br />Minimum: 1 <br /> |
+| `healthyThreshold` _integer_ | HealthyThreshold is the number of consecutive successful probes that<br />make a producer Healthy. | 3 | Maximum: 10 <br />Minimum: 1 <br /> |
+
+
+#### ServiceEndpointProducerStatus
+
+
+
+ServiceEndpointProducerStatus is one producer's health decision.
+
+
+
+_Appears in:_
+- [ServiceEndpointStatus](#serviceendpointstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `namespace` _string_ | Namespace is the producer VPCAttachment's namespace. |  | MinLength: 1 <br /> |
+| `name` _string_ | Name is the producer VPCAttachment's name. |  | MinLength: 1 <br /> |
+| `attachmentUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | AttachmentUID is the UID of the VPCAttachment that was probed. |  | Required: \{\} <br /> |
+| `node` _string_ | Node is the node that hosts the producer and probes it. |  | MinLength: 1 <br /> |
+| `port` _integer_ | Port is the TCP port that was probed. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `state` _[BackendHealthState](#backendhealthstate)_ | State is the decision. Healthy and Unknown producers receive new<br />flows; Unhealthy ones do not, unless every producer on the node is<br />Unhealthy. |  | Enum: [Healthy Unhealthy Unknown] <br />Required: \{\} <br /> |
+| `reason` _string_ | Reason is ProbeSucceeded, ProbeFailed, Pending or ProbeUnavailable. |  | MaxLength: 64 <br />Required: \{\} <br /> |
+| `message` _string_ | Message is the last probe error, when there is one. |  | MaxLength: 1024 <br /> |
+| `lastTransitionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | LastTransitionTime is when State last changed. |  | Required: \{\} <br /> |
+
+
 #### ServiceEndpointReference
 
 
@@ -3406,15 +3478,33 @@ _Appears in:_
 | `port` _integer_ | Port is the service port. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
 | `deliveryMode` _[ServiceEndpointDeliveryMode](#serviceendpointdeliverymode)_ | DeliveryMode defines how a backing attachment is selected relative to a<br />consumer. PreferNodeLocal uses a ready attachment on the consumer's node<br />when one exists and otherwise falls back to a ready remote attachment.<br />The dataplane preserves the consumer source address. If consumers with<br />overlapping address space present an identical TCP or UDP five-tuple to the<br />same replica, it rejects the later ambiguous flow fail-closed rather than<br />translate the source or risk returning traffic to the wrong VPC. |  | Enum: [NodeLocal PreferNodeLocal] <br />Required: \{\} <br /> |
 | `attachmentRef` _[ServiceEndpointAttachmentReference](#serviceendpointattachmentreference)_ | AttachmentRef identifies the Cloud API VPCAttachment that hosts this<br />endpoint when the service is delivered through a private VPC path.<br />The network API keeps this reference opaque; the consuming controller<br />resolves it against the Cloud API. |  |  |
-| `attachmentSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | AttachmentSelector selects the Cloud API VPCAttachments that host replicas<br />of this endpoint. Labels used here must be assigned by the platform service<br />controller, not by tenants. The dataplane selects one ready replica for<br />each consumer according to DeliveryMode. |  |  |
+| `attachmentSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | AttachmentSelector selects the Cloud API VPCAttachments that host replicas<br />of this endpoint. Labels used here must be assigned by the platform service<br />controller, not by tenants. The dataplane selects ready replicas for each<br />consumer according to DeliveryMode and Distribution. |  |  |
 | `region` _string_ | Region limits endpoint selection to a region. An empty value means the<br />endpoint is not region-scoped. |  |  |
+| `distribution` _[ServiceEndpointDistribution](#serviceendpointdistribution)_ | Distribution says how a consumer's traffic reaches the producers on<br />its own node. Single, the default, allows one ready producer per node<br />and VPC and sends every consumer on that node to it; an endpoint that<br />selects more is refused. Spread sends new flows to any producer on the<br />consumer's node that its health check has not found Unhealthy: each<br />TCP connection stays with the producer that received its first packet,<br />and each UDP datagram picks a producer of its own, which suits<br />request/response protocols such as DNS but not ones that need a UDP<br />flow to stay on one producer. An Unhealthy producer keeps its existing<br />TCP connections and replies, and gets new flows again once it is<br />Healthy. When every producer on a node is Unhealthy, all of them stay<br />eligible. A node may hold at most 16 producers of a Spread endpoint. |  | Enum: [Single Spread] <br /> |
+| `healthCheck` _[ServiceEndpointHealthCheck](#serviceendpointhealthcheck)_ | HealthCheck configures the TCP health check of a Spread endpoint's<br />producers. Each producer's own node probes it and publishes the<br />decision in status.producers. Required when Distribution is Spread and<br />refused otherwise.<br />Where interface traffic policy is enforced, the producer's policy must<br />allow TCP from fe80::/10 to the health check port on the Private path,<br />and the replies back. |  |  |
+
+
+#### ServiceEndpointStatus
+
+
+
+ServiceEndpointStatus reports what the nodes observe of an endpoint.
+
+
+
+_Appears in:_
+- [ServiceEndpoint](#serviceendpoint)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `producers` _[ServiceEndpointProducerStatus](#serviceendpointproducerstatus) array_ | Producers holds the health decision of every producer of a Spread<br />endpoint. Each node writes the entries of the producers on that node,<br />under its own field manager, and removes them when the producer stops<br />being selected. An entry whose attachmentUID no longer matches the<br />attachment of that name describes an earlier attachment and is ignored. |  | MaxItems: 4096 <br /> |
 
 
 #### ServiceRouteAuthorization
 
 
 
-ServiceRouteAuthorization bounds one network authorization episode.
+ServiceRouteAuthorization defines persistent or time-bounded access.
 
 
 
@@ -3423,6 +3513,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `persistent` _boolean_ | Persistent retains access until policy withdrawal or VPC lifetime replacement. |  |  |
 | `validUntil` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ValidUntil is the absolute UTC deadline for requests and existing replies.<br />Node controllers reject deadlines more than two minutes in the future. |  |  |
 
 
@@ -3502,7 +3593,7 @@ _Appears in:_
 | `serviceRef` _[ServiceEndpointReference](#serviceendpointreference)_ | ServiceRef identifies the ServiceEndpoint in this namespace. |  | Required: \{\} <br /> |
 | `consumerVPCRef` _[ServiceRouteVPCReference](#serviceroutevpcreference)_ | ConsumerVPCRef pins authorization to the immutable lifetime of the VPC<br />selected by AttachmentSelector. Galactic resolves the name through the<br />Cloud API and requires both the live name and UID to match. |  |  |
 | `frontend` _[ServiceRouteFrontend](#serviceroutefrontend)_ | Frontend is the address presented inside the consumer VPC. When set,<br />Galactic translates it to the ServiceEndpoint address and restores it on<br />replies. |  |  |
-| `authorization` _[ServiceRouteAuthorization](#servicerouteauthorization)_ | Authorization bounds translated access independently of application leases.<br />Only trusted networking integration may renew this deadline. |  |  |
+| `authorization` _[ServiceRouteAuthorization](#servicerouteauthorization)_ | Authorization defines the lifetime of translated service access. |  |  |
 | `attachmentSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | AttachmentSelector selects eligible VPC attachments by authoritative<br />labels. Labels that grant access to platform services must be assigned by<br />the network control plane, not by tenants. |  | Required: \{\} <br /> |
 | `protocolPorts` _[ServiceRouteProtocolPort](#servicerouteprotocolport) array_ | ProtocolPorts limits the traffic that the route is intended to carry.<br />An empty list means the endpoint's declared port and protocol are used. |  |  |
 | `region` _string_ | Region limits selected attachments to a region. An empty value means the<br />policy applies in every region where the endpoint is available. |  |  |
