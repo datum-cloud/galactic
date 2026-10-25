@@ -643,6 +643,35 @@ func TestSweepHashed_NATLocatorsWithoutWatch(t *testing.T) {
 	}
 }
 
+// TestSweepHashed_NATLocatorsEmptySeed checks that, with no configured shard
+// and no published group, traffic policy's locators are left unsynced while
+// the watch has not synced, so it keeps failing closed, and are set once the
+// watch has synced.
+func TestSweepHashed_NATLocatorsEmptySeed(t *testing.T) {
+	cases := map[string]struct {
+		lister egressShardLister
+		calls  int
+	}{
+		"WatchNotStarted":  {nil, 0},
+		"WatchUnsynced":    {&fakeLister{synced: false}, 0},
+		"WatchSyncedEmpty": {&fakeLister{synced: true}, 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, testHashed, nil, nil)
+			if tc.lister != nil {
+				f.g.shards = tc.lister
+			}
+			sink := &natLocatorSink{}
+			f.g.natLocators = sink.set
+			_ = f.sweep(t)
+			if sink.calls != tc.calls {
+				t.Errorf("natLocators called %d times, want %d", sink.calls, tc.calls)
+			}
+		})
+	}
+}
+
 // TestSweep_NATLocatorsWithoutGroupMap checks that a datapath without the
 // shard group map, which can only route to the configured shards, hands
 // traffic policy those shards.

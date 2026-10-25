@@ -76,7 +76,11 @@ type egressGroup struct {
 	// classification: the configured shards, every member of a published
 	// group, and the cluster's EgressShards once the watch has listed them.
 	// The first two cover every path usid_egress can take, so classification
-	// works before the watch syncs, and while it cannot start.
+	// works before the watch syncs, and while it cannot start. Before the
+	// watch has synced it is called only when that seed holds at least one
+	// SID: an empty set would mark the locators complete, so a node with no
+	// configured shard and no published group keeps traffic policy
+	// unsynced and fails closed.
 	natLocators func([]net.IP)
 	pinDir      string
 	trigger     chan struct{}
@@ -359,7 +363,7 @@ func (g *egressGroup) sweepHashed(
 		if sids, err := g.knownShardSIDs(groups, listed); err != nil {
 			slog.Error("Failed to read the egress shard groups; traffic policy's NAT locators are not updated",
 				"err", err)
-		} else {
+		} else if synced || len(sids) > 0 {
 			g.natLocators(sids)
 		}
 	}
@@ -949,8 +953,8 @@ func isUplink(ifindex int) bool {
 }
 
 // knownShardSIDs is every shard SID usid_egress can send this node's tenants
-// to: the configured shards, every member of a published group, and shards,
-// the cluster's EgressShards when the watch has listed them. It fails when a
+// to: the configured shards, every member of a published group, and the
+// cluster's EgressShards when the watch has listed them. It fails when a
 // group cannot be read, rather than report an incomplete set.
 func (g *egressGroup) knownShardSIDs(
 	groups *egressroutemap.ShardGroupTable, shards []bgpv1alpha1.EgressShard,
