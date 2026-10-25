@@ -1565,10 +1565,13 @@ struct {
 
 // TCP flow pins for LocalSet routes. Bounded LRU flow state, like
 // service_reverse_table: a pin only chooses among the route's current
-// members, so a stale one grants nothing.
+// members, so a stale one grants nothing. An LRU map is always preallocated,
+// and galactic-cni's memory cgroup pays for it, so it holds a quarter of the
+// reverse table's flows; an evicted pin's next packet takes the producer its
+// hash picks, the same one while the set is unchanged.
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 131072);
+	__uint(max_entries, 32768);
 	__type(key, struct service_reverse_key);
 	__type(value, struct service_flow_value);
 } service_flow_table SEC(".maps");
