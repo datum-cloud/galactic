@@ -235,8 +235,11 @@ cluster (the csi-driver must run on every fabric node before `deploy:fabric`), a
 the gateway and the janitor. `task deploy` does all of them in the right order
 (`deploy:cert-manager` before `deploy:fabric`, `deploy:fabric-api` last). In the
 lab each site is one cell whose cell, site and member cluster name are all the site
-name. `task verify:fabric-api` and `task verify:fabric-api-bootstrap` are the
-checks.
+name. Each site's fabric-router overlay creates that site's `fabric-api`
+ConfigMap, so it lands with the node sidecars in `deploy:fabric`, ahead of their
+start. `task verify:fabric-api` (which first runs
+`task verify:fabric-api-config`, a check that the overlays render it) and
+`task verify:fabric-api-bootstrap` are the checks.
 
 ## Ports
 

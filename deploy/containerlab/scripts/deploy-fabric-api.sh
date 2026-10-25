@@ -3,7 +3,8 @@
 # every cluster: the FabricQuery CRD, the gateway's and janitor's RBAC, the
 # lab PKI (a stand-in for the per-cell issuer infra owns in production), and
 # the gateway and janitor. The node sidecars come with deploy:fabric, through
-# config/fabric-router/components/fabric-api.
+# config/fabric-router/components/fabric-api, and so does the fabric-api
+# ConfigMap both read, which therefore has to exist before this runs.
 #
 # Each lab site is one cell; its cell, site and Karmada member cluster name
 # are all the site name. Runs host-side through a fresh kubeconfig per site,
@@ -17,6 +18,10 @@ for site in dfw iad sjc; do
   kc=$(site_kubeconfig "${site}")
   k() { kubectl --kubeconfig "${kc}" "$@"; }
   echo "Installing fabric-api on ${site}..."
+  if ! k -n galactic-system get configmap fabric-api >/dev/null; then
+    echo "${site}: no fabric-api ConfigMap in galactic-system; run deploy:fabric first" >&2
+    exit 1
+  fi
   # The CRD is the lab's copy until the kind ships in the network
   # repository; infra owns it in production.
   k apply --server-side -f "${CONFIG_DIR}/fabric-api/crd/"

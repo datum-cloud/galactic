@@ -1,16 +1,9 @@
-# iad's fabric-api gateway. The lab's cell, site and member cluster name are
-# all the site name; NSO pins a FabricQuery to cluster iad for this cell.
+# iad's fabric-api gateway. Its fabric-api ConfigMap comes with the site's
+# fabric-router overlay (deploy:fabric); NSO pins a FabricQuery to cluster iad
+# for this cell.
 namespace: galactic-system
 resources:
   - ../base
-configMapGenerator:
-  - name: fabric-api
-    literals:
-      - site=iad
-      - cell=iad
-      - cluster-name=iad
-generatorOptions:
-  disableNameSuffixHash: true
 patches:
   - target:
       kind: Deployment
