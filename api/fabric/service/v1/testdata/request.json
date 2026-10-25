@@ -1,0 +1,9 @@
+{
+  "apiMajor": 1,
+  "cell": "example-cell",
+  "projectId": "project-a",
+  "requestId": "b74e19ee-926f-43dc-b03d-c29550a827ab",
+  "expiresAt": "2026-10-24T12:00:30Z",
+  "query": {"type": "QUERY_TYPE_PING", "target": "1.1.1.1", "addressFamily": "ADDRESS_FAMILY_IPV4"},
+  "requiredFeatures": ["router-outcomes", "terminal-coverage"]
+}

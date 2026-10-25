@@ -20,6 +20,7 @@ syntax = "proto3";
 package fabric.service.v1;
 
 import "fabric/v1/fabric.proto";
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
 option go_package = "go.datum.net/galactic/api/fabric/service/v1;servicev1";
@@ -47,6 +48,40 @@ message GetCapabilitiesResponse {
   uint32 api_major = 2;
   // enabled reports whether the cell executes service diagnostics.
   bool enabled = 3;
+  // contract_revision is the commit the gateway was built from.
+  string contract_revision = 4;
+  // policy_revision is a digest of every other policy field below; it
+  // changes whenever the effective policy does.
+  string policy_revision = 5;
+  // operations lists the diagnostics and address families the service may
+  // request.
+  repeated Operation operations = 6;
+  // features names the capabilities a request may list in
+  // required_features.
+  repeated string features = 7;
+  Limits limits = 8;
+  google.protobuf.Timestamp generated_at = 9;
+}
+
+// Operation is one diagnostic and the address families it serves.
+message Operation {
+  fabric.v1.QueryType type = 1;
+  repeated fabric.v1.AddressFamily address_families = 2;
+}
+
+// Limits are the bounds the gateway applies to every service request.
+message Limits {
+  // max_request_lifetime bounds expires_at, measured from receipt.
+  google.protobuf.Duration max_request_lifetime = 1;
+  // max_node_execution bounds one router's queueing and execution.
+  google.protobuf.Duration max_node_execution = 2;
+  // max_selected_routers bounds the routers one request executes on.
+  uint32 max_selected_routers = 3;
+  // max_inventory_routers bounds the routers one snapshot may list; a
+  // larger inventory fails with InventoryTooLarge.
+  uint32 max_inventory_routers = 4;
+  // max_budgets holds the largest value each request budget may take.
+  fabric.v1.Budgets max_budgets = 5;
 }
 
 message RunDiagnosticRequest {
@@ -73,9 +108,83 @@ message RunDiagnosticRequest {
   repeated string required_features = 9;
 }
 
-// DiagnosticEvent is one event of a RunDiagnostic stream.
+// DiagnosticEvent is one event of a RunDiagnostic stream. A stream holds one
+// snapshot first, then one outcome per selected router in completion order,
+// then at most one complete. A stream that ends without complete was not
+// fully delivered, whatever its gRPC status.
 message DiagnosticEvent {
   string request_id = 1;
   // sequence is consecutive, starting at 1.
   uint64 sequence = 2;
+  oneof event {
+    Snapshot snapshot = 3;
+    RouterOutcome outcome = 4;
+    Complete complete = 5;
+  }
+}
+
+// Snapshot is the fixed router membership a request runs against, taken
+// once before any router executes.
+message Snapshot {
+  string snapshot_id = 1;
+  google.protobuf.Timestamp captured_at = 2;
+  // resource_version is the fabric-router pod list's resourceVersion.
+  string resource_version = 3;
+  // unscheduled_pod_count counts fabric-router pods with no node, which
+  // have no router identity.
+  uint32 unscheduled_pod_count = 4;
+  // routers lists every router of the inventory, one per node, by name.
+  repeated SnapshotRouter routers = 5;
+}
+
+message SnapshotRouter {
+  string node = 1;
+  // pod_uid is the fabric-router pod a selected router runs on; empty for
+  // an omitted router.
+  string pod_uid = 2;
+  bool selected = 3;
+  // omitted_reason says why an omitted router does not run: NotRequested,
+  // NoSidecar, PodTerminating, PodNotRunning, SidecarNotRunning, NoHostIP,
+  // NoCertificatePod or NodeBudget.
+  string omitted_reason = 4;
+}
+
+// RouterOutcome is one selected router's result: an observation or a typed
+// failure. Packet loss, unanswered hops and an empty route lookup are
+// observations.
+message RouterOutcome {
+  string node = 1;
+  string pod_uid = 2;
+  google.protobuf.Timestamp completed_at = 3;
+  oneof result {
+    fabric.v1.Observation observation = 4;
+    Failure failure = 5;
+  }
+}
+
+// Failure is a typed router failure. An unknown reason is a backend
+// failure, never packet loss.
+message Failure {
+  // reason is a fabric-api error code, e.g. NodeUnreachable or Timeout.
+  string reason = 1;
+  // message is a sanitized description of at most 256 bytes.
+  string message = 2;
+}
+
+// Complete is a stream's terminal coverage. expected equals successful +
+// failed + omitted, and successful + failed is the number of selected
+// routers in the snapshot.
+message Complete {
+  string snapshot_id = 1;
+  google.protobuf.Timestamp finished_at = 2;
+  uint32 expected = 3;
+  uint32 successful = 4;
+  uint32 failed = 5;
+  uint32 omitted = 6;
+  // truncated_routers counts successful observations whose payload is
+  // incomplete.
+  uint32 truncated_routers = 7;
+  // reason is Succeeded, PartialResults, ExecutionFailed, NoNodesAvailable,
+  // DeadlineExceeded, Cancelled, OwnershipLost or OutputLimitExceeded.
+  string reason = 8;
 }

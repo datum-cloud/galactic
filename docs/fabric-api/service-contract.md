@@ -589,7 +589,15 @@ and server types, and a descriptor set with imports in a versioned Galactic
 release asset named `fabric-service-api-<version>.tar.gz`, containing
 `proto/` sources and imports, `fabric-service-v1.pb` (descriptor set with imports),
 and `README.md` with the matching Go module version and generation instructions.
-Publish `SHA256SUMS` alongside it. Commit generated Go artifacts using
+Publish `SHA256SUMS` alongside it. The `publish-service-api` job of
+`.github/workflows/publish.yaml` attaches both to each published release;
+`task build:service-api VERSION=<version>` builds them locally. The `proto/`
+directory omits the `google/protobuf` well-known types, which every protobuf
+toolchain ships; the descriptor set includes them. The wire examples below are
+fixtures in `api/fabric/service/v1/testdata`, decoded by a test that imports
+only the published packages; the request fixture does not require
+`aggregate-probe-budgets`, which the gateway refuses until #1045.
+Commit generated Go artifacts using
 `task generate:proto`;
 never hand-edit them. Consumers pin a release tag or commit of
 `go.datum.net/galactic`, import only `api/fabric/service/v1`, `api/fabric/v1`, and
