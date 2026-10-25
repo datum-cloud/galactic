@@ -15,6 +15,11 @@ set -euo pipefail
 
 version=${1:?usage: service-api-bundle.sh VERSION OUT_DIR}
 out=${2:?usage: service-api-bundle.sh VERSION OUT_DIR}
+# The version names a file and a directory in the archive.
+if [[ ! $version =~ ^[A-Za-z0-9._+-]+$ ]]; then
+  echo "service-api-bundle.sh: version $version is not a plain release tag" >&2
+  exit 1
+fi
 name="fabric-service-api-${version}"
 
 work=$(mktemp -d)
@@ -43,7 +48,8 @@ Pin \`go.datum.net/galactic@${version}\` and import only:
 
 Generate a client from \`proto/\`, whose imports beyond it are the standard
 \`google/protobuf\` well-known types, or from the descriptor set
-\`fabric-service-v1.pb\`, which includes every import. For example:
+\`fabric-service-v1.pb\`, which includes every import. For example, with a
+\`buf.gen.yaml\` naming your language's plugins:
 
     buf generate "fabric-service-v1.pb#format=binpb" --template buf.gen.yaml
 README
