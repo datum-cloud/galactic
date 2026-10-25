@@ -574,6 +574,119 @@ func TestSweepHashed_UnsyncedOrFailingWatch(t *testing.T) {
 	}
 }
 
+// natLocatorSink records the shard SIDs each sweep hands traffic policy.
+type natLocatorSink struct {
+	calls int
+	sids  map[string]bool
+}
+
+func (s *natLocatorSink) set(sids []net.IP) {
+	s.calls++
+	s.sids = map[string]bool{}
+	for _, sid := range sids {
+		s.sids[sid.String()] = true
+	}
+}
+
+// TestSweepHashed_NATLocatorsWithoutWatch checks that traffic policy gets the
+// shard SIDs this node can egress through on every sweep, whether or not the
+// EgressShard watch has started or synced (#1084): the configured shards and
+// every member of a published group, plus the watch's shards once synced.
+// Without them every tenant packet on a path rule fails classification.
+func TestSweepHashed_NATLocatorsWithoutWatch(t *testing.T) {
+	configured := shardSIDFor(0x10)
+	published := []string{staticSIDFor(0x20), staticSIDFor(0x21)}
+	watched := shardSIDFor(0x30)
+	cases := map[string]struct {
+		lister egressShardLister
+		want   []string
+	}{
+		"WatchNotStarted": {nil, append([]string{configured}, published...)},
+		"WatchUnsynced":   {&fakeLister{synced: false}, append([]string{configured}, published...)},
+		"WatchFailing": {
+			&fakeLister{shards: []bgpv1alpha1.EgressShard{dual("watched", 0x30)}, synced: true, err: errInjected},
+			append([]string{configured}, published...),
+		},
+		"WatchSynced": {
+			&fakeLister{shards: []bgpv1alpha1.EgressShard{dual("watched", 0x30)}, synced: true},
+			append([]string{configured, watched}, published...),
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, testHashed, []string{configured}, nil)
+			candidates := []egressroutemap.ShardCandidate{
+				{SID: net.ParseIP(shardSIDFor(0x20))}, {SID: net.ParseIP(shardSIDFor(0x21))},
+			}
+			if _, err := f.groups.Apply(0, egressroutemap.GroupPolicy{}, candidates); err != nil {
+				t.Fatal(err)
+			}
+			if tc.lister != nil {
+				f.g.shards = tc.lister
+			}
+			sink := &natLocatorSink{}
+			f.g.natLocators = sink.set
+			_ = f.sweep(t)
+			if sink.calls != 1 {
+				t.Fatalf("natLocators called %d times, want once", sink.calls)
+			}
+			for _, sid := range tc.want {
+				if !sink.sids[sid] {
+					t.Errorf("natLocators got %v, missing %s", sink.sids, sid)
+				}
+			}
+			if len(sink.sids) != len(tc.want) {
+				t.Errorf("natLocators got %d SIDs %v, want %v", len(sink.sids),
+					sink.sids, tc.want)
+			}
+		})
+	}
+}
+
+// TestSweepHashed_NATLocatorsEmptySeed checks that, with no configured shard
+// and no published group, traffic policy's locators are left unsynced while
+// the watch has not synced, so it keeps failing closed, and are set once the
+// watch has synced.
+func TestSweepHashed_NATLocatorsEmptySeed(t *testing.T) {
+	cases := map[string]struct {
+		lister egressShardLister
+		calls  int
+	}{
+		"WatchNotStarted":  {nil, 0},
+		"WatchUnsynced":    {&fakeLister{synced: false}, 0},
+		"WatchSyncedEmpty": {&fakeLister{synced: true}, 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, testHashed, nil, nil)
+			if tc.lister != nil {
+				f.g.shards = tc.lister
+			}
+			sink := &natLocatorSink{}
+			f.g.natLocators = sink.set
+			_ = f.sweep(t)
+			if sink.calls != tc.calls {
+				t.Errorf("natLocators called %d times, want %d", sink.calls, tc.calls)
+			}
+		})
+	}
+}
+
+// TestSweep_NATLocatorsWithoutGroupMap checks that a datapath without the
+// shard group map, which can only route to the configured shards, hands
+// traffic policy those shards.
+func TestSweep_NATLocatorsWithoutGroupMap(t *testing.T) {
+	f := newFixture(t, testHashed, []string{shardSIDFor(0x10)}, nil)
+	sink := &natLocatorSink{}
+	f.g.natLocators = sink.set
+	if err := f.g.sweepWith(context.Background(), f.routes, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if sink.calls != 1 || len(sink.sids) != 1 || !sink.sids[shardSIDFor(0x10)] {
+		t.Errorf("natLocators got %d calls with %v, want the configured shard", sink.calls, sink.sids)
+	}
+}
+
 // TestSweepHashed_ShardNode checks a node that runs an egress shard: its own
 // shard is a local member, not an unreachable one, while a remote shard whose
 // SID does not resolve is still unreachable. Neither is alive, so neither
