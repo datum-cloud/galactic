@@ -108,13 +108,22 @@ type Outcome struct {
 	Node        Node
 	Observation *fabricv1.Observation
 	Err         error
+	// Completed is when the node's result was handed off.
+	Completed time.Time
 }
+
+// ServiceQueueWait bounds how long a Looking Glass service router job waits
+// for a cell execution slot.
+const ServiceQueueWait = 10 * time.Second
 
 // Runner fans one query out to a node snapshot through the cell's executor.
 type Runner struct {
 	Clients  NodeClients
 	Executor *Executor
 	Metrics  *Metrics
+	// QueueWait bounds a Stream job's wait for an execution slot; zero
+	// selects ServiceQueueWait.
+	QueueWait time.Duration
 	// Now returns the current time; nil selects time.Now.
 	Now func() time.Time
 }
@@ -126,6 +135,19 @@ func (r *Runner) now() time.Time {
 	return time.Now()
 }
 
+// runOptions distinguish the service's execution from the operator's and
+// FabricQuery's.
+type runOptions struct {
+	// retryReads repeats a cheap read once when it failed to connect.
+	retryReads bool
+	// queueWait, when positive, bounds a job's wait for an execution slot;
+	// exceeding it fails the job with QueueTimeout.
+	queueWait time.Duration
+	// requestCodes reports a failure caused by ctx ending as
+	// DeadlineExceeded or Cancelled rather than Timeout.
+	requestCodes bool
+}
+
 // Run executes q on every selected node in nodes and returns one outcome per
 // selected node, sorted by node name. Each node's deadline is the earlier of
 // the request's expiration and the node maximum, fixed before it queues for
@@ -133,16 +155,42 @@ func (r *Runner) now() time.Time {
 // fail the others.
 func (r *Runner) Run(ctx context.Context, project, requestID string, q query.Query, nodes []Node,
 	budgets *fabricv1.Budgets, expires time.Time) []Outcome {
-	var selected []Node
-	for _, n := range nodes {
-		if n.Selected {
-			selected = append(selected, n)
-		}
+	var mu sync.Mutex
+	var out []Outcome
+	r.fanOut(ctx, project, requestID, q, nodes, budgets, expires, runOptions{retryReads: true}, func(o Outcome) {
+		mu.Lock()
+		out = append(out, o)
+		mu.Unlock()
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Node.Name < out[j].Node.Name })
+	return out
+}
+
+// Stream executes q on every selected node in nodes like Run, but hands each
+// node's outcome to emit as soon as that node finishes, so a slow node never
+// delays a finished one. emit runs on the finished node's goroutine and may
+// be called concurrently; Stream returns once every call has returned. It
+// never repeats a node call, bounds each job's wait for a slot by
+// QueueWait (QueueTimeout), and reports a job cut short by ctx ending
+// as DeadlineExceeded or Cancelled; a node's own 30 s bound stays Timeout.
+func (r *Runner) Stream(ctx context.Context, project, requestID string, q query.Query, nodes []Node,
+	budgets *fabricv1.Budgets, expires time.Time, emit func(Outcome)) {
+	wait := r.QueueWait
+	if wait <= 0 {
+		wait = ServiceQueueWait
 	}
-	out := make([]Outcome, len(selected))
+	r.fanOut(ctx, project, requestID, q, nodes, budgets, expires,
+		runOptions{queueWait: wait, requestCodes: true}, emit)
+}
+
+func (r *Runner) fanOut(ctx context.Context, project, requestID string, q query.Query, nodes []Node,
+	budgets *fabricv1.Budgets, expires time.Time, opts runOptions, emit func(Outcome)) {
 	wire := node.QueryToProto(q)
 	var wg sync.WaitGroup
-	for i, n := range selected {
+	for _, n := range nodes {
+		if !n.Selected {
+			continue
+		}
 		deadline := r.now().Add(query.MaxNodeExecution)
 		if expires.Before(deadline) {
 			deadline = expires
@@ -150,21 +198,52 @@ func (r *Runner) Run(ctx context.Context, project, requestID string, q query.Que
 		wg.Go(func() {
 			nctx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
-			obs, err := r.one(nctx, project, requestID, wire, q, n, budgets, expires)
-			out[i] = Outcome{Node: n, Observation: obs, Err: err}
+			obs, err := r.one(nctx, project, requestID, wire, q, n, budgets, expires, opts)
+			if opts.requestCodes {
+				// When the request's expiration is the node's deadline, the
+				// node's timer can fire before ctx's: both mean the request
+				// expired.
+				expired := deadline.Equal(expires) && errors.Is(nctx.Err(), context.DeadlineExceeded)
+				err = requestErr(ctx, err, expired)
+			}
+			emit(Outcome{Node: n, Observation: obs, Err: err, Completed: r.now()})
 		})
 	}
 	wg.Wait()
-	sort.Slice(out, func(i, j int) bool { return out[i].Node.Name < out[j].Node.Name })
-	return out
+}
+
+// requestErr reports a failure that ctx's end, or the request's expiration,
+// caused as the request's own DeadlineExceeded or Cancelled.
+func requestErr(ctx context.Context, err error, expired bool) error {
+	if err == nil || (ctx.Err() == nil && !expired) {
+		return err
+	}
+	switch errcode.Of(err) {
+	case errcode.Timeout, errcode.NodeUnreachable, errcode.QueueTimeout:
+	default:
+		return err
+	}
+	if expired || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return errcode.Status(errcode.DeadlineExceeded, "the request's deadline passed before the router finished")
+	}
+	return errcode.Status(errcode.Cancelled, "the request was cancelled before the router finished")
 }
 
 func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabricv1.Query, q query.Query, n Node,
-	budgets *fabricv1.Budgets, expires time.Time) (*fabricv1.Observation, error) {
-	release, err := r.Executor.Acquire(ctx, project, q.Type.Expensive())
+	budgets *fabricv1.Budgets, expires time.Time, opts runOptions) (*fabricv1.Observation, error) {
+	actx := ctx
+	if opts.queueWait > 0 {
+		var cancel context.CancelFunc
+		actx, cancel = context.WithTimeout(ctx, opts.queueWait)
+		defer cancel()
+	}
+	release, err := r.Executor.Acquire(actx, project, q.Type.Expensive())
 	if err != nil {
 		if errors.Is(err, ErrQueueFull) {
 			return nil, errcode.Status(errcode.NodeBusy, "cell execution queue is full")
+		}
+		if ctx.Err() == nil {
+			return nil, errcode.Status(errcode.QueueTimeout, "waited too long for a cell execution slot")
 		}
 		return nil, errcode.Status(errcode.Timeout, "deadline passed waiting for a cell execution slot")
 	}
@@ -182,7 +261,7 @@ func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabri
 	// A cheap read that failed to connect is safe to repeat once: the node
 	// deduplicates by request ID. Searches and probes are never retried
 	// within an attempt, since their first execution may have run.
-	if err != nil && errcode.Of(err) == errcode.NodeUnreachable &&
+	if err != nil && opts.retryReads && errcode.Of(err) == errcode.NodeUnreachable &&
 		!q.Type.Expensive() && !q.Type.Probe() && ctx.Err() == nil {
 		resp, err = c.Execute(ctx, req)
 	}

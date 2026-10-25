@@ -231,11 +231,19 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 		Cell:        o.cell,
 		DialOptions: []grpc.DialOption{clientStats()},
 	}
+	// Customer execution stays off until its admission limits and
+	// execution ownership checks exist; the service only authenticates,
+	// validates and reports capabilities.
 	service := &gateway.Service{
 		Cell:      o.cell,
 		Allowlist: allowlist,
 		Elected:   debug.Elected,
 		Leader:    debug,
+		Discoverer: &gateway.Discoverer{
+			Reader: mgr.GetAPIReader(), Namespace: o.namespace, Selector: sel, CertsSelector: certsSel,
+		},
+		Runner:   runner,
+		Revision: metadata.GitCommit,
 	}
 	gs := gateway.NewServer(creds, allowlist, debug, service, grpc.MaxRecvMsgSize(64<<10), serverStats())
 	debugAddr := fmt.Sprintf(":%d", o.debugPort)

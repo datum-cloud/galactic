@@ -27,14 +27,20 @@ traceroute hops. Existing operator `FabricGatewayService.Query/ListNodes`, node
 schemas and result meanings. FabricQuery retains its existing persistence and
 resume semantics; customer requests have no such persistence or replay.
 
-Today, `api/fabric/v1/fabric.proto` exposes only unary methods;
-`internal/fabric/gateway/runner.go` collects all outcomes before returning;
-the gateway authenticates service identities and validates their requests
-(#1043) but answers a valid `RunDiagnostic` with `ServiceDisabled`.
+Today, `api/fabric/v1/fabric.proto` exposes only unary methods. The gateway
+authenticates service identities and validates their requests (#1043). With
+`gateway.Service.Enabled` set, the leader streams a request as specified under
+"Stream grammar and coverage": `Discoverer.Inventory` takes the unique-router
+snapshot, `Runner.Stream` hands off each router's outcome as it finishes, and
+the terminal coverage follows (#1044). No deployment sets `Enabled`, so a valid
+`RunDiagnostic` is answered with `ServiceDisabled`, and capabilities do not
+advertise `aggregate-probe-budgets`. Not yet implemented: admission and packet
+budgets with the atomic queue reservation before the snapshot (#1045), and the
+blocked-send bound and Lease-checked ownership (#1046). Until then each router
+job queues on its own and a full queue fails that router with `NodeBusy`.
 The executor has local concurrency/queue limits and project round robin; nodes
-pace packets locally. None establishes the new service or aggregate guarantees.
-The existing discovery returns pod candidates, including duplicates, rather than
-the unique-router accounting specified below.
+pace packets locally. None establishes the aggregate guarantees. Operator and
+FabricQuery discovery still return pod candidates, including duplicates.
 
 ## Service and identity
 

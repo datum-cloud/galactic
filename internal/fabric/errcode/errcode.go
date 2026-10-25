@@ -73,6 +73,14 @@ const (
 	// DeadlineExceeded means a Looking Glass service request's absolute
 	// expiration or deadline has passed.
 	DeadlineExceeded Code = "DeadlineExceeded"
+	// Cancelled means the caller cancelled a Looking Glass service request.
+	Cancelled Code = "Cancelled"
+	// QueueTimeout means a router's job waited for a cell execution slot
+	// longer than the queue bound allows.
+	QueueTimeout Code = "QueueTimeout"
+	// InventoryTooLarge means the cell's router inventory exceeds what one
+	// Looking Glass service snapshot may list.
+	InventoryTooLarge Code = "InventoryTooLarge"
 )
 
 // grpcCodes maps each code to the gRPC status code it travels as.
@@ -98,6 +106,9 @@ var grpcCodes = map[Code]codes.Code{
 	ServiceDisabled:        codes.FailedPrecondition,
 	OwnershipLost:          codes.Unavailable,
 	DeadlineExceeded:       codes.DeadlineExceeded,
+	Cancelled:              codes.Canceled,
+	QueueTimeout:           codes.DeadlineExceeded,
+	InventoryTooLarge:      codes.ResourceExhausted,
 }
 
 // MetadataQueryCode is the ErrorInfo metadata key carrying the query
