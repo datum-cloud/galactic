@@ -592,22 +592,22 @@ A pre-execution throttle uses a gRPC status with standard details:
 
 #1044 publishes protobuf sources, their transitive imports, generated Go client
 and server types, and a descriptor set with imports in a versioned Galactic
-release asset named `fabric-service-api-<version>.tar.gz`, containing
-`proto/` sources and imports, `fabric-service-v1.pb` (descriptor set with imports),
-and `README.md` with the matching Go module version and generation instructions.
+release asset named `fabric-service-api-<version>.tar.gz`, containing `proto/`
+sources and imports, `fabric-service-v1.pb` (descriptor set with imports), and
+`README.md` with the matching Go module version and generation instructions.
 Publish `SHA256SUMS` alongside it. The `publish-service-api` job of
-`.github/workflows/publish.yaml` attaches both to each published release, and
-CI builds and verifies the same bundle on every pull request;
+`.github/workflows/publish.yaml` attaches both to each published release, and CI
+builds and verifies the same bundle on every pull request;
 `task build:service-api VERSION=<version>` builds it locally. The `proto/`
 directory omits the `google/protobuf` well-known types, which every protobuf
 toolchain ships; the descriptor set includes them. Commit generated Go artifacts
-using `task generate:proto`; never hand-edit them. Consumers pin a release tag or commit of
-`go.datum.net/galactic`, import only `api/fabric/service/v1`, `api/fabric/v1`, and
-standard protobuf/gRPC packages, or generate another language client from the
-published descriptor/source bundle. No internal canonicalizer, error parser,
-identity helper, or Kubernetes client is required to call the service.
-The release must link these artifacts and their checksums. The source path
-alone is not proof that this publication gate has passed.
+using `task generate:proto`; never hand-edit them. Consumers pin a release tag
+or commit of `go.datum.net/galactic`, import only `api/fabric/service/v1`,
+`api/fabric/v1`, and standard protobuf/gRPC packages, or generate another
+language client from the published descriptor/source bundle. No internal
+canonicalizer, error parser, identity helper, or Kubernetes client is required
+to call the service. The release must link these artifacts and their checksums.
+The source path alone is not proof that this publication gate has passed.
 
 Within major v1, add optional fields/features only; reserve deleted field
 numbers/names and never repurpose enums. Unknown optional fields are ignored;
