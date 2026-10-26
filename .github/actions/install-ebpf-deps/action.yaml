@@ -39,7 +39,6 @@ runs:
     # rely on it merely happening to be preinstalled.
     - name: Install clang/llvm/linux-libc-dev
       shell: bash
-      timeout-minutes: 6
       run: |
         # The Azure mirror can keep transferring slowly enough to exhaust
         # the job budget without triggering apt's inactivity timeout.
