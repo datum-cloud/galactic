@@ -253,7 +253,9 @@ type NetworkServiceSpec struct {
 	// and publishes a decision in status.health of the backend's
 	// ServiceVIPBindings. The gateway nodes take a backend whose decision is
 	// Unhealthy out of the service's Maglev table, and keep every backend
-	// when all of them are Unhealthy. Unset, no backend is probed and every
+	// when all of them are Unhealthy by default. FailClosed instead requires
+	// fresh Healthy results for the current configuration and withdraws a VIP
+	// with no healthy backends. Unset, no backend is probed and every
 	// one stays in the table.
 	//
 	// Where interface traffic policy is enforced, the backend's policy must
@@ -262,6 +264,13 @@ type NetworkServiceSpec struct {
 	// +optional
 	HealthCheck *NetworkServiceHealthCheck `json:"healthCheck,omitempty"`
 }
+
+const (
+	// NetworkServiceHealthFailOpen retains unknown backends and all-unhealthy sets.
+	NetworkServiceHealthFailOpen = "FailOpen"
+	// NetworkServiceHealthFailClosed serves only fresh, verified healthy backends.
+	NetworkServiceHealthFailClosed = "FailClosed"
+)
 
 // NetworkServiceHealthCheck configures the TCP health check of a
 // NetworkService's backends. A probe succeeds when the TCP handshake completes
@@ -272,6 +281,14 @@ type NetworkServiceSpec struct {
 //
 // +kubebuilder:validation:XValidation:rule="self.timeoutSeconds <= self.intervalSeconds",message="timeoutSeconds must not exceed intervalSeconds"
 type NetworkServiceHealthCheck struct {
+	// FailurePolicy determines whether unknown and all-unhealthy backends may
+	// receive traffic. FailClosed requires a current Healthy decision and
+	// withdraws the service when health filtering is unavailable.
+	// +optional
+	// +kubebuilder:default=FailOpen
+	// +kubebuilder:validation:Enum=FailOpen;FailClosed
+	FailurePolicy string `json:"failurePolicy,omitempty"`
+
 	// Port is the TCP port probed on every backend, 1-65535. Unset, it is the
 	// service's backendPort. A udp service must set it to a TCP port its
 	// backends listen on, since a UDP datagram draws no reply a generic

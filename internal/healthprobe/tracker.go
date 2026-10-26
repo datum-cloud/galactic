@@ -38,8 +38,9 @@ const (
 
 // Decision is a backend's damped health decision.
 type Decision struct {
-	State  State
-	Reason string
+	LastProbeTime time.Time
+	State         State
+	Reason        string
 
 	// Message is the probe error that led to the decision, or "".
 	Message string
@@ -91,6 +92,7 @@ func (t *Tracker) Decision() Decision {
 // Observe records one probe's result, err being nil for a success, and
 // reports whether the decision's state or reason changed.
 func (t *Tracker) Observe(err error, now time.Time) bool {
+	t.decision.LastProbeTime = now
 	next := t.decision
 	if err == nil {
 		t.successes++

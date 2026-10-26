@@ -31,7 +31,7 @@ func TestNetworkServiceHealthCheckAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := networkv1alpha1.NetworkServiceHealthCheck{
-		IntervalSeconds: 5, TimeoutSeconds: 2, UnhealthyThreshold: 3, HealthyThreshold: 3,
+		FailurePolicy: "FailOpen", IntervalSeconds: 5, TimeoutSeconds: 2, UnhealthyThreshold: 3, HealthyThreshold: 3,
 	}
 	if got.Spec.HealthCheck == nil || *got.Spec.HealthCheck != want {
 		t.Errorf("healthCheck = %+v, want the defaults %+v", got.Spec.HealthCheck, want)
@@ -47,6 +47,20 @@ func TestNetworkServiceHealthCheckAdmission(t *testing.T) {
 		t.Fatalf("create udp service with a health check port: %v", err)
 	}
 
+	strict := protocolService("hc-strict", networkv1alpha1.NetworkServiceProtocolTCP, 443, 8443)
+	strict.Spec.HealthCheck = &networkv1alpha1.NetworkServiceHealthCheck{FailurePolicy: "FailClosed"}
+	if err := c.Create(ctx, strict); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(strict), strict); err != nil {
+		t.Fatal(err)
+	}
+	if strict.Spec.HealthCheck.FailurePolicy != "FailClosed" {
+		t.Fatal("failure policy was not preserved")
+	}
+	invalid := protocolService("hc-invalid", networkv1alpha1.NetworkServiceProtocolTCP, 443, 8443)
+	invalid.Spec.HealthCheck = &networkv1alpha1.NetworkServiceHealthCheck{FailurePolicy: "Ignore"}
+	requireRefusal(t, c.Create(ctx, invalid), []string{"failurePolicy"}, nil)
 	slow := protocolService("hc-timeout", networkv1alpha1.NetworkServiceProtocolTCP, 443, 8443)
 	slow.Spec.HealthCheck = &networkv1alpha1.NetworkServiceHealthCheck{IntervalSeconds: 2, TimeoutSeconds: 3}
 	requireRefusal(t, c.Create(ctx, slow), []string{"timeoutSeconds must not exceed intervalSeconds"}, nil)
@@ -78,6 +92,7 @@ func TestServiceVIPBindingHealthStatus(t *testing.T) {
 
 	health := &networkv1alpha1.ServiceVIPBindingHealth{
 		State: networkv1alpha1.BackendHealthUnhealthy, Reason: "ProbeFailed", Message: "connection refused",
+		ObservedGeneration: 3, LastProbeTime: metav1.NewTime(time.Unix(1_700_000_010, 0)),
 		AttachmentUID: "uid-1", Port: 8443, LastTransitionTime: metav1.NewTime(time.Unix(1_700_000_000, 0)),
 	}
 	binding.Status.Conditions = []metav1.Condition{{

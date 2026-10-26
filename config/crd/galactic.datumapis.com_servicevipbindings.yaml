@@ -249,6 +249,11 @@ spec:
                       AttachmentUID is the UID of the VPCAttachment that held the backend's
                       address when the decision was made.
                     type: string
+                  lastProbeTime:
+                    description: LastProbeTime is refreshed after every probe for
+                      FailClosed services.
+                    format: date-time
+                    type: string
                   lastTransitionTime:
                     description: LastTransitionTime is when State last changed.
                     format: date-time
@@ -257,6 +262,11 @@ spec:
                     description: Message is the last probe error, when there is one.
                     maxLength: 1024
                     type: string
+                  observedGeneration:
+                    description: ObservedGeneration identifies the NetworkService
+                      configuration probed.
+                    format: int64
+                    type: integer
                   port:
                     description: Port is the TCP port that was probed.
                     format: int32

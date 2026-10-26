@@ -123,8 +123,19 @@ func (r *BackendHealthReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 	id := healthTargetID(attachment.UID, target)
-	decision := r.Prober.Ensure(owner, id, target, seedDecision(binding.Status.Health, attachment.UID, target.Port))
+	seed := seedDecision(binding.Status.Health, attachment.UID, target.Port)
+	if rule.Spec.HealthCheck.FailurePolicy == bgpv1alpha1.NetworkServiceHealthFailClosed {
+		id = fmt.Sprintf("%s|%s|%d", id, rule.UID, rule.Generation)
+		seed = nil
+	}
+	decision := r.Prober.Ensure(owner, id, target, seed)
+	var lastProbeTime metav1.Time
+	if failClosedHealth(rule) {
+		lastProbeTime = metav1.NewTime(decision.LastProbeTime.Truncate(time.Second))
+	}
 	return ctrl.Result{}, r.publish(ctx, binding, &bgpv1alpha1.ServiceVIPBindingHealth{
+		LastProbeTime:      lastProbeTime,
+		ObservedGeneration: rule.Generation,
 		State:              bgpv1alpha1.BackendHealthState(decision.State),
 		Reason:             decision.Reason,
 		Message:            truncateMessage(decision.Message),
@@ -188,7 +199,8 @@ func healthEqual(a, b *bgpv1alpha1.ServiceVIPBindingHealth) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return a.State == b.State && a.Reason == b.Reason && a.Message == b.Message &&
+	return a.LastProbeTime.Equal(&b.LastProbeTime) && a.ObservedGeneration == b.ObservedGeneration &&
+		a.State == b.State && a.Reason == b.Reason && a.Message == b.Message &&
 		a.AttachmentUID == b.AttachmentUID && a.Port == b.Port &&
 		a.LastTransitionTime.Equal(&b.LastTransitionTime)
 }
@@ -236,6 +248,7 @@ func healthTarget(
 		return v
 	}
 	return healthprobe.Target{
+		Refresh:   failClosedHealth(rule),
 		Interface: attachment.Status.HostInterface,
 		Addr:      addr,
 		Port:      uint16(port),
