@@ -161,7 +161,8 @@ const (
 	BackendHealthHealthy BackendHealthState = "Healthy"
 
 	// BackendHealthUnhealthy: the last UnhealthyThreshold probes failed. Only
-	// this state takes a backend out of the gateways' Maglev tables.
+	// this state filters a backend with FailOpen; FailClosed also filters
+	// Unknown, missing and expired decisions.
 	BackendHealthUnhealthy BackendHealthState = "Unhealthy"
 
 	// BackendHealthUnknown: too few probes have completed to decide, or the
@@ -174,6 +175,14 @@ const (
 // on Port. A reader treats a decision whose attachment UID or port does not
 // match the backend it is checking as Unknown.
 type ServiceVIPBindingHealth struct {
+	// LastProbeTime is refreshed after every probe for FailClosed services.
+	// +optional
+	LastProbeTime metav1.Time `json:"lastProbeTime,omitempty"`
+
+	// ObservedGeneration identifies the NetworkService configuration probed.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// State is the decision.
 	// +kubebuilder:validation:Required
 	State BackendHealthState `json:"state"`

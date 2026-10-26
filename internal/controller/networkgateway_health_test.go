@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -421,5 +422,113 @@ func TestGatewayHealthFilteringChanged(t *testing.T) {
 	}
 	if !p.Create(event.CreateEvent{Object: off}) || !p.Delete(event.DeleteEvent{Object: off}) {
 		t.Error("a create or delete did not pass")
+	}
+}
+
+func TestBuildDesiredRuleFailClosedHealth(t *testing.T) {
+	router, adv, vrf := newBackendFixtures("vpc-1")
+	idx := &backendSIDIndex{
+		routers:      map[string]*bgpv1alpha1.BGPRouter{router.Name: router},
+		advs:         []*bgpv1alpha1.BGPAdvertisement{adv},
+		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{vrf.Name: vrf},
+	}
+	for _, tc := range []struct {
+		name                              string
+		state                             bgpv1alpha1.BackendHealthState
+		missing, stale, expired, disabled bool
+		want                              bool
+	}{
+		{name: "healthy", state: bgpv1alpha1.BackendHealthHealthy, want: true},
+		{name: "unhealthy", state: bgpv1alpha1.BackendHealthUnhealthy},
+		{name: "unknown", state: bgpv1alpha1.BackendHealthUnknown},
+		{name: "missing", missing: true},
+		{name: "old generation", state: bgpv1alpha1.BackendHealthHealthy, stale: true},
+		{name: "expired", state: bgpv1alpha1.BackendHealthHealthy, expired: true},
+		{name: "filtering disabled", state: bgpv1alpha1.BackendHealthHealthy, disabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := newHealthRule()
+			rule.Generation = 2
+			rule.Spec.HealthCheck.FailurePolicy = bgpv1alpha1.NetworkServiceHealthFailClosed
+			h := decision(tc.state)
+			h.ObservedGeneration = rule.Generation
+			h.LastProbeTime = metav1.Now()
+			if tc.stale {
+				h.ObservedGeneration--
+			}
+			if tc.expired {
+				h.LastProbeTime = metav1.NewTime(time.Now().Add(-time.Hour))
+			}
+			if tc.missing {
+				h = nil
+			}
+			b := healthBinding(rule, testHealthyAddr, h)
+			dr, _, _, _, err := buildDesiredRule(rule, []*cloudv1alpha1.VPCAttachment{newHealthAttachment()},
+				idx, nil, false, serviceBindings{b.Name: b}, healthGate{apply: !tc.disabled}, "")
+			if tc.want {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := backendAddrs(dr.Backends); !slices.Equal(got, []string{testHealthyAddr}) {
+					t.Fatalf("backends: %v", got)
+				}
+			} else if err == nil {
+				t.Fatal("expected no serving backends")
+			}
+		})
+	}
+}
+
+func TestGatewayHealthFailClosedWithdrawsAndRecovers(t *testing.T) {
+	objs := healthFixtureObjects()
+	for _, o := range objs {
+		if rule, ok := o.(*bgpv1alpha1.NetworkService); ok {
+			rule.Spec.HealthCheck.FailurePolicy = bgpv1alpha1.NetworkServiceHealthFailClosed
+		}
+		if b, ok := o.(*bgpv1alpha1.ServiceVIPBinding); ok {
+			b.Status.Health = decision(bgpv1alpha1.BackendHealthHealthy)
+			b.Status.Health.LastProbeTime = metav1.Now()
+		}
+	}
+	c, engine, r := reconcileHealthGateway(t, true, objs...)
+	runGatewayPass(t, r)
+	runGatewayPass(t, r)
+	if len(engineBackends(engine)) != 2 {
+		t.Fatal("healthy backends not loaded")
+	}
+	var bindings bgpv1alpha1.ServiceVIPBindingList
+	if err := c.List(context.Background(), &bindings); err != nil {
+		t.Fatal(err)
+	}
+	for i := range bindings.Items {
+		b := &bindings.Items[i]
+		b.Status.Health.State = bgpv1alpha1.BackendHealthUnhealthy
+		if err := c.Status().Update(context.Background(), b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGatewayPass(t, r)
+	if len(engineBackends(engine)) != 0 {
+		t.Fatal("unhealthy backends still loaded")
+	}
+	if _, ok := advertisedPrefixes(t, c, testRuleAdv); ok {
+		t.Fatal("VIP still advertised")
+	}
+	if cond := programmedFor(t, c); cond.Status != metav1.ConditionFalse {
+		t.Fatalf("Programmed=%s", cond.Status)
+	}
+	for i := range bindings.Items {
+		b := &bindings.Items[i]
+		b.Status.Health.State = bgpv1alpha1.BackendHealthHealthy
+		if err := c.Status().Update(context.Background(), b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGatewayPass(t, r)
+	if len(engineBackends(engine)) != 2 {
+		t.Fatal("healthy backends did not recover")
+	}
+	if _, ok := advertisedPrefixes(t, c, testRuleAdv); !ok {
+		t.Fatal("VIP did not recover")
 	}
 }

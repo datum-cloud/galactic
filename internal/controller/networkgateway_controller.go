@@ -501,6 +501,8 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := errors.Join(fwdErr, advErr, ruleStatusErr, sweepErr); err != nil {
 		return ctrl.Result{}, err
 	}
+	requeueAfter = healthExpiryRequeue(allRules, requeueAfter)
+
 	// Nothing else is sure to trigger the pass that drops a held rule once
 	// its drain delay ends, so ask for it.
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
@@ -1514,6 +1516,11 @@ func buildDesiredRule(
 	sidIndex *backendSIDIndex, owners backendOwners, serveIPv4 bool, bindings serviceBindings, health healthGate,
 	objNS string,
 ) (dr gateway.DesiredRule, unresolved []string, ipv4 ipv4Family, rh ruleHealth, err error) {
+	if failClosedHealth(rule) && !health.apply {
+		return gateway.DesiredRule{}, nil, ipv4Off, ruleHealth{notApplied: health.why},
+			fmt.Errorf("fail-closed backend health is unavailable: %s", health.why)
+	}
+
 	ipv4 = ipv4Off
 	if serveIPv4 {
 		ipv4 = ipv4NotLoaded
@@ -1725,7 +1732,9 @@ func resolveFamilyBackends(
 			out.unresolved = append(out.unresolved, held...)
 		default:
 			out.noneBound = true
-			unhealthy = nil
+			if !failClosedHealth(rule) {
+				unhealthy = nil
+			}
 		}
 		if unhealthy != nil {
 			healthy := make([]resolved, 0, len(candidates))
@@ -1737,6 +1746,9 @@ func resolveFamilyBackends(
 				healthy = append(healthy, c)
 			}
 			if len(healthy) == 0 {
+				if failClosedHealth(rule) {
+					return out, &backendSelectionError{err: errors.New("no backend has a current Healthy probe result")}
+				}
 				out.noneHealthy = true
 			} else {
 				candidates = healthy

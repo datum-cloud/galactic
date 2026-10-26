@@ -549,8 +549,14 @@ func TestShaping(t *testing.T) {
 		t.Error("shaping must not change the exact matched count")
 	}
 
+	// Keep sample times and durations identical across the responses whose
+	// encoded sizes are compared below. Protobuf varint sizes vary with time.
+	now := time.Now()
+	s2 := newServer(t, f, func(c *Config) {
+		c.ExpensiveEnabled = true
+		c.Now = func() time.Time { return now }
+	})
 	// A search shaped to its prefix budget keeps the exact total.
-	s2 := newServer(t, f, func(c *Config) { c.ExpensiveEnabled = true })
 	r = request(query.Query{Type: query.TypeASPath, Target: testASPath})
 	r.Budgets = &fabricv1.Budgets{MaxPrefixes: 2}
 	resp, err = s2.Execute(context.Background(), r)
@@ -574,6 +580,9 @@ func TestShaping(t *testing.T) {
 	}
 	if o := resp.GetObservation(); !o.GetTruncated() || len(o.GetRoutes().GetPrefixes()) >= 4 || o.GetMatched() != 4 {
 		t.Errorf("byte shaping: %d prefixes truncated=%v", len(o.GetRoutes().GetPrefixes()), o.GetTruncated())
+	}
+	if size := proto.Size(resp); size > int(r.Budgets.MaxResponseBytes) {
+		t.Errorf("shaped response is %d bytes, budget is %d", size, r.Budgets.MaxResponseBytes)
 	}
 
 	r = request(query.Query{Type: query.TypeASPath, Target: testASPath})

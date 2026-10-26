@@ -169,13 +169,25 @@ spec:
                   and publishes a decision in status.health of the backend's
                   ServiceVIPBindings. The gateway nodes take a backend whose decision is
                   Unhealthy out of the service's Maglev table, and keep every backend
-                  when all of them are Unhealthy. Unset, no backend is probed and every
+                  when all of them are Unhealthy by default. FailClosed instead requires
+                  fresh Healthy results for the current configuration and withdraws a VIP
+                  with no healthy backends. Unset, no backend is probed and every
                   one stays in the table.
 
                   Where interface traffic policy is enforced, the backend's policy must
                   allow TCP from fe80::/10 to the health check port on the Private path,
                   and the replies back.
                 properties:
+                  failurePolicy:
+                    default: FailOpen
+                    description: |-
+                      FailurePolicy determines whether unknown and all-unhealthy backends may
+                      receive traffic. FailClosed requires a current Healthy decision and
+                      withdraws the service when health filtering is unavailable.
+                    enum:
+                    - FailOpen
+                    - FailClosed
+                    type: string
                   healthyThreshold:
                     default: 3
                     description: |-

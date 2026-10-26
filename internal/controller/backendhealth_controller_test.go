@@ -242,3 +242,35 @@ func TestBackendHealthReconciler_PreservesBound(t *testing.T) {
 		t.Errorf("status.health = %+v, want Healthy", got.Status.Health)
 	}
 }
+
+func TestBackendHealthFailClosedRestartsOnGenerationAndDoesNotSeed(t *testing.T) {
+	rule, attachment, binding := newHealthFixture(t)
+	rule.Spec.HealthCheck.FailurePolicy = bgpv1alpha1.NetworkServiceHealthFailClosed
+	rule.Generation = 2
+	binding.Status.Health = &bgpv1alpha1.ServiceVIPBindingHealth{
+		State: bgpv1alpha1.BackendHealthHealthy, AttachmentUID: testHealthUID, Port: rule.Spec.BackendPort,
+	}
+	prober := newFakeProber(healthprobe.Decision{State: healthprobe.StateUnknown, LastProbeTime: time.Now()})
+	r, c := newHealthReconciler(t, prober, rule, attachment, binding)
+	reconcileHealth(t, r, binding)
+	owner := client.ObjectKeyFromObject(binding).String()
+	firstID := prober.owners[owner]
+	if firstID == "" || prober.seeds[owner] != nil || !prober.targets[owner].Refresh {
+		t.Fatal("strict probe must start unseeded and refresh its decision")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(rule), rule); err != nil {
+		t.Fatal(err)
+	}
+	rule.Generation++
+	if err := c.Update(context.Background(), rule); err != nil {
+		t.Fatal(err)
+	}
+	reconcileHealth(t, r, binding)
+	if prober.owners[owner] == firstID {
+		t.Fatal("changed generation reused old probe loop")
+	}
+	h := getHealth(t, c, binding)
+	if h.ObservedGeneration != rule.Generation || h.LastProbeTime.IsZero() {
+		t.Fatalf("health not scoped/refreshed: %+v", h)
+	}
+}

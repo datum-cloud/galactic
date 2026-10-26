@@ -17,6 +17,8 @@ import (
 // Target is one backend to probe: Addr on Port, over the host-side interface
 // Interface, with Config's timing and thresholds.
 type Target struct {
+	// Refresh publishes unchanged decisions so consumers can expire stale health.
+	Refresh   bool
 	Interface string
 	Addr      netip.Addr
 	Port      uint16
@@ -144,7 +146,7 @@ func (p *Prober) observe(loop *probeLoop, err error) {
 	p.mu.Lock()
 	changed := loop.tracker.Observe(err, p.now())
 	var owners []string
-	if changed {
+	if changed || loop.target.Refresh {
 		for o := range loop.owners {
 			owners = append(owners, o)
 		}

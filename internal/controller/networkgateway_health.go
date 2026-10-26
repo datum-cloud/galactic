@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -73,16 +74,22 @@ func (r *NetworkGatewayReconciler) passHealthGate(ctx context.Context, namespace
 // unhealthy reports whether b's node reports b Unhealthy for rule's VIP vip:
 // the binding b's node writes for rule today (generatedBinding), not being
 // deleted, carries a status.health of Unhealthy for b's attachment and rule's
-// health check port. Any other decision, or none, keeps b.
+// health check port. FailOpen keeps other decisions; FailClosed requires
+// a fresh Healthy result for the current service generation.
 func (idx serviceBindings) unhealthy(
 	rule *bgpv1alpha1.NetworkService, objNS string, vip netip.Addr, b ruleBackend,
 ) bool {
 	want := generatedBinding(rule, objNS, b.node, vip, b)
 	got, ok := idx[want.Name]
 	if !ok || !got.DeletionTimestamp.IsZero() || !generatedFor(got, rule) || got.Spec != want.Spec {
-		return false
+		return failClosedHealth(rule)
 	}
 	h := got.Status.Health
+	if failClosedHealth(rule) {
+		return h == nil || h.State != bgpv1alpha1.BackendHealthHealthy || h.AttachmentUID != b.uid ||
+			h.Port != ruleHealthCheckPort(rule) || h.ObservedGeneration != rule.Generation ||
+			h.LastProbeTime.IsZero() || time.Since(h.LastProbeTime.Time) >= healthResultLifetime(rule)
+	}
 	return h != nil && h.State == bgpv1alpha1.BackendHealthUnhealthy &&
 		h.AttachmentUID == b.uid && h.Port == ruleHealthCheckPort(rule)
 }
@@ -112,4 +119,31 @@ func gatewayHealthFilteringChanged() predicate.Predicate {
 			return !okOld || !okNew || oldGW.Status.BackendHealthFiltering != newGW.Status.BackendHealthFiltering
 		},
 	}
+}
+
+func failClosedHealth(rule *bgpv1alpha1.NetworkService) bool {
+	return rule.Spec.HealthCheck != nil &&
+		rule.Spec.HealthCheck.FailurePolicy == bgpv1alpha1.NetworkServiceHealthFailClosed
+}
+
+// Allow three complete probe cycles before a stopped producer loses authority.
+func healthResultLifetime(rule *bgpv1alpha1.NetworkService) time.Duration {
+	interval, timeout := rule.Spec.HealthCheck.IntervalSeconds, rule.Spec.HealthCheck.TimeoutSeconds
+	if interval < 1 {
+		interval = 5
+	}
+	if timeout < 1 {
+		timeout = 2
+	}
+	return 3 * time.Duration(interval+timeout) * time.Second
+}
+
+// Expiry must withdraw stale health even if its producer stops sending events.
+func healthExpiryRequeue(rules []bgpv1alpha1.NetworkService, next time.Duration) time.Duration {
+	for i := range rules {
+		if failClosedHealth(&rules[i]) && (next == 0 || next > 5*time.Second) {
+			return 5 * time.Second
+		}
+	}
+	return next
 }
