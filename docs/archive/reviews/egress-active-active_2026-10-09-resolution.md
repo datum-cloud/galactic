@@ -73,9 +73,9 @@ site), and infra's central alert evaluation.
 
 1. Release the `network` change adding `spec.drain`, install its CRD in staging,
    and re-pin galactic's `go.mod` to the release.
-2. infra: install the CNI RBAC, originate every shard's SID, IPv6 and IPv4
+2. Deployment: install the CNI RBAC, originate every shard's SID, IPv6 and IPv4
    addresses from its own node with a distinct IPv4 per shard, copy the
-   `galactic-cni-egress` rule group to the central evaluator, and write the
+   `galactic-cni-egress` rule group to any separate rule evaluator, and write the
    runbook anchors for the seven egress alerts.
 3. Run `docs/nat/active-active-rollout.md` in staging, including the
    privileged CI job on the staging kernel version.
