@@ -128,7 +128,16 @@ func elected() bool { return true }
 
 // serveFollower serves a gateway replica that does not lead and whose
 // election lease names the replica at leaderAddr, and returns its address.
-func serveFollower(t *testing.T, creds *identity.Credentials, leaderAddr string) string {
+// dial is added to its leader connection's options.
+func serveFollower(t *testing.T, creds *identity.Credentials, leaderAddr string, dial ...grpc.DialOption) string {
+	t.Helper()
+	f := followerService(t, creds, leaderAddr, dial...)
+	return serveGateway(t, creds, f.Leader.(*Debug), f)
+}
+
+// followerService is the service of a replica that does not lead and whose
+// election lease names the replica at leaderAddr.
+func followerService(t *testing.T, creds *identity.Credentials, leaderAddr string, dial ...grpc.DialOption) *Service {
 	t.Helper()
 	host, portStr, _ := net.SplitHostPort(leaderAddr)
 	port, _ := strconv.Atoi(portStr)
@@ -143,9 +152,9 @@ func serveFollower(t *testing.T, creds *identity.Credentials, leaderAddr string)
 	).Build()
 	notElected := func() bool { return false }
 	follower := &Debug{Elected: notElected, Reader: reader, Namespace: DefaultNamespace,
-		LeaseName: testLeaseName, PodName: "gw-follower", Port: port, Credentials: creds, Cell: testSite}
-	return serveGateway(t, creds, follower,
-		&Service{Cell: testSite, Allowlist: testAllowlist, Elected: notElected, Leader: follower})
+		LeaseName: testLeaseName, PodName: "gw-follower", Port: port, Credentials: creds, Cell: testSite,
+		DialOptions: dial}
+	return &Service{Cell: testSite, Allowlist: testAllowlist, Elected: notElected, Leader: follower}
 }
 
 func TestServiceAuthorization(t *testing.T) {

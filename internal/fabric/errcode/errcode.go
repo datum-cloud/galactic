@@ -96,6 +96,9 @@ const (
 	// DuplicateRequest means a request ID was reused with identical
 	// arguments; it is never answered with a saved result.
 	DuplicateRequest Code = "DuplicateRequest"
+	// OutputLimitExceeded means a Looking Glass service stream's output
+	// budget cannot hold another router's result.
+	OutputLimitExceeded Code = "OutputLimitExceeded"
 )
 
 // grpcCodes maps each code to the gRPC status code it travels as.
@@ -128,6 +131,7 @@ var grpcCodes = map[Code]codes.Code{
 	QueueFull:              codes.ResourceExhausted,
 	LimiterUnavailable:     codes.Unavailable,
 	DuplicateRequest:       codes.AlreadyExists,
+	OutputLimitExceeded:    codes.ResourceExhausted,
 }
 
 // MetadataQueryCode is the ErrorInfo metadata key carrying the query

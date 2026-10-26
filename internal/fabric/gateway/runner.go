@@ -238,20 +238,28 @@ func (r *Runner) fanOut(ctx context.Context, project, requestID string, q query.
 // cancelled when the gateway loses the election.
 var errOwnershipLost = errors.New("the gateway lost execution ownership")
 
+// errOutputLimit is the cause with which a service request's execution is
+// cancelled when its stream's output budget runs out.
+var errOutputLimit = errors.New("the stream's output budget is exhausted")
+
 // requestErr reports a failure that ctx's end, or the request's expiration,
 // caused as the request's own DeadlineExceeded, Cancelled or, when the
-// election was lost, OwnershipLost.
+// election was lost or the output budget ran out, OwnershipLost or
+// OutputLimitExceeded.
 func requestErr(ctx context.Context, err error, expired bool) error {
 	if err == nil || (ctx.Err() == nil && !expired) {
 		return err
 	}
 	switch errcode.Of(err) {
-	case errcode.Timeout, errcode.NodeUnreachable, errcode.QueueTimeout:
+	case errcode.Timeout, errcode.NodeUnreachable, errcode.QueueTimeout, errcode.Cancelled:
 	default:
 		return err
 	}
 	if errors.Is(context.Cause(ctx), errOwnershipLost) {
 		return errcode.Status(errcode.OwnershipLost, "the gateway lost execution ownership before the router finished")
+	}
+	if errors.Is(context.Cause(ctx), errOutputLimit) {
+		return errcode.Status(errcode.OutputLimitExceeded, "the stream's output budget ran out before the router finished")
 	}
 	if expired || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return errcode.Status(errcode.DeadlineExceeded, "the request's deadline passed before the router finished")
