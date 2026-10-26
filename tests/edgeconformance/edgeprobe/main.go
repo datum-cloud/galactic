@@ -17,9 +17,9 @@
 //	    prints the node's CLOCK_BOOTTIME and CLOCK_REALTIME, read back to
 //	    back: {"boot","real"}
 //	edgeprobe pid -container id
-//	    prints the host PID of a container's first process, found by the
-//	    container ID in /proc/<pid>/cgroup; it needs the host's PID
-//	    namespace
+//	    prints the host PID of a container's first process: the earliest
+//	    started process whose /proc/<pid>/cgroup names the container ID; it
+//	    needs the host's PID namespace
 package main
 
 import (
@@ -204,8 +204,9 @@ func containerPID(args []string) error {
 	if err != nil {
 		return err
 	}
-	// The container's first process is the one in its cgroup whose parent,
-	// the runtime's shim, is not.
+	// The container's first process is the one in its cgroup that started
+	// first: an exec into the container joins the cgroup later.
+	found, first := "", uint64(0)
 	for _, e := range entries {
 		if _, err := strconv.Atoi(e.Name()); err != nil || !in(e.Name()) {
 			continue
@@ -214,12 +215,20 @@ func containerPID(args []string) error {
 		if err != nil {
 			continue
 		}
-		// The parent PID is the second field after the parenthesized name.
+		// Field 22, starttime, counted from the state field after the
+		// parenthesized name, which is field 3.
 		fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
-		if len(fields) > 1 && !in(fields[1]) {
-			fmt.Println(e.Name())
-			return nil
+		if len(fields) < 20 {
+			continue
 		}
+		start, err := strconv.ParseUint(fields[19], 10, 64)
+		if err == nil && (found == "" || start < first) {
+			found, first = e.Name(), start
+		}
+	}
+	if found != "" {
+		fmt.Println(found)
+		return nil
 	}
 	return fmt.Errorf("no process of container %s", *id)
 }

@@ -99,7 +99,7 @@ func (s *side) renewStart(t *testing.T, l *lab) time.Duration {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return l.cell.bootToRef(s.node, time.Duration(v))
+	return l.bootRef(t, s.node, time.Duration(v))
 }
 
 func TestConformance(t *testing.T) {

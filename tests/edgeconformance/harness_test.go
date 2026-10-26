@@ -180,6 +180,17 @@ var (
 // now is the current time on the suite's reference clock.
 func now() time.Duration { return theLab.cell.now() }
 
+// bootRef converts a CLOCK_BOOTTIME reading taken on node to the suite's
+// reference clock.
+func (l *lab) bootRef(t *testing.T, node string, boot time.Duration) time.Duration {
+	t.Helper()
+	r, err := l.cell.bootToRef(node, boot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 // wallToRef converts a wall-clock instant to the suite's reference clock.
 func wallToRef(w time.Time) time.Duration { return theLab.cell.wallToRef(w) }
 
@@ -249,7 +260,7 @@ func (p *probeRun) wait(l *lab, t *testing.T) []event {
 		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
 			t.Fatalf("probe %s: %v: %s", p.name, err, sc.Text())
 		}
-		e.T = l.cell.bootToRef(p.node, e.T)
+		e.T = l.bootRef(t, p.node, e.T)
 		p.events = append(p.events, e)
 	}
 	l.save(t, p.name+".jsonl", p.out.Bytes())

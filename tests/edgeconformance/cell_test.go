@@ -42,7 +42,7 @@ type cell interface {
 	wallToRef(w time.Time) time.Duration
 	// bootToRef converts a CLOCK_BOOTTIME reading taken on node to the
 	// reference clock.
-	bootToRef(node string, boot time.Duration) time.Duration
+	bootToRef(node string, boot time.Duration) (time.Duration, error)
 	// versions returns what the run ran against, for the summary.
 	versions() map[string]string
 }
@@ -116,7 +116,7 @@ func (kindCell) now() time.Duration {
 
 func (k kindCell) wallToRef(w time.Time) time.Duration { return k.now() - time.Since(w) }
 
-func (kindCell) bootToRef(_ string, boot time.Duration) time.Duration { return boot }
+func (kindCell) bootToRef(_ string, boot time.Duration) (time.Duration, error) { return boot, nil }
 
 func (kindCell) versions() map[string]string {
 	images := map[string]string{}
@@ -205,12 +205,18 @@ func (*clusterCell) now() time.Duration { return time.Duration(time.Now().UnixNa
 
 func (*clusterCell) wallToRef(w time.Time) time.Duration { return time.Duration(w.UnixNano()) }
 
-func (c *clusterCell) bootToRef(node string, boot time.Duration) time.Duration {
-	s, err := c.sample(node)
-	if err != nil {
-		panic(fmt.Sprintf("read the clocks of %s: %v", node, err))
+func (c *clusterCell) bootToRef(node string, boot time.Duration) (time.Duration, error) {
+	var err error
+	// A node's pod can be briefly out of reach, as right after its node
+	// rejoins, so a failed read is retried before the row fails.
+	for range 5 {
+		var s clockSample
+		if s, err = c.sample(node); err == nil {
+			return boot + s.offset, nil
+		}
+		time.Sleep(2 * time.Second)
 	}
-	return boot + s.offset
+	return 0, fmt.Errorf("read the clocks of %s: %w", node, err)
 }
 
 // sample returns a recent reading of node's clocks.

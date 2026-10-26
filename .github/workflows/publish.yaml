@@ -123,10 +123,7 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
-  # The reference provider in examples/edge-provider, which the Galactic
-  # Edge conformance suite deploys on a cell that pulls its images
-  # (tests/edgeconformance, docs/edge/conformance.md). It is not part of the
-  # core and has no entry in publish-kustomize-bundles below.
+  # The reference edge provider, outside the core: no kustomize bundle entry.
   publish-galactic-edge-provider-example-image:
     permissions:
       id-token: write

@@ -614,7 +614,7 @@ func rowReboot(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	acquiredAt := l.cell.bootToRef(a.node, time.Duration(start))
+	acquiredAt := l.bootRef(t, a.node, time.Duration(start))
 	l.record(t, "lease epoch before and on the new boot",
 		fmt.Sprintf("%d -> %d (sequence %s)", epoch, ptr.Deref(acquired.Spec.LeaseTransitions, 0),
 			acquired.Annotations["galactic.datumapis.com/edge-sequence"]))

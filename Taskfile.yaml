@@ -201,9 +201,7 @@ tasks:
       - go vet ./...
       - go test -race ./...
 
-  # Not part of ci: it runs against a live cell for about 50 minutes, hard
-  # reboots one edge node and cuts one off from the API server. See
-  # docs/edge/conformance.md for the cell it needs and what it changes.
+  # Not part of ci: it disrupts a live cell's edge nodes (docs/edge/conformance.md).
   test:edge-conformance:talos:
     desc: Run the Galactic Edge provider conformance suite against a Talos/Cilium cell (EDGE_CONFORMANCE_KUBECONFIG, EDGE_CONFORMANCE_NODES, EDGE_CONFORMANCE_PROVIDER_IMAGE, EDGE_CONFORMANCE_TOOL_IMAGE)
     requires:
