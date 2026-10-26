@@ -1,37 +1,6 @@
-# Egress Translation Configuration
+# Egress translation configuration
 
-This is the reference doc for configuring the sharded, stateful egress
-translation tier — NAT66 (IPv6 to IPv6) and NAT64 (IPv6 to IPv4, RFC 6146)
-over one binary and one session table. It covers the `galactic-nat`
-binary, the `EgressShard` CRD, and the
-CNI-side settings that point tenant nodes at it. For a hands-on walkthrough
-of standing this up from nothing, see
-[docs/nat/getting-started.md](getting-started.md); this document only
-covers the "what", not the "why" or the step-by-step.
-
-> Last verified: 2026-09-25 against the current working tree of
-> `internal/config/nat.go`, `internal/config/cni.go`,
-> `cmd/galactic-nat/`, `config/galactic-nat/`,
-> `internal/plumbing/ebpf/natattach/`,
-> `internal/controller/egressshard_controller.go`, and
-> `deploy/containerlab/resources/galactic-nat/`.
-
-## Placement
-
-`galactic-nat` runs on every `galactic.datumapis.com/node: edge` node that
-also carries `galactic.datumapis.com/nat: enabled`, one DaemonSet per
-cluster, alongside `galactic-vrf` and, on nodes that opt into it,
-`galactic-gateway` (see [docs/node-labels.md](../node-labels.md)). An edge
-node without `nat=enabled`, a compute node, an unlabeled node and a
-control-plane node never run a shard. A shard there is one hop from the
-transit its masquerade addresses are originated into. Compute nodes run no
-shard: each compute node's tenant egress is SRv6-encapsulated toward its own
-site's edge shards (`GALACTIC_CNI_EGRESS_SHARD_SIDS`, [below](#shard-membership-galactic-cni-side)).
-
-`galactic-nat` used to run on compute nodes, one shard each. It moved because
-an edge node is where both a masquerade address and its replies belong; the
-move is also why it now shares that node's XDP hook with the gateway (see
-`GALACTIC_NAT_XDP_ATTACH`, under Option details below).
+`galactic-nat` provides sharded stateful NAT66 and NAT64. Use [deployment](deployment.md) for installation and verification, [active/active egress](active-active.md) for hashed shard selection, and [the rollout checklist](active-active-rollout.md) for qualification and rollback.
 
 ## `galactic-nat` configuration (`internal/config/nat.go`)
 
@@ -60,7 +29,7 @@ them with `galactic-gateway`, which runs from the same dispatcher by default.
 That is the whole process configuration. The shard's identity — its SID,
 masquerade addresses and NAT64 prefix — is not process configuration: it
 comes from the spec of the `EgressShard` targeting this node (see
-[below](#egressshard-crd-networkdatumapiscomv1alpha1)). The process attaches
+[below](#egressshard-crd-galacticdatumapiscomv1alpha1)). The process attaches
 its datapath at startup with no identity and programs one on reconcile, so a
 node without an `EgressShard` runs attached but claims no packet rather than
 crash-looping.
@@ -228,10 +197,10 @@ and the shard then says so at startup.
 
 `galactic-nat` runs `hostNetwork: true` and needs:
 
-| Capability  | Why                                                                                                                                                                        |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NET_ADMIN` | netlink XDP attach                                                                                                                                                         |
-| `BPF`       | eBPF program/map creation                                                                                                                                                  |
+| Capability  | Why                                                                                                                                                                                  |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `NET_ADMIN` | netlink XDP attach                                                                                                                                                                   |
+| `BPF`       | eBPF program/map creation                                                                                                                                                            |
 | `PERFMON`   | the verifier only allows pointer+scalar arithmetic on packet data (the SNAT/un-SNAT and NAT64 header rewrites) when the loading process is `perfmon_capable()`, even running as root |
 
 It also needs a real bpffs already mounted at `/sys/fs/bpf` on the host
@@ -453,260 +422,6 @@ egress is scheduled — `internal/plumbing/srv6.EgressDefaultRouteAdd`
 (called from a pod's own CNI ADD) fails outright if none of the
 configured shard SIDs are yet resolvable.
 
-## Active/active egress
-
-By default a compute node sends each tenant VRF to one shard: the first entry
-of `GALACTIC_CNI_EGRESS_SHARD_SIDS` that resolves, with every later entry
-standing by. Hashed mode spreads tenants across every healthy shard in the
-cluster instead, so each shard carries a share of the metro's egress and
-losing one costs only the sessions it held. Staging and production rollout,
-and rollback, follow
-[active-active-rollout.md](active-active-rollout.md).
-
-| Option                | Environment Variable                  | Set on                                          | Default   |
-| --------------------- | ------------------------------------- | ----------------------------------------------- | --------- |
-| Egress mode           | `GALACTIC_CNI_EGRESS_MODE`            | `galactic-cni`'s `credential-refresh` container | `ordered` |
-| Hash                  | `GALACTIC_CNI_EGRESS_HASH`            | `galactic-cni`'s `credential-refresh` container | `source`  |
-| Pin idle timeout      | `GALACTIC_CNI_EGRESS_PIN_IDLE`        | `galactic-cni`'s `credential-refresh` container | `2h4m`    |
-| Pool minimum (alerts) | `GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE` | `galactic-cni`'s `credential-refresh` container | `1`       |
-
-Unlike the shard list, these are read by `galactic-cni run`, the long-running
-container, not by the init container. A value that does not parse stops the
-container at startup rather than falling back to ordered mode, and so does
-hashed mode with more than three NAT64 prefixes in
-`GALACTIC_CNI_NAT64_PREFIX`.
-
-### Prerequisites
-
-- **The `EgressShard` CRD with `spec.drain`.** `galactic-cni` is built
-  against the `network` API version that adds it, but a Go dependency does
-  not change a cluster's schema: install the CRD from that `network` release
-  in every cluster first. Without it the API server prunes `spec.drain` and
-  a drain silently does nothing. Check by writing the field and reading it
-  back:
-  `kubectl patch egressshard <name> -n galactic-system --type=merge -p '{"spec":{"drain":false}}'`
-  then `kubectl get egressshard <name> -n galactic-system -o jsonpath='{.spec.drain}'`
-  must print `false`.
-- **`galactic-cni` may watch `EgressShard`s.** `config/galactic-cni/rbac.yaml`
-  grants `get`, `list` and `watch` on `egressshards`;
-  `kubectl auth can-i watch egressshards.galactic.datumapis.com -n galactic-system --as=system:serviceaccount:galactic-system:galactic-cni`
-  must answer `yes`.
-- **Every shard has its own identity and return route.** Each shard needs a
-  distinct `shardSID` locator, a distinct `shardAddressIPv6` and, for NAT64,
-  a distinct `shardAddressIPv4`, each originated from that shard's own node.
-  In ordered mode only the first shard carried traffic, so a second shard's
-  addresses may never have been tested: check that a reply to each of them
-  reaches that shard before tenants are spread onto it.
-
-### How a shard is chosen
-
-- **One group per translation class.** A compute node needs `::/0` for
-  NAT66 and one route per entry of `GALACTIC_CNI_NAT64_PREFIX` for NAT64.
-  Each route names the group for its class, and a group holds only the shards
-  that can translate that class: NAT66 needs a `shardAddressIPv6`; NAT64
-  toward a prefix needs a `shardAddressIPv4` and that prefix as the shard's
-  `nat64Prefix`, or, for the Well-Known Prefix `64:ff9b::/96`,
-  `translatesWellKnownPrefix`. A NAT66-only shard therefore never receives
-  NAT64 traffic, and a shard translating another NAT64 prefix never receives
-  this one's. A shard that is ready but cannot serve a class is counted as
-  `ineligible` for it and logged. When no shard can serve NAT66, `::/0`
-  gets no route, as an empty shard list gives none. When no shard can serve
-  a configured NAT64 prefix, its route still names its own empty group, so
-  its packets are dropped and counted as `group_empty` instead of matching
-  `::/0` and reaching a NAT66 shard. Either way
-  `GalacticEgressClassUnserved` fires. A cluster whose shards all serve one
-  family is a legitimate single-family deployment.
-- **The pool is the cluster.** One metro is one cluster, so a class's pool is
-  every eligible `EgressShard` in `galactic-cni`'s namespace. A shard is a
-  candidate once its status carries a `shardSID` and both `Programmed` and
-  `Ready` are `True`, and it is not being deleted.
-  `GALACTIC_CNI_EGRESS_SHARD_SIDS` is not used for placement in hashed mode.
-- **A shard counts only while it is reachable.** A dead node's `EgressShard`
-  status goes stale, but its BGP session drops and the route to its SID is
-  withdrawn. A candidate takes tenants only while its SID resolves to a
-  neighbor on an SRv6 uplink. `galactic-cni` rebuilds the groups on every
-  route or neighbor change that can affect a candidate, and every 30 seconds
-  as a backstop, so failover takes as long as BGP takes to withdraw the
-  route, plus a fraction of a second.
-- **The datapath picks per packet.** `usid_egress` hashes the packet and looks
-  the hash up in the group's 1021-slot Maglev table. When a shard joins or
-  leaves, about `1/N` of tenant addresses move.
-- **Placement is per node.** The hash includes the VRF's Linux routing table
-  ID, which each compute node allocates for itself. Every node builds the same
-  Maglev table, but the same tenant address on two nodes may land on two
-  shards. Nothing depends on it doing otherwise: a tenant's NAT sessions,
-  its pins and the source SID a shard replies to are all specific to the node
-  it runs on, so a workload that moves to another node starts new sessions
-  wherever it lands.
-- **`source` hashes the tenant's address.** Every connection from one tenant
-  address uses one shard per class and so one public address per family,
-  which RFC 4787 REQ-2 asks for and which sites that tie a login to the
-  client address rely on. One heavy tenant address can never use more than
-  one shard. `flow` hashes the 5-tuple and spreads that address over every
-  shard, but gives up the single public address. Placement balances
-  addresses (or flows), not bytes: shards serving a few heavy tenants carry
-  more traffic than their count suggests.
-- **Fragments.** In `flow` mode every fragment of a datagram, the first
-  included, hashes on its addresses and protocol only, so the fragments of
-  one datagram reach one shard. That keeps the shard choice consistent; it
-  says nothing about whether the shard translates fragments, which the NAT
-  datapath does not fully support (see Known constraints).
-- **Pins hold sessions in place.** The first packet from a tenant address
-  (in `flow` mode, from a flow) records the shard it went to. Later packets
-  follow that pin while the shard is reachable, even after a new shard joins
-  or the pinned shard starts draining. A pin expires after
-  `GALACTIC_CNI_EGRESS_PIN_IDLE` without a packet, which matches the shard's
-  longest idle timeout, so a pin never outlives the session it protects. Pins
-  live in a 65536-entry LRU on each compute node and are not shared between
-  nodes. One evicted under pressure falls back to the Maglev table, which
-  gives the same shard unless the membership changed since it was made. `0`
-  turns pins off.
-- **Sessions are not replicated.** A session lives on one shard. When a shard
-  fails, its sessions break and their tenants are placed elsewhere; only
-  sessions on surviving shards continue.
-
-### Draining and removing a shard
-
-Removing a shard without breaking its sessions takes three steps:
-
-1. Set `spec.drain: true`:
-
-   ```sh
-   kubectl patch egressshard <name> -n galactic-system --type=merge -p '{"spec":{"drain":true}}'
-   ```
-
-   A draining shard takes no new tenant address, and every pinned one keeps
-   reaching it until it goes idle. The shard itself changes nothing: it keeps
-   translating, advertising its SID and receiving replies.
-2. Wait for its sessions to end: `galactic_nat_sessions` on its node falls to
-   zero, or to a level you accept losing. A tenant address that keeps
-   sending refreshes its pin forever and keeps the shard busy; drain cannot
-   move it without breaking its sessions, so decide how long to wait.
-3. Delete the `EgressShard` (and remove the node's `nat=enabled` label).
-
-Deleting an `EgressShard` is not a drain. Deletion withdraws the shard's
-advertisement and clears its datapath at once, every session on it breaks,
-and `galactic-cni` drops it from every group as soon as it sees the deletion.
-With pins turned off (`GALACTIC_CNI_EGRESS_PIN_IDLE=0`) there is nothing to
-hold a tenant on a draining shard, so draining moves every one of its tenant
-addresses at once and breaks their sessions just as a failure would.
-
-### When nothing is reachable
-
-There is no spill-over to another metro. When no shard of a class is
-reachable, a new attachment fails its ADD, as it does in ordered mode, and an
-existing VRF's packets of that class are dropped and counted as `group_empty`
-rather than sent untranslated into the node's main table. A cluster with no
-`EgressShard` at all gives VRFs no egress route, which is not an error.
-
-### How the groups are published
-
-A group is one immutable snapshot: its Maglev table and every member's SID,
-next hop, drain state and slot generation in a single value. `galactic-cni`
-writes a new one-entry inner map for every change and swaps it into
-`egress_shard_groups`, an `ARRAY_OF_MAPS`, in one update. A packet therefore
-sees the old snapshot or the new one, never a mix of the two; an earlier
-design that updated ordinary array values in place let a packet read one
-shard's SID with another's MAC addresses while a slot was rewritten.
-
-Every member slot carries a generation that identifies the shard's tenure of
-it; a pin is honoured only while its slot still carries the generation it
-recorded. Generations come from a counter published in the snapshot
-(`next_slot_generation`) and a high-water mark in the running process that
-also covers snapshots it built but failed to publish. Neither goes down:
-disabling a group keeps the counter, and a restarted `galactic-cni` resumes
-from the published value. A generation only an unpublished snapshot held was
-never visible to a packet, so no pin can hold it. The counter is 32 bits and
-skips 0; wrapping takes four billion slot assignments, far longer than any
-pin lives.
-
-### Changing the NAT64 prefix list
-
-A group keeps the class it was first published for, so a class keeps its
-group across edits to `GALACTIC_CNI_NAT64_PREFIX` and across restarts. The
-pinned group map is the record of which group serves which class; nothing
-depends on the order of the list.
-
-- **Reordering** the list changes nothing.
-- **Adding** a prefix gives it a group that has never been used, or a retired
-  one that no route names any more.
-- **Removing** a prefix retires its group. Within one sweep of `galactic-cni`
-  restarting, the group is marked closing, so no CNI ADD names it again, and
-  every VRF's route toward the removed prefix is deleted. That leaves the
-  VRF exactly as an attachment made under the new list: traffic to the old
-  prefix follows `::/0`. The next sweep that finds no route naming the group
-  disables it, and only then can another prefix take it.
-- **Replacing** a prefix when all three NAT64 groups are in use takes two
-  sweeps: the new prefix gets a group once the old one is disabled, and has
-  no group, so no route, until then.
-
-A route the ingress sidecar owns is never deleted by `galactic-cni`, so a
-group it still names stays retired but enabled, serving its old class, and a
-new prefix waits for it. A route that names a group published for a
-different class, which only an earlier release could leave behind, is moved
-to its own class's group, even an empty one, which drops rather than
-translate the wrong class.
-
-### Turning it on and off
-
-Follow [active-active-rollout.md](active-active-rollout.md). In short: install
-the prerequisites, set `GALACTIC_CNI_EGRESS_MODE=hashed` and roll
-`galactic-cni`. Within one sweep of starting, each node builds the groups and
-moves every VRF route that pointed at a shard onto its class's group. The
-move breaks sessions whose new shard differs from the one they were on,
-roughly `(N-1)/N` of them, once.
-
-To go back, set `GALACTIC_CNI_EGRESS_MODE=ordered` and roll `galactic-cni`
-again, with `GALACTIC_CNI_EGRESS_SHARD_SIDS` still set on the init container.
-Each node first marks its groups closing, so no CNI ADD writes a new route
-naming one while they keep forwarding; then moves every route back to the
-first reachable shard of the static list; and disables the groups only after
-a sweep that read and rewrote every route without an error and found none
-left. A sweep that fails leaves the groups forwarding and is retried. A CNI
-ADD that read the groups open checks again after writing its routes and
-rewrites them in ordered mode if the groups closed meanwhile.
-`galactic_cni_egress_group_routes` reaching `0` on every node is the signal
-that no route names a group any more. **Do not roll back to a release that
-predates hashed mode until it does.** An older `usid_egress` reads a group
-route as a redirect to a nonexistent interface and drops the traffic.
-
-### Observability
-
-| Metric                                                     | Meaning                                                                                                                              |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `galactic_cni_egress_mode{mode}`                           | 1 for the configured mode. Always present, so a node configured for hashed mode that never published a group still says so.          |
-| `galactic_cni_egress_shard_watch_synced`                   | 1 once the `EgressShard` watch has listed the cluster.                                                                               |
-| `galactic_cni_egress_group_routes{class}`                  | Routes naming each class's group after the last successful sweep. Must be 0 before rolling back to an older release.                 |
-| `galactic_cni_egress_sweep_errors_total{stage}`            | Sweep failures: `apply`, `refresh`, `watch`, `close`, `disable`.                                                                     |
-| `galactic_cni_egress_pool_members{class,state}`            | Each class's shards: `active`, `draining`, `unreachable`, `local` (runs on this node), and `ineligible` (cannot translate it).       |
-| `galactic_cni_egress_pool_enabled{class}`                  | 1 while the class's group takes new routes; 0 while it is being retired.                                                             |
-| `galactic_cni_egress_pool_min_active`                      | `GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE`.                                                                                               |
-| `galactic_cni_egress_shard_packets_total{shard_sid,class}` | Tenant packets this node sent to each shard for each class, since the shard took its slot. `..._bytes_total` is the same in bytes.   |
-| `galactic_cni_egress_shard_selections_total{result}`       | How each packet was placed: `maglev`, `pin_hit`, `pin_stale` (re-placed), or dropped as `group_empty`, `shard_dead`, `parse_failed`. |
-
-A node that never published a group exports no `pool_*` series. That is not
-a healthy empty pool: read it together with `galactic_cni_egress_mode` and
-`galactic_cni_egress_shard_watch_synced`.
-
-A shard whose `spec.targetRef` names the node itself is `local` on that node.
-The node originates the shard's locator, so the SID never resolves over an
-uplink there, and it takes no tenant from that node. Hashed mode does not
-resolve a local shard's SID at all. Ordered mode, which tries each SID in the
-list, fails to resolve it and moves on, so neither mode sends that node's
-traffic to its own shard. An edge node running the cluster's only shard
-therefore has no active member. It also has no tenant, so
-`GalacticEgressPoolEmpty` and `GalacticEgressPoolBelowMinimum` fire only on a
-node with routes on the group (`galactic_cni_egress_group_routes` above 0):
-an empty pool on a node with nothing to egress is no outage. `config/monitoring/` alerts on these
-(`GalacticEgressPoolEmpty`, `GalacticEgressPoolBelowMinimum`,
-`GalacticEgressClassUnserved`, `GalacticEgressShardGroupDropping`,
-`GalacticEgressShardWatchNotSynced`, `GalacticEgressSweepFailing`,
-`GalacticCNIMetricsDown`). That file is the tested source of the rules, not
-where they run: on Datum's infra the rules are evaluated centrally from
-infra's own copy, so they take effect only once infra installs them there.
-To compare shards' load from their own side, compare `galactic_nat_sessions`
-across the cluster's shard nodes.
-
 ## Session table
 
 Every session is two rows in `nat_conn_table`, a 65536-entry LRU hash: a
@@ -742,127 +457,6 @@ gone idle for its protocol's timeout, compile-time constants in `nat.c`:
 - **Upgrade.** A restart reuses the pinned table and keeps every session. A
   release that changes the row layout recreates it instead, so that one
   restart drops every session on the shard.
-
-## Verifying
-
-```sh
-kubectl get egressshard -n galactic-system -o wide
-kubectl get bgpadvertisement -n galactic-system | grep nat66
-```
-
-Metrics, exposed on `GALACTIC_NAT_METRICS_PORT` (`9182` by default):
-
-| Metric                                                 | Type    | Labels                                               | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ------------------------------------------------------ | ------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `galactic_nat_conns`                                   | Gauge   | `family`                                             | Rows in this shard's `nat_conn_table`, expired sessions included. A session holds two rows. Expect it near capacity on a busy shard; see [Session table](#session-table).                                                                                                                                                                                                                                                                                                               |
-| `galactic_nat_sessions`                                | Gauge   | `family`, `proto`                                    | Live sessions, one per session within its idle timeout. `proto` is `tcp`, `udp` or `icmp`. Every series is reported, at zero when empty.                                                                                                                                                                                                                                                                                                                                                |
-| `galactic_nat_conn_table_oldest_row_age_seconds`       | Gauge   | —                                                    | Seconds since the least recently seen session in the table, expired ones included, last translated a packet. On a near-full table it approximates how long an idle session lasts before the LRU evicts it; on a table with room it only grows. Absent while the table holds no sessions.                                                                                                                                                                                                |
-| `galactic_nat_conn_table_max_entries`                  | Gauge   | —                                                    | Capacity of `nat_conn_table` in rows, read from the loaded map.                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `galactic_nat_drops_total`                             | Counter | `reason`                                             | Packets dropped by the `nat_ingress` program, by reason. Cumulative for the life of the *node*, not the process: the counters live in a map pinned under `natattach.PinDir`, which a restarting shard reuses as-is. Always read it as a delta — an absolute value includes every transient the node has ever seen, and zeroing it takes `bpftool map update` against the pin directly.                                                                                                  |
-| `galactic_nat_packets_total`                           | Counter | `family`, `direction`, `action`                      | Packets the shard translated and queued for transmit. `direction` is `outbound` (tenant to internet) or `return` (internet to tenant), `action` is `tx` (out the uplink it arrived on) or `redirect` (out another). Messages the shard sends on its own behalf (Packet Too Big, Fragmentation Needed, echo replies) are not translations and are not counted. Every combination is reported, at zero when unused. Cumulative for the life of the node, like `galactic_nat_drops_total`. |
-| `galactic_nat_bytes_total`                             | Counter | `family`, `direction`, `action`                      | Bytes of the packets in `galactic_nat_packets_total`: the translated IP packet, without the Ethernet header or the SRv6 outer header a return packet carries.                                                                                                                                                                                                                                                                                                                           |
-| `galactic_nat_datapath_enabled`                        | Gauge   | —                                                    | 1 when `GALACTIC_NAT_DATAPATH_ENABLED` turns the datapath on, 0 when it is off.                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `galactic_nat_datapath_attached`                       | Gauge   | —                                                    | 1 once startup has loaded the program and attached it to the uplinks or the XDP dispatcher. 0 before that, and while the datapath is turned off.                                                                                                                                                                                                                                                                                                                                        |
-| `galactic_nat_programmed`                              | Gauge   | —                                                    | 1 while `shard_config_table` holds an EgressShard identity, 0 while the shard claims no packet.                                                                                                                                                                                                                                                                                                                                                                                         |
-| `galactic_nat_uplink_covered`                          | Gauge   | `interface`                                          | 1 for each resolved uplink the datapath translates on, 0 for one it misses, whose traffic leaves untranslated. Absent while the datapath is turned off.                                                                                                                                                                                                                                                                                                                                 |
-| `galactic_nat_family_enabled`                          | Gauge   | `family`                                             | 1 when the programmed identity has a masquerade address for that family (`shardAddressIPv6` for `nat66`, `shardAddressIPv4` for `nat64`).                                                                                                                                                                                                                                                                                                                                               |
-| `galactic_nat_info`                                    | Gauge   | `shard_sid`, `nat64_prefix`, `xdp_attach`, `version` | Always 1. `shard_sid` and `nat64_prefix` are empty while unprogrammed, and `xdp_attach` is `off` while the datapath is turned off.                                                                                                                                                                                                                                                                                                                                                      |
-| `galactic_nat_masquerade_ports_in_use`                 | Gauge   | `family`, `address`, `proto`                         | Distinct masquerade ports (or ICMP Echo Identifiers) live sessions hold on the address, toward any destination. A port is claimed per destination address and port, so this can approach the range on a healthy shard; see the next series for exhaustion. Every protocol of every served address is reported, zero included.                                                                                                                                                           |
-| `galactic_nat_masquerade_destination_ports_max`        | Gauge   | `family`, `address`, `proto`                         | The most ports live sessions hold toward one destination address and port. A claim probes 8 of the range's candidates, so new flows to that destination fail with probability about (this / range)^8: 0.4% at half full.                                                                                                                                                                                                                                                                |
-| `galactic_nat_masquerade_port_range`                   | Gauge   | —                                                    | Ports available toward each destination, `NAT_PAT_PORT_RANGE` (28000).                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `galactic_nat_dispatch_lease_renewals_total`           | Counter | `slot`, `result`                                     | Renewals of the shard's XDP dispatcher slot lease, `success` or `error`. Present in dispatch mode only.                                                                                                                                                                                                                                                                                                                                                                                 |
-| `galactic_nat_dispatch_lease_expiry_timestamp_seconds` | Gauge   | `slot`                                               | Unix time the slot's lease, as last renewed, expires. The dispatcher skips the slot once it passes. Present in dispatch mode only.                                                                                                                                                                                                                                                                                                                                                      |
-| `galactic_nat_session_creates_total`                   | Counter | `family`, `proto`                                    | New sessions opened, each a masquerade port (or ICMP Echo Identifier) the shard claimed. A claim that found no port is a `*_pat_exhausted` drop instead, and one that adopted a live session's lost port is not counted. Every combination is reported, zero included.                                                                                                                                                                                                                  |
-| `galactic_nat_masquerade_claim_probes_total`           | Counter | `family`, `proto`, `probes`                          | Those claims by how many of the 8 candidates each probed. With a share u of a destination's ports held, a claim needs more than k probes with probability of roughly u^k, so a rising share above `probes="1"` is the earliest sign destinations are filling.                                                                                                                                                                                                                           |
-| `galactic_nat_uplink_resolve_errors_total`             | Counter | —                                                    | Times re-resolving the uplinks after a link or route change failed. The shard keeps its previous coverage, so uplinks that appeared since stay uncovered until a later resolution succeeds.                                                                                                                                                                                                                                                                                             |
-| `galactic_nat_uplink_rx_queue_packets_total`           | Counter | `interface`, `driver`, `queue`                       | Packets one NIC receive queue of an uplink received, from the driver's `ethtool -S` statistics. Exported for `bnxt_en`, `ixgbe`, `ice`, `i40e` and `mlx5_core`; any other driver exports nothing.                                                                                                                                                                                                                                                                                       |
-| `galactic_nat_uplink_rx_queue_discards_total`          | Counter | `interface`, `driver`, `queue`                       | Packets one NIC receive queue of an uplink discarded before the datapath saw them, so `galactic_nat_drops_total` never counts them. Only drivers that count discards per queue report it: `bnxt_en` today.                                                                                                                                                                                                                                                                              |
-
-The same port also serves the `EgressShard` reconciler's controller-runtime
-metrics (`controller_runtime_reconcile_total{controller="egressshard"}`,
-`controller_runtime_reconcile_errors_total`, `workqueue_*`), registered in the
-same registry as the series above.
-
-`config/monitoring/podmonitor-galactic-nat.yaml` scrapes every shard as
-`job="galactic-nat"` with a `node` label.
-
-A full table alone is not a problem. The table is evicting live sessions
-when it is full and its oldest row is younger than the longest session
-timeout, 7440 s: idle established TCP sessions are then evicted before they
-expire. `GalacticNatSessionTableEvictingLive` in
-`config/monitoring/prometheusrule.yaml` fires on this query after 15
-minutes:
-
-```promql
-sum by (node) (galactic_nat_conns) / on (node) max by (node) (galactic_nat_conn_table_max_entries) > 0.9
-  and on (node) max by (node) (galactic_nat_conn_table_oldest_row_age_seconds) < 7440
-```
-
-Drop reasons currently defined (`internal/plumbing/ebpf/natprog/dropreason.go`):
-
-| Reason                                                                             | Meaning                                                                                                                                                                                                                                         |
-| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `nat66_no_return_conn`, `nat64_no_return_conn`                                     | A TCP or UDP reply matched no live session.                                                                                                                                                                                                     |
-| `nat66_malformed_return`, `nat64_malformed_return`                                 | A reply too short to parse, or not TCP or UDP.                                                                                                                                                                                                  |
-| `nat66_malformed_forward`, `nat64_malformed_forward`                               | A tenant packet too short to parse, or of a protocol the family does not translate.                                                                                                                                                             |
-| `nat66_pat_exhausted`, `nat64_pat_exhausted`                                       | Every port or Echo Identifier in the probe held by a live session. `GalacticNatPortExhausted` fires after 15 minutes of them.                                                                                                                   |
-| `nat64_v4_fragment`, `nat64_v4_options`                                            | An IPv4 reply that was fragmented or carried options.                                                                                                                                                                                           |
-| `nat64_shard_unavailable`                                                          | A NAT64 packet reached a shard with no IPv4 masquerade address.                                                                                                                                                                                 |
-| `nat64_non_global_dest`                                                            | A tenant packet, Echo included, to a NAT64 address whose embedded IPv4 address is not globally reachable (RFC 6890 special-purpose, multicast or reserved).                                                                                     |
-| `nat66_icmp_malformed`                                                             | An ICMPv6 message, or the packet an ICMPv6 error quotes, too short to parse.                                                                                                                                                                    |
-| `nat66_icmp_no_conn`                                                               | An Echo Reply, or an ICMPv6 error, that matched no live session.                                                                                                                                                                                |
-| `icmp_untranslatable`                                                              | A well-formed ICMP message the shard has no translation for: an ICMP type it does not handle, an ICMPv4 error RFC 7915 says to drop, a tenant sending anything but an Echo Request, or an error quoting a packet the shard could not have sent. |
-| `icmp_unsolicited`                                                                 | An Echo Request addressed to a masquerade address itself, with the echo responder off.                                                                                                                                                          |
-| `nat64_icmp_malformed`                                                             | An ICMPv4 message, or the packet an ICMPv4 error quotes, too short to parse; or a tenant's ICMPv6 bound for a NAT64 address that is.                                                                                                            |
-| `nat64_icmp_no_conn`                                                               | An ICMPv4 Echo Reply, or an ICMPv4 error, that matched no live session.                                                                                                                                                                         |
-| `icmp_rate_limited`                                                                | A reply the echo responder would have sent, refused by the per-CPU token bucket.                                                                                                                                                                |
-| `fib_no_neigh`, `fib_unreachable`, `fib_frag_needed`, `fib_lookup_failed`          | The shard translated a packet and could not resolve where to send it.                                                                                                                                                                           |
-| `adjust_head_failed`, `hop_limit_exceeded`, `no_egress_ifindex`, `redirect_failed` | The shard translated a packet and could not transmit it.                                                                                                                                                                                        |
-
-A tenant can ping through NAT66: its Echo Request is translated like a UDP
-datagram, the Echo Identifier masqueraded in the port's place, and the
-ICMPv6 errors the internet sends back about its flows — Destination
-Unreachable, Packet Too Big, Time Exceeded, Parameter Problem — reach it
-rewritten to describe the packet it sent. A ping to a NAT64-synthesized
-address works too: the shard translates ICMPv6 Echo to ICMPv4 Echo and back.
-A reply that fits the internet path but not the fabric once the shard
-re-encapsulates it — 40 bytes bigger over NAT66, 60 over NAT64 — is still
-dropped and counted as `fib_frag_needed`, but its sender now hears why: the
-shard sends it a Packet Too Big, or a Fragmentation Needed over NAT64, from
-the masquerade address, carrying the fabric route's MTU less those bytes.
-TCP rarely needs this, since the fabric's MSS clamp keeps its segments small
-enough; UDP and ICMP do.
-
-ICMPv4 errors about a tenant's NAT64 flows reach it as the ICMPv6 errors RFC
-7915 section 4.2 maps them to, quoted packet translated too, from the
-reporting router's address synthesized into the prefix the flow used — so
-traceroute names each IPv4 hop, and a Fragmentation Needed arrives as a
-Packet Too Big for 20 bytes more than the IPv4 MTU. The quote is carried
-whole unless the ICMPv6 packet would exceed 1280 bytes or the message
-carries RFC 4884 extensions; then it is cut to the first 8 bytes of the
-quoted transport header, which is all the kernel matches an error on.
-
-The `fib_*` reasons and the three after them all mean the same class of
-thing: the shard translated a packet and then could not get rid of it.
-Every leg of this datapath resolves its own next hop and transmits from
-the driver, forward and return alike — see the constraint below — so the
-kernel's output path is doing none of that work and none of its failures
-are the kernel's to report.
-
-```sh
-kubectl exec -n galactic-system <galactic-nat-pod> -- \
-  wget -qO- http://localhost:9182/metrics | grep galactic_nat_
-```
-
-Confirm the eBPF program is attached (in dispatch mode, in the dispatcher's
-egress slot) and
-translating. On the `EgressShard` object, `Ready` should read
-`DatapathAttached` and `Programmed` should read `AddressesProgrammed`. `Ready` reading `UplinksMissing` names the uplinks
-whose traffic the shard is not translating:
-
-```sh
-kubectl get egressshard <name> -n galactic-system -o jsonpath='{.status.conditions}'
-```
 
 ## Known constraints
 
@@ -973,17 +567,47 @@ knowing before you rely on this component in production:
   `EgressShard`s instead, and uses the list only to move VRFs back when
   switching to ordered mode.
 
-## See also
+<a id="active-active-egress"></a>
+<a id="activeactive-egress"></a>
 
-- [docs/nat/getting-started.md](getting-started.md) — a hands-on
-  walkthrough for standing this up from nothing.
-- [docs/node-labels.md](../node-labels.md) — the node-labeling strategy
-  shared across every Galactic component.
-- [docs/router/configuration.md](../router/configuration.md) — the
-  `GALACTIC_ROUTER_*` environment variables a NAT66 shard node's
-  co-located `galactic-router` process also needs.
-- [docs/agents/ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md) —
-  the edge XDP programs that share the dispatcher with the shard.
-- [docs/cni/configuration.md](../cni/configuration.md) — the full
-  `galactic-cni` conflist/runtime configuration surface
-  `GALACTIC_CNI_EGRESS_SHARD_SIDS` is one part of.
+## Active/active egress
+
+Shard selection, class isolation, pinning, draining and publication are described in [active/active egress](active-active.md).
+
+<a id="prerequisites"></a>
+
+See [Prerequisites](active-active.md#prerequisites).
+
+<a id="how-a-shard-is-chosen"></a>
+
+See [How a shard is chosen](active-active.md#how-a-shard-is-chosen).
+
+<a id="draining-and-removing-a-shard"></a>
+
+See [Draining and removing a shard](active-active.md#draining-and-removing-a-shard).
+
+<a id="when-nothing-is-reachable"></a>
+
+See [When nothing is reachable](active-active.md#when-nothing-is-reachable).
+
+<a id="how-the-groups-are-published"></a>
+
+See [How the groups are published](active-active.md#how-the-groups-are-published).
+
+<a id="changing-the-nat64-prefix-list"></a>
+
+See [Changing the NAT64 prefix list](active-active.md#changing-the-nat64-prefix-list).
+
+<a id="turning-it-on-and-off"></a>
+
+See [Turning it on and off](active-active.md#turning-it-on-and-off).
+
+<a id="observability"></a>
+
+See [Observability](active-active.md#observability).
+
+
+<a id="placement"></a>
+<a id="verifying"></a>
+
+See [deployment and verification](deployment.md).

@@ -39,16 +39,16 @@ Both sweeps below are conceptually "GC" and live in the same `internal/gc`
 package, but run as two unrelated ticker loops in two different processes,
 each reading only the liveness signal it can see for itself:
 
-| Sweep                                  | Process                          | Reads                                                                | Removes                                                                              |
-| --------------------------------------- | --------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Sweep                                   | Process                            | Reads                                                                               | Removes                                                                                 |
+| --------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | Orphaned CRD + kernel VRF sweep         | `galactic-router` (`GCReconciler`) | `/var/run/netns` on this node, `BGPRouter`/`BGPAdvertisement`/`BGPVRFInstance` CRDs | `BGPAdvertisement`, `BGPVRFInstance` CRDs; kernel VRF interfaces                        |
-| eBPF `vrf_table` sweep                  | `galactic-cni`'s `run` container    | the pinned eBPF `vrf_table` map, `BGPRouter`/`BGPVRFInstance` CRDs     | stale `vrf_table` map entries (`Block`, `Argument` keys)                                |
+| eBPF `vrf_table` sweep                  | `galactic-cni`'s `run` container   | the pinned eBPF `vrf_table` map, `BGPRouter`/`BGPVRFInstance` CRDs                  | stale `vrf_table` map entries (`Block`, `Argument` keys)                                |
 
-They stay split rather than merging into one loop because the pinned
-`vrf_table` map only exists inside `galactic-cni`'s `run` container, which is
-the process holding the `/sys/fs/bpf` hostPath mount and `CAP_BPF` — RBAC and
-capabilities `galactic-router`'s own DaemonSet neither has nor, for this
-alone, should need.
+The loops have different ownership and liveness inputs. The installer loads and
+repairs the uSID maps and sweeps their stale VRF entries; the router reclaims
+orphaned CRDs and kernel VRFs. Both processes now mount `/sys/fs/bpf` and the
+router has `CAP_BPF` for its binding and traffic-policy work. The split is not
+an isolation boundary based on the router lacking BPF access.
 
 ---
 

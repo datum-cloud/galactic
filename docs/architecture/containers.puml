@@ -1,59 +1,36 @@
 @startuml containers
-!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
-
+!include <C4/C4_Container>
 LAYOUT_WITH_LEGEND()
-
-title Galactic — Container Diagram (the four deployable applications)
-
-Person(tenant, "Tenant / Developer", "Deploys pods/VMs; authors NetworkService specs")
-Person_Ext(client, "External Client")
-
+title Galactic deployment groups
+System_Ext(k8s, "Kubernetes API")
+System_Ext(nso, "NSO cell manager", "Owns VPC and attachment lifecycle")
 System_Boundary(galactic, "Galactic") {
-    Container(cnichain, "galactic-veth CNI chain", "Go binaries: galactic-cni (installer), galactic-veth/galactic-tap (master plugins), galactic-ipam, galactic-bgp, galactic-route", "Wires pods/VMs into VPC networks: VRF, veth/tap, IPAM, SRv6 registration; writes BGP CRDs")
-    Container(usidbpf, "SRv6 uSID datapath", "TC-BPF (cilium/ebpf)", "Kernel decap/encap for VPC traffic; loaded by galactic-cni, map entries registered by galactic-bgp")
-
-    Container(router, "galactic-router", "Go, controller-runtime", "Reconciles BGPRouter/BGPPeer/BGPAdvertisement/BGPPolicy/BGPVRFInstance CRDs; runs orphaned-CRD/VRF GC; own DaemonSet on every compute *and* gateway-role node")
-    Container(gobgp, "Embedded GoBGP", "osrg/gobgp v4 (in-process library)", "Tenant-role BGP speaker; EVPN path origination, per-node RIB (ephemeral)")
-
-    Container(gateway, "galactic-gateway", "Go, controller-runtime", "Reconciles NetworkGateway/NetworkService CRDs; anycast VIP advertisement; own single-container DaemonSet on gateway-role nodes")
-    Container(edgebpf, "Edge XDP DSR datapath", "XDP (cilium/ebpf)", "DSR (Direct Server Return) load-balancing over a Maglev consistent-hash ring on the gateway node's public interface")
-
-    Container(nat66, "galactic-nat", "Go, controller-runtime", "Reconciles EgressShard CRD; publishes a BGPAdvertisement for this shard's SID (its covering /64, one destination per tenant Argument) + public address (/128); own DaemonSet on every compute node")
-    Container(nat66bpf, "NAT66 egress XDP datapath", "XDP (cilium/ebpf)", "Sharded, stateful SNAT/un-SNAT for tenant egress traffic on the shard's uplink interface")
+    Container(cni, "galactic-cni and CNI chain", "Go / TC-BPF", "Installer, workload attachment, uSID datapath and map repair; nodes with galactic=router")
+    Container(router, "galactic-router", "Go / embedded GoBGP", "Tenant EVPN, policy and backend bindings; galactic=router or control for reflectors")
+    Container(gateway, "galactic-gateway", "Go / XDP", "Anycast L4 ingress; node=edge and gateway=enabled")
+    Container(nat, "galactic-nat", "Go / XDP", "Stateful NAT66/NAT64 shards; node=edge and nat=enabled")
+    Container(edge, "galactic-edge", "Go / TC-BPF", "Provider attachment programming and forwarding gates; node=edge and edge=enabled")
+    Container(vrf, "galactic-vrf", "Go / TC-BPF", "Ingress sidecar VPC forwarding; placed by its owning workload")
+    Container(cell, "galactic-controller cell", "Go", "Policy admission, pod injection, programming status; optional Edge core")
+    Container(identity, "galactic-controller fabric", "Go", "Central network identity allocation; separate hub/IPAM credentials")
+    Container(frr, "fabric-router", "FRR / fabric-config-agent", "Underlay sessions and per-node config activation; fabric=router or control")
+    Container(fabricctl, "fabric-router-controller", "Go", "Compile revisions; optional rollout and topology generation")
+    Container(api, "fabric-api", "Go / mTLS gRPC", "Optional node diagnostics, cell gateway, certificate sync and janitor")
 }
-
-Container_Ext(crds, "BGP / Gateway / NAT66 CRDs", "galactic.datumapis.com API", "BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance, NetworkGateway, NetworkService, EgressShard")
-Container_Ext(vpccrds, "VPC / VPCAttachment CRDs", "galactic.datumapis.com API", "Owned by the companion VPC operator")
-Container_Ext(fabric, "fabric-router", "FRR DaemonSet", "eBGP underlay reachability")
-System_Ext(k8sapi, "Kubernetes API Server")
-
-' CNI chain internals
-Rel(tenant, cnichain, "Triggers ADD/DEL", "CNI invocation by container runtime")
-Rel(cnichain, vpccrds, "Reads pre-populated identifiers", "CNI config / NAD annotation")
-Rel(cnichain, crds, "Writes BGPVRFInstance + BGPAdvertisement", "bare controller-runtime client")
-Rel(cnichain, usidbpf, "Registers locator/function/vrf_table map entries", "cilium/ebpf")
-
-' Router internals
-Rel(router, crds, "Watches BGP CRDs; updates status", "controller-runtime manager")
-Rel(router, gobgp, "Applies DesiredRouter (peers, VRFs, EVPN paths, policies)", "in-process")
-Rel(router, usidbpf, "GC sweeps stale vrf_table entries", "cilium/ebpf")
-Rel(gobgp, fabric, "Peers over eBGP underlay", "eBGP")
-
-' Gateway internals
-Rel(gateway, crds, "Reconciles NetworkGateway/NetworkService; reads BGPRouter/BGPAdvertisement/BGPVRFInstance for uSID resolution; writes per-rule BGPAdvertisement", "controller-runtime manager")
-Rel(gateway, edgebpf, "Loads/attaches XDP program; writes vip_table / encap_config_table", "cilium/ebpf")
-Rel(client, edgebpf, "External ingress traffic to VIP:port", "IPv6")
-Rel(gateway, router, "Co-located on the same gateway-role node -- separate pod/DaemonSet, not a sidecar", "no direct RPC")
-
-' NAT66 internals
-Rel(nat66, crds, "Reconciles EgressShard; reads this node's own BGPRouter; creates/updates/deletes the shard's BGPAdvertisement", "controller-runtime manager")
-Rel(nat66, nat66bpf, "Loads/attaches XDP program; reads nat_conn_table / drop_reasons for metrics", "cilium/ebpf")
-Rel(usidbpf, nat66bpf, "Tenant VRF default egress route SRv6-encapsulates toward a live shard SID (galactic-cni side, see GALACTIC_CNI_EGRESS_SHARD_SIDS)", "SRv6, fabric-wide")
-Rel(nat66, router, "Co-located on the same compute node -- separate pod/DaemonSet", "no direct RPC")
-
-Rel(cnichain, k8sapi, "Node lookup, kubeconfig refresh", "client-go")
-Rel(router, k8sapi, "Full manager + reconcile", "client-go")
-Rel(gateway, k8sapi, "Full manager + reconcile", "client-go")
-Rel(nat66, k8sapi, "Full manager + reconcile", "client-go")
-
+Rel(nso, k8s, "Writes VPCs and attachments")
+Rel(cni, k8s, "Writes attachment BGP state")
+Rel(router, k8s, "Reconciles routing and bindings")
+Rel(gateway, k8s, "Reads services; writes BGP advertisements")
+Rel(nat, k8s, "Reconciles shards; writes BGP advertisements")
+Rel(edge, k8s, "Programs attachments; reports gates and release")
+Rel(cell, k8s, "Admits, reconciles and reports")
+Rel(identity, k8s, "Publishes identities on the hub")
+Rel(fabricctl, k8s, "Writes revisions, releases and generated peers")
+Rel(frr, k8s, "Reads node configuration and activation intent")
+Rel(api, frr, "Reads routing state", "vty / BMP")
+Rel(router, cni, "Programs shared pinned maps", "BPF")
+Rel(cni, nat, "Sends tenant egress", "SRv6")
+Rel(gateway, cni, "Sends ingress to backends", "SRv6")
+Rel(vrf, cni, "Registers ingress and return-path state", "Pinned BPF maps")
+Rel(router, frr, "Uses underlay IP reachability for EVPN sessions")
 @enduml
