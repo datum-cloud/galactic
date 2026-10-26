@@ -1,0 +1,45 @@
+# ---
+# Workflow: Documentation
+# Checks local Markdown navigation, API resource coverage and generated references.
+# Runs for all PR bases, including stacked PRs, and pushes to main.
+# No cluster, container runtime, eBPF build or secrets are required.
+# Produces no deployment artifacts.
+# ---
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -- documentation
+  # Parse Markdown with CommonMark rules before checking links and anchors.
+  # Regenerate APIs into a temporary directory so drift fails without editing Git.
+  documentation:
+    name: Documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Install Markdown parser
+        run: |
+          python3 -m venv "$RUNNER_TEMP/docs-venv"
+          "$RUNNER_TEMP/docs-venv/bin/python" -m pip install -r hack/docs/requirements.txt
+      - name: Check links, anchors and resource coverage
+        run: |
+          "$RUNNER_TEMP/docs-venv/bin/python" -m unittest discover -s hack/docs -p 'test_*.py'
+          "$RUNNER_TEMP/docs-venv/bin/python" hack/docs/check.py
+      - name: Check generated API references
+        run: python3 hack/docs/generate_api.py --check

@@ -119,11 +119,18 @@ tasks:
   generate:api-docs:
     desc: Regenerate Galactic, cloud, BGP and gateway API references
     cmds:
-      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/v1alpha1 --output-path=docs/api/galactic.md --config=.crd-ref-docs.yaml
-      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/cloud/v1alpha1 --output-path=docs/api/cloud.md --config=.crd-ref-docs-cloud.yaml
-      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/network/v1alpha1 --output-path=docs/api/network-bgp.md --config=.crd-ref-docs-network-bgp.yaml
-      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/network/v1alpha1 --output-path=docs/api/network-gateway.md --config=.crd-ref-docs-network-gateway.yaml
-      - python3 -c 'from pathlib import Path; files = ["docs/api/galactic.md", "docs/api/cloud.md", "docs/api/network-bgp.md", "docs/api/network-gateway.md"]; [p.write_text(p.read_text().rstrip() + "\n") for p in map(Path, files)]'
+      - python3 hack/docs/generate_api.py
+
+  docs:check:
+    desc: Check documentation links, anchors and API resource coverage (install hack/docs/requirements.txt first)
+    cmds:
+      - python3 -m unittest discover -s hack/docs -p 'test_*.py'
+      - python3 hack/docs/check.py
+
+  docs:check-generated:
+    desc: Check generated API references without changing tracked files
+    cmds:
+      - python3 hack/docs/generate_api.py --check
 
   build:ebpf:
     desc: Regenerate the eBPF uSID, edge gateway DSR, NAT egress, and XDP dispatcher datapaths (requires clang)
