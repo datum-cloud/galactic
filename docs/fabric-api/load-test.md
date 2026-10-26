@@ -78,7 +78,7 @@ go to the harness:
 | `--keep`          | `false`                        | Leave the containers running                                    |
 | `--search-source` | `index`                        | The sidecar's `--search-source`: `index` or `frr`               |
 
-Run A below is `--search-source=frr`; run B is the default.
+In the [archived measurements](../archive/benchmarks/fabric-api-2026-10-07.md), Run A uses `--search-source=frr`; Run B uses the default index.
 
 ## Status of searches
 
