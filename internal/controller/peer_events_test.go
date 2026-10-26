@@ -20,7 +20,7 @@ import (
 	"go.datum.net/galactic/internal/model"
 )
 
-const testEmitterPeerAddr = "2607:ed40:1fb::2"
+const testEmitterPeerAddr = "2001:db8:1fb::2"
 
 // newPeerEventsTestClient returns a fake client, with the BGPPeerByRouterName
 // index PeerStateEventEmitter.emit relies on (via peersForRouter) pre-

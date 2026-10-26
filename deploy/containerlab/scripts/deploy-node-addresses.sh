@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-# The node owns its interface addresses, as Talos does in production; FRR's
+# The node owns its interface addresses, as a real node's OS does; FRR's
 # config carries routing only. resources/node-addresses/<node>.addrs lists
 # one "IFACE ADDRESS/LEN" or "IFACE alias TEXT" per line. Applied with
 # "ip addr replace", so a rerun changes nothing. It runs before

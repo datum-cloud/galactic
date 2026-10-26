@@ -19,7 +19,7 @@
 #     restores at boot without the API. It must survive pod restarts and
 #     must never be copied to another host;
 #   - the host's /etc/machine-id, read-only, which binds that state to the
-#     machine. Every node must have it (systemd and Talos hosts do): a pod
+#     machine. Every node must have it (systemd hosts do): a pod
 #     on a host without it stays in ContainerCreating and FRR does not
 #     start;
 #   - RBAC to read the node's deployment, its revisions, release

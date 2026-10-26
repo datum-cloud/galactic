@@ -610,7 +610,7 @@ func TestAutoDetect_FabricPeerRoutes(t *testing.T) {
 	}
 	bgp := func(idx int) netlink.Route {
 		return netlink.Route{LinkIndex: idx, Dst: &net.IPNet{
-			IP: net.ParseIP("2607:ed40:8002:6::"), Mask: net.CIDRMask(64, 128),
+			IP: net.ParseIP("2001:db8:8002:6::"), Mask: net.CIDRMask(64, 128),
 		}, Protocol: unix.RTPROT_BGP}
 	}
 
@@ -661,7 +661,7 @@ func TestAutoDetect_FabricPeerRoutes(t *testing.T) {
 			// node nominates lo as a fabric interface.
 			name: "an originated aggregate's blackhole is not a peer path",
 			routes: []netlink.Route{{LinkIndex: 2, Dst: nil}, {LinkIndex: 4, Dst: &net.IPNet{
-				IP: net.ParseIP("2607:ed40:1fe::"), Mask: net.CIDRMask(48, 128),
+				IP: net.ParseIP("2001:db8:1fe::"), Mask: net.CIDRMask(48, 128),
 			}, Protocol: unix.RTPROT_BGP, Type: unix.RTN_BLACKHOLE}},
 			want: []string{testIfaceEth0},
 		},
@@ -670,7 +670,7 @@ func TestAutoDetect_FabricPeerRoutes(t *testing.T) {
 			// reported on loopback must not attach the ingress hook there.
 			name: "loopback is never a fabric interface",
 			routes: []netlink.Route{{LinkIndex: 2, Dst: nil}, {LinkIndex: 4, Dst: &net.IPNet{
-				IP: net.ParseIP("2607:ed40:8002:6::"), Mask: net.CIDRMask(64, 128),
+				IP: net.ParseIP("2001:db8:8002:6::"), Mask: net.CIDRMask(64, 128),
 			}, Protocol: unix.RTPROT_BGP}},
 			want: []string{testIfaceEth0},
 		},
@@ -698,7 +698,7 @@ func TestAutoDetect_FabricPeerRoutes(t *testing.T) {
 			// tenant plumbing.
 			name: "non-BGP protocols are not fabric signals",
 			routes: []netlink.Route{{LinkIndex: 2, Dst: nil}, {LinkIndex: 3, Dst: &net.IPNet{
-				IP: net.ParseIP("2607:ed40:8002:6::"), Mask: net.CIDRMask(64, 128),
+				IP: net.ParseIP("2001:db8:8002:6::"), Mask: net.CIDRMask(64, 128),
 			}, Protocol: unix.RTPROT_KERNEL}},
 			want: []string{testIfaceEth0},
 		},
@@ -728,7 +728,7 @@ func TestAutoDetect_NoUsableRouteStillErrors(t *testing.T) {
 	t.Cleanup(func() { routeListFn = origRouteListFn })
 	routeListFn = func() ([]netlink.Route, error) {
 		return []netlink.Route{{LinkIndex: 2, Dst: &net.IPNet{
-			IP: net.ParseIP("2607:ed40:8002:6::"), Mask: net.CIDRMask(64, 128),
+			IP: net.ParseIP("2001:db8:8002:6::"), Mask: net.CIDRMask(64, 128),
 		}, Protocol: unix.RTPROT_STATIC}}, nil
 	}
 	if _, err := ResolveInterfaces(); err == nil {

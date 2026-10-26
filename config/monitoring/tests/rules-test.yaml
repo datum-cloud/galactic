@@ -183,7 +183,7 @@ tests:
   # does not.
   - interval: 30s
     input_series:
-      - series: 'fabric_router_bgp_mapped_nexthop{job="fabric-config-agent",node="edge-1",peer="2607:f740:0:3f::39b"}'
+      - series: 'fabric_router_bgp_mapped_nexthop{job="fabric-config-agent",node="edge-1",peer="2001:db8:f740:3f::39b"}'
         values: "1x40"
       - series: 'fabric_router_bgp_mapped_nexthop{job="fabric-config-agent",node="edge-1",peer="fd00::ffff:1"}'
         values: "1x2 0x38"
@@ -200,13 +200,13 @@ tests:
               team: connect
               job: fabric-config-agent
               node: edge-1
-              peer: "2607:f740:0:3f::39b"
+              peer: "2001:db8:f740:3f::39b"
             exp_annotations:
-              summary: "edge-1 announces an IPv4-mapped next hop to 2607:f740:0:3f::39b"
+              summary: "edge-1 announces an IPv4-mapped next hop to 2001:db8:f740:3f::39b"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpmappednexthop"
               description: >-
                 fabric-router on edge-1 has announced ::ffff:<router-id> as the IPv6 next hop to
-                2607:f740:0:3f::39b for 15 minutes, despite the agent's resets. Receiving routers cannot install
+                2001:db8:f740:3f::39b for 15 minutes, despite the agent's resets. Receiving routers cannot install
                 these routes, so other sites lose their routes to this node's locators and NAT shards. The agent's
                 MappedNextHopReset events on the pod show each reset.
 

@@ -134,9 +134,8 @@ readiness probes.
 
 > **Why not 5000:** `5000` is one of the most overloaded dev ports in
 > existence (macOS AirPlay Receiver, Flask's dev server, Docker Registry),
-> and on Talos specifically `/sbin/dashboard` permanently binds
-> `127.0.0.1:5000` on every node. Since `galactic-router` runs with
-> `hostNetwork: true`, that would collide on Talos-based clusters.
+> and node OSes run host services on it too. Since `galactic-router` runs
+> with `hostNetwork: true`, it would collide with any of them.
 
 ### `--gc-namespace` / `GALACTIC_ROUTER_GC_NAMESPACE`
 

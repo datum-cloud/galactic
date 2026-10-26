@@ -112,7 +112,7 @@ func TestSplitAdvertisementName(t *testing.T) {
 		vpcAttachment string
 		ok            bool
 	}{
-		{"e008-d54-compute-c21d3c-us-east-1-staging-lab", "eV2", "T2", true},
+		{"e008-d54-compute-c21d3c-site-a", "eV2", "T2", true},
 		{"e007-d53-edge-567e29-us-east-1", "eV1", "T1", true},
 		{"e008-d54", "", "", false},
 		{"-d54-worker", "", "", false},

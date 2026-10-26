@@ -759,7 +759,6 @@ ends the old series by design.
 
 The design needs `HASH_OF_MAPS`, `bpf_for_each_map_elem` (5.13), the tc egress hook, the
 synchronous map-in-map wait (4.20), and the 6.8 fix to inner-map freeing.
-Production and staging run Talos v1.13.10, whose kernel line is 6.18.
 
 The CNI preflight gains probes for `HASH_OF_MAPS` and `bpf_for_each_map_elem`. The inner-map
 fix cannot be probed, so the preflight also requires kernel 6.8 or later. That

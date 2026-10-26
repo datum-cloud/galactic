@@ -72,10 +72,10 @@ func TestBGPPrefixListAdmission(t *testing.T) {
 		admit   bool
 	}{
 		{"ipv6 ge 49 through 128", []networkv1alpha1.BGPPrefixListEntry{
-			entry(5, "2607:ed40:8003::/48", ptr.To[int32](49), ptr.To[int32](128))}, true},
+			entry(5, "2001:db8:8003::/48", ptr.To[int32](49), ptr.To[int32](128))}, true},
 		{"ipv6 ge only", []networkv1alpha1.BGPPrefixListEntry{
-			entry(5, "2607:ed40:8003::/48", ptr.To[int32](49), nil)}, true},
-		{"ipv6 exact", []networkv1alpha1.BGPPrefixListEntry{entry(5, "2607:ed40:10::/44", nil, nil)}, true},
+			entry(5, "2001:db8:8003::/48", ptr.To[int32](49), nil)}, true},
+		{"ipv6 exact", []networkv1alpha1.BGPPrefixListEntry{entry(5, "2001:db8:10::/44", nil, nil)}, true},
 		{"ipv4 le 32", []networkv1alpha1.BGPPrefixListEntry{
 			entry(5, "10.0.0.0/8", ptr.To[int32](16), ptr.To[int32](32))}, true},
 		// FRR 10.7.1 accepts bounds equal to the prefix length.
@@ -85,7 +85,7 @@ func TestBGPPrefixListAdmission(t *testing.T) {
 		{"sequence 4294967295", []networkv1alpha1.BGPPrefixListEntry{entry(4294967295, "0.0.0.0/0", nil, nil)}, true},
 		{"ipv4 ge 33", []networkv1alpha1.BGPPrefixListEntry{entry(5, "10.0.0.0/8", ptr.To[int32](33), nil)}, false},
 		{"ipv4 le 33", []networkv1alpha1.BGPPrefixListEntry{entry(5, "10.0.0.0/8", nil, ptr.To[int32](33))}, false},
-		{"ipv6 ge 129", []networkv1alpha1.BGPPrefixListEntry{entry(5, "2607:ed40::/32", ptr.To[int32](129), nil)}, false},
+		{"ipv6 ge 129", []networkv1alpha1.BGPPrefixListEntry{entry(5, "2001:db8::/32", ptr.To[int32](129), nil)}, false},
 		{"ge shorter than prefix", []networkv1alpha1.BGPPrefixListEntry{entry(5, "10.0.0.0/8", ptr.To[int32](4), nil)}, false},
 		{"le shorter than ge", []networkv1alpha1.BGPPrefixListEntry{
 			entry(5, "10.0.0.0/8", ptr.To[int32](24), ptr.To[int32](20))}, false},
@@ -95,7 +95,7 @@ func TestBGPPrefixListAdmission(t *testing.T) {
 		{"duplicate sequence", []networkv1alpha1.BGPPrefixListEntry{
 			entry(5, "10.0.0.0/8", nil, nil), entry(5, "10.1.0.0/16", nil, nil)}, false},
 		{"mixed families", []networkv1alpha1.BGPPrefixListEntry{
-			entry(5, "10.0.0.0/8", nil, nil), entry(10, "2607:ed40::/32", nil, nil)}, false},
+			entry(5, "10.0.0.0/8", nil, nil), entry(10, "2001:db8::/32", nil, nil)}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			list := &networkv1alpha1.BGPPrefixList{

@@ -23,7 +23,7 @@ import (
 
 const (
 	testNamespace = "galactic-system"
-	testLocator   = "2607:ed40:8002::/48"
+	testLocator   = "2001:db8:8002::/48"
 )
 
 // newRouterClient builds a fake client holding routers, so the derivation can
@@ -64,10 +64,10 @@ func TestNodeLocatorPrefix_DerivesBlockPlusNodeID(t *testing.T) {
 		nodeID        int32
 		want          string
 	}{
-		{"node 1", testLocator, 1, "2607:ed40:8002:1::/64"},
-		{"node 6", testLocator, 6, "2607:ed40:8002:6::/64"},
-		{"two-byte node id", testLocator, 0x0142, "2607:ed40:8002:142::/64"},
-		{"max node id", "2607:ed40:8001::/48", 0xDFFF, "2607:ed40:8001:dfff::/64"},
+		{"node 1", testLocator, 1, "2001:db8:8002:1::/64"},
+		{"node 6", testLocator, 6, "2001:db8:8002:6::/64"},
+		{"two-byte node id", testLocator, 0x0142, "2001:db8:8002:142::/64"},
+		{"max node id", "2001:db8:8001::/48", 0xDFFF, "2001:db8:8001:dfff::/64"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newRouterClient(t, router("n1", tc.locator, tc.nodeID))
@@ -122,7 +122,7 @@ func TestNodeLocatorPrefix_RejectsBadLocator(t *testing.T) {
 		nodeID        int32
 		wantSubstr    string
 	}{
-		{"not a /48", "2607:ed40:8002::/56", 1, "uSID Block"},
+		{"not a /48", "2001:db8:8002::/56", 1, "uSID Block"},
 		{"ipv4", "10.0.0.0/48", 1, ""},
 		{"unparseable", "not-a-prefix", 1, "parse SRv6 locator"},
 		{"node id too large", testLocator, 0x10000, "outside"},
@@ -180,7 +180,7 @@ func localRoute(dst string, loIndex int, opts ...func(*netlink.Route)) netlink.R
 // that has to survive.
 func TestStaleLocatorLocalRoute(t *testing.T) {
 	const lo = 1
-	keep := netip.MustParsePrefix("2607:ed40:8002:6::/64")
+	keep := netip.MustParsePrefix("2001:db8:8002:6::/64")
 	kernel := func(r *netlink.Route) { r.Protocol = unix.RTPROT_KERNEL }
 
 	for _, tc := range []struct {
@@ -190,29 +190,29 @@ func TestStaleLocatorLocalRoute(t *testing.T) {
 	}{
 		// The bug this fixes: a node moved to a different Block leaves the
 		// old /64 local on lo, claiming space it no longer owns.
-		{"our route for a locator we no longer own", localRoute("2607:ed40:8006:6::/64", lo), true},
-		{"a different Node-ID in the same Block", localRoute("2607:ed40:8002:1::/64", lo), true},
+		{"our route for a locator we no longer own", localRoute("2001:db8:8006:6::/64", lo), true},
+		{"a different Node-ID in the same Block", localRoute("2001:db8:8002:1::/64", lo), true},
 
-		{"the prefix we want to keep", localRoute("2607:ed40:8002:6::/64", lo), false},
+		{"the prefix we want to keep", localRoute("2001:db8:8002:6::/64", lo), false},
 
 		// Kernel-derived entries: one per assigned address. Deleting the
 		// loopback's would take this node's router-id address away.
-		{"kernel loopback host route", localRoute("2607:ed40:1fe::4/128", lo, kernel), false},
+		{"kernel loopback host route", localRoute("2001:db8:1fe::4/128", lo, kernel), false},
 		{"kernel ::1", localRoute("::1/128", lo, kernel), false},
 		// A /64 that the kernel derived, which we must still not touch even
 		// though its length matches ours.
-		{"kernel-derived /64", localRoute("2607:ed40:8006:6::/64", lo, kernel), false},
+		{"kernel-derived /64", localRoute("2001:db8:8006:6::/64", lo, kernel), false},
 
-		{"another link's route", localRoute("2607:ed40:8006:6::/64", lo+1), false},
-		{"another table", localRoute("2607:ed40:8006:6::/64", lo,
+		{"another link's route", localRoute("2001:db8:8006:6::/64", lo+1), false},
+		{"another table", localRoute("2001:db8:8006:6::/64", lo,
 			func(r *netlink.Route) { r.Table = unix.RT_TABLE_MAIN }), false},
-		{"not a local route", localRoute("2607:ed40:8006:6::/64", lo,
+		{"not a local route", localRoute("2001:db8:8006:6::/64", lo,
 			func(r *netlink.Route) { r.Type = unix.RTN_UNICAST }), false},
 
 		// Only the /64 this component writes qualifies. A /48 Block discard
 		// or a /128 SID is somebody else's business.
-		{"the /48 Block, not a node locator", localRoute("2607:ed40:8006::/48", lo), false},
-		{"a single SID", localRoute("2607:ed40:8006:6::1/128", lo), false},
+		{"the /48 Block, not a node locator", localRoute("2001:db8:8006::/48", lo), false},
+		{"a single SID", localRoute("2001:db8:8006:6::1/128", lo), false},
 
 		{"no destination", netlink.Route{LinkIndex: lo, Table: unix.RT_TABLE_LOCAL, Type: unix.RTN_LOCAL}, false},
 		{"ipv4", localRoute("10.0.0.0/24", lo), false},
@@ -231,7 +231,7 @@ func TestStaleLocatorLocalRoute(t *testing.T) {
 // rather than failing, so pruning finds nothing to do and reports no error.
 // Pinned so this does not start warning on every refresh tick.
 func TestPruneStaleLocatorLocalRoutes_UnknownLinkIsQuiet(t *testing.T) {
-	err := pruneStaleLocatorLocalRoutes(0x7fffffff, netip.MustParsePrefix("2607:ed40:8002:6::/64"))
+	err := pruneStaleLocatorLocalRoutes(0x7fffffff, netip.MustParsePrefix("2001:db8:8002:6::/64"))
 	if err != nil {
 		t.Errorf("pruneStaleLocatorLocalRoutes() on a nonexistent link error = %v, want nil", err)
 	}

@@ -12,7 +12,7 @@ import (
 
 const (
 	testPeerAddrV4 = "192.0.2.1"
-	testPeerAddrV6 = "2607:ed40:1fb::2"
+	testPeerAddrV6 = "2001:db8:1fb::2"
 )
 
 // TestAllDesiredPeersPresent verifies the no-op reconcile guard used by
@@ -51,7 +51,7 @@ func TestAllDesiredPeersPresent(t *testing.T) {
 		},
 		{
 			name:  "address normalization matches leading-zero IPv6 forms",
-			peers: []model.DesiredPeer{{Address: "2607:ed40:01fb::2"}},
+			peers: []model.DesiredPeer{{Address: "2001:db8:01fb::2"}},
 			rs: model.RuntimeStatus{Peers: []model.PeerStatus{
 				{Address: testPeerAddrV6},
 			}},

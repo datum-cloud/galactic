@@ -36,7 +36,7 @@ type BGPPrefixListEntry struct {
 
 	// GE is the minimum prefix-length to match (greater-than-or-equal).
 	// For example, "10.0.0.0/8 ge 16" matches lengths /16 through /32, and
-	// "2607:ed40:8003::/48 ge 49" lengths /49 through /128.
+	// "2001:db8:8003::/48 ge 49" lengths /49 through /128.
 	// When unset, the prefix-length of Prefix is the lower bound.
 	// +optional
 	// +kubebuilder:validation:Minimum=0

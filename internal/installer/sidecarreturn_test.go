@@ -121,8 +121,8 @@ func TestIsIngressAdvertisementName(t *testing.T) {
 		},
 		{
 			name:    "sidecar advertisement on a single-word node",
-			advName: crdnames.BGPAdvertisementName("2", crdnames.IngressAttachment, "eris-giune"),
-			node:    "eris-giune", want: true,
+			advName: crdnames.BGPAdvertisementName("2", crdnames.IngressAttachment, "edge-node-1"),
+			node:    "edge-node-1", want: true,
 		},
 		// A pod's own advertisement: identical shape, different segment.
 		{
@@ -133,7 +133,7 @@ func TestIsIngressAdvertisementName(t *testing.T) {
 		// The same sidecar advertisement, but originated by another node.
 		{
 			name:    "another node's sidecar advertisement",
-			advName: crdnames.BGPAdvertisementName("2", crdnames.IngressAttachment, "eris-giune"),
+			advName: crdnames.BGPAdvertisementName("2", crdnames.IngressAttachment, "edge-node-1"),
 			node:    testSidecarNode, want: false,
 		},
 		{name: "empty", advName: "", node: testSidecarNode, want: false},
@@ -314,7 +314,7 @@ func TestSidecarGatewayEndpoints_IgnoresPodAdvertisements(t *testing.T) {
 // this node's return path at an address that lives somewhere else.
 func TestSidecarGatewayEndpoints_IgnoresOtherNodes(t *testing.T) {
 	c := newAdvClient(t,
-		gatewayAdv("2", "eris-giune", "fd30:e2e:af7::1/128", 1),
+		gatewayAdv("2", "edge-node-1", "fd30:e2e:af7::1/128", 1),
 		gatewayAdv("2", testSidecarNode, testSidecarAddr+"/128", 1),
 	)
 	got, err := sidecarGatewayEndpoints(context.Background(), c, testNamespace, testSidecarNode)
@@ -362,8 +362,8 @@ func TestNodeLocatorIdentity_DecodesBlockAndNodeID(t *testing.T) {
 	if !ok {
 		t.Fatal("nodeLocatorIdentity() ok = false, want a configured identity")
 	}
-	if block != 0x2607ed408002 {
-		t.Errorf("block = %#x, want 0x2607ed408002", block)
+	if block != 0x20010db88002 {
+		t.Errorf("block = %#x, want 0x20010db88002", block)
 	}
 	if nodeID != 6 {
 		t.Errorf("nodeID = %d, want 6", nodeID)

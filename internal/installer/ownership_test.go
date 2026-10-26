@@ -28,7 +28,7 @@ func TestNodeLocatorPrefixSkipsFabricRouter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "2607:ed40:8002:102::/64"; got.String() != want {
+	if want := "2001:db8:8002:102::/64"; got.String() != want {
 		t.Errorf("nodeLocatorPrefix = %s, want %s", got, want)
 	}
 }

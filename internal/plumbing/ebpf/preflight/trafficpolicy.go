@@ -50,7 +50,7 @@ func CheckTrafficPolicy(kernelCheck bool) error {
 	return errors.Join(errs...)
 }
 
-// atLeast reports whether release ("6.18.2-talos") is at least want.
+// atLeast reports whether release ("6.18.2-custom") is at least want.
 func atLeast(release string, want [2]int) bool {
 	parts := strings.SplitN(release, ".", 3)
 	if len(parts) < 2 {

@@ -1095,12 +1095,12 @@ func TestRewriteEBPFInterfaces(t *testing.T) {
 	HostConflist = filepath.Join(t.TempDir(), "10-galactic.conflist")
 
 	written := hostconf.HostConf{
-		NodeName:        "eris-giune",
+		NodeName:        "edge-node-1",
 		Kubeconfig:      config.DefaultKubeconfig,
 		Namespace:       config.DefaultNamespace,
 		LogFile:         config.DefaultLogFile,
 		LogLevel:        "debug",
-		EgressShardSIDs: "2607:ed40:8002:2002:e00f::",
+		EgressShardSIDs: "2001:db8:8002:2002:e00f::",
 		NAT64Prefix:     "64:ff9b::/96",
 		EBPFInterfaces:  "bond0,ens2f1np1,ens1f1np1",
 		DANDir:          "/var/lib/galactic/dan",
