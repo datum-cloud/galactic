@@ -1,147 +1,45 @@
 # Galactic
 
-**Multi-cloud networking for Kubernetes, simplified.**
+Galactic supplies SRv6 networking for multi-cloud VPC workloads on Kubernetes.
+Its CNI plugins attach containers and VMs, its routing controllers distribute
+EVPN paths, and optional edge components provide ingress load balancing,
+NAT66/NAT64 egress and provider attachments.
 
-Galactic connects Kubernetes workloads across multiple clouds and regions as if they were on a single, unified network. It provides secure, isolated Virtual Private Clouds (VPCs) that span cloud boundaries—without vendor lock-in or complex configuration.
+## Start here
 
-## The Problem
+- [Documentation](docs/README.md): guides organized by task and component.
+- [System overview](docs/overview.md): components, packet paths and ownership.
+- [Local lab](docs/getting-started.md): build and exercise the multi-cluster topology.
+- [Development](docs/development/README.md): build, test and contribution workflow.
+- [API reference](docs/api/README.md): generated resource documentation.
 
-Modern organizations run workloads everywhere: AWS, Azure, GCP, on-premises, and edge locations. Each environment brings its own networking model, APIs, and constraints. The result is fragmented networks, operational complexity, and cloud provider lock-in.
+## Build and test
 
-## Our Approach
+Use a Linux development environment with the Go version in `go.mod`, Task,
+clang/LLVM and the required kernel headers. The
+[development container](.devcontainer/galactic/) provides a starting environment.
 
-Galactic provides the SRv6 data plane that makes multi-cloud VPC connectivity work at the kernel level. It runs as a DaemonSet agent on every node, managing SRv6 routes and VRF isolation, and as a CNI plugin that attaches pods to the correct virtual network. On nodes dedicated to the gateway role, a third component loads an edge XDP DSR (Direct Server Return) load balancer to handle L4 ingress at the VPC boundary. VPC and VPCAttachment definitions are managed by a companion operator; Galactic acts on the identifiers that operator assigns.
-
-Under the hood, Galactic uses Segment Routing over IPv6 (SRv6) for efficient, deterministic routing and Virtual Routing and Forwarding (VRF) for true network isolation at the kernel level. BGP is used to distribute SRv6 routes between agents across nodes and clusters.
-
-## Why Galactic
-
-**For Developers** — Attach to a VPC with a single annotation. No networking code, no cloud-specific APIs.
-
-**For Platform Teams** — Manage multi-cloud networking from Kubernetes using GitOps workflows and standard tooling.
-
-**For Organizations** — Move workloads between providers without network redesign. One networking model instead of N cloud-specific implementations.
-
-## Getting Started
-
-A ContainerLab environment is available under [`deploy/containerlab/`](./deploy/containerlab/):
-
-- **[`deploy/containerlab/`](./deploy/containerlab/)** — Three Kind clusters wired over an SRv6 transit mesh. The full GVPC multi-cluster environment with FRR underlay and GoBGP L3VPN overlay.
-
-See the [galactic DevContainer](./.devcontainer/galactic/) for development environment setup. On ARM64 / OrbStack, use the [containerlab DevContainer](./.devcontainer/containerlab-dood/) to run ContainerLab via Docker-out-of-Docker.
-
-### Production Deployment
-
-Manifests for a real cluster live under [`config/`](./config/), composed with [Kustomize](https://kustomize.io). One command deploys the `galactic-system` namespace (labeled `pod-security.kubernetes.io/enforce: privileged` — every DaemonSet here needs it, for hostPath volumes, hostNetwork, and elevated capabilities), the `galactic-cni` DaemonSet, and both `galactic-router` roles — the plain per-node role (`galactic-router`, runs on every `compute`/`edge` node except control-plane nodes, opt-in via `galactic.datumapis.com/galactic: router`) and `rr` (`galactic-router-rr`, the BGP route reflector, opt-in — stays at zero replicas until nodes are labeled `galactic.datumapis.com/galactic: control`):
-
-```bash
-kubectl apply -k config/
+```sh
+task build
+task test:unit
 ```
 
-Each component can also be applied on its own, e.g. `kubectl apply -k config/galactic-router` for just the router (both roles) or `kubectl apply -k config/galactic-router/overlays/router` for just the default per-node role.
+Before opening a PR, run `task ci`. It includes a Kind lifecycle test and needs
+Docker and the host networking prerequisites. Root-gated tests and feature
+acceptance checks are additional tiers; see the [development guide](docs/development/README.md).
 
-Two components are **not** part of `kubectl apply -k config/` and must be applied separately, each with its own per-node prerequisite:
+## Deployment
 
-- **`config/fabric-router/`** — the FRR underlay eBGP DaemonSet `galactic-router` depends on.
-- **`config/galactic-gateway/`** — the edge XDP DSR load-balancer control plane, a single-container `galactic-gateway` DaemonSet on nodes labeled both `galactic.datumapis.com/node: edge` and `galactic.datumapis.com/gateway: enabled` (`galactic-router` runs there too, but as its own independent DaemonSet via `galactic.datumapis.com/galactic: router` — see `config/galactic-router/` above, not bundled into this pod). `kubectl apply -k config/galactic-gateway/` only installs the shared, cluster-safe ServiceAccount/RBAC; `config/galactic-gateway/base/` itself is a template meant to be instantiated once per gateway node by a further overlay (see `deploy/containerlab/resources/galactic-gateway/` for a worked example) — apply that overlay per node instead of `base/` directly.
+Reusable Kubernetes manifests live in [config/](config/). The root Kustomization
+includes the namespace, CNI and both tenant-router roles. It does not install
+CRDs or assemble the underlay, controllers, optional edge services and
+observability into a complete production deployment.
 
-```bash
-kubectl apply -k config/fabric-router/
-kubectl apply -k config/galactic-gateway/
-```
-
-#### Prerequisites
-
-- **Container images.** `.github/workflows/publish.yaml` builds `ghcr.io/datum-cloud/galactic-cni`, `ghcr.io/datum-cloud/galactic-router`, `ghcr.io/datum-cloud/galactic-gateway`, and `ghcr.io/datum-cloud/fabric-router` (from `containers/galactic-cni/Dockerfile`, `containers/galactic-router/Dockerfile`, `containers/galactic-gateway/Dockerfile`, and `containers/fabric-router/Dockerfile` respectively) on every push and release — but it never publishes a `:latest` tag, only date-stamped tags per push/release (e.g. `v0.0.0-main-20260713-170924`) and, for tagged releases, semver tags. The `image:` references committed in `config/galactic-cni/daemonset.yaml`, `config/galactic-router/base/daemonset.yaml`, `config/galactic-gateway/base/daemonset.yaml`, and `config/fabric-router/daemonset.yaml` say `:latest` only as a placeholder that CI substitutes with a real published tag when it builds the `ghcr.io/datum-cloud/galactic-kustomize` OCI Kustomize bundle — that substitution never happens in the git checkout itself. Applying `config/` directly from a clone will therefore fail to pull `:latest`. Before applying, resolve the current tag (check the [package pages](https://github.com/orgs/datum-cloud/packages?repo_name=galactic) or the latest successful run of `publish.yaml` on `main`) and pin it, e.g.:
-
-  ```bash
-  cd config/galactic-cni && kustomize edit set image ghcr.io/datum-cloud/galactic-cni=ghcr.io/datum-cloud/galactic-cni:<resolved-tag>
-  cd config/galactic-router/base && kustomize edit set image ghcr.io/datum-cloud/galactic-router=ghcr.io/datum-cloud/galactic-router:<resolved-tag>
-  cd config/galactic-gateway/base && kustomize edit set image ghcr.io/datum-cloud/galactic-gateway=ghcr.io/datum-cloud/galactic-gateway:<resolved-tag>
-  cd config/fabric-router && kustomize edit set image ghcr.io/datum-cloud/fabric-router=ghcr.io/datum-cloud/fabric-router:<resolved-tag>
-  ```
-
-- **`config/fabric-router/`: one ConfigMap per node.** Unlike every other component under `config/`, `config/fabric-router/` has no generic default config — the underlay eBGP session (interface addresses, remote-AS, etc.) is different for every physical node, and this DaemonSet's `nodeAffinity` (`galactic.datumapis.com/fabric: router`) can legitimately match more than one node per cluster. Before applying `config/fabric-router/`, create one ConfigMap per matching node in the `galactic-system` namespace, named `fabric-router.<nodename>` (`<nodename>` is the Kubernetes node name, e.g. `fabric-router.worker-1`), with a `frr.conf` key holding that node's config. It may also carry `daemons` and/or `vtysh.conf` keys to override the defaults baked into the `fabric-router` image (see `containers/fabric-router/Dockerfile`); any other key is rejected. `fabric-config-agent` (in the same image) reads the node's ConfigMap from the API: its `frr-init` init container validates it with `vtysh -C` and installs it, holding the pod in `Init` with a `ConfigMissing` or `Rejected` event until a valid one exists; its `config-agent` sidecar then applies each later change with `frr-reload.py`, without restarting FRR or touching any other node. `deploy/containerlab/resources/fabric-router/{dfw,iad,sjc}/` are worked examples from the lab, not something you can apply as-is.
-
-  ```bash
-  kubectl -n galactic-system create configmap fabric-router.worker-1 --from-file=frr.conf=./frr.conf.worker-1
-  ```
-
-  **Migrating from the shared `fabric-config` ConfigMap.** A node with no `fabric-router.<nodename>` ConfigMap still falls back to key `frr.conf.<nodename>` of the old shared `fabric-config` ConfigMap (and its `daemons`/`vtysh.conf` keys), with a `DeprecatedConfigSource` warning event on the pod. The node's own ConfigMap always wins once it exists. Move every node to its own ConfigMap, then delete `fabric-config`; the fallback will be removed in a later release.
-
-- **`config/fabric-router/` and `config/galactic-router/`: rollouts are now automatic (`RollingUpdate`).** Both `config/fabric-router/daemonset.yaml` and `config/galactic-router/base/daemonset.yaml` use the DaemonSet default `updateStrategy` (`RollingUpdate`) rather than `OnDelete`, so a `kubectl apply` (new image tag, or a spec change) will restart pods on its own, one node at a time, gated only by each pod's liveness/health probe — which reflects "the process is up," not "the BGP session has reconverged." Watch session state after any rollout rather than assuming the controller's pacing was safe: for `fabric-router`, `vtysh -c "show bgp summary"` on the new pod; for `galactic-router`, the `BGPPeer` CRD's `STATE` column (`kubectl get bgppeer`) — there's no `vtysh` in that binary, it reports session state itself. For `galactic-router-rr`, every compute node's iBGP session pivots through that one pod, so its rollout is a fleet-wide route flap, not a single-node one; confirm every client has re-peered before considering it done.
-
-  A ConfigMap edit doesn't trigger a rollout, and doesn't need one: the `config-agent` sidecar applies a change to a node's `fabric-router.<nodename>` ConfigMap to that node's running FRR in place. Check the result with `kubectl -n galactic-system get events --field-selector involvedObject.name=fabric-router.<nodename>`: `Applied` carries the hash of the `frr.conf` the node now runs, `Rejected` means the change failed `vtysh -C` and the node kept its previous config, and `ReloadFailed` means `frr-reload.py` failed and the agent is retrying. A change to `daemons` can't be applied live; it raises `RestartRequired`, and takes effect when that node's pod is deleted. The sidecar also resets any IPv6 session announcing an IPv4-mapped next hop and raises `MappedNextHopReset` on the pod.
-
-- **`config/galactic-gateway/`: per-node public interface and SRv6 address.** `config/galactic-gateway/base/daemonset.yaml`'s `galactic-gateway` container requires `GALACTIC_GATEWAY_PUBLIC_INTERFACE` and `GALACTIC_GATEWAY_SRV6_ADDRESS` — the latter must be unique per gateway node and has no generic default (there's no in-cluster mechanism yet that derives it automatically; see `internal/config/gateway.go`'s `EnvGatewaySRv6Address` doc comment). Applying `base/` as shipped, without pinning both per node, produces a crash-looping container. Instantiate `base/` via a further overlay that pins it to one node (`kubernetes.io/hostname`) and sets that node's values — see `deploy/containerlab/resources/galactic-gateway/` for a worked example.
-
-- **Talos: gRPC health port.** `galactic-router` runs `hostNetwork: true` and defaults to gRPC health checks on port `5000`, which collides with Talos's built-in dashboard (`/sbin/dashboard` permanently binds `127.0.0.1:5000` on every Talos node). `config/galactic-router/base/daemonset.yaml` already ships with `GALACTIC_ROUTER_GRPC_HEALTH_PORT=5179` (and matching probe/containerPort) to avoid this; if you run `galactic-router` outside these manifests on Talos, set `GALACTIC_ROUTER_GRPC_HEALTH_PORT` to something other than `5000` yourself.
-
-- **`galactic-router`: BGP local address.** The node needs a global-unicast IPv6 address assigned to `lo` (typically by `config/fabric-router/`'s underlay eBGP daemon, which must start and converge before `galactic-router`), or you must set `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` explicitly — this is required even when `GALACTIC_ROUTER_BGP_LISTEN_PORT=-1` (no inbound listener), since `galactic-router` still needs a source address for outbound BGP connections. Without one of these, startup fails with `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS not set and no address could be detected on lo: no global-unicast IPv6 address found on lo`. See [`docs/router/configuration.md`](./docs/router/configuration.md) for details.
-
-See [`docs/router/configuration.md`](./docs/router/configuration.md) for the full `galactic-router` CLI flag / environment variable reference — env var names follow `GALACTIC_ROUTER_<FLAG_NAME>` (hyphens become underscores, uppercased); the reference table has the exact name for every flag.
-
-## Development
-
-This project uses [Task](https://taskfile.dev) as its build tool. Build, test, and lint operations are defined in the root `Taskfile.yaml`.
-
-### Install Task
-
-```bash
-# macOS
-brew install go-task
-
-# Linux (official installer)
-sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b ~/.local/bin
-
-# Go toolchain
-go install github.com/go-task/task/v3/cmd/task@latest
-```
-
-See [taskfile.dev/installation](https://taskfile.dev/installation/) for the full list of options.
-
-### Usage
-
-```bash
-task          # list available tasks
-```
-
-#### Building
-
-```bash
-task build           # produces bin/{galactic-cni,galactic-veth,galactic-tap,galactic-ipam,
-                     # galactic-bgp,galactic-route,galactic-router,galactic-gateway}
-task lint            # golangci-lint + yamlfmt; lint-fix applies safe auto-fixes
-task ci              # full pipeline: lint → build → test:unit → test:e2e
-```
-
-There is no `task docker-build` — the shared production Dockerfile and release
-workflow were removed (see Production Deployment above). `containers/galactic-cni/Dockerfile`
-exists only to support `task test:e2e` below.
-
-#### Testing
-
-```bash
-task test            # run unit tests then e2e tests (requires Docker + Kind)
-task test:unit       # unit tests only — race detector, coverage output
-task test:e2e        # full e2e lifecycle — spins up a Kind cluster, builds and
-                     # loads the image, then tears the cluster down on exit
-```
-
-`task test:unit` is the fast path for development; it runs the same command as the CI `test-unit` job. `task test:e2e` requires Docker and Kind and mirrors the CI `test-e2e` job exactly, including automatic cluster cleanup via a `trap` on exit.
-
-Run `task ci` before opening a pull request.
-
-The lab environment has its own `Taskfile.yaml`; run `task` from `deploy/containerlab/` to see available tasks.
-
-## Contributing
-
-See [AGENTS.md](./AGENTS.md) for the contributor guide (development workflow, code standards, architecture pointers) and its [Architecture Reference](./AGENTS.md#architecture-reference) section for links to the full per-component architecture docs (CNI, router, gateway).
+Follow the [component guides](docs/README.md#component-guides) and
+[shared operations](docs/operations/README.md) for prerequisites, node opt-ins
+and per-site overlays. Existing installations changing API groups must follow
+the [migration guide](docs/operations/migrations/galactic-api-consolidation.md).
 
 ## License
 
-See [LICENSE](./LICENSE) for details.
-
----
-
-*Galactic is developed by [Datum](https://datum.net).*
+See [LICENSE](LICENSE).

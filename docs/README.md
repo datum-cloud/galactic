@@ -1,110 +1,45 @@
-# Galactic Docs
+# Galactic documentation
 
-Index of everything under `docs/`. `AGENTS.md`/`CLAUDE.md` at the repo root
-is the primary entry point for working in this codebase (architecture
-reference table, dev workflow, deployment overview) — start there first.
-This page exists to help you find a specific document once you already know
-roughly what you're looking for.
+Galactic connects VPC workloads through SRv6, BGP and Linux networking. Start
+with the [system overview](overview.md) for components and ownership, or
+[run the local lab](getting-started.md) to exercise the packet paths.
 
-## Architecture — the "why" and internal design
+## Find a task
 
-One self-contained reference per binary/subsystem (layout, entry points,
-data flow, module reference, known constraints):
+| I want to…                                           | Start here                                                                             |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Understand components and packet paths               | [Overview](overview.md), [system diagrams](architecture/README.md)                     |
+| Build, test or contribute                            | [Development](development/README.md), [coding conventions](development/conventions.md) |
+| Run a complete development environment               | [Local lab walkthrough](getting-started.md)                                            |
+| Deploy or operate a component                        | The component guides below and [shared operations](operations/README.md)               |
+| Inspect metrics and alerts                           | [Observability](observability/README.md)                                               |
+| Look up API resources                                | [API reference index](api/README.md)                                                   |
+| Evaluate a proposal or remaining implementation work | [Designs](designs/README.md)                                                           |
+| Find a dated review or test result                   | [Archive](archive/README.md)                                                           |
+| Change this documentation                            | [Documentation maintenance](development/documentation.md)                              |
 
-- [agents/ARCHITECTURE-CNI.md](agents/ARCHITECTURE-CNI.md) — the CNI attach
-  chain (`galactic-cni`, `-veth`, `-tap`, `-ipam`, `-bgp`, `-route`).
-- [agents/ARCHITECTURE-ROUTER.md](agents/ARCHITECTURE-ROUTER.md) — the
-  BGP/EVPN control plane (`galactic-router`, embedded GoBGP, GC).
-- [agents/ARCHITECTURE-GATEWAY.md](agents/ARCHITECTURE-GATEWAY.md) — the edge
-  XDP DSR load balancer (`galactic-gateway`, `NetworkGateway`/`NetworkService`).
-- [agents/ARCHITECTURE-FABRIC-API.md](agents/ARCHITECTURE-FABRIC-API.md) — the
-  fabric looking glass (`fabric-api`: the `fabric-router` sidecar, the cell
-  gateway, `FabricQuery` execution, mTLS identities).
-- [agents/ARCHITECTURE.md](agents/ARCHITECTURE.md) — superseded by the first
-  three documents above; kept only as a redirect for old links.
-- [agents/CONVENTIONS.md](agents/CONVENTIONS.md) — Go naming, error
-  handling, testing patterns, linting, and commit-message conventions
-  enforced across every binary.
-- [node-labels.md](node-labels.md) — the `galactic.datumapis.com/*`
-  node-labeling scheme shared across `galactic-cni`, `-router`, `-gateway`,
-  `-nat66`, and `fabric-router`; cross-cutting, owned by no single component.
-- [architecture/README.md](architecture/README.md) — C4-model diagrams (system
-  context, container) rendered from PlantUML sources.
+## Component guides
 
-## Configuration — the "how" of deploying and operating each binary
+| Area                        | Architecture and behavior                                                                                                                            | Configuration and operation                                                                                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Workload attachment         | [CNI overview](cni/README.md), [architecture](cni/architecture.md), [ADD/DEL](cni/cni-cmd-sequence.md), [garbage collection](cni/gc-cmd-sequence.md) | [Chain configuration](cni/configuration.md), [environment](cni/environment-variables.md), [conflist fields](cni/conflist-reference.md), [examples](cni/conflist-examples.md) |
+| Tenant routing              | [Router architecture](router/architecture.md)                                                                                                        | [Router configuration](router/configuration.md)                                                                                                                              |
+| Public ingress              | [Gateway architecture](gateway/architecture.md), [backend health](gateway/backend-health.md)                                                         | [Deployment](gateway/deployment.md), [configuration](gateway/configuration.md)                                                                                               |
+| Public egress               | [Active/active egress](nat/active-active.md)                                                                                                         | [Deployment](nat/deployment.md), [configuration](nat/configuration.md), [rollout and rollback](nat/active-active-rollout.md)                                                 |
+| Cluster controllers         | [Cell and fabric roles](controller/README.md)                                                                                                        | [API migration](operations/migrations/galactic-api-consolidation.md)                                                                                                         |
+| Interface traffic policy    | [Node behavior](traffic-policy/node.md), [cell behavior](traffic-policy/controller.md)                                                               | [Rollout and rollback](traffic-policy/rollout.md)                                                                                                                            |
+| Underlay and fabric routing | [Fabric routing index](fabric-routing/README.md), [topology](fabric-routing/topology.md)                                                             | [Operations](fabric-routing/operations.md)                                                                                                                                   |
+| Fabric diagnostics          | [Fabric API index](fabric-api/README.md), [architecture](fabric-api/architecture.md), [query API](fabric-api/api.md)                                 | [Deployment](fabric-api/deployment.md), [configuration](fabric-api/configuration.md), [operations](fabric-api/operations.md), [load test](fabric-api/load-test.md)           |
+| Provider attachments        | [Edge index](edge/README.md), [provider contract](edge/provider-contract.md)                                                                         | [Troubleshooting](edge/troubleshooting.md)                                                                                                                                   |
+| Private services            | [Private-service routing](private-services/README.md)                                                                                                | Configuration and qualification limits are recorded in the same guide.                                                                                                       |
 
-- [router/configuration.md](router/configuration.md) — `galactic-router`
-  env vars/CLI flags and DaemonSet examples.
-- [router/private-service-routes.md](router/private-service-routes.md) — the
-  direct-endpoint contract for `ServiceEndpoint`, producer selection, and why
-  consumers receive no guest-visible service route.
-- [gateway/configuration.md](gateway/configuration.md) — `galactic-gateway`
-  deployment (node labeling, RBAC, per-node overlay), its config reference,
-  and the `NetworkGateway`/`NetworkService`/`ServiceVIPBinding` CRD fields.
-- [gateway/backend-health.md](gateway/backend-health.md) — how a
-  `NetworkService`'s backends are health-checked and an unhealthy one is
-  taken out of every gateway node's Maglev table.
-- [nat/configuration.md](nat/configuration.md) — `galactic-nat` placement
-  (edge nodes, sharing the uplinks' XDP hook with the gateway), config
-  reference, the `EgressShard` CRD, and the `galactic-cni`-side shard
-  membership settings that point tenant nodes at it.
-- [fabric-api/configuration.md](fabric-api/configuration.md) — `fabric-api`
-  deployment: prerequisites (cert-manager csi-driver, the per-cell `Issuer`),
-  flags and env vars for `node`/`gateway`/`janitor`/`query`, ports, mTLS
-  identities and rotation, limits, probe source and destination rules, cleanup,
-  alerts, and sidecar rollout.
-- [fabric-api/api.md](fabric-api/api.md) — the internal `FabricQuery` contract
-  (`galactic.datumapis.com/v1alpha1`): spec, target rules, lookup and
-  observation semantics, conditions, and typed error codes.
-- [fabric-api/load-test.md](fabric-api/load-test.md) — the full-table load test
-  that gates AS-path and community searches: method, how to run it
-  (`task test:fabric-api-load`), and the results for direct FRR scans versus the
-  BMP-fed search index.
-- [traffic-policy/controller.md](traffic-policy/controller.md) —
-  `galactic-controller --role=cell`: the TrafficPolicy webhook, the reserved
-  default policy, binding resolution status, flags and install order.
-- [traffic-policy/rollout.md](traffic-policy/rollout.md) — turning traffic
-  policy on in a cell: install order, writing grants, auditing with the
-  counters before enforcing, and backing out.
-- [traffic-policy/node.md](traffic-policy/node.md) — galactic-router's node
-  side: enabling it, what each binding applies, per-node status, the
-  `galactic_cni_traffic_policy_*` metrics and the `policy explain` and
-  `policy show` diagnostics.
-- [api/galactic.md](api/galactic.md) — the generated `galactic.datumapis.com`
-  API reference (TrafficPolicy, TrafficPolicyBinding).
-- [cni/README.md](cni/README.md) — entry point for the `galactic-cni` docs
-  subtree; from there:
-  - [cni/environment-variables.md](cni/environment-variables.md) — every
-    `GALACTIC_CNI_*`/`GALACTIC_IPAM_*` env var and conflist `HostConf` field.
-  - [cni/conflist-reference.md](cni/conflist-reference.md) /
-    [cni/conflist-examples.md](cni/conflist-examples.md) — the conflist field
-    reference and worked, copy-pasteable examples.
-  - [cni/cni-cmd-sequence.md](cni/cni-cmd-sequence.md) /
-    [cni/gc-cmd-sequence.md](cni/gc-cmd-sequence.md) — Mermaid sequence
-    diagrams for the attach/detach path and orphan garbage collection.
+## Reading status correctly
 
-## Observability
+Component guides describe the current repository. A feature may still be
+disabled by default or require deployment-specific qualification. Designs state
+their implementation status; historical reviews and measurements retain their
+original scope and date. None of those is a substitute for a release's rollout
+and acceptance checks.
 
-- [metrics.md](metrics.md) — every Prometheus metric for the VPC dataplane,
-  VPC ingress, routing and NAT: labels, label values and the shipped alerts,
-  with PromQL for dashboards and monitors.
-- [edge/troubleshooting.md](edge/troubleshooting.md) — finding the lifecycle
-  stage a Galactic Edge attachment or route stopped at, the objects involved
-  and a prefix's current owner, from conditions, Events and metrics.
-
-## Proposals and exploratory design
-
-Not descriptions of what's implemented today — read the architecture docs
-above for that.
-
-- [enhancements/proposals/masque-gateway-design.md](enhancements/proposals/masque-gateway-design.md)
-  — an alternative MASQUE/QUIC/Iroh-based ingress gateway design, distinct
-  from the implemented `galactic-gateway` (XDP DSR over a Maglev ring).
-- [enhancements/networking/latency-aware-routing/README.md](enhancements/networking/latency-aware-routing/README.md)
-  — latency-aware SRv6 path selection as a tenant-facing routing policy.
-  `status: provisional`, `stage: alpha`.
-- [enhancements/networking/interface-traffic-policy/README.md](enhancements/networking/interface-traffic-policy/README.md)
-  — per-interface ingress and egress traffic policy, deny by default and
-  enforced in the CNI datapath. `status: provisional`, `stage: alpha`.
-- [enhancements/networking/galactic-edge/README.md](enhancements/networking/galactic-edge/README.md) — proposed shared foundation for authorized provider attachments, tenant isolation, and exclusive forwarding ownership.
-- [enhancements/networking/galactic-edge/contract.md](enhancements/networking/galactic-edge/contract.md) — proposed provider contract: resources, writers, lifecycle, timing bounds and the failure-test matrix.
+The legacy `agents/`, `enhancements/` and other moved paths contain compatibility
+pointers for existing links. Use the canonical pages indexed here for new links.

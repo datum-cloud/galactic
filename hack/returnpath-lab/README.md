@@ -1,14 +1,13 @@
 # returnpath-lab
 
-Phase 0 proof harness for
-[docs/plans/855-return-path-ingress-decap.md](../../docs/plans/855-return-path-ingress-decap.md).
+Historical proof harness for the host return path, now described in the
+[VPC ingress reference](../../docs/observability/vpc-ingress.md).
 
-A lab tool, not a shipped binary. It performs by hand — and reverses — exactly
-what that plan's Pieces 1–3 would automate, so the plan's derived-but-unproven
-kernel assumptions can be tested before production code is written against
-them. It calls the same packages the real implementation will
-(`internal/plumbing/ebpf/usidmap`, `intf`, `uformat`, `egressroutemap`), so
-what it proves is proven about the real code paths.
+This is a lab tool, not a shipped binary. It programs and reverses host return
+path state by hand using `internal/plumbing/ebpf/usidmap`, `intf`, `uformat`
+and `egressroutemap`. The original implementation plan is no longer maintained;
+use this harness to investigate kernel behavior, not as a deployment procedure
+or evidence that the current release passed acceptance.
 
 ## Running it
 
