@@ -153,3 +153,33 @@ func (l Limits) Validate() error {
 	}
 	return errors.Join(errs...)
 }
+
+// Qualified refuses limits above the contract's qualified ceilings, its
+// Defaults: a cell may lower a rate, burst or count, never raise one, until
+// a contract revision qualifies the higher value. It complements Validate,
+// which checks the cross-field rules every set of limits must meet.
+func (l Limits) Qualified() error {
+	d := Defaults()
+	var errs []error
+	rate := func(name string, r, top Rate) {
+		if r.PerSecond > top.PerSecond || r.Burst > top.Burst {
+			errs = append(errs, fmt.Errorf("%s: rate %g burst %g exceeds the qualified rate %g burst %g",
+				name, r.PerSecond, r.Burst, top.PerSecond, top.Burst))
+		}
+	}
+	rate("request cell", l.RequestCell, d.RequestCell)
+	rate("request project", l.RequestProject, d.RequestProject)
+	rate("packet cell", l.PacketCell, d.PacketCell)
+	rate("packet principal", l.PacketPrincipal, d.PacketPrincipal)
+	rate("packet host", l.PacketHost, d.PacketHost)
+	rate("packet prefix", l.PacketPrefix, d.PacketPrefix)
+	count := func(name string, v, top int) {
+		if v > top {
+			errs = append(errs, fmt.Errorf("%s: %d exceeds the qualified %d", name, v, top))
+		}
+	}
+	count("principal slots", l.PrincipalSlots, d.PrincipalSlots)
+	count("principal queue", l.PrincipalQueue, d.PrincipalQueue)
+	count("project streams", l.ProjectStreams, d.ProjectStreams)
+	return errors.Join(errs...)
+}

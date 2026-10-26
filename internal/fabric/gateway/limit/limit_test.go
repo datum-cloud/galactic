@@ -48,6 +48,38 @@ func TestDefaultsValidate(t *testing.T) {
 	}
 }
 
+func TestQualified(t *testing.T) {
+	if err := Defaults().Qualified(); err != nil {
+		t.Fatalf("defaults above their own ceilings: %v", err)
+	}
+	lower := Defaults()
+	lower.PacketHost = Rate{PerSecond: 10, Burst: 320}
+	lower.PrincipalSlots, lower.ProjectStreams = 1, 1
+	if err := lower.Qualified(); err != nil {
+		t.Errorf("lowered limits refused: %v", err)
+	}
+	cases := map[string]func(*Limits){
+		"request cell rate": func(l *Limits) { l.RequestCell.PerSecond = 3 },
+		"request project":   func(l *Limits) { l.RequestProject.Burst = 3 },
+		"packet cell burst": func(l *Limits) { l.PacketCell.Burst = 641 },
+		"packet principal":  func(l *Limits) { l.PacketPrincipal.PerSecond = 21 },
+		"packet host":       func(l *Limits) { l.PacketHost.PerSecond = 21 },
+		"packet prefix":     func(l *Limits) { l.PacketPrefix.Burst = 700 },
+		"principal slots":   func(l *Limits) { l.PrincipalSlots = 3 },
+		"principal queue":   func(l *Limits) { l.PrincipalQueue = 33 },
+		"project streams":   func(l *Limits) { l.ProjectStreams = 3 },
+	}
+	for name, mod := range cases {
+		t.Run(name, func(t *testing.T) {
+			l := Defaults()
+			mod(&l)
+			if err := l.Qualified(); err == nil {
+				t.Fatal("limit above its qualified ceiling accepted")
+			}
+		})
+	}
+}
+
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*Limits){
 		"zero rate":            func(l *Limits) { l.PacketCell.PerSecond = 0 },

@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -54,6 +56,7 @@ type gatewayOptions struct {
 	retention, cleanupGrace       time.Duration
 	serviceIdentities             []string
 	aggregateBudgets              bool
+	limits                        limit.Limits
 }
 
 func newGatewayCommand() *cobra.Command {
@@ -62,6 +65,11 @@ func newGatewayCommand() *cobra.Command {
 		Use:   "gateway",
 		Short: "Execute this cell's FabricQuery objects and serve the operator debug service",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			limits, err := gatewayLimits(cmd.Flags(), o)
+			if err != nil {
+				return err
+			}
+			o.limits = limits
 			return runGateway(cmd.Context(), o)
 		},
 	}
@@ -101,9 +109,74 @@ func newGatewayCommand() *cobra.Command {
 			"allowed to call this cell's gateway; empty allows none")
 	f.BoolVar(&o.aggregateBudgets, "aggregate-budgets", false,
 		"Enforce the cell's aggregate admission and probe packet budgets on every caller, issue probe permits to "+
-			"nodes, and bound each principal's share of --cell-slots and --cell-queue to the contract defaults; "+
-			"every node must run with --probe-permits first")
+			"nodes, and bound each principal's share of --cell-slots and --cell-queue; every node must run with "+
+			"--probe-permits first")
+	registerLimitFlags(f, &o.limits)
 	return cmd
+}
+
+// limitFlags are the aggregate limits an operator may lower, each
+// defaulting to the contract's qualified value, which is also its ceiling.
+var limitFlags = []string{
+	"request-cell-rate", "request-cell-burst", "request-project-rate", "request-project-burst",
+	"packet-cell-rate", "packet-cell-burst", "packet-principal-rate", "packet-principal-burst",
+	"packet-host-rate", "packet-host-burst", "packet-prefix-rate", "packet-prefix-burst",
+	"principal-slots", "principal-queue", "service-streams", "project-streams", "queue-wait",
+}
+
+func registerLimitFlags(f *pflag.FlagSet, l *limit.Limits) {
+	*l = limit.Defaults()
+	rate := func(name, what string, r *limit.Rate) {
+		f.Float64Var(&r.PerSecond, name+"-rate", r.PerSecond, what+" tokens per second; may only be lowered")
+		f.Float64Var(&r.Burst, name+"-burst", r.Burst, what+" bucket size; may only be lowered")
+	}
+	rate("request-cell", "Looking Glass requests admitted in the cell:", &l.RequestCell)
+	rate("request-project", "Looking Glass requests admitted per project:", &l.RequestProject)
+	rate("packet-cell", "Worst-case probe packets charged in the cell:", &l.PacketCell)
+	rate("packet-principal", "Worst-case probe packets charged per project, FabricQuery source or operator:",
+		&l.PacketPrincipal)
+	rate("packet-host", "Worst-case probe packets charged per destination address:", &l.PacketHost)
+	rate("packet-prefix", "Worst-case probe packets charged per destination IPv4 /24 or IPv6 /64:", &l.PacketPrefix)
+	f.IntVar(&l.PrincipalSlots, "principal-slots", l.PrincipalSlots,
+		"Of --cell-slots, node jobs one principal may run at once; may only be lowered")
+	f.IntVar(&l.PrincipalQueue, "principal-queue", l.PrincipalQueue,
+		"Of --cell-queue, node jobs one principal may queue; may only be lowered")
+	f.IntVar(&l.Streams, "service-streams", l.Streams,
+		"Live Looking Glass streams in the cell, queued and draining ones included; may only be lowered")
+	f.IntVar(&l.ProjectStreams, "project-streams", l.ProjectStreams,
+		"Live Looking Glass streams per project; may only be lowered")
+	f.DurationVar(&l.QueueWait, "queue-wait", l.QueueWait,
+		"How long a Looking Glass router job or a direct operator's permit may wait for a slot; may only be lowered")
+}
+
+// gatewayLimits returns the aggregate limits the flags select, refusing
+// limit flags without --aggregate-budgets, a limit above its qualified
+// ceiling and limits that break a cross-field rule. A principal's slots,
+// queue and streams default to at most the cell's.
+func gatewayLimits(f *pflag.FlagSet, o *gatewayOptions) (limit.Limits, error) {
+	if !o.aggregateBudgets {
+		for _, name := range limitFlags {
+			if f.Changed(name) {
+				return limit.Limits{}, fmt.Errorf("--%s needs --aggregate-budgets", name)
+			}
+		}
+		return limit.Limits{}, nil
+	}
+	l := o.limits
+	l.Slots, l.Queue = o.slots, o.queue
+	if !f.Changed("principal-slots") {
+		l.PrincipalSlots = min(l.PrincipalSlots, o.slots)
+	}
+	if !f.Changed("principal-queue") {
+		l.PrincipalQueue = min(l.PrincipalQueue, o.queue)
+	}
+	if !f.Changed("project-streams") {
+		l.ProjectStreams = min(l.ProjectStreams, l.Streams)
+	}
+	if err := errors.Join(l.Qualified(), l.Validate()); err != nil {
+		return limit.Limits{}, fmt.Errorf("--aggregate-budgets: %w", err)
+	}
+	return l, nil
 }
 
 func runGateway(parent context.Context, o *gatewayOptions) error {
@@ -180,23 +253,18 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	}
 
 	executor := gateway.NewExecutor(o.slots, o.expensiveSlots, o.queue)
+	metrics := gateway.NewMetrics(ctrlmetrics.Registry, func() float64 { return float64(executor.Depth()) })
 	var admission *gateway.Admission
 	if o.aggregateBudgets {
-		limits := limit.Defaults()
-		limits.Slots, limits.Queue = o.slots, o.queue
-		// A smaller cell lowers each principal's share with it.
-		limits.PrincipalSlots = min(limits.PrincipalSlots, o.slots)
-		limits.PrincipalQueue = min(limits.PrincipalQueue, o.queue)
-		admission, err = gateway.NewAdmission(limits, &limit.Authority{
+		admission, err = gateway.NewAdmission(o.limits, &limit.Authority{
 			Reader: mgr.GetAPIReader(), Namespace: o.namespace, Name: o.leaseName, Identity: holder,
 		})
 		if err != nil {
 			return fmt.Errorf("--aggregate-budgets: %w", err)
 		}
-		executor.PrincipalSlots, executor.PrincipalQueue = limits.PrincipalSlots, limits.PrincipalQueue
+		executor.PrincipalSlots, executor.PrincipalQueue = o.limits.PrincipalSlots, o.limits.PrincipalQueue
 		go admission.Authority.Watch(ctx, limit.WatchInterval)
 	}
-	metrics := gateway.NewMetrics(ctrlmetrics.Registry, func() float64 { return float64(executor.Depth()) })
 	executor.ObserveWait = func(d time.Duration) { metrics.QueueWait(d.Seconds()) }
 	creds := o.tls.credentials(identity.Gateway(o.cell))
 	creds.OnLoad(func(leaf *x509.Certificate) { metrics.CertificateExpiry(float64(leaf.NotAfter.Unix())) })
@@ -231,7 +299,8 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	discoverer := &gateway.Discoverer{
 		Reader: mgr.GetClient(), Namespace: o.namespace, Selector: sel, CertsSelector: certsSel,
 	}
-	runner := &gateway.Runner{Clients: pool, Executor: executor, Metrics: metrics, Admission: admission}
+	runner := &gateway.Runner{Clients: pool, Executor: executor, Metrics: metrics, Admission: admission,
+		QueueWait: o.limits.QueueWait}
 	rec := &gateway.Reconciler{
 		Client:      mgr.GetClient(),
 		APIReader:   mgr.GetAPIReader(),
