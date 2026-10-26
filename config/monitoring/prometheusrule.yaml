@@ -1135,6 +1135,99 @@ spec:
             description: >-
               Prometheus cannot scrape {{ $labels.job }} on {{ $labels.pod }}, so the other fabric-api alerts cannot
               fire for it.
+        # The leader's aggregate limiter admits nothing during its 125 s
+        # recovery hold after a start, failover or failed Lease read; ten
+        # minutes without a ready replica is no ordinary hold. The series
+        # exist only on gateways run with --aggregate-budgets, and the max
+        # over replicas keeps a leader change from resetting the alert.
+        - alert: FabricAPILimiterUnavailable
+          expr: >-
+            max without (pod, instance, state) (fabric_api_gateway_limiter_state{job="fabric-api-gateway",state="ready"}) == 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-api's aggregate limiter in {{ $labels.namespace }} has admitted nothing for 10 minutes"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapilimiterunavailable"
+            description: >-
+              No fabric-api gateway replica in {{ $labels.namespace }} has had a ready aggregate limiter for 10
+              minutes, so every probe in the cell, operator, FabricQuery and Looking Glass alike, is refused with
+              LimiterUnavailable; route lookups and BGP summaries are unaffected. The leader cannot read its
+              election Lease, keeps losing the election, or its clock is unsynchronised
+              (fabric_api_gateway_clock_synchronized). Check the leader's logs and Lease.
+        # The limiter and each node's permit check trust the clock only while
+        # the kernel reports it synchronised within 500 ms. The gauges exist
+        # only where that trust is in use: a gateway with --aggregate-budgets
+        # and a node with --probe-permits.
+        - alert: FabricAPIClockUnsynchronized
+          expr: >-
+            fabric_api_gateway_clock_synchronized{job="fabric-api-gateway"} == 0
+            or
+            fabric_api_node_clock_synchronized{job="fabric-api-node"} == 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-api on {{ $labels.pod }} runs on an unsynchronised clock"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapiclockunsynchronized"
+            description: >-
+              The kernel clock under {{ $labels.pod }} has not been synchronised within 500 ms for 10 minutes. A
+              gateway on it admits no probe and no Looking Glass request; a node on it refuses every probe permit.
+              Check the host's time daemon (chrony, ntpd, systemd-timesyncd or Talos timed).
+        # More than half of at least 20 Looking Glass requests in 30 minutes
+        # were refused by a budget, a queue or the limiter. Throttling is the
+        # limits working; sustained throttling means the cell's limits or the
+        # service's own admission need attention. Disabled or idle cells never
+        # fire.
+        - alert: FabricAPIServiceThrottled
+          expr: >-
+            (
+              sum without (pod, instance, operation, reason) (increase(fabric_api_gateway_service_requests_total{job="fabric-api-gateway",reason=~"Throttled|QueueFull|LimiterUnavailable"}[30m]))
+              /
+              sum without (pod, instance, operation, reason) (increase(fabric_api_gateway_service_requests_total{job="fabric-api-gateway"}[30m]))
+            ) > 0.5
+            and
+            sum without (pod, instance, operation, reason) (increase(fabric_api_gateway_service_requests_total{job="fabric-api-gateway"}[30m])) >= 20
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Most Looking Glass requests in {{ $labels.namespace }} are refused by the cell's limits"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapiservicethrottled"
+            description: >-
+              {{ $value | humanizePercentage }} of Looking Glass requests in {{ $labels.namespace }} in the last 30
+              minutes were refused with Throttled, QueueFull or LimiterUnavailable. fabric_api_gateway_admission_refusals_total
+              names the scope (cell, project, destination or queue) that refused them.
+        # More than half of at least 10 Looking Glass requests that reached
+        # execution in 30 minutes produced no router result: every selected
+        # router failed, none was selectable, or the leader lost the election.
+        - alert: FabricAPIServiceExecutionFailing
+          expr: >-
+            (
+              sum without (pod, instance, operation, reason) (increase(fabric_api_gateway_service_requests_total{job="fabric-api-gateway",reason=~"ExecutionFailed|NoNodesAvailable|OwnershipLost|Internal"}[30m]))
+              /
+              sum without (pod, instance, operation, reason) (increase(fabric_api_gateway_service_requests_total{job="fabric-api-gateway",reason=~"Succeeded|PartialResults|ExecutionFailed|NoNodesAvailable|OwnershipLost|Internal"}[30m]))
+            ) > 0.5
+            and
+            sum without (pod, instance, operation, reason) (increase(fabric_api_gateway_service_requests_total{job="fabric-api-gateway",reason=~"Succeeded|PartialResults|ExecutionFailed|NoNodesAvailable|OwnershipLost|Internal"}[30m])) >= 10
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Most Looking Glass requests in {{ $labels.namespace }} return no router result"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapiserviceexecutionfailing"
+            description: >-
+              {{ $value | humanizePercentage }} of the Looking Glass requests {{ $labels.namespace }} executed in the
+              last 30 minutes ended ExecutionFailed, NoNodesAvailable, OwnershipLost or Internal.
+              fabric_api_gateway_service_router_outcomes_total gives each router's failure or omission reason.
     # The Galactic Edge foundation: galactic-controller --edge (job
     # galactic-controller, port 9184) exports attachment, route and service
     # state from every replica's cache, so the state rules take the max over

@@ -288,8 +288,10 @@ func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabri
 	if err != nil {
 		if errors.Is(err, ErrQueueFull) {
 			if r.Admission != nil {
-				return nil, errcode.Retry(errcode.QueueFull, "the cell's execution queue is full",
+				err := errcode.Retry(errcode.QueueFull, "the cell's execution queue is full",
 					string(limit.ScopeQueue), time.Second)
+				r.Admission.Metrics.refused(project, err)
+				return nil, err
 			}
 			return nil, errcode.Status(errcode.NodeBusy, "cell execution queue is full")
 		}
@@ -323,6 +325,7 @@ func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabri
 			}
 		case opts.checkOwnership:
 			if _, _, err := a.Authority.Check(ctx); err != nil {
+				a.Metrics.refused(project, err)
 				return nil, err
 			}
 		}

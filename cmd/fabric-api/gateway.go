@@ -272,10 +272,13 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 		if err != nil {
 			return fmt.Errorf("--aggregate-budgets: %w", err)
 		}
+		admission.Metrics = metrics
+		metrics.RegisterAdmission(admission, limit.KernelClock)
 		executor.PrincipalSlots, executor.PrincipalQueue = o.limits.PrincipalSlots, o.limits.PrincipalQueue
 		go admission.Authority.Watch(ctx, limit.WatchInterval)
 	}
 	serviceSwitch := &gateway.ServiceSwitch{}
+	metrics.RegisterService(serviceSwitch)
 	if o.serviceConfigMap != "" {
 		go serviceSwitch.Watch(ctx, mgr.GetAPIReader(), o.namespace, o.serviceConfigMap, gateway.ServiceSwitchInterval)
 	}
@@ -360,6 +363,7 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	service := &gateway.Service{
 		Cell:      o.cell,
 		Switch:    serviceSwitch,
+		Metrics:   metrics,
 		Allowlist: allowlist,
 		Elected:   debug.Elected,
 		Leader:    debug,

@@ -5,12 +5,17 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -19,9 +24,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	forwardv1 "go.datum.net/galactic/api/fabric/forward/v1"
 	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
 	"go.datum.net/galactic/internal/fabric/errcode"
 	"go.datum.net/galactic/internal/fabric/gateway/limit"
+	"go.datum.net/galactic/internal/fabric/identity"
+	"go.datum.net/galactic/internal/fabric/node"
 	"go.datum.net/galactic/internal/fabric/query"
 )
 
@@ -183,5 +191,132 @@ func TestServiceDisableCancelsRunningWork(t *testing.T) {
 		[]Node{{Name: routerA, PodUID: podA, Selected: true}}, nil, time.Now().Add(30*time.Second))
 	if len(out) != 1 || out[0].Err != nil {
 		t.Fatalf("operator probe while the service is off: %v", out)
+	}
+}
+
+// Routine telemetry carries attribution and counts, never a target, a
+// result or node error text, and no metric label names a project,
+// request, node or target.
+func TestServiceTelemetryCarriesNoPayload(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	nodes := &routerNodes{answers: map[string]routerAnswer{routerB: failAnswer(errcode.FRRUnavailable)}}
+	svc := newService(t, routerPods(routerA, routerB), nodes, 8)
+	adm := withAdmission(t, svc, limit.Defaults())
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg, func() float64 { return 0 })
+	m.RegisterService(svc.Switch)
+	m.RegisterAdmission(adm, func() error { return nil })
+	svc.Metrics, svc.Runner.Metrics, adm.Metrics = m, m, m
+
+	ping := string(query.TypePing)
+	// The project's request burst is 2: the third is throttled.
+	for i := range 3 {
+		events, err := collect(t, svc, requestFor(testProject, i+1, nil))
+		if i < 2 {
+			if err != nil {
+				t.Fatalf("request %d: %v", i, err)
+			}
+			if r := events[len(events)-1].GetComplete().GetReason(); r != CompletePartialResults {
+				t.Fatalf("request %d reason = %q", i, r)
+			}
+			continue
+		}
+		wantRetry(t, err, errcode.Throttled, string(limit.ScopeProject))
+	}
+
+	for labels, want := range map[[2]string]float64{
+		{ping, CompletePartialResults}:    2,
+		{ping, string(errcode.Throttled)}: 1,
+	} {
+		if got := testutil.ToFloat64(m.serviceRequests.WithLabelValues(labels[0], labels[1])); got != want {
+			t.Errorf("service requests %v = %g, want %g", labels, got, want)
+		}
+	}
+	for labels, want := range map[[2]string]float64{
+		{ping, "OK"}:                           2,
+		{ping, string(errcode.FRRUnavailable)}: 2,
+	} {
+		if got := testutil.ToFloat64(m.serviceOutcomes.WithLabelValues(labels[0], labels[1])); got != want {
+			t.Errorf("router outcomes %v = %g, want %g", labels, got, want)
+		}
+	}
+	if got := testutil.ToFloat64(m.admissionRefusals.WithLabelValues("service", "project", "Throttled")); got != 1 {
+		t.Errorf("throttled refusals = %g", got)
+	}
+	if got := testutil.ToFloat64(m.packetsCharged.WithLabelValues("service")); got != 4*limit.PingPackets {
+		t.Errorf("charged packets = %g", got)
+	}
+
+	forbidden := []string{testProject, testRequestID[:8], "2001:db8", routerA, routerB, podA, "raw failure",
+		testService}
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		for _, metric := range f.GetMetric() {
+			for _, l := range metric.GetLabel() {
+				for _, bad := range forbidden {
+					if strings.Contains(l.GetValue(), bad) {
+						t.Errorf("%s label %s=%q names %q", f.GetName(), l.GetName(), l.GetValue(), bad)
+					}
+				}
+			}
+		}
+	}
+
+	out := logs.String()
+	for _, bad := range []string{"2001:db8", "raw failure", "replies", "192.0.2.1"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("logs carry %q:\n%s", bad, out)
+		}
+	}
+	if strings.Count(out, `"msg":"Looking Glass request finished"`) != 2 ||
+		!strings.Contains(out, `"project":"project-a"`) || !strings.Contains(out, `"reason":"PartialResults"`) ||
+		!strings.Contains(out, `"msg":"Looking Glass request refused"`) {
+		t.Errorf("logs lack the requests' attribution:\n%s", out)
+	}
+}
+
+// A follower counts a request it refused itself, and the leader one it ran
+// or refused after forwarding, so each request is counted once in the cell.
+func TestServiceRequestCountedOnce(t *testing.T) {
+	m := NewMetrics(prometheus.NewRegistry(), func() float64 { return 0 })
+	svc := &Service{Cell: testSite, Allowlist: testAllowlist, Elected: func() bool { return false }, Metrics: m}
+	bad := validRequest(time.Now())
+	bad.ApiMajor = 2
+	if _, err := collect(t, svc, bad); errcode.Of(err) != errcode.VersionUnsupported {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := collect(t, svc, validRequest(time.Now())); errcode.Of(err) != errcode.OwnershipLost {
+		t.Fatalf("err = %v", err)
+	}
+	ping := string(query.TypePing)
+
+	// The leader counts a forwarded request it refuses before executing it.
+	leader := &Service{Cell: testSite, Allowlist: testAllowlist, Elected: elected, Metrics: m}
+	gw := node.WithCaller(t.Context(), identity.Gateway(testSite))
+	for _, env := range []*forwardv1.ForwardDiagnosticRequest{
+		{Service: identity.Service(testSite, testService).URI(), Request: validRequest(time.Now())},
+		{Service: "spiffe://fabric-api.datumapis.com/cell/other/service/x", Request: validRequest(time.Now())},
+	} {
+		stream := &chanStream{ctx: gw, events: make(chan *servicev1.DiagnosticEvent, 1)}
+		if err := leader.Forwarder().ForwardDiagnostic(env, stream); err == nil {
+			t.Fatal("an invalid forwarded request was accepted")
+		}
+	}
+	for labels, want := range map[[2]string]float64{
+		{ping, string(errcode.VersionUnsupported)}: 1,
+		{ping, string(errcode.OwnershipLost)}:      1,
+		{ping, string(errcode.InvalidQuery)}:       1,
+		{ping, string(errcode.Unauthorized)}:       1,
+	} {
+		if got := testutil.ToFloat64(m.serviceRequests.WithLabelValues(labels[0], labels[1])); got != want {
+			t.Errorf("service requests %v = %g, want %g", labels, got, want)
+		}
 	}
 }

@@ -200,7 +200,7 @@ func runNode(parent context.Context, o *nodeOptions) error {
 		return fmt.Errorf("--search-source must be index or frr, not %q", o.searchSource)
 	}
 
-	permits, err := nodePermits(o, creds)
+	permits, err := nodePermits(o, creds, metrics)
 	if err != nil {
 		return err
 	}
@@ -275,8 +275,8 @@ func runNode(parent context.Context, o *nodeOptions) error {
 
 // nodePermits returns the probe permit checker the flags select, or nil
 // without --probe-permits. Its permits are refused while the kernel clock
-// is unsynchronised.
-func nodePermits(o *nodeOptions, creds *identity.Credentials) (*node.Permits, error) {
+// is unsynchronised, which metrics reports.
+func nodePermits(o *nodeOptions, creds *identity.Credentials, metrics *node.Metrics) (*node.Permits, error) {
 	switch {
 	case !o.probePermits && (o.requirePermits || o.gatewayAddress != ""):
 		return nil, errors.New("--require-probe-permits and --gateway-address need --probe-permits")
@@ -295,8 +295,9 @@ func nodePermits(o *nodeOptions, creds *identity.Credentials) (*node.Permits, er
 	}
 	p := &node.Permits{
 		Reader: reader, Namespace: o.namespace, LeaseName: o.gatewayLease, Require: o.requirePermits,
-		Started: time.Now(), Clock: limit.KernelClock,
+		Started: time.Now(), Clock: limit.KernelClock, Metrics: metrics,
 	}
+	metrics.RegisterClock(limit.KernelClock)
 	if o.gatewayAddress != "" {
 		conn, err := grpc.NewClient(o.gatewayAddress,
 			grpc.WithTransportCredentials(credentials.NewTLS(creds.ClientConfig(identity.Gateway(o.cell)))),
