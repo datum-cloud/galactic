@@ -1181,7 +1181,11 @@ Relevant series: `galactic_edge_rule_packets_total`,
 by `reason`; `ipv4_fragment` counts IPv4 fragments addressed to a VIP, which
 are dropped because a later fragment has no ports to pick a backend by;
 the drop applies to any TCP or UDP port on a VIP address, and it is not
-counted in a VIP's own dropped packets because the port is unknown), and `galactic_edge_control_plane_drops_total` (rule
+counted in a VIP's own dropped packets because the port is unknown),
+`galactic_edge_neigh_fallbacks_total` (load-balanced packets handed to the
+kernel because the next hop toward the backend had no neighbor entry, for it
+to resolve the neighbor and forward them; not counted as drops), and
+`galactic_edge_control_plane_drops_total` (rule
 applications rejected before ever reaching the datapath, e.g. quota
 denials). In dispatch mode, `galactic_edge_dispatch_lease_renewals_total`
 (labeled by `slot` and `result`) and

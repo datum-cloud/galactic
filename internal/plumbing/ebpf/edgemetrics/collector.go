@@ -43,9 +43,10 @@ type VPCAttribution interface {
 // counters and drops by reason. There is no connection table here at all, direct
 // server return keeping no per-flow state to report.
 type Collector struct {
-	vipTable    *edgemap.VIPTable
-	dropReasons DropReasonsReader
-	attribution VPCAttribution
+	vipTable       *edgemap.VIPTable
+	dropReasons    DropReasonsReader
+	neighFallbacks DropReasonsReader
+	attribution    VPCAttribution
 }
 
 // NewCollector builds a Collector from already-constructed values, so tests can
@@ -54,6 +55,13 @@ type Collector struct {
 // series carries an empty vpc label.
 func NewCollector(vipTable *edgemap.VIPTable, dropReasons DropReasonsReader, attribution VPCAttribution) *Collector {
 	return &Collector{vipTable: vipTable, dropReasons: dropReasons, attribution: attribution}
+}
+
+// WithNeighFallbacks adds the neigh_fallbacks map, a single-entry per-CPU
+// array, as galactic_edge_neigh_fallbacks_total.
+func (c *Collector) WithNeighFallbacks(m DropReasonsReader) *Collector {
+	c.neighFallbacks = m
+	return c
 }
 
 // NewCollectorFromObjects builds a Collector reading directly from a loaded
@@ -65,7 +73,7 @@ func NewCollectorFromObjects(objs *edgeprog.EdgedsrObjects, attribution VPCAttri
 			edgemap.KernelTable{Map: objs.VipAddrTable}, edgemap.KernelTable{Map: objs.VipReturnStatsTable}),
 		objs.DropReasons,
 		attribution,
-	)
+	).WithNeighFallbacks(objs.NeighFallbacks)
 }
 
 const (
@@ -120,6 +128,15 @@ var (
 			"direction.",
 		[]string{"reason"}, nil,
 	)
+	neighFallbacksDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "neigh_fallbacks_total"),
+		"Encapsulated packets edge_lb handed to the kernel because the next hop toward the "+
+			"backend had no neighbor entry, for the kernel to resolve the neighbor and forward them. "+
+			"Counts the handoff, not delivery: the kernel drops what it cannot resolve, and these "+
+			"packets cross the node's netfilter FORWARD hook, where a host firewall can drop them. "+
+			"Not counted in drops_total.",
+		nil, nil,
+	)
 	returnPacketsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "return", "packets_total"),
 		"Reply packets this node forwarded for traffic sourced from this VIP, bypassing the kernel "+
@@ -149,6 +166,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- ruleBackendsDesc
 	ch <- ruleSecondsSinceLastPacketDesc
 	ch <- dropsDesc
+	ch <- neighFallbacksDesc
 	ch <- returnPacketsDesc
 	ch <- returnBytesDesc
 	ch <- returnDroppedDesc
@@ -159,6 +177,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.collectRules(ch)
 	c.collectReturn(ch)
 	c.collectDrops(ch)
+	c.collectNeighFallbacks(ch)
 }
 
 // vpcs snapshots the attribution. Callers take it after listing a map: the
@@ -256,4 +275,20 @@ func (c *Collector) collectDrops(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(dropsDesc, prometheus.CounterValue, float64(total), name)
 	}
+}
+
+func (c *Collector) collectNeighFallbacks(ch chan<- prometheus.Metric) {
+	if c.neighFallbacks == nil {
+		return
+	}
+	var perCPU []uint64
+	if err := c.neighFallbacks.Lookup(uint32(0), &perCPU); err != nil {
+		ch <- prometheus.NewInvalidMetric(neighFallbacksDesc, fmt.Errorf("lookup neigh_fallbacks: %w", err))
+		return
+	}
+	var total uint64
+	for _, v := range perCPU {
+		total += v
+	}
+	ch <- prometheus.MustNewConstMetric(neighFallbacksDesc, prometheus.CounterValue, float64(total))
 }

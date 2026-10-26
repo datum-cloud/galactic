@@ -456,7 +456,15 @@ forward half, so it has exactly one branch, not two. Replies are
    differ on every gateway that reaches its clients and its compute nodes over
    separate links, which is this role's normal shape — see [Known
    Constraints](#known-constraints) for the bug that came from returning
-   `XDP_TX` unconditionally. The inner packet travels completely unmodified —
+   `XDP_TX` unconditionally. A next hop with no neighbor entry, as after a
+   link flap or a node rejoining the fabric, sends the encapsulated packet to
+   the kernel with `XDP_PASS` instead, since XDP cannot start neighbor
+   resolution: the kernel solicits the neighbor and forwards the packet, and
+   later packets stay in XDP. Those packets are counted in `neigh_fallbacks`
+   (`galactic_edge_neigh_fallbacks_total`), not as drops. Unlike the XDP
+   path, they cross the node's netfilter FORWARD hook, as new flows from the
+   node's own encapsulation source, so a host firewall that drops forwarded
+   traffic drops them too. The inner packet travels completely unmodified —
    this is DSR's entire premise: no address or port rewriting and no checksum
    touch anywhere.
 
