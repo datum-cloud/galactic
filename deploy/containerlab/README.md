@@ -43,7 +43,7 @@ two bonds are equal paths — see the BGP design below.
 
 Every link that carries a datapath is an 802.3ad (LACP) bond of two veths: each
 edge node's transit uplink, and each compute node's uplink to its edge node.
-Production edge uplinks are bonds, and each datapath resolves a bond to its
+Edge uplinks are commonly bonds, and each datapath resolves a bond to its
 members before attaching — the XDP dispatcher `galactic-nat` and
 `galactic-gateway` run from attaches to the members only, `galactic-cni` attaches TC to the master and its members —
 so the lab presents bonds to exercise those code paths rather than leaving them
@@ -514,7 +514,7 @@ task deploy
 | `deploy:system`                  | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC¹                                                              |
 | `deploy:cni`                     | Install Cilium and Multus, then the galactic-cni DaemonSet                                                                                  |
 | `deploy:traffic-policy`          | Install the traffic policy CRDs and galactic-controller, and wait for its webhook (after `deploy:cert-manager`)                             |
-| `deploy:node-addresses`          | Address every fabric router node's interfaces outside FRR, as the host does in production                                                   |
+| `deploy:node-addresses`          | Address every fabric router node's interfaces outside FRR, as a host-managed deployment does                                                |
 | `deploy:fabric`                  | Apply FRR DaemonSets to all clusters                                                                                                        |
 | `deploy:fabric-routing`          | Install fabric-router-controller and import every node's `frr.conf` into the typed API (each stays on its ConfigMap)                        |
 | `deploy:fabric-topology`         | Generate each site's fabric peers from its `FabricTopology` instead of the imported ones (`SITES`, default sjc and iad)                     |
@@ -568,7 +568,7 @@ different branch, or `NETWORK_SHA=<commit>` to pin one commit.
 ## Traffic policy
 
 The lab enforces interface traffic policy (`GALACTIC_CNI_TRAFFIC_POLICY=enforce`
-in `resources/galactic-cni/shared/`), while production defaults to `off`. A
+in `resources/galactic-cni/shared/`), while the shipped default is `off`. A
 tenant interface therefore forwards nothing until galactic-router publishes
 its bindings, so each `deploy:nsNN` task applies the tenant's policies and
 bindings (`scripts/deploy-tenant-policy.sh`, from

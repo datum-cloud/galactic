@@ -68,12 +68,12 @@ This means Iroh relays can evolve to speak MASQUE, giving us the best of both wo
 
 ### Why This Approach?
 
-| Question             | Answer                                                                        |
-| -------------------- | ----------------------------------------------------------------------------- |
-| Why keep Iroh?       | Best-in-class NAT traversal, P2P hole punching, you're already running relays |
-| Why add MASQUE?      | IETF standard, browser support, firewall traversal, IP-level tunneling        |
-| Why not just MASQUE? | Lose Iroh's P2P capabilities and relay infrastructure                         |
-| Why not just Iroh?   | Custom protocol, no browser support, HTTP-level only                          |
+| Question             | Answer                                                                     |
+| -------------------- | -------------------------------------------------------------------------- |
+| Why keep Iroh?       | Best-in-class NAT traversal, P2P hole punching, existing relay deployments |
+| Why add MASQUE?      | IETF standard, browser support, firewall traversal, IP-level tunneling     |
+| Why not just MASQUE? | Lose Iroh's P2P capabilities and relay infrastructure                      |
+| Why not just Iroh?   | Custom protocol, no browser support, HTTP-level only                       |
 
 ### Migration Path
 
@@ -217,8 +217,8 @@ status:
   connectionDetails:
     type: PublicKey
     publicKey:
-      id: 2ovpybgj3snjmchns44pfn6dbwmdiu4ogfd66xyu72ghexllv6hq
-      homeRelay: https://relay.datum.net
+      id: <iroh-node-id>
+      homeRelay: https://relay.example.com
 ```
 
 ### Example: Attaching Connector to VPC
@@ -322,13 +322,13 @@ Client IP Packet                    SRv6 Packet (to VPC)
 
 ### What Stays
 
-| Capability                | Preserved                          |
-| ------------------------- | ---------------------------------- |
-| NAT traversal             | Yes - Iroh's hole punching         |
-| Relay infrastructure      | Yes - your relays, new protocol    |
-| Public key identity       | Yes - connection details unchanged |
-| P2P direct connections    | Yes - hole punch when possible     |
-| Control plane integration | Yes - same Connector CRD           |
+| Capability                | Preserved                           |
+| ------------------------- | ----------------------------------- |
+| NAT traversal             | Yes - Iroh's hole punching          |
+| Relay infrastructure      | Yes - existing relays, new protocol |
+| Public key identity       | Yes - connection details unchanged  |
+| P2P direct connections    | Yes - hole punch when possible      |
+| Control plane integration | Yes - same Connector CRD            |
 
 ---
 

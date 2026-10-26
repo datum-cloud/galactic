@@ -205,8 +205,8 @@ by FRR:
   expensive ones while they are off, the index is unsynced, or the breaker is open.
 
 The release gate was a full-table load test, which direct FRR scans failed and the
-index passed; see [load-test.md](load-test.md). Enabling searches is a staged infra
-rollout: after staging confirms those numbers on real fabric routers, enable them on
+index passed; see [load-test.md](load-test.md). Enable searches gradually:
+after confirming those numbers on production-scale fabric routers, enable them on
 a canary node first, check `fabric_api_node_search_index_synced` and bgpd's session
 and convergence behaviour, and expand in paces. The containerlab lab enables them.
 

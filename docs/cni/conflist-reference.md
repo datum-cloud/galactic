@@ -95,7 +95,7 @@ across instance replacement. The directory is node-level configuration (see
 defaults to `/run/kata-containers/dans-rs`.
 
 Per attachment rather than per node, because the decision follows the
-workload: one cell runs guests of several runtimes over this same plugin, and
+workload: a cell may run guests of several runtimes over this same plugin, and
 only some of them read the file. It is carried in the CNI config because that
 is the one channel delivered identically to ADD, DEL, and CHECK, so no
 operation has to re-derive it.

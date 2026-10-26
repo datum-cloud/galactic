@@ -50,8 +50,7 @@ validated.
 
 ## Validation
 
-Run on 2026-10-09 on a Fedora 44 host (kernel 7.1) against the containerlab
-`gvpc` lab's dfw cluster. The lab is local and isolated; no staging or
+Run against the containerlab `gvpc` lab's dfw cluster. The lab is local and isolated; no staging or
 production resource was touched.
 
 | Check                                                  | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -72,8 +71,7 @@ site), and infra's central alert evaluation.
 
 ## Remaining staging gates
 
-1. Release the `network` change adding `spec.drain` (branch
-   `feat/egressshard-drain`, commit `36ee528`), install its CRD in staging,
+1. Release the `network` change adding `spec.drain`, install its CRD in staging,
    and re-pin galactic's `go.mod` to the release.
 2. infra: install the CNI RBAC, originate every shard's SID, IPv6 and IPv4
    addresses from its own node with a distinct IPv4 per shard, copy the

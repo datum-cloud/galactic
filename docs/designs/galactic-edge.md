@@ -222,7 +222,7 @@ Enable the foundation and each provider explicitly. Existing services retain the
 
 ### Rollout, Upgrade and Rollback Planning
 
-Qualify an independent provider against fixed core artifacts on the target Talos/Cilium environment. Test overlapping tenants, unauthorized requests, policy changes, partial setup, provider crash and pause, API isolation, restart, cross-node replacement, and delayed cleanup. Capture packet evidence and failure timings. Upgrade and rollback must preserve the same ownership rules and reject incompatible contracts before activation.
+Qualify an independent provider against fixed core artifacts on a representative target environment. Test overlapping tenants, unauthorized requests, policy changes, partial setup, provider crash and pause, API isolation, restart, cross-node replacement, and delayed cleanup. Capture packet evidence and failure timings. Upgrade and rollback must preserve the same ownership rules and reject incompatible contracts before activation.
 
 ### Monitoring Requirements
 

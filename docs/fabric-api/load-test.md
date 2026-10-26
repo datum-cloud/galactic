@@ -82,9 +82,9 @@ In the [archived measurements](../archive/benchmarks/fabric-api-2026-10-07.md), 
 
 ## Status of searches
 
-Searches remain off by default (`--enable-expensive-queries`). Enabling them is an
-infra rollout step, taken after staging confirms these numbers on real fabric
-routers, and it requires each node's `frr.conf` to stream its Loc-RIB to the sidecar
+Searches remain off by default (`--enable-expensive-queries`). Enable them gradually,
+after confirming these numbers on production-scale fabric routers. Enabling them
+requires each node's `frr.conf` to stream its Loc-RIB to the sidecar
 (see [configuration.md](configuration.md#search-index)). The containerlab lab
 enables them, and `task verify:fabric-api` checks searches against FRR's own answer.
 
