@@ -212,7 +212,7 @@ federation, for diagnosing a cell directly:
    --gateway host:9346           │ any replica; a follower forwards Query to the
                                  │ leader named by the election lease's holder
                                  ▼
-                       Debug.Query ─► Runner (project key "operator/<name>")
+                       Debug.Query ─► Runner (project key "operator/<name>"; FabricQuery "fabricquery/<ns>/<cluster>")
                                  │ nodes see the *gateway* identity, so the
                                  ▼ public destination policy applies
                             node sidecars

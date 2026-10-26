@@ -130,7 +130,7 @@ func (d *Debug) Query(ctx context.Context, req *fabricv1.QueryRequest) (*fabricv
 		budgets = &fabricv1.Budgets{}
 	}
 	id := "debug-" + randomID()
-	outcomes := d.Runner.Run(ctx, "operator/"+operator, id, q, nodes, budgets, expires)
+	outcomes := d.Runner.Run(ctx, operatorPrincipal(operator), id, q, nodes, budgets, expires)
 	resp := &fabricv1.QueryResponse{RequestId: id}
 	for _, o := range outcomes {
 		nr := &fabricv1.NodeResult{Node: o.Node.Name, Observation: o.Observation}

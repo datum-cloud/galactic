@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -229,5 +230,28 @@ func TestPermitForwarding(t *testing.T) {
 	if _, err := permitv1.NewPermitServiceClient(nodeConn).ReleasePermit(ctx,
 		&permitv1.ReleasePermitRequest{Node: routerA, Id: resp.GetPermit().GetId()}); err != nil {
 		t.Errorf("forwarded ReleasePermit: %v", err)
+	}
+}
+
+func TestPermitForwardedToFollowerRefused(t *testing.T) {
+	p := &Permits{
+		Elected: func() bool { return false }, Discoverer: &Discoverer{Namespace: DefaultNamespace},
+		Leader: leaderConn{},
+	}
+	ctx := node.WithCaller(t.Context(), identity.Gateway(testSite))
+	ctx = metadata.NewIncomingContext(ctx, metadata.Pairs(nodePodHeader, "certs-"+routerA))
+	_, err := p.RequestPermit(ctx, pingPermitRequest(routerA, "alice", time.Now().Add(10*time.Second)))
+	if errcode.Of(err) != errcode.OwnershipLost {
+		t.Errorf("forwarded RequestPermit at a follower: %v", err)
+	}
+	_, err = p.ReleasePermit(ctx, &permitv1.ReleasePermitRequest{Node: routerA, Id: "x"})
+	if errcode.Of(err) != errcode.OwnershipLost {
+		t.Errorf("forwarded ReleasePermit at a follower: %v", err)
+	}
+}
+
+func TestPrincipalFamiliesDoNotCollide(t *testing.T) {
+	if fabricQueryPrincipal("operator", "bob") == operatorPrincipal("bob") {
+		t.Error("a FabricQuery in namespace operator shares an operator's key")
 	}
 }

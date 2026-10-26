@@ -78,6 +78,19 @@ func callerPod(ctx context.Context, namespace string) (string, error) {
 	return "", errcode.Status(errcode.Unauthorized, "only nodes may request probe permits")
 }
 
+// forwarded reports whether the call came from the gateway identity, which
+// only a follower forwarding to the leader presents.
+func forwarded(ctx context.Context) bool {
+	id, ok := node.CallerFrom(ctx)
+	return ok && id.Role == identity.RoleGateway
+}
+
+// operatorPrincipal is the budget key of an operator, whether it calls the
+// gateway or a node. Service project IDs cannot contain "/", and a
+// FabricQuery's key starts with "fabricquery/", so the families cannot
+// collide.
+func operatorPrincipal(name string) string { return "operator/" + name }
+
 // forwardCtx hands the caller's pod to the leader.
 func forwardCtx(ctx context.Context, pod string) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, nodePodHeader, pod)
@@ -104,6 +117,9 @@ func (p *Permits) RequestPermit(
 		return nil, err
 	}
 	if !p.Elected() {
+		if forwarded(ctx) {
+			return nil, errcode.Status(errcode.OwnershipLost, "this replica is not the leader")
+		}
 		conn, err := p.Leader.LeaderConn(ctx)
 		if err != nil {
 			return nil, errcode.Status(errcode.OwnershipLost, "no leader can issue probe permits")
@@ -132,7 +148,7 @@ func (p *Permits) RequestPermit(
 	if e := req.GetExpiresAt().AsTime(); e.Before(deadline) {
 		deadline = e
 	}
-	principal := "operator/" + req.GetOperator()
+	principal := operatorPrincipal(req.GetOperator())
 
 	wait := min(p.Admission.Limits.QueueWait, deadline.Sub(now))
 	actx, cancel := context.WithTimeout(ctx, wait)
@@ -182,6 +198,9 @@ func (p *Permits) ReleasePermit(
 		return nil, err
 	}
 	if !p.Elected() {
+		if forwarded(ctx) {
+			return nil, errcode.Status(errcode.OwnershipLost, "this replica is not the leader")
+		}
 		conn, err := p.Leader.LeaderConn(ctx)
 		if err != nil {
 			return nil, errcode.Status(errcode.OwnershipLost, "no leader holds probe permits")

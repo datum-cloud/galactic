@@ -5,9 +5,14 @@
 // Package limit holds the cell gateway's aggregate admission state: request
 // and packet token buckets, the live attempt keys, and the election
 // authority that decides when that state may be used. The leader keeps it
-// all in bounded memory; followers keep none. See
-// docs/fabric-api/service-contract.md, "Admission, execution, and aggregate
-// accounting".
+// all in bounded memory; followers keep none.
+//
+// Every probe a cell runs, whether for a service project, a FabricQuery or an
+// operator, charges its worst-case packets to the cell, its principal, its
+// destination host and its destination prefix; every request or node job
+// takes an execution slot. Nothing charged is refunded. After the process
+// acquires or loses the election it admits nothing for a recovery hold, then
+// starts every bucket empty.
 package limit
 
 import (
@@ -29,7 +34,7 @@ type Rate struct {
 // Probe packet costs, charged as each probe's worst case.
 const (
 	PingPackets       = query.PingCount
-	TraceroutePackets = query.TracerouteMaxHops
+	TraceroutePackets = query.TracerouteMaxHops * query.TracerouteProbesPerHop
 )
 
 // Hard bounds on the limiter's own memory and on what one request may hold.

@@ -623,6 +623,8 @@ func (s *Service) execute(
 			return err
 		}
 		switch {
+		case errors.Is(context.Cause(runCtx), errOwnershipLost):
+			return errcode.Status(errcode.OwnershipLost, "the election was lost during router discovery")
 		case errors.Is(runCtx.Err(), context.DeadlineExceeded):
 			return errcode.Status(errcode.DeadlineExceeded, "request's deadline passed during router discovery")
 		case runCtx.Err() != nil:

@@ -333,7 +333,7 @@ executor atomically or refuse the request. Charge one node-job unit per selected
 router; omitted routers cost no node execution or packets. Maintain FIFO within
 a principal and round robin between principal queues. A service request's
 principal is its project UID, an operator's its identity name, and a
-FabricQuery's its `source.namespace/source.cluster`: FabricQuery carries no
+FabricQuery's `fabricquery/<source.namespace>/<source.cluster>`: FabricQuery carries no
 project UID, so a FabricQuery and a service request for the same project are
 separate principals, sharing the executor and the cell and destination packet
 budgets but not a fairness key or a project packet budget. A principal may
@@ -371,7 +371,9 @@ maps. Expose aggregate counts rather than key-valued metrics.
 Cell and destination packet buckets include service, operator gateway,
 FabricQuery, and direct operator-node probes. Each principal above has its own
 packet bucket at the project rate: a service project, a FabricQuery source, or
-an operator, whether through the gateway or directly. Every probe, including direct-node Execute, must obtain a
+an operator, whether through the gateway or directly; a direct probe is
+charged only on a node running both `--probe-permits` and
+`--require-probe-permits`. Every probe, including direct-node Execute, must obtain a
 single-node, single-attempt permit from the active cell authority. For direct
 operators, the node requests it on an authenticated node-only internal RPC;
 the service has no access to that RPC. That admission uses the same executor

@@ -749,7 +749,9 @@ in memory and charges every probe, whoever asked for it:
 | Live service streams, cell / project   | 16 / 2                     | Each `RunDiagnostic`                                                | `QueueFull`                        |
 
 Principals are the service request's project, a `FabricQuery`'s
-`source.namespace/source.cluster`, and `operator/<name>` for an operator. Nothing
+`fabricquery/<source.namespace>/<source.cluster>`, and `operator/<name>` for an operator. A probe an
+operator sends a node directly is charged to the operator only on a node that
+runs both `--probe-permits` and `--require-probe-permits`. Nothing
 charged is refunded. Reads (route lookups, BGP summaries) take a node slot but
 no packets. The leader confirms it holds the election Lease, reading it uncached,
 before every admission and probe, and once a second besides. After it starts,

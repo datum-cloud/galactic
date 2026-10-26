@@ -327,7 +327,7 @@ func (r *Reconciler) launch(fq *fabricapi.FabricQuery, q query.Query, nodes []No
 		}()
 		log := slog.With("fabricQuery", key.String(), "requestID", spec.RequestID, "attempt", attempt)
 		started := r.now()
-		outcomes := r.Runner.Run(ctx, spec.Source.Namespace+"/"+spec.Source.Cluster, spec.RequestID,
+		outcomes := r.Runner.Run(ctx, fabricQueryPrincipal(spec.Source.Namespace, spec.Source.Cluster), spec.RequestID,
 			q, nodes, wire, spec.ExpiresAt.Time)
 		if r.Metrics != nil {
 			r.Metrics.stageLatency.WithLabelValues("execution").Observe(r.now().Sub(started).Seconds())
@@ -695,4 +695,11 @@ func nodesFromStatus(targets []fabricapi.NodeTarget) []Node {
 		})
 	}
 	return out
+}
+
+// fabricQueryPrincipal is the budget key of a FabricQuery source. Its
+// "fabricquery/" prefix keeps it apart from an operator's key and from a
+// service project's, whose IDs cannot contain "/".
+func fabricQueryPrincipal(namespace, cluster string) string {
+	return "fabricquery/" + namespace + "/" + cluster
 }

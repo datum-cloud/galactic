@@ -816,3 +816,43 @@ func TestServiceStreamOverTransport(t *testing.T) {
 		}
 	}
 }
+
+// stallReader blocks every List until its context ends.
+type stallReader struct {
+	client.Reader
+	listing chan struct{}
+}
+
+func (r stallReader) List(ctx context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	r.listing <- struct{}{}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestServiceOwnershipLostDuringDiscovery(t *testing.T) {
+	lease := newSwitchableLease(t)
+	svc := newService(t, routerPods(routerA), &routerNodes{}, 8)
+	adm, err := NewAdmission(roomyLimits(), &limit.Authority{
+		Reader: lease, Namespace: DefaultNamespace, Name: testLease, Identity: testHolder, Hold: time.Nanosecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activate(t, adm)
+	svc.Admission, svc.Runner.Admission, svc.Runner.Executor = adm, adm, adm.Executor()
+	listing := make(chan struct{}, 1)
+	svc.Discoverer.Reader = stallReader{Reader: svc.Discoverer.Reader, listing: listing}
+	go adm.Authority.Watch(t.Context(), 50*time.Millisecond)
+
+	_, done := run(t, svc, requestFor("project-a", 1, nil), 0)
+	<-listing
+	lease.fail(true)
+	select {
+	case err := <-done:
+		if errcode.Of(err) != errcode.OwnershipLost {
+			t.Errorf("err = %v, want OwnershipLost", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("discovery outlived the election")
+	}
+}
