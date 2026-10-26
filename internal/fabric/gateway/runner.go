@@ -19,6 +19,7 @@ import (
 
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/errcode"
+	"go.datum.net/galactic/internal/fabric/gateway/limit"
 	"go.datum.net/galactic/internal/fabric/identity"
 	"go.datum.net/galactic/internal/fabric/node"
 	"go.datum.net/galactic/internal/fabric/query"
@@ -121,12 +122,26 @@ type Runner struct {
 	Clients  NodeClients
 	Executor *Executor
 	Metrics  *Metrics
+	// Admission, when set, enforces the cell's aggregate probe budgets on
+	// every caller: each probe is dispatched only with a permit charged to
+	// its principal, destination and cell, a probe's slot whose node answer
+	// was lost stays held until the job's deadline plus ReservationGrace,
+	// and a full principal or cell queue is QueueFull with retry guidance.
+	Admission *Admission
 	// QueueWait bounds a Stream job's wait for an execution slot; zero
 	// selects ServiceQueueWait.
 	QueueWait time.Duration
 	// Now returns the current time; nil selects time.Now.
 	Now func() time.Time
+
+	// permitPods caches, per sidecar pod UID, whether the node enforces
+	// probe permits; it is cleared when it reaches maxPermitPods.
+	permitMu   sync.Mutex
+	permitPods map[string]bool
 }
+
+// maxPermitPods bounds the probe-permit capability cache.
+const maxPermitPods = 1024
 
 func (r *Runner) now() time.Time {
 	if r.Now != nil {
@@ -146,6 +161,11 @@ type runOptions struct {
 	// requestCodes reports a failure caused by ctx ending as
 	// DeadlineExceeded or Cancelled rather than Timeout.
 	requestCodes bool
+	// reservation, when set, holds the queue capacity every job uses.
+	reservation *Reservation
+	// checkOwnership confirms the election before every dispatch, not
+	// only a probe's.
+	checkOwnership bool
 }
 
 // Run executes q on every selected node in nodes and returns one outcome per
@@ -173,14 +193,16 @@ func (r *Runner) Run(ctx context.Context, project, requestID string, q query.Que
 // never repeats a node call, bounds each job's wait for a slot by
 // QueueWait (QueueTimeout), and reports a job cut short by ctx ending
 // as DeadlineExceeded or Cancelled; a node's own 30 s bound stays Timeout.
+// Jobs queue on res when it is set, and with Admission set every dispatch
+// first confirms the election.
 func (r *Runner) Stream(ctx context.Context, project, requestID string, q query.Query, nodes []Node,
-	budgets *fabricv1.Budgets, expires time.Time, emit func(Outcome)) {
+	budgets *fabricv1.Budgets, expires time.Time, res *Reservation, emit func(Outcome)) {
 	wait := r.QueueWait
 	if wait <= 0 {
 		wait = ServiceQueueWait
 	}
 	r.fanOut(ctx, project, requestID, q, nodes, budgets, expires,
-		runOptions{queueWait: wait, requestCodes: true}, emit)
+		runOptions{queueWait: wait, requestCodes: true, reservation: res, checkOwnership: true}, emit)
 }
 
 func (r *Runner) fanOut(ctx context.Context, project, requestID string, q query.Query, nodes []Node,
@@ -198,7 +220,7 @@ func (r *Runner) fanOut(ctx context.Context, project, requestID string, q query.
 		wg.Go(func() {
 			nctx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
-			obs, err := r.one(nctx, project, requestID, wire, q, n, budgets, expires, opts)
+			obs, err := r.one(nctx, project, requestID, wire, q, n, budgets, expires, deadline, opts)
 			if opts.requestCodes {
 				// When the request's expiration is the node's deadline, the
 				// node's timer can fire before ctx's: both mean the request
@@ -212,8 +234,13 @@ func (r *Runner) fanOut(ctx context.Context, project, requestID string, q query.
 	wg.Wait()
 }
 
+// errOwnershipLost is the cause with which a service request's execution is
+// cancelled when the gateway loses the election.
+var errOwnershipLost = errors.New("the gateway lost execution ownership")
+
 // requestErr reports a failure that ctx's end, or the request's expiration,
-// caused as the request's own DeadlineExceeded or Cancelled.
+// caused as the request's own DeadlineExceeded, Cancelled or, when the
+// election was lost, OwnershipLost.
 func requestErr(ctx context.Context, err error, expired bool) error {
 	if err == nil || (ctx.Err() == nil && !expired) {
 		return err
@@ -223,6 +250,9 @@ func requestErr(ctx context.Context, err error, expired bool) error {
 	default:
 		return err
 	}
+	if errors.Is(context.Cause(ctx), errOwnershipLost) {
+		return errcode.Status(errcode.OwnershipLost, "the gateway lost execution ownership before the router finished")
+	}
 	if expired || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return errcode.Status(errcode.DeadlineExceeded, "the request's deadline passed before the router finished")
 	}
@@ -230,16 +260,26 @@ func requestErr(ctx context.Context, err error, expired bool) error {
 }
 
 func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabricv1.Query, q query.Query, n Node,
-	budgets *fabricv1.Budgets, expires time.Time, opts runOptions) (*fabricv1.Observation, error) {
+	budgets *fabricv1.Budgets, expires, deadline time.Time, opts runOptions) (*fabricv1.Observation, error) {
 	actx := ctx
 	if opts.queueWait > 0 {
 		var cancel context.CancelFunc
 		actx, cancel = context.WithTimeout(ctx, opts.queueWait)
 		defer cancel()
 	}
-	release, err := r.Executor.Acquire(actx, project, q.Type.Expensive())
+	var release func()
+	var err error
+	if opts.reservation != nil {
+		release, err = opts.reservation.Acquire(actx, q.Type.Expensive())
+	} else {
+		release, err = r.Executor.Acquire(actx, project, q.Type.Expensive())
+	}
 	if err != nil {
 		if errors.Is(err, ErrQueueFull) {
+			if r.Admission != nil {
+				return nil, errcode.Retry(errcode.QueueFull, "the cell's execution queue is full",
+					string(limit.ScopeQueue), time.Second)
+			}
 			return nil, errcode.Status(errcode.NodeBusy, "cell execution queue is full")
 		}
 		if ctx.Err() == nil {
@@ -247,7 +287,12 @@ func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabri
 		}
 		return nil, errcode.Status(errcode.Timeout, "deadline passed waiting for a cell execution slot")
 	}
-	defer release()
+	held := false
+	defer func() {
+		if !held {
+			release()
+		}
+	}()
 
 	c, err := r.Clients.Client(n)
 	if err != nil {
@@ -256,8 +301,28 @@ func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabri
 	req := &fabricv1.ExecuteRequest{
 		RequestId: requestID, Node: n.Name, Query: wire, Budgets: budgets, ExpiresAt: timestamppb.New(expires),
 	}
+	if a := r.Admission; a != nil {
+		switch {
+		case q.Type.Probe():
+			if err := r.checkPermits(ctx, c, n); err != nil {
+				return nil, err
+			}
+			if req.Permit, err = a.permit(ctx, project, requestID, n.Name, q, deadline); err != nil {
+				return nil, err
+			}
+		case opts.checkOwnership:
+			if _, _, err := a.Authority.Check(ctx); err != nil {
+				return nil, err
+			}
+		}
+	}
 	start := r.now()
 	resp, err := c.Execute(ctx, req)
+	if r.Admission != nil && q.Type.Probe() && err != nil && !errcode.Typed(err) {
+		// No answer from the node: it may still be sending the probe.
+		held = true
+		holdUntil(release, deadline.Add(ReservationGrace), r.now())
+	}
 	// A cheap read that failed to connect is safe to repeat once: the node
 	// deduplicates by request ID. Searches and probes are never retried
 	// within an attempt, since their first execution may have run.
@@ -279,4 +344,30 @@ func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabri
 		return nil, err
 	}
 	return resp.GetObservation(), nil
+}
+
+// checkPermits refuses a node whose sidecar does not enforce probe permits:
+// it would ignore its permit's allowance and deadline. The answer is cached
+// per pod, whose UID changes with its image.
+func (r *Runner) checkPermits(ctx context.Context, c fabricv1.FabricServiceClient, n Node) error {
+	r.permitMu.Lock()
+	ok, cached := r.permitPods[n.PodUID]
+	r.permitMu.Unlock()
+	if !cached {
+		info, err := c.Info(ctx, &fabricv1.InfoRequest{})
+		if err != nil {
+			return errcode.Status(errcode.NodeUnreachable, "the node did not report its capabilities")
+		}
+		ok = info.GetProbePermits()
+		r.permitMu.Lock()
+		if r.permitPods == nil || len(r.permitPods) >= maxPermitPods {
+			r.permitPods = map[string]bool{}
+		}
+		r.permitPods[n.PodUID] = ok
+		r.permitMu.Unlock()
+	}
+	if !ok {
+		return errcode.Status(errcode.QueryTypeUnavailable, "the node does not enforce probe permits")
+	}
+	return nil
 }

@@ -277,7 +277,10 @@ type Limits struct {
 	// larger inventory fails with InventoryTooLarge.
 	MaxInventoryRouters uint32 `protobuf:"varint,4,opt,name=max_inventory_routers,json=maxInventoryRouters,proto3" json:"max_inventory_routers,omitempty"`
 	// max_budgets holds the largest value each request budget may take.
-	MaxBudgets    *v1.Budgets `protobuf:"bytes,5,opt,name=max_budgets,json=maxBudgets,proto3" json:"max_budgets,omitempty"`
+	MaxBudgets *v1.Budgets `protobuf:"bytes,5,opt,name=max_budgets,json=maxBudgets,proto3" json:"max_budgets,omitempty"`
+	// admission holds the cell's aggregate admission and probe budgets. It is
+	// set when the aggregate-probe-budgets feature is served.
+	Admission     *AdmissionLimits `protobuf:"bytes,6,opt,name=admission,proto3" json:"admission,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -347,6 +350,236 @@ func (x *Limits) GetMaxBudgets() *v1.Budgets {
 	return nil
 }
 
+func (x *Limits) GetAdmission() *AdmissionLimits {
+	if x != nil {
+		return x.Admission
+	}
+	return nil
+}
+
+// TokenRate is a token bucket's sustained rate, in tokens per second, and
+// its burst.
+type TokenRate struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PerSecond     float64                `protobuf:"fixed64,1,opt,name=per_second,json=perSecond,proto3" json:"per_second,omitempty"`
+	Burst         float64                `protobuf:"fixed64,2,opt,name=burst,proto3" json:"burst,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TokenRate) Reset() {
+	*x = TokenRate{}
+	mi := &file_fabric_service_v1_service_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TokenRate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TokenRate) ProtoMessage() {}
+
+func (x *TokenRate) ProtoReflect() protoreflect.Message {
+	mi := &file_fabric_service_v1_service_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TokenRate.ProtoReflect.Descriptor instead.
+func (*TokenRate) Descriptor() ([]byte, []int) {
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *TokenRate) GetPerSecond() float64 {
+	if x != nil {
+		return x.PerSecond
+	}
+	return 0
+}
+
+func (x *TokenRate) GetBurst() float64 {
+	if x != nil {
+		return x.Burst
+	}
+	return 0
+}
+
+// AdmissionLimits are a cell's aggregate limits. Request buckets charge one
+// token per RunDiagnostic; packet buckets charge each probe's worst case,
+// ping_packets or traceroute_packets, when its router job is dispatched.
+// Packet budgets are shared with the cell's operator and FabricQuery probes.
+type AdmissionLimits struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RequestCell    *TokenRate             `protobuf:"bytes,1,opt,name=request_cell,json=requestCell,proto3" json:"request_cell,omitempty"`
+	RequestProject *TokenRate             `protobuf:"bytes,2,opt,name=request_project,json=requestProject,proto3" json:"request_project,omitempty"`
+	PacketCell     *TokenRate             `protobuf:"bytes,3,opt,name=packet_cell,json=packetCell,proto3" json:"packet_cell,omitempty"`
+	PacketProject  *TokenRate             `protobuf:"bytes,4,opt,name=packet_project,json=packetProject,proto3" json:"packet_project,omitempty"`
+	// packet_destination_host charges the destination's /32 or /128, and
+	// packet_destination_prefix its /24 or /64, whatever the project.
+	PacketDestinationHost   *TokenRate `protobuf:"bytes,5,opt,name=packet_destination_host,json=packetDestinationHost,proto3" json:"packet_destination_host,omitempty"`
+	PacketDestinationPrefix *TokenRate `protobuf:"bytes,6,opt,name=packet_destination_prefix,json=packetDestinationPrefix,proto3" json:"packet_destination_prefix,omitempty"`
+	// active_jobs and project_active_jobs bound router jobs executing at once
+	// in the cell and per project.
+	ActiveJobs        uint32 `protobuf:"varint,7,opt,name=active_jobs,json=activeJobs,proto3" json:"active_jobs,omitempty"`
+	ProjectActiveJobs uint32 `protobuf:"varint,8,opt,name=project_active_jobs,json=projectActiveJobs,proto3" json:"project_active_jobs,omitempty"`
+	// queued_jobs and project_queued_jobs bound router jobs waiting for a
+	// slot. A request's selected routers are admitted together or refused
+	// with QueueFull.
+	QueuedJobs        uint32 `protobuf:"varint,9,opt,name=queued_jobs,json=queuedJobs,proto3" json:"queued_jobs,omitempty"`
+	ProjectQueuedJobs uint32 `protobuf:"varint,10,opt,name=project_queued_jobs,json=projectQueuedJobs,proto3" json:"project_queued_jobs,omitempty"`
+	// streams and project_streams bound live RunDiagnostic streams.
+	Streams        uint32 `protobuf:"varint,11,opt,name=streams,proto3" json:"streams,omitempty"`
+	ProjectStreams uint32 `protobuf:"varint,12,opt,name=project_streams,json=projectStreams,proto3" json:"project_streams,omitempty"`
+	// queue_wait bounds a router job's wait for a slot (QueueTimeout).
+	QueueWait         *durationpb.Duration `protobuf:"bytes,13,opt,name=queue_wait,json=queueWait,proto3" json:"queue_wait,omitempty"`
+	PingPackets       uint32               `protobuf:"varint,14,opt,name=ping_packets,json=pingPackets,proto3" json:"ping_packets,omitempty"`
+	TraceroutePackets uint32               `protobuf:"varint,15,opt,name=traceroute_packets,json=traceroutePackets,proto3" json:"traceroute_packets,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *AdmissionLimits) Reset() {
+	*x = AdmissionLimits{}
+	mi := &file_fabric_service_v1_service_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdmissionLimits) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdmissionLimits) ProtoMessage() {}
+
+func (x *AdmissionLimits) ProtoReflect() protoreflect.Message {
+	mi := &file_fabric_service_v1_service_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdmissionLimits.ProtoReflect.Descriptor instead.
+func (*AdmissionLimits) Descriptor() ([]byte, []int) {
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *AdmissionLimits) GetRequestCell() *TokenRate {
+	if x != nil {
+		return x.RequestCell
+	}
+	return nil
+}
+
+func (x *AdmissionLimits) GetRequestProject() *TokenRate {
+	if x != nil {
+		return x.RequestProject
+	}
+	return nil
+}
+
+func (x *AdmissionLimits) GetPacketCell() *TokenRate {
+	if x != nil {
+		return x.PacketCell
+	}
+	return nil
+}
+
+func (x *AdmissionLimits) GetPacketProject() *TokenRate {
+	if x != nil {
+		return x.PacketProject
+	}
+	return nil
+}
+
+func (x *AdmissionLimits) GetPacketDestinationHost() *TokenRate {
+	if x != nil {
+		return x.PacketDestinationHost
+	}
+	return nil
+}
+
+func (x *AdmissionLimits) GetPacketDestinationPrefix() *TokenRate {
+	if x != nil {
+		return x.PacketDestinationPrefix
+	}
+	return nil
+}
+
+func (x *AdmissionLimits) GetActiveJobs() uint32 {
+	if x != nil {
+		return x.ActiveJobs
+	}
+	return 0
+}
+
+func (x *AdmissionLimits) GetProjectActiveJobs() uint32 {
+	if x != nil {
+		return x.ProjectActiveJobs
+	}
+	return 0
+}
+
+func (x *AdmissionLimits) GetQueuedJobs() uint32 {
+	if x != nil {
+		return x.QueuedJobs
+	}
+	return 0
+}
+
+func (x *AdmissionLimits) GetProjectQueuedJobs() uint32 {
+	if x != nil {
+		return x.ProjectQueuedJobs
+	}
+	return 0
+}
+
+func (x *AdmissionLimits) GetStreams() uint32 {
+	if x != nil {
+		return x.Streams
+	}
+	return 0
+}
+
+func (x *AdmissionLimits) GetProjectStreams() uint32 {
+	if x != nil {
+		return x.ProjectStreams
+	}
+	return 0
+}
+
+func (x *AdmissionLimits) GetQueueWait() *durationpb.Duration {
+	if x != nil {
+		return x.QueueWait
+	}
+	return nil
+}
+
+func (x *AdmissionLimits) GetPingPackets() uint32 {
+	if x != nil {
+		return x.PingPackets
+	}
+	return 0
+}
+
+func (x *AdmissionLimits) GetTraceroutePackets() uint32 {
+	if x != nil {
+		return x.TraceroutePackets
+	}
+	return 0
+}
+
 type RunDiagnosticRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// api_major must be 1.
@@ -376,7 +609,7 @@ type RunDiagnosticRequest struct {
 
 func (x *RunDiagnosticRequest) Reset() {
 	*x = RunDiagnosticRequest{}
-	mi := &file_fabric_service_v1_service_proto_msgTypes[4]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -388,7 +621,7 @@ func (x *RunDiagnosticRequest) String() string {
 func (*RunDiagnosticRequest) ProtoMessage() {}
 
 func (x *RunDiagnosticRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_service_v1_service_proto_msgTypes[4]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -401,7 +634,7 @@ func (x *RunDiagnosticRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunDiagnosticRequest.ProtoReflect.Descriptor instead.
 func (*RunDiagnosticRequest) Descriptor() ([]byte, []int) {
-	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{4}
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RunDiagnosticRequest) GetApiMajor() uint32 {
@@ -488,7 +721,7 @@ type DiagnosticEvent struct {
 
 func (x *DiagnosticEvent) Reset() {
 	*x = DiagnosticEvent{}
-	mi := &file_fabric_service_v1_service_proto_msgTypes[5]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -500,7 +733,7 @@ func (x *DiagnosticEvent) String() string {
 func (*DiagnosticEvent) ProtoMessage() {}
 
 func (x *DiagnosticEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_service_v1_service_proto_msgTypes[5]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -513,7 +746,7 @@ func (x *DiagnosticEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiagnosticEvent.ProtoReflect.Descriptor instead.
 func (*DiagnosticEvent) Descriptor() ([]byte, []int) {
-	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{5}
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DiagnosticEvent) GetRequestId() string {
@@ -605,7 +838,7 @@ type Snapshot struct {
 
 func (x *Snapshot) Reset() {
 	*x = Snapshot{}
-	mi := &file_fabric_service_v1_service_proto_msgTypes[6]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -617,7 +850,7 @@ func (x *Snapshot) String() string {
 func (*Snapshot) ProtoMessage() {}
 
 func (x *Snapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_service_v1_service_proto_msgTypes[6]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -630,7 +863,7 @@ func (x *Snapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Snapshot.ProtoReflect.Descriptor instead.
 func (*Snapshot) Descriptor() ([]byte, []int) {
-	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{6}
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Snapshot) GetSnapshotId() string {
@@ -685,7 +918,7 @@ type SnapshotRouter struct {
 
 func (x *SnapshotRouter) Reset() {
 	*x = SnapshotRouter{}
-	mi := &file_fabric_service_v1_service_proto_msgTypes[7]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -697,7 +930,7 @@ func (x *SnapshotRouter) String() string {
 func (*SnapshotRouter) ProtoMessage() {}
 
 func (x *SnapshotRouter) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_service_v1_service_proto_msgTypes[7]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -710,7 +943,7 @@ func (x *SnapshotRouter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotRouter.ProtoReflect.Descriptor instead.
 func (*SnapshotRouter) Descriptor() ([]byte, []int) {
-	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{7}
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SnapshotRouter) GetNode() string {
@@ -760,7 +993,7 @@ type RouterOutcome struct {
 
 func (x *RouterOutcome) Reset() {
 	*x = RouterOutcome{}
-	mi := &file_fabric_service_v1_service_proto_msgTypes[8]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -772,7 +1005,7 @@ func (x *RouterOutcome) String() string {
 func (*RouterOutcome) ProtoMessage() {}
 
 func (x *RouterOutcome) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_service_v1_service_proto_msgTypes[8]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -785,7 +1018,7 @@ func (x *RouterOutcome) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouterOutcome.ProtoReflect.Descriptor instead.
 func (*RouterOutcome) Descriptor() ([]byte, []int) {
-	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{8}
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *RouterOutcome) GetNode() string {
@@ -857,14 +1090,20 @@ type Failure struct {
 	// reason is a fabric-api error code, e.g. NodeUnreachable or Timeout.
 	Reason string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
 	// message is a sanitized description of at most 256 bytes.
-	Message       string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	Message string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	// scope is the limit that refused a Throttled, QueueFull or
+	// LimiterUnavailable router: cell, project, destination or queue.
+	Scope string `protobuf:"bytes,3,opt,name=scope,proto3" json:"scope,omitempty"`
+	// retry_delay is the advised delay before a new attempt, for a refusal
+	// that carries one. It is guidance, not a reservation.
+	RetryDelay    *durationpb.Duration `protobuf:"bytes,4,opt,name=retry_delay,json=retryDelay,proto3" json:"retry_delay,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Failure) Reset() {
 	*x = Failure{}
-	mi := &file_fabric_service_v1_service_proto_msgTypes[9]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -876,7 +1115,7 @@ func (x *Failure) String() string {
 func (*Failure) ProtoMessage() {}
 
 func (x *Failure) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_service_v1_service_proto_msgTypes[9]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -889,7 +1128,7 @@ func (x *Failure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Failure.ProtoReflect.Descriptor instead.
 func (*Failure) Descriptor() ([]byte, []int) {
-	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{9}
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Failure) GetReason() string {
@@ -904,6 +1143,20 @@ func (x *Failure) GetMessage() string {
 		return x.Message
 	}
 	return ""
+}
+
+func (x *Failure) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
+func (x *Failure) GetRetryDelay() *durationpb.Duration {
+	if x != nil {
+		return x.RetryDelay
+	}
+	return nil
 }
 
 // Complete is a stream's terminal coverage. expected equals successful +
@@ -929,7 +1182,7 @@ type Complete struct {
 
 func (x *Complete) Reset() {
 	*x = Complete{}
-	mi := &file_fabric_service_v1_service_proto_msgTypes[10]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -941,7 +1194,7 @@ func (x *Complete) String() string {
 func (*Complete) ProtoMessage() {}
 
 func (x *Complete) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_service_v1_service_proto_msgTypes[10]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -954,7 +1207,7 @@ func (x *Complete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Complete.ProtoReflect.Descriptor instead.
 func (*Complete) Descriptor() ([]byte, []int) {
-	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{10}
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Complete) GetSnapshotId() string {
@@ -1035,14 +1288,40 @@ const file_fabric_service_v1_service_proto_rawDesc = "" +
 	"\fgenerated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\vgeneratedAt\"z\n" +
 	"\tOperation\x12(\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x14.fabric.v1.QueryTypeR\x04type\x12C\n" +
-	"\x10address_families\x18\x02 \x03(\x0e2\x18.fabric.v1.AddressFamilyR\x0faddressFamilies\"\xb9\x02\n" +
+	"\x10address_families\x18\x02 \x03(\x0e2\x18.fabric.v1.AddressFamilyR\x0faddressFamilies\"\xfb\x02\n" +
 	"\x06Limits\x12K\n" +
 	"\x14max_request_lifetime\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\x12maxRequestLifetime\x12G\n" +
 	"\x12max_node_execution\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x10maxNodeExecution\x120\n" +
 	"\x14max_selected_routers\x18\x03 \x01(\rR\x12maxSelectedRouters\x122\n" +
 	"\x15max_inventory_routers\x18\x04 \x01(\rR\x13maxInventoryRouters\x123\n" +
 	"\vmax_budgets\x18\x05 \x01(\v2\x12.fabric.v1.BudgetsR\n" +
-	"maxBudgets\"\xd9\x02\n" +
+	"maxBudgets\x12@\n" +
+	"\tadmission\x18\x06 \x01(\v2\".fabric.service.v1.AdmissionLimitsR\tadmission\"@\n" +
+	"\tTokenRate\x12\x1d\n" +
+	"\n" +
+	"per_second\x18\x01 \x01(\x01R\tperSecond\x12\x14\n" +
+	"\x05burst\x18\x02 \x01(\x01R\x05burst\"\xbe\x06\n" +
+	"\x0fAdmissionLimits\x12?\n" +
+	"\frequest_cell\x18\x01 \x01(\v2\x1c.fabric.service.v1.TokenRateR\vrequestCell\x12E\n" +
+	"\x0frequest_project\x18\x02 \x01(\v2\x1c.fabric.service.v1.TokenRateR\x0erequestProject\x12=\n" +
+	"\vpacket_cell\x18\x03 \x01(\v2\x1c.fabric.service.v1.TokenRateR\n" +
+	"packetCell\x12C\n" +
+	"\x0epacket_project\x18\x04 \x01(\v2\x1c.fabric.service.v1.TokenRateR\rpacketProject\x12T\n" +
+	"\x17packet_destination_host\x18\x05 \x01(\v2\x1c.fabric.service.v1.TokenRateR\x15packetDestinationHost\x12X\n" +
+	"\x19packet_destination_prefix\x18\x06 \x01(\v2\x1c.fabric.service.v1.TokenRateR\x17packetDestinationPrefix\x12\x1f\n" +
+	"\vactive_jobs\x18\a \x01(\rR\n" +
+	"activeJobs\x12.\n" +
+	"\x13project_active_jobs\x18\b \x01(\rR\x11projectActiveJobs\x12\x1f\n" +
+	"\vqueued_jobs\x18\t \x01(\rR\n" +
+	"queuedJobs\x12.\n" +
+	"\x13project_queued_jobs\x18\n" +
+	" \x01(\rR\x11projectQueuedJobs\x12\x18\n" +
+	"\astreams\x18\v \x01(\rR\astreams\x12'\n" +
+	"\x0fproject_streams\x18\f \x01(\rR\x0eprojectStreams\x128\n" +
+	"\n" +
+	"queue_wait\x18\r \x01(\v2\x19.google.protobuf.DurationR\tqueueWait\x12!\n" +
+	"\fping_packets\x18\x0e \x01(\rR\vpingPackets\x12-\n" +
+	"\x12traceroute_packets\x18\x0f \x01(\rR\x11traceroutePackets\"\xd9\x02\n" +
 	"\x14RunDiagnosticRequest\x12\x1b\n" +
 	"\tapi_major\x18\x01 \x01(\rR\bapiMajor\x12\x12\n" +
 	"\x04cell\x18\x02 \x01(\tR\x04cell\x12\x1d\n" +
@@ -1083,10 +1362,13 @@ const file_fabric_service_v1_service_proto_rawDesc = "" +
 	"\fcompleted_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAt\x12:\n" +
 	"\vobservation\x18\x04 \x01(\v2\x16.fabric.v1.ObservationH\x00R\vobservation\x126\n" +
 	"\afailure\x18\x05 \x01(\v2\x1a.fabric.service.v1.FailureH\x00R\afailureB\b\n" +
-	"\x06result\";\n" +
+	"\x06result\"\x8d\x01\n" +
 	"\aFailure\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\x9b\x02\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12\x14\n" +
+	"\x05scope\x18\x03 \x01(\tR\x05scope\x12:\n" +
+	"\vretry_delay\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\n" +
+	"retryDelay\"\x9b\x02\n" +
 	"\bComplete\x12\x1f\n" +
 	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
 	"snapshotId\x12;\n" +
@@ -1116,57 +1398,68 @@ func file_fabric_service_v1_service_proto_rawDescGZIP() []byte {
 	return file_fabric_service_v1_service_proto_rawDescData
 }
 
-var file_fabric_service_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_fabric_service_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_fabric_service_v1_service_proto_goTypes = []any{
 	(*GetCapabilitiesRequest)(nil),  // 0: fabric.service.v1.GetCapabilitiesRequest
 	(*GetCapabilitiesResponse)(nil), // 1: fabric.service.v1.GetCapabilitiesResponse
 	(*Operation)(nil),               // 2: fabric.service.v1.Operation
 	(*Limits)(nil),                  // 3: fabric.service.v1.Limits
-	(*RunDiagnosticRequest)(nil),    // 4: fabric.service.v1.RunDiagnosticRequest
-	(*DiagnosticEvent)(nil),         // 5: fabric.service.v1.DiagnosticEvent
-	(*Snapshot)(nil),                // 6: fabric.service.v1.Snapshot
-	(*SnapshotRouter)(nil),          // 7: fabric.service.v1.SnapshotRouter
-	(*RouterOutcome)(nil),           // 8: fabric.service.v1.RouterOutcome
-	(*Failure)(nil),                 // 9: fabric.service.v1.Failure
-	(*Complete)(nil),                // 10: fabric.service.v1.Complete
-	(*timestamppb.Timestamp)(nil),   // 11: google.protobuf.Timestamp
-	(v1.QueryType)(0),               // 12: fabric.v1.QueryType
-	(v1.AddressFamily)(0),           // 13: fabric.v1.AddressFamily
-	(*durationpb.Duration)(nil),     // 14: google.protobuf.Duration
-	(*v1.Budgets)(nil),              // 15: fabric.v1.Budgets
-	(*v1.Query)(nil),                // 16: fabric.v1.Query
-	(*v1.Observation)(nil),          // 17: fabric.v1.Observation
+	(*TokenRate)(nil),               // 4: fabric.service.v1.TokenRate
+	(*AdmissionLimits)(nil),         // 5: fabric.service.v1.AdmissionLimits
+	(*RunDiagnosticRequest)(nil),    // 6: fabric.service.v1.RunDiagnosticRequest
+	(*DiagnosticEvent)(nil),         // 7: fabric.service.v1.DiagnosticEvent
+	(*Snapshot)(nil),                // 8: fabric.service.v1.Snapshot
+	(*SnapshotRouter)(nil),          // 9: fabric.service.v1.SnapshotRouter
+	(*RouterOutcome)(nil),           // 10: fabric.service.v1.RouterOutcome
+	(*Failure)(nil),                 // 11: fabric.service.v1.Failure
+	(*Complete)(nil),                // 12: fabric.service.v1.Complete
+	(*timestamppb.Timestamp)(nil),   // 13: google.protobuf.Timestamp
+	(v1.QueryType)(0),               // 14: fabric.v1.QueryType
+	(v1.AddressFamily)(0),           // 15: fabric.v1.AddressFamily
+	(*durationpb.Duration)(nil),     // 16: google.protobuf.Duration
+	(*v1.Budgets)(nil),              // 17: fabric.v1.Budgets
+	(*v1.Query)(nil),                // 18: fabric.v1.Query
+	(*v1.Observation)(nil),          // 19: fabric.v1.Observation
 }
 var file_fabric_service_v1_service_proto_depIdxs = []int32{
 	2,  // 0: fabric.service.v1.GetCapabilitiesResponse.operations:type_name -> fabric.service.v1.Operation
 	3,  // 1: fabric.service.v1.GetCapabilitiesResponse.limits:type_name -> fabric.service.v1.Limits
-	11, // 2: fabric.service.v1.GetCapabilitiesResponse.generated_at:type_name -> google.protobuf.Timestamp
-	12, // 3: fabric.service.v1.Operation.type:type_name -> fabric.v1.QueryType
-	13, // 4: fabric.service.v1.Operation.address_families:type_name -> fabric.v1.AddressFamily
-	14, // 5: fabric.service.v1.Limits.max_request_lifetime:type_name -> google.protobuf.Duration
-	14, // 6: fabric.service.v1.Limits.max_node_execution:type_name -> google.protobuf.Duration
-	15, // 7: fabric.service.v1.Limits.max_budgets:type_name -> fabric.v1.Budgets
-	11, // 8: fabric.service.v1.RunDiagnosticRequest.expires_at:type_name -> google.protobuf.Timestamp
-	16, // 9: fabric.service.v1.RunDiagnosticRequest.query:type_name -> fabric.v1.Query
-	15, // 10: fabric.service.v1.RunDiagnosticRequest.budgets:type_name -> fabric.v1.Budgets
-	6,  // 11: fabric.service.v1.DiagnosticEvent.snapshot:type_name -> fabric.service.v1.Snapshot
-	8,  // 12: fabric.service.v1.DiagnosticEvent.outcome:type_name -> fabric.service.v1.RouterOutcome
-	10, // 13: fabric.service.v1.DiagnosticEvent.complete:type_name -> fabric.service.v1.Complete
-	11, // 14: fabric.service.v1.Snapshot.captured_at:type_name -> google.protobuf.Timestamp
-	7,  // 15: fabric.service.v1.Snapshot.routers:type_name -> fabric.service.v1.SnapshotRouter
-	11, // 16: fabric.service.v1.RouterOutcome.completed_at:type_name -> google.protobuf.Timestamp
-	17, // 17: fabric.service.v1.RouterOutcome.observation:type_name -> fabric.v1.Observation
-	9,  // 18: fabric.service.v1.RouterOutcome.failure:type_name -> fabric.service.v1.Failure
-	11, // 19: fabric.service.v1.Complete.finished_at:type_name -> google.protobuf.Timestamp
-	0,  // 20: fabric.service.v1.LookingGlassService.GetCapabilities:input_type -> fabric.service.v1.GetCapabilitiesRequest
-	4,  // 21: fabric.service.v1.LookingGlassService.RunDiagnostic:input_type -> fabric.service.v1.RunDiagnosticRequest
-	1,  // 22: fabric.service.v1.LookingGlassService.GetCapabilities:output_type -> fabric.service.v1.GetCapabilitiesResponse
-	5,  // 23: fabric.service.v1.LookingGlassService.RunDiagnostic:output_type -> fabric.service.v1.DiagnosticEvent
-	22, // [22:24] is the sub-list for method output_type
-	20, // [20:22] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	13, // 2: fabric.service.v1.GetCapabilitiesResponse.generated_at:type_name -> google.protobuf.Timestamp
+	14, // 3: fabric.service.v1.Operation.type:type_name -> fabric.v1.QueryType
+	15, // 4: fabric.service.v1.Operation.address_families:type_name -> fabric.v1.AddressFamily
+	16, // 5: fabric.service.v1.Limits.max_request_lifetime:type_name -> google.protobuf.Duration
+	16, // 6: fabric.service.v1.Limits.max_node_execution:type_name -> google.protobuf.Duration
+	17, // 7: fabric.service.v1.Limits.max_budgets:type_name -> fabric.v1.Budgets
+	5,  // 8: fabric.service.v1.Limits.admission:type_name -> fabric.service.v1.AdmissionLimits
+	4,  // 9: fabric.service.v1.AdmissionLimits.request_cell:type_name -> fabric.service.v1.TokenRate
+	4,  // 10: fabric.service.v1.AdmissionLimits.request_project:type_name -> fabric.service.v1.TokenRate
+	4,  // 11: fabric.service.v1.AdmissionLimits.packet_cell:type_name -> fabric.service.v1.TokenRate
+	4,  // 12: fabric.service.v1.AdmissionLimits.packet_project:type_name -> fabric.service.v1.TokenRate
+	4,  // 13: fabric.service.v1.AdmissionLimits.packet_destination_host:type_name -> fabric.service.v1.TokenRate
+	4,  // 14: fabric.service.v1.AdmissionLimits.packet_destination_prefix:type_name -> fabric.service.v1.TokenRate
+	16, // 15: fabric.service.v1.AdmissionLimits.queue_wait:type_name -> google.protobuf.Duration
+	13, // 16: fabric.service.v1.RunDiagnosticRequest.expires_at:type_name -> google.protobuf.Timestamp
+	18, // 17: fabric.service.v1.RunDiagnosticRequest.query:type_name -> fabric.v1.Query
+	17, // 18: fabric.service.v1.RunDiagnosticRequest.budgets:type_name -> fabric.v1.Budgets
+	8,  // 19: fabric.service.v1.DiagnosticEvent.snapshot:type_name -> fabric.service.v1.Snapshot
+	10, // 20: fabric.service.v1.DiagnosticEvent.outcome:type_name -> fabric.service.v1.RouterOutcome
+	12, // 21: fabric.service.v1.DiagnosticEvent.complete:type_name -> fabric.service.v1.Complete
+	13, // 22: fabric.service.v1.Snapshot.captured_at:type_name -> google.protobuf.Timestamp
+	9,  // 23: fabric.service.v1.Snapshot.routers:type_name -> fabric.service.v1.SnapshotRouter
+	13, // 24: fabric.service.v1.RouterOutcome.completed_at:type_name -> google.protobuf.Timestamp
+	19, // 25: fabric.service.v1.RouterOutcome.observation:type_name -> fabric.v1.Observation
+	11, // 26: fabric.service.v1.RouterOutcome.failure:type_name -> fabric.service.v1.Failure
+	16, // 27: fabric.service.v1.Failure.retry_delay:type_name -> google.protobuf.Duration
+	13, // 28: fabric.service.v1.Complete.finished_at:type_name -> google.protobuf.Timestamp
+	0,  // 29: fabric.service.v1.LookingGlassService.GetCapabilities:input_type -> fabric.service.v1.GetCapabilitiesRequest
+	6,  // 30: fabric.service.v1.LookingGlassService.RunDiagnostic:input_type -> fabric.service.v1.RunDiagnosticRequest
+	1,  // 31: fabric.service.v1.LookingGlassService.GetCapabilities:output_type -> fabric.service.v1.GetCapabilitiesResponse
+	7,  // 32: fabric.service.v1.LookingGlassService.RunDiagnostic:output_type -> fabric.service.v1.DiagnosticEvent
+	31, // [31:33] is the sub-list for method output_type
+	29, // [29:31] is the sub-list for method input_type
+	29, // [29:29] is the sub-list for extension type_name
+	29, // [29:29] is the sub-list for extension extendee
+	0,  // [0:29] is the sub-list for field type_name
 }
 
 func init() { file_fabric_service_v1_service_proto_init() }
@@ -1174,12 +1467,12 @@ func file_fabric_service_v1_service_proto_init() {
 	if File_fabric_service_v1_service_proto != nil {
 		return
 	}
-	file_fabric_service_v1_service_proto_msgTypes[5].OneofWrappers = []any{
+	file_fabric_service_v1_service_proto_msgTypes[7].OneofWrappers = []any{
 		(*DiagnosticEvent_Snapshot)(nil),
 		(*DiagnosticEvent_Outcome)(nil),
 		(*DiagnosticEvent_Complete)(nil),
 	}
-	file_fabric_service_v1_service_proto_msgTypes[8].OneofWrappers = []any{
+	file_fabric_service_v1_service_proto_msgTypes[10].OneofWrappers = []any{
 		(*RouterOutcome_Observation)(nil),
 		(*RouterOutcome_Failure)(nil),
 	}
@@ -1189,7 +1482,7 @@ func file_fabric_service_v1_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fabric_service_v1_service_proto_rawDesc), len(file_fabric_service_v1_service_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	forwardv1 "go.datum.net/galactic/api/fabric/forward/v1"
+	permitv1 "go.datum.net/galactic/api/fabric/permit/v1"
 	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/errcode"
@@ -36,9 +37,10 @@ import (
 const operatorHeader = "x-fabric-api-operator"
 
 // GatewayMethods is the gateway server's per-role method table. Operators
-// call the debug service directly and service identities the Looking Glass
-// service; the gateway identity appears only on calls a follower forwards to
-// the leader. No role may call another role's methods.
+// call the debug service directly, service identities the Looking Glass
+// service and nodes the permit service; the gateway identity appears only
+// on calls a follower forwards to the leader. No role may call another
+// role's methods.
 var GatewayMethods = map[identity.Role]map[string]bool{
 	identity.RoleOperator: {
 		fabricv1.FabricGatewayService_Query_FullMethodName:     true,
@@ -47,6 +49,12 @@ var GatewayMethods = map[identity.Role]map[string]bool{
 	identity.RoleGateway: {
 		fabricv1.FabricGatewayService_Query_FullMethodName:        true,
 		forwardv1.ForwardService_ForwardDiagnostic_FullMethodName: true,
+		permitv1.PermitService_RequestPermit_FullMethodName:       true,
+		permitv1.PermitService_ReleasePermit_FullMethodName:       true,
+	},
+	identity.RoleNode: {
+		permitv1.PermitService_RequestPermit_FullMethodName: true,
+		permitv1.PermitService_ReleasePermit_FullMethodName: true,
 	},
 	identity.RoleService: {
 		servicev1.LookingGlassService_GetCapabilities_FullMethodName: true,
@@ -122,7 +130,7 @@ func (d *Debug) Query(ctx context.Context, req *fabricv1.QueryRequest) (*fabricv
 		budgets = &fabricv1.Budgets{}
 	}
 	id := "debug-" + randomID()
-	outcomes := d.Runner.Run(ctx, "operator/"+operator, id, q, nodes, budgets, expires)
+	outcomes := d.Runner.Run(ctx, operatorPrincipal(operator), id, q, nodes, budgets, expires)
 	resp := &fabricv1.QueryResponse{RequestId: id}
 	for _, o := range outcomes {
 		nr := &fabricv1.NodeResult{Node: o.Node.Name, Observation: o.Observation}

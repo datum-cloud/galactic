@@ -82,6 +82,47 @@ message Limits {
   uint32 max_inventory_routers = 4;
   // max_budgets holds the largest value each request budget may take.
   fabric.v1.Budgets max_budgets = 5;
+  // admission holds the cell's aggregate admission and probe budgets. It is
+  // set when the aggregate-probe-budgets feature is served.
+  AdmissionLimits admission = 6;
+}
+
+// TokenRate is a token bucket's sustained rate, in tokens per second, and
+// its burst.
+message TokenRate {
+  double per_second = 1;
+  double burst = 2;
+}
+
+// AdmissionLimits are a cell's aggregate limits. Request buckets charge one
+// token per RunDiagnostic; packet buckets charge each probe's worst case,
+// ping_packets or traceroute_packets, when its router job is dispatched.
+// Packet budgets are shared with the cell's operator and FabricQuery probes.
+message AdmissionLimits {
+  TokenRate request_cell = 1;
+  TokenRate request_project = 2;
+  TokenRate packet_cell = 3;
+  TokenRate packet_project = 4;
+  // packet_destination_host charges the destination's /32 or /128, and
+  // packet_destination_prefix its /24 or /64, whatever the project.
+  TokenRate packet_destination_host = 5;
+  TokenRate packet_destination_prefix = 6;
+  // active_jobs and project_active_jobs bound router jobs executing at once
+  // in the cell and per project.
+  uint32 active_jobs = 7;
+  uint32 project_active_jobs = 8;
+  // queued_jobs and project_queued_jobs bound router jobs waiting for a
+  // slot. A request's selected routers are admitted together or refused
+  // with QueueFull.
+  uint32 queued_jobs = 9;
+  uint32 project_queued_jobs = 10;
+  // streams and project_streams bound live RunDiagnostic streams.
+  uint32 streams = 11;
+  uint32 project_streams = 12;
+  // queue_wait bounds a router job's wait for a slot (QueueTimeout).
+  google.protobuf.Duration queue_wait = 13;
+  uint32 ping_packets = 14;
+  uint32 traceroute_packets = 15;
 }
 
 message RunDiagnosticRequest {
@@ -169,6 +210,12 @@ message Failure {
   string reason = 1;
   // message is a sanitized description of at most 256 bytes.
   string message = 2;
+  // scope is the limit that refused a Throttled, QueueFull or
+  // LimiterUnavailable router: cell, project, destination or queue.
+  string scope = 3;
+  // retry_delay is the advised delay before a new attempt, for a refusal
+  // that carries one. It is guidance, not a reservation.
+  google.protobuf.Duration retry_delay = 4;
 }
 
 // Complete is a stream's terminal coverage. expected equals successful +

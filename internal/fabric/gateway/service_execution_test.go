@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ import (
 	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/errcode"
+	"go.datum.net/galactic/internal/fabric/gateway/limit"
 	"go.datum.net/galactic/internal/fabric/identity"
 	"go.datum.net/galactic/internal/fabric/node"
 	"go.datum.net/galactic/internal/fabric/testpki"
@@ -44,11 +46,13 @@ const (
 type routerAnswer func(ctx context.Context, req *fabricv1.ExecuteRequest) (*fabricv1.Observation, error)
 
 // routerNodes is a NodeClients whose routers each answer with their own
-// function, ok by default, and which counts every call.
+// function, ok by default, and which counts every call. Every router
+// enforces probe permits unless it is listed in legacy.
 type routerNodes struct {
 	mu      sync.Mutex
 	answers map[string]routerAnswer
 	calls   map[string]int
+	legacy  map[string]bool
 }
 
 func (f *routerNodes) Client(n Node) (fabricv1.FabricServiceClient, error) {
@@ -90,6 +94,14 @@ func (c *routerClient) Execute(
 		return nil, err
 	}
 	return &fabricv1.ExecuteResponse{Observation: obs}, nil
+}
+
+func (c *routerClient) Info(
+	context.Context, *fabricv1.InfoRequest, ...grpc.CallOption,
+) (*fabricv1.InfoResponse, error) {
+	c.f.mu.Lock()
+	defer c.f.mu.Unlock()
+	return &fabricv1.InfoResponse{Node: c.node, ProbePermits: !c.f.legacy[c.node]}, nil
 }
 
 func okAnswer(name string) routerAnswer {
@@ -160,10 +172,13 @@ func newService(t *testing.T, objs []client.Object, nodes *routerNodes, slots in
 	reader := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
 	sel, _ := labels.Parse(DefaultPodSelector)
 	certs, _ := labels.Parse(DefaultCertsSelector)
+	adm := newTestAdmission(t, roomyLimits())
 	return &Service{
 		Cell: testSite, Allowlist: testAllowlist, Elected: elected, Enabled: true, Revision: "abc123",
 		Discoverer: &Discoverer{Reader: reader, Namespace: DefaultNamespace, Selector: sel, CertsSelector: certs},
-		Runner:     &Runner{Clients: nodes, Executor: NewExecutor(slots, 0, 0), QueueWait: 200 * time.Millisecond},
+		Runner: &Runner{Clients: nodes, Executor: NewExecutor(slots, 0, 0), QueueWait: 200 * time.Millisecond,
+			Admission: adm},
+		Admission: adm,
 	}
 }
 
@@ -251,7 +266,7 @@ func checkGrammar(t *testing.T, events []*servicev1.DiagnosticEvent) (
 		t.Fatalf("stream has %d events", len(events))
 	}
 	for i, ev := range events {
-		if ev.GetSequence() != uint64(i+1) || ev.GetRequestId() != testRequestID {
+		if ev.GetSequence() != uint64(i+1) || ev.GetRequestId() == "" || ev.GetRequestId() != events[0].GetRequestId() {
 			t.Fatalf("event %d: sequence %d, request %q", i, ev.GetSequence(), ev.GetRequestId())
 		}
 	}
@@ -536,7 +551,10 @@ func TestServiceDiscoveryCutShort(t *testing.T) {
 	ctx, cancel := context.WithCancel(node.WithCaller(t.Context(), identity.Service(testSite, testService)))
 	stream := &chanStream{ctx: ctx, events: make(chan *servicev1.DiagnosticEvent, 1)}
 	time.AfterFunc(100*time.Millisecond, cancel)
-	if err := svc.RunDiagnostic(validRequest(time.Now()), stream); errcode.Of(err) != errcode.Cancelled {
+	// A new attempt: the first one's request ID stays registered.
+	req = validRequest(time.Now())
+	req.RequestId = "c0ffee00-926f-43dc-b03d-c29550a827ab"
+	if err := svc.RunDiagnostic(req, stream); errcode.Of(err) != errcode.Cancelled {
 		t.Errorf("cancelled during discovery: %v", err)
 	}
 }
@@ -628,12 +646,19 @@ func TestServiceStreamFailureStopsExecution(t *testing.T) {
 
 	// An outcome cannot be delivered: the router still running is
 	// cancelled and RunDiagnostic returns.
-	cancelled := make(chan struct{})
+	// router-b answers only once router-a is running, so router-a is under
+	// way when the stream breaks.
+	cancelled, running := make(chan struct{}), make(chan struct{})
 	nodes = &routerNodes{answers: map[string]routerAnswer{
 		routerA: func(ctx context.Context, _ *fabricv1.ExecuteRequest) (*fabricv1.Observation, error) {
+			close(running)
 			<-ctx.Done()
 			close(cancelled)
 			return nil, errcode.Status(errcode.Timeout, "cancelled")
+		},
+		routerB: func(context.Context, *fabricv1.ExecuteRequest) (*fabricv1.Observation, error) {
+			<-running
+			return pingObservation(routerB, 3), nil
 		},
 	}}
 	svc = newService(t, routerPods(routerA, routerB), nodes, 8)
@@ -662,7 +687,7 @@ func TestRunnerStreamNeverRetries(t *testing.T) {
 		AddressFamily: fabricv1.AddressFamily_ADDRESS_FAMILY_IPV4})
 	routers := []Node{{Name: routerA, Selected: true}}
 	expires := time.Now().Add(10 * time.Second)
-	r.Stream(t.Context(), "p", "id", q, routers, nil, expires, func(Outcome) {})
+	r.Stream(t.Context(), "p", "id", q, routers, nil, expires, nil, func(Outcome) {})
 	if n := nodes.total(); n != 1 {
 		t.Errorf("Stream called the router %d times", n)
 	}
@@ -690,13 +715,23 @@ func TestServiceCapabilities(t *testing.T) {
 			t.Errorf("operation %v serves %d families", op.GetType(), len(op.GetAddressFamilies()))
 		}
 	}
-	// Aggregate probe budgets are not advertised until they are enforced.
-	if f := on.GetFeatures(); len(f) != 2 || f[0] != FeatureRouterOutcomes || f[1] != FeatureTerminalCoverage {
+	if a := on.GetLimits().GetAdmission(); a.GetProjectActiveJobs() != 2 || a.GetTraceroutePackets() != 20 ||
+		a.GetRequestProject().GetBurst() != roomyLimits().RequestProject.Burst ||
+		a.GetQueueWait().AsDuration() != limit.MaxQueueWait {
+		t.Errorf("admission limits = %v", a)
+	}
+	if f := on.GetFeatures(); !slices.Equal(f, []string{
+		FeatureRouterOutcomes, FeatureTerminalCoverage, FeatureAggregateProbeBudgets,
+	}) {
 		t.Errorf("features = %v", f)
 	}
 	again, _ := svc.GetCapabilities(ctx, req)
 	svc.Enabled = false
 	off, _ := svc.GetCapabilities(ctx, req)
+	// With execution off nothing is advertised as enforced.
+	if slices.Contains(off.GetFeatures(), FeatureAggregateProbeBudgets) || off.GetLimits().GetAdmission() != nil {
+		t.Errorf("disabled capabilities = %v", off)
+	}
 	if again.GetPolicyRevision() != on.GetPolicyRevision() || off.GetPolicyRevision() == on.GetPolicyRevision() {
 		t.Errorf("policy revisions %q, %q, %q", on.GetPolicyRevision(), again.GetPolicyRevision(), off.GetPolicyRevision())
 	}
@@ -705,9 +740,8 @@ func TestServiceCapabilities(t *testing.T) {
 	// maximum, is refused before any work.
 	svc.Enabled = true
 	for name, edit := range map[string]func(*runReq){
-		"aggregate budgets": func(r *runReq) { r.RequiredFeatures = []string{FeatureAggregateProbeBudgets} },
-		"unknown feature":   func(r *runReq) { r.RequiredFeatures = []string{"router-outcomes-v2"} },
-		"large budget":      func(r *runReq) { r.Budgets = &fabricv1.Budgets{MaxPathsPerPrefix: 9} },
+		"unknown feature": func(r *runReq) { r.RequiredFeatures = []string{"router-outcomes-v2"} },
+		"large budget":    func(r *runReq) { r.Budgets = &fabricv1.Budgets{MaxPathsPerPrefix: 9} },
 	} {
 		req := validRequest(time.Now())
 		edit(req)
@@ -716,10 +750,28 @@ func TestServiceCapabilities(t *testing.T) {
 		}
 	}
 	req2 := validRequest(time.Now())
-	req2.RequiredFeatures = []string{FeatureRouterOutcomes, FeatureTerminalCoverage}
+	req2.RequiredFeatures = []string{FeatureRouterOutcomes, FeatureTerminalCoverage, FeatureAggregateProbeBudgets}
 	req2.Budgets = &fabricv1.Budgets{MaxPathsPerPrefix: 8}
 	if _, err := collect(t, svc, req2); err != nil {
 		t.Errorf("served features: %v", err)
+	}
+
+	// Without an Admission the service is neither advertised as enabled nor
+	// executes, and aggregate probe budgets are neither advertised nor
+	// accepted as a requirement.
+	svc.Admission = nil
+	bare, _ := svc.GetCapabilities(ctx, req)
+	if bare.GetEnabled() || slices.Contains(bare.GetFeatures(), FeatureAggregateProbeBudgets) ||
+		bare.GetLimits().GetAdmission() != nil {
+		t.Errorf("capabilities without admission = %v", bare)
+	}
+	req3 := validRequest(time.Now())
+	req3.RequiredFeatures = []string{FeatureAggregateProbeBudgets}
+	if _, err := collect(t, svc, req3); errcode.Of(err) != errcode.VersionUnsupported {
+		t.Errorf("aggregate budgets required without admission: %v", err)
+	}
+	if _, err := collect(t, svc, validRequest(time.Now())); errcode.Of(err) != errcode.ServiceDisabled {
+		t.Errorf("execution without admission: %v", err)
 	}
 }
 
@@ -729,12 +781,15 @@ func TestServiceStreamOverTransport(t *testing.T) {
 	dir := t.TempDir()
 	ca := testpki.NewCA(t, testSite)
 	gwCreds := loadCreds(t, ca, dir, identity.Gateway(testSite))
-	leader := newService(t, routerPods(routerA, routerB), &routerNodes{}, 8)
-	leaderAddr := serveGateway(t, gwCreds, &Debug{Elected: elected}, leader)
-	followerAddr := serveFollower(t, gwCreds, leaderAddr)
-
 	svcCreds := loadCreds(t, ca, filepath.Join(dir, "svc"), identity.Service(testSite, testService))
-	for name, addr := range map[string]string{"leader": leaderAddr, "follower": followerAddr} {
+	for _, name := range []string{"leader", "follower"} {
+		// Each path gets its own leader, whose attempt cache has not seen
+		// the request ID.
+		leader := newService(t, routerPods(routerA, routerB), &routerNodes{}, 8)
+		addr := serveGateway(t, gwCreds, &Debug{Elected: elected}, leader)
+		if name == "follower" {
+			addr = serveFollower(t, gwCreds, addr)
+		}
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		stream, err := servicev1.NewLookingGlassServiceClient(dialAs(t, addr, svcCreds)).
 			RunDiagnostic(ctx, validRequest(time.Now()))
@@ -753,8 +808,51 @@ func TestServiceStreamOverTransport(t *testing.T) {
 			events = append(events, ev)
 		}
 		cancel()
+		if len(events) == 0 || events[0].GetRequestId() != testRequestID {
+			t.Errorf("%s: events do not echo the request ID", name)
+		}
 		if _, _, c := checkGrammar(t, events); c.GetReason() != CompleteSucceeded || c.GetSuccessful() != 2 {
 			t.Errorf("%s: complete = %v", name, c)
 		}
+	}
+}
+
+// stallReader blocks every List until its context ends.
+type stallReader struct {
+	client.Reader
+	listing chan struct{}
+}
+
+func (r stallReader) List(ctx context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	r.listing <- struct{}{}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestServiceOwnershipLostDuringDiscovery(t *testing.T) {
+	lease := newSwitchableLease(t)
+	svc := newService(t, routerPods(routerA), &routerNodes{}, 8)
+	adm, err := NewAdmission(roomyLimits(), &limit.Authority{
+		Reader: lease, Namespace: DefaultNamespace, Name: testLease, Identity: testHolder, Hold: time.Nanosecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activate(t, adm)
+	svc.Admission, svc.Runner.Admission, svc.Runner.Executor = adm, adm, adm.Executor()
+	listing := make(chan struct{}, 1)
+	svc.Discoverer.Reader = stallReader{Reader: svc.Discoverer.Reader, listing: listing}
+	go adm.Authority.Watch(t.Context(), 50*time.Millisecond)
+
+	_, done := run(t, svc, requestFor("project-a", 1, nil), 0)
+	<-listing
+	lease.fail(true)
+	select {
+	case err := <-done:
+		if errcode.Of(err) != errcode.OwnershipLost {
+			t.Errorf("err = %v, want OwnershipLost", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("discovery outlived the election")
 	}
 }

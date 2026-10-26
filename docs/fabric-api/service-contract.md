@@ -32,15 +32,18 @@ authenticates service identities and validates their requests (#1043). With
 `gateway.Service.Enabled` set, the leader streams a request as specified under
 "Stream grammar and coverage": `Discoverer.Inventory` takes the unique-router
 snapshot, `Runner.Stream` hands off each router's outcome as it finishes, and
-the terminal coverage follows (#1044). No deployment sets `Enabled`, so a valid
-`RunDiagnostic` is answered with `ServiceDisabled`, and capabilities do not
-advertise `aggregate-probe-budgets`. Not yet implemented: admission and packet
-budgets with the atomic queue reservation before the snapshot (#1045), and the
-blocked-send bound and Lease-checked ownership (#1046). Until then each router
-job queues on its own and a full queue fails that router with `NodeBusy`.
-The executor has local concurrency/queue limits and project round robin; nodes
-pace packets locally. None establishes the aggregate guarantees. Operator and
-FabricQuery discovery still return pod candidates, including duplicates.
+the terminal coverage follows (#1044). With the gateway's `--aggregate-budgets`,
+the leader enforces "Admission, execution, and aggregate accounting" below
+(`internal/fabric/gateway/limit`, `gateway.Admission`, `gateway.Permits`), and
+nodes run with `--probe-permits` verify each probe's permit (#1045). Execution
+requires the gateway's admission, and capabilities advertise
+`aggregate-probe-budgets` only while execution is enabled with it. Nodes
+charge direct operator probes only with `--require-probe-permits`, so enabling
+execution requires every node to run with it. No deployment sets `Enabled` or
+these flags, so a valid `RunDiagnostic` is answered with `ServiceDisabled`. Not yet implemented: the blocked-send bound and
+stream-level ownership rules of #1046, and the metrics and packaged
+configuration of #1047. Operator and FabricQuery discovery still return pod
+candidates, including duplicates.
 
 ## Service and identity
 
@@ -92,8 +95,10 @@ The initial feature names are `router-outcomes`, `terminal-coverage`, and
 `aggregate-probe-budgets`; all three are required to advertise an enabled v1
 service. `contract_revision` is the implementing release commit SHA and
 `policy_revision` is the digest of effective service policy and limits.
-It does not probe routers or reserve diagnostic capacity. Cache for at most
-30 s. Capabilities advertise policy, not current router availability. Validate
+`limits.admission` reports the cell's admission and packet budgets, present
+only with `aggregate-probe-budgets`. A router failure refused by a limit
+carries the same `scope` and `retry_delay` as a refused request. It does not probe routers or reserve
+diagnostic capacity. Cache for at most 30 s. Capabilities advertise policy, not current router availability. Validate
 again on execution; policy changes may reject a previously advertised request.
 
 `RunDiagnosticRequest` fields:
@@ -326,16 +331,19 @@ identities. Never use the common service account as the fairness key.
 After snapshot construction, admit all selected node jobs to the bounded shared
 executor atomically or refuse the request. Charge one node-job unit per selected
 router; omitted routers cost no node execution or packets. Maintain FIFO within
-a project and round robin between project queues. Retain separate operator
-principal queues and FabricQuery's trusted project queues; a FabricQuery and a
-service request for the same project use the same fairness key. A project may
-hold at most two node slots; direct operator principals have the same cap.
+a principal and round robin between principal queues. A service request's
+principal is its project UID, an operator's its identity name, and a
+FabricQuery's `fabricquery/<source.namespace>/<source.cluster>`: FabricQuery carries no
+project UID, so a FabricQuery and a service request for the same project are
+separate principals, sharing the executor and the cell and destination packet
+budgets but not a fairness key or a project packet budget. A principal may
+hold at most two node slots.
 The shared executor has eight slots total. Keep the existing two-slot ceiling
 for legacy expensive queries, which this service cannot submit. Queue admission
 counts reserved snapshot-delivery slots toward the same limits. Live-stream
 caps do not reserve node-job capacity: a second 32-router stream from a project
 whose first stream still occupies its queue is refused with `QueueFull`.
-FabricQuery work for that project contributes to the same queue limit.
+FabricQuery work counts against its own principal's queue limit.
 
 Immediately before dispatch of each probe node job, atomically reserve its
 worst-case packet count from cell, project (when present), and destination
@@ -353,17 +361,19 @@ rotating hosts within one prefix still consumes its prefix budget. Avoid a
 claim of global internet destination protection from a cell-local mechanism.
 
 Use bounded maps (4096 project keys, 16384 destination/prefix keys, 4 MiB total
-bucket-state storage). A key may be discarded only when fully refilled and no
-active/queued work references it. On capacity exhaustion reject new keys with
+bucket-state storage). A key may be discarded only when fully refilled: it then
+holds no debt, and a key recreated later starts at no more than a full bucket. On capacity exhaustion reject new keys with
 `LimiterUnavailable`; never evict debt. Persist no diagnostic payload in these
 maps. Expose aggregate counts rather than key-valued metrics.
 
 ### Alternate callers and node enforcement
 
 Cell and destination packet buckets include service, operator gateway,
-FabricQuery, and direct operator-node probes. Project packet buckets apply to
-service and FabricQuery; direct operators use their own principal bucket with
-the same rates. Every probe, including direct-node Execute, must obtain a
+FabricQuery, and direct operator-node probes. Each principal above has its own
+packet bucket at the project rate: a service project, a FabricQuery source, or
+an operator, whether through the gateway or directly; a direct probe is
+charged only on a node running both `--probe-permits` and
+`--require-probe-permits`. Every probe, including direct-node Execute, must obtain a
 single-node, single-attempt permit from the active cell authority. For direct
 operators, the node requests it on an authenticated node-only internal RPC;
 the service has no access to that RPC. That admission uses the same executor
@@ -386,7 +396,9 @@ because it can evict completed entries. After node restart or lost
 permit-consumption state,
 refuse permits for 32 s, then validate epoch and expiration before accepting
 new ones; never reuse a surviving permit. Unsupported/old nodes fail closed
-for aggregate-budget probes when the feature is enabled.
+for aggregate-budget probes when the feature is enabled: a node reports
+`probe_permits` in `Info` only when it enforces permits, and the gateway sends
+a probe to no other node, failing that router with `QueryTypeUnavailable`.
 
 Keep the existing node-wide packet pacing and destination checks as additional
 limits. Per-node pacing alone cannot substitute for aggregate charging.
@@ -544,7 +556,7 @@ A request received at 12:00:00 with the following expiration has 30 s remaining:
 ```
 
 A request that also lists `aggregate-probe-budgets` is refused with
-`VersionUnsupported` until the gateway enforces aggregate probe budgets (#1045);
+`VersionUnsupported` by a gateway that does not enforce aggregate probe budgets;
 a v1 service is advertised as enabled only once all three features are served.
 
 A mixed result stream (one JSON object per protobuf event):

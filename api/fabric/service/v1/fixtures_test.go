@@ -58,7 +58,8 @@ func TestCapabilitiesFixture(t *testing.T) {
 	var caps servicev1.GetCapabilitiesResponse
 	decode(t, fixture(t, "capabilities.json"), &caps)
 	if len(caps.GetOperations()) != 4 || caps.GetLimits().GetMaxSelectedRouters() != 32 ||
-		caps.GetLimits().GetMaxRequestLifetime().AsDuration().Seconds() != 120 {
+		caps.GetLimits().GetMaxRequestLifetime().AsDuration().Seconds() != 120 ||
+		caps.GetLimits().GetAdmission().GetPacketDestinationPrefix().GetPerSecond() != 40 {
 		t.Errorf("capabilities = %v", &caps)
 	}
 }

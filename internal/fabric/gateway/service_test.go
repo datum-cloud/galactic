@@ -53,7 +53,7 @@ type (
 
 func serveGateway(t *testing.T, creds *identity.Credentials, d *Debug, svc *Service, opts ...grpc.ServerOption) string {
 	t.Helper()
-	srv := NewServer(creds, svc.Allowlist, d, svc, opts...)
+	srv := NewServer(creds, svc.Allowlist, d, svc, noPermits(d.Elected), opts...)
 	var lc net.ListenConfig
 	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
@@ -62,6 +62,11 @@ func serveGateway(t *testing.T, creds *identity.Credentials, d *Debug, svc *Serv
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(srv.Stop)
 	return l.Addr().String()
+}
+
+// noPermits is a permit service that issues no permits.
+func noPermits(elected func() bool) *Permits {
+	return &Permits{Elected: elected, Discoverer: &Discoverer{Namespace: DefaultNamespace}}
 }
 
 func dialTLS(t *testing.T, addr string, cfg *tls.Config) *grpc.ClientConn {
@@ -577,7 +582,9 @@ func TestParseAllowlist(t *testing.T) {
 	if err := (Allowlist{}).Handshake(identity.Service(testSite, testService)); err == nil {
 		t.Error("an empty allowlist accepted a service")
 	}
-	if err := (Allowlist{}).Handshake(identity.Node(testSite, "ns", "pod")); err == nil {
-		t.Error("the gateway accepted a node identity")
+	// A node connects for the permit service alone; GatewayMethods keeps
+	// it from every other method (TestPermitAuthorization).
+	if err := (Allowlist{}).Handshake(identity.Node(testSite, "ns", "pod")); err != nil {
+		t.Errorf("the gateway refused a node identity: %v", err)
 	}
 }

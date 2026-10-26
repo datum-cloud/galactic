@@ -348,8 +348,11 @@ type ExecuteRequest struct {
 	Query *Query `protobuf:"bytes,3,opt,name=query,proto3" json:"query,omitempty"`
 	// expires_at is the absolute request expiration. A node rejects an expired
 	// request and clamps its own deadline to it.
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	Budgets       *Budgets               `protobuf:"bytes,5,opt,name=budgets,proto3" json:"budgets,omitempty"`
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	Budgets   *Budgets               `protobuf:"bytes,5,opt,name=budgets,proto3" json:"budgets,omitempty"`
+	// permit authorizes one probe against the cell's aggregate packet budgets.
+	// Only the cell's gateway sets it; a node consumes each permit once.
+	Permit        *ProbePermit `protobuf:"bytes,6,opt,name=permit,proto3" json:"permit,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -419,6 +422,124 @@ func (x *ExecuteRequest) GetBudgets() *Budgets {
 	return nil
 }
 
+func (x *ExecuteRequest) GetPermit() *ProbePermit {
+	if x != nil {
+		return x.Permit
+	}
+	return nil
+}
+
+// ProbePermit is the cell gateway's authorization of one probe on one node:
+// one attempt, its destination, operation and packet allowance, bound to
+// the gateway's election epoch. It is internal to galactic.
+type ProbePermit struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is unique per permit; a node refuses an ID it already consumed.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// epoch is the election Lease's UID and holder identity when the permit
+	// was issued, as "<uid>/<holder>".
+	Epoch string `protobuf:"bytes,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	// request_id is the attempt the permit was issued for.
+	RequestId string `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// node is the node the probe may run on.
+	Node string `protobuf:"bytes,4,opt,name=node,proto3" json:"node,omitempty"`
+	// destination is the probe's canonical numeric destination.
+	Destination string    `protobuf:"bytes,5,opt,name=destination,proto3" json:"destination,omitempty"`
+	Operation   QueryType `protobuf:"varint,6,opt,name=operation,proto3,enum=fabric.v1.QueryType" json:"operation,omitempty"`
+	// packets is the most probe packets the node may send under the permit.
+	Packets uint32 `protobuf:"varint,7,opt,name=packets,proto3" json:"packets,omitempty"`
+	// deadline is when the permit expires; the node sends nothing after it.
+	Deadline      *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=deadline,proto3" json:"deadline,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProbePermit) Reset() {
+	*x = ProbePermit{}
+	mi := &file_fabric_v1_fabric_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProbePermit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProbePermit) ProtoMessage() {}
+
+func (x *ProbePermit) ProtoReflect() protoreflect.Message {
+	mi := &file_fabric_v1_fabric_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProbePermit.ProtoReflect.Descriptor instead.
+func (*ProbePermit) Descriptor() ([]byte, []int) {
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ProbePermit) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ProbePermit) GetEpoch() string {
+	if x != nil {
+		return x.Epoch
+	}
+	return ""
+}
+
+func (x *ProbePermit) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *ProbePermit) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+func (x *ProbePermit) GetDestination() string {
+	if x != nil {
+		return x.Destination
+	}
+	return ""
+}
+
+func (x *ProbePermit) GetOperation() QueryType {
+	if x != nil {
+		return x.Operation
+	}
+	return QueryType_QUERY_TYPE_UNSPECIFIED
+}
+
+func (x *ProbePermit) GetPackets() uint32 {
+	if x != nil {
+		return x.Packets
+	}
+	return 0
+}
+
+func (x *ProbePermit) GetDeadline() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Deadline
+	}
+	return nil
+}
+
 type ExecuteResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Observation   *Observation           `protobuf:"bytes,1,opt,name=observation,proto3" json:"observation,omitempty"`
@@ -428,7 +549,7 @@ type ExecuteResponse struct {
 
 func (x *ExecuteResponse) Reset() {
 	*x = ExecuteResponse{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[3]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -440,7 +561,7 @@ func (x *ExecuteResponse) String() string {
 func (*ExecuteResponse) ProtoMessage() {}
 
 func (x *ExecuteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[3]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -453,7 +574,7 @@ func (x *ExecuteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteResponse.ProtoReflect.Descriptor instead.
 func (*ExecuteResponse) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{3}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ExecuteResponse) GetObservation() *Observation {
@@ -492,7 +613,7 @@ type Observation struct {
 
 func (x *Observation) Reset() {
 	*x = Observation{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[4]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -504,7 +625,7 @@ func (x *Observation) String() string {
 func (*Observation) ProtoMessage() {}
 
 func (x *Observation) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[4]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -517,7 +638,7 @@ func (x *Observation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Observation.ProtoReflect.Descriptor instead.
 func (*Observation) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{4}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Observation) GetNode() string {
@@ -667,7 +788,7 @@ type RouteResult struct {
 
 func (x *RouteResult) Reset() {
 	*x = RouteResult{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[5]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -679,7 +800,7 @@ func (x *RouteResult) String() string {
 func (*RouteResult) ProtoMessage() {}
 
 func (x *RouteResult) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[5]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -692,7 +813,7 @@ func (x *RouteResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteResult.ProtoReflect.Descriptor instead.
 func (*RouteResult) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{5}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RouteResult) GetLookupKind() LookupKind {
@@ -734,7 +855,7 @@ type IndexState struct {
 
 func (x *IndexState) Reset() {
 	*x = IndexState{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[6]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -746,7 +867,7 @@ func (x *IndexState) String() string {
 func (*IndexState) ProtoMessage() {}
 
 func (x *IndexState) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[6]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -759,7 +880,7 @@ func (x *IndexState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexState.ProtoReflect.Descriptor instead.
 func (*IndexState) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{6}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *IndexState) GetSyncedAt() *timestamppb.Timestamp {
@@ -807,7 +928,7 @@ type PrefixObservation struct {
 
 func (x *PrefixObservation) Reset() {
 	*x = PrefixObservation{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[7]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -819,7 +940,7 @@ func (x *PrefixObservation) String() string {
 func (*PrefixObservation) ProtoMessage() {}
 
 func (x *PrefixObservation) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[7]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -832,7 +953,7 @@ func (x *PrefixObservation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrefixObservation.ProtoReflect.Descriptor instead.
 func (*PrefixObservation) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{7}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *PrefixObservation) GetPrefix() string {
@@ -897,7 +1018,7 @@ type Path struct {
 
 func (x *Path) Reset() {
 	*x = Path{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[8]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -909,7 +1030,7 @@ func (x *Path) String() string {
 func (*Path) ProtoMessage() {}
 
 func (x *Path) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[8]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -922,7 +1043,7 @@ func (x *Path) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Path.ProtoReflect.Descriptor instead.
 func (*Path) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{8}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Path) GetBest() bool {
@@ -1097,7 +1218,7 @@ type ASSegment struct {
 
 func (x *ASSegment) Reset() {
 	*x = ASSegment{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[9]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1109,7 +1230,7 @@ func (x *ASSegment) String() string {
 func (*ASSegment) ProtoMessage() {}
 
 func (x *ASSegment) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[9]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1122,7 +1243,7 @@ func (x *ASSegment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ASSegment.ProtoReflect.Descriptor instead.
 func (*ASSegment) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{9}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ASSegment) GetType() string {
@@ -1152,7 +1273,7 @@ type NextHop struct {
 
 func (x *NextHop) Reset() {
 	*x = NextHop{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[10]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1164,7 +1285,7 @@ func (x *NextHop) String() string {
 func (*NextHop) ProtoMessage() {}
 
 func (x *NextHop) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[10]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1177,7 +1298,7 @@ func (x *NextHop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NextHop.ProtoReflect.Descriptor instead.
 func (*NextHop) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{10}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *NextHop) GetAddress() string {
@@ -1232,7 +1353,7 @@ type Installation struct {
 
 func (x *Installation) Reset() {
 	*x = Installation{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[11]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1244,7 +1365,7 @@ func (x *Installation) String() string {
 func (*Installation) ProtoMessage() {}
 
 func (x *Installation) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[11]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1257,7 +1378,7 @@ func (x *Installation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Installation.ProtoReflect.Descriptor instead.
 func (*Installation) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{11}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Installation) GetSampleTime() *timestamppb.Timestamp {
@@ -1309,7 +1430,7 @@ type ZebraRoute struct {
 
 func (x *ZebraRoute) Reset() {
 	*x = ZebraRoute{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[12]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1321,7 +1442,7 @@ func (x *ZebraRoute) String() string {
 func (*ZebraRoute) ProtoMessage() {}
 
 func (x *ZebraRoute) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[12]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1334,7 +1455,7 @@ func (x *ZebraRoute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ZebraRoute.ProtoReflect.Descriptor instead.
 func (*ZebraRoute) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{12}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ZebraRoute) GetProtocol() string {
@@ -1392,7 +1513,7 @@ type ZebraNextHop struct {
 
 func (x *ZebraNextHop) Reset() {
 	*x = ZebraNextHop{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[13]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1404,7 +1525,7 @@ func (x *ZebraNextHop) String() string {
 func (*ZebraNextHop) ProtoMessage() {}
 
 func (x *ZebraNextHop) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[13]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1417,7 +1538,7 @@ func (x *ZebraNextHop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ZebraNextHop.ProtoReflect.Descriptor instead.
 func (*ZebraNextHop) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{13}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ZebraNextHop) GetAddress() string {
@@ -1468,7 +1589,7 @@ type SummaryResult struct {
 
 func (x *SummaryResult) Reset() {
 	*x = SummaryResult{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[14]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1480,7 +1601,7 @@ func (x *SummaryResult) String() string {
 func (*SummaryResult) ProtoMessage() {}
 
 func (x *SummaryResult) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[14]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1493,7 +1614,7 @@ func (x *SummaryResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SummaryResult.ProtoReflect.Descriptor instead.
 func (*SummaryResult) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{14}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SummaryResult) GetRouterId() string {
@@ -1554,7 +1675,7 @@ type Peer struct {
 
 func (x *Peer) Reset() {
 	*x = Peer{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[15]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1566,7 +1687,7 @@ func (x *Peer) String() string {
 func (*Peer) ProtoMessage() {}
 
 func (x *Peer) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[15]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1579,7 +1700,7 @@ func (x *Peer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Peer.ProtoReflect.Descriptor instead.
 func (*Peer) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{15}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Peer) GetAddress() string {
@@ -1696,7 +1817,7 @@ type PingResult struct {
 
 func (x *PingResult) Reset() {
 	*x = PingResult{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[16]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1708,7 +1829,7 @@ func (x *PingResult) String() string {
 func (*PingResult) ProtoMessage() {}
 
 func (x *PingResult) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[16]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1721,7 +1842,7 @@ func (x *PingResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingResult.ProtoReflect.Descriptor instead.
 func (*PingResult) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{16}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *PingResult) GetSource() string {
@@ -1793,7 +1914,7 @@ type TracerouteResult struct {
 
 func (x *TracerouteResult) Reset() {
 	*x = TracerouteResult{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[17]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1805,7 +1926,7 @@ func (x *TracerouteResult) String() string {
 func (*TracerouteResult) ProtoMessage() {}
 
 func (x *TracerouteResult) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[17]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1818,7 +1939,7 @@ func (x *TracerouteResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TracerouteResult.ProtoReflect.Descriptor instead.
 func (*TracerouteResult) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{17}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *TracerouteResult) GetSource() string {
@@ -1859,7 +1980,7 @@ type Hop struct {
 
 func (x *Hop) Reset() {
 	*x = Hop{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[18]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1871,7 +1992,7 @@ func (x *Hop) String() string {
 func (*Hop) ProtoMessage() {}
 
 func (x *Hop) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[18]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1884,7 +2005,7 @@ func (x *Hop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Hop.ProtoReflect.Descriptor instead.
 func (*Hop) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{18}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Hop) GetTtl() uint32 {
@@ -1920,7 +2041,7 @@ type ProbeReply struct {
 
 func (x *ProbeReply) Reset() {
 	*x = ProbeReply{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[19]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1932,7 +2053,7 @@ func (x *ProbeReply) String() string {
 func (*ProbeReply) ProtoMessage() {}
 
 func (x *ProbeReply) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[19]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1945,7 +2066,7 @@ func (x *ProbeReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeReply.ProtoReflect.Descriptor instead.
 func (*ProbeReply) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{19}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ProbeReply) GetSequence() uint32 {
@@ -1998,7 +2119,7 @@ type InfoRequest struct {
 
 func (x *InfoRequest) Reset() {
 	*x = InfoRequest{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[20]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2010,7 +2131,7 @@ func (x *InfoRequest) String() string {
 func (*InfoRequest) ProtoMessage() {}
 
 func (x *InfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[20]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2023,7 +2144,7 @@ func (x *InfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InfoRequest.ProtoReflect.Descriptor instead.
 func (*InfoRequest) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{20}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{21}
 }
 
 type InfoResponse struct {
@@ -2040,14 +2161,18 @@ type InfoResponse struct {
 	EnabledQueryTypes    []QueryType `protobuf:"varint,8,rep,packed,name=enabled_query_types,json=enabledQueryTypes,proto3,enum=fabric.v1.QueryType" json:"enabled_query_types,omitempty"`
 	// probe_sources lists the per-family probe source addresses that are
 	// available.
-	ProbeSources  []string `protobuf:"bytes,9,rep,name=probe_sources,json=probeSources,proto3" json:"probe_sources,omitempty"`
+	ProbeSources []string `protobuf:"bytes,9,rep,name=probe_sources,json=probeSources,proto3" json:"probe_sources,omitempty"`
+	// probe_permits is true when the node verifies and enforces each probe's
+	// ProbePermit. A gateway enforcing aggregate probe budgets sends probes
+	// only to such nodes.
+	ProbePermits  bool `protobuf:"varint,10,opt,name=probe_permits,json=probePermits,proto3" json:"probe_permits,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InfoResponse) Reset() {
 	*x = InfoResponse{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[21]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2059,7 +2184,7 @@ func (x *InfoResponse) String() string {
 func (*InfoResponse) ProtoMessage() {}
 
 func (x *InfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[21]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2072,7 +2197,7 @@ func (x *InfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InfoResponse.ProtoReflect.Descriptor instead.
 func (*InfoResponse) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{21}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *InfoResponse) GetNode() string {
@@ -2138,6 +2263,13 @@ func (x *InfoResponse) GetProbeSources() []string {
 	return nil
 }
 
+func (x *InfoResponse) GetProbePermits() bool {
+	if x != nil {
+		return x.ProbePermits
+	}
+	return false
+}
+
 type QueryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Query *Query                 `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
@@ -2153,7 +2285,7 @@ type QueryRequest struct {
 
 func (x *QueryRequest) Reset() {
 	*x = QueryRequest{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[22]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2165,7 +2297,7 @@ func (x *QueryRequest) String() string {
 func (*QueryRequest) ProtoMessage() {}
 
 func (x *QueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[22]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2178,7 +2310,7 @@ func (x *QueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryRequest.ProtoReflect.Descriptor instead.
 func (*QueryRequest) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{22}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *QueryRequest) GetQuery() *Query {
@@ -2219,7 +2351,7 @@ type QueryResponse struct {
 
 func (x *QueryResponse) Reset() {
 	*x = QueryResponse{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[23]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2231,7 +2363,7 @@ func (x *QueryResponse) String() string {
 func (*QueryResponse) ProtoMessage() {}
 
 func (x *QueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[23]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2244,7 +2376,7 @@ func (x *QueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResponse.ProtoReflect.Descriptor instead.
 func (*QueryResponse) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{23}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *QueryResponse) GetRequestId() string {
@@ -2273,7 +2405,7 @@ type NodeResult struct {
 
 func (x *NodeResult) Reset() {
 	*x = NodeResult{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[24]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2285,7 +2417,7 @@ func (x *NodeResult) String() string {
 func (*NodeResult) ProtoMessage() {}
 
 func (x *NodeResult) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[24]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2298,7 +2430,7 @@ func (x *NodeResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeResult.ProtoReflect.Descriptor instead.
 func (*NodeResult) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{24}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *NodeResult) GetNode() string {
@@ -2337,7 +2469,7 @@ type ListNodesRequest struct {
 
 func (x *ListNodesRequest) Reset() {
 	*x = ListNodesRequest{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[25]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2349,7 +2481,7 @@ func (x *ListNodesRequest) String() string {
 func (*ListNodesRequest) ProtoMessage() {}
 
 func (x *ListNodesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[25]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2362,7 +2494,7 @@ func (x *ListNodesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListNodesRequest.ProtoReflect.Descriptor instead.
 func (*ListNodesRequest) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{25}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{26}
 }
 
 type ListNodesResponse struct {
@@ -2374,7 +2506,7 @@ type ListNodesResponse struct {
 
 func (x *ListNodesResponse) Reset() {
 	*x = ListNodesResponse{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[26]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2386,7 +2518,7 @@ func (x *ListNodesResponse) String() string {
 func (*ListNodesResponse) ProtoMessage() {}
 
 func (x *ListNodesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[26]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2399,7 +2531,7 @@ func (x *ListNodesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListNodesResponse.ProtoReflect.Descriptor instead.
 func (*ListNodesResponse) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{26}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ListNodesResponse) GetNodes() []*NodeEndpoint {
@@ -2422,7 +2554,7 @@ type NodeEndpoint struct {
 
 func (x *NodeEndpoint) Reset() {
 	*x = NodeEndpoint{}
-	mi := &file_fabric_v1_fabric_proto_msgTypes[27]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2434,7 +2566,7 @@ func (x *NodeEndpoint) String() string {
 func (*NodeEndpoint) ProtoMessage() {}
 
 func (x *NodeEndpoint) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_v1_fabric_proto_msgTypes[27]
+	mi := &file_fabric_v1_fabric_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2447,7 +2579,7 @@ func (x *NodeEndpoint) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeEndpoint.ProtoReflect.Descriptor instead.
 func (*NodeEndpoint) Descriptor() ([]byte, []int) {
-	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{27}
+	return file_fabric_v1_fabric_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *NodeEndpoint) GetNode() string {
@@ -2498,7 +2630,7 @@ const file_fabric_v1_fabric_proto_rawDesc = "" +
 	"\x12max_response_bytes\x18\x01 \x01(\rR\x10maxResponseBytes\x12!\n" +
 	"\fmax_prefixes\x18\x02 \x01(\rR\vmaxPrefixes\x12/\n" +
 	"\x14max_paths_per_prefix\x18\x03 \x01(\rR\x11maxPathsPerPrefix\x127\n" +
-	"\x18max_communities_per_path\x18\x04 \x01(\rR\x15maxCommunitiesPerPath\"\xd4\x01\n" +
+	"\x18max_communities_per_path\x18\x04 \x01(\rR\x15maxCommunitiesPerPath\"\x84\x02\n" +
 	"\x0eExecuteRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x12\n" +
@@ -2506,7 +2638,18 @@ const file_fabric_v1_fabric_proto_rawDesc = "" +
 	"\x05query\x18\x03 \x01(\v2\x10.fabric.v1.QueryR\x05query\x129\n" +
 	"\n" +
 	"expires_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12,\n" +
-	"\abudgets\x18\x05 \x01(\v2\x12.fabric.v1.BudgetsR\abudgets\"K\n" +
+	"\abudgets\x18\x05 \x01(\v2\x12.fabric.v1.BudgetsR\abudgets\x12.\n" +
+	"\x06permit\x18\x06 \x01(\v2\x16.fabric.v1.ProbePermitR\x06permit\"\x8e\x02\n" +
+	"\vProbePermit\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\tR\x05epoch\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x03 \x01(\tR\trequestId\x12\x12\n" +
+	"\x04node\x18\x04 \x01(\tR\x04node\x12 \n" +
+	"\vdestination\x18\x05 \x01(\tR\vdestination\x122\n" +
+	"\toperation\x18\x06 \x01(\x0e2\x14.fabric.v1.QueryTypeR\toperation\x12\x18\n" +
+	"\apackets\x18\a \x01(\rR\apackets\x126\n" +
+	"\bdeadline\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\bdeadline\"K\n" +
 	"\x0fExecuteResponse\x128\n" +
 	"\vobservation\x18\x01 \x01(\v2\x16.fabric.v1.ObservationR\vobservation\"\xb6\x04\n" +
 	"\vObservation\x12\x12\n" +
@@ -2663,7 +2806,7 @@ const file_fabric_v1_fabric_proto_rawDesc = "" +
 	"\atimeout\x18\x04 \x01(\bR\atimeout\x12\x1b\n" +
 	"\ticmp_type\x18\x05 \x01(\tR\bicmpType\x12\x1b\n" +
 	"\ticmp_code\x18\x06 \x01(\rR\bicmpCode\"\r\n" +
-	"\vInfoRequest\"\xd5\x02\n" +
+	"\vInfoRequest\"\xfa\x02\n" +
 	"\fInfoResponse\x12\x12\n" +
 	"\x04node\x18\x01 \x01(\tR\x04node\x12\x12\n" +
 	"\x04site\x18\x02 \x01(\tR\x04site\x12\x1b\n" +
@@ -2674,7 +2817,9 @@ const file_fabric_v1_fabric_proto_rawDesc = "" +
 	"\x15diagnostics_available\x18\x06 \x01(\bR\x14diagnosticsAvailable\x12-\n" +
 	"\x12unavailable_reason\x18\a \x01(\tR\x11unavailableReason\x12D\n" +
 	"\x13enabled_query_types\x18\b \x03(\x0e2\x14.fabric.v1.QueryTypeR\x11enabledQueryTypes\x12#\n" +
-	"\rprobe_sources\x18\t \x03(\tR\fprobeSources\"\xaf\x01\n" +
+	"\rprobe_sources\x18\t \x03(\tR\fprobeSources\x12#\n" +
+	"\rprobe_permits\x18\n" +
+	" \x01(\bR\fprobePermits\"\xaf\x01\n" +
 	"\fQueryRequest\x12&\n" +
 	"\x05query\x18\x01 \x01(\v2\x10.fabric.v1.QueryR\x05query\x12\x14\n" +
 	"\x05nodes\x18\x02 \x03(\tR\x05nodes\x12,\n" +
@@ -2739,7 +2884,7 @@ func file_fabric_v1_fabric_proto_rawDescGZIP() []byte {
 }
 
 var file_fabric_v1_fabric_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_fabric_v1_fabric_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
+var file_fabric_v1_fabric_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_fabric_v1_fabric_proto_goTypes = []any{
 	(QueryType)(0),                // 0: fabric.v1.QueryType
 	(AddressFamily)(0),            // 1: fabric.v1.AddressFamily
@@ -2747,89 +2892,93 @@ var file_fabric_v1_fabric_proto_goTypes = []any{
 	(*Query)(nil),                 // 3: fabric.v1.Query
 	(*Budgets)(nil),               // 4: fabric.v1.Budgets
 	(*ExecuteRequest)(nil),        // 5: fabric.v1.ExecuteRequest
-	(*ExecuteResponse)(nil),       // 6: fabric.v1.ExecuteResponse
-	(*Observation)(nil),           // 7: fabric.v1.Observation
-	(*RouteResult)(nil),           // 8: fabric.v1.RouteResult
-	(*IndexState)(nil),            // 9: fabric.v1.IndexState
-	(*PrefixObservation)(nil),     // 10: fabric.v1.PrefixObservation
-	(*Path)(nil),                  // 11: fabric.v1.Path
-	(*ASSegment)(nil),             // 12: fabric.v1.ASSegment
-	(*NextHop)(nil),               // 13: fabric.v1.NextHop
-	(*Installation)(nil),          // 14: fabric.v1.Installation
-	(*ZebraRoute)(nil),            // 15: fabric.v1.ZebraRoute
-	(*ZebraNextHop)(nil),          // 16: fabric.v1.ZebraNextHop
-	(*SummaryResult)(nil),         // 17: fabric.v1.SummaryResult
-	(*Peer)(nil),                  // 18: fabric.v1.Peer
-	(*PingResult)(nil),            // 19: fabric.v1.PingResult
-	(*TracerouteResult)(nil),      // 20: fabric.v1.TracerouteResult
-	(*Hop)(nil),                   // 21: fabric.v1.Hop
-	(*ProbeReply)(nil),            // 22: fabric.v1.ProbeReply
-	(*InfoRequest)(nil),           // 23: fabric.v1.InfoRequest
-	(*InfoResponse)(nil),          // 24: fabric.v1.InfoResponse
-	(*QueryRequest)(nil),          // 25: fabric.v1.QueryRequest
-	(*QueryResponse)(nil),         // 26: fabric.v1.QueryResponse
-	(*NodeResult)(nil),            // 27: fabric.v1.NodeResult
-	(*ListNodesRequest)(nil),      // 28: fabric.v1.ListNodesRequest
-	(*ListNodesResponse)(nil),     // 29: fabric.v1.ListNodesResponse
-	(*NodeEndpoint)(nil),          // 30: fabric.v1.NodeEndpoint
-	(*timestamppb.Timestamp)(nil), // 31: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 32: google.protobuf.Duration
+	(*ProbePermit)(nil),           // 6: fabric.v1.ProbePermit
+	(*ExecuteResponse)(nil),       // 7: fabric.v1.ExecuteResponse
+	(*Observation)(nil),           // 8: fabric.v1.Observation
+	(*RouteResult)(nil),           // 9: fabric.v1.RouteResult
+	(*IndexState)(nil),            // 10: fabric.v1.IndexState
+	(*PrefixObservation)(nil),     // 11: fabric.v1.PrefixObservation
+	(*Path)(nil),                  // 12: fabric.v1.Path
+	(*ASSegment)(nil),             // 13: fabric.v1.ASSegment
+	(*NextHop)(nil),               // 14: fabric.v1.NextHop
+	(*Installation)(nil),          // 15: fabric.v1.Installation
+	(*ZebraRoute)(nil),            // 16: fabric.v1.ZebraRoute
+	(*ZebraNextHop)(nil),          // 17: fabric.v1.ZebraNextHop
+	(*SummaryResult)(nil),         // 18: fabric.v1.SummaryResult
+	(*Peer)(nil),                  // 19: fabric.v1.Peer
+	(*PingResult)(nil),            // 20: fabric.v1.PingResult
+	(*TracerouteResult)(nil),      // 21: fabric.v1.TracerouteResult
+	(*Hop)(nil),                   // 22: fabric.v1.Hop
+	(*ProbeReply)(nil),            // 23: fabric.v1.ProbeReply
+	(*InfoRequest)(nil),           // 24: fabric.v1.InfoRequest
+	(*InfoResponse)(nil),          // 25: fabric.v1.InfoResponse
+	(*QueryRequest)(nil),          // 26: fabric.v1.QueryRequest
+	(*QueryResponse)(nil),         // 27: fabric.v1.QueryResponse
+	(*NodeResult)(nil),            // 28: fabric.v1.NodeResult
+	(*ListNodesRequest)(nil),      // 29: fabric.v1.ListNodesRequest
+	(*ListNodesResponse)(nil),     // 30: fabric.v1.ListNodesResponse
+	(*NodeEndpoint)(nil),          // 31: fabric.v1.NodeEndpoint
+	(*timestamppb.Timestamp)(nil), // 32: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 33: google.protobuf.Duration
 }
 var file_fabric_v1_fabric_proto_depIdxs = []int32{
 	0,  // 0: fabric.v1.Query.type:type_name -> fabric.v1.QueryType
 	1,  // 1: fabric.v1.Query.address_family:type_name -> fabric.v1.AddressFamily
 	3,  // 2: fabric.v1.ExecuteRequest.query:type_name -> fabric.v1.Query
-	31, // 3: fabric.v1.ExecuteRequest.expires_at:type_name -> google.protobuf.Timestamp
+	32, // 3: fabric.v1.ExecuteRequest.expires_at:type_name -> google.protobuf.Timestamp
 	4,  // 4: fabric.v1.ExecuteRequest.budgets:type_name -> fabric.v1.Budgets
-	7,  // 5: fabric.v1.ExecuteResponse.observation:type_name -> fabric.v1.Observation
-	31, // 6: fabric.v1.Observation.sample_time:type_name -> google.protobuf.Timestamp
-	32, // 7: fabric.v1.Observation.duration:type_name -> google.protobuf.Duration
-	8,  // 8: fabric.v1.Observation.routes:type_name -> fabric.v1.RouteResult
-	17, // 9: fabric.v1.Observation.summary:type_name -> fabric.v1.SummaryResult
-	19, // 10: fabric.v1.Observation.ping:type_name -> fabric.v1.PingResult
-	20, // 11: fabric.v1.Observation.traceroute:type_name -> fabric.v1.TracerouteResult
-	2,  // 12: fabric.v1.RouteResult.lookup_kind:type_name -> fabric.v1.LookupKind
-	10, // 13: fabric.v1.RouteResult.prefixes:type_name -> fabric.v1.PrefixObservation
-	9,  // 14: fabric.v1.RouteResult.index:type_name -> fabric.v1.IndexState
-	31, // 15: fabric.v1.IndexState.synced_at:type_name -> google.protobuf.Timestamp
-	31, // 16: fabric.v1.IndexState.last_update:type_name -> google.protobuf.Timestamp
-	11, // 17: fabric.v1.PrefixObservation.paths:type_name -> fabric.v1.Path
-	14, // 18: fabric.v1.PrefixObservation.installation:type_name -> fabric.v1.Installation
-	12, // 19: fabric.v1.Path.as_path_segments:type_name -> fabric.v1.ASSegment
-	13, // 20: fabric.v1.Path.next_hops:type_name -> fabric.v1.NextHop
-	31, // 21: fabric.v1.Path.last_update:type_name -> google.protobuf.Timestamp
-	31, // 22: fabric.v1.Installation.sample_time:type_name -> google.protobuf.Timestamp
-	15, // 23: fabric.v1.Installation.routes:type_name -> fabric.v1.ZebraRoute
-	16, // 24: fabric.v1.ZebraRoute.next_hops:type_name -> fabric.v1.ZebraNextHop
-	18, // 25: fabric.v1.SummaryResult.peers:type_name -> fabric.v1.Peer
-	32, // 26: fabric.v1.Peer.uptime:type_name -> google.protobuf.Duration
-	22, // 27: fabric.v1.PingResult.replies:type_name -> fabric.v1.ProbeReply
-	32, // 28: fabric.v1.PingResult.rtt_min:type_name -> google.protobuf.Duration
-	32, // 29: fabric.v1.PingResult.rtt_avg:type_name -> google.protobuf.Duration
-	32, // 30: fabric.v1.PingResult.rtt_max:type_name -> google.protobuf.Duration
-	21, // 31: fabric.v1.TracerouteResult.hops:type_name -> fabric.v1.Hop
-	22, // 32: fabric.v1.Hop.probes:type_name -> fabric.v1.ProbeReply
-	32, // 33: fabric.v1.ProbeReply.rtt:type_name -> google.protobuf.Duration
-	0,  // 34: fabric.v1.InfoResponse.enabled_query_types:type_name -> fabric.v1.QueryType
-	3,  // 35: fabric.v1.QueryRequest.query:type_name -> fabric.v1.Query
-	4,  // 36: fabric.v1.QueryRequest.budgets:type_name -> fabric.v1.Budgets
-	32, // 37: fabric.v1.QueryRequest.timeout:type_name -> google.protobuf.Duration
-	27, // 38: fabric.v1.QueryResponse.results:type_name -> fabric.v1.NodeResult
-	7,  // 39: fabric.v1.NodeResult.observation:type_name -> fabric.v1.Observation
-	30, // 40: fabric.v1.ListNodesResponse.nodes:type_name -> fabric.v1.NodeEndpoint
-	5,  // 41: fabric.v1.FabricService.Execute:input_type -> fabric.v1.ExecuteRequest
-	23, // 42: fabric.v1.FabricService.Info:input_type -> fabric.v1.InfoRequest
-	25, // 43: fabric.v1.FabricGatewayService.Query:input_type -> fabric.v1.QueryRequest
-	28, // 44: fabric.v1.FabricGatewayService.ListNodes:input_type -> fabric.v1.ListNodesRequest
-	6,  // 45: fabric.v1.FabricService.Execute:output_type -> fabric.v1.ExecuteResponse
-	24, // 46: fabric.v1.FabricService.Info:output_type -> fabric.v1.InfoResponse
-	26, // 47: fabric.v1.FabricGatewayService.Query:output_type -> fabric.v1.QueryResponse
-	29, // 48: fabric.v1.FabricGatewayService.ListNodes:output_type -> fabric.v1.ListNodesResponse
-	45, // [45:49] is the sub-list for method output_type
-	41, // [41:45] is the sub-list for method input_type
-	41, // [41:41] is the sub-list for extension type_name
-	41, // [41:41] is the sub-list for extension extendee
-	0,  // [0:41] is the sub-list for field type_name
+	6,  // 5: fabric.v1.ExecuteRequest.permit:type_name -> fabric.v1.ProbePermit
+	0,  // 6: fabric.v1.ProbePermit.operation:type_name -> fabric.v1.QueryType
+	32, // 7: fabric.v1.ProbePermit.deadline:type_name -> google.protobuf.Timestamp
+	8,  // 8: fabric.v1.ExecuteResponse.observation:type_name -> fabric.v1.Observation
+	32, // 9: fabric.v1.Observation.sample_time:type_name -> google.protobuf.Timestamp
+	33, // 10: fabric.v1.Observation.duration:type_name -> google.protobuf.Duration
+	9,  // 11: fabric.v1.Observation.routes:type_name -> fabric.v1.RouteResult
+	18, // 12: fabric.v1.Observation.summary:type_name -> fabric.v1.SummaryResult
+	20, // 13: fabric.v1.Observation.ping:type_name -> fabric.v1.PingResult
+	21, // 14: fabric.v1.Observation.traceroute:type_name -> fabric.v1.TracerouteResult
+	2,  // 15: fabric.v1.RouteResult.lookup_kind:type_name -> fabric.v1.LookupKind
+	11, // 16: fabric.v1.RouteResult.prefixes:type_name -> fabric.v1.PrefixObservation
+	10, // 17: fabric.v1.RouteResult.index:type_name -> fabric.v1.IndexState
+	32, // 18: fabric.v1.IndexState.synced_at:type_name -> google.protobuf.Timestamp
+	32, // 19: fabric.v1.IndexState.last_update:type_name -> google.protobuf.Timestamp
+	12, // 20: fabric.v1.PrefixObservation.paths:type_name -> fabric.v1.Path
+	15, // 21: fabric.v1.PrefixObservation.installation:type_name -> fabric.v1.Installation
+	13, // 22: fabric.v1.Path.as_path_segments:type_name -> fabric.v1.ASSegment
+	14, // 23: fabric.v1.Path.next_hops:type_name -> fabric.v1.NextHop
+	32, // 24: fabric.v1.Path.last_update:type_name -> google.protobuf.Timestamp
+	32, // 25: fabric.v1.Installation.sample_time:type_name -> google.protobuf.Timestamp
+	16, // 26: fabric.v1.Installation.routes:type_name -> fabric.v1.ZebraRoute
+	17, // 27: fabric.v1.ZebraRoute.next_hops:type_name -> fabric.v1.ZebraNextHop
+	19, // 28: fabric.v1.SummaryResult.peers:type_name -> fabric.v1.Peer
+	33, // 29: fabric.v1.Peer.uptime:type_name -> google.protobuf.Duration
+	23, // 30: fabric.v1.PingResult.replies:type_name -> fabric.v1.ProbeReply
+	33, // 31: fabric.v1.PingResult.rtt_min:type_name -> google.protobuf.Duration
+	33, // 32: fabric.v1.PingResult.rtt_avg:type_name -> google.protobuf.Duration
+	33, // 33: fabric.v1.PingResult.rtt_max:type_name -> google.protobuf.Duration
+	22, // 34: fabric.v1.TracerouteResult.hops:type_name -> fabric.v1.Hop
+	23, // 35: fabric.v1.Hop.probes:type_name -> fabric.v1.ProbeReply
+	33, // 36: fabric.v1.ProbeReply.rtt:type_name -> google.protobuf.Duration
+	0,  // 37: fabric.v1.InfoResponse.enabled_query_types:type_name -> fabric.v1.QueryType
+	3,  // 38: fabric.v1.QueryRequest.query:type_name -> fabric.v1.Query
+	4,  // 39: fabric.v1.QueryRequest.budgets:type_name -> fabric.v1.Budgets
+	33, // 40: fabric.v1.QueryRequest.timeout:type_name -> google.protobuf.Duration
+	28, // 41: fabric.v1.QueryResponse.results:type_name -> fabric.v1.NodeResult
+	8,  // 42: fabric.v1.NodeResult.observation:type_name -> fabric.v1.Observation
+	31, // 43: fabric.v1.ListNodesResponse.nodes:type_name -> fabric.v1.NodeEndpoint
+	5,  // 44: fabric.v1.FabricService.Execute:input_type -> fabric.v1.ExecuteRequest
+	24, // 45: fabric.v1.FabricService.Info:input_type -> fabric.v1.InfoRequest
+	26, // 46: fabric.v1.FabricGatewayService.Query:input_type -> fabric.v1.QueryRequest
+	29, // 47: fabric.v1.FabricGatewayService.ListNodes:input_type -> fabric.v1.ListNodesRequest
+	7,  // 48: fabric.v1.FabricService.Execute:output_type -> fabric.v1.ExecuteResponse
+	25, // 49: fabric.v1.FabricService.Info:output_type -> fabric.v1.InfoResponse
+	27, // 50: fabric.v1.FabricGatewayService.Query:output_type -> fabric.v1.QueryResponse
+	30, // 51: fabric.v1.FabricGatewayService.ListNodes:output_type -> fabric.v1.ListNodesResponse
+	48, // [48:52] is the sub-list for method output_type
+	44, // [44:48] is the sub-list for method input_type
+	44, // [44:44] is the sub-list for extension type_name
+	44, // [44:44] is the sub-list for extension extendee
+	0,  // [0:44] is the sub-list for field type_name
 }
 
 func init() { file_fabric_v1_fabric_proto_init() }
@@ -2837,20 +2986,20 @@ func file_fabric_v1_fabric_proto_init() {
 	if File_fabric_v1_fabric_proto != nil {
 		return
 	}
-	file_fabric_v1_fabric_proto_msgTypes[4].OneofWrappers = []any{
+	file_fabric_v1_fabric_proto_msgTypes[5].OneofWrappers = []any{
 		(*Observation_Routes)(nil),
 		(*Observation_Summary)(nil),
 		(*Observation_Ping)(nil),
 		(*Observation_Traceroute)(nil),
 	}
-	file_fabric_v1_fabric_proto_msgTypes[8].OneofWrappers = []any{}
+	file_fabric_v1_fabric_proto_msgTypes[9].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fabric_v1_fabric_proto_rawDesc), len(file_fabric_v1_fabric_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   28,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

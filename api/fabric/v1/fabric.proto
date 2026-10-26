@@ -84,6 +84,31 @@ message ExecuteRequest {
   // request and clamps its own deadline to it.
   google.protobuf.Timestamp expires_at = 4;
   Budgets budgets = 5;
+  // permit authorizes one probe against the cell's aggregate packet budgets.
+  // Only the cell's gateway sets it; a node consumes each permit once.
+  ProbePermit permit = 6;
+}
+
+// ProbePermit is the cell gateway's authorization of one probe on one node:
+// one attempt, its destination, operation and packet allowance, bound to
+// the gateway's election epoch. It is internal to galactic.
+message ProbePermit {
+  // id is unique per permit; a node refuses an ID it already consumed.
+  string id = 1;
+  // epoch is the election Lease's UID and holder identity when the permit
+  // was issued, as "<uid>/<holder>".
+  string epoch = 2;
+  // request_id is the attempt the permit was issued for.
+  string request_id = 3;
+  // node is the node the probe may run on.
+  string node = 4;
+  // destination is the probe's canonical numeric destination.
+  string destination = 5;
+  QueryType operation = 6;
+  // packets is the most probe packets the node may send under the permit.
+  uint32 packets = 7;
+  // deadline is when the permit expires; the node sends nothing after it.
+  google.protobuf.Timestamp deadline = 8;
 }
 
 message ExecuteResponse {
@@ -309,6 +334,10 @@ message InfoResponse {
   // probe_sources lists the per-family probe source addresses that are
   // available.
   repeated string probe_sources = 9;
+  // probe_permits is true when the node verifies and enforces each probe's
+  // ProbePermit. A gateway enforcing aggregate probe budgets sends probes
+  // only to such nodes.
+  bool probe_permits = 10;
 }
 
 message QueryRequest {
