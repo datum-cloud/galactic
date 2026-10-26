@@ -71,6 +71,8 @@ type lab struct {
 	cell       cell
 	// talos is set for the talos target.
 	talos *talosConfig
+	// clocksAtStart is the cell's clock check before the first row.
+	clocksAtStart map[string]string
 }
 
 var (
@@ -153,6 +155,11 @@ func newLab(kubeconfig, targetName string) (*lab, error) {
 	}
 	if err := l.installProbe(); err != nil {
 		return nil, err
+	}
+	// Cross-node bounds mean nothing on clocks further apart than the
+	// suite allows, so the run stops before its first row.
+	if l.clocksAtStart, err = l.cell.checkClocks(); err != nil {
+		return nil, fmt.Errorf("node clocks: %w", err)
 	}
 	return l, nil
 }

@@ -104,14 +104,15 @@ func (s *side) renewStart(t *testing.T, l *lab) time.Duration {
 
 func TestConformance(t *testing.T) {
 	l := getLab(t)
-	t.Cleanup(func() { l.writeSummary(t) })
-
 	a := &side{tn: tenantA, deploy: "a1", node: edgeNode1}
 	b := &side{tn: tenantB, deploy: "b1", node: edgeNode1}
 	// EDGE_CONFORMANCE_KEEP leaves the fixtures in place for debugging.
 	if os.Getenv("EDGE_CONFORMANCE_KEEP") == "" {
 		t.Cleanup(func() { teardown(t, l, a, b) })
 	}
+	// Cleanups run last-registered first: the summary reads the fixture's
+	// pods for their versions, so it runs before the teardown.
+	t.Cleanup(func() { l.writeSummary(t) })
 	if !t.Run("setup", func(t *testing.T) { setup(t, l, a, b) }) {
 		t.FailNow()
 	}
@@ -317,6 +318,16 @@ func (l *lab) writeSummary(t *testing.T) {
 	commit, _ := exec.CommandContext(context.Background(), "git", "-C", l.root, "rev-parse", "HEAD").Output()
 	dirty, _ := exec.CommandContext(context.Background(), "git", "-C", l.root, "status", "--porcelain").Output()
 	images := l.cell.versions()
+	clocks, err := l.cell.checkClocks()
+	if err != nil {
+		t.Errorf("node clocks at the end of the run: %v", err)
+	}
+	for k, v := range l.clocksAtStart {
+		images[k+" (start)"] = v
+	}
+	for k, v := range clocks {
+		images[k+" (end)"] = v
+	}
 	results.Lock()
 	defer results.Unlock()
 	b, _ := json.MarshalIndent(map[string]any{
@@ -1007,20 +1018,23 @@ func rowCrash(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 	l.record(t, "route epoch after restart", r.Spec.Claim.Epoch)
 }
 
-// containerStart returns when a's provider container last started.
+// containerStart returns when a's provider container last started: when its
+// first process started, read from the node's /proc to 10 ms.
 func (l *lab) containerStart(t *testing.T, a *side) time.Duration {
 	t.Helper()
-	var pod corev1.Pod
-	if err := l.c.Get(context.Background(), client.ObjectKeyFromObject(a.pod), &pod); err != nil {
+	pid, err := l.cell.containerPID(a.node, a.pod.Namespace, a.pod.Name, "edge-provider")
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.State.Running != nil {
-			return wallToRef(cs.State.Running.StartedAt.Time)
-		}
+	out, err := nodeExec(a.node, probePath, "start", "-pid", strconv.Itoa(pid))
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("provider container is not running")
-	return 0
+	boot, err := strconv.ParseInt(out, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l.bootRef(t, a.node, time.Duration(boot))
 }
 
 func rowStall(t *testing.T, l *lab, a *side, pa netip.Prefix) {

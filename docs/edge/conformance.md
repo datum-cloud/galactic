@@ -34,6 +34,8 @@ The cell must already run the core, unchanged:
   ([node requirements](troubleshooting.md#node-requirements)).
 - Pods in the namespace `edge-conformance-system` may run privileged, with
   the host's network and PID namespaces.
+- The compute node reaches each edge node's internal address on UDP port
+  `7779`, where the suite compares their clocks.
 
 The suite brings everything else, and labels each object it creates
 `app.kubernetes.io/part-of=galactic-edge-fixture`:
@@ -61,14 +63,14 @@ more than the suite's own tenants:
 
 | Row | Step                                                                                                  | Effect beyond the fixture                                                                                                                                           |
 | --- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 12  | Drops the edge node's traffic to the API server: the API endpoints, the `kubernetes` Service and KubePrism | For up to 150 s, the node's kubelet and every component on it can't reach the API server. The node may turn `NotReady`. Packets keep flowing.                     |
+| 12  | Drops the edge node's traffic to the API server: the API endpoints, the `kubernetes` Service and KubePrism | For up to 240 s, the node's kubelet and every component on it can't reach the API server. The node may turn `NotReady`. Packets keep flowing.                     |
 | 14  | Stops `galactic-edge` on an edge node for 25 s                                                        | No other edge attachments on that node are programmed during the stop.                                                                                             |
 | 16  | Stops `galactic-router` on an edge node for 25 s                                                      | The route reflector withdraws everything that node advertises, such as an egress shard's SID or a gateway's VIPs, until the router resumes.                          |
 | 23  | Hard-reboots an edge node through `/proc/sysrq-trigger`, as on a power loss                           | Everything on the node stops until it boots again, which takes minutes on bare metal.                                                                               |
 
 Row 12's `nft` rules live in the table `edgeconf_isolate`, in the node's
 network namespace and the provider pod's. A process on the node deletes them
-after 150 s even if the suite dies first.
+after 240 s even if the suite dies first.
 
 ## Running it
 
@@ -108,8 +110,24 @@ time to one reference clock before it compares them.
   time synchronization.
 
 The suite allows 100 ms of clock difference between nodes in a cross-node
-comparison. `summary.json` records each node's measured offset from the
-runner's clock.
+comparison, and checks it before the first row and again at the end:
+
+- **Between nodes:** each edge node answers `edgeprobe clockserve` on UDP
+  port `7779`, and the compute node asks it for its time with
+  `edgeprobe clockping`, keeping the exchange with the shortest round trip.
+  The check fails when the measured offset plus half that round trip exceeds
+  100 ms for any pair of nodes. Probe events, lease renew-starts and API
+  timestamps all come from the nodes, so this is the comparison the bounds
+  rest on.
+- **Between the runner and each node:** the suite reads each node's clock
+  through `kubectl exec`. Its own times only mark when it sent a command
+  through `kubectl exec`, which is delayed by about as much as that read is
+  uncertain, so the check fails only when the runner is certainly more than
+  100 ms from a node.
+
+A failed check at the start stops the run before its first row; at the end
+it fails the run. `summary.json` records every measurement as an offset and
+its uncertainty.
 
 ## Results
 
