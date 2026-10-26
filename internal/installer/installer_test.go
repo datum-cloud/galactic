@@ -1095,7 +1095,7 @@ func TestRewriteEBPFInterfaces(t *testing.T) {
 	HostConflist = filepath.Join(t.TempDir(), "10-galactic.conflist")
 
 	written := hostconf.HostConf{
-		NodeName:        "eris-giune",
+		NodeName:        "gateway-node",
 		Kubeconfig:      config.DefaultKubeconfig,
 		Namespace:       config.DefaultNamespace,
 		LogFile:         config.DefaultLogFile,

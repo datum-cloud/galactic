@@ -21,18 +21,18 @@ import (
 // an IPv4-mapped next hop, one healthy IPv6 session, an IPv4 session, one not
 // yet established, and one sourced from a link-local address.
 const neighborsJSON = `{
-  "2607:f740:0:3f::39b": {
+  "2001:db8:0:3f::39b": {
     "bgpState": "Established",
-    "hostLocal": "2600:9c07:0:48::2",
+    "hostLocal": "2001:db8:0:48::2",
     "nexthop": "188.42.80.235",
     "nexthopGlobal": "::ffff:188.42.80.235",
     "nexthopLocal": "::"
   },
   "fd00::ffff:1": {
     "bgpState": "Established",
-    "hostLocal": "2600:9c07:0:48::2",
+    "hostLocal": "2001:db8:0:48::2",
     "nexthop": "188.42.80.235",
-    "nexthopGlobal": "2600:9c07:0:48::2",
+    "nexthopGlobal": "2001:db8:0:48::2",
     "nexthopLocal": "::"
   },
   "10.1.30.1": {
@@ -58,7 +58,7 @@ const neighborsJSON = `{
   }
 }`
 
-const mappedPeer = "2607:f740:0:3f::39b"
+const mappedPeer = "2001:db8:0:3f::39b"
 
 // Routes as `show ipv6 route json` reports them: a BGP route with no installed
 // route, an installed BGP route, a BGP route that loses to an installed static
@@ -74,7 +74,7 @@ const routesJSON = `{
     {"protocol": "static", "selected": true, "installed": true, "distance": 1},
     {"protocol": "bgp", "distance": 200}
   ],
-  "2600:9c07:0:48::/64": [
+  "2001:db8:0:48::/64": [
     {"protocol": "connected", "selected": true, "installed": true}
   ]
 }`
@@ -204,7 +204,7 @@ func TestNextHopGuardClearsRecoveredSession(t *testing.T) {
 	bgp.neighbors = strings.Replace(neighborsJSON, `"nexthopGlobal": "::ffff:188.42.80.235",
     "nexthopLocal": "::"
   },
-  "fd00::ffff:1"`, `"nexthopGlobal": "2600:9c07:0:48::2",
+  "fd00::ffff:1"`, `"nexthopGlobal": "2001:db8:0:48::2",
     "nexthopLocal": "::"
   },
   "fd00::ffff:1"`, 1)

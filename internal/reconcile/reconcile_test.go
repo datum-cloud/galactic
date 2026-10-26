@@ -228,7 +228,7 @@ func TestBuildDesiredRouter_PeerUpdateSource(t *testing.T) {
 		want         string
 	}{
 		{name: "unset stays empty", updateSource: nil, want: ""},
-		{name: "explicit value carries through", updateSource: ptrString("2607:f740:100::635"), want: "2607:f740:100::635"},
+		{name: "explicit value carries through", updateSource: ptrString("2001:db8:100::635"), want: "2001:db8:100::635"},
 	}
 
 	for _, tc := range tests {

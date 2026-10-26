@@ -3,8 +3,7 @@
 # deploy/containerlab/resources/tenants/base/pod.yaml) rather than
 # reimplementing its curated tool set from a stock base. See
 # containers/galactic-debug/README.md for how the two `kubectl debug` modes
-# below are meant to be used, and the KB note both modes were designed
-# against: ~/.vaults/notebook/projects/galactic/kb/xregion-503-envoy-egress-route-incidents.md.
+# below are meant to be used.
 
 # Build galactic-usid (base62<->hex uSID codec CLI) and the gobgp CLI,
 # pinned to the same major version galactic-router embeds (see go.mod's
@@ -61,20 +60,17 @@ ARG KUBECTL_VERSION=v1.34.0
 ARG CRICTL_VERSION=v1.34.0
 ARG YQ_VERSION=v4.44.3
 
-# bpftool/bpftrace: eBPF map/prog introspection -- the tool that was
-# missing on the night-two incident ("no low-level eBPF map introspection
-# tool available on these nodes"), for dumping galactic-cni's usid_egress
-# and egress_route_table maps directly.
-# frr: ships vtysh, for querying fabric-router's FRR instance directly
-# rather than only through the infra repo's looking glass -- night one's
-# root cause was an FRR underlay advertisement flag.
+# bpftool/bpftrace: eBPF map/prog introspection, which nodes do not
+# otherwise provide, for dumping galactic-cni's usid_egress and
+# egress_route_table maps directly.
+# frr: ships vtysh, for querying fabric-router's FRR instance directly.
 RUN apk add --no-cache \
       bpftool \
       bpftrace \
       frr
 
 # kubectl: correlating with the EndpointSlice state that drives
-# vpc-vrf-sidecar's route installs (night two's root cause path).
+# vpc-vrf-sidecar's route installs.
 RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
       -o /usr/local/bin/kubectl \
     && chmod +x /usr/local/bin/kubectl
