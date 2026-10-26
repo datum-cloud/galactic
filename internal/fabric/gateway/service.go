@@ -78,7 +78,7 @@ const (
 // probes are charged too.
 func (s *Service) features() []string {
 	f := []string{FeatureRouterOutcomes, FeatureTerminalCoverage}
-	if s.Enabled && s.Admission != nil {
+	if s.enabled() {
 		f = append(f, FeatureAggregateProbeBudgets)
 	}
 	return f
@@ -218,15 +218,16 @@ type LeaderDialer interface {
 
 // Service implements the Looking Glass service. Any replica authenticates
 // and validates a request; a follower forwards it once to the leader, which
-// validates it again before executing. Unless Enabled and given an
+// validates it again before executing. Unless its Switch is on and it has an
 // Admission, the leader refuses a valid request with ServiceDisabled.
 type Service struct {
 	servicev1.UnimplementedLookingGlassServiceServer
 
 	// Cell is the cell this gateway serves.
 	Cell string
-	// Enabled makes the leader execute valid requests.
-	Enabled bool
+	// Switch, while on, makes the leader execute valid requests; turning it
+	// off cancels those running. A nil Switch is off.
+	Switch *ServiceSwitch
 	// Admission enforces the cell's aggregate admission and probe budgets.
 	// It must be the Runner's; without it nothing executes.
 	Admission *Admission
@@ -257,6 +258,13 @@ func (s *Service) now() time.Time {
 	return time.Now()
 }
 
+// enabled reports whether the service executes requests: its Switch is on
+// and it has an Admission.
+func (s *Service) enabled() bool {
+	on, _ := s.Switch.State()
+	return on && s.Admission != nil
+}
+
 // GetCapabilities reports the cell's service policy.
 func (s *Service) GetCapabilities(
 	ctx context.Context, req *servicev1.GetCapabilitiesRequest,
@@ -282,7 +290,7 @@ func (s *Service) capabilities() *servicev1.GetCapabilitiesResponse {
 	resp := &servicev1.GetCapabilitiesResponse{
 		Cell:     s.Cell,
 		ApiMajor: ServiceAPIMajor,
-		Enabled:  s.Enabled && s.Admission != nil,
+		Enabled:  s.enabled(),
 		Operations: []*servicev1.Operation{
 			{Type: fabricv1.QueryType_QUERY_TYPE_ROUTE_LOOKUP, AddressFamilies: families},
 			{Type: fabricv1.QueryType_QUERY_TYPE_BGP_SUMMARY, AddressFamilies: families},
@@ -584,7 +592,8 @@ func (s *Service) forward(
 // write or a hand-off to the buffer blocked for SendBound, cancels every
 // router still running and ends the stream without complete; the deadline,
 // the loss of the election and the output budget cancel them too, but the
-// stream still ends with complete. An outcome larger than
+// stream still ends with complete, as it does when the Switch is turned off.
+// An outcome larger than
 // maxOutcomeBytes is delivered as a ResponseTooLarge failure, and once the
 // stream's output budget cannot hold an outcome, that router and every
 // router still running fail with OutputLimitExceeded. A failure before the
@@ -599,36 +608,28 @@ func (s *Service) execute(
 		return errcode.Status(errcode.DeadlineExceeded, "request's deadline has passed")
 	}
 	adm := s.Admission
-	if !s.Enabled || adm == nil || s.Discoverer == nil || s.Runner == nil {
+	on, offCtx := s.Switch.State()
+	if !on || adm == nil || s.Discoverer == nil || s.Runner == nil {
 		return errcode.Status(errcode.ServiceDisabled, "this cell does not execute Looking Glass service diagnostics")
 	}
 	project := req.GetProjectId()
-	_, epochCtx, err := adm.Authority.Check(ctx)
-	if err != nil {
-		return err
-	}
-	if err := adm.Buckets.ChargeRequest(project, adm.now()); err != nil {
-		return err
-	}
-	if err := adm.Attempts.Register(attemptKey(caller, req), requestDigest(req), req.GetExpiresAt().AsTime(),
-		adm.now()); err != nil {
-		return err
-	}
-	closeStream, err := adm.openStream(project)
+	epochCtx, closeStream, err := adm.admit(ctx, caller, req)
 	if err != nil {
 		return err
 	}
 	defer closeStream()
 
 	// sendCtx ends when the stream does, a write fails or the consumer
-	// stalls; runCtx also ends at the deadline, when the election is lost or
-	// when the output budget runs out. Outcomes those cut short still reach
-	// the writer, so the consumer can see them while the stream lasts.
+	// stalls; runCtx also ends at the deadline, when the election is lost,
+	// when the service is turned off or when the output budget runs out.
+	// Outcomes those cut short still reach the writer, so the consumer can
+	// see them while the stream lasts.
 	sendCtx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
 	ownedCtx, lose := context.WithCancelCause(sendCtx)
 	defer lose(nil)
 	defer context.AfterFunc(epochCtx, func() { lose(errOwnershipLost) })()
+	defer context.AfterFunc(offCtx, func() { lose(errServiceDisabled) })()
 	runCtx, cancel := context.WithDeadline(ownedCtx, deadline)
 	defer cancel()
 
@@ -640,6 +641,8 @@ func (s *Service) execute(
 		switch {
 		case errors.Is(context.Cause(runCtx), errOwnershipLost):
 			return errcode.Status(errcode.OwnershipLost, "the election was lost during router discovery")
+		case errors.Is(context.Cause(runCtx), errServiceDisabled):
+			return errcode.Status(errcode.ServiceDisabled, "the service was disabled during router discovery")
 		case errors.Is(runCtx.Err(), context.DeadlineExceeded):
 			return errcode.Status(errcode.DeadlineExceeded, "request's deadline passed during router discovery")
 		case runCtx.Err() != nil:

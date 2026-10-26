@@ -55,6 +55,7 @@ type gatewayOptions struct {
 	maxInFlight                   int
 	retention, cleanupGrace       time.Duration
 	serviceIdentities             []string
+	serviceConfigMap              string
 	aggregateBudgets              bool
 	limits                        limit.Limits
 }
@@ -107,6 +108,10 @@ func newGatewayCommand() *cobra.Command {
 	f.StringSliceVar(&o.serviceIdentities, "service-identities", nil,
 		"Names of the Looking Glass service identities (spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>) "+
 			"allowed to call this cell's gateway; empty allows none")
+	f.StringVar(&o.serviceConfigMap, "service-config-map", "",
+		"ConfigMap in --namespace whose key \"service\" turns Looking Glass execution on (\"enabled\") or off "+
+			"(\"disabled\") while the gateway runs, read every second; empty, missing, unreadable or any other "+
+			"value keeps it off. Execution also needs --aggregate-budgets")
 	f.BoolVar(&o.aggregateBudgets, "aggregate-budgets", false,
 		"Enforce the cell's aggregate admission and probe packet budgets on every caller, issue probe permits to "+
 			"nodes, and bound each principal's share of --cell-slots and --cell-queue; every node must run with "+
@@ -150,11 +155,15 @@ func registerLimitFlags(f *pflag.FlagSet, l *limit.Limits) {
 }
 
 // gatewayLimits returns the aggregate limits the flags select, refusing
-// limit flags without --aggregate-budgets, a limit above its qualified
-// ceiling and limits that break a cross-field rule. A principal's slots,
-// queue and streams default to at most the cell's.
+// limit flags or --service-config-map without --aggregate-budgets, a limit
+// above its qualified ceiling and limits that break a cross-field rule. A
+// principal's slots, queue and streams default to at most the cell's.
 func gatewayLimits(f *pflag.FlagSet, o *gatewayOptions) (limit.Limits, error) {
 	if !o.aggregateBudgets {
+		if o.serviceConfigMap != "" {
+			return limit.Limits{}, errors.New("--service-config-map needs --aggregate-budgets: the service " +
+				"executes only under the cell's aggregate budgets")
+		}
 		for _, name := range limitFlags {
 			if f.Changed(name) {
 				return limit.Limits{}, fmt.Errorf("--%s needs --aggregate-budgets", name)
@@ -266,6 +275,10 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 		executor.PrincipalSlots, executor.PrincipalQueue = o.limits.PrincipalSlots, o.limits.PrincipalQueue
 		go admission.Authority.Watch(ctx, limit.WatchInterval)
 	}
+	serviceSwitch := &gateway.ServiceSwitch{}
+	if o.serviceConfigMap != "" {
+		go serviceSwitch.Watch(ctx, mgr.GetAPIReader(), o.namespace, o.serviceConfigMap, gateway.ServiceSwitchInterval)
+	}
 	executor.ObserveWait = func(d time.Duration) { metrics.QueueWait(d.Seconds()) }
 	creds := o.tls.credentials(identity.Gateway(o.cell))
 	creds.OnLoad(func(leaf *x509.Certificate) { metrics.CertificateExpiry(float64(leaf.NotAfter.Unix())) })
@@ -341,10 +354,12 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 		Cell:        o.cell,
 		DialOptions: []grpc.DialOption{clientStats()},
 	}
-	// Enabled is deliberately unset: the service authenticates, validates
+	// The service executes only while serviceSwitch is on and admission
+	// enforces the aggregate budgets; otherwise it authenticates, validates
 	// and reports capabilities, and refuses execution with ServiceDisabled.
 	service := &gateway.Service{
 		Cell:      o.cell,
+		Switch:    serviceSwitch,
 		Allowlist: allowlist,
 		Elected:   debug.Elected,
 		Leader:    debug,

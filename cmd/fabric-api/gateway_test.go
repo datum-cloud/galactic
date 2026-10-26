@@ -22,7 +22,7 @@ const (
 )
 
 // parseLimits parses args as the gateway's limit flags, with the cell slot,
-// queue and budget flags they depend on.
+// queue, budget and service switch flags they depend on.
 func parseLimits(t *testing.T, args ...string) (limit.Limits, error) {
 	t.Helper()
 	o := &gatewayOptions{}
@@ -30,6 +30,7 @@ func parseLimits(t *testing.T, args ...string) (limit.Limits, error) {
 	f.IntVar(&o.slots, "cell-slots", 8, "")
 	f.IntVar(&o.queue, "cell-queue", 256, "")
 	f.BoolVar(&o.aggregateBudgets, "aggregate-budgets", false, "")
+	f.StringVar(&o.serviceConfigMap, "service-config-map", "", "")
 	registerLimitFlags(f, &o.limits)
 	if err := f.Parse(args); err != nil {
 		t.Fatal(err)
@@ -76,11 +77,12 @@ func TestGatewayLimitsRefused(t *testing.T) {
 		args []string
 		want string
 	}{
-		"limit without budgets":  {[]string{"--packet-cell-rate=50"}, "needs --aggregate-budgets"},
-		"raised rate":            {[]string{budgets, "--packet-host-rate=21"}, qualified},
-		"raised burst":           {[]string{budgets, "--request-project-burst=3"}, qualified},
-		"raised principal slots": {[]string{budgets, "--principal-slots=3"}, qualified},
-		"raised project streams": {[]string{budgets, "--project-streams=3"}, qualified},
+		"limit without budgets":   {[]string{"--packet-cell-rate=50"}, "needs --aggregate-budgets"},
+		"service without budgets": {[]string{"--service-config-map=fabric-api-service"}, "needs --aggregate-budgets"},
+		"raised rate":             {[]string{budgets, "--packet-host-rate=21"}, qualified},
+		"raised burst":            {[]string{budgets, "--request-project-burst=3"}, qualified},
+		"raised principal slots":  {[]string{budgets, "--principal-slots=3"}, qualified},
+		"raised project streams":  {[]string{budgets, "--project-streams=3"}, qualified},
 		"principal above cell": {
 			[]string{budgets, "--cell-slots=1", "--principal-slots=2"}, "principal slots",
 		},

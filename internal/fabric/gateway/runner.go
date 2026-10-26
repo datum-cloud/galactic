@@ -243,9 +243,9 @@ var errOwnershipLost = errors.New("the gateway lost execution ownership")
 var errOutputLimit = errors.New("the stream's output budget is exhausted")
 
 // requestErr reports a failure that ctx's end, or the request's expiration,
-// caused as the request's own DeadlineExceeded, Cancelled or, when the
-// election was lost or the output budget ran out, OwnershipLost or
-// OutputLimitExceeded.
+// caused as the request's own DeadlineExceeded, Cancelled (also when the
+// service was turned off) or, when the election was lost or the output
+// budget ran out, OwnershipLost or OutputLimitExceeded.
 func requestErr(ctx context.Context, err error, expired bool) error {
 	if err == nil || (ctx.Err() == nil && !expired) {
 		return err
@@ -257,6 +257,9 @@ func requestErr(ctx context.Context, err error, expired bool) error {
 	}
 	if errors.Is(context.Cause(ctx), errOwnershipLost) {
 		return errcode.Status(errcode.OwnershipLost, "the gateway lost execution ownership before the router finished")
+	}
+	if errors.Is(context.Cause(ctx), errServiceDisabled) {
+		return errcode.Status(errcode.Cancelled, "the service was disabled before the router finished")
 	}
 	if errors.Is(context.Cause(ctx), errOutputLimit) {
 		return errcode.Status(errcode.OutputLimitExceeded, "the stream's output budget ran out before the router finished")

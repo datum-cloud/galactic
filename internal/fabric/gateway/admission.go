@@ -13,9 +13,11 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/errcode"
 	"go.datum.net/galactic/internal/fabric/gateway/limit"
+	"go.datum.net/galactic/internal/fabric/identity"
 	"go.datum.net/galactic/internal/fabric/node"
 	"go.datum.net/galactic/internal/fabric/query"
 )
@@ -91,6 +93,32 @@ func (a *Admission) openStream(project string) (func(), error) {
 			delete(a.projectStreams, project)
 		}
 	}, nil
+}
+
+// admit admits a service request before its discovery: it confirms the
+// election, charges the cell's and the project's request tokens, registers
+// the attempt key and opens a live stream. It returns the epoch's context
+// and the function that ends the stream.
+func (a *Admission) admit(
+	ctx context.Context, caller identity.ID, req *servicev1.RunDiagnosticRequest,
+) (context.Context, func(), error) {
+	project := req.GetProjectId()
+	_, epochCtx, err := a.Authority.Check(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := a.Buckets.ChargeRequest(project, a.now()); err != nil {
+		return nil, nil, err
+	}
+	if err := a.Attempts.Register(attemptKey(caller, req), requestDigest(req), req.GetExpiresAt().AsTime(),
+		a.now()); err != nil {
+		return nil, nil, err
+	}
+	closeStream, err := a.openStream(project)
+	if err != nil {
+		return nil, nil, err
+	}
+	return epochCtx, closeStream, nil
 }
 
 // probeCost is a probe's worst-case packet count.
