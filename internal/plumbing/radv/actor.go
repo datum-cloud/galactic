@@ -40,11 +40,13 @@ type raWriter interface {
 // It sends the first advertisement as soon as the connection is open, then
 // MaxInitialRtrAdvertisements-1 more MinDelayBetweenRAs apart, so a guest gets
 // its default route without having to solicit one. Both jobs share one
-// connection and one last-sent clock, so a solicited reply also reschedules the
-// next unsolicited send rather than the guest receiving a redundant
-// advertisement moments later. A solicited reply counts toward the initial
-// burst, which RFC 4861 section 6.2.4 permits, so a guest that solicits early
-// may see fewer than MaxInitialRtrAdvertisements unsolicited ones.
+// connection and one unsolicited-send timer, so a solicited reply also
+// reschedules the next unsolicited send rather than the guest receiving a
+// redundant advertisement moments later. Only multicast advertisements are
+// subject to MinDelayBetweenRAs; a reply sent directly to the soliciting guest
+// is not delayed by an earlier multicast. A solicited reply counts toward the
+// initial burst, which RFC 4861 section 6.2.4 permits, so a guest that solicits
+// early may see fewer than MaxInitialRtrAdvertisements unsolicited ones.
 //
 // Callers run one per recorded attachment, starting it when the attachment
 // appears and cancelling when it disappears or the daemon shuts down. It
@@ -168,7 +170,7 @@ func runActorLoop(
 	resendTimer := time.NewTimer(0)
 	defer resendTimer.Stop()
 
-	var lastSent time.Time
+	var lastMulticastSent time.Time
 	sent := 0
 	send := func(dst netip.Addr) {
 		ra := buildAdvertisement(mtu, hwAddr)
@@ -177,7 +179,9 @@ func runActorLoop(
 			// the timer is still rescheduled so the next attempt is not lost.
 			slog.Warn("Failed to send router advertisement", "err", err, "hostInterface", iface, "dst", dst)
 		} else {
-			lastSent = time.Now()
+			if dst.IsMulticast() {
+				lastMulticastSent = time.Now()
+			}
 			sent++
 		}
 		resendTimer.Reset(nextUnsolicitedDelay(sent))
@@ -198,23 +202,28 @@ func runActorLoop(
 				return
 			}
 
-			if rateLimited(lastSent, time.Now()) {
-				continue
+			dst := responseDestination(src)
+			if delay := multicastDelay(lastMulticastSent, time.Now(), dst); delay > 0 {
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return
+				}
 			}
-			send(responseDestination(src))
+			send(dst)
 		}
 	}
 }
 
-// rateLimited reports whether now is too soon after lastSent to send another
-// advertisement: a router must never send more than one, solicited or not,
-// within the minimum delay. A zero lastSent, meaning none sent yet this
-// actor's lifetime, is never rate-limited.
-func rateLimited(lastSent, now time.Time) bool {
-	if lastSent.IsZero() {
-		return false
+// multicastDelay returns how long a multicast advertisement to dst must wait
+// to preserve MinDelayBetweenRAs. Unicast replies and the actor's first
+// multicast advertisement need no additional delay.
+func multicastDelay(lastMulticastSent, now time.Time, dst netip.Addr) time.Duration {
+	if !dst.IsMulticast() || lastMulticastSent.IsZero() {
+		return 0
 	}
-	return now.Sub(lastSent) < MinDelayBetweenRAs
+
+	return max(0, MinDelayBetweenRAs-now.Sub(lastMulticastSent))
 }
 
 // responseDestination returns where a solicited reply should go for a

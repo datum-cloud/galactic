@@ -103,10 +103,9 @@ func TestRunActorLoop_InitialBurst(t *testing.T) {
 	}
 }
 
-// TestRunActorLoop_SolicitationDuringBurstIsRateLimited checks a solicitation
-// arriving right after the first advertisement gets no extra reply inside
-// MinDelayBetweenRAs.
-func TestRunActorLoop_SolicitationDuringBurstIsRateLimited(t *testing.T) {
+// TestRunActorLoop_UnicastSolicitationDuringBurstRepliesPromptly checks that
+// multicast spacing does not delay a unicast solicited reply.
+func TestRunActorLoop_UnicastSolicitationDuringBurstRepliesPromptly(t *testing.T) {
 	const minDelay = 200 * time.Millisecond
 	shrinkRadvTimers(t, minDelay)
 
@@ -115,8 +114,41 @@ func TestRunActorLoop_SolicitationDuringBurstIsRateLimited(t *testing.T) {
 	rsCh <- netip.MustParseAddr("fe80::2")
 	runLoopFor(t, w, rsCh, minDelay/2)
 
-	if sends := w.snapshot(); len(sends) != 1 {
-		t.Fatalf("sent %d advertisements within %v of start, want 1", len(sends), minDelay/2)
+	sends := w.snapshot()
+	if len(sends) < 1 || len(sends) > 2 {
+		t.Fatalf(
+			"sent %d advertisements within %v of start, want prompt unicast reply and optional initial multicast",
+			len(sends), minDelay/2,
+		)
+	}
+	want := netip.MustParseAddr("fe80::2")
+	found := false
+	for _, send := range sends {
+		found = found || send.dst == want
+	}
+	if !found {
+		t.Fatalf("advertisements sent to %v, want a solicited reply to %v", sends, want)
+	}
+}
+
+// TestRunActorLoop_MulticastSolicitationDuringBurstIsDeferred checks a reply
+// to an unspecified source is delayed rather than dropped when the initial
+// multicast advertisement was just sent.
+func TestRunActorLoop_MulticastSolicitationDuringBurstIsDeferred(t *testing.T) {
+	const minDelay = 100 * time.Millisecond
+	shrinkRadvTimers(t, minDelay)
+
+	w := &recordingWriter{}
+	rsCh := make(chan netip.Addr, 1)
+	rsCh <- netip.IPv6Unspecified()
+	runLoopFor(t, w, rsCh, minDelay+minDelay/2)
+
+	sends := w.snapshot()
+	if len(sends) != 2 {
+		t.Fatalf("sent %d advertisements, want initial multicast and deferred reply", len(sends))
+	}
+	if gap := sends[1].at.Sub(sends[0].at); gap < minDelay {
+		t.Fatalf("multicast reply sent after %v, want at least %v", gap, minDelay)
 	}
 }
 
@@ -163,24 +195,26 @@ func TestHasLinkLocal(t *testing.T) {
 	}
 }
 
-func TestRateLimited(t *testing.T) {
+func TestMulticastDelay(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	tests := []struct {
 		name     string
 		lastSent time.Time
 		now      time.Time
-		want     bool
+		dst      netip.Addr
+		want     time.Duration
 	}{
-		{"NeverSent", time.Time{}, base, false},
-		{"JustSent", base, base.Add(1 * time.Second), true},
-		{"ExactlyAtBoundary", base, base.Add(MinDelayBetweenRAs), false},
-		{"WellPastBoundary", base, base.Add(MinDelayBetweenRAs + time.Second), false},
+		{"NeverSent", time.Time{}, base, allNodesMulticast, 0},
+		{"Unicast", base, base.Add(time.Second), netip.MustParseAddr("fe80::2"), 0},
+		{"MulticastJustSent", base, base.Add(time.Second), allNodesMulticast, MinDelayBetweenRAs - time.Second},
+		{"ExactlyAtBoundary", base, base.Add(MinDelayBetweenRAs), allNodesMulticast, 0},
+		{"WellPastBoundary", base, base.Add(MinDelayBetweenRAs + time.Second), allNodesMulticast, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := rateLimited(tt.lastSent, tt.now); got != tt.want {
-				t.Errorf("rateLimited(%v, %v) = %v, want %v", tt.lastSent, tt.now, got, tt.want)
+			if got := multicastDelay(tt.lastSent, tt.now, tt.dst); got != tt.want {
+				t.Errorf("multicastDelay(%v, %v, %v) = %v, want %v", tt.lastSent, tt.now, tt.dst, got, tt.want)
 			}
 		})
 	}
