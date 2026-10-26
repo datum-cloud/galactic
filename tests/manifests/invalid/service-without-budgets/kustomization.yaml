@@ -1,0 +1,4 @@
+resources:
+  - ../../../../config/fabric-api/base
+components:
+  - ../../../../config/fabric-api/components/service

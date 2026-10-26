@@ -25,6 +25,10 @@ const (
 	RecoveryHold = 125 * time.Second
 	// LeaseReadTimeout bounds each uncached election Lease read.
 	LeaseReadTimeout = time.Second
+	// MaxClockError bounds the kernel's estimate of its clock's maximum
+	// error: two clocks within it of true time are within the contract's 1 s
+	// of each other.
+	MaxClockError = 500 * time.Millisecond
 )
 
 // Epoch identifies one term of the election: the Lease object's UID and
@@ -67,7 +71,8 @@ func ReadEpoch(ctx context.Context, r client.Reader, namespace, name string, now
 // remaining delay; the first valid read after the hold empties the buckets
 // and admits from that instant. A failed read, another holder or an expired
 // term refuses with OwnershipLost and cancels the context of the epoch's
-// work.
+// work. An unhealthy Clock is treated like a failed read, refused with
+// LimiterUnavailable.
 type Authority struct {
 	// Reader must read uncached.
 	Reader    client.Reader
@@ -77,6 +82,9 @@ type Authority struct {
 	Identity string
 	// Buckets are emptied when a hold ends.
 	Buckets *Buckets
+	// Clock, when set, reports an error while this host's clock cannot be
+	// trusted within MaxClockError; KernelClock is the production check.
+	Clock func() error
 	// Hold overrides RecoveryHold; tests only.
 	Hold time.Duration
 	// Now returns the current time; nil selects time.Now.
@@ -114,6 +122,10 @@ func (a *Authority) Check(ctx context.Context) (Epoch, context.Context, error) {
 	if err == nil && epoch.Holder != a.Identity {
 		err = errcode.Status(errcode.OwnershipLost, "this gateway does not hold the election lease")
 	}
+	if err == nil && a.Clock != nil && a.Clock() != nil {
+		err = errcode.Retry(errcode.LimiterUnavailable, "this gateway's clock is not synchronised", string(ScopeCell),
+			time.Second)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
@@ -134,6 +146,29 @@ func (a *Authority) Check(ctx context.Context) (Epoch, context.Context, error) {
 		a.active = true
 	}
 	return a.epoch, a.epochCtx, nil
+}
+
+// Authority states, as State reports them.
+const (
+	StateReady       = "ready"
+	StateRecovering  = "recovering"
+	StateUnavailable = "unavailable"
+)
+
+// State reports StateReady while the authority admits work,
+// StateRecovering during a recovery hold, and StateUnavailable while this
+// process does not hold the election or could not confirm it at its last
+// check.
+func (a *Authority) State() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case a.active:
+		return StateReady
+	case a.epochCtx != nil:
+		return StateRecovering
+	}
+	return StateUnavailable
 }
 
 // WatchInterval is how often Watch confirms ownership.

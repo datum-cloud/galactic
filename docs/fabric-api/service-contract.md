@@ -28,8 +28,8 @@ schemas and result meanings. FabricQuery retains its existing persistence and
 resume semantics; customer requests have no such persistence or replay.
 
 Today, `api/fabric/v1/fabric.proto` exposes only unary methods. The gateway
-authenticates service identities and validates their requests (#1043). With
-`gateway.Service.Enabled` set, the leader streams a request as specified under
+authenticates service identities and validates their requests (#1043). While
+its `gateway.Service.Switch` is on, the leader streams a request as specified under
 "Stream grammar and coverage": `Discoverer.Inventory` takes the unique-router
 snapshot, `Runner.Stream` hands off each router's outcome as it finishes, and
 the terminal coverage follows (#1044). With the gateway's `--aggregate-budgets`,
@@ -39,16 +39,24 @@ nodes run with `--probe-permits` verify each probe's permit (#1045). Execution
 requires the gateway's admission, and capabilities advertise
 `aggregate-probe-budgets` only while execution is enabled with it. Nodes
 charge direct operator probes only with `--require-probe-permits`, so enabling
-execution requires every node to run with it. No deployment sets `Enabled` or
-these flags, so a valid `RunDiagnostic` is answered with `ServiceDisabled`.
+execution requires every node to run with it. Opt-in Kustomize Components set
+these flags, and the gateway's `--service-config-map` names the ConfigMap
+whose `service` key switches execution on and off at run time (#1047); it
+ships off, so a valid `RunDiagnostic` is answered with `ServiceDisabled` until
+an operator switches it on.
 The delivery and transport bounds under "Cancellation, delivery, and failure
 assumptions" are enforced (#1046): one writer per stream, the 2 s write and
 hand-off bound on the leader and on a forwarding follower, the per-outcome and
 per-stream output caps, the per-replica call and service connection caps,
 fixed 64 KiB windows and buffers, and keepalive on the gateway listener
 (`internal/fabric/gateway/stream.go`). A shutdown signal stops the listener at
-once. Service disable is a startup setting until #1047 adds its controls, and
-the metrics and packaged configuration are #1047's. Operator and FabricQuery
+once. Switching the service off cancels its running requests within the 2 s
+bound without a restart. The limits are gateway flags that may only lower
+the defaults below; the gateway refuses to start on any other value, and
+the leader and nodes fail closed while the kernel clock is unsynchronised
+within 500 ms. [configuration.md](configuration.md#operating-the-looking-glass-service)
+documents the switch, the limit flags, the metrics, the alerts and the
+upgrade and rollback order. Operator and FabricQuery
 discovery still return pod candidates, including duplicates.
 
 ## Service and identity
@@ -651,8 +659,9 @@ an operator explicitly returns to legacy policy. Removing permit enforcement
 must not leave a service advertising aggregate guarantees.
 
 No service endpoint is exposed publicly by this contract. Configure it alongside
-the internal gateway listener with distinct method authorization. #1047 defines
-validated configuration keys and operational commands from these semantics.
+the internal gateway listener with distinct method authorization. Its
+validated configuration keys and operational commands are in
+[configuration.md](configuration.md#operating-the-looking-glass-service).
 Metrics use bounded labels (operation, reason, traffic class, limiter scope),
 never project IDs, request IDs, destinations, node UIDs, or result contents.
 Routine logs may contain sanitized attempt metadata but not diagnostic output,

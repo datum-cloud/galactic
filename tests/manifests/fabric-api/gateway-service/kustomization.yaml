@@ -1,0 +1,7 @@
+# The gateway enforcing aggregate budgets and serving the Looking Glass
+# service behind its switch.
+resources:
+  - ../../../../config/fabric-api/base
+components:
+  - ../../../../config/fabric-api/components/aggregate-budgets
+  - ../../../../config/fabric-api/components/service

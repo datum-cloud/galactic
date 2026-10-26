@@ -14,8 +14,12 @@ import (
 	"go.datum.net/galactic/internal/fabric/index"
 )
 
-// labelType is the query type label every per-request collector carries.
-const labelType = "type"
+// labelType is the query type label every per-request collector carries,
+// and labelOutcome the label carrying an operation's outcome.
+const (
+	labelType    = "type"
+	labelOutcome = "outcome"
+)
 
 // Metrics is the node sidecar's Prometheus instrumentation in a private
 // registry. Request IDs and targets are never labels.
@@ -37,6 +41,7 @@ type Metrics struct {
 	credentialsOK   prometheus.Gauge
 	identityRefresh *prometheus.CounterVec
 	bmpMessages     prometheus.Counter
+	permits         *prometheus.CounterVec
 }
 
 // NewMetrics builds Metrics with every collector registered.
@@ -46,7 +51,7 @@ func NewMetrics() *Metrics {
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "fabric_api_node_requests_total",
 			Help: "Execute calls by query type and outcome (OK or the error code).",
-		}, []string{labelType, "outcome"}),
+		}, []string{labelType, labelOutcome}),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "fabric_api_node_request_duration_seconds",
 			Help:    "Execute call duration by query type, including queueing.",
@@ -104,12 +109,29 @@ func NewMetrics() *Metrics {
 		identityRefresh: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "fabric_api_node_identity_refreshes_total",
 			Help: "Reads of FRR version, router ID and ASN, by outcome.",
-		}, []string{"outcome"}),
+		}, []string{labelOutcome}),
+		permits: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "fabric_api_node_permits_total",
+			Help: "Probe permits the node verified, by outcome: accepted, or why it refused one (malformed, " +
+				"mismatch, expired, starting, clock, lease, epoch, replayed, full).",
+		}, []string{labelOutcome}),
 	}
 	m.Registry.MustRegister(m.requests, m.duration, m.responseBytes, m.truncated, m.inFlight, m.dedupHits,
 		m.dedupEntries, m.available, m.frrInfo, m.breakerOpen, m.probePackets, m.certExpiry, m.credentialsOK,
-		m.identityRefresh, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+		m.identityRefresh, m.permits, collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
+}
+
+// RegisterClock exports clock's health as fabric_api_node_clock_synchronized,
+// read on every scrape. A node registers it only when it verifies probe
+// permits, the one place it trusts its clock.
+func (m *Metrics) RegisterClock(clock func() error) {
+	m.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "fabric_api_node_clock_synchronized",
+		Help: "1 while the kernel reports its clock synchronised within the permit bound; probe permits are " +
+			"refused otherwise.",
+	}, func() float64 { return boolGauge(clock() == nil) }))
 }
 
 // Handler serves the registry.

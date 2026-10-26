@@ -174,12 +174,19 @@ func newService(t *testing.T, objs []client.Object, nodes *routerNodes, slots in
 	certs, _ := labels.Parse(DefaultCertsSelector)
 	adm := newTestAdmission(t, roomyLimits())
 	return &Service{
-		Cell: testSite, Allowlist: testAllowlist, Elected: elected, Enabled: true, Revision: "abc123",
+		Cell: testSite, Allowlist: testAllowlist, Elected: elected, Switch: switchedOn(), Revision: "abc123",
 		Discoverer: &Discoverer{Reader: reader, Namespace: DefaultNamespace, Selector: sel, CertsSelector: certs},
 		Runner: &Runner{Clients: nodes, Executor: NewExecutor(slots, 0, 0), QueueWait: 200 * time.Millisecond,
 			Admission: adm},
 		Admission: adm,
 	}
+}
+
+// switchedOn returns a service switch that is on.
+func switchedOn() *ServiceSwitch {
+	w := &ServiceSwitch{}
+	w.Set(true)
+	return w
 }
 
 // chanStream is a RunDiagnostic server stream that hands each event to a
@@ -726,7 +733,7 @@ func TestServiceCapabilities(t *testing.T) {
 		t.Errorf("features = %v", f)
 	}
 	again, _ := svc.GetCapabilities(ctx, req)
-	svc.Enabled = false
+	svc.Switch.Set(false)
 	off, _ := svc.GetCapabilities(ctx, req)
 	// With execution off nothing is advertised as enforced.
 	if slices.Contains(off.GetFeatures(), FeatureAggregateProbeBudgets) || off.GetLimits().GetAdmission() != nil {
@@ -738,7 +745,7 @@ func TestServiceCapabilities(t *testing.T) {
 
 	// A request requiring an unserved feature, or a budget above its
 	// maximum, is refused before any work.
-	svc.Enabled = true
+	svc.Switch.Set(true)
 	for name, edit := range map[string]func(*runReq){
 		"unknown feature": func(r *runReq) { r.RequiredFeatures = []string{"router-outcomes-v2"} },
 		"large budget":    func(r *runReq) { r.Budgets = &fabricv1.Budgets{MaxPathsPerPrefix: 9} },

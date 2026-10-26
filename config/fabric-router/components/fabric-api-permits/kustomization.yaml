@@ -1,0 +1,37 @@
+# Makes each node's fabric-api sidecar verify the cell gateway's probe
+# permits (--probe-permits). List it after components/fabric-api, which it
+# requires; the build fails without it:
+#
+#   resources:
+#     - ../../config/fabric-router
+#   components:
+#     - ../../config/fabric-router/components/fabric-api
+#     - ../../config/fabric-router/components/fabric-api-permits
+#
+# The sidecar then reads the gateway's election Lease (fabric-api-gateway in
+# galactic-system) to check each permit's epoch, so it gets the
+# fabric-router ServiceAccount's token and a Role allowing get on that one
+# Lease. It accepts a permit once, sends nothing past its packets or
+# deadline, refuses every permit for 32 seconds after it starts and while
+# its host's clock is unsynchronised, and reports probePermits in Info,
+# which the gateway requires before it sends a node a probe under
+# --aggregate-budgets. A probe without a permit still runs.
+#
+# Applying it changes the pod template, so every fabric-router pod restarts
+# and FRR with it: roll it out as a routing change (one canary node, check
+# underlay sessions and convergence, then paced expansion). See
+# docs/fabric-api/configuration.md#enabling.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - rbac.yaml
+patches:
+  - path: daemonset-patch.yaml
+  # Fails the build unless components/fabric-api, which adds this
+  # DaemonSet, came first; it changes nothing.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: fabric-api-certs
+        namespace: galactic-system

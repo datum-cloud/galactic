@@ -1,0 +1,26 @@
+# The sidecar reads the gateway's election Lease, uncached, to check each
+# probe permit's epoch, and reads nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fabric-api-node-lease
+  namespace: galactic-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["fabric-api-gateway"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fabric-api-node-lease
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fabric-api-node-lease
+subjects:
+  - kind: ServiceAccount
+    name: fabric-router
+    namespace: galactic-system

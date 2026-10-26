@@ -120,7 +120,7 @@ internal/fabric/
   identity/                    URI SAN identities, reloading mTLS credentials, certificate sync
   errcode/                     Typed error codes carried as gRPC ErrorInfo
   node/                        FabricService implementation (the sidecar's logic)
-  gateway/                     Reconciler, Runner, Executor, Pool, Discoverer, Debug, Service, Admission, Permits, Janitor
+  gateway/                     Reconciler, Runner, Executor, Pool, Discoverer, Debug, Service, ServiceSwitch, Admission, Permits, Janitor
   gateway/limit/               Aggregate token buckets, attempt keys, election authority and limits
   testpki/                     Throwaway CA for tests
 
@@ -128,11 +128,17 @@ config/fabric-api/
   serviceaccount.yaml, rbac.yaml   Gateway and janitor identities and RBAC
   kustomization.yaml               Applies only the two files above
   base/                            Gateway Deployment, Service, PDB, janitor CronJob
+  components/aggregate-budgets/    Opt-in: --aggregate-budgets on the gateway
+  components/service/              Opt-in, after aggregate-budgets: the service switch ConfigMap, its Role, identities
   crd/                             Generated FabricQuery CRD (lab and tests only)
 
 config/fabric-router/components/fabric-api/
   kustomization.yaml, daemonset-patch.yaml   The opt-in sidecar Component
   certs-daemonset.yaml             fabric-api-certs: obtains each node's certificate
+config/fabric-router/components/fabric-api-permits/          Opt-in, after fabric-api: --probe-permits, Lease Role, token
+config/fabric-router/components/fabric-api-require-permits/  Opt-in, after fabric-api-permits: --require-probe-permits
+
+tests/manifests/                 Render fixtures for the Components (task test:manifests)
 
 config/monitoring/
   podmonitor-fabric-router.yaml    api-metrics endpoint (job=fabric-api-node)
@@ -325,13 +331,23 @@ registers:
   certificate on every unary and streaming call, and the node-only permit
   service (`gateway.Permits`). The service takes each request's router
   inventory with an uncached pod list and runs through the shared `Runner` and
-  executor, but its `Enabled` field is not set, so the leader refuses valid
-  requests with `ServiceDisabled`; no flag turns execution on.
+  executor, but only while its `gateway.ServiceSwitch` (`serviceswitch.go`)
+  is on; otherwise the leader refuses valid requests with `ServiceDisabled`.
+  With `--service-config-map`, `ServiceSwitch.Watch` reads that ConfigMap's
+  `service` key uncached every second; only `enabled` turns it on, and
+  turning it off cancels running requests through the context `State` hands
+  each one. Without the flag it stays off.
 
 With `--aggregate-budgets` it also builds a `gateway.Admission` under a
-`limit.Authority` for that holder identity, gives it to the runner, the
-service and the permit service, bounds each principal's share of the executor,
-and starts `Authority.Watch`, which reads the Lease every second.
+`limit.Authority` for that holder identity, from the limit flags
+(`gatewayLimits` refuses one without `--aggregate-budgets`, one above its
+`limit.Defaults` ceiling (`Limits.Qualified`) and any breaking a cross-field
+rule (`Limits.Validate`)). It gives the admission to the runner, the service
+and the permit service, bounds each principal's share of the executor, and
+starts `Authority.Watch`, which reads the Lease every second. The authority
+also checks `limit.KernelClock` (adjtimex) and refuses, like a failed Lease
+read, while the kernel clock is not synchronised within 500 ms; `State`
+reports it for `fabric_api_gateway_limiter_state`.
 
 Metrics are registered on controller-runtime's registry and served on `:9347`
 along with its own; `/healthz` and `/readyz` are plain pings on `:8081`.
@@ -443,7 +459,7 @@ manifest sets yet (see
 | `internal/fabric/gateway/limit`             | `Limits` and `Validate`; `Buckets` (request and packet token buckets, never negative, key families bounded without evicting debt); `Attempts` (duplicate attempt keys, fail closed); `Authority` (uncached Lease check, epoch, 125 s recovery hold, `Watch`)   | Buckets, attempt keys, epoch (memory)             |
 | `internal/fabric/gateway` (`discovery.go`)  | Pod snapshot with omission reasons, one pod per node, node budget, node-to-certs-pod mapping (`NoCertificatePod`); `Inventory`, the service's one-router-per-node snapshot (newest usable pod, `NotRequested`, `NoSidecar`, unscheduled count, 256-router cap) | No                                                |
 | `internal/fabric/gateway` (`debug.go`)      | Operator debug service, leader forwarding through the election lease                                                                                                                                                                                           | Connection to the leader                          |
-| `internal/fabric/gateway` (`service.go`)    | `NewServer`, service `Allowlist`, Looking Glass service authorization and attribution validation, one-hop typed forwarding to the leader, capabilities, and (when `Enabled`) streamed execution with terminal coverage and its output budget                   | No                                                |
+| `internal/fabric/gateway` (`service.go`)    | `NewServer`, service `Allowlist`, Looking Glass service authorization and attribution validation, one-hop typed forwarding to the leader, capabilities, and (while `Switch` is on) streamed execution with terminal coverage and its output budget             | No                                                |
 | `internal/fabric/gateway` (`stream.go`)     | Delivery and transport bounds: the single stream writer with its 2 s write bound, per-replica call and service connection caps, fixed windows and keepalive on the listener and the follower's leader connection                                               | No                                                |
 | `internal/fabric/gateway` (`janitor.go`)    | `Janitor.Sweep`, `StaleCounter`                                                                                                                                                                                                                                | No                                                |
 | `internal/fabric/gateway` (`metrics.go`)    | `fabric_api_gateway_*` and shared `fabric_api_*` collectors                                                                                                                                                                                                    | Prometheus collectors                             |
@@ -814,6 +830,7 @@ with the Component but its restart does not touch FRR.
 | Fan-out, deadlines, retries                        | `internal/fabric/gateway/runner.go:Runner.Run`, `one`                                                                 |
 | Cell concurrency and fairness                      | `internal/fabric/gateway/executor.go:Executor.Acquire`, `Reserve`                                                     |
 | Aggregate admission and probe budgets              | `internal/fabric/gateway/service.go:Service.execute`, `admission.go:Admission.permit`, `limit/`                       |
+| Looking Glass switch and limit flags               | `internal/fabric/gateway/serviceswitch.go`, `cmd/fabric-api/gateway.go:gatewayLimits`                                 |
 | Probe permits on the node                          | `internal/fabric/node/permit.go:Permits.consume`, `server.go:probeGrant`                                              |
 | Node snapshot and omission reasons                 | `internal/fabric/gateway/discovery.go:Discoverer.Snapshot`, `omitReason`                                              |
 | Operator debug service and leader forwarding       | `internal/fabric/gateway/debug.go:Debug.Query`, `forward`, `leaderAddress`                                            |
@@ -822,6 +839,7 @@ with the Component but its restart does not touch FRR.
 | Wire contract                                      | `api/fabric/v1/fabric.proto` (regenerate with `task generate:proto`)                                                  |
 | Sidecar pod spec, UID, capabilities, volumes       | `config/fabric-router/components/fabric-api/daemonset-patch.yaml`                                                     |
 | Gateway Deployment, janitor CronJob, RBAC          | `config/fabric-api/base/`, `config/fabric-api/rbac.yaml`                                                              |
+| Opt-in budget, permit and service Components       | `config/fabric-api/components/`, `config/fabric-router/components/fabric-api-*permits/`, `tests/manifests/`           |
 | Metrics and alerts                                 | `internal/fabric/node/metrics.go`, `gateway/metrics.go`, `config/monitoring/prometheusrule.yaml` (`fabric-api` group) |
 
 **Stable vs. frequently changed:**

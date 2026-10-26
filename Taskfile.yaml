@@ -9,9 +9,11 @@ vars:
       [ -n "$gobin" ] && echo "$gobin" || echo "$(go env GOPATH)/bin"
   GOLANGCI_LINT: '{{.LOCALBIN}}/golangci-lint'
   YAMLFMT: '{{.LOCALBIN}}/yamlfmt'
+  KUSTOMIZE: '{{.LOCALBIN}}/kustomize'
   GO_LICENSES: '{{.LOCALBIN}}/go-licenses'
   GOLANGCI_LINT_VERSION: v2.12.2
   YAMLFMT_VERSION: v0.21.0
+  KUSTOMIZE_VERSION: v5.8.1
   GO_LICENSES_VERSION: v1.6.0
   PROMETHEUS_VERSION: v3.15.0
 
@@ -229,6 +231,28 @@ tasks:
       - CGO_ENABLED=0 GOBIN={{.GOBGP_BIN}} go install github.com/osrg/gobgp/v4/cmd/gobgpd@v4.10.0 github.com/osrg/gobgp/v4/cmd/gobgp@v4.10.0
       - go run ./hack/fabric-api-loadtest --mrt {{.MRT}} --gobgp-bin {{.GOBGP_BIN}} {{.CLI_ARGS}}
 
+  test:manifests:
+    desc: Render the opt-in Component fixtures in tests/manifests
+    # Every fixture under tests/manifests/fabric-api composes Components the
+    # way a cell overlay does and must build; every fixture under
+    # tests/manifests/invalid omits a Component another requires and must
+    # fail to build.
+    deps: [kustomize]
+    cmds:
+      - |
+        status=0
+        for dir in tests/manifests/fabric-api/*/; do
+          if ! {{.KUSTOMIZE}} build "$dir" > /dev/null; then
+            echo "FAIL: $dir does not build"; status=1
+          fi
+        done
+        for dir in tests/manifests/invalid/*/; do
+          if {{.KUSTOMIZE}} build "$dir" > /dev/null 2>&1; then
+            echo "FAIL: $dir builds, but omits a required Component"; status=1
+          fi
+        done
+        exit $status
+
   test:alerts:
     desc: Unit-test the alert rules in config/monitoring/ with promtool
     # promtool reads plain rule files, so the PrometheusRule's spec is
@@ -284,6 +308,16 @@ tasks:
           TARGET: '{{.GOLANGCI_LINT}}'
           PACKAGE: github.com/golangci/golangci-lint/v2/cmd/golangci-lint
           VERSION: '{{.GOLANGCI_LINT_VERSION}}'
+
+  kustomize:
+    desc: Download kustomize if needed
+    run: once
+    cmds:
+      - task: install-tool
+        vars:
+          TARGET: '{{.KUSTOMIZE}}'
+          PACKAGE: sigs.k8s.io/kustomize/kustomize/v5
+          VERSION: '{{.KUSTOMIZE_VERSION}}'
 
   yamlfmt:
     desc: Download yamlfmt if needed

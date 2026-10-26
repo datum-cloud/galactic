@@ -1,0 +1,37 @@
+# Wires the Looking Glass service into the fabric-api gateway: the service
+# identities it accepts and the fabric-api-service ConfigMap whose key
+# "service" turns execution on ("enabled") or off ("disabled") while the
+# gateway runs, without a restart. List it after
+# components/aggregate-budgets, which it requires; the build fails without
+# it:
+#
+#   resources:
+#     - ../../config/fabric-api/base
+#   components:
+#     - ../../config/fabric-api/components/aggregate-budgets
+#     - ../../config/fabric-api/components/service
+#
+# The ConfigMap ships with execution off. Flux creates it once and never
+# overwrites it (kustomize.toolkit.fluxcd.io/ssa: IfNotPresent), so the
+# value in the cluster is the switch an operator turns with kubectl, and a
+# reconcile never turns the service back on after an emergency stop.
+# Turning it off cancels running Looking Glass requests within 2 seconds and
+# refuses new ones with ServiceDisabled; operator and FabricQuery work and
+# the limiter's state are untouched. See
+# docs/fabric-api/configuration.md#operating-the-looking-glass-service.
+#
+# Prerequisites: every node requires probe permits
+# (config/fabric-router/components/fabric-api-require-permits), so direct
+# operator probes are charged too, and the cell's fabric-api Issuer issues
+# the service certificate. Replace looking-glass in --service-identities
+# when the service's certificate names another service.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - configmap.yaml
+  - rbac.yaml
+patches:
+  - path: deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: fabric-api-gateway
