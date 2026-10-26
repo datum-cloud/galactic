@@ -589,7 +589,7 @@ func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 			}
 			rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
-			dr, unresolved, _, _, err := buildDesiredRule(rule, tt.attachments, idx, nil, false, nil, healthGate{})
+			dr, unresolved, _, _, err := buildDesiredRule(rule, tt.attachments, idx, nil, false, nil, healthGate{}, "")
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("buildDesiredRule: err = nil, want an error; got %+v", dr)
@@ -625,12 +625,12 @@ func TestBuildDesiredRule_RefusesSecondIPv6VIP(t *testing.T) {
 	}
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
 	rule := newTestRule(testRuleName, "vpc-1", "2001:db8:100::32", "2001:db8:100::33", testVIP4)
-	if _, _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil, healthGate{}); err == nil {
+	if _, _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil, healthGate{}, ""); err == nil {
 		t.Fatal("buildDesiredRule: err = nil, want an error for two IPv6 VIPs")
 	}
 
 	rule.Spec.VIPAddresses = []string{"2001:db8:100::32", testVIP4}
-	if _, _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil, healthGate{}); err != nil {
+	if _, _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil, healthGate{}, ""); err != nil {
 		t.Fatalf("buildDesiredRule with one IPv6 and one IPv4 VIP: %v", err)
 	}
 }
@@ -662,7 +662,7 @@ func TestGatherRules_SharedBackendServesOldestRule(t *testing.T) {
 	}
 	r := &NetworkGatewayReconciler{NodeName: testNodeGWA}
 
-	desired, outcomes, _, err := r.gatherRules(context.Background(), testNamespace, rules, attachments, idx)
+	desired, outcomes, _, err := r.gatherRules(context.Background(), testNamespace, rules, rules, attachments, idx)
 	if err != nil {
 		t.Fatalf("gatherRules: %v", err)
 	}
@@ -701,7 +701,7 @@ func TestBuildDesiredRule_SameNodeBackendsGetTheirOwnSlot(t *testing.T) {
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")}
 
 	dr, _, _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), attachments, idx, nil, false, nil,
-		healthGate{})
+		healthGate{}, "")
 	if err != nil {
 		t.Fatalf("buildDesiredRule: %v", err)
 	}
@@ -1848,10 +1848,14 @@ func TestApplyBGPAdvertisements_DashedNamesStaySeparate(t *testing.T) {
 	}
 	nodeC := newGatewayReconciler(fakeClient, scheme, nil, "c")
 	nodeBC := newGatewayReconciler(fakeClient, scheme, nil, "b-c")
-	if err := nodeC.applyBGPAdvertisements(ctx, ruleAB, desired("2001:db8:a::1"), testRouterName, false); err != nil {
+	if err := nodeC.applyBGPAdvertisements(
+		ctx, testNamespace, ruleAB, desired("2001:db8:a::1"), testRouterName, false,
+	); err != nil {
 		t.Fatalf("apply rule a-b on node c: %v", err)
 	}
-	if err := nodeBC.applyBGPAdvertisements(ctx, ruleA, desired("2001:db8:a::2"), testRouterName, false); err != nil {
+	if err := nodeBC.applyBGPAdvertisements(
+		ctx, testNamespace, ruleA, desired("2001:db8:a::2"), testRouterName, false,
+	); err != nil {
 		t.Fatalf("apply rule a on node b-c: %v", err)
 	}
 
@@ -1869,7 +1873,7 @@ func TestApplyBGPAdvertisements_DashedNamesStaySeparate(t *testing.T) {
 		t.Errorf("rule a-b's advertisement Prefixes = %v, want [2001:db8:a::1/128]", abOnC.Spec.Prefixes)
 	}
 
-	if err := withdrawRuleAdvertisements(ctx, fakeClient, ruleA, "b-c"); err != nil {
+	if err := withdrawRuleAdvertisements(ctx, fakeClient, ruleA, testNamespace, "b-c"); err != nil {
 		t.Fatalf("withdraw rule a from node b-c: %v", err)
 	}
 	err := fakeClient.Get(ctx, testRuleKey(ruleAdvertisementName("a", "b-c", "v6")), &bgpv1alpha1.BGPAdvertisement{})
@@ -1911,7 +1915,7 @@ func TestApplyBGPAdvertisements_PrunesOlderAdvertisements(t *testing.T) {
 
 	r := newGatewayReconciler(fakeClient, scheme, nil, testNodeGWA)
 	desired := gateway.DesiredRule{VIPAddresses: []netip.Addr{netip.MustParseAddr(testVIP)}}
-	if err := r.applyBGPAdvertisements(ctx, rule, desired, testRouterName, false); err != nil {
+	if err := r.applyBGPAdvertisements(ctx, testNamespace, rule, desired, testRouterName, false); err != nil {
 		t.Fatalf("applyBGPAdvertisements: %v", err)
 	}
 
@@ -2006,7 +2010,7 @@ func TestBuildDesiredRule_CarriesSessionAffinity(t *testing.T) {
 	} {
 		rule := newTestRule(testRuleName, "vpc-1", testVIP)
 		rule.Spec.SessionAffinity = affinity
-		dr, _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil, healthGate{})
+		dr, _, _, _, err := buildDesiredRule(rule, attachments, idx, nil, false, nil, healthGate{}, "")
 		if err != nil {
 			t.Fatalf("affinity %q: %v", affinity, err)
 		}

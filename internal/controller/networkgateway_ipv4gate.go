@@ -46,8 +46,10 @@ func listServiceBindings(ctx context.Context, c client.Client, namespace string)
 // b's IPv6 address: same name, rule label and spec, so a binding left from an
 // earlier spec, or not yet updated to the current one, does not open the gate.
 // A binding being deleted does not count either.
-func (idx serviceBindings) unbound(rule *bgpv1alpha1.NetworkService, vip netip.Addr, b ruleBackend) string {
-	want := generatedBinding(rule, b.node, vip, b)
+func (idx serviceBindings) unbound(
+	rule *bgpv1alpha1.NetworkService, objNS string, vip netip.Addr, b ruleBackend,
+) string {
+	want := generatedBinding(rule, objNS, b.node, vip, b)
 	got, ok := idx[want.Name]
 	switch {
 	case !ok:
@@ -56,7 +58,7 @@ func (idx serviceBindings) unbound(rule *bgpv1alpha1.NetworkService, vip netip.A
 		// Its finalizer is removing its rows, so the backend is about to
 		// stop answering on the VIP whatever its Bound condition says.
 		return "ServiceVIPBinding being deleted"
-	case got.Labels[networkRuleLabel] != rule.Name || got.Spec != want.Spec:
+	case !generatedFor(got, rule) || got.Spec != want.Spec:
 		return "ServiceVIPBinding not updated to the rule yet"
 	}
 	if reason := bindingUnboundReason(got); reason != "" {

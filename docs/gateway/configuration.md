@@ -535,7 +535,7 @@ gateway node, named after that node (see the worked example above).
 | `spec.backendPort`     | tcp, udp | `int32` (1–65535)      | Destination port on every selected backend. Required for a protocol with ports, refused for one without.                                                                                                                                                                                                                                                                                                                                                                                      |
 | `spec.sessionAffinity` | No       | `string` enum          | `None` (default), `ClientIP` or `ClientIPAndProtocol`: which connections from one client share a backend. See [Session affinity](#session-affinity).                                                                                                                                                                                                                                                                                                                                          |
 | `spec.healthCheck`     | No       | object                 | Turns on TCP health checks of the backends: `port` (default `backendPort`, required for `udp`), `intervalSeconds` (5), `timeoutSeconds` (2), `unhealthyThreshold` (3), `healthyThreshold` (3). See [Backend health checks](backend-health.md).                                                                                                                                                                                                                                                |
-| `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes exist in the namespace; not an ownership check, see below); the rule-wide `Programmed`, `Advertised`, `BackendsReady`, `Ready` and, with an IPv4 VIP, `IPv4Served` (see [Reading a rule's status](#reading-a-rules-status)); `<gateway-node>/Programmed` and `<gateway-node>/Advertised` per gateway node, `<gateway-node>/IPv4Served` per gateway node for a rule with an IPv4 VIP, and `<backend-node>/BackendsBound` per node hosting a backend. |
+| `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes serve the rule; for a rule in a project namespace, also an ownership check, see [Services in a project namespace](#services-in-a-project-namespace)); the rule-wide `Programmed`, `Advertised`, `BackendsReady`, `Ready` and, with an IPv4 VIP, `IPv4Served` (see [Reading a rule's status](#reading-a-rules-status)); `<gateway-node>/Programmed` and `<gateway-node>/Advertised` per gateway node, `<gateway-node>/IPv4Served` per gateway node for a rule with an IPv4 VIP, and `<backend-node>/BackendsBound` per node hosting a backend. |
 
 Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkservices.yaml`:
 
@@ -842,12 +842,36 @@ stops serving it. The rule's finalizer deletes its `BGPAdvertisement`s,
 and each node keeps the rule loaded until they are gone plus a 5-second
 drain delay, so traffic already on its way to the VIP is not dropped.
 
-> **Note:** `NetworkService` is not a tenant API. The platform API that serves
-> tenants writes it, after checking that the tenant owns the VPC `vpcRef`
-> names. Galactic does not repeat that check: `Accepted` means only that
-> gateway nodes exist in the namespace. Anyone RBAC allows to write a
-> `NetworkService` in `galactic-system` can provision ingress for any `vpcRef`,
-> so grant that access only to platform controllers.
+#### Services in a project namespace
+
+A `NetworkService` can live in the gateway namespace (`galactic-system`) or in
+a project namespace, one holding no `NetworkGateway`. Every gateway serves
+both. A cluster runs one gateway namespace, the one `galactic-router`'s BGP
+objects live in (`GALACTIC_ROUTER_GC_NAMESPACE`), and the
+`BGPAdvertisement`s and `ServiceVIPBinding`s made for every service live
+there, whatever namespace the service is in.
+
+A service in the gateway namespace is trusted: the platform API that serves
+tenants writes it after checking that the tenant owns the VPC `vpcRef` names,
+and `Accepted` means only that gateway nodes exist. Anyone RBAC allows to
+write a `NetworkService` in `galactic-system` can provision ingress for any
+`vpcRef`, so grant that access only to platform controllers.
+
+A service in a project namespace is trusted for nothing, and the gateways
+check it themselves:
+
+| Check                                                                                                                                       | Outcome when it fails                               |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| A `VPC` in the service's namespace has `status.vpc` equal to `vpcRef`                                                                       | `Accepted=False`, reason `OwnershipDenied`          |
+| No other service serves one of its VIP addresses on its protocol and port (a service in the gateway namespace always wins, then the oldest) | `Accepted=False`, reason `VIPClaimed`               |
+| Its backends are `VPCAttachment`s in its own namespace                                                                                      | Attachments elsewhere are never selected or claimed |
+
+Once accepted it reports `Accepted=True` with reason `OwnershipVerified`. A
+service that loses `Accepted` is unloaded and its routes withdrawn. Its
+generated objects carry the `galactic.datum.net/network-rule-namespace` label
+naming its namespace, and no owner reference, since one cannot cross
+namespaces: the service's finalizer and each gateway's sweep remove its
+advertisements, and each backend node removes its bindings.
 
 ### `ServiceVIPBinding` — the backend-side half, generated by `galactic-router`
 

@@ -197,7 +197,7 @@ func TestBuildDesiredRule_LeavesOutIPv4VIPs(t *testing.T) {
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
 
 	dr, _, _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, testVIP), attachments, idx, nil,
-		false, nil, healthGate{})
+		false, nil, healthGate{}, "")
 	if err != nil {
 		t.Fatalf("dual-stack rule: %v", err)
 	}
@@ -206,13 +206,13 @@ func TestBuildDesiredRule_LeavesOutIPv4VIPs(t *testing.T) {
 	}
 
 	_, _, _, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, "198.51.100.7"), attachments, idx,
-		nil, false, nil, healthGate{})
+		nil, false, nil, healthGate{}, "")
 	if !errors.Is(err, errNoServedVIP) {
 		t.Errorf("IPv4-only rule: err = %v, want errNoServedVIP", err)
 	}
 
 	_, _, _, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, "not-an-ip"), attachments, idx,
-		nil, false, nil, healthGate{})
+		nil, false, nil, healthGate{}, "")
 	if err == nil || errors.Is(err, errNoServedVIP) {
 		t.Errorf("rule with an unparseable VIP: err = %v, want a parse error", err)
 	}
@@ -221,7 +221,7 @@ func TestBuildDesiredRule_LeavesOutIPv4VIPs(t *testing.T) {
 	if !hasIPv4VIP(mapped) {
 		t.Error("hasIPv4VIP missed an IPv4-mapped IPv6 VIP")
 	}
-	dr, _, _, _, err = buildDesiredRule(mapped, attachments, idx, nil, false, nil, healthGate{})
+	dr, _, _, _, err = buildDesiredRule(mapped, attachments, idx, nil, false, nil, healthGate{}, "")
 	if err != nil {
 		t.Fatalf("rule with an IPv4-mapped VIP: %v", err)
 	}
@@ -265,7 +265,8 @@ func TestDrainingOutcome_WithholdsIPv4VIPs(t *testing.T) {
 			fakeClient := newIndexedClientBuilder(scheme).WithObjects(rule, stillAdvertised).Build()
 			r := newGatewayReconciler(fakeClient, scheme, newFakeGatewayEngine(), testNodeGWA)
 
-			o, draining, err := r.drainingOutcome(context.Background(), rule, attachments, idx, nil, nil, healthGate{})
+			o, draining, err := r.drainingOutcome(context.Background(), testNamespace, rule, attachments, idx, nil, nil,
+				healthGate{})
 			if err != nil {
 				t.Fatalf("drainingOutcome: %v", err)
 			}
@@ -289,7 +290,7 @@ func TestBuildDesiredRule_ServesIPv4WhenEnabled(t *testing.T) {
 	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, testBackendAddr4)}
 
 	dr, unresolved, _, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP, "::ffff:"+testVIP4),
-		attachments, idx, nil, true, nil, healthGate{})
+		attachments, idx, nil, true, nil, healthGate{}, "")
 	if err != nil {
 		t.Fatalf("dual-stack rule: %v", err)
 	}
@@ -329,7 +330,7 @@ func TestBuildDesiredRule_ServesIPv4WhenEnabled(t *testing.T) {
 	}
 
 	dr, _, _, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4), attachments, idx, nil, true, nil,
-		healthGate{})
+		healthGate{}, "")
 	if err != nil {
 		t.Fatalf("IPv4-only rule with IPv4 VIPs served: %v", err)
 	}
@@ -352,7 +353,7 @@ func TestBuildDesiredRule_IPv4FamilyWithoutBackends(t *testing.T) {
 		backendClaimFor(rule, backend, familyIPv4): {Namespace: testNamespace, Name: "older-rule"},
 	}
 
-	dr, unresolved, ipv4, _, err := buildDesiredRule(rule, attachments, idx, owners, true, nil, healthGate{})
+	dr, unresolved, ipv4, _, err := buildDesiredRule(rule, attachments, idx, owners, true, nil, healthGate{}, "")
 	if err != nil {
 		t.Fatalf("dual-stack rule: %v", err)
 	}
@@ -370,7 +371,7 @@ func TestBuildDesiredRule_IPv4FamilyWithoutBackends(t *testing.T) {
 
 	ipv4Only := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr4)}
 	_, unresolved, ipv4, _, err = buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4), ipv4Only, idx, nil,
-		true, nil, healthGate{})
+		true, nil, healthGate{}, "")
 	if err == nil || ipv4 != ipv4NoBackend {
 		t.Errorf("IPv4-only rule over an IPv4-only attachment: err = %v, ipv4 = %d; want an error and %d",
 			err, ipv4, ipv4NoBackend)
@@ -394,7 +395,7 @@ func TestBuildDesiredRule_SecondIPv4VIP(t *testing.T) {
 		serveIPv4 bool
 		want      ipv4Family
 	}{{true, ipv4MultipleVIPs}, {false, ipv4Off}} {
-		dr, _, ipv4, _, err := buildDesiredRule(rule, attachments, idx, nil, tc.serveIPv4, nil, healthGate{})
+		dr, _, ipv4, _, err := buildDesiredRule(rule, attachments, idx, nil, tc.serveIPv4, nil, healthGate{}, "")
 		if err != nil {
 			t.Fatalf("IPv4VIPs %v: %v", tc.serveIPv4, err)
 		}
@@ -408,7 +409,7 @@ func TestBuildDesiredRule_SecondIPv4VIP(t *testing.T) {
 	}
 
 	_, _, ipv4, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP4, "198.51.100.7"), attachments,
-		idx, nil, true, nil, healthGate{})
+		idx, nil, true, nil, healthGate{}, "")
 	if err == nil || ipv4 != ipv4MultipleVIPs {
 		t.Errorf("IPv4-only rule with two IPv4 VIPs: err = %v, ipv4 = %d; want an error and %d",
 			err, ipv4, ipv4MultipleVIPs)

@@ -394,7 +394,7 @@ func updateSummaryConditions(ctx context.Context, c client.Client, reader client
 		if !current.DeletionTimestamp.IsZero() {
 			return nil
 		}
-		nodes, err := gatewayNodeNames(ctx, c, current.Namespace)
+		nodes, err := servingGatewayNodeNames(ctx, c, current.Namespace)
 		if err != nil {
 			return err
 		}

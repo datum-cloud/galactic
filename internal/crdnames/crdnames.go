@@ -241,9 +241,21 @@ const serviceVIPBindingHashLen = 16
 // distinct names. The readable prefix is cut to keep the result within an
 // object name's 253 characters and trimmed to end in an alphanumeric.
 func ServiceVIPBindingName(rule, nodeName, vip, backend string, backendPort int32) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%s/%d", rule, nodeName, vip, backend, backendPort)))
+	return serviceVIPBindingName(rule, rule, nodeName, vip, backend, backendPort)
+}
+
+// TenantServiceVIPBindingName is ServiceVIPBindingName for a NetworkService in
+// namespace whose bindings live in another namespace: the prefix is
+// "<namespace>-<rule>-<node>" and the hash covers "<namespace>/<rule>", which
+// no rule name can be, so it never matches a name ServiceVIPBindingName gives.
+func TenantServiceVIPBindingName(namespace, rule, nodeName, vip, backend string, backendPort int32) string {
+	return serviceVIPBindingName(namespace+"/"+rule, namespace+"-"+rule, nodeName, vip, backend, backendPort)
+}
+
+func serviceVIPBindingName(ruleKey, rulePrefix, nodeName, vip, backend string, backendPort int32) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%s/%d", ruleKey, nodeName, vip, backend, backendPort)))
 	suffix := "-" + hex.EncodeToString(sum[:])[:serviceVIPBindingHashLen]
-	prefix := rule + "-" + nodeName
+	prefix := rulePrefix + "-" + nodeName
 	if maxPrefix := 253 - len(suffix); len(prefix) > maxPrefix {
 		prefix = prefix[:maxPrefix]
 	}

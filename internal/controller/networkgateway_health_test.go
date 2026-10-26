@@ -55,7 +55,7 @@ func newHealthAttachment() *cloudv1alpha1.VPCAttachment {
 func healthBinding(
 	rule *bgpv1alpha1.NetworkService, addr string, h *bgpv1alpha1.ServiceVIPBindingHealth,
 ) *bgpv1alpha1.ServiceVIPBinding {
-	b := generatedBinding(rule, testComputeNodeName, netip.MustParseAddr(testVIP), ruleBackend{
+	b := generatedBinding(rule, "", testComputeNodeName, netip.MustParseAddr(testVIP), ruleBackend{
 		node:       testComputeNodeName,
 		addr:       netip.MustParseAddr(addr),
 		port:       testBackendPort,
@@ -183,7 +183,7 @@ func TestBuildDesiredRule_Health(t *testing.T) {
 			}
 
 			dr, _, _, rh, err := buildDesiredRule(rule, []*cloudv1alpha1.VPCAttachment{newHealthAttachment()}, idx,
-				nil, false, bindings, tt.gate)
+				nil, false, bindings, tt.gate, "")
 			if err != nil {
 				t.Fatalf("buildDesiredRule: %v", err)
 			}
@@ -214,9 +214,9 @@ func TestBuildDesiredRule_HealthIsDeterministic(t *testing.T) {
 	attachments := []*cloudv1alpha1.VPCAttachment{newHealthAttachment()}
 
 	a, _, _, _, errA := buildDesiredRule(rule, attachments, idx, nil, false,
-		serviceBindings{healthy.Name: healthy, sick.Name: sick}, healthGate{apply: true})
+		serviceBindings{healthy.Name: healthy, sick.Name: sick}, healthGate{apply: true}, "")
 	b, _, _, _, errB := buildDesiredRule(rule, attachments, idx, nil, false,
-		serviceBindings{sick.Name: sick, healthy.Name: healthy}, healthGate{apply: true})
+		serviceBindings{sick.Name: sick, healthy.Name: healthy}, healthGate{apply: true}, "")
 	if errA != nil || errB != nil {
 		t.Fatalf("buildDesiredRule: %v, %v", errA, errB)
 	}

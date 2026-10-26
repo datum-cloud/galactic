@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,12 +20,15 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/gateway"
 )
@@ -125,16 +129,16 @@ func (r *NetworkServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("get NetworkService %s: %w", req.NamespacedName, err)
 	}
 
-	isGateway, err := isGatewayNode(ctx, r.Client, rule.Namespace, r.NodeName)
+	gw, err := nodeServingGateway(ctx, r.Client, rule.Namespace, r.NodeName)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("determine gateway-node membership for %s: %w", r.NodeName, err)
 	}
-	if !isGateway {
+	if gw == nil {
 		return ctrl.Result{}, nil
 	}
 
 	if !rule.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, rule)
+		return r.reconcileDelete(ctx, rule, gw.Namespace)
 	}
 
 	if !controllerutil.ContainsFinalizer(rule, networkRuleFinalizer) {
@@ -145,7 +149,7 @@ func (r *NetworkServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
-	if err := r.updateAcceptedCondition(ctx, rule); err != nil {
+	if err := r.updateAcceptedCondition(ctx, rule, gw.Namespace); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update Accepted condition for NetworkService %s: %w", req.NamespacedName, err)
 	}
 	if err := updateSummaryConditions(ctx, r.Client, r.APIReader, req.NamespacedName); err != nil {
@@ -155,53 +159,93 @@ func (r *NetworkServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, nil
 }
 
-// updateAcceptedCondition sets the Accepted condition once gateway nodes exist
-// for this namespace.
+// updateAcceptedCondition sets the Accepted condition once gateway nodes
+// serve the rule (servingGateways). gwNamespace is the namespace of this
+// node's serving NetworkGateway.
 //
-// Accepted means only that: a gateway node is registered to serve the rule. It
-// is not an ownership check. NetworkService is internal, written by the platform
-// API that serves tenants, which verifies the tenant owns the VPC before it
-// writes the rule; who may write it here is decided by RBAC on its namespace.
-// NetworkGatewayReconciler programs only accepted rules, and nothing else sets
-// the condition.
+// For a rule in a gateway namespace, Accepted means only that: a gateway node
+// is registered to serve it. It is not an ownership check: the platform API
+// that writes the rule there verified the tenant owns the VPC, and RBAC on
+// the namespace decides who else may write it.
+//
+// A rule in a tenant namespace, one holding no NetworkGateway, is checked
+// here instead. It is accepted only when a VPC in its own namespace carries
+// its vpcRef (OwnershipVerified, or OwnershipDenied when none does) and no
+// other rule already serves one of its VIP addresses on its protocol and port
+// (VIPClaimed, see tenantVIPConflicts). Its backends come only from its own
+// namespace (selectRuleBackends).
+//
+// NetworkGatewayReconciler programs only accepted rules, and withdraws the
+// routes of one that loses Accepted. Nothing else sets the condition. It is
+// written only when it changes, and follows the generation, or anything
+// waiting on Accepted for the current spec (kubectl wait among them) treats it
+// as stale.
 func (r *NetworkServiceReconciler) updateAcceptedCondition(
-	ctx context.Context, rule *bgpv1alpha1.NetworkService,
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, gwNamespace string,
 ) error {
-	nodes, err := gatewayNodeNames(ctx, r.Client, rule.Namespace)
+	cond, err := r.acceptedCondition(ctx, rule, gwNamespace)
 	if err != nil {
 		return err
 	}
-
+	if current := meta.FindStatusCondition(rule.Status.Conditions, cond.Type); current != nil &&
+		current.Status == cond.Status && current.Reason == cond.Reason && current.Message == cond.Message &&
+		current.ObservedGeneration == rule.Generation {
+		return nil
+	}
 	ruleCopy := rule.DeepCopy()
+	setRuleCondition(ruleCopy, cond)
+	return r.Status().Update(ctx, ruleCopy)
+}
+
+// acceptedCondition computes rule's Accepted condition (updateAcceptedCondition).
+func (r *NetworkServiceReconciler) acceptedCondition(
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, gwNamespace string,
+) (metav1.Condition, error) {
+	cond := metav1.Condition{Type: bgpv1alpha1.ConditionTypeAccepted, Status: metav1.ConditionFalse}
+	nodes, err := servingGatewayNodeNames(ctx, r.Client, rule.Namespace)
+	if err != nil {
+		return cond, err
+	}
 	if len(nodes) == 0 {
 		// No gateway nodes registered for this PoP yet. Surfaced on the
 		// Accepted condition rather than silently skipped. The NetworkGateway
 		// watch re-queues this rule as soon as a node registers, so it is not
 		// parked here until the next periodic resync.
-		setRuleCondition(ruleCopy, metav1.Condition{
-			Type:    bgpv1alpha1.ConditionTypeAccepted,
-			Status:  metav1.ConditionFalse,
-			Reason:  "NoGatewayNodes",
-			Message: "no NetworkGateway nodes are registered in this namespace yet",
-		})
-		return r.Status().Update(ctx, ruleCopy)
+		cond.Reason = "NoGatewayNodes"
+		cond.Message = "no NetworkGateway nodes are registered in this namespace yet"
+		return cond, nil
+	}
+	if !ruleIsTenant(rule, gwNamespace) {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = reasonGatewayNodesRegistered
+		cond.Message = "gateway nodes are registered for this namespace"
+		return cond, nil
 	}
 
-	// Already accepted for this generation: nothing to write. A spec edit
-	// bumps the generation, and the condition has to follow it, or anything
-	// waiting on Accepted for the current spec (kubectl wait among them)
-	// treats it as stale.
-	if cond := meta.FindStatusCondition(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted); cond != nil &&
-		cond.Status == metav1.ConditionTrue && cond.ObservedGeneration == rule.Generation {
-		return nil
+	owns, why, err := ruleOwnsVPC(ctx, r.Client, rule)
+	if err != nil {
+		return cond, err
 	}
-	setRuleCondition(ruleCopy, metav1.Condition{
-		Type:    bgpv1alpha1.ConditionTypeAccepted,
-		Status:  metav1.ConditionTrue,
-		Reason:  reasonGatewayNodesRegistered,
-		Message: "gateway nodes are registered for this namespace",
-	})
-	return r.Status().Update(ctx, ruleCopy)
+	if !owns {
+		cond.Reason = bgpv1alpha1.AcceptedReasonOwnershipDenied
+		cond.Message = why
+		return cond, nil
+	}
+	rules := &bgpv1alpha1.NetworkServiceList{}
+	if err := r.List(ctx, rules); err != nil {
+		return cond, fmt.Errorf("list NetworkServices: %w", err)
+	}
+	if owner, lost := tenantVIPConflicts(rules.Items, gwNamespace)[client.ObjectKeyFromObject(rule)]; lost {
+		cond.Reason = reasonVIPClaimed
+		cond.Message = fmt.Sprintf("NetworkService %s already serves one of its VIP addresses on %s port %d",
+			owner, rule.Spec.Protocol, rule.Spec.Port)
+		return cond, nil
+	}
+	cond.Status = metav1.ConditionTrue
+	cond.Reason = bgpv1alpha1.AcceptedReasonOwnershipVerified
+	cond.Message = fmt.Sprintf("VPC %q is in namespace %s, and gateway nodes in %s serve it",
+		rule.Spec.VPCRef, rule.Namespace, gwNamespace)
+	return cond, nil
 }
 
 // reconcileDelete orders teardown on NetworkService deletion:
@@ -232,7 +276,7 @@ func (r *NetworkServiceReconciler) updateAcceptedCondition(
 // and the advertisement's owner reference to the rule lets Kubernetes garbage
 // collection delete it as a last resort.
 func (r *NetworkServiceReconciler) reconcileDelete(
-	ctx context.Context, rule *bgpv1alpha1.NetworkService,
+	ctx context.Context, rule *bgpv1alpha1.NetworkService, gwNamespace string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -244,10 +288,10 @@ func (r *NetworkServiceReconciler) reconcileDelete(
 	// gateway-node membership, which a name-based lookup would need. This finds
 	// every advertisement the rule ever caused, including one for a node that
 	// has since left.
-	if _, err := deleteRuleAdvertisements(ctx, r.Client, r.Client, rule); err != nil {
+	if _, err := deleteRuleAdvertisements(ctx, r.Client, r.Client, rule, gwNamespace); err != nil {
 		return ctrl.Result{}, err
 	}
-	missed, err := deleteRuleAdvertisements(ctx, r.APIReader, r.Client, rule)
+	missed, err := deleteRuleAdvertisements(ctx, r.APIReader, r.Client, rule, gwNamespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -276,17 +320,14 @@ func (r *NetworkServiceReconciler) reconcileDelete(
 	return ctrl.Result{}, nil
 }
 
-// deleteRuleAdvertisements lists rule's BGPAdvertisements through reader and
-// deletes each one through c that is not already being deleted. It returns how
+// deleteRuleAdvertisements lists rule's BGPAdvertisements in objNS through
+// reader and deletes each one through c that is not already being deleted. It returns how
 // many it deleted.
 func deleteRuleAdvertisements(
-	ctx context.Context, reader client.Reader, c client.Client, rule *bgpv1alpha1.NetworkService,
+	ctx context.Context, reader client.Reader, c client.Client, rule *bgpv1alpha1.NetworkService, objNS string,
 ) (int, error) {
 	advList := &bgpv1alpha1.BGPAdvertisementList{}
-	if err := reader.List(ctx, advList,
-		client.InNamespace(rule.Namespace),
-		client.MatchingLabels{networkRuleLabel: rule.Name},
-	); err != nil {
+	if err := reader.List(ctx, advList, ruleSelector(rule, objNS)); err != nil {
 		return 0, fmt.Errorf("list BGPAdvertisements for NetworkService %s/%s teardown: %w",
 			rule.Namespace, rule.Name, err)
 	}
@@ -313,6 +354,11 @@ func deleteRuleAdvertisements(
 // NetworkService watch: this reconciler's work depends on the namespace's
 // gateway-node pool, so a rule must be re-examined whenever that pool changes
 // rather than waiting on its own periodic resync.
+//
+// A tenant rule's Accepted condition also depends on the VPCs in its namespace
+// and on the VIPs other rules serve, so a VPC change re-queues the rules in
+// its namespace, and a rule appearing, going or changing its spec re-queues
+// every other rule sharing one of its VIP addresses.
 func (r *NetworkServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.NetworkService{}).
@@ -321,12 +367,65 @@ func (r *NetworkServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return gatewayToRuleRequests(ctx, r.Client, obj)
 			}),
 		).
+		Watches(&cloudv1alpha1.VPC{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return namespaceRules(ctx, r.Client, obj.GetNamespace())
+			}),
+		).
+		Watches(&bgpv1alpha1.NetworkService{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return sharedVIPRuleRequests(ctx, r.Client, obj)
+			}),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
 		Named("networkservice").
 		Complete(r)
 }
 
-// gatewayToRuleRequests maps a NetworkGateway change to every NetworkService in
-// its namespace, the inverse of ruleToGatewayRequests and a deliberate
+// namespaceRules returns a reconcile request for every NetworkService in
+// namespace.
+func namespaceRules(ctx context.Context, c client.Client, namespace string) []ctrlreconcile.Request {
+	list := &bgpv1alpha1.NetworkServiceList{}
+	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "list NetworkServices for VPC change", "namespace", namespace)
+		return nil
+	}
+	reqs := make([]ctrlreconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return reqs
+}
+
+// sharedVIPRuleRequests returns a reconcile request for every NetworkService
+// other than obj that lists one of obj's VIP addresses.
+func sharedVIPRuleRequests(ctx context.Context, c client.Client, obj client.Object) []ctrlreconcile.Request {
+	rule, ok := obj.(*bgpv1alpha1.NetworkService)
+	if !ok {
+		return nil
+	}
+	list := &bgpv1alpha1.NetworkServiceList{}
+	if err := c.List(ctx, list); err != nil {
+		log.FromContext(ctx).Error(err, "list NetworkServices for NetworkService change", "networkService", rule.Name)
+		return nil
+	}
+	var reqs []ctrlreconcile.Request
+	for i := range list.Items {
+		other := &list.Items[i]
+		if other.Namespace == rule.Namespace && other.Name == rule.Name {
+			continue
+		}
+		if slices.ContainsFunc(other.Spec.VIPAddresses, func(v string) bool {
+			return slices.Contains(rule.Spec.VIPAddresses, v)
+		}) {
+			reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(other)})
+		}
+	}
+	return reqs
+}
+
+// gatewayToRuleRequests maps a NetworkGateway change to every NetworkService
+// its namespace's gateways serve, the inverse of ruleToGatewayRequests and a deliberate
 // broadcast for the same reason: a NetworkService carries no gateway reference,
 // and its Accepted condition depends on the whole gateway-node pool. Without
 // it, a rule created before any gateway node registered stays unaccepted, and
@@ -339,13 +438,13 @@ func gatewayToRuleRequests(ctx context.Context, c client.Client, obj client.Obje
 	}
 	logger := log.FromContext(ctx)
 
-	ruleList := &bgpv1alpha1.NetworkServiceList{}
-	if err := c.List(ctx, ruleList, client.InNamespace(gw.Namespace)); err != nil {
+	rules, _, err := listServedNetworkServices(ctx, c, gw.Namespace)
+	if err != nil {
 		logger.Error(err, "list NetworkServices for NetworkGateway change", "networkGateway", gw.Name)
 		return nil
 	}
-	reqs := make([]ctrlreconcile.Request, 0, len(ruleList.Items))
-	for _, rule := range ruleList.Items {
+	reqs := make([]ctrlreconcile.Request, 0, len(rules))
+	for _, rule := range rules {
 		reqs = append(reqs, ctrlreconcile.Request{
 			NamespacedName: types.NamespacedName{Namespace: rule.Namespace, Name: rule.Name},
 		})
