@@ -85,6 +85,11 @@
       ]
     },
     {
+      "description": "Never automerge FRR: containers/fabric-router rebuilds zebra from the release's commit (FRR_COMMIT) with patches applied, so a bump updates FRR_COMMIT and rechecks the patches by hand",
+      "matchDepNames": ["quay.io/frrouting/frr"],
+      "automerge": false
+    },
+    {
       "description": "Never automerge major updates",
       "matchUpdateTypes": ["major"],
       "automerge": false,
