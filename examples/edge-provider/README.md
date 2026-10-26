@@ -142,5 +142,5 @@ spec, and its overlap check keeps two providers' routes for one prefix apart.
 ## Conformance
 
 `tests/edgeconformance` runs the contract's failure-test matrix against this
-provider in the containerlab lab: `task deploy:galactic-edge`, then
-`task verify:edge-conformance` from `deploy/containerlab`.
+provider, in the containerlab lab or on a Talos/Cilium cell; see
+[the conformance suite](../../docs/edge/conformance.md).

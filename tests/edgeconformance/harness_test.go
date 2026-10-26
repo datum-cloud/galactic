@@ -10,12 +10,19 @@
 // kustomizations, and pods acting under a provider's ServiceAccount through
 // pod-bound tokens for the cases a well-behaved provider never produces.
 //
-// It drives the containerlab lab's dfw cluster (deploy/containerlab,
-// task deploy:galactic-edge) and skips unless EDGE_CONFORMANCE_KUBECONFIG
-// names that cluster's kubeconfig. Node-level steps (signals, packet probes)
-// run through docker exec on the Kind node containers, which share the host's
-// kernel and so its CLOCK_BOOTTIME: every timing is measured on that clock,
-// the one leases are timed on. Run it with task verify:edge-conformance.
+// It runs against one of two cells, chosen by EDGE_CONFORMANCE_TARGET, and
+// skips unless EDGE_CONFORMANCE_KUBECONFIG names the cell's kubeconfig:
+//
+//   - kind (the default): the containerlab lab's dfw cluster
+//     (deploy/containerlab, task deploy:galactic-edge). Node-level steps run
+//     through docker exec on the Kind node containers, which share the
+//     host's kernel and so its CLOCK_BOOTTIME, the clock leases are timed
+//     on. Run it with task verify:edge-conformance in deploy/containerlab.
+//   - talos: a cell of real nodes, the target Talos/Cilium environment. The
+//     suite brings its own fixture (talos_test.go): a privileged pod on each
+//     node under test for node-level steps, and two tenant VPCs with
+//     clients. Run it with task test:edge-conformance:talos; see
+//     docs/edge/conformance.md.
 package edgeconformance_test
 
 import (
@@ -33,7 +40,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sys/unix"
 	appsv1 "k8s.io/api/apps/v1"
 	authv1 "k8s.io/api/authentication/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -62,6 +68,9 @@ type lab struct {
 	root       string
 	artifacts  string
 	probeBin   string
+	cell       cell
+	// talos is set for the talos target.
+	talos *talosConfig
 }
 
 var (
@@ -81,7 +90,7 @@ func getLab(t *testing.T) *lab {
 			skipReason = "EDGE_CONFORMANCE_KUBECONFIG is not set; run task verify:edge-conformance"
 			return
 		}
-		theLab, errLabInit = newLab(kc)
+		theLab, errLabInit = newLab(kc, os.Getenv("EDGE_CONFORMANCE_TARGET"))
 	})
 	if skipReason != "" {
 		t.Skip(skipReason)
@@ -92,7 +101,7 @@ func getLab(t *testing.T) *lab {
 	return theLab
 }
 
-func newLab(kubeconfig string) (*lab, error) {
+func newLab(kubeconfig, targetName string) (*lab, error) {
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return nil, err
@@ -125,13 +134,30 @@ func newLab(kubeconfig string) (*lab, error) {
 		return nil, err
 	}
 	l := &lab{kubeconfig: kubeconfig, rest: cfg, c: c, cs: cs, scheme: s, root: root, artifacts: artifacts}
+	switch targetName {
+	case "", "kind":
+		l.cell = kindCell{}
+	case "talos":
+		tc, err := talosConfigFromEnv()
+		if err != nil {
+			return nil, err
+		}
+		l.talos = tc
+		l.cell = &clusterCell{l: l}
+		tc.apply()
+		if err := l.deployTools(); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("EDGE_CONFORMANCE_TARGET %q: want kind or talos", targetName)
+	}
 	if err := l.installProbe(); err != nil {
 		return nil, err
 	}
 	return l, nil
 }
 
-// installProbe builds edgeprobe and copies it onto every dfw node.
+// installProbe builds edgeprobe and copies it onto every node under test.
 func (l *lab) installProbe() error {
 	l.probeBin = filepath.Join(l.artifacts, "edgeprobe")
 	cmd := exec.CommandContext(context.Background(), "go", "build", "-o", l.probeBin, "./tests/edgeconformance/edgeprobe")
@@ -139,89 +165,35 @@ func (l *lab) installProbe() error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("build edgeprobe: %w: %s", err, out)
 	}
-	for _, n := range []string{computeNode, edgeNode1, edgeNode2} {
-		cp := exec.CommandContext(context.Background(), "docker", "cp", l.probeBin, n+":/usr/local/bin/edgeprobe")
-		if out, err := cp.CombinedOutput(); err != nil {
-			return fmt.Errorf("copy edgeprobe to %s: %w: %s", n, err, out)
-		}
-	}
-	return nil
+	return l.cell.install(l.probeBin)
 }
 
-// The dfw nodes: one compute node and the two edge nodes running galactic-edge.
-const (
+// The nodes under test: one compute node and two edge nodes running
+// galactic-edge. They default to the lab's dfw nodes; the talos target
+// sets them from EDGE_CONFORMANCE_NODES.
+var (
 	computeNode = "dfw-worker"
 	edgeNode1   = "dfw-worker2"
 	edgeNode2   = "dfw-worker3"
 )
 
-// boottime reads the host's CLOCK_BOOTTIME, which every Kind node shares.
-func boottime() time.Duration {
-	var ts unix.Timespec
-	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
-		panic(err)
-	}
-	return time.Duration(ts.Nano())
-}
+// now is the current time on the suite's reference clock.
+func now() time.Duration { return theLab.cell.now() }
 
-// wallToBoot converts a wall-clock instant to CLOCK_BOOTTIME.
-func wallToBoot(w time.Time) time.Duration {
-	return boottime() - time.Since(w)
-}
+// wallToRef converts a wall-clock instant to the suite's reference clock.
+func wallToRef(w time.Time) time.Duration { return theLab.cell.wallToRef(w) }
 
-// nodeExec runs a command in a node container.
-func nodeExec(node string, args ...string) (string, error) {
-	cmd := exec.CommandContext(context.Background(), "docker", append([]string{"exec", node}, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("%s %v: %w: %s", node, args, err, out)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
+// nodeExec runs a command on a node.
+func nodeExec(node string, args ...string) (string, error) { return run(theLab.cell, node, args...) }
 
-// sandboxPID returns the PID of the pod's sandbox, whose network namespace
-// is the pod's.
+// sandboxPID returns the PID of a process in the pod's network namespace.
 func sandboxPID(node, namespace, pod string) (int, error) {
-	id, err := nodeExec(node, "crictl", "pods", "--namespace", namespace, "--name", pod, "--state", "ready", "-q")
-	if err != nil {
-		return 0, err
-	}
-	ids := strings.Fields(id)
-	if len(ids) != 1 {
-		return 0, fmt.Errorf("pod %s/%s has %d ready sandboxes on %s", namespace, pod, len(ids), node)
-	}
-	pid, err := nodeExec(node, "crictl", "inspectp", "-o", "go-template", "--template", "{{.info.pid}}", ids[0])
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(pid)
-}
-
-// containerPID returns the PID of a pod's running container.
-func containerPID(node, namespace, pod, container string) (int, error) {
-	sb, err := nodeExec(node, "crictl", "pods", "--namespace", namespace, "--name", pod, "--state", "ready", "-q")
-	if err != nil {
-		return 0, err
-	}
-	id, err := nodeExec(node, "crictl", "ps", "--pod", strings.TrimSpace(sb), "--name", container,
-		"--state", "running", "-q")
-	if err != nil {
-		return 0, err
-	}
-	if id == "" {
-		return 0, fmt.Errorf("container %s of %s/%s is not running", container, namespace, pod)
-	}
-	pid, err := nodeExec(node, "crictl", "inspect", "-o", "go-template", "--template", "{{.info.pid}}",
-		strings.Fields(id)[0])
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(pid)
+	return theLab.cell.containerPID(node, namespace, pod, "")
 }
 
 // signal sends sig to a pod's container from its node.
 func signal(node, namespace, pod, container, sig string) error {
-	pid, err := containerPID(node, namespace, pod, container)
+	pid, err := theLab.cell.containerPID(node, namespace, pod, container)
 	if err != nil {
 		return err
 	}
@@ -250,22 +222,22 @@ type probeRun struct {
 	cmd    *exec.Cmd
 	out    bytes.Buffer
 	name   string
+	node   string
 	events []event
 }
 
 // startProbe runs edgeprobe with args in the network namespace of the pod
 // whose sandbox has pid on node.
 func startProbe(node string, pid int, name string, args ...string) (*probeRun, error) {
-	full := append([]string{"exec", node, "nsenter", "-t", strconv.Itoa(pid), "-n", "/usr/local/bin/edgeprobe"},
-		args...)
-	p := &probeRun{cmd: exec.CommandContext(context.Background(), "docker", full...), name: name}
+	full := append([]string{"nsenter", "-t", strconv.Itoa(pid), "-n", probePath}, args...)
+	p := &probeRun{cmd: theLab.cell.command(node, full...), name: name, node: node}
 	p.cmd.Stdout = &p.out
 	p.cmd.Stderr = os.Stderr
 	return p, p.cmd.Start()
 }
 
 // wait waits for the probe and parses its events, saving them as an
-// artifact.
+// artifact. Event times are converted to the reference clock.
 func (p *probeRun) wait(l *lab, t *testing.T) []event {
 	t.Helper()
 	if err := p.cmd.Wait(); err != nil {
@@ -277,6 +249,7 @@ func (p *probeRun) wait(l *lab, t *testing.T) []event {
 		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
 			t.Fatalf("probe %s: %v: %s", p.name, err, sc.Text())
 		}
+		e.T = l.cell.bootToRef(p.node, e.T)
 		p.events = append(p.events, e)
 	}
 	l.save(t, p.name+".jsonl", p.out.Bytes())

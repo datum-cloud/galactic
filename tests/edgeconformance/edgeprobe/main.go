@@ -13,6 +13,13 @@
 //	edgeprobe sniff -iface link -port 7777 -duration 30s
 //	    prints each IPv6 UDP datagram to port on link: {"t","src","dst"},
 //	    then {"t","end"} when the capture ends
+//	edgeprobe clock
+//	    prints the node's CLOCK_BOOTTIME and CLOCK_REALTIME, read back to
+//	    back: {"boot","real"}
+//	edgeprobe pid -container id
+//	    prints the host PID of a container's first process, found by the
+//	    container ID in /proc/<pid>/cgroup; it needs the host's PID
+//	    namespace
 package main
 
 import (
@@ -33,7 +40,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: edgeprobe send|sniff [flags]")
+		fmt.Fprintln(os.Stderr, "usage: edgeprobe send|sniff|clock|pid [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -42,6 +49,10 @@ func main() {
 		err = send(os.Args[2:])
 	case "sniff":
 		err = sniff(os.Args[2:])
+	case "clock":
+		err = clock()
+	case "pid":
+		err = containerPID(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -168,3 +179,47 @@ func sniff(args []string) error {
 }
 
 func htons(v uint16) uint16 { return v<<8 | v>>8 }
+
+func clock() error {
+	var ts unix.Timespec
+	b := boottime()
+	if err := unix.ClockGettime(unix.CLOCK_REALTIME, &ts); err != nil {
+		return err
+	}
+	return out.Encode(map[string]int64{"boot": b, "real": ts.Nano()})
+}
+
+func containerPID(args []string) error {
+	fs := flag.NewFlagSet("pid", flag.ExitOnError)
+	id := fs.String("container", "", "container ID")
+	_ = fs.Parse(args)
+	if len(*id) < 12 {
+		return fmt.Errorf("container ID %q is too short", *id)
+	}
+	in := func(pid string) bool {
+		b, err := os.ReadFile("/proc/" + pid + "/cgroup")
+		return err == nil && strings.Contains(string(b), *id)
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return err
+	}
+	// The container's first process is the one in its cgroup whose parent,
+	// the runtime's shim, is not.
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil || !in(e.Name()) {
+			continue
+		}
+		stat, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue
+		}
+		// The parent PID is the second field after the parenthesized name.
+		fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
+		if len(fields) > 1 && !in(fields[1]) {
+			fmt.Println(e.Name())
+			return nil
+		}
+	}
+	return fmt.Errorf("no process of container %s", *id)
+}

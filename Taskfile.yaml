@@ -201,6 +201,26 @@ tasks:
       - go vet ./...
       - go test -race ./...
 
+  # Not part of ci: it runs against a live cell for about 50 minutes, hard
+  # reboots one edge node and cuts one off from the API server. See
+  # docs/edge/conformance.md for the cell it needs and what it changes.
+  test:edge-conformance:talos:
+    desc: Run the Galactic Edge provider conformance suite against a Talos/Cilium cell (EDGE_CONFORMANCE_KUBECONFIG, EDGE_CONFORMANCE_NODES, EDGE_CONFORMANCE_PROVIDER_IMAGE, EDGE_CONFORMANCE_TOOL_IMAGE)
+    requires:
+      vars: [EDGE_CONFORMANCE_KUBECONFIG, EDGE_CONFORMANCE_NODES, EDGE_CONFORMANCE_PROVIDER_IMAGE, EDGE_CONFORMANCE_TOOL_IMAGE]
+    env:
+      EDGE_CONFORMANCE_TARGET: talos
+    cmds:
+      - go test -count=1 -v -timeout 120m -run TestConformance ./tests/edgeconformance/
+
+  test:edge-conformance:talos:clean:
+    desc: Delete everything the conformance suite created in a cell (EDGE_CONFORMANCE_KUBECONFIG)
+    requires:
+      vars: [EDGE_CONFORMANCE_KUBECONFIG]
+    cmds:
+      - kubectl --kubeconfig "$EDGE_CONFORMANCE_KUBECONFIG" delete namespace -l app.kubernetes.io/part-of=galactic-edge-fixture --wait=true --timeout=300s
+      - kubectl --kubeconfig "$EDGE_CONFORMANCE_KUBECONFIG" delete edgeprovider conf-a conf-b conf-u conf-v --ignore-not-found
+
   test:unit-root:
     desc: Re-run just the requireRoot(t)-gated unit tests, as root
     deps: [build:ebpf]

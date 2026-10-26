@@ -91,14 +91,15 @@ func (s *side) lastRenewal(t *testing.T, l *lab) time.Duration {
 	return s.renewStart(t, l)
 }
 
-// renewStart returns the side's lease's latest renew-start.
+// renewStart returns the side's lease's latest renew-start, taken on the
+// provider's node.
 func (s *side) renewStart(t *testing.T, l *lab) time.Duration {
 	t.Helper()
 	v, err := strconv.ParseInt(s.lease(t, l).Annotations[galacticv1alpha1.EdgeLeaseRenewStartAnnotation], 10, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return time.Duration(v)
+	return l.cell.bootToRef(s.node, time.Duration(v))
 }
 
 func TestConformance(t *testing.T) {
@@ -139,13 +140,21 @@ func TestConformance(t *testing.T) {
 	t.Run("19-20-traffic-policy", func(t *testing.T) { rowPolicy(t, l, a) })
 	t.Run("21-gc-with-only-edge-users", func(t *testing.T) { rowGC(t, l, a) })
 	t.Run("18-grant-ceiling", func(t *testing.T) { rowCeiling(t, l, a, pa) })
+	// Rows 12 and 23 need real nodes: the talos target runs them, the lab
+	// skips them.
+	t.Run("12-api-isolation", func(t *testing.T) { rowAPIIsolation(t, l, a, pa) })
+	t.Run("23-node-reboot", func(t *testing.T) { rowReboot(t, l, a, pa) })
 	t.Run("24-drain", func(t *testing.T) { rowDrain(t, l, a, b) })
 }
 
 // setup registers and approves both providers, grants each its tenant's
 // VPC, and starts one provider instance per tenant on the same edge node,
-// claiming the same prefix in each VPC.
+// claiming the same prefix in each VPC. On the talos target it first
+// creates the tenants, which the lab deploys itself.
 func setup(t *testing.T, l *lab, sides ...*side) {
+	if l.talos != nil {
+		l.deployTenants(t)
+	}
 	for _, s := range sides {
 		l.ensureNamespace(t, s.tn.namespace)
 		l.register(t, s.tn.provider, s.tn.namespace, true)
@@ -302,17 +311,12 @@ func largestGap(rs []event) time.Duration {
 	return g
 }
 
-// writeSummary saves the run's measurements with the commit and core
-// images it ran against.
+// writeSummary saves the run's measurements with the commit and the
+// versions it ran against.
 func (l *lab) writeSummary(t *testing.T) {
 	commit, _ := exec.CommandContext(context.Background(), "git", "-C", l.root, "rev-parse", "HEAD").Output()
 	dirty, _ := exec.CommandContext(context.Background(), "git", "-C", l.root, "status", "--porcelain").Output()
-	images := map[string]string{}
-	for _, img := range []string{"galactic-edge:latest", "galactic-controller:latest", "galactic-router:latest",
-		"galactic-cni:latest", "edge-provider:latest"} {
-		id, _ := exec.CommandContext(context.Background(), "docker", "image", "inspect", "--format", "{{.Id}}", img).Output()
-		images[img] = strings.TrimSpace(string(id))
-	}
+	images := l.cell.versions()
 	results.Lock()
 	defer results.Unlock()
 	b, _ := json.MarshalIndent(map[string]any{
@@ -339,6 +343,9 @@ func teardown(t *testing.T, l *lab, sides ...*side) {
 	}
 	for _, p := range []string{"conf-u", "conf-v"} {
 		_ = l.c.Delete(ctx, &galacticv1alpha1.EdgeProvider{ObjectMeta: metav1.ObjectMeta{Name: p}})
+	}
+	if l.talos != nil {
+		l.teardownTalos(t)
 	}
 }
 
@@ -565,7 +572,7 @@ func rowOutOfGrant(t *testing.T, l *lab, a *side) {
 // edgeAdvertisements counts the BGPAdvertisements core publishes for p.
 func (l *lab) edgeAdvertisements(t *testing.T, p netip.Prefix) int {
 	t.Helper()
-	out, err := l.kubectl("get", "bgpadvertisements", "-n", "galactic-system", "-l", "galactic.datumapis.com/edge-route",
+	out, err := l.kubectl("get", "bgpadvertisements", "-n", systemNamespace, "-l", "galactic.datumapis.com/edge-route",
 		"-o", "jsonpath={range .items[*]}{.spec}{\"\\n\"}{end}")
 	if err != nil {
 		t.Fatal(err)
@@ -931,7 +938,7 @@ func rowSubnet(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 	if err := l.c.Create(ctx, va); err != nil {
 		t.Fatal(err)
 	}
-	recorded := boottime()
+	recorded := now()
 	va.Status.PodSubnet = prefix
 	if err := l.c.Status().Update(ctx, va); err != nil {
 		t.Fatal(err)
@@ -970,7 +977,7 @@ func rowCrash(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 	a.refresh(t, l)
 	var last, killed time.Duration
 	rs := gateWindow(t, l, a, "crash", 55*time.Second, func() {
-		killed = boottime()
+		killed = now()
 		if err := signal(a.node, a.pod.Namespace, a.pod.Name, "edge-provider", "KILL"); err != nil {
 			t.Fatal(err)
 		}
@@ -1009,7 +1016,7 @@ func (l *lab) containerStart(t *testing.T, a *side) time.Duration {
 	}
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Running != nil {
-			return wallToBoot(cs.State.Running.StartedAt.Time)
+			return wallToRef(cs.State.Running.StartedAt.Time)
 		}
 	}
 	t.Fatal("provider container is not running")
@@ -1040,7 +1047,7 @@ func rowStall(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 	}()
 	last := a.lastRenewal(t, l)
 	time.Sleep(25 * time.Second)
-	cont := boottime()
+	cont := now()
 	if err := signal(a.node, a.pod.Namespace, a.pod.Name, "edge-provider", "CONT"); err != nil {
 		t.Fatal(err)
 	}
@@ -1167,17 +1174,17 @@ func rowRemovalAgentStuck(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 	agent := l.agentPod(t, a.node)
 	var deleted time.Duration
 	rs := gateWindow(t, l, a, "removal-agent-stuck", 50*time.Second, func() {
-		if err := signal(a.node, "galactic-system", agent, "galactic-edge", "STOP"); err != nil {
+		if err := signal(a.node, systemNamespace, agent, "galactic-edge", "STOP"); err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = signal(a.node, "galactic-system", agent, "galactic-edge", "CONT") }()
+		defer func() { _ = signal(a.node, systemNamespace, agent, "galactic-edge", "CONT") }()
 		r := l.route(t, a.tn.namespace, a.vpcUID, pa)
-		deleted = boottime()
+		deleted = now()
 		if err := l.c.Delete(ctx, r); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(25 * time.Second)
-		if err := signal(a.node, "galactic-system", agent, "galactic-edge", "CONT"); err != nil {
+		if err := signal(a.node, systemNamespace, agent, "galactic-edge", "CONT"); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -1193,7 +1200,7 @@ func rowRemovalAgentStuck(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 	// deleted route's entry left the index, TakeoverWait after deletion.
 	r := l.waitAccepted(t, a.tn.namespace, a.vpcUID, pa, a.att.Name, 2*time.Minute)
 	if c := meta.FindStatusCondition(r.Status.Conditions, galacticv1alpha1.EdgeRouteAccepted); c != nil {
-		accepted := wallToBoot(c.LastTransitionTime.Time)
+		accepted := wallToRef(c.LastTransitionTime.Time)
 		l.record(t, "recreated route accepted after the deletion (1 s resolution)", accepted-deleted)
 		if accepted-deleted < takeoverWait-time.Second {
 			t.Errorf("the recreated route was accepted %v after the deletion, before TakeoverWait %v",
@@ -1207,7 +1214,7 @@ func rowRemovalAgentStuck(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 func (l *lab) agentPod(t *testing.T, node string) string {
 	t.Helper()
 	var pods corev1.PodList
-	if err := l.c.List(context.Background(), &pods, client.InNamespace("galactic-system"),
+	if err := l.c.List(context.Background(), &pods, client.InNamespace(systemNamespace),
 		client.MatchingLabels{"app.kubernetes.io/name": "galactic-edge"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1225,16 +1232,16 @@ func rowAgentStall(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 	agent := l.agentPod(t, a.node)
 	var last, cont time.Duration
 	rs := gateWindow(t, l, a, "agent-stall", 50*time.Second, func() {
-		if err := signal(a.node, "galactic-system", agent, "galactic-edge", "STOP"); err != nil {
+		if err := signal(a.node, systemNamespace, agent, "galactic-edge", "STOP"); err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = signal(a.node, "galactic-system", agent, "galactic-edge", "CONT") }()
+		defer func() { _ = signal(a.node, systemNamespace, agent, "galactic-edge", "CONT") }()
 		// The agent applied no renewal after it stopped, so the latest one
 		// it can have applied started no later than this one.
 		last = a.renewStart(t, l)
 		time.Sleep(25 * time.Second)
-		cont = boottime()
-		if err := signal(a.node, "galactic-system", agent, "galactic-edge", "CONT"); err != nil {
+		cont = now()
+		if err := signal(a.node, systemNamespace, agent, "galactic-edge", "CONT"); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -1266,7 +1273,7 @@ func rowAgentRestart(t *testing.T, l *lab, a *side) {
 	agent := l.agentPod(t, a.node)
 	rs := gateWindow(t, l, a, "agent-restart", 30*time.Second, func() {
 		if err := l.c.Delete(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-			Namespace: "galactic-system", Name: agent}}); err != nil {
+			Namespace: systemNamespace, Name: agent}}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -1278,16 +1285,16 @@ func rowAgentRestart(t *testing.T, l *lab, a *side) {
 
 func rowRouterDown(t *testing.T, l *lab, a *side) {
 	a.refresh(t, l)
-	router := l.podOn(t, "galactic-system", "galactic-router", a.node)
+	router := l.podOn(t, systemNamespace, "galactic-router", a.node)
 	var stopped time.Duration
 	rs := gateWindow(t, l, a, "router-down", 40*time.Second, func() {
-		stopped = boottime()
-		if err := signal(a.node, "galactic-system", router, "galactic-router", "STOP"); err != nil {
+		stopped = now()
+		if err := signal(a.node, systemNamespace, router, "galactic-router", "STOP"); err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = signal(a.node, "galactic-system", router, "galactic-router", "CONT") }()
+		defer func() { _ = signal(a.node, systemNamespace, router, "galactic-router", "CONT") }()
 		time.Sleep(25 * time.Second)
-		if err := signal(a.node, "galactic-system", router, "galactic-router", "CONT"); err != nil {
+		if err := signal(a.node, systemNamespace, router, "galactic-router", "CONT"); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -1331,7 +1338,7 @@ func rowRevocation(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 			t.Fatal(err)
 		}
 		a.svc.Spec.Prefixes = []string{"fd00:ed9e:300::/48"}
-		revoked = boottime()
+		revoked = now()
 		if err := l.c.Update(ctx, a.svc); err != nil {
 			t.Fatal(err)
 		}
@@ -1392,7 +1399,7 @@ func rowPolicy(t *testing.T, l *lab, a *side) {
 		{"missing policy (row 19)", "edge-conformance-missing", false},
 		{"original policy again", labIngress, true},
 	} {
-		changed := boottime()
+		changed := now()
 		setPolicy(step.policy)
 		var at time.Duration
 		eventually(t, 30*time.Second, 500*time.Millisecond, step.name+" applied", func() (bool, error) {
@@ -1403,7 +1410,7 @@ func rowPolicy(t *testing.T, l *lab, a *side) {
 			}
 			_ = p.cmd.Wait()
 			got := strings.Contains(p.out.String(), a.tn.provider+"/")
-			at = boottime()
+			at = now()
 			return got == step.reachable, nil
 		})
 		l.record(t, step.name+" took effect within", at-changed)
@@ -1444,7 +1451,7 @@ func rowGC(t *testing.T, l *lab, a *side) {
 func (l *lab) gcInterval(t *testing.T) time.Duration {
 	t.Helper()
 	var ds appsv1.DaemonSet
-	if err := l.c.Get(context.Background(), client.ObjectKey{Namespace: "galactic-system", Name: "galactic-router"},
+	if err := l.c.Get(context.Background(), client.ObjectKey{Namespace: systemNamespace, Name: "galactic-router"},
 		&ds); err != nil {
 		t.Fatal(err)
 	}
@@ -1478,7 +1485,7 @@ func rowCeiling(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 		t.Fatal(err)
 	}
 	rs := replies(l.probe(t, a.tn, computeNode, "ceiling", targetAddr(), 50*time.Second).wait(l, t))
-	ceiling := wallToBoot(until) - maxSkew
+	ceiling := wallToRef(until) - maxSkew
 	if len(rs) == 0 {
 		t.Fatal("no replies before the ceiling")
 	}
@@ -1522,7 +1529,7 @@ func rowDrain(t *testing.T, l *lab, a, b *side) {
 	drain := time.Duration(ptr.Deref(a.svc.Spec.DrainSeconds, 30)) * time.Second
 	var deleted time.Duration
 	rs := gateWindow(t, l, a, "drain", 30*time.Second, func() {
-		deleted = boottime()
+		deleted = now()
 		if err := l.c.Delete(ctx, a.svc); err != nil {
 			t.Fatal(err)
 		}
