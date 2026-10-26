@@ -56,7 +56,8 @@ type PermitGateway interface {
 // at least PermitStartupRefusal after the node started, and only while the
 // gateway election Lease, read uncached, still carries the permit's epoch.
 // Consumed IDs are kept until their deadline plus PermitGrace in a set that
-// fails closed when full.
+// fails closed when full. A node whose Clock is unhealthy refuses every
+// permit.
 type Permits struct {
 	// Reader reads the gateway's election Lease uncached.
 	Reader    client.Reader
@@ -73,6 +74,9 @@ type Permits struct {
 	// MaxConsumed and MaxConsumedBytes bound the consumed set; zero selects
 	// the defaults.
 	MaxConsumed, MaxConsumedBytes int
+	// Clock, when set, reports an error while this host's clock cannot be
+	// trusted within limit.MaxClockError; every permit is then refused.
+	Clock func() error
 
 	mu       sync.Mutex
 	consumed map[string]consumedPermit
@@ -111,6 +115,8 @@ func (p *Permits) consume(ctx context.Context, pm *fabricv1.ProbePermit, node, r
 		return refuse("the probe permit has expired or is too long-lived")
 	case p.starting(now):
 		return refuse("this node accepts no probe permit until its startup refusal ends")
+	case p.Clock != nil && p.Clock() != nil:
+		return refuse("this node's clock is not synchronised")
 	}
 	epoch, err := limit.ReadEpoch(ctx, p.Reader, p.Namespace, p.LeaseName, now)
 	if err != nil {

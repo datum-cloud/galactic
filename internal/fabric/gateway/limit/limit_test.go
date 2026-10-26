@@ -469,3 +469,72 @@ func TestAuthorityIgnoresCallerCancellation(t *testing.T) {
 		t.Fatalf("authority left its active state: %v", err)
 	}
 }
+
+// An unhealthy clock refuses new work at once; once it stays unhealthy for
+// ClockGrace it is uncertainty like a failed Lease read: the epoch's work is
+// cancelled and admission resumes only after a new hold.
+func TestAuthorityClockHealth(t *testing.T) {
+	clk := &clock{now: t0}
+	lc := newLease(t, holderA, t0)
+	var clockErr error
+	a := &Authority{Reader: lc, Namespace: leaseNS, Name: leaseName, Identity: holderA,
+		Buckets: NewBuckets(Defaults(), t0), Now: clk.Now, Hold: time.Second,
+		Clock: func() error { return clockErr }}
+	if s := a.State(); s != StateUnavailable {
+		t.Fatalf("state before any check = %s", s)
+	}
+	_, _, _ = a.Check(t.Context())
+	if s := a.State(); s != StateRecovering {
+		t.Fatalf("state in hold = %s", s)
+	}
+	clk.now = t0.Add(time.Second)
+	lc.set(t, "u1", clk.now)
+	_, ctx, err := a.Check(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := a.State(); s != StateReady {
+		t.Fatalf("state after hold = %s", s)
+	}
+
+	// A short run of bad samples refuses, but keeps the epoch.
+	clockErr = errors.New("unsynchronised")
+	_, _, err = a.Check(t.Context())
+	wantCode(t, err, errcode.LimiterUnavailable)
+	clk.now = clk.now.Add(ClockGrace - time.Millisecond)
+	_, _, err = a.Check(t.Context())
+	wantCode(t, err, errcode.LimiterUnavailable)
+	if ctx.Err() != nil {
+		t.Fatal("a clock unhealthy for less than ClockGrace ended the epoch")
+	}
+	if s := a.State(); s != StateUnavailable {
+		t.Fatalf("state while refusing for the clock = %s", s)
+	}
+	clockErr = nil
+	if _, _, err := a.Check(t.Context()); err != nil {
+		t.Fatalf("recovered within grace: %v", err)
+	}
+	if s := a.State(); s != StateReady {
+		t.Fatalf("state after recovering within grace = %s", s)
+	}
+
+	// A run as long as ClockGrace ends the epoch.
+	clockErr = errors.New("unsynchronised")
+	_, _, _ = a.Check(t.Context())
+	clk.now = clk.now.Add(ClockGrace)
+	_, _, err = a.Check(t.Context())
+	wantCode(t, err, errcode.LimiterUnavailable)
+	if ctx.Err() == nil {
+		t.Fatal("epoch context survived a clock unhealthy for ClockGrace")
+	}
+	if s := a.State(); s != StateUnavailable {
+		t.Fatalf("state with an unhealthy clock = %s", s)
+	}
+
+	clockErr = nil
+	_, _, err = a.Check(t.Context())
+	wantCode(t, err, errcode.LimiterUnavailable)
+	if d, _ := errcode.RetryDelay(err); d != time.Second {
+		t.Fatalf("hold after the clock recovered = %s", d)
+	}
+}

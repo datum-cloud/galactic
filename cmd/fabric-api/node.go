@@ -28,6 +28,7 @@ import (
 	permitv1 "go.datum.net/galactic/api/fabric/permit/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/frr"
+	"go.datum.net/galactic/internal/fabric/gateway/limit"
 	"go.datum.net/galactic/internal/fabric/identity"
 	"go.datum.net/galactic/internal/fabric/index"
 	"go.datum.net/galactic/internal/fabric/node"
@@ -273,7 +274,8 @@ func runNode(parent context.Context, o *nodeOptions) error {
 }
 
 // nodePermits returns the probe permit checker the flags select, or nil
-// without --probe-permits.
+// without --probe-permits. Its permits are refused while the kernel clock
+// is unsynchronised.
 func nodePermits(o *nodeOptions, creds *identity.Credentials) (*node.Permits, error) {
 	switch {
 	case !o.probePermits && (o.requirePermits || o.gatewayAddress != ""):
@@ -293,7 +295,7 @@ func nodePermits(o *nodeOptions, creds *identity.Credentials) (*node.Permits, er
 	}
 	p := &node.Permits{
 		Reader: reader, Namespace: o.namespace, LeaseName: o.gatewayLease, Require: o.requirePermits,
-		Started: time.Now(),
+		Started: time.Now(), Clock: limit.KernelClock,
 	}
 	if o.gatewayAddress != "" {
 		conn, err := grpc.NewClient(o.gatewayAddress,

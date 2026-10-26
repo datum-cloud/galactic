@@ -167,6 +167,10 @@ func TestPermitRefusals(t *testing.T) {
 		}, code: errcode.LimiterUnavailable},
 		"no id":           {mod: func(p *fabricv1.ProbePermit) { p.Id = "" }, code: errcode.LimiterUnavailable},
 		"startup refusal": {perm: func(p *Permits) { p.Started = time.Now() }, code: errcode.LimiterUnavailable},
+		"clock unsynchronised": {
+			perm: func(p *Permits) { p.Clock = func() error { return errors.New("unsynchronised") } },
+			code: errcode.LimiterUnavailable,
+		},
 		"lease unreadable": {perm: func(p *Permits) {
 			p.Reader = leaseReader(t, "gateway-0_a")
 			p.LeaseName = "missing"

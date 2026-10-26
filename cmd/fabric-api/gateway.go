@@ -258,6 +258,7 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	if o.aggregateBudgets {
 		admission, err = gateway.NewAdmission(o.limits, &limit.Authority{
 			Reader: mgr.GetAPIReader(), Namespace: o.namespace, Name: o.leaseName, Identity: holder,
+			Clock: limit.KernelClock,
 		})
 		if err != nil {
 			return fmt.Errorf("--aggregate-budgets: %w", err)
