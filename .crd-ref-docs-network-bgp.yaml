@@ -45,7 +45,6 @@ processor:
     - "NetworkEgressPolicySpec"
     - "NetworkEgressPolicyStatus"
   ignoreFields: []
-
 render:
   kubernetes: {}
   markdown:

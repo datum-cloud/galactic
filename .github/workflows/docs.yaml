@@ -6,20 +6,16 @@
 # Produces no deployment artifacts.
 # ---
 name: Documentation
-
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: docs-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   # -- documentation
   # Parse Markdown with CommonMark rules before checking links and anchors.

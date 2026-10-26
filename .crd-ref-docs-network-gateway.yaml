@@ -94,7 +94,6 @@ processor:
     - "BGPPrefixListSpec"
     - "BGPPrefixListStatus"
   ignoreFields: []
-
 render:
   kubernetes: {}
   markdown:
