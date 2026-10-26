@@ -51,7 +51,7 @@ type cell interface {
 func run(c cell, node string, args ...string) (string, error) {
 	out, err := c.command(node, args...).CombinedOutput()
 	if err != nil {
-		return string(out), fmt.Errorf("%s %v: %w: %s", node, args, err, out)
+		return string(out), fmt.Errorf("%s %v: %w: %s", role(node), args, err, out)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -171,7 +171,7 @@ func (c *clusterCell) install(bin string) error {
 			return err
 		}
 		if _, err := c.l.kubectl("cp", bin, toolNamespace+"/"+pod+":"+probePath); err != nil {
-			return fmt.Errorf("copy edgeprobe to %s: %w", n, err)
+			return fmt.Errorf("copy edgeprobe to %s: %w", role(n), err)
 		}
 		if _, err := run(c, n, "chmod", "0755", probePath); err != nil {
 			return err
@@ -186,7 +186,7 @@ func (c *clusterCell) containerPID(node, namespace, name, container string) (int
 		return 0, err
 	}
 	if pod.Spec.NodeName != node {
-		return 0, fmt.Errorf("pod %s/%s is on %s, not %s", namespace, name, pod.Spec.NodeName, node)
+		return 0, fmt.Errorf("pod %s/%s is on %s, not %s", namespace, name, role(pod.Spec.NodeName), role(node))
 	}
 	for _, cs := range pod.Status.ContainerStatuses {
 		if (container == "" || cs.Name == container) && cs.State.Running != nil && cs.ContainerID != "" {
@@ -216,7 +216,7 @@ func (c *clusterCell) bootToRef(node string, boot time.Duration) (time.Duration,
 		}
 		time.Sleep(2 * time.Second)
 	}
-	return 0, fmt.Errorf("read the clocks of %s: %w", node, err)
+	return 0, fmt.Errorf("read the clocks of %s: %w", role(node), err)
 }
 
 // sample returns a recent reading of node's clocks.
@@ -253,11 +253,11 @@ func (c *clusterCell) versions() map[string]string {
 		var node corev1.Node
 		if err := c.l.c.Get(ctx, client.ObjectKey{Name: n}, &node); err == nil {
 			i := node.Status.NodeInfo
-			v["node/"+n] = fmt.Sprintf("os=%q kernel=%s runtime=%s kubelet=%s", i.OSImage, i.KernelVersion,
+			v["node/"+role(n)] = fmt.Sprintf("os=%q kernel=%s runtime=%s kubelet=%s", i.OSImage, i.KernelVersion,
 				i.ContainerRuntimeVersion, i.KubeletVersion)
 		}
 		if s, err := c.sample(n); err == nil {
-			v["clock/"+n] = fmt.Sprintf("realtime %v from this host's, read in %v", s.skew, s.rtt)
+			v["clock/"+role(n)] = fmt.Sprintf("realtime %v from this host's, read in %v", s.skew, s.rtt)
 		}
 	}
 	var pods corev1.PodList
@@ -269,12 +269,21 @@ func (c *clusterCell) versions() map[string]string {
 			if !versionedPod(p) {
 				continue
 			}
+			where := role(p.Spec.NodeName)
+			if !underTest(p.Spec.NodeName) {
+				where = "cell"
+			}
 			for _, cs := range p.Status.ContainerStatuses {
-				v["image/"+ns+"/"+cs.Name] = cs.ImageID
+				v["image/"+where+"/"+ns+"/"+cs.Name] = cs.ImageID
 			}
 		}
 	}
 	return v
+}
+
+// underTest reports whether node is one of the nodes under test.
+func underTest(node string) bool {
+	return node == computeNode || node == edgeNode1 || node == edgeNode2
 }
 
 // versionedPod reports whether p runs a component whose version the
@@ -284,9 +293,7 @@ func versionedPod(p corev1.Pod) bool {
 	if p.Status.Phase != corev1.PodRunning {
 		return false
 	}
-	switch p.Spec.NodeName {
-	case computeNode, edgeNode1, edgeNode2:
-	default:
+	if !underTest(p.Spec.NodeName) {
 		return strings.HasPrefix(p.Name, "galactic-controller-")
 	}
 	for _, prefix := range []string{"galactic-", "cilium-", "edge-provider-", "fabric-router-"} {

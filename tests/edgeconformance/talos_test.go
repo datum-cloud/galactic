@@ -167,7 +167,7 @@ func (l *lab) toolPod(node string) (string, error) {
 			}
 		}
 	}
-	return "", fmt.Errorf("no ready edge-conformance-node pod on %s", node)
+	return "", fmt.Errorf("no ready edge-conformance-node pod on %s", role(node))
 }
 
 // apply applies a manifest with kubectl.
@@ -445,9 +445,24 @@ func (l *lab) isolate(t *testing.T, node string, pid int, limit time.Duration) f
 	}
 	return func() {
 		if out, err := nodeExec(node, "sh", "-c", undo); err != nil {
-			t.Errorf("restore %s's API access: %v: %s", node, err, out)
+			t.Errorf("restore %s's API access: %v: %s", role(node), err, out)
 		}
 	}
+}
+
+// role names a node by its part in the run: compute, edge-1 or edge-2. The
+// run's output and summary name nodes only this way, so that results can
+// be shared without the cell's node names.
+func role(node string) string {
+	switch node {
+	case computeNode:
+		return "compute"
+	case edgeNode1:
+		return "edge-1"
+	case edgeNode2:
+		return "edge-2"
+	}
+	return "a node outside the run"
 }
 
 // otherEdge returns the edge node that is not node.
@@ -582,7 +597,7 @@ func rowReboot(t *testing.T, l *lab, a *side, pa netip.Prefix) {
 	cmd := theLab.cell.command(a.node, "sh", "-c",
 		"echo 1 > /proc/sys/kernel/sysrq; echo s > /proc/sysrq-trigger; sleep 2; echo b > /proc/sysrq-trigger")
 	go func() { _ = cmd.Run() }()
-	eventually(t, 20*time.Minute, 5*time.Second, a.node+" back on a new boot", func() (bool, error) {
+	eventually(t, 20*time.Minute, 5*time.Second, role(a.node)+" back on a new boot", func() (bool, error) {
 		var n corev1.Node
 		if err := l.c.Get(ctx, client.ObjectKey{Name: a.node}, &n); err != nil {
 			return false, err

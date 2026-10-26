@@ -126,3 +126,10 @@ when it is set:
 
 The `go test -v` output names each row as a subtest, `NN-description`, and
 logs each measurement beside the bound it was checked against.
+
+The output and the summary name the nodes under test by role: `compute`,
+`edge-1` and `edge-2`. A `talos` run's results still describe a live cell,
+through its node OS and kernel versions, image digests, clock offsets and the
+API server errors quoted in failures. Keep them private. In a public issue or
+pull request, report only each row's outcome and its measurement against the
+bound.
