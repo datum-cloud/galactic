@@ -775,6 +775,27 @@ until the job's deadline plus 2 seconds, since the node may still be sending
 it. The rates and caps are the contract's defaults; only `--cell-slots` and
 `--cell-queue` change them.
 
+### Stream delivery and transport bounds
+
+Every gateway replica bounds Looking Glass service delivery, whether or not
+`--aggregate-budgets` is set. None of these values is configurable:
+
+| Bound                                                                                        | Value                              | Past it                                                                                   |
+| -------------------------------------------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------- |
+| One write to the consumer, or a finished outcome waiting for the stream's two-outcome buffer | 2 s                                | The request is cancelled and its stream ends `CANCELLED`; its routers stop                |
+| One outcome event                                                                            | 144 KiB                            | The router's outcome is a `ResponseTooLarge` failure                                      |
+| Serialized events of one stream                                                              | 5 MiB                              | That router and every router still running fail `OutputLimitExceeded`, as does `complete` |
+| `RunDiagnostic` calls / forwarded calls                                                      | 32 / 16 per replica                | `QueueFull` with a 1 s retry delay                                                        |
+| Service identity TLS connections                                                             | 64 per replica                     | The connection is closed after its handshake                                              |
+| A silent connection                                                                          | Pinged after 4 s, closed 4 s later | Its calls are cancelled                                                                   |
+
+Every connection to the listener, and a follower's connection to the leader,
+uses fixed 64 KiB flow-control windows and buffers. A follower relays one event
+at a time under the same 2 s write bound, and never forwards a call twice. A
+client may ping no more often than every 5 seconds. On `SIGTERM` the gateway
+closes its listener's connections at once, cancelling operator and service
+calls in flight.
+
 ### Enabling
 
 The deployment manifests do not set these flags yet. Turn them on in this

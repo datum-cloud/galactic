@@ -52,6 +52,16 @@ const (
 	// outcomeBuffer is how many finished router outcomes may wait for the
 	// stream's writer.
 	outcomeBuffer = 2
+	// maxOutcomeBytes bounds one serialized outcome event; a larger result
+	// is delivered as a ResponseTooLarge failure.
+	maxOutcomeBytes = 144 << 10
+	// maxCompleteBytes is the output reserved for the terminal event.
+	maxCompleteBytes = 64 << 10
+	// failureReserve is the output reserved for each router still to
+	// report, enough for its failure outcome.
+	failureReserve = 1 << 10
+	// MaxStreamBytes bounds the serialized events of one stream.
+	MaxStreamBytes = 5 << 20
 )
 
 // Service feature names, as GetCapabilities advertises and a request's
@@ -182,17 +192,18 @@ func (s *contextStream) Context() context.Context { return s.ctx }
 // gateway-only forwarding service on one mTLS listener. Every call, unary or streaming, is authorized per role from
 // GatewayMethods against a peer certificate re-verified on that call, bounded
 // by the certificate's expiry, and stripped of forwarding metadata unless
-// the gateway identity sent it. opts are appended.
+// the gateway identity sent it. Connections, windows and concurrent
+// diagnostic calls are bounded per replica (see transportOptions and
+// rpcCaps). opts are appended.
 func NewServer(
 	creds *identity.Credentials, allowlist Allowlist, debug *Debug, service *Service, permits *Permits,
 	opts ...grpc.ServerOption,
 ) *grpc.Server {
 	auth := &node.Authorizer{Methods: GatewayMethods, Credentials: creds, Allow: allowlist.Check}
-	gs := grpc.NewServer(append([]grpc.ServerOption{
-		grpc.Creds(credentials.NewTLS(creds.ServerConfig(allowlist.Handshake))),
+	gs := grpc.NewServer(append(append(transportOptions(credentials.NewTLS(creds.ServerConfig(allowlist.Handshake))),
 		grpc.ChainUnaryInterceptor(auth.Unary(), StripForwardingUnary),
-		grpc.ChainStreamInterceptor(auth.Stream(), StripForwardingStream),
-	}, opts...)...)
+		grpc.ChainStreamInterceptor(auth.Stream(), StripForwardingStream, newRPCCaps().stream),
+	), opts...)...)
 	fabricv1.RegisterFabricGatewayServiceServer(gs, debug)
 	servicev1.RegisterLookingGlassServiceServer(gs, service)
 	forwardv1.RegisterForwardServiceServer(gs, service.Forwarder())
@@ -234,6 +245,9 @@ type Service struct {
 	Leader LeaderDialer
 	// Now, when set, replaces the wall clock.
 	Now func() time.Time
+
+	// outputLimit, when positive, replaces MaxStreamBytes.
+	outputLimit int
 }
 
 func (s *Service) now() time.Time {
@@ -527,7 +541,8 @@ func checkFeatures(required, served []string) error {
 }
 
 // forward hands a validated request to the leader once, with this replica's
-// gateway identity, and relays its events.
+// gateway identity, and relays its events under the same write bound as the
+// leader's. A forwarded call that fails is never forwarded again.
 func (s *Service) forward(
 	ctx context.Context, caller identity.ID, req *servicev1.RunDiagnosticRequest, received, deadline time.Time,
 	stream grpc.ServerStreamingServer[servicev1.DiagnosticEvent],
@@ -550,18 +565,12 @@ func (s *Service) forward(
 	if err != nil {
 		return err
 	}
-	for {
-		ev, err := events.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if err := stream.Send(ev); err != nil {
-			return err
-		}
+	w := newEventWriter(stream.Send)
+	defer w.close()
+	if err := relay(events.Recv, w); !errors.Is(err, io.EOF) {
+		return err
 	}
+	return nil
 }
 
 // execute runs a validated request on the leader and sends its events: one
@@ -570,12 +579,18 @@ func (s *Service) forward(
 // discovery it confirms the election, charges the cell's and the project's
 // request tokens, registers the attempt key and opens a live stream; after
 // discovery it reserves queue capacity for every selected router at once,
-// before the snapshot is sent. Events are sent by this goroutine alone;
-// finished outcomes wait for it in a buffer of outcomeBuffer, and a failed
-// send or the loss of the election cancels every router still running. A
-// failure before the snapshot is returned as the call's status; once the
-// snapshot is sent the stream ends with complete and status OK, whatever
-// the diagnostic's own result.
+// before the snapshot is sent. Events are written by one writer; finished
+// outcomes wait for it in a buffer of outcomeBuffer. A failed write, or a
+// write or a hand-off to the buffer blocked for SendBound, cancels every
+// router still running and ends the stream without complete; the deadline,
+// the loss of the election and the output budget cancel them too, but the
+// stream still ends with complete. An outcome larger than
+// maxOutcomeBytes is delivered as a ResponseTooLarge failure, and once the
+// stream's output budget cannot hold an outcome, that router and every
+// router still running fail with OutputLimitExceeded. A failure before the
+// snapshot is returned as the call's status; once the snapshot is sent the
+// stream ends with complete and status OK, whatever the diagnostic's own
+// result.
 func (s *Service) execute(
 	ctx context.Context, caller identity.ID, req *servicev1.RunDiagnosticRequest, deadline time.Time,
 	send func(*servicev1.DiagnosticEvent) error,
@@ -605,12 +620,12 @@ func (s *Service) execute(
 	}
 	defer closeStream()
 
-	// sendCtx ends when the stream does or a send fails; runCtx also ends
-	// at the deadline or when the election is lost. Outcomes a deadline or
-	// the loss cuts short still reach the writer, so the consumer can see
-	// them while the stream lasts.
-	sendCtx, abort := context.WithCancel(ctx)
-	defer abort()
+	// sendCtx ends when the stream does, a write fails or the consumer
+	// stalls; runCtx also ends at the deadline, when the election is lost or
+	// when the output budget runs out. Outcomes those cut short still reach
+	// the writer, so the consumer can see them while the stream lasts.
+	sendCtx, abort := context.WithCancelCause(ctx)
+	defer abort(nil)
 	ownedCtx, lose := context.WithCancelCause(sendCtx)
 	defer lose(nil)
 	defer context.AfterFunc(epochCtx, func() { lose(errOwnershipLost) })()
@@ -642,11 +657,15 @@ func (s *Service) execute(
 			string(limit.ScopeQueue), time.Second)
 	}
 	defer res.Release()
+	w := newEventWriter(send)
+	defer w.close()
 	var seq uint64
+	out := streamOutput{limit: s.streamLimit(), pending: selectedCount(inv.Routers)}
 	next := func(ev *servicev1.DiagnosticEvent) error {
 		seq++
 		ev.RequestId, ev.Sequence = req.GetRequestId(), seq
-		return send(ev)
+		out.used += proto.Size(ev)
+		return w.write(ev)
 	}
 	err = next(&servicev1.DiagnosticEvent{Event: &servicev1.DiagnosticEvent_Snapshot{Snapshot: snapshot}})
 	if err != nil {
@@ -663,25 +682,85 @@ func (s *Service) execute(
 		defer close(outcomes)
 		s.Runner.Stream(runCtx, project, req.GetRequestId(), q, inv.Routers, budgets, deadline, res,
 			func(o Outcome) {
+				t := time.NewTimer(SendBound)
+				defer t.Stop()
 				select {
 				case outcomes <- o:
 				case <-sendCtx.Done():
+				case <-t.C:
+					abort(errConsumerStalled)
 				}
 			})
 	}()
+	stop := func(err error) error {
+		abort(err)
+		for range outcomes {
+		}
+		return err
+	}
+	// ended ends the stream once sendCtx has: its consumer is gone or
+	// stalled, so no further event is written.
+	ended := func() error {
+		if errors.Is(context.Cause(sendCtx), errConsumerStalled) {
+			return stop(stalledStatus())
+		}
+		return stop(errcode.Status(errcode.Cancelled, "the stream ended before the request finished"))
+	}
 	var tally streamCoverage
-	for o := range outcomes {
-		tally.add(o)
-		if err := next(outcomeEvent(o)); err != nil {
-			abort()
-			for range outcomes {
-			}
-			return err
+	for {
+		if sendCtx.Err() != nil {
+			return ended()
+		}
+		var o Outcome
+		var ok bool
+		select {
+		case o, ok = <-outcomes:
+		case <-sendCtx.Done():
+			return ended()
+		}
+		if !ok {
+			break
+		}
+		ev := out.fit(o, func() { lose(errOutputLimit) })
+		tally.add(ev)
+		if err := next(outcomeEvent(ev)); err != nil {
+			return stop(err)
 		}
 	}
 	return next(&servicev1.DiagnosticEvent{Event: &servicev1.DiagnosticEvent_Complete{
 		Complete: tally.complete(inv, s.now()),
 	}})
+}
+
+func (s *Service) streamLimit() int {
+	if s.outputLimit > 0 {
+		return s.outputLimit
+	}
+	return MaxStreamBytes
+}
+
+// streamOutput is a stream's output budget: bytes written so far, and the
+// routers still to report, each of which keeps failureReserve of the budget,
+// like the terminal event keeps maxCompleteBytes.
+type streamOutput struct {
+	limit, used, pending int
+}
+
+// fit returns o as it can be delivered: a result over maxOutcomeBytes as
+// ResponseTooLarge, and a result the remaining budget cannot hold as
+// OutputLimitExceeded, calling exhausted so the routers still running stop.
+func (b *streamOutput) fit(o Outcome, exhausted func()) Outcome {
+	b.pending--
+	size := proto.Size(outcomeEvent(o))
+	if size > maxOutcomeBytes {
+		o.Observation, o.Err = nil, errcode.Status(errcode.ResponseTooLarge, "router's result exceeds its size bound")
+		size = proto.Size(outcomeEvent(o))
+	}
+	if b.used+size+b.pending*failureReserve+maxCompleteBytes > b.limit {
+		exhausted()
+		o.Observation, o.Err = nil, errcode.Status(errcode.OutputLimitExceeded, "the stream's output budget is exhausted")
+	}
+	return o
 }
 
 func selectedCount(routers []Node) int {
@@ -770,6 +849,10 @@ func failureMessage(code errcode.Code) string {
 		return "the gateway lost execution ownership"
 	case errcode.LimiterUnavailable:
 		return "the cell's limiter is unavailable"
+	case errcode.ResponseTooLarge:
+		return "router's result exceeds its size bound"
+	case errcode.OutputLimitExceeded:
+		return "the stream's output budget is exhausted"
 	}
 	return "router diagnostic failed"
 }
@@ -777,8 +860,8 @@ func failureMessage(code errcode.Code) string {
 // streamCoverage counts a stream's outcomes.
 type streamCoverage struct {
 	successful, failed, truncated int
-	// stopped is the request-level reason, DeadlineExceeded, Cancelled or
-	// OwnershipLost, that cut a router short, if any.
+	// stopped is the request-level reason, DeadlineExceeded, Cancelled,
+	// OwnershipLost or OutputLimitExceeded, that cut a router short, if any.
 	stopped errcode.Code
 }
 
@@ -792,7 +875,7 @@ func (c *streamCoverage) add(o Outcome) {
 	}
 	c.failed++
 	switch code := errcode.Of(o.Err); code {
-	case errcode.DeadlineExceeded, errcode.Cancelled, errcode.OwnershipLost:
+	case errcode.DeadlineExceeded, errcode.Cancelled, errcode.OwnershipLost, errcode.OutputLimitExceeded:
 		if c.stopped == "" {
 			c.stopped = code
 		}
@@ -800,7 +883,8 @@ func (c *streamCoverage) add(o Outcome) {
 }
 
 // complete returns the terminal coverage. A request cut short by its
-// deadline, cancellation or the loss of the election reports that first; otherwise no selected router
+// deadline, cancellation, the loss of the election or its output budget
+// reports that first; otherwise no selected router
 // is NoNodesAvailable, no success ExecutionFailed, and any failure,
 // truncation or omission other than NotRequested PartialResults.
 func (c *streamCoverage) complete(inv Inventory, now time.Time) *servicev1.Complete {

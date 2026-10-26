@@ -40,10 +40,16 @@ requires the gateway's admission, and capabilities advertise
 `aggregate-probe-budgets` only while execution is enabled with it. Nodes
 charge direct operator probes only with `--require-probe-permits`, so enabling
 execution requires every node to run with it. No deployment sets `Enabled` or
-these flags, so a valid `RunDiagnostic` is answered with `ServiceDisabled`. Not yet implemented: the blocked-send bound and
-stream-level ownership rules of #1046, and the metrics and packaged
-configuration of #1047. Operator and FabricQuery discovery still return pod
-candidates, including duplicates.
+these flags, so a valid `RunDiagnostic` is answered with `ServiceDisabled`.
+The delivery and transport bounds under "Cancellation, delivery, and failure
+assumptions" are enforced (#1046): one writer per stream, the 2 s write and
+hand-off bound on the leader and on a forwarding follower, the per-outcome and
+per-stream output caps, the per-replica call and service connection caps,
+fixed 64 KiB windows and buffers, and keepalive on the gateway listener
+(`internal/fabric/gateway/stream.go`). A shutdown signal stops the listener at
+once. Service disable is a startup setting until #1047 adds its controls, and
+the metrics and packaged configuration are #1047's. Operator and FabricQuery
+discovery still return pod candidates, including duplicates.
 
 ## Service and identity
 

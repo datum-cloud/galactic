@@ -303,6 +303,10 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 		}
 	}()
 	defer gs.Stop()
+	// A shutdown signal closes every connection at once, so a service
+	// stream's routers stop within 2 s rather than running on while the
+	// manager shuts down.
+	defer context.AfterFunc(ctx, gs.Stop)()
 
 	slog.Info("starting fabric-api gateway", "version", metadata.Version, "site", o.site, "cluster", o.clusterName,
 		"cell", o.cell, "debug", debugAddr)

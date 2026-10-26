@@ -207,7 +207,7 @@ func (d *Debug) conn(addr string) (*grpc.ClientConn, error) {
 		// A forwarded call may already have run on the leader, so it is
 		// never replayed, not even transparently.
 		grpc.WithDisableRetry(),
-	}, d.DialOptions...)
+	}, append(leaderDialOptions(), d.DialOptions...)...)
 	c, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		return nil, err
