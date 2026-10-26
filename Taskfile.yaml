@@ -97,6 +97,13 @@ tasks:
       - buf lint
       - buf generate
 
+  build:service-api:
+    desc: Build the Looking Glass service API release asset and its SHA256SUMS in dist/ (requires buf)
+    vars:
+      VERSION: '{{.VERSION | default "dev"}}'
+    cmds:
+      - hack/service-api-bundle.sh "{{.VERSION}}" dist
+
   generate:crd:
     desc: Regenerate all Galactic API deepcopy code and CRDs (requires controller-gen)
     cmds:

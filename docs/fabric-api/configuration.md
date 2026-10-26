@@ -383,7 +383,7 @@ service presents the certificate on its gRPC connection to the gateway's
 renews them; the gateway accepts the overlapping-bundle rotation below. The
 service contract is [service-contract.md](service-contract.md). The gateway
 does not execute service diagnostics: it answers a valid `RunDiagnostic`
-with `ServiceDisabled`.
+with `ServiceDisabled`, and `GetCapabilities` reports `enabled: false`.
 
 ### Rotation
 

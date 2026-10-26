@@ -205,3 +205,33 @@ jobs:
         - { path: config/galactic-controller/fabric, name: ghcr.io/datum-cloud/galactic-controller, tag: "${{ needs.publish-galactic-controller-image.outputs.tag }}" }
         - { path: config/fabric-router-controller/base, name: ghcr.io/datum-cloud/fabric-router-controller, tag: "${{ needs.publish-fabric-router-controller-image.outputs.tag }}" }
     secrets: inherit
+
+  # The Looking Glass service API (protobuf sources, a descriptor set with
+  # imports, and a README) is a release asset, so a consumer outside this
+  # repository can generate a client pinned to the release.
+  publish-service-api:
+    if: github.event_name == 'release'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.70.0
+
+      - name: Build the service API bundle
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: hack/service-api-bundle.sh "$TAG" dist
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "dist/fabric-service-api-$TAG.tar.gz" dist/SHA256SUMS --clobber

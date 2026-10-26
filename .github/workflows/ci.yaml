@@ -218,6 +218,28 @@ jobs:
         # produced fresh on every build, here exactly as everywhere else.
         run: task build
 
+  # The Looking Glass service API bundle publish.yaml attaches to releases:
+  # built and verified here so a broken bundle fails a pull request rather
+  # than a release.
+  service-api:
+    name: Service API bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.70.0
+
+      - name: Build and verify the bundle
+        run: |
+          hack/service-api-bundle.sh ci dist
+          cd dist && sha256sum -c SHA256SUMS
+
   # Tier 2: Integration tests (every PR, main branch, and releases)
   test-e2e:
     name: E2E Tests

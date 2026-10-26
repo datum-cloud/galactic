@@ -8,11 +8,15 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
+	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"go.datum.net/galactic/internal/fabric/errcode"
 )
 
 // Defaults for discovery.
@@ -38,7 +42,15 @@ const (
 	OmitDuplicatePod    = "DuplicatePod"
 	OmitNodeBudget      = "NodeBudget"
 	OmitNoCertificate   = "NoCertificatePod"
+	// OmitNotRequested and OmitNoSidecar are used only by Inventory: a
+	// router outside an explicit selection, and a router whose pod has no
+	// fabric-api container.
+	OmitNotRequested = "NotRequested"
+	OmitNoSidecar    = "NoSidecar"
 )
+
+// MaxInventoryRouters bounds the routers one Inventory may list.
+const MaxInventoryRouters = 256
 
 // Node is one node in an execution snapshot.
 type Node struct {
@@ -263,4 +275,124 @@ func omitReason(pod *corev1.Pod) string {
 		}
 	}
 	return OmitSidecarNotReady
+}
+
+// Inventory is the fixed router membership of one Looking Glass service
+// request: every scheduled fabric-router pod grouped by node, one entry per
+// router, whether or not it can execute.
+type Inventory struct {
+	ID              string
+	CapturedAt      time.Time
+	ResourceVersion string
+	// Unscheduled counts fabric-router pods with no node.
+	Unscheduled int
+	// Routers lists one Node per router, sorted by name. A selected router
+	// carries the pod it runs on; an omitted one carries its reason.
+	Routers []Node
+}
+
+// Inventory lists the cell's fabric-router pods once and returns one router
+// per node. Each router runs on its newest usable pod, ties broken by pod
+// name; other pods on the node add nothing. A router with no usable pod is
+// omitted with the reason of its newest pod. When requested is non-empty it
+// selects exactly those routers, every other router being NotRequested, and
+// naming a router outside the inventory fails with InvalidQuery. At most
+// maxSelected routers are selected, in name order, the rest NodeBudget. An
+// inventory of more than MaxInventoryRouters fails with InventoryTooLarge.
+// Unlike Snapshot, it applies no node selector.
+func (d *Discoverer) Inventory(
+	ctx context.Context, requested []string, maxSelected int, now time.Time,
+) (Inventory, error) {
+	var pods corev1.PodList
+	if err := d.Reader.List(ctx, &pods,
+		client.InNamespace(d.Namespace),
+		client.MatchingLabelsSelector{Selector: d.Selector},
+	); err != nil {
+		return Inventory{}, fmt.Errorf("list fabric-router pods: %w", err)
+	}
+	certs, err := d.certPods(ctx)
+	if err != nil {
+		return Inventory{}, err
+	}
+	inv := Inventory{ID: uuid.NewString(), CapturedAt: now, ResourceVersion: pods.ResourceVersion}
+	type candidate struct {
+		node    Node
+		created time.Time
+	}
+	byNode := map[string][]candidate{}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Spec.NodeName == "" {
+			inv.Unscheduled++
+			continue
+		}
+		n := Node{Name: pod.Spec.NodeName, Pod: pod.Name, PodUID: string(pod.UID), HostIP: pod.Status.HostIP}
+		n.IdentityPod, n.IdentityPods = pod.Name, []string{pod.Name}
+		if certs != nil {
+			n.IdentityPods, n.IdentityPod = certs[n.Name], ""
+			if len(n.IdentityPods) > 0 {
+				n.IdentityPod = n.IdentityPods[0]
+			}
+		}
+		port, ok := sidecarPort(pod)
+		switch {
+		case !ok:
+			n.OmittedReason = OmitNoSidecar
+		default:
+			n.Port, n.OmittedReason = port, omitReason(pod)
+			if n.OmittedReason == "" && n.IdentityPod == "" {
+				n.OmittedReason = OmitNoCertificate
+			}
+		}
+		n.Selected = n.OmittedReason == ""
+		byNode[n.Name] = append(byNode[n.Name], candidate{node: n, created: pod.CreationTimestamp.Time})
+	}
+	if len(byNode) > MaxInventoryRouters {
+		return Inventory{}, errcode.Status(errcode.InventoryTooLarge,
+			fmt.Sprintf("the cell has %d routers, more than the %d a snapshot may list", len(byNode), MaxInventoryRouters))
+	}
+	for _, cs := range byNode {
+		sort.Slice(cs, func(i, j int) bool {
+			if cs[i].node.Selected != cs[j].node.Selected {
+				return cs[i].node.Selected
+			}
+			if !cs[i].created.Equal(cs[j].created) {
+				return cs[i].created.After(cs[j].created)
+			}
+			return cs[i].node.Pod < cs[j].node.Pod
+		})
+		inv.Routers = append(inv.Routers, cs[0].node)
+	}
+	sort.Slice(inv.Routers, func(i, j int) bool { return inv.Routers[i].Name < inv.Routers[j].Name })
+
+	if len(requested) > 0 {
+		want := make(map[string]bool, len(requested))
+		for _, name := range requested {
+			want[name] = true
+		}
+		for i := range inv.Routers {
+			r := &inv.Routers[i]
+			if want[r.Name] {
+				delete(want, r.Name)
+				continue
+			}
+			r.Selected, r.OmittedReason = false, OmitNotRequested
+		}
+		if len(want) > 0 {
+			return Inventory{}, errcode.Status(errcode.InvalidQuery, "a selected node is not in the cell's router inventory")
+		}
+	}
+	selected := 0
+	for i := range inv.Routers {
+		r := &inv.Routers[i]
+		if !r.Selected {
+			continue
+		}
+		if selected >= maxSelected {
+			r.Selected, r.OmittedReason = false, OmitNodeBudget
+			continue
+		}
+		selected++
+	}
+	return inv, nil
 }

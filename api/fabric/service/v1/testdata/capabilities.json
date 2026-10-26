@@ -1,0 +1,22 @@
+{
+  "cell": "example-cell",
+  "apiMajor": 1,
+  "enabled": false,
+  "contractRevision": "0123abcd",
+  "policyRevision": "sha256:5e1c0f2b6ad5e6c7b0f9a9d1c0c1f5d1e8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3",
+  "operations": [
+    {"type": "QUERY_TYPE_ROUTE_LOOKUP", "addressFamilies": ["ADDRESS_FAMILY_IPV4", "ADDRESS_FAMILY_IPV6"]},
+    {"type": "QUERY_TYPE_BGP_SUMMARY", "addressFamilies": ["ADDRESS_FAMILY_IPV4", "ADDRESS_FAMILY_IPV6"]},
+    {"type": "QUERY_TYPE_PING", "addressFamilies": ["ADDRESS_FAMILY_IPV4", "ADDRESS_FAMILY_IPV6"]},
+    {"type": "QUERY_TYPE_TRACEROUTE", "addressFamilies": ["ADDRESS_FAMILY_IPV4", "ADDRESS_FAMILY_IPV6"]}
+  ],
+  "features": ["router-outcomes", "terminal-coverage"],
+  "limits": {
+    "maxRequestLifetime": "120s",
+    "maxNodeExecution": "30s",
+    "maxSelectedRouters": 32,
+    "maxInventoryRouters": 256,
+    "maxBudgets": {"maxResponseBytes": 131072, "maxPrefixes": 100, "maxPathsPerPrefix": 8, "maxCommunitiesPerPath": 64}
+  },
+  "generatedAt": "2026-10-24T12:00:00Z"
+}

@@ -27,6 +27,7 @@ import (
 	v1 "go.datum.net/galactic/api/fabric/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
@@ -99,7 +100,20 @@ type GetCapabilitiesResponse struct {
 	Cell     string                 `protobuf:"bytes,1,opt,name=cell,proto3" json:"cell,omitempty"`
 	ApiMajor uint32                 `protobuf:"varint,2,opt,name=api_major,json=apiMajor,proto3" json:"api_major,omitempty"`
 	// enabled reports whether the cell executes service diagnostics.
-	Enabled       bool `protobuf:"varint,3,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	Enabled bool `protobuf:"varint,3,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// contract_revision is the commit the gateway was built from.
+	ContractRevision string `protobuf:"bytes,4,opt,name=contract_revision,json=contractRevision,proto3" json:"contract_revision,omitempty"`
+	// policy_revision is a digest of every other policy field below; it
+	// changes whenever the effective policy does.
+	PolicyRevision string `protobuf:"bytes,5,opt,name=policy_revision,json=policyRevision,proto3" json:"policy_revision,omitempty"`
+	// operations lists the diagnostics and address families the service may
+	// request.
+	Operations []*Operation `protobuf:"bytes,6,rep,name=operations,proto3" json:"operations,omitempty"`
+	// features names the capabilities a request may list in
+	// required_features.
+	Features      []string               `protobuf:"bytes,7,rep,name=features,proto3" json:"features,omitempty"`
+	Limits        *Limits                `protobuf:"bytes,8,opt,name=limits,proto3" json:"limits,omitempty"`
+	GeneratedAt   *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=generated_at,json=generatedAt,proto3" json:"generated_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -155,6 +169,184 @@ func (x *GetCapabilitiesResponse) GetEnabled() bool {
 	return false
 }
 
+func (x *GetCapabilitiesResponse) GetContractRevision() string {
+	if x != nil {
+		return x.ContractRevision
+	}
+	return ""
+}
+
+func (x *GetCapabilitiesResponse) GetPolicyRevision() string {
+	if x != nil {
+		return x.PolicyRevision
+	}
+	return ""
+}
+
+func (x *GetCapabilitiesResponse) GetOperations() []*Operation {
+	if x != nil {
+		return x.Operations
+	}
+	return nil
+}
+
+func (x *GetCapabilitiesResponse) GetFeatures() []string {
+	if x != nil {
+		return x.Features
+	}
+	return nil
+}
+
+func (x *GetCapabilitiesResponse) GetLimits() *Limits {
+	if x != nil {
+		return x.Limits
+	}
+	return nil
+}
+
+func (x *GetCapabilitiesResponse) GetGeneratedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.GeneratedAt
+	}
+	return nil
+}
+
+// Operation is one diagnostic and the address families it serves.
+type Operation struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Type            v1.QueryType           `protobuf:"varint,1,opt,name=type,proto3,enum=fabric.v1.QueryType" json:"type,omitempty"`
+	AddressFamilies []v1.AddressFamily     `protobuf:"varint,2,rep,packed,name=address_families,json=addressFamilies,proto3,enum=fabric.v1.AddressFamily" json:"address_families,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *Operation) Reset() {
+	*x = Operation{}
+	mi := &file_fabric_service_v1_service_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Operation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Operation) ProtoMessage() {}
+
+func (x *Operation) ProtoReflect() protoreflect.Message {
+	mi := &file_fabric_service_v1_service_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Operation.ProtoReflect.Descriptor instead.
+func (*Operation) Descriptor() ([]byte, []int) {
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *Operation) GetType() v1.QueryType {
+	if x != nil {
+		return x.Type
+	}
+	return v1.QueryType(0)
+}
+
+func (x *Operation) GetAddressFamilies() []v1.AddressFamily {
+	if x != nil {
+		return x.AddressFamilies
+	}
+	return nil
+}
+
+// Limits are the bounds the gateway applies to every service request.
+type Limits struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// max_request_lifetime bounds expires_at, measured from receipt.
+	MaxRequestLifetime *durationpb.Duration `protobuf:"bytes,1,opt,name=max_request_lifetime,json=maxRequestLifetime,proto3" json:"max_request_lifetime,omitempty"`
+	// max_node_execution bounds one router's queueing and execution.
+	MaxNodeExecution *durationpb.Duration `protobuf:"bytes,2,opt,name=max_node_execution,json=maxNodeExecution,proto3" json:"max_node_execution,omitempty"`
+	// max_selected_routers bounds the routers one request executes on.
+	MaxSelectedRouters uint32 `protobuf:"varint,3,opt,name=max_selected_routers,json=maxSelectedRouters,proto3" json:"max_selected_routers,omitempty"`
+	// max_inventory_routers bounds the routers one snapshot may list; a
+	// larger inventory fails with InventoryTooLarge.
+	MaxInventoryRouters uint32 `protobuf:"varint,4,opt,name=max_inventory_routers,json=maxInventoryRouters,proto3" json:"max_inventory_routers,omitempty"`
+	// max_budgets holds the largest value each request budget may take.
+	MaxBudgets    *v1.Budgets `protobuf:"bytes,5,opt,name=max_budgets,json=maxBudgets,proto3" json:"max_budgets,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Limits) Reset() {
+	*x = Limits{}
+	mi := &file_fabric_service_v1_service_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Limits) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Limits) ProtoMessage() {}
+
+func (x *Limits) ProtoReflect() protoreflect.Message {
+	mi := &file_fabric_service_v1_service_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Limits.ProtoReflect.Descriptor instead.
+func (*Limits) Descriptor() ([]byte, []int) {
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *Limits) GetMaxRequestLifetime() *durationpb.Duration {
+	if x != nil {
+		return x.MaxRequestLifetime
+	}
+	return nil
+}
+
+func (x *Limits) GetMaxNodeExecution() *durationpb.Duration {
+	if x != nil {
+		return x.MaxNodeExecution
+	}
+	return nil
+}
+
+func (x *Limits) GetMaxSelectedRouters() uint32 {
+	if x != nil {
+		return x.MaxSelectedRouters
+	}
+	return 0
+}
+
+func (x *Limits) GetMaxInventoryRouters() uint32 {
+	if x != nil {
+		return x.MaxInventoryRouters
+	}
+	return 0
+}
+
+func (x *Limits) GetMaxBudgets() *v1.Budgets {
+	if x != nil {
+		return x.MaxBudgets
+	}
+	return nil
+}
+
 type RunDiagnosticRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// api_major must be 1.
@@ -184,7 +376,7 @@ type RunDiagnosticRequest struct {
 
 func (x *RunDiagnosticRequest) Reset() {
 	*x = RunDiagnosticRequest{}
-	mi := &file_fabric_service_v1_service_proto_msgTypes[2]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -196,7 +388,7 @@ func (x *RunDiagnosticRequest) String() string {
 func (*RunDiagnosticRequest) ProtoMessage() {}
 
 func (x *RunDiagnosticRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_service_v1_service_proto_msgTypes[2]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -209,7 +401,7 @@ func (x *RunDiagnosticRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunDiagnosticRequest.ProtoReflect.Descriptor instead.
 func (*RunDiagnosticRequest) Descriptor() ([]byte, []int) {
-	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{2}
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *RunDiagnosticRequest) GetApiMajor() uint32 {
@@ -275,19 +467,28 @@ func (x *RunDiagnosticRequest) GetRequiredFeatures() []string {
 	return nil
 }
 
-// DiagnosticEvent is one event of a RunDiagnostic stream.
+// DiagnosticEvent is one event of a RunDiagnostic stream. A stream holds one
+// snapshot first, then one outcome per selected router in completion order,
+// then at most one complete. A stream that ends without complete was not
+// fully delivered, whatever its gRPC status.
 type DiagnosticEvent struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	// sequence is consecutive, starting at 1.
-	Sequence      uint64 `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Sequence uint64 `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	// Types that are valid to be assigned to Event:
+	//
+	//	*DiagnosticEvent_Snapshot
+	//	*DiagnosticEvent_Outcome
+	//	*DiagnosticEvent_Complete
+	Event         isDiagnosticEvent_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DiagnosticEvent) Reset() {
 	*x = DiagnosticEvent{}
-	mi := &file_fabric_service_v1_service_proto_msgTypes[3]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -299,7 +500,7 @@ func (x *DiagnosticEvent) String() string {
 func (*DiagnosticEvent) ProtoMessage() {}
 
 func (x *DiagnosticEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_fabric_service_v1_service_proto_msgTypes[3]
+	mi := &file_fabric_service_v1_service_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -312,7 +513,7 @@ func (x *DiagnosticEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiagnosticEvent.ProtoReflect.Descriptor instead.
 func (*DiagnosticEvent) Descriptor() ([]byte, []int) {
-	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{3}
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *DiagnosticEvent) GetRequestId() string {
@@ -329,18 +530,519 @@ func (x *DiagnosticEvent) GetSequence() uint64 {
 	return 0
 }
 
+func (x *DiagnosticEvent) GetEvent() isDiagnosticEvent_Event {
+	if x != nil {
+		return x.Event
+	}
+	return nil
+}
+
+func (x *DiagnosticEvent) GetSnapshot() *Snapshot {
+	if x != nil {
+		if x, ok := x.Event.(*DiagnosticEvent_Snapshot); ok {
+			return x.Snapshot
+		}
+	}
+	return nil
+}
+
+func (x *DiagnosticEvent) GetOutcome() *RouterOutcome {
+	if x != nil {
+		if x, ok := x.Event.(*DiagnosticEvent_Outcome); ok {
+			return x.Outcome
+		}
+	}
+	return nil
+}
+
+func (x *DiagnosticEvent) GetComplete() *Complete {
+	if x != nil {
+		if x, ok := x.Event.(*DiagnosticEvent_Complete); ok {
+			return x.Complete
+		}
+	}
+	return nil
+}
+
+type isDiagnosticEvent_Event interface {
+	isDiagnosticEvent_Event()
+}
+
+type DiagnosticEvent_Snapshot struct {
+	Snapshot *Snapshot `protobuf:"bytes,3,opt,name=snapshot,proto3,oneof"`
+}
+
+type DiagnosticEvent_Outcome struct {
+	Outcome *RouterOutcome `protobuf:"bytes,4,opt,name=outcome,proto3,oneof"`
+}
+
+type DiagnosticEvent_Complete struct {
+	Complete *Complete `protobuf:"bytes,5,opt,name=complete,proto3,oneof"`
+}
+
+func (*DiagnosticEvent_Snapshot) isDiagnosticEvent_Event() {}
+
+func (*DiagnosticEvent_Outcome) isDiagnosticEvent_Event() {}
+
+func (*DiagnosticEvent_Complete) isDiagnosticEvent_Event() {}
+
+// Snapshot is the fixed router membership a request runs against, taken
+// once before any router executes.
+type Snapshot struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	SnapshotId string                 `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	CapturedAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=captured_at,json=capturedAt,proto3" json:"captured_at,omitempty"`
+	// resource_version is the fabric-router pod list's resourceVersion.
+	ResourceVersion string `protobuf:"bytes,3,opt,name=resource_version,json=resourceVersion,proto3" json:"resource_version,omitempty"`
+	// unscheduled_pod_count counts fabric-router pods with no node, which
+	// have no router identity.
+	UnscheduledPodCount uint32 `protobuf:"varint,4,opt,name=unscheduled_pod_count,json=unscheduledPodCount,proto3" json:"unscheduled_pod_count,omitempty"`
+	// routers lists every router of the inventory, one per node, by name.
+	Routers       []*SnapshotRouter `protobuf:"bytes,5,rep,name=routers,proto3" json:"routers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Snapshot) Reset() {
+	*x = Snapshot{}
+	mi := &file_fabric_service_v1_service_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Snapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Snapshot) ProtoMessage() {}
+
+func (x *Snapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_fabric_service_v1_service_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Snapshot.ProtoReflect.Descriptor instead.
+func (*Snapshot) Descriptor() ([]byte, []int) {
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *Snapshot) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+func (x *Snapshot) GetCapturedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CapturedAt
+	}
+	return nil
+}
+
+func (x *Snapshot) GetResourceVersion() string {
+	if x != nil {
+		return x.ResourceVersion
+	}
+	return ""
+}
+
+func (x *Snapshot) GetUnscheduledPodCount() uint32 {
+	if x != nil {
+		return x.UnscheduledPodCount
+	}
+	return 0
+}
+
+func (x *Snapshot) GetRouters() []*SnapshotRouter {
+	if x != nil {
+		return x.Routers
+	}
+	return nil
+}
+
+type SnapshotRouter struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Node  string                 `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
+	// pod_uid is the fabric-router pod a selected router runs on; empty for
+	// an omitted router.
+	PodUid   string `protobuf:"bytes,2,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	Selected bool   `protobuf:"varint,3,opt,name=selected,proto3" json:"selected,omitempty"`
+	// omitted_reason says why an omitted router does not run: NotRequested,
+	// NoSidecar, PodTerminating, PodNotRunning, SidecarNotRunning, NoHostIP,
+	// NoCertificatePod or NodeBudget.
+	OmittedReason string `protobuf:"bytes,4,opt,name=omitted_reason,json=omittedReason,proto3" json:"omitted_reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotRouter) Reset() {
+	*x = SnapshotRouter{}
+	mi := &file_fabric_service_v1_service_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotRouter) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotRouter) ProtoMessage() {}
+
+func (x *SnapshotRouter) ProtoReflect() protoreflect.Message {
+	mi := &file_fabric_service_v1_service_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotRouter.ProtoReflect.Descriptor instead.
+func (*SnapshotRouter) Descriptor() ([]byte, []int) {
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *SnapshotRouter) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+func (x *SnapshotRouter) GetPodUid() string {
+	if x != nil {
+		return x.PodUid
+	}
+	return ""
+}
+
+func (x *SnapshotRouter) GetSelected() bool {
+	if x != nil {
+		return x.Selected
+	}
+	return false
+}
+
+func (x *SnapshotRouter) GetOmittedReason() string {
+	if x != nil {
+		return x.OmittedReason
+	}
+	return ""
+}
+
+// RouterOutcome is one selected router's result: an observation or a typed
+// failure. Packet loss, unanswered hops and an empty route lookup are
+// observations.
+type RouterOutcome struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Node        string                 `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
+	PodUid      string                 `protobuf:"bytes,2,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	CompletedAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
+	// Types that are valid to be assigned to Result:
+	//
+	//	*RouterOutcome_Observation
+	//	*RouterOutcome_Failure
+	Result        isRouterOutcome_Result `protobuf_oneof:"result"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RouterOutcome) Reset() {
+	*x = RouterOutcome{}
+	mi := &file_fabric_service_v1_service_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouterOutcome) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouterOutcome) ProtoMessage() {}
+
+func (x *RouterOutcome) ProtoReflect() protoreflect.Message {
+	mi := &file_fabric_service_v1_service_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouterOutcome.ProtoReflect.Descriptor instead.
+func (*RouterOutcome) Descriptor() ([]byte, []int) {
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *RouterOutcome) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+func (x *RouterOutcome) GetPodUid() string {
+	if x != nil {
+		return x.PodUid
+	}
+	return ""
+}
+
+func (x *RouterOutcome) GetCompletedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CompletedAt
+	}
+	return nil
+}
+
+func (x *RouterOutcome) GetResult() isRouterOutcome_Result {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+func (x *RouterOutcome) GetObservation() *v1.Observation {
+	if x != nil {
+		if x, ok := x.Result.(*RouterOutcome_Observation); ok {
+			return x.Observation
+		}
+	}
+	return nil
+}
+
+func (x *RouterOutcome) GetFailure() *Failure {
+	if x != nil {
+		if x, ok := x.Result.(*RouterOutcome_Failure); ok {
+			return x.Failure
+		}
+	}
+	return nil
+}
+
+type isRouterOutcome_Result interface {
+	isRouterOutcome_Result()
+}
+
+type RouterOutcome_Observation struct {
+	Observation *v1.Observation `protobuf:"bytes,4,opt,name=observation,proto3,oneof"`
+}
+
+type RouterOutcome_Failure struct {
+	Failure *Failure `protobuf:"bytes,5,opt,name=failure,proto3,oneof"`
+}
+
+func (*RouterOutcome_Observation) isRouterOutcome_Result() {}
+
+func (*RouterOutcome_Failure) isRouterOutcome_Result() {}
+
+// Failure is a typed router failure. An unknown reason is a backend
+// failure, never packet loss.
+type Failure struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// reason is a fabric-api error code, e.g. NodeUnreachable or Timeout.
+	Reason string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	// message is a sanitized description of at most 256 bytes.
+	Message       string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Failure) Reset() {
+	*x = Failure{}
+	mi := &file_fabric_service_v1_service_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Failure) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Failure) ProtoMessage() {}
+
+func (x *Failure) ProtoReflect() protoreflect.Message {
+	mi := &file_fabric_service_v1_service_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Failure.ProtoReflect.Descriptor instead.
+func (*Failure) Descriptor() ([]byte, []int) {
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *Failure) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *Failure) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+// Complete is a stream's terminal coverage. expected equals successful +
+// failed + omitted, and successful + failed is the number of selected
+// routers in the snapshot.
+type Complete struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	SnapshotId string                 `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	FinishedAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	Expected   uint32                 `protobuf:"varint,3,opt,name=expected,proto3" json:"expected,omitempty"`
+	Successful uint32                 `protobuf:"varint,4,opt,name=successful,proto3" json:"successful,omitempty"`
+	Failed     uint32                 `protobuf:"varint,5,opt,name=failed,proto3" json:"failed,omitempty"`
+	Omitted    uint32                 `protobuf:"varint,6,opt,name=omitted,proto3" json:"omitted,omitempty"`
+	// truncated_routers counts successful observations whose payload is
+	// incomplete.
+	TruncatedRouters uint32 `protobuf:"varint,7,opt,name=truncated_routers,json=truncatedRouters,proto3" json:"truncated_routers,omitempty"`
+	// reason is Succeeded, PartialResults, ExecutionFailed, NoNodesAvailable,
+	// DeadlineExceeded, Cancelled, OwnershipLost or OutputLimitExceeded.
+	Reason        string `protobuf:"bytes,8,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Complete) Reset() {
+	*x = Complete{}
+	mi := &file_fabric_service_v1_service_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Complete) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Complete) ProtoMessage() {}
+
+func (x *Complete) ProtoReflect() protoreflect.Message {
+	mi := &file_fabric_service_v1_service_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Complete.ProtoReflect.Descriptor instead.
+func (*Complete) Descriptor() ([]byte, []int) {
+	return file_fabric_service_v1_service_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *Complete) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+func (x *Complete) GetFinishedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.FinishedAt
+	}
+	return nil
+}
+
+func (x *Complete) GetExpected() uint32 {
+	if x != nil {
+		return x.Expected
+	}
+	return 0
+}
+
+func (x *Complete) GetSuccessful() uint32 {
+	if x != nil {
+		return x.Successful
+	}
+	return 0
+}
+
+func (x *Complete) GetFailed() uint32 {
+	if x != nil {
+		return x.Failed
+	}
+	return 0
+}
+
+func (x *Complete) GetOmitted() uint32 {
+	if x != nil {
+		return x.Omitted
+	}
+	return 0
+}
+
+func (x *Complete) GetTruncatedRouters() uint32 {
+	if x != nil {
+		return x.TruncatedRouters
+	}
+	return 0
+}
+
+func (x *Complete) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 var File_fabric_service_v1_service_proto protoreflect.FileDescriptor
 
 const file_fabric_service_v1_service_proto_rawDesc = "" +
 	"\n" +
-	"\x1ffabric/service/v1/service.proto\x12\x11fabric.service.v1\x1a\x16fabric/v1/fabric.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"I\n" +
+	"\x1ffabric/service/v1/service.proto\x12\x11fabric.service.v1\x1a\x16fabric/v1/fabric.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"I\n" +
 	"\x16GetCapabilitiesRequest\x12\x12\n" +
 	"\x04cell\x18\x01 \x01(\tR\x04cell\x12\x1b\n" +
-	"\tapi_major\x18\x02 \x01(\rR\bapiMajor\"d\n" +
+	"\tapi_major\x18\x02 \x01(\rR\bapiMajor\"\x86\x03\n" +
 	"\x17GetCapabilitiesResponse\x12\x12\n" +
 	"\x04cell\x18\x01 \x01(\tR\x04cell\x12\x1b\n" +
 	"\tapi_major\x18\x02 \x01(\rR\bapiMajor\x12\x18\n" +
-	"\aenabled\x18\x03 \x01(\bR\aenabled\"\xd9\x02\n" +
+	"\aenabled\x18\x03 \x01(\bR\aenabled\x12+\n" +
+	"\x11contract_revision\x18\x04 \x01(\tR\x10contractRevision\x12'\n" +
+	"\x0fpolicy_revision\x18\x05 \x01(\tR\x0epolicyRevision\x12<\n" +
+	"\n" +
+	"operations\x18\x06 \x03(\v2\x1c.fabric.service.v1.OperationR\n" +
+	"operations\x12\x1a\n" +
+	"\bfeatures\x18\a \x03(\tR\bfeatures\x121\n" +
+	"\x06limits\x18\b \x01(\v2\x19.fabric.service.v1.LimitsR\x06limits\x12=\n" +
+	"\fgenerated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\vgeneratedAt\"z\n" +
+	"\tOperation\x12(\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x14.fabric.v1.QueryTypeR\x04type\x12C\n" +
+	"\x10address_families\x18\x02 \x03(\x0e2\x18.fabric.v1.AddressFamilyR\x0faddressFamilies\"\xb9\x02\n" +
+	"\x06Limits\x12K\n" +
+	"\x14max_request_lifetime\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\x12maxRequestLifetime\x12G\n" +
+	"\x12max_node_execution\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x10maxNodeExecution\x120\n" +
+	"\x14max_selected_routers\x18\x03 \x01(\rR\x12maxSelectedRouters\x122\n" +
+	"\x15max_inventory_routers\x18\x04 \x01(\rR\x13maxInventoryRouters\x123\n" +
+	"\vmax_budgets\x18\x05 \x01(\v2\x12.fabric.v1.BudgetsR\n" +
+	"maxBudgets\"\xd9\x02\n" +
 	"\x14RunDiagnosticRequest\x12\x1b\n" +
 	"\tapi_major\x18\x01 \x01(\rR\bapiMajor\x12\x12\n" +
 	"\x04cell\x18\x02 \x01(\tR\x04cell\x12\x1d\n" +
@@ -353,11 +1055,51 @@ const file_fabric_service_v1_service_proto_rawDesc = "" +
 	"\x05query\x18\x06 \x01(\v2\x10.fabric.v1.QueryR\x05query\x12\x14\n" +
 	"\x05nodes\x18\a \x03(\tR\x05nodes\x12,\n" +
 	"\abudgets\x18\b \x01(\v2\x12.fabric.v1.BudgetsR\abudgets\x12+\n" +
-	"\x11required_features\x18\t \x03(\tR\x10requiredFeatures\"L\n" +
+	"\x11required_features\x18\t \x03(\tR\x10requiredFeatures\"\x89\x02\n" +
 	"\x0fDiagnosticEvent\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1a\n" +
-	"\bsequence\x18\x02 \x01(\x04R\bsequence2\xdf\x01\n" +
+	"\bsequence\x18\x02 \x01(\x04R\bsequence\x129\n" +
+	"\bsnapshot\x18\x03 \x01(\v2\x1b.fabric.service.v1.SnapshotH\x00R\bsnapshot\x12<\n" +
+	"\aoutcome\x18\x04 \x01(\v2 .fabric.service.v1.RouterOutcomeH\x00R\aoutcome\x129\n" +
+	"\bcomplete\x18\x05 \x01(\v2\x1b.fabric.service.v1.CompleteH\x00R\bcompleteB\a\n" +
+	"\x05event\"\x84\x02\n" +
+	"\bSnapshot\x12\x1f\n" +
+	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
+	"snapshotId\x12;\n" +
+	"\vcaptured_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"capturedAt\x12)\n" +
+	"\x10resource_version\x18\x03 \x01(\tR\x0fresourceVersion\x122\n" +
+	"\x15unscheduled_pod_count\x18\x04 \x01(\rR\x13unscheduledPodCount\x12;\n" +
+	"\arouters\x18\x05 \x03(\v2!.fabric.service.v1.SnapshotRouterR\arouters\"\x80\x01\n" +
+	"\x0eSnapshotRouter\x12\x12\n" +
+	"\x04node\x18\x01 \x01(\tR\x04node\x12\x17\n" +
+	"\apod_uid\x18\x02 \x01(\tR\x06podUid\x12\x1a\n" +
+	"\bselected\x18\x03 \x01(\bR\bselected\x12%\n" +
+	"\x0eomitted_reason\x18\x04 \x01(\tR\romittedReason\"\xf9\x01\n" +
+	"\rRouterOutcome\x12\x12\n" +
+	"\x04node\x18\x01 \x01(\tR\x04node\x12\x17\n" +
+	"\apod_uid\x18\x02 \x01(\tR\x06podUid\x12=\n" +
+	"\fcompleted_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAt\x12:\n" +
+	"\vobservation\x18\x04 \x01(\v2\x16.fabric.v1.ObservationH\x00R\vobservation\x126\n" +
+	"\afailure\x18\x05 \x01(\v2\x1a.fabric.service.v1.FailureH\x00R\afailureB\b\n" +
+	"\x06result\";\n" +
+	"\aFailure\x12\x16\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\x9b\x02\n" +
+	"\bComplete\x12\x1f\n" +
+	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
+	"snapshotId\x12;\n" +
+	"\vfinished_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"finishedAt\x12\x1a\n" +
+	"\bexpected\x18\x03 \x01(\rR\bexpected\x12\x1e\n" +
+	"\n" +
+	"successful\x18\x04 \x01(\rR\n" +
+	"successful\x12\x16\n" +
+	"\x06failed\x18\x05 \x01(\rR\x06failed\x12\x18\n" +
+	"\aomitted\x18\x06 \x01(\rR\aomitted\x12+\n" +
+	"\x11truncated_routers\x18\a \x01(\rR\x10truncatedRouters\x12\x16\n" +
+	"\x06reason\x18\b \x01(\tR\x06reason2\xdf\x01\n" +
 	"\x13LookingGlassService\x12h\n" +
 	"\x0fGetCapabilities\x12).fabric.service.v1.GetCapabilitiesRequest\x1a*.fabric.service.v1.GetCapabilitiesResponse\x12^\n" +
 	"\rRunDiagnostic\x12'.fabric.service.v1.RunDiagnosticRequest\x1a\".fabric.service.v1.DiagnosticEvent0\x01B7Z5go.datum.net/galactic/api/fabric/service/v1;servicev1b\x06proto3"
@@ -374,29 +1116,57 @@ func file_fabric_service_v1_service_proto_rawDescGZIP() []byte {
 	return file_fabric_service_v1_service_proto_rawDescData
 }
 
-var file_fabric_service_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_fabric_service_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_fabric_service_v1_service_proto_goTypes = []any{
 	(*GetCapabilitiesRequest)(nil),  // 0: fabric.service.v1.GetCapabilitiesRequest
 	(*GetCapabilitiesResponse)(nil), // 1: fabric.service.v1.GetCapabilitiesResponse
-	(*RunDiagnosticRequest)(nil),    // 2: fabric.service.v1.RunDiagnosticRequest
-	(*DiagnosticEvent)(nil),         // 3: fabric.service.v1.DiagnosticEvent
-	(*timestamppb.Timestamp)(nil),   // 4: google.protobuf.Timestamp
-	(*v1.Query)(nil),                // 5: fabric.v1.Query
-	(*v1.Budgets)(nil),              // 6: fabric.v1.Budgets
+	(*Operation)(nil),               // 2: fabric.service.v1.Operation
+	(*Limits)(nil),                  // 3: fabric.service.v1.Limits
+	(*RunDiagnosticRequest)(nil),    // 4: fabric.service.v1.RunDiagnosticRequest
+	(*DiagnosticEvent)(nil),         // 5: fabric.service.v1.DiagnosticEvent
+	(*Snapshot)(nil),                // 6: fabric.service.v1.Snapshot
+	(*SnapshotRouter)(nil),          // 7: fabric.service.v1.SnapshotRouter
+	(*RouterOutcome)(nil),           // 8: fabric.service.v1.RouterOutcome
+	(*Failure)(nil),                 // 9: fabric.service.v1.Failure
+	(*Complete)(nil),                // 10: fabric.service.v1.Complete
+	(*timestamppb.Timestamp)(nil),   // 11: google.protobuf.Timestamp
+	(v1.QueryType)(0),               // 12: fabric.v1.QueryType
+	(v1.AddressFamily)(0),           // 13: fabric.v1.AddressFamily
+	(*durationpb.Duration)(nil),     // 14: google.protobuf.Duration
+	(*v1.Budgets)(nil),              // 15: fabric.v1.Budgets
+	(*v1.Query)(nil),                // 16: fabric.v1.Query
+	(*v1.Observation)(nil),          // 17: fabric.v1.Observation
 }
 var file_fabric_service_v1_service_proto_depIdxs = []int32{
-	4, // 0: fabric.service.v1.RunDiagnosticRequest.expires_at:type_name -> google.protobuf.Timestamp
-	5, // 1: fabric.service.v1.RunDiagnosticRequest.query:type_name -> fabric.v1.Query
-	6, // 2: fabric.service.v1.RunDiagnosticRequest.budgets:type_name -> fabric.v1.Budgets
-	0, // 3: fabric.service.v1.LookingGlassService.GetCapabilities:input_type -> fabric.service.v1.GetCapabilitiesRequest
-	2, // 4: fabric.service.v1.LookingGlassService.RunDiagnostic:input_type -> fabric.service.v1.RunDiagnosticRequest
-	1, // 5: fabric.service.v1.LookingGlassService.GetCapabilities:output_type -> fabric.service.v1.GetCapabilitiesResponse
-	3, // 6: fabric.service.v1.LookingGlassService.RunDiagnostic:output_type -> fabric.service.v1.DiagnosticEvent
-	5, // [5:7] is the sub-list for method output_type
-	3, // [3:5] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	2,  // 0: fabric.service.v1.GetCapabilitiesResponse.operations:type_name -> fabric.service.v1.Operation
+	3,  // 1: fabric.service.v1.GetCapabilitiesResponse.limits:type_name -> fabric.service.v1.Limits
+	11, // 2: fabric.service.v1.GetCapabilitiesResponse.generated_at:type_name -> google.protobuf.Timestamp
+	12, // 3: fabric.service.v1.Operation.type:type_name -> fabric.v1.QueryType
+	13, // 4: fabric.service.v1.Operation.address_families:type_name -> fabric.v1.AddressFamily
+	14, // 5: fabric.service.v1.Limits.max_request_lifetime:type_name -> google.protobuf.Duration
+	14, // 6: fabric.service.v1.Limits.max_node_execution:type_name -> google.protobuf.Duration
+	15, // 7: fabric.service.v1.Limits.max_budgets:type_name -> fabric.v1.Budgets
+	11, // 8: fabric.service.v1.RunDiagnosticRequest.expires_at:type_name -> google.protobuf.Timestamp
+	16, // 9: fabric.service.v1.RunDiagnosticRequest.query:type_name -> fabric.v1.Query
+	15, // 10: fabric.service.v1.RunDiagnosticRequest.budgets:type_name -> fabric.v1.Budgets
+	6,  // 11: fabric.service.v1.DiagnosticEvent.snapshot:type_name -> fabric.service.v1.Snapshot
+	8,  // 12: fabric.service.v1.DiagnosticEvent.outcome:type_name -> fabric.service.v1.RouterOutcome
+	10, // 13: fabric.service.v1.DiagnosticEvent.complete:type_name -> fabric.service.v1.Complete
+	11, // 14: fabric.service.v1.Snapshot.captured_at:type_name -> google.protobuf.Timestamp
+	7,  // 15: fabric.service.v1.Snapshot.routers:type_name -> fabric.service.v1.SnapshotRouter
+	11, // 16: fabric.service.v1.RouterOutcome.completed_at:type_name -> google.protobuf.Timestamp
+	17, // 17: fabric.service.v1.RouterOutcome.observation:type_name -> fabric.v1.Observation
+	9,  // 18: fabric.service.v1.RouterOutcome.failure:type_name -> fabric.service.v1.Failure
+	11, // 19: fabric.service.v1.Complete.finished_at:type_name -> google.protobuf.Timestamp
+	0,  // 20: fabric.service.v1.LookingGlassService.GetCapabilities:input_type -> fabric.service.v1.GetCapabilitiesRequest
+	4,  // 21: fabric.service.v1.LookingGlassService.RunDiagnostic:input_type -> fabric.service.v1.RunDiagnosticRequest
+	1,  // 22: fabric.service.v1.LookingGlassService.GetCapabilities:output_type -> fabric.service.v1.GetCapabilitiesResponse
+	5,  // 23: fabric.service.v1.LookingGlassService.RunDiagnostic:output_type -> fabric.service.v1.DiagnosticEvent
+	22, // [22:24] is the sub-list for method output_type
+	20, // [20:22] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_fabric_service_v1_service_proto_init() }
@@ -404,13 +1174,22 @@ func file_fabric_service_v1_service_proto_init() {
 	if File_fabric_service_v1_service_proto != nil {
 		return
 	}
+	file_fabric_service_v1_service_proto_msgTypes[5].OneofWrappers = []any{
+		(*DiagnosticEvent_Snapshot)(nil),
+		(*DiagnosticEvent_Outcome)(nil),
+		(*DiagnosticEvent_Complete)(nil),
+	}
+	file_fabric_service_v1_service_proto_msgTypes[8].OneofWrappers = []any{
+		(*RouterOutcome_Observation)(nil),
+		(*RouterOutcome_Failure)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fabric_service_v1_service_proto_rawDesc), len(file_fabric_service_v1_service_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

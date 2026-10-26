@@ -27,14 +27,20 @@ traceroute hops. Existing operator `FabricGatewayService.Query/ListNodes`, node
 schemas and result meanings. FabricQuery retains its existing persistence and
 resume semantics; customer requests have no such persistence or replay.
 
-Today, `api/fabric/v1/fabric.proto` exposes only unary methods;
-`internal/fabric/gateway/runner.go` collects all outcomes before returning;
-the gateway authenticates service identities and validates their requests
-(#1043) but answers a valid `RunDiagnostic` with `ServiceDisabled`.
+Today, `api/fabric/v1/fabric.proto` exposes only unary methods. The gateway
+authenticates service identities and validates their requests (#1043). With
+`gateway.Service.Enabled` set, the leader streams a request as specified under
+"Stream grammar and coverage": `Discoverer.Inventory` takes the unique-router
+snapshot, `Runner.Stream` hands off each router's outcome as it finishes, and
+the terminal coverage follows (#1044). No deployment sets `Enabled`, so a valid
+`RunDiagnostic` is answered with `ServiceDisabled`, and capabilities do not
+advertise `aggregate-probe-budgets`. Not yet implemented: admission and packet
+budgets with the atomic queue reservation before the snapshot (#1045), and the
+blocked-send bound and Lease-checked ownership (#1046). Until then each router
+job queues on its own and a full queue fails that router with `NodeBusy`.
 The executor has local concurrency/queue limits and project round robin; nodes
-pace packets locally. None establishes the new service or aggregate guarantees.
-The existing discovery returns pod candidates, including duplicates, rather than
-the unique-router accounting specified below.
+pace packets locally. None establishes the aggregate guarantees. Operator and
+FabricQuery discovery still return pod candidates, including duplicates.
 
 ## Service and identity
 
@@ -518,9 +524,11 @@ includes upstream revocation detection or federation latency.
 
 ## Wire examples
 
-The JSON below uses protobuf JSON field spelling for the proposed messages;
-timestamps and UUIDs are illustrative. #1044 must validate these fixtures with
-the generated descriptor and publish the finalized schema alongside them.
+The JSON below uses protobuf JSON field spelling for the `fabric.service.v1`
+messages; timestamps and UUIDs are illustrative. The request and the mixed
+result stream are fixtures in `api/fabric/service/v1/testdata`, beside a
+capabilities response; the release bundle's build decodes them against its own
+descriptor set, and a test decodes them with only the published packages.
 A request received at 12:00:00 with the following expiration has 30 s remaining:
 
 ```json
@@ -531,9 +539,13 @@ A request received at 12:00:00 with the following expiration has 30 s remaining:
   "requestId": "b74e19ee-926f-43dc-b03d-c29550a827ab",
   "expiresAt": "2026-10-24T12:00:30Z",
   "query": {"type": "QUERY_TYPE_PING", "target": "1.1.1.1", "addressFamily": "ADDRESS_FAMILY_IPV4"},
-  "requiredFeatures": ["router-outcomes", "terminal-coverage", "aggregate-probe-budgets"]
+  "requiredFeatures": ["router-outcomes", "terminal-coverage"]
 }
 ```
+
+A request that also lists `aggregate-probe-budgets` is refused with
+`VersionUnsupported` until the gateway enforces aggregate probe budgets (#1045);
+a v1 service is advertised as enabled only once all three features are served.
 
 A mixed result stream (one JSON object per protobuf event):
 
@@ -586,18 +598,22 @@ A pre-execution throttle uses a gRPC status with standard details:
 
 #1044 publishes protobuf sources, their transitive imports, generated Go client
 and server types, and a descriptor set with imports in a versioned Galactic
-release asset named `fabric-service-api-<version>.tar.gz`, containing
-`proto/` sources and imports, `fabric-service-v1.pb` (descriptor set with imports),
-and `README.md` with the matching Go module version and generation instructions.
-Publish `SHA256SUMS` alongside it. Commit generated Go artifacts using
-`task generate:proto`;
-never hand-edit them. Consumers pin a release tag or commit of
-`go.datum.net/galactic`, import only `api/fabric/service/v1`, `api/fabric/v1`, and
-standard protobuf/gRPC packages, or generate another language client from the
-published descriptor/source bundle. No internal canonicalizer, error parser,
-identity helper, or Kubernetes client is required to call the service.
-The release must link these artifacts and their checksums. The source path
-alone is not proof that this publication gate has passed.
+release asset named `fabric-service-api-<version>.tar.gz`, containing `proto/`
+sources and imports, `fabric-service-v1.pb` (descriptor set with imports), and
+`README.md` with the matching Go module version and generation instructions.
+Publish `SHA256SUMS` alongside it. The `publish-service-api` job of
+`.github/workflows/publish.yaml` attaches both to each published release, and CI
+builds and verifies the same bundle on every pull request;
+`task build:service-api VERSION=<version>` builds it locally. The `proto/`
+directory omits the `google/protobuf` well-known types, which every protobuf
+toolchain ships; the descriptor set includes them. Commit generated Go artifacts
+using `task generate:proto`; never hand-edit them. Consumers pin a release tag
+or commit of `go.datum.net/galactic`, import only `api/fabric/service/v1`,
+`api/fabric/v1`, and standard protobuf/gRPC packages, or generate another
+language client from the published descriptor/source bundle. No internal
+canonicalizer, error parser, identity helper, or Kubernetes client is required
+to call the service. The release must link these artifacts and their checksums.
+The source path alone is not proof that this publication gate has passed.
 
 Within major v1, add optional fields/features only; reserve deleted field
 numbers/names and never repurpose enums. Unknown optional fields are ignored;

@@ -231,11 +231,18 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 		Cell:        o.cell,
 		DialOptions: []grpc.DialOption{clientStats()},
 	}
+	// Enabled is deliberately unset: the service authenticates, validates
+	// and reports capabilities, and refuses execution with ServiceDisabled.
 	service := &gateway.Service{
 		Cell:      o.cell,
 		Allowlist: allowlist,
 		Elected:   debug.Elected,
 		Leader:    debug,
+		Discoverer: &gateway.Discoverer{
+			Reader: mgr.GetAPIReader(), Namespace: o.namespace, Selector: sel, CertsSelector: certsSel,
+		},
+		Runner:   runner,
+		Revision: metadata.GitCommit,
 	}
 	gs := gateway.NewServer(creds, allowlist, debug, service, grpc.MaxRecvMsgSize(64<<10), serverStats())
 	debugAddr := fmt.Sprintf(":%d", o.debugPort)

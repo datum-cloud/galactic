@@ -121,6 +121,28 @@ func forwardDiagnostic(ctx context.Context, conn *grpc.ClientConn, env *forwardv
 
 func elected() bool { return true }
 
+// serveFollower serves a gateway replica that does not lead and whose
+// election lease names the replica at leaderAddr, and returns its address.
+func serveFollower(t *testing.T, creds *identity.Credentials, leaderAddr string) string {
+	t.Helper()
+	host, portStr, _ := net.SplitHostPort(leaderAddr)
+	port, _ := strconv.Atoi(portStr)
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	holder := "gw-leader_1234"
+	reader := fake.NewClientBuilder().WithScheme(s).WithObjects(
+		&coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: testLeaseName, Namespace: DefaultNamespace},
+			Spec: coordinationv1.LeaseSpec{HolderIdentity: &holder}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gw-leader", Namespace: DefaultNamespace},
+			Status: corev1.PodStatus{PodIP: host}},
+	).Build()
+	notElected := func() bool { return false }
+	follower := &Debug{Elected: notElected, Reader: reader, Namespace: DefaultNamespace,
+		LeaseName: testLeaseName, PodName: "gw-follower", Port: port, Credentials: creds, Cell: testSite}
+	return serveGateway(t, creds, follower,
+		&Service{Cell: testSite, Allowlist: testAllowlist, Elected: notElected, Leader: follower})
+}
+
 func TestServiceAuthorization(t *testing.T) {
 	dir := t.TempDir()
 	ca := testpki.NewCA(t, testSite)
@@ -339,23 +361,10 @@ func TestServiceForwarding(t *testing.T) {
 	leaderAddr := serveGateway(t, gwCreds, &Debug{Elected: elected},
 		&Service{Cell: testSite, Allowlist: testAllowlist, Elected: elected},
 		grpc.ChainStreamInterceptor(rec.interceptor))
-	host, portStr, _ := net.SplitHostPort(leaderAddr)
-	port, _ := strconv.Atoi(portStr)
-
+	followerAddr := serveFollower(t, gwCreds, leaderAddr)
 	s := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(s)
-	holder := "gw-leader_1234"
-	reader := fake.NewClientBuilder().WithScheme(s).WithObjects(
-		&coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: testLeaseName, Namespace: DefaultNamespace},
-			Spec: coordinationv1.LeaseSpec{HolderIdentity: &holder}},
-		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gw-leader", Namespace: DefaultNamespace},
-			Status: corev1.PodStatus{PodIP: host}},
-	).Build()
 	notElected := func() bool { return false }
-	followerDebug := &Debug{Elected: notElected, Reader: reader, Namespace: DefaultNamespace,
-		LeaseName: testLeaseName, PodName: "gw-follower", Port: port, Credentials: gwCreds, Cell: testSite}
-	followerAddr := serveGateway(t, gwCreds, followerDebug,
-		&Service{Cell: testSite, Allowlist: testAllowlist, Elected: notElected, Leader: followerDebug})
 
 	// A follower authenticates the service, forwards the validated request
 	// once in a typed envelope, and relays the leader's answer.
