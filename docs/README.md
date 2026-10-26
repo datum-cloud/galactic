@@ -91,6 +91,9 @@ data flow, module reference, known constraints):
 - [edge/troubleshooting.md](edge/troubleshooting.md) — finding the lifecycle
   stage a Galactic Edge attachment or route stopped at, the objects involved
   and a prefix's current owner, from conditions, Events and metrics.
+- [edge/conformance.md](edge/conformance.md) — running the Galactic Edge
+  provider conformance suite against the containerlab lab or a cluster of
+  real nodes: what it needs, what it disrupts, and how to read its results.
 
 ## Proposals and exploratory design
 

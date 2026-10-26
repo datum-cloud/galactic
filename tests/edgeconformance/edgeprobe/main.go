@@ -13,6 +13,22 @@
 //	edgeprobe sniff -iface link -port 7777 -duration 30s
 //	    prints each IPv6 UDP datagram to port on link: {"t","src","dst"},
 //	    then {"t","end"} when the capture ends
+//	edgeprobe clock
+//	    prints the node's CLOCK_BOOTTIME and CLOCK_REALTIME, read back to
+//	    back: {"boot","real"}
+//	edgeprobe pid -container id
+//	    prints the host PID of a container's first process: the earliest
+//	    started process whose /proc/<pid>/cgroup names the container ID; it
+//	    needs the host's PID namespace
+//	edgeprobe start -pid pid
+//	    prints when process pid started, on CLOCK_BOOTTIME in nanoseconds,
+//	    to the kernel's 10 ms resolution
+//	edgeprobe clockserve -port 7779 -duration 10s
+//	    answers each UDP datagram to port with its CLOCK_REALTIME
+//	edgeprobe clockping -to [addr]:port -count 20
+//	    asks a clockserve for its CLOCK_REALTIME count times and prints the
+//	    exchange with the shortest round trip: {"offset","rtt"}, offset
+//	    being the server's realtime less this host's at the midpoint
 package main
 
 import (
@@ -33,7 +49,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: edgeprobe send|sniff [flags]")
+		fmt.Fprintln(os.Stderr, "usage: edgeprobe send|sniff|clock|pid|start|clockserve|clockping [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -42,6 +58,16 @@ func main() {
 		err = send(os.Args[2:])
 	case "sniff":
 		err = sniff(os.Args[2:])
+	case "clock":
+		err = clock()
+	case "pid":
+		err = containerPID(os.Args[2:])
+	case "start":
+		err = processStart(os.Args[2:])
+	case "clockserve":
+		err = clockServe(os.Args[2:])
+	case "clockping":
+		err = clockPing(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -168,3 +194,155 @@ func sniff(args []string) error {
 }
 
 func htons(v uint16) uint16 { return v<<8 | v>>8 }
+
+func clock() error {
+	var ts unix.Timespec
+	b := boottime()
+	if err := unix.ClockGettime(unix.CLOCK_REALTIME, &ts); err != nil {
+		return err
+	}
+	return out.Encode(map[string]int64{"boot": b, "real": ts.Nano()})
+}
+
+func containerPID(args []string) error {
+	fs := flag.NewFlagSet("pid", flag.ExitOnError)
+	id := fs.String("container", "", "container ID")
+	_ = fs.Parse(args)
+	if len(*id) < 12 {
+		return fmt.Errorf("container ID %q is too short", *id)
+	}
+	in := func(pid string) bool {
+		b, err := os.ReadFile("/proc/" + pid + "/cgroup")
+		return err == nil && strings.Contains(string(b), *id)
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return err
+	}
+	// The container's first process is the one in its cgroup that started
+	// first: an exec into the container joins the cgroup later.
+	found, first := "", uint64(0)
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil || !in(e.Name()) {
+			continue
+		}
+		start, err := startTicks(e.Name())
+		if err == nil && (found == "" || start < first) {
+			found, first = e.Name(), start
+		}
+	}
+	if found != "" {
+		fmt.Println(found)
+		return nil
+	}
+	return fmt.Errorf("no process of container %s", *id)
+}
+
+// startTicks returns /proc/<pid>/stat's starttime: clock ticks of
+// CLOCK_BOOTTIME at which the process started.
+func startTicks(pid string) (uint64, error) {
+	stat, err := os.ReadFile("/proc/" + pid + "/stat")
+	if err != nil {
+		return 0, err
+	}
+	// Field 22, starttime, counted from the state field after the
+	// parenthesized name, which is field 3.
+	fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
+	if len(fields) < 20 {
+		return 0, fmt.Errorf("short /proc/%s/stat", pid)
+	}
+	return strconv.ParseUint(fields[19], 10, 64)
+}
+
+// userHZ is the kernel's USER_HZ, the unit of starttime, which Linux fixes
+// at 100 on every architecture it exports to user space.
+const userHZ = 100
+
+func processStart(args []string) error {
+	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	pid := fs.Int("pid", 0, "process ID")
+	_ = fs.Parse(args)
+	ticks, err := startTicks(strconv.Itoa(*pid))
+	if err != nil {
+		return err
+	}
+	fmt.Println(ticks * uint64(time.Second/userHZ))
+	return nil
+}
+
+func realtime() int64 {
+	var ts unix.Timespec
+	_ = unix.ClockGettime(unix.CLOCK_REALTIME, &ts)
+	return ts.Nano()
+}
+
+func clockServe(args []string) error {
+	fs := flag.NewFlagSet("clockserve", flag.ExitOnError)
+	port := fs.Int("port", 7779, "UDP port")
+	duration := fs.Duration("duration", 10*time.Second, "how long to answer")
+	_ = fs.Parse(args)
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: *port})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(time.Now().Add(*duration)); err != nil {
+		return err
+	}
+	buf := make([]byte, 64)
+	for {
+		n, from, err := conn.ReadFromUDP(buf)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		reply := binary.BigEndian.AppendUint64(append([]byte(nil), buf[:n]...), uint64(realtime()))
+		if _, err := conn.WriteToUDP(reply, from); err != nil {
+			return err
+		}
+	}
+}
+
+func clockPing(args []string) error {
+	fs := flag.NewFlagSet("clockping", flag.ExitOnError)
+	to := fs.String("to", "", "clockserve [address]:port")
+	count := fs.Int("count", 20, "exchanges")
+	_ = fs.Parse(args)
+	ap, err := netip.ParseAddrPort(*to)
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(ap))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	var best struct{ Offset, RTT int64 }
+	got := false
+	buf := make([]byte, 64)
+	for i := range *count {
+		seq := binary.BigEndian.AppendUint64(nil, uint64(i))
+		sent := realtime()
+		if _, err := conn.Write(seq); err != nil {
+			return err
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			return err
+		}
+		n, err := conn.Read(buf)
+		recv := realtime()
+		if err != nil || n != 16 || binary.BigEndian.Uint64(buf[:8]) != uint64(i) {
+			continue
+		}
+		rtt := recv - sent
+		if !got || rtt < best.RTT {
+			best.Offset, best.RTT, got = int64(binary.BigEndian.Uint64(buf[8:16]))-(sent+rtt/2), rtt, true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !got {
+		return errors.New("no answer")
+	}
+	return out.Encode(map[string]int64{"offset": best.Offset, "rtt": best.RTT})
+}

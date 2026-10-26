@@ -123,6 +123,20 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
+  # The reference edge provider, outside the core: no kustomize bundle entry.
+  publish-galactic-edge-provider-example-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.22.0
+    with:
+      image-name: galactic-edge-provider-example
+      dockerfile-path: examples/edge-provider/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
   # galactic-vrf, the #855 ingress sidecar, deliberately has no entry in
   # publish-kustomize-bundles below: it has no config/galactic-vrf base to
   # stamp an image into yet (the #856 deployment contract is still open).

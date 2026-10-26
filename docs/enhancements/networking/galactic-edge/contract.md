@@ -444,7 +444,7 @@ Each row is an acceptance test. The pass condition is fixed here, before anythin
 | 24  | Drain                                | Drain a service with active traffic                                                                                 | No new routes accepted; forwarding ends ≤ `drainSeconds`; resources released                                                                                                                                          | Lab              | #995         |
 | 25  | Independent provider                 | Run rows 1 to 24 and their lettered rows with a provider built outside the core                                     | All pass with no change to core source, schema, image or deployment                                                                                                                                                   | Talos            | #1000, #1002 |
 
-Results record the commit, the environment, measured timings per row and packet captures for rows 6, 12 and 13. `tests/edgeconformance` runs the rows the containerlab lab can host with the reference provider (`task verify:edge-conformance`).
+Results record the commit, the environment, measured timings per row and packet captures for rows 6, 12 and 13. `tests/edgeconformance` runs the lab and cluster rows with the reference provider, against the containerlab lab or a cluster of real nodes ([the conformance suite](../../../edge/conformance.md)).
 
 ## Open items
 

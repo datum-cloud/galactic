@@ -45,6 +45,11 @@ const (
 	// runs no provider.
 	fixtureTag = "conformance"
 	labIngress = "lab-ingress"
+
+	// systemNamespace holds the core's node agents.
+	systemNamespace = "galactic-system"
+	// appLabel selects the tenants' clients and the fixture's node pods.
+	appLabel = "app"
 )
 
 // edgeTaint tolerates the taint the lab's edge nodes carry for the egress
@@ -130,7 +135,8 @@ func (l *lab) applyOverlay(t *testing.T, name, base, extra string, files map[str
 // ensureNamespace creates a provider namespace.
 func (l *lab) ensureNamespace(t *testing.T, name string) {
 	t.Helper()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name,
+		Labels: map[string]string{"app.kubernetes.io/part-of": "galactic-edge-fixture"}}}
 	if err := l.c.Create(context.Background(), ns); err != nil && !apierrors.IsAlreadyExists(err) {
 		t.Fatal(err)
 	}
@@ -250,24 +256,18 @@ patches:
         path: /spec/template/spec/tolerations
         value: [{key: galactic.datumapis.com/nat, operator: Exists, effect: NoSchedule}]
       - op: add
-        path: /spec/template/spec/containers/0/imagePullPolicy
-        value: Never
-      - op: add
         path: /spec/template/metadata/labels/edge-conformance~1instance
         value: %s
       - op: add
         path: /spec/selector/matchLabels/edge-conformance~1instance
         value: %s
-`, namespace, name, name, name, node, name, name)+tunPatch, map[string]string{"config.yaml": config})
+%s`, namespace, name, name, name, node, name, name, l.providerPatch()), map[string]string{"config.yaml": config})
 	l.waitProviderPod(t, namespace, name, node)
 }
 
 // tunPatch is how the lab gives a provider pod /dev/net/tun; see
 // deploy/containerlab/resources/galactic-edge/tun-device-plugin.
-var tunPatch = `  - target:
-      kind: Deployment
-    patch: |-
-      - op: add
+const tunPatch = `      - op: add
         path: /spec/template/spec/containers/0/resources
         value: {limits: {devic.es/tun: "1"}}
 `
@@ -389,7 +389,7 @@ func (l *lab) clientPID(t *testing.T, tn tenant, node string) int {
 	i := map[string]string{computeNode: "1", edgeNode1: "2", edgeNode2: "3"}[node]
 	var pods corev1.PodList
 	if err := l.c.List(context.Background(), &pods, client.InNamespace(tn.vpcNamespace),
-		client.MatchingLabels{"app": "edge-client-" + i}); err != nil {
+		client.MatchingLabels{appLabel: "edge-client-" + i}); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range pods.Items {
@@ -401,6 +401,7 @@ func (l *lab) clientPID(t *testing.T, tn tenant, node string) int {
 			return pid
 		}
 	}
-	t.Fatalf("no running edge-client-%s in %s (task deploy:ns10 / deploy:ns20 creates them)", i, tn.vpcNamespace)
+	t.Fatalf("no running edge-client-%s in %s (task deploy:ns10 / deploy:ns20 create them in the lab)", i,
+		tn.vpcNamespace)
 	return 0
 }
