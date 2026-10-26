@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fabric-router
+  namespace: galactic-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: fabric-api
+          args:
+            - node
+            - --probe-permits
+            - --require-probe-permits
+            - --gateway-address=fabric-api-gateway.galactic-system.svc:9346

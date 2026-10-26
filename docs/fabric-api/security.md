@@ -128,10 +128,13 @@ service presents the certificate on its gRPC connection to the gateway's
 `debug` port and, to rotate without a restart, reloads the files as cert-manager
 renews them; the gateway accepts the overlapping-bundle rotation below. The
 service contract is [service-contract.md](../designs/looking-glass-service.md). The gateway
-does not execute service diagnostics: it answers a valid `RunDiagnostic`
-with `ServiceDisabled`, and `GetCapabilities` reports `enabled: false`. With
-`--aggregate-budgets`, `GetCapabilities` also lists `aggregate-probe-budgets`
-and the cell's admission limits.
+executes service diagnostics only while its service switch is on, under
+`--aggregate-budgets` (see
+[Operating the Looking Glass service](operations.md#operating-the-looking-glass-service));
+otherwise it answers a valid `RunDiagnostic` with `ServiceDisabled`, and
+`GetCapabilities` reports `enabled: false`. While execution is on,
+`GetCapabilities` also lists `aggregate-probe-budgets` and the cell's
+admission limits.
 
 ### Rotation
 

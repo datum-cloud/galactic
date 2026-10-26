@@ -240,6 +240,27 @@ jobs:
           hack/service-api-bundle.sh ci dist
           cd dist && sha256sum -c SHA256SUMS
 
+  # The opt-in Kustomize Components that must be listed in order fail their
+  # build when one is missing; tests/manifests renders each composition.
+  manifests:
+    name: Manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: arduino/setup-task@v3.0.0
+        with:
+          version: ${{ env.TASK_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Render the Component fixtures
+        run: task test:manifests
+
   # Tier 2: Integration tests (every PR, main branch, and releases)
   test-e2e:
     name: E2E Tests

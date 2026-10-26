@@ -63,6 +63,10 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | FabricAPICertificateRenewalFailing     | mTLS certificate expires in under 4 hours                                   | 15m   | warning    |
 | FabricAPICredentialsMissing            | `fabric_api_credentials_loaded == 0`                                        | 15m   | warning    |
 | FabricAPISearchIndexUnsynced           | search index holds routes but is not synced with bgpd                       | 15m   | warning    |
+| FabricAPILimiterUnavailable            | no gateway replica has had a ready aggregate limiter                        | 10m   | warning    |
+| FabricAPIClockUnsynchronized           | limiter or permit-checking kernel clock not synchronised                    | 10m   | warning    |
+| FabricAPIServiceThrottled              | over half of 20+ Looking Glass requests in 30m throttled                    | 15m   | warning    |
+| FabricAPIServiceExecutionFailing       | over half of 10+ executed Looking Glass requests in 30m failed              | 15m   | warning    |
 | FabricAPIMetricsDown                   | `fabric-api-node` or `fabric-api-gateway` scrape down                       | 10m   | warning    |
 | GalacticEdgeAttachmentNotProgrammed    | admitted and allocated attachments not programmed by their node             | 15m   | warning    |
 | GalacticEdgeServicePolicyUnresolved    | an `EdgeService`'s `TrafficPolicyResolved` is False                         | 10m   | warning    |
