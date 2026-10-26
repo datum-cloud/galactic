@@ -15,9 +15,10 @@
 # overwrites it (kustomize.toolkit.fluxcd.io/ssa: IfNotPresent), so the
 # value in the cluster is the switch an operator turns with kubectl, and a
 # reconcile never turns the service back on after an emergency stop.
-# Turning it off cancels running Looking Glass requests within 2 seconds and
-# refuses new ones with ServiceDisabled; operator and FabricQuery work and
-# the limiter's state are untouched. See
+# Each replica reads it every second. Once the leader reads "disabled", it
+# cancels running Looking Glass requests within 2 seconds and refuses new
+# ones with ServiceDisabled; operator and FabricQuery work and the
+# limiter's state are untouched. See
 # docs/fabric-api/configuration.md#operating-the-looking-glass-service.
 #
 # Prerequisites: every node requires probe permits

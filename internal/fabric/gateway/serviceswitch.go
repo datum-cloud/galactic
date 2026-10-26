@@ -89,6 +89,10 @@ func (w *ServiceSwitch) Watch(ctx context.Context, reader client.Reader, namespa
 	var last string
 	for {
 		on, problem := readServiceSwitch(ctx, reader, namespace, name)
+		if ctx.Err() != nil {
+			w.Set(false)
+			return
+		}
 		if problem != "" && problem != last {
 			slog.Warn("Looking Glass execution is off: "+problem, "configmap", name, "key", ServiceSwitchKey)
 		}

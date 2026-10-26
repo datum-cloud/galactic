@@ -25,9 +25,9 @@ const (
 	RecoveryHold = 125 * time.Second
 	// LeaseReadTimeout bounds each uncached election Lease read.
 	LeaseReadTimeout = time.Second
-	// MaxClockError bounds the kernel's estimate of its clock's maximum
-	// error: two clocks within it of true time are within the contract's 1 s
-	// of each other.
+	// MaxClockError bounds the kernel's estimate of its clock's error: two
+	// clocks within it of true time are within the contract's 1 s of each
+	// other.
 	MaxClockError = 500 * time.Millisecond
 )
 

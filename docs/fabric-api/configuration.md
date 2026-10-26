@@ -781,8 +781,9 @@ it. The rates and caps are the contract's defaults, which are also their
 ceilings: [Limits and capacity](#limits-and-capacity) lists the flags that
 lower them.
 
-The leader trusts its clock only while the kernel reports it synchronised
-within 500 ms (`adjtimex`, read without privileges). Otherwise its limiter is
+The leader trusts its clock only while the kernel reports it synchronised,
+with an estimated error of at most 500 ms (`adjtimex`, read without
+privileges and allowed by the default seccomp profiles). Otherwise its limiter is
 unavailable: it admits nothing (`LimiterUnavailable`), cancels the epoch's
 work like a failed Lease read, and serves a new 125-second hold once the
 clock recovers. A node with `--probe-permits` refuses every permit while its
@@ -877,7 +878,8 @@ kubectl -n galactic-system patch configmap fabric-api-service --type merge \
   -p '{"data":{"service":"disabled"}}'
 ```
 
-Within a second of the change, and without a restart:
+Each replica reads the change within a second, and from then on, without a
+restart:
 
 - a new `RunDiagnostic` is refused with `ServiceDisabled` (`FAILED_PRECONDITION`),
   and `GetCapabilities` reports `enabled: false`;

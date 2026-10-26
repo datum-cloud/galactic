@@ -68,8 +68,9 @@ func NewMetrics(reg prometheus.Registerer, depth func() float64) *Metrics {
 				"the reason a router was omitted from the request.",
 		}, []string{labelOperation, labelOutcome}),
 		serviceDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "fabric_api_gateway_service_request_duration_seconds",
-			Help:    "Time from admission to the end of a Looking Glass service request's stream on the leader.",
+			Name: "fabric_api_gateway_service_request_duration_seconds",
+			Help: "Time from the leader's receipt of a Looking Glass service request to the end of its stream, " +
+				"for requests whose snapshot was delivered.",
 			Buckets: []float64{.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120},
 		}, []string{labelOperation}),
 		admissionRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
