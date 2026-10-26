@@ -437,6 +437,22 @@ func TestCollector_CollectsDropsByReason(t *testing.T) {
 	}
 }
 
+// TestCollector_CollectsNeighFallbacks covers the packets edge_lb handed to the
+// kernel for neighbor resolution, which are counted apart from every drop.
+func TestCollector_CollectsNeighFallbacks(t *testing.T) {
+	vt := edgemap.NewVIPTable(
+		newFakeVIPTable(), newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable())
+	c := NewCollector(vt, fakeDropReasons{}, nil).WithNeighFallbacks(fakeDropReasons{0: 5})
+	metrics := collect(t, c)
+
+	if got := metricValue(findMetric(t, metrics, neighFallbacksDesc, "", "")); got != 5 {
+		t.Errorf("neigh_fallbacks_total = %v, want 5", got)
+	}
+	if got := metricValue(findMetric(t, metrics, dropsDesc, "reason", "fib_no_neigh")); got != 0 {
+		t.Errorf("drops_total{reason=fib_no_neigh} = %v, want 0", got)
+	}
+}
+
 // TestCollector_CollectsReturnCounters covers the return path's own counters.
 // They are keyed by VIP address alone, with no port or protocol, since
 // edge_return matches a reply on its source address -- so one series covers

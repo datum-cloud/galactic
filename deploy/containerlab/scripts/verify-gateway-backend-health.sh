@@ -190,16 +190,10 @@ flows_through() {
 }
 
 # mapping GATEWAY prints "port backend" for each fixed UDP source port
-# through GATEWAY. One TCP request goes first: edge_lb drops a packet whose
-# next hop has no neighbor entry yet (fib_no_neigh), and only TCP's
-# retransmits ride that out, so on a path idle long enough for the entry to
-# expire the first UDP probes would be lost for a reason this check does not
-# test.
+# through GATEWAY.
 mapping() {
   local p
   pin "$1"
-  pick_port
-  request tcp "${PORT_PICKED}" >/dev/null
   for p in "${PORTS[@]}"; do
     echo "${p} $(request udp "${p}")"
   done

@@ -59,6 +59,9 @@
 //     ingress interface, bpf_redirect and XDP_REDIRECT where it is not. The
 //     two differ on every gateway that reaches its clients and its compute
 //     nodes over different links, which is this role's normal shape.
+//     Where the next hop has no neighbor entry, the encapsulated packet goes
+//     to the kernel instead, which resolves the neighbor and forwards it;
+//     see push_outer_header.
 //  7. A packet the route refuses for size, too big once the outer header is
 //     on, is answered with an ICMPv6 Packet Too Big, or for an IPv4 packet
 //     with Don't Fragment set an ICMPv4 Fragmentation Needed, to the client
@@ -364,6 +367,16 @@ struct {
 	__type(value, __u64);
 } drop_reasons SEC(".maps");
 
+// neigh_fallbacks counts the encapsulated packets edge_lb passed to the kernel
+// because their next hop had no neighbor entry; see push_outer_header. They
+// are not drops, so they have their own map rather than a drop_reasons bucket.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} neigh_fallbacks SEC(".maps");
+
 // struct icmp_bucket is one CPU's token bucket, held as nanoseconds of credit
 // rather than whole tokens so a refill is an addition, with no division on the
 // packet path: each message costs EDGE_ICMP_COST_NS, and credit accrues one
@@ -648,11 +661,31 @@ static EDGE_ALWAYS_INLINE long resolve_fib4_and_write_eth(void *ctx, __u32 ifind
 //
 // outer_payload_len is the whole inner packet's length, header included, and
 // nexthdr says what that packet is: EDGE_IPPROTO_IPV6 or EDGE_IPPROTO_IPIP.
+//
+// A next hop with no neighbor entry is not a failure. XDP has no way to start
+// neighbor resolution, so a drop here repeats for every packet until something
+// else resolves the neighbor, as after a link flap, a neighbor table purge or
+// a gateway restart, for as long as the kernel takes to notice. The
+// encapsulated packet goes to the kernel instead, framed as the original was
+// so the stack takes it as addressed to this host: the kernel forwards it to
+// the backend's uSID, queuing it while it solicits the neighbor, and every
+// later packet finds the entry and stays in XDP. That case returns
+// EDGE_PUSH_TO_KERNEL and is counted in neigh_fallbacks, not as a drop.
+#define EDGE_PUSH_TO_KERNEL 1
+
 static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 src[16],
 						 const __u8 dst[16], __be16 outer_payload_len, __u8 nexthdr,
 						 struct vip_stats_value *stats, __u32 *egress_ifindex,
 						 __u16 *frag_mtu)
 {
+	struct edge_ethhdr orig_eth;
+	void *orig = (void *) (long) ctx->data;
+	if (orig + sizeof(orig_eth) > (void *) (long) ctx->data_end) {
+		count_claimed_drop(DROP_REASON_ADJUST_HEAD_FAILED, stats);
+		return -1;
+	}
+	__builtin_memcpy(&orig_eth, orig, sizeof(orig_eth));
+
 	if (bpf_xdp_adjust_head(ctx, -40) != 0) {
 		count_claimed_drop(DROP_REASON_ADJUST_HEAD_FAILED, stats);
 		return -1;
@@ -685,6 +718,16 @@ static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 s
 	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, src, dst,
 						 (__u16) (sizeof(*outer) + __builtin_bswap16(outer_payload_len)),
 						 eth, egress_ifindex, frag_mtu);
+	if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH) {
+		__builtin_memcpy(eth->h_dest, orig_eth.h_dest, sizeof(eth->h_dest));
+		__builtin_memcpy(eth->h_source, orig_eth.h_source, sizeof(eth->h_source));
+		eth->h_proto = __builtin_bswap16(EDGE_ETH_P_IPV6);
+		__u32 key = 0;
+		__u64 *counter = bpf_map_lookup_elem(&neigh_fallbacks, &key);
+		if (counter)
+			*counter += 1;
+		return EDGE_PUSH_TO_KERNEL;
+	}
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		count_fib_drop(fib_rc, stats);
 		return -1;
@@ -944,8 +987,11 @@ static EDGE_ALWAYS_INLINE int lb_forward(struct xdp_md *ctx, struct vip_value *r
 	// checksum touch, the client's packet travelling inside untouched to the
 	// backend, which replies to the client directly.
 	__u32 egress_ifindex = 0;
-	if (push_outer_header(ctx, cfg->encap_src, b->usid, outer_payload_len, nexthdr, stats,
-			      &egress_ifindex, frag_mtu) != 0)
+	int pushed = push_outer_header(ctx, cfg->encap_src, b->usid, outer_payload_len, nexthdr, stats,
+				       &egress_ifindex, frag_mtu);
+	if (pushed == EDGE_PUSH_TO_KERNEL)
+		return XDP_PASS;
+	if (pushed != 0)
 		return -1;
 	return leave_via(ctx, egress_ifindex, stats);
 }

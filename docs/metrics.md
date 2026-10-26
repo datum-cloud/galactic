@@ -633,6 +633,7 @@ so there is no connection table to report. See
 | `galactic_edge_return_bytes_total`                      | counter | same                                | Bytes of those replies                                                                               |
 | `galactic_edge_return_dropped_packets_total`            | counter | same                                | Replies sourced from the VIP that the datapath dropped. A subset of `return_packets_total`           |
 | `galactic_edge_drops_total`                             | counter | `reason`                            | Packets `edge_lb` and `edge_return` dropped, by reason                                               |
+| `galactic_edge_neigh_fallbacks_total`                   | counter | none                                | Packets `edge_lb` handed to the kernel to resolve the next hop. Not counted as drops                 |
 | `galactic_edge_control_plane_drops_total`               | counter | `rule`, `reason` (`quota_exceeded`) | Rule applications refused before they reached the datapath                                           |
 | `galactic_edge_dispatch_lease_renewals_total`           | counter | `slot`, `result`                    | Renewals of the gateway's XDP dispatcher slot leases. Dispatch mode only                             |
 | `galactic_edge_dispatch_lease_expiry_timestamp_seconds` | gauge   | `slot`                              | Unix time each lease, as last renewed, expires. Dispatch mode only                                   |
@@ -650,6 +651,15 @@ so there is no connection table to report. See
   `fib_lookup_failed`, `adjust_head_failed`, `no_egress_ifindex`,
   `redirect_failed`, `return_hop_limit`, `icmp_rate_limited`, plus
   `unknown_<n>` for an index the binary has no name for.
+- `fib_no_neigh` counts only replies `edge_return` forwards and ICMP errors
+  the gateway sends. A load-balanced packet whose next hop has no neighbor
+  entry goes to the kernel, which resolves the neighbor and forwards it, and
+  is counted in `galactic_edge_neigh_fallbacks_total` instead. That counter
+  rises briefly after a link or node rejoins the fabric. Steady growth means
+  neighbor entries keep expiring or a next hop does not answer, and the
+  kernel drops what it cannot resolve. The counter records the handoff, not
+  delivery: these packets cross the node's netfilter FORWARD hook, unlike the
+  XDP path, so a host firewall that drops forwarded traffic drops them too.
 
 The port also serves controller-runtime's metrics for the
 `NetworkGateway`/`NetworkService` reconcilers.
