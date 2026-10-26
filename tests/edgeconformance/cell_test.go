@@ -376,8 +376,10 @@ func (c *clusterCell) pingClock(node string) (clockDiff, error) {
 	out, err := run(c, computeNode, probePath, "clockping", "-to",
 		netip.AddrPortFrom(addr, clockPort).String(), "-count", "20")
 	if err != nil {
-		return clockDiff{}, fmt.Errorf("compare %s's clock with compute's over UDP port %d: %w", role(node),
-			clockPort, err)
+		// The command and its output carry the node's address; the error
+		// names the node by role only.
+		return clockDiff{}, fmt.Errorf("compare %s's clock with compute's over UDP port %d: %s", role(node),
+			clockPort, strings.ReplaceAll(err.Error(), addr.String(), role(node)))
 	}
 	var r struct{ Offset, RTT int64 }
 	if err := json.Unmarshal([]byte(out), &r); err != nil {

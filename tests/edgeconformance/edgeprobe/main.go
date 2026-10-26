@@ -342,7 +342,7 @@ func clockPing(args []string) error {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !got {
-		return fmt.Errorf("no answer from %s", ap)
+		return errors.New("no answer")
 	}
 	return out.Encode(map[string]int64{"offset": best.Offset, "rtt": best.RTT})
 }
