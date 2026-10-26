@@ -1,6 +1,6 @@
 # FabricQuery API Reference
 
-The proposed [Looking Glass service contract](service-contract.md) defines the
+The proposed [Looking Glass service contract](../designs/looking-glass-service.md) defines the
 separate customer-service API, coverage, aggregate limits, and failure bounds
 for #1042. It is a future implementation contract; the interfaces and settings
 documented on this page remain the current baseline.
@@ -9,7 +9,7 @@ documented on this page remain the current baseline.
 fabric-api gateway: one object per public looking-glass query per resolved cell.
 This page documents its spec, status, validation, semantics and error codes. For
 how the gateway executes it see
-[docs/agents/ARCHITECTURE-FABRIC-API.md](../agents/ARCHITECTURE-FABRIC-API.md); for
+[docs/agents/ARCHITECTURE-FABRIC-API.md](architecture.md); for
 deploying it see [configuration.md](configuration.md).
 
 The **public** `LookingGlassQuery` that tenants create is served by NSO and is out
@@ -25,7 +25,7 @@ cluster, and its status is written by that cell's gateway and returned by Karmad
 
 | Property        | Value                                                                                                                                               |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Group, version  | `galactic.datumapis.com/v1alpha1`                                                                                                                    |
+| Group, version  | `galactic.datumapis.com/v1alpha1`                                                                                                                   |
 | Kind            | `FabricQuery`, list kind `FabricQueryList`                                                                                                          |
 | Scope           | Namespaced (the project's mapped namespace on the hub)                                                                                              |
 | Short name      | `fq`                                                                                                                                                |
@@ -141,7 +141,7 @@ in the `ErrorInfo` metadata under the key `queryCode` and at the start of the me
 
 Whether a numeric destination may be probed is a separate decision from syntax.
 The node checks it against the destination policy for the caller's role; see
-[configuration.md](configuration.md#destination). In short, a public probe may
+[configuration.md](security.md#destination). In short, a public probe may
 target only IPv6 global unicast (`2000::/3`) and non-special-use IPv4, minus any
 `--deny-prefixes`. Routing visibility does not authorize an active probe to every
 visible prefix.
