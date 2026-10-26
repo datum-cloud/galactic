@@ -1,5 +1,7 @@
 # MASQUE Gateway Architecture
 
+> For the #970 implementation, this proposal is superseded by the [MASQUE connector contract](masque/contract.md) and [acceptance matrix](masque/acceptance.md). The resource model, client work and transport scope below are historical context.
+
 Status: proposed. This exploratory design is separate from the implemented XDP/DSR galactic-gateway and is not deployment guidance. References to external client and connector architectures are historical context, not verified current integrations.
 
 ## Executive Summary
