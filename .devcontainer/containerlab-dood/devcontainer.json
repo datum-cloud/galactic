@@ -1,6 +1,6 @@
 {
     "name": "containerlab-dood",
-    "image": "ghcr.io/srl-labs/containerlab/devcontainer-dood-slim:0.81.1",
+    "image": "ghcr.io/srl-labs/containerlab/devcontainer-dood-slim:0.82.0",
     "runArgs": [
         "--network=host",
         "--pid=host",
