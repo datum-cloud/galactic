@@ -5,8 +5,10 @@
 package vipxlatmap
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
 	"github.com/cilium/ebpf"
@@ -32,5 +34,18 @@ func OpenPinnedVipXlatTable(pinDir string) (*VipXlatTable, io.Closer, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("vipxlatmap: open pinned map %q under %q: %w", prog.UsidMapVipXlatTable, pinDir, err)
 	}
-	return NewVipXlatTable(usidmap.KernelTable{Map: m}), m, nil
+	table := NewVipXlatTable(usidmap.KernelTable{Map: m})
+	ranges, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "vip_xlat_range_table"), nil)
+	if errors.Is(err, os.ErrNotExist) {
+		return table, m, nil
+	}
+	if err != nil {
+		return nil, nil, errors.Join(fmt.Errorf("open range translation map: %w", err), m.Close())
+	}
+	table.WithRangeTable(usidmap.KernelTable{Map: ranges})
+	return table, rangeMapCloser{m, ranges}, nil
 }
+
+type rangeMapCloser struct{ exact, ranges *ebpf.Map }
+
+func (c rangeMapCloser) Close() error { return errors.Join(c.exact.Close(), c.ranges.Close()) }

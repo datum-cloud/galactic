@@ -47,6 +47,11 @@ type VIPXlatSweepTable interface {
 //
 // Any error building the live set skips the whole pass rather than sweep
 // against a partial view.
+type vipXlatRangeSweepTable interface {
+	ListRanges() ([]vipxlatmap.RangeEntry, error)
+	ReconcileRanges(map[vipxlatmap.RangeKey]struct{}, uint64) ([]vipxlatmap.RangeEntry, error)
+}
+
 type VIPXlatSweeper struct {
 	Client   client.Client
 	NodeName string
@@ -67,7 +72,7 @@ func (s *VIPXlatSweeper) Sweep(ctx context.Context) gc.CleanupResult {
 	// for a binding created after the list below survives this pass.
 	cutoff := s.Table.Generation()
 
-	live, unresolved, err := s.liveRows(ctx)
+	live, liveRanges, unresolved, err := s.liveRows(ctx)
 	if err != nil {
 		slog.Error("GC: failed to build live set for eBPF vip_xlat_table sweep, skipping this tick", "err", err)
 		result.Errors++
@@ -83,11 +88,32 @@ func (s *VIPXlatSweeper) Sweep(ctx context.Context) gc.CleanupResult {
 		}
 		for _, e := range entries {
 			for _, rows := range unresolved {
-				if rows.shapes(e) {
+				if rows.end == 0 && rows.shapes(e) {
 					live[e.Key] = struct{}{}
 					break
 				}
 			}
+		}
+	}
+
+	if rangeTable, ok := s.Table.(vipXlatRangeSweepTable); ok {
+		entries, listErr := rangeTable.ListRanges()
+		if listErr != nil {
+			result.Errors++
+			return result
+		}
+		for _, entry := range entries {
+			for _, rows := range unresolved {
+				if rows.end == entry.EndPort && rows.shapes(vipxlatmap.Entry{Key: entry.Key}) {
+					liveRanges[entry.RangeKey] = struct{}{}
+				}
+			}
+		}
+		removed, sweepErr := rangeTable.ReconcileRanges(liveRanges, cutoff)
+		result.EBPFVIPXlatEntriesRemoved += len(removed)
+		if sweepErr != nil {
+			slog.Error("GC: range translation reconcile failed", "err", sweepErr)
+			result.Errors++
 		}
 	}
 
@@ -97,7 +123,7 @@ func (s *VIPXlatSweeper) Sweep(ctx context.Context) gc.CleanupResult {
 			"direction", e.Direction, "block", e.Block, "argument", e.Argument, "slot", e.Slot,
 			"proto", e.Proto, "addr", e.Addr, "port", e.Port)
 	}
-	result.EBPFVIPXlatEntriesRemoved = len(removed)
+	result.EBPFVIPXlatEntriesRemoved += len(removed)
 	if err != nil {
 		slog.Error("GC: errors while reconciling eBPF vip_xlat_table", "err", err)
 		result.Errors++
@@ -114,13 +140,14 @@ func (s *VIPXlatSweeper) Sweep(ctx context.Context) gc.CleanupResult {
 // not resolve.
 func (s *VIPXlatSweeper) liveRows(
 	ctx context.Context,
-) (map[vipxlatmap.Key]struct{}, []vipBindingRows, error) {
+) (map[vipxlatmap.Key]struct{}, map[vipxlatmap.RangeKey]struct{}, []vipBindingRows, error) {
 	list := &bgpv1alpha1.ServiceVIPBindingList{}
 	if err := s.Client.List(ctx, list); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	live := make(map[vipxlatmap.Key]struct{})
+	liveRanges := make(map[vipxlatmap.RangeKey]struct{})
 	var unresolved []vipBindingRows
 	indexes := make(map[string]*backendSIDIndex)
 	for i := range list.Items {
@@ -135,7 +162,7 @@ func (s *VIPXlatSweeper) liveRows(
 		idx, ok := indexes[b.Namespace]
 		if !ok {
 			if idx, err = buildBackendSIDIndex(ctx, s.Client, b.Namespace); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			indexes[b.Namespace] = idx
 		}
@@ -147,10 +174,15 @@ func (s *VIPXlatSweeper) liveRows(
 			continue
 		}
 		rows = rows.at(block, argument)
-		live[rows.ingress.key()] = struct{}{}
-		live[rows.egress.key()] = struct{}{}
+		if rows.end != 0 {
+			liveRanges[vipxlatmap.RangeKey{Key: rows.ingress.key(), EndPort: rows.end}] = struct{}{}
+			liveRanges[vipxlatmap.RangeKey{Key: rows.egress.key(), EndPort: rows.end}] = struct{}{}
+		} else {
+			live[rows.ingress.key()] = struct{}{}
+			live[rows.egress.key()] = struct{}{}
+		}
 	}
-	return live, unresolved, nil
+	return live, liveRanges, unresolved, nil
 }
 
 // key returns the vip_xlat_table key r is written under.

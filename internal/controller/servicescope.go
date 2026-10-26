@@ -257,6 +257,7 @@ type vipListener struct {
 	addr     netip.Addr
 	protocol bgpv1alpha1.NetworkServiceProtocol
 	port     int32
+	end      int32
 }
 
 // tenantVIPConflicts returns, for each service in a tenant namespace (one
@@ -289,9 +290,29 @@ func tenantVIPConflicts(
 			if err != nil {
 				continue
 			}
-			l := vipListener{addr: addr.Unmap(), protocol: rule.Spec.Protocol, port: rule.Spec.Port}
-			if owner, taken := owners[l]; taken && tenant && owner != key {
-				lost[key] = owner
+			l := vipListener{
+				addr:     addr.Unmap(),
+				protocol: rule.Spec.Protocol,
+				port:     rule.Spec.Port,
+				end:      rule.Spec.Port,
+			}
+			if rule.Spec.PortRange != nil {
+				l.port, l.end = rule.Spec.PortRange.Start, rule.Spec.PortRange.End
+			}
+			var conflict *types.NamespacedName
+			for claimed, owner := range owners {
+				if claimed.addr == l.addr && claimed.protocol == l.protocol && l.port <= claimed.end &&
+					claimed.port <= l.end &&
+					(tenant || rule.Spec.AddressGroup != nil) &&
+					owner != key {
+					if conflict == nil || owner.String() < conflict.String() {
+						copy := owner
+						conflict = &copy
+					}
+				}
+			}
+			if conflict != nil {
+				lost[key] = *conflict
 				claims = nil
 				break
 			}

@@ -13,6 +13,7 @@ Package v1alpha1 contains API Schema definitions for the galactic.datumapis.com/
 - [NetworkEgressPolicy](#networkegresspolicy)
 - [NetworkGateway](#networkgateway)
 - [NetworkService](#networkservice)
+- [NetworkServiceAddress](#networkserviceaddress)
 - [ServiceEndpoint](#serviceendpoint)
 - [ServiceRoutePolicy](#serviceroutepolicy)
 - [ServiceVIPBinding](#servicevipbinding)
@@ -87,7 +88,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Healthy` | BackendHealthHealthy: the last HealthyThreshold probes succeeded.<br /> |
-| `Unhealthy` | BackendHealthUnhealthy: the last UnhealthyThreshold probes failed. Only<br />this state takes a backend out of the gateways' Maglev tables.<br /> |
+| `Unhealthy` | BackendHealthUnhealthy: the last UnhealthyThreshold probes failed. Only<br />this state filters a backend with FailOpen; FailClosed also filters<br />Unknown, missing and expired decisions.<br /> |
 | `Unknown` | BackendHealthUnknown: too few probes have completed to decide, or the<br />probe cannot run on the backend's node.<br /> |
 
 
@@ -377,6 +378,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `capabilities` _string array_ |  |  | MaxItems: 16 <br /> |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
 | `backendHealthFiltering` _boolean_ | BackendHealthFiltering reports that this node's gateway can leave a<br />backend reported Unhealthy out of a NetworkService's Maglev table.<br />Every gateway in the namespace applies health only while every<br />NetworkGateway there reports it, so all of them build the same table.<br />The gateway sets it on every status write; a gateway that cannot apply<br />health, an older one included, writes its status without it. |  |  |
@@ -435,6 +437,102 @@ selection.
 | `status` _[NetworkServiceStatus](#networkservicestatus)_ |  |  |  |
 
 
+#### NetworkServiceAddress
+
+
+
+NetworkServiceAddress coordinates forwarding and withdrawal for a shared address.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `NetworkServiceAddress` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[NetworkServiceAddressSpec](#networkserviceaddressspec)_ |  |  |  |
+| `status` _[NetworkServiceAddressStatus](#networkserviceaddressstatus)_ |  |  |  |
+
+
+#### NetworkServiceAddressGroup
+
+
+
+NetworkServiceAddressGroup identifies the complete desired listener inventory of one allocated VIP.
+
+
+
+_Appears in:_
+- [NetworkServiceAddressSpec](#networkserviceaddressspec)
+- [NetworkServiceSpec](#networkservicespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `uid` _string_ |  |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `generation` _integer_ |  |  | Minimum: 1 <br /> |
+| `revision` _string_ |  |  | MaxLength: 64 <br />MinLength: 1 <br /> |
+| `listenerName` _string_ |  |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+| `listeners` _[NetworkServiceAddressListener](#networkserviceaddresslistener) array_ |  |  | MaxItems: 16 <br />MinItems: 1 <br /> |
+
+
+#### NetworkServiceAddressListener
+
+
+
+NetworkServiceAddressListener describes one socket interval in an address group.
+
+
+
+_Appears in:_
+- [NetworkServiceAddressGroup](#networkserviceaddressgroup)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ |  |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+| `protocol` _[NetworkServiceProtocol](#networkserviceprotocol)_ |  |  | Enum: [tcp udp] <br /> |
+| `port` _integer_ |  |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `portRange` _[PortRange](#portrange)_ |  |  |  |
+
+
+#### NetworkServiceAddressSpec
+
+
+
+NetworkServiceAddressSpec is the authoritative listener inventory for one allocated address.
+
+
+
+_Appears in:_
+- [NetworkServiceAddress](#networkserviceaddress)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `vpcRef` _string_ |  |  | MinLength: 1 <br /> |
+| `vipAddress` _string_ |  |  |  |
+| `group` _[NetworkServiceAddressGroup](#networkserviceaddressgroup)_ |  |  |  |
+
+
+#### NetworkServiceAddressStatus
+
+
+
+NetworkServiceAddressStatus reports address-level convergence.
+
+
+
+_Appears in:_
+- [NetworkServiceAddress](#networkserviceaddress)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ |  |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ |  |  |  |
+
+
 #### NetworkServiceHealthCheck
 
 
@@ -453,6 +551,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `failurePolicy` _string_ | FailurePolicy determines whether unknown and all-unhealthy backends may<br />receive traffic. FailClosed requires a current Healthy decision and<br />withdraws the service when health filtering is unavailable. | FailOpen | Enum: [FailOpen FailClosed] <br /> |
 | `port` _integer_ | Port is the TCP port probed on every backend, 1-65535. Unset, it is the<br />service's backendPort. A udp service must set it to a TCP port its<br />backends listen on, since a UDP datagram draws no reply a generic<br />probe can expect. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 | `intervalSeconds` _integer_ | IntervalSeconds is the time between two probes of one backend. | 5 | Maximum: 300 <br />Minimum: 1 <br /> |
 | `timeoutSeconds` _integer_ | TimeoutSeconds is how long a probe waits for the handshake. It must not<br />exceed IntervalSeconds. | 2 | Maximum: 60 <br />Minimum: 1 <br /> |
@@ -475,6 +574,7 @@ the API server refuses any other.
 
 
 _Appears in:_
+- [NetworkServiceAddressListener](#networkserviceaddresslistener)
 - [NetworkServiceSpec](#networkservicespec)
 - [ServiceEndpointSpec](#serviceendpointspec)
 - [ServiceRouteProtocolPort](#servicerouteprotocolport)
@@ -530,11 +630,13 @@ _Appears in:_
 | `vpcRef` _string_ | VPCRef is the opaque identifier of the target VPC this service applies<br />to, a VPC's status.vpc. In a gateway namespace, the platform API that<br />serves tenants verifies the tenant owns this VPC before it writes the<br />service. In a project namespace, the service is accepted only while a<br />VPC in that namespace carries this identifier. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `vipAddresses` _string array_ | VIPAddresses is the list of ingress VIP addresses this service provisions<br />on the gateway nodes: at most one IPv6 and at most one IPv4 address.<br />A backend node rewrites a reply's source from the backend's address, port<br />and protocol back to a single VIP of the client's family, so a backend<br />cannot answer for a second VIP of one family. Another VIP of a family<br />needs its own service whose backends listen on a different BackendPort.<br />An IPv4 VIP is written in dotted form; the IPv4-mapped IPv6 form is<br />refused.<br />Workloads are IPv6 only, so both VIPs are served by the selected<br />attachments' IPv6 addresses. A backend node translates the IPv4 VIP's<br />flows statelessly: the backend sees an IPv4 client a.b.c.d as<br />64:ff9b::a.b.c.d (RFC 6052) and replies to that address, and its node<br />sends the reply back to the client as IPv4 from the VIP. A gateway node<br />serves the IPv4 VIP only while it has IPv4 VIPs turned on, and<br />load-balances it only over the backends whose ServiceVIPBinding for it<br />reports Bound. It advertises the IPv4 VIP while at least one such<br />backend exists, and reports the outcome in its "<node>/IPv4Served"<br />condition. The IPv6 VIP is served independently of the IPv4 one.<br />An existing service whose list breaks these limits keeps validating while<br />the list is unchanged, since the API server ratchets validation of an<br />unchanged field on Kubernetes 1.30 and later; any edit to the list must<br />bring it within them, and an older API server refuses any update to such<br />a service. |  | MaxItems: 8 <br />MinItems: 1 <br />Required: \{\} <br />items:MaxLength: 45 <br /> |
 | `protocol` _[NetworkServiceProtocol](#networkserviceprotocol)_ | Protocol is the IP protocol this service load-balances on VIPAddresses.<br />The API admits tcp, udp, sctp, esp, gre and icmp, and the gateway<br />datapath serves tcp and udp. A service with any other admitted value is<br />refused with a message saying its protocol is not served yet. sctp has<br />ports and needs Port and BackendPort. esp, gre and icmp have no ports<br />and must set neither; a backend for them is chosen from the client and<br />VIP addresses alone. The set of values is open-ended, so a client must<br />accept and preserve a value it does not recognise, as<br />NetworkServiceProtocol describes. |  | Enum: [tcp udp sctp esp gre icmp] <br />Required: \{\} <br /> |
-| `port` _integer_ | Port is the ingress port on VIPAddresses that this service load-balances,<br />1-65535. It is required for a protocol with ports (tcp, udp and sctp)<br />and must be unset for one without (esp, gre and icmp). Zero means unset<br />and is omitted when encoding, and an explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `port` _integer_ | Port is the ingress port on VIPAddresses that this service load-balances,<br />1-65535. It is required when PortRange is absent for tcp, udp and sctp<br />and must be unset for one without (esp, gre and icmp). Zero means unset<br />and is omitted when encoding, and an explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `portRange` _[PortRange](#portrange)_ | PortRange replaces Port for an inclusive IPv6 UDP interval. Backend ports<br />are preserved; BackendPort must be omitted. |  |  |
+| `addressGroup` _[NetworkServiceAddressGroup](#networkserviceaddressgroup)_ | AddressGroup binds this listener to a complete, authoritative address inventory. |  |  |
 | `backendSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | BackendSelector selects the VPCAttachments (galactic.datumapis.com/v1alpha1)<br />that serve this service, matched against each VPCAttachment object's own<br />labels: in any namespace for a service in a gateway namespace, and only<br />in its own namespace for a service in a project namespace. Only<br />attachments whose status.vpc equals VPCRef are candidates, whatever their<br />labels, so a selector cannot reach into another tenant's VPC. Each selected attachment contributes the<br />IPv6 addresses in its spec.interface.addresses as backends, on<br />BackendPort, for both VIPs: its node translates the IPv4 VIP's flows to<br />and from IPv6, and its IPv4 addresses are never backends. An attachment<br />with no status.node, or no IPv6 address, is not a backend until it has<br />both. An empty selector is rejected rather than read as "every<br />attachment in the VPC". |  | Required: \{\} <br /> |
 | `backendPort` _integer_ | BackendPort is the destination port on every selected backend, 1-65535.<br />Like Port, it is required for tcp, udp and sctp and must be unset for<br />esp, gre and icmp. Zero means unset and is omitted when encoding, and an<br />explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 | `sessionAffinity` _[NetworkServiceSessionAffinity](#networkservicesessionaffinity)_ | SessionAffinity selects which connections from one client share a<br />backend: None, the default, balances each connection on its own;<br />ClientIP pins a client address to one backend; ClientIPAndProtocol pins<br />a client address and protocol to one. Two services pin a client to the<br />same backend only if both set the same affinity and select the same<br />backend addresses. A change takes effect on every gateway node without a<br />restart, and rehashes every connection of the service, so most open<br />connections reach a different backend afterwards. | None | Enum: [None ClientIP ClientIPAndProtocol] <br /> |
-| `healthCheck` _[NetworkServiceHealthCheck](#networkservicehealthcheck)_ | HealthCheck turns on health checks for the service's backends. Each<br />backend's own node opens a TCP connection to it on the health check<br />port, from the link-local address of the backend's host-side interface,<br />and publishes a decision in status.health of the backend's<br />ServiceVIPBindings. The gateway nodes take a backend whose decision is<br />Unhealthy out of the service's Maglev table, and keep every backend<br />when all of them are Unhealthy. Unset, no backend is probed and every<br />one stays in the table.<br />Where interface traffic policy is enforced, the backend's policy must<br />allow TCP from fe80::/10 to the health check port on the Private path,<br />and the replies back. |  |  |
+| `healthCheck` _[NetworkServiceHealthCheck](#networkservicehealthcheck)_ | HealthCheck turns on health checks for the service's backends. Each<br />backend's own node opens a TCP connection to it on the health check<br />port, from the link-local address of the backend's host-side interface,<br />and publishes a decision in status.health of the backend's<br />ServiceVIPBindings. The gateway nodes take a backend whose decision is<br />Unhealthy out of the service's Maglev table, and keep every backend<br />when all of them are Unhealthy by default. FailClosed instead requires<br />fresh Healthy results for the current configuration and withdraws a VIP<br />with no healthy backends. Unset, no backend is probed and every<br />one stays in the table.<br />Where interface traffic policy is enforced, the backend's policy must<br />allow TCP from fe80::/10 to the health check port on the Private path,<br />and the replies back. |  |  |
 
 
 #### NetworkServiceStatus
@@ -552,6 +654,25 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
+
+
+#### PortRange
+
+
+
+PortRange is an inclusive transport port interval.
+
+
+
+_Appears in:_
+- [NetworkServiceAddressListener](#networkserviceaddresslistener)
+- [NetworkServiceSpec](#networkservicespec)
+- [ServiceVIPBindingSpec](#servicevipbindingspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `start` _integer_ |  |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `end` _integer_ |  |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 
 
 #### ServiceEndpoint
@@ -979,6 +1100,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `lastProbeTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | LastProbeTime is refreshed after every probe for FailClosed services. |  |  |
+| `observedGeneration` _integer_ | ObservedGeneration identifies the NetworkService configuration probed. |  |  |
 | `state` _[BackendHealthState](#backendhealthstate)_ | State is the decision. |  | Enum: [Healthy Unhealthy Unknown] <br />Required: \{\} <br /> |
 | `reason` _string_ | Reason is ProbeSucceeded, ProbeFailed, Pending or ProbeUnavailable. |  | MaxLength: 64 <br />Required: \{\} <br /> |
 | `message` _string_ | Message is the last probe error, when there is one. |  | MaxLength: 1024 <br /> |
@@ -1003,7 +1126,8 @@ _Appears in:_
 | `targetRef` _[TargetRef](#targetref)_ | TargetRef identifies the Node this binding applies to. |  | Required: \{\} <br /> |
 | `vpcRef` _string_ | VPCRef is the opaque identifier of the VPC the backend belongs to,<br />copied from the owning NetworkService. It names the tenant VRF the<br />binding's translation rows are written for, so two tenants using the<br />same backend address on one node never share a row. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `vipAddress` _string_ | VIPAddress is the service VIP the backend must be reachable on. |  | Required: \{\} <br /> |
-| `port` _integer_ | Port is the VIP-facing port traffic arrives on. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
+| `port` _integer_ | Port is the VIP-facing port traffic arrives on. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `portRange` _[PortRange](#portrange)_ | PortRange translates an inclusive IPv6 UDP interval without changing ports.<br />It replaces Port and requires BackendPort to be omitted. |  |  |
 | `protocol` _[NetworkServiceProtocol](#networkserviceprotocol)_ | Protocol is the transport protocol this binding applies to. |  | Enum: [tcp udp] <br />Required: \{\} <br /> |
 | `backendAddress` _string_ | BackendAddress is the backend's own real address (its pod-netns<br />address for a veth backend, or its actual guest-facing address for a<br />tap backend) — the VIP-boundary substitution target for both kinds<br />now (see EgressKind's own doc comment for why veth needs this too,<br />not just tap). +optional at the API level for the same reason<br />EgressKind itself carries no matching CEL requirement; the<br />reconciler validates it's set for either kind before doing anything. |  |  |
 | `backendPort` _integer_ | BackendPort is the backend's own real port, paired with<br />BackendAddress — required for both kinds, see that field's doc<br />comment. |  | Maximum: 65535 <br />Minimum: 1 <br /> |

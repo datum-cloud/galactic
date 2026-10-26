@@ -6,12 +6,14 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"sort"
 	"strconv"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -142,6 +144,27 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, fmt.Errorf("get NetworkService %s: %w", req.NamespacedName, err)
 	}
 	if !rule.DeletionTimestamp.IsZero() {
+		if rule.Spec.AddressGroup != nil {
+			nodes, err := servingGatewayNodeNames(ctx, r.Client, rule.Namespace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !groupedRuleWithdrawn(rule, nodes) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			bindings, err := r.nodeBindings(ctx, rule)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			for _, binding := range bindings {
+				if err := r.Delete(ctx, &binding, client.Preconditions{UID: &binding.UID}); client.IgnoreNotFound(
+					err,
+				) != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		// The gateways keep serving a deleting rule until its routes are
 		// withdrawn and drained, so its bindings stay until the rule is gone
 		// and garbage collection removes them.
@@ -270,6 +293,10 @@ func generatedBinding(
 		name = crdnames.TenantServiceVIPBindingName(
 			rule.Namespace, rule.Name, node, vip.String(), b.addr.String(), int32(b.port))
 	}
+	if interval := rule.Spec.PortRange; interval != nil {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%d/%d", name, interval.Start, interval.End)))
+		name = fmt.Sprintf("svcvip-range-%x", sum[:16])
+	}
 	l := ruleLabels(rule, objNS)
 	l[bindingNodeLabel] = gatewayNodeLabelValue(node)
 	l[bindingManagedByLabel] = bindingManagedByValue
@@ -284,9 +311,10 @@ func generatedBinding(
 			VPCRef:         rule.Spec.VPCRef,
 			VIPAddress:     vip.String(),
 			Port:           rule.Spec.Port,
+			PortRange:      rule.Spec.PortRange.DeepCopy(),
 			Protocol:       rule.Spec.Protocol,
 			BackendAddress: b.addr.String(),
-			BackendPort:    int32(b.port),
+			BackendPort:    rule.Spec.BackendPort,
 			EgressKind:     b.egressKind,
 		},
 	}

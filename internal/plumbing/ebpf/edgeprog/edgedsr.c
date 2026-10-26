@@ -244,6 +244,20 @@ struct vip_key {
 	__u8 vip[16];
 };
 
+#define EDGE_MAX_RANGES 16
+
+struct vip_range {
+	__u16 start;
+	__u16 end;
+	__u64 generation;
+};
+
+struct vip_range_value {
+	__u32 count;
+	struct vip_range ranges[EDGE_MAX_RANGES];
+	__u64 generation;
+};
+
 // struct vip_value is vip_table's value: the backend set for one VIP, port, and
 // protocol, plus a precomputed Maglev table mapping each slot to an index into
 // backends, and the session affinity that selects flow_hash's inputs (one of
@@ -327,6 +341,37 @@ struct {
 	__type(key, struct vip_key);
 	__type(value, struct vip_value);
 } vip_table SEC(".maps");
+
+// Separate from vip_table so an older program cannot expose a range start
+// as an accidental singleton after rollback. One row serves the whole interval.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct vip_key);
+	__type(value, struct vip_value);
+} vip_range_backends SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct vip_key);
+	__type(value, struct vip_range_value);
+} vip_range_table SEC(".maps");
+
+// Ownership outlives individual listeners. Expiry fails closed if reconciliation
+// stops while a separate routing process still advertises this address.
+struct vip_owned_value {
+	__u64 generation;
+	__u64 expires_at_ns;
+	__u8 blocked;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct vip_addr_key);
+	__type(value, struct vip_owned_value);
+} vip_owned_table SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -996,21 +1041,62 @@ static EDGE_ALWAYS_INLINE int lb_forward(struct xdp_md *ctx, struct vip_value *r
 	return leave_via(ctx, egress_ifindex, stats);
 }
 
+static EDGE_ALWAYS_INLINE struct vip_value *lookup_vip_rule(struct vip_key *key)
+{
+	struct vip_value *rule = bpf_map_lookup_elem(&vip_table, key);
+	__u16 wire_port = key->port;
+	__u16 port = __builtin_bswap16(wire_port);
+	key->port = 0;
+	struct vip_range_value *ranges = bpf_map_lookup_elem(&vip_range_table, key);
+	key->port = wire_port;
+	if (!ranges)
+		return rule;
+#pragma unroll
+	for (int i = 0; i < EDGE_MAX_RANGES; i++) {
+		if (i < ranges->count && port >= ranges->ranges[i].start && port <= ranges->ranges[i].end) {
+			// A stale exact row must not override newly claimed range coverage.
+			if (rule)
+				return (void *) 0;
+			key->port = __builtin_bswap16(ranges->ranges[i].start);
+			struct vip_value *matched = bpf_map_lookup_elem(&vip_range_backends, key);
+			if (matched && matched->generation == ranges->ranges[i].generation)
+				return matched;
+			return (void *) 0;
+		}
+	}
+	return rule;
+}
+
+static EDGE_ALWAYS_INLINE int vip_owned(const __u8 *addr)
+{
+	struct vip_addr_key key;
+	__builtin_memcpy(key.vip, addr, 16);
+	struct vip_owned_value *value = bpf_map_lookup_elem(&vip_owned_table, &key);
+	return value ? ((value->blocked || value->expires_at_ns <= bpf_ktime_get_ns()) ? 2 : 1) : 0;
+}
+
 static EDGE_ALWAYS_INLINE int edge_lb_v6(struct xdp_md *ctx, struct edge_ethhdr *eth, void *data_end)
 {
 	struct edge_ip6hdr *ip6 = (void *) (eth + 1);
 	if ((void *) (ip6 + 1) > data_end)
 		return pass_unclaimed_lb(ctx);
 
-	if (ip6->nexthdr != EDGE_IPPROTO_TCP && ip6->nexthdr != EDGE_IPPROTO_UDP)
+	int owned = vip_owned(ip6->daddr);
+	if (ip6->nexthdr != EDGE_IPPROTO_TCP && ip6->nexthdr != EDGE_IPPROTO_UDP) {
+		if (owned && ip6->nexthdr != 58)
+			return XDP_DROP;
 		return pass_unclaimed_lb(ctx);
+	}
+
+	if (owned == 2)
+		return XDP_DROP;
 
 	if (is_v4_mapped(ip6->daddr))
 		return pass_unclaimed_lb(ctx);
 
 	struct edge_l4ports *ports = (void *) (ip6 + 1);
 	if ((void *) (ports + 1) > data_end)
-		return pass_unclaimed_lb(ctx);
+		return owned ? XDP_DROP : pass_unclaimed_lb(ctx);
 
 	struct vip_key vk;
 	__builtin_memset(&vk, 0, sizeof(vk));
@@ -1018,9 +1104,9 @@ static EDGE_ALWAYS_INLINE int edge_lb_v6(struct xdp_md *ctx, struct edge_ethhdr 
 	vk.port = ports->dest;
 	__builtin_memcpy(vk.vip, ip6->daddr, 16);
 
-	struct vip_value *rule = bpf_map_lookup_elem(&vip_table, &vk);
+	struct vip_value *rule = lookup_vip_rule(&vk);
 	if (!rule)
-		return pass_unclaimed_lb(ctx); // not one of this gateway's VIPs
+		return owned ? XDP_DROP : pass_unclaimed_lb(ctx);
 
 	// Claimed past this point -- every subsequent failure is a drop, not
 	// a pass-through (this gateway owns this VIP+port+protocol).
@@ -1108,7 +1194,7 @@ static EDGE_ALWAYS_INLINE int edge_lb_v4(struct xdp_md *ctx, struct edge_ethhdr 
 	vk.port = ports->dest;
 	__builtin_memcpy(vk.vip, vip, 16);
 
-	struct vip_value *rule = bpf_map_lookup_elem(&vip_table, &vk);
+	struct vip_value *rule = lookup_vip_rule(&vk);
 	if (!rule)
 		return pass_unclaimed_lb(ctx); // not one of this gateway's VIPs
 

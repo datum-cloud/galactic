@@ -30,8 +30,8 @@ import (
 // Messages the NetworkService schema refuses a protocol or port shape with.
 const (
 	notServedMessage          = "protocol is not served yet"
-	portRequiredMessage       = "port is required for tcp, udp and sctp"
-	backendPortRequiredMsg    = "backendPort is required for tcp, udp and sctp"
+	portRequiredMessage       = "exactly one of port and portRange is required"
+	backendPortRequiredMsg    = "UDP ranges preserve ports and omit backendPort; singleton services require backendPort"
 	portForbiddenMessage      = "port must not be set for esp, gre and icmp"
 	backendPortForbiddenMsg   = "backendPort must not be set for esp, gre and icmp"
 	unsupportedProtocolPrefix = `spec.protocol: Unsupported value`
@@ -50,6 +50,7 @@ func startProtocolAPI(t *testing.T) (client.Client, *apiextensionsv1.CustomResou
 	}
 	names := []string{
 		"galactic.datumapis.com_networkservices.yaml",
+		"galactic.datumapis.com_networkserviceaddresses.yaml",
 		"galactic.datumapis.com_serviceendpoints.yaml",
 		"galactic.datumapis.com_serviceroutepolicies.yaml",
 		"galactic.datumapis.com_servicevipbindings.yaml",

@@ -62,6 +62,7 @@ type DesiredRule struct {
 	// galactic.datumapis.com/v1alpha1's NetworkServiceProtocol enum values.
 	Protocol string
 	Port     uint16
+	PortEnd  uint16
 
 	// Affinity is "None", "ClientIP" or "ClientIPAndProtocol", matching
 	// galactic.datumapis.com/v1alpha1's NetworkServiceSessionAffinity enum

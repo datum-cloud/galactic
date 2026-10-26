@@ -6,7 +6,9 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
+	"strconv"
 	"testing"
 )
 
@@ -151,5 +153,60 @@ func TestNodeQuotaEnforcer_ReapplyWithChangedVIPCountAdjustsTotal(t *testing.T) 
 	total, _ := e.Stats()
 	if total != 2 {
 		t.Errorf("totalEntries after VIP count change = %d, want 2 (not 3 -- must replace, not add)", total)
+	}
+}
+
+func TestRangeQuotaWidthDescriptorsAndRollback(t *testing.T) {
+	ctx := context.Background()
+	q := NewNodeQuotaEnforcer(64, 64)
+	base := testDesiredRule(t, "wide", "2001:db8::1")
+	base.Protocol = protocolUDP
+	base.Port = 10000
+	base.PortEnd = 11024
+	base.VPCRef = "tenant"
+	if ok, _ := q.CheckAndReserve(ctx, base); ok {
+		t.Fatal("overwide range accepted")
+	}
+	base.PortEnd = 11023
+	if ok, _ := q.CheckAndReserve(ctx, base); !ok {
+		t.Fatal("maximum range rejected")
+	}
+	base.PortEnd = 11024
+	if ok, _ := q.CheckAndReserve(ctx, base); ok {
+		t.Fatal("overwide update accepted")
+	}
+	if total, _ := q.Stats(); total != 1 {
+		t.Fatalf("failed update changed reservation: %d", total)
+	}
+	if err := q.Release(ctx, base.Key); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 17 {
+		rule := base
+		rule.Key = fmt.Sprintf("listener-%d", i)
+		rule.Port = uint16(1000 + i*10)
+		rule.PortEnd = 0
+		if i == 0 {
+			rule.PortEnd = rule.Port + 1
+		}
+		ok, err := q.CheckAndReserve(ctx, rule)
+		if err != nil || ok != (i < 16) {
+			t.Fatalf("descriptor %d: ok=%v err=%v", i, ok, err)
+		}
+	}
+	if total, _ := q.Stats(); total != 16 {
+		t.Fatalf("failed reservation leaked: %d", total)
+	}
+}
+
+func TestLegacySingletonQuotaAllowsMoreThan16Sockets(t *testing.T) {
+	q := NewNodeQuotaEnforcer(64, 64)
+	for i := range 17 {
+		rule := testDesiredRule(t, strconv.Itoa(i), "2001:db8::1")
+		rule.Protocol = protocolUDP
+		rule.Port = uint16(10000 + i)
+		if ok, err := q.CheckAndReserve(context.Background(), rule); err != nil || !ok {
+			t.Fatalf("legacy singleton %d rejected: %v", i, err)
+		}
 	}
 }

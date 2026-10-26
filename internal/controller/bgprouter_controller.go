@@ -41,6 +41,8 @@ const annotationConfigHash = "galactic.datum.net/config-hash"
 // is what keeps BGPPeer status current.
 const peerStatusRequeue = 30 * time.Second
 
+const advertisementLeaseRequeue = 5 * time.Second
+
 // reasonAccepted is the shared condition Reason used across this
 // reconciler's Accepted-condition updates below.
 const reasonAccepted = "Accepted"
@@ -126,6 +128,11 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
+	requeueAfter, err := r.advertisementRequeueAfter(ctx, router, time.Now())
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Hash the desired state to skip no-op reconciles.
 	newHash, hashErr := r.Hasher(*desired)
 	if hashErr != nil {
@@ -161,7 +168,8 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// hash.
 	if router.Annotations[annotationConfigHash] == newHash && runtimeStatus.Healthy &&
 		allDesiredPeersPresent(desired.Peers, runtimeStatus) &&
-		allDesiredVRFsApplied(desired.VRFInstances, runtimeStatus) {
+		allDesiredVRFsApplied(desired.VRFInstances, runtimeStatus) &&
+		advertisementsMatchRuntime(desired.Advertisements, runtimeStatus) {
 		// True no-op: runtime is healthy with the current config.
 		routerCopy := router.DeepCopy()
 		routerCopy.Status.ObservedGeneration = router.Generation
@@ -173,7 +181,7 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// A Galactic Edge advertisement left out by a closed gate does not
 		// move the hash, so it is reported here too.
 		r.updateAdvertisementStatuses(ctx, router, runtimeStatus)
-		return ctrl.Result{RequeueAfter: peerStatusRequeue}, nil
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	// Apply to runtime.
@@ -231,11 +239,17 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Update per-VRF-instance BGPVRFInstance statuses.
 	r.updateVRFInstanceStatuses(ctx, router, postApplyStatus)
 
-	return ctrl.Result{RequeueAfter: peerStatusRequeue}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // updateRouterStatus updates the BGPRouter status from runtime status.
 func (r *BGPRouterReconciler) updateRouterStatus(router *bgpv1alpha1.BGPRouter, rs model.RuntimeStatus) {
+	router.Status.ObservedGeneration = router.Generation
+	router.Status.SupportsAdvertisementLeases = rs.Healthy
+	if rs.Healthy {
+		now := metav1.Now()
+		router.Status.LastSuccessfulReconcileTime = &now
+	}
 	if rs.Healthy {
 		setRouterPhase(router, bgpv1alpha1.BGPRouterPhaseReady)
 		setRouterCondition(router, metav1.Condition{
@@ -403,6 +417,12 @@ func (r *BGPRouterReconciler) updateAdvertisementStatuses(
 				Status:  metav1.ConditionTrue,
 				Reason:  "Advertised",
 				Message: "Prefixes are being advertised",
+			})
+		} else if reconcile.AdvertisementLeaseExpired(adv, time.Now()) {
+			advCopy.Status.AdvertisedPrefixes = 0
+			setAdvertisementCondition(advCopy, metav1.Condition{
+				Type: ConditionAdvertised, Status: metav1.ConditionFalse,
+				Reason: "LeaseExpired", Message: "The serving lease expired and its prefixes were withdrawn",
 			})
 		} else if reconcile.IsEdgeAdvertisement(adv) && !r.Reconciler.EdgeGateOpen(adv) {
 			// Left out of the desired router because its forwarding
@@ -645,4 +665,42 @@ func normalizeIP(s string) string {
 		return ip.String()
 	}
 	return s
+}
+
+func (r *BGPRouterReconciler) advertisementRequeueAfter(
+	ctx context.Context, router *bgpv1alpha1.BGPRouter, now time.Time,
+) (time.Duration, error) {
+	var advertisements bgpv1alpha1.BGPAdvertisementList
+	if err := r.List(ctx, &advertisements, client.InNamespace(router.Namespace),
+		client.MatchingFields{BGPAdvByRouterName: router.Name}); err != nil {
+		return 0, fmt.Errorf("list advertisement lease deadlines: %w", err)
+	}
+	delay := peerStatusRequeue
+	for _, adv := range advertisements.Items {
+		if adv.Spec.ExpiresAt == nil {
+			continue
+		}
+		delay = min(delay, advertisementLeaseRequeue)
+		remaining := adv.Spec.ExpiresAt.Sub(now)
+		if remaining > 0 {
+			delay = min(delay, remaining)
+		}
+	}
+	return delay, nil
+}
+
+func advertisementsMatchRuntime(desired []model.DesiredAdvertisement, status model.RuntimeStatus) bool {
+	if len(desired) != len(status.Advertisements) {
+		return false
+	}
+	names := make(map[string]bool, len(status.Advertisements))
+	for _, advertisement := range status.Advertisements {
+		names[advertisement.Name] = true
+	}
+	for _, advertisement := range desired {
+		if !names[advertisement.Name] {
+			return false
+		}
+	}
+	return true
 }

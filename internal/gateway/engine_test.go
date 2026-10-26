@@ -353,7 +353,7 @@ func TestEngine_ReconcileApplyErrorReleasesQuotaReservation(t *testing.T) {
 	}
 }
 
-func TestEngine_ReconcileRemoveErrorKeepsRuleActiveAndReleasesQuota(t *testing.T) {
+func TestEngine_ReconcileRemoveErrorKeepsRuleActiveAndReservation(t *testing.T) {
 	dp := newFakeDatapath()
 	quota := &fakeQuota{}
 	e := NewEngine(dp, quota, &fakeTelemetry{})
@@ -374,8 +374,8 @@ func TestEngine_ReconcileRemoveErrorKeepsRuleActiveAndReleasesQuota(t *testing.T
 	if len(status.Rules) != 1 || !strings.Contains(status.Rules[0].Error, "simulated teardown failure") {
 		t.Errorf("status.Rules = %+v, want one entry reporting the datapath error", status.Rules)
 	}
-	if len(quota.released) != 1 || quota.released[0] != testKeyA {
-		t.Errorf("quota.released = %v, want [%s] even though datapath removal failed", quota.released, testKeyA)
+	if len(quota.released) != 0 {
+		t.Errorf("quota released despite failed removal: %v", quota.released)
 	}
 
 	// The key stays active so the next pass retries the datapath teardown.
@@ -466,5 +466,46 @@ func TestEngine_DatapathGenerationDelegates(t *testing.T) {
 
 	if got := e.DatapathGeneration(); got != 12345 {
 		t.Errorf("DatapathGeneration() = %d, want 12345", got)
+	}
+}
+
+func TestEngineFailedPartialApplyRetainsOwnershipUntilCleanup(t *testing.T) {
+	ctx := context.Background()
+	dp := newFakeDatapath()
+	dp.applyErr = errors.New("partial write")
+	dp.removeErr = errors.New("cleanup failed")
+	quota := NewNodeQuotaEnforcer(64, 64)
+	engine := NewEngine(dp, quota, &fakeTelemetry{})
+	a := testDesiredRule(t, "a", "2001:db8::1")
+	a.Protocol = protocolUDP
+	a.Port = 10000
+	a.PortEnd = 10127
+	_, err := engine.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{"a": a}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total, _ := quota.Stats(); total != 1 {
+		t.Fatalf("lost failed rule reservation: %d", total)
+	}
+	dp.applyErr = nil
+	b := a
+	b.Key = "b"
+	status, err := engine.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{"b": b}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Healthy || len(dp.applyCalls) != 1 {
+		t.Fatalf("overlapping replacement applied: %+v %v", status, dp.applyCalls)
+	}
+	dp.removeErr = nil
+	status, err = engine.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{"b": b}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Healthy || len(dp.applyCalls) != 2 {
+		t.Fatalf("replacement failed after cleanup: %+v", status)
+	}
+	if total, _ := quota.Stats(); total != 1 {
+		t.Fatalf("reservation leak: %d", total)
 	}
 }

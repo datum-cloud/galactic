@@ -127,6 +127,7 @@ type ReturnEntry struct {
 // true between them and no caller has to remember to.
 type VIPTable struct {
 	table       Table
+	peer        Table
 	stats       Table
 	addrs       Table
 	returnStats Table
@@ -273,6 +274,20 @@ func (t *VIPTable) claimAddr(vip netip.Addr, generation uint64) error {
 // this process would be wrong after the restart Reconcile's cutoff exists to
 // survive.
 func (t *VIPTable) releaseAddr(vip netip.Addr) error {
+	if t.peer != nil {
+		it := t.peer.Iterate()
+		var key edgeprog.EdgedsrVipKey
+		var value edgeprog.EdgedsrVipValue
+		for it.Next(&key, &value) {
+			if fromWireAddr(key.Vip) == vip {
+				return nil
+			}
+		}
+		if err := it.Err(); err != nil {
+			return err
+		}
+	}
+
 	wireAddr, err := toWireAddrKey(vip)
 	if err != nil {
 		return err
@@ -558,3 +573,5 @@ func (t *VIPTable) reconcileAddrs(cutoff uint64) error {
 	}
 	return errors.Join(errs...)
 }
+
+func (t *VIPTable) WithPeerTable(peer Table) *VIPTable { t.peer = peer; return t }

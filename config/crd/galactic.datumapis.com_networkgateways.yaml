@@ -97,6 +97,12 @@ spec:
                   The gateway sets it on every status write; a gateway that cannot apply
                   health, an older one included, writes its status without it.
                 type: boolean
+              capabilities:
+                items:
+                  type: string
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: set
               conditions:
                 description: Conditions contains the standard conditions for this
                   resource.

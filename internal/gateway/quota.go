@@ -19,6 +19,8 @@ const (
 	// addresses, so this also bounds a tenant's worst-case map footprint to
 	// eight times this value.
 	DefaultMaxRulesPerTenant = 64
+	MaxRangePorts            = 1024
+	MaxCoveredPortsPerTenant = 4096
 
 	// DefaultMaxRuleTableEntries is the node-wide ceiling across every tenant,
 	// defaulting to the map's own capacity. Once desired state would fill the
@@ -56,6 +58,7 @@ type NodeQuotaEnforcer struct {
 	ruleTenant      map[string]string
 	ruleEntries     map[string]int
 	totalEntries    int
+	rules           map[string]DesiredRule
 }
 
 // NewNodeQuotaEnforcer returns a NodeQuotaEnforcer with the given limits. Use
@@ -79,6 +82,9 @@ func (e *NodeQuotaEnforcer) CheckAndReserve(_ context.Context, rule DesiredRule)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	if !e.rangeCapacity(rule) {
+		return false, nil
+	}
 	entries := len(rule.VIPAddresses)
 	if entries == 0 {
 		entries = 1 // defensive: a rule always occupies at least one row
@@ -117,6 +123,10 @@ func (e *NodeQuotaEnforcer) CheckAndReserve(_ context.Context, rule DesiredRule)
 	if !alreadyReserved || prevTenant != rule.VPCRef {
 		e.tenantRuleCount[rule.VPCRef] = tenantCount
 	}
+	if e.rules == nil {
+		e.rules = make(map[string]DesiredRule)
+	}
+	e.rules[rule.Key] = rule
 	e.ruleTenant[rule.Key] = rule.VPCRef
 	e.ruleEntries[rule.Key] = entries
 	e.totalEntries = projectedTotal
@@ -144,6 +154,7 @@ func (e *NodeQuotaEnforcer) Release(_ context.Context, key string) error {
 		delete(e.tenantRuleCount, tenant)
 	}
 	delete(e.ruleEntries, key)
+	delete(e.rules, key)
 	delete(e.ruleTenant, key)
 	return nil
 }
@@ -162,3 +173,57 @@ func (e *NodeQuotaEnforcer) Stats() (totalEntries int, tenantRuleCounts map[stri
 }
 
 var _ QuotaEnforcer = (*NodeQuotaEnforcer)(nil)
+
+func portEnd(rule DesiredRule) uint16 {
+	if rule.PortEnd != 0 {
+		return rule.PortEnd
+	}
+	return rule.Port
+}
+
+func (e *NodeQuotaEnforcer) rangeCapacity(rule DesiredRule) bool {
+	end := portEnd(rule)
+	if rule.PortEnd != 0 && (rule.Protocol != protocolUDP ||
+		rule.Port == 0 ||
+		end < rule.Port ||
+		int(end)-int(rule.Port)+1 > MaxRangePorts) {
+		return false
+	}
+	tenantHasRange := rule.PortEnd != 0
+	covered := (int(end) - int(rule.Port) + 1) * len(rule.VIPAddresses)
+	for key, other := range e.rules {
+		if key == rule.Key {
+			continue
+		}
+		if other.VPCRef == rule.VPCRef {
+			tenantHasRange = tenantHasRange || other.PortEnd != 0
+			covered += (int(portEnd(other)) - int(other.Port) + 1) * len(other.VIPAddresses)
+		}
+	}
+	if tenantHasRange && covered > MaxCoveredPortsPerTenant {
+		return false
+	}
+	for _, vip := range rule.VIPAddresses {
+		descriptors := 1
+		vipHasRange := rule.PortEnd != 0
+		for key, other := range e.rules {
+			if key == rule.Key || other.Protocol != rule.Protocol {
+				continue
+			}
+			for _, ovip := range other.VIPAddresses {
+				if vip != ovip {
+					continue
+				}
+				descriptors++
+				vipHasRange = vipHasRange || other.PortEnd != 0
+				if (rule.PortEnd != 0 || other.PortEnd != 0) && rule.Port <= portEnd(other) && other.Port <= end {
+					return false
+				}
+			}
+		}
+		if vipHasRange && descriptors > edgemap.MaxRangesPerVIP {
+			return false
+		}
+	}
+	return true
+}

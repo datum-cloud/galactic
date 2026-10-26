@@ -152,8 +152,9 @@ type Entry struct {
 
 // VipXlatTable is the read/write API for vip_xlat_table.
 type VipXlatTable struct {
-	table usidmap.Table
-	clock func() uint64
+	table  usidmap.Table
+	ranges usidmap.Table
+	clock  func() uint64
 
 	// writeMu serializes every write this process makes to the map, so a
 	// removal that reads a row to decide ownership deletes the row it read
@@ -340,6 +341,10 @@ func (t *VipXlatTable) register(
 	key, err := kernelKey(direction, block, argument, slot, proto, keyAddr, keyPort)
 	if err != nil {
 		return fmt.Errorf("vipxlatmap: vip_xlat_table: register: key address: %w", err)
+	}
+
+	if err := t.rejectRangeOverlap(key, keyPort); err != nil {
+		return err
 	}
 
 	value := prog.UsidVipXlatValue{

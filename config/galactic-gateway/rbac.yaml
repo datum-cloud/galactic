@@ -28,11 +28,13 @@ rules:
     resources:
       - networkgateways
       - networkservices
+      - networkserviceaddresses
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["galactic.datumapis.com"]
     resources:
       - networkgateways/status
       - networkservices/status
+      - networkserviceaddresses/status
     verbs: ["get", "update", "patch"]
   # Full CRUD: NetworkGatewayReconciler creates one BGPAdvertisement per VIP
   # address family per NetworkService it serves plus one for its own

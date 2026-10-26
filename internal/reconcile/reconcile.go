@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -110,6 +111,15 @@ func (r *Reconciler) BuildDesiredRouter(
 	); err != nil {
 		return nil, fmt.Errorf("list BGPAdvertisements for router %s/%s: %w", namespace, router.Name, err)
 	}
+
+	active := advList.Items[:0]
+	now := time.Now()
+	for _, adv := range advList.Items {
+		if !AdvertisementLeaseExpired(&adv, now) {
+			active = append(active, adv)
+		}
+	}
+	advList.Items = active
 
 	// A node hosts one instance per VPC with at least one attachment here,
 	// shared by every attachment on that VPC, so every instance targeting this
@@ -478,4 +488,9 @@ func validateTimers(holdTime, keepaliveTime *metav1.Duration) error {
 		return fmt.Errorf("keepaliveTime %v must be <= holdTime/3 (%v)", keepalive, maxKeepalive)
 	}
 	return nil
+}
+
+// AdvertisementLeaseExpired reports whether an advertisement's serving lease has ended.
+func AdvertisementLeaseExpired(adv *bgpv1alpha1.BGPAdvertisement, now time.Time) bool {
+	return adv.Spec.ExpiresAt != nil && !adv.Spec.ExpiresAt.After(now)
 }

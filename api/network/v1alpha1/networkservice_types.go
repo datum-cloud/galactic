@@ -135,8 +135,10 @@ type NetworkService struct {
 // NetworkServiceSpec defines the desired ingress load-balancing state for a
 // tenant VPC.
 //
-// +kubebuilder:validation:XValidation:rule="!(self.protocol in ['tcp', 'udp', 'sctp']) || has(self.port)",message="port is required for tcp, udp and sctp"
-// +kubebuilder:validation:XValidation:rule="!(self.protocol in ['tcp', 'udp', 'sctp']) || has(self.backendPort)",message="backendPort is required for tcp, udp and sctp"
+// +kubebuilder:validation:XValidation:rule="!(self.protocol in ['tcp', 'udp', 'sctp']) || has(self.port) != has(self.portRange)",message="exactly one of port and portRange is required"
+// +kubebuilder:validation:XValidation:rule="has(self.portRange) ? !has(self.backendPort) && self.protocol == 'udp' : !(self.protocol in ['tcp', 'udp', 'sctp']) || has(self.backendPort)",message="UDP ranges preserve ports and omit backendPort; singleton services require backendPort"
+// +kubebuilder:validation:XValidation:rule="!has(self.portRange) || self.vipAddresses.all(v, isIP(v) && ip(v).family() == 6)",message="port ranges require IPv6 VIPs"
+// +kubebuilder:validation:XValidation:rule="!has(self.portRange) || has(self.addressGroup)",message="port ranges require a complete address group"
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.port)",message="port must not be set for esp, gre and icmp, which have no ports"
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.backendPort)",message="backendPort must not be set for esp, gre and icmp, which have no ports"
 // +kubebuilder:validation:XValidation:rule="self.protocol != 'udp' || !has(self.healthCheck) || has(self.healthCheck.port)",message="healthCheck.port is required for udp: a health check probes a TCP port"
@@ -202,13 +204,22 @@ type NetworkServiceSpec struct {
 	Protocol NetworkServiceProtocol `json:"protocol"`
 
 	// Port is the ingress port on VIPAddresses that this service load-balances,
-	// 1-65535. It is required for a protocol with ports (tcp, udp and sctp)
+	// 1-65535. It is required when PortRange is absent for tcp, udp and sctp
 	// and must be unset for one without (esp, gre and icmp). Zero means unset
 	// and is omitted when encoding, and an explicit 0 is refused.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port,omitempty"`
+
+	// PortRange replaces Port for an inclusive IPv6 UDP interval. Backend ports
+	// are preserved; BackendPort must be omitted.
+	// +optional
+	PortRange *PortRange `json:"portRange,omitempty"`
+
+	// AddressGroup binds this listener to a complete, authoritative address inventory.
+	// +optional
+	AddressGroup *NetworkServiceAddressGroup `json:"addressGroup,omitempty"`
 
 	// BackendSelector selects the VPCAttachments (galactic.datumapis.com/v1alpha1)
 	// that serve this service, matched against each VPCAttachment object's own

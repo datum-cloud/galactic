@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"sort"
 	"time"
 
@@ -81,7 +82,7 @@ func (idx serviceBindings) unhealthy(
 ) bool {
 	want := generatedBinding(rule, objNS, b.node, vip, b)
 	got, ok := idx[want.Name]
-	if !ok || !got.DeletionTimestamp.IsZero() || !generatedFor(got, rule) || got.Spec != want.Spec {
+	if !ok || !got.DeletionTimestamp.IsZero() || !generatedFor(got, rule) || !reflect.DeepEqual(got.Spec, want.Spec) {
 		return failClosedHealth(rule)
 	}
 	h := got.Status.Health

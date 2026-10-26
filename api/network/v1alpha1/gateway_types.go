@@ -45,6 +45,10 @@ type NetworkGatewaySpec struct {
 
 // NetworkGatewayStatus defines the observed state of a NetworkGateway.
 type NetworkGatewayStatus struct {
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=16
+	Capabilities []string `json:"capabilities,omitempty"`
 	// ObservedGeneration is the .metadata.generation this status was computed from.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

@@ -123,6 +123,14 @@ type BGPRouterSpec struct {
 
 // BGPRouterStatus defines the observed state of a BGPRouter.
 type BGPRouterStatus struct {
+	// SupportsAdvertisementLeases reports independent expiry enforcement by the router.
+	// Consumers must also require current observedGeneration and a healthy router.
+	// +optional
+	SupportsAdvertisementLeases bool `json:"supportsAdvertisementLeases,omitempty"`
+	// LastSuccessfulReconcileTime is the last healthy apply or verified no-op reconciliation.
+	// +optional
+	LastSuccessfulReconcileTime *metav1.Time `json:"lastSuccessfulReconcileTime,omitempty"`
+
 	// Phase is the high-level lifecycle state of this router.
 	// +optional
 	Phase BGPRouterPhase `json:"phase,omitempty"`

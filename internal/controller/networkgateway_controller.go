@@ -344,13 +344,21 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 			stillOwned, checkErr := isGatewayNode(ctx, r.Client, req.Namespace, r.NodeName)
 			if checkErr != nil {
-				return ctrl.Result{}, errors.Join(withdrawErr, fmt.Errorf("check for this node's own NetworkGateway: %w", checkErr))
+				return ctrl.Result{}, errors.Join(
+					withdrawErr,
+					fmt.Errorf("check for this node's own NetworkGateway: %w", checkErr),
+				)
 			}
 			if stillOwned {
 				return ctrl.Result{}, withdrawErr
 			}
 			if stopErr := r.Engine.Stop(ctx); stopErr != nil {
-				logger.Error(stopErr, "stop gateway engine for deleted NetworkGateway", "networkGateway", req.NamespacedName)
+				logger.Error(
+					stopErr,
+					"stop gateway engine for deleted NetworkGateway",
+					"networkGateway",
+					req.NamespacedName,
+				)
 			}
 			r.drain.reset()
 			return ctrl.Result{}, withdrawErr
@@ -381,7 +389,12 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			withdrawErr = errors.Join(withdrawErr, clearErr)
 		}
 		if stopErr := r.Engine.Stop(ctx); stopErr != nil {
-			logger.Error(stopErr, "stop gateway engine for terminating NetworkGateway", "networkGateway", req.NamespacedName)
+			logger.Error(
+				stopErr,
+				"stop gateway engine for terminating NetworkGateway",
+				"networkGateway",
+				req.NamespacedName,
+			)
 		}
 		r.drain.reset()
 		gwCopy := gw.DeepCopy()
@@ -407,6 +420,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		gwCopy := gw.DeepCopy()
 		gwCopy.Status.BackendHealthFiltering = r.BackendHealth
 		gwCopy.Status.ObservedGeneration = gw.Generation
+		gwCopy.Status.Capabilities = nil
 		setGatewayCondition(gwCopy, metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
 			Status:  metav1.ConditionFalse,
@@ -419,6 +433,12 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, withdrawErr
 	}
 
+	return r.reconcileServingGateway(ctx, req, gw)
+}
+
+func (r *NetworkGatewayReconciler) reconcileServingGateway(ctx context.Context, req ctrl.Request,
+	gw *bgpv1alpha1.NetworkGateway) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
 	// Crash-safety ordering contract (see GatewayEngine.ReconcileOrphans):
 	// cutoff must be captured before desired's NetworkService CRDs are listed.
 	cutoff := r.Engine.DatapathGeneration()
@@ -426,6 +446,11 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	served, allRules, err := listServedNetworkServices(ctx, r.Client, gw.Namespace)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("list NetworkServices for NetworkGateway %s: %w", req.NamespacedName, err)
+	}
+
+	addresses, err := r.prepareAddressInventory(ctx, gw.Namespace, served)
+	if err != nil {
+		return ctrl.Result{}, errors.Join(err, withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName))
 	}
 
 	// An ambiguous router only blocks advertisement wiring; the datapath
@@ -452,7 +477,15 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
+	leaseSupport, err := r.routerLeaseSupport(ctx, gw.Namespace, routerName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	r.gateAddressRules(addresses, &desired, outcomes, leaseSupport)
 	desired, fwdErr := r.ensureIPv4Forwarding(desired, outcomes)
+	if err := r.primeGroupedServing(ctx, addresses, desired, outcomes); err != nil {
+		return ctrl.Result{}, errors.Join(err, withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName))
+	}
 	status, err := r.reconcileEngine(ctx, gw, desired)
 	if err != nil {
 		return ctrl.Result{}, errors.Join(fwdErr, err)
@@ -465,10 +498,31 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		logger.Info("no BGPRouter targets this node; skipping BGPAdvertisement wiring", "node", r.NodeName)
 	}
 
-	advErr, ruleStatusErr := r.publishRuleOutcomes(ctx, gw.Namespace, outcomes, status, routerName)
+	if err := r.finishAddressConvergence(ctx, gw, desired, status, cutoff); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	addressAnnouncements, addressErr := r.publishAddressOutcomes(
+		ctx,
+		gw.Namespace,
+		addresses,
+		outcomes,
+		status,
+		routerName,
+	)
+	advErr, ruleStatusErr := r.publishRuleOutcomes(
+		ctx,
+		gw.Namespace,
+		outcomes,
+		status,
+		routerName,
+		addressAnnouncements,
+	)
+	advErr = errors.Join(advErr, addressErr)
 
 	gwCopy := gw.DeepCopy()
 	gwCopy.Status.BackendHealthFiltering = r.BackendHealth
+	gwCopy.Status.Capabilities = r.servingCapabilities(leaseSupport)
 	gwCopy.Status.ObservedGeneration = gw.Generation
 	ready := readyConditionFor(status, advErr)
 	if fwdErr != nil {
@@ -489,19 +543,13 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		logger.Error(sweepErr, "withdraw advertisements for deleted NetworkServices")
 	}
 
-	// Crash recovery. A failed sweep leaves orphaned vip_table state behind
-	// until a later pass succeeds, so it is returned for retry, after the
-	// status write above so the failure stays visible on the object.
-	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
-		logger.Error(err, "reconcile orphaned vip_table state")
-		return ctrl.Result{}, errors.Join(fwdErr, advErr, ruleStatusErr, sweepErr,
-			fmt.Errorf("reconcile orphaned vip_table state: %w", err))
-	}
-
 	if err := errors.Join(fwdErr, advErr, ruleStatusErr, sweepErr); err != nil {
 		return ctrl.Result{}, err
 	}
 	requeueAfter = healthExpiryRequeue(allRules, requeueAfter)
+	if len(addresses) > 0 && (requeueAfter == 0 || requeueAfter > sharedAddressRenewInterval) {
+		requeueAfter = sharedAddressRenewInterval
+	}
 
 	// Nothing else is sure to trigger the pass that drops a held rule once
 	// its drain delay ends, so ask for it.
@@ -549,7 +597,10 @@ func (r *NetworkGatewayReconciler) syncReturnPath(ctx context.Context, namespace
 	var fwdErr error
 	if len(v4) > 0 && r.EnsureIPv4Forwarding != nil {
 		if err := r.EnsureIPv4Forwarding(); err != nil {
-			fwdErr = fmt.Errorf("turn on IPv4 forwarding for the return path; IPv4 VIP replies are not claimed: %w", err)
+			fwdErr = fmt.Errorf(
+				"turn on IPv4 forwarding for the return path; IPv4 VIP replies are not claimed: %w",
+				err,
+			)
 			v4 = nil
 		}
 	}
@@ -643,8 +694,14 @@ func loadsIPv4VIP(desired gateway.EngineState) bool {
 // VIPs are balanced over and advertised by and backend health is read from,
 // or nil while IPv4VIPs and BackendHealth are both off, when nothing reads
 // them.
-func (r *NetworkGatewayReconciler) passBindings(ctx context.Context, namespace string) (serviceBindings, error) {
-	if !r.IPv4VIPs && !r.BackendHealth {
+func (r *NetworkGatewayReconciler) passBindings(
+	ctx context.Context,
+	namespace string,
+	rules []bgpv1alpha1.NetworkService,
+) (serviceBindings, error) {
+	if !r.IPv4VIPs && !r.BackendHealth && !slices.ContainsFunc(rules, func(rule bgpv1alpha1.NetworkService) bool {
+		return rule.Spec.AddressGroup != nil || rule.Spec.PortRange != nil
+	}) {
 		return nil, nil
 	}
 	return listServiceBindings(ctx, r.Client, namespace)
@@ -668,7 +725,7 @@ func (r *NetworkGatewayReconciler) gatherRules(
 	logger := log.FromContext(ctx)
 	desired := gateway.EngineState{Rules: make(map[string]gateway.DesiredRule)}
 
-	bindings, err := r.passBindings(ctx, namespace)
+	bindings, err := r.passBindings(ctx, namespace, rules)
 	if err != nil {
 		return desired, nil, 0, err
 	}
@@ -695,6 +752,10 @@ func (r *NetworkGatewayReconciler) gatherRules(
 
 	for i := range rules {
 		rule := &rules[i]
+		if !rule.DeletionTimestamp.IsZero() && rule.Spec.AddressGroup != nil {
+			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: errors.New("listener is withdrawing")})
+			continue
+		}
 		if !rule.DeletionTimestamp.IsZero() {
 			// Being torn down. NetworkServiceReconciler's finalizer owns the
 			// rule's advertisements: reconcileDelete deletes every one
@@ -835,7 +896,12 @@ type ruleOutcome struct {
 // statusErr: they are retried too, but say nothing about whether this node
 // serves traffic, so they stay out of the Ready condition.
 func (r *NetworkGatewayReconciler) publishRuleOutcomes(
-	ctx context.Context, namespace string, outcomes []ruleOutcome, status gateway.EngineStatus, routerName string,
+	ctx context.Context,
+	namespace string,
+	outcomes []ruleOutcome,
+	status gateway.EngineStatus,
+	routerName string,
+	addressAnnouncements ...map[string]bool,
 ) (advErr, statusErr error) {
 	logger := log.FromContext(ctx)
 
@@ -862,7 +928,12 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 		}
 		if o.unaccepted {
 			if err := withdrawRuleAdvertisements(ctx, r.Client, o.rule, namespace, r.NodeName); err != nil {
-				logger.Error(err, "withdraw BGPAdvertisements for unaccepted NetworkService", "networkRule", o.rule.Name)
+				logger.Error(
+					err,
+					"withdraw BGPAdvertisements for unaccepted NetworkService",
+					"networkRule",
+					o.rule.Name,
+				)
 				advErrs = append(advErrs, fmt.Errorf("networkRule %s: %w", o.rule.Name, err))
 			}
 			if hasNodeRuleConditions(o.rule, r.NodeName) {
@@ -873,6 +944,34 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 			continue
 		}
 		cond := programmedCondition(r.NodeName, o, loadErrs)
+		if o.rule.Spec.AddressGroup != nil {
+			if !status.Healthy {
+				cond.Status = metav1.ConditionUnknown
+				cond.Reason = "CleanupUnconfirmed"
+				cond.Message = "Shared address remains blocked until forwarding cleanup is confirmed"
+			}
+			if err := withdrawRuleAdvertisements(ctx, r.Client, o.rule, namespace, r.NodeName); err != nil {
+				advErrs = append(advErrs, err)
+			}
+			advertised := false
+			if len(addressAnnouncements) > 0 && len(o.rule.Spec.VIPAddresses) == 1 {
+				advertised = addressAnnouncements[0][canonicalVIP(o.rule.Spec.VIPAddresses[0])]
+			}
+			adv := metav1.Condition{
+				Type:    advertisedConditionType(r.NodeName),
+				Status:  metav1.ConditionFalse,
+				Reason:  "NotServed",
+				Message: "Listener does not serve on this gateway",
+			}
+			if cond.Status == metav1.ConditionTrue && advertised {
+				adv.Status, adv.Reason = metav1.ConditionTrue, reasonAdvertised
+				adv.Message = "Shared address is advertised and this listener serves"
+			}
+			if err := r.setRuleConditions(ctx, o.rule, cond, adv, nil, nil); err != nil {
+				statusErrs = append(statusErrs, err)
+			}
+			continue
+		}
 		// The rule's IPv4 VIP is advertised only when this node loaded it over
 		// only its Bound backends, at least one (ipv4Loaded), and the rule
 		// loaded.
@@ -1218,6 +1317,9 @@ func (r *NetworkGatewayReconciler) setRuleConditions(
 		current := &bgpv1alpha1.NetworkService{}
 		if err := r.Get(ctx, key, current); err != nil {
 			return err
+		}
+		if current.UID != rule.UID || current.Generation != rule.Generation {
+			return errors.New("service revision changed during programming")
 		}
 		c := programmed
 		c.ObservedGeneration = current.Generation
@@ -1581,7 +1683,7 @@ func buildDesiredRule(
 		}
 		vip := f.vips[0]
 		var unbound func(ruleBackend) string
-		if f.family == familyIPv4 {
+		if needsBindingConfirmation(rule, f.family) {
 			unbound = func(b ruleBackend) string { return bindings.unbound(rule, objNS, vip, b) }
 		}
 		var unhealthy func(ruleBackend) bool
@@ -1628,6 +1730,7 @@ func buildDesiredRule(
 		VIPAddresses: vips,
 		Protocol:     string(rule.Spec.Protocol),
 		Port:         port,
+		PortEnd:      rulePortEnd(rule),
 		Affinity:     string(rule.Spec.SessionAffinity),
 		Backends:     v6Backends,
 		IPv4Backends: v4Backends,
@@ -2008,6 +2111,17 @@ func prefixesByFamily(vips []netip.Addr) (v4, v6 []string) {
 func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.NetworkGateway{}).
+		Watches(&bgpv1alpha1.NetworkServiceAddress{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return broadcastToGatewayRequests(
+					ctx,
+					r.Client,
+					obj.GetNamespace(),
+					"NetworkServiceAddress",
+					obj.GetName(),
+				)
+			}),
+		).
 		Watches(&bgpv1alpha1.NetworkService{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return ruleToGatewayRequests(ctx, r.Client, obj)
@@ -2061,7 +2175,7 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 			builder.WithPredicates(vpcAttachmentBackendChanged()),
 		)
-	if r.IPv4VIPs || r.BackendHealth {
+	{
 		// A rule's IPv4 VIP is balanced over, and advertised for, only the
 		// backends whose bindings are Bound, and a rule with a healthCheck
 		// over only the backends no binding reports Unhealthy, so a binding
@@ -2073,7 +2187,7 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "ServiceVIPBinding", obj.GetName())
 			}),
-			builder.WithPredicates(bindingReadinessChanged(r.BackendHealth)),
+			builder.WithPredicates(bindingReadinessChanged(true)),
 		)
 	}
 	if r.BackendHealth {
@@ -2146,8 +2260,9 @@ func locatesBackend(obj client.Object) bool {
 // isRuleAdvertisement reports whether obj is a gateway VIP advertisement made
 // for a NetworkService.
 func isRuleAdvertisement(obj client.Object) bool {
-	_, ok := obj.GetLabels()[networkRuleLabel]
-	return ok
+	_, rule := obj.GetLabels()[networkRuleLabel]
+	_, address := obj.GetLabels()[serviceAddressLabel]
+	return rule || address
 }
 
 // ruleToGatewayRequests maps a NetworkService change to every NetworkGateway
@@ -2298,6 +2413,9 @@ func isNodeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, nodeName string) boo
 	if adv.Labels[gatewayNodeLabel] != gatewayNodeLabelValue(nodeName) {
 		return false
 	}
+	if address := adv.Labels[serviceAddressLabel]; address != "" {
+		return adv.Name == addressAdvertisementName(address, nodeName)
+	}
 	key, ok := ruleKeyFromLabels(adv)
 	if !ok {
 		return false
@@ -2349,6 +2467,25 @@ func (r *NetworkGatewayReconciler) sweepOrphanedAdvertisements(
 		if !isNodeAdvertisement(adv, r.NodeName) {
 			continue
 		}
+		if address := adv.Labels[serviceAddressLabel]; address != "" {
+			reader := r.APIReader
+			if reader == nil {
+				reader = r.Client
+			}
+			anchor := &bgpv1alpha1.NetworkServiceAddress{}
+			err := reader.Get(ctx, types.NamespacedName{Namespace: adv.Namespace, Name: address}, anchor)
+			if err == nil {
+				continue
+			}
+			if !apierrors.IsNotFound(err) {
+				errs = append(errs, err)
+				continue
+			}
+			if err := r.Delete(ctx, adv); err != nil && !apierrors.IsNotFound(err) {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		ruleName, _ := ruleKeyFromLabels(adv)
 		if known[ruleName] {
 			continue
@@ -2358,7 +2495,10 @@ func (r *NetworkGatewayReconciler) sweepOrphanedAdvertisements(
 		case err == nil:
 			continue
 		case !apierrors.IsNotFound(err):
-			errs = append(errs, fmt.Errorf("check NetworkService %s for BGPAdvertisement %s: %w", ruleName, adv.Name, err))
+			errs = append(
+				errs,
+				fmt.Errorf("check NetworkService %s for BGPAdvertisement %s: %w", ruleName, adv.Name, err),
+			)
 			continue
 		}
 		if err := r.Delete(ctx, adv); err != nil && !apierrors.IsNotFound(err) {
@@ -2399,4 +2539,40 @@ func withdrawNodeAdvertisements(ctx context.Context, c client.Client, namespace,
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func needsBindingConfirmation(rule *bgpv1alpha1.NetworkService, family addrFamily) bool {
+	return family == familyIPv4 || rule.Spec.AddressGroup != nil || rule.Spec.PortRange != nil
+}
+
+func (r *NetworkGatewayReconciler) finishAddressConvergence(ctx context.Context, gw *bgpv1alpha1.NetworkGateway,
+	desired gateway.EngineState, status gateway.EngineStatus, cutoff uint64) error {
+	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
+		copy := gw.DeepCopy()
+		copy.Status.ObservedGeneration = gw.Generation
+		setGatewayCondition(
+			copy,
+			metav1.Condition{
+				Type:    bgpv1alpha1.ConditionTypeReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  "OrphanCleanupFailed",
+				Message: err.Error(),
+			},
+		)
+		return errors.Join(
+			err,
+			r.Status().Update(ctx, copy),
+			withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName),
+		)
+	}
+	if status.Healthy {
+		if blocker, ok := r.Engine.(interface {
+			SetBlockedVIPs(context.Context, []netip.Addr) error
+		}); ok {
+			if err := blocker.SetBlockedVIPs(ctx, nil); err != nil {
+				return errors.Join(err, withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName))
+			}
+		}
+	}
+	return nil
 }

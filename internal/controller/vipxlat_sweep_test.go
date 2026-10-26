@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strconv"
 	"testing"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -231,7 +232,8 @@ func TestVIPXlatSweeper_ListErrorSkipsPass(t *testing.T) {
 		vip: testSweepOrphanVIP, backend: testSweepOrphanBackend}})
 	table := vipxlatmap.NewVipXlatTable(mem)
 
-	result := (&VIPXlatSweeper{Client: c, NodeName: testComputeNodeName, Table: table}).Sweep(context.Background())
+	sweeper := &VIPXlatSweeper{Client: c, NodeName: testComputeNodeName, Table: table}
+	result := sweeper.Sweep(context.Background())
 	if result.Errors != 1 || result.EBPFVIPXlatEntriesRemoved != 0 {
 		t.Errorf("Sweep = %+v, want 1 error and nothing removed", result)
 	}
@@ -271,7 +273,8 @@ func TestVIPXlatSweeper_KeepsIPv4VIPRows(t *testing.T) {
 	writeSweepRows(t, mem, block, argument, rows)
 
 	table := vipxlatmap.NewVipXlatTable(mem)
-	result := (&VIPXlatSweeper{Client: c, NodeName: testComputeNodeName, Table: table}).Sweep(context.Background())
+	sweeper := &VIPXlatSweeper{Client: c, NodeName: testComputeNodeName, Table: table}
+	result := sweeper.Sweep(context.Background())
 	if result.Errors != 0 || result.EBPFVIPXlatEntriesRemoved != len(rows)-len(live) {
 		t.Fatalf("Sweep: %d errors, %d removed; want 0 and %d",
 			result.Errors, result.EBPFVIPXlatEntriesRemoved, len(rows)-len(live))
@@ -329,11 +332,69 @@ func TestVIPXlatSweeper_RemovesIPv4BackendRows(t *testing.T) {
 	}
 
 	table := vipxlatmap.NewVipXlatTable(mem)
-	result := (&VIPXlatSweeper{Client: c, NodeName: testComputeNodeName, Table: table}).Sweep(context.Background())
+	sweeper := &VIPXlatSweeper{Client: c, NodeName: testComputeNodeName, Table: table}
+	result := sweeper.Sweep(context.Background())
 	if result.Errors != 0 || result.EBPFVIPXlatEntriesRemoved != 2 {
 		t.Errorf("Sweep: %d errors, %d removed; want 0 and 2", result.Errors, result.EBPFVIPXlatEntriesRemoved)
 	}
 	if len(mem.entries) != 0 {
 		t.Errorf("%d IPv4-backend rows left, want none", len(mem.entries))
+	}
+}
+
+func TestVIPXlatSweeperCompactRangeRecovery(t *testing.T) {
+	for _, unresolved := range []bool{false, true} {
+		t.Run(strconv.FormatBool(unresolved), func(t *testing.T) {
+			router, _, vrf := newBackendFixtures(testVPCRef)
+			binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+			binding.Spec.Protocol = "udp"
+			binding.Spec.Port = 0
+			binding.Spec.BackendPort = 0
+			binding.Spec.PortRange = &bgpv1alpha1.PortRange{Start: 10000, End: 10127}
+			c := fake.NewClientBuilder().WithScheme(newRuleTestScheme(t)).WithObjects(router, vrf, binding).Build()
+			block, argument, err := resolveVIPBindingContext(context.Background(), c, testNamespace,
+				testComputeNodeName, testVPCRef)
+			if err != nil {
+				t.Fatal(err)
+			}
+			exact, ranges := newMemTable(), newMemTable()
+			table := vipxlatmap.NewVipXlatTable(exact).WithRangeTable(ranges)
+			vip, backend := sweepIP(binding.Spec.VIPAddress), sweepIP(binding.Spec.BackendAddress)
+			slot := srv6.BackendSlot(netip.MustParseAddr(binding.Spec.BackendAddress), 10000)
+			for _, start := range []uint16{10000, 11000} {
+				if err := table.RegisterIngressRange(block, argument, slot, ipProtoUDP,
+					vip, start, start+127, backend); err != nil {
+					t.Fatal(err)
+				}
+				if err := table.RegisterEgressRange(block, argument, ipProtoUDP,
+					backend, start, start+127, vip); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if unresolved {
+				if err := c.Delete(context.Background(), vrf); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A fresh wrapper simulates restart; persisted generations remain readable.
+			table = vipxlatmap.NewVipXlatTable(exact).WithRangeTable(ranges)
+			sweeper := &VIPXlatSweeper{Client: c, NodeName: testComputeNodeName, Table: table}
+			result := sweeper.Sweep(context.Background())
+			if result.Errors != 0 || result.EBPFVIPXlatEntriesRemoved != 2 {
+				t.Fatalf("sweep: %+v", result)
+			}
+			entries, err := table.ListRanges()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 2 {
+				t.Fatalf("live compact rows lost: %+v", entries)
+			}
+			for _, entry := range entries {
+				if entry.Port != 10000 || entry.EndPort != 10127 {
+					t.Fatalf("unexpected retained range: %+v", entry)
+				}
+			}
+		})
 	}
 }

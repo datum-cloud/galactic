@@ -202,7 +202,7 @@ func selectRuleBackends(
 	sel := ruleSelection{pending: pending}
 	self := client.ObjectKeyFromObject(rule)
 	for _, b := range candidates {
-		if owner, ok := owners[backendClaimFor(rule, b, family)]; ok && owner != self {
+		if owner, ok := owners.owner(backendClaimFor(rule, b, family)); ok && owner != self {
 			sel.claimed = append(sel.claimed, claimedBackend{ruleBackend: b, owner: owner})
 			continue
 		}
@@ -276,6 +276,13 @@ func ruleCandidateBackends(
 // datapath does not serve.
 var errUnservedProtocol = errors.New("the gateway datapath serves tcp and udp only")
 
+func rulePortEnd(rule *bgpv1alpha1.NetworkService) uint16 {
+	if rule.Spec.PortRange != nil {
+		return uint16(rule.Spec.PortRange.End)
+	}
+	return 0
+}
+
 // rulePorts returns rule's ingress port and backend port. It refuses any
 // protocol but tcp and udp, wrapping errUnservedProtocol, and a port outside
 // 1-65535, so no reader of the ports ever serves a rule on port 0.
@@ -284,6 +291,14 @@ func rulePorts(rule *bgpv1alpha1.NetworkService) (port, backendPort uint16, err 
 	case bgpv1alpha1.NetworkServiceProtocolTCP, bgpv1alpha1.NetworkServiceProtocolUDP:
 	default:
 		return 0, 0, fmt.Errorf("protocol %q is not served: %w", rule.Spec.Protocol, errUnservedProtocol)
+	}
+	if interval := rule.Spec.PortRange; interval != nil {
+		if rule.Spec.Protocol != bgpv1alpha1.NetworkServiceProtocolUDP || rule.Spec.Port != 0 || rule.Spec.BackendPort != 0 ||
+			interval.Start < 1 || interval.End < interval.Start ||
+			interval.End > 65535 {
+			return 0, 0, errors.New("invalid port-preserving UDP range")
+		}
+		return uint16(interval.Start), uint16(interval.Start), nil
 	}
 	if rule.Spec.Port < 1 || rule.Spec.Port > 65535 {
 		return 0, 0, fmt.Errorf("port %d is outside 1-65535", rule.Spec.Port)
@@ -306,19 +321,47 @@ type backendClaim struct {
 	vpc       string
 	addr      netip.Addr
 	port      uint16
+	end       uint16
 	protocol  bgpv1alpha1.NetworkServiceProtocol
 	vipFamily addrFamily
 }
 
 // backendClaimFor returns the claim backend b of rule makes.
 func backendClaimFor(rule *bgpv1alpha1.NetworkService, b ruleBackend, vipFamily addrFamily) backendClaim {
-	return backendClaim{
+	claim := backendClaim{
 		vpc: rule.Spec.VPCRef, addr: b.addr, port: b.port, protocol: rule.Spec.Protocol, vipFamily: vipFamily,
 	}
+	if rule.Spec.PortRange != nil {
+		claim.end = uint16(rule.Spec.PortRange.End)
+	}
+	return claim
 }
 
 // backendOwners maps each backend claim to the rule that owns it.
 type backendOwners map[backendClaim]types.NamespacedName
+
+func (owners backendOwners) owner(claim backendClaim) (types.NamespacedName, bool) {
+	var owner types.NamespacedName
+	for other, candidate := range owners {
+		if claim.vpc == other.vpc && claim.addr == other.addr && claim.protocol == other.protocol &&
+			claim.vipFamily == other.vipFamily &&
+			intervalsIntersect(claim.port, claim.end, other.port, other.end) &&
+			(owner.Name == "" || candidate.String() < owner.String()) {
+			owner = candidate
+		}
+	}
+	return owner, owner.Name != ""
+}
+
+func intervalsIntersect(a, endA, b, endB uint16) bool {
+	if endA == 0 {
+		endA = a
+	}
+	if endB == 0 {
+		endB = b
+	}
+	return a <= endB && b <= endA
+}
 
 // ruleBackendOwners assigns every backend claim the rules make to the oldest
 // rule making it, by creation time and then namespace/name, so the gateway
@@ -350,7 +393,7 @@ func ruleBackendOwners(
 		for _, tv := range vips.valid() {
 			for _, b := range backends {
 				claim := backendClaimFor(rule, b, tv.family)
-				if _, taken := owners[claim]; !taken {
+				if _, taken := owners.owner(claim); !taken {
 					owners[claim] = client.ObjectKeyFromObject(rule)
 				}
 			}

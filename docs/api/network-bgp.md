@@ -267,6 +267,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `expiresAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ExpiresAt is the serving lease deadline. The router withdraws the advertisement<br />at or after this time unless the producer renews it. Unset preserves unleased behavior. |  |  |
 | `routerRef` _[RouterRef](#routerref)_ | RouterRef targets a single BGPRouter by name. |  | Required: \{\} <br /> |
 | `addressFamily` _[AddressFamily](#addressfamily)_ | AddressFamily defines the AFI/SAFI for this advertisement. |  | Required: \{\} <br /> |
 | `prefixes` _[Prefix](#prefix) array_ | Prefixes is the list of CIDR prefixes to advertise.<br />At least one of Prefixes, Redistribute, or OriginateFrom must be specified. |  | MaxItems: 256 <br />MaxLength: 64 <br /> |
@@ -1235,6 +1236,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `supportsAdvertisementLeases` _boolean_ | SupportsAdvertisementLeases reports independent expiry enforcement by the router.<br />Consumers must also require current observedGeneration and a healthy router. |  |  |
+| `lastSuccessfulReconcileTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | LastSuccessfulReconcileTime is the last healthy apply or verified no-op reconciliation. |  |  |
 | `phase` _[BGPRouterPhase](#bgprouterphase)_ | Phase is the high-level lifecycle state of this router. |  |  |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `peers` _[BGPRouterPeerSummary](#bgprouterpeersummary)_ | Peers summarizes peer session counts. |  |  |
@@ -1490,7 +1493,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Healthy` | BackendHealthHealthy: the last HealthyThreshold probes succeeded.<br /> |
-| `Unhealthy` | BackendHealthUnhealthy: the last UnhealthyThreshold probes failed. Only<br />this state takes a backend out of the gateways' Maglev tables.<br /> |
+| `Unhealthy` | BackendHealthUnhealthy: the last UnhealthyThreshold probes failed. Only<br />this state filters a backend with FailOpen; FailClosed also filters<br />Unknown, missing and expired decisions.<br /> |
 | `Unknown` | BackendHealthUnknown: too few probes have completed to decide, or the<br />probe cannot run on the backend's node.<br /> |
 
 
@@ -3104,6 +3107,23 @@ _Appears in:_
 | `incomplete` |  |
 
 
+#### PortRange
+
+
+
+PortRange is an inclusive transport port interval.
+
+
+
+_Appears in:_
+- [ServiceVIPBindingSpec](#servicevipbindingspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `start` _integer_ |  |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `end` _integer_ |  |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+
+
 #### Prefix
 
 _Underlying type:_ _string_
@@ -3737,6 +3757,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `lastProbeTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | LastProbeTime is refreshed after every probe for FailClosed services. |  |  |
+| `observedGeneration` _integer_ | ObservedGeneration identifies the NetworkService configuration probed. |  |  |
 | `state` _[BackendHealthState](#backendhealthstate)_ | State is the decision. |  | Enum: [Healthy Unhealthy Unknown] <br />Required: \{\} <br /> |
 | `reason` _string_ | Reason is ProbeSucceeded, ProbeFailed, Pending or ProbeUnavailable. |  | MaxLength: 64 <br />Required: \{\} <br /> |
 | `message` _string_ | Message is the last probe error, when there is one. |  | MaxLength: 1024 <br /> |
@@ -3761,7 +3783,8 @@ _Appears in:_
 | `targetRef` _[TargetRef](#targetref)_ | TargetRef identifies the Node this binding applies to. |  | Required: \{\} <br /> |
 | `vpcRef` _string_ | VPCRef is the opaque identifier of the VPC the backend belongs to,<br />copied from the owning NetworkService. It names the tenant VRF the<br />binding's translation rows are written for, so two tenants using the<br />same backend address on one node never share a row. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `vipAddress` _string_ | VIPAddress is the service VIP the backend must be reachable on. |  | Required: \{\} <br /> |
-| `port` _integer_ | Port is the VIP-facing port traffic arrives on. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
+| `port` _integer_ | Port is the VIP-facing port traffic arrives on. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `portRange` _[PortRange](#portrange)_ |  |  |  |
 | `backendAddress` _string_ | BackendAddress is the backend's own real address (its pod-netns<br />address for a veth backend, or its actual guest-facing address for a<br />tap backend) — the VIP-boundary substitution target for both kinds<br />now (see EgressKind's own doc comment for why veth needs this too,<br />not just tap). +optional at the API level for the same reason<br />EgressKind itself carries no matching CEL requirement; the<br />reconciler validates it's set for either kind before doing anything. |  |  |
 | `backendPort` _integer_ | BackendPort is the backend's own real port, paired with<br />BackendAddress — required for both kinds, see that field's doc<br />comment. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 | `egressKind` _[ServiceVIPBindingEgressKind](#servicevipbindingegresskind)_ | EgressKind selects which backend mechanism this binding drives. |  | Enum: [veth tap] <br />Required: \{\} <br /> |

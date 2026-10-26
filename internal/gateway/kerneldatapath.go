@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -43,7 +44,8 @@ func affinityNumber(affinity string) (uint8, error) {
 		return edgeprog.AffinityClientIPAndProtocol, nil
 	default:
 		return 0, fmt.Errorf(
-			"kerneldatapath: unsupported affinity %q (want \"None\", \"ClientIP\" or \"ClientIPAndProtocol\")", affinity)
+			"kerneldatapath: unsupported affinity %q (want \"None\", \"ClientIP\" or \"ClientIPAndProtocol\")",
+			affinity)
 	}
 }
 
@@ -145,8 +147,12 @@ func buildMaglevTable(rule DesiredRule, in []DesiredBackend) ([]edgemap.Backend,
 // attached to the node's public interface by the time ApplyRule is first
 // called; that lifecycle belongs to the attach package and process startup.
 type KernelDatapath struct {
-	mu       sync.Mutex
-	vipTable *edgemap.VIPTable
+	mu            sync.Mutex
+	vipTable      *edgemap.VIPTable
+	rangeVIPTable *edgemap.VIPTable
+	rangeRules    map[string]bool
+	ranges        *edgemap.RangeTable
+	owned         edgemap.Table
 
 	// vipKeysByName maps a rule's key to the vip_table keys currently registered
 	// for it, so RemoveRule, which receives only a key string, knows what to
@@ -182,7 +188,17 @@ func NewKernelDatapath(objs *edgeprog.EdgedsrObjects, encapSrc netip.Addr) (*Ker
 	return &KernelDatapath{
 		vipTable: edgemap.NewVIPTable(
 			edgemap.KernelTable{Map: objs.VipTable}, edgemap.KernelTable{Map: objs.VipStatsTable},
-			edgemap.KernelTable{Map: objs.VipAddrTable}, edgemap.KernelTable{Map: objs.VipReturnStatsTable}),
+			edgemap.KernelTable{Map: objs.VipAddrTable},
+			edgemap.KernelTable{Map: objs.VipReturnStatsTable}).WithPeerTable(edgemap.KernelTable{Map: objs.VipRangeBackends}),
+
+		rangeVIPTable: edgemap.NewVIPTable(edgemap.KernelTable{Map: objs.VipRangeBackends},
+			edgemap.KernelTable{Map: objs.VipStatsTable},
+			edgemap.KernelTable{Map: objs.VipAddrTable},
+			edgemap.KernelTable{Map: objs.VipReturnStatsTable}).WithPeerTable(edgemap.KernelTable{Map: objs.VipTable}),
+
+		rangeRules:    make(map[string]bool),
+		ranges:        edgemap.NewRangeTable(edgemap.KernelTable{Map: objs.VipRangeTable}),
+		owned:         edgemap.KernelTable{Map: objs.VipOwnedTable},
 		vipKeysByName: make(map[string][]edgemap.VIPKey),
 		vpcByKey:      make(map[edgemap.VIPKey]string),
 	}, nil
@@ -200,11 +216,36 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 	if err != nil {
 		return err
 	}
+	if err := d.retireCoverage(rule); err != nil {
+		return err
+	}
 	affinity, err := affinityNumber(rule.Affinity)
 	if err != nil {
 		return fmt.Errorf("kerneldatapath: rule %s: %w", rule.Key, err)
 	}
 
+	table := d.vipTable
+	if rule.PortEnd != 0 {
+		table = d.rangeVIPTable
+		if table == nil {
+			return errors.New("range backend map unavailable")
+		}
+	}
+	if d.rangeRules == nil {
+		d.rangeRules = make(map[string]bool)
+	}
+	if oldRange, exists := d.rangeRules[rule.Key]; exists && oldRange != (rule.PortEnd != 0) {
+		oldTable := d.vipTable
+		if oldRange {
+			oldTable = d.rangeVIPTable
+		}
+		for _, key := range d.vipKeysByName[rule.Key] {
+			if err := oldTable.Unregister(key); err != nil {
+				return err
+			}
+		}
+	}
+	d.rangeRules[rule.Key] = rule.PortEnd != 0
 	type family struct {
 		backends []edgemap.Backend
 		table    [edgemap.MaglevTableSize]byte
@@ -230,16 +271,16 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 
 	for i, key := range keys {
 		f := families[key.VIP.Is4()]
-		if err := d.vipTable.Register(key, affinity, f.backends, f.table); err != nil {
+		if err := table.Register(key, affinity, f.backends, f.table); err != nil {
 			// Record the keys that did land, alongside the ones this rule
 			// already owned, the prune below not having run yet, so
 			// RemoveRule can still find every live entry.
-			for _, written := range keys[:i] {
+			for _, written := range keys[:i+1] {
 				if !slices.Contains(d.vipKeysByName[rule.Key], written) {
 					d.vipKeysByName[rule.Key] = append(d.vipKeysByName[rule.Key], written)
 				}
 			}
-			for _, unwritten := range keys[i:] {
+			for _, unwritten := range keys[i+1:] {
 				if !slices.Contains(d.vipKeysByName[rule.Key], unwritten) {
 					d.clearVPC(unwritten)
 				}
@@ -258,13 +299,49 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 		if _, ok := stillOwned[old]; ok {
 			continue
 		}
-		if err := d.vipTable.Unregister(old); err != nil {
+		if err := table.Unregister(old); err != nil {
 			return fmt.Errorf("kerneldatapath: apply rule %s: prune dropped key %+v: %w", rule.Key, old, err)
 		}
 		d.clearVPC(old)
 	}
 
 	d.vipKeysByName[rule.Key] = keys
+	return d.activateRanges(rule, keys, table)
+}
+
+// retireCoverage makes prior range sockets unreachable before backend rows change.
+// The caller holds d.mu across retirement, backend writes, and activation.
+func (d *KernelDatapath) retireCoverage(rule DesiredRule) error {
+	if rule.PortEnd != 0 && (rule.Protocol != protocolUDP || rule.PortEnd < rule.Port || d.ranges == nil) {
+		return errors.New("invalid or unsupported UDP range")
+	}
+	if d.ranges != nil {
+		for _, key := range d.vipKeysByName[rule.Key] {
+			if err := d.ranges.Remove(key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// activateRanges publishes only complete backend snapshots after staging.
+func (d *KernelDatapath) activateRanges(rule DesiredRule, keys []edgemap.VIPKey, table *edgemap.VIPTable) error {
+	if rule.PortEnd != 0 {
+		for _, key := range keys {
+			entry, exists, readErr := table.Get(key)
+			if readErr != nil || !exists {
+				return fmt.Errorf("read range backend row: exists=%t: %w", exists, readErr)
+			}
+			if err := d.ranges.Register(key, rule.PortEnd, entry.Generation); err != nil {
+				cleanupErrors := []error{err}
+				for _, written := range keys {
+					cleanupErrors = append(cleanupErrors, d.ranges.Remove(written), table.Unregister(written))
+				}
+				return fmt.Errorf("activate range: %w", errors.Join(cleanupErrors...))
+			}
+		}
+	}
 	return nil
 }
 
@@ -273,13 +350,23 @@ func (d *KernelDatapath) RemoveRule(_ context.Context, key string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	table := d.vipTable
+	if d.rangeRules[key] {
+		table = d.rangeVIPTable
+	}
 	for _, k := range d.vipKeysByName[key] {
-		if err := d.vipTable.Unregister(k); err != nil {
+		if d.ranges != nil {
+			if err := d.ranges.Remove(k); err != nil {
+				return err
+			}
+		}
+		if err := table.Unregister(k); err != nil {
 			return fmt.Errorf("kerneldatapath: remove rule %s: %w", key, err)
 		}
 		d.clearVPC(k)
 	}
 	delete(d.vipKeysByName, key)
+	delete(d.rangeRules, key)
 	return nil
 }
 
@@ -344,11 +431,39 @@ func (d *KernelDatapath) ReconcileOrphans(_ context.Context, live []DesiredRule,
 			// whole sweep over one bad rule.
 			continue
 		}
-		for _, k := range keys {
-			liveKeys[k] = struct{}{}
+		if rule.PortEnd == 0 {
+			for _, k := range keys {
+				liveKeys[k] = struct{}{}
+			}
 		}
 	}
 
+	if d.ranges != nil {
+		ranges := map[edgemap.VIPKey]uint16{}
+		for _, rule := range live {
+			if rule.PortEnd != 0 {
+				keys, err := vipKeysForRule(rule)
+				if err != nil {
+					continue
+				}
+				for _, key := range keys {
+					ranges[key] = rule.PortEnd
+				}
+			}
+		}
+		if err := d.ranges.Reconcile(ranges, cutoff); err != nil {
+			return err
+		}
+		if d.rangeVIPTable != nil {
+			liveRangeKeys := map[edgemap.VIPKey]struct{}{}
+			for key := range ranges {
+				liveRangeKeys[key] = struct{}{}
+			}
+			if _, err := d.rangeVIPTable.Reconcile(liveRangeKeys, cutoff); err != nil {
+				return err
+			}
+		}
+	}
 	if _, err := d.vipTable.Reconcile(liveKeys, cutoff); err != nil {
 		return fmt.Errorf("kerneldatapath: reconcile orphans: %w", err)
 	}
@@ -356,3 +471,27 @@ func (d *KernelDatapath) ReconcileOrphans(_ context.Context, live []DesiredRule,
 }
 
 var _ Datapath = (*KernelDatapath)(nil)
+
+func (d *KernelDatapath) SetOwnedVIPs(_ context.Context, addrs []netip.Addr) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.owned == nil {
+		return errors.New("owned VIP protection is unavailable")
+	}
+	return edgemap.ReplaceOwnedVIPs(d.owned, addrs, d.Generation())
+}
+
+func (d *KernelDatapath) SupportsPortRanges() bool {
+	return d.ranges != nil && d.rangeVIPTable != nil && d.owned != nil
+}
+
+// SetBlockedVIPs suppresses data traffic to owned addresses during convergence.
+func (d *KernelDatapath) SetBlockedVIPs(_ context.Context, addrs []netip.Addr) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.owned == nil {
+		return errors.New("owned VIP protection is unavailable")
+	}
+	return edgemap.SetBlockedVIPs(d.owned, addrs)
+}
+func (d *KernelDatapath) SupportsOwnedVIPs() bool { return d.owned != nil }

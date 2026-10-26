@@ -124,6 +124,28 @@ spec:
                 maximum: 65535
                 minimum: 1
                 type: integer
+              portRange:
+                description: |-
+                  PortRange translates an inclusive IPv6 UDP interval without changing ports.
+                  It replaces Port and requires BackendPort to be omitted.
+                properties:
+                  end:
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  start:
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                required:
+                - end
+                - start
+                type: object
+                x-kubernetes-validations:
+                - message: port range start must not exceed end
+                  rule: self.start <= self.end
               protocol:
                 description: Protocol is the transport protocol this binding applies
                   to.
@@ -163,12 +185,18 @@ spec:
                 type: string
             required:
             - egressKind
-            - port
             - protocol
             - targetRef
             - vipAddress
             - vpcRef
             type: object
+            x-kubernetes-validations:
+            - message: exactly one of port and portRange is required
+              rule: has(self.port) != has(self.portRange)
+            - message: UDP ranges preserve ports and omit backendPort
+              rule: '!has(self.portRange) || self.protocol == ''udp'' && !has(self.backendPort)'
+            - message: range bindings are immutable; replace to change the translation
+              rule: '!has(oldSelf.portRange) || self == oldSelf'
           status:
             description: ServiceVIPBindingStatus defines the observed state of a ServiceVIPBinding.
             properties:

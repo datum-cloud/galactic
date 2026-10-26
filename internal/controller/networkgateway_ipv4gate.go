@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"net/netip"
+	"reflect"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -58,7 +59,7 @@ func (idx serviceBindings) unbound(
 		// Its finalizer is removing its rows, so the backend is about to
 		// stop answering on the VIP whatever its Bound condition says.
 		return "ServiceVIPBinding being deleted"
-	case !generatedFor(got, rule) || got.Spec != want.Spec:
+	case !generatedFor(got, rule) || !reflect.DeepEqual(got.Spec, want.Spec):
 		return "ServiceVIPBinding not updated to the rule yet"
 	}
 	if reason := bindingUnboundReason(got); reason != "" {
@@ -77,7 +78,7 @@ func bindingReadinessChanged(health bool) predicate.Predicate {
 	relevant := func(obj client.Object) bool {
 		binding, ok := obj.(*bgpv1alpha1.ServiceVIPBinding)
 		return ok && binding.Labels[bindingManagedByLabel] == bindingManagedByValue &&
-			(health || bindingIsIPv4(binding))
+			(health || bindingIsIPv4(binding) || binding.Spec.PortRange != nil)
 	}
 	return predicate.Funcs{
 		CreateFunc:  func(e event.CreateEvent) bool { return relevant(e.Object) },

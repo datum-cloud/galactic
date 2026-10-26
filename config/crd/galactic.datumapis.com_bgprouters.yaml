@@ -377,6 +377,11 @@ spec:
                       revision renders.
                     type: string
                 type: object
+              lastSuccessfulReconcileTime:
+                description: LastSuccessfulReconcileTime is the last healthy apply
+                  or verified no-op reconciliation.
+                format: date-time
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the .metadata.generation this status
                   was computed from.
@@ -401,6 +406,11 @@ spec:
               phase:
                 description: Phase is the high-level lifecycle state of this router.
                 type: string
+              supportsAdvertisementLeases:
+                description: |-
+                  SupportsAdvertisementLeases reports independent expiry enforcement by the router.
+                  Consumers must also require current observedGeneration and a healthy router.
+                type: boolean
             type: object
         type: object
     served: true
