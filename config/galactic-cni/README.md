@@ -10,7 +10,7 @@ kubectl apply -k config/galactic-cni/
 or as part of the whole platform with `kubectl apply -k config/`. This
 DaemonSet opts in via the independent `galactic.datumapis.com/galactic:
 router` label and runs on both compute and edge nodes (see
-[docs/node-labels.md](../../docs/node-labels.md)).
+[docs/node-labels.md](../../docs/operations/node-labels.md)).
 
 ## What's here
 

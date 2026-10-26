@@ -1,7 +1,7 @@
 # Reference edge provider
 
 A minimal Galactic Edge provider built only on the
-[provider contract](../../docs/enhancements/networking/galactic-edge/contract.md):
+[provider contract](../../docs/edge/provider-contract.md):
 the `galactic.datumapis.com/v1alpha1` edge resources, its own ServiceAccount,
 and the attachment `galactic-edge` programs into its pod. It is a separate Go
 module that imports only `go.datum.net/galactic/api/v1alpha1`; its module path
@@ -41,12 +41,12 @@ beside the provider.
 
 ## What the cell needs
 
-| Prerequisite | Why | Who |
-| --- | --- | --- |
-| `config/galactic-edge` applied, `galactic-controller --role=cell --edge`, and the `galactic-edge` DaemonSet on nodes labeled `galactic.datumapis.com/node=edge` and `galactic.datumapis.com/edge=enabled` | Admission, allocation, programming and the forwarding gate | Operator |
-| A device plugin that gives pods `/dev/net/tun` as a resource | Kubernetes gives no unprivileged pod `/dev/net/tun`, and the contract gives a provider no hostPath or capability. Only `PacketAccess` needs it. | Operator |
-| A workload of the VPC on the provider's node | An attachment joins the VPC's existing host VRF on its node; only CNI ADD creates that VRF | Tenant or platform |
-| An `EdgeService` granting the VPC to the provider | Authorizes the attachment and its prefixes | Platform authority |
+| Prerequisite                                                                                                                                                                                              | Why                                                                                                                                             | Who                |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `config/galactic-edge` applied, `galactic-controller --role=cell --edge`, and the `galactic-edge` DaemonSet on nodes labeled `galactic.datumapis.com/node=edge` and `galactic.datumapis.com/edge=enabled` | Admission, allocation, programming and the forwarding gate                                                                                      | Operator           |
+| A device plugin that gives pods `/dev/net/tun` as a resource                                                                                                                                              | Kubernetes gives no unprivileged pod `/dev/net/tun`, and the contract gives a provider no hostPath or capability. Only `PacketAccess` needs it. | Operator           |
+| A workload of the VPC on the provider's node                                                                                                                                                              | An attachment joins the VPC's existing host VRF on its node; only CNI ADD creates that VRF                                                      | Tenant or platform |
+| An `EdgeService` granting the VPC to the provider                                                                                                                                                         | Authorizes the attachment and its prefixes                                                                                                      | Platform authority |
 
 The containerlab lab's `deploy:galactic-edge` task sets all of this up on dfw;
 see `deploy/containerlab/resources/galactic-edge/`, including the

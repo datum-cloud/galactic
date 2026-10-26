@@ -1,6 +1,14 @@
 processor:
   ignoreTypes:
-    - ".*List$"
+    # Exclude collection wrappers by name: BGPPrefixList is a resource.
+    - "[.]EdgeAttachmentList$"
+    - "[.]EdgeInstanceList$"
+    - "[.]EdgeProviderList$"
+    - "[.]EdgeRouteIndexList$"
+    - "[.]EdgeRouteList$"
+    - "[.]EdgeServiceList$"
+    - "[.]TrafficPolicyBindingList$"
+    - "[.]TrafficPolicyList$"
 
 render:
   kubernetes: {}

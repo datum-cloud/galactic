@@ -1,5 +1,4 @@
 version: '3'
-
 vars:
   LOCALBIN:
     sh: echo "$(pwd)/bin"
@@ -14,29 +13,24 @@ vars:
   YAMLFMT_VERSION: v0.21.0
   GO_LICENSES_VERSION: v1.6.0
   PROMETHEUS_VERSION: v3.15.0
-
 tasks:
   default:
     silent: true
     cmds:
       - task --list
-
   ##
   ## Development
   ##
-
   fmt:
     desc: Format code
     run: once
     cmds:
       - go fmt ./...
-
   vet:
     desc: Vet code
     run: once
     cmds:
       - GOOS=linux go vet ./...
-
   ci:
     desc: Run the full CI pipeline
     cmds:
@@ -44,39 +38,33 @@ tasks:
       - task: build
       - task: test:unit
       - task: test:e2e
-
   test:
     desc: Run all tests
     cmds:
       - task: test:unit
       - task: test:e2e
-
   lint:
     desc: Lint
-    deps: [golangci-lint, yamlfmt, yaml-ext, build:ebpf]
+    deps: [golangci-lint, yamlfmt, yaml-ext, 'build:ebpf']
     cmds:
       - '{{.GOLANGCI_LINT}} run'
       # examples/edge-provider is its own module, which the root run skips.
       - cd examples/edge-provider && {{.GOLANGCI_LINT}} run --config ../../.golangci.yaml
       - '{{.YAMLFMT}} -lint'
-
   lint-fix:
     desc: Lint and apply fixes
-    deps: [golangci-lint, yamlfmt, build:ebpf]
+    deps: [golangci-lint, yamlfmt, 'build:ebpf']
     cmds:
       - '{{.GOLANGCI_LINT}} run --fix'
       - '{{.YAMLFMT}}'
-
   notice:
     desc: Regenerate NOTICE file
     deps: [go-licenses]
     cmds:
       - '{{.GO_LICENSES}} report ./... --ignore go.datum.net/galactic --template scripts/licenses/notice.tmpl > NOTICE'
-
   ##
   ## Build
   ##
-
   build:
     desc: Build binaries
     cmds:
@@ -89,21 +77,18 @@ tasks:
       - task: fmt
       - task: vet
       - task: build:binaries
-
   generate:proto:
     desc: Regenerate api/**/*.pb.go from the .proto files (requires buf, protoc-gen-go, protoc-gen-go-grpc)
     dir: api
     cmds:
       - buf lint
       - buf generate
-
   build:service-api:
     desc: Build the Looking Glass service API release asset and its SHA256SUMS in dist/ (requires buf)
     vars:
       VERSION: '{{.VERSION | default "dev"}}'
     cmds:
       - hack/service-api-bundle.sh "{{.VERSION}}" dist
-
   generate:crd:
     desc: Regenerate all Galactic API deepcopy code and CRDs (requires controller-gen)
     cmds:
@@ -115,16 +100,19 @@ tasks:
       - controller-gen crd paths=./api/cloud/v1alpha1/... output:crd:artifacts:config=config/crd
       - controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/network/v1alpha1/...
       - controller-gen crd paths=./api/network/v1alpha1/... output:crd:artifacts:config=config/crd
-
   generate:api-docs:
     desc: Regenerate Galactic, cloud, BGP and gateway API references
     cmds:
-      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/v1alpha1 --output-path=docs/api/galactic.md --config=.crd-ref-docs.yaml
-      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/cloud/v1alpha1 --output-path=docs/api/cloud.md --config=.crd-ref-docs-cloud.yaml
-      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/network/v1alpha1 --output-path=docs/api/network-bgp.md --config=.crd-ref-docs-network-bgp.yaml
-      - go run github.com/elastic/crd-ref-docs@v0.2.0 --renderer=markdown --source-path=api/network/v1alpha1 --output-path=docs/api/network-gateway.md --config=.crd-ref-docs-network-gateway.yaml
-      - python3 -c 'from pathlib import Path; files = ["docs/api/galactic.md", "docs/api/cloud.md", "docs/api/network-bgp.md", "docs/api/network-gateway.md"]; [p.write_text(p.read_text().rstrip() + "\n") for p in map(Path, files)]'
-
+      - python3 hack/docs/generate_api.py
+  docs:check:
+    desc: Check documentation links, anchors and API resource coverage (install hack/docs/requirements.txt first)
+    cmds:
+      - python3 -m unittest discover -s hack/docs -p 'test_*.py'
+      - python3 hack/docs/check.py
+  docs:check-generated:
+    desc: Check generated API references without changing tracked files
+    cmds:
+      - python3 hack/docs/generate_api.py --check
   build:ebpf:
     desc: Regenerate the eBPF uSID, edge gateway DSR, NAT egress, and XDP dispatcher datapaths (requires clang)
     run: once
@@ -134,7 +122,6 @@ tasks:
       - go generate ./internal/plumbing/ebpf/edgeprog/...
       - go generate ./internal/plumbing/ebpf/natprog/...
       - go generate ./internal/plumbing/ebpf/xdpdispatch/...
-
   require-clang:
     internal: true
     run: once
@@ -150,7 +137,6 @@ tasks:
           echo "  Debian/Ubuntu: sudo apt install clang llvm" >&2
           exit 1
         fi
-
   build:binaries:
     internal: true
     vars:
@@ -165,13 +151,7 @@ tasks:
       SPDX_LICENSE: AGPL-3.0-or-later
       GIT_URL: https://github.com/datum-cloud/galactic
       LDFLAGS: >-
-        -s -w
-        -X go.datum.net/galactic/internal/metadata.Version={{.VERSION}}
-        -X go.datum.net/galactic/internal/metadata.GitCommit={{.GIT_COMMIT}}
-        -X go.datum.net/galactic/internal/metadata.GitTreeState={{.GIT_TREE_STATE}}
-        -X go.datum.net/galactic/internal/metadata.BuildDate={{.BUILD_DATE}}
-        -X go.datum.net/galactic/internal/metadata.SPDXLicense={{.SPDX_LICENSE}}
-        -X go.datum.net/galactic/internal/metadata.GitURL={{.GIT_URL}}
+        -s -w -X go.datum.net/galactic/internal/metadata.Version={{.VERSION}} -X go.datum.net/galactic/internal/metadata.GitCommit={{.GIT_COMMIT}} -X go.datum.net/galactic/internal/metadata.GitTreeState={{.GIT_TREE_STATE}} -X go.datum.net/galactic/internal/metadata.BuildDate={{.BUILD_DATE}} -X go.datum.net/galactic/internal/metadata.SPDXLicense={{.SPDX_LICENSE}} -X go.datum.net/galactic/internal/metadata.GitURL={{.GIT_URL}}
     cmds:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-cni ./cmd/galactic-cni
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-veth ./cmd/galactic-veth
@@ -188,18 +168,15 @@ tasks:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-controller ./cmd/galactic-controller
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-usid ./cmd/galactic-usid
       - GOBIN={{.LOCALBIN}} go install github.com/containernetworking/plugins/plugins/main/host-device@v1.9.1
-
   ##
   ## CI
   ##
-
   test:unit:
     desc: Unit tests with race detection and coverage
-    deps: [build:ebpf]
+    deps: ['build:ebpf']
     cmds:
       - bash scripts/ci.sh unittest
       - task: test:edge-provider
-
   test:edge-provider:
     desc: Build, vet and unit-test the reference edge provider (examples/edge-provider, its own module)
     dir: examples/edge-provider
@@ -207,13 +184,11 @@ tasks:
       - go build ./...
       - go vet ./...
       - go test -race ./...
-
   test:unit-root:
     desc: Re-run just the requireRoot(t)-gated unit tests, as root
-    deps: [build:ebpf]
+    deps: ['build:ebpf']
     cmds:
       - bash scripts/ci.sh unittest-root
-
   test:fabric-api-load:
     desc: Measure fabric-api queries against FRR with full Internet tables (MRT=<rib files, comma-separated>, needs Docker)
     # The release gate for enabling AS-path and community searches: bgpd
@@ -228,7 +203,6 @@ tasks:
       - mkdir -p {{.GOBGP_BIN}}
       - CGO_ENABLED=0 GOBIN={{.GOBGP_BIN}} go install github.com/osrg/gobgp/v4/cmd/gobgpd@v4.10.0 github.com/osrg/gobgp/v4/cmd/gobgp@v4.10.0
       - go run ./hack/fabric-api-loadtest --mrt {{.MRT}} --gobgp-bin {{.GOBGP_BIN}} {{.CLI_ARGS}}
-
   test:alerts:
     desc: Unit-test the alert rules in config/monitoring/ with promtool
     # promtool reads plain rule files, so the PrometheusRule's spec is
@@ -242,7 +216,6 @@ tasks:
       - cp config/monitoring/tests/rules-test.yaml {{.ALERTS_DIR}}/
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} check rules rules.yaml
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} test rules rules-test.yaml
-
   test:fabric-parity:
     desc: Compile every fabric frr.conf back through the typed API and diff it with the pinned FRR's frr-reload
     # Needs Docker, so it is not part of ci. The synthetic fixtures always
@@ -250,31 +223,26 @@ tasks:
     # fabric-router configs to check real routers too.
     cmds:
       - go test -count=1 -tags frr -run 'TestImportCompileParity' ./internal/fabric/routing/
-
   test:e2e:
     desc: E2E tests (Kind cluster, build+load image, lifecycle)
     # build:ebpf here is only for the host-side `go test ./tests/e2e/...`
     # compile in scripts/ci.sh -- the galactic-cni image built inside
     # ci.sh's docker build regenerates its own copy via the Dockerfile.
-    deps: [build:ebpf]
+    deps: ['build:ebpf']
     cmds:
       - bash scripts/ci.sh e2etest
-
   ##
   ## Cleanup
   ##
-
   clean:
     desc: Remove build artifacts
     cmds:
       - rm -rf bin/
       - rm -rf dist/
       - rm -f cover.out
-
   ##
   ## Dependencies
   ##
-
   golangci-lint:
     desc: Download golangci-lint if needed
     run: once
@@ -284,7 +252,6 @@ tasks:
           TARGET: '{{.GOLANGCI_LINT}}'
           PACKAGE: github.com/golangci/golangci-lint/v2/cmd/golangci-lint
           VERSION: '{{.GOLANGCI_LINT_VERSION}}'
-
   yamlfmt:
     desc: Download yamlfmt if needed
     run: once
@@ -294,7 +261,6 @@ tasks:
           TARGET: '{{.YAMLFMT}}'
           PACKAGE: github.com/google/yamlfmt/cmd/yamlfmt
           VERSION: '{{.YAMLFMT_VERSION}}'
-
   yaml-ext:
     desc: Enforce .yaml extension (no .yml)
     run: once
@@ -305,7 +271,6 @@ tasks:
           echo "ERROR: .yml files found; rename to .yaml"
           exit 1
         fi
-
   go-licenses:
     internal: true
     run: once
@@ -315,12 +280,11 @@ tasks:
           TARGET: '{{.GO_LICENSES}}'
           PACKAGE: github.com/google/go-licenses
           VERSION: '{{.GO_LICENSES_VERSION}}'
-
   install-tool:
     internal: true
     cmds:
       - mkdir -p {{.LOCALBIN}}
-      - |
+      - |-
         if [ ! -f "{{.TARGET}}-{{.VERSION}}" ]; then
           echo "Downloading {{.PACKAGE}}@{{.VERSION}}"
           rm -f "{{.TARGET}}" || true

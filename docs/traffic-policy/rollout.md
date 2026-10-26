@@ -5,7 +5,7 @@ interface forwards only what its bindings grant, in each direction. That is a
 deliberate behavior change, so turning it on in a cell is a migration. This
 guide is the order to do it in, what to check at each step, and how to back
 out. The design is in
-[the traffic policy proposal](../enhancements/networking/interface-traffic-policy/README.md);
+[the traffic policy proposal](../designs/interface-traffic-policy.md);
 [controller.md](controller.md) and [node.md](node.md) are the component
 references.
 

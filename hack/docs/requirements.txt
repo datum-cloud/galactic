@@ -1,0 +1,3 @@
+# CommonMark parsing keeps examples, code spans and reference links accurate.
+markdown-it-py==4.0.0
+mdurl==0.1.2

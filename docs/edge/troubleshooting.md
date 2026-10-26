@@ -3,9 +3,9 @@
 How to find where an edge attachment or route stopped, which objects are
 involved, and who forwards a prefix now, from the conditions, Events and
 metrics the foundation emits. The lifecycle itself is defined in
-[the provider contract](../enhancements/networking/galactic-edge/contract.md);
+[the provider contract](provider-contract.md);
 the metrics are listed in
-[the metrics reference](../metrics.md#galactic-edge-foundation--galactic_edge_foundation_).
+[the metrics reference](../observability/edge.md#galactic-edge-foundation--galactic_edge_foundation_).
 
 ## Lifecycle stages
 
@@ -171,7 +171,7 @@ section bounds.
 
 `config/monitoring/` ships the PodMonitors for both components and the
 `galactic-edge` alert group, listed in
-[the metrics reference](../metrics.md#shipped-alerts). They fire on what the
+[the metrics reference](../observability/alerts.md#shipped-alerts). They fire on what the
 foundation itself stopped doing: attachments not programmed, services
 without a resolvable policy, lost ownership scopes, failing cleanup and
 unreachable metrics. A refused admission is a tenant or provider decision

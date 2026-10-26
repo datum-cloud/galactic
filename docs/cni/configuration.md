@@ -48,8 +48,8 @@ inside the master plugin. A real-world attachment's conflist has this shape:
   (interface kind, allocated addresses) from `prevResult` alone. In
   practice this stage is not optional — without it the attachment is
   never BGP-advertised and stays unreachable from other nodes. The
-  conflist itself is still authored outside this repo (the companion
-  operator, cross-repo), but the master plugin (`galactic-veth`/
+  NSO cell manager authors the conflist using the Galactic attachment
+  integration, but the master plugin (`galactic-veth`/
   `galactic-tap`) fetches its own attachment's `NetworkAttachmentDefinition`
   and fails ADD before creating any kernel state if `galactic-bgp` is
   missing from its `plugins` list — see `internal/hostconf.VerifyChainIncludes`

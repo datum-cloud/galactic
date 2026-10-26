@@ -243,7 +243,7 @@ Per rule, each gateway node's `<node>/Programmed` condition, which stays
 | ------------------------ | ----------------------------------------------------------------------------- |
 | `BackendsUnhealthy`      | Loaded without the unhealthy backends; the message names them                 |
 | `NoHealthyBackends`      | Every backend is unhealthy, so all of them are kept                           |
-| `HealthChecksNotApplied` | A gateway node in the namespace does not apply health, so none of them does |
+| `HealthChecksNotApplied` | A gateway node in the namespace does not apply health, so none of them does   |
 
 The rule-wide `BackendsReady` condition reports each of them as a backend
 problem, as it reports `BackendsUnresolved`.
