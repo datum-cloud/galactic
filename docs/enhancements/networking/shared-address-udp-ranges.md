@@ -26,7 +26,7 @@ Range binding cleanup contexts are persisted in `galactic.datum.net/range-contex
 
 The initial feature is IPv6 only. NSO's sharing and UDP-range admission gates default off. It requires current capability reports from every gateway in a selected cell before grouped services are emitted. Range forwarding additionally requires a matching current-generation backend binding, including the exact range; a Bound condition from an old router or a schema-pruned range cannot open the gate.
 
-Publish Galactic's API/controller/datapath commit first, then update NSO's Galactic dependency to that reachable commit. Install Galactic CRDs/RBAC, upgraded backend routers and gateways before enabling NSO admission. Do not enable gates until the full veth and tap workload paths and failure scenarios have been qualified in a disposable topology. The checked-in NSO dependency cannot resolve unpublished Galactic APIs; local paired validation uses an external workspace without committing machine-specific replaces:
+Publish Galactic's API/controller/datapath commit first, then update NSO's Galactic dependency to that reachable commit. Install Galactic CRDs/RBAC, upgraded backend routers and gateways before enabling NSO admission. Do not enable gates until the full veth and tap workload paths and failure scenarios have been qualified in a disposable topology. During development, unpublished Galactic APIs require paired validation in an external workspace without committing machine-specific replaces:
 
 ```sh
 mkdir /tmp/nlb-paired-validation
@@ -58,4 +58,4 @@ The backend ingress fixture validates rewrite through the FIB lookup and intenti
 - All four existing BPF programs generated with LLVM 19. Privileged Linux kernel tests and the bounded microbenchmarks above ran separately from ordinary unit tests.
 - The prescribed full `task ci` pipeline, Kind end-to-end deployment, and full-package Linux race run were not completed. The Docker VM filesystem was full; task-specific RAM scratch enabled unit/kernel validation without deleting unrelated user data. YAML lint also reports existing repository/generated-file formatting differences; generated CRDs retain the repository generator's format.
 
-The NSO half is validated against this checkout through an external workspace/modfile. Its normal dependency still needs a reachable Galactic commit before a standalone NSO build or release. No cluster deployment or production traffic change was performed.
+The paired workspace supports validation of unpublished cross-repository changes. Standalone NSO validation and releases use a dependency pinned to the published Galactic commit; local replace directives must not be committed. No cluster deployment or production traffic change was performed.
