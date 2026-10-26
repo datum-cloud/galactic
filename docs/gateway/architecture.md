@@ -13,7 +13,7 @@ Use [deployment](deployment.md) to install it, [configuration](configuration.md)
 | `galactic-cni`     | Backend TC-BPF programs and pinned maps used for VIP translation and tenant forwarding                                                      |
 | `galactic-nat`     | Independent NAT66/NAT64 egress sessions; shares XDP through the dispatcher when colocated                                                   |
 
-The gateway and router run as separate pods. The gateway requires a public uplink and a node locator; it does not require a tenant VRF on the gateway itself. The DaemonSet selects `node=edge` and `gateway=enabled`, and the co-located router is independently selected by `galactic=router`. See [node labels](../node-labels.md).
+The gateway and router run as separate pods. The gateway requires a public uplink and a node locator; it does not require a tenant VRF on the gateway itself. The DaemonSet selects `node=edge` and `gateway=enabled`, and the co-located router is independently selected by `galactic=router`. See [node labels](../operations/node-labels.md).
 
 ## Control plane
 
@@ -37,7 +37,7 @@ The XDP program answers an oversized encapsulation with the applicable Packet To
 
 ## XDP ownership and recovery
 
-The shared dispatcher owns the interface hook. Gateway and NAT use separate slots and leases, so one can stop without detaching the other's program. Direct attachment remains an explicit configuration choice. Attach selection, driver mode and bond-member sequencing follow the [host XDP guide](../xdp-attach-mode.md).
+The shared dispatcher owns the interface hook. Gateway and NAT use separate slots and leases, so one can stop without detaching the other's program. Direct attachment remains an explicit configuration choice. Attach selection, driver mode and bond-member sequencing follow the [host XDP guide](../operations/xdp-attach-mode.md).
 
 <a id="recovery"></a>
 ### Recovery

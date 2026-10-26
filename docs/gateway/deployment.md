@@ -35,7 +35,7 @@ enabled` (see `config/galactic-gateway/base/daemonset.yaml`'s node affinity,
 which also excludes `node-role.kubernetes.io/control-plane` nodes outright).
 It runs there alongside `galactic-vrf`, which `node=edge` also places, so
 label an edge node `gateway=enabled` to opt it in. Read
-[docs/node-labels.md](../node-labels.md) for the full node-labeling
+[docs/node-labels.md](../operations/node-labels.md) for the full node-labeling
 strategy before doing anything else here.
 
 A gateway node still needs the same underlay BGP connectivity every other
@@ -552,7 +552,7 @@ since a rule's backends can span many VPCAttachments.
 
 Confirm the eBPF program is actually attached to the node's public
 interface. `edgeattach.Attach` requests the host's XDP mode, native unless a
-NIC on the host uses `bnxt_en` (see [XDP attach mode](../xdp-attach-mode.md)),
+NIC on the host uses `bnxt_en` (see [XDP attach mode](../operations/xdp-attach-mode.md)),
 so a plain `ip -d link show dev <public-interface>` on the node itself should
 show an attached `xdp` program, or `xdpgeneric` on a `bnxt_en` host, if this
 step succeeded; the pod-level checks above (healthy gRPC health status, nonzero

@@ -4,7 +4,7 @@
 side of interface traffic policy. It does not program any node: the per-node
 datapath state belongs to `galactic-router`, which reads the bindings this
 controller resolves (see [Traffic policy on the node](node.md)). The design is in
-[the traffic policy proposal](../enhancements/networking/interface-traffic-policy/README.md);
+[the traffic policy proposal](../designs/interface-traffic-policy.md);
 the API reference is [docs/api/galactic.md](../api/galactic.md).
 
 ## What it does

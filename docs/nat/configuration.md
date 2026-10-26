@@ -70,7 +70,7 @@ its slaves at startup and the program attached to each of them, never to
 the master itself, the same way `galactic-gateway` treats a bonded public
 interface. As with the gateway, the program is attached in the host's XDP
 mode, generic on a host with a `bnxt_en` NIC and native elsewhere (see
-[XDP attach mode](../xdp-attach-mode.md)). In native mode every resolved
+[XDP attach mode](../operations/xdp-attach-mode.md)). In native mode every resolved
 interface is checked for native XDP support before any is touched. In either
 mode the slaves are attached one at a time, each waited back into its LACP
 aggregate before the next, so a NIC whose driver drops carrier to attach an

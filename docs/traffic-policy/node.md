@@ -8,7 +8,7 @@ datapath, reports what it applied in the TrafficPolicyBinding's
 Galactic Edge attachment on its node (see [Edge attachments](#edge-attachments)). The cell side, which
 validates policies and resolves bindings, is
 [galactic-controller](controller.md); the design is in
-[the traffic policy proposal](../enhancements/networking/interface-traffic-policy/README.md).
+[the traffic policy proposal](../designs/interface-traffic-policy.md).
 
 ## Enabling it
 
@@ -146,7 +146,7 @@ entry disappears when the attachment leaves the node.
 galactic-router serves the policy counters on its metrics port (`9179`),
 which the `galactic-router` PodMonitor already scrapes, as
 `galactic_cni_traffic_policy_*`: the prefix names the datapath that counts,
-not the process that serves them. [docs/metrics.md](../metrics.md#traffic-policy--galactic_cni_traffic_policy_)
+not the process that serves them. [docs/metrics.md](../observability/traffic-policy.md#traffic-policy--galactic_cni_traffic_policy_)
 lists every series, its labels and example queries.
 
 Every installed rule has a series from the moment it is published, at zero,

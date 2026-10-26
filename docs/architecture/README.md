@@ -10,7 +10,7 @@ NSO owns VPC and attachment lifecycle. Galactic's cell controller handles policy
 
 ## Deployment groups
 
-Gateway, NAT and Edge agents have independent opt-in labels on edge nodes. Tenant router and CNI placement is independent of those opt-ins. Fabric routing and diagnostics have their own deployment prerequisites. See [node labels](../node-labels.md) and each component's deployment guide.
+Gateway, NAT and Edge agents have independent opt-in labels on edge nodes. Tenant router and CNI placement is independent of those opt-ins. Fabric routing and diagnostics have their own deployment prerequisites. See [node labels](../operations/node-labels.md) and each component's deployment guide.
 
 The gateway and NAT share an XDP hook only when configured to use the dispatcher. The router uses the underlay to carry EVPN sessions; it does not establish the underlay's FRR sessions itself.
 
@@ -35,4 +35,4 @@ With a container runtime, use the PlantUML image selected by your development en
 - [Ingress gateway](../gateway/architecture.md)
 - [Active/active egress](../nat/active-active.md)
 - [Fabric routing](../fabric-routing/topology.md)
-- [Fabric diagnostics](../agents/ARCHITECTURE-FABRIC-API.md)
+- [Fabric diagnostics](../fabric-api/architecture.md)

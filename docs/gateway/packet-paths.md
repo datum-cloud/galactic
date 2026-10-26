@@ -298,7 +298,7 @@ datapath runs from its own slot.
   Attached directly, the programs hold their own empty copies of the
   dispatcher maps, so every unclaimed packet passes to the kernel.
 - The dispatcher attaches in the host's XDP mode (`xdpmode`, see
-  [docs/xdp-attach-mode.md](../xdp-attach-mode.md)): generic on a host with a
+  [docs/xdp-attach-mode.md](../operations/xdp-attach-mode.md)): generic on a host with a
   `bnxt_en` NIC (#673), native elsewhere. `Linked` and `Coverage` read the
   mode back from the kernel, and `EnsureLink` migrates a pinned link left in
   the other mode, under the dispatch lock and the bond guards, keeping every

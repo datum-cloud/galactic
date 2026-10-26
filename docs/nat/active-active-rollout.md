@@ -15,7 +15,7 @@ are deployed by infra.
       unserved translation classes and stable group identity. Current source
       covers these in `TestSweepHashed_EmptyMembershipKeepsRoutesOnGroups`,
       `internal/plumbing/ebpf/attachreg/group_test.go` and
-      `TestSweepHashed_ClassListChanges`. The [October 9 review resolution](../feature_reviews/egress-active-active_2026-10-09-resolution.md#re-review-findings)
+      `TestSweepHashed_ClassListChanges`. The [October 9 review resolution](../archive/reviews/egress-active-active_2026-10-09-resolution.md#re-review-findings)
       records an intermediate implementation, not the current release's
       eligibility. Passing these regression tests does not replace the
       staging checks below.

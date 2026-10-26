@@ -13,7 +13,7 @@
 | `galactic-router`                        | Node BGP and traffic-policy programming and node-owned status                                                                                                            |
 | `galactic-edge`                          | Node-side Edge attachment programming, fencing and release                                                                                                               |
 
-The ownership split above is reflected in `cmd/galactic-controller/main.go` (`SetupCloud`, `Setup`) and `fabric.go`. The [API consolidation migration](../migration/galactic-api-consolidation.md) describes the transition from the previous cloud controller. Do not run two attachment writers during that transition.
+The ownership split above is reflected in `cmd/galactic-controller/main.go` (`SetupCloud`, `Setup`) and `fabric.go`. The [API consolidation migration](../operations/migrations/galactic-api-consolidation.md) describes the transition from the previous cloud controller. Do not run two attachment writers during that transition.
 
 ## Shared flags
 
@@ -47,7 +47,7 @@ CLI defaults below describe the binary. Deployment overlays may override them; f
 
 Admission fails closed. Deploy the webhook with its serving Deployment, and keep its certificates and Service reachable. Neither the controller nor its CRDs are installed by the root `config/` kustomization.
 
-For `--edge`, first install the Edge prerequisites in `config/galactic-edge/` and its node agent on eligible nodes. A deleting attachment is held until the node reports `Released` or the node is removed. See [Edge troubleshooting](../edge/troubleshooting.md) and the [provider contract](../enhancements/networking/galactic-edge/contract.md) for ownership and timing requirements.
+For `--edge`, first install the Edge prerequisites in `config/galactic-edge/` and its node agent on eligible nodes. A deleting attachment is held until the node reports `Released` or the node is removed. See [Edge troubleshooting](../edge/troubleshooting.md) and the [provider contract](../edge/provider-contract.md) for ownership and timing requirements.
 
 ## Fabric flags
 
@@ -63,7 +63,7 @@ For `--edge`, first install the Edge prerequisites in `config/galactic-edge/` an
 
 Use `config/galactic-controller/fabric/` as the deployment base and supply the platform project and both credentials through the environment's overlay. Its default project is empty, so the base is not a complete deployment. Apply `hub-rbac.yaml` to the hub for the hub credential; the local ServiceAccount and lease remain in the deployment's own cluster.
 
-The allocator reads network intent from the hub, requests identities through platform IPAM, and writes NetworkFabricIdentity there for distribution to cells. Keep these central credentials out of cell deployments. Verify identity objects and their propagation before migrating attachment writers, following the [migration sequence](../migration/galactic-api-consolidation.md#cutover-sequence).
+The allocator reads network intent from the hub, requests identities through platform IPAM, and writes NetworkFabricIdentity there for distribution to cells. Keep these central credentials out of cell deployments. Verify identity objects and their propagation before migrating attachment writers, following the [migration sequence](../operations/migrations/galactic-api-consolidation.md#cutover-sequence).
 
 ## Further reading
 

@@ -6,7 +6,7 @@ See [scraping and component ports](README.md#where-the-metrics-come-from) and [s
 Every gateway node serves every VIP identically (anycast), so the same
 series appear on each one. Direct server return keeps no per-flow state,
 so there is no connection table to report. See
-[ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md).
+[ARCHITECTURE-GATEWAY.md](../gateway/architecture.md).
 
 | Metric                                                  | Type    | Labels                              | Meaning                                                                                              |
 | ------------------------------------------------------- | ------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------- |

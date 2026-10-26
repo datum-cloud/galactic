@@ -226,7 +226,7 @@ cluster may not have installed: an informer for a missing CRD never syncs. A
 route reflector has no tenant interfaces, so `--reflector` with this option is
 a configuration error. Whether the datapath enforces what this publishes is
 galactic-cni's setting, not this one. See
-[the traffic policy design](../enhancements/networking/interface-traffic-policy/README.md).
+[the traffic policy design](../designs/interface-traffic-policy.md).
 
 ### `--service-frontend-enabled` / `GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED`
 

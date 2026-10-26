@@ -7,7 +7,7 @@ This guide describes the installation order for NAT66/NAT64 shards. Run it first
 `galactic-nat` runs on every `galactic.datumapis.com/node: edge` node that
 also carries `galactic.datumapis.com/nat: enabled`, one DaemonSet per
 cluster, alongside `galactic-vrf` and, on nodes that opt into it,
-`galactic-gateway` (see [docs/node-labels.md](../node-labels.md)). An edge
+`galactic-gateway` (see [docs/node-labels.md](../operations/node-labels.md)). An edge
 node without `nat=enabled`, a compute node, an unlabeled node and a
 control-plane node never run a shard. A shard there is one hop from the
 transit its masquerade addresses are originated into. Compute nodes run no

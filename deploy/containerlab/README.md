@@ -73,20 +73,20 @@ link and the transit mesh stay single links: nothing attaches to them.
   the next free one, so `eth1` is still the transit-facing member on every edge
   node. The table below lists the members.
 
-| Node        | Bond  | Members   | Peer                     |
-|-------------|-------|-----------|--------------------------|
-| dfw-worker  | bond0 | eth1 eth3 | dfw-worker2 bond1        |
-| dfw-worker  | bond1 | eth2 eth4 | dfw-worker3 bond1        |
-| dfw-worker2 | bond0 | eth1 eth3 | tr1 bond1 (eth1 eth6)    |
-| dfw-worker2 | bond1 | eth2 eth4 | dfw-worker bond0         |
-| dfw-worker3 | bond0 | eth1 eth3 | tr1 bond2 (eth5 eth7)    |
-| dfw-worker3 | bond1 | eth2 eth4 | dfw-worker bond1         |
-| sjc-worker  | bond0 | eth1 eth2 | sjc-worker2 bond1        |
-| sjc-worker2 | bond0 | eth1 eth3 | tr2 bond1 (eth1 eth5)    |
-| sjc-worker2 | bond1 | eth2 eth4 | sjc-worker bond0         |
-| iad-worker  | bond0 | eth1 eth2 | iad-worker2 bond1        |
-| iad-worker2 | bond0 | eth1 eth4 | tr3 bond1 (eth4 eth5)    |
-| iad-worker2 | bond1 | eth2 eth5 | iad-worker bond0         |
+| Node          | Bond    | Members     | Peer                       |
+| ------------- | ------- | ----------- | -------------------------- |
+| dfw-worker    | bond0   | eth1 eth3   | dfw-worker2 bond1          |
+| dfw-worker    | bond1   | eth2 eth4   | dfw-worker3 bond1          |
+| dfw-worker2   | bond0   | eth1 eth3   | tr1 bond1 (eth1 eth6)      |
+| dfw-worker2   | bond1   | eth2 eth4   | dfw-worker bond0           |
+| dfw-worker3   | bond0   | eth1 eth3   | tr1 bond2 (eth5 eth7)      |
+| dfw-worker3   | bond1   | eth2 eth4   | dfw-worker bond1           |
+| sjc-worker    | bond0   | eth1 eth2   | sjc-worker2 bond1          |
+| sjc-worker2   | bond0   | eth1 eth3   | tr2 bond1 (eth1 eth5)      |
+| sjc-worker2   | bond1   | eth2 eth4   | sjc-worker bond0           |
+| iad-worker    | bond0   | eth1 eth2   | iad-worker2 bond1          |
+| iad-worker2   | bond0   | eth1 eth4   | tr3 bond1 (eth4 eth5)      |
+| iad-worker2   | bond1   | eth2 eth5   | iad-worker bond0           |
 
 `task verify:bonds` (part of `task verify`) checks every member on both ends is
 collecting and distributing in its bond's active aggregator. `task
@@ -107,21 +107,21 @@ hanging off `tr4`, the transit router with no site attached.
 
 ### Node roles
 
-| Node                | Kind          | Role                                                                           |
-|---------------------|---------------|--------------------------------------------------------------------------------|
-| `dfw-control-plane` | ext-container | Kind control-plane; runs Cilium, Multus                                        |
-| `dfw-worker`        | ext-container | compute: FRR PE, galactic-router PE, galactic-cni                              |
-| `dfw-worker2`       | ext-container | edge: FRR PE, galactic-router PE, galactic-cni, egress shard, galactic-gateway |
-| `dfw-worker3`       | ext-container | edge: dfw's second edge node, same components as `dfw-worker2`                 |
-| `sjc-control-plane` | ext-container | Kind control-plane; runs Cilium, Multus                                        |
-| `sjc-worker`        | ext-container | compute: FRR PE, galactic-router PE, galactic-cni                              |
-| `sjc-worker2`       | ext-container | edge: FRR PE, galactic-router PE, galactic-cni, egress shard, galactic-gateway |
-| `iad-control-plane` | ext-container | Kind control-plane; runs Cilium, Multus                                        |
-| `iad-worker`        | ext-container | compute: FRR PE, galactic-router PE, galactic-cni                              |
-| `iad-worker2`       | ext-container | edge: FRR PE, galactic-router PE, galactic-cni, egress shard, galactic-gateway |
-| `iad-worker3`       | ext-container | EVPN route reflector for all three clusters; FRR PE only                       |
-| `tr1`–`tr4`         | linux (FRR)   | iBGP full mesh, AS 65100                                                       |
-| `remote-host`       | linux (nginx) | off-fabric host on `tr4`; runs no Galactic component, no BGP; VIP client       |
+| Node                  | Kind            | Role                                                                             |
+| --------------------- | --------------- | -------------------------------------------------------------------------------- |
+| `dfw-control-plane`   | ext-container   | Kind control-plane; runs Cilium, Multus                                          |
+| `dfw-worker`          | ext-container   | compute: FRR PE, galactic-router PE, galactic-cni                                |
+| `dfw-worker2`         | ext-container   | edge: FRR PE, galactic-router PE, galactic-cni, egress shard, galactic-gateway   |
+| `dfw-worker3`         | ext-container   | edge: dfw's second edge node, same components as `dfw-worker2`                   |
+| `sjc-control-plane`   | ext-container   | Kind control-plane; runs Cilium, Multus                                          |
+| `sjc-worker`          | ext-container   | compute: FRR PE, galactic-router PE, galactic-cni                                |
+| `sjc-worker2`         | ext-container   | edge: FRR PE, galactic-router PE, galactic-cni, egress shard, galactic-gateway   |
+| `iad-control-plane`   | ext-container   | Kind control-plane; runs Cilium, Multus                                          |
+| `iad-worker`          | ext-container   | compute: FRR PE, galactic-router PE, galactic-cni                                |
+| `iad-worker2`         | ext-container   | edge: FRR PE, galactic-router PE, galactic-cni, egress shard, galactic-gateway   |
+| `iad-worker3`         | ext-container   | EVPN route reflector for all three clusters; FRR PE only                         |
+| `tr1`–`tr4`           | linux (FRR)     | iBGP full mesh, AS 65100                                                         |
+| `remote-host`         | linux (nginx)   | off-fabric host on `tr4`; runs no Galactic component, no BGP; VIP client         |
 
 Every edge node is tainted (`galactic.datumapis.com/nat=enabled:NoSchedule`) and so is the
 route reflector (`galactic.datumapis.com/galactic=control:NoSchedule`): no tenant pods land
@@ -140,7 +140,7 @@ Compute nodes run no shard: each egresses through its own site's edge shards onl
 reflector runs neither `galactic-cni` nor a shard — its
 `galactic=control` label is mutually exclusive with the `galactic=router` value that pulls
 those in, which is why the reflector needs a worker of its own (see
-[docs/node-labels.md](../../docs/node-labels.md)).
+[docs/node-labels.md](../../docs/operations/node-labels.md)).
 
 veth's native `XDP_TX`/`XDP_REDIRECT` fast path does not deliver a frame to the peer
 interface's normal receive stack at all unless the peer *also* runs an XDP program, and
@@ -211,39 +211,39 @@ node's pre-existing `bgp router-id`, so router-id and loopback are the same valu
 
 ### Transit loopbacks
 
-| Node | IPv6 loopback   | IPv4 loopback     |
-|------|-----------------|-------------------|
-| tr1  | fc00:0:1::1/128 | 10.255.255.100/32 |
-| tr2  | fc00:0:5::1/128 | 10.255.255.101/32 |
-| tr3  | fc00:0:6::1/128 | 10.255.255.102/32 |
-| tr4  | fc00:0:7::1/128 | 10.255.255.103/32 |
+| Node   | IPv6 loopback     | IPv4 loopback       |
+| ------ | ----------------- | ------------------- |
+| tr1    | fc00:0:1::1/128   | 10.255.255.100/32   |
+| tr2    | fc00:0:5::1/128   | 10.255.255.101/32   |
+| tr3    | fc00:0:6::1/128   | 10.255.255.102/32   |
+| tr4    | fc00:0:7::1/128   | 10.255.255.103/32   |
 
 ### Fabric (worker) loopbacks
 
-| Node        | Role    | IPv6 loopback   | IPv4 loopback   |
-|-------------|---------|-----------------|-----------------|
-| iad-worker  | compute | fc00:0:4::1/128 | 10.255.255.1/32 |
-| dfw-worker  | compute | fc00:0:2::1/128 | 10.255.255.2/32 |
-| sjc-worker  | compute | fc00:0:3::1/128 | 10.255.255.3/32 |
-| iad-worker3 | EVPN RR | fc00:0:8::1/128 | 10.255.255.4/32 |
-| iad-worker2 | edge    | fc00:0:9::1/128 | 10.255.255.5/32 |
-| dfw-worker2 | edge    | fc00:0:a::1/128 | 10.255.255.6/32 |
-| dfw-worker3 | edge    | fc00:0:b::1/128 | 10.255.255.7/32 |
-| sjc-worker2 | edge    | fc00:0:c::1/128 | 10.255.255.8/32 |
+| Node          | Role      | IPv6 loopback     | IPv4 loopback     |
+| ------------- | --------- | ----------------- | ----------------- |
+| iad-worker    | compute   | fc00:0:4::1/128   | 10.255.255.1/32   |
+| dfw-worker    | compute   | fc00:0:2::1/128   | 10.255.255.2/32   |
+| sjc-worker    | compute   | fc00:0:3::1/128   | 10.255.255.3/32   |
+| iad-worker3   | EVPN RR   | fc00:0:8::1/128   | 10.255.255.4/32   |
+| iad-worker2   | edge      | fc00:0:9::1/128   | 10.255.255.5/32   |
+| dfw-worker2   | edge      | fc00:0:a::1/128   | 10.255.255.6/32   |
+| dfw-worker3   | edge      | fc00:0:b::1/128   | 10.255.255.7/32   |
+| sjc-worker2   | edge      | fc00:0:c::1/128   | 10.255.255.8/32   |
 
 ### TR–TR point-to-point links (numbered)
 
 The host octet/hextet is the transit router's own index on both families, so `10.0.13.3`
 and `2001:db8:0:13::3` are both tr3 on the tr1–tr3 link.
 
-| Link    | IPv6 subnet        | IPv4 subnet  |
-|---------|--------------------|--------------|
-| tr1–tr2 | 2001:db8:0:12::/64 | 10.0.12.0/24 |
-| tr1–tr3 | 2001:db8:0:13::/64 | 10.0.13.0/24 |
-| tr1–tr4 | 2001:db8:0:14::/64 | 10.0.14.0/24 |
-| tr2–tr3 | 2001:db8:0:23::/64 | 10.0.23.0/24 |
-| tr2–tr4 | 2001:db8:0:24::/64 | 10.0.24.0/24 |
-| tr3–tr4 | 2001:db8:0:34::/64 | 10.0.34.0/24 |
+| Link      | IPv6 subnet          | IPv4 subnet    |
+| --------- | -------------------- | -------------- |
+| tr1–tr2   | 2001:db8:0:12::/64   | 10.0.12.0/24   |
+| tr1–tr3   | 2001:db8:0:13::/64   | 10.0.13.0/24   |
+| tr1–tr4   | 2001:db8:0:14::/64   | 10.0.14.0/24   |
+| tr2–tr3   | 2001:db8:0:23::/64   | 10.0.23.0/24   |
+| tr2–tr4   | 2001:db8:0:24::/64   | 10.0.24.0/24   |
+| tr3–tr4   | 2001:db8:0:34::/64   | 10.0.34.0/24   |
 
 ### Edge uplinks (numbered, eBGP to the transit)
 
@@ -252,26 +252,26 @@ site (`1x` dfw, `2x` sjc, `3x` iad) and the node within it; the IPv4 third octet
 exactly. `remote-host` is not a worker and runs no BGP — `tr4` originates its subnets on
 its behalf.
 
-| Link                    | IPv6 subnet        | TR address       | Edge address     | IPv4 subnet  | TR address | Edge address |
-|-------------------------|--------------------|------------------|------------------|--------------|------------|--------------|
-| dfw-worker2 – tr1:bond1 | 2001:db8:1:11::/64 | 2001:db8:1:11::1 | 2001:db8:1:11::2 | 10.1.11.0/24 | 10.1.11.1  | 10.1.11.2    |
-| dfw-worker3 – tr1:bond2 | 2001:db8:1:12::/64 | 2001:db8:1:12::1 | 2001:db8:1:12::2 | 10.1.12.0/24 | 10.1.12.1  | 10.1.12.2    |
-| sjc-worker2 – tr2:bond1 | 2001:db8:1:21::/64 | 2001:db8:1:21::1 | 2001:db8:1:21::2 | 10.1.21.0/24 | 10.1.21.1  | 10.1.21.2    |
-| iad-worker2 – tr3:bond1 | 2001:db8:1:32::/64 | 2001:db8:1:32::1 | 2001:db8:1:32::2 | 10.1.32.0/24 | 10.1.32.1  | 10.1.32.2    |
-| remote-host – tr4:eth4  | 2001:db8:1:40::/64 | 2001:db8:1:40::1 | 2001:db8:1:40::2 | 11.1.40.0/24 | 11.1.40.1  | 11.1.40.2    |
+| Link                      | IPv6 subnet          | TR address         | Edge address       | IPv4 subnet    | TR address   | Edge address   |
+| ------------------------- | -------------------- | ------------------ | ------------------ | -------------- | ------------ | -------------- |
+| dfw-worker2 – tr1:bond1   | 2001:db8:1:11::/64   | 2001:db8:1:11::1   | 2001:db8:1:11::2   | 10.1.11.0/24   | 10.1.11.1    | 10.1.11.2      |
+| dfw-worker3 – tr1:bond2   | 2001:db8:1:12::/64   | 2001:db8:1:12::1   | 2001:db8:1:12::2   | 10.1.12.0/24   | 10.1.12.1    | 10.1.12.2      |
+| sjc-worker2 – tr2:bond1   | 2001:db8:1:21::/64   | 2001:db8:1:21::1   | 2001:db8:1:21::2   | 10.1.21.0/24   | 10.1.21.1    | 10.1.21.2      |
+| iad-worker2 – tr3:bond1   | 2001:db8:1:32::/64   | 2001:db8:1:32::1   | 2001:db8:1:32::2   | 10.1.32.0/24   | 10.1.32.1    | 10.1.32.2      |
+| remote-host – tr4:eth4    | 2001:db8:1:40::/64   | 2001:db8:1:40::1   | 2001:db8:1:40::2   | 11.1.40.0/24   | 11.1.40.1    | 11.1.40.2      |
 
 ### Site-internal links (numbered, iBGP to the site's edge node)
 
 Same convention with the edge node in the router's seat: it takes `::1`/`.1`, the worker
 behind it `::2`/`.2`.
 
-| Link                           | IPv6 subnet        | Edge address     | Node address     | IPv4 subnet  | Edge address | Node address |
-|--------------------------------|--------------------|------------------|------------------|--------------|--------------|--------------|
-| dfw-worker – dfw-worker2:bond1 | 2001:db8:1:10::/64 | 2001:db8:1:10::1 | 2001:db8:1:10::2 | 10.1.10.0/24 | 10.1.10.1    | 10.1.10.2    |
-| dfw-worker – dfw-worker3:bond1 | 2001:db8:1:13::/64 | 2001:db8:1:13::1 | 2001:db8:1:13::2 | 10.1.13.0/24 | 10.1.13.1    | 10.1.13.2    |
-| sjc-worker – sjc-worker2:bond1 | 2001:db8:1:20::/64 | 2001:db8:1:20::1 | 2001:db8:1:20::2 | 10.1.20.0/24 | 10.1.20.1    | 10.1.20.2    |
-| iad-worker – iad-worker2:bond1 | 2001:db8:1:30::/64 | 2001:db8:1:30::1 | 2001:db8:1:30::2 | 10.1.30.0/24 | 10.1.30.1    | 10.1.30.2    |
-| iad-worker3 – iad-worker2:eth3 | 2001:db8:1:31::/64 | 2001:db8:1:31::1 | 2001:db8:1:31::2 | 10.1.31.0/24 | 10.1.31.1    | 10.1.31.2    |
+| Link                             | IPv6 subnet          | Edge address       | Node address       | IPv4 subnet    | Edge address   | Node address   |
+| -------------------------------- | -------------------- | ------------------ | ------------------ | -------------- | -------------- | -------------- |
+| dfw-worker – dfw-worker2:bond1   | 2001:db8:1:10::/64   | 2001:db8:1:10::1   | 2001:db8:1:10::2   | 10.1.10.0/24   | 10.1.10.1      | 10.1.10.2      |
+| dfw-worker – dfw-worker3:bond1   | 2001:db8:1:13::/64   | 2001:db8:1:13::1   | 2001:db8:1:13::2   | 10.1.13.0/24   | 10.1.13.1      | 10.1.13.2      |
+| sjc-worker – sjc-worker2:bond1   | 2001:db8:1:20::/64   | 2001:db8:1:20::1   | 2001:db8:1:20::2   | 10.1.20.0/24   | 10.1.20.1      | 10.1.20.2      |
+| iad-worker – iad-worker2:bond1   | 2001:db8:1:30::/64   | 2001:db8:1:30::1   | 2001:db8:1:30::2   | 10.1.30.0/24   | 10.1.30.1      | 10.1.30.2      |
+| iad-worker3 – iad-worker2:eth3   | 2001:db8:1:31::/64   | 2001:db8:1:31::1   | 2001:db8:1:31::2   | 10.1.31.0/24   | 10.1.31.1      | 10.1.31.2      |
 
 ### Cluster SRv6 addressing
 
@@ -299,12 +299,12 @@ node running both tenant delivery and an egress shard needs two Node-IDs, not
 one. Sharing one would let `galactic-nat`'s XDP program claim that node's own
 tenant ingress before the TC decap hook ever ran, silently.
 
-| Service     | Node-ID range     | Identity                                                                                                              |
-|-------------|-------------------|-----------------------------------------------------------------------------------------------------------------------|
-| `0x1`       | `0x1000`–`0x1FFF` | Tenant delivery — every node's `BGPRouter`                                                                            |
-| `0x2`       | `0x2000`–`0x2FFF` | NAT egress shard (`EgressShard.spec.shardSID`)                                                                        |
-| `0x3`       | `0x3000`–`0x3FFF` | Edge gateway (`GALACTIC_GATEWAY_SRV6_ADDRESS`); unused in this lab, whose gateways derive their node's own `0x1` uSID |
-| `0x4`–`0xD` | —                 | Unallocated                                                                                                           |
+| Service       | Node-ID range       | Identity                                                                                                                |
+| ------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `0x1`         | `0x1000`–`0x1FFF`   | Tenant delivery — every node's `BGPRouter`                                                                              |
+| `0x2`         | `0x2000`–`0x2FFF`   | NAT egress shard (`EgressShard.spec.shardSID`)                                                                          |
+| `0x3`         | `0x3000`–`0x3FFF`   | Edge gateway (`GALACTIC_GATEWAY_SRV6_ADDRESS`); unused in this lab, whose gateways derive their node's own `0x1` uSID   |
+| `0x4`–`0xD`   | —                   | Unallocated                                                                                                             |
 
 `0x0` is left reserved (it is the one short range, since Node-ID `0x0000` is
 invalid), and `0xE`–`0xF` are the LIB — Function space, not Node-ID space. See
@@ -313,16 +313,16 @@ invalid), and `0xE`–`0xF` are the LIB — Function space, not Node-ID space. S
 The node index is per site and stable across services: `*-worker` is `001`,
 `*-worker2` is `002`, `*-worker3` is `003`.
 
-| Node        | BGPRouter nodeID | Shard SID                   |
-|-------------|------------------|-----------------------------|
-| dfw-worker  | 4097 (`0x1001`)  | —                           |
-| dfw-worker2 | 4098 (`0x1002`)  | `2001:db8:ff01:2002:e001::` |
-| dfw-worker3 | 4099 (`0x1003`)  | `2001:db8:ff01:2003:e001::` |
-| sjc-worker  | 4097 (`0x1001`)  | —                           |
-| sjc-worker2 | 4098 (`0x1002`)  | `2001:db8:ff02:2002:e001::` |
-| iad-worker  | 4097 (`0x1001`)  | —                           |
-| iad-worker2 | 4098 (`0x1002`)  | `2001:db8:ff03:2002:e001::` |
-| iad-worker3 | 4099 (`0x1003`)  | — (route reflector)         |
+| Node          | BGPRouter nodeID   | Shard SID                     |
+| ------------- | ------------------ | ----------------------------- |
+| dfw-worker    | 4097 (`0x1001`)    | —                             |
+| dfw-worker2   | 4098 (`0x1002`)    | `2001:db8:ff01:2002:e001::`   |
+| dfw-worker3   | 4099 (`0x1003`)    | `2001:db8:ff01:2003:e001::`   |
+| sjc-worker    | 4097 (`0x1001`)    | —                             |
+| sjc-worker2   | 4098 (`0x1002`)    | `2001:db8:ff02:2002:e001::`   |
+| iad-worker    | 4097 (`0x1001`)    | —                             |
+| iad-worker2   | 4098 (`0x1002`)    | `2001:db8:ff03:2002:e001::`   |
+| iad-worker3   | 4099 (`0x1003`)    | — (route reflector)           |
 
 Each edge node therefore holds two identities in its site locator: delivery
 (`0x1NNN`) and egress shard (`0x2NNN`). Its `frr.conf`
@@ -337,11 +337,11 @@ The test VPC `ns10` (see [docs/tenants.md](docs/tenants.md)) gets a host address
 within its node's block (illustrative only — the exact hextet depends on allocation
 order; see docs/tenants.md's [SRv6 USID Argument allocation](docs/tenants.md#srv6-usid-argument-allocation)):
 
-| Cluster | Compute node | FRR loopback    | Node locator block      | USID ns10                       |
-|---------|--------------|-----------------|-------------------------|---------------------------------|
-| dfw     | dfw-worker   | fc00:0:2::1/128 | 2001:db8:ff01:1001::/64 | 2001:db8:ff01:1001:e001::/128   |
-| sjc     | sjc-worker   | fc00:0:3::1/128 | 2001:db8:ff02:1001::/64 | 2001:db8:ff02:1001:e001::/128   |
-| iad     | iad-worker   | fc00:0:4::1/128 | 2001:db8:ff03:1001::/64 | 2001:db8:ff03:1001:e001::/128   |
+| Cluster   | Compute node   | FRR loopback      | Node locator block        | USID ns10                         |
+| --------- | -------------- | ----------------- | ------------------------- | --------------------------------- |
+| dfw       | dfw-worker     | fc00:0:2::1/128   | 2001:db8:ff01:1001::/64   | 2001:db8:ff01:1001:e001::/128     |
+| sjc       | sjc-worker     | fc00:0:3::1/128   | 2001:db8:ff02:1001::/64   | 2001:db8:ff02:1001:e001::/128     |
+| iad       | iad-worker     | fc00:0:4::1/128   | 2001:db8:ff03:1001::/64   | 2001:db8:ff03:1001:e001::/128     |
 
 The `galactic-router address` column is no longer set explicitly in the
 per-cluster Kustomize patches — `galactic-router` auto-detects it from `lo`
@@ -350,19 +350,19 @@ FRR loopback address on the same host.
 
 ### Management network (fc00:10::/64)
 
-| Node              | Address      |
-|-------------------|--------------|
-| dfw-control-plane | fc00:10::102 |
-| dfw-worker        | fc00:10::103 |
-| dfw-worker2       | fc00:10::104 |
-| dfw-worker3       | fc00:10::105 |
-| iad-control-plane | fc00:10::112 |
-| iad-worker        | fc00:10::113 |
-| iad-worker2       | fc00:10::114 |
-| iad-worker3       | fc00:10::115 |
-| sjc-control-plane | fc00:10::122 |
-| sjc-worker        | fc00:10::123 |
-| sjc-worker2       | fc00:10::124 |
+| Node                | Address        |
+| ------------------- | -------------- |
+| dfw-control-plane   | fc00:10::102   |
+| dfw-worker          | fc00:10::103   |
+| dfw-worker2         | fc00:10::104   |
+| dfw-worker3         | fc00:10::105   |
+| iad-control-plane   | fc00:10::112   |
+| iad-worker          | fc00:10::113   |
+| iad-worker2         | fc00:10::114   |
+| iad-worker3         | fc00:10::115   |
+| sjc-control-plane   | fc00:10::122   |
+| sjc-worker          | fc00:10::123   |
+| sjc-worker2         | fc00:10::124   |
 
 ## Known limitations
 

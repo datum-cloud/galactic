@@ -1,6 +1,6 @@
 # Private Service Connect
 
-Status: partially implemented design. Direct endpoint routes, producer selection and opt-in same-family frontend translation exist. Use the [private-service guide](../router/private-service-routes.md) for current behavior. The qualification gaps recorded below remain distinct from implementation availability.
+Status: partially implemented design. Direct endpoint routes, producer selection and opt-in same-family frontend translation exist. Use the [private-service guide](../private-services/README.md) for current behavior. The qualification gaps recorded below remain distinct from implementation availability.
 
 - [Summary](#summary)
 - [Motivation](#motivation)
@@ -127,7 +127,7 @@ project and propagated object UIDs are separate lifetimes.
 The networking APIs live in the
 [network repository](https://github.com/datum-cloud/network/blob/main/api/v1alpha1/serviceroute_types.go).
 Galactic owns route compilation and packet handling. The
-[private-service routing reference](../router/private-service-routes.md)
+[private-service routing reference](../private-services/README.md)
 documents packet handling for this contract. This enhancement defines the
 resource design; the network repository holds its schemas, and Galactic holds
 its controller and data-plane implementation.
@@ -361,7 +361,7 @@ endpoint's selection contract. Galactic's attachment readiness checks establish
 network eligibility; they do not substitute for service health. A `Spread`
 endpoint's producers are probed over TCP by their own node, which publishes
 each decision in the endpoint's `status.producers`; see
-[Private service routes](../router/private-service-routes.md#several-producers-on-one-node).
+[Private service routes](../private-services/README.md#several-producers-on-one-node).
 
 ### Status and lifecycle
 

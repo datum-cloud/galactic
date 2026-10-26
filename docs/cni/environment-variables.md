@@ -294,7 +294,7 @@ host side stays down until `galactic-bgp` has attached and verified every
 enforcement program, and CNI ADD fails if the kernel failed the traffic policy
 preflight or the node has no SRv6 locator. Read by `galactic-cni run`, which
 writes it where the datapath and the CNI plugins read it. See the
-[design](../enhancements/networking/interface-traffic-policy/README.md#rollout).
+[design](../designs/interface-traffic-policy.md#rollout).
 
 **Type:** `off`, `audit` or `enforce` · **Default:** `off`
 
