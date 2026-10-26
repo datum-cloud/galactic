@@ -74,10 +74,12 @@ func (r *NetworkGatewayReconciler) passHealthGate(ctx context.Context, namespace
 // the binding b's node writes for rule today (generatedBinding), not being
 // deleted, carries a status.health of Unhealthy for b's attachment and rule's
 // health check port. Any other decision, or none, keeps b.
-func (idx serviceBindings) unhealthy(rule *bgpv1alpha1.NetworkService, vip netip.Addr, b ruleBackend) bool {
-	want := generatedBinding(rule, b.node, vip, b)
+func (idx serviceBindings) unhealthy(
+	rule *bgpv1alpha1.NetworkService, objNS string, vip netip.Addr, b ruleBackend,
+) bool {
+	want := generatedBinding(rule, objNS, b.node, vip, b)
 	got, ok := idx[want.Name]
-	if !ok || !got.DeletionTimestamp.IsZero() || got.Labels[networkRuleLabel] != rule.Name || got.Spec != want.Spec {
+	if !ok || !got.DeletionTimestamp.IsZero() || !generatedFor(got, rule) || got.Spec != want.Spec {
 		return false
 	}
 	h := got.Status.Health

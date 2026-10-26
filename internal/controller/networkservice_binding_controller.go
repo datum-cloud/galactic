@@ -121,6 +121,12 @@ type NetworkServiceBindingReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	NodeName string
+
+	// Namespace is the gateway namespace, where galactic-router's BGP objects
+	// live: every binding for a rule in another namespace is written here,
+	// beside the BGPRouter its rows resolve against. Empty writes each
+	// rule's bindings in the rule's own namespace.
+	Namespace string
 }
 
 // Reconcile converges this node's generated bindings for one NetworkService.
@@ -128,8 +134,10 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 	rule := &bgpv1alpha1.NetworkService{}
 	if err := r.Get(ctx, req.NamespacedName, rule); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Owner references garbage-collect the rule's bindings.
-			return ctrl.Result{}, nil
+			// Owner references garbage-collect the bindings of a rule in
+			// their own namespace. A tenant rule's cannot carry one, so this
+			// node deletes its own.
+			return ctrl.Result{}, r.deleteTenantBindings(ctx, req.NamespacedName)
 		}
 		return ctrl.Result{}, fmt.Errorf("get NetworkService %s: %w", req.NamespacedName, err)
 	}
@@ -155,10 +163,10 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 	rules := &bgpv1alpha1.NetworkServiceList{}
-	if err := r.List(ctx, rules, client.InNamespace(rule.Namespace)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("list NetworkServices in %s: %w", rule.Namespace, err)
+	if err := r.List(ctx, rules); err != nil {
+		return ctrl.Result{}, fmt.Errorf("list NetworkServices: %w", err)
 	}
-	owners := ruleBackendOwners(rules.Items, attachments)
+	owners := ruleBackendOwners(rules.Items, attachments, r.Namespace)
 	desired, claimed, ipv4Err, buildErr := r.desiredBindings(rule, attachments, owners)
 	if buildErr != nil {
 		// The spec cannot be built into bindings: a second IPv6 VIP, a
@@ -225,7 +233,7 @@ func (r *NetworkServiceBindingReconciler) desiredBindings(
 		if tv.family == familyIPv4 && !ipv4Served {
 			continue
 		}
-		sel, err := selectRuleBackends(rule, attachments, owners, tv.family)
+		sel, err := selectRuleBackends(rule, attachments, owners, tv.family, r.Namespace)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -247,25 +255,29 @@ func (r *NetworkServiceBindingReconciler) desiredBindings(
 func (r *NetworkServiceBindingReconciler) newBinding(
 	rule *bgpv1alpha1.NetworkService, vip netip.Addr, b ruleBackend,
 ) *bgpv1alpha1.ServiceVIPBinding {
-	return generatedBinding(rule, r.NodeName, vip, b)
+	return generatedBinding(rule, r.Namespace, r.NodeName, vip, b)
 }
 
 // generatedBinding returns the binding node writes for rule's VIP vip and
-// backend b: its name, labels and spec. The gateway compares a binding against
-// it before trusting its Bound condition.
+// backend b, in objNS when rule is a tenant rule (generatedNamespace): its
+// name, labels and spec. The gateway compares a binding against it before
+// trusting its Bound condition.
 func generatedBinding(
-	rule *bgpv1alpha1.NetworkService, node string, vip netip.Addr, b ruleBackend,
+	rule *bgpv1alpha1.NetworkService, objNS, node string, vip netip.Addr, b ruleBackend,
 ) *bgpv1alpha1.ServiceVIPBinding {
+	name := crdnames.ServiceVIPBindingName(rule.Name, node, vip.String(), b.addr.String(), int32(b.port))
+	if ruleIsTenant(rule, objNS) {
+		name = crdnames.TenantServiceVIPBindingName(
+			rule.Namespace, rule.Name, node, vip.String(), b.addr.String(), int32(b.port))
+	}
+	l := ruleLabels(rule, objNS)
+	l[bindingNodeLabel] = gatewayNodeLabelValue(node)
+	l[bindingManagedByLabel] = bindingManagedByValue
 	return &bgpv1alpha1.ServiceVIPBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: rule.Namespace,
-			Name: crdnames.ServiceVIPBindingName(
-				rule.Name, node, vip.String(), b.addr.String(), int32(b.port)),
-			Labels: map[string]string{
-				networkRuleLabel:      rule.Name,
-				bindingNodeLabel:      gatewayNodeLabelValue(node),
-				bindingManagedByLabel: bindingManagedByValue,
-			},
+			Namespace: generatedNamespace(rule, objNS),
+			Name:      name,
+			Labels:    l,
 		},
 		Spec: bgpv1alpha1.ServiceVIPBindingSpec{
 			TargetRef:      bgpv1alpha1.TargetRef{Kind: bindingTargetKind, Name: node},
@@ -304,7 +316,7 @@ func (r *NetworkServiceBindingReconciler) applyBindings(
 			binding.Spec = want.Spec
 			// Not a controller reference, and not blocking owner deletion:
 			// the binding's own finalizer orders its teardown.
-			return controllerutil.SetOwnerReference(rule, binding, r.Scheme)
+			return setRuleOwner(rule, binding, r.Scheme)
 		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("apply ServiceVIPBinding %s: %w", want.Name, err))
@@ -342,18 +354,47 @@ func bindingIsIPv4(binding *bgpv1alpha1.ServiceVIPBinding) bool {
 func (r *NetworkServiceBindingReconciler) nodeBindings(
 	ctx context.Context, rule *bgpv1alpha1.NetworkService,
 ) ([]bgpv1alpha1.ServiceVIPBinding, error) {
+	return r.keyBindings(ctx, client.ObjectKeyFromObject(rule))
+}
+
+// keyBindings lists the generated bindings this node wrote for the rule known
+// by key.
+func (r *NetworkServiceBindingReconciler) keyBindings(
+	ctx context.Context, key client.ObjectKey,
+) ([]bgpv1alpha1.ServiceVIPBinding, error) {
+	objNS := r.Namespace
+	if objNS == "" {
+		objNS = key.Namespace
+	}
 	list := &bgpv1alpha1.ServiceVIPBindingList{}
-	if err := r.List(ctx, list,
-		client.InNamespace(rule.Namespace),
-		client.MatchingLabels{
-			networkRuleLabel:      rule.Name,
-			bindingNodeLabel:      gatewayNodeLabelValue(r.NodeName),
-			bindingManagedByLabel: bindingManagedByValue,
-		},
-	); err != nil {
-		return nil, fmt.Errorf("list ServiceVIPBindings for NetworkService %s: %w", rule.Name, err)
+	if err := r.List(ctx, list, ruleKeySelector(key, objNS, map[string]string{
+		bindingNodeLabel:      gatewayNodeLabelValue(r.NodeName),
+		bindingManagedByLabel: bindingManagedByValue,
+	})); err != nil {
+		return nil, fmt.Errorf("list ServiceVIPBindings for NetworkService %s: %w", key, err)
 	}
 	return list.Items, nil
+}
+
+// deleteTenantBindings deletes the generated bindings this node wrote for the
+// deleted tenant rule known by key. A rule in the bindings' own namespace is
+// left to garbage collection.
+func (r *NetworkServiceBindingReconciler) deleteTenantBindings(ctx context.Context, key client.ObjectKey) error {
+	if r.Namespace == "" || key.Namespace == r.Namespace {
+		return nil
+	}
+	bindings, err := r.keyBindings(ctx, key)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for i := range bindings {
+		if err := r.Delete(ctx, &bindings[i]); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete ServiceVIPBinding %s of deleted NetworkService %s: %w",
+				bindings[i].Name, key, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // publishCondition sets this node's BackendsBound condition on rule, or removes
@@ -512,12 +553,17 @@ func (r *NetworkServiceBindingReconciler) SetupWithManager(mgr ctrl.Manager) err
 		// Accepted. Other status writes, including this reconciler's own
 		// conditions and the gateways' Programmed conditions, change neither.
 		For(&bgpv1alpha1.NetworkService{}, builder.WithPredicates(ruleBindingInputsChanged())).
-		// Rules in one namespace compete for backends, so a rule appearing,
-		// going, or changing its spec can give another rule a backend or take
-		// one away. Every rule in its namespace is re-queued.
+		// Rules in one VPC compete for backends, whatever their namespace, so
+		// a rule appearing, going, or changing its spec can give another rule
+		// a backend or take one away. Every rule in its VPC is re-queued; an
+		// update maps both versions, so a rule moving VPC re-queues both.
 		Watches(&bgpv1alpha1.NetworkService{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
-				return namespaceRuleRequests(ctx, r.Client, obj.GetNamespace())
+				rule, ok := obj.(*bgpv1alpha1.NetworkService)
+				if !ok {
+					return nil
+				}
+				return vpcRulesRequests(ctx, r.Client, rule.Spec.VPCRef)
 			}),
 			builder.WithPredicates(ruleBindingInputsChanged()),
 		).
@@ -577,31 +623,22 @@ func vpcRuleRequests(ctx context.Context, c client.Client, obj client.Object) []
 	if !ok || attachment.Status.VPC == "" {
 		return nil
 	}
+	return vpcRulesRequests(ctx, c, attachment.Status.VPC)
+}
+
+// vpcRulesRequests returns a reconcile request for every NetworkService whose
+// VPC is vpc.
+func vpcRulesRequests(ctx context.Context, c client.Client, vpc string) []ctrlreconcile.Request {
 	list := &bgpv1alpha1.NetworkServiceList{}
 	if err := c.List(ctx, list); err != nil {
-		log.FromContext(ctx).Error(err, "list NetworkServices for VPCAttachment change")
+		log.FromContext(ctx).Error(err, "list NetworkServices for change", "vpc", vpc)
 		return nil
 	}
 	var reqs []ctrlreconcile.Request
 	for i := range list.Items {
-		if list.Items[i].Spec.VPCRef != attachment.Status.VPC {
+		if list.Items[i].Spec.VPCRef != vpc {
 			continue
 		}
-		reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
-	}
-	return reqs
-}
-
-// namespaceRuleRequests returns a reconcile request for every NetworkService in
-// namespace.
-func namespaceRuleRequests(ctx context.Context, c client.Client, namespace string) []ctrlreconcile.Request {
-	list := &bgpv1alpha1.NetworkServiceList{}
-	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		log.FromContext(ctx).Error(err, "list NetworkServices for NetworkService change", "namespace", namespace)
-		return nil
-	}
-	reqs := make([]ctrlreconcile.Request, 0, len(list.Items))
-	for i := range list.Items {
 		reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
 	}
 	return reqs
@@ -615,9 +652,9 @@ func (r *NetworkServiceBindingReconciler) bindingRuleRequests(obj client.Object)
 		labels[bindingNodeLabel] != gatewayNodeLabelValue(r.NodeName) {
 		return nil
 	}
-	rule := labels[networkRuleLabel]
-	if rule == "" {
+	key, ok := ruleKeyFromLabels(obj)
+	if !ok {
 		return nil
 	}
-	return []ctrlreconcile.Request{{NamespacedName: client.ObjectKey{Namespace: obj.GetNamespace(), Name: rule}}}
+	return []ctrlreconcile.Request{{NamespacedName: key}}
 }

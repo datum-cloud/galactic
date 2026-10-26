@@ -87,7 +87,8 @@ func (r *BackendHealthReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	rule := &bgpv1alpha1.NetworkService{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: binding.Namespace, Name: binding.Labels[networkRuleLabel]}, rule)
+	ruleKey, _ := ruleKeyFromLabels(binding)
+	err := r.Get(ctx, ruleKey, rule)
 	switch {
 	case apierrors.IsNotFound(err):
 		// Garbage collection is about to remove the binding.
@@ -360,12 +361,19 @@ func (r *BackendHealthReconciler) nodeBindings(
 
 // ruleBindingRequests maps a NetworkService to its bindings on this node.
 func (r *BackendHealthReconciler) ruleBindingRequests(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
-	bindings, err := r.nodeBindings(ctx, obj.GetNamespace(), client.MatchingLabels{networkRuleLabel: obj.GetName()})
+	bindings, err := r.nodeBindings(ctx, "", client.MatchingLabels{networkRuleLabel: obj.GetName()})
 	if err != nil {
 		log.FromContext(ctx).Error(err, "list ServiceVIPBindings for NetworkService change", "networkService", obj.GetName())
 		return nil
 	}
-	return bindingRequests(bindings)
+	key := client.ObjectKeyFromObject(obj)
+	matched := bindings[:0]
+	for i := range bindings {
+		if k, ok := ruleKeyFromLabels(&bindings[i]); ok && k == key {
+			matched = append(matched, bindings[i])
+		}
+	}
+	return bindingRequests(matched)
 }
 
 // attachmentBindingRequests maps a VPCAttachment on this node to this node's

@@ -37,7 +37,7 @@ var testIPv4AdvName = ruleAdvertisementName(testRuleName, testNodeGWA, "v4")
 func newIPv4Binding(
 	rule *bgpv1alpha1.NetworkService, addr string, status metav1.ConditionStatus, reason string,
 ) *bgpv1alpha1.ServiceVIPBinding {
-	b := generatedBinding(rule, testComputeNodeName, netip.MustParseAddr(testVIP4), ruleBackend{
+	b := generatedBinding(rule, "", testComputeNodeName, netip.MustParseAddr(testVIP4), ruleBackend{
 		node:       testComputeNodeName,
 		addr:       netip.MustParseAddr(addr),
 		port:       testBackendPort,

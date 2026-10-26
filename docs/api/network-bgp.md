@@ -3396,9 +3396,10 @@ _Appears in:_
 
 
 ServiceEndpointHealthCheck configures the TCP health check of an endpoint's
-producers. A probe opens a TCP connection to the endpoint's address on Port
-through the producer's host-side interface, from that interface's
-link-local address. It succeeds when the handshake completes within
+producers. A probe opens a TCP connection to the producer attachment's first
+IPv6 address, not the endpoint's address, on Port, through the producer's
+host-side interface and from that interface's link-local address. A producer
+with no IPv6 address is never probed and stays Unknown. A probe succeeds when the handshake completes within
 TimeoutSeconds, and fails when the connection is refused, reset or times
 out. A producer's decision changes after UnhealthyThreshold consecutive
 failures or HealthyThreshold consecutive successes. A crashed producer

@@ -271,7 +271,7 @@ func runCmd(cfg *config.RouterConfig) error {
 
 	// Register the ServiceVIPBinding controller and the NetworkService binding
 	// writer that generates its bindings.
-	if err := setupVIPBindingControllers(mgr, nodeName, vipXlat, cfg.GCInterval); err != nil {
+	if err := setupVIPBindingControllers(mgr, nodeName, cfg.GCNamespace, vipXlat, cfg.GCInterval); err != nil {
 		return err
 	}
 
@@ -398,7 +398,7 @@ func runGCTicker(
 // backends of NetworkServices with a healthCheck and publishes each one's
 // health on its bindings.
 func setupVIPBindingControllers(
-	mgr ctrl.Manager, nodeName string, table controller.VIPTranslationTable, sweepInterval time.Duration,
+	mgr ctrl.Manager, nodeName, namespace string, table controller.VIPTranslationTable, sweepInterval time.Duration,
 ) error {
 	if err := (&controller.ServiceVIPBindingReconciler{
 		Client:              mgr.GetClient(),
@@ -409,9 +409,10 @@ func setupVIPBindingControllers(
 		return fmt.Errorf("setup ServiceVIPBinding controller: %w", err)
 	}
 	if err := (&controller.NetworkServiceBindingReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		NodeName: nodeName,
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		NodeName:  nodeName,
+		Namespace: namespace,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkService binding controller: %w", err)
 	}

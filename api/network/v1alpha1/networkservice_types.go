@@ -67,33 +67,41 @@ const (
 )
 
 // Ownership reasons for the Accepted condition on NetworkService and
-// NetworkEgressPolicy, reserved for an admission check that verifies the
-// requester is authorized for the VPC resources the object references. No such
-// check runs in this repository and nothing sets these reasons. On a
-// NetworkService, Accepted reports only that a gateway node is registered in
-// its namespace.
+// NetworkEgressPolicy. The gateways set them on a NetworkService in a project
+// namespace, one holding no NetworkGateway: OwnershipVerified once a VPC in its
+// namespace carries its vpcRef, OwnershipDenied while none does. Nothing sets
+// them on a NetworkEgressPolicy, or on a NetworkService in a gateway
+// namespace, whose Accepted reports only that a gateway node is registered
+// there.
 const (
-	// AcceptedReasonOwnershipVerified is reserved for an admission check that
-	// found the requester authorized for the VPC resources the object
-	// references.
+	// AcceptedReasonOwnershipVerified reports that a VPC in the object's
+	// namespace carries the VPC identifier it references.
 	AcceptedReasonOwnershipVerified string = "OwnershipVerified"
 
-	// AcceptedReasonOwnershipDenied is reserved for an admission check that
-	// rejected the object because the requester is not authorized for the VPC
-	// resources it references.
+	// AcceptedReasonOwnershipDenied reports that no VPC in the object's
+	// namespace carries the VPC identifier it references.
 	AcceptedReasonOwnershipDenied string = "OwnershipDenied"
 )
 
 // NetworkService defines ingress load-balancing for a single tenant VPC, served
 // by every NetworkGateway node identically (anycast Direct Server Return —
-// see NetworkGateway's doc comment). It is namespaced (deployed to
-// galactic-system) and written by the platform API that serves tenants, which
-// verifies the tenant owns vpcRef before it writes the service; RBAC on the
-// namespace decides who else may write it. vpcRef is an opaque string
-// identifier because this kind carries identifiers from the VPC API in
-// api/cloud/v1alpha1 without a Kubernetes object reference. Accepted is set
-// once a gateway node is registered in the namespace and is not an ownership
-// check.
+// see NetworkGateway's doc comment). vpcRef is an opaque string identifier
+// because this kind carries identifiers from the VPC API in api/cloud/v1alpha1
+// without a Kubernetes object reference.
+//
+// A NetworkService lives in one of two kinds of namespace. In a gateway
+// namespace, one holding NetworkGateways (galactic-system), it is written by
+// the platform API that serves tenants, which verifies the tenant owns vpcRef
+// before it writes the service; RBAC on the namespace decides who else may
+// write it, and Accepted reports only that a gateway node is registered
+// there. In a project namespace, one holding no NetworkGateway, it is served
+// by every NetworkGateway in the cluster and trusted for nothing: it is
+// Accepted (OwnershipVerified) only while a VPC in its own namespace carries
+// its vpcRef (OwnershipDenied otherwise), and only while no other service
+// already serves one of its VIP addresses on its protocol and port
+// (VIPClaimed); its backends come only from VPCAttachments in its own
+// namespace. Either way, the BGPAdvertisements and ServiceVIPBindings made for
+// it live in the gateway namespace.
 //
 // Unlike the earlier Full-NAT design this type originally described, there
 // is no primary/secondary gateway node for a service: every NetworkGateway
@@ -134,9 +142,10 @@ type NetworkService struct {
 // +kubebuilder:validation:XValidation:rule="self.protocol != 'udp' || !has(self.healthCheck) || has(self.healthCheck.port)",message="healthCheck.port is required for udp: a health check probes a TCP port"
 type NetworkServiceSpec struct {
 	// VPCRef is the opaque identifier of the target VPC this service applies
-	// to. This repo does not own the VPC API and does not validate the
-	// identifier beyond non-emptiness. The platform API that serves tenants
-	// verifies the tenant owns this VPC before it writes the service.
+	// to, a VPC's status.vpc. In a gateway namespace, the platform API that
+	// serves tenants verifies the tenant owns this VPC before it writes the
+	// service. In a project namespace, the service is accepted only while a
+	// VPC in that namespace carries this identifier.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	VPCRef string `json:"vpcRef"`
@@ -201,11 +210,12 @@ type NetworkServiceSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port,omitempty"`
 
-	// BackendSelector selects the VPCAttachments (galactic.datumapis.com/v1alpha1,
-	// in any namespace) that serve this service, matched against each
-	// VPCAttachment object's own labels. Only attachments whose status.vpc
-	// equals VPCRef are candidates, whatever their labels, so a selector cannot
-	// reach into another tenant's VPC. Each selected attachment contributes the
+	// BackendSelector selects the VPCAttachments (galactic.datumapis.com/v1alpha1)
+	// that serve this service, matched against each VPCAttachment object's own
+	// labels: in any namespace for a service in a gateway namespace, and only
+	// in its own namespace for a service in a project namespace. Only
+	// attachments whose status.vpc equals VPCRef are candidates, whatever their
+	// labels, so a selector cannot reach into another tenant's VPC. Each selected attachment contributes the
 	// IPv6 addresses in its spec.interface.addresses as backends, on
 	// BackendPort, for both VIPs: its node translates the IPv4 VIP's flows to
 	// and from IPv6, and its IPv4 addresses are never backends. An attachment

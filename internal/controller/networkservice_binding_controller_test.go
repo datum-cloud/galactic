@@ -705,7 +705,7 @@ func TestNetworkServiceBindingReconciler_SharedBackendServesOldestRule(t *testin
 
 // TestNetworkServiceBindingReconciler_TakesOverBackendFromDeletedRule covers the
 // older rule going away: the newer rule's next reconcile, which the rule watch
-// triggers for every rule in the namespace, writes its binding.
+// triggers for every rule in the VPC, writes its binding.
 func TestNetworkServiceBindingReconciler_TakesOverBackendFromDeletedRule(t *testing.T) {
 	older := newSharingBindingRule(testOlderRule, testBindingVIP, 100, testBackendPort)
 	newer := newSharingBindingRule(testNewerRule, "2001:db8:100::33", 200, testBackendPort)
@@ -718,7 +718,7 @@ func TestNetworkServiceBindingReconciler_TakesOverBackendFromDeletedRule(t *test
 	if err := c.Delete(context.Background(), older); err != nil {
 		t.Fatalf("delete rule older: %v", err)
 	}
-	reqs := namespaceRuleRequests(context.Background(), c, testNamespace)
+	reqs := vpcRulesRequests(context.Background(), c, testVPCRef)
 	if len(reqs) != 1 || reqs[0].Name != testNewerRule {
 		t.Fatalf("requests after deleting rule older = %v, want rule newer", reqs)
 	}

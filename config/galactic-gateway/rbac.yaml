@@ -70,6 +70,13 @@ rules:
     resources:
       - vpcattachments
     verbs: ["get", "list", "watch"]
+  # A NetworkService in a project namespace, one holding no NetworkGateway, is
+  # accepted only when a VPC in that namespace carries its vpcRef, so the
+  # gateway reads VPCs and re-checks its services when one changes.
+  - apiGroups: ["galactic.datumapis.com"]
+    resources:
+      - vpcs
+    verbs: ["get", "list", "watch"]
   # With GALACTIC_GATEWAY_IPV4_VIPS on, a rule's IPv4 VIP is load-balanced
   # only over backends whose ServiceVIPBinding (written by galactic-router on
   # the backend's node) reports Bound, and advertised only while one does, so

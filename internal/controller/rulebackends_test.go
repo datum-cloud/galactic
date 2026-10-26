@@ -107,7 +107,7 @@ func TestSelectRuleBackends_DropsConflictingBackends(t *testing.T) {
 	slot := newBackendAttachment(testVPCRef, b.String())
 	slot.Name = "slot"
 
-	sel, err := selectRuleBackends(rule, []*cloudv1alpha1.VPCAttachment{slot, dup, first}, nil, familyIPv6)
+	sel, err := selectRuleBackends(rule, []*cloudv1alpha1.VPCAttachment{slot, dup, first}, nil, familyIPv6, "")
 	if err != nil {
 		t.Fatalf("selectRuleBackends: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestRuleBackendOwners(t *testing.T) {
 			}
 			attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment(testVPCRef)}
 			// The list order must not matter: the newer rule comes first.
-			owners := ruleBackendOwners([]bgpv1alpha1.NetworkService{*b, *a}, attachments)
+			owners := ruleBackendOwners([]bgpv1alpha1.NetworkService{*b, *a}, attachments, "")
 
 			owner := owners[backendClaimFor(a, ruleBackend{
 				addr: netip.MustParseAddr(testBackendAddr), port: testBackendPort,
@@ -214,7 +214,7 @@ func TestRuleBackendOwners(t *testing.T) {
 				t.Errorf("owner of rule a's backend = %q, want %q", owner.Name, tt.wantOwner)
 			}
 
-			selB, err := selectRuleBackends(b, attachments, owners, familyIPv6)
+			selB, err := selectRuleBackends(b, attachments, owners, familyIPv6, "")
 			if err != nil {
 				t.Fatalf("selectRuleBackends(b): %v", err)
 			}
@@ -233,7 +233,7 @@ func TestRuleBackendOwners(t *testing.T) {
 				t.Errorf("rule b backends = %+v, want its one backend", selB.backends)
 			}
 
-			selA, err := selectRuleBackends(a, attachments, owners, familyIPv6)
+			selA, err := selectRuleBackends(a, attachments, owners, familyIPv6, "")
 			if err != nil {
 				t.Fatalf("selectRuleBackends(a): %v", err)
 			}
@@ -279,7 +279,7 @@ func TestAttachmentsByVPC_SelectSameBackends(t *testing.T) {
 	for _, vpc := range []string{"vpc-blue", "vpc-green", "vpc-empty"} {
 		t.Run(vpc, func(t *testing.T) {
 			rule := newTestRule(testRuleName, vpc, testVIP)
-			want, err := selectRuleBackends(rule, all, nil, familyIPv6)
+			want, err := selectRuleBackends(rule, all, nil, familyIPv6, "")
 			if err != nil {
 				t.Fatalf("selectRuleBackends over the full list: %v", err)
 			}
@@ -298,7 +298,7 @@ func TestAttachmentsByVPC_SelectSameBackends(t *testing.T) {
 				"indexed list": indexed,
 				"grouped list": byVPC[vpc],
 			} {
-				got, err := selectRuleBackends(rule, candidates, nil, familyIPv6)
+				got, err := selectRuleBackends(rule, candidates, nil, familyIPv6, "")
 				if err != nil {
 					t.Fatalf("selectRuleBackends over the %s: %v", name, err)
 				}

@@ -76,8 +76,8 @@ func (f addrFamily) has(addr netip.Addr) bool {
 }
 
 // listVPCAttachments lists the VPCAttachments opts select, cluster-wide.
-// Attachments live in tenant namespaces while NetworkServices live in
-// galactic-system, so the list is never namespaced; selectRuleBackends scopes
+// Attachments live in tenant namespaces while a NetworkService may live in a
+// gateway namespace, so the list is never namespaced; selectRuleBackends scopes
 // it to one rule's VPC.
 //
 // The list skips the cache's deep copy: the returned attachments share their
@@ -186,12 +186,16 @@ func groupAttachmentsByVPC(attachments []*cloudv1alpha1.VPCAttachment) map[strin
 // another rule is claimed rather than a backend: its node can translate its
 // replies back to only one rule's VIP of each family.
 //
+// A service in a tenant namespace, one other than objNS (ruleIsTenant), picks
+// only attachments in its own namespace, so its selector cannot reach another
+// project's workloads even when it names their VPC.
+//
 // An invalid selector is a spec error and fails the rule.
 func selectRuleBackends(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, owners backendOwners,
-	family addrFamily,
+	family addrFamily, objNS string,
 ) (ruleSelection, error) {
-	candidates, pending, err := ruleCandidateBackends(rule, attachments)
+	candidates, pending, err := ruleCandidateBackends(rule, attachments, objNS)
 	if err != nil {
 		return ruleSelection{}, err
 	}
@@ -212,7 +216,7 @@ func selectRuleBackends(
 // selected attachments that are not backends yet, as "namespace/name: reason".
 // See selectRuleBackends for which attachments qualify.
 func ruleCandidateBackends(
-	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
+	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, objNS string,
 ) (backends []ruleBackend, pending []string, err error) {
 	_, port, err := rulePorts(rule)
 	if err != nil {
@@ -225,6 +229,9 @@ func ruleCandidateBackends(
 
 	for _, attachment := range attachments {
 		if attachment.Status.VPC != rule.Spec.VPCRef || !selector.Matches(labels.Set(attachment.Labels)) {
+			continue
+		}
+		if ruleIsTenant(rule, objNS) && attachment.Namespace != rule.Namespace {
 			continue
 		}
 		key := types.NamespacedName{Namespace: attachment.Namespace, Name: attachment.Name}
@@ -322,7 +329,7 @@ type backendOwners map[backendClaim]types.NamespacedName
 // VIP, and a valid selector (ruleTranslatedVIPs). A rule being deleted keeps
 // its claims, since its bindings, and their rows, last until it is gone.
 func ruleBackendOwners(
-	rules []bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
+	rules []bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, objNS string,
 ) backendOwners {
 	ordered := make([]*bgpv1alpha1.NetworkService, 0, len(rules))
 	for i := range rules {
@@ -336,7 +343,7 @@ func ruleBackendOwners(
 		if err != nil {
 			continue
 		}
-		backends, _, err := ruleCandidateBackends(rule, attachments)
+		backends, _, err := ruleCandidateBackends(rule, attachments, objNS)
 		if err != nil {
 			continue
 		}

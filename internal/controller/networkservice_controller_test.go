@@ -326,7 +326,7 @@ func TestNetworkServiceReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNode
 		Build()
 
 	r := &NetworkServiceReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
-	if err := r.updateAcceptedCondition(context.Background(), rule); err != nil {
+	if err := r.updateAcceptedCondition(context.Background(), rule, testNamespace); err != nil {
 		t.Fatalf("updateAcceptedCondition: unexpected error: %v", err)
 	}
 
@@ -365,7 +365,7 @@ func TestNetworkServiceReconciler_GatewayAppearanceRequeuesParkedRule(t *testing
 	// No NetworkGateway exists yet, so this is the zero-nodes branch (see
 	// TestNetworkServiceReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes
 	// for why it is reached directly rather than through Reconcile).
-	if err := r.updateAcceptedCondition(ctx, rule); err != nil {
+	if err := r.updateAcceptedCondition(ctx, rule, testNamespace); err != nil {
 		t.Fatalf("updateAcceptedCondition: unexpected error: %v", err)
 	}
 	parked := &bgpv1alpha1.NetworkService{}

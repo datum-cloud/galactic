@@ -40,6 +40,7 @@ const (
 	cloudAPIGroup          = "galactic.datumapis.com"
 	cloudAPIVersion        = "v1alpha1"
 	resourceVPCAttachments = "vpcattachments"
+	resourceVPCs           = "vpcs"
 )
 
 func main() {
@@ -78,6 +79,7 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPRouters},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPVRFInstances},
 		{group: cloudAPIGroup, version: cloudAPIVersion, resource: resourceVPCAttachments},
+		{group: cloudAPIGroup, version: cloudAPIVersion, resource: resourceVPCs},
 	}
 
 	for _, r := range resources {
