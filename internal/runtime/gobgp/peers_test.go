@@ -51,7 +51,7 @@ func TestPeerFromDesired_RouteReflectorClientFollowsExplicitFlag(t *testing.T) {
 // reach.
 func TestPeerFromDesired_UpdateSourceOverridesLocalAddress(t *testing.T) {
 	const (
-		processDefault = "2607:ed40:1ff::3"
+		processDefault = "2001:db8:1ff::3"
 		perPeer        = "2607:f740:100::635"
 	)
 

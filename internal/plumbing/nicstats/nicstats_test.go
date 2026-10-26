@@ -172,7 +172,7 @@ func info(driver, iface string) string {
 
 func TestCollector(t *testing.T) {
 	const (
-		stalled = "ens1f1np1"
+		stalled = "ens4"
 		healthy = "eth0"
 		unknown = "veth0"
 	)
@@ -198,19 +198,19 @@ func TestCollector(t *testing.T) {
 	want := `
 # HELP galactic_nat_uplink_info ` + infoHelp + `
 # TYPE galactic_nat_uplink_info gauge
-` + info("bnxt_en", "ens1f1np1") + `
+` + info("bnxt_en", "ens4") + `
 ` + info("ixgbe", "eth0") + `
 ` + info("veth", "veth0") + `
 # HELP galactic_nat_uplink_queue_driver_stat_total ` + ringStatHelp + `
 # TYPE galactic_nat_uplink_queue_driver_stat_total counter
-galactic_nat_uplink_queue_driver_stat_total{driver="bnxt_en",interface="ens1f1np1",queue="2",` +
+galactic_nat_uplink_queue_driver_stat_total{driver="bnxt_en",interface="ens4",queue="2",` +
 		`stat="tx_ucast_packets"} 4
 # HELP galactic_nat_uplink_rx_queue_discards_total ` + discardsHelp + `
 # TYPE galactic_nat_uplink_rx_queue_discards_total counter
-galactic_nat_uplink_rx_queue_discards_total{driver="bnxt_en",interface="ens1f1np1",queue="2"} 23554
+galactic_nat_uplink_rx_queue_discards_total{driver="bnxt_en",interface="ens4",queue="2"} 23554
 # HELP galactic_nat_uplink_rx_queue_packets_total ` + packetsHelp + `
 # TYPE galactic_nat_uplink_rx_queue_packets_total counter
-galactic_nat_uplink_rx_queue_packets_total{driver="bnxt_en",interface="ens1f1np1",queue="2"} 313000
+galactic_nat_uplink_rx_queue_packets_total{driver="bnxt_en",interface="ens4",queue="2"} 313000
 galactic_nat_uplink_rx_queue_packets_total{driver="ixgbe",interface="eth0",queue="0"} 10
 `
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want)); err != nil {

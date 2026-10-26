@@ -64,7 +64,7 @@ const mappedPeer = "2607:f740:0:3f::39b"
 // route, an installed BGP route, a BGP route that loses to an installed static
 // route, and a connected route.
 const routesJSON = `{
-  "2607:ed40:10d::1:0:1/128": [
+  "2001:db8:10d::1:0:1/128": [
     {"protocol": "bgp", "selected": true, "distance": 200}
   ],
   "fc00:0:5::/48": [

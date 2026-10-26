@@ -101,7 +101,7 @@ func TestResolveTargets(t *testing.T) {
 		nonBondName = "eth0"
 		bondName    = "bond0"
 		bondIndex   = 10
-		slave1      = "enp3s0f1"
+		slave1      = "ens1"
 		slave2      = "eno2"
 	)
 

@@ -362,8 +362,8 @@ func TestNodeLocatorIdentity_DecodesBlockAndNodeID(t *testing.T) {
 	if !ok {
 		t.Fatal("nodeLocatorIdentity() ok = false, want a configured identity")
 	}
-	if block != 0x2607ed408002 {
-		t.Errorf("block = %#x, want 0x2607ed408002", block)
+	if block != 0x20010db88002 {
+		t.Errorf("block = %#x, want 0x20010db88002", block)
 	}
 	if nodeID != 6 {
 		t.Errorf("nodeID = %d, want 6", nodeID)

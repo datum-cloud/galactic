@@ -114,29 +114,29 @@ func TestSelect(t *testing.T) {
 		{
 			name: "all bnxt_en selects generic",
 			build: func(f *fakeSysfs) {
-				f.physical("ens1f0np0", "bnxt_en")
-				f.physical("ens3f0np0", "bnxt_en")
+				f.physical("ens3", "bnxt_en")
+				f.physical("ens7", "bnxt_en")
 				f.virtual("bond1")
 				f.file("bonding_masters")
 			},
-			required:   []string{"ens1f0np0", "ens3f0np0"},
+			required:   []string{"ens3", "ens7"},
 			want:       Generic,
-			wantReason: "ens1f0np0=bnxt_en, ens3f0np0=bnxt_en",
+			wantReason: "ens3=bnxt_en, ens7=bnxt_en",
 		},
 		{
 			name: "one bnxt_en NIC among others selects generic for the whole host",
 			build: func(f *fakeSysfs) {
 				f.physical(testNIC1, "igb")
-				f.physical("ens1f0np0", "bnxt_en")
+				f.physical("ens3", "bnxt_en")
 			},
 			required:   []string{testNIC1},
 			want:       Generic,
-			wantReason: "ens1f0np0=bnxt_en",
+			wantReason: "ens3=bnxt_en",
 		},
 		{
 			name: "virtual targets follow the host's NICs",
 			build: func(f *fakeSysfs) {
-				f.physical("ens1f0np0", "bnxt_en")
+				f.physical("ens3", "bnxt_en")
 				f.virtual("veth-return")
 			},
 			required: []string{"veth-return"},
@@ -195,7 +195,7 @@ func TestSelect_ReportsWhatItCannotDecideOn(t *testing.T) {
 		{
 			name: "both at once",
 			build: func(f *fakeSysfs) {
-				f.physical("ens1f0np0", "bnxt_en")
+				f.physical("ens3", "bnxt_en")
 				f.unbound(testNIC2)
 			},
 			required: []string{testNIC2, "bond9"},
@@ -266,10 +266,10 @@ func TestModeFlagsAndAttachMode(t *testing.T) {
 // is listed as skipped rather than failing startup, and the rest decide.
 func TestSelect_SkipsANonTargetNICWithNoDriver(t *testing.T) {
 	f := newFakeSysfs(t)
-	f.physical("ens1f0np0", "bnxt_en")
+	f.physical("ens3", "bnxt_en")
 	f.unbound(testNIC2)
 
-	got, err := Select("ens1f0np0")
+	got, err := Select("ens3")
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}

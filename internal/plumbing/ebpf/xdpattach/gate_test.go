@@ -30,9 +30,9 @@ func (f *fakeSlaveLink) Type() string              { return "veth" }
 // Interface names these tests drive: one slave whose driver takes a native
 // program, one whose driver does not.
 const (
-	gateSlave      = "enp3s0f1"
+	gateSlave      = "ens1"
 	gateSlaveNoXDP = "eno2"
-	gateSlaveSib   = "enp6s0f1"
+	gateSlaveSib   = "ens2"
 	gateMasterIdx  = 7
 )
 
