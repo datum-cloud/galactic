@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,9 +25,11 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	forwardv1 "go.datum.net/galactic/api/fabric/forward/v1"
+	permitv1 "go.datum.net/galactic/api/fabric/permit/v1"
 	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/errcode"
+	"go.datum.net/galactic/internal/fabric/gateway/limit"
 	"go.datum.net/galactic/internal/fabric/identity"
 	"go.datum.net/galactic/internal/fabric/node"
 	"go.datum.net/galactic/internal/fabric/query"
@@ -59,13 +62,16 @@ const (
 	FeatureAggregateProbeBudgets = "aggregate-probe-budgets"
 )
 
-// serviceFeatures maps every known feature to whether this gateway serves
-// it. Aggregate probe budgets are not enforced yet, so a request requiring
-// them is refused.
-var serviceFeatures = map[string]bool{
-	FeatureRouterOutcomes:        true,
-	FeatureTerminalCoverage:      true,
-	FeatureAggregateProbeBudgets: false,
+// features lists the features this gateway serves: aggregate probe budgets
+// only while it executes requests under an Admission. Enabling execution
+// asserts that every node also requires probe permits, so direct operator
+// probes are charged too.
+func (s *Service) features() []string {
+	f := []string{FeatureRouterOutcomes, FeatureTerminalCoverage}
+	if s.Enabled && s.Admission != nil {
+		f = append(f, FeatureAggregateProbeBudgets)
+	}
+	return f
 }
 
 // Terminal reasons of a stream's complete event.
@@ -116,11 +122,11 @@ func (a Allowlist) Check(id identity.ID) error {
 	return nil
 }
 
-// Handshake is the gateway server's handshake check: operators, the gateway
-// and listed service identities may connect.
+// Handshake is the gateway server's handshake check: operators, the
+// gateway, nodes and listed service identities may connect.
 func (a Allowlist) Handshake(id identity.ID) error {
 	switch id.Role {
-	case identity.RoleOperator, identity.RoleGateway:
+	case identity.RoleOperator, identity.RoleGateway, identity.RoleNode:
 		return nil
 	case identity.RoleService:
 		return a.Check(id)
@@ -172,13 +178,14 @@ type contextStream struct {
 func (s *contextStream) Context() context.Context { return s.ctx }
 
 // NewServer returns the gateway's gRPC server: the operator debug service,
-// the Looking Glass service and the gateway-only forwarding service on one
-// mTLS listener. Every call, unary or streaming, is authorized per role from
+// the Looking Glass service, the node-only permit service and the
+// gateway-only forwarding service on one mTLS listener. Every call, unary or streaming, is authorized per role from
 // GatewayMethods against a peer certificate re-verified on that call, bounded
 // by the certificate's expiry, and stripped of forwarding metadata unless
 // the gateway identity sent it. opts are appended.
 func NewServer(
-	creds *identity.Credentials, allowlist Allowlist, debug *Debug, service *Service, opts ...grpc.ServerOption,
+	creds *identity.Credentials, allowlist Allowlist, debug *Debug, service *Service, permits *Permits,
+	opts ...grpc.ServerOption,
 ) *grpc.Server {
 	auth := &node.Authorizer{Methods: GatewayMethods, Credentials: creds, Allow: allowlist.Check}
 	gs := grpc.NewServer(append([]grpc.ServerOption{
@@ -189,6 +196,7 @@ func NewServer(
 	fabricv1.RegisterFabricGatewayServiceServer(gs, debug)
 	servicev1.RegisterLookingGlassServiceServer(gs, service)
 	forwardv1.RegisterForwardServiceServer(gs, service.Forwarder())
+	permitv1.RegisterPermitServiceServer(gs, permits)
 	return gs
 }
 
@@ -199,8 +207,8 @@ type LeaderDialer interface {
 
 // Service implements the Looking Glass service. Any replica authenticates
 // and validates a request; a follower forwards it once to the leader, which
-// validates it again before executing. Unless Enabled, the leader refuses a
-// valid request with ServiceDisabled.
+// validates it again before executing. Unless Enabled and given an
+// Admission, the leader refuses a valid request with ServiceDisabled.
 type Service struct {
 	servicev1.UnimplementedLookingGlassServiceServer
 
@@ -208,6 +216,9 @@ type Service struct {
 	Cell string
 	// Enabled makes the leader execute valid requests.
 	Enabled bool
+	// Admission enforces the cell's aggregate admission and probe budgets.
+	// It must be the Runner's; without it nothing executes.
+	Admission *Admission
 	// Discoverer takes each request's router inventory; it should read
 	// uncached, so the snapshot carries the pod list's resourceVersion.
 	Discoverer *Discoverer
@@ -257,14 +268,14 @@ func (s *Service) capabilities() *servicev1.GetCapabilitiesResponse {
 	resp := &servicev1.GetCapabilitiesResponse{
 		Cell:     s.Cell,
 		ApiMajor: ServiceAPIMajor,
-		Enabled:  s.Enabled,
+		Enabled:  s.Enabled && s.Admission != nil,
 		Operations: []*servicev1.Operation{
 			{Type: fabricv1.QueryType_QUERY_TYPE_ROUTE_LOOKUP, AddressFamilies: families},
 			{Type: fabricv1.QueryType_QUERY_TYPE_BGP_SUMMARY, AddressFamilies: families},
 			{Type: fabricv1.QueryType_QUERY_TYPE_PING, AddressFamilies: families},
 			{Type: fabricv1.QueryType_QUERY_TYPE_TRACEROUTE, AddressFamilies: families},
 		},
-		Features: []string{FeatureRouterOutcomes, FeatureTerminalCoverage},
+		Features: s.features(),
 		Limits: &servicev1.Limits{
 			MaxRequestLifetime:  durationpb.New(MaxServiceRequestLifetime),
 			MaxNodeExecution:    durationpb.New(query.MaxNodeExecution),
@@ -272,6 +283,9 @@ func (s *Service) capabilities() *servicev1.GetCapabilitiesResponse {
 			MaxInventoryRouters: MaxInventoryRouters,
 			MaxBudgets:          maxServiceBudgets(),
 		},
+	}
+	if slices.Contains(resp.Features, FeatureAggregateProbeBudgets) {
+		resp.Limits.Admission = admissionLimits(s.Admission.Limits)
 	}
 	policy, err := proto.MarshalOptions{Deterministic: true}.Marshal(resp)
 	if err == nil {
@@ -281,6 +295,30 @@ func (s *Service) capabilities() *servicev1.GetCapabilitiesResponse {
 	resp.ContractRevision = s.Revision
 	resp.GeneratedAt = timestamppb.New(s.now())
 	return resp
+}
+
+// admissionLimits reports a cell's aggregate limits.
+func admissionLimits(l limit.Limits) *servicev1.AdmissionLimits {
+	r := func(r limit.Rate) *servicev1.TokenRate {
+		return &servicev1.TokenRate{PerSecond: r.PerSecond, Burst: r.Burst}
+	}
+	return &servicev1.AdmissionLimits{
+		RequestCell:             r(l.RequestCell),
+		RequestProject:          r(l.RequestProject),
+		PacketCell:              r(l.PacketCell),
+		PacketProject:           r(l.PacketPrincipal),
+		PacketDestinationHost:   r(l.PacketHost),
+		PacketDestinationPrefix: r(l.PacketPrefix),
+		ActiveJobs:              uint32(l.Slots),
+		ProjectActiveJobs:       uint32(l.PrincipalSlots),
+		QueuedJobs:              uint32(l.Queue),
+		ProjectQueuedJobs:       uint32(l.PrincipalQueue),
+		Streams:                 uint32(l.Streams),
+		ProjectStreams:          uint32(l.ProjectStreams),
+		QueueWait:               durationpb.New(l.QueueWait),
+		PingPackets:             limit.PingPackets,
+		TraceroutePackets:       limit.TraceroutePackets,
+	}
 }
 
 // maxServiceBudgets are the largest result budgets a service request may
@@ -312,7 +350,7 @@ func (s *Service) RunDiagnostic(
 	if !s.Elected() {
 		return s.forward(ctx, caller, canonical, received, deadline, stream)
 	}
-	return s.execute(ctx, canonical, deadline, stream.Send)
+	return s.execute(ctx, caller, canonical, deadline, stream.Send)
 }
 
 // Forwarder returns the gateway-only service a follower forwards to.
@@ -362,7 +400,7 @@ func (f *forwarder) ForwardDiagnostic(
 	if !now.Before(deadline) {
 		return errcode.Status(errcode.DeadlineExceeded, "forwarded request's deadline has passed")
 	}
-	return s.execute(ctx, canonical, deadline, stream.Send)
+	return s.execute(ctx, svc, canonical, deadline, stream.Send)
 }
 
 // serviceCaller returns the authenticated service identity of a call.
@@ -417,7 +455,7 @@ func (s *Service) validate(
 	if err := checkBudgets(req.GetBudgets()); err != nil {
 		return nil, time.Time{}, err
 	}
-	if err := checkFeatures(req.GetRequiredFeatures()); err != nil {
+	if err := checkFeatures(req.GetRequiredFeatures(), s.features()); err != nil {
 		return nil, time.Time{}, err
 	}
 	out := proto.CloneOf(req)
@@ -468,10 +506,10 @@ func checkNodes(nodes []string) error {
 
 // checkBudgets refuses a budget above its advertised maximum.
 func checkBudgets(b *fabricv1.Budgets) error {
-	limit := maxServiceBudgets()
-	if b.GetMaxResponseBytes() > limit.GetMaxResponseBytes() || b.GetMaxPrefixes() > limit.GetMaxPrefixes() ||
-		b.GetMaxPathsPerPrefix() > limit.GetMaxPathsPerPrefix() ||
-		b.GetMaxCommunitiesPerPath() > limit.GetMaxCommunitiesPerPath() {
+	ceiling := maxServiceBudgets()
+	if b.GetMaxResponseBytes() > ceiling.GetMaxResponseBytes() || b.GetMaxPrefixes() > ceiling.GetMaxPrefixes() ||
+		b.GetMaxPathsPerPrefix() > ceiling.GetMaxPathsPerPrefix() ||
+		b.GetMaxCommunitiesPerPath() > ceiling.GetMaxCommunitiesPerPath() {
 		return errcode.Status(errcode.InvalidQuery, "a budget exceeds its advertised maximum")
 	}
 	return nil
@@ -479,9 +517,9 @@ func checkBudgets(b *fabricv1.Budgets) error {
 
 // checkFeatures refuses a required feature this gateway does not serve,
 // known or not.
-func checkFeatures(features []string) error {
-	for _, f := range features {
-		if !serviceFeatures[f] {
+func checkFeatures(required, served []string) error {
+	for _, f := range required {
+		if !slices.Contains(served, f) {
 			return errcode.Status(errcode.VersionUnsupported, "a required feature is not available")
 		}
 	}
@@ -528,28 +566,55 @@ func (s *Service) forward(
 
 // execute runs a validated request on the leader and sends its events: one
 // snapshot of the cell's routers before any router executes, each selected
-// router's outcome as it finishes, and the terminal coverage. Events are
-// sent by this goroutine alone; finished outcomes wait for it in a buffer of
-// outcomeBuffer, and a failed send cancels every router still running. A
+// router's outcome as it finishes, and the terminal coverage. Before
+// discovery it confirms the election, charges the cell's and the project's
+// request tokens, registers the attempt key and opens a live stream; after
+// discovery it reserves queue capacity for every selected router at once,
+// before the snapshot is sent. Events are sent by this goroutine alone;
+// finished outcomes wait for it in a buffer of outcomeBuffer, and a failed
+// send or the loss of the election cancels every router still running. A
 // failure before the snapshot is returned as the call's status; once the
 // snapshot is sent the stream ends with complete and status OK, whatever
 // the diagnostic's own result.
 func (s *Service) execute(
-	ctx context.Context, req *servicev1.RunDiagnosticRequest, deadline time.Time,
+	ctx context.Context, caller identity.ID, req *servicev1.RunDiagnosticRequest, deadline time.Time,
 	send func(*servicev1.DiagnosticEvent) error,
 ) error {
 	if !s.now().Before(deadline) {
 		return errcode.Status(errcode.DeadlineExceeded, "request's deadline has passed")
 	}
-	if !s.Enabled || s.Discoverer == nil || s.Runner == nil {
+	adm := s.Admission
+	if !s.Enabled || adm == nil || s.Discoverer == nil || s.Runner == nil {
 		return errcode.Status(errcode.ServiceDisabled, "this cell does not execute Looking Glass service diagnostics")
 	}
+	project := req.GetProjectId()
+	_, epochCtx, err := adm.Authority.Check(ctx)
+	if err != nil {
+		return err
+	}
+	if err := adm.Buckets.ChargeRequest(project, adm.now()); err != nil {
+		return err
+	}
+	if err := adm.Attempts.Register(attemptKey(caller, req), requestDigest(req), req.GetExpiresAt().AsTime(),
+		adm.now()); err != nil {
+		return err
+	}
+	closeStream, err := adm.openStream(project)
+	if err != nil {
+		return err
+	}
+	defer closeStream()
+
 	// sendCtx ends when the stream does or a send fails; runCtx also ends
-	// at the deadline. Outcomes a deadline cuts short still reach the
-	// writer, so the consumer can see them while the stream lasts.
+	// at the deadline or when the election is lost. Outcomes a deadline or
+	// the loss cuts short still reach the writer, so the consumer can see
+	// them while the stream lasts.
 	sendCtx, abort := context.WithCancel(ctx)
 	defer abort()
-	runCtx, cancel := context.WithDeadline(sendCtx, deadline)
+	ownedCtx, lose := context.WithCancelCause(sendCtx)
+	defer lose(nil)
+	defer context.AfterFunc(epochCtx, func() { lose(errOwnershipLost) })()
+	runCtx, cancel := context.WithDeadline(ownedCtx, deadline)
 	defer cancel()
 
 	inv, err := s.Discoverer.Inventory(runCtx, req.GetNodes(), MaxServiceNodes, s.now())
@@ -569,6 +634,12 @@ func (s *Service) execute(
 	if proto.Size(snapshot) > maxSnapshotBytes {
 		return errcode.Status(errcode.InventoryTooLarge, "the cell's router snapshot exceeds its size bound")
 	}
+	res, err := s.Runner.Executor.Reserve(project, selectedCount(inv.Routers))
+	if err != nil {
+		return errcode.Retry(errcode.QueueFull, "the cell's execution queue cannot take this request",
+			string(limit.ScopeQueue), time.Second)
+	}
+	defer res.Release()
 	var seq uint64
 	next := func(ev *servicev1.DiagnosticEvent) error {
 		seq++
@@ -588,7 +659,7 @@ func (s *Service) execute(
 	outcomes := make(chan Outcome, outcomeBuffer)
 	go func() {
 		defer close(outcomes)
-		s.Runner.Stream(runCtx, req.GetProjectId(), req.GetRequestId(), q, inv.Routers, budgets, deadline,
+		s.Runner.Stream(runCtx, project, req.GetRequestId(), q, inv.Routers, budgets, deadline, res,
 			func(o Outcome) {
 				select {
 				case outcomes <- o:
@@ -609,6 +680,32 @@ func (s *Service) execute(
 	return next(&servicev1.DiagnosticEvent{Event: &servicev1.DiagnosticEvent_Complete{
 		Complete: tally.complete(inv, s.now()),
 	}})
+}
+
+func selectedCount(routers []Node) int {
+	n := 0
+	for _, r := range routers {
+		if r.Selected {
+			n++
+		}
+	}
+	return n
+}
+
+// attemptKey identifies an attempt within its service identity, project
+// and cell.
+func attemptKey(caller identity.ID, req *servicev1.RunDiagnosticRequest) string {
+	return caller.URI() + "|" + req.GetProjectId() + "|" + req.GetRequestId()
+}
+
+// requestDigest digests a canonical request's execution arguments: every
+// field but its expiration.
+func requestDigest(req *servicev1.RunDiagnosticRequest) string {
+	args := proto.CloneOf(req)
+	args.ExpiresAt = nil
+	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(args)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 func snapshotEvent(inv Inventory) *servicev1.Snapshot {
@@ -632,9 +729,13 @@ func outcomeEvent(o Outcome) *servicev1.DiagnosticEvent {
 	out := &servicev1.RouterOutcome{Node: o.Node.Name, PodUid: o.Node.PodUID, CompletedAt: timestamppb.New(o.Completed)}
 	if o.Err != nil {
 		code := errcode.Of(o.Err)
-		out.Result = &servicev1.RouterOutcome_Failure{Failure: &servicev1.Failure{
-			Reason: string(code), Message: failureMessage(code),
-		}}
+		f := &servicev1.Failure{
+			Reason: string(code), Message: failureMessage(code), Scope: errcode.Metadata(o.Err)[errcode.MetadataScope],
+		}
+		if d, ok := errcode.RetryDelay(o.Err); ok {
+			f.RetryDelay = durationpb.New(d)
+		}
+		out.Result = &servicev1.RouterOutcome_Failure{Failure: f}
 	} else {
 		out.Result = &servicev1.RouterOutcome_Observation{Observation: o.Observation}
 	}
@@ -659,6 +760,14 @@ func failureMessage(code errcode.Code) string {
 		return "request was cancelled before the router finished"
 	case errcode.FRRUnavailable:
 		return "router's routing daemon is unavailable"
+	case errcode.Throttled:
+		return "a probe packet budget is exhausted"
+	case errcode.QueueFull:
+		return "the cell's execution queue is full"
+	case errcode.OwnershipLost:
+		return "the gateway lost execution ownership"
+	case errcode.LimiterUnavailable:
+		return "the cell's limiter is unavailable"
 	}
 	return "router diagnostic failed"
 }
@@ -666,8 +775,8 @@ func failureMessage(code errcode.Code) string {
 // streamCoverage counts a stream's outcomes.
 type streamCoverage struct {
 	successful, failed, truncated int
-	// stopped is the request-level reason, DeadlineExceeded or Cancelled,
-	// that cut a router short, if any.
+	// stopped is the request-level reason, DeadlineExceeded, Cancelled or
+	// OwnershipLost, that cut a router short, if any.
 	stopped errcode.Code
 }
 
@@ -681,7 +790,7 @@ func (c *streamCoverage) add(o Outcome) {
 	}
 	c.failed++
 	switch code := errcode.Of(o.Err); code {
-	case errcode.DeadlineExceeded, errcode.Cancelled:
+	case errcode.DeadlineExceeded, errcode.Cancelled, errcode.OwnershipLost:
 		if c.stopped == "" {
 			c.stopped = code
 		}
@@ -689,7 +798,7 @@ func (c *streamCoverage) add(o Outcome) {
 }
 
 // complete returns the terminal coverage. A request cut short by its
-// deadline or cancellation reports that first; otherwise no selected router
+// deadline, cancellation or the loss of the election reports that first; otherwise no selected router
 // is NoNodesAvailable, no success ExecutionFailed, and any failure,
 // truncation or omission other than NotRequested PartialResults.
 func (c *streamCoverage) complete(inv Inventory, now time.Time) *servicev1.Complete {

@@ -10,10 +10,12 @@ package errcode
 import (
 	"context"
 	"errors"
+	"time"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.datum.net/galactic/internal/fabric/frr"
 	"go.datum.net/galactic/internal/fabric/probe"
@@ -81,6 +83,19 @@ const (
 	// InventoryTooLarge means the cell's router inventory exceeds what one
 	// Looking Glass service snapshot may list.
 	InventoryTooLarge Code = "InventoryTooLarge"
+	// Throttled means an admission or packet budget is exhausted; the
+	// status carries RetryInfo.
+	Throttled Code = "Throttled"
+	// QueueFull means the cell's execution queue, a project's share of it,
+	// or the live-stream limit cannot take the request's work.
+	QueueFull Code = "QueueFull"
+	// LimiterUnavailable means the cell's limiter cannot account for new
+	// work: it is in its recovery hold, its key maps are full, or a node
+	// cannot verify a probe permit.
+	LimiterUnavailable Code = "LimiterUnavailable"
+	// DuplicateRequest means a request ID was reused with identical
+	// arguments; it is never answered with a saved result.
+	DuplicateRequest Code = "DuplicateRequest"
 )
 
 // grpcCodes maps each code to the gRPC status code it travels as.
@@ -109,11 +124,91 @@ var grpcCodes = map[Code]codes.Code{
 	Cancelled:              codes.Canceled,
 	QueueTimeout:           codes.DeadlineExceeded,
 	InventoryTooLarge:      codes.ResourceExhausted,
+	Throttled:              codes.ResourceExhausted,
+	QueueFull:              codes.ResourceExhausted,
+	LimiterUnavailable:     codes.Unavailable,
+	DuplicateRequest:       codes.AlreadyExists,
 }
 
 // MetadataQueryCode is the ErrorInfo metadata key carrying the query
 // package's own validation code on an InvalidQuery error.
 const MetadataQueryCode = "queryCode"
+
+// Throttle metadata keys and their execution_started value.
+const (
+	MetadataScope            = "scope"
+	MetadataExecutionStarted = "execution_started"
+)
+
+// Retry builds a refusal that carries retry guidance: ErrorInfo metadata
+// naming the limiting scope (cell, project, destination or queue) and
+// execution_started=false, and RetryInfo with delay rounded up to the
+// millisecond.
+func Retry(code Code, msg, scope string, delay time.Duration) error {
+	gc, ok := grpcCodes[code]
+	if !ok {
+		gc = codes.Unknown
+	}
+	if len(msg) > query.MaxErrorMessageLength {
+		msg = msg[:query.MaxErrorMessageLength]
+	}
+	if r := delay % time.Millisecond; r != 0 {
+		delay += time.Millisecond - r
+	}
+	st, err := status.New(gc, msg).WithDetails(
+		&errdetails.ErrorInfo{Reason: string(code), Domain: Domain, Metadata: map[string]string{
+			MetadataScope: scope, MetadataExecutionStarted: "false",
+		}},
+		&errdetails.RetryInfo{RetryDelay: durationpb.New(delay)},
+	)
+	if err != nil {
+		return status.Error(gc, msg)
+	}
+	return st.Err()
+}
+
+// RetryDelay returns a status's RetryInfo delay, if it carries one.
+func RetryDelay(err error) (time.Duration, bool) {
+	st, ok := status.FromError(err)
+	if !ok {
+		return 0, false
+	}
+	for _, d := range st.Details() {
+		if ri, ok := d.(*errdetails.RetryInfo); ok {
+			return ri.GetRetryDelay().AsDuration(), true
+		}
+	}
+	return 0, false
+}
+
+// Typed reports whether err is a status carrying a fabric-api ErrorInfo,
+// i.e. an answer rather than a transport or context failure.
+func Typed(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetDomain() == Domain {
+			return true
+		}
+	}
+	return false
+}
+
+// Metadata returns a status's ErrorInfo metadata in Domain, if any.
+func Metadata(err error) map[string]string {
+	st, ok := status.FromError(err)
+	if !ok {
+		return nil
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetDomain() == Domain {
+			return info.GetMetadata()
+		}
+	}
+	return nil
+}
 
 // Status builds a gRPC error carrying code as its ErrorInfo reason.
 func Status(code Code, msg string) error {

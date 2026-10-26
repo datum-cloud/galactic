@@ -10,13 +10,30 @@
     {"type": "QUERY_TYPE_PING", "addressFamilies": ["ADDRESS_FAMILY_IPV4", "ADDRESS_FAMILY_IPV6"]},
     {"type": "QUERY_TYPE_TRACEROUTE", "addressFamilies": ["ADDRESS_FAMILY_IPV4", "ADDRESS_FAMILY_IPV6"]}
   ],
-  "features": ["router-outcomes", "terminal-coverage"],
+  "features": ["router-outcomes", "terminal-coverage", "aggregate-probe-budgets"],
   "limits": {
     "maxRequestLifetime": "120s",
     "maxNodeExecution": "30s",
     "maxSelectedRouters": 32,
     "maxInventoryRouters": 256,
-    "maxBudgets": {"maxResponseBytes": 131072, "maxPrefixes": 100, "maxPathsPerPrefix": 8, "maxCommunitiesPerPath": 64}
+    "maxBudgets": {"maxResponseBytes": 131072, "maxPrefixes": 100, "maxPathsPerPrefix": 8, "maxCommunitiesPerPath": 64},
+    "admission": {
+      "requestCell": {"perSecond": 2, "burst": 8},
+      "requestProject": {"perSecond": 0.2, "burst": 2},
+      "packetCell": {"perSecond": 100, "burst": 640},
+      "packetProject": {"perSecond": 20, "burst": 640},
+      "packetDestinationHost": {"perSecond": 20, "burst": 640},
+      "packetDestinationPrefix": {"perSecond": 40, "burst": 640},
+      "activeJobs": 8,
+      "projectActiveJobs": 2,
+      "queuedJobs": 256,
+      "projectQueuedJobs": 32,
+      "streams": 16,
+      "projectStreams": 2,
+      "queueWait": "10s",
+      "pingPackets": 3,
+      "traceroutePackets": 20
+    }
   },
   "generatedAt": "2026-10-24T12:00:00Z"
 }

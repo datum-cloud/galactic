@@ -22,7 +22,10 @@ import (
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	permitv1 "go.datum.net/galactic/api/fabric/permit/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/frr"
 	"go.datum.net/galactic/internal/fabric/identity"
@@ -72,6 +75,8 @@ type nodeOptions struct {
 	breakerCooldown                          time.Duration
 	searchSource, bmpAddress                 string
 	indexMaxRoutes                           int
+	probePermits, requirePermits             bool
+	gatewayAddress, gatewayLease             string
 }
 
 func newNodeCommand() *cobra.Command {
@@ -121,6 +126,15 @@ func newNodeCommand() *cobra.Command {
 	f.IntVar(&o.indexMaxRoutes, "search-index-max-routes", 4_000_000, "Prefixes the search index holds at most")
 	f.DurationVar(&o.breakerCooldown, "expensive-breaker-cooldown", node.DefaultBreakerCooldown,
 		"How long expensive searches stay suspended after one times out")
+	f.BoolVar(&o.probePermits, "probe-permits", false,
+		"Verify and enforce the cell gateway's probe permits, reading its election lease from the API (needs a "+
+			"service account token that may get --gateway-lease-name in --namespace)")
+	f.BoolVar(&o.requirePermits, "require-probe-permits", false,
+		"With --probe-permits, refuse a probe without a permit; a direct operator's probe obtains one from "+
+			"--gateway-address")
+	f.StringVar(&o.gatewayAddress, "gateway-address", "",
+		"host:port of the cell gateway's gRPC service, from which direct operator probes obtain permits")
+	f.StringVar(&o.gatewayLease, "gateway-lease-name", "fabric-api-gateway", "The cell gateway's election lease name")
 	return cmd
 }
 
@@ -185,6 +199,10 @@ func runNode(parent context.Context, o *nodeOptions) error {
 		return fmt.Errorf("--search-source must be index or frr, not %q", o.searchSource)
 	}
 
+	permits, err := nodePermits(o, creds)
+	if err != nil {
+		return err
+	}
 	srv, err := node.NewServer(node.Config{
 		NodeName:         o.nodeName,
 		Site:             o.site,
@@ -200,6 +218,7 @@ func runNode(parent context.Context, o *nodeOptions) error {
 		PacketRate:       o.packetRate,
 		BreakerCooldown:  o.breakerCooldown,
 		Index:            ix,
+		Permits:          permits,
 		Credentials:      creds,
 		Metrics:          metrics,
 	})
@@ -251,6 +270,42 @@ func runNode(parent context.Context, o *nodeOptions) error {
 	case err := <-errc:
 		return err
 	}
+}
+
+// nodePermits returns the probe permit checker the flags select, or nil
+// without --probe-permits.
+func nodePermits(o *nodeOptions, creds *identity.Credentials) (*node.Permits, error) {
+	switch {
+	case !o.probePermits && (o.requirePermits || o.gatewayAddress != ""):
+		return nil, errors.New("--require-probe-permits and --gateway-address need --probe-permits")
+	case !o.probePermits:
+		return nil, nil
+	case o.requirePermits && o.gatewayAddress == "":
+		return nil, errors.New("--require-probe-permits needs --gateway-address for direct operator probes")
+	}
+	cfg, err := ctrl.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("--probe-permits: %w", err)
+	}
+	reader, err := client.New(cfg, client.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("--probe-permits: %w", err)
+	}
+	p := &node.Permits{
+		Reader: reader, Namespace: o.namespace, LeaseName: o.gatewayLease, Require: o.requirePermits,
+		Started: time.Now(),
+	}
+	if o.gatewayAddress != "" {
+		conn, err := grpc.NewClient(o.gatewayAddress,
+			grpc.WithTransportCredentials(credentials.NewTLS(creds.ClientConfig(identity.Gateway(o.cell)))),
+			// A permit request charges budgets; it is never replayed.
+			grpc.WithDisableRetry())
+		if err != nil {
+			return nil, fmt.Errorf("--gateway-address: %w", err)
+		}
+		p.Gateway = permitv1.NewPermitServiceClient(conn)
+	}
+	return p, nil
 }
 
 // idleUnconfigured serves only metrics, reporting diagnostics unavailable,

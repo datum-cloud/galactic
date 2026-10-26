@@ -111,6 +111,10 @@ type Config struct {
 	// are refused until the index has the full table; they never fall back
 	// to scans.
 	Index *index.Index
+	// Permits, when set, verifies and enforces each probe's permit from
+	// the cell gateway, and Info reports probe_permits. Without it a probe
+	// carrying a permit is refused.
+	Permits *Permits
 	// Credentials reports whether mTLS credentials are loaded; nil means
 	// always loaded.
 	Credentials interface{ Err() error }
@@ -333,8 +337,62 @@ func (s *Server) Execute(
 	args := fmt.Sprintf("%s|%s|%s|%v", q.Type, q.AddressFamily, q.Target, req.GetBudgets().String())
 	policy := s.policyFor(ctx)
 	return s.dedup.do(ctx, key, args, req.GetExpiresAt().AsTime(), func() (*fabricv1.ExecuteResponse, error) {
-		return s.execute(ctx, q, effectiveBudgets(req.GetBudgets(), s.cfg.Ceilings), policy)
+		var g *grant
+		if q.Type.Probe() {
+			pg, release, err := s.probeGrant(ctx, req, q)
+			if err != nil {
+				return nil, err
+			}
+			defer release()
+			g = pg
+		}
+		return s.execute(ctx, q, effectiveBudgets(req.GetBudgets(), s.cfg.Ceilings), policy, g)
 	})
+}
+
+// probeGrant returns the permit grant a probe runs under, or nil when none
+// is required. A gateway's permit is consumed; a direct operator's probe,
+// when permits are required, obtains one from the gateway first and
+// releases it when done. An operator may not supply a permit. The returned
+// function, never nil, runs after the probe.
+func (s *Server) probeGrant(ctx context.Context, req *fabricv1.ExecuteRequest, q query.Query,
+) (*grant, func(), error) {
+	none := func() {}
+	p := s.cfg.Permits
+	pm := req.GetPermit()
+	caller, _ := CallerFrom(ctx)
+	if caller.Role == identity.RoleOperator {
+		if pm != nil {
+			return nil, none, errcode.Status(errcode.InvalidQuery, "only the cell gateway may supply a probe permit")
+		}
+		if p == nil || !p.Require {
+			return nil, none, nil
+		}
+		var err error
+		if pm, err = p.obtain(ctx, s.cfg.NodeName, caller.Name, req, s.cfg.Now()); err != nil {
+			return nil, none, err
+		}
+		release := func() { p.release(s.cfg.NodeName, pm.GetId()) }
+		g, err := p.consume(ctx, pm, s.cfg.NodeName, req.GetRequestId(), q, s.cfg.Now())
+		if err != nil {
+			release()
+			return nil, none, err
+		}
+		return &g, release, nil
+	}
+	switch {
+	case pm == nil && (p == nil || !p.Require):
+		return nil, none, nil
+	case pm == nil:
+		return nil, none, errcode.Status(errcode.LimiterUnavailable, "this node requires a probe permit")
+	case p == nil:
+		return nil, none, errcode.Status(errcode.LimiterUnavailable, "this node cannot verify probe permits")
+	}
+	g, err := p.consume(ctx, pm, s.cfg.NodeName, req.GetRequestId(), q, s.cfg.Now())
+	if err != nil {
+		return nil, none, err
+	}
+	return &g, none, nil
 }
 
 // validate checks a request and returns its canonical query and the
@@ -396,9 +454,10 @@ func (s *Server) policyFor(ctx context.Context) query.DestinationPolicy {
 	return s.cfg.PublicPolicy
 }
 
-// execute runs a validated query within the node's budgets.
+// execute runs a validated query within the node's budgets, and a probe
+// within its permit grant g, when one applies.
 func (s *Server) execute(
-	ctx context.Context, q query.Query, b budgets, policy query.DestinationPolicy,
+	ctx context.Context, q query.Query, b budgets, policy query.DestinationPolicy, g *grant,
 ) (*fabricv1.ExecuteResponse, error) {
 	select {
 	case s.sem <- struct{}{}:
@@ -419,7 +478,7 @@ func (s *Server) execute(
 	obs := &fabricv1.Observation{Node: s.cfg.NodeName, SampleTime: timestamppb.New(started)}
 	var err error
 	if q.Type.Probe() {
-		err = s.runProbe(ctx, q, policy, obs)
+		err = s.runProbe(ctx, q, policy, obs, g)
 	} else {
 		err = s.runFRR(ctx, q, b, obs)
 	}
@@ -618,7 +677,7 @@ func (s *Server) run(ctx context.Context, cmd frr.Command) (frr.Response, error)
 // runProbe sends a ping or traceroute from this node's source for the
 // query's family.
 func (s *Server) runProbe(
-	ctx context.Context, q query.Query, policy query.DestinationPolicy, obs *fabricv1.Observation,
+	ctx context.Context, q query.Query, policy query.DestinationPolicy, obs *fabricv1.Observation, g *grant,
 ) error {
 	dst, err := query.ResolvedProbe(q)
 	if err != nil {
@@ -642,7 +701,16 @@ func (s *Server) runProbe(
 	default:
 		return errcode.Status(errcode.NodeBusy, "the node's probe budget is full")
 	}
-	opts := probe.Options{Limiter: packetLimiter{s}}
+	limiter := &packetLimiter{s: s, allowance: -1}
+	if g != nil {
+		// No packet leaves after the permit's deadline or beyond its
+		// allowance.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, g.deadline)
+		defer cancel()
+		limiter.allowance = g.packets
+	}
+	opts := probe.Options{Limiter: limiter}
 	if q.Type == query.TypePing {
 		res, err := s.cfg.Prober.Ping(ctx, src, dst, opts)
 		if err != nil {
@@ -660,12 +728,22 @@ func (s *Server) runProbe(
 }
 
 // packetLimiter paces probe packets through the node-wide rate limiter and
-// counts them.
-type packetLimiter struct{ s *Server }
+// counts them. A non-negative allowance is a permit's packet budget; a
+// packet beyond it is refused.
+type packetLimiter struct {
+	s         *Server
+	allowance int
+}
 
-func (l packetLimiter) Wait(ctx context.Context) error {
+func (l *packetLimiter) Wait(ctx context.Context) error {
+	if l.allowance == 0 {
+		return errcode.Status(errcode.LimiterUnavailable, "the probe permit's packet allowance is spent")
+	}
 	if err := l.s.limiter.Wait(ctx); err != nil {
 		return err
+	}
+	if l.allowance > 0 {
+		l.allowance--
 	}
 	if m := l.s.cfg.Metrics; m != nil {
 		m.probePackets.Inc()
@@ -850,6 +928,7 @@ func (s *Server) Info(context.Context, *fabricv1.InfoRequest) (*fabricv1.InfoRes
 		FrrVersion:           st.version.Raw,
 		DiagnosticsAvailable: reason == "",
 		UnavailableReason:    reason,
+		ProbePermits:         s.cfg.Permits != nil,
 	}
 	for _, t := range query.Types {
 		if t.Expensive() && s.searchUnavailable() != "" {

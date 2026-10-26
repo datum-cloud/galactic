@@ -20,7 +20,10 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,6 +33,7 @@ import (
 
 	fabricapi "go.datum.net/galactic/internal/fabric/api/v1alpha1"
 	"go.datum.net/galactic/internal/fabric/gateway"
+	"go.datum.net/galactic/internal/fabric/gateway/limit"
 	"go.datum.net/galactic/internal/fabric/identity"
 	"go.datum.net/galactic/internal/fabric/query"
 	"go.datum.net/galactic/internal/metadata"
@@ -49,6 +53,7 @@ type gatewayOptions struct {
 	maxInFlight                   int
 	retention, cleanupGrace       time.Duration
 	serviceIdentities             []string
+	aggregateBudgets              bool
 }
 
 func newGatewayCommand() *cobra.Command {
@@ -94,6 +99,10 @@ func newGatewayCommand() *cobra.Command {
 	f.StringSliceVar(&o.serviceIdentities, "service-identities", nil,
 		"Names of the Looking Glass service identities (spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>) "+
 			"allowed to call this cell's gateway; empty allows none")
+	f.BoolVar(&o.aggregateBudgets, "aggregate-budgets", false,
+		"Enforce the cell's aggregate admission and probe packet budgets on every caller, issue probe permits to "+
+			"nodes, and bound each principal's share of --cell-slots and --cell-queue to the contract defaults; "+
+			"every node must run with --probe-permits first")
 	return cmd
 }
 
@@ -130,14 +139,29 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(fabricapi.AddToScheme(scheme))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                        scheme,
-		Metrics:                       metricsserver.Options{BindAddress: o.metricsAddress},
-		HealthProbeBindAddress:        o.healthAddress,
-		LeaderElection:                true,
-		LeaderElectionID:              o.leaseName,
-		LeaderElectionNamespace:       o.namespace,
-		LeaderElectionReleaseOnCancel: true,
+	restConfig := ctrl.GetConfigOrDie()
+	// The election identity is this process's own, "<pod>_<uuid>", so the
+	// limiter can recognise the Lease as its own and no later process
+	// reuses it.
+	holder := o.podName + "_" + string(uuid.NewUUID())
+	kc, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return fmt.Errorf("kubernetes client: %w", err)
+	}
+	lock, err := resourcelock.New(resourcelock.LeasesResourceLock, o.namespace, o.leaseName, kc.CoreV1(),
+		kc.CoordinationV1(), resourcelock.ResourceLockConfig{Identity: holder})
+	if err != nil {
+		return fmt.Errorf("election lock: %w", err)
+	}
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+		Scheme:                              scheme,
+		Metrics:                             metricsserver.Options{BindAddress: o.metricsAddress},
+		HealthProbeBindAddress:              o.healthAddress,
+		LeaderElection:                      true,
+		LeaderElectionID:                    o.leaseName,
+		LeaderElectionNamespace:             o.namespace,
+		LeaderElectionReleaseOnCancel:       true,
+		LeaderElectionResourceLockInterface: lock,
 		// Pods are cached only in the fabric-router namespace; FabricQuery
 		// is cached cluster-wide since NSO writes it into each project's
 		// mapped namespace.
@@ -156,6 +180,22 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	}
 
 	executor := gateway.NewExecutor(o.slots, o.expensiveSlots, o.queue)
+	var admission *gateway.Admission
+	if o.aggregateBudgets {
+		limits := limit.Defaults()
+		limits.Slots, limits.Queue = o.slots, o.queue
+		// A smaller cell lowers each principal's share with it.
+		limits.PrincipalSlots = min(limits.PrincipalSlots, o.slots)
+		limits.PrincipalQueue = min(limits.PrincipalQueue, o.queue)
+		admission, err = gateway.NewAdmission(limits, &limit.Authority{
+			Reader: mgr.GetAPIReader(), Namespace: o.namespace, Name: o.leaseName, Identity: holder,
+		})
+		if err != nil {
+			return fmt.Errorf("--aggregate-budgets: %w", err)
+		}
+		executor.PrincipalSlots, executor.PrincipalQueue = limits.PrincipalSlots, limits.PrincipalQueue
+		go admission.Authority.Watch(ctx, limit.WatchInterval)
+	}
 	metrics := gateway.NewMetrics(ctrlmetrics.Registry, func() float64 { return float64(executor.Depth()) })
 	executor.ObserveWait = func(d time.Duration) { metrics.QueueWait(d.Seconds()) }
 	creds := o.tls.credentials(identity.Gateway(o.cell))
@@ -191,7 +231,7 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	discoverer := &gateway.Discoverer{
 		Reader: mgr.GetClient(), Namespace: o.namespace, Selector: sel, CertsSelector: certsSel,
 	}
-	runner := &gateway.Runner{Clients: pool, Executor: executor, Metrics: metrics}
+	runner := &gateway.Runner{Clients: pool, Executor: executor, Metrics: metrics, Admission: admission}
 	rec := &gateway.Reconciler{
 		Client:      mgr.GetClient(),
 		APIReader:   mgr.GetAPIReader(),
@@ -241,10 +281,14 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 		Discoverer: &gateway.Discoverer{
 			Reader: mgr.GetAPIReader(), Namespace: o.namespace, Selector: sel, CertsSelector: certsSel,
 		},
-		Runner:   runner,
-		Revision: metadata.GitCommit,
+		Runner:    runner,
+		Admission: admission,
+		Revision:  metadata.GitCommit,
 	}
-	gs := gateway.NewServer(creds, allowlist, debug, service, grpc.MaxRecvMsgSize(64<<10), serverStats())
+	permits := &gateway.Permits{
+		Admission: admission, Executor: executor, Discoverer: discoverer, Elected: debug.Elected, Leader: debug,
+	}
+	gs := gateway.NewServer(creds, allowlist, debug, service, permits, grpc.MaxRecvMsgSize(64<<10), serverStats())
 	debugAddr := fmt.Sprintf(":%d", o.debugPort)
 	if o.podIP != "" {
 		debugAddr = net.JoinHostPort(o.podIP, strconv.Itoa(o.debugPort))

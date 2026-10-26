@@ -108,6 +108,8 @@ api/fabric/service/v1/
   service.proto                LookingGlassService, the customer service's contract
 api/fabric/forward/v1/
   forward.proto                ForwardService, gateway-only follower-to-leader forwarding
+api/fabric/permit/v1/
+  permit.proto                 PermitService, node-only probe permits for direct operator probes
 
 internal/fabric/
   api/v1alpha1/                FabricQuery types, deepcopy, CRD envtest
@@ -118,7 +120,8 @@ internal/fabric/
   identity/                    URI SAN identities, reloading mTLS credentials, certificate sync
   errcode/                     Typed error codes carried as gRPC ErrorInfo
   node/                        FabricService implementation (the sidecar's logic)
-  gateway/                     Reconciler, Runner, Executor, Pool, Discoverer, Debug, Service, Janitor
+  gateway/                     Reconciler, Runner, Executor, Pool, Discoverer, Debug, Service, Admission, Permits, Janitor
+  gateway/limit/               Aggregate token buckets, attempt keys, election authority and limits
   testpki/                     Throwaway CA for tests
 
 config/fabric-api/
@@ -293,13 +296,19 @@ With a cell set, `runNode`:
    `Info.diagnostics_available` is true, and is wired to no pod probe.
 6. Serves `/metrics` on `<host-ip>:9345` unless `--metrics-bind-address` is set.
 
+With `--probe-permits`, step 3 also gives the server a `node.Permits`, which
+reads the gateway's election Lease through an uncached client built from the
+pod's service account, and with `--gateway-address` a `PermitService` client
+for direct operator probes.
+
 Shutdown is a graceful gRPC stop with a 10 s limit.
 
 ### `cmd/fabric-api/gateway.go` — `fabric-api gateway`
 
 The cell executor. It requires `--site`, `--cluster-name`, `--cell` and
 `--pod-name`. It builds a controller-runtime manager with leader election
-(lease `fabric-api-gateway` in the pods' namespace, released on cancel), caches
+(lease `fabric-api-gateway` in the pods' namespace, released on cancel, held
+through its own resource lock under the identity `<pod>_<uuid>`), caches
 `Pod`s only in the `fabric-router` namespace and `FabricQuery` cluster-wide, and
 registers:
 
@@ -313,11 +322,16 @@ registers:
   (`gateway.Debug`), the Looking Glass service (`gateway.Service`) and the
   gateway-only forwarding service, authorized per role from
   `gateway.GatewayMethods` by a `node.Authorizer` that re-verifies the caller's
-  certificate on every unary and streaming call. The service takes each
-  request's router inventory with an uncached pod list and runs through the
-  shared `Runner` and executor, but its `Enabled` field is not set, so the
-  leader refuses valid requests with `ServiceDisabled`; no flag turns
-  execution on.
+  certificate on every unary and streaming call, and the node-only permit
+  service (`gateway.Permits`). The service takes each request's router
+  inventory with an uncached pod list and runs through the shared `Runner` and
+  executor, but its `Enabled` field is not set, so the leader refuses valid
+  requests with `ServiceDisabled`; no flag turns execution on.
+
+With `--aggregate-budgets` it also builds a `gateway.Admission` under a
+`limit.Authority` for that holder identity, gives it to the runner, the
+service and the permit service, bounds each principal's share of the executor,
+and starts `Authority.Watch`, which reads the Lease every second.
 
 Metrics are registered on controller-runtime's registry and served on `:9347`
 along with its own; `/healthz` and `/readyz` are plain pings on `:8081`.
@@ -391,7 +405,9 @@ The Component also adds the `fabric-api-certs` DaemonSet (see
 The Component sets `automountServiceAccountToken: false` on the pod and adds a
 projected token volume mounted only into `frr-init` and `config-agent`, the two
 containers that call the Kubernetes API. The `fabric-api` sidecar needs no API
-access and gets no token.
+access and gets no token, unless it runs with `--probe-permits`, which no
+manifest sets yet (see
+[Aggregate probe budgets](../fabric-api/configuration.md#aggregate-probe-budgets)).
 
 ---
 
@@ -403,6 +419,7 @@ access and gets no token.
 | `api/fabric/v1`                             | `FabricService` and `FabricGatewayService` contract: `Execute`, `Info`, `Query`, `ListNodes`; observations, budgets                                                                                                                                            | No                                                |
 | `api/fabric/service/v1`                     | `LookingGlassService` contract: `GetCapabilities` (policy, features, limits), `RunDiagnostic` and its snapshot, outcome and complete events; `testdata/` holds the wire examples                                                                               | No                                                |
 | `api/fabric/forward/v1`                     | `ForwardService.ForwardDiagnostic`: the gateway-only envelope a follower forwards to the leader                                                                                                                                                                | No                                                |
+| `api/fabric/permit/v1`                      | `PermitService.RequestPermit`/`ReleasePermit`: a node obtains a probe permit for a direct operator's probe                                                                                                                                                     | No                                                |
 | `internal/fabric/query`                     | `Canonicalize` (target rules, family inference, AS-path grammar, community forms), `DestinationPolicy`, `Budgets`/`Ceilings`, probe limits. Imports nothing from the rest of galactic                                                                          | No                                                |
 | `internal/fabric/frr` (`command.go`)        | Closed command builder: `VersionCommand`, `SummaryCommand`, `LookupCommand`, `SearchCommand`, `RouteCommand`. `Command` fields are unexported, so there is no free-text path                                                                                   | No                                                |
 | `internal/fabric/frr` (`vty.go`)            | Unix-socket client: `cmd\0` out, read to `\0\0\0<ret>`, per-command connection, byte cap, deadline handling                                                                                                                                                    | No                                                |
@@ -416,10 +433,14 @@ access and gets no token.
 | `internal/fabric/node` (`server.go`)        | `Execute` pipeline, `Info`, FRR identity refresh, expensive-query breaker, probe policy and budgets                                                                                                                                                            | Semaphores, limiter, breaker, last-read FRR state |
 | `internal/fabric/node` (`dedup.go`)         | Duplicate-suppression cache keyed by `(requestID, node, operation)`, bounded in entries and bytes                                                                                                                                                              | In-memory cache                                   |
 | `internal/fabric/node` (`shape.go`)         | Per-node shaping: path and community caps, response fit                                                                                                                                                                                                        | No                                                |
+| `internal/fabric/node` (`permit.go`)        | `Permits`: verifies and consumes each probe permit once (node, request, destination, operation, deadline, Lease epoch), refuses all for 32 s after start, obtains and releases permits for direct operator probes                                              | Consumed permit IDs (memory)                      |
 | `internal/fabric/node` (`auth.go`)          | `Authorizer` (unary and stream) and `AuthInterceptor`: identity from the handshake, optional per-call re-verification capped at certificate expiry, per-role method table, call logging                                                                        | No                                                |
 | `internal/fabric/gateway` (`reconciler.go`) | `FabricQuery` lifecycle: validation, snapshot, start marker, terminal status, conditions, coverage, shrink to budget                                                                                                                                           | In-flight executions (memory)                     |
 | `internal/fabric/gateway` (`runner.go`)     | `Pool` (one mTLS connection per sidecar, pinned to its certs pod's identity), `Runner` fan-out, per-node deadline, cheap-read retry; `Runner.Stream` hands each outcome off as its node finishes, with no retry and a queue bound (`QueueTimeout`)             | Connections                                       |
-| `internal/fabric/gateway` (`executor.go`)   | Cell-wide slots with an expensive sub-budget and per-project round-robin queue                                                                                                                                                                                 | Queue state                                       |
+| `internal/fabric/gateway` (`executor.go`)   | Cell-wide slots with an expensive sub-budget and per-principal round-robin queue; optional per-principal slot and queue caps; all-or-nothing `Reserve` of a request's jobs                                                                                     | Queue state                                       |
+| `internal/fabric/gateway` (`admission.go`)  | `Admission`: request tokens, attempt keys, live stream caps and probe permits charged to the packet buckets, under the election `Authority`; slot hold after a lost node answer                                                                                | Stream counts (memory)                            |
+| `internal/fabric/gateway` (`permit.go`)     | `Permits`: the node-only permit service; maps the node identity's certs pod to its node, holds the operator's slot until release or deadline plus 2 s, forwards once to the leader                                                                             | Held permits (memory)                             |
+| `internal/fabric/gateway/limit`             | `Limits` and `Validate`; `Buckets` (request and packet token buckets, never negative, key families bounded without evicting debt); `Attempts` (duplicate attempt keys, fail closed); `Authority` (uncached Lease check, epoch, 125 s recovery hold, `Watch`)   | Buckets, attempt keys, epoch (memory)             |
 | `internal/fabric/gateway` (`discovery.go`)  | Pod snapshot with omission reasons, one pod per node, node budget, node-to-certs-pod mapping (`NoCertificatePod`); `Inventory`, the service's one-router-per-node snapshot (newest usable pod, `NotRequested`, `NoSidecar`, unscheduled count, 256-router cap) | No                                                |
 | `internal/fabric/gateway` (`debug.go`)      | Operator debug service, leader forwarding through the election lease                                                                                                                                                                                           | Connection to the leader                          |
 | `internal/fabric/gateway` (`service.go`)    | `NewServer`, service `Allowlist`, Looking Glass service authorization and attribution validation, one-hop typed forwarding to the leader, capabilities, and (when `Enabled`) streamed execution with terminal coverage                                         | No                                                |
@@ -790,7 +811,9 @@ with the Component but its restart does not touch FRR.
 | Typed error codes and their gRPC mapping           | `internal/fabric/errcode/errcode.go`                                                                                  |
 | FabricQuery lifecycle, conditions, coverage        | `internal/fabric/gateway/reconciler.go:Reconcile`, `terminalStatus`, `persist`                                        |
 | Fan-out, deadlines, retries                        | `internal/fabric/gateway/runner.go:Runner.Run`, `one`                                                                 |
-| Cell concurrency and fairness                      | `internal/fabric/gateway/executor.go:Executor.Acquire`                                                                |
+| Cell concurrency and fairness                      | `internal/fabric/gateway/executor.go:Executor.Acquire`, `Reserve`                                                     |
+| Aggregate admission and probe budgets              | `internal/fabric/gateway/service.go:Service.execute`, `admission.go:Admission.permit`, `limit/`                       |
+| Probe permits on the node                          | `internal/fabric/node/permit.go:Permits.consume`, `server.go:probeGrant`                                              |
 | Node snapshot and omission reasons                 | `internal/fabric/gateway/discovery.go:Discoverer.Snapshot`, `omitReason`                                              |
 | Operator debug service and leader forwarding       | `internal/fabric/gateway/debug.go:Debug.Query`, `forward`, `leaderAddress`                                            |
 | Cleanup                                            | `internal/fabric/gateway/janitor.go:Janitor.Sweep`, `StaleCounter`                                                    |

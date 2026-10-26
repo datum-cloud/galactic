@@ -1,0 +1,57 @@
+// Copyright 2026 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// The node-to-gateway probe permit contract. It is internal to galactic:
+// only a cell's node identities may call it. A node asks the cell's gateway
+// for a permit before it runs a probe an operator sent it directly, so every
+// probe in the cell draws from the same aggregate packet budgets.
+
+syntax = "proto3";
+
+package fabric.permit.v1;
+
+import "fabric/v1/fabric.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "go.datum.net/galactic/api/fabric/permit/v1;permitv1";
+
+// PermitService runs on each cell's fabric-api gateway. A follower forwards
+// a call once to the leader, which alone issues permits.
+service PermitService {
+  // RequestPermit reserves a cell execution slot and the probe's worst-case
+  // packets, and returns a permit for one attempt on the calling node.
+  rpc RequestPermit(RequestPermitRequest) returns (RequestPermitResponse);
+  // ReleasePermit reports that the node finished a permit's probe, freeing
+  // its execution slot before the permit expires.
+  rpc ReleasePermit(ReleasePermitRequest) returns (ReleasePermitResponse);
+}
+
+message RequestPermitRequest {
+  // node is the calling node; it must be the node the caller's identity
+  // belongs to.
+  string node = 1;
+  // operator is the operator identity name the probe runs for; its packet
+  // budget is charged.
+  string operator = 2;
+  // request_id is the operator's request ID.
+  string request_id = 3;
+  // query is the probe, in canonical form.
+  fabric.v1.Query query = 4;
+  // expires_at is the request's absolute expiration; the permit's deadline
+  // is never later.
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message RequestPermitResponse {
+  fabric.v1.ProbePermit permit = 1;
+}
+
+message ReleasePermitRequest {
+  // node is the calling node.
+  string node = 1;
+  // id is the finished permit's ID.
+  string id = 2;
+}
+
+message ReleasePermitResponse {}
