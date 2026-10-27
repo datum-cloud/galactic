@@ -11,6 +11,7 @@ Metrics, scrape configuration and shipped alert rules. Use the subsystem referen
 - [Routing](routing.md)
 - [NAT66 / NAT64 — `galactic_nat_*`](nat.md)
 - [Fabric looking glass — `fabric_api_*`](fabric-api.md)
+- [Netlink listings — `galactic_netlink_dump_*`](netlink.md)
 - [Shipped alerts](alerts.md)
 
 ## Where the metrics come from

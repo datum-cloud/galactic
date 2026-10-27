@@ -31,6 +31,7 @@ import (
 	"go.datum.net/galactic/internal/gateway"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
@@ -198,6 +199,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 	gwQuota := gateway.NewNodeQuotaEnforcer(gateway.DefaultMaxRulesPerTenant, gateway.DefaultMaxRuleTableEntries)
 	gwTelemetry := gateway.NewPrometheusTelemetryEmitter()
 	gwTelemetry.MustRegister(ctrlmetrics.Registry)
+	nldump.MustRegister(ctrlmetrics.Registry)
 	gwEngine := gateway.NewEngine(gwDatapath, gwQuota, gwTelemetry)
 
 	// The gateway engine reconciler. No SRv6 address is passed: this datapath
