@@ -15,6 +15,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // gatewayAssignmentMu guards gatewayPrefix and gatewayNodeID.
@@ -151,7 +152,7 @@ func ensureGatewayAddress(vpc, inner string) error {
 // every datapath reload, so a replace leaves the address assigned but no
 // longer local, and the gateway then forwards its own traffic.
 func hasAddress(link netlink.Link, addr net.IP) (bool, error) {
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+	addrs, err := nldump.AddrList(link, netlink.FAMILY_V6)
 	if err != nil {
 		return false, fmt.Errorf("list addresses on %q: %w", link.Attrs().Name, err)
 	}
