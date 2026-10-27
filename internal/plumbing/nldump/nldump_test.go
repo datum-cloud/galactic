@@ -25,9 +25,7 @@ import (
 // netlink functions return, including for a link deleted since it was looked
 // up, which lists no addresses.
 func TestDumps_MatchPackageLevelFunctions(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("test requires root (CAP_NET_ADMIN) to create a network namespace; re-run via sudo")
-	}
+	requireRoot(t)
 	nsObj, err := ns.TempNetNS()
 	if err != nil {
 		t.Fatalf("create test netns: %v", err)
@@ -96,6 +94,13 @@ func TestDumps_MatchPackageLevelFunctions(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func requireRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("test requires root (CAP_NET_ADMIN) to create a network namespace; re-run via sudo")
 	}
 }
 
