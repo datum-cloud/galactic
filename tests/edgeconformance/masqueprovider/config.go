@@ -2,15 +2,23 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+//go:build linux
+
 package main
 
 import (
+	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
+	"time"
 
 	"sigs.k8s.io/yaml"
+
+	"go.datum.net/galactic/internal/edge/connectip"
+	"go.datum.net/galactic/internal/edge/masque"
 )
 
 // Config is the fixture's configuration file.
@@ -29,12 +37,14 @@ type Config struct {
 }
 
 // Service is one EdgeService grant. A provider cannot read an EdgeService,
-// so the deployer copies its UID and its VPC's UID from the grant.
+// so the deployer copies its UID, its VPC's UID and its VPC's base62
+// identifier from the grant.
 type Service struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 	UID       string `json:"uid"`
 	VPCUID    string `json:"vpcUID"`
+	VPCID     string `json:"vpcID"`
 	// VPC is the Galactic-VPC header value that selects this service.
 	VPC string `json:"vpc"`
 }
@@ -79,8 +89,8 @@ func (c *Config) Validate() error {
 	}
 	services := map[string]bool{}
 	for _, s := range c.Services {
-		if s.Namespace == "" || s.Name == "" || s.UID == "" || s.VPCUID == "" || s.VPC == "" {
-			return fmt.Errorf("service %q: namespace, name, uid, vpcUID and vpc are required", s.Name)
+		if s.Namespace == "" || s.Name == "" || s.UID == "" || s.VPCUID == "" || s.VPCID == "" || s.VPC == "" {
+			return fmt.Errorf("service %q: namespace, name, uid, vpcUID, vpcID and vpc are required", s.Name)
 		}
 		if services[s.Key()] {
 			return fmt.Errorf("service %q is listed twice", s.Key())
@@ -112,4 +122,38 @@ func (c *Config) Validate() error {
 		prefixes[cn.Service+"/"+cn.Prefix.String()] = true
 	}
 	return nil
+}
+
+// grantTTL is how long a fixture grant authorizes forwarding after each
+// request. The fixture's credentials are test credentials with no expiry of
+// their own.
+const grantTTL = time.Hour
+
+// Authorize implements masque.Authorizer over the configured connectors:
+// each is a static bearer credential bound to one service's VPC and one
+// /96.
+func (c *Config) Authorize(_ context.Context, credential, vpc string) (masque.Grant, error) {
+	var found *Connector
+	for i := range c.Connectors {
+		if subtle.ConstantTimeCompare([]byte(c.Connectors[i].Credential), []byte(credential)) == 1 {
+			found = &c.Connectors[i]
+		}
+	}
+	if found == nil {
+		return masque.Grant{}, connectip.ErrUnauthenticated
+	}
+	var svc Service
+	for _, s := range c.Services {
+		if s.Key() == found.Service {
+			svc = s
+		}
+	}
+	if svc.VPC != vpc {
+		return masque.Grant{}, connectip.ErrForbidden
+	}
+	return masque.Grant{
+		Connector: found.ID, Principal: found.ID, VPC: svc.VPC, VPCUID: svc.VPCUID, VPCID: svc.VPCID,
+		Service: masque.ServiceRef{Namespace: svc.Namespace, Name: svc.Name, UID: svc.UID},
+		Prefix:  found.Prefix, Routes: found.Routes, NotAfter: time.Now().Add(grantTTL),
+	}, nil
 }
