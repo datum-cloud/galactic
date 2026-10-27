@@ -224,20 +224,37 @@ tasks:
       - CGO_ENABLED=0 GOBIN={{.GOBGP_BIN}} go install github.com/osrg/gobgp/v4/cmd/gobgpd@v4.10.0 github.com/osrg/gobgp/v4/cmd/gobgp@v4.10.0
       - go run ./hack/fabric-api-loadtest --mrt {{.MRT}} --gobgp-bin {{.GOBGP_BIN}} {{.CLI_ARGS}}
   test:manifests:
-    desc: Render the opt-in Component fixtures in tests/manifests
+    desc: Render the opt-in Component fixtures in tests/manifests and check every manifest's log settings
     # Every fixture under tests/manifests/fabric-api composes Components the
     # way a cell overlay does and must build; every fixture under
     # tests/manifests/invalid omits a Component another requires and must
     # fail to build.
+    #
+    # Those fixtures and every kustomization under config/ and deploy/,
+    # except Components, are rendered and checked for a LOG_LEVEL, LOG_FORMAT, --log-level or
+    # --log-format that internal/logging rejects. The containerlab overlays
+    # under deploy/containerlab/resources build only once the lab scripts
+    # copy config/ onto a node, so they are not rendered here; their source
+    # YAML, inline patches included, is checked instead.
     deps: [kustomize]
     cmds:
+      - go build -o {{.LOCALBIN}}/check-log-settings ./hack/check-log-settings
       - |
         status=0
-        for dir in tests/manifests/fabric-api/*/; do
-          if ! {{.KUSTOMIZE}} build "$dir" > /dev/null; then
-            echo "FAIL: $dir does not build"; status=1
+        for file in $(find config deploy tests/manifests -name kustomization.yaml | sort); do
+          dir=$(dirname "$file")
+          case "$dir" in deploy/containerlab/resources/*|tests/manifests/invalid/*) continue ;; esac
+          grep -q '^kind: Component$' "$file" && continue
+          if ! out=$({{.KUSTOMIZE}} build "$dir"); then
+            echo "FAIL: $dir does not build"; status=1; continue
+          fi
+          if ! printf '%s\n' "$out" | {{.LOCALBIN}}/check-log-settings -label "$dir" -; then
+            echo "FAIL: $dir sets an unsupported log level or format"; status=1
           fi
         done
+        if ! find config deploy tests/manifests -name '*.yaml' -print0 | xargs -0 {{.LOCALBIN}}/check-log-settings; then
+          echo "FAIL: source YAML sets an unsupported log level or format"; status=1
+        fi
         for dir in tests/manifests/invalid/*/; do
           if {{.KUSTOMIZE}} build "$dir" > /dev/null 2>&1; then
             echo "FAIL: $dir builds, but omits a required Component"; status=1
