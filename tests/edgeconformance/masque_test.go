@@ -972,6 +972,11 @@ func (m *masque) teardown(t *testing.T) {
 			}
 		}
 	}
+	for _, n := range []string{computeNode, edgeNode1, edgeNode2} {
+		if _, err := nodeExec(n, "rm", "-f", masqueCA); err != nil {
+			t.Error(err)
+		}
+	}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		for i := 1; i <= 2; i++ {
 			p := m.client(t, mt.tn, i)
