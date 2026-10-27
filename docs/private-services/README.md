@@ -148,6 +148,13 @@ nodes that are not yet upgraded as expired, and send remote consumers to
 them only when no current entry offers a producer. This lasts until the
 rollout finishes. A rolled-back router ignores `renewTime`.
 
+Apply the `ServiceEndpoint` CRD with `renewTime` before upgrading
+`galactic-router`. Without it the API server prunes the field from every
+report, so every entry reads as expired and no `Unhealthy` producer drains.
+Nodes compare `renewTime` with their own clock, so keep node clocks in sync:
+a skew near 45 seconds expires live reports early or keeps a lost node's
+reports current for that much longer.
+
 Spread needs a `galactic-cni` whose datapath has the producer set map. A
 `galactic-router` that finds the map missing refuses the endpoint's Spread
 routes on that node, retrying, and keeps every other route working. Roll out

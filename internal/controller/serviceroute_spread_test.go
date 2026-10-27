@@ -106,7 +106,7 @@ func TestProducerReportsOnlyRenewed(t *testing.T) {
 	endpoint := func(state networkv1alpha1.BackendHealthState, renewed *metav1.Time) *networkv1alpha1.ServiceEndpoint {
 		return &networkv1alpha1.ServiceEndpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: producerHealthEndpoint, Namespace: producerHealthNamespace,
-				ResourceVersion: renewed.String()},
+				ResourceVersion: "1"},
 			Status: networkv1alpha1.ServiceEndpointStatus{Producers: []networkv1alpha1.ServiceEndpointProducerStatus{{
 				Namespace: producerHealthNamespace, Name: "resolver-a", AttachmentUID: "uid-a",
 				Node: producerHealthNode, Port: 8053,
@@ -124,6 +124,8 @@ func TestProducerReportsOnlyRenewed(t *testing.T) {
 			endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(0)), true},
 		{"expired report renewed", endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(lifetime+time.Second)),
 			endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(0)), false},
+		{"renewTime dropped", endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(20*time.Second)),
+			endpoint(networkv1alpha1.BackendHealthHealthy, nil), false},
 		{"decision changed", endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(20*time.Second)),
 			endpoint(networkv1alpha1.BackendHealthUnhealthy, renewedAt(0)), false},
 	} {

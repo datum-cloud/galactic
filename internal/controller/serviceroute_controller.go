@@ -536,7 +536,8 @@ func (r *ServiceRoutePolicyReconciler) consumerVPCIdentity(
 }
 
 // producerReportsOnlyRenewed reports whether newObj differs from oldObj only
-// in the renewTime of status.producers entries that were current at now.
+// in the renewTime of status.producers entries that are current at now in
+// both.
 func producerReportsOnlyRenewed(oldObj, newObj client.Object, now time.Time) bool {
 	oldEndpoint, ok := oldObj.(*networkv1alpha1.ServiceEndpoint)
 	if !ok {
@@ -546,9 +547,11 @@ func producerReportsOnlyRenewed(oldObj, newObj client.Object, now time.Time) boo
 	if !ok || len(oldEndpoint.Status.Producers) != len(newEndpoint.Status.Producers) {
 		return false
 	}
-	for _, entry := range oldEndpoint.Status.Producers {
-		if !serviceroute.ProducerReportCurrent(entry, now) {
-			return false
+	for _, endpoint := range []*networkv1alpha1.ServiceEndpoint{oldEndpoint, newEndpoint} {
+		for _, entry := range endpoint.Status.Producers {
+			if !serviceroute.ProducerReportCurrent(entry, now) {
+				return false
+			}
 		}
 	}
 	strip := func(endpoint *networkv1alpha1.ServiceEndpoint) *networkv1alpha1.ServiceEndpoint {
