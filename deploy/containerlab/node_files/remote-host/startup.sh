@@ -25,6 +25,8 @@ ip link set eth1 up
 # on the link, the same TR-.1/node-.2 convention every worker uplink uses.
 ip -6 addr add 2001:db8:1:40::2/64 dev eth1 || true
 ip -4 addr add 11.1.40.2/24 dev eth1 || true
+# The Looking Glass probe destination; see node_files/tr4/frr.conf.
+ip -6 addr add 2c0f:40::2/64 dev eth1 || true
 
 # Everything this host talks to is somewhere behind tr4: the whole fabric,
 # every site's nodes, and every tenant's egress source address. A default

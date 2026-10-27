@@ -1,0 +1,27 @@
+# Step 1: dfw's fabric-router sidecars verify probe permits. The permit
+# Components set the sidecar's arguments whole, so the patch keeps the
+# lab's own (resources/fabric-router/base/fabric-lab-patch.yaml) beside them.
+resources:
+  - ../../../../fabric-router/dfw
+components:
+  - ../../../../fabric-router/base/fabric/components/fabric-api-permits
+patches:
+  - target:
+      kind: DaemonSet
+      name: fabric-router
+    patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: fabric-router
+      spec:
+        template:
+          spec:
+            containers:
+              - name: fabric-api
+                args:
+                  - node
+                  - --probe-permits
+                  - --operator-allow-prefixes=10.255.255.0/24,fc00:0::/32
+                  - --enable-expensive-queries
+                  - --log-level=debug

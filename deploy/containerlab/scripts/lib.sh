@@ -48,6 +48,21 @@ copy_config() {
   docker cp "${CONFIG_DIR}" "${node}:/galactic/config"
 }
 
+# copy_fabric_config NODE copies config/fabric-router/ onto NODE, nested under
+# resources/fabric-router/base/ so the base overlay's "fabric" resource
+# reference resolves. rm -rf first: like deploy-galactic-router.sh's
+# copy_router_config, docker cp nests SRC inside an already-existing DEST
+# dir instead of overwriting it, so a rerun against an already-provisioned
+# node would silently keep serving the prior copy from underneath the new
+# one -- kubectl would then report the DaemonSet "unchanged" even after a
+# real manifest edit (found live: a fabric-lab-patch.yaml affinity fix
+# never took effect on a redeploy until this guard was added).
+copy_fabric_config() {
+  local node="$1"
+  docker exec "${node}" rm -rf /galactic/resources/fabric-router/base/fabric
+  docker cp "${CONFIG_DIR}/fabric-router" "${node}:/galactic/resources/fabric-router/base/fabric"
+}
+
 apply_k() {
   local node="$1" path="$2"
   docker exec "${node}" kubectl apply -k "${path}"

@@ -260,6 +260,13 @@ its behalf.
 | iad-worker2 – tr3:bond1   | 2001:db8:1:32::/64   | 2001:db8:1:32::1   | 2001:db8:1:32::2   | 10.1.32.0/24   | 10.1.32.1    | 10.1.32.2      |
 | remote-host – tr4:eth4    | 2001:db8:1:40::/64   | 2001:db8:1:40::1   | 2001:db8:1:40::2   | 11.1.40.0/24   | 11.1.40.1    | 11.1.40.2      |
 
+`remote-host` also takes `2c0f:40::2/64` on the same link. fabric-api's public probe
+policy refuses `2001:db8::/32`, so a Looking Glass ping or traceroute over IPv6 needs a
+global destination, and this is it. `tr4` also originates `11.1.42.0/24` and `2c0f:42::/64`
+and drops them without an ICMP error: a probe there is lost and a traceroute ends in silent
+hops, keeping its routers busy for about 20 s (`verify:looking-glass` cancels, expires and
+fails over such probes). None of these prefixes leave the lab.
+
 ### Site-internal links (numbered, iBGP to the site's edge node)
 
 Same convention with the edge node in the router's seat: it takes `::1`/`.1`, the worker
@@ -552,6 +559,9 @@ task deploy
 | `verify:ns30`                    | Verify ns30 ping (dfw only, 2 pods)                                                                                                         |
 | `verify:ns40`                    | Verify ns40 ping (iad only, 2 pods)                                                                                                         |
 | `verify:traffic-policy`          | Every binding installed; each path forwards what it grants and drops, and counts, what it does not                                          |
+| `deploy:looking-glass`           | Enable the Looking Glass service on dfw in the documented order (restarts dfw's FRR twice); issue its test certificates                     |
+| `verify:looking-glass`           | Qualify the Looking Glass service on dfw with the independent client, with faults (about 45 min; not in `verify`)                           |
+| `undeploy:looking-glass`         | Switch the Looking Glass service off on dfw and roll its enabling steps back (restarts dfw's FRR twice)                                     |
 | `destroy`                        | Destroy the lab and remove all Kind clusters                                                                                                |
 | `restart`                        | Full rebuild — destroy then redeploy                                                                                                        |
 | `rebuild`                        | Full rebuild — clean (destroy + delete images/artifacts) then redeploy                                                                      |

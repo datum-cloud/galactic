@@ -43,8 +43,18 @@ tasks:
 
   "build:fabric-api":
     desc: Build the fabric-api image (node sidecar, cell gateway, janitor)
+    # The commit becomes the gateway's Looking Glass contract_revision, which
+    # verify:looking-glass records as the build under test.
+    vars:
+      GIT_COMMIT:
+        sh: git rev-parse HEAD
+      GIT_TREE_STATE:
+        sh: git diff --quiet HEAD && echo clean || echo dirty
     cmds:
-      - docker build --network=host -t fabric-api:latest -f ../../containers/fabric-api/Dockerfile ../..
+      - >-
+        docker build --network=host -t fabric-api:latest
+        --build-arg GIT_COMMIT={{.GIT_COMMIT}} --build-arg GIT_TREE_STATE={{.GIT_TREE_STATE}}
+        -f ../../containers/fabric-api/Dockerfile ../..
 
   "build:galactic-router":
     desc: Build the galactic-router container image
@@ -523,6 +533,45 @@ tasks:
     desc: Verify every fabric-router's frr-exporter reports all underlay sessions Established
     cmds:
       - ./scripts/verify-fabric-metrics.sh
+
+  # Looking Glass service qualification on dfw (tests/lgqualify): the
+  # independent client in examples/looking-glass-client against real fabric
+  # routers, with faults. deploy:looking-glass enables the service in the
+  # documented order (restarting dfw's FRR twice) and undeploy:looking-glass
+  # rolls it back. The run takes about 45 minutes, restarts and pauses the
+  # gateway leader, resets one of dfw-worker's BGP sessions 80 times, and
+  # writes its evidence to bin/lg-qualify/<run>/ at the repository root.
+  "deploy:looking-glass":
+    desc: Enable the Looking Glass service on dfw and issue the qualification's service certificates
+    deps: ["build:fabric-api"]
+    cmds:
+      - |
+        set -e
+        for node in dfw-worker dfw-worker2 dfw-worker3; do
+          docker save fabric-api:latest | docker exec -i "${node}" ctr --namespace k8s.io images import -
+        done
+      - ./scripts/deploy-looking-glass.sh
+
+  "undeploy:looking-glass":
+    desc: Switch the Looking Glass service off on dfw and roll its enabling steps back
+    cmds:
+      - ./scripts/undeploy-looking-glass.sh
+
+  "verify:looking-glass":
+    desc: Qualify the Looking Glass service on dfw with the independent client (about 45 minutes)
+    dir: ../..
+    vars:
+      OUT: '{{.ROOT_DIR}}/../../bin/lg-qualify'
+    cmds:
+      - mkdir -p {{.OUT}}
+      - cd examples/looking-glass-client && CGO_ENABLED=0 go build -o {{.OUT}}/looking-glass-client .
+      - CGO_ENABLED=0 go build -o {{.OUT}}/fabric-api ./cmd/fabric-api
+      - kind get kubeconfig --name dfw > {{.OUT}}/dfw.kubeconfig
+      - >-
+        LG_QUALIFY_KUBECONFIG={{.OUT}}/dfw.kubeconfig
+        LG_QUALIFY_CLIENT={{.OUT}}/looking-glass-client
+        LG_QUALIFY_FABRIC_API={{.OUT}}/fabric-api
+        go test -count=1 -v -timeout 120m -run TestQualify ./tests/lgqualify/
 
   "verify:fabric-api":
     desc: Verify the fabric-api looking glass on every fabric node, directly and through FabricQuery

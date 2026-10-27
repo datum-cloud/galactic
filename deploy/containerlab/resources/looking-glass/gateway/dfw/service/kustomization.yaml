@@ -1,0 +1,7 @@
+# Step 4: dfw's gateway serves the Looking Glass service to the
+# looking-glass identity. The switch (ConfigMap fabric-api-service) is
+# created off; deploy-looking-glass.sh turns it on last.
+resources:
+  - ../budgets
+components:
+  - ../../../../../../../config/fabric-api/components/service
