@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
@@ -223,7 +222,6 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	ctx, stop := signalContext(parent)
 	defer stop()
 	defer setupTracing(ctx, "gateway")()
-	ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))

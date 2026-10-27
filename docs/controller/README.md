@@ -27,6 +27,8 @@ CLI defaults below describe the binary. Deployment overlays may override them; f
 | `--health-probe-bind-address` | `:8081`                                      | Health and readiness listener                                   |
 | `--leader-elect`              | `true`                                       | Elect one reconciler; cell webhook replicas all serve admission |
 
+Logging takes `--log-level` (`LOG_LEVEL`) and `--log-format` (`LOG_FORMAT`); see [Logging](../observability/logging.md).
+
 ## Cell flags
 
 | Flag                    | Default                                                 | Meaning                                                                                                 |

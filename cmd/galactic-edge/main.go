@@ -24,7 +24,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	_ "golang.org/x/crypto/x509roots/fallback"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -43,6 +42,7 @@ import (
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/route"
 	"go.datum.net/galactic/internal/edge/timing"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/nldump"
@@ -69,11 +69,15 @@ func main() {
 
 func newRootCommand() *cobra.Command {
 	o := &options{}
+	var logOpts logging.Options
 	cmd := &cobra.Command{
 		Use:          "galactic-edge",
 		Short:        "Program and release Galactic Edge attachments on this node",
 		Version:      metadata.Version,
 		SilenceUsage: true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context(), o)
 		},
@@ -94,6 +98,7 @@ func newRootCommand() *cobra.Command {
 	f.StringVar(&o.bootIDPath, "boot-id-path", "/proc/sys/kernel/random/boot_id", "File holding this boot's ID")
 	f.StringVar(&o.metricsAddress, "metrics-bind-address", ":9186", "Address serving /metrics")
 	f.StringVar(&o.healthAddress, "health-probe-bind-address", ":9187", "Address serving /healthz and /readyz")
+	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
 }
 
@@ -109,7 +114,6 @@ func run(parent context.Context, o *options) error {
 	}
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 	hostattach.SysctlRoot = o.procSys
 
 	// A new owner ID per process start: a restarted agent must fence its

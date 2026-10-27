@@ -1,6 +1,6 @@
 # Observability
 
-Metrics, scrape configuration and shipped alert rules. Use the subsystem reference for metric names, labels and interpretation.
+Metrics, scrape configuration, shipped alert rules and log format. Use the subsystem reference for metric names, labels and interpretation.
 
 - [VPC dataplane — `galactic_usid_*`](vpc-dataplane.md)
 - [Tenant egress pool — `galactic_cni_egress_*`](egress-pool.md)
@@ -13,6 +13,7 @@ Metrics, scrape configuration and shipped alert rules. Use the subsystem referen
 - [Fabric looking glass — `fabric_api_*`](fabric-api.md)
 - [Netlink listings — `galactic_netlink_dump_*`](netlink.md)
 - [Shipped alerts](alerts.md)
+- [Logging](logging.md)
 
 ## Where the metrics come from
 

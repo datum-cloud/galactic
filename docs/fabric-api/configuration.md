@@ -39,6 +39,8 @@ syntax (`10m`).
 | `--version`, `-V` |              |         | Print the version and exit (root only)       |
 | `--build-info`    |              |         | Print build information and exit (root only) |
 
+[Logging](../observability/logging.md) describes what these two flags cover.
+
 Tracing is enabled only when `OTEL_EXPORTER_OTLP_ENDPOINT` or
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set; the standard OpenTelemetry exporter
 variables then apply. Trace-context propagation is always on.
