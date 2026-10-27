@@ -12,7 +12,7 @@ The cell must run galactic-controller with `--edge` and the galactic-edge Daemon
 2. Grant each connector an `EdgeService` in its VPC's namespace. It grants `PacketAccess` and `PrefixReachability`, lists the connector's /96 in `prefixes`, and sets a `clientPool` outside every connector /96. A service that lacks `PrefixReachability` gets an attachment, but core refuses every route on it.
 3. Run the provider pod as that ServiceAccount, with a pod-bound token, the downward-API pod name, namespace, UID and node name, a device-plugin TUN, and no host namespace, hostPath, `NET_ADMIN` or BPF access. `tests/edgeconformance/masqueprovider/deploy/` is a worked example.
 
-The adapter's `Authorizer` turns a request's credential and VPC selector into a `Grant`: connector ID, VPC UID and base62 identifier, the `EdgeService` reference, the connector /96, the routes to advertise and an absolute deadline. A grant the adapter cannot use (wrong VPC, no service, not a masked IPv6 /96, already expired) is refused.
+The adapter's `Authorizer` turns a request's credential and VPC selector into a `Grant`: connector ID, VPC UID and base62 identifier, the `EdgeService` reference, the connector /96, the routes to advertise and an absolute deadline. A grant the adapter cannot use (wrong VPC, no service, not a masked IPv6 /96, already expired) is refused. The `Authorizer` also refreshes an open request's grant (`Refresh`) and retires a grant (`Retire`); see [Grant refresh and revocation](#grant-refresh-and-revocation).
 
 ## Readiness
 
@@ -24,11 +24,34 @@ The adapter registers its instance at start and admits nothing until it holds th
 
 Only then does the request get its packet path. The request waits up to 30 seconds for these steps (`Config.Prepare`), including any wait behind another request preparing the same attachment or route, and is answered 503 if they do not complete. It fails at once, also with 503, when core refuses the attachment, the attachment is draining, its status names another VPC or node or no packet device, the device cannot be opened, or core refuses the route outright (for example `CapabilityNotGranted`, `PrefixNotGranted` or `PrefixConflict`). On a refusal after the device is known, the attachment reports `Ready=False` with reason `DataPlaneFailed`.
 
-Connectors of one service share its attachment and device. A connector has at most one open request: another request for it is answered 503 before any preparation, and the open request is left in place.
+Connectors of one service share its attachment and device.
+
+## Replacing a connector's request
+
+A connector forwards through at most one request. A new request for a connector that already has one open, such as a reconnect or an HTTP/3 to HTTP/2 fallback, replaces it:
+
+1. The new request is authorized and prepared as above while the open request keeps forwarding. When both name the same service, they share its attachment and route claim, so the claim is neither released nor written again.
+2. The open request ends. Its packets stop at once, and its transport closes it.
+3. The adapter waits up to 1 second for the old request to close: its packet I/O stopped, its device registration and any packets queued for it discarded, and its references dropped. Only then is the new request registered and given its packet path.
+4. If the old request does not close within that second, the new request is answered 503 and the adapter retires the connector's grant through `Authorizer.Retire`, so neither request forwards.
+
+A request arriving while another request for the same connector is being admitted is answered 503 and can be retried. Each request carries a new `SessionInfo.ID`. A replaced request's late `Close` releases only its own references and never the claim its successor holds.
+
+A replacement on another provider pod is not done by the adapter. The grant authority retires the old pod's service before granting the new one, and core then moves the route only after the old holder's gate is closed ([MASQUE connector design](../designs/masque/contract.md#cross-instance-replacement-and-stale-cleanup)).
 
 ## Forwarding
 
 A request forwards a packet, in either direction, only while its instance Lease is held at the epoch it was admitted under and before the Lease's deadline, before its grant's deadline, and while the request is open. Every second the adapter also checks each attachment and route it uses. It ends the requests on an attachment that is deleted, replaced, draining, no longer programmed or reprogrammed, and the requests on a route whose claim core no longer accepts, whose gate the node closed, or whose claim moved to another attachment. Losing the lease ends every request. A full device drops the packet and counts it instead of ending the request. These checks are in addition to the foundation's: galactic-edge closes a route's gate at the Lease deadline even if the provider stops.
+
+## Grant refresh and revocation
+
+Every 5 seconds (`Config.Refresh`) the adapter calls `Authorizer.Refresh` for each open request, with a 2 second deadline. A refreshed grant with the same connector, VPC, service, /96 and routes moves the request's deadline. Any other answer has one of these results:
+
+- Unauthenticated or forbidden: the connector's grant was revoked, retired or rotated, and only that connector's request ends.
+- A changed grant: the request ends.
+- Any other error, or an answer after the 2 second deadline: the request keeps the deadline it had and ends at it unless a later refresh succeeds.
+
+`Adapter.Revoke(connector)` ends a connector's request at once, for an authority that notifies revocations. Neither path is the backstop. Each connector has its own `EdgeService`, and galactic-edge closes the connector's route gate at that service's `validUntil`, even while other connectors keep the shared instance's Lease renewing.
 
 ## Drain and shutdown
 
@@ -50,4 +73,12 @@ On shutdown, stop the transports first so every request ends, then call `Shutdow
 ## Verification
 
 - `go test ./internal/edge/masque/` runs the adapter's unit tests and, with `KUBEBUILDER_ASSETS` set, `TestAgainstCore`. That test runs the adapter as a provider pod's pod-bound identity against core's attachment and route controllers and the shipped RBAC and admission policies.
-- `task verify:masque-conformance`, run from `deploy/containerlab`, runs the fixture in the lab: packet access, isolation, NAT egress, shared-attachment cancellation, maintenance, process restart, partial setup, recreation and teardown. A lab result is not target-platform qualification.
+- `task verify:masque-conformance`, run from `deploy/containerlab`, runs the fixture in the lab. Its rows cover:
+  - packet access, isolation and NAT egress
+  - shared-attachment cancellation, maintenance and process restart
+  - same-pod replacement
+  - provider stall, agent stall and API partition, each measuring local cutoff and local withdrawal separately
+  - partial setup, recreation and single-connector revocation
+  - teardown
+
+  The lab cannot read the compute node's tenant routes, so it does not measure remote convergence. A lab result is not target-platform qualification.

@@ -104,9 +104,13 @@ type masque struct {
 // stay isolated in both directions, NAT egress works from the attachment
 // node, two connectors share one attachment and ending one leaves the
 // other forwarding, a restarted provider process adopts its attachments,
-// router maintenance keeps an attachment in use, and recreation, partial
-// setup and teardown clean up through core while leaving unrelated and
-// replacement resources alone. Run it with task verify:masque-conformance.
+// router maintenance keeps an attachment in use, a connector's second
+// request replaces its first without both forwarding, a stalled provider,
+// a stalled agent and an API partition each stop forwarding within the
+// local expiry bound, recreation, partial setup and teardown clean up
+// through core while leaving unrelated and replacement resources alone, and
+// one connector's expired grant stops it while another keeps the shared
+// instance renewing. Run it with task verify:masque-conformance.
 func TestMASQUE(t *testing.T) {
 	l := getLab(t)
 	t.Cleanup(func() { l.writeSummary(t) })
@@ -123,8 +127,13 @@ func TestMASQUE(t *testing.T) {
 	t.Run("shared-attachment-cancel", m.rowSharedCancel)
 	t.Run("maintenance-during-use", m.rowMaintenance)
 	t.Run("process-restart", m.rowProcessRestart)
+	t.Run("same-pod-replacement", m.rowReplace)
+	t.Run("provider-stall", m.rowProviderStall)
+	t.Run("agent-stall", m.rowAgentStall)
+	t.Run("api-partition", m.rowAPIPartition)
 	t.Run("partial-setup", m.rowPartial)
 	t.Run("recreation", m.rowRecreation)
+	t.Run("connector-revocation", m.rowConnectorRevocation)
 }
 
 func newMasque(t *testing.T, l *lab) *masque {

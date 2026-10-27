@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"sync"
 	"time"
 
 	"sigs.k8s.io/yaml"
@@ -34,6 +35,11 @@ type Config struct {
 	Services []Service `json:"services"`
 	// Connectors are the CONNECT-IP clients the fixture admits.
 	Connectors []Connector `json:"connectors"`
+
+	mu sync.Mutex
+	// retired holds the IDs of connectors whose grant was retired; the
+	// fixture refuses them until it restarts.
+	retired map[string]bool
 }
 
 // Service is one EdgeService grant. A provider cannot read an EdgeService,
@@ -142,6 +148,19 @@ func (c *Config) Authorize(_ context.Context, credential, vpc string) (masque.Gr
 	if found == nil {
 		return masque.Grant{}, connectip.ErrUnauthenticated
 	}
+	return c.grant(found, vpc)
+}
+
+// grant returns cn's grant for vpc, refusing a retired connector or another
+// VPC.
+func (c *Config) grant(cn *Connector, vpc string) (masque.Grant, error) {
+	c.mu.Lock()
+	retired := c.retired[cn.ID]
+	c.mu.Unlock()
+	if retired {
+		return masque.Grant{}, connectip.ErrForbidden
+	}
+	found := cn
 	var svc Service
 	for _, s := range c.Services {
 		if s.Key() == found.Service {
@@ -156,4 +175,27 @@ func (c *Config) Authorize(_ context.Context, credential, vpc string) (masque.Gr
 		Service: masque.ServiceRef{Namespace: svc.Namespace, Name: svc.Name, UID: svc.UID},
 		Prefix:  found.Prefix, Routes: found.Routes, NotAfter: time.Now().Add(grantTTL),
 	}, nil
+}
+
+// Refresh implements masque.Authorizer: it renews g for another grantTTL
+// while its connector is configured unchanged and not retired.
+func (c *Config) Refresh(_ context.Context, g masque.Grant) (masque.Grant, error) {
+	for i := range c.Connectors {
+		if c.Connectors[i].ID == g.Connector {
+			return c.grant(&c.Connectors[i], g.VPC)
+		}
+	}
+	return masque.Grant{}, connectip.ErrForbidden
+}
+
+// Retire implements masque.Authorizer: the connector is refused from now
+// on.
+func (c *Config) Retire(_ context.Context, g masque.Grant) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.retired == nil {
+		c.retired = map[string]bool{}
+	}
+	c.retired[g.Connector] = true
+	return nil
 }

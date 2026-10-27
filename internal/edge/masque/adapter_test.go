@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,9 +88,13 @@ type harness struct {
 	// leaseEpoch is the epoch of the lease start gives the adapter; zero
 	// means 3.
 	leaseEpoch uint64
-	// calls records claim releases, attachment deletes and lease releases
-	// in order.
+	// calls records claim releases, attachment deletes, lease releases and
+	// grant retirements in order.
 	calls []string
+	// refresh answers Refresh; nil renews the grant for another hour.
+	refresh func(Grant) (Grant, error)
+	// retired holds the connectors whose grants were retired.
+	retired map[string]bool
 }
 
 func (h *harness) record(call string) {
@@ -253,8 +258,41 @@ func (h *harness) Authorize(_ context.Context, credential, vpc string) (Grant, e
 	if g.VPC != vpc {
 		return Grant{}, connectip.ErrForbidden
 	}
+	h.mu.Lock()
+	retired := h.retired[g.Connector]
+	h.mu.Unlock()
+	if retired {
+		return Grant{}, connectip.ErrForbidden
+	}
 	g.NotAfter = h.wall().Add(time.Hour)
 	return g, nil
+}
+
+// Refresh implements Authorizer with h.refresh, refusing retired grants.
+func (h *harness) Refresh(_ context.Context, g Grant) (Grant, error) {
+	h.mu.Lock()
+	refresh, retired := h.refresh, h.retired[g.Connector]
+	h.mu.Unlock()
+	switch {
+	case retired:
+		return Grant{}, connectip.ErrForbidden
+	case refresh != nil:
+		return refresh(g)
+	}
+	g.NotAfter = h.wall().Add(time.Hour)
+	return g, nil
+}
+
+// Retire implements Authorizer and records the retirement.
+func (h *harness) Retire(_ context.Context, g Grant) error {
+	h.record("retired " + g.Connector)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.retired == nil {
+		h.retired = map[string]bool{}
+	}
+	h.retired[g.Connector] = true
+	return nil
 }
 
 // open returns one end of a nonblocking packet socket pair as the device
@@ -668,31 +706,114 @@ func TestSharedAttachment(t *testing.T) {
 	}
 }
 
-// TestDuplicateRequest refuses a second request of a connector that already
-// has one open, before any preparation, and leaves the first request's
-// claim and stream intact.
-func TestDuplicateRequest(t *testing.T) {
+// serve stands in for a transport: once l ends, it closes the request's
+// packet path p, if any, and then l, as the CONNECT-IP server does.
+func serve(l connectip.Lease, p connectip.BackendSession) {
+	go func() {
+		<-l.Done()
+		if p != nil {
+			_ = p.Close()
+		}
+		_ = l.Close()
+	}()
+}
+
+// TestReplaceRequest admits a second request of a connector whose first is
+// open: the first stops forwarding and closes before the second is
+// registered, the route claim and attachment stay held across the handoff,
+// a packet queued for the first is discarded, and the first's late Close
+// leaves the second intact.
+func TestReplaceRequest(t *testing.T) {
 	h := newHarness(t)
 	h.start()
 	l1 := h.admit(credA1)
-	defer func() { _ = l1.Close() }()
 	s1, err := h.a.Open(context.Background(), l1.Info())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = s1.Close() }()
-	if l2, err := h.a.Admit(context.Background(), credA1, testVPCName); !errors.Is(err, ErrUnavailable) ||
-		!strings.Contains(err.Error(), "already has an open request") {
-		t.Fatalf("second request of the connector = %v, %v; want a refusal", l2, err)
-	}
-	expectLive(t, l1, "a refused duplicate request")
-	if h.route(credA1).Spec.Claim.Released {
-		t.Fatal("a refused duplicate request released the connector's claim")
-	}
-	if _, err := h.host(deviceName(h.attachment(svcA))).Write(packet("fd00:10:0:1:1::9")); err != nil {
+	serve(l1, s1)
+	attUID, epoch := h.attachment(svcA).UID, h.route(credA1).Spec.Claim.Epoch
+	dev := h.host(deviceName(h.attachment(svcA)))
+	if _, err := dev.Write(packet("fd00:10:0:1:1::7")); err != nil {
 		t.Fatal(err)
 	}
-	expectRead(t, s1, "fd00:10:0:1:1::9")
+	// Let the device reader queue the packet for the first request. If it
+	// has not, the packet reaches the replacement and the check below fails.
+	time.Sleep(50 * time.Millisecond)
+
+	l2 := h.admit(credA1)
+	defer func() { _ = l2.Close() }()
+	expectDone(t, l1, "the replacement")
+	select {
+	case <-l1.(*session).closed:
+	default:
+		t.Fatal("the replacement was registered before the first request closed")
+	}
+	if err := s1.WritePacket(packet("fd00:10::5")); !errors.Is(err, errStopped) {
+		t.Fatalf("the replaced request's WritePacket = %v, want %v", err, errStopped)
+	}
+	if l2.Info().ID <= l1.Info().ID {
+		t.Fatalf("the replacement has request ID %d, not after %d", l2.Info().ID, l1.Info().ID)
+	}
+	rt := h.route(credA1)
+	if rt.Spec.Claim.Released || rt.Spec.Claim.Epoch != epoch || l2.Info().Epoch != uint64(epoch) {
+		t.Fatalf("claim after the replacement: %+v, want epoch %d held throughout", rt.Spec.Claim, epoch)
+	}
+	if got := h.attachment(svcA).UID; got != attUID {
+		t.Fatal("the replacement requested a new attachment")
+	}
+	s2, err := h.a.Open(context.Background(), l2.Info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s2.Close() }()
+	if _, err := dev.Write(packet("fd00:10:0:1:1::8")); err != nil {
+		t.Fatal(err)
+	}
+	expectRead(t, s2, "fd00:10:0:1:1::8")
+
+	_ = l1.Close()
+	_ = s1.Close()
+	expectLive(t, l2, "the replaced request's late Close")
+	if h.route(credA1).Spec.Claim.Released {
+		t.Fatal("the replaced request's late Close released the replacement's claim")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.calls) != 0 {
+		t.Fatalf("the replacement did %q, want nothing released or retired", h.calls)
+	}
+}
+
+// TestReplaceStalledRequest admits a second request of a connector whose
+// first never closes: the first stops forwarding, the second is refused
+// after the quiesce timeout and the connector's grant is retired.
+func TestReplaceStalledRequest(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	l1 := h.admit(credA1)
+	defer func() { _ = l1.Close() }()
+	start := time.Now()
+	l2, err := h.a.Admit(context.Background(), credA1, testVPCName)
+	if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "did not stop") {
+		t.Fatalf("replacing a stalled request = %v, %v; want a refusal", l2, err)
+	}
+	if d := time.Since(start); d < quiesceTimeout || d > quiesceTimeout+time.Second {
+		t.Fatalf("the replacement gave up after %v, want %v", d, quiesceTimeout)
+	}
+	expectDone(t, l1, "a refused replacement")
+	if l1.(*session).forwarding() {
+		t.Fatal("the stalled request still forwards")
+	}
+	h.mu.Lock()
+	calls := strings.Join(h.calls, ", ")
+	h.mu.Unlock()
+	if calls != "retired a1" {
+		t.Fatalf("the refused replacement did %q, want the connector's grant retired", calls)
+	}
+	if _, err := h.a.Admit(context.Background(), credA1, testVPCName); !errors.Is(err, connectip.ErrForbidden) {
+		t.Fatalf("a request after retirement = %v, want forbidden", err)
+	}
 }
 
 // TestReleaseRacesReacquire drops a connector's only request and, before
@@ -1035,7 +1156,9 @@ func TestShutdownReleasesInOrder(t *testing.T) {
 }
 
 // TestConcurrentRequestsOfOneConnector admits several requests of one
-// connector at once: exactly one is admitted, the rest are refused.
+// connector at once, each closed by its transport once it ends: every
+// request is either admitted, replacing the one before it, or refused while
+// another is being admitted, and only the last admitted one stays open.
 func TestConcurrentRequestsOfOneConnector(t *testing.T) {
 	h := newHarness(t)
 	h.start()
@@ -1048,23 +1171,143 @@ func TestConcurrentRequestsOfOneConnector(t *testing.T) {
 	for range n {
 		go func() {
 			l, err := h.a.Admit(context.Background(), credA1, testVPCName)
+			if err == nil {
+				serve(l, nil)
+			}
 			results <- result{l, err}
 		}()
 	}
-	admitted := 0
+	var admitted []connectip.Lease
 	for range n {
 		r := <-results
 		switch {
 		case r.err == nil:
-			admitted++
-			defer func() { _ = r.l.Close() }()
-		case !errors.Is(r.err, ErrUnavailable) || !strings.Contains(r.err.Error(), "already has an open request"):
+			admitted = append(admitted, r.l)
+		case !errors.Is(r.err, ErrUnavailable) || !strings.Contains(r.err.Error(), "being admitted"):
 			t.Errorf("concurrent request: %v", r.err)
 		}
 	}
-	if admitted != 1 {
-		t.Fatalf("%d concurrent requests of one connector were admitted, want 1", admitted)
+	if len(admitted) == 0 {
+		t.Fatal("no concurrent request of the connector was admitted")
 	}
+	live := 0
+	for _, l := range admitted {
+		defer func() { _ = l.Close() }()
+		if l.(*session).forwarding() {
+			live++
+		}
+	}
+	if live != 1 {
+		t.Fatalf("%d requests of one connector forward, want 1", live)
+	}
+}
+
+// TestGrantRefresh refreshes an open request's grant: a refreshed deadline
+// keeps it forwarding past the first, a failed refresh keeps the deadline
+// it had, a changed grant ends it, and a revoked one ends only that
+// connector's request while others on the instance and the same attachment
+// keep forwarding.
+func TestGrantRefresh(t *testing.T) {
+	advance := func(h *harness, d time.Duration) {
+		h.mu.Lock()
+		h.now = h.now.Add(d)
+		h.mu.Unlock()
+	}
+	setRefresh := func(h *harness, f func(Grant) (Grant, error)) {
+		h.mu.Lock()
+		h.refresh = f
+		h.mu.Unlock()
+	}
+	refreshed := func(l connectip.Lease, want time.Time) {
+		t.Helper()
+		waitFor(t, "the grant to be refreshed", func() bool {
+			return l.(*session).notAfter.Load() == want.UnixNano()
+		})
+	}
+	t.Run("extends", func(t *testing.T) {
+		h := newHarness(t)
+		h.start()
+		h.a.cfg.Refresh = 2 * time.Millisecond
+		l := h.admit(credA1)
+		defer func() { _ = l.Close() }()
+		want := h.wall().Add(3 * time.Hour)
+		setRefresh(h, func(g Grant) (Grant, error) { g.NotAfter = want; return g, nil })
+		refreshed(l, want)
+		advance(h, 2*time.Hour)
+		if !l.(*session).forwarding() {
+			t.Fatal("a refreshed grant stopped forwarding at its first deadline")
+		}
+		expectLive(t, l, "a refreshed grant's first deadline")
+	})
+	t.Run("authority unavailable", func(t *testing.T) {
+		h := newHarness(t)
+		h.start()
+		h.a.cfg.Refresh = 2 * time.Millisecond
+		var calls atomic.Int32
+		setRefresh(h, func(Grant) (Grant, error) { calls.Add(1); return Grant{}, errors.New("unavailable") })
+		l := h.admit(credA1)
+		defer func() { _ = l.Close() }()
+		waitFor(t, "refreshes to fail", func() bool { return calls.Load() > 2 })
+		expectLive(t, l, "a failed refresh")
+		advance(h, 2*time.Hour)
+		if l.(*session).forwarding() {
+			t.Fatal("a grant whose refresh failed forwards past its deadline")
+		}
+	})
+	t.Run("changed", func(t *testing.T) {
+		h := newHarness(t)
+		h.start()
+		h.a.cfg.Refresh = 2 * time.Millisecond
+		setRefresh(h, func(g Grant) (Grant, error) {
+			g.Prefix, g.NotAfter = netip.MustParsePrefix("fd00:10:0:1:9::/96"), g.NotAfter.Add(time.Hour)
+			return g, nil
+		})
+		l := h.admit(credA1)
+		defer func() { _ = l.Close() }()
+		expectDone(t, l, "a refresh changing the grant's /96")
+	})
+	t.Run("revoked", func(t *testing.T) {
+		h := newHarness(t)
+		h.start()
+		h.a.cfg.Refresh = 2 * time.Millisecond
+		setRefresh(h, func(g Grant) (Grant, error) {
+			if g.Connector == "a1" {
+				return Grant{}, connectip.ErrForbidden
+			}
+			g.NotAfter = h.wall().Add(time.Hour)
+			return g, nil
+		})
+		la1, la2, lb := h.admit(credA1), h.admit("cred-a2"), h.admit("cred-b")
+		for _, l := range []connectip.Lease{la1, la2, lb} {
+			defer func() { _ = l.Close() }()
+		}
+		expectDone(t, la1, "revoking the connector's grant")
+		if la1.(*session).forwarding() {
+			t.Fatal("a revoked connector still forwards")
+		}
+		time.Sleep(20 * time.Millisecond)
+		for _, l := range []connectip.Lease{la2, lb} {
+			expectLive(t, l, "revoking another connector")
+			if !l.(*session).forwarding() {
+				t.Fatalf("revoking another connector stopped %s", l.Info().Connector)
+			}
+		}
+		if _, ok := h.a.heldLease(); !ok {
+			t.Fatal("revoking one connector released the instance's lease")
+		}
+	})
+}
+
+// TestRevoke ends only the named connector's request.
+func TestRevoke(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	la, lb := h.admit(credA1), h.admit("cred-a2")
+	defer func() { _ = la.Close() }()
+	defer func() { _ = lb.Close() }()
+	h.a.Revoke("a1")
+	expectDone(t, la, "revoking the connector")
+	expectLive(t, lb, "revoking another connector")
 }
 
 // TestDeleteLeavesForeignReplacement deletes an idle attachment whose name
@@ -1197,4 +1440,32 @@ func TestAdoptTerminatingAttachment(t *testing.T) {
 	if att := h.attachment(svcA); att.UID == old.UID {
 		t.Fatal("the request was served on the released attachment")
 	}
+}
+
+// TestRevokeDuringAdmission revokes a connector while its request is still
+// being prepared: the request is refused rather than admitted after the
+// revocation.
+func TestRevokeDuringAdmission(t *testing.T) {
+	h := newHarness(t)
+	h.programAttachment = nil
+	h.start()
+	done := make(chan error, 1)
+	go func() {
+		l, err := h.a.Admit(context.Background(), credA1, testVPCName)
+		if err == nil {
+			_ = l.Close()
+		}
+		done <- err
+	}()
+	waitFor(t, "the request to request its attachment", func() bool {
+		var list galacticv1alpha1.EdgeAttachmentList
+		return h.c.List(context.Background(), &list) == nil && len(list.Items) == 1
+	})
+	h.a.Revoke("a1")
+	h.setCore(h.programmed, h.accepted)
+	if err := <-done; !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("a request revoked during admission = %v, want a refusal", err)
+	}
+	l := h.admit(credA1)
+	defer func() { _ = l.Close() }()
 }

@@ -355,6 +355,31 @@ func (f *coreFixture) Authorize(_ context.Context, credential, vpc string) (Gran
 	return g, nil
 }
 
+// Refresh renews g for another hour while its credential is still granted.
+func (f *coreFixture) Refresh(_ context.Context, g Grant) (Grant, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, cur := range f.grants {
+		if cur.Connector == g.Connector && cur.sameAuthority(&g) {
+			g.NotAfter = time.Now().Add(time.Hour)
+			return g, nil
+		}
+	}
+	return Grant{}, connectip.ErrForbidden
+}
+
+// Retire removes g's connector from the fixture's grants.
+func (f *coreFixture) Retire(_ context.Context, g Grant) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for cred, cur := range f.grants {
+		if cur.Connector == g.Connector {
+			delete(f.grants, cred)
+		}
+	}
+	return nil
+}
+
 func (f *coreFixture) open(name string) (*os.File, error) {
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
@@ -547,6 +572,41 @@ func TestAgainstCore(t *testing.T) {
 		expectDoneWithin(t, l, 30*time.Second, "withdrawing the service")
 		expectLive(t, l2, "withdrawing another service")
 	})
+	t.Run("one connector's service expires", func(t *testing.T) {
+		svc := f.service("expiring", "fd00:10:0:e::400/120", Capabilities, "fd00:10:0:1:6::/96")
+		f.connector("c6", svc, "fd00:10:0:1:6::/96")
+		l := f.admit(a, "c6")
+		defer func() { _ = l.Close() }()
+		lease, _ := a.heldLease()
+		if err := f.admin.Get(context.Background(), client.ObjectKeyFromObject(svc), svc); err != nil {
+			t.Fatal(err)
+		}
+		svc.Spec.ValidUntil = &metav1.Time{Time: time.Now().Add(-time.Second)}
+		if err := f.admin.Update(context.Background(), svc); err != nil {
+			t.Fatal(err)
+		}
+		expectDoneWithin(t, l, 30*time.Second, "the connector's service expiring")
+		expectLive(t, l2, "another connector's service expiring")
+		if cur, ok := a.heldLease(); !ok || !sameLease(cur, lease) {
+			t.Fatal("one connector's service expiring changed the shared instance's lease")
+		}
+	})
+	t.Run("replacement keeps the claim", func(t *testing.T) {
+		svc := f.service("handoff", "fd00:10:0:e::500/120", Capabilities, "fd00:10:0:1:7::/96")
+		f.connector("c7", svc, "fd00:10:0:1:7::/96")
+		old := f.admit(a, "c7")
+		serve(old, nil)
+		epoch := f.route(old.Info().Claim).Spec.Claim.Epoch
+		l := f.admit(a, "c7")
+		defer func() { _ = l.Close() }()
+		expectDoneWithin(t, old, time.Second, "the replacement")
+		rt := f.route(l.Info().Claim)
+		if rt.Spec.Claim.Released || rt.Spec.Claim.Epoch != epoch || !acceptedFor(rt, l.Info().Attachment,
+			f.attachment(l.Info().Attachment).UID, mustLease(t, a)) {
+			t.Fatalf("claim after the replacement: %+v, want epoch %d accepted throughout", rt.Spec.Claim, epoch)
+		}
+		expectLive(t, l2, "another connector's replacement")
+	})
 
 	// The process dies without shutting down.
 	_ = s2.Close()
@@ -707,4 +767,13 @@ func expectDoneWithin(t *testing.T, l connectip.Lease, d time.Duration, what str
 	case <-time.After(d):
 		t.Fatalf("%s did not end the request", what)
 	}
+}
+
+func mustLease(t *testing.T, a *Adapter) claim.Lease {
+	t.Helper()
+	l, ok := a.heldLease()
+	if !ok {
+		t.Fatal("the adapter holds no lease")
+	}
+	return l
 }
