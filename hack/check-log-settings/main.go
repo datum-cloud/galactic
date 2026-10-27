@@ -168,8 +168,8 @@ func walk(n any, fn func(map[string]any)) {
 }
 
 // inlinePatches returns the strategic-merge patches a kustomization holds as
-// strings. JSON 6902 patches name no container, so they are left to the
-// rendered output.
+// strings. JSON 6902 patches name no container, so they are checked only in
+// rendered output, never in an overlay that isn't rendered.
 func inlinePatches(doc any) []string {
 	m, ok := doc.(map[string]any)
 	if !ok {
@@ -210,7 +210,8 @@ func checkContainer(c map[string]any) []string {
 		e, _ := e.(map[string]any)
 		key, _ := e["name"].(string)
 		value, ok := e["value"].(string)
-		if !ok || strings.Contains(value, "$(") {
+		// The binary treats an empty variable as unset.
+		if !ok || value == "" || strings.Contains(value, "$(") {
 			continue
 		}
 		switch key {

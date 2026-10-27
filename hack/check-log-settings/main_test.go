@@ -86,6 +86,17 @@ containers:
 `,
 		},
 		{
+			name: "an empty variable is unset, an empty flag is not",
+			yaml: `
+containers:
+  - name: n
+    image: galactic-nat
+    args: [--log-format=]
+    env: [{name: LOG_LEVEL, value: ""}, {name: LOG_FORMAT, value: ""}]
+`,
+			want: []string{`--log-format ""`},
+		},
+		{
 			name: "references are not resolved",
 			yaml: `
 containers:
