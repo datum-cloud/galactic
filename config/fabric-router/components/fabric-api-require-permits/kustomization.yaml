@@ -1,0 +1,32 @@
+# Makes each node's fabric-api sidecar refuse a probe without a permit
+# (--require-probe-permits). A probe an operator sends a node directly
+# first obtains a permit from the cell gateway's Service, charged to that
+# operator, so every probe in the cell counts against the aggregate budgets;
+# the Looking Glass service must not be enabled before this. List it after
+# components/fabric-api-permits, which it requires; the build fails without
+# it:
+#
+#   resources:
+#     - ../../config/fabric-router
+#   components:
+#     - ../../config/fabric-router/components/fabric-api
+#     - ../../config/fabric-router/components/fabric-api-permits
+#     - ../../config/fabric-router/components/fabric-api-require-permits
+#
+# Apply it only once the gateway runs with --aggregate-budgets
+# (config/fabric-api/components/aggregate-budgets): without a gateway
+# issuing permits, every probe on these nodes is refused. Like
+# components/fabric-api-permits, applying it restarts FRR on every node: roll
+# it out as a routing change. See docs/fabric-api/configuration.md#enabling.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: daemonset-patch.yaml
+  # Fails the build unless components/fabric-api-permits, which adds this
+  # Role, came first; it changes nothing.
+  - patch: |-
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: fabric-api-node-lease
+        namespace: galactic-system

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strings"
@@ -78,7 +79,7 @@ const (
 // probes are charged too.
 func (s *Service) features() []string {
 	f := []string{FeatureRouterOutcomes, FeatureTerminalCoverage}
-	if s.Enabled && s.Admission != nil {
+	if s.enabled() {
 		f = append(f, FeatureAggregateProbeBudgets)
 	}
 	return f
@@ -218,15 +219,16 @@ type LeaderDialer interface {
 
 // Service implements the Looking Glass service. Any replica authenticates
 // and validates a request; a follower forwards it once to the leader, which
-// validates it again before executing. Unless Enabled and given an
+// validates it again before executing. Unless its Switch is on and it has an
 // Admission, the leader refuses a valid request with ServiceDisabled.
 type Service struct {
 	servicev1.UnimplementedLookingGlassServiceServer
 
 	// Cell is the cell this gateway serves.
 	Cell string
-	// Enabled makes the leader execute valid requests.
-	Enabled bool
+	// Switch, while on, makes the leader execute valid requests; turning it
+	// off cancels those running. A nil Switch is off.
+	Switch *ServiceSwitch
 	// Admission enforces the cell's aggregate admission and probe budgets.
 	// It must be the Runner's; without it nothing executes.
 	Admission *Admission
@@ -243,6 +245,8 @@ type Service struct {
 	Elected func() bool
 	// Leader connects a follower to the leader.
 	Leader LeaderDialer
+	// Metrics, when set, counts requests and their routers' outcomes.
+	Metrics *Metrics
 	// Now, when set, replaces the wall clock.
 	Now func() time.Time
 
@@ -255,6 +259,13 @@ func (s *Service) now() time.Time {
 		return s.Now()
 	}
 	return time.Now()
+}
+
+// enabled reports whether the service executes requests: its Switch is on
+// and it has an Admission.
+func (s *Service) enabled() bool {
+	on, _ := s.Switch.State()
+	return on && s.Admission != nil
 }
 
 // GetCapabilities reports the cell's service policy.
@@ -282,7 +293,7 @@ func (s *Service) capabilities() *servicev1.GetCapabilitiesResponse {
 	resp := &servicev1.GetCapabilitiesResponse{
 		Cell:     s.Cell,
 		ApiMajor: ServiceAPIMajor,
-		Enabled:  s.Enabled && s.Admission != nil,
+		Enabled:  s.enabled(),
 		Operations: []*servicev1.Operation{
 			{Type: fabricv1.QueryType_QUERY_TYPE_ROUTE_LOOKUP, AddressFamilies: families},
 			{Type: fabricv1.QueryType_QUERY_TYPE_BGP_SUMMARY, AddressFamilies: families},
@@ -359,6 +370,7 @@ func (s *Service) RunDiagnostic(
 	received := s.now()
 	canonical, deadline, err := s.validate(ctx, req, received, received)
 	if err != nil {
+		s.Metrics.serviceRequest(req, errcode.Of(err))
 		return err
 	}
 	if !s.Elected() {
@@ -382,39 +394,58 @@ type forwarder struct {
 func (f *forwarder) ForwardDiagnostic(
 	env *forwardv1.ForwardDiagnosticRequest, stream grpc.ServerStreamingServer[servicev1.DiagnosticEvent],
 ) error {
-	s := f.s
 	ctx := stream.Context()
+	svc, canonical, deadline, err := f.accept(ctx, env)
+	if err != nil {
+		// A follower counts only what it refused itself, so the leader
+		// counts the forwarded requests it refuses before executing them.
+		f.s.Metrics.serviceRequest(env.GetRequest(), errcode.Of(err))
+		return err
+	}
+	return f.s.execute(ctx, svc, canonical, deadline, stream.Send)
+}
+
+// accept checks a forwarded request's caller, election, envelope and
+// request, and returns its service identity, canonical request and
+// effective deadline.
+func (f *forwarder) accept(ctx context.Context, env *forwardv1.ForwardDiagnosticRequest,
+) (identity.ID, *servicev1.RunDiagnosticRequest, time.Time, error) {
+	s := f.s
+	fail := func(err error) (identity.ID, *servicev1.RunDiagnosticRequest, time.Time, error) {
+		return identity.ID{}, nil, time.Time{}, err
+	}
 	if id, ok := node.CallerFrom(ctx); !ok || id.Role != identity.RoleGateway {
-		return errcode.Status(errcode.Unauthorized, "only the gateway may forward diagnostics")
+		return fail(errcode.Status(errcode.Unauthorized, "only the gateway may forward diagnostics"))
 	}
 	if !s.Elected() {
-		return errcode.Status(errcode.OwnershipLost, "this replica does not lead; forwarded requests are not forwarded again")
+		return fail(errcode.Status(errcode.OwnershipLost,
+			"this replica does not lead; forwarded requests are not forwarded again"))
 	}
 	svc, err := identity.Parse(env.GetService())
 	if err != nil || svc.Role != identity.RoleService || svc.Cell != s.Cell {
-		return errcode.Status(errcode.Unauthorized, "forwarded request names no service identity of this cell")
+		return fail(errcode.Status(errcode.Unauthorized, "forwarded request names no service identity of this cell"))
 	}
 	if err := s.Allowlist.Check(svc); err != nil {
-		return err
+		return fail(err)
 	}
 	now := s.now()
 	if !env.GetReceivedAt().IsValid() || env.GetReceivedAt().AsTime().After(now.Add(maxForwardSkew)) {
-		return errcode.Status(errcode.InvalidQuery, "forwarded request has no valid receipt time")
+		return fail(errcode.Status(errcode.InvalidQuery, "forwarded request has no valid receipt time"))
 	}
 	if !env.GetDeadline().IsValid() {
-		return errcode.Status(errcode.InvalidQuery, "forwarded request has no deadline")
+		return fail(errcode.Status(errcode.InvalidQuery, "forwarded request has no deadline"))
 	}
 	canonical, deadline, err := s.validate(ctx, env.GetRequest(), env.GetReceivedAt().AsTime(), now)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	if d := env.GetDeadline().AsTime(); d.Before(deadline) {
 		deadline = d
 	}
 	if !now.Before(deadline) {
-		return errcode.Status(errcode.DeadlineExceeded, "forwarded request's deadline has passed")
+		return fail(errcode.Status(errcode.DeadlineExceeded, "forwarded request's deadline has passed"))
 	}
-	return s.execute(ctx, svc, canonical, deadline, stream.Send)
+	return svc, canonical, deadline, nil
 }
 
 // serviceCaller returns the authenticated service identity of a call.
@@ -542,16 +573,20 @@ func checkFeatures(required, served []string) error {
 
 // forward hands a validated request to the leader once, with this replica's
 // gateway identity, and relays its events under the same write bound as the
-// leader's. A forwarded call that fails is never forwarded again.
+// leader's. A forwarded call that fails is never forwarded again. The
+// leader counts the request; this replica counts it only when no leader
+// could be reached.
 func (s *Service) forward(
 	ctx context.Context, caller identity.ID, req *servicev1.RunDiagnosticRequest, received, deadline time.Time,
 	stream grpc.ServerStreamingServer[servicev1.DiagnosticEvent],
 ) error {
 	if s.Leader == nil {
+		s.Metrics.serviceRequest(req, errcode.OwnershipLost)
 		return errcode.Status(errcode.OwnershipLost, "this replica does not lead and cannot forward")
 	}
 	conn, err := s.Leader.LeaderConn(ctx)
 	if err != nil {
+		s.Metrics.serviceRequest(req, errcode.OwnershipLost)
 		return errcode.Status(errcode.OwnershipLost, err.Error())
 	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
@@ -584,7 +619,8 @@ func (s *Service) forward(
 // write or a hand-off to the buffer blocked for SendBound, cancels every
 // router still running and ends the stream without complete; the deadline,
 // the loss of the election and the output budget cancel them too, but the
-// stream still ends with complete. An outcome larger than
+// stream still ends with complete, as it does when the Switch is turned off.
+// An outcome larger than
 // maxOutcomeBytes is delivered as a ResponseTooLarge failure, and once the
 // stream's output budget cannot hold an outcome, that router and every
 // router still running fail with OutputLimitExceeded. A failure before the
@@ -594,41 +630,35 @@ func (s *Service) forward(
 func (s *Service) execute(
 	ctx context.Context, caller identity.ID, req *servicev1.RunDiagnosticRequest, deadline time.Time,
 	send func(*servicev1.DiagnosticEvent) error,
-) error {
+) (err error) {
+	rec := serviceRecord{started: s.now()}
+	defer func() { s.finish(caller, req, &rec, err) }()
 	if !s.now().Before(deadline) {
 		return errcode.Status(errcode.DeadlineExceeded, "request's deadline has passed")
 	}
 	adm := s.Admission
-	if !s.Enabled || adm == nil || s.Discoverer == nil || s.Runner == nil {
+	on, offCtx := s.Switch.State()
+	if !on || adm == nil || s.Discoverer == nil || s.Runner == nil {
 		return errcode.Status(errcode.ServiceDisabled, "this cell does not execute Looking Glass service diagnostics")
 	}
 	project := req.GetProjectId()
-	_, epochCtx, err := adm.Authority.Check(ctx)
-	if err != nil {
-		return err
-	}
-	if err := adm.Buckets.ChargeRequest(project, adm.now()); err != nil {
-		return err
-	}
-	if err := adm.Attempts.Register(attemptKey(caller, req), requestDigest(req), req.GetExpiresAt().AsTime(),
-		adm.now()); err != nil {
-		return err
-	}
-	closeStream, err := adm.openStream(project)
+	epochCtx, closeStream, err := adm.admit(ctx, caller, req)
 	if err != nil {
 		return err
 	}
 	defer closeStream()
 
 	// sendCtx ends when the stream does, a write fails or the consumer
-	// stalls; runCtx also ends at the deadline, when the election is lost or
-	// when the output budget runs out. Outcomes those cut short still reach
-	// the writer, so the consumer can see them while the stream lasts.
+	// stalls; runCtx also ends at the deadline, when the election is lost,
+	// when the service is turned off or when the output budget runs out.
+	// Outcomes those cut short still reach the writer, so the consumer can
+	// see them while the stream lasts.
 	sendCtx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
 	ownedCtx, lose := context.WithCancelCause(sendCtx)
 	defer lose(nil)
 	defer context.AfterFunc(epochCtx, func() { lose(errOwnershipLost) })()
+	defer context.AfterFunc(offCtx, func() { lose(errServiceDisabled) })()
 	runCtx, cancel := context.WithDeadline(ownedCtx, deadline)
 	defer cancel()
 
@@ -640,6 +670,8 @@ func (s *Service) execute(
 		switch {
 		case errors.Is(context.Cause(runCtx), errOwnershipLost):
 			return errcode.Status(errcode.OwnershipLost, "the election was lost during router discovery")
+		case errors.Is(context.Cause(runCtx), errServiceDisabled):
+			return errcode.Status(errcode.ServiceDisabled, "the service was disabled during router discovery")
 		case errors.Is(runCtx.Err(), context.DeadlineExceeded):
 			return errcode.Status(errcode.DeadlineExceeded, "request's deadline passed during router discovery")
 		case runCtx.Err() != nil:
@@ -653,8 +685,10 @@ func (s *Service) execute(
 	}
 	res, err := s.Runner.Executor.Reserve(project, selectedCount(inv.Routers))
 	if err != nil {
-		return errcode.Retry(errcode.QueueFull, "the cell's execution queue cannot take this request",
+		err := errcode.Retry(errcode.QueueFull, "the cell's execution queue cannot take this request",
 			string(limit.ScopeQueue), time.Second)
+		adm.Metrics.refused(project, err)
+		return err
 	}
 	defer res.Release()
 	w := newEventWriter(send)
@@ -671,6 +705,9 @@ func (s *Service) execute(
 	if err != nil {
 		return err
 	}
+	rec.inventory = &inv
+	op := serviceOperation(req)
+	s.Metrics.serviceOmitted(op, inv.Routers)
 
 	q := node.QueryFromProto(req.GetQuery())
 	budgets := req.GetBudgets()
@@ -723,13 +760,72 @@ func (s *Service) execute(
 		}
 		ev := out.fit(o, func() { lose(errOutputLimit) })
 		tally.add(ev)
+		s.Metrics.serviceOutcome(op, ev.Err)
 		if err := next(outcomeEvent(ev)); err != nil {
 			return stop(err)
 		}
 	}
-	return next(&servicev1.DiagnosticEvent{Event: &servicev1.DiagnosticEvent_Complete{
-		Complete: tally.complete(inv, s.now()),
-	}})
+	rec.complete = tally.complete(inv, s.now())
+	return next(&servicev1.DiagnosticEvent{Event: &servicev1.DiagnosticEvent_Complete{Complete: rec.complete}})
+}
+
+// serviceRecord is what finish reports about a request the leader ran.
+type serviceRecord struct {
+	started time.Time
+	// inventory is set once the snapshot is delivered.
+	inventory *Inventory
+	// complete is the terminal coverage, set before it is sent.
+	complete *servicev1.Complete
+}
+
+// reasonDeliveryFailed is the reason a request whose stream broke is
+// counted and logged with.
+const reasonDeliveryFailed = "DeliveryFailed"
+
+// finish counts a request the leader ran and, once its snapshot was
+// delivered, logs it: who asked, for which project, its operation, reason
+// and coverage counts and how long it took. The log carries no target,
+// observation or node error text. A request refused before its snapshot is
+// logged only at debug level.
+func (s *Service) finish(caller identity.ID, req *servicev1.RunDiagnosticRequest, rec *serviceRecord, err error) {
+	reason := reasonDeliveryFailed
+	switch {
+	case err == nil && rec.complete != nil:
+		reason = rec.complete.GetReason()
+	case errcode.Typed(err):
+		reason = string(errcode.Of(err))
+	}
+	op := serviceOperation(req)
+	elapsed := s.now().Sub(rec.started)
+	s.Metrics.serviceRequest(req, errcode.Code(reason))
+	if rec.inventory == nil {
+		slog.Debug("Looking Glass request refused", "service", caller.Name, "project", req.GetProjectId(),
+			"requestID", req.GetRequestId(), labelOperation, op, labelReason, reason)
+		return
+	}
+	if s.Metrics != nil {
+		s.Metrics.serviceDuration.WithLabelValues(op).Observe(elapsed.Seconds())
+	}
+	attrs := []any{
+		"service", caller.Name, "project", req.GetProjectId(), "requestID", req.GetRequestId(),
+		labelOperation, op, labelReason, reason, "routers", len(rec.inventory.Routers),
+		"selected", selectedCount(rec.inventory.Routers), "duration", elapsed,
+	}
+	if c := rec.complete; c != nil {
+		attrs = append(attrs, "successful", c.GetSuccessful(), "failed", c.GetFailed(), "omitted", c.GetOmitted(),
+			"truncated", c.GetTruncatedRouters())
+	}
+	slog.Info("Looking Glass request finished", attrs...)
+}
+
+// serviceOperation is a request's operation as a metric label: its query
+// type, or Unsupported for one the service does not serve.
+func serviceOperation(req *servicev1.RunDiagnosticRequest) string {
+	t := node.QueryFromProto(req.GetQuery()).Type
+	if !serviceQueryTypes[t] {
+		return "Unsupported"
+	}
+	return string(t)
 }
 
 func (s *Service) streamLimit() int {

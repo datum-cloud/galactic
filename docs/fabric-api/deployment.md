@@ -202,8 +202,9 @@ What the Component changes in the pod:
   `0770 frr:frrvty` sockets through group 102.
 - Sets `automountServiceAccountToken: false` on the pod and adds a projected
   token volume mounted only into `frr-init` and `config-agent`, the containers
-  that call the Kubernetes API. The sidecar has no API access unless it runs
-  with `--probe-permits`, which no manifest sets yet (see
+  that call the Kubernetes API. The sidecar has no API access unless the
+  opt-in `components/fabric-api-permits` Component adds `--probe-permits` and
+  mounts the token into it (see
   [Enabling aggregate probe budgets](operations.md#enabling-aggregate-probe-budgets)).
 
 The `fabric-api-certs` DaemonSet runs the same image with `args: [certsync, ...]`,

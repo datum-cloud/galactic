@@ -1,0 +1,7 @@
+# The node sidecar requiring probe permits, with every Component it needs.
+resources:
+  - ../../../../config/fabric-router
+components:
+  - ../../../../config/fabric-router/components/fabric-api
+  - ../../../../config/fabric-router/components/fabric-api-permits
+  - ../../../../config/fabric-router/components/fabric-api-require-permits

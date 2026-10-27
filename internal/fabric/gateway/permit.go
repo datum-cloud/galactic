@@ -156,8 +156,10 @@ func (p *Permits) RequestPermit(
 	release, err := p.Executor.Acquire(actx, principal, false)
 	switch {
 	case errors.Is(err, ErrQueueFull):
-		return nil, errcode.Retry(errcode.QueueFull, "the cell's execution queue is full", string(limit.ScopeQueue),
+		err := errcode.Retry(errcode.QueueFull, "the cell's execution queue is full", string(limit.ScopeQueue),
 			time.Second)
+		p.Admission.Metrics.refused(principal, err)
+		return nil, err
 	case err != nil:
 		return nil, errcode.Status(errcode.QueueTimeout, "waited too long for a cell execution slot")
 	}

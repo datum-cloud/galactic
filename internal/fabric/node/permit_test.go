@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -115,7 +116,8 @@ func permitFor(req *fabricv1.ExecuteRequest) *fabricv1.ProbePermit {
 
 func TestPermitConsumedOnce(t *testing.T) {
 	prober := &packetProber{packets: 3}
-	s := permitServer(t, prober, nil)
+	metrics := NewMetrics()
+	s := permitServer(t, prober, func(p *Permits) { p.Metrics = metrics })
 	ctx := WithCaller(t.Context(), identity.Gateway("dfw"))
 
 	req := request(query.Query{Type: query.TypePing, Target: testPingDst})
@@ -133,6 +135,11 @@ func TestPermitConsumedOnce(t *testing.T) {
 	if n := prober.sent.Load(); n != 3 {
 		t.Errorf("sent %d packets, want 3", n)
 	}
+	for outcome, want := range map[string]float64{PermitAccepted: 1, permitReplayed: 1} {
+		if n := testutil.ToFloat64(metrics.permits.WithLabelValues(outcome)); n != want {
+			t.Errorf("%s permits = %g, want %g", outcome, n, want)
+		}
+	}
 	if info, _ := s.Info(ctx, &fabricv1.InfoRequest{}); !info.GetProbePermits() {
 		t.Error("Info does not report probe permits")
 	}
@@ -141,41 +148,64 @@ func TestPermitConsumedOnce(t *testing.T) {
 func TestPermitRefusals(t *testing.T) {
 	ctx := WithCaller(t.Context(), identity.Gateway("dfw"))
 	cases := map[string]struct {
-		mod  func(*fabricv1.ProbePermit)
-		perm func(*Permits)
-		code errcode.Code
+		mod     func(*fabricv1.ProbePermit)
+		perm    func(*Permits)
+		code    errcode.Code
+		outcome string
 	}{
 		"other epoch": {
 			mod:  func(p *fabricv1.ProbePermit) { p.Epoch = "lease-uid/gateway-1_b" },
-			code: errcode.OwnershipLost,
+			code: errcode.OwnershipLost, outcome: permitEpoch,
 		},
-		"other node":    {mod: func(p *fabricv1.ProbePermit) { p.Node = "other" }, code: errcode.LimiterUnavailable},
-		"other request": {mod: func(p *fabricv1.ProbePermit) { p.RequestId = "x" }, code: errcode.LimiterUnavailable},
+		"other node": {
+			mod:  func(p *fabricv1.ProbePermit) { p.Node = "other" },
+			code: errcode.LimiterUnavailable, outcome: permitMismatch,
+		},
+		"other request": {
+			mod:  func(p *fabricv1.ProbePermit) { p.RequestId = "x" },
+			code: errcode.LimiterUnavailable, outcome: permitMismatch,
+		},
 		"other dest": {
 			mod:  func(p *fabricv1.ProbePermit) { p.Destination = "9.9.9.9" },
-			code: errcode.LimiterUnavailable,
+			code: errcode.LimiterUnavailable, outcome: permitMismatch,
 		},
 		"other operation": {
 			mod:  func(p *fabricv1.ProbePermit) { p.Operation = fabricv1.QueryType_QUERY_TYPE_TRACEROUTE },
-			code: errcode.LimiterUnavailable,
+			code: errcode.LimiterUnavailable, outcome: permitMismatch,
 		},
 		"expired": {mod: func(p *fabricv1.ProbePermit) {
 			p.Deadline = timestamppb.New(time.Now().Add(-time.Second))
-		}, code: errcode.LimiterUnavailable},
+		}, code: errcode.LimiterUnavailable, outcome: permitExpired},
 		"too long-lived": {mod: func(p *fabricv1.ProbePermit) {
 			p.Deadline = timestamppb.New(time.Now().Add(time.Minute))
-		}, code: errcode.LimiterUnavailable},
-		"no id":           {mod: func(p *fabricv1.ProbePermit) { p.Id = "" }, code: errcode.LimiterUnavailable},
-		"startup refusal": {perm: func(p *Permits) { p.Started = time.Now() }, code: errcode.LimiterUnavailable},
+		}, code: errcode.LimiterUnavailable, outcome: permitExpired},
+		"no id": {
+			mod:  func(p *fabricv1.ProbePermit) { p.Id = "" },
+			code: errcode.LimiterUnavailable, outcome: permitMalformed,
+		},
+		"startup refusal": {
+			perm: func(p *Permits) { p.Started = time.Now() },
+			code: errcode.LimiterUnavailable, outcome: permitStarting,
+		},
+		"clock unsynchronised": {
+			perm: func(p *Permits) { p.Clock = func() error { return errors.New("unsynchronised") } },
+			code: errcode.LimiterUnavailable, outcome: permitClock,
+		},
 		"lease unreadable": {perm: func(p *Permits) {
 			p.Reader = leaseReader(t, "gateway-0_a")
 			p.LeaseName = "missing"
-		}, code: errcode.OwnershipLost},
+		}, code: errcode.OwnershipLost, outcome: permitLease},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			prober := &packetProber{packets: 3}
-			s := permitServer(t, prober, tc.perm)
+			metrics := NewMetrics()
+			s := permitServer(t, prober, func(p *Permits) {
+				p.Metrics = metrics
+				if tc.perm != nil {
+					tc.perm(p)
+				}
+			})
 			req := request(query.Query{Type: query.TypePing, Target: testPingDst})
 			req.Permit = permitFor(req)
 			if tc.mod != nil {
@@ -185,6 +215,12 @@ func TestPermitRefusals(t *testing.T) {
 			wantCode(t, err, tc.code)
 			if prober.sent.Load() != 0 {
 				t.Error("a refused permit sent packets")
+			}
+			if n := testutil.ToFloat64(metrics.permits.WithLabelValues(tc.outcome)); n != 1 {
+				t.Errorf("%s refusals counted %g times", tc.outcome, n)
+			}
+			if n := testutil.ToFloat64(metrics.permits.WithLabelValues(PermitAccepted)); n != 0 {
+				t.Errorf("a refused permit counted as accepted")
 			}
 		})
 	}
@@ -358,5 +394,25 @@ func TestDirectOperatorPermit(t *testing.T) {
 	wantCode(t, err, errcode.LimiterUnavailable)
 	if len(starting.requests) != 0 {
 		t.Error("a starting node requested a permit")
+	}
+}
+
+// A probe whose target is not a probe destination is counted as invalid,
+// not as a permit that does not match.
+func TestPermitInvalidTarget(t *testing.T) {
+	metrics := NewMetrics()
+	p := &Permits{Reader: leaseReader(t, "gateway-0_a"), Namespace: leaseNS, LeaseName: leaseName,
+		Started: time.Now().Add(-time.Hour), Metrics: metrics}
+	q := query.Query{Type: query.TypePing, Target: "not-an-address"}
+	pm := &fabricv1.ProbePermit{Id: "permit", Epoch: leaseEpoch, Node: testNode,
+		Deadline: timestamppb.New(time.Now().Add(20 * time.Second))}
+	if _, err := p.consume(t.Context(), pm, testNode, "req", q, time.Now()); err == nil {
+		t.Fatal("a permit for an invalid target was accepted")
+	}
+	if n := testutil.ToFloat64(metrics.permits.WithLabelValues(permitInvalid)); n != 1 {
+		t.Errorf("invalid permits = %g", n)
+	}
+	if n := testutil.ToFloat64(metrics.permits.WithLabelValues(permitMismatch)); n != 0 {
+		t.Errorf("an invalid target counted as a mismatch")
 	}
 }

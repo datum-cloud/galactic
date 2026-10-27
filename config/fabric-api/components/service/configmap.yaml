@@ -1,0 +1,12 @@
+# The Looking Glass service switch. Only the exact value "enabled" turns
+# execution on; "disabled", a missing key or ConfigMap, an unreadable one or
+# any other value keeps it off. Each gateway replica reads it every second.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fabric-api-service
+  namespace: galactic-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/ssa: IfNotPresent
+data:
+  service: disabled

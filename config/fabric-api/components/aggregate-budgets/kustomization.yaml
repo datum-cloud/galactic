@@ -1,0 +1,24 @@
+# Turns on the cell's aggregate admission and probe packet budgets in the
+# fabric-api gateway (--aggregate-budgets). Include it from the per-cell
+# gateway overlay of config/fabric-api/base:
+#
+#   resources:
+#     - ../../config/fabric-api/base
+#   components:
+#     - ../../config/fabric-api/components/aggregate-budgets
+#
+# Apply it only once every node's sidecar verifies probe permits
+# (config/fabric-router/components/fabric-api-permits): the gateway sends a
+# probe to no other node. From then on every probe in the cell, operator,
+# FabricQuery and Looking Glass, is charged to the cell's budgets, and each
+# gateway start or failover refuses probes for 125 seconds while the leader
+# serves its recovery hold. The limits are the contract's defaults; an
+# overlay may lower any of them with the gateway's limit flags, never raise
+# one. See docs/fabric-api/configuration.md#aggregate-probe-budgets.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: fabric-api-gateway
