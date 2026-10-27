@@ -274,6 +274,9 @@ cd deploy/containerlab && task verify:fabric-api
 cd deploy/containerlab && task verify:fabric-api-bootstrap
 ```
 
+Before switching the Looking Glass service on in a cell, qualify the build
+with the [qualification suite](qualification.md).
+
 In a real cell, read the same facts from the cluster:
 
 ```sh
