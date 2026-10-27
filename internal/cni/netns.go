@@ -11,6 +11,8 @@ import (
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
+
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // configureInterfaceInNetns applies addresses and default routes to the guest
@@ -101,7 +103,7 @@ func addrFamily(ip net.IP) int {
 func addAddrIfMissing(handle *netlink.Handle, link netlink.Link, ifName string, ipNet *net.IPNet) error {
 	want := netlink.Addr{IPNet: ipNet}
 
-	existing, err := handle.AddrList(link, addrFamily(ipNet.IP))
+	existing, err := nldump.On(handle).AddrList(link, addrFamily(ipNet.IP))
 	if err != nil {
 		return fmt.Errorf("list addresses on %q: %w", ifName, err)
 	}
@@ -122,7 +124,7 @@ func addAddrIfMissing(handle *netlink.Handle, link netlink.Link, ifName string, 
 // gateway is a real misconfiguration rather than something a retried ADD should
 // paper over, so it returns an error.
 func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName string, gateway net.IP) error {
-	existing, err := handle.RouteList(link, addrFamily(gateway))
+	existing, err := nldump.On(handle).RouteList(link, addrFamily(gateway))
 	if err != nil {
 		return fmt.Errorf("list routes on %q: %w", ifName, err)
 	}
@@ -136,7 +138,7 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 		return fmt.Errorf("default route on %q already points via %s, refusing to add conflicting route via %s",
 			ifName, r.Gw, gateway)
 	}
-	routes, err := handle.RouteList(nil, addrFamily(gateway))
+	routes, err := nldump.On(handle).RouteList(nil, addrFamily(gateway))
 	if err != nil {
 		return fmt.Errorf("list namespace routes: %w", err)
 	}
@@ -208,7 +210,7 @@ func flushGuestNetnsConfig(netnsPath, ifName string) error {
 		}
 
 		for _, family := range []int{netlink.FAMILY_V6, netlink.FAMILY_V4} {
-			routes, err := handle.RouteList(link, family)
+			routes, err := nldump.On(handle).RouteList(link, family)
 			if err != nil {
 				return fmt.Errorf("list routes on %q: %w", ifName, err)
 			}
@@ -221,7 +223,7 @@ func flushGuestNetnsConfig(netnsPath, ifName string) error {
 				}
 			}
 
-			addrs, err := handle.AddrList(link, family)
+			addrs, err := nldump.On(handle).AddrList(link, family)
 			if err != nil {
 				return fmt.Errorf("list addresses on %q: %w", ifName, err)
 			}

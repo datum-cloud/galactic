@@ -19,6 +19,7 @@ import (
 
 	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // cmdCheck validates that the container's network state matches what ADD
@@ -215,7 +216,7 @@ func validateIPOnInterface(ip net.IP, name, netns string) error {
 			return fmt.Errorf("find link: %w", err)
 		}
 
-		addrs, err := handle.AddrList(link, netlink.FAMILY_V6)
+		addrs, err := nldump.On(handle).AddrList(link, netlink.FAMILY_V6)
 		if err != nil {
 			return fmt.Errorf("list addresses: %w", err)
 		}

@@ -11,6 +11,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // Plain routes are the kernel routes installed for EVPN Type 5 paths carrying
@@ -64,7 +66,7 @@ const mainTable = unix.RT_TABLE_MAIN
 // before its default route. Idempotent: a rule already present is left alone.
 func EnsurePlainRouteRules() error {
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
-		existing, err := netlink.RuleList(family)
+		existing, err := nldump.RuleList(family)
 		if err != nil {
 			return fmt.Errorf("list %s policy rules: %w", familyName(family), err)
 		}
@@ -201,7 +203,7 @@ func sameForwarding(existing, desired *netlink.Route) bool {
 
 // plainRoutesFor returns the routes in PlainRouteTable for exactly prefix.
 func plainRoutesFor(prefix *net.IPNet) ([]netlink.Route, error) {
-	routes, err := netlink.RouteListFiltered(prefixFamily(prefix),
+	routes, err := nldump.RouteListFiltered(prefixFamily(prefix),
 		&netlink.Route{Table: int(PlainRouteTable), Dst: prefix},
 		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_DST)
 	if err != nil {
@@ -229,7 +231,7 @@ func PlainRouteDel(prefix *net.IPNet) error {
 func PlainRouteList() ([]*net.IPNet, error) {
 	var dsts []*net.IPNet
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
-		routes, err := netlink.RouteListFiltered(family,
+		routes, err := nldump.RouteListFiltered(family,
 			&netlink.Route{Table: int(PlainRouteTable), Protocol: PlainRouteProtocol},
 			netlink.RT_FILTER_TABLE|netlink.RT_FILTER_PROTOCOL)
 		if err != nil {
@@ -253,7 +255,7 @@ func PlainRouteList() ([]*net.IPNet, error) {
 // matches; a route FRR or the kernel installed carries its own protocol and is
 // left alone.
 func RemoveLegacyPlainRoute(prefix *net.IPNet) (int, error) {
-	routes, err := netlink.RouteListFiltered(prefixFamily(prefix),
+	routes, err := nldump.RouteListFiltered(prefixFamily(prefix),
 		&netlink.Route{Table: mainTable, Dst: prefix},
 		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_DST)
 	if err != nil {

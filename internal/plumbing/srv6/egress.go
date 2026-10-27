@@ -14,6 +14,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // ErrNoShardResolvable is wrapped by EgressPrefixRouteAdd and
@@ -210,7 +211,7 @@ func resolveUplinkNeighbor(name string) (linkIndex int, dmac, smac net.HardwareA
 	smac = link.Attrs().HardwareAddr
 	linkIndex = link.Attrs().Index
 
-	neighs, err := netlink.NeighList(linkIndex, netlink.FAMILY_V6)
+	neighs, err := nldump.NeighList(linkIndex, netlink.FAMILY_V6)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("list neighbors on %s: %w", name, err)
 	}
