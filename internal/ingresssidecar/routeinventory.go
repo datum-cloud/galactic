@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // listRoutes returns the egress routes this pod installed in tableID, for the
@@ -139,7 +140,7 @@ func mergeRouteInventory(
 func redirectPrefixes(linkIndex int, local map[string]struct{}) ([]*net.IPNet, error) {
 	var out []*net.IPNet
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		routes, err := netlink.RouteListFiltered(family,
+		routes, err := nldump.RouteListFiltered(family,
 			&netlink.Route{Table: unix.RT_TABLE_MAIN, LinkIndex: linkIndex},
 			netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF)
 		if err != nil {
@@ -163,7 +164,7 @@ func redirectPrefixes(linkIndex int, local map[string]struct{}) ([]*net.IPNet, e
 // vrfLocalAddresses returns every address assigned to an interface enslaved
 // to the VRF device at vrfIndex.
 func vrfLocalAddresses(vrfIndex int) (map[string]struct{}, error) {
-	links, err := netlink.LinkList()
+	links, err := nldump.LinkList()
 	if err != nil {
 		return nil, fmt.Errorf("list links: %w", err)
 	}
@@ -172,7 +173,7 @@ func vrfLocalAddresses(vrfIndex int) (map[string]struct{}, error) {
 		if link.Attrs().MasterIndex != vrfIndex {
 			continue
 		}
-		addrs, err := netlink.AddrList(link, netlink.FAMILY_ALL)
+		addrs, err := nldump.AddrList(link, netlink.FAMILY_ALL)
 		if errors.Is(err, unix.ENODEV) {
 			continue // removed since LinkList, so it holds no address
 		}
@@ -193,7 +194,7 @@ func legacySeg6Routes(tableID uint32) ([]RouteInfo, error) {
 	// Two passes, not AF_UNSPEC, matching internal/plumbing/vrf.FlushTable's
 	// own approach to listing everything in one table across both families.
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		routes, err := netlink.RouteListFiltered(
+		routes, err := nldump.RouteListFiltered(
 			family,
 			&netlink.Route{Table: int(tableID)},
 			netlink.RT_FILTER_TABLE,

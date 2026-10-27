@@ -22,6 +22,7 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // ingressVPCAttachment is the synthetic attachment segment
@@ -70,7 +71,7 @@ func (NetlinkGatewayAddressResolver) ResolveGatewayAddress(vpc string) (net.IP, 
 	}
 	vrfIndex := vrfLink.Attrs().Index
 
-	links, err := netlink.LinkList()
+	links, err := nldump.LinkList()
 	if err != nil {
 		return nil, fmt.Errorf("list links: %w", err)
 	}
@@ -79,7 +80,7 @@ func (NetlinkGatewayAddressResolver) ResolveGatewayAddress(vpc string) (net.IP, 
 		if attrs.Index == vrfIndex || attrs.MasterIndex != vrfIndex {
 			continue // not a slave of this VPC's VRF
 		}
-		addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+		addrs, err := nldump.AddrList(link, netlink.FAMILY_V6)
 		if err != nil {
 			return nil, fmt.Errorf("list addresses on %s: %w", attrs.Name, err)
 		}

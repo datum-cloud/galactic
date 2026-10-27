@@ -6,7 +6,8 @@
 // galactic binaries share. It holds no code of its own; the sub-packages cover
 // SRv6 encoding and interface naming (intf, srv6), Linux VRF lifecycle (vrf),
 // interface sysctls (sysctl), bonding-master recognition (bond), loopback
-// address detection (loaddr), stateless prefix translation (nptv6), Router
+// address detection (loaddr), netlink dumps that survive concurrent changes
+// (nldump), stateless prefix translation (nptv6), Router
 // Advertisements for tap-attached guests (radv), VIP binding on backend nodes
 // (vip), and the eBPF datapaths (ebpf).
 //
