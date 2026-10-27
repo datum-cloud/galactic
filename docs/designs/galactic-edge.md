@@ -86,7 +86,7 @@ Consider a service that connects an external site to a tenant's VPC. It establis
 
 The provider requests an attachment for the tenant and reachability for the prefix. Galactic Edge verifies the grant, prepares the isolated connection, and enables forwarding and routing only when their prerequisites hold. Return traffic follows the published prefix to the attachment; the provider delivers it to the external site.
 
-A second service using a different protocol follows the same lifecycle. This is the reuse requirement in [#992](https://github.com/datum-cloud/galactic/issues/992), illustrated through an abstract provider. The [MASQUE proposal (#970)](https://github.com/datum-cloud/galactic/issues/970) is one potential consumer; its transport requirements are outside this design.
+A second service using a different protocol follows the same lifecycle. This is the reuse requirement in [#992](https://github.com/datum-cloud/galactic/issues/992), illustrated through an abstract provider. The [MASQUE connector contract](masque/contract.md) defines the #970 consumer: client authority, retained /96 allocations and transport sessions. Its [acceptance matrix](masque/acceptance.md) separates foundation evidence from MASQUE integration checks; those transport requirements remain outside this foundation design.
 
 ### Risks and Mitigations
 
