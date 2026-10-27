@@ -13,12 +13,35 @@ line has one format and one level threshold.
 | `--log-level`  | `LOG_LEVEL`  | `info`  | `debug`, `info`, `warn` or `error` |
 | `--log-format` | `LOG_FORMAT` | `json`  | `json` or `text`                   |
 
-An explicit flag wins over the environment variable. Production runs the
-defaults: one JSON object per line on stderr, with `time`, `level` and `msg`
-keys. controller-runtime's lines also carry a `logger` key naming the
-component. Its verbose lines (`V(1)` and up) appear only at
-`--log-level=debug`. klog keeps its own verbosity setting, which these flags
-don't change, so client-go's `klog.V(n)` lines stay off.
+An explicit flag wins over the environment variable. `--log-level` also
+accepts what Go's `slog` parses beyond the four names: any case, and an offset
+such as `info+2`.
+
+An unsupported value stops the binary at startup, before it does anything
+else, whether it comes from the flag or the environment variable. A DaemonSet
+with one crash-loops on every node. `task test:manifests`, which CI runs,
+renders every kustomization under `config/` and `deploy/` and fails on an
+unsupported value for a container running one of these binaries.
+`hack/check-log-settings` applies the same rules (`internal/logging`'s
+`ValidateLevel` and `ValidateFormat`) to any YAML, so downstream manifests
+should run it on their rendered output, with a Galactic release that includes
+it:
+
+```sh
+kustomize build <overlay> | go run go.datum.net/galactic/hack/check-log-settings@<version> -
+```
+
+It recognizes a Galactic container by its image repository name, and checks
+only literal values, not ones read from a ConfigMap or Secret. An empty
+`LOG_LEVEL` or `LOG_FORMAT` counts as unset. In source YAML that isn't
+rendered, such as the containerlab overlays, it reads strategic-merge patches
+but not JSON 6902 patches.
+
+Production runs the defaults: one JSON object per line on stderr, with
+`time`, `level` and `msg` keys. controller-runtime's lines also carry a
+`logger` key naming the component. Its verbose lines (`V(1)` and up) appear
+only at `--log-level=debug`. klog keeps its own verbosity setting, which these
+flags don't change, so client-go's `klog.V(n)` lines stay off.
 
 For local runs, `--log-format=text --log-level=debug` gives readable output
 with the verbose lines. No binary enables controller-runtime's zap development

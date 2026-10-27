@@ -15,9 +15,11 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -116,6 +118,62 @@ func TestSetupRejectsInvalidOptions(t *testing.T) {
 		if err := Setup(&bytes.Buffer{}, tc.level, tc.format); err == nil {
 			t.Errorf("Setup(%q, %q) succeeded, want an error", tc.level, tc.format)
 		}
+	}
+}
+
+func TestValidateMatchesSetup(t *testing.T) {
+	for _, level := range append(slices.Clone(Levels), "INFO", "info+2") {
+		if err := ValidateLevel(level); err != nil {
+			t.Errorf("ValidateLevel(%q) = %v, want nil", level, err)
+		}
+	}
+	for _, format := range Formats {
+		if err := ValidateFormat(format); err != nil {
+			t.Errorf("ValidateFormat(%q) = %v, want nil", format, err)
+		}
+	}
+	for _, level := range []string{"loud", "verbose", "", "trace"} {
+		if ValidateLevel(level) == nil {
+			t.Errorf("ValidateLevel(%q) = nil, want an error", level)
+		}
+	}
+	for _, format := range []string{"console", "JSON", ""} {
+		if ValidateFormat(format) == nil {
+			t.Errorf("ValidateFormat(%q) = nil, want an error", format)
+		}
+	}
+}
+
+// TestBinariesListsEveryCaller keeps Binaries, which the manifest check uses
+// to find Galactic containers, in step with the commands that import this
+// package.
+func TestBinariesListsEveryCaller(t *testing.T) {
+	const self = "go.datum.net/galactic/internal/logging"
+	root := filepath.Join("..", "..", "cmd")
+	callers := map[string]bool{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+		if err != nil {
+			return err
+		}
+		for _, imp := range f.Imports {
+			if p, _ := strconv.Unquote(imp.Path.Value); p == self {
+				rel, _ := filepath.Rel(root, path)
+				callers[strings.Split(filepath.ToSlash(rel), "/")[0]] = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := slices.Sorted(maps.Keys(callers))
+	want := slices.Sorted(slices.Values(Binaries))
+	if !slices.Equal(got, want) {
+		t.Errorf("commands importing %s = %v, Binaries = %v", self, got, want)
 	}
 }
 

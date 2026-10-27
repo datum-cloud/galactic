@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/pflag"
@@ -31,6 +32,29 @@ const (
 	// EnvLevel and EnvFormat supply the flags' defaults.
 	EnvLevel  = "LOG_LEVEL"
 	EnvFormat = "LOG_FORMAT"
+)
+
+var (
+	// Levels are the documented --log-level values. ValidateLevel also
+	// accepts what slog parses beyond them: any case, and an offset such as
+	// info+2.
+	Levels = []string{"debug", "info", "warn", "error"}
+	// Formats are the accepted --log-format values.
+	Formats = []string{FormatJSON, FormatText}
+	// Binaries are the commands under cmd/ that call Setup. Each publishes an
+	// image of the same name, so a manifest check uses this list to find the
+	// containers whose LOG_LEVEL, LOG_FORMAT, --log-level and --log-format
+	// these rules govern.
+	Binaries = []string{
+		"fabric-api",
+		"fabric-router-controller",
+		"galactic-controller",
+		"galactic-edge",
+		"galactic-gateway",
+		"galactic-nat",
+		"galactic-router",
+		"galactic-vrf",
+	}
 )
 
 // Options holds the --log-level and --log-format flag values.
@@ -60,25 +84,47 @@ func (o *Options) Setup() error {
 // controller-runtime keeps the logger from its first SetLogger call, so a
 // binary calls Setup once, before it builds a manager.
 func Setup(w io.Writer, level, format string) error {
-	var l slog.Level
-	if err := l.UnmarshalText([]byte(level)); err != nil {
-		return fmt.Errorf("--log-level: %w", err)
+	l, err := parseLevel(level)
+	if err != nil {
+		return err
+	}
+	if err := ValidateFormat(format); err != nil {
+		return err
 	}
 	opts := &slog.HandlerOptions{Level: l}
-	var h slog.Handler
-	switch format {
-	case FormatJSON:
-		h = slog.NewJSONHandler(w, opts)
-	case FormatText:
+	var h slog.Handler = slog.NewJSONHandler(w, opts)
+	if format == FormatText {
 		h = slog.NewTextHandler(w, opts)
-	default:
-		return fmt.Errorf("--log-format must be %s or %s, not %q", FormatJSON, FormatText, format)
 	}
 	logger := slog.New(h)
 	slog.SetDefault(logger)
 	ctrl.SetLogger(logr.FromSlogHandler(h))
 	klog.SetSlogLogger(logger)
 	return nil
+}
+
+// ValidateLevel returns the error Setup returns for level, or nil if Setup
+// accepts it.
+func ValidateLevel(level string) error {
+	_, err := parseLevel(level)
+	return err
+}
+
+// ValidateFormat returns the error Setup returns for format, or nil if Setup
+// accepts it.
+func ValidateFormat(format string) error {
+	if !slices.Contains(Formats, format) {
+		return fmt.Errorf("--log-format must be %s or %s, not %q", FormatJSON, FormatText, format)
+	}
+	return nil
+}
+
+func parseLevel(level string) (slog.Level, error) {
+	var l slog.Level
+	if err := l.UnmarshalText([]byte(level)); err != nil {
+		return 0, fmt.Errorf("--log-level: %w", err)
+	}
+	return l, nil
 }
 
 func envOr(key, def string) string {

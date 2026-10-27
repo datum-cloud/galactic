@@ -245,7 +245,8 @@ jobs:
           cd dist && sha256sum -c SHA256SUMS
 
   # The opt-in Kustomize Components that must be listed in order fail their
-  # build when one is missing; tests/manifests renders each composition.
+  # build when one is missing; tests/manifests renders each composition. The
+  # same task checks every manifest's log level and format.
   manifests:
     name: Manifests
     runs-on: ubuntu-latest
@@ -262,7 +263,7 @@ jobs:
           version: ${{ env.TASK_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Render the Component fixtures
+      - name: Render the manifests and check log settings
         run: task test:manifests
 
   # Tier 2: Integration tests (every PR, main branch, and releases)
