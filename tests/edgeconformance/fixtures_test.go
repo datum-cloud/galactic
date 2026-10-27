@@ -105,11 +105,18 @@ patches:
 // examples/edge-provider/deploy's directories and applies it.
 func (l *lab) applyOverlay(t *testing.T, name, base, extra string, files map[string]string) {
 	t.Helper()
+	l.applyOverlayOf(t, filepath.Join(l.root, "examples", "edge-provider", "deploy", base), name, extra, files)
+}
+
+// applyOverlayOf renders a kustomization named name over the directory base
+// and applies it.
+func (l *lab) applyOverlayOf(t *testing.T, base, name, extra string, files map[string]string) {
+	t.Helper()
 	dir := filepath.Join(l.artifacts, "overlays", name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	rel, err := filepath.Rel(dir, filepath.Join(l.root, "examples", "edge-provider", "deploy", base))
+	rel, err := filepath.Rel(dir, base)
 	if err != nil {
 		t.Fatal(err)
 	}
