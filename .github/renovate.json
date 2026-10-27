@@ -8,6 +8,16 @@
   "schedule": ["before 6am on Monday"],
   "timezone": "America/New_York",
   "labels": ["dependencies"],
+  "customManagers": [
+    {
+      "description": "Track the gobgp CLI pin in the galactic-debug image",
+      "customType": "regex",
+      "managerFilePatterns": ["/^containers/galactic-debug/Dockerfile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+ARG GOBGP_VERSION=(?<currentValue>\\S+)"
+      ]
+    }
+  ],
   "packageRules": [
     {
       "description": "Block Go toolchain major/minor upgrades; allow patch-only updates",
@@ -25,6 +35,12 @@
     {
       "description": "Group all Go module dependency updates into one PR",
       "matchManagers": ["gomod"],
+      "groupName": "Go dependencies",
+      "groupSlug": "go-deps"
+    },
+    {
+      "description": "Bump the galactic-debug gobgp CLI in the same PR as go.mod's gobgp, so the CLI matches the embedded server",
+      "matchPackageNames": ["github.com/osrg/gobgp/v4"],
       "groupName": "Go dependencies",
       "groupSlug": "go-deps"
     },

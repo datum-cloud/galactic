@@ -143,11 +143,9 @@ never the guest.
 
 ## Version pins
 
-`gobgp` is pinned in the Dockerfile's `GOBGP_VERSION` build arg to match
-the major version `galactic-router` embeds (`go.mod`'s
-`github.com/osrg/gobgp/v4`). Bump it alongside any `go.mod` bump of that
-dependency -- it is not vendored from this module's own `go.sum`, so it
-does not drift automatically the way the embedded server does.
+`gobgp` is pinned in the Dockerfile's `GOBGP_VERSION` build arg to the
+version `galactic-router` embeds (`go.mod`'s `github.com/osrg/gobgp/v4`).
+Renovate bumps both in the same pull request.
 
 `KUBECTL_VERSION`/`CRICTL_VERSION`/`YQ_VERSION` build args pin the rest;
 bump periodically, roughly tracking the Kubernetes minor version of the
