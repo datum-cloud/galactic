@@ -23,6 +23,9 @@ type Config struct {
 	// LogLevel controls GoBGP's internal log verbosity.
 	// Valid values: debug, info, warn, error, panic. Defaults to panic.
 	LogLevel string
+	// APISocket, when non-empty, is the unix socket path the server serves
+	// the GoBGP API on, read-only, for the gobgp CLI. Empty serves no API.
+	APISocket string
 }
 
 // Server wraps an embedded GoBGP BgpServer.
@@ -75,7 +78,17 @@ func (s *Server) Reconfigure() (*gobgpserver.BgpServer, error) {
 
 func (s *Server) newBgpServer() *gobgpserver.BgpServer {
 	opts := s.buildServerOptions()
-	return gobgpserver.NewBgpServer(opts...)
+	var apiOpts []gobgpserver.ServerOption
+	if s.cfg.APISocket != "" {
+		apiOpts = apiServerOptions(s.cfg.APISocket)
+	}
+	b := gobgpserver.NewBgpServer(append(opts, apiOpts...)...)
+	// Nil options mean the socket can't be bound and no API is served, so
+	// there is nothing to wait for.
+	if apiOpts != nil {
+		waitForAPISocket(s.cfg.APISocket)
+	}
+	return b
 }
 
 // buildServerOptions assembles the ServerOption slice for NewBgpServer.
