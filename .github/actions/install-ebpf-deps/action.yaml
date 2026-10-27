@@ -14,6 +14,12 @@ runs:
     # The cache key names the runner image, which fixes the package versions
     # apt resolves. ImageOS and ImageVersion are the runner's environment,
     # not the env context, so a step reads them.
+    #
+    # GitHub serves several image versions at once, so a job often lands on
+    # one with no cache of its own. restore-keys then hands it the newest
+    # cache from any image, and apt downloads only the packages whose
+    # versions differ, instead of all of clang and llvm from a mirror that
+    # can trickle slowly enough to outlast the job's timeout.
     - name: Name the runner image
       id: image
       shell: bash
@@ -25,6 +31,8 @@ runs:
       with:
         path: ~/.cache/ebpf-deps-apt
         key: ebpf-deps-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.name }}-${{ hashFiles('.github/actions/install-ebpf-deps/action.yaml') }}
+        restore-keys: |
+          ebpf-deps-apt-${{ runner.os }}-${{ runner.arch }}-
 
     # Pinned to an explicit versioned package (clang-18/llvm-18) rather than
     # the unversioned clang/llvm meta-packages, matching ci.yaml's
