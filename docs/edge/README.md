@@ -4,6 +4,7 @@ Galactic Edge gives providers authorized attachments to tenant VPCs and controls
 
 - [Provider contract](provider-contract.md): resources, writers, lifecycle, timing assumptions and required failure evidence.
 - [Troubleshooting](troubleshooting.md): conditions, Events, metrics and locating the current prefix holder.
+- [MASQUE provider adapter](masque-provider.md): setup, readiness, drain and cleanup of the CONNECT-IP provider's attachments and routes.
 - [CONNECT-IP interoperability](connectip-interop.md): HTTP/3 and HTTP/2 protocol proof with an independent client, selections and remaining HTTP/2 listener work.
 - [Foundation metrics](../observability/edge.md): lifecycle and forwarding-gate measurements.
 - [Design record](../designs/galactic-edge.md): motivation and design alternatives.

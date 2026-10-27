@@ -82,7 +82,7 @@ The existing implementation mechanism is `EdgeService.spec.validUntil` and [the 
 
 ## Interfaces and session transitions
 
-Use the existing [connectip interfaces](../../../internal/edge/connectip/backend.go): `Admission.Admit`, `Lease.Info/Routes/Done/Close`, and `PacketBackend.Open`. Their production adapter is follow-on work. `SessionInfo.ID` is the request generation, `Connector` is the connector UUID, `VPC` carries the immutable VPC identity, and `Epoch` is the Edge route epoch. Do not overload one epoch for both session and foundation authority. The adapter keeps the full attachment/service/route UIDs, instance incarnation/epoch and process boot ID beside this snapshot; string names alone cannot authorize I/O.
+Use the existing [connectip interfaces](../../../internal/edge/connectip/backend.go): `Admission.Admit`, `Lease.Info/Routes/Done/Close`, and `PacketBackend.Open`. [`internal/edge/masque`](../../edge/masque-provider.md) implements them over the provider contract. `SessionInfo.ID` is the request generation, `Connector` is the connector UUID, `VPC` carries the immutable VPC identity, and `Epoch` is the Edge route epoch. Do not overload one epoch for both session and foundation authority. The adapter keeps the full attachment/service/route UIDs, instance incarnation/epoch and process boot ID beside this snapshot; string names alone cannot authorize I/O.
 
 1. **Pending:** reserve bounded pre-admission capacity before credential parsing or API work. Authenticate and authorize with the authority. No TUN write or MTU probe yet.
 2. **Allocated:** read the retained /96 and finite service grant; reserve one connector session transition. A failed admission releases provisional request resources, not the durable allocation.

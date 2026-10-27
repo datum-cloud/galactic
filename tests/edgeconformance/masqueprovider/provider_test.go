@@ -9,28 +9,27 @@ package main
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
-	"go.datum.net/galactic/internal/edge/claim"
 	"go.datum.net/galactic/internal/edge/connectip"
+	"go.datum.net/galactic/internal/edge/masque"
 )
 
-const notA96 = "/96"
+const (
+	notA96   = "/96"
+	svcName  = "svc"
+	required = "required"
+)
 
 func validConfig() *Config {
 	return &Config{
 		Provider: "masque-fixture", Authority: "masque.test:8443", Listen: ":8443",
 		Services: []Service{
-			{Namespace: "ns10", Name: "svc", UID: "s10", VPCUID: "v10", VPC: "10"},
-			{Namespace: "ns20", Name: "svc", UID: "s20", VPCUID: "v20", VPC: "20"},
+			{Namespace: "ns10", Name: svcName, UID: "s10", VPCUID: "v10", VPCID: "000000v10", VPC: "10"},
+			{Namespace: "ns20", Name: svcName, UID: "s20", VPCUID: "v20", VPCID: "000000v20", VPC: "20"},
 		},
 		Connectors: []Connector{
 			{ID: "c10", Credential: "t10", Service: "ns10/svc", Prefix: netip.MustParsePrefix("fd00:1::/96")},
@@ -48,8 +47,9 @@ func TestConfigValidate(t *testing.T) {
 		mutate func(*Config)
 		want   string
 	}{
-		{"no authority", func(c *Config) { c.Authority = "" }, "required"},
-		{"service without VPC", func(c *Config) { c.Services[0].VPC = "" }, "required"},
+		{"no authority", func(c *Config) { c.Authority = "" }, required},
+		{"service without VPC", func(c *Config) { c.Services[0].VPC = "" }, required},
+		{"service without VPC ID", func(c *Config) { c.Services[0].VPCID = "" }, required},
 		{"duplicate service", func(c *Config) { c.Services[1].Namespace = "ns10" }, "twice"},
 		{"shared credential", func(c *Config) { c.Connectors[1].Credential = "t10" }, "not unique"},
 		{"unknown service", func(c *Config) { c.Connectors[0].Service = "ns30/svc" }, "unknown service"},
@@ -71,126 +71,21 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
-// fixture returns a provider with both connectors' services served and the
-// lease held until deadline on a clock that reads now.
-func fixture(t *testing.T, now *time.Duration, deadline time.Duration) *Provider {
-	t.Helper()
-	p := &Provider{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: validConfig(),
-		Clock: func() time.Duration { return *now }}
-	p.services = map[string]*service{}
-	for _, s := range p.Config.Services {
-		p.services[s.Key()] = &service{cfg: s,
-			attachment: &galacticv1alpha1.EdgeAttachment{ObjectMeta: metav1.ObjectMeta{Name: "ea-" + s.Namespace}}}
-	}
-	for _, c := range p.Config.Connectors {
-		p.connectors = append(p.connectors, &connector{cfg: c, svc: p.services[c.Service], route: "er-" + c.ID,
-			grants: map[*grant]struct{}{}})
-	}
-	p.setLease(&claim.Lease{Key: "ei-pod", Epoch: 1, Deadline: deadline})
-	return p
-}
-
-// serve marks every service's backend open and every connector's route
-// accepted at epoch 3.
-func serve(p *Provider) {
-	for _, s := range p.services {
-		s.backend = &connectip.TUNBackend{}
-	}
-	for _, c := range p.connectors {
-		c.active, c.epoch = true, 3
-	}
-}
-
-func TestAdmit(t *testing.T) {
-	now := time.Second
-	p := fixture(t, &now, time.Minute)
-	ctx := context.Background()
-
-	if _, err := p.Admit(ctx, "unknown", "10"); !errors.Is(err, connectip.ErrUnauthenticated) {
-		t.Errorf("unknown credential: %v, want ErrUnauthenticated", err)
-	}
-	if _, err := p.Admit(ctx, "t10", "20"); !errors.Is(err, connectip.ErrForbidden) {
-		t.Errorf("VPC 10's credential for VPC 20: %v, want ErrForbidden", err)
-	}
-	if _, err := p.Admit(ctx, "t10", "10"); err == nil || errors.Is(err, connectip.ErrForbidden) ||
-		errors.Is(err, connectip.ErrUnauthenticated) {
-		t.Errorf("connector without an accepted route: %v, want an unavailable error", err)
-	}
-
-	serve(p)
-	l, err := p.Admit(ctx, "t20", "20")
+func TestAuthorize(t *testing.T) {
+	c := validConfig()
+	g, err := c.Authorize(context.Background(), "t20", "20")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := connectip.SessionInfo{ID: 1, Principal: "c20", VPC: "20", Prefix: netip.MustParsePrefix("fd00:1::/96"),
-		Connector: p.connectors[1].cfg.ID, Attachment: "ea-ns20", Claim: "er-c20", Epoch: 3}
-	if got := l.Info(); got != want {
-		t.Errorf("Info() = %+v, want %+v", got, want)
+	if g.Connector != "c20" || g.VPC != "20" || g.VPCUID != "v20" || g.VPCID != "000000v20" ||
+		g.Service != (masque.ServiceRef{Namespace: "ns20", Name: svcName, UID: "s20"}) ||
+		g.Prefix != netip.MustParsePrefix("fd00:1::/96") || !g.NotAfter.After(time.Now()) {
+		t.Fatalf("grant %+v does not match connector c20", g)
 	}
-
-	// Losing the route ends that connector's session and no other.
-	other, err := p.Admit(ctx, "t10", "10")
-	if err != nil {
-		t.Fatal(err)
+	if _, err := c.Authorize(context.Background(), "nope", "10"); !errors.Is(err, connectip.ErrUnauthenticated) {
+		t.Fatalf("unknown credential: %v", err)
 	}
-	p.mu.Lock()
-	p.deactivate(p.connectors[1], "test")
-	p.mu.Unlock()
-	select {
-	case <-l.Done():
-	default:
-		t.Error("VPC 20's session survived its route")
-	}
-	select {
-	case <-other.Done():
-		t.Error("VPC 10's session ended with VPC 20's route")
-	default:
-	}
-	if _, err := p.Admit(ctx, "t20", "20"); err == nil {
-		t.Error("admitted a connector whose route is no longer accepted")
-	}
-	_ = other.Close()
-	if len(p.connectors[0].grants) != 0 {
-		t.Error("Close left the grant registered")
-	}
-
-	// Past the lease's deadline nothing is admitted.
-	serve(p)
-	now = 2 * time.Minute
-	if _, err := p.Admit(ctx, "t10", "10"); err == nil {
-		t.Error("admitted past the lease's deadline")
-	}
-}
-
-type fakeSession struct{ writes, reads int }
-
-func (s *fakeSession) WritePacket([]byte) error { s.writes++; return nil }
-func (s *fakeSession) ReadPacket(context.Context, []byte) (int, error) {
-	s.reads++
-	return 40, nil
-}
-func (s *fakeSession) Close() error { return nil }
-
-func TestGatedSessionStopsAtDeadline(t *testing.T) {
-	now := time.Second
-	p := fixture(t, &now, 10*time.Second)
-	inner := &fakeSession{}
-	s := &gatedSession{BackendSession: inner, allow: p.forwarding}
-	buf := make([]byte, 64)
-	if err := s.WritePacket(buf); err != nil {
-		t.Fatal(err)
-	}
-	if n, err := s.ReadPacket(context.Background(), buf); err != nil || n != 40 {
-		t.Fatalf("ReadPacket = %d, %v", n, err)
-	}
-	now = 10 * time.Second
-	if err := s.WritePacket(buf); !errors.Is(err, errExpired) {
-		t.Errorf("write at the deadline: %v, want errExpired", err)
-	}
-	if _, err := s.ReadPacket(context.Background(), buf); !errors.Is(err, errExpired) {
-		t.Errorf("read at the deadline: %v, want errExpired", err)
-	}
-	if inner.writes != 1 {
-		t.Errorf("%d writes reached the device, want 1", inner.writes)
+	if _, err := c.Authorize(context.Background(), "t10", "20"); !errors.Is(err, connectip.ErrForbidden) {
+		t.Fatalf("credential for another VPC: %v", err)
 	}
 }

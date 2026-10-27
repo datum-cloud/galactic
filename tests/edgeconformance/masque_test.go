@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -48,7 +49,10 @@ const (
 	masqueGrant    = "fd00:ed9e:300::/48"
 	masquePool     = "fd00:ed9e:0:30::/64"
 	masquePrefix   = "fd00:ed9e:300:1::/96"
-	masqueOutside  = "fd00:ed9e:400:1::/96"
+	// masqueSecond is VPC 10's second connector, in the same service as
+	// its first, so the two share one attachment.
+	masqueSecond  = "fd00:ed9e:300:2::/96"
+	masqueOutside = "fd00:ed9e:400:1::/96"
 	// masquePartial is the partly set-up instance's /96, also outside the
 	// grant and claimed by no other instance.
 	masquePartial   = "fd00:ed9e:400:2::/96"
@@ -67,6 +71,7 @@ type masqueTenant struct {
 	tn     tenant
 	svc    *galacticv1alpha1.EdgeService
 	vpcUID string
+	vpcID  string
 	token  string
 	id     int
 }
@@ -77,6 +82,8 @@ type masque struct {
 	a, b *masqueTenant
 	// refused is the credential of a connector whose route core refuses.
 	refused string
+	// second is the credential of VPC 10's second connector.
+	second  string
 	certPEM []byte
 	keyPEM  []byte
 	// pod is the running pod of the fixture's main Deployment.
@@ -90,13 +97,16 @@ type masque struct {
 }
 
 // TestMASQUE proves CONNECT-IP packet access on the Galactic Edge foundation
-// with the MASQUE fixture provider (tests/edgeconformance/masqueprovider):
-// the deployed agent creates the fixture's PacketAccess devices and the
+// with the MASQUE fixture provider (tests/edgeconformance/masqueprovider),
+// which runs the MASQUE provider adapter (internal/edge/masque): the
+// deployed agent creates the fixture's PacketAccess devices and the
 // unprivileged fixture opens them, two VPCs with identical connector /96s
 // stay isolated in both directions, NAT egress works from the attachment
-// node, and recreation, partial setup and teardown clean up through core
-// while leaving unrelated and replacement resources alone. Run it with
-// task verify:masque-conformance.
+// node, two connectors share one attachment and ending one leaves the
+// other forwarding, a restarted provider process adopts its attachments,
+// router maintenance keeps an attachment in use, and recreation, partial
+// setup and teardown clean up through core while leaving unrelated and
+// replacement resources alone. Run it with task verify:masque-conformance.
 func TestMASQUE(t *testing.T) {
 	l := getLab(t)
 	t.Cleanup(func() { l.writeSummary(t) })
@@ -110,6 +120,9 @@ func TestMASQUE(t *testing.T) {
 	t.Run("M16-unprivileged-provider", m.rowUnprivileged)
 	t.Run("M07-isolation", func(t *testing.T) { m.isolation(t, "cold") })
 	t.Run("nat-egress", m.rowNATEgress)
+	t.Run("shared-attachment-cancel", m.rowSharedCancel)
+	t.Run("maintenance-during-use", m.rowMaintenance)
+	t.Run("process-restart", m.rowProcessRestart)
 	t.Run("partial-setup", m.rowPartial)
 	t.Run("recreation", m.rowRecreation)
 }
@@ -133,7 +146,7 @@ func newMasque(t *testing.T, l *lab) *masque {
 			token: rand.Text(), id: 0x0a10},
 		b: &masqueTenant{tn: tenant{vpcNamespace: "ns20", vpc: "20", provider: masqueProvider},
 			token: rand.Text(), id: 0x0b20},
-		refused: rand.Text(), certPEM: certPEM, keyPEM: keyPEM,
+		refused: rand.Text(), second: rand.Text(), certPEM: certPEM, keyPEM: keyPEM,
 		links: map[string]string{}, unrelated: map[string]types.UID{},
 	}
 }
@@ -194,7 +207,7 @@ func (m *masque) setup(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
-		mt.vpcUID = l.vpcUID(t, mt.tn)
+		mt.vpcUID, mt.vpcID = l.vpcUID(t, mt.tn), l.vpcID(t, mt.tn)
 		mt.svc = l.grantService(t, mt.tn, masqueService, func(s *galacticv1alpha1.EdgeService) {
 			s.Spec.Capabilities = []string{"PacketAccess", "PrefixReachability"}
 			s.Spec.Prefixes = []string{masqueGrant}
@@ -203,9 +216,11 @@ func (m *masque) setup(t *testing.T) {
 		l.waitServiceAdmitted(t, mt.svc, true)
 	}
 	m.pod = m.deploy(t, "m1", edgeNode1, m.config(true))
-	m.waitServing(t, m.pod)
+	// The adapter requests a connector's attachment and claims its route
+	// when a request first needs them.
 	m.waitConnected(t, m.a)
 	m.waitConnected(t, m.b)
+	m.waitServing(t, m.pod)
 }
 
 // fixtureConfig, fixtureService and fixtureConnector are the fixture's
@@ -223,6 +238,7 @@ type fixtureService struct {
 	Name      string `json:"name"`
 	UID       string `json:"uid"`
 	VPCUID    string `json:"vpcUID"`
+	VPCID     string `json:"vpcID"`
 	VPC       string `json:"vpc"`
 }
 
@@ -235,17 +251,20 @@ type fixtureConnector struct {
 }
 
 // config is the fixture's config.yaml: both tenants' services and
-// connectors, plus, when withRefused is set, a VPC 10 connector whose /96
-// lies outside the grant, so core refuses its route.
+// connectors, VPC 10's second connector, plus, when withRefused is set, a
+// VPC 10 connector whose /96 lies outside the grant, so core refuses its
+// route.
 func (m *masque) config(withRefused bool) string {
 	svcs := make([]fixtureService, 0, 2)
-	conns := make([]fixtureConnector, 0, 3)
+	conns := make([]fixtureConnector, 0, 4)
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		svcs = append(svcs, mt.serviceConfig())
 		conns = append(conns, fixtureConnector{ID: "connector-" + mt.tn.vpc, Credential: mt.token,
 			Service: mt.serviceKey(), Prefix: masquePrefix,
 			Routes: []string{"fd20:" + mt.tn.vpc + "::/32", remoteHost + "/128"}})
 	}
+	conns = append(conns, fixtureConnector{ID: "connector-10-second", Credential: m.second,
+		Service: m.a.serviceKey(), Prefix: masqueSecond, Routes: []string{"fd20:10::/32"}})
 	if withRefused {
 		conns = append(conns, fixtureConnector{ID: "connector-outside", Credential: m.refused,
 			Service: m.a.serviceKey(), Prefix: masqueOutside})
@@ -256,7 +275,7 @@ func (m *masque) config(withRefused bool) string {
 // serviceConfig is mt's grant as the fixture's config.yaml lists it.
 func (mt *masqueTenant) serviceConfig() fixtureService {
 	return fixtureService{Namespace: mt.svc.Namespace, Name: mt.svc.Name, UID: string(mt.svc.UID),
-		VPCUID: mt.vpcUID, VPC: mt.tn.vpc}
+		VPCUID: mt.vpcUID, VPCID: mt.vpcID, VPC: mt.tn.vpc}
 }
 
 // serviceKey is how a fixture connector names mt's service.
@@ -315,14 +334,13 @@ patches:
 	return l.waitProviderPod(t, masqueNS, name, node)
 }
 
-// waitServing waits until pod's attachments to both services are ready and
-// both tenants' routes are accepted for them, and records their host links.
+// waitServing waits until pod's attachments to both services are ready,
+// and records their host links.
 func (m *masque) waitServing(t *testing.T, pod *corev1.Pod) {
 	t.Helper()
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		att := m.l.waitServing(t, pod, mt.svc)
 		m.links[att.Name] = att.Status.HostLink
-		m.l.waitAccepted(t, masqueNS, mt.vpcUID, netip.MustParsePrefix(masquePrefix), att.Name, 3*time.Minute)
 	}
 }
 
@@ -346,22 +364,28 @@ func (m *masque) waitConnected(t *testing.T, mt *masqueTenant) {
 // where the client runs does not change the gVPC path behind the fixture.
 func (m *masque) connect(t *testing.T, name, token, vpc string, id int, d time.Duration, dsts ...string) *probeRun {
 	t.Helper()
-	p, err := startProbe(m.pod.Spec.NodeName, 1, name, m.connectArgs(token, vpc, id, d, dsts)...)
+	p, err := startProbe(m.pod.Spec.NodeName, 1, name, connectArgs(m.pod, token, vpc, id, d, dsts)...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return p
 }
 
-func (m *masque) connectArgs(token, vpc string, id int, d time.Duration, dsts []string) []string {
-	return []string{"connectip", "-server", "[" + m.pod.Status.PodIP + "]:" + strconv.Itoa(masquePort),
+func connectArgs(pod *corev1.Pod, token, vpc string, id int, d time.Duration, dsts []string) []string {
+	return []string{"connectip", "-server", "[" + pod.Status.PodIP + "]:" + strconv.Itoa(masquePort),
 		"-authority", masqueAuthority, "-ca", masqueCA, "-token", token, "-vpc", vpc, "-id", strconv.Itoa(id),
 		"-to", strings.Join(dsts, ","), "-interval", probeInterval.String(), "-duration", d.String()}
 }
 
-// connectOnce runs one short session and returns its events.
+// connectOnce runs one short session to the fixture's pod and returns its
+// events.
 func (m *masque) connectOnce(token, vpc string, id int, d time.Duration, dsts ...string) ([]event, error) {
-	p, err := startProbe(m.pod.Spec.NodeName, 1, "once", m.connectArgs(token, vpc, id, d, dsts)...)
+	return connectOnceTo(m.pod, token, vpc, id, d, dsts...)
+}
+
+// connectOnceTo runs one short session to pod and returns its events.
+func connectOnceTo(pod *corev1.Pod, token, vpc string, id int, d time.Duration, dsts ...string) ([]event, error) {
+	p, err := startProbe(pod.Spec.NodeName, 1, "once", connectArgs(pod, token, vpc, id, d, dsts)...)
 	if err != nil {
 		return nil, err
 	}
@@ -411,6 +435,12 @@ func others(evs []event) int {
 // of the probes the window holds, so its reply ratio alone proves nothing.
 func requireSession(t *testing.T, what string, evs []event, d time.Duration, n int) {
 	t.Helper()
+	requireSessionFor(t, what, evs, d, n, masquePrefix)
+}
+
+// requireSessionFor is requireSession for a connector assigned prefix.
+func requireSessionFor(t *testing.T, what string, evs []event, d time.Duration, n int, prefix string) {
+	t.Helper()
 	if s := status(evs); s != 200 {
 		t.Errorf("%s: status %d, want 200", what, s)
 	}
@@ -420,11 +450,26 @@ func requireSession(t *testing.T, what string, evs []event, d time.Duration, n i
 			assigned = e.Assigned
 		}
 	}
-	if assigned != masquePrefix {
-		t.Errorf("%s: assigned %q, want %s", what, assigned, masquePrefix)
+	if assigned != prefix {
+		t.Errorf("%s: assigned %q, want %s", what, assigned, prefix)
 	}
 	if want, got := int(d/probeInterval)*n, sentCount(evs); got < want*9/10 {
 		t.Errorf("%s: sent %d of the window's %d probes", what, got, want)
+	}
+}
+
+// requireAnswered fails unless evs is a whole session of d to dst in which
+// at least 90% of the probes were answered, no two answers were more than a
+// second apart, and nothing else arrived.
+func (m *masque) requireAnswered(t *testing.T, what string, evs []event, d time.Duration, dst string) {
+	t.Helper()
+	requireSession(t, what, evs, d, 1)
+	rs := echoes(evs, dst)
+	m.l.record(t, what, fmt.Sprintf("%d/%d, largest gap %v, %d other", len(rs), sentCount(evs), largestGap(rs),
+		others(evs)))
+	if len(rs) < sentCount(evs)*9/10 || largestGap(rs) > time.Second || others(evs) > 0 {
+		t.Errorf("%s: %d of %d answered, largest gap %v, %d other packets", what, len(rs), sentCount(evs),
+			largestGap(rs), others(evs))
 	}
 }
 
@@ -471,7 +516,7 @@ func (m *masque) client(t *testing.T, tn tenant, i int) *corev1.Pod {
 	t.Helper()
 	var pods corev1.PodList
 	if err := m.l.c.List(context.Background(), &pods, client.InNamespace(tn.vpcNamespace),
-		client.MatchingLabels{"app": "edge-client-" + strconv.Itoa(i)}); err != nil {
+		client.MatchingLabels{appLabel: "edge-client-" + strconv.Itoa(i)}); err != nil {
 		t.Fatal(err)
 	}
 	for i := range pods.Items {
@@ -558,8 +603,6 @@ func (m *masque) checkAdmission(t *testing.T) {
 	t.Helper()
 	l := m.l
 	dst := m.workload(t, m.a.tn, 2).addr
-	att := l.attachmentOf(t, m.pod, m.a.svc)
-	l.record(t, "outside-grant route", m.waitRefused(t, m.a.vpcUID, netip.MustParsePrefix(masqueOutside), att.Name))
 	for _, c := range []struct {
 		what, token, vpc string
 		want             int
@@ -577,6 +620,9 @@ func (m *masque) checkAdmission(t *testing.T) {
 			t.Errorf("%s: status %d with %d replies, want %d and none", c.what, got, len(echoes(evs, dst)), c.want)
 		}
 	}
+	// The refused connector's request claimed its route, which core refused.
+	att := l.attachmentOf(t, m.pod, m.a.svc)
+	l.record(t, "outside-grant route", m.waitRefused(t, m.a.vpcUID, netip.MustParsePrefix(masqueOutside), att.Name))
 }
 
 // recordVersions saves what the run executed against: Kubernetes, the
@@ -739,15 +785,24 @@ func (m *masque) rowNATEgress(t *testing.T) {
 func (m *masque) rowPartial(t *testing.T) {
 	l := m.l
 	dst := m.workload(t, m.a.tn, 2).addr
+	token := rand.Text()
 	b := marshalConfig([]fixtureService{m.a.serviceConfig()}, []fixtureConnector{{ID: "connector-partial",
-		Credential: rand.Text(), Service: m.a.serviceKey(), Prefix: masquePartial}})
+		Credential: token, Service: m.a.serviceKey(), Prefix: masquePartial}})
 	pod := m.deploy(t, "partial", edgeNode1, b)
+	// Its only connector's request gets the attachment set up, and is
+	// refused once core refuses the route.
+	var evs []event
+	eventually(t, 2*time.Minute, 2*time.Second, "partial instance's request refused", func() (bool, error) {
+		var err error
+		evs, err = connectOnceTo(pod, token, "10", 1, time.Second, dst)
+		return err == nil && status(evs) == 503, err
+	})
 	att := l.waitServing(t, pod, m.a.svc)
 	m.links[att.Name] = att.Status.HostLink
 	route := m.waitRefused(t, m.a.vpcUID, netip.MustParsePrefix(masquePartial), att.Name)
 	l.record(t, "partial instance's route", route)
 
-	p := m.connect(t, "partial-continuity", m.a.token, "10", m.a.id, 20*time.Second, dst)
+	p := m.connect(t, "partial-continuity", m.a.token, "10", m.a.id, 40*time.Second, dst)
 	time.Sleep(3 * time.Second)
 	// Orphaning the Deployment and its ReplicaSet leaves nothing to replace
 	// the pod, which is then killed without running its shutdown.
@@ -761,8 +816,9 @@ func (m *masque) rowPartial(t *testing.T) {
 		t.Fatal(err)
 	}
 	killed := time.Now()
-	evs := p.wait(l, t)
-	requireSession(t, "first instance's request", evs, 20*time.Second, 1)
+	m.waitAcceptedFor(t, 20*time.Second, m.a)
+	evs = p.wait(l, t)
+	requireSession(t, "first instance's request", evs, 40*time.Second, 1)
 	rs := echoes(evs, dst)
 	l.record(t, "first instance across the kill", fmt.Sprintf("%d/%d, largest gap %v", len(rs), sentCount(evs),
 		largestGap(rs)))
@@ -772,7 +828,219 @@ func (m *masque) rowPartial(t *testing.T) {
 	}
 	m.waitReaped(t, pod.UID, []*galacticv1alpha1.EdgeAttachment{att}, killed)
 	m.waitNoRoute(t, m.a.vpcUID, netip.MustParsePrefix(masquePartial))
-	m.waitAcceptedFor(t, 20*time.Second)
+}
+
+// rowSharedCancel runs VPC 10's two connectors at once. Both are in one
+// service, so they share its attachment and packet device. The second's
+// request ends while the first's runs: the first keeps forwarding without a
+// gap and its route stays accepted, the second's claim is released, and the
+// attachment is neither replaced nor taken out of service.
+func (m *masque) rowSharedCancel(t *testing.T) {
+	l := m.l
+	dst := m.workload(t, m.a.tn, 2).addr
+	att := l.attachmentOf(t, m.pod, m.a.svc)
+	first := m.connect(t, "shared-first", m.a.token, "10", m.a.id, 45*time.Second, dst)
+	time.Sleep(3 * time.Second)
+	second := m.connect(t, "shared-second", m.second, "10", m.a.id+1, 5*time.Second, dst)
+	evs := second.wait(l, t)
+	requireSessionFor(t, "second connector's request", evs, 5*time.Second, 1, masqueSecond)
+	if n := len(echoes(evs, dst)); n < sentCount(evs)*9/10 || others(evs) > 0 {
+		t.Errorf("second connector: %d of %d answered, %d other packets", n, sentCount(evs), others(evs))
+	}
+	ended := time.Now()
+	r := l.route(t, masqueNS, m.a.vpcUID, netip.MustParsePrefix(masqueSecond))
+	if r == nil || r.Spec.Claim == nil || r.Spec.Claim.Attachment != att.Name {
+		t.Fatalf("the second connector's route was not claimed on the shared attachment %s", att.Name)
+	}
+	eventually(t, 10*time.Second, 500*time.Millisecond, "second connector's claim released", func() (bool, error) {
+		r := l.route(t, masqueNS, m.a.vpcUID, netip.MustParsePrefix(masqueSecond))
+		return r != nil && r.Spec.Claim != nil && r.Spec.Claim.Released, nil
+	})
+	l.record(t, "second connector's claim released after its request ended", time.Since(ended).Round(time.Second))
+	m.waitAcceptedFor(t, 15*time.Second, m.a)
+	m.requireAnswered(t, "first connector across the second's end", first.wait(l, t), 45*time.Second, dst)
+	cur := l.attachmentOf(t, m.pod, m.a.svc)
+	if cur == nil || cur.UID != att.UID ||
+		!meta.IsStatusConditionTrue(cur.Status.Conditions, galacticv1alpha1.EdgeAttachmentReady) {
+		t.Error("ending one connector's request replaced the shared attachment or took it out of service")
+	}
+}
+
+// rowMaintenance leaves the fixture's attachments their VPCs' only users on
+// the fixture's node, by scaling each tenant's edge client there to zero,
+// and lets galactic-router's garbage collection run while a request of each
+// tenant reaches its workload on the compute node. The VRFs, the
+// attachments and the requests survive it, and a connector's first request
+// after collection is set up and answered.
+func (m *masque) rowMaintenance(t *testing.T) {
+	l, ctx := m.l, context.Background()
+	atts := map[*masqueTenant]*galacticv1alpha1.EdgeAttachment{}
+	for _, mt := range []*masqueTenant{m.a, m.b} {
+		atts[mt] = l.attachmentOf(t, m.pod, mt.svc)
+		old := m.client(t, mt.tn, 2)
+		key := client.ObjectKey{Namespace: mt.tn.vpcNamespace, Name: "edge-client-2"}
+		scale := func(n int32) error {
+			d := &appsv1.Deployment{}
+			if err := l.c.Get(ctx, key, d); err != nil {
+				return err
+			}
+			d.Spec.Replicas = &n
+			return l.c.Update(ctx, d)
+		}
+		if err := scale(0); err != nil {
+			t.Fatal(err)
+		}
+		// The row replaces this client on purpose; teardown expects its
+		// replacement.
+		defer func() {
+			if err := scale(1); err != nil {
+				t.Error(err)
+				return
+			}
+			var p *corev1.Pod
+			eventually(t, 3*time.Minute, 2*time.Second, "edge-client-2 restored in "+mt.tn.vpcNamespace,
+				func() (bool, error) {
+					var pods corev1.PodList
+					err := l.c.List(ctx, &pods, client.InNamespace(mt.tn.vpcNamespace),
+						client.MatchingLabels{appLabel: "edge-client-2"})
+					for i := range pods.Items {
+						if c := &pods.Items[i]; c.Status.Phase == corev1.PodRunning && c.DeletionTimestamp == nil {
+							p = c
+						}
+					}
+					return p != nil, err
+				})
+			delete(m.unrelated, old.Namespace+"/"+old.Name)
+			m.unrelated[p.Namespace+"/"+p.Name] = p.UID
+		}()
+	}
+	// Precondition: no pod of either VPC is left on the fixture's node, so
+	// the attachment is all that keeps each VPC's VRF there.
+	for _, mt := range []*masqueTenant{m.a, m.b} {
+		eventually(t, 3*time.Minute, 2*time.Second, "no VPC "+mt.tn.vpc+" pod on "+edgeNode1, func() (bool, error) {
+			var pods corev1.PodList
+			if err := l.c.List(ctx, &pods, client.InNamespace(mt.tn.vpcNamespace)); err != nil {
+				return false, err
+			}
+			for _, p := range pods.Items {
+				if p.Spec.NodeName == edgeNode1 {
+					return false, nil
+				}
+			}
+			return true, nil
+		})
+	}
+	router := l.podOn(t, systemNS, "galactic-router", edgeNode1)
+	since := time.Now().UTC().Format(time.RFC3339)
+	interval := l.gcInterval(t)
+	l.record(t, "galactic-router GC interval", interval)
+	d := interval + 45*time.Second
+	runs := map[*masqueTenant]*probeRun{}
+	for _, mt := range []*masqueTenant{m.a, m.b} {
+		runs[mt] = m.connect(t, "maintenance-vpc-"+mt.tn.vpc, mt.token, mt.tn.vpc, mt.id, d,
+			m.workload(t, mt.tn, 1).addr)
+	}
+	time.Sleep(interval + 30*time.Second)
+	logs, err := l.kubectl("-n", systemNS, "logs", router, "--since-time="+since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mt := range []*masqueTenant{m.a, m.b} {
+		vrf := fmt.Sprintf("G%09sV", atts[mt].Status.VPC)
+		if _, err := nodeExec(edgeNode1, "ip", "link", "show", vrf); err != nil {
+			t.Errorf("VPC %s's VRF %s is gone with the fixture's attachment still on it: %v", mt.tn.vpc, vrf, err)
+		}
+		// A collection pass ran and kept the VRF for the attachment.
+		if !slices.ContainsFunc(strings.Split(logs, "\n"), func(line string) bool {
+			return strings.Contains(line, "GC: kept VRF an edge attachment uses") && strings.Contains(line, vrf)
+		}) {
+			t.Errorf("no garbage collection pass kept VPC %s's VRF %s during the row", mt.tn.vpc, vrf)
+		}
+	}
+	dst := m.workload(t, m.a.tn, 1).addr
+	evs, err := m.connectOnce(m.second, "10", m.a.id+1, 3*time.Second, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireSessionFor(t, "second connector's first request after collection", evs, 3*time.Second, 1, masqueSecond)
+	if n := len(echoes(evs, dst)); n < sentCount(evs)*9/10 {
+		t.Errorf("second connector after collection: %d of %d answered", n, sentCount(evs))
+	}
+	for mt, p := range runs {
+		m.requireAnswered(t, "VPC "+mt.tn.vpc+" across garbage collection", p.wait(l, t), d,
+			m.workload(t, mt.tn, 1).addr)
+		if cur := l.attachmentOf(t, m.pod, mt.svc); cur == nil || cur.UID != atts[mt].UID {
+			t.Errorf("VPC %s's attachment did not survive garbage collection", mt.tn.vpc)
+		}
+	}
+}
+
+// rowProcessRestart kills the fixture's process without shutdown. The
+// kubelet restarts its container in the same pod, and the new process
+// adopts the pod's attachments: both tenants are served again on the same
+// attachment objects, under a later lease epoch.
+func (m *masque) rowProcessRestart(t *testing.T) {
+	l, ctx := m.l, context.Background()
+	atts := map[*masqueTenant]types.UID{}
+	for _, mt := range []*masqueTenant{m.a, m.b} {
+		atts[mt] = l.attachmentOf(t, m.pod, mt.svc).UID
+	}
+	leaseKey := client.ObjectKey{Namespace: masqueNS, Name: "ei-" + string(m.pod.UID)}
+	epoch := func() int32 {
+		var lease coordinationv1.Lease
+		if err := l.c.Get(ctx, leaseKey, &lease); err != nil {
+			t.Fatal(err)
+		}
+		if lease.Spec.LeaseTransitions == nil {
+			return 0
+		}
+		return *lease.Spec.LeaseTransitions
+	}
+	before := epoch()
+	pid, err := containerPID(edgeNode1, m.pod.Namespace, m.pod.Name, "masque-provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodeExec(edgeNode1, "kill", "-KILL", strconv.Itoa(pid)); err != nil {
+		t.Fatal(err)
+	}
+	killed := time.Now()
+	m.waitConnected(t, m.a)
+	m.waitConnected(t, m.b)
+	l.record(t, "serving again after the process was killed", time.Since(killed).Round(time.Second))
+	p := l.providerPod(t, masqueNS, "m1")
+	if p == nil || p.UID != m.pod.UID {
+		t.Fatal("killing the process replaced the pod")
+	}
+	restarts := int32(0)
+	for _, cs := range p.Status.ContainerStatuses {
+		restarts += cs.RestartCount
+	}
+	l.record(t, "fixture container restarts", restarts)
+	if restarts == 0 {
+		t.Error("the fixture's container was not restarted")
+	}
+	logs, err := l.kubectl("-n", masqueNS, "logs", m.pod.Name, "-c", "masque-provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mt := range []*masqueTenant{m.a, m.b} {
+		cur := l.attachmentOf(t, m.pod, mt.svc)
+		if cur == nil || cur.UID != atts[mt] {
+			t.Errorf("VPC %s's attachment was replaced instead of adopted", mt.tn.vpc)
+			continue
+		}
+		// The new process found the attachment at start, before any
+		// request asked for it.
+		if !slices.ContainsFunc(strings.Split(logs, "\n"), func(line string) bool {
+			return strings.Contains(line, `"msg":"adopted attachment"`) && strings.Contains(line, cur.Name)
+		}) {
+			t.Errorf("the restarted process did not adopt VPC %s's attachment %s", mt.tn.vpc, cur.Name)
+		}
+	}
+	if after := epoch(); after <= before {
+		t.Errorf("the restarted process forwards under lease epoch %d, not after %d", after, before)
+	}
 }
 
 // waitRefused waits for core to refuse the claim on p and returns the
@@ -832,13 +1100,15 @@ func (m *masque) waitNoRoute(t *testing.T, vpcUID string, p netip.Prefix) {
 	})
 }
 
-// waitAcceptedFor checks that both tenants' routes stay accepted for the
-// current pod's attachments for d.
-func (m *masque) waitAcceptedFor(t *testing.T, d time.Duration) {
+// waitAcceptedFor checks that each of tenants' routes stays accepted for
+// the current pod's attachment for d. The adapter holds a connector's route
+// only while a request of the connector is open, so the caller keeps one
+// open throughout.
+func (m *masque) waitAcceptedFor(t *testing.T, d time.Duration, tenants ...*masqueTenant) {
 	t.Helper()
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		for _, mt := range []*masqueTenant{m.a, m.b} {
+		for _, mt := range tenants {
 			att := m.l.attachmentOf(t, m.pod, mt.svc)
 			r := m.l.route(t, masqueNS, mt.vpcUID, netip.MustParsePrefix(masquePrefix))
 			if att == nil || r == nil || r.Status.Accepted == nil || r.Status.Accepted.Attachment != att.Name ||
@@ -873,12 +1143,22 @@ func (m *masque) rowRecreation(t *testing.T) {
 		m.pod = p
 		return true, nil
 	})
-	m.waitServing(t, m.pod)
 	m.waitConnected(t, m.a)
 	m.waitConnected(t, m.b)
+	m.waitServing(t, m.pod)
 	l.record(t, "replacement serving after", time.Since(deleted).Round(time.Second))
 	m.waitReaped(t, old.UID, oldAtts, deleted)
-	m.waitAcceptedFor(t, 20*time.Second)
+	runs := map[*masqueTenant]*probeRun{}
+	for _, mt := range []*masqueTenant{m.a, m.b} {
+		runs[mt] = m.connect(t, "recreated-vpc-"+mt.tn.vpc, mt.token, mt.tn.vpc, mt.id, 30*time.Second,
+			m.workload(t, mt.tn, 2).addr)
+	}
+	time.Sleep(3 * time.Second)
+	m.waitAcceptedFor(t, 20*time.Second, m.a, m.b)
+	for mt, p := range runs {
+		m.requireAnswered(t, "VPC "+mt.tn.vpc+" after the old pod was reaped", p.wait(l, t), 30*time.Second,
+			m.workload(t, mt.tn, 2).addr)
+	}
 	m.isolation(t, "after-recreation")
 }
 
