@@ -1,0 +1,6 @@
+# The fixture's ServiceAccount and Deployment. The suite's overlay sets the
+# namespace, the node, and the masque-config Secret (config.yaml, tls.crt,
+# tls.key) the pod mounts.
+resources:
+  - serviceaccount.yaml
+  - deployment.yaml
