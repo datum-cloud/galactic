@@ -40,6 +40,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/radv"
 )
 
@@ -1109,6 +1110,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	slog.Info("Starting CNI installer run daemon", "grpcHealthPort", grpcHealthPort, "metricsPort", metricsPort)
 
 	m := metrics.New()
+	nldump.MustRegister(m.Registry)
 
 	ebpfState, datapath, err := startEBPFDatapath(ctx, m)
 	if err != nil {
