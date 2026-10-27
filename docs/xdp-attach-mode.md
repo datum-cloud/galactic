@@ -28,4 +28,4 @@ See [Rollback](operations/xdp-attach-mode.md#rollback).
 
 <a id="staging-validation"></a>
 
-See [Staging validation](operations/xdp-attach-mode.md#staging-validation).
+See [Validation](operations/xdp-attach-mode.md#validation).

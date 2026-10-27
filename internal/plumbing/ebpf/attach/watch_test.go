@@ -711,7 +711,7 @@ func TestWatch_HealsExternallyClearedFilterViaWatcherReconcile(t *testing.T) {
 const (
 	primaryUplink = "bond0"
 	lateUplink    = "bond1"
-	failedUplink  = "ens1f0np0"
+	failedUplink  = "ens3"
 )
 
 // TestWatch_PublishesAttachedSetWhenBGPConvergesAfterStart reproduces issue
@@ -732,7 +732,7 @@ func TestWatch_PublishesAttachedSetWhenBGPConvergesAfterStart(t *testing.T) {
 	resolved <- []string{primaryUplink, lateUplink, failedUplink} // unchanged: no publish
 	resolveInterfacesFn = func() ([]string, error) { return <-resolved, nil }
 
-	// ens1f0np0 fails to attach, so the plugin must not be told to use it.
+	// ens3 fails to attach, so the plugin must not be told to use it.
 	reconcileFn = func(_ *ebpf.Program, _, next map[string]struct{}) map[string]struct{} {
 		out := make(map[string]struct{}, len(next))
 		for name := range next {

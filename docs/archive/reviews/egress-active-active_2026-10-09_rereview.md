@@ -41,8 +41,6 @@ Not ready for staging enablement: snapshot publication is substantially improved
 - R03 follows directly from the installed route set and longest-prefix-match lookup; existing single-family tests expect the missing specific prefix and do not exercise actual packet selection through the catch-all.
 - No privileged kernel acceptance, containerlab scenario, promtool alert tests, full `task ci`, remote CI verification or live staging checks were completed in this review. A green lint/unit run does not close these gates.
 
-Reproduction artifacts for this session: `/tmp/review-overlay.json`, `/tmp/review_regression_test.go`, `/tmp/review-class-overlay.json`, `/tmp/review_class_lifecycle_test.go`, and `/tmp/egress-rereview-class-repro.log`. Other checks are logged under `/tmp/egress-rereview-*.log`.
-
 ## Architecture
 
 **Layers observed:** installer informer → translation-class groups → CNI registration → metrics → acceptance script

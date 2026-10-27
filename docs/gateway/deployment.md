@@ -364,8 +364,8 @@ Skew to watch for during the rollout. It fails closed at every step:
 - An older gateway leaves IPv4 VIPs out and never advertises them.
 - A `galactic-router` that predates IPv4 bindings writes none, so no binding
   is ever `Bound` and the gate never opens.
-- A `galactic-router` built from `main` with the native IPv4 path (merged
-  2026-10-20, before translation, and possibly running on the staging labs)
+- A `galactic-router` built from `main` with the native IPv4 path (an earlier
+  build, before translation)
   counts only `NotAdvertised` and `Advertised` as loaded. This gateway
   reports those only once some backend's binding is `Bound`, so on its own
   that router writes nothing. Beside upgraded backend nodes it can see one,

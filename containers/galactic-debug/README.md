@@ -1,12 +1,10 @@
 # galactic-debug
 
 An incident-response toolbox image, built on `nicolaka/netshoot` plus the
-tools two real xregion-503 incidents needed that netshoot didn't already
-have: `bpftool`, `bpftrace`, `vtysh` (FRR client), the `gobgp` CLI,
-`kubectl`, `crictl`, `yq`, and `galactic-usid` (this repo's base62/hex uSID
-codec, `cmd/galactic-usid`). Background:
-`projects/galactic/kb/xregion-503-envoy-egress-route-incidents.md` in the
-notebook.
+tools that debugging Galactic's datapath and routing needs and netshoot
+doesn't already have: `bpftool`, `bpftrace`, `vtysh` (FRR client), the
+`gobgp` CLI, `kubectl`, `crictl`, `yq`, and `galactic-usid` (this repo's
+base62/hex uSID codec, `cmd/galactic-usid`).
 
 Published as `ghcr.io/datum-cloud/galactic-debug`. Not deployed as a
 standing workload -- attach it on demand with `kubectl debug`.
@@ -22,8 +20,8 @@ kubectl debug -it <pod> --image=ghcr.io/datum-cloud/galactic-debug:latest --targ
 
 `--target` joins the ephemeral container to that container's process
 namespace, so `nsenter -t <pid> -n -- <cmd>` works immediately against its
-netns without a separate privileged pod. Use this for anything shaped like
-the night-two investigation: the container you actually want may not be
+netns without a separate privileged pod. Use this when a proxy or backend
+in one pod misbehaves: the container you actually want may not be
 `hostNetwork` and can have its own dedicated per-pod attachment the host
 can't see, so always confirm you're looking at the target's own netns, not
 the host's, before trusting a "looks fine" result.
@@ -43,10 +41,10 @@ manifest targeting that node (`nodeName` + `hostPID`/`hostNetwork` +
 `securityContext.privileged: true`) until every cluster's `kubectl` is new
 enough for the profile flag.
 
-## Known caveats to re-check every time, not just once
+## Known caveats to re-check every time
 
-- **A shared public hostname can be served by more than one region's
-  proxy.** Testing from one client only exercises whichever region
+- **A service reachable through more than one region needs testing in
+  each.** Testing from one client only exercises whichever region
   anycast/DNS happened to route to. Confirm each region explicitly with
   `curl --resolve host:port:[pod-ip]` against a throwaway pod inside that
   region's cluster, rather than trusting whatever the public DNS name
@@ -60,8 +58,8 @@ enough for the profile flag.
   one-second-spaced retransmits for a healthy path. `tcpdump`/`tshark` are
   how you tell the two apart, not response codes alone.
 - **A DaemonSet is not always the source of truth for what image is
-  actually running.** Some of this stack's DaemonSets are continuously
-  re-rendered from a CR (or from GitOps) faster than a direct edit
+  actually running.** A DaemonSet managed by an operator or by GitOps
+  can be re-rendered faster than a direct edit
   survives -- check the running pod's digest, not just the manifest, and
   expect a floating tag to re-resolve to something new on every restart.
 
@@ -74,5 +72,5 @@ dependency -- it is not vendored from this module's own `go.sum`, so it
 does not drift automatically the way the embedded server does.
 
 `KUBECTL_VERSION`/`CRICTL_VERSION`/`YQ_VERSION` build args pin the rest;
-bump periodically, roughly tracking the GKE clusters' own Kubernetes
-minor version (see `infra/`).
+bump periodically, roughly tracking the Kubernetes minor version of the
+clusters you debug.

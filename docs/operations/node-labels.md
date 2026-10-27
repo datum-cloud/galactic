@@ -233,8 +233,8 @@ shard. Keep the gap to that restart:
 2. Apply the new manifests straight away. They place the pods back on the
    node.
 
-Production is not affected: infra sets its own placement and already requires
-`node=edge`. A gateway or NAT node that should not become an edge node has no
+A deployment that sets its own placement and already requires `node=edge` is
+not affected. A gateway or NAT node that should not become an edge node has no
 place in the new scheme: move its role to an edge node instead.
 
 ---

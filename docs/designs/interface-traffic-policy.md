@@ -264,7 +264,7 @@ schema as well, so it holds even for clients that bypass the webhook's checks.
 While the webhook is down, writes fail rather than admit a null.
 
 The CEL IP and CIDR functions the schema uses need Kubernetes 1.31 or later;
-the schema is tested on 1.33 and 1.35, and edge clusters run 1.35.
+the schema is tested on 1.33 and 1.35.
 
 The webhook also parses every address and prefix again, since the schema only
 checks strings, and enforces the reserved default name (next section).
@@ -755,7 +755,6 @@ ends the old series by design.
 
 The design needs `HASH_OF_MAPS`, `bpf_for_each_map_elem` (5.13), the tc egress hook, the
 synchronous map-in-map wait (4.20), and the 6.8 fix to inner-map freeing.
-Production and staging run Talos v1.13.10, whose kernel line is 6.18.
 
 The CNI preflight gains probes for `HASH_OF_MAPS` and `bpf_for_each_map_elem`. The inner-map
 fix cannot be probed, so the preflight also requires kernel 6.8 or later. That

@@ -31,8 +31,7 @@ an ingress grant for the requests and an egress grant for the replies.
 In `audit` and `enforce`, a new interface's host side stays down until every
 enforcement program is attached and verified, and CNI ADD fails on a node
 whose kernel failed the preflight (Linux 6.8 or later, `HASH_OF_MAPS` and
-`bpf_for_each_map_elem`). Production and staging run Talos v1.13.10, on
-kernel 6.18.
+`bpf_for_each_map_elem`).
 
 ## Before you start
 

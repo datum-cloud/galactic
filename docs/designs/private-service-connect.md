@@ -222,7 +222,7 @@ spec:
   deliveryMode: PreferNodeLocal
   # Optional placement boundary; empty imposes no region restriction.
   # Trusted placement and selectors establish actual location membership.
-  region: us-central-1
+  region: region-a
   # Select shared replicas using protected, platform-managed labels.
   # Every selected producer must serve this tuple and service context.
   # Alternatively, use attachmentRef with namespace and name for one producer.
@@ -230,7 +230,7 @@ spec:
   attachmentSelector:
     matchLabels:
       networking.datumapis.com/service: internal-dns
-      topology.kubernetes.io/region: us-central-1
+      topology.kubernetes.io/region: region-a
 ```
 
 The address is not a Kubernetes Service frontend or an address from which
@@ -280,7 +280,7 @@ spec:
       port: 53
   # Optional consumer placement boundary; must agree with a scoped endpoint.
   # This field does not authorize cross-region fallback.
-  region: us-central-1
+  region: region-a
   # Proposed: consumer-facing address translated to the endpoint destination.
   frontend:
     # Same address family as the endpoint; restored as the reply source.

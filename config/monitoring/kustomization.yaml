@@ -10,10 +10,8 @@
 #
 # The rules' expressions are unit-tested with promtool: task test:alerts.
 #
-# On Datum's infra, applying this kustomization to an edge cluster gets the
-# PodMonitors scraped (the VictoriaMetrics operator converts them) but never
-# fires the PrometheusRule: edge vmalert does not notify, so the rules run
-# centrally from infra's copy. See prometheusrule.yaml's header.
+# A deployment may scrape these PodMonitors in one place and evaluate the
+# rules in another. See prometheusrule.yaml's header.
 namespace: galactic-system
 resources:
   - podmonitor-fabric-api-gateway.yaml

@@ -246,9 +246,9 @@ an empty pool on a node with nothing to egress is no outage. `config/monitoring/
 (`GalacticEgressPoolEmpty`, `GalacticEgressPoolBelowMinimum`,
 `GalacticEgressClassUnserved`, `GalacticEgressShardGroupDropping`,
 `GalacticEgressShardWatchNotSynced`, `GalacticEgressSweepFailing`,
-`GalacticCNIMetricsDown`). That file is the tested source of the rules, not
-where they run: on Datum's infra the rules are evaluated centrally from
-infra's own copy, so they take effect only once infra installs them there.
+`GalacticCNIMetricsDown`). That file is the tested source of the rules; a
+deployment that evaluates its own copy elsewhere has to install them there
+before they take effect.
 To compare shards' load from their own side, compare `galactic_nat_sessions`
 across the cluster's shard nodes.
 

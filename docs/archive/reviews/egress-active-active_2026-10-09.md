@@ -31,8 +31,6 @@ Not ready for staging enablement signoff: fix rollback and shard-state publicati
 | Remote CI status                                                | Unverified: GitHub API connection failed.                                                                                                                                                                                                            |
 | Live staging CRD, routing, scrape health and image availability | Unverified; no live staging evidence obtained.                                                                                                                                                                                                       |
 
-Logs from this review are in `/tmp/galactic-review-{datapath-tests,reproductions,lint,build}.log` for this workspace session.
-
 ### Staging acceptance gates
 
 1. Fix F01 and F05 with iterator/write failure-injection tests. Resolve F06 with an explicit publication/snapshot contract and concurrency coverage. For F04, enforce compatible pool membership; a tightly controlled initial staging trial can also explicitly verify homogeneous shards, but this does not fix general admission behavior.
@@ -41,7 +39,7 @@ Logs from this review are in `/tmp/galactic-review-{datapath-tests,reproductions
 4. Require a green `task ci`, the separate privileged `task test:unit-root` job on the target kernel, and `task test:alerts`. Fix F02 before treating `verify:nat-active-active` as an acceptance gate.
 5. Run a two-shard staging canary using `hashed`, `source`, the default `2h4m` pin idle, and pool minimum `2`. Exercise NAT66 **and NAT64**, TCP/UDP/ICMP, large packets and sustained sessions. The added lab script uses only IPv6 HTTP/NAT66; its flow phase uses pins off and its source phase uses 20 seconds, so it does not establish all default-mode behavior.
 6. Check shard addition, actual BGP route withdrawal and restoration, explicit drain, CNI restart with existing pins, initial informer delay/API outage, all shards unavailable, and concurrent membership changes. A prohibit route validates local selection failure, not full BGP failure detection timing. Confirm sessions on a surviving shard continue; sessions on a failed shard are expected to break because NAT state is not replicated.
-7. Verify the existing CNI PodMonitor produces `job="galactic-cni"` and correct node labels, the new rules are installed in the actual evaluator (infra centrally evaluates its own copy), and targets scrape successfully. Confirm active/minimum, per-shard traffic and drop counters. Do not interpret absent series as health.
+7. Verify the existing CNI PodMonitor produces `job="galactic-cni"` and correct node labels, the new rules are installed in the actual evaluator (which may be a separate copy of the rules), and targets scrape successfully. Confirm active/minimum, per-shard traffic and drop counters. Do not interpret absent series as health.
 8. Rehearse rollback: preserve the static SID list in the init-container configuration, switch to ordered on the new binary, verify no sentinel routes remain and the group is disabled, then roll back the binary. Mode changes can break sessions placed on a different shard. Delete only **after explicit drain and session quiescence**, not as the drain operation.
 
 ## Architecture

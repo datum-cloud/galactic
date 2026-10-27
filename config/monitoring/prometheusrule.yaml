@@ -10,17 +10,13 @@
 # the collector or the log pipeline behind it.
 #
 # This file is the tested source for these rules, not necessarily where they
-# run. On Datum's infra the edge clusters' vmalert records but never notifies,
-# so the rules are evaluated centrally against the metrics the edge vmagent
-# remote-writes, and infra carries a copy of them. Change them here first,
-# with their tests, then update infra's copy to match.
+# run. A deployment that evaluates its own copy elsewhere changes the rules
+# here first, with their tests, then updates that copy to match.
 #
-# Every alert carries the labels and annotations infra's alerting standard
-# (infra docs/enhancements/alerting-standards) checks for: severity, service
-# and team, summary, description and runbook_url. service is galactic, the
-# Backstage System that owns galactic-router, galactic-nat and the fabric
-# router underlay, and team is connect, that System's owner in infra's
-# catalog-info.yaml.
+# Every alert carries severity, service and team labels and summary,
+# description and runbook_url annotations. service is galactic, which covers
+# galactic-router, galactic-nat and the fabric router underlay, and team is
+# connect, its owner.
 #
 # Unit tests: tests/rules-test.yaml, run with task test:alerts.
 apiVersion: monitoring.coreos.com/v1

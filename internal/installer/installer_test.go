@@ -1095,21 +1095,21 @@ func TestRewriteEBPFInterfaces(t *testing.T) {
 	HostConflist = filepath.Join(t.TempDir(), "10-galactic.conflist")
 
 	written := hostconf.HostConf{
-		NodeName:        "eris-giune",
+		NodeName:        "gateway-node",
 		Kubeconfig:      config.DefaultKubeconfig,
 		Namespace:       config.DefaultNamespace,
 		LogFile:         config.DefaultLogFile,
 		LogLevel:        "debug",
-		EgressShardSIDs: "2607:ed40:8002:2002:e00f::",
+		EgressShardSIDs: "2001:db8:8002:2002:e00f::",
 		NAT64Prefix:     "64:ff9b::/96",
-		EBPFInterfaces:  "bond0,ens2f1np1,ens1f1np1",
+		EBPFInterfaces:  "bond0,ens6,ens4",
 		DANDir:          "/var/lib/galactic/dan",
 	}
 	if err := os.WriteFile(HostConflist, []byte(renderConflist(&written)), 0644); err != nil {
 		t.Fatalf("write conflist: %v", err)
 	}
 
-	attached := []string{uplinkBond0, "ens2f1np1", "ens1f1np1", uplinkBond1, "ens1f0np0", "ens2f0np0"}
+	attached := []string{uplinkBond0, "ens6", "ens4", uplinkBond1, "ens3", "ens5"}
 	rewriteEBPFInterfaces(attached)
 
 	got, err := hostconf.Load(HostConflist, hostconf.PluginType)

@@ -27,9 +27,9 @@ Scrape config and alert rules are in `config/monitoring/` (not part of
 | `FabricAPISearchIndexUnsynced`        | `fabric_api_node_search_index_synced` is 0 on a node whose index has held routes (a node with no `bmp targets fabric-api` block never fires) | 15m |
 | `FabricAPIMetricsDown`                | A fabric-api target cannot be scraped                                                                                                        | 10m |
 
-All are `severity: warning`, `service: galactic`, `team: connect`. On Datum's infra
-the PodMonitors are scraped on each edge cluster but the rules are evaluated from
-infra's copy; change the rules here, with their tests, then update infra's copy.
+All are `severity: warning`, `service: galactic`, `team: connect`. A deployment that
+evaluates its own copy of the rules changes them here first, with their tests, then
+updates that copy.
 
 Node metrics (port 9345, a private registry with Go and process collectors):
 `fabric_api_node_requests_total{type,outcome}`,

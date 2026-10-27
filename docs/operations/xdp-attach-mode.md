@@ -20,10 +20,9 @@ That mechanism is a hypothesis, not a confirmed root cause.
 
 Generic mode runs the same programs after the driver has built an skb. Their
 `XDP_TX` and `XDP_REDIRECT` verdicts then go through the kernel's ordinary
-transmit path, so the driver's XDP TX ring is never used. A staging run with
-generic mode saw zero NIC queue discards and zero stalls over 408 seconds of
-NAT64 and NAT66 TCP, UDP and ping traffic. That is limited-duration evidence,
-not proof that the stall is gone.
+transmit path, so the driver's XDP TX ring is never used. Short test runs in generic mode
+saw no NIC queue discards or stalls. That is limited-duration evidence, not
+proof that the stall is gone.
 
 The `GalacticNatUplinkRxQueueStalled` alert (`config/monitoring/`) still
 watches for it, and `galactic-nat` still exports the `bnxt_en` ring counters
@@ -141,9 +140,9 @@ capacity figures.
 - **There is no override variable.** The mode follows the host's NICs, so
   every datapath on a host always agrees.
 
-## Staging validation
+## Validation
 
-On a `bnxt_en` edge node after the release reaches it:
+On a host with a `bnxt_en` NIC after the release reaches it:
 
 1. Both pods log `Selected the XDP attach mode for this host` with
    `mode=generic` and a reason naming the `bnxt_en` NICs.
@@ -155,12 +154,11 @@ On a `bnxt_en` edge node after the release reaches it:
 4. NAT64 and NAT66 TCP, UDP and ping through the shard, and VIP traffic
    through the gateway, all pass. Use `task verify:nat-egress` and
    `task verify:gateway-ingress` in the lab, and the same checks against
-   staging.
+   your own clusters.
 5. Over at least a day of normal traffic, neither
    `GalacticNatUplinkRxQueueStalled` nor `GalacticNatUplinkRxQueueLossy`
    fires, per-queue receive counters keep rising on every queue, and NIC
    queue discards stay at zero.
 
-A node that already runs the dispatcher in generic mode, as the staging lab's
-edge node did by hand before this change, needs no migration and sees no
-bounce.
+A node that already runs the dispatcher in generic mode needs no migration
+and sees no bounce.
