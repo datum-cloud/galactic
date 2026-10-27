@@ -169,6 +169,15 @@ func (e *Executor) wait(ctx context.Context, project string, expensive bool) (fu
 	}
 	select {
 	case <-w.ready:
+		// A grant can arrive after ctx ends: dispatchLocked runs on the
+		// releasing job's goroutine, so the slot may already be handed to
+		// this waiter by the time its own select runs, leaving both cases
+		// ready and the choice to the runtime. Do not start cancelled work;
+		// hand the slot back so the next waiter gets it.
+		if err := ctx.Err(); err != nil {
+			release()
+			return nil, err
+		}
 		if e.ObserveWait != nil {
 			e.ObserveWait(time.Since(w.queued))
 		}
