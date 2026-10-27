@@ -15,6 +15,8 @@ vars:
   KUSTOMIZE_VERSION: v5.8.1
   GO_LICENSES_VERSION: v1.6.0
   PROMETHEUS_VERSION: v3.15.0
+  XRAY_VERSION: v26.10.21
+  XRAY_SHA256: 0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978
 tasks:
   default:
     silent: true
@@ -239,6 +241,25 @@ tasks:
       - cp config/monitoring/tests/rules-test.yaml {{.ALERTS_DIR}}/
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} check rules rules.yaml
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} test rules rules-test.yaml
+  test:connectip-interop:
+    desc: Prove CONNECT-IP over HTTP/3 and HTTP/2 against the pinned Xray client (linux/amd64, needs sudo and nftables)
+    # Not part of ci: the suite creates network namespaces and a TUN device
+    # as root. Results land in bin/connectip-interop (results.json and every
+    # client's log); see docs/edge/connectip-interop.md.
+    vars:
+      XRAY_DIR: '{{.LOCALBIN}}/xray-{{.XRAY_VERSION}}'
+      ARTIFACTS: '{{.LOCALBIN}}/connectip-interop'
+    cmds:
+      - mkdir -p {{.XRAY_DIR}}
+      - |
+        if [ ! -x {{.XRAY_DIR}}/xray ]; then
+          curl -fsSL -o {{.XRAY_DIR}}/xray.zip https://github.com/XTLS/Xray-core/releases/download/{{.XRAY_VERSION}}/Xray-linux-64.zip
+          echo "{{.XRAY_SHA256}}  {{.XRAY_DIR}}/xray.zip" | sha256sum -c -
+          unzip -o -q {{.XRAY_DIR}}/xray.zip xray -d {{.XRAY_DIR}}
+        fi
+      - go test -c -race -o {{.LOCALBIN}}/connectip-interop.test ./tests/connectipinterop/
+      - rm -rf {{.ARTIFACTS}}
+      - sudo env CONNECTIP_INTEROP_XRAY={{.XRAY_DIR}}/xray CONNECTIP_INTEROP_ARTIFACTS={{.ARTIFACTS}} {{.LOCALBIN}}/connectip-interop.test -test.v -test.count=1 -test.timeout=10m
   test:fabric-parity:
     desc: Compile every fabric frr.conf back through the typed API and diff it with the pinned FRR's frr-reload
     # Needs Docker, so it is not part of ci. The synthetic fixtures always
