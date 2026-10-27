@@ -46,6 +46,7 @@ func packetRequest(pod *corev1.Pod, svc *galacticv1alpha1.EdgeService, contract,
 // carries the pod-bound extras the admission policies read, and its only
 // binding is the one core keeps for the approved provider.
 func (m *masque) rowRefusedRequests(t *testing.T) {
+	m.inUse(t)
 	l, ctx := m.l, context.Background()
 	tp := l.tokenPod(t, masqueNS, "token-masque", edgeNode1)
 	defer l.deleteAndWait(t, tp)
@@ -210,6 +211,7 @@ func (m *masque) rowMissingDevice(t *testing.T) {
 // tap: the TUN device is not on the host. M07 proves both directions
 // through it.
 func (m *masque) rowRegistration(t *testing.T) {
+	m.inUse(t)
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		att := m.l.attachmentOf(t, m.pod, mt.svc)
 		link, err := nodeExec(edgeNode1, "ip", "-d", "-o", "link", "show", "dev", att.Status.HostLink)
@@ -243,6 +245,7 @@ func (m *masque) rowRegistration(t *testing.T) {
 // connected. galactic-edge removes it at its next pass, without taking the
 // attachment out of service.
 func (m *masque) rowRouteDrift(t *testing.T) {
+	m.inUse(t)
 	l := m.l
 	att := l.attachmentOf(t, m.pod, m.a.svc)
 	sandbox := strconv.Itoa(podPID(t, edgeNode1, m.pod.Namespace, m.pod.Name))

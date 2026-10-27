@@ -357,6 +357,16 @@ func (m *masque) waitServing(t *testing.T, pod *corev1.Pod) {
 	}
 }
 
+// inUse connects both tenants and waits until the fixture serves their
+// attachments. The adapter deletes an attachment that has had no request
+// for its idle period, so a row that reads the attachments calls this first.
+func (m *masque) inUse(t *testing.T) {
+	t.Helper()
+	m.waitConnected(t, m.a)
+	m.waitConnected(t, m.b)
+	m.waitServing(t, m.pod)
+}
+
 // waitConnected waits until mt's connector is admitted and its tenant's
 // workload on the provider's node answers through it.
 func (m *masque) waitConnected(t *testing.T, mt *masqueTenant) {
@@ -887,6 +897,7 @@ func (m *masque) rowSharedCancel(t *testing.T) {
 // after collection is set up and answered.
 func (m *masque) rowMaintenance(t *testing.T) {
 	l, ctx := m.l, context.Background()
+	m.inUse(t)
 	atts := map[*masqueTenant]*galacticv1alpha1.EdgeAttachment{}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		atts[mt] = l.attachmentOf(t, m.pod, mt.svc)
@@ -994,6 +1005,7 @@ func (m *masque) rowMaintenance(t *testing.T) {
 // attachment objects, under a later lease epoch.
 func (m *masque) rowProcessRestart(t *testing.T) {
 	l, ctx := m.l, context.Background()
+	m.inUse(t)
 	atts := map[*masqueTenant]types.UID{}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		atts[mt] = l.attachmentOf(t, m.pod, mt.svc).UID
