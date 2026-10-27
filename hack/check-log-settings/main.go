@@ -10,7 +10,8 @@
 // kustomize output, or source YAML such as a patch file or a kustomization
 // with inline patches. A container is a Galactic one when its image
 // repository, or, in a patch without an image, its name, is one of
-// logging.Binaries. Only literal values are checked; one taken from a
+// logging.Binaries, or when its command runs one of them, directly or from a
+// shell script. Only literal values are checked; one taken from a
 // ConfigMap, a Secret or a $(VAR) reference is not.
 //
 //	kustomize build config/galactic-router/overlays/router | check-log-settings -label galactic-router -
@@ -198,7 +199,8 @@ func inlinePatches(doc any) []string {
 func checkContainer(c map[string]any) []string {
 	name, _ := c["name"].(string)
 	image, _ := c["image"].(string)
-	if !isGalactic(name, image) {
+	command, _ := c["command"].([]any)
+	if !isGalactic(name, image) && !runsGalactic(command) {
 		return nil
 	}
 	var findings []string
@@ -254,8 +256,8 @@ func checkContainer(c map[string]any) []string {
 	return findings
 }
 
-// isGalactic reports whether a container runs a binary that calls
-// logging.Setup. Each such binary is published as an image of its own name.
+// isGalactic reports whether a container's image, or its name in a patch
+// without an image, is a binary that calls logging.Setup.
 func isGalactic(name, image string) bool {
 	if image == "" {
 		return slices.Contains(logging.Binaries, name)
@@ -265,4 +267,19 @@ func isGalactic(name, image string) bool {
 		repo = repo[:i]
 	}
 	return slices.Contains(logging.Binaries, path.Base(repo))
+}
+
+// runsGalactic reports whether command runs a binary that calls
+// logging.Setup, such as fabric-config-agent, which ships in the
+// fabric-router image and runs from a shell script in frr-init.
+func runsGalactic(command []any) bool {
+	for _, a := range command {
+		arg, _ := a.(string)
+		for _, word := range strings.Fields(arg) {
+			if slices.Contains(logging.Binaries, path.Base(word)) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -34,8 +34,10 @@ it:
 kustomize build <overlay> | go run go.datum.net/galactic/hack/check-log-settings@<version> -
 ```
 
-It recognizes a Galactic container by its image repository name, and checks
-only literal values, not ones read from a ConfigMap or Secret. An empty
+It recognizes a Galactic container by its image repository name, or by a
+command that runs one of these binaries: `fabric-config-agent` ships in the
+`fabric-router` image, run directly by `config-agent` and from a shell script
+by `frr-init`. It checks only literal values, not ones read from a ConfigMap or Secret. An empty
 `LOG_LEVEL` or `LOG_FORMAT` counts as unset. In source YAML that isn't
 rendered, such as the containerlab overlays, it reads strategic-merge patches
 but not JSON 6902 patches.
