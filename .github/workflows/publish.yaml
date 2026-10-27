@@ -145,7 +145,10 @@ jobs:
   # workload, only attached on demand via `kubectl debug` (see
   # containers/galactic-debug/README.md), so there is no manifest for it
   # to stamp a tag into.
+  # Branch builds of it are never used, so it publishes only from main and
+  # release tags.
   publish-galactic-debug-image:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       id-token: write
       contents: read
