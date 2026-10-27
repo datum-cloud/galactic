@@ -7,13 +7,14 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"go.datum.net/galactic/internal/installer"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 )
 
@@ -74,10 +75,16 @@ func newRunCommand() *cobra.Command {
 }
 
 func newRootCommand() *cobra.Command {
+	var logOpts logging.Options
 	cmd := &cobra.Command{
-		Use:   appName,
-		Short: strings.Split(appDesc, "\n")[0],
-		Long:  appDesc,
+		Use:           appName,
+		Short:         strings.Split(appDesc, "\n")[0],
+		Long:          appDesc,
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("build-info"); ok {
 				fmt.Println(metadata.BuildInfo(appName))
@@ -95,11 +102,13 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 
 	cmd.AddCommand(newInitCommand(), newRunCommand())
+	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
 }
 
 func main() {
 	if err := newRootCommand().Execute(); err != nil {
-		log.Fatalf("error: %v", err)
+		slog.Error(appName+" failed", "error", err)
+		os.Exit(1)
 	}
 }

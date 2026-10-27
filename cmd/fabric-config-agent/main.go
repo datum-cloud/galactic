@@ -42,6 +42,7 @@ import (
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/fabricconfig"
 	"go.datum.net/galactic/internal/fabricconfig/activation"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 )
 
@@ -89,6 +90,7 @@ type options struct {
 
 func main() {
 	if err := newRootCommand().Execute(); err != nil {
+		slog.Error(appName+" failed", "error", err)
 		os.Exit(1)
 	}
 }
@@ -96,11 +98,16 @@ func main() {
 // newRootCommand builds the root command and its init and watch subcommands.
 func newRootCommand() *cobra.Command {
 	opts := &options{}
+	var logOpts logging.Options
 	cmd := &cobra.Command{
-		Use:          appName,
-		Short:        strings.Split(appDesc, "\n")[0],
-		Long:         appDesc,
-		SilenceUsage: true,
+		Use:           appName,
+		Short:         strings.Split(appDesc, "\n")[0],
+		Long:          appDesc,
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("build-info"); ok {
 				fmt.Println(metadata.BuildInfo(appName))
@@ -167,6 +174,7 @@ func newRootCommand() *cobra.Command {
 	watch.Flags().BoolVar(&opts.nextHopDetectOnly, "detect-only", false,
 		"Report IPv6 sessions announcing an IPv4-mapped next hop without resetting them")
 	cmd.AddCommand(watch)
+	logOpts.BindFlags(pf)
 	return cmd
 }
 

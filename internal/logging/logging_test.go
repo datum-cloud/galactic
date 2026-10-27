@@ -209,6 +209,62 @@ func TestBinariesUseThisPackage(t *testing.T) {
 	}
 }
 
+// unmanagedBinaries are the commands under cmd/ that don't install the shared
+// handler. The CNI plugins are exec'd by the container runtime per call and
+// log as JSON to their own file; galactic-usid is a one-shot codec command.
+var unmanagedBinaries = map[string]bool{
+	"galactic-bgp":   true,
+	"galactic-ipam":  true,
+	"galactic-route": true,
+	"galactic-tap":   true,
+	"galactic-veth":  true,
+	"galactic-usid":  true,
+}
+
+// TestLongRunningBinariesInstallTheHandler fails when a command under cmd/
+// doesn't import this package, so a new long-running binary can't log through
+// slog's unconfigured default. A binary that needs no shared handler is added
+// to unmanagedBinaries with the reason.
+func TestLongRunningBinariesInstallTheHandler(t *testing.T) {
+	const pkg = "go.datum.net/galactic/internal/logging"
+	root := filepath.Join("..", "..", "cmd")
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		files, err := filepath.Glob(filepath.Join(root, d.Name(), "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		uses := false
+		for _, file := range files {
+			if strings.HasSuffix(file, "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(fset, file, nil, parser.ImportsOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, imp := range f.Imports {
+				if path, _ := strconv.Unquote(imp.Path.Value); path == pkg {
+					uses = true
+				}
+			}
+		}
+		switch {
+		case uses && unmanagedBinaries[d.Name()]:
+			t.Errorf("cmd/%s imports %s; remove it from unmanagedBinaries", d.Name(), pkg)
+		case !uses && !unmanagedBinaries[d.Name()]:
+			t.Errorf("cmd/%s doesn't import %s; call logging.Setup from its root command", d.Name(), pkg)
+		}
+	}
+}
+
 // restoreDefaults returns a function that puts slog's default logger back, so
 // one test's handler doesn't receive another package's output.
 func restoreDefaults(t *testing.T) func() {
