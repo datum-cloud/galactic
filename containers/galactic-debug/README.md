@@ -9,11 +9,6 @@ base62/hex uSID codec, `cmd/galactic-usid`).
 Published as `ghcr.io/datum-cloud/galactic-debug`. Not deployed as a
 standing workload -- attach it on demand with `kubectl debug`.
 
-Only `main` and release tags publish it: `v0.0.0-main` tracks `main`,
-`vX.Y.Z` matches a release, and `latest` is the newest release. Branch
-pushes don't publish it; use the release tag matching the deployed
-Galactic version.
-
 ## Two usage modes
 
 **Pod/proxy-level** (most incidents -- a specific backend or proxy is
