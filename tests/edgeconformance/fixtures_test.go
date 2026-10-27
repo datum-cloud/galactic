@@ -41,6 +41,9 @@ const (
 	outside = "fd00:ed9e:200:1::/64"
 
 	capSocket = "SocketAccess"
+	capPacket = "PacketAccess"
+	// providerSA is the ServiceAccount every provider deployment runs as.
+	providerSA = "edge-provider"
 	// fixtureTag fills fields of objects the suite writes as a pod that
 	// runs no provider.
 	fixtureTag = "conformance"
