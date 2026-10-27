@@ -27,7 +27,9 @@
 // I/O and then releases the lease. Independent datapath and route fencing must
 // be enforced by the foundation even when a protocol worker is paused.
 // NewTUNBackend consumes a descriptor supplied by the attachment provisioner;
-// it does not create devices, enter namespaces or program routes.
+// it does not create devices, enter namespaces or program routes. A
+// TUNBackend checks no authority of its own: serve it only through a wrapper
+// that does, as internal/edge/masque does for every packet.
 //
 // This package provides the HTTP/3 protocol component and integration interfaces,
 // not a production admission authority or host attachment controller. HTTP/2

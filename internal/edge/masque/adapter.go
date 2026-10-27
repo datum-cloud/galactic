@@ -83,6 +83,9 @@ type Config struct {
 	// Idle is how long an attachment with no request is kept before it is
 	// deleted. Zero means 30 seconds.
 	Idle time.Duration
+	// Refresh is how often each open request's grant is refreshed. Zero
+	// means timing.RenewInterval.
+	Refresh time.Duration
 }
 
 // Adapter is one provider pod's connectip.Admission and
@@ -109,7 +112,11 @@ type Adapter struct {
 	mu      sync.Mutex
 	closing bool
 	// pending holds the connectors whose request is being prepared.
-	pending     map[string]bool
+	pending map[string]bool
+	// revokeSeq counts Revoke calls and revokedAt holds each connector's
+	// latest, so an admission that began before it is refused.
+	revokeSeq   uint64
+	revokedAt   map[string]uint64
 	attachments map[string]*attachment
 	routes      map[string]*route
 	sessions    map[uint64]*session
@@ -142,13 +149,16 @@ func New(cfg Config) (*Adapter, error) {
 	if cfg.Idle == 0 {
 		cfg.Idle = 30 * time.Second
 	}
+	if cfg.Refresh == 0 {
+		cfg.Refresh = timing.RenewInterval
+	}
 	log := cfg.Log
 	if log == nil {
 		log = slog.Default()
 	}
 	a := &Adapter{
 		cfg: cfg, log: log, attachments: map[string]*attachment{}, routes: map[string]*route{},
-		sessions: map[uint64]*session{}, pending: map[string]bool{},
+		sessions: map[uint64]*session{}, pending: map[string]bool{}, revokedAt: map[string]uint64{},
 	}
 	a.stop, a.cancelStop = context.WithCancel(context.Background())
 	return a, nil
@@ -311,10 +321,25 @@ func (a *Adapter) loseLease(reason string) {
 	}
 }
 
+// quiesceTimeout bounds how long a replacement waits for the request it
+// replaces to stop its packet I/O and close.
+const quiesceTimeout = time.Second
+
 // Admit implements connectip.Admission. It returns the Authorizer's
 // connectip.ErrUnauthenticated or connectip.ErrForbidden, and ErrUnavailable
 // when the grant is valid but the connector cannot forward now.
+//
+// A request of a connector that already has one open replaces it once
+// authorized and prepared: the open request ends, and the new one is
+// registered only after the old one closed, so the connector never has two
+// forwarding requests. The attachment and route stay held across the
+// handoff when the grant names the same service. A request arriving while
+// another of the same connector is being admitted is refused as
+// unavailable.
 func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.Lease, error) {
+	a.mu.Lock()
+	began := a.revokeSeq
+	a.mu.Unlock()
 	g, err := a.cfg.Authorizer.Authorize(ctx, credential, vpc)
 	if err != nil {
 		return nil, err
@@ -326,8 +351,8 @@ func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.
 		return nil, fmt.Errorf("%w: the instance holds no lease", ErrUnavailable)
 	}
 	a.mu.Lock()
-	closing, open := a.closing, a.pending[g.Connector] || a.connectorOpen(g.Connector)
-	if !closing && !open {
+	closing, busy := a.closing, a.pending[g.Connector]
+	if !closing && !busy {
 		a.pending[g.Connector] = true
 		a.admitting.Add(1)
 	}
@@ -335,8 +360,9 @@ func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.
 	switch {
 	case closing:
 		return nil, fmt.Errorf("%w: the provider is shutting down", ErrUnavailable)
-	case open:
-		return nil, fmt.Errorf("%w: connector %s already has an open request", ErrUnavailable, g.Connector)
+	case busy:
+		return nil, fmt.Errorf("%w: connector %s already has a request being admitted", ErrUnavailable,
+			g.Connector)
 	}
 	// The connector's reservation ends once its request is registered or
 	// refused.
@@ -359,7 +385,75 @@ func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.
 		a.releaseAttachment(att)
 		return nil, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
 	}
-	return a.newSession(&g, att, rt)
+	if err := a.replace(&g); err != nil {
+		rctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
+		defer cancel()
+		a.releaseRoute(rctx, rt)
+		a.releaseAttachment(att)
+		return nil, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
+	}
+	return a.newSession(&g, att, rt, began)
+}
+
+// replace ends the open requests of g's connector and waits, up to
+// quiesceTimeout, for each to close: its packet I/O stopped, its device
+// registration and queued packets discarded and its references dropped.
+// A request that does not close in time fails the replacement and has its
+// grant retired, since it may still hold a packet in flight; the connector
+// then forwards through neither request.
+// The wait has its own bound rather than the request's, so a request that
+// spent most of its preparation time still gives the old one the full
+// quiesce period.
+func (a *Adapter) replace(g *Grant) error {
+	a.mu.Lock()
+	var old []*session
+	for _, s := range a.sessions {
+		if s.grant.Connector == g.Connector {
+			old = append(old, s)
+		}
+	}
+	a.mu.Unlock()
+	if len(old) == 0 {
+		return nil
+	}
+	t := time.NewTimer(quiesceTimeout)
+	defer t.Stop()
+	for _, s := range old {
+		s.end("replaced")
+		a.log.Info("replacing request", "session", s.info.ID, "connector", g.Connector)
+	}
+	for _, s := range old {
+		select {
+		case <-s.closed:
+		case <-t.C:
+			rctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+			defer cancel()
+			if err := a.cfg.Authorizer.Retire(rctx, s.grant); err != nil {
+				a.log.Warn("could not retire the grant of a request that did not stop", "session", s.info.ID,
+					"connector", g.Connector, "error", err)
+			}
+			return fmt.Errorf("request %d did not stop within %v", s.info.ID, quiesceTimeout)
+		case <-a.stop.Done():
+			return fmt.Errorf("waiting for request %d to stop: the provider is shutting down", s.info.ID)
+		}
+	}
+	return nil
+}
+
+// Revoke ends the open requests of connector, as when its authority
+// reports the connector's grant revoked, and refuses the connector's
+// admissions already under way. Each request's transport then closes it and
+// releases what it held. It does not wait.
+func (a *Adapter) Revoke(connector string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.revokeSeq++
+	a.revokedAt[connector] = a.revokeSeq
+	for _, s := range a.sessions {
+		if s.grant.Connector == connector {
+			s.end("revoked")
+		}
+	}
 }
 
 // isClosing reports whether Shutdown has started.
@@ -367,17 +461,6 @@ func (a *Adapter) isClosing() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.closing
-}
-
-// connectorOpen reports whether a request of connector is open. The
-// caller holds a.mu.
-func (a *Adapter) connectorOpen(connector string) bool {
-	for _, s := range a.sessions {
-		if s.grant.Connector == connector {
-			return true
-		}
-	}
-	return false
 }
 
 // Shutdown stops admitting requests and waits, bounded by ctx, for those

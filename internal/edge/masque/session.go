@@ -42,16 +42,27 @@ type session struct {
 	done    chan struct{}
 	ended   atomic.Bool
 	endOnce sync.Once
+	// notAfter is the grant's current deadline in Unix nanoseconds on
+	// cfg.Now; every packet reads it.
+	notAfter atomic.Int64
+	// timerMu guards timer, which ends the request at notAfter.
+	timerMu sync.Mutex
 	timer   *time.Timer
+	// pkt is the request's packet path once opened; close closes it.
+	pkt atomic.Pointer[packetSession]
 
 	closeOnce sync.Once
+	// closed is closed once close has stopped the packet path and dropped
+	// the request's references.
+	closed chan struct{}
 	// drops counts client packets dropped because the device was full.
 	drops atomic.Uint64
 }
 
 // newSession admits a request of g on e and r, which it takes the caller's
-// references to.
-func (a *Adapter) newSession(g *Grant, e *attachment, r *route) (connectip.Lease, error) {
+// references to. began is Adapter.revokeSeq when the admission began; a
+// Revoke of the connector since refuses it.
+func (a *Adapter) newSession(g *Grant, e *attachment, r *route, began uint64) (connectip.Lease, error) {
 	l, ok := a.heldLease()
 	a.mu.Lock()
 	var err error
@@ -60,6 +71,8 @@ func (a *Adapter) newSession(g *Grant, e *attachment, r *route) (connectip.Lease
 		err = errors.New("the lease changed during admission")
 	case a.closing:
 		err = errors.New("the provider is shutting down")
+	case a.revokedAt[g.Connector] > began:
+		err = errors.New("the connector was revoked during admission")
 	case !r.active || r.att != e || !e.serving(r.attGen):
 		err = errors.New("the attachment or route changed during admission")
 	}
@@ -74,14 +87,15 @@ func (a *Adapter) newSession(g *Grant, e *attachment, r *route) (connectip.Lease
 	defer a.mu.Unlock()
 	s := &session{
 		a: a, grant: *g, att: e, attGen: r.attGen, rt: r, rtGen: r.gen, leaseKey: l.Key, leaseEpoch: l.Epoch,
-		done: make(chan struct{}),
+		done: make(chan struct{}), closed: make(chan struct{}),
 		info: connectip.SessionInfo{
 			ID: a.nextID.Add(1), Principal: g.Principal, VPC: g.VPC, Prefix: g.Prefix, Connector: g.Connector,
 			Attachment: e.name, Claim: r.name, Epoch: uint64(r.epoch),
 		},
 	}
 	a.sessions[s.info.ID] = s
-	s.timer = time.AfterFunc(g.NotAfter.Sub(a.cfg.Now()), func() { s.end("grant expired") })
+	s.setDeadline(g.NotAfter)
+	go s.refreshLoop()
 	a.log.Info("request admitted", "session", s.info.ID, "connector", g.Connector, "principal", g.Principal,
 		"service", g.Service.UID, "attachment", e.name, "attachmentUID", e.uid, "route", r.name, "claimEpoch",
 		r.epoch, "instanceEpoch", l.Epoch)
@@ -118,17 +132,95 @@ func (s *session) Close() error {
 	return nil
 }
 
-// close is Close with the release of the route claim bounded by ctx.
+// close is Close with the release of the route claim bounded by ctx. It
+// closes the request's packet registration before dropping its references,
+// so packets the device queued for this request are discarded with it.
 func (s *session) close(ctx context.Context) {
 	s.closeOnce.Do(func() {
 		s.end("closed")
+		s.timerMu.Lock()
 		s.timer.Stop()
+		s.timerMu.Unlock()
+		if p := s.pkt.Swap(closedPacketPath); p != nil {
+			_ = p.inner.Close()
+		}
 		s.a.mu.Lock()
 		delete(s.a.sessions, s.info.ID)
 		s.a.mu.Unlock()
 		s.a.releaseRoute(ctx, s.rt)
 		s.a.releaseAttachment(s.att)
+		close(s.closed)
 	})
+}
+
+// setDeadline makes notAfter the request's deadline and ends the request
+// when it passes.
+func (s *session) setDeadline(notAfter time.Time) {
+	s.notAfter.Store(notAfter.UnixNano())
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+	if s.timer != nil {
+		s.timer.Stop()
+	}
+	if s.ended.Load() {
+		return
+	}
+	s.timer = time.AfterFunc(notAfter.Sub(s.a.cfg.Now()), func() { s.end("grant expired") })
+}
+
+// refreshTimeout bounds one Refresh call; a slower answer is discarded.
+const refreshTimeout = 2 * time.Second
+
+// refreshLoop refreshes the request's grant every cfg.Refresh until the
+// request ends. A refused refresh ends only this request. A failed one
+// leaves the deadline as it was, so the request ends at it unless a later
+// refresh succeeds.
+func (s *session) refreshLoop() {
+	t := time.NewTicker(s.a.cfg.Refresh)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-t.C:
+		}
+		if reason := s.refresh(); reason != "" {
+			s.end(reason)
+			return
+		}
+	}
+}
+
+// refresh makes one Refresh call and applies its result. It returns why the
+// request must end, or "".
+func (s *session) refresh() string {
+	ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+	defer cancel()
+	go func() {
+		select {
+		case <-s.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	g, err := s.a.cfg.Authorizer.Refresh(ctx, s.grant)
+	switch {
+	case errors.Is(err, connectip.ErrUnauthenticated), errors.Is(err, connectip.ErrForbidden):
+		return "grant revoked"
+	case err != nil:
+		s.a.log.Warn("grant refresh failed; the request keeps its deadline", "session", s.info.ID,
+			"connector", s.info.Connector, "error", err)
+		return ""
+	case ctx.Err() != nil:
+		// An answer that arrived after its deadline is not fresh authority.
+		return ""
+	case !s.grant.sameAuthority(&g):
+		return "grant changed"
+	case g.validate(s.grant.VPC, s.a.cfg.Now()) != nil:
+		return "refreshed grant is invalid"
+	}
+	s.setDeadline(g.NotAfter)
+	return ""
 }
 
 // forwarding reports whether the request may carry a packet now: it has
@@ -141,7 +233,7 @@ func (s *session) forwarding() bool {
 	a := s.a
 	l := a.lease.Load()
 	return l != nil && l.Key == s.leaseKey && l.Epoch == s.leaseEpoch &&
-		int64(a.cfg.Claims.Clock()) < a.deadline.Load() && a.cfg.Now().Before(s.grant.NotAfter)
+		int64(a.cfg.Claims.Clock()) < a.deadline.Load() && a.cfg.Now().UnixNano() < s.notAfter.Load()
 }
 
 // Open implements connectip.PacketBackend. It opens the packet path of an
@@ -163,8 +255,19 @@ func (a *Adapter) Open(ctx context.Context, info connectip.SessionInfo) (connect
 	if err != nil {
 		return nil, err
 	}
-	return &packetSession{s: s, inner: inner}, nil
+	p := &packetSession{s: s, inner: inner}
+	// A request closed while the device registration was made must not
+	// leave it behind.
+	if !s.pkt.CompareAndSwap(nil, p) {
+		_ = inner.Close()
+		return nil, fmt.Errorf("%w: request %d is closed or already open", ErrUnavailable, info.ID)
+	}
+	return p, nil
 }
+
+// closedPacketPath marks a closed request's packet path, so Open cannot
+// register one after close.
+var closedPacketPath = &packetSession{}
 
 // packetSession is a request's packet path, gated by its session.
 type packetSession struct {

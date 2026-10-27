@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"time"
 )
 
@@ -51,7 +52,8 @@ type Grant struct {
 }
 
 // Authorizer authenticates a CONNECT-IP request's credential and authorizes
-// it for the VPC the request selects.
+// it for the VPC the request selects, and keeps each issued grant current
+// while its request is open.
 type Authorizer interface {
 	// Authorize returns the connector's grant. It returns an error wrapping
 	// connectip.ErrUnauthenticated for an invalid credential and
@@ -59,6 +61,23 @@ type Authorizer interface {
 	// other error is retryable. It must honor ctx and must not log or
 	// retain credential.
 	Authorize(ctx context.Context, credential, vpc string) (Grant, error)
+	// Refresh revalidates g against the authority's current records and
+	// returns it with a new deadline. It never accepts a new credential
+	// revision. It returns an error wrapping connectip.ErrUnauthenticated
+	// or connectip.ErrForbidden once g is revoked, retired or rotated; any
+	// other error is retryable and leaves g's deadline unchanged.
+	Refresh(ctx context.Context, g Grant) (Grant, error)
+	// Retire ends g's authorization, so that no later Authorize or Refresh
+	// of it succeeds and its EdgeService stops being renewed.
+	Retire(ctx context.Context, g Grant) error
+}
+
+// sameAuthority reports whether a refreshed grant r still authorizes what g
+// did: the same connector, principal, VPC, service, /96 and routes. Only
+// the deadline may change.
+func (g *Grant) sameAuthority(r *Grant) bool {
+	return g.Connector == r.Connector && g.Principal == r.Principal && g.VPC == r.VPC && g.VPCUID == r.VPCUID &&
+		g.VPCID == r.VPCID && g.Service == r.Service && g.Prefix == r.Prefix && slices.Equal(g.Routes, r.Routes)
 }
 
 // validate reports why g cannot admit a request for vpc at now.

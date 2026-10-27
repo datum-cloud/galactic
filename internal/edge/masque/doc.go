@@ -19,6 +19,14 @@
 // forwards packets only while all three are current and its grant's
 // deadline has not passed.
 //
+// A connector forwards through at most one request. A new request of a
+// connector with one open replaces it: the open request ends, and the new
+// one is registered only once the old one has closed, its packet I/O
+// stopped and its queued packets discarded. The route claim and attachment
+// stay held across the handoff. Each request's grant is refreshed through
+// the Authorizer while it is open; a refused refresh, or Revoke, ends only
+// that connector's request.
+//
 // Requests of one service share its attachment and device, counted per
 // request. Ending one request removes only its own packet registration; the
 // last request of a connector releases its route claim, and an attachment
