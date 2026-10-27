@@ -2,22 +2,25 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package nldump lists links, addresses and routes over netlink without
-// failing when another process changes them mid-dump.
+// Package nldump lists links, addresses, routes, neighbors and rules over
+// netlink without failing when another process changes them mid-dump.
 //
 // The kernel flags a dump interrupted when the state it walks changes while
 // the dump runs, as it does whenever another process adds or removes a link,
-// address or route. The package-level netlink list functions make a single
-// attempt and return netlink.ErrDumpInterrupted, so any churn on the node
-// fails the caller. These functions retry an interrupted dump a bounded
-// number of times and never return a partial result: an entry missing from an
-// interrupted dump would look absent. Every interrupted attempt, and every
-// dump still interrupted on its last attempt, is counted in the metrics
-// MustRegister exposes, so churn is visible before it fails a caller.
+// address, route, neighbor or rule. The netlink list functions and Handle
+// methods make a single attempt and return netlink.ErrDumpInterrupted, so any
+// churn on the node fails the caller. These functions retry an interrupted
+// dump a bounded number of times and never return a partial result: an entry
+// missing from an interrupted dump would look absent. Every interrupted
+// attempt, and every dump still interrupted on its last attempt, is counted
+// in the metrics MustRegister exposes, so churn is visible before it fails a
+// caller.
 //
-// Each call opens its own netlink socket in the calling thread's network
-// namespace, with the same send and receive timeout, as the package-level
-// functions do.
+// Each package-level function opens its own netlink socket in the calling
+// thread's network namespace, with the same send and receive timeout, as the
+// package-level netlink functions do. On returns a Lister that lists over a
+// handle the caller already holds instead, such as one opened in another
+// network namespace.
 package nldump
 
 import (
@@ -45,9 +48,11 @@ const labelKind = "kind"
 
 // Listing kinds, the values of labelKind.
 const (
-	kindLink    = "link"
-	kindAddress = "address"
-	kindRoute   = "route"
+	kindLink     = "link"
+	kindAddress  = "address"
+	kindRoute    = "route"
+	kindNeighbor = "neighbor"
+	kindRule     = "rule"
 )
 
 var (
@@ -67,7 +72,7 @@ var (
 )
 
 func init() {
-	for _, kind := range []string{kindLink, kindAddress, kindRoute} {
+	for _, kind := range []string{kindLink, kindAddress, kindRoute, kindNeighbor, kindRule} {
 		interrupted.WithLabelValues(kind)
 		failures.WithLabelValues(kind)
 	}
@@ -85,26 +90,86 @@ var sleep = time.Sleep
 
 // LinkList returns every link in the calling thread's network namespace.
 func LinkList() ([]netlink.Link, error) {
-	return dump(kindLink, func(h *netlink.Handle) ([]netlink.Link, error) { return h.LinkList() })
+	return dump(Lister.LinkList)
 }
 
 // AddrList returns link's addresses of family, or every link's when link is
 // nil. Errors other than an interrupted dump are returned as netlink returns
 // them.
 func AddrList(link netlink.Link, family int) ([]netlink.Addr, error) {
-	return dump(kindAddress, func(h *netlink.Handle) ([]netlink.Addr, error) { return h.AddrList(link, family) })
+	return dump(func(l Lister) ([]netlink.Addr, error) { return l.AddrList(link, family) })
+}
+
+// RouteList returns the main-table routes of family through link, or through
+// any link when link is nil, as netlink.RouteList does.
+func RouteList(link netlink.Link, family int) ([]netlink.Route, error) {
+	return dump(func(l Lister) ([]netlink.Route, error) { return l.RouteList(link, family) })
 }
 
 // RouteListFiltered returns the routes of family that match filter on the
 // fields filterMask selects, as netlink.RouteListFiltered does.
 func RouteListFiltered(family int, filter *netlink.Route, filterMask uint64) ([]netlink.Route, error) {
-	return dump(kindRoute, func(h *netlink.Handle) ([]netlink.Route, error) {
-		return h.RouteListFiltered(family, filter, filterMask)
-	})
+	return dump(func(l Lister) ([]netlink.Route, error) { return l.RouteListFiltered(family, filter, filterMask) })
 }
 
-// dump runs list over an rtnetlink handle, through retry.
-func dump[T any](kind string, list func(*netlink.Handle) (T, error)) (T, error) {
+// NeighList returns the neighbor entries of family on the link with index
+// linkIndex, or on every link when linkIndex is 0, as netlink.NeighList does.
+func NeighList(linkIndex, family int) ([]netlink.Neigh, error) {
+	return dump(func(l Lister) ([]netlink.Neigh, error) { return l.NeighList(linkIndex, family) })
+}
+
+// RuleList returns the policy routing rules of family, as netlink.RuleList
+// does.
+func RuleList(family int) ([]netlink.Rule, error) {
+	return dump(func(l Lister) ([]netlink.Rule, error) { return l.RuleList(family) })
+}
+
+// Lister runs the retrying listings over a netlink handle its caller owns, in
+// whatever network namespace that handle was opened. It neither closes the
+// handle nor changes its socket timeout.
+type Lister struct {
+	h *netlink.Handle
+}
+
+// On returns a Lister over h.
+func On(h *netlink.Handle) Lister {
+	return Lister{h: h}
+}
+
+// LinkList returns every link, as LinkList does.
+func (l Lister) LinkList() ([]netlink.Link, error) {
+	return retry(kindLink, l.h.LinkList)
+}
+
+// AddrList returns link's addresses of family, as AddrList does.
+func (l Lister) AddrList(link netlink.Link, family int) ([]netlink.Addr, error) {
+	return retry(kindAddress, func() ([]netlink.Addr, error) { return l.h.AddrList(link, family) })
+}
+
+// RouteList returns the routes of family through link, as RouteList does.
+func (l Lister) RouteList(link netlink.Link, family int) ([]netlink.Route, error) {
+	return retry(kindRoute, func() ([]netlink.Route, error) { return l.h.RouteList(link, family) })
+}
+
+// RouteListFiltered returns the routes matching filter, as RouteListFiltered
+// does.
+func (l Lister) RouteListFiltered(family int, filter *netlink.Route, filterMask uint64) ([]netlink.Route, error) {
+	return retry(kindRoute, func() ([]netlink.Route, error) { return l.h.RouteListFiltered(family, filter, filterMask) })
+}
+
+// NeighList returns the neighbor entries on linkIndex, as NeighList does.
+func (l Lister) NeighList(linkIndex, family int) ([]netlink.Neigh, error) {
+	return retry(kindNeighbor, func() ([]netlink.Neigh, error) { return l.h.NeighList(linkIndex, family) })
+}
+
+// RuleList returns the policy routing rules of family, as RuleList does.
+func (l Lister) RuleList(family int) ([]netlink.Rule, error) {
+	return retry(kindRule, func() ([]netlink.Rule, error) { return l.h.RuleList(family) })
+}
+
+// dump runs list over a Lister on a fresh rtnetlink handle in the calling
+// thread's network namespace.
+func dump[T any](list func(Lister) (T, error)) (T, error) {
 	var zero T
 	// The handle makes one attempt per call, so retry sees, and counts, every
 	// interruption.
@@ -119,7 +184,7 @@ func dump[T any](kind string, list func(*netlink.Handle) (T, error)) (T, error) 
 	if err := handle.SetSocketTimeout(netlink.GetSocketTimeout()); err != nil {
 		return zero, err
 	}
-	return retry(kind, func() (T, error) { return list(handle) })
+	return list(On(handle))
 }
 
 // retry calls list until it returns anything but netlink.ErrDumpInterrupted,

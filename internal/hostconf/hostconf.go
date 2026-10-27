@@ -34,6 +34,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // PluginType is the "type" value the installer writes into the static
@@ -267,7 +269,7 @@ func DetectNodeNameFromAPI() (string, error) {
 		return "", fmt.Errorf("list nodes: %w", err)
 	}
 
-	addrs, err := netlink.AddrList(nil, netlink.FAMILY_ALL)
+	addrs, err := nldump.AddrList(nil, netlink.FAMILY_ALL)
 	if err != nil {
 		return "", fmt.Errorf("list local addresses: %w", err)
 	}

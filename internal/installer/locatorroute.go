@@ -18,6 +18,7 @@ import (
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // ensureLocatorLocalRoute installs a local route for this node's uSID locator
@@ -96,7 +97,7 @@ func ensureLocatorLocalRoute(ctx context.Context, k8s client.Client, namespace, 
 // pruneStaleLocatorLocalRoutes removes every locator local route on lo except
 // keep. See staleLocatorLocalRoute for what it will and will not touch.
 func pruneStaleLocatorLocalRoutes(loIndex int, keep netip.Prefix) error {
-	routes, err := netlink.RouteListFiltered(unix.AF_INET6,
+	routes, err := nldump.RouteListFiltered(unix.AF_INET6,
 		&netlink.Route{Table: unix.RT_TABLE_LOCAL, LinkIndex: loIndex},
 		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF)
 	if err != nil {

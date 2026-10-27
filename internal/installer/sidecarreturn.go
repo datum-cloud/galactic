@@ -26,6 +26,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // The ingress sidecar's return path, host side.
@@ -355,7 +356,7 @@ func ensureSidecarReturnNeighbor(addr netip.Addr, hostIfindex int, mac net.Hardw
 // routes, and a range check that drifted from the constants would delete
 // someone else's.
 func pruneSidecarReturnRoutes(live map[uint32]netip.Addr) error {
-	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6,
+	routes, err := nldump.RouteListFiltered(netlink.FAMILY_V6,
 		&netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
 	if err != nil {
 		return fmt.Errorf("list routes to prune the sidecar return path: %w", err)

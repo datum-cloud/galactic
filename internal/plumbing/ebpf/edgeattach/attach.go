@@ -22,6 +22,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/mappin"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // linkByNameFn and linkListFn are override points, as elsewhere in this
@@ -29,7 +30,7 @@ import (
 // touching the host network stack.
 var (
 	linkByNameFn = netlink.LinkByName
-	linkListFn   = netlink.LinkList
+	linkListFn   = nldump.LinkList
 )
 
 // PinDir is the default bpffs directory every edge program map is pinned under,

@@ -15,6 +15,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // ErrDrift is wrapped by Readback when the kernel does not hold the state the
@@ -138,7 +140,7 @@ func checkLink(h *netlink.Handle, name, master string, add func(string, ...any))
 }
 
 func checkAddr(h *netlink.Handle, link netlink.Link, want netip.Addr, add func(string, ...any)) {
-	addrs, err := h.AddrList(link, unix.AF_INET6)
+	addrs, err := nldump.On(h).AddrList(link, unix.AF_INET6)
 	if err != nil {
 		add("list addresses on %q: %v", link.Attrs().Name, err)
 		return
@@ -155,7 +157,7 @@ func checkAddr(h *netlink.Handle, link netlink.Link, want netip.Addr, add func(s
 }
 
 func checkNeigh(h *netlink.Handle, link netlink.Link, ip netip.Addr, mac net.HardwareAddr, add func(string, ...any)) {
-	neighs, err := h.NeighList(link.Attrs().Index, unix.AF_INET6)
+	neighs, err := nldump.On(h).NeighList(link.Attrs().Index, unix.AF_INET6)
 	if err != nil {
 		add("list neighbors on %q: %v", link.Attrs().Name, err)
 		return
@@ -177,7 +179,8 @@ func checkNeigh(h *netlink.Handle, link netlink.Link, ip netip.Addr, mac net.Har
 func checkRoute(
 	h *netlink.Handle, table uint32, dst netip.Prefix, ifindex int, gw netip.Addr, add func(string, ...any),
 ) {
-	routes, err := h.RouteListFiltered(unix.AF_INET6, &netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
+	routes, err := nldump.On(h).RouteListFiltered(
+		unix.AF_INET6, &netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
 	if err != nil {
 		add("list routes in table %d: %v", table, err)
 		return
@@ -198,7 +201,8 @@ func checkRoute(
 }
 
 func checkUnreachableDefault(h *netlink.Handle, table uint32, add func(string, ...any)) {
-	routes, err := h.RouteListFiltered(unix.AF_INET6, &netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
+	routes, err := nldump.On(h).RouteListFiltered(
+		unix.AF_INET6, &netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
 	if err != nil {
 		add("list routes in table %d: %v", table, err)
 		return
@@ -214,7 +218,7 @@ func checkUnreachableDefault(h *netlink.Handle, table uint32, add func(string, .
 // checkLocalRoute requires the kernel's local route for addr in table, without
 // which the pod VRF does not deliver traffic addressed to the attachment.
 func checkLocalRoute(h *netlink.Handle, table uint32, addr netip.Addr, add func(string, ...any)) {
-	routes, err := h.RouteListFiltered(unix.AF_INET6,
+	routes, err := nldump.On(h).RouteListFiltered(unix.AF_INET6,
 		&netlink.Route{Table: int(table), Type: unix.RTN_LOCAL}, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_TYPE)
 	if err != nil {
 		add("list local routes in table %d: %v", table, err)

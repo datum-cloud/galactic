@@ -14,6 +14,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 const (
@@ -57,7 +59,7 @@ const (
 // Errors are per attachment and never abort the sweep: one guest that is down
 // must not stop the others.
 func EnsureTapGuestNeighbors() (resolved, pending int) {
-	links, err := netlink.LinkList()
+	links, err := nldump.LinkList()
 	if err != nil {
 		slog.Warn("hostgw: could not list links to resolve tap guest neighbors", "err", err)
 		return 0, 0
@@ -124,7 +126,7 @@ func EnsureTapGuestNeighbors() (resolved, pending int) {
 func guestAddrsForTap(tableID, tapIndex int) []net.IP {
 	var out []net.IP
 	for _, family := range []int{netlink.FAMILY_V6, netlink.FAMILY_V4} {
-		routes, err := netlink.RouteListFiltered(family,
+		routes, err := nldump.RouteListFiltered(family,
 			&netlink.Route{Table: tableID}, netlink.RT_FILTER_TABLE)
 		if err != nil {
 			continue
@@ -182,7 +184,7 @@ func lookupNeighborMAC(linkIndex int, guest net.IP) (net.HardwareAddr, error) {
 	if guest.To4() != nil {
 		family = netlink.FAMILY_V4
 	}
-	neighs, err := netlink.NeighList(linkIndex, family)
+	neighs, err := nldump.NeighList(linkIndex, family)
 	if err != nil {
 		return nil, fmt.Errorf("list neighbors on link %d: %w", linkIndex, err)
 	}

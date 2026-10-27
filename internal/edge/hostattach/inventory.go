@@ -11,6 +11,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 const aliasPrefix = "galactic-edge:hostattach:"
@@ -69,7 +71,7 @@ func ListHost() ([]ObservedAttachment, error) {
 }
 
 func listOwned(h *netlink.Handle) ([]ObservedAttachment, error) {
-	links, err := h.LinkList()
+	links, err := nldump.On(h).LinkList()
 	if err != nil {
 		return nil, fmt.Errorf("hostattach: list owned links: %w", err)
 	}
@@ -95,7 +97,7 @@ func hostPrefixes(a Attachment) []netip.Prefix {
 // no longer appear in desired state. Kernel-derived local/link-local routes
 // and routes using other links are never candidates for deletion.
 func extraRoutes(h *netlink.Handle, index int, table uint32, want []netip.Prefix) ([]netlink.Route, error) {
-	routes, err := h.RouteListFiltered(unix.AF_INET6, &netlink.Route{Table: int(table), LinkIndex: index},
+	routes, err := nldump.On(h).RouteListFiltered(unix.AF_INET6, &netlink.Route{Table: int(table), LinkIndex: index},
 		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF)
 	if err != nil {
 		return nil, fmt.Errorf("hostattach: list attachment routes: %w", err)

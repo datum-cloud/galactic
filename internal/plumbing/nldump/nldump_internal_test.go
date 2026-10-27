@@ -149,7 +149,7 @@ func TestMustRegister_ExposesEveryKind(t *testing.T) {
 			}
 		}
 	}
-	want := []string{kindAddress, kindLink, kindRoute}
+	want := []string{kindAddress, kindLink, kindNeighbor, kindRoute, kindRule}
 	for _, name := range []string{"galactic_netlink_dump_interrupted_total", "galactic_netlink_dump_failures_total"} {
 		slices.Sort(got[name])
 		if !slices.Equal(got[name], want) {

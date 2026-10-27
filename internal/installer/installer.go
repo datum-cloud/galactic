@@ -199,7 +199,7 @@ var newK8sClientFn = func() (client.Client, error) {
 
 // addrListFn can be overridden in tests to mock netlink interface addresses.
 var addrListFn = func(family int) ([]netlink.Addr, error) {
-	return netlink.AddrList(nil, family)
+	return nldump.AddrList(nil, family)
 }
 
 // ebpfStartFn loads, pins, and attaches the eBPF uSID datapath, then keeps its

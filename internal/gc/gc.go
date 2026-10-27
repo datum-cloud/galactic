@@ -28,6 +28,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/nptv6map"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/nptv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
@@ -850,7 +851,7 @@ func edgeLinkVRFKeys(pinDir string) (map[usidmap.VRFKey]struct{}, error) {
 // needing no real VRF interface or CAP_NET_ADMIN.
 var (
 	listVRFLinksFn = vrf.ListVRFLinks
-	listAllLinksFn = netlink.LinkList
+	listAllLinksFn = nldump.LinkList
 )
 
 // resolveVRFKernelState recovers the Linux VRF routing table ID and egress

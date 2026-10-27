@@ -24,6 +24,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
@@ -37,9 +38,9 @@ var hostLinkNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})([A-Za-z0-9]{3})H$
 var (
 	openDatapathMapsFn = attachreg.OpenPinnedMaps
 	listRoutesFn       = func(tableID uint32, family int) ([]netlink.Route, error) {
-		return netlink.RouteListFiltered(family, &netlink.Route{Table: int(tableID)}, netlink.RT_FILTER_TABLE)
+		return nldump.RouteListFiltered(family, &netlink.Route{Table: int(tableID)}, netlink.RT_FILTER_TABLE)
 	}
-	listAddrsFn                                    = netlink.AddrList
+	listAddrsFn                                    = nldump.AddrList
 	linkByIndexFn                                  = netlink.LinkByIndex
 	resolvePublicUplinkFn attachreg.UplinkResolver = srv6.ResolvePublicUplink
 )
