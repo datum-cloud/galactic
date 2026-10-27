@@ -7,9 +7,12 @@ package controller
 import (
 	"errors"
 	"testing"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/serviceroute"
 )
 
@@ -91,5 +94,47 @@ func TestServiceRouteReplacePolicyFallsBackWhenProducerSetsCannotCoexist(t *test
 		if programmer.log[i] != want[i] {
 			t.Fatalf("operations = %v, want %v", programmer.log, want)
 		}
+	}
+}
+
+func TestProducerReportsOnlyRenewed(t *testing.T) {
+	now := time.Now()
+	renewedAt := func(ago time.Duration) *metav1.Time {
+		at := metav1.NewTime(now.Add(-ago))
+		return &at
+	}
+	endpoint := func(state networkv1alpha1.BackendHealthState, renewed *metav1.Time) *networkv1alpha1.ServiceEndpoint {
+		return &networkv1alpha1.ServiceEndpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: producerHealthEndpoint, Namespace: producerHealthNamespace,
+				ResourceVersion: renewed.String()},
+			Status: networkv1alpha1.ServiceEndpointStatus{Producers: []networkv1alpha1.ServiceEndpointProducerStatus{{
+				Namespace: producerHealthNamespace, Name: "resolver-a", AttachmentUID: "uid-a",
+				Node: producerHealthNode, Port: 8053,
+				State: state, Reason: "ProbeSucceeded", RenewTime: renewed,
+			}}},
+		}
+	}
+	lifetime := networkv1alpha1.ServiceEndpointProducerReportLifetime
+	for _, tc := range []struct {
+		name     string
+		old, new *networkv1alpha1.ServiceEndpoint
+		want     bool
+	}{
+		{"current report renewed", endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(20*time.Second)),
+			endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(0)), true},
+		{"expired report renewed", endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(lifetime+time.Second)),
+			endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(0)), false},
+		{"decision changed", endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(20*time.Second)),
+			endpoint(networkv1alpha1.BackendHealthUnhealthy, renewedAt(0)), false},
+	} {
+		if got := producerReportsOnlyRenewed(tc.old, tc.new, now); got != tc.want {
+			t.Errorf("%s: producerReportsOnlyRenewed = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	added := endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(0))
+	added.Status.Producers = append(added.Status.Producers, added.Status.Producers[0])
+	added.Status.Producers[1].Name = "resolver-b"
+	if producerReportsOnlyRenewed(endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(time.Second)), added, now) {
+		t.Error("producerReportsOnlyRenewed accepted an added producer")
 	}
 }

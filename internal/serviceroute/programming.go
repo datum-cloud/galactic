@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -48,7 +49,7 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 	if err := validateProducerTopology(endpoint, producers); err != nil {
 		return plan, err
 	}
-	unhealthy := unhealthyProducers(endpoint, producers)
+	health := producersHealth(endpoint, producers, time.Now())
 	ready := map[types.NamespacedName]bool{}
 	for _, a := range readyAttachments(attachments) {
 		ready[types.NamespacedName{Namespace: a.Namespace, Name: a.Name}] = a.Status.HostInterface != ""
@@ -80,7 +81,7 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 			continue
 		}
 		selected++
-		local, p := selectProducers(endpoint, a.Status.Node, producers, unhealthy)
+		local, p := selectProducers(endpoint, a.Status.Node, producers, health)
 		if len(local) != 0 {
 			p = local[0]
 		}

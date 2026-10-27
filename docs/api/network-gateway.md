@@ -687,6 +687,7 @@ _Appears in:_
 | `reason` _string_ | Reason is ProbeSucceeded, ProbeFailed, Pending or ProbeUnavailable. |  | MaxLength: 64 <br />Required: \{\} <br /> |
 | `message` _string_ | Message is the last probe error, when there is one. |  | MaxLength: 1024 <br /> |
 | `lastTransitionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | LastTransitionTime is when State last changed. |  | Required: \{\} <br /> |
+| `renewTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | RenewTime is when the producer's node last confirmed this entry. The<br />entry is current for 60 seconds after it, and expired after that or<br />when RenewTime is unset. |  |  |
 
 
 #### ServiceEndpointReference
@@ -744,7 +745,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `producers` _[ServiceEndpointProducerStatus](#serviceendpointproducerstatus) array_ | Producers holds the health decision of every producer of a Spread<br />endpoint. Each node writes the entries of the producers on that node,<br />under its own field manager, and removes them when the producer stops<br />being selected. An entry whose attachmentUID no longer matches the<br />attachment of that name describes an earlier attachment and is ignored. |  | MaxItems: 4096 <br /> |
+| `producers` _[ServiceEndpointProducerStatus](#serviceendpointproducerstatus) array_ | Producers holds the health decision of every producer of a Spread<br />endpoint. Each node writes the entries of the producers on that node,<br />under its own field manager, and removes them when the producer stops<br />being selected. An entry whose attachmentUID no longer matches the<br />attachment of that name describes an earlier attachment and is ignored.<br />Each node renews its entries every 15 seconds; an entry not renewed<br />for 60 seconds is expired, because its node or its galactic-router has<br />stopped, and no node routes on its state. |  | MaxItems: 4096 <br /> |
 
 
 #### ServiceRouteAuthorization

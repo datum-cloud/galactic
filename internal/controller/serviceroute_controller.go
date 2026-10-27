@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +24,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -253,11 +255,26 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		logger.Error(err, "update ServiceRoutePolicy acceptance status")
 		return ctrl.Result{}, err
 	}
+	return serviceRouteRequeue(policy, endpoint, intents, time.Now()), nil
+}
+
+// serviceRouteRequeue returns when a programmed policy is next checked: at the
+// map resync interval while it has intents or a frontend, and no later than
+// the next expiry of one of endpoint's producer reports, which can move
+// consumers to another node's producer without any event, including onto a
+// node with no intents yet.
+func serviceRouteRequeue(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
+	intents []serviceroute.RouteIntent, now time.Time,
+) ctrl.Result {
 	requeue := ctrl.Result{}
 	if len(intents) != 0 || policy.Spec.Frontend != nil {
 		requeue.RequeueAfter = serviceRouteMapResyncInterval
 	}
-	return requeue, nil
+	if left, ok := serviceroute.NextProducerReportExpiry(endpoint, now); ok &&
+		(requeue.RequeueAfter == 0 || left < requeue.RequeueAfter) {
+		requeue.RequeueAfter = left
+	}
+	return requeue
 }
 
 func (r *ServiceRoutePolicyReconciler) setAccepted(
@@ -300,7 +317,12 @@ func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		For(&networkv1alpha1.ServiceRoutePolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&networkv1alpha1.ServiceRoutePolicy{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Watches(&networkv1alpha1.ServiceEndpoint{}, handler.EnqueueRequestsFromMapFunc(r.endpointPolicies)).
+		// A renewal of producer reports that are still current changes no
+		// route; expiry is handled by requeueing.
+		Watches(&networkv1alpha1.ServiceEndpoint{}, handler.EnqueueRequestsFromMapFunc(r.endpointPolicies),
+			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+				return !producerReportsOnlyRenewed(e.ObjectOld, e.ObjectNew, time.Now())
+			}})).
 		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies)).
 		Watches(&cloudv1alpha1.VPC{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies)).
 		Watches(&networkv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies)).
@@ -511,6 +533,33 @@ func (r *ServiceRoutePolicyReconciler) consumerVPCIdentity(
 		return "", fmt.Errorf("consumer VPC %s has no allocated status identity", key)
 	}
 	return vpc.Status.VPC, nil
+}
+
+// producerReportsOnlyRenewed reports whether newObj differs from oldObj only
+// in the renewTime of status.producers entries that were current at now.
+func producerReportsOnlyRenewed(oldObj, newObj client.Object, now time.Time) bool {
+	oldEndpoint, ok := oldObj.(*networkv1alpha1.ServiceEndpoint)
+	if !ok {
+		return false
+	}
+	newEndpoint, ok := newObj.(*networkv1alpha1.ServiceEndpoint)
+	if !ok || len(oldEndpoint.Status.Producers) != len(newEndpoint.Status.Producers) {
+		return false
+	}
+	for _, entry := range oldEndpoint.Status.Producers {
+		if !serviceroute.ProducerReportCurrent(entry, now) {
+			return false
+		}
+	}
+	strip := func(endpoint *networkv1alpha1.ServiceEndpoint) *networkv1alpha1.ServiceEndpoint {
+		endpoint = endpoint.DeepCopy()
+		endpoint.ResourceVersion, endpoint.ManagedFields = "", nil
+		for i := range endpoint.Status.Producers {
+			endpoint.Status.Producers[i].RenewTime = nil
+		}
+		return endpoint
+	}
+	return equality.Semantic.DeepEqual(strip(oldEndpoint), strip(newEndpoint))
 }
 
 func (r *ServiceRoutePolicyReconciler) endpointPolicies(ctx context.Context, obj client.Object) []ctrl.Request {

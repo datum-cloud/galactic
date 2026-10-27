@@ -146,7 +146,7 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 	if err := validateProducerTopology(endpoint, producers); err != nil {
 		return nil, err
 	}
-	unhealthy := unhealthyProducers(endpoint, producers)
+	health := producersHealth(endpoint, producers, time.Now())
 
 	consumers := readyAttachments(attachments)
 	intents := make([]RouteIntent, 0, len(consumers))
@@ -157,7 +157,7 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 		if !consumerMatchesVPC(policy, consumer, consumerVPCIdentity) {
 			continue
 		}
-		local, producer := selectProducers(endpoint, consumer.Status.Node, producers, unhealthy)
+		local, producer := selectProducers(endpoint, consumer.Status.Node, producers, health)
 		consumerKey := types.NamespacedName{Namespace: consumer.Namespace, Name: consumer.Name}
 		if len(local) != 0 {
 			if consumer.Status.Node == localNode {
@@ -165,7 +165,7 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 					Attachment: consumerKey, Kind: RouteIntentLocalSet,
 					Service: cloneIPNet(service), Frontend: cloneIPNet(frontend), ConsumerDevice: consumer.Status.HostInterface,
 					Ports: clonePorts(ports), ConsumerNextHop: attachmentNextHop(consumer, service.IP),
-					Producers: producerTargets(local, unhealthy, service.IP),
+					Producers: producerTargets(local, health, service.IP),
 				})
 			}
 			continue
@@ -344,10 +344,11 @@ func spread(endpoint *networkv1alpha1.ServiceEndpoint) bool {
 // selectProducers returns, for a Spread endpoint, every producer on
 // consumerNode as local. Otherwise, or when consumerNode has none, it returns
 // the one producer a consumer there is sent to, or nil. A Spread endpoint's
-// remote producer is the first one not Unhealthy, or the first one when all
-// are.
+// remote producer is the first one whose node currently reports it Healthy or
+// Unknown, or has never reported it; failing that, the first one whose report
+// expired, since its node may be down; failing that, the first one.
 func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumerNode string,
-	producers []*cloudv1alpha1.VPCAttachment, unhealthy map[types.UID]bool,
+	producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth,
 ) (local []*cloudv1alpha1.VPCAttachment, remote *cloudv1alpha1.VPCAttachment) {
 	if spread(endpoint) {
 		for _, producer := range producers {
@@ -362,9 +363,11 @@ func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumerNode str
 			len(producers) == 0 {
 			return nil, nil
 		}
-		for _, producer := range producers {
-			if !unhealthy[producer.UID] {
-				return nil, producer
+		for _, want := range []producerHealth{producerEligible, producerReportExpired} {
+			for _, producer := range producers {
+				if health[producer.UID] == want {
+					return nil, producer
+				}
 			}
 		}
 		return nil, producers[0]
@@ -386,12 +389,26 @@ func chooseProducer(mode networkv1alpha1.ServiceEndpointDeliveryMode, consumerNo
 	return nil
 }
 
-// unhealthyProducers returns the UIDs of a Spread endpoint's producers whose
-// status entry, written by their own node for that same attachment, says
-// Unhealthy. A producer with no current entry is not in it.
-func unhealthyProducers(endpoint *networkv1alpha1.ServiceEndpoint,
-	producers []*cloudv1alpha1.VPCAttachment,
-) map[types.UID]bool {
+// producerHealth is what a Spread endpoint's status.producers says of one
+// producer.
+type producerHealth int
+
+const (
+	// producerEligible: its node currently reports it Healthy or Unknown, or
+	// has no entry for it.
+	producerEligible producerHealth = iota
+	// producerReportExpired: its node stopped renewing its entry.
+	producerReportExpired
+	// producerUnhealthy: its node currently reports it Unhealthy.
+	producerUnhealthy
+)
+
+// producersHealth classifies a Spread endpoint's producers by the status entry
+// their own node wrote for that same attachment, as of now. A producer with
+// no such entry is eligible.
+func producersHealth(endpoint *networkv1alpha1.ServiceEndpoint,
+	producers []*cloudv1alpha1.VPCAttachment, now time.Time,
+) map[types.UID]producerHealth {
 	if !spread(endpoint) {
 		return nil
 	}
@@ -400,26 +417,54 @@ func unhealthyProducers(endpoint *networkv1alpha1.ServiceEndpoint,
 	for _, entry := range endpoint.Status.Producers {
 		reported[types.NamespacedName{Namespace: entry.Namespace, Name: entry.Name}] = entry
 	}
-	unhealthy := make(map[types.UID]bool)
+	health := make(map[types.UID]producerHealth, len(producers))
 	for _, producer := range producers {
 		entry, ok := reported[types.NamespacedName{Namespace: producer.Namespace, Name: producer.Name}]
-		if ok && entry.AttachmentUID == producer.UID && entry.Node == producer.Status.Node &&
-			entry.State == networkv1alpha1.BackendHealthUnhealthy {
-			unhealthy[producer.UID] = true
+		switch {
+		case !ok || entry.AttachmentUID != producer.UID || entry.Node != producer.Status.Node:
+		case !ProducerReportCurrent(entry, now):
+			health[producer.UID] = producerReportExpired
+		case entry.State == networkv1alpha1.BackendHealthUnhealthy:
+			health[producer.UID] = producerUnhealthy
 		}
 	}
-	return unhealthy
+	return health
 }
 
-// producerTargets builds a LocalSet intent's members. Unhealthy producers
-// drain, unless every one of them is Unhealthy: then all stay eligible, since
-// an empty set would drop every new flow.
-func producerTargets(local []*cloudv1alpha1.VPCAttachment, unhealthy map[types.UID]bool,
+// ProducerReportCurrent reports whether entry was renewed within
+// ServiceEndpointProducerReportLifetime before now.
+func ProducerReportCurrent(entry networkv1alpha1.ServiceEndpointProducerStatus, now time.Time) bool {
+	return entry.RenewTime != nil &&
+		now.Before(entry.RenewTime.Add(networkv1alpha1.ServiceEndpointProducerReportLifetime))
+}
+
+// NextProducerReportExpiry returns how long until the first current entry of
+// endpoint's status.producers expires, and false when none is current.
+func NextProducerReportExpiry(endpoint *networkv1alpha1.ServiceEndpoint, now time.Time) (time.Duration, bool) {
+	var next time.Duration
+	found := false
+	for _, entry := range endpoint.Status.Producers {
+		if !ProducerReportCurrent(entry, now) {
+			continue
+		}
+		left := entry.RenewTime.Add(networkv1alpha1.ServiceEndpointProducerReportLifetime).Sub(now)
+		if !found || left < next {
+			next, found = left, true
+		}
+	}
+	return next, found
+}
+
+// producerTargets builds a LocalSet intent's members. Producers currently
+// reported Unhealthy drain, unless every one of them is: then all stay
+// eligible, since an empty set would drop every new flow. An expired report
+// drains nothing.
+func producerTargets(local []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth,
 	service net.IP,
 ) []ProducerTarget {
 	allUnhealthy := true
 	for _, producer := range local {
-		if !unhealthy[producer.UID] {
+		if health[producer.UID] != producerUnhealthy {
 			allUnhealthy = false
 			break
 		}
@@ -430,7 +475,7 @@ func producerTargets(local []*cloudv1alpha1.VPCAttachment, unhealthy map[types.U
 			Attachment: types.NamespacedName{Namespace: producer.Namespace, Name: producer.Name},
 			Device:     producer.Status.HostInterface,
 			NextHop:    attachmentNextHop(producer, service),
-			Draining:   unhealthy[producer.UID] && !allUnhealthy,
+			Draining:   health[producer.UID] == producerUnhealthy && !allUnhealthy,
 		})
 	}
 	return targets

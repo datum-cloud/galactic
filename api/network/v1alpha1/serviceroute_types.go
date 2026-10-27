@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"time"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -128,6 +130,18 @@ const (
 // endpoint that a node can hold.
 const ServiceEndpointMaxProducersPerNode = 16
 
+const (
+	// ServiceEndpointProducerReportRenewInterval is how often a node renews
+	// its entries in a Spread endpoint's status.producers while its decisions
+	// do not change.
+	ServiceEndpointProducerReportRenewInterval = 15 * time.Second
+
+	// ServiceEndpointProducerReportLifetime is how long after its renewTime
+	// an entry in status.producers is current. Nodes route on an entry only
+	// while it is current.
+	ServiceEndpointProducerReportLifetime = 60 * time.Second
+)
+
 // ServiceEndpointHealthCheck configures the TCP health check of an endpoint's
 // producers. A probe opens a TCP connection to the producer attachment's first
 // IPv6 address, not the endpoint's address, on Port, through the producer's
@@ -188,6 +202,9 @@ type ServiceEndpointStatus struct {
 	// under its own field manager, and removes them when the producer stops
 	// being selected. An entry whose attachmentUID no longer matches the
 	// attachment of that name describes an earlier attachment and is ignored.
+	// Each node renews its entries every 15 seconds; an entry not renewed
+	// for 60 seconds is expired, because its node or its galactic-router has
+	// stopped, and no node routes on its state.
 	// +optional
 	// +listType=map
 	// +listMapKey=namespace
@@ -238,6 +255,12 @@ type ServiceEndpointProducerStatus struct {
 	// LastTransitionTime is when State last changed.
 	// +kubebuilder:validation:Required
 	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
+
+	// RenewTime is when the producer's node last confirmed this entry. The
+	// entry is current for 60 seconds after it, and expired after that or
+	// when RenewTime is unset.
+	// +optional
+	RenewTime *metav1.Time `json:"renewTime,omitempty"`
 }
 
 // ServiceEndpointDeliveryMode defines the placement contract for a service.
