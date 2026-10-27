@@ -1116,3 +1116,85 @@ func TestNoAttachmentAfterShutdown(t *testing.T) {
 		t.Fatal("an attachment was requested after shutdown started")
 	}
 }
+
+// TestShutdownStopsPreparation shuts down while a request waits for its
+// attachment to be programmed: the request gives up at once, and the
+// attachment it requested is deleted with the rest.
+func TestShutdownStopsPreparation(t *testing.T) {
+	h := newHarness(t)
+	h.programAttachment = nil
+	h.start()
+	h.a.cfg.Prepare = time.Minute
+	admitted := make(chan error, 1)
+	go func() {
+		_, err := h.a.Admit(context.Background(), credA1, testVPCName)
+		admitted <- err
+	}()
+	waitFor(t, "the request to request its attachment", func() bool {
+		var list galacticv1alpha1.EdgeAttachmentList
+		return h.c.List(context.Background(), &list) == nil && len(list.Items) == 1
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := h.a.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("shutdown waited %v for the preparation", d)
+	}
+	if err := <-admitted; !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("request prepared across shutdown = %v, want unavailable", err)
+	}
+	var list galacticv1alpha1.EdgeAttachmentList
+	if err := h.c.List(context.Background(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 0 {
+		t.Fatal("shutdown left the attachment the interrupted request asked for")
+	}
+}
+
+// TestAdoptTerminatingAttachment restarts with an attachment of the pod
+// that is being deleted: the process adopts it without marking it, a request
+// waits for its release, and once it is gone the next request gets a new
+// attachment.
+func TestAdoptTerminatingAttachment(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	name := provider.AttachmentName(svcA.UID, testPod)
+	old := &galacticv1alpha1.EdgeAttachment{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: name,
+		Finalizers: []string{galacticv1alpha1.EdgeAttachmentFinalizer}}}
+	old.Spec.PodUID, old.Spec.ServiceRef = testPod, galacticv1alpha1.EdgeServiceReference{
+		Namespace: svcA.Namespace, Name: svcA.Name, UID: svcA.UID}
+	old.Spec.ProviderRef.Name, old.Spec.InstanceRef.Name = coreProvider, provider.InstanceName(testPod)
+	if err := h.c.Create(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.c.Delete(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	h.start()
+	if _, adopted := h.a.attachments[svcA.UID]; !adopted {
+		t.Fatal("the terminating attachment was not adopted")
+	}
+	if got := ready(h.attachment(svcA)); got != "" {
+		t.Fatalf("the terminating attachment was marked Ready=%q", got)
+	}
+	h.a.cfg.Prepare = 200 * time.Millisecond
+	if _, err := h.a.Admit(ctx, credA1, testVPCName); !errors.Is(err, ErrUnavailable) ||
+		!strings.Contains(err.Error(), "being released") {
+		t.Fatalf("request while the attachment is released = %v, want a wait for its release", err)
+	}
+	cur := h.attachment(svcA)
+	cur.Finalizers = nil
+	if err := h.c.Update(ctx, cur); err != nil {
+		t.Fatal(err)
+	}
+	h.a.cfg.Prepare = 2 * time.Second
+	l := h.admit(credA1)
+	defer func() { _ = l.Close() }()
+	if att := h.attachment(svcA); att.UID == old.UID {
+		t.Fatal("the request was served on the released attachment")
+	}
+}

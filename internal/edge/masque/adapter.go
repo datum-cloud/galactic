@@ -99,6 +99,13 @@ type Adapter struct {
 	deadline atomic.Int64
 	nextID   atomic.Uint64
 
+	// stop is cancelled when Shutdown starts, ending every preparation in
+	// flight; admitting counts the requests between their reservation and
+	// their registration or refusal.
+	stop       context.Context
+	cancelStop context.CancelFunc
+	admitting  sync.WaitGroup
+
 	mu      sync.Mutex
 	closing bool
 	// pending holds the connectors whose request is being prepared.
@@ -139,10 +146,12 @@ func New(cfg Config) (*Adapter, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Adapter{
+	a := &Adapter{
 		cfg: cfg, log: log, attachments: map[string]*attachment{}, routes: map[string]*route{},
 		sessions: map[uint64]*session{}, pending: map[string]bool{},
-	}, nil
+	}
+	a.stop, a.cancelStop = context.WithCancel(context.Background())
+	return a, nil
 }
 
 // Start registers the pod's EdgeInstance and adopts the attachments an
@@ -174,7 +183,10 @@ func (a *Adapter) Start(ctx context.Context) error {
 			svc: ServiceRef{Namespace: ref.Namespace, Name: ref.Name, UID: ref.UID}}
 		a.mu.Unlock()
 		// No device is open on it in this process until a request needs it.
-		_ = a.setReady(ctx, att, false, "NotServing", "adopted by a restarted provider process")
+		// One being deleted waits for its release instead.
+		if att.DeletionTimestamp == nil {
+			_ = a.setReady(ctx, att, false, "NotServing", "adopted by a restarted provider process")
+		}
 		a.log.Info("adopted attachment", "attachment", att.Name)
 	}
 	a.log.Info("instance registered", "instance", inst.Name)
@@ -317,6 +329,7 @@ func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.
 	closing, open := a.closing, a.pending[g.Connector] || a.connectorOpen(g.Connector)
 	if !closing && !open {
 		a.pending[g.Connector] = true
+		a.admitting.Add(1)
 	}
 	a.mu.Unlock()
 	switch {
@@ -331,10 +344,12 @@ func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.
 		a.mu.Lock()
 		delete(a.pending, g.Connector)
 		a.mu.Unlock()
+		a.admitting.Done()
 	}()
 
 	ctx, cancel := context.WithTimeout(ctx, a.cfg.Prepare)
 	defer cancel()
+	defer context.AfterFunc(a.stop, cancel)()
 	att, err := a.acquireAttachment(ctx, &g)
 	if err != nil {
 		return nil, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
@@ -365,13 +380,30 @@ func (a *Adapter) connectorOpen(connector string) bool {
 	return false
 }
 
-// Shutdown stops admitting requests, ends every request, then releases the
+// Shutdown stops admitting requests and waits, bounded by ctx, for those
+// still being prepared to give up. It then ends every request, releases the
 // routes, deletes the attachments and releases the lease, in that order, so
 // that nothing is taken over while this pod still forwards. Call it after
 // Run returned and the transports stopped serving.
 func (a *Adapter) Shutdown(ctx context.Context) error {
 	a.mu.Lock()
 	a.closing = true
+	a.mu.Unlock()
+	// Requests still being prepared stop, so that what they created is in
+	// the snapshot below.
+	a.cancelStop()
+	var errs []error
+	admitted := make(chan struct{})
+	go func() {
+		a.admitting.Wait()
+		close(admitted)
+	}()
+	select {
+	case <-admitted:
+	case <-ctx.Done():
+		errs = append(errs, fmt.Errorf("requests still being admitted: %w", context.Cause(ctx)))
+	}
+	a.mu.Lock()
 	sessions := make([]*session, 0, len(a.sessions))
 	for _, s := range a.sessions {
 		sessions = append(sessions, s)
@@ -382,7 +414,6 @@ func (a *Adapter) Shutdown(ctx context.Context) error {
 	for _, s := range sessions {
 		s.close(ctx)
 	}
-	var errs []error
 	a.mu.Lock()
 	routes := make([]*route, 0, len(a.routes))
 	for _, r := range a.routes {
