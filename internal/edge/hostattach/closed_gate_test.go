@@ -99,7 +99,7 @@ func TestClosedGateNeverReachesShard(t *testing.T) {
 			return err
 		}
 		defer func() { _ = h.Close() }()
-		return pruneRoutes(h, link, table, []netip.Prefix{own})
+		return pruneRoutes(h, link, table, []installed{{dst: own}})
 	})
 	echoes := f.tunA.echoes.Load()
 	for range 3 {

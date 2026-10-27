@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -70,6 +71,124 @@ func TestPeerNamespaceOwnership(t *testing.T) {
 	// A crash before stamping leaves a real, namespace-verified pair releasable.
 	if err := Release(hostH, victimH, a); err != nil {
 		t.Fatalf("release verified unstamped pair: %v", err)
+	}
+}
+
+// TestPeerNamespaceOnlyImpostor offers the host link's peer from another
+// namespace: a pod link with the same name and index as the real peer, whose
+// own peer has the host link's ifindex in a third namespace. Every index
+// matches, so only the peer namespace tells it apart.
+func TestPeerNamespaceOnlyImpostor(t *testing.T) {
+	requireRoot(t)
+	host := newHost(t, vpcA)
+	hostH := host.open(t)
+	victim, impostor, decoy := newTestNS(t), newTestNS(t), newTestNS(t)
+	victimH, impostorH := victim.open(t), impostor.open(t)
+	a := recoveryAttachment()
+	const hostIndex = 4000
+	for _, pair := range []struct {
+		from testNS
+		name string
+		peer testNS
+	}{{host, a.HostLink, victim}, {decoy, "decoy-h", impostor}} {
+		pair.from.do(t, func() error {
+			return netlink.LinkAdd(&netlink.Veth{
+				LinkAttrs: netlink.LinkAttrs{Name: pair.name, Index: hostIndex},
+				PeerName:  a.PodLink, PeerNamespace: netlink.NsFd(int(pair.peer.Fd())),
+			})
+		})
+	}
+	podLink := func(n testNS) netlink.LinkAttrs {
+		var attrs netlink.LinkAttrs
+		n.do(t, func() error {
+			l, err := netlink.LinkByName(a.PodLink)
+			if err == nil {
+				attrs = *l.Attrs()
+			}
+			return err
+		})
+		return attrs
+	}
+	realLink, fake := podLink(victim), podLink(impostor)
+	if realLink.Index != fake.Index || realLink.ParentIndex != hostIndex || fake.ParentIndex != hostIndex {
+		t.Fatalf("precondition: real pod link %d->%d, impostor %d->%d, want equal indexes peering with %d",
+			realLink.Index, realLink.ParentIndex, fake.Index, fake.ParentIndex, hostIndex)
+	}
+	a.PodIndex = realLink.Index
+
+	if _, err := Provision(hostH, impostorH, a); !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("adoption through the impostor = %v", err)
+	}
+	if err := Release(hostH, impostorH, a); !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("release through the impostor = %v", err)
+	}
+	host.do(t, func() error {
+		link, err := netlink.LinkByName(a.HostLink)
+		if err != nil {
+			return err
+		}
+		if link.Attrs().Alias != "" || link.Attrs().MasterIndex != 0 {
+			t.Error("the impostor's offer changed the host link")
+		}
+		return nil
+	})
+	if got := podLink(impostor); got.MasterIndex != 0 || got.Alias != "" || got.Flags&net.FlagUp != 0 {
+		t.Errorf("the impostor's pod link was changed: master %d, alias %q, flags %v", got.MasterIndex, got.Alias,
+			got.Flags)
+	}
+	if _, err := Provision(hostH, victimH, a); err != nil {
+		t.Fatalf("adoption through the real peer = %v", err)
+	}
+}
+
+// TestPodLinkRouteDrift adds routes through the pod link to the pod VRF
+// beside the default route toward the host: a stray prefix, a second default
+// at a better metric, and a stray prefix written as a kernel route. Readback
+// reports each, Provision removes it, and the node's own default stays.
+func TestPodLinkRouteDrift(t *testing.T) {
+	requireRoot(t)
+	host := newHost(t, vpcA)
+	hostH := host.open(t)
+	pod := newTestNS(t)
+	podH := pod.open(t)
+	a := recoveryAttachment()
+	if _, err := Provision(hostH, podH, a); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		route func(index int) *netlink.Route
+	}{
+		{"stray prefix", func(index int) *netlink.Route {
+			return &netlink.Route{LinkIndex: index, Table: int(a.PodTable), Dst: ip6Net("fd00:dead::/64")}
+		}},
+		{"second default at a better metric", func(index int) *netlink.Route {
+			return &netlink.Route{LinkIndex: index, Table: int(a.PodTable), Dst: ip6Net("::/0"), Priority: 1}
+		}},
+		{"stray prefix written as a kernel route", func(index int) *netlink.Route {
+			return &netlink.Route{LinkIndex: index, Table: int(a.PodTable), Dst: ip6Net("fd00:dead::/64"),
+				Protocol: unix.RTPROT_KERNEL}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod.do(t, func() error {
+				link, err := netlink.LinkByName(a.PodLink)
+				if err != nil {
+					return err
+				}
+				return netlink.RouteAdd(tc.route(link.Attrs().Index))
+			})
+			if err := Readback(hostH, podH, a); !errors.Is(err, ErrDrift) ||
+				!strings.Contains(err.Error(), "unexpected route") {
+				t.Fatalf("readback = %v, want drift reporting the route", err)
+			}
+			if _, err := Provision(hostH, podH, a); err != nil {
+				t.Fatal(err)
+			}
+			if err := Readback(hostH, podH, a); err != nil {
+				t.Fatalf("readback after repair = %v", err)
+			}
+		})
 	}
 }
 

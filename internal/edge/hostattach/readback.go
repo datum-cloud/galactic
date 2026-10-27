@@ -76,12 +76,13 @@ func Readback(host, pod *Namespace, a Attachment) error {
 	checkNeigh(podH, podLink, hostLinkLocal, hostLink.Attrs().HardwareAddr, add)
 
 	hostIdx := hostLink.Attrs().Index
-	checkExtraRoutes(hostH, hostIdx, hostTable, hostPrefixes(a), add)
+	checkExtraRoutes(hostH, hostIdx, hostTable, hostRoutes(a), add)
 	checkRoute(hostH, hostTable, netip.PrefixFrom(a.Address, 128), hostIdx, netip.Addr{}, add)
 	for _, p := range a.Prefixes {
 		checkRoute(hostH, hostTable, p, hostIdx, a.Address, add)
 	}
-	checkRoute(podH, a.PodTable, netip.PrefixFrom(netip.IPv6Unspecified(), 0), podLink.Attrs().Index, hostLinkLocal, add)
+	checkExtraRoutes(podH, podLink.Attrs().Index, a.PodTable, podRoutes, add)
+	checkRoute(podH, a.PodTable, podDefault, podLink.Attrs().Index, hostLinkLocal, add)
 	checkUnreachableDefault(podH, a.PodTable, add)
 	checkLocalRoute(podH, a.PodTable, a.Address, add)
 
@@ -91,7 +92,7 @@ func Readback(host, pod *Namespace, a Attachment) error {
 			if want := a.TUN.effectiveMTU(a.MTU); tun.Attrs().MTU != want {
 				add("TUN %q MTU %d, want %d", a.TUN.Name, tun.Attrs().MTU, want)
 			}
-			checkExtraRoutes(podH, tun.Attrs().Index, a.PodTable, a.Prefixes, add)
+			checkExtraRoutes(podH, tun.Attrs().Index, a.PodTable, tunRoutes(a), add)
 			if tun.Attrs().Alias != ownerAlias(a.ID) {
 				add("TUN ownership does not match attachment")
 			}
@@ -244,13 +245,14 @@ func sameDst(got *net.IPNet, want netip.Prefix) bool {
 	return netip.PrefixFrom(addr.Unmap(), ones) == want
 }
 
-func checkExtraRoutes(h *netlink.Handle, index int, table uint32, want []netip.Prefix, add func(string, ...any)) {
+func checkExtraRoutes(h *netlink.Handle, index int, table uint32, want []installed, add func(string, ...any)) {
 	extras, err := extraRoutes(h, index, table, want)
 	if err != nil {
 		add("%v", err)
 		return
 	}
 	for _, r := range extras {
-		add("unexpected route %s in table %d through ifindex %d", r.Dst, table, index)
+		add("unexpected route %s via %s metric %d in table %d through ifindex %d", r.Dst, r.Gw, r.Priority, table,
+			index)
 	}
 }

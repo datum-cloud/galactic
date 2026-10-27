@@ -7,6 +7,7 @@ package hostattach
 import (
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/vishvananda/netlink"
@@ -87,41 +88,113 @@ func listOwned(h *netlink.Handle) ([]ObservedAttachment, error) {
 	return result, nil
 }
 
-func hostPrefixes(a Attachment) []netip.Prefix {
-	prefixes := make([]netip.Prefix, 0, len(a.Prefixes)+1)
-	prefixes = append(prefixes, netip.PrefixFrom(a.Address, 128))
-	return append(prefixes, a.Prefixes...)
+// podDefault is the destination of the only route an attachment's pod link
+// carries in the pod VRF.
+var podDefault = netip.PrefixFrom(netip.IPv6Unspecified(), 0)
+
+// installed is a route the node installs through an attachment's link: its
+// destination and, for a route with one, its gateway.
+type installed struct {
+	dst netip.Prefix
+	gw  netip.Addr
 }
 
-// extraRoutes lists static unicast destinations on a dedicated owned link that
-// no longer appear in desired state. Kernel-derived local/link-local routes
-// and routes using other links are never candidates for deletion.
-func extraRoutes(h *netlink.Handle, index int, table uint32, want []netip.Prefix) ([]netlink.Route, error) {
+// hostRoutes are the routes the node installs through the host link: the
+// attachment's address, and each prefix via that address.
+func hostRoutes(a Attachment) []installed {
+	routes := make([]installed, 0, len(a.Prefixes)+1)
+	routes = append(routes, installed{dst: netip.PrefixFrom(a.Address, 128)})
+	for _, p := range a.Prefixes {
+		routes = append(routes, installed{dst: p, gw: a.Address})
+	}
+	return routes
+}
+
+// podRoutes is the route the node installs through the pod link: the pod
+// VRF's default, via the host link's link-local address.
+var podRoutes = []installed{{dst: podDefault, gw: hostLinkLocal}}
+
+// tunRoutes are the routes the node installs through the packet device: one
+// per prefix, without a gateway.
+func tunRoutes(a Attachment) []installed {
+	routes := make([]installed, 0, len(a.Prefixes))
+	for _, p := range a.Prefixes {
+		routes = append(routes, installed{dst: p})
+	}
+	return routes
+}
+
+// matches reports whether r is the installed route: the same destination
+// and gateway, at the default metric the node's writes leave.
+func (want installed) matches(r netlink.Route) bool {
+	if !sameDst(r.Dst, want.dst) || (r.Priority != 0 && r.Priority != defaultRouteMetric) {
+		return false
+	}
+	gw, _ := netip.AddrFromSlice(r.Gw)
+	return gw.Unmap() == want.gw
+}
+
+// defaultRouteMetric is the metric the kernel gives an IPv6 route added
+// without one.
+const defaultRouteMetric = 1024
+
+// extraRoutes lists the unicast routes through a dedicated owned link that
+// the node does not install: any destination, gateway or metric other than
+// want's. A kernel route counts as the kernel's own only when it is the
+// connected route of an address on the link, so a route written with
+// "proto kernel" is still extra. Local and multicast routes, and routes
+// through other links, are never candidates.
+func extraRoutes(h *netlink.Handle, index int, table uint32, want []installed) ([]netlink.Route, error) {
 	routes, err := nldump.On(h).RouteListFiltered(unix.AF_INET6, &netlink.Route{Table: int(table), LinkIndex: index},
 		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF)
 	if err != nil {
 		return nil, fmt.Errorf("hostattach: list attachment routes: %w", err)
 	}
+	connected, err := connectedPrefixes(h, index)
+	if err != nil {
+		return nil, err
+	}
 	var extras []netlink.Route
 	for _, r := range routes {
-		if r.Type != unix.RTN_UNICAST || r.Protocol == unix.RTPROT_KERNEL {
+		if r.Type != unix.RTN_UNICAST {
 			continue
 		}
-		found := false
-		for _, p := range want {
-			if sameDst(r.Dst, p) {
-				found = true
-				break
-			}
+		if r.Protocol == unix.RTPROT_KERNEL && slices.ContainsFunc(connected, func(p netip.Prefix) bool {
+			return sameDst(r.Dst, p)
+		}) {
+			continue
 		}
-		if !found {
+		if !slices.ContainsFunc(want, func(w installed) bool { return w.matches(r) }) {
 			extras = append(extras, r)
 		}
 	}
 	return extras, nil
 }
 
-func pruneRoutes(h *netlink.Handle, index int, table uint32, want []netip.Prefix) error {
+// connectedPrefixes returns the prefixes of the IPv6 addresses on the link
+// with index: the destinations of the kernel's connected routes through it.
+func connectedPrefixes(h *netlink.Handle, index int) ([]netip.Prefix, error) {
+	link, err := h.LinkByIndex(index)
+	if err != nil {
+		return nil, fmt.Errorf("hostattach: look up link %d: %w", index, err)
+	}
+	addrs, err := nldump.On(h).AddrList(link, netlink.FAMILY_V6)
+	if err != nil {
+		return nil, fmt.Errorf("hostattach: list addresses of link %d: %w", index, err)
+	}
+	prefixes := make([]netip.Prefix, 0, len(addrs))
+	for _, a := range addrs {
+		addr, ok := netip.AddrFromSlice(a.IP)
+		if !ok {
+			continue
+		}
+		ones, _ := a.Mask.Size()
+		prefixes = append(prefixes, netip.PrefixFrom(addr.Unmap(), ones).Masked())
+	}
+	return prefixes, nil
+}
+
+func pruneRoutes(h *netlink.Handle, index int, table uint32, want []installed) error {
 	extras, err := extraRoutes(h, index, table, want)
 	if err != nil {
 		return err
