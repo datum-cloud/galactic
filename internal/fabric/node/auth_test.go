@@ -5,14 +5,17 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +27,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
+	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
 	"go.datum.net/galactic/internal/fabric/errcode"
 	"go.datum.net/galactic/internal/fabric/identity"
 	"go.datum.net/galactic/internal/fabric/testpki"
@@ -218,5 +222,33 @@ func TestAuthorizerEndsStreamAtExpiry(t *testing.T) {
 	}
 	if now := time.Now(); now.Before(notAfter.Truncate(time.Second)) {
 		t.Errorf("stream ended at %v, before the certificate's expiry %v", now, notAfter)
+	}
+}
+
+// A failed Looking Glass service call is logged by its codes alone, since
+// its message can quote the caller's target; other calls keep the message.
+func TestLogCallOmitsServiceErrorText(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	const target = "192.0.2.77"
+	refusal := errcode.StatusWithMetadata(errcode.InvalidQuery, "InvalidTarget: "+target+" is not a plain address",
+		map[string]string{errcode.MetadataQueryCode: "InvalidTarget"})
+
+	logCall(servicev1.LookingGlassService_RunDiagnostic_FullMethodName, nil, refusal)
+	line := logs.String()
+	if strings.Contains(line, target) {
+		t.Errorf("service failure log names the target: %s", line)
+	}
+	if !strings.Contains(line, `"code":"InvalidQuery"`) || !strings.Contains(line, `"queryCode":"InvalidTarget"`) {
+		t.Errorf("service failure log lacks its codes: %s", line)
+	}
+
+	logs.Reset()
+	logCall(testMethod, nil, refusal)
+	if !strings.Contains(logs.String(), target) {
+		t.Errorf("operator failure log lost its message: %s", logs.String())
 	}
 }
