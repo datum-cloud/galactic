@@ -518,7 +518,7 @@ func configureHostLink(
 			LinkIndex: idx, Table: int(table), Dst: prefixNet(p), Gw: a.Address.AsSlice(),
 		})
 	}
-	if err := pruneRoutes(h, link.Attrs().Index, table, hostRoutes(a)); err != nil {
+	if err := pruneRoutes(h, link.Attrs().Index, table, hostRoutes(a), connected()); err != nil {
 		return fmt.Errorf("hostattach: host link %q: %w", a.HostLink, err)
 	}
 	for _, r := range routes {
@@ -578,10 +578,14 @@ func configurePodLink(h *netlink.Handle, link netlink.Link, a Attachment, hostMA
 	}); err != nil {
 		return fmt.Errorf("hostattach: neighbor %s on %q: %w", hostLinkLocal, a.PodLink, err)
 	}
-	// The pod link carries only the default route toward the host; any other
-	// route through it would send pod VRF traffic past the uSID datapath's
-	// view of the attachment.
-	if err := pruneRoutes(h, idx, a.PodTable, podRoutes); err != nil {
+	// The pod link carries only the node's addresses and the default route
+	// toward the host. Any other address brings a connected route, and any
+	// other route sends pod VRF traffic past the uSID datapath's view of the
+	// attachment.
+	if err := pruneAddrs(h, link, []netip.Addr{a.Address}); err != nil {
+		return fmt.Errorf("hostattach: pod link %q: %w", a.PodLink, err)
+	}
+	if err := pruneRoutes(h, idx, a.PodTable, podRoutes, connected(a.Address)); err != nil {
 		return fmt.Errorf("hostattach: pod link %q: %w", a.PodLink, err)
 	}
 	def := &netlink.Route{
@@ -635,7 +639,10 @@ func ensureTUN(h *netlink.Handle, pod *Namespace, a Attachment) error {
 	if err := h.LinkSetUp(tun); err != nil {
 		return fmt.Errorf("hostattach: set TUN %q up: %w", a.TUN.Name, err)
 	}
-	if err := pruneRoutes(h, tun.Attrs().Index, a.PodTable, tunRoutes(a)); err != nil {
+	if err := pruneAddrs(h, tun, nil); err != nil {
+		return fmt.Errorf("hostattach: TUN %q: %w", a.TUN.Name, err)
+	}
+	if err := pruneRoutes(h, tun.Attrs().Index, a.PodTable, tunRoutes(a), connected()); err != nil {
 		return fmt.Errorf("hostattach: TUN %q: %w", a.TUN.Name, err)
 	}
 	for _, p := range a.Prefixes {

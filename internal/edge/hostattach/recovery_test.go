@@ -192,6 +192,49 @@ func TestPodLinkRouteDrift(t *testing.T) {
 	}
 }
 
+// TestAddressDrift adds a global address to the pod link and to the packet
+// device. The kernel's connected route for each would steer pod VRF traffic
+// past the attachment's routes, and is "proto kernel", so the node must not
+// treat it as its own: Readback reports the addresses, and Provision removes
+// them and their routes.
+func TestAddressDrift(t *testing.T) {
+	requireRoot(t)
+	host := newHost(t, vpcA)
+	hostH := host.open(t)
+	pod := newTestNS(t)
+	podH := pod.open(t)
+	a := recoveryAttachment()
+	a.TUN = &TUN{Name: "rtun", Owner: uint32(os.Getuid()), Group: uint32(os.Getgid())}
+	a.Prefixes = []netip.Prefix{netip.MustParsePrefix("fd00:5::/96")}
+	if _, err := Provision(hostH, podH, a); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ link, addr string }{
+		{a.PodLink, "fd00:dead::1/64"},
+		{a.TUN.Name, "fd00:5::1:0/112"},
+	} {
+		t.Run(tc.link, func(t *testing.T) {
+			pod.do(t, func() error {
+				link, err := netlink.LinkByName(tc.link)
+				if err != nil {
+					return err
+				}
+				return netlink.AddrAdd(link, &netlink.Addr{IPNet: ip6Net(tc.addr), Flags: unix.IFA_F_NODAD})
+			})
+			if err := Readback(hostH, podH, a); !errors.Is(err, ErrDrift) ||
+				!strings.Contains(err.Error(), "unexpected address") {
+				t.Fatalf("readback = %v, want drift reporting the address", err)
+			}
+			if _, err := Provision(hostH, podH, a); err != nil {
+				t.Fatal(err)
+			}
+			if err := Readback(hostH, podH, a); err != nil {
+				t.Fatalf("readback after repair = %v", err)
+			}
+		})
+	}
+}
+
 func TestPrefixRemovalAndPartialRecovery(t *testing.T) {
 	requireRoot(t)
 	host := newHost(t, vpcA)

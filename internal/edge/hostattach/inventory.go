@@ -138,28 +138,43 @@ func (want installed) matches(r netlink.Route) bool {
 // without one.
 const defaultRouteMetric = 1024
 
+// linkLocalPrefix is the kernel's connected route for any link-local
+// address, which every link carries.
+var linkLocalPrefix = netip.MustParsePrefix("fe80::/64")
+
+// connected lists the kernel's connected routes the node expects through
+// one of an attachment's links: the link-local prefix, and the prefixes of
+// the addresses the node itself assigns to the link.
+func connected(own ...netip.Addr) []netip.Prefix {
+	prefixes := make([]netip.Prefix, 0, len(own)+1)
+	prefixes = append(prefixes, linkLocalPrefix)
+	for _, a := range own {
+		prefixes = append(prefixes, netip.PrefixFrom(a, a.BitLen()))
+	}
+	return prefixes
+}
+
 // extraRoutes lists the unicast routes through a dedicated owned link that
 // the node does not install: any destination, gateway or metric other than
-// want's. A kernel route counts as the kernel's own only when it is the
-// connected route of an address on the link, so a route written with
-// "proto kernel" is still extra. Local and multicast routes, and routes
-// through other links, are never candidates.
-func extraRoutes(h *netlink.Handle, index int, table uint32, want []installed) ([]netlink.Route, error) {
+// want's. A kernel route counts as the kernel's own only when it is one of
+// the connected routes the node expects (see connected), never because the
+// link happens to carry an address now, so neither a route written with
+// "proto kernel" nor the connected route of an address someone else added
+// is exempt. Local and multicast routes, and routes through other links, are
+// never candidates.
+func extraRoutes(h *netlink.Handle, index int, table uint32, want []installed, kernel []netip.Prefix,
+) ([]netlink.Route, error) {
 	routes, err := nldump.On(h).RouteListFiltered(unix.AF_INET6, &netlink.Route{Table: int(table), LinkIndex: index},
 		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF)
 	if err != nil {
 		return nil, fmt.Errorf("hostattach: list attachment routes: %w", err)
-	}
-	connected, err := connectedPrefixes(h, index)
-	if err != nil {
-		return nil, err
 	}
 	var extras []netlink.Route
 	for _, r := range routes {
 		if r.Type != unix.RTN_UNICAST {
 			continue
 		}
-		if r.Protocol == unix.RTPROT_KERNEL && slices.ContainsFunc(connected, func(p netip.Prefix) bool {
+		if r.Protocol == unix.RTPROT_KERNEL && slices.ContainsFunc(kernel, func(p netip.Prefix) bool {
 			return sameDst(r.Dst, p)
 		}) {
 			continue
@@ -171,31 +186,40 @@ func extraRoutes(h *netlink.Handle, index int, table uint32, want []installed) (
 	return extras, nil
 }
 
-// connectedPrefixes returns the prefixes of the IPv6 addresses on the link
-// with index: the destinations of the kernel's connected routes through it.
-func connectedPrefixes(h *netlink.Handle, index int) ([]netip.Prefix, error) {
-	link, err := h.LinkByIndex(index)
+// extraAddrs lists the IPv6 addresses on link other than link-local ones and
+// own, the addresses the node assigns to it.
+func extraAddrs(h *netlink.Handle, link netlink.Link, own []netip.Addr) ([]netlink.Addr, error) {
+	addrs, err := nldump.On(h).AddrList(link, unix.AF_INET6)
 	if err != nil {
-		return nil, fmt.Errorf("hostattach: look up link %d: %w", index, err)
+		return nil, fmt.Errorf("hostattach: list addresses on %q: %w", link.Attrs().Name, err)
 	}
-	addrs, err := nldump.On(h).AddrList(link, netlink.FAMILY_V6)
-	if err != nil {
-		return nil, fmt.Errorf("hostattach: list addresses of link %d: %w", index, err)
-	}
-	prefixes := make([]netip.Prefix, 0, len(addrs))
+	var extras []netlink.Addr
 	for _, a := range addrs {
 		addr, ok := netip.AddrFromSlice(a.IP)
-		if !ok {
+		if !ok || addr.Unmap().IsLinkLocalUnicast() || slices.Contains(own, addr.Unmap()) {
 			continue
 		}
-		ones, _ := a.Mask.Size()
-		prefixes = append(prefixes, netip.PrefixFrom(addr.Unmap(), ones).Masked())
+		extras = append(extras, a)
 	}
-	return prefixes, nil
+	return extras, nil
 }
 
-func pruneRoutes(h *netlink.Handle, index int, table uint32, want []installed) error {
-	extras, err := extraRoutes(h, index, table, want)
+// pruneAddrs removes the addresses extraAddrs finds on link.
+func pruneAddrs(h *netlink.Handle, link netlink.Link, own []netip.Addr) error {
+	extras, err := extraAddrs(h, link, own)
+	if err != nil {
+		return err
+	}
+	for _, a := range extras {
+		if err := h.AddrDel(link, &a); err != nil {
+			return fmt.Errorf("hostattach: remove stray address %s from %q: %w", a.IPNet, link.Attrs().Name, err)
+		}
+	}
+	return nil
+}
+
+func pruneRoutes(h *netlink.Handle, index int, table uint32, want []installed, kernel []netip.Prefix) error {
+	extras, err := extraRoutes(h, index, table, want, kernel)
 	if err != nil {
 		return err
 	}

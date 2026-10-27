@@ -180,7 +180,7 @@ stateDiagram-v2
 
 A failed step leaves the attachment in its last state with a condition naming the reason. Partial host state carries the attachment ID in the host link's alias, so the node finds and finishes it on restart (`internal/edge/hostattach/inventory.go:33`).
 
-The node provisions every attachment again at least once a minute (`agent.Resync`), which repairs host state that drifted under it. It removes every IPv6 unicast route through the host link, the pod link or the packet device other than the ones it installs, matching destination, gateway and metric, and exempts only the kernel's connected routes for the link's own addresses. A route that appears after that pass, or that the node fails to remove, fails `Readback`, and the attachment leaves `Programmed`.
+The node provisions every attachment again at least once a minute (`agent.Resync`), which repairs host state that drifted under it. It removes every IPv6 unicast route through the host link, the pod link or the packet device in the table it owns, other than the ones it installs, matching destination, gateway and metric. The only kernel routes it leaves are the connected routes of the addresses it assigns itself, and it removes any other global address from the pod link and the packet device, so an address added in the pod brings no route of its own. A route or address that appears after that pass, or that the node fails to remove, fails `Readback`, and the attachment leaves `Programmed`. IPv4 routes, other tables and policy rules are outside this repair.
 
 ### Forwarding claim
 
