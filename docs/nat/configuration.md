@@ -10,6 +10,8 @@ flags, or a combination of both (CLI flags take precedence), with the
 `galactic-router` and `galactic-gateway` use (see
 [docs/router/configuration.md](../router/configuration.md)).
 
+Logging takes `--log-level` (`LOG_LEVEL`) and `--log-format` (`LOG_FORMAT`), without the `GALACTIC_NAT` prefix; see [Logging](../observability/logging.md).
+
 | Option             | Environment Variable             | CLI Flag                  | Default       | Required |
 | ------------------ | -------------------------------- | ------------------------- | ------------- | -------- |
 | Node name          | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —             | Yes      |

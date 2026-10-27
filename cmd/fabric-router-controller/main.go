@@ -29,6 +29,7 @@ import (
 	"go.datum.net/galactic/internal/fabric/routing/frrimport"
 	"go.datum.net/galactic/internal/fabric/routing/frrtext"
 	"go.datum.net/galactic/internal/fabric/routing/revision"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 )
 
@@ -41,10 +42,14 @@ func main() {
 }
 
 func newRootCommand() *cobra.Command {
+	var logOpts logging.Options
 	cmd := &cobra.Command{
 		Use:          appName,
 		Short:        "Compile fabric routers' typed BGP resources into FRR configuration",
 		SilenceUsage: true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("version"); ok {
 				fmt.Printf("%s version %s\n", appName, metadata.Version)
@@ -56,6 +61,7 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	cmd.AddCommand(newImportCommand(), newPreviewCommand(), newDiffCommand(), newRunCommand())
 	cmd.AddCommand(newOpsCommands()...)
+	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
 }
 

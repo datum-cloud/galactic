@@ -14,7 +14,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 	_ "golang.org/x/crypto/x509roots/fallback"
 
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 )
 
@@ -44,14 +44,14 @@ func main() {
 }
 
 func newRootCommand() *cobra.Command {
-	var logLevel, logFormat string
+	var logOpts logging.Options
 	cmd := &cobra.Command{
 		Use:          appName,
 		Short:        strings.Split(appDesc, "\n")[0],
 		Long:         appDesc,
 		SilenceUsage: true,
 		PersistentPreRunE: func(*cobra.Command, []string) error {
-			return setupLogging(logLevel, logFormat)
+			return logOpts.Setup()
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("build-info"); ok {
@@ -65,31 +65,11 @@ func newRootCommand() *cobra.Command {
 			return cmd.Help()
 		},
 	}
-	cmd.PersistentFlags().StringVar(&logLevel, "log-level", envOr("LOG_LEVEL", "info"),
-		"Log level: debug, info, warn, error (env LOG_LEVEL)")
-	cmd.PersistentFlags().StringVar(&logFormat, "log-format", envOr("LOG_FORMAT", "json"),
-		"Log format: json or text (env LOG_FORMAT)")
+	logOpts.BindFlags(cmd.PersistentFlags())
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	cmd.AddCommand(newNodeCommand(), newGatewayCommand(), newJanitorCommand(), newQueryCommand(), newCertSyncCommand())
 	return cmd
-}
-
-func setupLogging(level, format string) error {
-	var l slog.Level
-	if err := l.UnmarshalText([]byte(level)); err != nil {
-		return fmt.Errorf("--log-level: %w", err)
-	}
-	opts := &slog.HandlerOptions{Level: l}
-	switch format {
-	case "json":
-		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, opts)))
-	case "text":
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, opts)))
-	default:
-		return fmt.Errorf("--log-format must be json or text, not %q", format)
-	}
-	return nil
 }
 
 // signalContext returns a context cancelled on SIGINT or SIGTERM.

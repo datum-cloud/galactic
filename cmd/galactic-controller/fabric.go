@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
@@ -40,7 +39,6 @@ func runFabric(parent context.Context, o *options) error {
 	}
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 
 	scheme := runtime.NewScheme()
 	for _, register := range []func(*runtime.Scheme) error{

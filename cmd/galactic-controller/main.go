@@ -18,7 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-logr/logr"
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	"github.com/spf13/cobra"
 	_ "golang.org/x/crypto/x509roots/fallback"
@@ -45,6 +44,7 @@ import (
 	edgediag "go.datum.net/galactic/internal/edge/diag"
 	edgeroute "go.datum.net/galactic/internal/edge/route"
 	"go.datum.net/galactic/internal/edge/timing"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/trafficpolicy/cell"
 	"go.datum.net/galactic/internal/trafficpolicy/webhook"
@@ -82,11 +82,15 @@ func main() {
 
 func newRootCommand() *cobra.Command {
 	o := &options{}
+	var logOpts logging.Options
 	cmd := &cobra.Command{
 		Use:          "galactic-controller",
 		Short:        "Run Galactic's cell or fabric controllers",
 		Version:      metadata.Version,
 		SilenceUsage: true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context(), o)
 		},
@@ -115,6 +119,7 @@ func newRootCommand() *cobra.Command {
 	f.DurationVar(&o.edgeMaxSkew, "edge-max-skew", 2*time.Second,
 		"Cell role: maximum wall-clock error of any node; an EdgeService stops admitting this long before its "+
 			"validUntil. It must equal galactic-edge's --max-skew")
+	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
 }
 
@@ -133,7 +138,6 @@ func run(parent context.Context, o *options) error {
 	}
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
