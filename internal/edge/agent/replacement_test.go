@@ -31,6 +31,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -351,13 +352,12 @@ func (e *e2e) site(name, address string) *site {
 		},
 	}
 	e.create(s.att)
-	s.att.Status = galacticv1alpha1.EdgeAttachmentStatus{NodeName: node, VPC: vpcA, Address: address}
-	for _, c := range []string{galacticv1alpha1.EdgeAttachmentAdmitted, galacticv1alpha1.EdgeAttachmentAllocated} {
-		meta.SetStatusCondition(&s.att.Status.Conditions, metav1.Condition{Type: c, Status: metav1.ConditionTrue, Reason: c})
-	}
-	if err := e.admin.Status().Update(ctx, s.att); err != nil {
-		e.t.Fatal(err)
-	}
+	e.attachmentStatus(s.att, func(st *galacticv1alpha1.EdgeAttachmentStatus) {
+		st.NodeName, st.VPC, st.Address = node, vpcA, address
+		for _, c := range []string{galacticv1alpha1.EdgeAttachmentAdmitted, galacticv1alpha1.EdgeAttachmentAllocated} {
+			meta.SetStatusCondition(&st.Conditions, metav1.Condition{Type: c, Status: metav1.ConditionTrue, Reason: c})
+		}
+	})
 	// The provider waits for its device, opens it, then reports Ready.
 	var tun string
 	eventually(e.t, name+" programmed", func() bool {
@@ -369,15 +369,28 @@ func (e *e2e) site(name, address string) *site {
 		return meta.IsStatusConditionTrue(a.Status.Conditions, galacticv1alpha1.EdgeAttachmentProgrammed)
 	})
 	s.serve(tun)
-	if err := e.admin.Get(ctx, client.ObjectKeyFromObject(s.att), s.att); err != nil {
-		e.t.Fatal(err)
-	}
-	meta.SetStatusCondition(&s.att.Status.Conditions, metav1.Condition{Type: galacticv1alpha1.EdgeAttachmentReady,
-		Status: metav1.ConditionTrue, Reason: "Ready"})
-	if err := e.admin.Status().Update(ctx, s.att); err != nil {
-		e.t.Fatal(err)
-	}
+	e.attachmentStatus(s.att, func(st *galacticv1alpha1.EdgeAttachmentStatus) {
+		meta.SetStatusCondition(&st.Conditions, metav1.Condition{Type: galacticv1alpha1.EdgeAttachmentReady,
+			Status: metav1.ConditionTrue, Reason: "Ready"})
+	})
 	return s
+}
+
+// attachmentStatus applies set to att's latest status and writes it, reading
+// again on a conflict: the agent and the publication reconciler write
+// attachment status concurrently. att is left as written.
+func (e *e2e) attachmentStatus(att *galacticv1alpha1.EdgeAttachment, set func(*galacticv1alpha1.EdgeAttachmentStatus)) {
+	e.t.Helper()
+	ctx := context.Background()
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := e.admin.Get(ctx, client.ObjectKeyFromObject(att), att); err != nil {
+			return err
+		}
+		set(&att.Status)
+		return e.admin.Status().Update(ctx, att)
+	}); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 // serve answers nothing: it records when each packet for the site reaches
