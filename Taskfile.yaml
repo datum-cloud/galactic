@@ -231,11 +231,12 @@ tasks:
     # fail to build.
     #
     # Those fixtures and every kustomization under config/ and deploy/,
-    # except Components, are rendered and checked for a LOG_LEVEL, LOG_FORMAT, --log-level or
-    # --log-format that internal/logging rejects. The containerlab overlays
-    # under deploy/containerlab/resources build only once the lab scripts
-    # copy config/ onto a node, so they are not rendered here; their source
-    # YAML, inline patches included, is checked instead.
+    # except Components, are rendered and checked for a LOG_LEVEL,
+    # LOG_FORMAT, --log-level or --log-format that internal/logging rejects.
+    # The containerlab overlays under deploy/containerlab/resources build
+    # only once the lab scripts copy config/ onto a node, so they are not
+    # rendered here; their source YAML, inline patches included, is checked
+    # instead.
     deps: [kustomize]
     cmds:
       - go build -o {{.LOCALBIN}}/check-log-settings ./hack/check-log-settings
