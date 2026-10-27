@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -26,13 +27,18 @@ const (
 	reasonBackendsUnhealthy = "BackendsUnhealthy"
 
 	// reasonNoHealthyBackends: every backend of a VIP family is reported
-	// Unhealthy, so all of them are kept.
+	// Unhealthy, so all of them are kept. A FailClosed rule reports it with
+	// status False instead, because it is not loaded.
 	reasonNoHealthyBackends = "NoHealthyBackends"
 
 	// reasonHealthChecksNotApplied: some gateway node in the namespace does
 	// not apply backend health, so none of them does.
 	reasonHealthChecksNotApplied = "HealthChecksNotApplied"
 )
+
+// errNoHealthyBackends is the build error of a FailClosed rule whose every
+// backend lacks a current Healthy probe result.
+var errNoHealthyBackends = errors.New("no backend has a current Healthy probe result")
 
 // healthGate is whether one pass applies backend health, and why not.
 //
