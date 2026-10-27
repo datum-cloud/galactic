@@ -210,8 +210,8 @@ func TestBinariesUseThisPackage(t *testing.T) {
 }
 
 // unmanagedBinaries are the commands under cmd/ that don't install the shared
-// handler. The CNI plugins are exec'd by the container runtime per call and
-// log as JSON to their own file; galactic-usid is a one-shot codec command.
+// handler. The CNI plugins are exec'd per call by the container runtime, and
+// galactic-usid is a one-shot codec command.
 var unmanagedBinaries = map[string]bool{
 	"galactic-bgp":   true,
 	"galactic-ipam":  true,
