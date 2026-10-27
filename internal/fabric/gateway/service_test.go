@@ -562,6 +562,15 @@ func TestServiceValidation(t *testing.T) {
 		}
 	}
 
+	// With no deployment ranges configured, the public policy still
+	// refuses special-use targets.
+	open := &Service{Cell: testSite, Allowlist: testAllowlist, Elected: elected, Now: func() time.Time { return now }}
+	req := validRequest(now)
+	req.Query.Target = "fc00::1"
+	if err := open.RunDiagnostic(req, &fakeEventStream{ctx: ctx}); errcode.Of(err) != errcode.DestinationNotAllowed {
+		t.Errorf("unique local probe without --deny-prefixes: %v, want %s", err, errcode.DestinationNotAllowed)
+	}
+
 	// GetCapabilities checks the version and cell too.
 	_, err := svc.GetCapabilities(ctx, &servicev1.GetCapabilitiesRequest{Cell: testSite, ApiMajor: 2})
 	if errcode.Of(err) != errcode.VersionUnsupported {
