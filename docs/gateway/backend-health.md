@@ -48,8 +48,11 @@ link-local address.
 
 - **Success** is a completed handshake within `timeoutSeconds`. The prober
   closes the connection at once and sends no data.
-- **Failure** is a refused connection, a reset, or no handshake within the
-  timeout.
+- **Cold starts.** A connection refusal is retried at most twice, 250 ms
+  apart, within the same `timeoutSeconds` budget. All attempts produce one
+  health observation; the next probe still waits the configured interval.
+- **Failure** is a refusal after those attempts, another connection error,
+  or no handshake within the timeout. Cancellation stops retries immediately.
 - **Port.** The health check port defaults to `backendPort`, so the probe
   reaches the socket that serves the VIP. A UDP service must name a TCP port
   the backend listens on: a UDP send that does not fail proves nothing, and
@@ -243,10 +246,15 @@ Per rule, each gateway node's `<node>/Programmed` condition, which stays
 | ------------------------ | ----------------------------------------------------------------------------- |
 | `BackendsUnhealthy`      | Loaded without the unhealthy backends; the message names them                 |
 | `NoHealthyBackends`      | Every backend is unhealthy, so all of them are kept                           |
-| `HealthChecksNotApplied` | A gateway node in the namespace does not apply health, so none of them does |
+| `HealthChecksNotApplied` | A gateway node in the namespace does not apply health, so none of them does   |
 
 The rule-wide `BackendsReady` condition reports each of them as a backend
 problem, as it reports `BackendsUnresolved`.
+
+A rule with `failurePolicy: FailClosed` is not loaded while no backend has a
+current `Healthy` result. Its `<node>/Programmed` condition is then `False`
+with reason `NoHealthyBackends`, its VIPs are withdrawn, and the rule-wide
+`Programmed` and `Ready` conditions carry the same reason.
 
 ## Rollout and rollback
 

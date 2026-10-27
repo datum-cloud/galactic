@@ -17,6 +17,7 @@ import (
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/bond"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // routeListFn and linkByIndexFn are package vars so tests can substitute a fake
@@ -29,7 +30,7 @@ import (
 // VRF-scoped underlay, and would otherwise be undetectable.
 var (
 	routeListFn = func() ([]netlink.Route, error) {
-		return netlink.RouteListFiltered(netlink.FAMILY_V6,
+		return nldump.RouteListFiltered(netlink.FAMILY_V6,
 			&netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
 	}
 	linkByIndexFn = func(index int) (netlink.Link, error) {
@@ -38,7 +39,7 @@ var (
 	// linkListFn enumerates every link on the host, for expandBondSlaves.
 	// linkByNameFn is declared in health.go and reused here.
 	linkListFn = func() ([]netlink.Link, error) {
-		return netlink.LinkList()
+		return nldump.LinkList()
 	}
 )
 

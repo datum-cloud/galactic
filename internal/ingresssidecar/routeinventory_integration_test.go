@@ -7,7 +7,9 @@ package ingresssidecar
 import (
 	"fmt"
 	"net"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
@@ -147,6 +149,112 @@ func TestListRoutes_SkipsGatewayReturnRoute(t *testing.T) {
 		}
 		if len(routes) != 1 || routes[0].Prefix.String() != backend.String() {
 			return fmt.Errorf("listRoutes = %v, want only the backend redirect %s", routes, backend)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestListRoutes_SurvivesLinkAndRouteChurn: the startup inventory completes
+// while other processes add and remove links and routes in the pod's
+// namespace, as a predecessor pod's teardown does. The kernel interrupts any
+// link, address or route dump that overlaps such a change, and the inventory
+// retries the dump instead of failing.
+func TestListRoutes_SurvivesLinkAndRouteChurn(t *testing.T) {
+	requireRoot(t)
+	setUpTestPinDir(t)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	t.Cleanup(func() { _ = nsObj.Close() })
+
+	const tableID = vrf.SidecarTableIDBase + 11
+	const stableLinks, redirects, linkChurners = 300, 200, 2
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		vrfLink := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "ivstestchurn"}, Table: tableID}
+		if err := netlink.LinkAdd(vrfLink); err != nil {
+			return fmt.Errorf("add VRF: %w", err)
+		}
+		if err := netlink.LinkSetUp(vrfLink); err != nil {
+			return fmt.Errorf("set VRF up: %w", err)
+		}
+		inner := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "ivstestchurnin", MasterIndex: vrfLink.Attrs().Index}}
+		if err := netlink.LinkAdd(inner); err != nil {
+			return fmt.Errorf("add VRF slave: %w", err)
+		}
+		if err := netlink.AddrAdd(inner, &netlink.Addr{
+			IPNet: mustPrefix(t, "fd42:0:3::1"), Flags: unix.IFA_F_NODAD,
+		}); err != nil {
+			return fmt.Errorf("assign VRF slave address: %w", err)
+		}
+		for i := range stableLinks {
+			if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: fmt.Sprintf("stab%d", i)}}); err != nil {
+				return fmt.Errorf("add stable link %d: %w", i, err)
+			}
+		}
+		for i := range redirects {
+			if err := ensureRedirectRoute(mustPrefix(t, fmt.Sprintf("fd00:7::%x", i+1)), tableID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	churn := func(change func(i int)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = nsObj.Do(func(_ ns.NetNS) error {
+				for i := 0; ; i++ {
+					select {
+					case <-stop:
+						return nil
+					default:
+					}
+					change(i)
+					// Bursts of changes, not a saturated loop: a loop that
+					// never pauses can outlast any bounded retry.
+					time.Sleep(2 * time.Millisecond)
+				}
+			})
+		}()
+	}
+	for c := range linkChurners {
+		churn(func(i int) {
+			dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: fmt.Sprintf("churn%d_%d", c, i%4)}}
+			if err := netlink.LinkAdd(dummy); err == nil {
+				_ = netlink.LinkDel(dummy)
+			}
+		})
+	}
+	churn(func(i int) {
+		_ = ensureRedirectRoute(mustPrefix(t, fmt.Sprintf("fd00:8::%x", i%4+1)), tableID)
+		_ = removeRedirectRoute(mustPrefix(t, fmt.Sprintf("fd00:8::%x", (i+2)%4+1)))
+	})
+	t.Cleanup(func() {
+		close(stop)
+		wg.Wait()
+	})
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		for i := range 100 {
+			routes, err := listRoutes(tableID)
+			if err != nil {
+				return fmt.Errorf("listRoutes failed on iteration %d while links and routes were changing: %w", i, err)
+			}
+			if len(routes) < redirects {
+				return fmt.Errorf("listRoutes returned %d routes on iteration %d, want at least %d", len(routes), i, redirects)
+			}
 		}
 		return nil
 	})

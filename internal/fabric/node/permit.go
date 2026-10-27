@@ -56,7 +56,8 @@ type PermitGateway interface {
 // at least PermitStartupRefusal after the node started, and only while the
 // gateway election Lease, read uncached, still carries the permit's epoch.
 // Consumed IDs are kept until their deadline plus PermitGrace in a set that
-// fails closed when full.
+// fails closed when full. A node whose Clock is unhealthy refuses every
+// permit.
 type Permits struct {
 	// Reader reads the gateway's election Lease uncached.
 	Reader    client.Reader
@@ -73,6 +74,11 @@ type Permits struct {
 	// MaxConsumed and MaxConsumedBytes bound the consumed set; zero selects
 	// the defaults.
 	MaxConsumed, MaxConsumedBytes int
+	// Clock, when set, reports an error while this host's clock cannot be
+	// trusted within limit.MaxClockError; every permit is then refused.
+	Clock func() error
+	// Metrics, when set, counts each permit decision.
+	Metrics *Metrics
 
 	mu       sync.Mutex
 	consumed map[string]consumedPermit
@@ -90,39 +96,69 @@ type grant struct {
 	deadline time.Time
 }
 
+// Permit decisions, as fabric_api_node_permits_total's outcome label
+// reports them.
+const (
+	PermitAccepted  = "accepted"
+	permitInvalid   = "invalid"
+	permitMalformed = "malformed"
+	permitMismatch  = "mismatch"
+	permitExpired   = "expired"
+	permitStarting  = "starting"
+	permitClock     = "clock"
+	permitLease     = "lease"
+	permitEpoch     = "epoch"
+	permitReplayed  = "replayed"
+	permitFull      = "full"
+)
+
 // consume verifies p for q on node and records it consumed.
 func (p *Permits) consume(ctx context.Context, pm *fabricv1.ProbePermit, node, requestID string, q query.Query,
 	now time.Time) (grant, error) {
-	refuse := func(msg string) (grant, error) {
+	refuse := func(outcome, msg string) (grant, error) {
+		p.observe(outcome)
 		return grant{}, errcode.Status(errcode.LimiterUnavailable, msg)
 	}
 	dst, err := query.ResolvedProbe(q)
 	if err != nil {
+		p.observe(permitInvalid)
 		return grant{}, errcode.FromError(err)
 	}
 	deadline := pm.GetDeadline().AsTime()
 	switch {
 	case pm.GetId() == "" || !pm.GetDeadline().IsValid():
-		return refuse("the probe permit is malformed")
+		return refuse(permitMalformed, "the probe permit is malformed")
 	case pm.GetNode() != node || pm.GetRequestId() != requestID ||
 		pm.GetOperation() != QueryToProto(q).GetType() || pm.GetDestination() != dst.String():
-		return refuse("the probe permit does not match this probe")
+		return refuse(permitMismatch, "the probe permit does not match this probe")
 	case !now.Before(deadline) || deadline.Sub(now) > MaxPermitLifetime:
-		return refuse("the probe permit has expired or is too long-lived")
+		return refuse(permitExpired, "the probe permit has expired or is too long-lived")
 	case p.starting(now):
-		return refuse("this node accepts no probe permit until its startup refusal ends")
+		return refuse(permitStarting, "this node accepts no probe permit until its startup refusal ends")
+	case p.Clock != nil && p.Clock() != nil:
+		return refuse(permitClock, "this node's clock is not synchronised")
 	}
 	epoch, err := limit.ReadEpoch(ctx, p.Reader, p.Namespace, p.LeaseName, now)
 	if err != nil {
+		p.observe(permitLease)
 		return grant{}, err
 	}
 	if epoch.String() != pm.GetEpoch() {
+		p.observe(permitEpoch)
 		return grant{}, errcode.Status(errcode.OwnershipLost, "the probe permit is from another gateway epoch")
 	}
-	if err := p.record(pm.GetId(), deadline.Add(PermitGrace), now); err != nil {
+	if outcome, err := p.record(pm.GetId(), deadline.Add(PermitGrace), now); err != nil {
+		p.observe(outcome)
 		return grant{}, err
 	}
+	p.observe(PermitAccepted)
 	return grant{packets: int(pm.GetPackets()), deadline: deadline}, nil
+}
+
+func (p *Permits) observe(outcome string) {
+	if p.Metrics != nil {
+		p.Metrics.permits.WithLabelValues(outcome).Inc()
+	}
 }
 
 // starting reports whether the node is still in its startup refusal.
@@ -131,8 +167,9 @@ func (p *Permits) starting(now time.Time) bool {
 }
 
 // record adds id to the consumed set, refusing a consumed ID and failing
-// closed when the set is full of live entries.
-func (p *Permits) record(id string, until, now time.Time) error {
+// closed when the set is full of live entries. A refusal returns its
+// outcome.
+func (p *Permits) record(id string, until, now time.Time) (string, error) {
 	maxN, maxBytes := p.MaxConsumed, p.MaxConsumedBytes
 	if maxN <= 0 {
 		maxN = DefaultConsumedPermits
@@ -146,7 +183,7 @@ func (p *Permits) record(id string, until, now time.Time) error {
 		p.consumed = map[string]consumedPermit{}
 	}
 	if c, ok := p.consumed[id]; ok && now.Before(c.until) {
-		return errcode.Status(errcode.LimiterUnavailable, "the probe permit was already used")
+		return permitReplayed, errcode.Status(errcode.LimiterUnavailable, "the probe permit was already used")
 	}
 	size := len(id) + consumedOverhead
 	if len(p.consumed) >= maxN || p.bytes+size > maxBytes {
@@ -158,11 +195,11 @@ func (p *Permits) record(id string, until, now time.Time) error {
 		}
 	}
 	if len(p.consumed) >= maxN || p.bytes+size > maxBytes {
-		return errcode.Status(errcode.LimiterUnavailable, "this node's consumed-permit set is full")
+		return permitFull, errcode.Status(errcode.LimiterUnavailable, "this node's consumed-permit set is full")
 	}
 	p.consumed[id] = consumedPermit{until: until, size: size}
 	p.bytes += size
-	return nil
+	return "", nil
 }
 
 // obtain asks the gateway for a permit for a direct operator's probe. A

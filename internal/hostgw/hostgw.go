@@ -25,6 +25,7 @@ import (
 
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
@@ -230,7 +231,7 @@ func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tab
 		desiredRoute.Flags = int(netlink.FLAG_ONLINK)
 	}
 
-	existingRoutes, err := netlink.RouteListFiltered(
+	existingRoutes, err := nldump.RouteListFiltered(
 		family,
 		&netlink.Route{Table: tableID},
 		netlink.RT_FILTER_TABLE,

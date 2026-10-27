@@ -18,13 +18,13 @@ addressing service can write the records. Operating it is in
 | `--topology` and its RBAC (`config/fabric-router-controller/components/topology`) | Implemented, off in `config/`, on in the lab. The envtests run the generator as the shipped ServiceAccount with only the shipped RBAC                                                                                  |
 | Compiler, revisions, rollout                                                      | Unchanged. Generated peers are ordinary `BGPPeer`s                                                                                                                                                                     |
 | Lab fixtures (`deploy/containerlab/resources/fabric-topology`)                    | Implemented. `TestLabParity` proves they generate every lab session and compile to what the imported peers compile to. `deploy:fabric-topology` applies them and replaces the imported peers; lab-tested on two sites  |
-| An authoritative writer of endpoint records                                       | **Not implemented, and not available anywhere.** Until one exists, infra has to write the records from the same hostvars it renders `frr.conf` from; it writes none yet. See [the addressing gap](#the-addressing-gap) |
+| An authoritative writer of endpoint records                                       | **Not implemented, and not available anywhere.** Until one exists, a deployment has to write the records from the same source it renders `frr.conf` from. See [the addressing gap](#the-addressing-gap) |
 | Distribution of records between cells                                             | **External.** Infra's per-cell bundles must carry every cell's records into every cell of the routing domain                                                                                                           |
 
 ## Why
 
-Today every managed session is written twice. Infra's hostvars list each
-node's `bgpNeighbors`, and the two ends of one session are authored
+Without it, every managed session is written twice. Each node's neighbors
+are listed in its own configuration, and the two ends of one session are authored
 separately, in different files, often in different cells: a reflector in one
 cell lists every client of every cell it serves, and each client lists the
 reflector. Adding a node means editing every router that peers with it;
@@ -355,9 +355,9 @@ they are.
   ask for one. That keeps the generator independent of whether a person or an
   addressing service wrote the record, and keeps addressing credentials out
   of every cell.
-- **Transport per relationship, as a list.** Production has two shared
-  transports (the private mesh within a cell, the public network between
-  cells). The lab has a point-to-point link per pair of nodes, which is a
+- **Transport per relationship, as a list.** A deployment typically has a
+  few shared transports (for example a private mesh within a cell and a public
+  network between cells). The lab has a point-to-point link per pair of nodes, which is a
   transport per link; a relationship lists them, and two records peer only
   over a transport they share, so a hub peers only with the router on the
   other end of its own link.
@@ -413,10 +413,9 @@ they are.
 What is missing is **an authoritative source of endpoint records**. Today:
 
 - Router IDs, loopbacks, private mesh and transit addresses and peer ASNs
-  live only in infra's hand-written hostvars, where `bgpNeighbors` are
-  authored at both ends.
-- NetBox holds the same inventory and is checked against the hostvars, but
-  nothing reads it, and it is not consumable from inside a cell.
+  live only in the deployment's own configuration source, where neighbors
+  are authored at both ends. No inventory system is consumable from inside a
+  cell.
 - `NetworkFabricIdentity` is a per-network integer for route targets and VRFs,
   allocated centrally by `galactic-controller --role=fabric`. It is not an
   address and must not be duplicated for routers.
@@ -424,8 +423,8 @@ What is missing is **an authoritative source of endpoint records**. Today:
   resolves it.
 - `go.miloapis.com/ipam` is used only for per-network identity.
 
-So the records, when infra starts writing them, come from its hostvars, with
-`source.type: Manual`. This milestone adds no addressing client and no in-cluster stand-in
+So the records, until such a writer exists, come from the deployment's own
+configuration source, with `source.type: Manual`. This milestone adds no addressing client and no in-cluster stand-in
 for one.
 
 An addressing-backed writer would have to provide:

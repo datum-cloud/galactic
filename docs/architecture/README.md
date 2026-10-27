@@ -1,65 +1,38 @@
-# Galactic — C4 Diagrams
+# System diagrams
 
-C4-model diagrams (PlantUML, rendered from the `.puml` sources in this
-directory) of Galactic's applications. See
-[docs/agents/ARCHITECTURE-CNI.md](../agents/ARCHITECTURE-CNI.md),
-[docs/agents/ARCHITECTURE-ROUTER.md](../agents/ARCHITECTURE-ROUTER.md), and
-[docs/agents/ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md) for
-the prose these diagrams summarize.
+These diagrams show system boundaries and deployment groups. A box may contain several related commands; this is not a count of binaries or a claim that every node runs every component.
 
-**Regenerating:** edit the `.puml` source, then re-render with Docker or
-Podman:
+## System context
 
-```bash
-podman run --rm -v "$(pwd)/docs/architecture:/data:Z" docker.io/plantuml/plantuml -tpng "/data/*.puml" "/data/**/*.puml"
+NSO owns VPC and attachment lifecycle. Galactic's cell controller handles policy, pod injection and programming status, while its separate fabric role allocates central network identity. The [controller reference](../controller/README.md) defines these responsibilities.
+
+![System context](context.png)
+
+## Deployment groups
+
+Gateway, NAT and Edge agents have independent opt-in labels on edge nodes. Tenant router and CNI placement is independent of those opt-ins. Fabric routing and diagnostics have their own deployment prerequisites. See [node labels](../operations/node-labels.md) and each component's deployment guide.
+
+The gateway and NAT share an XDP hook only when configured to use the dispatcher. The router uses the underlay to carry EVPN sessions; it does not establish the underlay's FRR sessions itself.
+
+![Deployment groups](containers.png)
+
+## Updating the diagrams
+
+The checked-in PNGs were rendered with PlantUML 1.2026.9, its bundled C4 library, and the Smetana layout engine on Java 21. Edit [context.puml](context.puml) or [containers.puml](containers.puml), then regenerate both PNGs from that version. The sources use PlantUML's bundled C4 library so they do not fetch a moving remote include.
+
+From the repository root, with a PlantUML installation:
+
+```sh
+plantuml -Playout=smetana -tpng docs/architecture/context.puml docs/architecture/containers.puml
 ```
 
-Commit both the `.puml` source and the regenerated `.png` — GitHub does not
-render PlantUML inline.
+With a container runtime, use the PlantUML image selected by your development environment, mount this directory at `/data`, and render the two sources there. Record the renderer version when changing generated assets. Commit sources and rendered files together.
 
----
+## Component explanations
 
-## Level 1 — System Context
-
-Galactic as a single box in its environment: why it exists, not how it's
-built internally. It's the shared networking substrate at the center of
-Datum Cloud's multi-cloud VPC story — the `Compute` (pod/VM workloads),
-`Connectors` (interconnect/multi-site peering), and `Gateways` (ingress
-load-balancing) product surfaces all move their traffic over Galactic,
-alongside the people/systems that deploy and configure it and the external
-systems it depends on (Kubernetes API, the companion VPC operator, the
-underlay fabric, iBGP peers).
-
-![System Context](./context.png)
-
-## Level 2 — Container: the four deployable applications
-
-The four separately-built, separately-deployed applications — the
-`galactic-veth` CNI chain, `galactic-router`, `galactic-gateway`, and
-`galactic-nat` — plus the kernel eBPF datapaths each one drives and the
-CRDs that connect them. `galactic-gateway` is deployed as its own
-single-container DaemonSet on gateway-role (`edge`) nodes; `galactic-router`
-runs there too, as its own independent DaemonSet (the same one that runs on
-`compute` nodes), not co-located in the same pod. `galactic-nat` runs on those same
-`edge` nodes: its own single-container DaemonSet running unconditionally
-on every edge node, alongside — again not co-located with — both of them.
-It shares the node's XDP hook with `galactic-gateway`, each running from
-its own slot of the node's shared, pinned XDP dispatcher
-(`GALACTIC_NAT_XDP_ATTACH=dispatch`), and each site's compute nodes send their egress to that site's edge shards
-over SRv6. It used to run on compute nodes instead. The diagram shows each pairing
-co-located on the node but connected by no direct RPC — a crash in one does
-not take down the other; both `galactic-gateway` and `galactic-nat`
-publish their own BGP reachability by writing a `BGPAdvertisement` CRD that
-the co-located `galactic-router`'s embedded GoBGP picks up and advertises,
-not by speaking BGP themselves.
-
-![Containers](./containers.png)
-
----
-
-## Source files
-
-| Diagram                | Source                                                        |
-| ----------------------- | -------------------------------------------------------------- |
-| System Context           | [`context.puml`](./context.puml)                               |
-| Container                | [`containers.puml`](./containers.puml)                          |
+- [CNI attachment and uSID datapath](../cni/architecture.md)
+- [Tenant BGP router](../router/architecture.md)
+- [Ingress gateway](../gateway/architecture.md)
+- [Active/active egress](../nat/active-active.md)
+- [Fabric routing](../fabric-routing/topology.md)
+- [Fabric diagnostics](../fabric-api/architecture.md)

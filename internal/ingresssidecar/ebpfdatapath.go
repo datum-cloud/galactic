@@ -25,6 +25,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
@@ -199,7 +200,7 @@ func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string, peerIndex uint32
 func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+		addrs, err := nldump.AddrList(link, netlink.FAMILY_V6)
 		if err != nil {
 			return nil, fmt.Errorf("list addresses on %q: %w", link.Attrs().Name, err)
 		}

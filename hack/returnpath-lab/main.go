@@ -86,7 +86,7 @@ type config struct {
 func main() {
 	var cfg config
 	flag.StringVar(&cfg.locator, "locator", "",
-		"this node's BGPRouter spec.srv6Locator, e.g. 2607:ed40:8002::/48 (required)")
+		"this node's BGPRouter spec.srv6Locator, e.g. 2001:db8:2::/48 (required)")
 	flag.UintVar(&cfg.nodeID, "node-id", 0, "this node's BGPRouter spec.nodeID (required)")
 	flag.StringVar(&cfg.vpc, "vpc", "", "base62 VPC id, e.g. 2 (required)")
 	flag.UintVar(&cfg.argument, "argument", 0, "this VPC's BGPVRFInstance spec.vrfID on this node (required)")
@@ -170,7 +170,7 @@ func usage() {
           imported the sidecar's return-path advertisement at all.
   attach-iface / detach-iface
           attach the already-loaded usid_ingress to an extra interface, or
-          remove it. For testing the WireGuard/KubeSpan exclusion.
+          remove it. For testing the WireGuard link exclusion.
   filters list an interface's tc filter chain in evaluation order -- who runs
           before usid_ingress, and whether usid_ingress is attached at all.
   inject  send one real SRv6-encapsulated packet at a gateway node's return

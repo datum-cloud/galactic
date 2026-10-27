@@ -16,11 +16,10 @@ import (
 
 // TestAnycastSpike_TwoGatewayNodesSamePrefixSurviveIndependently is a
 // go/no-go spike for the DSR/Maglev redesign's anycast premise (every
-// gateway node advertises the same VIP prefix at equal preference — see the
-// kitt design doc's §0). The specific risk under test: an earlier, rejected
-// design (docs referenced: `~/.claude/datum/plans/merry-percolating-tulip.md`
-// §4) avoided colocating the gateway in a tenant VRF specifically to sidestep
-// two named GoBGP issues — monitor.go's processEVPNPath skipping local paths
+// gateway node advertises the same VIP prefix at equal preference). The
+// specific risk under test: an earlier, rejected design avoided colocating
+// the gateway in a tenant VRF specifically to sidestep two named GoBGP
+// issues — monitor.go's processEVPNPath skipping local paths
 // before RT match, and rtIndex being 1:1 not fan-out. Reading those two
 // functions directly (see monitor.go) shows both are scoped to advertisements
 // that carry a VRFID/Function (tenant-VRF SEG6 kernel-route installation) —

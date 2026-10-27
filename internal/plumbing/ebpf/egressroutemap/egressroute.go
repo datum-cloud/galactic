@@ -22,6 +22,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // neighborResolveTimeout and neighborResolvePollInterval bound how long
@@ -270,7 +271,7 @@ func solicitNeighbor(linkIndex int, nextHop net.IP) {
 // soliciting. It is resolveNeighbor's passive fast path and its poll step once
 // a solicit is in flight.
 func lookupNeighbor(linkIndex int, nextHop net.IP) (net.HardwareAddr, error) {
-	neighs, err := netlink.NeighList(linkIndex, netlink.FAMILY_V6)
+	neighs, err := nldump.NeighList(linkIndex, netlink.FAMILY_V6)
 	if err != nil {
 		return nil, fmt.Errorf("list neighbors on link %d: %w", linkIndex, err)
 	}

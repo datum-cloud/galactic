@@ -5,7 +5,7 @@ interface forwards only what its bindings grant, in each direction. That is a
 deliberate behavior change, so turning it on in a cell is a migration. This
 guide is the order to do it in, what to check at each step, and how to back
 out. The design is in
-[the traffic policy proposal](../enhancements/networking/interface-traffic-policy/README.md);
+[the traffic policy proposal](../designs/interface-traffic-policy.md);
 [controller.md](controller.md) and [node.md](node.md) are the component
 references.
 
@@ -31,8 +31,7 @@ an ingress grant for the requests and an egress grant for the replies.
 In `audit` and `enforce`, a new interface's host side stays down until every
 enforcement program is attached and verified, and CNI ADD fails on a node
 whose kernel failed the preflight (Linux 6.8 or later, `HASH_OF_MAPS` and
-`bpf_for_each_map_elem`). Production and staging run Talos v1.13.10, on
-kernel 6.18.
+`bpf_for_each_map_elem`).
 
 ## Before you start
 

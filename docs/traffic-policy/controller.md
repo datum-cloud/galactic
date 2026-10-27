@@ -4,7 +4,7 @@
 side of interface traffic policy. It does not program any node: the per-node
 datapath state belongs to `galactic-router`, which reads the bindings this
 controller resolves (see [Traffic policy on the node](node.md)). The design is in
-[the traffic policy proposal](../enhancements/networking/interface-traffic-policy/README.md);
+[the traffic policy proposal](../designs/interface-traffic-policy.md);
 the API reference is [docs/api/galactic.md](../api/galactic.md).
 
 ## What it does
@@ -36,18 +36,11 @@ the API reference is [docs/api/galactic.md](../api/galactic.md).
   only those fields with server-side apply, so the per-node entries under
   `status.nodes` stay with the nodes that write them.
 
-## Flags
+## Process configuration
 
-| Flag                          | Default                                                 | Meaning                                                    |
-| ----------------------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
-| `--role`                      | none (required)                                         | `cell`, the only role so far                               |
-| `--namespace`                 | `POD_NAMESPACE`, else `galactic-system`                 | Namespace of the pod and its leader election lease         |
-| `--metrics-bind-address`      | `:9184`                                                 | controller-runtime metrics                                 |
-| `--health-probe-bind-address` | `:8081`                                                 | `/healthz`, and `/readyz` once the webhook is serving      |
-| `--webhook-port`              | `9443`                                                  | Admission webhook port                                     |
-| `--webhook-cert-dir`          | `/tmp/k8s-webhook-server/serving-certs`                 | Holds `tls.crt` and `tls.key`                              |
-| `--leader-elect`              | `true`                                                  | One replica reconciles; every replica serves the webhook   |
-| `--controller-username`       | `system:serviceaccount:<namespace>:galactic-controller` | The only user allowed to write the reserved default policy |
+The [controller reference](../controller/README.md) defines the cell and fabric
+roles, their flags, credentials and installation prerequisites. This page
+covers only the cell's traffic-policy responsibilities.
 
 ## Installing
 

@@ -13,6 +13,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
@@ -63,7 +64,7 @@ func checkTerminationRoutes(vpc, vpcAttachment string, terminations []Terminatio
 	}
 	defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
 
-	routes, err := handle.RouteListFiltered(
+	routes, err := nldump.On(handle).RouteListFiltered(
 		netlink.FAMILY_V6,
 		&netlink.Route{Table: int(tableID)},
 		netlink.RT_FILTER_TABLE,

@@ -14,20 +14,21 @@ flag name — the mapping is defined in `internal/config` (see `RouterConfig`
 and the `EnvRouter*` constants). Always use the exact name from the table
 below.
 
-| Option                   | Environment Variable                      | CLI Flag                    | Default                     |
-| ------------------------ | ----------------------------------------- | --------------------------- | --------------------------- |
-| Node name                | `GALACTIC_ROUTER_NODE_NAME`               | `--node-name`               | _(required)_                |
-| Route reflector          | `GALACTIC_ROUTER_REFLECTOR`               | `--reflector`               | `false`                     |
-| BGP listen port          | `GALACTIC_ROUTER_BGP_LISTEN_PORT`         | `--bgp-listen-port`         | `179`                       |
-| BGP local address        | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`       | `--bgp-local-address`       | _(auto-detected from `lo`)_ |
-| Metrics port             | `GALACTIC_ROUTER_METRICS_PORT`            | `--metrics-port`            | `9179`                      |
-| gRPC health port         | `GALACTIC_ROUTER_GRPC_HEALTH_PORT`        | `--grpc-health-port`        | `5179`                      |
-| Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE`            | `--gc-namespace`            | `galactic-system`           |
-| Orphan-cleanup interval  | `GALACTIC_ROUTER_GC_INTERVAL`             | `--gc-interval`             | `5m`                        |
-| BMP stations             | `GALACTIC_ROUTER_BMP_STATIONS`            | `--bmp-stations`            | _(empty; BMP disabled)_     |
-| BMP policy               | `GALACTIC_ROUTER_BMP_POLICY`              | `--bmp-policy`              | `pre-policy`                |
-| BMP statistics interval  | `GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL` | `--bmp-statistics-interval` | `60s`                       |
-| Traffic policy           | `GALACTIC_ROUTER_TRAFFIC_POLICY`          | `--traffic-policy`          | `false`                     |
+| Option                   | Environment Variable                       | CLI Flag                     | Default                     |
+| ------------------------ | ------------------------------------------ | ---------------------------- | --------------------------- |
+| Node name                | `GALACTIC_ROUTER_NODE_NAME`                | `--node-name`                | _(required)_                |
+| Route reflector          | `GALACTIC_ROUTER_REFLECTOR`                | `--reflector`                | `false`                     |
+| BGP listen port          | `GALACTIC_ROUTER_BGP_LISTEN_PORT`          | `--bgp-listen-port`          | `179`                       |
+| BGP local address        | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`        | `--bgp-local-address`        | _(auto-detected from `lo`)_ |
+| Metrics port             | `GALACTIC_ROUTER_METRICS_PORT`             | `--metrics-port`             | `9179`                      |
+| gRPC health port         | `GALACTIC_ROUTER_GRPC_HEALTH_PORT`         | `--grpc-health-port`         | `5179`                      |
+| Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE`             | `--gc-namespace`             | `galactic-system`           |
+| Orphan-cleanup interval  | `GALACTIC_ROUTER_GC_INTERVAL`              | `--gc-interval`              | `5m`                        |
+| BMP stations             | `GALACTIC_ROUTER_BMP_STATIONS`             | `--bmp-stations`             | _(empty; BMP disabled)_     |
+| BMP policy               | `GALACTIC_ROUTER_BMP_POLICY`               | `--bmp-policy`               | `pre-policy`                |
+| BMP statistics interval  | `GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL`  | `--bmp-statistics-interval`  | `60s`                       |
+| Traffic policy           | `GALACTIC_ROUTER_TRAFFIC_POLICY`           | `--traffic-policy`           | `false`                     |
+| Service frontends        | `GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED` | `--service-frontend-enabled` | `false`                     |
 
 ## Required Options
 
@@ -98,8 +99,7 @@ This is the process-wide default, applied to every peer this instance
 configures. `BGPPeer.spec.updateSource` overrides it per peer — needed when
 a single node has to source different sessions from different addresses,
 e.g. most peers over the SRv6 loopback but one peer reached over the node's
-own eth0/bond0 link instead, because the SRv6 underlay doesn't route to that
-peer's site.
+own uplink instead, because the SRv6 underlay doesn't route to that peer.
 
 **Type:** string
 **Default:** _(auto-detected from `lo`)_
@@ -225,7 +225,15 @@ cluster may not have installed: an informer for a missing CRD never syncs. A
 route reflector has no tenant interfaces, so `--reflector` with this option is
 a configuration error. Whether the datapath enforces what this publishes is
 galactic-cni's setting, not this one. See
-[the traffic policy design](../enhancements/networking/interface-traffic-policy/README.md).
+[the traffic policy design](../designs/interface-traffic-policy.md).
+
+### `--service-frontend-enabled` / `GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED`
+
+Enables same-family private service frontend address translation on this node.
+The default is `false`. Enable it on participating routers only after their
+CNI datapaths support the frontend maps. The publishing controller supplies
+the producer address and `ServiceRoutePolicy.spec.frontend.address` supplies
+the consumer address; ports are not translated. See [private service frontends](../private-services/README.md#consumer-service-frontends) for lifecycle, rollout and compatibility requirements.
 
 ## Configuration Precedence
 

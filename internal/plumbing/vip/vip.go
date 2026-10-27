@@ -22,6 +22,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // InterfaceName is the dummy link this package owns exclusively for VIP
@@ -92,7 +94,7 @@ func Verify(addr net.IP) error {
 	if addr.To4() != nil {
 		family = unix.AF_INET
 	}
-	addrs, err := netlink.AddrList(link, family)
+	addrs, err := nldump.AddrList(link, family)
 	if err != nil {
 		return fmt.Errorf("vip: list addresses on %s: %w", InterfaceName, err)
 	}

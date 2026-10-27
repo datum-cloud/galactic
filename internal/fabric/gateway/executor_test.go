@@ -102,6 +102,50 @@ func TestExecutorFairAcrossProjects(t *testing.T) {
 	}
 }
 
+// A waiter whose context has ended is never granted a slot. Dispatch can
+// hand a queued waiter its slot from the releasing job's goroutine after the
+// cancel, and the waiter's own select then has both cases ready, so it must
+// give the slot back instead of starting work the caller cancelled.
+func TestExecutorCancelledWaiterNeverGranted(t *testing.T) {
+	e := NewExecutor(1, 1, 10)
+	// A free slot: a cancelled Acquire must still refuse.
+	for range 100 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if rel, err := e.Acquire(ctx, "p", false); err == nil {
+			rel()
+			t.Fatal("Acquire granted a slot after ctx ended")
+		}
+	}
+	// The slot is handed to the waiter by the holder's release, after the
+	// cancel.
+	for range 100 {
+		hold, err := e.Acquire(context.Background(), "p", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+		var rel func()
+		var aerr error
+		wg.Go(func() { rel, aerr = e.Acquire(ctx, "p", false) })
+		waitDepth(t, e, 1)
+		cancel()
+		hold()
+		wg.Wait()
+		if aerr == nil {
+			rel()
+			t.Fatal("queued Acquire granted a slot after ctx ended")
+		}
+		if !errors.Is(aerr, context.Canceled) {
+			t.Fatalf("err = %v", aerr)
+		}
+		if e.Depth() != 0 {
+			t.Fatalf("depth = %d, want 0", e.Depth())
+		}
+	}
+}
+
 func TestExecutorQueueBound(t *testing.T) {
 	e := NewExecutor(1, 1, 1)
 	hold, _ := e.Acquire(context.Background(), "p", false)

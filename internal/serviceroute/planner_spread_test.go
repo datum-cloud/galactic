@@ -6,11 +6,14 @@ package serviceroute
 import (
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -20,6 +23,7 @@ const (
 	spreadProducerNamespace = "service"
 	spreadConsumerName      = "consumer"
 	bothLocalProducers      = "producer-a,producer-z"
+	firstRemoteProducer     = "a-remote"
 )
 
 func spreadEndpoint(mode networkv1alpha1.ServiceEndpointDeliveryMode) (
@@ -42,7 +46,16 @@ func reportHealth(endpoint *networkv1alpha1.ServiceEndpoint, producer *cloudv1al
 	endpoint.Status.Producers = append(endpoint.Status.Producers, networkv1alpha1.ServiceEndpointProducerStatus{
 		Namespace: producer.Namespace, Name: producer.Name, AttachmentUID: producer.UID,
 		Node: producer.Status.Node, Port: 8053, State: state, LastTransitionTime: metav1.Now(),
+		RenewTime: ptr.To(metav1.Now()),
 	})
+}
+
+// expireReport makes the last entry of endpoint's status.producers one its
+// node stopped renewing before the report lifetime.
+func expireReport(endpoint *networkv1alpha1.ServiceEndpoint) {
+	entry := &endpoint.Status.Producers[len(endpoint.Status.Producers)-1]
+	entry.RenewTime = ptr.To(metav1.NewTime(
+		time.Now().Add(-networkv1alpha1.ServiceEndpointProducerReportLifetime - time.Second)))
 }
 
 func producerSummary(intent RouteIntent) string {
@@ -136,7 +149,7 @@ func TestCompileSpreadDrainsUnhealthyProducers(t *testing.T) {
 func TestCompileSpreadFallsBackToHealthyRemoteProducer(t *testing.T) {
 	policy, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
 	consumer := spreadConsumer()
-	first := readyAttachment(spreadProducerNamespace, "a-remote", "first-uid", testRemoteNodeName, "remote-a",
+	first := readyAttachment(spreadProducerNamespace, firstRemoteProducer, "first-uid", testRemoteNodeName, "remote-a",
 		testLabels(testProducerLabel, "yes"))
 	last := readyAttachment(spreadProducerNamespace, "z-remote", "last-uid", testRemoteNodeName, "remote-z",
 		testLabels(testProducerLabel, "yes"))
@@ -156,7 +169,7 @@ func TestCompileSpreadFallsBackToHealthyRemoteProducer(t *testing.T) {
 		return got[0].ProducerAttachment
 	}
 
-	if got := remote(); got.Name != "a-remote" {
+	if got := remote(); got.Name != firstRemoteProducer {
 		t.Fatalf("remote producer = %s, want a-remote", got)
 	}
 	reportHealth(endpoint, first, networkv1alpha1.BackendHealthUnhealthy)
@@ -164,7 +177,7 @@ func TestCompileSpreadFallsBackToHealthyRemoteProducer(t *testing.T) {
 		t.Fatalf("remote producer with a-remote Unhealthy = %s, want z-remote", got)
 	}
 	reportHealth(endpoint, last, networkv1alpha1.BackendHealthUnhealthy)
-	if got := remote(); got.Name != "a-remote" {
+	if got := remote(); got.Name != firstRemoteProducer {
 		t.Fatalf("remote producer with both Unhealthy = %s, want a-remote", got)
 	}
 
@@ -176,6 +189,120 @@ func TestCompileSpreadFallsBackToHealthyRemoteProducer(t *testing.T) {
 	if len(got) != 1 || got[0].Kind != RouteIntentRemoteProducer || got[0].ServiceDevice != "remote-a" {
 		t.Fatalf("producer node intents = %+v, want one RemoteProducer half through remote-a", got)
 	}
+}
+
+func TestCompileSpreadIgnoresExpiredLocalReports(t *testing.T) {
+	policy, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal)
+	consumer := spreadConsumer()
+	first := readyAttachment(spreadProducerNamespace, "a-producer", "first-uid", testNodeName, "producer-a",
+		testLabels(testProducerLabel, "yes"))
+	last := readyAttachment(spreadProducerNamespace, "z-producer", "last-uid", testNodeName, "producer-z",
+		testLabels(testProducerLabel, "yes"))
+	attachments := []*cloudv1alpha1.VPCAttachment{consumer, first, last}
+	compile := func() string {
+		t.Helper()
+		got, err := Compile(policy, endpoint, attachments, testNodeName, nil)
+		if err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("intents = %+v, want one", got)
+		}
+		return producerSummary(got[0])
+	}
+
+	// An Unhealthy decision written before its node's router stopped no
+	// longer drains the producer.
+	reportHealth(endpoint, first, networkv1alpha1.BackendHealthUnhealthy)
+	expireReport(endpoint)
+	reportHealth(endpoint, last, networkv1alpha1.BackendHealthHealthy)
+	if got := compile(); got != bothLocalProducers {
+		t.Fatalf("producers with an expired Unhealthy decision = %s, want all eligible", got)
+	}
+	endpoint.Status.Producers[0].RenewTime = nil
+	if got := compile(); got != bothLocalProducers {
+		t.Fatalf("producers with a never-renewed Unhealthy decision = %s, want all eligible", got)
+	}
+}
+
+func TestCompileSpreadAvoidsRemoteProducersWithExpiredReports(t *testing.T) {
+	policy, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+	consumer := spreadConsumer()
+	lost := readyAttachment(spreadProducerNamespace, firstRemoteProducer, "lost-uid", testRemoteNodeName, "remote-a",
+		testLabels(testProducerLabel, "yes"))
+	live := readyAttachment(spreadProducerNamespace, "z-remote", "live-uid", "node-c", "remote-z",
+		testLabels(testProducerLabel, "yes"))
+	resolver := func(attachment *cloudv1alpha1.VPCAttachment) (net.IP, error) {
+		return net.ParseIP("fd00::" + string(attachment.UID[0])), nil
+	}
+	attachments := []*cloudv1alpha1.VPCAttachment{consumer, lost, live}
+	remote := func() string {
+		t.Helper()
+		got, err := Compile(policy, endpoint, attachments, testNodeName, resolver)
+		if err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		if len(got) != 1 || got[0].Kind != RouteIntentRemoteConsumer {
+			t.Fatalf("intents = %+v, want one RemoteConsumer intent", got)
+		}
+		plan, err := ProgrammingPlan(policy, endpoint, attachments, "")
+		if err != nil {
+			t.Fatalf("ProgrammingPlan: %v", err)
+		}
+		if want := []string{got[0].ProducerAttachment.Name}; !planNodesInclude(plan, attachments, want) {
+			t.Fatalf("ProgrammingPlan nodes = %v, want the node of %v", plan.Nodes, want)
+		}
+		return got[0].ProducerAttachment.Name
+	}
+
+	// a-remote's node went down while its attachment still reads ready.
+	reportHealth(endpoint, lost, networkv1alpha1.BackendHealthHealthy)
+	expireReport(endpoint)
+	reportHealth(endpoint, live, networkv1alpha1.BackendHealthHealthy)
+	if got := remote(); got != "z-remote" {
+		t.Fatalf("remote producer with a-remote's report expired = %s, want z-remote", got)
+	}
+	// An expired report is preferred over a current Unhealthy one.
+	endpoint.Status.Producers[1].State = networkv1alpha1.BackendHealthUnhealthy
+	if got := remote(); got != firstRemoteProducer {
+		t.Fatalf("remote producer with z-remote Unhealthy = %s, want a-remote", got)
+	}
+	endpoint.Status.Producers[1].State = networkv1alpha1.BackendHealthHealthy
+	expireReport(endpoint)
+	if got := remote(); got != firstRemoteProducer {
+		t.Fatalf("remote producer with every report expired = %s, want a-remote", got)
+	}
+}
+
+func TestNextProducerReportExpiry(t *testing.T) {
+	_, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+	now := time.Now()
+	if _, ok := NextProducerReportExpiry(endpoint, now); ok {
+		t.Fatal("NextProducerReportExpiry found an expiry with no reports")
+	}
+	lifetime := networkv1alpha1.ServiceEndpointProducerReportLifetime
+	for _, ago := range []time.Duration{lifetime + time.Second, 10 * time.Second, 40 * time.Second} {
+		renewed := metav1.NewTime(now.Add(-ago))
+		endpoint.Status.Producers = append(endpoint.Status.Producers,
+			networkv1alpha1.ServiceEndpointProducerStatus{RenewTime: &renewed})
+	}
+	endpoint.Status.Producers = append(endpoint.Status.Producers, networkv1alpha1.ServiceEndpointProducerStatus{})
+	if left, ok := NextProducerReportExpiry(endpoint, now); !ok || left != lifetime-40*time.Second {
+		t.Fatalf("NextProducerReportExpiry = %v, %v, want %v", left, ok, lifetime-40*time.Second)
+	}
+}
+
+func planNodesInclude(plan ProgrammingRequirements, attachments []*cloudv1alpha1.VPCAttachment,
+	names []string,
+) bool {
+	for _, attachment := range attachments {
+		for _, name := range names {
+			if attachment.Name == name && !slices.Contains(plan.Nodes, attachment.Status.Node) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func TestCompileSpreadRefusesMoreProducersThanASetHolds(t *testing.T) {

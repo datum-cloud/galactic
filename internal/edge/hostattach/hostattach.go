@@ -43,6 +43,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // MinMTU is the smallest MTU an attachment link or packet device may have:
@@ -459,7 +461,7 @@ func ensureMTU(h *netlink.Handle, link netlink.Link, mtu int) error {
 // route for it from the VRF table, after which the address no longer accepts
 // traffic.
 func ensureAddr(h *netlink.Handle, link netlink.Link, addr *netlink.Addr) error {
-	addrs, err := h.AddrList(link, unix.AF_INET6)
+	addrs, err := nldump.On(h).AddrList(link, unix.AF_INET6)
 	if err != nil {
 		return err
 	}
@@ -535,7 +537,7 @@ func configureHostLink(
 // attachment or to a workload, and choosing between them is not the
 // provisioner's decision.
 func checkRouteOwner(h *netlink.Handle, r *netlink.Route) error {
-	existing, err := h.RouteListFiltered(unix.AF_INET6, &netlink.Route{Table: r.Table, Dst: r.Dst},
+	existing, err := nldump.On(h).RouteListFiltered(unix.AF_INET6, &netlink.Route{Table: r.Table, Dst: r.Dst},
 		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_DST)
 	if err != nil {
 		return fmt.Errorf("hostattach: list routes for %s in table %d: %w", r.Dst, r.Table, err)

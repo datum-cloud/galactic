@@ -75,10 +75,11 @@ func NextInterval() time.Duration {
 }
 
 // MinDelayBetweenRAs and MaxRADelayTime are the fixed protocol constants
-// governing solicited replies: no more than one advertisement within
-// MinDelayBetweenRAs of the last one sent, solicited or not, and a random delay
-// in [0, MaxRADelayTime) before replying, so several solicitations arriving
-// together do not each provoke a synchronized reply.
+// governing solicited replies: multicast advertisements are separated by at
+// least MinDelayBetweenRAs, and a reply waits a random delay in
+// [0, MaxRADelayTime), so several solicitations arriving together do not each
+// provoke a synchronized reply. A unicast reply is not subject to the
+// multicast spacing requirement.
 //
 // Vars rather than consts so tests can shrink them; unlike the intervals above,
 // the RFC does not intend these to be tunable in production.

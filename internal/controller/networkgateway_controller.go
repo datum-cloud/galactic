@@ -1035,6 +1035,8 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 			cond.Reason = reasonUnservedProtocol
 		case errors.Is(o.buildErr, errVIPClaimed):
 			cond.Reason = reasonVIPClaimed
+		case errors.Is(o.buildErr, errNoHealthyBackends):
+			cond.Reason = reasonNoHealthyBackends
 		}
 		cond.Message = fmt.Sprintf("not loaded on node %s: %v", node, o.buildErr)
 		return cond
@@ -1865,7 +1867,7 @@ func resolveFamilyBackends(
 			}
 			if len(healthy) == 0 {
 				if failClosedHealth(rule) {
-					return out, &backendSelectionError{err: errors.New("no backend has a current Healthy probe result")}
+					return out, &backendSelectionError{err: errNoHealthyBackends}
 				}
 				out.noneHealthy = true
 			} else {

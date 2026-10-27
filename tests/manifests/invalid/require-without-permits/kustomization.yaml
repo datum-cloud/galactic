@@ -1,0 +1,5 @@
+resources:
+  - ../../../../config/fabric-router
+components:
+  - ../../../../config/fabric-router/components/fabric-api
+  - ../../../../config/fabric-router/components/fabric-api-require-permits

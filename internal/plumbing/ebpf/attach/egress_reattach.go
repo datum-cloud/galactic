@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachmentidentity"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // ReattachEgress moves every usid_egress attachment on this node's veths and
@@ -156,9 +157,9 @@ func linkGone(err error) bool {
 	return errors.As(err, &notFound) || errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENOENT)
 }
 
-// listLinksFn indirects netlink.LinkList so a test can confine ReattachEgress
+// listLinksFn indirects nldump.LinkList so a test can confine ReattachEgress
 // to its own namespace's links.
-var listLinksFn = netlink.LinkList
+var listLinksFn = nldump.LinkList
 
 // ReattachDeliver attaches tp_deliver to the tc egress of every interface
 // carrying the managed egress chain, replacing any filter there in place, and

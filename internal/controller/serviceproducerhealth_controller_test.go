@@ -32,6 +32,7 @@ const (
 	producerHealthNamespace = "dns"
 	producerHealthNode      = "node-a"
 	producerHealthOtherNode = "node-b"
+	producerHealthClass     = "dns"
 )
 
 // ownerProber returns a decision per probe owner, Unknown/Pending for any
@@ -147,7 +148,8 @@ func TestServiceProducerHealthReconcilerPublishesThisNodesProducers(t *testing.T
 	endpoint := &networkv1alpha1.ServiceEndpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: producerHealthEndpoint, Namespace: producerHealthNamespace},
 		Spec: networkv1alpha1.ServiceEndpointSpec{
-			ServiceClass: "dns", Address: producerHealthAddress, Port: 53, Protocol: networkv1alpha1.NetworkServiceProtocolUDP,
+			ServiceClass: producerHealthClass, Address: producerHealthAddress, Port: 53,
+			Protocol:     networkv1alpha1.NetworkServiceProtocolUDP,
 			DeliveryMode: networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal,
 			AttachmentSelector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{producerHealthLabel: producerHealthEndpoint},
@@ -250,5 +252,73 @@ func TestServiceProducerHealthReconcilerPublishesThisNodesProducers(t *testing.T
 	}
 	if len(prober.owners) != 0 {
 		t.Errorf("probes after Single = %v, want none", prober.owners)
+	}
+}
+
+func TestServiceProducerHealthReconcilerRenewsReports(t *testing.T) {
+	c := startProducerHealthAPI(t)
+	ctx := context.Background()
+	endpoint := &networkv1alpha1.ServiceEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: producerHealthEndpoint, Namespace: producerHealthNamespace},
+		Spec: networkv1alpha1.ServiceEndpointSpec{
+			ServiceClass: producerHealthClass, Address: producerHealthAddress, Port: 53,
+			Protocol:     networkv1alpha1.NetworkServiceProtocolUDP,
+			DeliveryMode: networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal,
+			AttachmentSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{producerHealthLabel: producerHealthEndpoint},
+			},
+			Distribution: networkv1alpha1.ServiceEndpointDistributionSpread,
+			HealthCheck:  &networkv1alpha1.ServiceEndpointHealthCheck{Port: 8053},
+		},
+	}
+	if err := c.Create(ctx, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	createProducer(t, c, "resolver-a", producerHealthNode, "fd00:1::a/64")
+	key := client.ObjectKeyFromObject(endpoint)
+	r := &ServiceProducerHealthReconciler{Client: c, NodeName: producerHealthNode, Prober: newOwnerProber()}
+	interval := networkv1alpha1.ServiceEndpointProducerReportRenewInterval
+
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := producerEntries(t, c)["resolver-a"]
+	if first.RenewTime == nil || time.Since(first.RenewTime.Time) > time.Minute {
+		t.Fatalf("resolver-a renewTime = %v, want now", first.RenewTime)
+	}
+	if result.RequeueAfter != interval {
+		t.Fatalf("RequeueAfter after publishing = %v, want %v", result.RequeueAfter, interval)
+	}
+
+	// An unchanged decision within the renew interval is not rewritten.
+	if err := c.Get(ctx, key, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	version := endpoint.ResourceVersion
+	result, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, key, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if endpoint.ResourceVersion != version {
+		t.Fatal("an unchanged decision was rewritten within the renew interval")
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > interval {
+		t.Fatalf("RequeueAfter before renewal is due = %v, want within %v", result.RequeueAfter, interval)
+	}
+
+	// Once the interval passes, the same decision is renewed.
+	later := first.RenewTime.Add(interval)
+	entries := []networkv1alpha1.ServiceEndpointProducerStatus{first}
+	entries[0].RenewTime = nil
+	if _, err := r.publish(ctx, endpoint, entries, later); err != nil {
+		t.Fatal(err)
+	}
+	if got := producerEntries(t, c)["resolver-a"]; got.RenewTime == nil || !got.RenewTime.Time.Equal(later) ||
+		got.State != first.State || !got.LastTransitionTime.Equal(&first.LastTransitionTime) {
+		t.Fatalf("resolver-a after renewal = %+v, want the same decision renewed at %v", got, later)
 	}
 }

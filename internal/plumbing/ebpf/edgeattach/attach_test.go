@@ -101,7 +101,7 @@ func TestResolveTargets(t *testing.T) {
 		nonBondName = "eth0"
 		bondName    = "bond0"
 		bondIndex   = 10
-		slave1      = "enp3s0f1"
+		slave1      = "ens1"
 		slave2      = "eno2"
 	)
 
@@ -411,10 +411,8 @@ func TestAttach_MultipleInterfacesRollsBackOnPartialFailure(t *testing.T) {
 // master fails: on this test's kernel, with veth slaves (which do support
 // native XDP themselves), it does not -- some kernels' bonding driver does
 // implement ndo_bpf by forwarding the attach to every slave, which only
-// fails if a slave's own driver lacks native XDP support (this is believed
-// to be the actual failure mode on proxima-evices: 802.3ad over an
-// igb/tg3 pair, and tg3 in particular is commonly cited as lacking native
-// XDP support; not independently confirmed against that node's kernel).
+// fails if a slave's own driver lacks native XDP support (tg3, for example,
+// is commonly cited as lacking it).
 // Whether master-attach fails outright or succeeds-but-silently-relies-on
 // slave support is kernel/driver dependent either way, so asserting one
 // direction here would make this test flaky across kernels rather than

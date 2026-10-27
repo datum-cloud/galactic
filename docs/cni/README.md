@@ -4,7 +4,7 @@ Entry point for everything documenting the `galactic-cni` plugin chain —
 how attachments are configured, how ADD/DEL/CHECK/STATUS flow through the
 chain, and how orphaned state gets garbage collected. For the chain's own
 layout, entry points, and module reference, see
-[docs/agents/ARCHITECTURE-CNI.md](../agents/ARCHITECTURE-CNI.md) instead —
+[docs/agents/ARCHITECTURE-CNI.md](../cni/architecture.md) instead —
 these pages assume that context and go deep on configuration and runtime
 behavior.
 

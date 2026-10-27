@@ -1,7 +1,10 @@
 processor:
   docPaths: []
   ignoreTypes:
-    - ".*List$"
+    # Exclude collection wrappers by name: BGPPrefixList is a resource.
+    - "[.]NetworkFabricIdentityList$"
+    - "[.]VPCAttachmentList$"
+    - "[.]VPCList$"
   ignoreFields: []
 
 render:

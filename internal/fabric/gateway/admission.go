@@ -13,9 +13,11 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/errcode"
 	"go.datum.net/galactic/internal/fabric/gateway/limit"
+	"go.datum.net/galactic/internal/fabric/identity"
 	"go.datum.net/galactic/internal/fabric/node"
 	"go.datum.net/galactic/internal/fabric/query"
 )
@@ -35,6 +37,8 @@ type Admission struct {
 	Buckets   *limit.Buckets
 	Attempts  *limit.Attempts
 	Authority *limit.Authority
+	// Metrics, when set, counts refusals and charged packets.
+	Metrics *Metrics
 	// Now returns the current time; nil selects time.Now.
 	Now func() time.Time
 
@@ -78,8 +82,10 @@ func (a *Admission) openStream(project string) (func(), error) {
 		a.projectStreams = map[string]int{}
 	}
 	if a.streams >= a.Limits.Streams || a.projectStreams[project] >= a.Limits.ProjectStreams {
-		return nil, errcode.Retry(errcode.QueueFull, "the live stream limit is reached", string(limit.ScopeQueue),
+		err := errcode.Retry(errcode.QueueFull, "the live stream limit is reached", string(limit.ScopeQueue),
 			time.Second)
+		a.Metrics.refused(project, err)
+		return nil, err
 	}
 	a.streams++
 	a.projectStreams[project]++
@@ -91,6 +97,43 @@ func (a *Admission) openStream(project string) (func(), error) {
 			delete(a.projectStreams, project)
 		}
 	}, nil
+}
+
+// liveStreams returns the live service streams.
+func (a *Admission) liveStreams() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.streams
+}
+
+// admit admits a service request before its discovery: it confirms the
+// election, charges the cell's and the project's request tokens, registers
+// the attempt key and opens a live stream. It returns the epoch's context
+// and the function that ends the stream.
+func (a *Admission) admit(
+	ctx context.Context, caller identity.ID, req *servicev1.RunDiagnosticRequest,
+) (context.Context, func(), error) {
+	project := req.GetProjectId()
+	refuse := func(err error) (context.Context, func(), error) {
+		a.Metrics.refused(project, err)
+		return nil, nil, err
+	}
+	_, epochCtx, err := a.Authority.Check(ctx)
+	if err != nil {
+		return refuse(err)
+	}
+	if err := a.Buckets.ChargeRequest(project, a.now()); err != nil {
+		return refuse(err)
+	}
+	if err := a.Attempts.Register(attemptKey(caller, req), requestDigest(req), req.GetExpiresAt().AsTime(),
+		a.now()); err != nil {
+		return refuse(err)
+	}
+	closeStream, err := a.openStream(project)
+	if err != nil {
+		return nil, nil, err
+	}
+	return epochCtx, closeStream, nil
 }
 
 // probeCost is a probe's worst-case packet count.
@@ -109,6 +152,7 @@ func (a *Admission) permit(
 ) (*fabricv1.ProbePermit, error) {
 	epoch, _, err := a.Authority.Check(ctx)
 	if err != nil {
+		a.Metrics.refused(principal, err)
 		return nil, err
 	}
 	dst, err := query.ResolvedProbe(q)
@@ -117,8 +161,10 @@ func (a *Admission) permit(
 	}
 	cost := probeCost(q.Type)
 	if err := a.Buckets.ChargePackets(principal, dst, cost, a.now()); err != nil {
+		a.Metrics.refused(principal, err)
 		return nil, err
 	}
+	a.Metrics.charged(principal, cost)
 	return &fabricv1.ProbePermit{
 		Id:          newPermitID(),
 		Epoch:       epoch.String(),

@@ -1,245 +1,8 @@
-# fabric-api Deployment & Configuration
+# fabric-api configuration reference
 
-The proposed [Looking Glass service contract](service-contract.md) defines the
-separate customer-service API, coverage, aggregate limits, and failure bounds
-for #1042. It is a future implementation contract; the interfaces and settings
-documented on this page remain the current baseline.
+For installation use [deployment](deployment.md); for certificate identities use [security](security.md); for rollout, verification and troubleshooting use [operations](operations.md). The [FabricQuery reference](api.md) defines request and result semantics.
 
-This is a how-to and reference guide for deploying and configuring
-`fabric-api`, the looking glass over `fabric-router`'s FRR state. For the
-design rationale (why a sidecar, why pod identities, why the budgets are what
-they are) see
-[docs/agents/ARCHITECTURE-FABRIC-API.md](../agents/ARCHITECTURE-FABRIC-API.md);
-this document covers the "how". The `FabricQuery` contract is in
-[api.md](api.md).
-
-> Last verified: 2026-10-07 against the `feat/fabric-api` working tree:
-> `cmd/fabric-api/`, `internal/fabric/`, `config/fabric-api/`,
-> `config/fabric-router/components/fabric-api/`, `config/monitoring/`, and the
-> lab in `deploy/containerlab/` (`deploy:cert-manager`, `deploy:fabric-api`,
-> `verify:fabric-api`, `verify:fabric-api-bootstrap`).
-
-## What you deploy
-
-fabric-api has four runtime parts, all from one image,
-`ghcr.io/datum-cloud/fabric-api`:
-
-| Part    | Kind                                         | Where                      | What it does                                                                                                          |
-| ------- | -------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| node    | Sidecar in the `fabric-router` DaemonSet pod | Every `fabric-router` node | Reads FRR over its vty sockets and sends ICMP probes; answers mTLS gRPC on the node's own address                     |
-| gateway | Deployment, 2 replicas, leader-elected       | One per cell               | Executes `FabricQuery` objects by fanning out to the node sidecars; serves the operator debug service                 |
-| certs   | DaemonSet `fabric-api-certs`                 | Every `fabric-router` node | Obtains the node's certificate from a csi-driver volume and copies it to the node for the sidecar; needs no API token |
-| janitor | CronJob                                      | One per cell               | Deletes expired `FabricQuery` copies the federation failed to delete                                                  |
-
-Everything is opt-in. `kubectl apply -k config/` does not deploy any of it, and
-the base `fabric-router` DaemonSet is unchanged unless you include the
-Component.
-
-## Prerequisites
-
-None of these are created by this repository's manifests.
-
-1. **cert-manager and its csi-driver**, running on every node that runs
-   `fabric-router` (tolerating the nodes' taints), because the `fabric-api-certs`
-   pods mount a csi volume. The csi-driver needs no special setting.
-2. **An `Issuer` named `fabric-api`** in `galactic-system`, backed by a dedicated
-   per-cell fabric-api CA. Not a general cluster CA: trust is per cell. Infra owns
-   it in production; the lab's stand-in is
-   `deploy/containerlab/resources/fabric-api/pki/pki.yaml`.
-3. **The `FabricQuery` CRD** (`fabricqueries.galactic.datumapis.com`). Infra owns
-   its lifecycle in every cell. `config/fabric-api/crd/` is a copy for the lab and
-   tests only; do not apply it where infra manages the CRD.
-4. **A per-cell `fabric-api` ConfigMap** in `galactic-system` (see
-   [Per-cell ConfigMap](#step-2-per-cell-configmap)).
-5. **A federation path that delivers `FabricQuery` objects** to the cell, pinned
-   to its member cluster. That is NSO and Karmada's work and is out of scope here.
-
-### Why certificates are issued in a separate pod
-
-A `csi.cert-manager.io` volume blocks its pod until the certificate is issued.
-The driver's `continueOnNotReady` setting does not change that: it covers only the
-driver's own readiness gates. With a broken Issuer a lab test showed
-`MountVolume.SetUp` waiting ("Referenced issuer does not have Ready condition")
-and a `fabric-router` pod stuck in `PodInitializing` with FRR down. So the
-sidecar's certificate does not come from a volume in the `fabric-router` pod:
-
-- The Component adds a DaemonSet, `fabric-api-certs`, with the same placement as
-  `fabric-router` and no API token. It runs `fabric-api certsync`, which copies
-  `tls.crt`, `tls.key` and `ca.crt` from its csi volume (`fabric-api-csi`) to the
-  node's tmpfs directory `/run/fabric-api/tls` every 10 seconds. It validates the
-  key pair first and replaces each file atomically.
-- The `fabric-router` pod mounts `/run/fabric-api/tls` read-only as a hostPath of
-  type `DirectoryOrCreate`, which never blocks the pod.
-- A broken Issuer therefore stalls only the `fabric-api-certs` pod (it waits in
-  `ContainerCreating`). The sidecar reports no credentials and fails closed;
-  routing is unaffected. When the Issuer is repaired the sidecar picks the
-  certificate up without a restart.
-
-`task verify:fabric-api-bootstrap` in `deploy/containerlab/` is the lab's check of
-this property.
-
-## Deployment
-
-### Step 1: cell-wide RBAC and ServiceAccounts
-
-```sh
-kubectl apply -k config/fabric-api/
-```
-
-This applies only `serviceaccount.yaml` and `rbac.yaml`: the `fabric-api-gateway`
-and `fabric-api-janitor` ServiceAccounts, and their roles. It is safe and
-idempotent in any cell.
-
-| Identity             | Scope             | Permissions                                                                                                  |
-| -------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------ |
-| `fabric-api-gateway` | Cluster           | `fabricqueries`: get, list, watch. `fabricqueries/status`: get, update, patch. `nodes`: get (node selectors) |
-| `fabric-api-gateway` | `galactic-system` | `pods`: get, list, watch. `leases`: get, list, watch, create, update, patch. `events`: create, patch         |
-| `fabric-api-janitor` | Cluster           | `fabricqueries`: list, delete                                                                                |
-
-The gateway cannot edit a spec, create or delete a query, or touch FRR's
-ConfigMaps. Delete access is deliberately a separate identity.
-
-### Step 2: per-cell ConfigMap
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: fabric-api
-  namespace: galactic-system
-data:
-  site: dfw
-  cell: dfw
-  cluster-name: dfw
-```
-
-| Key            | Used by       | Meaning                                                                                                       |
-| -------------- | ------------- | ------------------------------------------------------------------------------------------------------------- |
-| `site`         | node, gateway | The location this cell serves. The gateway executes only `FabricQuery` objects whose `spec.site` equals it    |
-| `cell`         | node, gateway | The cell name in every mTLS identity. Must equal the `CELL_NAME` in the certificates' URI SANs                |
-| `cluster-name` | gateway       | This cell's Karmada member cluster name. The gateway executes only objects whose `spec.clusterName` equals it |
-
-The gateway's Deployment references all three keys as required, so it will not
-start without the ConfigMap. The node sidecar references `site` and `cell` as
-optional: without `cell` it stays up, logs an error, serves only metrics and
-reports diagnostics unavailable, so a missing ConfigMap never crash-loops a
-container in the `fabric-router` pod. Container environment is fixed at start, so
-creating the ConfigMap after the Component is rolled out means recreating the
-pods, which restarts FRR. Create it first.
-
-### Step 3: the gateway and janitor
-
-`config/fabric-api/base/` holds the gateway Deployment, its ClusterIP Service, a
-PodDisruptionBudget (`minAvailable: 1`) and the janitor CronJob. It is not applied
-by anything by default because it needs per-cell values: the ConfigMap above and
-the cell name in the gateway certificate's URI SAN. Instantiate it from a per-cell
-overlay (compare `deploy/containerlab/resources/fabric-api/gateway/dfw/`):
-
-```yaml
-# overlays/<cell>/gateway/kustomization.yaml
-namespace: galactic-system
-resources:
-  - ../../../config/fabric-api/base
-configMapGenerator:
-  - name: fabric-api
-    literals:
-      - site=dfw
-      - cell=dfw
-      - cluster-name=dfw
-generatorOptions:
-  disableNameSuffixHash: true
-patches:
-  - target:
-      kind: Deployment
-      name: fabric-api-gateway
-    patch: |-
-      - op: replace
-        path: /spec/template/spec/volumes/0/csi/volumeAttributes/csi.cert-manager.io~1uri-sans
-        value: spiffe://fabric-api.datumapis.com/cell/dfw/gateway
-```
-
-Adjust the relative path to `config/fabric-api/base`. `disableNameSuffixHash`
-matters: the pods reference the ConfigMap by the fixed name `fabric-api`.
-
-The base pins `ghcr.io/datum-cloud/fabric-api` at a tag the release pipeline
-stamps. Override it from an overlay's `images:` stanza. The gateway runs as UID
-65532 with a read-only root filesystem and no capabilities, requests 20m CPU and
-64Mi memory, and limits memory to 512Mi.
-
-### Step 4: the node sidecar Component, as a canary
-
-Add the Component to an overlay of `config/fabric-router` and replace
-`CELL_NAME` in the URI SAN of the `fabric-api-certs` DaemonSet's csi volume:
-
-```yaml
-# overlays/<cell>/fabric-router/kustomization.yaml
-resources:
-  - ../../../config/fabric-router
-components:
-  - ../../../config/fabric-router/components/fabric-api
-patches:
-  - path: fabric-api-cell-patch.yaml
-```
-
-```yaml
-# overlays/<cell>/fabric-router/fabric-api-cell-patch.yaml
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: fabric-api-certs
-spec:
-  template:
-    spec:
-      volumes:
-        - name: fabric-api-csi
-          csi:
-            driver: csi.cert-manager.io
-            volumeAttributes:
-              csi.cert-manager.io/uri-sans: spiffe://fabric-api.datumapis.com/cell/dfw/ns/${POD_NAMESPACE}/pod/${POD_NAME}
-```
-
-`fabric-router` still needs its own per-node `fabric-router.<nodename>`
-ConfigMaps as usual (see `AGENTS.md`). The Component does not create the cell
-ConfigMap, the Issuer or the CRD. Applying it adds the `fabric-api-certs` DaemonSet and recreates every `fabric-router` pod
-and restarts FRR; follow [Rollout](#rollout).
-
-What the Component changes in the pod:
-
-- Adds the `fabric-api` container (`args: [node]`) with ports `fabric-api`/9344
-  and `api-metrics`/9345, 10m CPU and 64Mi memory requested, a 768Mi memory limit
-  and `GOMEMLIMIT=640MiB` (the search index holds a copy of bgpd's selected routes;
-  see [Search index](#search-index)).
-  It has no readiness, liveness or startup probe, on purpose.
-- Mounts FRR's `/run/frr` read-only and the node's `/run/fabric-api/tls` (a
-  hostPath, filled by `fabric-api-certs`) at `/var/run/fabric-api/tls` read-only.
-- Runs the container as UID 0, GID 102 (`frrvty`), dropping every capability and
-  adding only `NET_RAW`, with a read-only root filesystem and no privilege
-  escalation. Raw ICMP sockets need `NET_RAW` in the effective set, which a
-  non-root container cannot get; without `CAP_DAC_OVERRIDE` it reaches FRR's
-  `0770 frr:frrvty` sockets through group 102.
-- Sets `automountServiceAccountToken: false` on the pod and adds a projected
-  token volume mounted only into `frr-init` and `config-agent`, the containers
-  that call the Kubernetes API. The sidecar has no API access.
-
-The `fabric-api-certs` DaemonSet runs the same image with `args: [certsync, ...]`,
-tolerates every taint, avoids control-plane nodes and requires the same
-`galactic.datumapis.com/fabric` label values as `fabric-router`. It runs as root
-(to write the root-owned node directory) with every capability dropped, a
-read-only root filesystem, 5m CPU and 16Mi memory requested and a 64Mi limit.
-
-### Lab
-
-In `deploy/containerlab/`: `task build:fabric-api` builds the image,
-`task deploy:cert-manager` installs cert-manager and the csi-driver in every
-cluster (the csi-driver must run on every fabric node before `deploy:fabric`), and `task deploy:fabric-api` installs the CRD copy, RBAC, a stand-in PKI,
-the gateway and the janitor. `task deploy` does all of them in the right order
-(`deploy:cert-manager` before `deploy:fabric`, `deploy:fabric-api` last). In the
-lab each site is one cell whose cell, site and member cluster name are all the site
-name. Each site's fabric-router overlay creates that site's `fabric-api`
-ConfigMap, so it lands with the node sidecars in `deploy:fabric`, ahead of their
-start. `task verify:fabric-api` (which first runs
-`task verify:fabric-api-config`, a check that the overlays render it) and
-`task verify:fabric-api-bootstrap` are the checks.
+The [Looking Glass service contract](../designs/looking-glass-service.md) describes future behavior beyond the currently available operator and FabricQuery interfaces.
 
 ## Ports
 
@@ -260,172 +23,6 @@ reaches 9344 and 9345 (gateway pods to 9344, your scraper to 9345), do so.
 `9342` and `9343` on the same pods belong to `frr-exporter` and the config agent.
 The debug Service is `ClusterIP` only; a port-forward to it is a transport choice
 and does not bypass the gateway's identity checks.
-
-## Identities and certificates
-
-Every certificate carries exactly one URI SAN in the trust domain
-`fabric-api.datumapis.com`:
-
-| Identity | URI SAN                                                                  | Issued to                                 | Key usages                |
-| -------- | ------------------------------------------------------------------------ | ----------------------------------------- | ------------------------- |
-| gateway  | `spiffe://fabric-api.datumapis.com/cell/<cell>/gateway`                  | The gateway Deployment (both replicas)    | `client auth,server auth` |
-| node     | `spiffe://fabric-api.datumapis.com/cell/<cell>/ns/<namespace>/pod/<pod>` | Each node's `fabric-api-certs` pod        | `server auth`             |
-| operator | `spiffe://fabric-api.datumapis.com/cell/<cell>/operator/<name>`          | A person or tool calling directly         | `client auth`             |
-| service  | `spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>`           | The customer-facing Looking Glass service | `client auth`             |
-
-The node identity names a **pod**, not the node: the csi-driver can template a
-pod's name and namespace (`${POD_NAME}`, `${POD_NAMESPACE}`) but not its node's
-name. That pod is the node's `fabric-api-certs` pod, not the `fabric-router` pod
-the sidecar runs in. The gateway maps each node to its newest Running
-`fabric-api-certs` pod (selected by `--certs-selector`, default
-`app.kubernetes.io/name=fabric-api-certs`), records it in
-`status.nodes[].certificatePod`, and dials accepting only the identities of
-that node's certs pods: the newest one, and any it is replacing, since a sidecar
-keeps presenting a replaced pod's certificate until the new one reaches it. A
-node with no running certs pod is omitted with reason `NoCertificatePod`. The
-sidecar does not know that pod's name, so it accepts any node identity in its own
-cell and namespace as its own; the gateway's pinning is what ties a certificate to
-a node. Each path segment must be a lower-case DNS-label-like string (`[a-z0-9]`,
-with `.` and `-` inside).
-
-How an identity is checked:
-
-- TLS 1.3 minimum, mutual. The server requires a client certificate and the
-  client accepts only a server proving the identity it expected.
-- The chain is verified against the trust bundle current at handshake time, with
-  the right key usage, and the identity's **cell must equal this process's own
-  cell**.
-- A process refuses to load a certificate whose identity is not its own (for
-  the sidecar: any node identity in its cell and namespace), is not valid now, or does not chain to the bundle it shipped with.
-- At the handshake a node accepts only gateway and operator identities. Per RPC, a
-  gateway or operator may call the node's `Execute` and `Info`; on the gateway's
-  debug service an operator may call `Query` and `ListNodes`, and the gateway
-  identity may call only `Query` (the form in which a follower forwards to the
-  leader). Anything else is `Unauthorized`.
-- The gateway also accepts node identities, which may call only its
-  `RequestPermit` and `ReleasePermit` (and the gateway identity, forwarding
-  them to the leader). The handler further requires the node identity's
-  namespace to be the gateway's `--namespace` and its pod to be a
-  `fabric-api-certs` pod on the node the call names.
-- The gateway also accepts a service identity whose name is in
-  `--service-identities`. A service may call only the Looking Glass service's
-  `GetCapabilities` and `RunDiagnostic`, never `Query`, `ListNodes` or a node.
-  The gateway identity may call the gateway-only `ForwardDiagnostic`, with which
-  a follower hands a request to the leader; no other identity may.
-- On every gateway RPC, unary or streaming, the gateway verifies the caller's
-  certificate again against its current bundle and clock, so a connection opened
-  by a certificate that has since expired, or whose CA has left the bundle, is
-  refused with `UNAUTHENTICATED`. A call's context ends when the caller's
-  certificate expires, after which a stream sends and receives nothing more.
-  Metadata keys starting `x-fabric-api-` are dropped from every call the
-  gateway identity did not make.
-
-The csi volume attributes in the `fabric-api-certs` DaemonSet (volume
-`fabric-api-csi`) and the gateway Deployment:
-
-| Attribute                          | `fabric-api-certs`                                       | Gateway                      |
-| ---------------------------------- | -------------------------------------------------------- | ---------------------------- |
-| `csi.cert-manager.io/issuer-name`  | `fabric-api`                                             | `fabric-api`                 |
-| `csi.cert-manager.io/issuer-kind`  | `Issuer`                                                 | `Issuer`                     |
-| `csi.cert-manager.io/uri-sans`     | `.../cell/CELL_NAME/ns/${POD_NAMESPACE}/pod/${POD_NAME}` | `.../cell/CELL_NAME/gateway` |
-| `csi.cert-manager.io/key-usages`   | `server auth`                                            | `client auth,server auth`    |
-| `csi.cert-manager.io/duration`     | `24h`                                                    | `24h`                        |
-| `csi.cert-manager.io/renew-before` | `8h`                                                     | `8h`                         |
-| `csi.cert-manager.io/fs-group`     | not set                                                  | `65532`                      |
-
-`CELL_NAME` is a literal placeholder in both manifests that your overlay must
-replace with the cell name (the same value as the ConfigMap's `cell` key). The
-csi-driver cannot take it from a ConfigMap. A mismatch is not subtle: the process
-rejects its own certificate (`certificate identity ... is not ...`), reports
-credentials not loaded and fails closed. The files are `tls.crt`, `tls.key` and
-`ca.crt`, read from `/var/run/fabric-api/tls` (`--tls-cert`, `--tls-key`,
-`--tls-ca`). For the gateway that is its own csi volume; for the sidecar it is the
-hostPath that `certsync` fills.
-
-### Operator certificates
-
-An operator certificate is a normal cert-manager `Certificate` from the same
-`fabric-api` Issuer, for example the lab's:
-
-```yaml
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: fabric-api-operator
-  namespace: galactic-system
-spec:
-  secretName: fabric-api-operator
-  duration: 24h
-  renewBefore: 8h
-  uris:
-    - spiffe://fabric-api.datumapis.com/cell/dfw/operator/alice
-  usages:
-    - digital signature
-    - client auth
-  privateKey:
-    algorithm: ECDSA
-    size: 256
-  issuerRef:
-    name: fabric-api
-    kind: Issuer
-```
-
-An operator certificate can reach any node and the gateway in its cell, so treat
-who may request one as an access decision.
-
-### Service certificates
-
-The customer-facing Looking Glass service gets one certificate per cell it calls,
-from that cell's `fabric-api` Issuer, with URI SAN
-`spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>` and usage
-`client auth`, issued like an operator certificate. The gateway accepts it only
-when `<name>` is in its `--service-identities` list. The project and request
-IDs in a `RunDiagnostic` request are trusted because that identity is
-authenticated: issuing a service certificate grants the right to attribute
-diagnostics to any project, so treat it as an access decision too. The
-service presents the certificate on its gRPC connection to the gateway's
-`debug` port and, to rotate without a restart, reloads the files as cert-manager
-renews them; the gateway accepts the overlapping-bundle rotation below. The
-service contract is [service-contract.md](service-contract.md). The gateway
-does not execute service diagnostics: it answers a valid `RunDiagnostic`
-with `ServiceDisabled`, and `GetCapabilities` reports `enabled: false`. With
-`--aggregate-budgets`, `GetCapabilities` also lists `aggregate-probe-budgets`
-and the cell's admission limits.
-
-### Rotation
-
-Certificates last 24h and renew 8h before expiry. The csi-driver renews in place; for
-the sidecar, `certsync` copies the new files to the node within 10 seconds. The
-sidecar polls its files every 10 seconds, the gateway every 30, and each swaps in a new certificate, key and bundle without a
-restart, and without touching FRR. A new set is accepted only if the certificate
-matches the process's identity, is valid now and chains to the bundle delivered
-with it. If it does not, the previous credentials stay in use until they expire.
-With none loaded, every handshake fails closed, the process keeps running and
-retrying, and routing is unaffected.
-
-| Situation                          | Behaviour                                                      | Signal                                                                     |
-| ---------------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| Files missing or unreadable        | Handshakes fail; warning logged every 30s                      | `fabric_api_credentials_loaded` 0; `FabricAPICredentialsMissing` after 15m |
-| Renewal produces a bad certificate | The previous one keeps serving until its `notAfter`, then none | `fabric_api_certificate_expiry_timestamp_seconds` stops advancing          |
-| Certificate expires                | Credentials cleared; handshakes fail closed                    | `FabricAPICertificateRenewalFailing` fires earlier, at under 4h left       |
-| Wrong cell, pod or role in the SAN | Certificate rejected at load                                   | Warning in the log; credentials not loaded                                 |
-
-**Rotating the CA.** A peer verifies the other side against its own current
-bundle, so a leaf from a new CA is unusable by any peer that has not yet loaded a
-bundle trusting that CA. Rotate with overlap, using a bundle that holds both
-certificates (the loader accepts a multi-certificate `ca.crt`):
-
-1. Make every pod's `ca.crt` trust both the old and the new CA.
-2. Wait until every node sidecar and the gateway have reloaded it (within 30
-   seconds of the volume updating), confirmed by `fabric_api_credentials_loaded` 1 and
-   a fresh `fabric_api_certificate_expiry_timestamp_seconds` per pod.
-3. Switch issuance to the new CA. Leaves renew within 24 hours and chain to it.
-4. After every leaf from the old CA has been replaced (allow more than the 24h
-   duration), remove the old CA from the bundle.
-
-How step 1 is achieved depends on the issuer integration (infra owns it) and is
-not exercised by this repository's lab; the code path that tolerates the overlap
-is covered by `TestRotationWithOverlappingBundle`.
 
 ## Command-line reference
 
@@ -448,38 +45,38 @@ variables then apply. Trace-context propagation is always on.
 
 ### `fabric-api node`
 
-| Flag                           | Env                      | Default                           | Meaning                                                                                                                                                         |
-| ------------------------------ | ------------------------ | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--node-name`                  | `NODE_NAME`              |                                   | This node's name. Required; requests naming another node are refused (`WrongNode`)                                                                              |
-| `--site`                       | `SITE`                   |                                   | Site this node serves; reported by `Info`                                                                                                                       |
-| `--cell`                       | `CELL`                   |                                   | Cell name in the mTLS identities. If empty the process idles and serves only metrics                                                                            |
-| `--namespace`                  | `POD_NAMESPACE`          |                                   | This pod's namespace. Required                                                                                                                                  |
-| `--pod-name`                   | `POD_NAME`               |                                   | This pod's name. Required                                                                                                                                       |
-| `--host-ip`                    | `HOST_IP`                |                                   | Address the gRPC service binds to: the pod's `hostIP`. Required                                                                                                 |
-| `--port`                       |                          | `9344`                            | gRPC port                                                                                                                                                       |
-| `--metrics-bind-address`       | `METRICS_BIND_ADDRESS`   | `<host-ip>:9345`                  | Address serving `/metrics`                                                                                                                                      |
-| `--frr-socket-dir`             |                          | `/run/frr`                        | Directory holding `bgpd.vty` and `zebra.vty`                                                                                                                    |
-| `--tls-cert`                   | `FABRIC_API_TLS_CERT`    | `/var/run/fabric-api/tls/tls.crt` | Certificate file                                                                                                                                                |
-| `--tls-key`                    | `FABRIC_API_TLS_KEY`     | `/var/run/fabric-api/tls/tls.key` | Private key file                                                                                                                                                |
-| `--tls-ca`                     | `FABRIC_API_TLS_CA`      | `/var/run/fabric-api/tls/ca.crt`  | Trust bundle file                                                                                                                                               |
-| `--probe-source-ipv4`          | `PROBE_SOURCE_IPV4`      |                                   | Explicit IPv4 probe source                                                                                                                                      |
-| `--probe-source-ipv6`          | `PROBE_SOURCE_IPV6`      |                                   | Explicit IPv6 probe source                                                                                                                                      |
-| `--probe-source-interface`     | `PROBE_SOURCE_INTERFACE` | `lo`                              | Interface whose single global address per family is the source for a family with no explicit one; empty disables                                                |
-| `--deny-prefixes`              |                          |                                   | Comma-separated platform or management CIDRs no probe may target                                                                                                |
-| `--operator-allow-prefixes`    |                          |                                   | Comma-separated CIDRs only operator identities may probe. Lab only; never set in production                                                                     |
-| `--enable-expensive-queries`   |                          | `false`                           | Enable `ASPath`, `Community` and `LargeCommunity` searches. See [Query types](#query-types)                                                                     |
-| `--max-concurrent`             |                          | `4`                               | `Execute` calls running at once; further calls wait within their deadline                                                                                       |
-| `--max-expensive`              |                          | `1`                               | Expensive searches running at once; no queue (`NodeBusy`)                                                                                                       |
-| `--max-probes`                 |                          | `2`                               | Probes running at once; no queue (`NodeBusy`)                                                                                                                   |
-| `--probe-packet-rate`          |                          | `20`                              | Probe packets per second across all probes on the node (burst 5, not configurable)                                                                              |
-| `--expensive-breaker-cooldown` |                          | `10m`                             | How long expensive searches stay suspended after one times out (`--search-source=frr` only)                                                                     |
-| `--search-source`              |                          | `index`                           | What answers AS-path and community searches: `index` (a local copy of bgpd's Loc-RIB fed over BMP) or `frr` (FRR's own scans, which starve bgpd on full tables) |
-| `--bmp-station-address`        |                          | `127.0.0.1:9348`                  | Loopback address the BMP station listens on, with `--search-source=index`                                                                                       |
-| `--search-index-max-routes`    |                          | `4000000`                         | Prefixes the index holds at most; announcements for new prefixes beyond it are dropped and counted                                                              |
-| `--probe-permits`              |                          | `false`                           | Verify and enforce the gateway's probe permits, and report `probePermits` in `Info`. Needs API access; see [Aggregate probe budgets](#aggregate-probe-budgets)  |
-| `--require-probe-permits`      |                          | `false`                           | With `--probe-permits`, refuse any probe without a permit; a direct operator's probe first obtains one from `--gateway-address`                                 |
-| `--gateway-address`            |                          |                                   | `host:port` of the cell gateway's gRPC service, from which direct operator probes obtain permits. Required by `--require-probe-permits`                         |
-| `--gateway-lease-name`         |                          | `fabric-api-gateway`              | The gateway's election lease, read uncached in `--namespace` to verify each permit's epoch                                                                      |
+| Flag                           | Env                      | Default                           | Meaning                                                                                                                                                                                                                      |
+| ------------------------------ | ------------------------ | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--node-name`                  | `NODE_NAME`              |                                   | This node's name. Required; requests naming another node are refused (`WrongNode`)                                                                                                                                           |
+| `--site`                       | `SITE`                   |                                   | Site this node serves; reported by `Info`                                                                                                                                                                                    |
+| `--cell`                       | `CELL`                   |                                   | Cell name in the mTLS identities. If empty the process idles and serves only metrics                                                                                                                                         |
+| `--namespace`                  | `POD_NAMESPACE`          |                                   | This pod's namespace. Required                                                                                                                                                                                               |
+| `--pod-name`                   | `POD_NAME`               |                                   | This pod's name. Required                                                                                                                                                                                                    |
+| `--host-ip`                    | `HOST_IP`                |                                   | Address the gRPC service binds to: the pod's `hostIP`. Required                                                                                                                                                              |
+| `--port`                       |                          | `9344`                            | gRPC port                                                                                                                                                                                                                    |
+| `--metrics-bind-address`       | `METRICS_BIND_ADDRESS`   | `<host-ip>:9345`                  | Address serving `/metrics`                                                                                                                                                                                                   |
+| `--frr-socket-dir`             |                          | `/run/frr`                        | Directory holding `bgpd.vty` and `zebra.vty`                                                                                                                                                                                 |
+| `--tls-cert`                   | `FABRIC_API_TLS_CERT`    | `/var/run/fabric-api/tls/tls.crt` | Certificate file                                                                                                                                                                                                             |
+| `--tls-key`                    | `FABRIC_API_TLS_KEY`     | `/var/run/fabric-api/tls/tls.key` | Private key file                                                                                                                                                                                                             |
+| `--tls-ca`                     | `FABRIC_API_TLS_CA`      | `/var/run/fabric-api/tls/ca.crt`  | Trust bundle file                                                                                                                                                                                                            |
+| `--probe-source-ipv4`          | `PROBE_SOURCE_IPV4`      |                                   | Explicit IPv4 probe source                                                                                                                                                                                                   |
+| `--probe-source-ipv6`          | `PROBE_SOURCE_IPV6`      |                                   | Explicit IPv6 probe source                                                                                                                                                                                                   |
+| `--probe-source-interface`     | `PROBE_SOURCE_INTERFACE` | `lo`                              | Interface whose single global address per family is the source for a family with no explicit one; empty disables                                                                                                             |
+| `--deny-prefixes`              |                          |                                   | Comma-separated platform or management CIDRs no probe may target                                                                                                                                                             |
+| `--operator-allow-prefixes`    |                          |                                   | Comma-separated CIDRs only operator identities may probe. Lab only; never set in production                                                                                                                                  |
+| `--enable-expensive-queries`   |                          | `false`                           | Enable `ASPath`, `Community` and `LargeCommunity` searches. See [Query types](#query-types)                                                                                                                                  |
+| `--max-concurrent`             |                          | `4`                               | `Execute` calls running at once; further calls wait within their deadline                                                                                                                                                    |
+| `--max-expensive`              |                          | `1`                               | Expensive searches running at once; no queue (`NodeBusy`)                                                                                                                                                                    |
+| `--max-probes`                 |                          | `2`                               | Probes running at once; no queue (`NodeBusy`)                                                                                                                                                                                |
+| `--probe-packet-rate`          |                          | `20`                              | Probe packets per second across all probes on the node (burst 5, not configurable)                                                                                                                                           |
+| `--expensive-breaker-cooldown` |                          | `10m`                             | How long expensive searches stay suspended after one times out (`--search-source=frr` only)                                                                                                                                  |
+| `--search-source`              |                          | `index`                           | What answers AS-path and community searches: `index` (a local copy of bgpd's Loc-RIB fed over BMP) or `frr` (FRR's own scans, which starve bgpd on full tables)                                                              |
+| `--bmp-station-address`        |                          | `127.0.0.1:9348`                  | Loopback address the BMP station listens on, with `--search-source=index`                                                                                                                                                    |
+| `--search-index-max-routes`    |                          | `4000000`                         | Prefixes the index holds at most; announcements for new prefixes beyond it are dropped and counted                                                                                                                           |
+| `--probe-permits`              |                          | `false`                           | Verify and enforce the gateway's probe permits, and report `probePermits` in `Info`. Permits are refused while the kernel clock is unsynchronised. Needs API access; see [Aggregate probe budgets](#aggregate-probe-budgets) |
+| `--require-probe-permits`      |                          | `false`                           | With `--probe-permits`, refuse any probe without a permit; a direct operator's probe first obtains one from `--gateway-address`                                                                                              |
+| `--gateway-address`            |                          |                                   | `host:port` of the cell gateway's gRPC service, from which direct operator probes obtain permits. Required by `--require-probe-permits`                                                                                      |
+| `--gateway-lease-name`         |                          | `fabric-api-gateway`              | The gateway's election lease, read uncached in `--namespace` to verify each permit's epoch                                                                                                                                   |
 
 Not configurable by flag: the 4 MiB FRR read cap, the 2 second socket dial
 timeout, the duplicate-suppression cache (1024 entries or 32 MiB), the 60 second
@@ -492,36 +89,38 @@ the stale result.
 
 To change a flag in production, patch the `fabric-api` container's `args` in your
 overlay (keep `node` first). Any such change is a pod template change and restarts
-FRR, so it follows [Rollout](#rollout).
+FRR, so it follows [Rollout](operations.md#rollout).
 
 ### `fabric-api gateway`
 
-| Flag                                  | Env                                  | Default                                                | Meaning                                                                                                                                                                                                                                                                                                                     |
-| ------------------------------------- | ------------------------------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--site`                              | `SITE`                               |                                                        | Site this cell serves. Required                                                                                                                                                                                                                                                                                             |
-| `--cluster-name`                      | `CLUSTER_NAME`                       |                                                        | This cell's Karmada member cluster name. Required                                                                                                                                                                                                                                                                           |
-| `--cell`                              | `CELL`                               |                                                        | Cell name in the mTLS identities. Required                                                                                                                                                                                                                                                                                  |
-| `--namespace`                         | `POD_NAMESPACE`                      | `galactic-system`                                      | Namespace of the `fabric-router` pods, the election lease and this pod                                                                                                                                                                                                                                                      |
-| `--pod-name`                          | `POD_NAME`                           |                                                        | This pod's name. Required                                                                                                                                                                                                                                                                                                   |
-| `--debug-bind-address`                |                                      |                                                        | Address the debug service binds to. Empty binds every address in the pod's network namespace, which a port-forward (through the pod's loopback) and the Service both need                                                                                                                                                   |
-| `--pod-selector`                      |                                      | `app.kubernetes.io/name=fabric-router`                 | Label selector of `fabric-router` pods                                                                                                                                                                                                                                                                                      |
-| `--certs-selector`                    |                                      | `app.kubernetes.io/name=fabric-api-certs`              | Label selector of the per-node `fabric-api-certs` pods whose identity each sidecar presents                                                                                                                                                                                                                                 |
-| `--lease-name`                        |                                      | `fabric-api-gateway`                                   | Leader election lease name                                                                                                                                                                                                                                                                                                  |
-| `--debug-port`                        |                                      | `9346`                                                 | Operator debug gRPC port                                                                                                                                                                                                                                                                                                    |
-| `--metrics-bind-address`              |                                      | `:9347`                                                | Address serving `/metrics`                                                                                                                                                                                                                                                                                                  |
-| `--health-probe-bind-address`         |                                      | `:8081`                                                | Address serving `/healthz` and `/readyz`                                                                                                                                                                                                                                                                                    |
-| `--tls-cert`, `--tls-key`, `--tls-ca` | `FABRIC_API_TLS_CERT`, `_KEY`, `_CA` | `/var/run/fabric-api/tls/tls.crt`, `tls.key`, `ca.crt` | As for the node                                                                                                                                                                                                                                                                                                             |
-| `--cell-slots`                        |                                      | `8`                                                    | Node RPCs running at once across all queries                                                                                                                                                                                                                                                                                |
-| `--cell-expensive-slots`              |                                      | `2`                                                    | Of those, expensive searches                                                                                                                                                                                                                                                                                                |
-| `--cell-queue`                        |                                      | `256`                                                  | Node RPCs that may wait for a slot                                                                                                                                                                                                                                                                                          |
-| `--max-nodes`                         |                                      | `32`                                                   | Nodes one query executes on in this cell (ceiling 32)                                                                                                                                                                                                                                                                       |
-| `--max-object-bytes`                  |                                      | `393216` (384 KiB)                                     | Serialized `FabricQuery` size ceiling (ceiling 384 KiB)                                                                                                                                                                                                                                                                     |
-| `--max-node-response-bytes`           |                                      | `131072` (128 KiB)                                     | Node response ceiling (ceiling 128 KiB)                                                                                                                                                                                                                                                                                     |
-| `--max-in-flight`                     |                                      | `256`                                                  | Queries executing at once; more wait for a requeue                                                                                                                                                                                                                                                                          |
-| `--retention`                         |                                      | `1h`                                                   | Retention the stale-object count assumes; keep equal to the janitor's `--retention`                                                                                                                                                                                                                                         |
-| `--cleanup-grace`                     |                                      | `15m`                                                  | Cleanup grace the stale-object count assumes; keep equal to the janitor's `--grace`                                                                                                                                                                                                                                         |
-| `--service-identities`                |                                      |                                                        | Comma-separated names of the Looking Glass service identities allowed to call this gateway. Empty allows none                                                                                                                                                                                                               |
-| `--aggregate-budgets`                 |                                      | `false`                                                | Enforce the cell's aggregate admission and probe packet budgets on every caller and issue probe permits. Requires `--cell-slots` at most 8; a principal's share is 2 slots and 32 queued jobs, lowered to `--cell-slots` and `--cell-queue` when those are smaller. See [Aggregate probe budgets](#aggregate-probe-budgets) |
+| Flag                                  | Env                                  | Default                                                | Meaning                                                                                                                                                                                                                                                                                     |
+| ------------------------------------- | ------------------------------------ | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--site`                              | `SITE`                               |                                                        | Site this cell serves. Required                                                                                                                                                                                                                                                             |
+| `--cluster-name`                      | `CLUSTER_NAME`                       |                                                        | This cell's Karmada member cluster name. Required                                                                                                                                                                                                                                           |
+| `--cell`                              | `CELL`                               |                                                        | Cell name in the mTLS identities. Required                                                                                                                                                                                                                                                  |
+| `--namespace`                         | `POD_NAMESPACE`                      | `galactic-system`                                      | Namespace of the `fabric-router` pods, the election lease and this pod                                                                                                                                                                                                                      |
+| `--pod-name`                          | `POD_NAME`                           |                                                        | This pod's name. Required                                                                                                                                                                                                                                                                   |
+| `--debug-bind-address`                |                                      |                                                        | Address the debug service binds to. Empty binds every address in the pod's network namespace, which a port-forward (through the pod's loopback) and the Service both need                                                                                                                   |
+| `--pod-selector`                      |                                      | `app.kubernetes.io/name=fabric-router`                 | Label selector of `fabric-router` pods                                                                                                                                                                                                                                                      |
+| `--certs-selector`                    |                                      | `app.kubernetes.io/name=fabric-api-certs`              | Label selector of the per-node `fabric-api-certs` pods whose identity each sidecar presents                                                                                                                                                                                                 |
+| `--lease-name`                        |                                      | `fabric-api-gateway`                                   | Leader election lease name                                                                                                                                                                                                                                                                  |
+| `--debug-port`                        |                                      | `9346`                                                 | Operator debug gRPC port                                                                                                                                                                                                                                                                    |
+| `--metrics-bind-address`              |                                      | `:9347`                                                | Address serving `/metrics`                                                                                                                                                                                                                                                                  |
+| `--health-probe-bind-address`         |                                      | `:8081`                                                | Address serving `/healthz` and `/readyz`                                                                                                                                                                                                                                                    |
+| `--tls-cert`, `--tls-key`, `--tls-ca` | `FABRIC_API_TLS_CERT`, `_KEY`, `_CA` | `/var/run/fabric-api/tls/tls.crt`, `tls.key`, `ca.crt` | As for the node                                                                                                                                                                                                                                                                             |
+| `--cell-slots`                        |                                      | `8`                                                    | Node RPCs running at once across all queries                                                                                                                                                                                                                                                |
+| `--cell-expensive-slots`              |                                      | `2`                                                    | Of those, expensive searches                                                                                                                                                                                                                                                                |
+| `--cell-queue`                        |                                      | `256`                                                  | Node RPCs that may wait for a slot                                                                                                                                                                                                                                                          |
+| `--max-nodes`                         |                                      | `32`                                                   | Nodes one query executes on in this cell (ceiling 32)                                                                                                                                                                                                                                       |
+| `--max-object-bytes`                  |                                      | `393216` (384 KiB)                                     | Serialized `FabricQuery` size ceiling (ceiling 384 KiB)                                                                                                                                                                                                                                     |
+| `--max-node-response-bytes`           |                                      | `131072` (128 KiB)                                     | Node response ceiling (ceiling 128 KiB)                                                                                                                                                                                                                                                     |
+| `--max-in-flight`                     |                                      | `256`                                                  | Queries executing at once; more wait for a requeue                                                                                                                                                                                                                                          |
+| `--retention`                         |                                      | `1h`                                                   | Retention the stale-object count assumes; keep equal to the janitor's `--retention`                                                                                                                                                                                                         |
+| `--cleanup-grace`                     |                                      | `15m`                                                  | Cleanup grace the stale-object count assumes; keep equal to the janitor's `--grace`                                                                                                                                                                                                         |
+| `--service-identities`                |                                      |                                                        | Comma-separated names of the Looking Glass service identities allowed to call this gateway. Empty allows none                                                                                                                                                                               |
+| `--service-config-map`                |                                      |                                                        | ConfigMap in `--namespace` whose key `service` turns Looking Glass execution on (`enabled`) or off while the gateway runs, read every second. Empty keeps it off. Needs `--aggregate-budgets`. See [Operating the Looking Glass service](operations.md#operating-the-looking-glass-service) |
+| `--aggregate-budgets`                 |                                      | `false`                                                | Enforce the cell's aggregate admission and probe packet budgets on every caller and issue probe permits. Requires `--cell-slots` at most 8. See [Aggregate probe budgets](#aggregate-probe-budgets)                                                                                         |
+| Limit flags                           |                                      | The contract's                                         | `--request-*`, `--packet-*`, `--principal-slots`, `--principal-queue`, `--service-streams`, `--project-streams` and `--queue-wait`: the aggregate limits, each only lowerable; need `--aggregate-budgets`. See [Limits and capacity](#limits-and-capacity)                                  |
 
 `--max-nodes`, `--max-object-bytes` and `--max-node-response-bytes` can only lower
 their ceilings: zero or a value above the ceiling selects the ceiling. The
@@ -608,8 +207,8 @@ by FRR:
   expensive ones while they are off, the index is unsynced, or the breaker is open.
 
 The release gate was a full-table load test, which direct FRR scans failed and the
-index passed; see [load-test.md](load-test.md). Enabling searches is a staged infra
-rollout: after staging confirms those numbers on real fabric routers, enable them on
+index passed; see [load-test.md](load-test.md). Enable searches gradually:
+after confirming those numbers on production-scale fabric routers, enable them on
 a canary node first, check `fabric_api_node_search_index_synced` and bgpd's session
 and convergence behaviour, and expand in paces. The containerlab lab enables them.
 
@@ -735,7 +334,7 @@ Without `--aggregate-budgets` the cell executor above and each node's packet
 pacer are the only limits, and they are local: nothing bounds how many probe
 packets the cell as a whole sends to one destination. With it, the leader
 gateway holds every budget of the
-[service contract](service-contract.md#admission-execution-and-aggregate-accounting)
+[service contract](../designs/looking-glass-service.md#admission-execution-and-aggregate-accounting)
 in memory and charges every probe, whoever asked for it:
 
 | Budget                                 | Default                    | Charged to                                                          | When exhausted                     |
@@ -772,8 +371,75 @@ one from the gateway's `RequestPermit`, charged to that operator.
 
 When a probe's node call ends without the node's answer, its slot stays held
 until the job's deadline plus 2 seconds, since the node may still be sending
-it. The rates and caps are the contract's defaults; only `--cell-slots` and
-`--cell-queue` change them.
+it. The rates and caps are the contract's defaults, which are also their
+ceilings: [Limits and capacity](#limits-and-capacity) lists the flags that
+lower them.
+
+The leader trusts its clock only while the kernel reports it synchronised,
+with an estimated error of at most 500 ms (`adjtimex`, read without
+privileges and allowed by the default seccomp profiles). Otherwise its
+limiter is unavailable: it admits no probe and no Looking Glass request
+(`LimiterUnavailable`), whoever asks. A shorter run than 3 seconds refuses
+only new work; once the clock has been unhealthy for 3 seconds, the leader
+cancels the epoch's work like a failed Lease read and serves a new
+125-second hold once the clock recovers. A node with `--probe-permits` refuses every permit while its
+own clock is unsynchronised. A host whose time daemon (chrony, ntpd,
+systemd-timesyncd, Talos timed) disciplines the kernel clock passes; a host
+with none does not.
+
+### Limits and capacity
+
+Every limit defaults to the [service contract](../designs/looking-glass-service.md#initial-defaults-and-hard-bounds)'s
+qualified value, which is also its ceiling: a cell may lower one, never raise
+it, until a contract revision qualifies a higher value. A limit flag without
+`--aggregate-budgets`, a value above its ceiling, and a combination that
+breaks a cross-field rule (a non-positive rate, a burst over 120 seconds of
+its rate, a packet burst that cannot fund one 20-packet traceroute, a
+per-project or per-principal limit above its cell's) all stop the gateway
+from starting, naming every offending limit in its log. A rolling update to
+such a configuration leaves the previous replicas serving.
+
+| Flag                                                  | Default and ceiling | Bounds                                                                                     |
+| ----------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------ |
+| `--request-cell-rate`, `--request-cell-burst`         | 2/s, 8              | Looking Glass requests admitted in the cell                                                |
+| `--request-project-rate`, `--request-project-burst`   | 0.2/s, 2            | Looking Glass requests admitted per project                                                |
+| `--packet-cell-rate`, `--packet-cell-burst`           | 100/s, 640          | Worst-case probe packets charged in the cell, every caller included                        |
+| `--packet-principal-rate`, `--packet-principal-burst` | 20/s, 640           | Worst-case probe packets per project, `FabricQuery` source or operator                     |
+| `--packet-host-rate`, `--packet-host-burst`           | 20/s, 640           | Worst-case probe packets per destination address                                           |
+| `--packet-prefix-rate`, `--packet-prefix-burst`       | 40/s, 640           | Worst-case probe packets per destination IPv4 /24 or IPv6 /64                              |
+| `--cell-slots`, `--principal-slots`                   | 8, 2                | Node jobs running at once in the cell, and per principal                                   |
+| `--cell-queue`, `--principal-queue`                   | 256, 32             | Node jobs queued in the cell, and per principal                                            |
+| `--service-streams`, `--project-streams`              | 16, 2               | Live Looking Glass streams in the cell, and per project, queued and draining ones included |
+| `--queue-wait`                                        | 10s                 | A Looking Glass router job's, or a direct operator permit's, wait for a slot               |
+
+A smaller `--cell-slots`, `--cell-queue` or `--service-streams` lowers the
+per-principal default with it. Changing any limit restarts the gateway, so
+like any gateway restart it cancels running Looking Glass requests and
+refuses every probe in the cell for the 125-second recovery hold; make limit
+changes when that pause is acceptable.
+
+Lower a limit when its traffic is a problem, not because it refuses work.
+`fabric_api_gateway_admission_refusals_total` shows which scope refuses:
+
+- `scope="project"`: one project, `FabricQuery` source or operator at its
+  own budget. Fairness working; lower the project limits only to protect the
+  routers or destinations further.
+- `scope="cell"`: the cell's budget is exhausted across callers. Raising it
+  needs a contract revision; lower `--request-project-*` to share it more
+  evenly.
+- `scope="destination"`: probes concentrated on one address or prefix,
+  whatever their callers. These budgets protect the destination.
+- `scope="queue"`: slots, queue or streams are full. A request selecting
+  fewer routers needs fewer slots.
+
+The bounds these limits give, from the contract: a cancelled, disabled or
+stalled request releases its slots and stops its reachable routers within 2
+seconds; a queued router job dispatches or fails `QueueTimeout` within
+`--queue-wait`; a node sends no probe packet later than its permit's deadline
+plus 2 seconds, at most 32 seconds after dispatch; a new leader admits
+nothing for 125 seconds. In any interval of length T, the packets a bucket of
+rate r and burst B allows the cell to send are at most B + r(T + 32): with the
+destination host defaults, at most 1300 packets in any one second.
 
 ### Stream delivery and transport bounds
 
@@ -796,92 +462,7 @@ client may ping no more often than every 5 seconds. On `SIGTERM` the gateway
 closes its listener's connections at once, cancelling operator and service
 calls in flight.
 
-### Enabling
-
-The deployment manifests do not set these flags yet. Turn them on in this
-order, each step cell by cell:
-
-1. **Nodes verify permits.** Give the `fabric-router` ServiceAccount `get` on
-   the gateway's Lease and mount its token into the `fabric-api` container (the
-   Component mounts it only into `frr-init` and `config-agent`):
-
-   ```yaml
-   apiVersion: rbac.authorization.k8s.io/v1
-   kind: Role
-   metadata:
-     name: fabric-api-node-lease
-     namespace: galactic-system
-   rules:
-     - apiGroups: ["coordination.k8s.io"]
-       resources: ["leases"]
-       resourceNames: ["fabric-api-gateway"]
-       verbs: ["get"]
-   ```
-
-   Bind it to the `fabric-router` ServiceAccount and add `--probe-permits` to
-   the sidecar's args. This changes the pod template, so it is a routing
-   rollout: follow [Rollout](#rollout).
-2. **The gateway enforces budgets.** Add `--aggregate-budgets` to the gateway.
-   Expect operator and `FabricQuery` probes to be refused for 125 seconds after
-   each gateway restart.
-3. **Nodes require permits.** Until this step, probes operators send nodes
-   directly are not charged, and the Looking Glass service must not be
-   enabled. Add `--require-probe-permits` and
-   `--gateway-address=fabric-api-gateway.galactic-system.svc:9346` (the gateway
-   Service) to the sidecar, so direct operator probes are charged too. Another
-   routing rollout.
-
-Roll back in the reverse order. Removing `--aggregate-budgets` while nodes still
-require permits refuses every gateway probe (`LimiterUnavailable`).
-
-## Probe sources and destinations
-
-### Source
-
-Probes use the default VRF and an explicit per-family fabric loopback address, and
-never fall back to `127.0.0.1`, `::1`, an unspecified address or an unrelated
-interface. For each family the sidecar uses, in order:
-
-1. `--probe-source-ipv4` or `--probe-source-ipv6`, if set. The value must parse and
-   be of the right family; a loopback or unspecified address makes startup fail.
-2. Otherwise the single global unicast address of that family on
-   `--probe-source-interface` (default `lo`), ignoring loopback and link-local
-   addresses.
-3. Otherwise none. A family with no source, or with more than one candidate on the
-   interface (the log says "several candidate probe sources; set one explicitly"),
-   answers `ProbeSourceUnavailable` for that family. A missing interface logs a
-   warning and disables auto-detection.
-
-`Info.probe_sources` lists the sources that resolved. If `lo` carries other global
-addresses (VIPs, for instance), set the sources explicitly.
-
-### Destination
-
-A probe's destination is a numeric address pinned by NSO; the node validates it
-again and never resolves names. Under the **public policy**, the one applied to
-every call from the gateway identity, a destination is refused
-(`DestinationNotAllowed`) if it is:
-
-- an IPv6 address outside `2000::/3` (global unicast), or
-- in a special-use range: IPv4 `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`,
-  `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24`, `192.0.2.0/24`,
-  `192.31.196.0/24`, `192.52.193.0/24`, `192.88.99.0/24`, `192.168.0.0/16`,
-  `192.175.48.0/24`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`,
-  `224.0.0.0/4`, `240.0.0.0/4`; IPv6 `::/128`, `::1/128`, `::ffff:0:0/96`,
-  `64:ff9b::/96`, `64:ff9b:1::/48`, `100::/64`, `2001::/23`, `2001:db8::/32`,
-  `2002::/16`, `3fff::/20`, `5f00::/16` (SRv6 SIDs), `fc00::/7`, `fe80::/10`,
-  `ff00::/8`, or
-- inside a range listed in `--deny-prefixes`: add your management and platform
-  ranges here.
-
-The **operator policy** applies to calls made directly to a node with an operator
-identity. It is the public policy plus `--operator-allow-prefixes`, and an allowed
-prefix bypasses every other rule, including `--deny-prefixes`. The lab uses it to
-check cross-site reachability between fabric loopbacks (`10.255.255.0/24` and
-`fc00::/32`). A node refuses to start with allow exceptions on the public policy,
-and nothing enforces "never in production" except not setting the flag. Calls made
-through the gateway's debug service carry the gateway's identity at the node, so
-they get the public policy whoever the operator is.
+To turn the budgets on, follow [Enabling aggregate probe budgets](operations.md#enabling-aggregate-probe-budgets).
 
 ## Per-node and per-cell state
 
@@ -923,143 +504,99 @@ janitor's `--retention` and `--grace`, or the gauge and alert disagree with what
 janitor deletes. The janitor has no metrics: it logs each deletion (and, at debug
 level, each outcome), so read its activity from the CronJob's logs.
 
-## Observability
 
-Scrape config and alert rules are in `config/monitoring/` (not part of
-`config/kustomization.yaml`; they need the Prometheus Operator CRDs):
+## Moved sections
 
-- The `fabric-router` PodMonitor's `api-metrics` endpoint scrapes the sidecar's
-  port 9345 as `job="fabric-api-node"`, with a `node` label. A pod without the port
-  yields no target.
-- `podmonitor-fabric-api-gateway.yaml` scrapes the gateway's port 9347 as
-  `job="fabric-api-gateway"`.
-- The `fabric-api` group in `prometheusrule.yaml`, unit-tested by `task test:alerts`.
-  None fires merely because nobody ran a query.
+These anchors keep older bookmarks working. Use the focused guides linked above for new references.
 
-| Alert                                 | Fires when                                                                                                                                   | For |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | --- |
-| `FabricAPIExecutionStalled`           | A gateway has executions in flight and finished none in 10 minutes                                                                           | 10m |
-| `FabricAPINodeDiagnosticsUnavailable` | `fabric_api_node_diagnostics_available` is 0                                                                                                 | 15m |
-| `FabricAPINodeUnreachable`            | More than half of at least 5 node calls in 30 minutes were `NodeUnreachable` or `Timeout`                                                    | 15m |
-| `FabricAPIResultsOversized`           | 10 or more `ResponseTooLarge` outcomes on a node in an hour                                                                                  | 15m |
-| `FabricAPICleanupBacklog`             | More than 50 stale `FabricQuery` objects                                                                                                     | 1h  |
-| `FabricAPICertificateRenewalFailing`  | A loaded certificate has less than 4 hours left                                                                                              | 15m |
-| `FabricAPICredentialsMissing`         | `fabric_api_credentials_loaded` is 0                                                                                                         | 15m |
-| `FabricAPISearchIndexUnsynced`        | `fabric_api_node_search_index_synced` is 0 on a node whose index has held routes (a node with no `bmp targets fabric-api` block never fires) | 15m |
-| `FabricAPIMetricsDown`                | A fabric-api target cannot be scraped                                                                                                        | 10m |
+<a id="deploy-fabric-api"></a>
 
-All are `severity: warning`, `service: galactic`, `team: connect`. On Datum's infra
-the PodMonitors are scraped on each edge cluster but the rules are evaluated from
-infra's copy; change the rules here, with their tests, then update infra's copy.
+[deploy fabric api](deployment.md#deploy-fabric-api).
 
-Node metrics (port 9345, a private registry with Go and process collectors):
-`fabric_api_node_requests_total{type,outcome}`,
-`fabric_api_node_request_duration_seconds{type}`,
-`fabric_api_node_response_bytes{type}`,
-`fabric_api_node_truncated_responses_total{type}`,
-`fabric_api_node_in_flight_requests`,
-`fabric_api_node_duplicate_requests_total`,
-`fabric_api_node_duplicate_cache_entries`,
-`fabric_api_node_diagnostics_available`,
-`fabric_api_node_frr_info{version,supported}`,
-`fabric_api_node_expensive_breaker_open`,
-`fabric_api_node_probe_packets_total`,
-`fabric_api_node_identity_refreshes_total{outcome}`,
-`fabric_api_certificate_expiry_timestamp_seconds` and
-`fabric_api_credentials_loaded`.
+<a id="what-you-deploy"></a>
 
-Gateway metrics (port 9347, on controller-runtime's registry, so its own metrics
-appear too): `fabric_api_gateway_queries_total{type,reason}`,
-`fabric_api_gateway_node_outcomes_total{outcome}`,
-`fabric_api_gateway_node_rpc_duration_seconds{type,code}`,
-`fabric_api_gateway_queue_depth`, `fabric_api_gateway_status_writes_total{kind,outcome}`,
-`fabric_api_gateway_status_bytes`, `fabric_api_gateway_truncated_results_total`,
-`fabric_api_gateway_stage_latency_seconds{stage}` (`receipt`, `execution`,
-`completion`), `fabric_api_gateway_executions_in_flight`,
-`fabric_api_gateway_queue_wait_seconds` (time a node RPC waited for a cell slot),
-`fabric_api_gateway_stale_objects`, `fabric_api_certificate_expiry_timestamp_seconds`
-and `fabric_api_credentials_loaded`. Request IDs and targets are never labels.
+[what you deploy](deployment.md#what-you-deploy).
 
-## Rollout
+<a id="prerequisites"></a>
 
-The `fabric-api` sidecar lives in the `fabric-router` pod, and `/run/frr` stays a
-pod-scoped `emptyDir` so FRR's sockets are never exposed beyond the pod. The cost
-is that changing the sidecar's tag, flags or the Component itself changes the
-DaemonSet's pod template, and the rolling update recreates the whole pod, FRR
-included. **A sidecar release is a routing rollout.**
+[prerequisites](deployment.md#prerequisites).
 
-1. **Do the prerequisites first**, outside the pods: cert-manager with its
-   csi-driver on every fabric node, the Issuer, the cell ConfigMap and the CRD. Roll out the
-   gateway and janitor first; they do not touch `fabric-router`.
-2. **Canary one node.** Stage the change so only one node's pod is recreated
-   first, however your delivery system stages a DaemonSet change (the per-node
-   overlays used for `galactic-gateway` pin an instance to one node; the same idea
-   applies). Do not let the first change reach every node at once.
-3. **Check underlay sessions and convergence** on the canary: every `frr_bgp_peer_state`
-   for the node back to Established for both families (frr-exporter on port 9342),
-   no `FabricBGPSessionDown` or `FabricBGPPrefixesDropped`, and `fabric-router` Ready.
-   Shallow daemon liveness is not a convergence gate. Then check the looking glass:
-   `fabric_api_node_diagnostics_available` 1, `fabric_api_credentials_loaded` 1, and
-   a direct `fabric-api query --info`.
-4. **Pace the expansion**, one site or a small batch at a time, repeating step 3.
-   Stop on any session loss.
-5. **Roll back** by restoring the previous tag or removing the Component from the
-   overlay; that is another rolling restart, so pace it the same way. Probe success
-   is not evidence of routing health.
+<a id="why-certificates-are-issued-in-a-separate-pod"></a>
 
-Keep the gateway's and the sidecar's tags in step. They are the same image, and
-this repository does not test a gateway and sidecars at different versions. The
-publish pipeline stamps one tag into both `config/fabric-api/base` and the
-Component.
+[why certificates are issued in a separate pod](deployment.md#why-certificates-are-issued-in-a-separate-pod).
 
-A failing sidecar must not gate any of this, and a certificate that cannot be issued
-stalls only the `fabric-api-certs` pod. If a `fabric-api-certs` pod hangs in
-`ContainerCreating`, the csi-driver is missing on that node or the Issuer cannot
-issue; the node then shows `NoCertificatePod` to the gateway. A `fabric-router` pod
-that hangs on `fabric-api-tls` should not occur, since that is a hostPath; check the
-Component's patch. If the sidecar runs but reports diagnostics
-unavailable, FRR and the underlay are unaffected; read `unavailableReason`.
+<a id="deployment"></a>
 
-## Verifying
+[deployment](deployment.md#deployment).
 
-```sh
-# Per node (lab): ASN, router ID, both address families' sessions, exact and
-# longest-match lookups with zebra evidence, operator probes, then each gateway
-# and a FabricQuery end to end.
-cd deploy/containerlab && task verify:fabric-api
+<a id="step-1-cell-wide-rbac-and-serviceaccounts"></a>
 
-# Disruptive: break the Issuer, recreate one fabric-router pod, check FRR and the
-# underlay come up with diagnostics unavailable, then repair the Issuer.
-cd deploy/containerlab && task verify:fabric-api-bootstrap
-```
+[step 1 cell wide rbac and serviceaccounts](deployment.md#step-1-cell-wide-rbac-and-serviceaccounts).
 
-In a real cell, read the same facts from the cluster:
+<a id="step-2-per-cell-configmap"></a>
 
-```sh
-kubectl -n galactic-system get pods -l app.kubernetes.io/name=fabric-router \
-  -o custom-columns=NODE:.spec.nodeName,POD:.metadata.name,READY:.status.containerStatuses[*].ready
-kubectl -n galactic-system logs deploy/fabric-api-gateway | grep -i "fabric query"
-kubectl get fabricqueries -A      # short name: fq
-```
+[step 2 per cell configmap](deployment.md#step-2-per-cell-configmap).
 
-## Troubleshooting
+<a id="step-3-the-gateway-and-janitor"></a>
 
-| Symptom                                             | Likely cause and where to look                                                                                                                                                             |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `fabric-api-certs` pod stuck in `ContainerCreating` | csi-driver not installed or not on this node, or the Issuer cannot issue. FRR is unaffected; the node reports no credentials and the gateway omits it as `NoCertificatePod`                |
-| `unavailableReason` starts with `credentials:`      | Issuer missing or not ready, `certsync` has not copied files yet, or `CELL_NAME` in the `fabric-api-certs` volume is not the ConfigMap's `cell`; check the certs pod and the sidecar's log |
-| `unavailableReason` is `FRRVersionUnsupported`      | FRR is not 10.7; ship a fabric-api that supports the new release before the `fabric-router` image                                                                                          |
-| `unavailableReason` is `FRRUnavailable`             | `bgpd.vty`/`zebra.vty` not reachable: FRR restarting, or the container lacks group 102                                                                                                     |
-| Sidecar logs "fabric-api node is not configured"    | `CELL` is empty: the ConfigMap or its `cell` key is missing. Fix it and recreate the pod                                                                                                   |
-| Gateway pod `CreateContainerConfigError`            | The `fabric-api` ConfigMap or one of `site`, `cell`, `cluster-name` is missing                                                                                                             |
-| `FabricQuery` stays untouched                       | `spec.site` or `spec.clusterName` does not equal this gateway's; or this replica is not the leader                                                                                         |
-| `NodeUnreachable` for every node                    | Gateway cannot reach `hostIP:9344` (host firewall) or the TLS handshake fails; check identities and cell values                                                                            |
-| `Unauthorized`                                      | The caller's role may not make this call: a node identity cannot call anything, and a gateway identity may call only the debug `Query`                                                     |
-| `DestinationNotAllowed` on a ping                   | Public policy applied; a direct node call with an operator identity may carry `--operator-allow-prefixes` in the lab                                                                       |
-| `ProbeSourceUnavailable`                            | No probe source for that family; see [Source](#source)                                                                                                                                     |
-| `QueryTypeUnavailable`                              | Expensive types are gated, or the breaker is open after a timed-out scan                                                                                                                   |
-| `NodeBusy`                                          | Node or cell budget full; expensive and probe budgets have no queue                                                                                                                        |
-| `ResponseTooLarge`                                  | FRR's answer exceeded 4 MiB, or did not fit the node's budget even when shaped; see `FabricAPIResultsOversized`                                                                            |
-| `DuplicateConflict`                                 | A request ID was reused with different arguments                                                                                                                                           |
+[step 3 the gateway and janitor](deployment.md#step-3-the-gateway-and-janitor).
 
-For the typed codes carried in results, see [api.md](api.md#error-codes).
+<a id="step-4-the-node-sidecar-component-as-a-canary"></a>
+
+[step 4 the node sidecar component as a canary](deployment.md#step-4-the-node-sidecar-component-as-a-canary).
+
+<a id="lab"></a>
+
+[lab](deployment.md#lab).
+
+<a id="fabric-api-identities-and-probe-policy"></a>
+
+[fabric api identities and probe policy](security.md#fabric-api-identities-and-probe-policy).
+
+<a id="identities-and-certificates"></a>
+
+[identities and certificates](security.md#identities-and-certificates).
+
+<a id="operator-certificates"></a>
+
+[operator certificates](security.md#operator-certificates).
+
+<a id="service-certificates"></a>
+
+[service certificates](security.md#service-certificates).
+
+<a id="rotation"></a>
+
+[rotation](security.md#rotation).
+
+<a id="probe-sources-and-destinations"></a>
+
+[probe sources and destinations](security.md#probe-sources-and-destinations).
+
+<a id="source"></a>
+
+[source](security.md#source).
+
+<a id="destination"></a>
+
+[destination](security.md#destination).
+
+<a id="operate-fabric-api"></a>
+
+[operate fabric api](operations.md#operate-fabric-api).
+
+<a id="observability"></a>
+
+[observability](operations.md#observability).
+
+<a id="rollout"></a>
+
+[rollout](operations.md#rollout).
+
+<a id="verifying"></a>
+
+[verifying](operations.md#verifying).
+
+<a id="troubleshooting"></a>
+
+[troubleshooting](operations.md#troubleshooting).

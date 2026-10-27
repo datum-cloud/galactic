@@ -51,6 +51,7 @@ jobs:
       - name: Install eBPF build dependencies
         # `task lint` type-checks the whole module, which needs
         # internal/plumbing/ebpf/prog's bpf2go output regenerated first.
+        timeout-minutes: 6
         uses: ./.github/actions/install-ebpf-deps
 
       - name: Run lint
@@ -75,6 +76,7 @@ jobs:
       - name: Install eBPF build dependencies
         # `task test:unit` builds internal/plumbing/ebpf/prog, which needs
         # its bpf2go output regenerated first.
+        timeout-minutes: 6
         uses: ./.github/actions/install-ebpf-deps
 
       - name: Install envtest binaries
@@ -167,6 +169,7 @@ jobs:
         # unprivileged runner user -- it's the regeneration below, run as
         # root, that needs clang-18 and llvm-strip-18 on root's PATH and
         # BPF2GO_CC in root's environment, both passed explicitly there.
+        timeout-minutes: 6
         uses: ./.github/actions/install-ebpf-deps
 
       - name: Install envtest binaries
@@ -207,6 +210,7 @@ jobs:
         # `task build`'s build:ebpf step regenerates
         # internal/plumbing/ebpf/prog's bpf2go output before it builds any
         # binary -- see the composite action for the package pins.
+        timeout-minutes: 6
         uses: ./.github/actions/install-ebpf-deps
 
       - name: Build binary
@@ -240,6 +244,27 @@ jobs:
           hack/service-api-bundle.sh ci dist
           cd dist && sha256sum -c SHA256SUMS
 
+  # The opt-in Kustomize Components that must be listed in order fail their
+  # build when one is missing; tests/manifests renders each composition.
+  manifests:
+    name: Manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: arduino/setup-task@v3.0.0
+        with:
+          version: ${{ env.TASK_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Render the Component fixtures
+        run: task test:manifests
+
   # Tier 2: Integration tests (every PR, main branch, and releases)
   test-e2e:
     name: E2E Tests
@@ -264,6 +289,7 @@ jobs:
         # inside containers/galactic-cni/Dockerfile's builder stage), which
         # needs internal/plumbing/ebpf/prog's bpf2go output regenerated
         # first.
+        timeout-minutes: 6
         uses: ./.github/actions/install-ebpf-deps
 
       - name: Run E2E tests

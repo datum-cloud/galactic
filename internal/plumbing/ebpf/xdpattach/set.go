@@ -16,11 +16,12 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // linkListFn is an override point, matching linkByNameFn, so the bond sibling
 // lookup can be faked in tests.
-var linkListFn = netlink.LinkList
+var linkListFn = nldump.LinkList
 
 // attachFn is an override point so Set's tests can drive attachment without a
 // real program or a real NIC.

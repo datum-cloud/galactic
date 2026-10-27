@@ -1,7 +1,32 @@
 processor:
   docPaths: []
   ignoreTypes:
-    - ".*List$"
+    # Exclude collection wrappers by name: BGPPrefixList is a resource.
+    - "[.]BGPAdvertisementList$"
+    - "[.]BGPCommunitySetList$"
+    - "[.]BGPPeerList$"
+    - "[.]BGPPeerProfileList$"
+    - "[.]BGPPolicyList$"
+    - "[.]BGPPrefixListList$"
+    - "[.]BGPRouterClassList$"
+    - "[.]BGPRouterList$"
+    - "[.]BGPStaticRouteList$"
+    - "[.]BGPVRFInstanceList$"
+    - "[.]EgressShardList$"
+    - "[.]FRRRouterParametersList$"
+    - "[.]FabricEndpointList$"
+    - "[.]FabricReleaseAuthorizationList$"
+    - "[.]FabricRolloutPolicyList$"
+    - "[.]FabricRouterDeploymentList$"
+    - "[.]FabricRouterRevisionList$"
+    - "[.]FabricTopologyList$"
+    - "[.]NetworkEgressPolicyList$"
+    - "[.]NetworkGatewayList$"
+    - "[.]NetworkServiceAddressList$"
+    - "[.]NetworkServiceList$"
+    - "[.]ServiceEndpointList$"
+    - "[.]ServiceRoutePolicyList$"
+    - "[.]ServiceVIPBindingList$"
     - "AFI"
     - "SAFI"
     - "AddressFamily"
@@ -70,7 +95,6 @@ processor:
     - "BGPPrefixListSpec"
     - "BGPPrefixListStatus"
   ignoreFields: []
-
 render:
   kubernetes: {}
   markdown:

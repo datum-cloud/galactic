@@ -13,6 +13,8 @@ import (
 	"fmt"
 
 	"github.com/vishvananda/netlink"
+
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // Detect returns the first global-unicast IPv6 address on the loopback,
@@ -24,7 +26,7 @@ func Detect() (string, error) {
 		return "", fmt.Errorf("find lo interface: %w", err)
 	}
 
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+	addrs, err := nldump.AddrList(link, netlink.FAMILY_V6)
 	if err != nil {
 		return "", fmt.Errorf("list lo addresses: %w", err)
 	}

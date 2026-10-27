@@ -24,6 +24,7 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/ingresssidecar"
 	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 const (
@@ -67,6 +68,7 @@ func runCmd(cfg *config.VRFConfig) error {
 
 	metrics := ingresssidecar.NewMetrics()
 	metrics.MustRegister(ctrlmetrics.Registry)
+	nldump.MustRegister(ctrlmetrics.Registry)
 	lifecycle := ingresssidecar.NewLifecycleMetrics(cfg.SweepInterval, cfg.TeardownGracePeriod)
 	lifecycle.MustRegister(ctrlmetrics.Registry)
 

@@ -1,0 +1,12 @@
+# Tests that components/aggregate-budgets came first: the service executes
+# only under the cell's aggregate budgets, and the gateway refuses
+# --service-config-map without them.
+- op: test
+  path: /spec/template/spec/containers/0/args/1
+  value: --aggregate-budgets
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --service-config-map=fabric-api-service
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --service-identities=looking-glass

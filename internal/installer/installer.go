@@ -40,6 +40,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/radv"
 )
 
@@ -198,7 +199,7 @@ var newK8sClientFn = func() (client.Client, error) {
 
 // addrListFn can be overridden in tests to mock netlink interface addresses.
 var addrListFn = func(family int) ([]netlink.Addr, error) {
-	return netlink.AddrList(nil, family)
+	return nldump.AddrList(nil, family)
 }
 
 // ebpfStartFn loads, pins, and attaches the eBPF uSID datapath, then keeps its
@@ -1109,6 +1110,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	slog.Info("Starting CNI installer run daemon", "grpcHealthPort", grpcHealthPort, "metricsPort", metricsPort)
 
 	m := metrics.New()
+	nldump.MustRegister(m.Registry)
 
 	ebpfState, datapath, err := startEBPFDatapath(ctx, m)
 	if err != nil {

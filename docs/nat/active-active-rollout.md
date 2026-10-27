@@ -11,14 +11,18 @@ are deployed by infra.
 
 ## 1. Before enabling
 
-- [ ] The release fixes the open findings R02, R03 and R05 recorded in
-      [the review resolution](../feature_reviews/egress-active-active_2026-10-09-resolution.md#re-review-findings).
-      Until then hashed mode can send a class's traffic to shards that cannot
-      translate it.
+- [ ] Verify the target release contains the fixes for empty membership,
+      unserved translation classes and stable group identity. Current source
+      covers these in `TestSweepHashed_EmptyMembershipKeepsRoutesOnGroups`,
+      `internal/plumbing/ebpf/attachreg/group_test.go` and
+      `TestSweepHashed_ClassListChanges`. The [October 9 review resolution](../archive/reviews/egress-active-active_2026-10-09-resolution.md#re-review-findings)
+      records an intermediate implementation, not the current release's
+      eligibility. Passing these regression tests does not replace the
+      staging checks below.
 - [ ] The release running in the cluster contains hashed mode, and the
       privileged CI job (`task test:unit-root`) passed for it on the target
       kernel version. A green unprivileged run skips every datapath test.
-- [ ] The `EgressShard` CRD from the `network` release that adds
+- [ ] The `EgressShard` CRD from the Galactic release that supports
       `spec.drain` is installed. Prove it persists: patch `spec.drain` to
       its current value on one shard and read it back with
       `-o jsonpath='{.spec.drain}'`. An empty answer means the API server is

@@ -1,14 +1,13 @@
 # returnpath-lab
 
-Phase 0 proof harness for
-[docs/plans/855-return-path-ingress-decap.md](../../docs/plans/855-return-path-ingress-decap.md).
+Historical proof harness for the host return path, now described in the
+[VPC ingress reference](../../docs/observability/vpc-ingress.md).
 
-A lab tool, not a shipped binary. It performs by hand — and reverses — exactly
-what that plan's Pieces 1–3 would automate, so the plan's derived-but-unproven
-kernel assumptions can be tested before production code is written against
-them. It calls the same packages the real implementation will
-(`internal/plumbing/ebpf/usidmap`, `intf`, `uformat`, `egressroutemap`), so
-what it proves is proven about the real code paths.
+This is a lab tool, not a shipped binary. It programs and reverses host return
+path state by hand using `internal/plumbing/ebpf/usidmap`, `intf`, `uformat`
+and `egressroutemap`. The original implementation plan is no longer maintained;
+use this harness to investigate kernel behavior, not as a deployment procedure
+or evidence that the current release passed acceptance.
 
 ## Running it
 
@@ -77,12 +76,12 @@ value, so that is what `vrf_table` must be keyed on.
 Always run `probe` before `up` for a baseline. `-purge-locator` on teardown is
 not optional on a node that also runs `galactic-gateway` — see below.
 
-## What the first run established (2026-09-02, us-central-1-staging-lab)
+## What the first run established
 
 Confirmed:
 
 - **Gaps 1 and 2 are real.** `locator_table` and `function_table` were empty
-  on the gateway node; `vrf_table` held only the sidecar's five synthetic
+  on the gateway node; `vrf_table` held only the sidecar's synthetic
   `BlockMax` entries and nothing under the node's real locator.
 - **Pod-netns discovery works**, which answers the plan's Open Question 1:
   walking `/proc/*/ns/net`, deduplicating by inode, and looking for
@@ -90,9 +89,8 @@ Confirmed:
   unambiguously. The VRF's name is the identifier — no annotation, CRI call
   or published inode is needed.
 - **The sibling plan's advertisement path works end to end.** On the backend
-  node, `egress_route_table` resolved the gateway address to
-  `2607:ed40:8002:6:e001::`, decoding to exactly the expected block, Node-ID,
-  Function and Argument.
+  node, `egress_route_table` resolved the gateway address to a SID that
+  decodes to exactly the expected Block, Node-ID, Function and Argument.
 - **Envoy's source-address selection is correct** — a VRF-bound socket in the
   Envoy pod sourced from the derived gateway address.
 - **`up` installs cleanly**: veth across the netns boundary, enslavement into
@@ -101,20 +99,19 @@ Confirmed:
 
 Found, and not previously known:
 
-- **The forward path drops packets on the backend node.** `vrf_table` for that
-  VPC showed `pkts=54 drops=21` against `fib_no_neigh=21` — ~40% loss. The
-  backend is a Kraftlet unikernel on a tap (`egress_kind=1`), and
+- **The forward path drops packets to tap-backed backends.** `vrf_table`
+  counted a large share of that VPC's packets as `fib_no_neigh` drops. The
+  backend is a unikernel on a tap (`egress_kind=1`), and
   `hostgw.ConfigureHostGateway` installs its permanent neighbor entry only
   when `guestHWAddr != nil`, which its own doc comment says is "nil for tap
   attachments". So tap-backed workloads depend on dynamic NDP and lose
-  traffic when it is not resolved. This is independent of the return path and
-  is live today.
+  traffic when it is not resolved. This is independent of the return path.
 - **Seeding `locator_table` is not harmless on a `galactic-gateway` node.**
   That component's `GALACTIC_GATEWAY_SRV6_ADDRESS` shares this node's Block
   and Node-ID with Function `0x0`. `usid_ingress` step 2 matches on the top
   64 bits alone, so once a locator entry exists the gateway's own address is
   claimed and then dropped at step 4 as `UNKNOWN_FUNCTION` rather than passed
-  through. Measured zero collateral in a short window here, but it is
+  through. No collateral drops showed up during the run, but the hazard is
   structural, and the plan's Piece 1 currently describes these writes as
   harmless.
 - **`usid_egress` never sees host-originated traffic.** It attaches to the
@@ -132,50 +129,43 @@ Found, and not previously known:
   too small to hold it and `count_drop` silently fails for that index, so two
   nodes on the identical image can expose different counters.
 
-## Root cause, established (2026-09-02)
+## Root cause
 
 Phase 0's gate is **not** cleared, and the reason is upstream of everything the
-plan describes. Inter-node SRv6 decap cannot work on this cluster at all:
+plan describes. Inter-node SRv6 decap cannot work on a cluster whose
+inter-node IPv6 rides a WireGuard mesh:
 
 1. **`usid_ingress` is not attached to the interface that carries the
    traffic.** `attach.ResolveInterfaces` picks the interfaces holding the IPv6
    default route and then deliberately skips WireGuard links
-   (`attach/interfaces.go:166`, `excludedLinkType`) — a sensible guard, since a
+   (`attach/interfaces.go`, `excludedLinkType`) — a sensible guard, since a
    WireGuard mesh can install a default-ish route and
    `srv6.ResolveNodeSourceAddress` would otherwise bake its ULA in as the
-   node's source address. But this is Talos with KubeSpan enabled, and
-   `kubespan` is exactly what carries all inter-node IPv6 — the iBGP sessions
-   included. Attached sets were `[lo bond0 eno2 enp3s0f1]` on the gateway node
-   and `[lo bond0 ens2f1np1 ens1f1np1]` on the backend node; neither includes
-   `kubespan`.
+   node's source address. But on such a cluster the WireGuard mesh is exactly
+   what carries all inter-node IPv6, the iBGP sessions included, and the
+   attached set on both the gateway and the backend node held only `lo`, the
+   bond and the physical uplinks.
 
-   Proven by capture: an injected return packet arrives correctly formed and on
-   the wrong interface —
-
-   ```
-   kubespan In IP6 2600:9c01:0:c::2 > 2607:ed40:8002:6:e001:::
-              IP6 fd20:0:2::3:0:0.44444 > fd30:e2e:3a5:...:9999: Flags [S]
-   ```
-
-   while `tcpdump` on `eno2`, `enp3s0f1` and `bond0`, filtered to that same
-   destination, captured nothing.
+   A capture proved it: an injected return packet arrived correctly formed on
+   the WireGuard interface, while captures on the attached uplinks, filtered
+   to the same destination, saw nothing.
 
 2. **Attaching it there is not sufficient either.** `attach-iface` was used to
-   attach the running program (id 2828) to `kubespan` via the production
+   attach the running program to the WireGuard interface via the production
    `attach.Attach` path, with Pieces 1–3 installed and every map entry
-   verified. `vrf_table` `pkts` stayed at 0. `kubespan` reports `link-type RAW
-   (Raw IP)` — there is no Ethernet header — and `usid_ingress` step 1
-   unconditionally parses `struct usid_ethhdr` and tests `h_proto ==
+   verified. `vrf_table` `pkts` stayed at 0. A WireGuard interface reports
+   `link-type RAW (Raw IP)` — there is no Ethernet header — and `usid_ingress`
+   step 1 unconditionally parses `struct usid_ethhdr` and tests `h_proto ==
    ETH_P_IPV6`. On an L3 interface it reads the inner IPv6 header's own bytes
    as an ethertype, mismatches, and returns `TC_ACT_UNSPEC` — silently, on the
    one path that is deliberately uncounted.
 
 So the datapath structurally assumes an Ethernet-framed fabric. Over a
-KubeSpan/WireGuard mesh it cannot decap, and the same applies to the forward
-direction: the backend node's `vrf_table` hits (`pkts=54`) come from the Envoy
-pod *on that same node*, whose encapsulated traffic loops back via `lo` — which
-*is* in the attached set. Cross-node #855 ingress has therefore never worked
-here, in either direction.
+WireGuard mesh it cannot decap, and the same applies to the forward direction:
+the backend node's `vrf_table` hits come from the Envoy pod *on that same
+node*, whose encapsulated traffic loops back via `lo` — which *is* in the
+attached set. Cross-node #855 ingress therefore cannot work over such an
+underlay, in either direction.
 
 ### What this means for the plan
 
@@ -184,7 +174,7 @@ but they are not sufficient and are not the top blocker. Before any of that
 work is worth doing, one of the following has to be settled:
 
 - run the SRv6 fabric over an Ethernet-framed underlay on these nodes (i.e. do
-  not carry it over KubeSpan), or
+  not carry it over a WireGuard mesh), or
 - teach `usid_ingress`/`usid_egress` to handle L3/RAW interfaces — detect the
   absence of a MAC header rather than assuming `ETH_HLEN`, and give step 9 a
   redirect path that does not depend on resolved L2 addressing.

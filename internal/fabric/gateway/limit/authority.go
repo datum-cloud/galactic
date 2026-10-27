@@ -25,6 +25,14 @@ const (
 	RecoveryHold = 125 * time.Second
 	// LeaseReadTimeout bounds each uncached election Lease read.
 	LeaseReadTimeout = time.Second
+	// MaxClockError bounds the kernel's estimate of its clock's error: two
+	// clocks within it of true time are within the contract's 1 s of each
+	// other.
+	MaxClockError = 500 * time.Millisecond
+	// ClockGrace is how long the clock may stay unhealthy before the
+	// authority ends its epoch. Shorter runs refuse new work only, so one
+	// bad sample does not cost the cell a recovery hold.
+	ClockGrace = 3 * time.Second
 )
 
 // Epoch identifies one term of the election: the Lease object's UID and
@@ -67,7 +75,10 @@ func ReadEpoch(ctx context.Context, r client.Reader, namespace, name string, now
 // remaining delay; the first valid read after the hold empties the buckets
 // and admits from that instant. A failed read, another holder or an expired
 // term refuses with OwnershipLost and cancels the context of the epoch's
-// work.
+// work. While Clock reports unhealthy, Check refuses with
+// LimiterUnavailable; once it has for ClockGrace, the epoch ends like on a
+// failed read, so its work is cancelled and admission resumes only after a
+// new hold.
 type Authority struct {
 	// Reader must read uncached.
 	Reader    client.Reader
@@ -77,6 +88,9 @@ type Authority struct {
 	Identity string
 	// Buckets are emptied when a hold ends.
 	Buckets *Buckets
+	// Clock, when set, reports an error while this host's clock cannot be
+	// trusted within MaxClockError; KernelClock is the production check.
+	Clock func() error
 	// Hold overrides RecoveryHold; tests only.
 	Hold time.Duration
 	// Now returns the current time; nil selects time.Now.
@@ -88,6 +102,9 @@ type Authority struct {
 	until    time.Time
 	epochCtx context.Context
 	cancel   context.CancelFunc
+	// clockBadSince is when Clock first reported unhealthy in its current
+	// run of failures; zero while it is healthy.
+	clockBadSince time.Time
 }
 
 func (a *Authority) now() time.Time {
@@ -114,12 +131,24 @@ func (a *Authority) Check(ctx context.Context) (Epoch, context.Context, error) {
 	if err == nil && epoch.Holder != a.Identity {
 		err = errcode.Status(errcode.OwnershipLost, "this gateway does not hold the election lease")
 	}
+	clockBad := err == nil && a.Clock != nil && a.Clock() != nil
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
 		a.loseLocked()
 		return Epoch{}, nil, err
 	}
+	if clockBad {
+		if a.clockBadSince.IsZero() {
+			a.clockBadSince = now
+		}
+		if now.Sub(a.clockBadSince) >= ClockGrace {
+			a.loseLocked()
+		}
+		return Epoch{}, nil, errcode.Retry(errcode.LimiterUnavailable, "this gateway's clock is not synchronised",
+			string(ScopeCell), time.Second)
+	}
+	a.clockBadSince = time.Time{}
 	if epoch != a.epoch || a.epochCtx == nil {
 		a.loseLocked()
 		a.epoch, a.until = epoch, now.Add(a.hold())
@@ -134,6 +163,31 @@ func (a *Authority) Check(ctx context.Context) (Epoch, context.Context, error) {
 		a.active = true
 	}
 	return a.epoch, a.epochCtx, nil
+}
+
+// Authority states, as State reports them.
+const (
+	StateReady       = "ready"
+	StateRecovering  = "recovering"
+	StateUnavailable = "unavailable"
+)
+
+// State reports StateReady while the authority admits work,
+// StateRecovering during a recovery hold, and StateUnavailable while this
+// process does not hold the election, could not confirm it at its last
+// check, or is refusing work for an unhealthy clock.
+func (a *Authority) State() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case !a.clockBadSince.IsZero():
+		return StateUnavailable
+	case a.active:
+		return StateReady
+	case a.epochCtx != nil:
+		return StateRecovering
+	}
+	return StateUnavailable
 }
 
 // WatchInterval is how often Watch confirms ownership.

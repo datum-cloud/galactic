@@ -114,7 +114,7 @@ func TestApplyGlobal_ListenPortUnsetFallsBackToFactoryDefault(t *testing.T) {
 // Established. peerNeedsApply must say "skip" only when the peer's config is
 // truly unchanged and GoBGP still reports it as configured.
 func TestPeerNeedsApply(t *testing.T) {
-	const addr = "2607:ed40:1ff::1"
+	const addr = "2001:db8:1ff::1"
 	peer := model.DesiredPeer{
 		Name:       "to-worker",
 		PeerASN:    33438,

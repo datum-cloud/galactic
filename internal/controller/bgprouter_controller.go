@@ -311,7 +311,7 @@ func (r *BGPRouterReconciler) updatePeerStatuses(
 	logger := log.FromContext(ctx)
 
 	// Build a lookup map by normalized peer address so IPv6 variants
-	// (e.g. 2607:ed40:01fb::2 vs 2607:ed40:1fb::2) match.
+	// (e.g. 2001:db8:01fb::2 vs 2001:db8:1fb::2) match.
 	stateByAddr := make(map[string]model.PeerStatus, len(rs.Peers))
 	for _, ps := range rs.Peers {
 		stateByAddr[normalizeIP(ps.Address)] = ps

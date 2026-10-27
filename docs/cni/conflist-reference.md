@@ -21,14 +21,14 @@ else is).
 
 ## Master Plugin Fields (`galactic-veth` / `galactic-tap`)
 
-| Field           | Required | Type     | Description                                                                                                                                                                                                          |
-| --------------- | -------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `vpc`           | **Yes**  | `string` | Base62-encoded VPC identifier (48-bit value). Used to derive VRF names, interface names, and BGP route targets.                                                                                                      |
-| `vpcattachment` | **Yes**  | `string` | Base62-encoded VPC attachment identifier (16-bit value). Paired with `vpc` for deterministic VRF/BGP naming.                                                                                                         |
-| `mtu`           | No       | `int`    | MTU for the host-side interface. For `galactic-veth` this applies to both veth endpoints; for `galactic-tap` it applies to the tap interface.                                                                        |
-| `namespace`     | No       | `string` | Kubernetes namespace used for NAD lookup (and, for `galactic-bgp`'s own stanza, `BGPRouter`/BGP CRD lookup). Resolution order: this field → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace` → `galactic-system`. |
-| `dan`           | No       | `bool`   | `galactic-tap` only. Write a Directly Attachable Network file for the sandbox, so a Kata runtime-rs shim adopts this tap instead of discovering a network of its own. Off unless set. See [Directly attachable networking](#directly-attachable-networking) below.                                                     |
-| `ipam`          | No       | `IPAM`   | IPAM delegation block (see [IPAM Fields](#ipam-fields) below). Presence alone decides whether IPAM runs at all — no env var or sibling field can trigger or suppress it.                                             |
+| Field           | Required | Type     | Description                                                                                                                                                                                                                                                        |
+| --------------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `vpc`           | **Yes**  | `string` | Base62-encoded VPC identifier (48-bit value). Used to derive VRF names, interface names, and BGP route targets.                                                                                                                                                    |
+| `vpcattachment` | **Yes**  | `string` | Base62-encoded VPC attachment identifier (16-bit value). Paired with `vpc` for deterministic VRF/BGP naming.                                                                                                                                                       |
+| `mtu`           | No       | `int`    | MTU for the host-side interface. For `galactic-veth` this applies to both veth endpoints; for `galactic-tap` it applies to the tap interface.                                                                                                                      |
+| `namespace`     | No       | `string` | Kubernetes namespace used for NAD lookup (and, for `galactic-bgp`'s own stanza, `BGPRouter`/BGP CRD lookup). Resolution order: this field → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace` → `galactic-system`.                                               |
+| `dan`           | No       | `bool`   | `galactic-tap` only. Write a Directly Attachable Network file for the sandbox, so a Kata runtime-rs shim adopts this tap instead of discovering a network of its own. Off unless set. See [Directly attachable networking](#directly-attachable-networking) below. |
+| `ipam`          | No       | `IPAM`   | IPAM delegation block (see [IPAM Fields](#ipam-fields) below). Presence alone decides whether IPAM runs at all — no env var or sibling field can trigger or suppress it.                                                                                           |
 
 Standard CNI fields (`cniVersion`, `name`, `dns`, `runtimeConfig`) are also
 supported via the embedded `types.PluginConf`. Both binaries declare support
@@ -95,7 +95,7 @@ across instance replacement. The directory is node-level configuration (see
 defaults to `/run/kata-containers/dans-rs`.
 
 Per attachment rather than per node, because the decision follows the
-workload: one cell runs guests of several runtimes over this same plugin, and
+workload: a cell may run guests of several runtimes over this same plugin, and
 only some of them read the file. It is carried in the CNI config because that
 is the one channel delivered identically to ADD, DEL, and CHECK, so no
 operation has to re-derive it.
