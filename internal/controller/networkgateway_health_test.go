@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"slices"
 	"strings"
@@ -472,8 +473,8 @@ func TestBuildDesiredRuleFailClosedHealth(t *testing.T) {
 				if got := backendAddrs(dr.Backends); !slices.Equal(got, []string{testHealthyAddr}) {
 					t.Fatalf("backends: %v", got)
 				}
-			} else if err == nil {
-				t.Fatal("expected no serving backends")
+			} else if !errors.Is(err, errNoHealthyBackends) {
+				t.Fatalf("err = %v, want %v", err, errNoHealthyBackends)
 			}
 		})
 	}
@@ -514,8 +515,8 @@ func TestGatewayHealthFailClosedWithdrawsAndRecovers(t *testing.T) {
 	if _, ok := advertisedPrefixes(t, c, testRuleAdv); ok {
 		t.Fatal("VIP still advertised")
 	}
-	if cond := programmedFor(t, c); cond.Status != metav1.ConditionFalse {
-		t.Fatalf("Programmed=%s", cond.Status)
+	if cond := programmedFor(t, c); cond.Status != metav1.ConditionFalse || cond.Reason != reasonNoHealthyBackends {
+		t.Fatalf("Programmed=%s/%s", cond.Status, cond.Reason)
 	}
 	for i := range bindings.Items {
 		b := &bindings.Items[i]
