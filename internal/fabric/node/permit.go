@@ -43,7 +43,8 @@ const (
 )
 
 // PermitGateway obtains and releases permits from the cell's gateway on a
-// direct operator's behalf. permitv1.PermitServiceClient satisfies it.
+// direct operator's behalf. GatewayConn and permitv1.PermitServiceClient
+// satisfy it.
 type PermitGateway interface {
 	RequestPermit(ctx context.Context, in *permitv1.RequestPermitRequest,
 		opts ...grpc.CallOption) (*permitv1.RequestPermitResponse, error)

@@ -52,8 +52,10 @@ tasks:
     deps: [golangci-lint, yamlfmt, yaml-ext, 'build:ebpf']
     cmds:
       - '{{.GOLANGCI_LINT}} run'
-      # examples/edge-provider is its own module, which the root run skips.
+      # examples/edge-provider and examples/looking-glass-client are their
+      # own modules, which the root run skips.
       - cd examples/edge-provider && {{.GOLANGCI_LINT}} run --config ../../.golangci.yaml
+      - cd examples/looking-glass-client && {{.GOLANGCI_LINT}} run --config ../../.golangci.yaml
       - '{{.YAMLFMT}} -lint'
   lint-fix:
     desc: Lint and apply fixes
@@ -181,6 +183,7 @@ tasks:
     cmds:
       - bash scripts/ci.sh unittest
       - task: test:edge-provider
+      - task: test:looking-glass-client
   test:edge-provider:
     desc: Build, vet and unit-test the reference edge provider (examples/edge-provider, its own module)
     dir: examples/edge-provider
@@ -188,6 +191,19 @@ tasks:
       - go build ./...
       - go vet ./...
       - go test -race ./...
+  test:looking-glass-client:
+    desc: Build, vet and unit-test the independent Looking Glass client (examples/looking-glass-client, its own module)
+    dir: examples/looking-glass-client
+    cmds:
+      - go build ./...
+      - go vet ./...
+      - go test -race ./...
+      # The client must build from the published service API alone.
+      - |
+        if go list -deps ./... | grep -E '^go\.datum\.net/galactic/' | grep -vxE 'go\.datum\.net/galactic/api/fabric/(service/)?v1'; then
+          echo "the client imports Galactic packages beyond the published service API" >&2
+          exit 1
+        fi
   test:unit-root:
     desc: Re-run just the requireRoot(t)-gated unit tests, as root
     deps: ['build:ebpf']

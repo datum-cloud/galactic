@@ -195,7 +195,7 @@ func TestDestinationPrefixAcrossProjects(t *testing.T) {
 	l := roomyLimits()
 	l.PacketPrefix = limit.Rate{PerSecond: 1, Burst: 2 * limit.TraceroutePackets}
 	withAdmission(t, svc, l)
-	for i, target := range []string{probeTarget6, "2001:db8::2", "2001:db8::3"} {
+	for i, target := range []string{probeTarget6, "2606:4700::2", "2606:4700::3"} {
 		events, err := collect(t, svc, requestFor(fmt.Sprintf("project-%d", i), i, func(r *runReq) {
 			r.Query = traceroute(target)
 		}))
@@ -226,7 +226,7 @@ func TestAggregateBudgetsCoverEveryCaller(t *testing.T) {
 	routers := []Node{{Name: routerA, PodUID: podA, Selected: true}}
 	expires := time.Now().Add(30 * time.Second)
 
-	events, err := collect(t, svc, requestFor("project-a", 1, func(r *runReq) { r.Query = traceroute("2001:db8:1::1") }))
+	events, err := collect(t, svc, requestFor("project-a", 1, func(r *runReq) { r.Query = traceroute("2606:4700:1::1") }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestAggregateBudgetsCoverEveryCaller(t *testing.T) {
 		return node.QueryFromProto(&fabricv1.Query{Type: fabricv1.QueryType_QUERY_TYPE_TRACEROUTE, Target: target,
 			AddressFamily: fabricv1.AddressFamily_ADDRESS_FAMILY_IPV6})
 	}
-	out := svc.Runner.Run(t.Context(), "ns/cluster", "fq-1", trace("2001:db8:2::1"), routers, nil, expires)
+	out := svc.Runner.Run(t.Context(), "ns/cluster", "fq-1", trace("2606:4700:2::1"), routers, nil, expires)
 	if out[0].Err != nil {
 		t.Fatalf("FabricQuery: %v", out[0].Err)
 	}
@@ -248,7 +248,7 @@ func TestAggregateBudgetsCoverEveryCaller(t *testing.T) {
 		t.Fatalf("direct operator: %v", err)
 	}
 
-	out = svc.Runner.Run(t.Context(), "operator/bob", "op-1", trace("2001:db8:4::1"), routers, nil, expires)
+	out = svc.Runner.Run(t.Context(), "operator/bob", "op-1", trace("2606:4700:4::1"), routers, nil, expires)
 	if errcode.Of(out[0].Err) != errcode.Throttled || errcode.Metadata(out[0].Err)[errcode.MetadataScope] != "cell" {
 		t.Errorf("operator through the gateway past the cell budget: %v", out[0].Err)
 	}

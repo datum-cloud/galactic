@@ -38,8 +38,8 @@ const (
 	testLease  = "fabric-api-gateway"
 	testHolder = "gateway-0_test"
 	// probeTarget6 and probeTarget4 are probe destinations.
-	probeTarget6 = "2001:db8::1"
-	probeTarget4 = "192.0.2.1"
+	probeTarget6 = "2606:4700::1"
+	probeTarget4 = "9.9.9.9"
 	// podA is router-a's fabric-router pod UID.
 	podA = "pod-a"
 )
@@ -206,7 +206,7 @@ func TestServiceDuplicateAttempts(t *testing.T) {
 	if errcode.Of(err) != errcode.DuplicateRequest {
 		t.Errorf("retry with a later expiration: %v", err)
 	}
-	_, err = collect(t, svc, requestFor("project-a", 1, func(r *runReq) { r.Query.Target = "2001:db8::2" }))
+	_, err = collect(t, svc, requestFor("project-a", 1, func(r *runReq) { r.Query.Target = "2606:4700::2" }))
 	if errcode.Of(err) != errcode.DuplicateConflict {
 		t.Errorf("changed arguments: %v", err)
 	}

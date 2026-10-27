@@ -1,0 +1,6 @@
+# Step 2: dfw's gateway charges every probe to the cell's aggregate budgets,
+# at the contract's default limits.
+resources:
+  - ../../../../fabric-api/gateway/dfw
+components:
+  - ../../../../../../../config/fabric-api/components/aggregate-budgets

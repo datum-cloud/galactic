@@ -251,7 +251,7 @@ func TestServiceTelemetryCarriesNoPayload(t *testing.T) {
 		t.Errorf("charged packets = %g", got)
 	}
 
-	forbidden := []string{testProject, testRequestID[:8], "2001:db8", routerA, routerB, podA, "raw failure",
+	forbidden := []string{testProject, testRequestID[:8], "2606:4700", routerA, routerB, podA, "raw failure",
 		testService}
 	families, err := reg.Gather()
 	if err != nil {
@@ -270,7 +270,7 @@ func TestServiceTelemetryCarriesNoPayload(t *testing.T) {
 	}
 
 	out := logs.String()
-	for _, bad := range []string{"2001:db8", "raw failure", "replies", "192.0.2.1"} {
+	for _, bad := range []string{"2606:4700", "raw failure", "replies", "192.0.2.1"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("logs carry %q:\n%s", bad, out)
 		}

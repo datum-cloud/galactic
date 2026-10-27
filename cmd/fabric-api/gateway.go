@@ -55,6 +55,7 @@ type gatewayOptions struct {
 	maxInFlight                   int
 	retention, cleanupGrace       time.Duration
 	serviceIdentities             []string
+	denyPrefixes                  []string
 	serviceConfigMap              string
 	aggregateBudgets              bool
 	limits                        limit.Limits
@@ -108,6 +109,9 @@ func newGatewayCommand() *cobra.Command {
 	f.StringSliceVar(&o.serviceIdentities, "service-identities", nil,
 		"Names of the Looking Glass service identities (spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>) "+
 			"allowed to call this cell's gateway; empty allows none")
+	f.StringSliceVar(&o.denyPrefixes, "deny-prefixes", nil,
+		"Platform or management ranges no Looking Glass probe may target, refused before the snapshot; "+
+			"set it to the nodes' --deny-prefixes")
 	f.StringVar(&o.serviceConfigMap, "service-config-map", "",
 		"ConfigMap in --namespace whose key \"service\" turns Looking Glass execution on (\"enabled\") or off "+
 			"(\"disabled\") while the gateway runs, read every second; empty, missing, unreadable or any other "+
@@ -211,6 +215,10 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	allowlist, err := gateway.ParseAllowlist(o.serviceIdentities)
 	if err != nil {
 		return fmt.Errorf("--service-identities: %w", err)
+	}
+	deny, err := query.ParsePrefixes(o.denyPrefixes)
+	if err != nil {
+		return fmt.Errorf("--deny-prefixes: %w", err)
 	}
 	ctx, stop := signalContext(parent)
 	defer stop()
@@ -361,12 +369,13 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	// enforces the aggregate budgets; otherwise it authenticates, validates
 	// and reports capabilities, and refuses execution with ServiceDisabled.
 	service := &gateway.Service{
-		Cell:      o.cell,
-		Switch:    serviceSwitch,
-		Metrics:   metrics,
-		Allowlist: allowlist,
-		Elected:   debug.Elected,
-		Leader:    debug,
+		Cell:         o.cell,
+		Switch:       serviceSwitch,
+		Metrics:      metrics,
+		Allowlist:    allowlist,
+		Destinations: query.DestinationPolicy{Deny: deny},
+		Elected:      debug.Elected,
+		Leader:       debug,
 		Discoverer: &gateway.Discoverer{
 			Reader: mgr.GetAPIReader(), Namespace: o.namespace, Selector: sel, CertsSelector: certsSel,
 		},

@@ -140,7 +140,9 @@ each step cell by cell:
    after `components/fabric-api-permits`. It adds `--require-probe-permits`
    and `--gateway-address=fabric-api-gateway.galactic-system.svc:9346` (the
    gateway Service), so direct operator probes are charged too. Another
-   routing rollout.
+   routing rollout. It also issues each node's certificate for client auth
+   as well as server auth, since the sidecar asks the gateway for those
+   permits as a TLS client; that recreates the `fabric-api-certs` pods.
 4. **The gateway serves the Looking Glass service, switched off.** Add
    `config/fabric-api/components/service` after
    `components/aggregate-budgets`. See
@@ -271,6 +273,9 @@ cd deploy/containerlab && task verify:fabric-api
 # underlay come up with diagnostics unavailable, then repair the Issuer.
 cd deploy/containerlab && task verify:fabric-api-bootstrap
 ```
+
+Before switching the Looking Glass service on in a cell, qualify the build
+with the [qualification suite](qualification.md).
 
 In a real cell, read the same facts from the cluster:
 

@@ -1,0 +1,29 @@
+# Step 3: dfw's fabric-router sidecars refuse any probe without a permit,
+# direct operator probes included, so the gateway's budgets charge every
+# probe in the cell. The lab's own sidecar arguments are kept as in step 1.
+resources:
+  - ../permits
+components:
+  - ../../../../fabric-router/base/fabric/components/fabric-api-require-permits
+patches:
+  - target:
+      kind: DaemonSet
+      name: fabric-router
+    patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: fabric-router
+      spec:
+        template:
+          spec:
+            containers:
+              - name: fabric-api
+                args:
+                  - node
+                  - --probe-permits
+                  - --require-probe-permits
+                  - --gateway-address=fabric-api-gateway.galactic-system.svc:9346
+                  - --operator-allow-prefixes=10.255.255.0/24,fc00:0::/32
+                  - --enable-expensive-queries
+                  - --log-level=debug

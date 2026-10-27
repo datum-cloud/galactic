@@ -9,6 +9,7 @@ Use fabric-api to query FRR state and run bounded ICMP diagnostics from fabric r
 - [Operations](operations.md): observability, rollout, verification and troubleshooting.
 - [FabricQuery API](api.md): query and result semantics, conditions and errors.
 - [Load-test procedure](load-test.md): repeat the full-table diagnostic qualification.
+- [Looking Glass qualification](qualification.md): run the service's acceptance suite on real fabric routers.
 - [Metric reference](../observability/fabric-api.md): exported series and alerts.
 
 The [Looking Glass service contract](../designs/looking-glass-service.md) specifies proposed service behavior. It does not announce a customer API or qualified aggregate limits.
