@@ -22,6 +22,25 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 patches:
   - path: daemonset-patch.yaml
+  # A sidecar asks the gateway for a direct operator probe's permit as a TLS
+  # client, and the gateway requires client auth of its callers, so each
+  # node's certificate is issued for client auth too. This recreates the
+  # fabric-api-certs pods only, never FRR.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: fabric-api-certs
+        namespace: galactic-system
+      spec:
+        template:
+          spec:
+            volumes:
+              - name: fabric-api-csi
+                csi:
+                  driver: csi.cert-manager.io
+                  volumeAttributes:
+                    csi.cert-manager.io/key-usages: client auth,server auth
   # Fails the build unless components/fabric-api-permits, which adds this
   # Role, came first; it changes nothing.
   - patch: |-
