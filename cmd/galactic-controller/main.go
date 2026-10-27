@@ -46,6 +46,7 @@ import (
 	edgeroute "go.datum.net/galactic/internal/edge/route"
 	"go.datum.net/galactic/internal/edge/timing"
 	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/serviceaddress"
 	"go.datum.net/galactic/internal/trafficpolicy/cell"
 	"go.datum.net/galactic/internal/trafficpolicy/webhook"
 	networkingv1alpha "go.datum.net/network-services-operator/api/v1alpha"
@@ -236,6 +237,10 @@ func SetupCloud(mgr ctrl.Manager) error {
 
 // Setup registers the cell role's webhook and reconcilers with mgr.
 func Setup(mgr ctrl.Manager, controllerUsername string) error {
+	if err := (&serviceaddress.RetirementReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up address retirement reconciler: %w", err)
+	}
+
 	mgr.GetWebhookServer().Register(webhook.Path, &ctrlwebhook.Admission{Handler: &webhook.PolicyValidator{
 		ControllerUsername: controllerUsername,
 		Reader:             mgr.GetAPIReader(),

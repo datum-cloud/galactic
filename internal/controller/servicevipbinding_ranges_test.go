@@ -137,6 +137,10 @@ func TestRangeBindingReadinessIncludesRangeAndGeneration(t *testing.T) {
 	}
 	binding.Status.ObservedGeneration = 2
 	binding.Status.Conditions[0].ObservedGeneration = 2
+	if bindings.unbound(rule, testNamespace, vip, backend) == "" {
+		t.Fatal("old backend writer admitted coordinated binding")
+	}
+	binding.Status.SourceAuthorityEnforced = true
 	if reason := bindings.unbound(rule, testNamespace, vip, backend); reason != "" {
 		t.Fatal(reason)
 	}

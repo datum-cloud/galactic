@@ -35,7 +35,7 @@ type NetworkServiceAddressListener struct {
 }
 
 // NetworkServiceAddressGroup identifies the complete desired listener inventory of one allocated VIP.
-// +kubebuilder:validation:XValidation:rule="!has(self.listenerName) || self.listeners.exists(l, l.name == self.listenerName)",message="listenerName must identify a declared listener"
+// +kubebuilder:validation:XValidation:rule="!has(self.listenerName) || (has(self.listeners) && self.listeners.exists(l, l.name == self.listenerName))",message="listenerName must identify a declared listener"
 type NetworkServiceAddressGroup struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
@@ -49,11 +49,11 @@ type NetworkServiceAddressGroup struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	ListenerName string `json:"listenerName,omitempty"`
-	// +kubebuilder:validation:MinItems=1
+	// +optional
 	// +kubebuilder:validation:MaxItems=16
 	// +listType=map
 	// +listMapKey=name
-	Listeners []NetworkServiceAddressListener `json:"listeners"`
+	Listeners []NetworkServiceAddressListener `json:"listeners,omitempty"`
 }
 
 // NetworkServiceAddressSpec is the authoritative listener inventory for one allocated address.
@@ -61,9 +61,13 @@ type NetworkServiceAddressGroup struct {
 // +kubebuilder:validation:XValidation:rule="self.group.generation >= oldSelf.group.generation",message="address generation must not regress"
 // +kubebuilder:validation:XValidation:rule="self.group.generation != oldSelf.group.generation || self.group == oldSelf.group",message="equal generations must have identical inventories"
 // +kubebuilder:validation:XValidation:rule="!has(self.group.listenerName)",message="address inventory must not select an individual listener"
+// +kubebuilder:validation:XValidation:rule="(has(self.retired) && self.retired) || (size(self.vpcRef) > 0 && has(self.group.listeners) && size(self.group.listeners) > 0)",message="active addresses require a VPC and listener inventory"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.retired) || !oldSelf.retired || self == oldSelf",message="retired address authority is immutable"
 type NetworkServiceAddressSpec struct {
-	// +kubebuilder:validation:MinLength=1
-	VPCRef string `json:"vpcRef"`
+	// Retired permanently closes this allocation identity.
+	// +optional
+	Retired bool   `json:"retired,omitempty"`
+	VPCRef  string `json:"vpcRef"`
 	// +kubebuilder:validation:XValidation:rule="isIP(self) && ip(self).family() == 6",message="VIP must be IPv6"
 	VIPAddress string                     `json:"vipAddress"`
 	Group      NetworkServiceAddressGroup `json:"group"`
@@ -103,6 +107,8 @@ func init() {
 }
 
 const (
-	CapabilitySharedAddressListeners = "SharedAddressListeners"
-	CapabilityUDPPortRanges          = "UDPPortRanges"
+	CapabilityTerminalAddressRetirement = "TerminalAddressRetirement"
+	ConditionTypeAddressRetired         = "Retired"
+	CapabilitySharedAddressListeners    = "SharedAddressListeners"
+	CapabilityUDPPortRanges             = "UDPPortRanges"
 )

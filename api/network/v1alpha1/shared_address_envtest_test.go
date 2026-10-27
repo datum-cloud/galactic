@@ -94,3 +94,64 @@ func TestSharedAddressRangeAdmission(t *testing.T) {
 		})
 	}
 }
+
+func TestTerminalAddressRetirementAdmission(t *testing.T) {
+	c, _ := startProtocolAPI(t)
+	ctx := context.Background()
+	terminal := &api.NetworkServiceAddress{ObjectMeta: metav1.ObjectMeta{Name: "preemptive", Namespace: protocolNamespace}, Spec: api.NetworkServiceAddressSpec{Retired: true, VIPAddress: "2001:db8::1", Group: api.NetworkServiceAddressGroup{UID: "allocation", Generation: 1, Revision: "retired"}}}
+	if err := c.Create(ctx, terminal); err != nil {
+		t.Fatalf("preemptive retirement rejected: %v", err)
+	}
+	for _, mutate := range []func(*api.NetworkServiceAddress){
+		func(a *api.NetworkServiceAddress) { a.Spec.Retired = false },
+		func(a *api.NetworkServiceAddress) { a.Spec.Group.Generation++ },
+		func(a *api.NetworkServiceAddress) { a.Spec.VPCRef = "new-vpc" },
+	} {
+		changed := terminal.DeepCopy()
+		mutate(changed)
+		if err := c.Update(ctx, changed); !apierrors.IsInvalid(err) {
+			t.Fatalf("terminal mutation accepted: %v", err)
+		}
+	}
+	active := terminal.DeepCopy()
+	active.Name = "empty-active"
+	active.ResourceVersion = ""
+	active.UID = ""
+	active.Spec.Retired = false
+	if err := c.Create(ctx, active); !apierrors.IsInvalid(err) {
+		t.Fatalf("empty active inventory accepted: %v", err)
+	}
+	active.Spec.VPCRef = "vpc"
+	active.Spec.Group.Listeners = []api.NetworkServiceAddressListener{{Name: "control", Protocol: api.NetworkServiceProtocolTCP, Port: 443}}
+	if err := c.Create(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	active.Spec.Retired = true
+	if err := c.Update(ctx, active); err != nil {
+		t.Fatalf("existing inventory retirement rejected: %v", err)
+	}
+}
+
+func TestCoordinatedBindingSourceAdmission(t *testing.T) {
+	c, _ := startProtocolAPI(t)
+	ctx := context.Background()
+	binding := &api.ServiceVIPBinding{ObjectMeta: metav1.ObjectMeta{Name: "source-bound", Namespace: protocolNamespace}, Spec: api.ServiceVIPBindingSpec{
+		TargetRef: api.TargetRef{Kind: "Node", Name: "backend"}, VPCRef: "vpc", VIPAddress: "2001:db8::1", Port: 443, Protocol: api.NetworkServiceProtocolTCP,
+		BackendAddress: "fd00::1", BackendPort: 8443, EgressKind: api.ServiceVIPBindingEgressKindTap,
+		SourceRef: &api.ServiceVIPBindingSourceReference{Namespace: protocolNamespace, Name: "service", UID: "service-uid", Generation: 1, AllocationUID: "allocation"},
+	}}
+	if err := c.Create(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*api.ServiceVIPBinding){
+		func(b *api.ServiceVIPBinding) { b.Spec.SourceRef = nil },
+		func(b *api.ServiceVIPBinding) { b.Spec.SourceRef.UID = "replacement" },
+		func(b *api.ServiceVIPBinding) { b.Spec.SourceRef.Generation++ },
+	} {
+		changed := binding.DeepCopy()
+		mutate(changed)
+		if err := c.Update(ctx, changed); !apierrors.IsInvalid(err) {
+			t.Fatalf("source mutation accepted: %v", err)
+		}
+	}
+}

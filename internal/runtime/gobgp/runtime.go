@@ -76,7 +76,9 @@ type GoBGPRuntime struct {
 	rtIndex map[string]uint32
 	// appliedAdvertisements holds the EVPN advertisements, by name, whose
 	// routes the last successful applyEVPN converged, for status reporting.
+	advertisementMu       sync.Mutex
 	appliedAdvertisements map[string]model.DesiredAdvertisement
+	advertisementOwners   map[string]model.DesiredAdvertisement
 	// appliedRoutes tracks each EVPN route currently announced, by route rather
 	// than by advertisement, since several advertisements can claim one route
 	// and withdrawing it on behalf of one would drop it for all.
@@ -235,6 +237,11 @@ func (r *GoBGPRuntime) startGoBGP(ctx context.Context) (*gobgpserver.BgpServer, 
 			return nil, fmt.Errorf("gobgp not ready: %w", err)
 		}
 		b = r.server.bgp.Load()
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.runAdvertisementLeases(srvCtx)
+		}()
 	}
 
 	return b, nil
@@ -519,6 +526,7 @@ type evpnRoute struct {
 // advertisement's name is not part of the path.
 func sameEVPNRoute(a, b evpnRoute) bool {
 	a.adv.Name, b.adv.Name = "", ""
+	a.adv.ExpiresAt, b.adv.ExpiresAt = time.Time{}, time.Time{}
 	return a.routerID == b.routerID && reflect.DeepEqual(a.adv, b.adv)
 }
 
@@ -565,10 +573,25 @@ func desiredEVPNRoutes(
 // since advertisements that share a route share its single path, and
 // withdrawals run before announcements.
 func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredAdvertisement, routerID string) error {
+	r.advertisementMu.Lock()
+	defer r.advertisementMu.Unlock()
+	now := time.Now()
+	active := make([]model.DesiredAdvertisement, 0, len(advs))
+	for _, adv := range advs {
+		if !adv.ExpiresAt.IsZero() {
+			if !adv.ExpiresAt.After(now) {
+				continue
+			}
+			adv.ExpiresAt = now.Add(adv.ExpiresAt.Sub(now))
+		}
+		active = append(active, adv)
+	}
+	advs = active
 	desired, byName, err := desiredEVPNRoutes(advs, routerID)
 	if err != nil {
 		return err
 	}
+	r.advertisementOwners = byName
 
 	for key, applied := range r.appliedRoutes {
 		if _, ok := desired[key]; ok {
@@ -582,6 +605,7 @@ func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredA
 
 	for key, route := range desired {
 		if applied, ok := r.appliedRoutes[key]; ok && sameEVPNRoute(applied, route) {
+			r.appliedRoutes[key] = route
 			continue
 		}
 		if err := buildEVPNPaths(b, route.adv, route.routerID, false); err != nil {
@@ -670,13 +694,7 @@ func (r *GoBGPRuntime) Status(ctx context.Context) (model.RuntimeStatus, error) 
 		status.VRFs = append(status.VRFs, st)
 	}
 
-	// Collect advertisement statuses from the applied advertisements map.
-	for name, adv := range r.appliedAdvertisements {
-		status.Advertisements = append(status.Advertisements, model.AdvertisementStatus{
-			Name:               name,
-			AdvertisedPrefixes: int32(len(adv.Prefixes)),
-		})
-	}
+	status.Advertisements = r.advertisementStatuses()
 
 	return status, nil
 }

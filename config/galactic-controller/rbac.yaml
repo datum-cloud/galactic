@@ -3,6 +3,15 @@ kind: ClusterRole
 metadata:
   name: galactic-controller
 rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [networkserviceaddresses]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [networkserviceaddresses/status]
+    verbs: [get, update, patch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [networkgateways, networkservices, servicevipbindings]
+    verbs: [get, list, watch]
   # TrafficPolicy: validated by the webhook, its Accepted status written
   # here, and the reserved default-deny-all created in each tenant namespace.
   - apiGroups: [galactic.datumapis.com]

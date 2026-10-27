@@ -158,7 +158,6 @@ spec:
                       - message: ranges require UDP
                         rule: '!has(self.portRange) || self.protocol == ''udp'''
                     maxItems: 16
-                    minItems: 1
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
@@ -173,14 +172,13 @@ spec:
                     type: string
                 required:
                 - generation
-                - listeners
                 - revision
                 - uid
                 type: object
                 x-kubernetes-validations:
                 - message: listenerName must identify a declared listener
-                  rule: '!has(self.listenerName) || self.listeners.exists(l, l.name
-                    == self.listenerName)'
+                  rule: '!has(self.listenerName) || (has(self.listeners) && self.listeners.exists(l,
+                    l.name == self.listenerName))'
               backendPort:
                 description: |-
                   BackendPort is the destination port on every selected backend, 1-65535.
@@ -476,6 +474,9 @@ spec:
                 == 6)'
             - message: port ranges require a complete address group
               rule: '!has(self.portRange) || has(self.addressGroup)'
+            - message: service address group requires a listener inventory
+              rule: '!has(self.addressGroup) || (has(self.addressGroup.listeners)
+                && size(self.addressGroup.listeners) > 0)'
             - message: port must not be set for esp, gre and icmp, which have no ports
               rule: '!(self.protocol in [''esp'', ''gre'', ''icmp'']) || !has(self.port)'
             - message: backendPort must not be set for esp, gre and icmp, which have

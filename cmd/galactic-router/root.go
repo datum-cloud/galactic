@@ -166,8 +166,11 @@ func runCmd(cfg *config.RouterConfig) error {
 		if cfg.Reflector {
 			// A route reflector never runs galactic-cni, so the pin is never
 			// created there. That is expected, not an error.
-			ctrl.Log.Info("vip_xlat_table not available on this route reflector; tap-kind VIP bindings are not served here",
-				"error", err.Error())
+			ctrl.Log.Info(
+				"vip_xlat_table not available on this route reflector; tap-kind VIP bindings are not served here",
+				"error",
+				err.Error(),
+			)
 		} else {
 			ctrl.Log.Error(err, "vip_xlat_table not available on this node yet; "+
 				"tap-kind ServiceVIPBinding objects retry opening it until the eBPF uSID datapath is loaded")
@@ -201,6 +204,7 @@ func runCmd(cfg *config.RouterConfig) error {
 
 	// Create reconciler.
 	rec := reconcile.New(mgr.GetClient(), nodeName, bgpLocalAddr)
+	rec.SetAPIReader(mgr.GetAPIReader())
 
 	wake, closeGates, err := setupEdgeGate(mgr, rec, nodeName, cfg.Reflector)
 	if err != nil {

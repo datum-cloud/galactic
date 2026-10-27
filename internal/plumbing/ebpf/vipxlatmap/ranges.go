@@ -7,6 +7,7 @@ package vipxlatmap
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"slices"
 
@@ -29,7 +30,39 @@ type RangeEntry struct {
 	Generation  uint64
 }
 
-func (t *VipXlatTable) WithRangeTable(table usidmap.Table) *VipXlatTable { t.ranges = table; return t }
+func (t *VipXlatTable) WithRangeTable(table usidmap.Table) *VipXlatTable {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	t.ranges = table
+	return t
+}
+
+// discoverRanges runs under writeMu. A missing optional pin leaves scalar
+// translations available and is retried on the next operation.
+func (t *VipXlatTable) discoverRanges() error {
+	if t.ranges != nil || t.openRanges == nil {
+		return nil
+	}
+	table, err := t.openRanges()
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	t.ranges = table
+	return nil
+}
+
+func (t *VipXlatTable) requireRanges() error {
+	if err := t.discoverRanges(); err != nil {
+		return err
+	}
+	if t.ranges == nil {
+		return errors.New("range translation is unavailable")
+	}
+	return nil
+}
 
 func validateRange(block uint64, argument uint16, proto uint8, start, end uint16, addr, rewrite net.IP) error {
 	if err := uformat.ValidateBlock(block); err != nil {
@@ -60,8 +93,8 @@ func (t *VipXlatTable) registerRange(direction uint8,
 	rewrite net.IP) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	if t.ranges == nil {
-		return errors.New("range translation is unavailable")
+	if err := t.requireRanges(); err != nil {
+		return err
 	}
 	if err := validateRange(block, argument, proto, start, end, addr, rewrite); err != nil {
 		return err
@@ -176,8 +209,8 @@ func (t *VipXlatTable) UnregisterRangeBindingAt(block uint64,
 	backend net.IP) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	if t.ranges == nil {
-		return errors.New("range translation is unavailable")
+	if err := t.requireRanges(); err != nil {
+		return err
 	}
 	if err := validateRange(block, argument, proto, start, end, vip, backend); err != nil {
 		return err
@@ -200,8 +233,8 @@ func (t *VipXlatTable) RangeBindingPresent(block uint64,
 	error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	if t.ranges == nil {
-		return false, errors.New("range translation is unavailable")
+	if err := t.requireRanges(); err != nil {
+		return false, err
 	}
 	if err := validateRange(block, argument, proto, start, end, vip, backend); err != nil {
 		return false, err
@@ -232,6 +265,15 @@ func (t *VipXlatTable) RangeBindingPresent(block uint64,
 }
 
 func (t *VipXlatTable) ListRanges() ([]RangeEntry, error) {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	return t.listRanges()
+}
+
+func (t *VipXlatTable) listRanges() ([]RangeEntry, error) {
+	if err := t.discoverRanges(); err != nil {
+		return nil, err
+	}
 	if t.ranges == nil {
 		return nil, nil
 	}
@@ -263,7 +305,7 @@ func (t *VipXlatTable) ListRanges() ([]RangeEntry, error) {
 func (t *VipXlatTable) ReconcileRanges(live map[RangeKey]struct{}, cutoff uint64) ([]RangeEntry, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	entries, err := t.ListRanges()
+	entries, err := t.listRanges()
 	if err != nil {
 		return nil, err
 	}
@@ -296,10 +338,17 @@ func (t *VipXlatTable) ReconcileRanges(live map[RangeKey]struct{}, cutoff uint64
 }
 
 // SupportsPortRanges reports whether the compact range map is available.
-func (t *VipXlatTable) SupportsPortRanges() bool { return t.ranges != nil }
+func (t *VipXlatTable) SupportsPortRanges() bool {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	return t.discoverRanges() == nil && t.ranges != nil
+}
 
 // rejectRangeOverlap is called under writeMu before publishing a singleton.
 func (t *VipXlatTable) rejectRangeOverlap(key prog.UsidVipXlatKey, port uint16) error {
+	if err := t.discoverRanges(); err != nil {
+		return err
+	}
 	if t.ranges == nil {
 		return nil
 	}

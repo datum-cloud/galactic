@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"reflect"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -132,7 +133,8 @@ type VIPTranslationTable interface {
 // error rather than a nil-pointer panic.
 type ServiceVIPBindingReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme    *runtime.Scheme
+	APIReader client.Reader
 
 	NodeName string
 
@@ -168,6 +170,16 @@ func (r *ServiceVIPBindingReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
+	allowed, err := r.bindingSourceAllowed(ctx, binding)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !allowed {
+		if err := r.Delete(ctx, binding, client.Preconditions{UID: &binding.UID}); client.IgnoreNotFound(err) != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if err := r.reconcileBind(ctx, binding); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -182,6 +194,7 @@ func (r *ServiceVIPBindingReconciler) reconcileBind(ctx context.Context, binding
 	bindErr := r.applyBind(ctx, binding)
 
 	bindingCopy := binding.DeepCopy()
+	bindingCopy.Status.SourceAuthorityEnforced = binding.Spec.SourceRef != nil
 	cond := metav1.Condition{Type: bgpv1alpha1.ConditionTypeBound}
 	var conflict *vipRowConflictError
 	if errors.As(bindErr, &conflict) {
@@ -930,8 +943,11 @@ func vrfInstanceTargetsRouter(vrf *bgpv1alpha1.BGPVRFInstance, router *bgpv1alph
 // bindings, so one written first converges without waiting for an unrelated
 // event. Advertisements buildBackendSIDIndex ignores are filtered out.
 func (r *ServiceVIPBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.ServiceVIPBinding{}).
+		Watches(&bgpv1alpha1.NetworkService{}, handler.EnqueueRequestsFromMapFunc(r.bindingAuthorityRequests)).
+		Watches(&bgpv1alpha1.NetworkServiceAddress{}, handler.EnqueueRequestsFromMapFunc(r.bindingAuthorityRequests)).
 		Watches(&bgpv1alpha1.ServiceVIPBinding{}, handler.EnqueueRequestsFromMapFunc(r.nodePeerRequests)).
 		Watches(&bgpv1alpha1.BGPAdvertisement{}, handler.EnqueueRequestsFromMapFunc(r.advertisementRequests),
 			builder.WithPredicates(bindingAdvertisementPredicate())).
@@ -1015,4 +1031,33 @@ func (r *ServiceVIPBindingReconciler) nodePeerRequests(ctx context.Context, obj 
 		reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(peer)})
 	}
 	return reqs
+}
+
+func (r *ServiceVIPBindingReconciler) bindingAuthorityRequests(
+	ctx context.Context,
+	obj client.Object,
+) []ctrlreconcile.Request {
+	bindings := &bgpv1alpha1.ServiceVIPBindingList{}
+	if err := r.List(ctx, bindings); err != nil {
+		return nil
+	}
+	var requests []ctrlreconcile.Request
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		source := binding.Spec.SourceRef
+		if source == nil || binding.Spec.TargetRef.Name != r.NodeName {
+			continue
+		}
+		matches := false
+		switch authority := obj.(type) {
+		case *bgpv1alpha1.NetworkService:
+			matches = source.Namespace == authority.Namespace && source.Name == authority.Name
+		case *bgpv1alpha1.NetworkServiceAddress:
+			matches = source.Namespace == authority.Namespace && source.AllocationUID == authority.Spec.Group.UID
+		}
+		if matches {
+			requests = append(requests, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(binding)})
+		}
+	}
+	return requests
 }

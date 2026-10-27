@@ -5,9 +5,11 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -204,5 +206,115 @@ func TestRouterAdvertisementLeaseTimer(t *testing.T) {
 	}
 	if delay != peerStatusRequeue {
 		t.Fatalf("legacy requeue = %v", delay)
+	}
+}
+
+func TestCoordinatedAdvertisementAuthorityAndWithdrawalFinalizer(t *testing.T) {
+	f := newLeaseRouterFixture(t)
+	ctx := context.Background()
+	r, c, ad := f.r, f.c, f.leased
+	address, _ := sharedAddressFixture()
+	if err := c.Create(ctx, address); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(ad), ad); err != nil {
+		t.Fatal(err)
+	}
+	ad.Labels = map[string]string{serviceAddressLabel: address.Name, serviceAddressNamespaceLabel: address.Namespace,
+		serviceAddressUIDLabel: string(address.UID), gatewayNodeLabel: gatewayNodeLabelValue(testVRFRouterNode)}
+	if err := c.Update(ctx, ad); err != nil {
+		t.Fatal(err)
+	}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.router)}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(ad), ad); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(ad.Finalizers, reconcile.CoordinatedAdvertisementFinalizer) {
+		t.Fatal("route consumed without cleanup guard")
+	}
+	if err := c.Delete(ctx, ad); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(ad), ad); err != nil {
+		t.Fatal("route guard removed before confirmed withdrawal", err)
+	}
+	for _, installed := range f.rm.status.Advertisements {
+		if installed.Name == ad.Name {
+			t.Fatal("deleting advertisement still installed")
+		}
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(ad), ad); !apierrors.IsNotFound(err) {
+		t.Fatalf("withdrawn ad retained: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	address.Spec.Retired = true
+	address.Generation++
+	if err := c.Update(ctx, address); err != nil {
+		t.Fatal(err)
+	}
+	late := f.leased.DeepCopy()
+	late.Name = "late-create"
+	late.ResourceVersion = ""
+	late.UID = ""
+	late.Finalizers = nil
+	late.DeletionTimestamp = nil
+	if err := c.Create(ctx, late); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	for _, installed := range f.rm.status.Advertisements {
+		if installed.Name == late.Name {
+			t.Fatal("late advertisement reopened retired allocation")
+		}
+	}
+	if len(f.rm.status.Advertisements) != 1 || f.rm.status.Advertisements[0].Name != leaseLegacyName {
+		t.Fatal("legacy advertisement disturbed")
+	}
+}
+
+func TestRouterStopReleasesOnlyOwnCoordinatedAdvertisementGuards(t *testing.T) {
+	f := newLeaseRouterFixture(t)
+	ctx := context.Background()
+	address, _ := sharedAddressFixture()
+	own := f.leased.DeepCopy()
+	own.Name = "own"
+	own.ResourceVersion = ""
+	own.Finalizers = []string{reconcile.CoordinatedAdvertisementFinalizer}
+	own.Labels = map[string]string{
+		serviceAddressLabel: address.Name,
+		gatewayNodeLabel:    gatewayNodeLabelValue(testVRFRouterNode),
+	}
+	foreign := own.DeepCopy()
+	foreign.Name = "foreign"
+	foreign.Labels = map[string]string{serviceAddressLabel: address.Name, gatewayNodeLabel: "other-node"}
+	for _, ad := range []*bgpv1alpha1.BGPAdvertisement{own, foreign} {
+		if err := f.c.Create(ctx, ad); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.c.Delete(ctx, f.router); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.router)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(own), own); !apierrors.IsNotFound(err) {
+		t.Fatalf("own guard retained after stop: %v", err)
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(foreign), foreign); err != nil {
+		t.Fatal("foreign router guard changed", err)
 	}
 }

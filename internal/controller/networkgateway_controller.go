@@ -342,7 +342,14 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				withdrawErr = errors.Join(withdrawErr, clearErr)
 			}
 
-			stillOwned, checkErr := isGatewayNode(ctx, r.Client, req.Namespace, r.NodeName)
+			// Capture the pinned-map clock before proving this node has no live
+			// gateway; a restarted engine has no in-memory rules to stop.
+			cutoff := r.Engine.DatapathGeneration()
+			reader := r.APIReader
+			if reader == nil {
+				reader = r.Client
+			}
+			stillOwned, checkErr := isGatewayNode(ctx, reader, req.Namespace, r.NodeName)
 			if checkErr != nil {
 				return ctrl.Result{}, errors.Join(
 					withdrawErr,
@@ -353,15 +360,17 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				return ctrl.Result{}, withdrawErr
 			}
 			if stopErr := r.Engine.Stop(ctx); stopErr != nil {
-				logger.Error(
-					stopErr,
-					"stop gateway engine for deleted NetworkGateway",
-					"networkGateway",
-					req.NamespacedName,
-				)
+				return ctrl.Result{}, errors.Join(withdrawErr, stopErr)
+			}
+			if sweepErr := r.Engine.ReconcileOrphans(ctx, gateway.EngineState{}, cutoff); sweepErr != nil {
+				return ctrl.Result{}, errors.Join(withdrawErr, sweepErr)
 			}
 			r.drain.reset()
-			return ctrl.Result{}, withdrawErr
+			pending, ackErr := r.acknowledgeStoppedGateway(ctx, req.Namespace)
+			if pending {
+				return ctrl.Result{RequeueAfter: time.Second}, errors.Join(withdrawErr, ackErr)
+			}
+			return ctrl.Result{}, errors.Join(withdrawErr, ackErr)
 		}
 		return ctrl.Result{}, fmt.Errorf("get NetworkGateway %s: %w", req.NamespacedName, err)
 	}
@@ -498,7 +507,7 @@ func (r *NetworkGatewayReconciler) reconcileServingGateway(ctx context.Context, 
 		logger.Info("no BGPRouter targets this node; skipping BGPAdvertisement wiring", "node", r.NodeName)
 	}
 
-	if err := r.finishAddressConvergence(ctx, gw, desired, status, cutoff); err != nil {
+	if err := r.finishAddressConvergence(ctx, gw, desired, status, cutoff, addresses); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1323,7 +1332,8 @@ func (r *NetworkGatewayReconciler) setRuleConditions(
 		}
 		c := programmed
 		c.ObservedGeneration = current.Generation
-		changed := meta.SetStatusCondition(&current.Status.Conditions, c)
+		changed := meta.RemoveStatusCondition(&current.Status.Conditions, stoppedGatewayConditionType(r.NodeName))
+		changed = meta.SetStatusCondition(&current.Status.Conditions, c) || changed
 		a := advertised
 		a.ObservedGeneration = current.Generation
 		changed = meta.SetStatusCondition(&current.Status.Conditions, a) || changed
@@ -1334,7 +1344,9 @@ func (r *NetworkGatewayReconciler) setRuleConditions(
 		} else {
 			changed = meta.RemoveStatusCondition(&current.Status.Conditions, ipv4ServedConditionType(r.NodeName)) || changed
 		}
-		changed = removeDepartedNodeConditions(&current.Status.Conditions, departed) || changed
+		if current.Spec.AddressGroup == nil {
+			changed = removeDepartedNodeConditions(&current.Status.Conditions, departed) || changed
+		}
 		if !changed {
 			return nil
 		}
@@ -1462,6 +1474,9 @@ func clearNodeConditions(
 		current := &bgpv1alpha1.NetworkService{}
 		if err := c.Get(ctx, key, current); err != nil {
 			return err
+		}
+		if current.Spec.AddressGroup != nil {
+			return nil
 		}
 		if !removeNodeRuleConditions(&current.Status.Conditions, node) {
 			return nil
@@ -2116,7 +2131,7 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return broadcastToGatewayRequests(
 					ctx,
 					r.Client,
-					obj.GetNamespace(),
+					metav1.NamespaceAll,
 					"NetworkServiceAddress",
 					obj.GetName(),
 				)
@@ -2320,7 +2335,7 @@ func allGatewayRequests(ctx context.Context, c client.Client, sourceKind, source
 
 // gatewayNodeNames returns the targetRef.name of every NetworkGateway in
 // namespace, the pool of gateway nodes for this PoP.
-func gatewayNodeNames(ctx context.Context, c client.Client, namespace string) ([]string, error) {
+func gatewayNodeNames(ctx context.Context, c client.Reader, namespace string) ([]string, error) {
 	list := &bgpv1alpha1.NetworkGatewayList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list NetworkGateways: %w", err)
@@ -2336,7 +2351,7 @@ func gatewayNodeNames(ctx context.Context, c client.Client, namespace string) ([
 // gateway nodes. NetworkServiceReconciler uses it to scope its per-object
 // lifecycle work to gateway-role nodes, so every other node's router process
 // leaves NetworkService objects alone.
-func isGatewayNode(ctx context.Context, c client.Client, namespace, nodeName string) (bool, error) {
+func isGatewayNode(ctx context.Context, c client.Reader, namespace, nodeName string) (bool, error) {
 	names, err := gatewayNodeNames(ctx, c, namespace)
 	if err != nil {
 		return false, err
@@ -2414,7 +2429,7 @@ func isNodeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, nodeName string) boo
 		return false
 	}
 	if address := adv.Labels[serviceAddressLabel]; address != "" {
-		return adv.Name == addressAdvertisementName(address, nodeName)
+		return adv.Name == addressKeyAdvertisementName(addressKeyFromAdvertisement(adv), adv.Namespace, nodeName)
 	}
 	key, ok := ruleKeyFromLabels(adv)
 	if !ok {
@@ -2473,11 +2488,12 @@ func (r *NetworkGatewayReconciler) sweepOrphanedAdvertisements(
 				reader = r.Client
 			}
 			anchor := &bgpv1alpha1.NetworkServiceAddress{}
-			err := reader.Get(ctx, types.NamespacedName{Namespace: adv.Namespace, Name: address}, anchor)
-			if err == nil {
+			err := reader.Get(ctx, addressKeyFromAdvertisement(adv), anchor)
+			if err == nil &&
+				(adv.Labels[serviceAddressUIDLabel] == "" || adv.Labels[serviceAddressUIDLabel] == string(anchor.UID)) {
 				continue
 			}
-			if !apierrors.IsNotFound(err) {
+			if err != nil && !apierrors.IsNotFound(err) {
 				errs = append(errs, err)
 				continue
 			}
@@ -2546,7 +2562,7 @@ func needsBindingConfirmation(rule *bgpv1alpha1.NetworkService, family addrFamil
 }
 
 func (r *NetworkGatewayReconciler) finishAddressConvergence(ctx context.Context, gw *bgpv1alpha1.NetworkGateway,
-	desired gateway.EngineState, status gateway.EngineStatus, cutoff uint64) error {
+	desired gateway.EngineState, status gateway.EngineStatus, cutoff uint64, snapshots ...addressInventory) error {
 	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
 		copy := gw.DeepCopy()
 		copy.Status.ObservedGeneration = gw.Generation
@@ -2566,6 +2582,11 @@ func (r *NetworkGatewayReconciler) finishAddressConvergence(ctx context.Context,
 		)
 	}
 	if status.Healthy {
+		for _, snapshot := range snapshots {
+			if err := r.confirmAddressSnapshot(ctx, gw.Namespace, snapshot); err != nil {
+				return errors.Join(err, withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName))
+			}
+		}
 		if blocker, ok := r.Engine.(interface {
 			SetBlockedVIPs(context.Context, []netip.Addr) error
 		}); ok {

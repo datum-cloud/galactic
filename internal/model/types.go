@@ -80,6 +80,8 @@ type DesiredVRFInstance struct {
 
 // DesiredAdvertisement describes a set of prefixes to originate.
 type DesiredAdvertisement struct {
+	// ExpiresAt bounds this owner independently of full router reconciliation.
+	ExpiresAt       time.Time
 	Name            string
 	AddressFamily   AddressFamily
 	Prefixes        []string

@@ -139,6 +139,7 @@ type NetworkService struct {
 // +kubebuilder:validation:XValidation:rule="has(self.portRange) ? !has(self.backendPort) && self.protocol == 'udp' : !(self.protocol in ['tcp', 'udp', 'sctp']) || has(self.backendPort)",message="UDP ranges preserve ports and omit backendPort; singleton services require backendPort"
 // +kubebuilder:validation:XValidation:rule="!has(self.portRange) || self.vipAddresses.all(v, isIP(v) && ip(v).family() == 6)",message="port ranges require IPv6 VIPs"
 // +kubebuilder:validation:XValidation:rule="!has(self.portRange) || has(self.addressGroup)",message="port ranges require a complete address group"
+// +kubebuilder:validation:XValidation:rule="!has(self.addressGroup) || (has(self.addressGroup.listeners) && size(self.addressGroup.listeners) > 0)",message="service address group requires a listener inventory"
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.port)",message="port must not be set for esp, gre and icmp, which have no ports"
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.backendPort)",message="backendPort must not be set for esp, gre and icmp, which have no ports"
 // +kubebuilder:validation:XValidation:rule="self.protocol != 'udp' || !has(self.healthCheck) || has(self.healthCheck.port)",message="healthCheck.port is required for udp: a health check probes a TCP port"

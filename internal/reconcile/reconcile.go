@@ -40,6 +40,7 @@ type EdgeGate interface {
 // Reconciler assembles DesiredRouter values from BGP CRDs.
 type Reconciler struct {
 	client       client.Client
+	apiReader    client.Reader
 	nodeName     string
 	localAddress string
 	edgeGate     EdgeGate
@@ -115,8 +116,12 @@ func (r *Reconciler) BuildDesiredRouter(
 	active := advList.Items[:0]
 	now := time.Now()
 	for _, adv := range advList.Items {
-		if !AdvertisementLeaseExpired(&adv, now) {
-			active = append(active, adv)
+		current, allowed, err := r.coordinatedAdvertisement(ctx, &adv)
+		if err != nil {
+			return nil, err
+		}
+		if allowed && !AdvertisementLeaseExpired(current, now) {
+			active = append(active, *current)
 		}
 	}
 	advList.Items = active
@@ -202,6 +207,7 @@ func (r *Reconciler) BuildDesiredRouter(
 		}
 		desired.Advertisements = append(desired.Advertisements, model.DesiredAdvertisement{
 			Name:            adv.Name,
+			ExpiresAt:       advertisementDeadline(&adv),
 			AddressFamily:   adv.Spec.AddressFamily,
 			Prefixes:        prefixes,
 			Communities:     communities,
@@ -493,4 +499,11 @@ func validateTimers(holdTime, keepaliveTime *metav1.Duration) error {
 // AdvertisementLeaseExpired reports whether an advertisement's serving lease has ended.
 func AdvertisementLeaseExpired(adv *bgpv1alpha1.BGPAdvertisement, now time.Time) bool {
 	return adv.Spec.ExpiresAt != nil && !adv.Spec.ExpiresAt.After(now)
+}
+
+func advertisementDeadline(adv *bgpv1alpha1.BGPAdvertisement) time.Time {
+	if adv.Spec.ExpiresAt == nil {
+		return time.Time{}
+	}
+	return adv.Spec.ExpiresAt.Time
 }

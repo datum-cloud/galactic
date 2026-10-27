@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -509,4 +512,465 @@ func TestSharedAdvertisementLeaseRenewalPreservesReadiness(t *testing.T) {
 	if installed, err := r.reconcileAddressAdvertisement(ctx, a, "replacement-router", true); err != nil || installed {
 		t.Fatalf("changed path reused old readiness: installed=%t error=%v", installed, err)
 	}
+}
+
+func TestRetiredGatewayAcknowledgesAddressWithdrawal(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRuleTestScheme(t)
+	a, _ := sharedAddressFixture()
+	a.Finalizers = []string{serviceAddressFinalizer}
+	now := metav1.Now()
+	a.DeletionTimestamp = &now
+	for _, node := range []string{testNodeGWA, testSharedNodeB} {
+		for _, kind := range []string{programmedConditionType(node), advertisedConditionType(node)} {
+			state := metav1.ConditionFalse
+			if node == testSharedNodeB {
+				state = metav1.ConditionTrue
+			}
+			a.Status.Conditions = append(
+				a.Status.Conditions,
+				metav1.Condition{
+					Type:               kind,
+					Status:             state,
+					Reason:             "BeforeRemoval",
+					ObservedGeneration: a.Generation,
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Hour)),
+				},
+			)
+		}
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&api.NetworkServiceAddress{}).
+		WithObjects(a, newTestGateway(testNodeGWA)).
+		Build()
+	r := newGatewayReconciler(c, scheme, newFakeGatewayEngine(), testNodeGWA)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testSharedNodeB}}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	stoppedEngine := newFakeGatewayEngine()
+	departing := newGatewayReconciler(c, scheme, stoppedEngine, testSharedNodeB)
+	if _, err := departing.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if !stoppedEngine.stopped {
+		t.Fatal("fixture did not confirm successful engine stop")
+	}
+	t.Log("departed gateway successfully stopped its engine")
+	if err := r.finalizeAddress(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	current := &api.NetworkServiceAddress{}
+	err := c.Get(ctx, client.ObjectKeyFromObject(a), current)
+	if err == nil {
+		t.Fatalf(
+			"address permanently retained departed node conditions despite no services or advertisements: %+v",
+			current.Status.Conditions,
+		)
+	}
+	if !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+}
+func TestNewInventoryCannotBorrowOldProgramming(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRuleTestScheme(t)
+	a, rule := sharedAddressFixture()
+	previous := a.DeepCopy()
+	a.Generation++
+	a.Spec.Group.Generation++
+	a.Spec.Group.Revision = "inventory-2"
+	a.Spec.Group.Listeners[0].Port = 444
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&api.NetworkServiceAddress{}).
+		WithObjects(a).
+		Build()
+	r := newGatewayReconciler(c, scheme, newFakeGatewayEngine(), testNodeGWA)
+	key := rule.Namespace + "/" + rule.Name
+	outcome := ruleOutcome{rule: rule, desired: gateway.DesiredRule{Key: key, Backends: []gateway.DesiredBackend{{}}}}
+	_, err := r.publishAddressOutcomes(
+		ctx,
+		testNamespace,
+		addressInventory{a.Spec.VIPAddress: previous},
+		[]ruleOutcome{outcome},
+		gateway.EngineStatus{Healthy: true, Rules: []gateway.RuleStatus{{Key: key, Applied: true}}},
+		testRouterName,
+	)
+	if err != nil {
+		return
+	}
+	current := &api.NetworkServiceAddress{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(a), current); err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(current.Status.Conditions, programmedConditionType(testNodeGWA))
+	if cond != nil && cond.Status == metav1.ConditionTrue && cond.ObservedGeneration == a.Generation {
+		t.Fatalf("new inventory borrowed old programming receipt: %+v", cond)
+	}
+}
+
+func TestTenantAddressAuthorityAdvertisementAndRetirement(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRuleTestScheme(t)
+	address, rule := sharedAddressFixture()
+	address.Name = "nlb-address-" + strings.Repeat("a", 64)
+	address.Namespace = "project-a"
+	rule.Namespace = address.Namespace
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&api.NetworkService{}, &api.NetworkServiceAddress{}).
+		WithObjects(address, rule, newTestGateway(testNodeGWA)).
+		Build()
+	engine := &ownedTestEngine{fakeGatewayEngine: newFakeGatewayEngine()}
+	r := newGatewayReconciler(c, scheme, engine, testNodeGWA)
+	inventory, err := r.prepareAddressInventory(ctx, testNamespace, []api.NetworkService{*rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := addressRuleError(rule, inventory); err != nil {
+		t.Fatalf("tenant authority rejected: %v", err)
+	}
+	key := rule.Namespace + "/" + rule.Name
+	dr := gateway.DesiredRule{Key: key, Backends: []gateway.DesiredBackend{{}}}
+	outcomes := []ruleOutcome{{rule: rule, desired: dr}}
+	desired := gateway.EngineState{Rules: map[string]gateway.DesiredRule{key: dr}}
+	if err := r.primeGroupedServing(ctx, inventory, desired, outcomes); err != nil {
+		t.Fatal(err)
+	}
+	status := gateway.EngineStatus{Healthy: true, Rules: []gateway.RuleStatus{{Key: key, Applied: true}}}
+	if _, err := r.publishAddressOutcomes(ctx, testNamespace, inventory, outcomes, status, testRouterName); err != nil {
+		t.Fatal(err)
+	}
+	ads := &api.BGPAdvertisementList{}
+	if err := c.List(ctx, ads); err != nil {
+		t.Fatal(err)
+	}
+	if len(ads.Items) != 1 {
+		t.Fatalf("advertisements: %d", len(ads.Items))
+	}
+	ad := ads.Items[0]
+	for _, value := range ad.Labels {
+		if errs := validation.IsValidLabelValue(value); len(errs) > 0 {
+			t.Fatalf("invalid advertisement label: %v", errs)
+		}
+	}
+	if ad.Namespace != testNamespace || addressKeyFromAdvertisement(&ad) != client.ObjectKeyFromObject(address) ||
+		len(ad.OwnerReferences) != 0 ||
+		!isNodeAdvertisement(&ad, testNodeGWA) {
+		t.Fatalf("wrong tenant advertisement identity: %+v", ad)
+	}
+	binding := newTestServiceVIPBinding(api.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+	binding.Spec.SourceRef = &api.ServiceVIPBindingSourceReference{
+		Namespace:     rule.Namespace,
+		Name:          rule.Name,
+		UID:           rule.UID,
+		Generation:    rule.Generation,
+		AllocationUID: rule.Spec.AddressGroup.UID,
+	}
+	binder := &ServiceVIPBindingReconciler{Client: c, APIReader: c}
+	if allowed, err := binder.bindingSourceAllowed(ctx, binding); err != nil || !allowed {
+		t.Fatalf("tenant binding source rejected: %t %v", allowed, err)
+	}
+	if err := c.Delete(ctx, rule); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	address.Spec.Retired = true
+	address.Generation++
+	if err := c.Update(ctx, address); err != nil {
+		t.Fatal(err)
+	}
+	inventory, err = r.prepareAddressInventory(ctx, testNamespace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyStatus := gateway.EngineStatus{Healthy: true}
+	if _, err := r.publishAddressOutcomes(ctx, testNamespace, inventory, nil, emptyStatus, testRouterName); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if !addressRetirementAcknowledged(address) {
+		t.Fatalf("tenant retirement not acknowledged: %+v", address.Status)
+	}
+	assertRetiredAddressReuse(t, ctx, c, r, engine, address, rule)
+}
+
+func TestLateBindingCannotActivateRetiredSource(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRuleTestScheme(t)
+	address, rule := sharedAddressFixture()
+	address.Spec.Retired = true
+	binding := newTestServiceVIPBinding(api.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+	binding.Spec.SourceRef = &api.ServiceVIPBindingSourceReference{
+		Namespace:     rule.Namespace,
+		Name:          rule.Name,
+		UID:           rule.UID,
+		Generation:    rule.Generation,
+		AllocationUID: rule.Spec.AddressGroup.UID,
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&api.ServiceVIPBinding{}).
+		WithObjects(address, rule, binding).
+		Build()
+	table := &fakeVIPTable{}
+	r := &ServiceVIPBindingReconciler{
+		Client:              c,
+		APIReader:           c,
+		Scheme:              scheme,
+		NodeName:            testComputeNodeName,
+		VIPTranslationTable: table,
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(binding)}); err != nil {
+		t.Fatal(err)
+	}
+	current := &api.ServiceVIPBinding{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(binding), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.DeletionTimestamp.IsZero() {
+		t.Fatal("late binding was not retired")
+	}
+	if len(table.ingressCalls) != 0 || len(table.egressCalls) != 0 {
+		t.Fatal("late binding wrote translation maps")
+	}
+}
+
+func TestRetirementWaitsForInflightBindingCleanup(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRuleTestScheme(t)
+	address, _ := sharedAddressFixture()
+	address.Spec.Retired = true
+	stoppedGatewayConditions(&address.Status.Conditions, testNodeGWA, address.Generation)
+	binding := newTestServiceVIPBinding(api.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+	binding.Finalizers = []string{serviceVIPBindingFinalizer}
+	binding.Spec.SourceRef = &api.ServiceVIPBindingSourceReference{
+		Namespace:     address.Namespace,
+		Name:          "old-service",
+		UID:           "source",
+		AllocationUID: address.Spec.Group.UID,
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&api.NetworkServiceAddress{}).
+		WithObjects(address, binding).
+		Build()
+	r := newGatewayReconciler(c, scheme, newFakeGatewayEngine(), testNodeGWA)
+	if err := r.finalizeAddress(ctx, address); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if addressRetirementAcknowledged(address) {
+		t.Fatal("in-flight binding cleanup was bypassed")
+	}
+	if err := c.Delete(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.finalizeAddress(ctx, address); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if addressRetirementAcknowledged(address) {
+		t.Fatal("binding finalizer was bypassed")
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(binding), binding); err != nil {
+		t.Fatal(err)
+	}
+	binding.Finalizers = nil
+	if err := c.Update(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.finalizeAddress(ctx, address); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if !addressRetirementAcknowledged(address) {
+		t.Fatal("confirmed binding cleanup did not release retirement")
+	}
+}
+
+func assertRetiredAddressReuse(
+	t *testing.T,
+	ctx context.Context,
+	c client.Client,
+	r *NetworkGatewayReconciler,
+	engine *ownedTestEngine,
+	address *api.NetworkServiceAddress,
+	rule *api.NetworkService,
+) {
+	t.Helper()
+	var inventory addressInventory
+	var err error
+	replacement := address.DeepCopy()
+	replacement.Name = "replacement"
+	replacement.UID = "new-anchor"
+	replacement.ResourceVersion = ""
+	replacement.Generation = 1
+	replacement.Spec.Retired = false
+	replacement.Spec.Group.UID = "new-allocation"
+	replacement.Status = api.NetworkServiceAddressStatus{}
+	if err := c.Create(ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	inventory, err = r.prepareAddressInventory(ctx, testNamespace, []api.NetworkService{*rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inventory[address.Spec.VIPAddress] == nil ||
+		inventory[address.Spec.VIPAddress].Spec.Group.UID != "new-allocation" {
+		t.Fatal("retired old UID poisoned new allocation")
+	}
+	if err := addressRuleError(rule, inventory); err == nil {
+		t.Fatal("late old service reopened retired allocation")
+	}
+	if err := c.Delete(ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(replacement), replacement); err != nil {
+		t.Fatal(err)
+	}
+	replacement.Finalizers = nil
+	if err := c.Update(ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	inventory, err = r.prepareAddressInventory(ctx, testNamespace, []api.NetworkService{*rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := rule.DeepCopy()
+	legacy.Spec.AddressGroup = nil
+	if err := addressRuleError(legacy, inventory); err != nil || len(engine.owned) != 0 {
+		t.Fatalf("retired old UID blocked legacy reuse: %v owned=%v", err, engine.owned)
+	}
+}
+
+func TestStoppedGatewayWaitsForAdvertisementFinalizer(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRuleTestScheme(t)
+	address, _ := sharedAddressFixture()
+	ad := &api.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace,
+		Name: addressAdvertisementName(address.Name, testSharedNodeB), Finalizers: []string{"routing-withdrawal"},
+		Labels: map[string]string{
+			serviceAddressLabel: address.Name,
+			gatewayNodeLabel:    gatewayNodeLabelValue(testSharedNodeB),
+		}}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(address).WithObjects(address, ad).Build()
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(c, scheme, engine, testSharedNodeB)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testSharedNodeB}}
+	result, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !engine.stopped || result.RequeueAfter == 0 {
+		t.Fatal("gateway must stop and retry pending BGP cleanup")
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if meta.IsStatusConditionTrue(address.Status.Conditions, stoppedGatewayConditionType(testSharedNodeB)) {
+		t.Fatal("BGP cleanup finalizer was bypassed")
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(ad), ad); err != nil {
+		t.Fatal(err)
+	}
+	ad.Finalizers = nil
+	if err := c.Update(ctx, ad); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if !meta.IsStatusConditionTrue(address.Status.Conditions, stoppedGatewayConditionType(testSharedNodeB)) {
+		t.Fatal("successful stop was not recorded")
+	}
+	address.Generation++
+	address.Spec.Retired = true
+	if err := c.Update(ctx, address); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.finalizeAddress(ctx, address); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if !addressRetirementAcknowledged(address) {
+		t.Fatal("later retirement lost departed-node stop receipt")
+	}
+}
+
+func TestStoppedGatewayWaitsForPersistedOrphanCleanup(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRuleTestScheme(t)
+	address, _ := sharedAddressFixture()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(address).WithObjects(address).Build()
+	datapath := &stoppedGatewayDatapath{persistedRows: 1, sweepErr: errors.New("persisted orphan cleanup failed")}
+	// Restart with an empty engine over rows retained from a previous process.
+	engine := gateway.NewEngine(datapath, gateway.NoopQuotaEnforcer{}, gateway.NoopTelemetryEmitter{})
+	if err := engine.Stop(ctx); err != nil || datapath.persistedRows != 1 {
+		t.Fatal("fixture must retain persisted state after an empty-engine Stop")
+	}
+	r := newGatewayReconciler(c, scheme, engine, testSharedNodeB)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testSharedNodeB}}
+	if _, err := r.Reconcile(ctx, req); !errors.Is(err, datapath.sweepErr) {
+		t.Fatalf("expected orphan cleanup error, got %v", err)
+	}
+	if datapath.persistedRows != 1 || datapath.cutoff != 123 {
+		t.Fatal("stopped engine must sweep persisted orphan rows using the pre-read cutoff")
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if meta.IsStatusConditionTrue(address.Status.Conditions, stoppedGatewayConditionType(testSharedNodeB)) {
+		t.Fatal("failed persisted cleanup must not acknowledge gateway stop")
+	}
+	datapath.sweepErr = nil
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if datapath.persistedRows != 0 ||
+		!meta.IsStatusConditionTrue(address.Status.Conditions, stoppedGatewayConditionType(testSharedNodeB)) {
+		t.Fatal("successful persisted cleanup must clear rows before acknowledging gateway stop")
+	}
+}
+
+// stoppedGatewayDatapath preserves rows independently of the engine's lifetime.
+type stoppedGatewayDatapath struct {
+	gateway.NoopDatapath
+	persistedRows int
+	cutoff        uint64
+	sweepErr      error
+}
+
+func (*stoppedGatewayDatapath) Generation() uint64 { return 123 }
+
+func (d *stoppedGatewayDatapath) ReconcileOrphans(_ context.Context, live []gateway.DesiredRule, cutoff uint64) error {
+	d.cutoff = cutoff
+	if len(live) != 0 {
+		return errors.New("stopped gateway must sweep with an empty live set")
+	}
+	if d.sweepErr != nil {
+		return d.sweepErr
+	}
+	d.persistedRows = 0
+	return nil
 }

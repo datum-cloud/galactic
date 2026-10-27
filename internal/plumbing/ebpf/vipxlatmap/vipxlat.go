@@ -155,6 +155,9 @@ type VipXlatTable struct {
 	table  usidmap.Table
 	ranges usidmap.Table
 	clock  func() uint64
+	// openRanges retries discovery when the optional range pin appears after
+	// the exact map. Access to this callback and ranges is guarded by writeMu.
+	openRanges func() (usidmap.Table, error)
 
 	// writeMu serializes every write this process makes to the map, so a
 	// removal that reads a row to decide ownership deletes the row it read

@@ -112,7 +112,6 @@ spec:
                       - message: ranges require UDP
                         rule: '!has(self.portRange) || self.protocol == ''udp'''
                     maxItems: 16
-                    minItems: 1
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
@@ -127,21 +126,22 @@ spec:
                     type: string
                 required:
                 - generation
-                - listeners
                 - revision
                 - uid
                 type: object
                 x-kubernetes-validations:
                 - message: listenerName must identify a declared listener
-                  rule: '!has(self.listenerName) || self.listeners.exists(l, l.name
-                    == self.listenerName)'
+                  rule: '!has(self.listenerName) || (has(self.listeners) && self.listeners.exists(l,
+                    l.name == self.listenerName))'
+              retired:
+                description: Retired permanently closes this allocation identity.
+                type: boolean
               vipAddress:
                 type: string
                 x-kubernetes-validations:
                 - message: VIP must be IPv6
                   rule: isIP(self) && ip(self).family() == 6
               vpcRef:
-                minLength: 1
                 type: string
             required:
             - group
@@ -159,6 +159,11 @@ spec:
                 == oldSelf.group
             - message: address inventory must not select an individual listener
               rule: '!has(self.group.listenerName)'
+            - message: active addresses require a VPC and listener inventory
+              rule: (has(self.retired) && self.retired) || (size(self.vpcRef) > 0
+                && has(self.group.listeners) && size(self.group.listeners) > 0)
+            - message: retired address authority is immutable
+              rule: '!has(oldSelf.retired) || !oldSelf.retired || self == oldSelf'
           status:
             description: NetworkServiceAddressStatus reports address-level convergence.
             properties:

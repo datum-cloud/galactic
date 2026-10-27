@@ -113,3 +113,33 @@ func TestRuntimeManagerStopAllEmpty(t *testing.T) {
 		t.Fatalf("StopAll() on empty manager returned error: %v", err)
 	}
 }
+
+func TestRuntimeManagerRetainsFailedStopOwnership(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Stop", true: "StopAll"}[all], func(t *testing.T) {
+			ctx := context.Background()
+			key := types.NamespacedName{Name: "router"}
+			rt := &fakeRuntime{stopErr: errors.New("stop failed")}
+			manager := NewRuntimeManager(func(types.NamespacedName) (RouterRuntime, error) { return rt, nil })
+			if err := manager.Apply(ctx, key, model.DesiredRouter{}); err != nil {
+				t.Fatal(err)
+			}
+			stop := func() error {
+				if all {
+					return manager.StopAll(ctx)
+				}
+				return manager.Stop(ctx, key)
+			}
+			if err := stop(); err == nil {
+				t.Fatal("failed stop reported success")
+			}
+			if err := stop(); err == nil {
+				t.Fatal("failed runtime was forgotten and reported absent")
+			}
+			rt.stopErr = nil
+			if err := stop(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

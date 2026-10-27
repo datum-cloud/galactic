@@ -476,7 +476,7 @@ _Appears in:_
 | `generation` _integer_ |  |  | Minimum: 1 <br /> |
 | `revision` _string_ |  |  | MaxLength: 64 <br />MinLength: 1 <br /> |
 | `listenerName` _string_ |  |  | MaxLength: 63 <br />MinLength: 1 <br /> |
-| `listeners` _[NetworkServiceAddressListener](#networkserviceaddresslistener) array_ |  |  | MaxItems: 16 <br />MinItems: 1 <br /> |
+| `listeners` _[NetworkServiceAddressListener](#networkserviceaddresslistener) array_ |  |  | MaxItems: 16 <br /> |
 
 
 #### NetworkServiceAddressListener
@@ -511,7 +511,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `vpcRef` _string_ |  |  | MinLength: 1 <br /> |
+| `retired` _boolean_ | Retired permanently closes this allocation identity. |  |  |
+| `vpcRef` _string_ |  |  |  |
 | `vipAddress` _string_ |  |  |  |
 | `group` _[NetworkServiceAddressGroup](#networkserviceaddressgroup)_ |  |  |  |
 
@@ -1110,6 +1111,26 @@ _Appears in:_
 | `lastTransitionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | LastTransitionTime is when State last changed. |  | Required: \{\} <br /> |
 
 
+#### ServiceVIPBindingSourceReference
+
+
+
+ServiceVIPBindingSourceReference is immutable authority for a coordinated translation.
+
+
+
+_Appears in:_
+- [ServiceVIPBindingSpec](#servicevipbindingspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `generation` _integer_ |  |  | Minimum: 1 <br /> |
+| `namespace` _string_ |  |  | MinLength: 1 <br /> |
+| `name` _string_ |  |  | MinLength: 1 <br /> |
+| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ |  |  | MinLength: 1 <br />Type: string <br /> |
+| `allocationUID` _string_ |  |  | MinLength: 1 <br /> |
+
+
 #### ServiceVIPBindingSpec
 
 
@@ -1123,6 +1144,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `sourceRef` _[ServiceVIPBindingSourceReference](#servicevipbindingsourcereference)_ | SourceRef binds generated coordinated translations to one source allocation. |  |  |
 | `targetRef` _[TargetRef](#targetref)_ | TargetRef identifies the Node this binding applies to. |  | Required: \{\} <br /> |
 | `vpcRef` _string_ | VPCRef is the opaque identifier of the VPC the backend belongs to,<br />copied from the owning NetworkService. It names the tenant VRF the<br />binding's translation rows are written for, so two tenants using the<br />same backend address on one node never share a row. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `vipAddress` _string_ | VIPAddress is the service VIP the backend must be reachable on. |  | Required: \{\} <br /> |
@@ -1147,6 +1169,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `sourceAuthorityEnforced` _boolean_ | SourceAuthorityEnforced confirms terminal source-allocation checks before map writes. |  |  |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource,<br />including Bound (set True once internal/plumbing/vip.Verify or the<br />equivalent tap-translation-table check confirms the backend is<br />actually reachable on VIPAddress, not merely that the bind/table-write<br />call itself returned nil). |  |  |
 | `health` _[ServiceVIPBindingHealth](#servicevipbindinghealth)_ | Health is the health decision for this binding's backend, set by<br />galactic-router on the backend's node while the owning NetworkService<br />has a healthCheck, and cleared once it has none. Every binding of one<br />backend carries the same decision. |  |  |

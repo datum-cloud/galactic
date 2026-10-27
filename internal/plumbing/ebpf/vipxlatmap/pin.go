@@ -8,8 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/cilium/ebpf"
 
@@ -34,18 +34,55 @@ func OpenPinnedVipXlatTable(pinDir string) (*VipXlatTable, io.Closer, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("vipxlatmap: open pinned map %q under %q: %w", prog.UsidMapVipXlatTable, pinDir, err)
 	}
-	table := NewVipXlatTable(usidmap.KernelTable{Map: m})
-	ranges, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "vip_xlat_range_table"), nil)
-	if errors.Is(err, os.ErrNotExist) {
-		return table, m, nil
-	}
-	if err != nil {
-		return nil, nil, errors.Join(fmt.Errorf("open range translation map: %w", err), m.Close())
-	}
-	table.WithRangeTable(usidmap.KernelTable{Map: ranges})
-	return table, rangeMapCloser{m, ranges}, nil
+	table, closer := newPinnedTable(usidmap.KernelTable{Map: m}, m, func() (usidmap.Table, io.Closer, error) {
+		ranges, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapVipXlatRangeTable), nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open range translation map: %w", err)
+		}
+		return usidmap.KernelTable{Map: ranges}, ranges, nil
+	})
+	return table, closer, nil
 }
 
-type rangeMapCloser struct{ exact, ranges *ebpf.Map }
+// newPinnedTable keeps the exact handle and its registration ledger stable when
+// a newer CNI creates the range map after the router has already started.
+func newPinnedTable(exact usidmap.Table, exactCloser io.Closer,
+	openRanges func() (usidmap.Table, io.Closer, error),
+) (*VipXlatTable, io.Closer) {
+	closer := &rangeMapCloser{exact: exactCloser}
+	table := NewVipXlatTable(exact)
+	table.openRanges = func() (usidmap.Table, error) {
+		closer.mu.Lock()
+		defer closer.mu.Unlock()
+		if closer.closed {
+			return nil, errors.New("translation map handles are closed")
+		}
+		ranges, handle, err := openRanges()
+		if err != nil {
+			return nil, err
+		}
+		closer.ranges = handle
+		return ranges, nil
+	}
+	return table, closer
+}
 
-func (c rangeMapCloser) Close() error { return errors.Join(c.exact.Close(), c.ranges.Close()) }
+type rangeMapCloser struct {
+	mu            sync.Mutex
+	exact, ranges io.Closer
+	closed        bool
+}
+
+func (c *rangeMapCloser) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	err := c.exact.Close()
+	if c.ranges != nil {
+		err = errors.Join(err, c.ranges.Close())
+	}
+	return err
+}

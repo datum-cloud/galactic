@@ -28,6 +28,8 @@ import (
 
 const serviceAddressFinalizer = "galactic.datum.net/address-withdrawal"
 const serviceAddressLabel = "galactic.datum.net/service-address"
+const serviceAddressNamespaceLabel = "galactic.datum.net/service-address-namespace"
+const serviceAddressUIDLabel = "galactic.datum.net/service-address-uid"
 const sharedAddressLeaseDuration = 30 * time.Second
 const sharedAddressRenewInterval = 5 * time.Second
 
@@ -43,17 +45,22 @@ func (r *NetworkGatewayReconciler) prepareAddressInventory(
 	namespace string,
 	rules []bgpv1alpha1.NetworkService,
 ) (addressInventory, error) {
-	list := &bgpv1alpha1.NetworkServiceAddressList{}
-	if err := r.List(ctx, list, client.InNamespace(namespace)); err != nil {
+	list, err := servedAddressInventories(ctx, r.Client, namespace)
+	if err != nil {
 		return nil, err
 	}
 	addresses := addressInventory{}
 	var owned []netip.Addr
+	retiredUIDs := map[string]bool{}
 	for i := range list.Items {
 		address := &list.Items[i]
 		vip, err := netip.ParseAddr(address.Spec.VIPAddress)
 		if err != nil || !vip.Is6() || vip.Is4In6() {
 			return nil, fmt.Errorf("invalid shared VIP %q", address.Spec.VIPAddress)
+		}
+		if addressRetirementAcknowledged(address) {
+			retiredUIDs[address.Spec.Group.UID] = true
+			continue
 		}
 		owned = append(owned, vip)
 		if address.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(address, serviceAddressFinalizer) {
@@ -71,7 +78,7 @@ func (r *NetworkGatewayReconciler) prepareAddressInventory(
 		}
 	}
 	for _, rule := range rules {
-		if rule.Spec.AddressGroup == nil {
+		if rule.Spec.AddressGroup == nil || retiredUIDs[rule.Spec.AddressGroup.UID] {
 			continue
 		}
 		for _, value := range rule.Spec.VIPAddresses {
@@ -113,7 +120,7 @@ func listenerInterval(listener bgpv1alpha1.NetworkServiceAddressListener) (uint1
 }
 
 func validAddressInventory(address *bgpv1alpha1.NetworkServiceAddress) error {
-	if address == nil || !address.DeletionTimestamp.IsZero() {
+	if address == nil || address.Spec.Retired || !address.DeletionTimestamp.IsZero() {
 		return errors.New("address inventory is missing, conflicted or withdrawing")
 	}
 	g := &address.Spec.Group
@@ -204,11 +211,19 @@ func (r *NetworkGatewayReconciler) reconcileAddressAdvertisement(
 	address *bgpv1alpha1.NetworkServiceAddress,
 	router string,
 	serve bool,
+	gatewayNamespaces ...string,
 ) (bool, error) {
-	key := types.NamespacedName{Namespace: address.Namespace, Name: addressAdvertisementName(address.Name, r.NodeName)}
+	objNS := address.Namespace
+	if len(gatewayNamespaces) > 0 {
+		objNS = gatewayNamespaces[0]
+	}
+	key := types.NamespacedName{
+		Namespace: objNS,
+		Name:      addressKeyAdvertisementName(client.ObjectKeyFromObject(address), objNS, r.NodeName),
+	}
 	adv := &bgpv1alpha1.BGPAdvertisement{}
 	err := r.Get(ctx, key, adv)
-	if !serve || router == "" || !address.DeletionTimestamp.IsZero() {
+	if !serve || router == "" || address.Spec.Retired || !address.DeletionTimestamp.IsZero() {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
@@ -223,7 +238,7 @@ func (r *NetworkGatewayReconciler) reconcileAddressAdvertisement(
 	if err != nil && !apierrors.IsNotFound(err) {
 		return false, err
 	}
-	if pending, err := r.withdrawLegacyAddressAdvertisements(ctx, address); err != nil || pending {
+	if pending, err := r.withdrawLegacyAddressAdvertisements(ctx, address, objNS); err != nil || pending {
 		return false, err
 	}
 	previous := adv.DeepCopy()
@@ -232,12 +247,21 @@ func (r *NetworkGatewayReconciler) reconcileAddressAdvertisement(
 	if err == nil && !previous.DeletionTimestamp.IsZero() {
 		return false, nil
 	}
+	if err == nil && previous.Spec.RouterRef.Name != router {
+		return false, client.IgnoreNotFound(r.Delete(ctx, previous, client.Preconditions{UID: &previous.UID}))
+	}
 	adv = &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, adv, func() error {
 		adv.Labels = map[string]string{
-			serviceAddressLabel: address.Name,
-			gatewayNodeLabel:    gatewayNodeLabelValue(r.NodeName),
+			serviceAddressLabel:          gatewayNodeLabelValue(address.Name),
+			serviceAddressNamespaceLabel: address.Namespace,
+			serviceAddressUIDLabel:       string(address.UID),
+			gatewayNodeLabel:             gatewayNodeLabelValue(r.NodeName),
 		}
+		if adv.Annotations == nil {
+			adv.Annotations = map[string]string{}
+		}
+		adv.Annotations[serviceAddressLabel] = address.Name
 		deadline := adv.Spec.ExpiresAt
 		if deadline == nil || time.Until(deadline.Time) < sharedAddressLeaseDuration-sharedAddressRenewInterval {
 			renewed := metav1.NewTime(time.Now().Add(sharedAddressLeaseDuration))
@@ -246,7 +270,10 @@ func (r *NetworkGatewayReconciler) reconcileAddressAdvertisement(
 		adv.Spec = bgpv1alpha1.BGPAdvertisementSpec{ExpiresAt: deadline, RouterRef: bgpv1alpha1.RouterRef{Name: router},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
 			Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(address.Spec.VIPAddress + "/128")}}
-		return controllerutil.SetOwnerReference(address, adv, r.Scheme)
+		if address.Namespace == adv.Namespace {
+			return controllerutil.SetOwnerReference(address, adv, r.Scheme)
+		}
+		return nil
 	})
 	previousRoute := previous.Spec.DeepCopy()
 	previousRoute.ExpiresAt = nil
@@ -272,13 +299,23 @@ func (r *NetworkGatewayReconciler) publishAddressOutcomes(
 		}
 	}
 	var errs []error
-	all := &bgpv1alpha1.NetworkServiceAddressList{}
-	if err := r.List(ctx, all, client.InNamespace(namespace)); err != nil {
+	all, err := servedAddressInventories(ctx, r.Client, namespace)
+	if err != nil {
 		return nil, err
 	}
 	for i := range all.Items {
 		address := &all.Items[i]
+		if addressRetirementAcknowledged(address) {
+			continue
+		}
 		vip := canonicalVIP(address.Spec.VIPAddress)
+		snapshot, known := addresses[vip]
+		if !known || snapshot != nil && !sameAddressRevision(snapshot, address) {
+			errs = append(errs, errors.New("address revision changed after programming"))
+			_, err := r.reconcileAddressAdvertisement(ctx, address, router, false, namespace)
+			errs = append(errs, err)
+			continue
+		}
 		serve := false
 		for _, o := range outcomes {
 			if o.rule.Spec.AddressGroup == nil || o.rule.Spec.AddressGroup.UID != address.Spec.Group.UID ||
@@ -293,7 +330,7 @@ func (r *NetworkGatewayReconciler) publishAddressOutcomes(
 		if !status.Healthy || validAddressInventory(address) != nil || addresses[vip] == nil {
 			serve = false
 		}
-		installed, err := r.reconcileAddressAdvertisement(ctx, address, router, serve)
+		installed, err := r.reconcileAddressAdvertisement(ctx, address, router, serve, namespace)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -301,7 +338,7 @@ func (r *NetworkGatewayReconciler) publishAddressOutcomes(
 		if err := r.reportAddressNode(ctx, address, serve, installed, status.Healthy); err != nil {
 			errs = append(errs, err)
 		}
-		if !address.DeletionTimestamp.IsZero() && status.Healthy {
+		if (address.Spec.Retired || !address.DeletionTimestamp.IsZero()) && status.Healthy {
 			if err := r.finalizeAddress(ctx, address); err != nil {
 				errs = append(errs, err)
 			}
@@ -323,7 +360,7 @@ func (r *NetworkGatewayReconciler) reportAddressNode(
 		if current.UID != address.UID || current.Generation != address.Generation {
 			return errors.New("address revision changed during programming")
 		}
-		changed := false
+		changed := meta.RemoveStatusCondition(&current.Status.Conditions, stoppedGatewayConditionType(r.NodeName))
 		for _, item := range []struct {
 			kind  string
 			value bool
@@ -365,16 +402,18 @@ func (r *NetworkGatewayReconciler) finalizeAddress(
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(address), current); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if current.UID != address.UID || current.DeletionTimestamp.IsZero() {
+	if current.UID != address.UID || (!current.Spec.Retired && current.DeletionTimestamp.IsZero()) {
 		return nil
 	}
-	gateways := &bgpv1alpha1.NetworkGatewayList{}
-	if err := reader.List(ctx, gateways, client.InNamespace(address.Namespace)); err != nil {
+	gateways, err := servingGateways(ctx, reader, address.Namespace)
+	if err != nil {
 		return err
 	}
 	nodes := map[string]bool{}
-	for _, gw := range gateways.Items {
+	currentNodes := map[string]bool{}
+	for _, gw := range gateways {
 		nodes[gw.Spec.TargetRef.Name] = true
+		currentNodes[gw.Spec.TargetRef.Name] = true
 	}
 	for _, condition := range current.Status.Conditions {
 		if node, ok := gatewayNodeConditionNode(condition.Type); ok {
@@ -385,6 +424,10 @@ func (r *NetworkGatewayReconciler) finalizeAddress(
 		return nil
 	}
 	for node := range nodes {
+		if !currentNodes[node] &&
+			meta.IsStatusConditionTrue(current.Status.Conditions, stoppedGatewayConditionType(node)) {
+			continue
+		}
 		for _, kind := range []string{programmedConditionType(node), advertisedConditionType(node)} {
 			condition := meta.FindStatusCondition(current.Status.Conditions, kind)
 			if condition == nil || condition.ObservedGeneration != current.Generation ||
@@ -394,12 +437,14 @@ func (r *NetworkGatewayReconciler) finalizeAddress(
 		}
 	}
 	ads := &bgpv1alpha1.BGPAdvertisementList{}
-	selector := client.MatchingLabels{serviceAddressLabel: address.Name}
-	if err := reader.List(ctx, ads, client.InNamespace(address.Namespace), selector); err != nil {
+	selector := client.MatchingLabels{serviceAddressLabel: gatewayNodeLabelValue(address.Name)}
+	if err := reader.List(ctx, ads, selector); err != nil {
 		return err
 	}
-	if len(ads.Items) != 0 {
-		return nil
+	for _, ad := range ads.Items {
+		if addressKeyFromAdvertisement(&ad) == client.ObjectKeyFromObject(address) {
+			return nil
+		}
 	}
 	services := &bgpv1alpha1.NetworkServiceList{}
 	if err := reader.List(ctx, services); err != nil {
@@ -410,12 +455,31 @@ func (r *NetworkGatewayReconciler) finalizeAddress(
 			return nil
 		}
 	}
+	bindings := &bgpv1alpha1.ServiceVIPBindingList{}
+	if err := reader.List(ctx, bindings); err != nil {
+		return err
+	}
+	for _, binding := range bindings.Items {
+		if binding.Spec.SourceRef != nil && binding.Spec.SourceRef.AllocationUID == current.Spec.Group.UID {
+			return nil
+		}
+	}
+	if current.Spec.Retired {
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type: bgpv1alpha1.ConditionTypeAddressRetired, Status: metav1.ConditionTrue,
+			Reason: "Withdrawn", Message: "The allocation has been permanently retired and forwarding is withdrawn",
+			ObservedGeneration: current.Generation,
+		})
+		current.Status.ObservedGeneration = current.Generation
+		return r.Status().Update(ctx, current)
+	}
 	base := current.DeepCopy()
 	controllerutil.RemoveFinalizer(current, serviceAddressFinalizer)
 	return r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 func groupedRuleWithdrawn(rule *bgpv1alpha1.NetworkService, nodes []string) bool {
+	currentNodes := slices.Clone(nodes)
 	for _, c := range rule.Status.Conditions {
 		if node, ok := gatewayNodeConditionNode(c.Type); ok && !slices.Contains(nodes, node) {
 			nodes = append(nodes, node)
@@ -425,6 +489,10 @@ func groupedRuleWithdrawn(rule *bgpv1alpha1.NetworkService, nodes []string) bool
 		return false
 	}
 	for _, node := range nodes {
+		if !slices.Contains(currentNodes, node) &&
+			meta.IsStatusConditionTrue(rule.Status.Conditions, stoppedGatewayConditionType(node)) {
+			continue
+		}
 		for _, kind := range []string{programmedConditionType(node), advertisedConditionType(node)} {
 			condition := meta.FindStatusCondition(rule.Status.Conditions, kind)
 			if condition == nil || condition.ObservedGeneration != rule.Generation ||
@@ -448,7 +516,7 @@ func (r *NetworkGatewayReconciler) servingCapabilities(leaseSupport bool) []stri
 	if !ok || !engine.SupportsOwnedVIPs() {
 		return nil
 	}
-	caps := []string{bgpv1alpha1.CapabilitySharedAddressListeners}
+	caps := []string{bgpv1alpha1.CapabilitySharedAddressListeners, bgpv1alpha1.CapabilityTerminalAddressRetirement}
 	if engine.SupportsPortRanges() {
 		caps = append(caps, bgpv1alpha1.CapabilityUDPPortRanges)
 	}
@@ -512,7 +580,7 @@ func (r *NetworkGatewayReconciler) primeGroupedServing(
 		if err := reader.Get(ctx, client.ObjectKeyFromObject(address), fresh); err != nil {
 			return err
 		}
-		if fresh.UID != address.UID || fresh.Generation != address.Generation || !fresh.DeletionTimestamp.IsZero() {
+		if !sameAddressRevision(fresh, address) || fresh.Spec.Retired || !fresh.DeletionTimestamp.IsZero() {
 			return errors.New("address changed before forwarding activation")
 		}
 		condition = meta.FindStatusCondition(fresh.Status.Conditions, programmedConditionType(r.NodeName))
@@ -545,14 +613,14 @@ func (r *NetworkGatewayReconciler) routerLeaseSupport(ctx context.Context, names
 }
 
 func (r *NetworkGatewayReconciler) withdrawLegacyAddressAdvertisements(ctx context.Context,
-	address *bgpv1alpha1.NetworkServiceAddress) (bool, error) {
+	address *bgpv1alpha1.NetworkServiceAddress, namespace string) (bool, error) {
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
 	legacy := &bgpv1alpha1.BGPAdvertisementList{}
 	selector := client.MatchingLabels{gatewayNodeLabel: gatewayNodeLabelValue(r.NodeName)}
-	if err := reader.List(ctx, legacy, client.InNamespace(address.Namespace), selector); err != nil {
+	if err := reader.List(ctx, legacy, client.InNamespace(namespace), selector); err != nil {
 		return false, err
 	}
 	pending := false
@@ -573,4 +641,245 @@ func (r *NetworkGatewayReconciler) withdrawLegacyAddressAdvertisements(ctx conte
 		}
 	}
 	return pending, nil
+}
+
+func addressRetirementAcknowledged(address *bgpv1alpha1.NetworkServiceAddress) bool {
+	condition := meta.FindStatusCondition(address.Status.Conditions, bgpv1alpha1.ConditionTypeAddressRetired)
+	return address.Spec.Retired && condition != nil && condition.Status == metav1.ConditionTrue &&
+		condition.ObservedGeneration == address.Generation
+}
+
+func sameAddressRevision(a, b *bgpv1alpha1.NetworkServiceAddress) bool {
+	return a.UID == b.UID && a.Generation == b.Generation && reflect.DeepEqual(a.Spec, b.Spec) &&
+		a.DeletionTimestamp.Equal(b.DeletionTimestamp)
+}
+
+func (r *NetworkGatewayReconciler) confirmAddressSnapshot(
+	ctx context.Context,
+	namespace string,
+	snapshot addressInventory,
+) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	list, err := servedAddressInventories(ctx, reader, namespace)
+	if err != nil {
+		return err
+	}
+	current := addressInventory{}
+	for i := range list.Items {
+		address := &list.Items[i]
+		if addressRetirementAcknowledged(address) {
+			continue
+		}
+		vip := canonicalVIP(address.Spec.VIPAddress)
+		if _, duplicate := current[vip]; duplicate {
+			current[vip] = nil
+		} else {
+			current[vip] = address
+		}
+	}
+	if len(current) != len(snapshot) {
+		return errors.New("address inventory changed before forwarding activation")
+	}
+	for vip, previous := range snapshot {
+		fresh, ok := current[vip]
+		if !ok || (fresh == nil) != (previous == nil) || fresh != nil && !sameAddressRevision(previous, fresh) {
+			return errors.New("address revision changed before forwarding activation")
+		}
+	}
+	return nil
+}
+
+func retiredRuleAllocation(
+	ctx context.Context,
+	reader client.Reader,
+	rule *bgpv1alpha1.NetworkService,
+	namespace string,
+) (bool, error) {
+	if rule.Spec.AddressGroup == nil {
+		return false, nil
+	}
+	addresses := &bgpv1alpha1.NetworkServiceAddressList{}
+	if err := reader.List(ctx, addresses, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for _, address := range addresses.Items {
+		if address.Spec.Group.UID == rule.Spec.AddressGroup.UID && address.Spec.Retired {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *ServiceVIPBindingReconciler) bindingSourceAllowed(
+	ctx context.Context,
+	binding *bgpv1alpha1.ServiceVIPBinding,
+) (bool, error) {
+	source := binding.Spec.SourceRef
+	if source == nil {
+		return true, nil
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	rule := &bgpv1alpha1.NetworkService{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: source.Namespace, Name: source.Name}, rule); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	if rule.UID != source.UID || rule.Generation != source.Generation || rule.Spec.AddressGroup == nil ||
+		rule.Spec.AddressGroup.UID != source.AllocationUID ||
+		!rule.DeletionTimestamp.IsZero() {
+		return false, nil
+	}
+	addresses := &bgpv1alpha1.NetworkServiceAddressList{}
+	if err := reader.List(ctx, addresses, client.InNamespace(source.Namespace)); err != nil {
+		return false, err
+	}
+	for i := range addresses.Items {
+		address := &addresses.Items[i]
+		if address.Spec.Group.UID == source.AllocationUID {
+			if address.Spec.Retired || !address.DeletionTimestamp.IsZero() {
+				return false, nil
+			}
+			return addressRuleError(rule, addressInventory{canonicalVIP(address.Spec.VIPAddress): address}) == nil, nil
+		}
+	}
+	return false, nil
+}
+
+func stoppedGatewayConditionType(node string) string { return node + "/Stopped" }
+
+func stoppedGatewayConditions(conditions *[]metav1.Condition, node string, generation int64) {
+	for _, kind := range []string{programmedConditionType(node), advertisedConditionType(node)} {
+		meta.SetStatusCondition(
+			conditions,
+			metav1.Condition{Type: kind, Status: metav1.ConditionFalse, ObservedGeneration: generation,
+				Reason: "DataplaneStopped", Message: "Gateway forwarding stopped and its advertisements are absent"},
+		)
+	}
+	meta.SetStatusCondition(
+		conditions,
+		metav1.Condition{
+			Type:               stoppedGatewayConditionType(node),
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: generation,
+			Reason:             "DataplaneStopped",
+			Message:            "Gateway forwarding stopped and its advertisements are absent",
+		},
+	)
+}
+
+func (r *NetworkGatewayReconciler) acknowledgeStoppedGateway(ctx context.Context, namespace string) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	ads := &bgpv1alpha1.BGPAdvertisementList{}
+	selector := client.MatchingLabels{gatewayNodeLabel: gatewayNodeLabelValue(r.NodeName)}
+	if err := reader.List(ctx, ads, client.InNamespace(namespace), selector); err != nil {
+		return true, err
+	}
+	if len(ads.Items) > 0 {
+		return true, nil
+	}
+	addresses, err := servedAddressInventories(ctx, reader, namespace)
+	if err != nil {
+		return true, err
+	}
+	for i := range addresses.Items {
+		address := &addresses.Items[i]
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current := &bgpv1alpha1.NetworkServiceAddress{}
+			if err := reader.Get(ctx, client.ObjectKeyFromObject(address), current); err != nil {
+				return client.IgnoreNotFound(err)
+			}
+			if current.UID != address.UID {
+				return errors.New("address identity changed during gateway retirement")
+			}
+			stoppedGatewayConditions(&current.Status.Conditions, r.NodeName, current.Generation)
+			return r.Status().Update(ctx, current)
+		}); err != nil {
+			return true, err
+		}
+	}
+	rules := &bgpv1alpha1.NetworkServiceList{}
+	if err := reader.List(ctx, rules); err != nil {
+		return true, err
+	}
+	for i := range rules.Items {
+		rule := &rules.Items[i]
+		if rule.Spec.AddressGroup == nil {
+			continue
+		}
+		known := false
+		for _, address := range addresses.Items {
+			if address.Spec.Group.UID == rule.Spec.AddressGroup.UID {
+				known = true
+				break
+			}
+		}
+		if !known {
+			continue
+		}
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current := &bgpv1alpha1.NetworkService{}
+			if err := reader.Get(ctx, client.ObjectKeyFromObject(rule), current); err != nil {
+				return client.IgnoreNotFound(err)
+			}
+			if current.UID != rule.UID {
+				return errors.New("service identity changed during gateway retirement")
+			}
+			stoppedGatewayConditions(&current.Status.Conditions, r.NodeName, current.Generation)
+			return r.Status().Update(ctx, current)
+		}); err != nil {
+			return true, err
+		}
+	}
+	return false, nil
+}
+
+func servedAddressInventories(
+	ctx context.Context,
+	reader client.Reader,
+	gatewayNamespace string,
+) (*bgpv1alpha1.NetworkServiceAddressList, error) {
+	addresses := &bgpv1alpha1.NetworkServiceAddressList{}
+	if err := reader.List(ctx, addresses); err != nil {
+		return nil, err
+	}
+	gateways := &bgpv1alpha1.NetworkGatewayList{}
+	if err := reader.List(ctx, gateways); err != nil {
+		return nil, err
+	}
+	gatewayNamespaces := map[string]bool{}
+	for _, gw := range gateways.Items {
+		gatewayNamespaces[gw.Namespace] = true
+	}
+	served := &bgpv1alpha1.NetworkServiceAddressList{}
+	for _, address := range addresses.Items {
+		if address.Namespace == gatewayNamespace || !gatewayNamespaces[address.Namespace] {
+			served.Items = append(served.Items, address)
+		}
+	}
+	return served, nil
+}
+
+func addressKeyAdvertisementName(key types.NamespacedName, namespace, node string) string {
+	identity, _ := ruleNameKey(key, namespace)
+	return addressAdvertisementName(identity, node)
+}
+
+func addressKeyFromAdvertisement(ad *bgpv1alpha1.BGPAdvertisement) types.NamespacedName {
+	namespace := ad.Labels[serviceAddressNamespaceLabel]
+	if namespace == "" {
+		namespace = ad.Namespace
+	}
+	name := ad.Annotations[serviceAddressLabel]
+	if name == "" {
+		name = ad.Labels[serviceAddressLabel]
+	}
+	return types.NamespacedName{Namespace: namespace, Name: name}
 }

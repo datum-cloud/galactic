@@ -55,6 +55,7 @@ const ReasonGateClosed = "GateClosed"
 type BGPRouterReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
+	APIReader      client.Reader
 	Reconciler     *reconcile.Reconciler
 	RuntimeManager galacticruntime.RuntimeManager
 	Hasher         func(model.DesiredRouter) (string, error)
@@ -74,9 +75,9 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if errors.IsNotFound(err) {
 			// Router deleted: stop its runtime.
 			if stopErr := r.RuntimeManager.Stop(ctx, req.NamespacedName); stopErr != nil {
-				logger.Error(stopErr, "stop runtime for deleted router", "router", req.NamespacedName)
+				return ctrl.Result{}, stopErr
 			}
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, r.releaseStoppedRouterAdvertisements(ctx, req.NamespacedName)
 		}
 		return ctrl.Result{}, fmt.Errorf("get BGPRouter %s: %w", req.NamespacedName, err)
 	}
@@ -90,8 +91,14 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Handle deletion.
 	if !router.DeletionTimestamp.IsZero() {
+		if router.Spec.TargetRef.Name != r.NodeName {
+			return ctrl.Result{}, nil
+		}
 		if stopErr := r.RuntimeManager.Stop(ctx, req.NamespacedName); stopErr != nil {
-			logger.Error(stopErr, "stop runtime for terminating router", "router", req.NamespacedName)
+			return ctrl.Result{}, stopErr
+		}
+		if err := r.releaseStoppedRouterAdvertisements(ctx, req.NamespacedName); err != nil {
+			return ctrl.Result{}, err
 		}
 		routerCopy := router.DeepCopy()
 		setRouterPhase(routerCopy, bgpv1alpha1.BGPRouterPhaseFailed)
@@ -105,6 +112,10 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			logger.Error(updateErr, "update status for terminating router")
 		}
 		return ctrl.Result{}, nil
+	}
+
+	if err := r.prepareCoordinatedAdvertisements(ctx, router); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Build desired state.
@@ -130,6 +141,10 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	requeueAfter, err := r.advertisementRequeueAfter(ctx, router, time.Now())
 	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.refreshAdvertisementLeases(ctx, req.NamespacedName, desired.Advertisements); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -585,6 +600,7 @@ func nptv6ConfiguredCondition(spec *bgpv1alpha1.NPTv6Spec) metav1.Condition {
 
 // SetupWithManager registers the BGPRouterReconciler with the manager.
 func (r *BGPRouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	b := ctrl.NewControllerManagedBy(mgr)
 	if r.Wake != nil {
 		b = b.WatchesRawSource(source.Channel(r.Wake, &handler.EnqueueRequestForObject{}))
@@ -703,4 +719,15 @@ func advertisementsMatchRuntime(desired []model.DesiredAdvertisement, status mod
 		}
 	}
 	return true
+}
+
+func (r *BGPRouterReconciler) refreshAdvertisementLeases(
+	ctx context.Context,
+	key types.NamespacedName,
+	advertisements []model.DesiredAdvertisement,
+) error {
+	if leases, ok := r.RuntimeManager.(galacticruntime.AdvertisementLeaseManager); ok {
+		return leases.RefreshAdvertisementLeases(ctx, key, advertisements)
+	}
+	return nil
 }

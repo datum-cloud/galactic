@@ -4,6 +4,9 @@ metadata:
   name: galactic-router
 rules:
   - apiGroups: ["galactic.datumapis.com"]
+    resources: ["networkserviceaddresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgprouters
       - bgppeers

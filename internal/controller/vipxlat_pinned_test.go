@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -165,5 +166,59 @@ func TestPinnedVIPTranslationTable_ConcurrentFirstUse(t *testing.T) {
 		if got[i] != got[0] {
 			t.Fatalf("caller %d got a different handle", i)
 		}
+	}
+}
+
+// Use the same lazy wrapper the router supplies, rather than injecting the raw
+// table, so range delegation and finalizer cleanup are exercised end to end.
+func TestServiceVIPBindingReconciler_RangeThroughPinnedTable(t *testing.T) {
+	ctx := context.Background()
+	router, adv, vrf := newBackendFixtures(testVPCRef)
+	binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+	binding.Spec.BackendAddress = testBackendAddr
+	binding.Spec.Protocol = bgpv1alpha1.NetworkServiceProtocolUDP
+	binding.Spec.Port, binding.Spec.BackendPort = 0, 0
+	binding.Spec.PortRange = &bgpv1alpha1.PortRange{Start: 20000, End: 20999}
+	c := fake.NewClientBuilder().WithScheme(newRuleTestScheme(t)).
+		WithStatusSubresource(&bgpv1alpha1.ServiceVIPBinding{}).
+		WithObjects(router, adv, vrf, binding).Build()
+	raw := vipxlatmap.NewVipXlatTable(newMemTable()).WithRangeTable(newMemTable())
+	closer := &countingCloser{}
+	table := &PinnedVIPTranslationTable{Open: func() (*vipxlatmap.VipXlatTable, io.Closer, error) {
+		return raw, closer, nil
+	}}
+	defer func() {
+		if err := table.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	r := &ServiceVIPBindingReconciler{Client: c, NodeName: testComputeNodeName, VIPTranslationTable: table}
+	req := ctrl.Request{NamespacedName: bindingKey()}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	got := &bgpv1alpha1.ServiceVIPBinding{}
+	if err := c.Get(ctx, bindingKey(), got); err != nil {
+		t.Fatal(err)
+	}
+	if !meta.IsStatusConditionTrue(got.Status.Conditions, bgpv1alpha1.ConditionTypeBound) {
+		t.Fatalf("binding not Bound: %+v", got.Status)
+	}
+	rows, err := table.ListRanges()
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("range rows=%d err=%v", len(rows), err)
+	}
+	if err := c.Delete(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = table.ListRanges()
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("range rows after deletion=%d err=%v", len(rows), err)
+	}
+	if err := c.Get(ctx, bindingKey(), got); !apierrors.IsNotFound(err) {
+		t.Fatalf("binding finalizer retained: %v", err)
 	}
 }
