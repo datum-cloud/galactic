@@ -241,6 +241,10 @@ type Service struct {
 	Revision string
 	// Allowlist names the accepted service identities.
 	Allowlist Allowlist
+	// Destinations is the public destination policy a probe target must
+	// pass before its snapshot. Its Deny should match every node's
+	// --deny-prefixes; its Allow must be empty.
+	Destinations query.DestinationPolicy
 	// Elected reports whether this replica leads.
 	Elected func() bool
 	// Leader connects a follower to the leader.
@@ -490,7 +494,7 @@ func (s *Service) validate(
 		return nil, time.Time{}, errcode.Status(errcode.InvalidQuery,
 			fmt.Sprintf("expires_at is more than %s after receipt", MaxServiceRequestLifetime))
 	}
-	q, err := serviceQuery(req)
+	q, err := serviceQuery(req, s.Destinations)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -514,8 +518,8 @@ func (s *Service) validate(
 
 // serviceQuery canonicalizes a request's query and refuses any type the
 // service may not request, and any probe target that is not a numeric
-// address.
-func serviceQuery(req *servicev1.RunDiagnosticRequest) (query.Query, error) {
+// address or that destinations refuses.
+func serviceQuery(req *servicev1.RunDiagnosticRequest, destinations query.DestinationPolicy) (query.Query, error) {
 	if req.GetQuery() == nil {
 		return query.Query{}, errcode.Status(errcode.InvalidQuery, "query is required")
 	}
@@ -528,7 +532,11 @@ func serviceQuery(req *servicev1.RunDiagnosticRequest) (query.Query, error) {
 		return query.Query{}, errcode.FromError(err)
 	}
 	if q.Type.Probe() {
-		if _, err := query.ResolvedProbe(q); err != nil {
+		dst, err := query.ResolvedProbe(q)
+		if err != nil {
+			return query.Query{}, errcode.FromError(err)
+		}
+		if err := destinations.Check(dst); err != nil {
 			return query.Query{}, errcode.FromError(err)
 		}
 	}

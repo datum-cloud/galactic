@@ -115,7 +115,7 @@ func pingObservation(name string, replies uint32) *fabricv1.Observation {
 	obs := &fabricv1.Observation{
 		Node: name, RouterId: "192.0.2.1", Asn: 64512, SampleTime: timestamppb.Now(),
 		Result: &fabricv1.Observation_Ping{Ping: &fabricv1.PingResult{
-			Source: "2001:db8::a", Destination: "2001:db8::1", Sent: 3, Received: replies,
+			Source: "2606:4700::a", Destination: "2606:4700::1", Sent: 3, Received: replies,
 		}},
 	}
 	for i := range uint32(3) {
@@ -126,7 +126,7 @@ func pingObservation(name string, replies uint32) *fabricv1.Observation {
 
 func failAnswer(code errcode.Code) routerAnswer {
 	return func(context.Context, *fabricv1.ExecuteRequest) (*fabricv1.Observation, error) {
-		return nil, errcode.Status(code, "raw failure naming 2001:db8::1")
+		return nil, errcode.Status(code, "raw failure naming 2606:4700::1")
 	}
 }
 
@@ -497,7 +497,7 @@ func TestServiceCoverage(t *testing.T) {
 			}
 			for n, reason := range tc.failures {
 				f := outcomes[n].GetFailure()
-				if f.GetReason() != reason || f.GetMessage() == "" || f.GetMessage() == "raw failure naming 2001:db8::1" {
+				if f.GetReason() != reason || f.GetMessage() == "" || f.GetMessage() == "raw failure naming 2606:4700::1" {
 					t.Errorf("router %s failure = %v, want sanitized %s", n, f, reason)
 				}
 			}

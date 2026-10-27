@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	"go.datum.net/galactic/internal/fabric/errcode"
 	"go.datum.net/galactic/internal/fabric/identity"
 	"go.datum.net/galactic/internal/fabric/node"
+	"go.datum.net/galactic/internal/fabric/query"
 	"go.datum.net/galactic/internal/fabric/testpki"
 )
 
@@ -92,7 +94,7 @@ func validRequest(now time.Time) *servicev1.RunDiagnosticRequest {
 		RequestId: testRequestID,
 		ExpiresAt: timestamppb.New(now.Add(30 * time.Second)),
 		Query: &fabricv1.Query{
-			Type: fabricv1.QueryType_QUERY_TYPE_PING, Target: "2001:0DB8::1",
+			Type: fabricv1.QueryType_QUERY_TYPE_PING, Target: "2606:4700:0000::1",
 		},
 	}
 }
@@ -400,7 +402,7 @@ func TestServiceForwarding(t *testing.T) {
 		got.GetCell() != testSite {
 		t.Errorf("envelope attribution = %v", env)
 	}
-	if got.GetQuery().GetTarget() != "2001:db8::1" ||
+	if got.GetQuery().GetTarget() != "2606:4700::1" ||
 		got.GetQuery().GetAddressFamily() != fabricv1.AddressFamily_ADDRESS_FAMILY_IPV6 {
 		t.Errorf("envelope query is not canonical: %v", got.GetQuery())
 	}
@@ -492,7 +494,10 @@ func (s *fakeEventStream) Send(ev *servicev1.DiagnosticEvent) error {
 
 func TestServiceValidation(t *testing.T) {
 	now := time.Now()
-	svc := &Service{Cell: testSite, Allowlist: testAllowlist, Elected: elected, Now: func() time.Time { return now }}
+	svc := &Service{
+		Cell: testSite, Allowlist: testAllowlist, Elected: elected, Now: func() time.Time { return now },
+		Destinations: query.DestinationPolicy{Deny: []netip.Prefix{netip.MustParsePrefix("2606:4700:ff::/48")}},
+	}
 	ctx := node.WithCaller(t.Context(), identity.Service(testSite, testService))
 	for name, tc := range map[string]struct {
 		edit func(*runReq)
@@ -524,7 +529,18 @@ func TestServiceValidation(t *testing.T) {
 		"as-path": {func(r *runReq) {
 			r.Query = &fabricv1.Query{Type: fabricv1.QueryType_QUERY_TYPE_AS_PATH, Target: "_64512_"}
 		}, errcode.InvalidQuery},
-		"hostname probe":  {func(r *runReq) { r.Query.Target = "example.com" }, errcode.InvalidQuery},
+		"hostname probe": {func(r *runReq) { r.Query.Target = "example.com" }, errcode.InvalidQuery},
+		// The public destination policy refuses before the snapshot, so a
+		// forbidden probe costs no tokens, slots or packets.
+		"documentation probe": {func(r *runReq) { r.Query.Target = "2001:db8::1" }, errcode.DestinationNotAllowed},
+		"unique local probe":  {func(r *runReq) { r.Query.Target = "fc00::1" }, errcode.DestinationNotAllowed},
+		"private probe": {func(r *runReq) {
+			r.Query = &fabricv1.Query{Type: fabricv1.QueryType_QUERY_TYPE_TRACEROUTE, Target: "10.0.0.1"}
+		}, errcode.DestinationNotAllowed},
+		"multicast probe": {func(r *runReq) {
+			r.Query = &fabricv1.Query{Type: fabricv1.QueryType_QUERY_TYPE_PING, Target: "224.0.0.1"}
+		}, errcode.DestinationNotAllowed},
+		"denied probe":    {func(r *runReq) { r.Query.Target = "2606:4700:ff::1" }, errcode.DestinationNotAllowed},
 		"too many nodes":  {func(r *runReq) { r.Nodes = make([]string, MaxServiceNodes+1) }, errcode.InvalidQuery},
 		"duplicate nodes": {func(r *runReq) { r.Nodes = []string{"a", "a"} }, errcode.InvalidQuery},
 		"empty node name": {func(r *runReq) { r.Nodes = []string{""} }, errcode.InvalidQuery},
