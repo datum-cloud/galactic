@@ -89,11 +89,11 @@ Malformed capsules don't behave the same way on both servers:
 
 ## Recorded run
 
-Recorded 2026-10-27 with `task test:connectip-interop`, on base commit `1a9d0f16` with this suite applied. The host ran Fedora 44, Linux 7.1.3, Go 1.26.5 and Xray 26.10.21 (built with Go 1.27.3). Four consecutive runs, the last on the final code, each passed all 33 tests under the race detector and removed every fixture namespace. The table shows the last run.
+Recorded 2026-10-27 with `task test:connectip-interop`, on base commit `1a9d0f16` with this suite applied. The host ran Fedora 44, Linux 7.1.3, Go 1.26.5 and Xray 26.10.21 (built with Go 1.27.3). Five consecutive runs, the last on the published code, each passed all 33 tests under the race detector and removed every fixture namespace. The table shows the last run.
 
 | Check                                                  | HTTP/3                                                                       | HTTP/2                                                                              |
 | ------------------------------------------------------ | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Negotiated protocol                                    | ALPN `h3` over QUIC; 450 outer UDP/443 packets, no TCP/443                   | ALPN `h2`; request seen as `HTTP/2.0`; 341 outer TCP/443 packets, no UDP/443        |
+| Negotiated protocol                                    | ALPN `h3` over QUIC; 368 outer UDP/443 packets, no TCP/443                   | ALPN `h2`; request seen as `HTTP/2.0`; 225 outer TCP/443 packets, no UDP/443        |
 | 1280-byte inner packets in the UDP phase, VPC / client | 20 / 20; none larger                                                         | 20 / 20; none larger                                                                |
 | UDP and TCP echo                                       | 20 of 20 datagrams, 256 KiB stream: passed                                   | 20 of 20 datagrams, 256 KiB stream: passed                                          |
 | Untrusted certificate                                  | Rejected by the client; no session: passed                                   | Rejected by the client; no session: passed                                          |
