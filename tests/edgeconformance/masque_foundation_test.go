@@ -250,7 +250,7 @@ func (m *masque) rowRouteDrift(t *testing.T) {
 	att := l.attachmentOf(t, m.pod, m.a.svc)
 	sandbox := strconv.Itoa(podPID(t, edgeNode1, m.pod.Namespace, m.pod.Name))
 	inPod := func(args ...string) (string, error) {
-		return nodeExec(edgeNode1, append([]string{"nsenter", "-t", sandbox, "-n"}, args...)...)
+		return nodeExec(edgeNode1, append([]string{nsenter, "-t", sandbox, "-n"}, args...)...)
 	}
 	links, err := inPod("ip", "-o", "link", "show", "master", att.Status.PodVRF)
 	if err != nil {

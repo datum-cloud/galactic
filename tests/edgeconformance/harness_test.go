@@ -261,10 +261,13 @@ type probeRun struct {
 	events []event
 }
 
+// nsenter enters a pod's namespaces from its node.
+const nsenter = "nsenter"
+
 // startProbe runs edgeprobe with args in the network namespace of the pod
 // whose sandbox has pid on node.
 func startProbe(node string, pid int, name string, args ...string) (*probeRun, error) {
-	full := append([]string{"exec", node, "nsenter", "-t", strconv.Itoa(pid), "-n", "/usr/local/bin/edgeprobe"},
+	full := append([]string{"exec", node, nsenter, "-t", strconv.Itoa(pid), "-n", "/usr/local/bin/edgeprobe"},
 		args...)
 	p := &probeRun{cmd: exec.CommandContext(context.Background(), "docker", full...), name: name}
 	p.cmd.Stdout = &p.out
