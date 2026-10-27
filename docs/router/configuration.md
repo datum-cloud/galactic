@@ -29,6 +29,7 @@ Logging takes `--log-level` (`LOG_LEVEL`) and `--log-format` (`LOG_FORMAT`), wit
 | BMP stations             | `GALACTIC_ROUTER_BMP_STATIONS`             | `--bmp-stations`             | _(empty; BMP disabled)_     |
 | BMP policy               | `GALACTIC_ROUTER_BMP_POLICY`               | `--bmp-policy`               | `pre-policy`                |
 | BMP statistics interval  | `GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL`  | `--bmp-statistics-interval`  | `60s`                       |
+| GoBGP API directory      | `GALACTIC_ROUTER_GOBGP_API_DIR`            | `--gobgp-api-dir`            | _(empty; no API)_           |
 | Traffic policy           | `GALACTIC_ROUTER_TRAFFIC_POLICY`           | `--traffic-policy`           | `false`                     |
 | Service frontends        | `GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED` | `--service-frontend-enabled` | `false`                     |
 
@@ -183,6 +184,31 @@ gauge on the metrics port, labeled `router` (the BGPRouter's
 established, `0` while it is down or its host does not resolve.
 
 **Type:** comma-separated list of `host:port`
+**Default:** _(empty)_
+
+### `--gobgp-api-dir` / `GALACTIC_ROUTER_GOBGP_API_DIR`
+
+Directory to serve each BGPRouter's GoBGP API in, as a unix socket named
+`<namespace>_<name>.sock`, so the `gobgp` CLI can query the live RIB. A name
+too long for a socket path is replaced by a hash. Empty serves no API.
+
+The API is read-only. Only `Get*`, `List*` and `Watch*` methods are served;
+any other method, such as `AddPath` or `DeletePeer`, returns
+`PermissionDenied`. The router creates the directory with mode `0700`, so
+only root on the node can connect. Read-only is not low-privilege: the API
+returns the full routing state, including any peer passwords and TCP-AO keys
+configured. It removes a stale socket file before it
+listens, and a GoBGP server replaced by an ASN, router ID or listen-port
+change serves the API again on the same path.
+
+The base DaemonSet sets `/run/galactic-router` and mounts it from the host.
+From a [galactic-debug](../../containers/galactic-debug/README.md) node pod:
+
+```sh
+gobgp --target unix:///host/run/galactic-router/<namespace>_<name>.sock neighbor
+```
+
+**Type:** directory path
 **Default:** _(empty)_
 
 ### `--bmp-policy` / `GALACTIC_ROUTER_BMP_POLICY`

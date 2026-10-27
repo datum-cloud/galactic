@@ -2,10 +2,10 @@
 
 An incident-response toolbox image, built on `nicolaka/netshoot` plus the
 tools that debugging Galactic's datapath and routing needs and netshoot
-doesn't already have: `bpftool`, `vtysh` (FRR client), `crictl`, `yq`, and
-`galactic-usid` (this repo's base62/hex uSID codec, `cmd/galactic-usid`).
-The image also ships `gobgp`, `kubectl` and `bpftrace`, which don't work
-from a debug pod today (see [What doesn't work](#what-doesnt-work)).
+doesn't already have: `bpftool`, `vtysh` (FRR client), the `gobgp` CLI,
+`crictl`, `yq`, and `galactic-usid` (this repo's base62/hex uSID codec,
+`cmd/galactic-usid`). The image also ships `kubectl` and `bpftrace`, which
+don't work from a debug pod today (see [What doesn't work](#what-doesnt-work)).
 
 Published as `ghcr.io/datum-cloud/galactic-debug`. Not deployed as a
 standing workload: attach it on demand as a node debug pod.
@@ -81,6 +81,20 @@ filesystem, not on the host:
 vtysh --vty_socket /proc/$(pgrep -x bgpd)/root/var/run/frr -c 'show bgp summary'
 ```
 
+**gobgp** reads galactic-router's GoBGP state through a read-only unix
+socket per BGPRouter under `/run/galactic-router` on the host (see
+[`--gobgp-api-dir`](../../docs/router/configuration.md)). A galactic-router
+release older than this setting serves no socket.
+
+```
+ls /host/run/galactic-router/
+gobgp --target unix:///host/run/galactic-router/<namespace>_<name>.sock neighbor
+gobgp --target unix:///host/run/galactic-router/<namespace>_<name>.sock global rib -a evpn
+```
+
+Commands that change state, such as `neighbor add`, fail with
+`PermissionDenied`.
+
 **A pod's network namespace.** Find the pod sandbox's PID with crictl,
 then enter its netns with `nsenter`:
 
@@ -100,11 +114,10 @@ never the guest.
 
 ## What doesn't work
 
-| Tool       | Why                                                                                                                                        | Tracked in                                                   |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
-| `gobgp`    | galactic-router's embedded GoBGP server has no gRPC API, so the CLI has nothing to connect to. Read BGPPeer status and router logs instead | [#1157](https://github.com/datum-cloud/galactic/issues/1157) |
-| `kubectl`  | The pod runs as the namespace's `default` service account, which has no RBAC. Run `kubectl` from your workstation                          | [#1158](https://github.com/datum-cloud/galactic/issues/1158) |
-| `bpftrace` | Needs tracefs, which the pod doesn't mount. Even with `mount -t tracefs tracefs /sys/kernel/tracing` it isn't verified to work             | [#1158](https://github.com/datum-cloud/galactic/issues/1158) |
+| Tool       | Why                                                                                                                            | Tracked in                                                   |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| `kubectl`  | The pod runs as the namespace's `default` service account, which has no RBAC. Run `kubectl` from your workstation              | [#1158](https://github.com/datum-cloud/galactic/issues/1158) |
+| `bpftrace` | Needs tracefs, which the pod doesn't mount. Even with `mount -t tracefs tracefs /sys/kernel/tracing` it isn't verified to work | [#1158](https://github.com/datum-cloud/galactic/issues/1158) |
 
 ## Known caveats to re-check every time
 
@@ -130,11 +143,9 @@ never the guest.
 
 ## Version pins
 
-`gobgp` is pinned in the Dockerfile's `GOBGP_VERSION` build arg to match
-the major version `galactic-router` embeds (`go.mod`'s
-`github.com/osrg/gobgp/v4`). Bump it alongside any `go.mod` bump of that
-dependency -- it is not vendored from this module's own `go.sum`, so it
-does not drift automatically the way the embedded server does.
+`gobgp` is pinned in the Dockerfile's `GOBGP_VERSION` build arg to the
+version `galactic-router` embeds (`go.mod`'s `github.com/osrg/gobgp/v4`).
+Renovate bumps both in the same pull request.
 
 `KUBECTL_VERSION`/`CRICTL_VERSION`/`YQ_VERSION` build args pin the rest;
 bump periodically, roughly tracking the Kubernetes minor version of the

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -69,6 +70,23 @@ func resolveBGPLocalAddress(explicit string, detect func() (string, error)) (str
 			"GALACTIC_ROUTER_BGP_LOCAL_ADDRESS not set and no address could be detected on lo: %w", err)
 	}
 	return addr, nil
+}
+
+// prepareGoBGPAPIDir makes dir, when set, a directory only root can enter, so
+// only root on the node can reach the GoBGP API sockets in it. It sets the mode
+// even when dir exists, since a hostPath DirectoryOrCreate volume creates it
+// world-readable before the router starts.
+func prepareGoBGPAPIDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("%s: %w", config.EnvRouterGoBGPAPIDir, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("%s: %w", config.EnvRouterGoBGPAPIDir, err)
+	}
+	return nil
 }
 
 // runCmd contains the application startup logic. It reads configuration from
@@ -194,7 +212,11 @@ func runCmd(cfg *config.RouterConfig) error {
 	if err != nil {
 		return err
 	}
-	factory := gobgp.NewRuntimeFactory(int32(bgpListenPort), cfg.Reflector, bgpLocalAddr, peerEventEmitter, bmpCfg)
+	if err := prepareGoBGPAPIDir(cfg.GoBGPAPIDir); err != nil {
+		return err
+	}
+	factory := gobgp.NewRuntimeFactory(int32(bgpListenPort), cfg.Reflector, bgpLocalAddr, peerEventEmitter, bmpCfg,
+		gobgp.WithAPIDir(cfg.GoBGPAPIDir))
 
 	// Create runtime manager.
 	runtimeMgr := galacticruntime.NewRuntimeManager(factory)
@@ -543,6 +565,8 @@ func newRootCommand() *cobra.Command {
 		"BMP route monitoring policy: "+strings.Join(config.RouterBMPPolicies, ", "))
 	cmd.Flags().Duration("bmp-statistics-interval", config.DefaultRouterBMPStatisticsInterval,
 		"Interval between BMP statistics reports per peer; 0 disables them")
+	cmd.Flags().String("gobgp-api-dir", "",
+		"Directory to serve the GoBGP API in, read-only, as a unix socket per BGPRouter; empty serves none")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 

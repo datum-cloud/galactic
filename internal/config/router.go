@@ -66,6 +66,11 @@ const (
 	EnvRouterBMPStations           = "GALACTIC_ROUTER_BMP_STATIONS"
 	EnvRouterBMPPolicy             = "GALACTIC_ROUTER_BMP_POLICY"
 	EnvRouterBMPStatisticsInterval = "GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL"
+
+	// EnvRouterGoBGPAPIDir is the directory galactic-router serves each
+	// embedded GoBGP server's API in, read-only, as a unix socket for the
+	// gobgp CLI. Empty, the default, serves no API.
+	EnvRouterGoBGPAPIDir = "GALACTIC_ROUTER_GOBGP_API_DIR"
 )
 
 // --- RouterConfig ----------------------------------------------------------
@@ -103,6 +108,9 @@ type RouterConfig struct {
 	BMPStations           []string
 	BMPPolicy             string
 	BMPStatisticsInterval time.Duration
+
+	// GoBGPAPIDir is EnvRouterGoBGPAPIDir.
+	GoBGPAPIDir string
 }
 
 // NewRouterConfig creates a config resolver reading the GALACTIC_ROUTER
@@ -126,6 +134,7 @@ func NewRouterConfig() *RouterConfig {
 	v.SetDefault("bmp_stations", "")
 	v.SetDefault("bmp_policy", DefaultRouterBMPPolicy)
 	v.SetDefault("bmp_statistics_interval", DefaultRouterBMPStatisticsInterval.String())
+	v.SetDefault("gobgp_api_dir", "")
 
 	cfg := &RouterConfig{
 		v:      v,
@@ -155,6 +164,7 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{"bmp-stations", "bmp_stations"},
 		{"bmp-policy", "bmp_policy"},
 		{"bmp-statistics-interval", "bmp_statistics_interval"},
+		{"gobgp-api-dir", "gobgp_api_dir"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -182,6 +192,7 @@ func (c *RouterConfig) readFields() {
 	c.BMPStations = splitCommaList(c.v.GetString("bmp_stations"))
 	c.BMPPolicy = c.v.GetString("bmp_policy")
 	c.BMPStatisticsInterval = c.v.GetDuration("bmp_statistics_interval")
+	c.GoBGPAPIDir = c.v.GetString("gobgp_api_dir")
 }
 
 // Validate checks that the required configuration fields are set and within

@@ -18,10 +18,11 @@ ARG GIT_TREE_STATE=unknown
 ARG BUILD_DATE=unknown
 ARG SPDX_LICENSE=AGPL-3.0-or-later
 ARG GIT_URL=https://github.com/datum-cloud/galactic
-# Keep in sync with go.mod's github.com/osrg/gobgp/v4 version -- this CLI
-# is not vendored from this module's own go.sum, so it does not drift
-# automatically the way galactic-router's embedded server does.
-ARG GOBGP_VERSION=v4.9.0
+# Keep in sync with go.mod's github.com/osrg/gobgp/v4 version. This CLI is
+# not built from this module's go.sum, so Renovate bumps it through a custom
+# manager grouped with the go.mod update (see .github/renovate.json).
+# renovate: datasource=go depName=github.com/osrg/gobgp/v4
+ARG GOBGP_VERSION=v4.10.0
 
 WORKDIR /workspace
 
