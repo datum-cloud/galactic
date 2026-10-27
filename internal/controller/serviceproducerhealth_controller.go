@@ -48,7 +48,9 @@ import (
 // node stops applying is removed. Each producer has one probe loop, started
 // from the decision already published for the same attachment and port, so a
 // restarted galactic-router changes no producer set. A producer with no IPv6
-// address cannot be probed and is published as Unknown.
+// address cannot be probed and is published as Unknown. The node renews its
+// entries every ServiceEndpointProducerReportRenewInterval, so other nodes stop
+// routing on them once it is down or its galactic-router stops.
 type ServiceProducerHealthReconciler struct {
 	client.Client
 	NodeName string
@@ -86,7 +88,7 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 	if endpoint.Spec.Distribution != networkv1alpha1.ServiceEndpointDistributionSpread ||
 		endpoint.Spec.HealthCheck == nil || !endpoint.DeletionTimestamp.IsZero() {
 		r.releaseExcept(req.NamespacedName, nil)
-		return ctrl.Result{}, r.publish(ctx, endpoint, nil)
+		return r.publish(ctx, endpoint, nil, time.Now())
 	}
 
 	list := &cloudv1alpha1.VPCAttachmentList{}
@@ -102,7 +104,7 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 		// The policy controller reports an invalid endpoint; there is
 		// nothing to probe.
 		r.releaseExcept(req.NamespacedName, nil)
-		return ctrl.Result{}, r.publish(ctx, endpoint, nil)
+		return r.publish(ctx, endpoint, nil, time.Now())
 	}
 
 	published := make(map[types.NamespacedName]networkv1alpha1.ServiceEndpointProducerStatus)
@@ -141,7 +143,7 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 		entries = append(entries, entry)
 	}
 	r.track(req.NamespacedName, wanted, entries)
-	return ctrl.Result{}, r.publish(ctx, endpoint, entries)
+	return r.publish(ctx, endpoint, entries, time.Now())
 }
 
 // producerHealthCheckPort returns the port endpoint's healthCheck probes: its
@@ -285,10 +287,12 @@ func (r *ServiceProducerHealthReconciler) recordStatesLocked(endpoint types.Name
 }
 
 // publish applies entries as this node's part of endpoint's status.producers,
-// unless this node's published entries already equal them.
+// each renewed at now, unless this node's published entries already equal
+// them and were all renewed within the renew interval. It requeues for the
+// next renewal while entries is not empty.
 func (r *ServiceProducerHealthReconciler) publish(ctx context.Context, endpoint *networkv1alpha1.ServiceEndpoint,
-	entries []networkv1alpha1.ServiceEndpointProducerStatus,
-) error {
+	entries []networkv1alpha1.ServiceEndpointProducerStatus, now time.Time,
+) (ctrl.Result, error) {
 	var current []networkv1alpha1.ServiceEndpointProducerStatus
 	for _, entry := range endpoint.Status.Producers {
 		if entry.Node == r.NodeName {
@@ -297,11 +301,24 @@ func (r *ServiceProducerHealthReconciler) publish(ctx context.Context, endpoint 
 	}
 	sortProducerEntries(current)
 	sortProducerEntries(entries)
+	renewIn := time.Duration(0)
+	if len(entries) != 0 {
+		renewIn = networkv1alpha1.ServiceEndpointProducerReportRenewInterval
+	}
 	if producerEntriesEqual(current, entries) {
-		return nil
+		if len(entries) == 0 {
+			return ctrl.Result{}, nil
+		}
+		if age, ok := oldestRenewal(current, now); ok && age < renewIn {
+			return ctrl.Result{RequeueAfter: max(renewIn-age, time.Second)}, nil
+		}
 	}
 	if entries == nil {
 		entries = []networkv1alpha1.ServiceEndpointProducerStatus{}
+	}
+	renewed := metav1.NewTime(now.Truncate(time.Second))
+	for i := range entries {
+		entries[i].RenewTime = &renewed
 	}
 	body, err := json.Marshal(map[string]any{
 		"apiVersion": networkv1alpha1.GroupVersion.String(),
@@ -310,19 +327,33 @@ func (r *ServiceProducerHealthReconciler) publish(ctx context.Context, endpoint 
 		"status":     map[string]any{"producers": entries},
 	})
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 	obj := &networkv1alpha1.ServiceEndpoint{}
 	obj.Name, obj.Namespace = endpoint.Name, endpoint.Namespace
 	err = r.Status().Patch(ctx, obj, client.RawPatch(types.ApplyPatchType, body),
 		client.FieldOwner(nodeFieldOwner(r.NodeName)), client.ForceOwnership)
 	if apierrors.IsNotFound(err) {
-		return nil
+		return ctrl.Result{}, nil
 	}
 	if err != nil {
-		return fmt.Errorf("apply status.producers of ServiceEndpoint %s/%s: %w", endpoint.Namespace, endpoint.Name, err)
+		return ctrl.Result{}, fmt.Errorf("apply status.producers of ServiceEndpoint %s/%s: %w",
+			endpoint.Namespace, endpoint.Name, err)
 	}
-	return nil
+	return ctrl.Result{RequeueAfter: renewIn}, nil
+}
+
+// oldestRenewal returns the age at now of the least recently renewed entry,
+// and false when an entry was never renewed.
+func oldestRenewal(entries []networkv1alpha1.ServiceEndpointProducerStatus, now time.Time) (time.Duration, bool) {
+	var oldest time.Duration
+	for _, entry := range entries {
+		if entry.RenewTime == nil {
+			return 0, false
+		}
+		oldest = max(oldest, now.Sub(entry.RenewTime.Time))
+	}
+	return oldest, true
 }
 
 func sortProducerEntries(entries []networkv1alpha1.ServiceEndpointProducerStatus) {

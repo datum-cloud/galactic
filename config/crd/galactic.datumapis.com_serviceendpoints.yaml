@@ -276,6 +276,9 @@ spec:
                   under its own field manager, and removes them when the producer stops
                   being selected. An entry whose attachmentUID no longer matches the
                   attachment of that name describes an earlier attachment and is ignored.
+                  Each node renews its entries every 15 seconds; an entry not renewed
+                  for 60 seconds is expired, because its node or its galactic-router has
+                  stopped, and no node routes on its state.
                 items:
                   description: ServiceEndpointProducerStatus is one producer's health
                     decision.
@@ -316,6 +319,13 @@ spec:
                       description: Reason is ProbeSucceeded, ProbeFailed, Pending
                         or ProbeUnavailable.
                       maxLength: 64
+                      type: string
+                    renewTime:
+                      description: |-
+                        RenewTime is when the producer's node last confirmed this entry. The
+                        entry is current for 60 seconds after it, and expired after that or
+                        when RenewTime is unset.
+                      format: date-time
                       type: string
                     state:
                       description: |-

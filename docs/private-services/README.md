@@ -84,18 +84,28 @@ TCP connection from `fe80::/10` on the Private path. The node publishes the
 decision for each of its producers in the endpoint's `status.producers`:
 
 ```console
-$ kubectl get serviceendpoint resolver -o jsonpath='{range .status.producers[*]}{.name}{"\t"}{.node}{"\t"}{.state}{"\t"}{.reason}{"\n"}{end}'
-resolver-a   node-1   Healthy     ProbeSucceeded
-resolver-b   node-1   Unhealthy   ProbeFailed
+$ kubectl get serviceendpoint resolver -o jsonpath='{range .status.producers[*]}{.name}{"\t"}{.node}{"\t"}{.state}{"\t"}{.reason}{"\t"}{.renewTime}{"\n"}{end}'
+resolver-a   node-1   Healthy     ProbeSucceeded   2026-01-01T12:00:45Z
+resolver-b   node-1   Unhealthy   ProbeFailed      2026-01-01T12:00:45Z
 ```
 
-What the decision does:
+The node renews its entries every 15 seconds, whether or not a decision
+changed, and sets each entry's `renewTime`. An entry is current for 60 seconds
+after its `renewTime`. After that it is expired: its node is down, or its
+`galactic-router` has stopped, and its `state` may no longer be true. An entry
+with no `renewTime` is expired too.
+
+What a current decision does:
 
 | State       | New flows | Existing TCP connections and replies |
 | ----------- | --------- | ------------------------------------ |
 | `Healthy`   | yes       | yes                                  |
 | `Unknown`   | yes       | yes                                  |
 | `Unhealthy` | no        | yes                                  |
+
+An expired entry never drains a producer on its own node, so a producer
+reported `Unhealthy` just before its node's router stopped takes new flows
+again once the entry expires.
 
 When every producer on a node is `Unhealthy`, all of them keep taking new
 flows, because an empty set would drop every request. A producer that crashes
@@ -111,9 +121,14 @@ longest request, then stop it. Its in-flight requests and open connections
 finish while new ones go to the other producers.
 
 When the consumer's node has no producer, `PreferNodeLocal` sends the consumer
-to one remote producer, the first by namespace and name that its node has not
-reported `Unhealthy`, through the SRv6 service tunnel as with `Single`. A
-remote consumer therefore does not spread. While a health change reaches the
+to one remote producer, through the SRv6 service tunnel as with `Single`. It is
+the first producer by namespace and name whose node currently reports it
+`Healthy` or `Unknown`, or has no entry for it. If there is none, it is the
+first producer whose entry expired, and failing that the first producer. So
+when a node goes down while its producers' attachments still read ready,
+consumers on other nodes move off those producers within 60 seconds of the
+node's last renewal, as long as another node currently reports a producer that
+can take them. A remote consumer does not spread. While a health change reaches the
 consumer's node and the producer's node at different moments, the two can
 briefly disagree on that producer, and its requests are refused until they
 agree.
@@ -126,6 +141,19 @@ the current eligible ones, so if that set changed since the connection opened,
 the connection resets. Changing an endpoint between `Single` and `Spread`
 replaces its routes, which can drop a request in flight and moves existing TCP
 connections.
+
+A `galactic-router` without report renewal writes no `renewTime`, so while
+routers are being upgraded, consumers on upgraded nodes treat the entries of
+nodes that are not yet upgraded as expired, and send remote consumers to
+them only when no current entry offers a producer. This lasts until the
+rollout finishes. A rolled-back router ignores `renewTime`.
+
+Apply the `ServiceEndpoint` CRD with `renewTime` before upgrading
+`galactic-router`. Without it the API server prunes the field from every
+report, so every entry reads as expired and no `Unhealthy` producer drains.
+Nodes compare `renewTime` with their own clock, so keep node clocks in sync:
+a skew near 45 seconds expires live reports early or keeps a lost node's
+reports current for that much longer.
 
 Spread needs a `galactic-cni` whose datapath has the producer set map. A
 `galactic-router` that finds the map missing refuses the endpoint's Spread
