@@ -239,6 +239,12 @@ type event struct {
 	Dst   string        `json:"dst"`
 	Sent  int           `json:"sent"`
 	End   bool          `json:"end"`
+	// ID is a captured ICMPv6 echo request's identifier.
+	ID int `json:"id"`
+	// Status and Assigned are a CONNECT-IP request's response status and
+	// assigned prefix.
+	Status   int    `json:"status"`
+	Assigned string `json:"assigned"`
 }
 
 // last reports whether e marks the end of a probe's window: a send probe's

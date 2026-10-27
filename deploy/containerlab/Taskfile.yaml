@@ -26,6 +26,7 @@ tasks:
       - "build:galactic-controller"
       - "build:galactic-edge"
       - "build:edge-provider"
+      - "build:masque-provider"
       - "build:fabric-router-controller"
       - "build:remote-host"
 
@@ -80,6 +81,11 @@ tasks:
     desc: Build the reference edge provider image (examples/edge-provider)
     cmds:
       - docker build --network=host -t edge-provider:latest -f ../../examples/edge-provider/Dockerfile ../..
+
+  "build:masque-provider":
+    desc: Build the conformance suite's MASQUE fixture provider image (tests/edgeconformance/masqueprovider)
+    cmds:
+      - docker build --network=host -t masque-provider:latest -f ../../tests/edgeconformance/masqueprovider/Dockerfile ../..
 
   "build:fabric-router-controller":
     desc: Build the fabric-router-controller image (typed fabric routing)
@@ -294,6 +300,7 @@ tasks:
         load fabric-router-controller:latest {{.FABRIC_NODES}}
         load galactic-edge:latest {{.EDGE_NODES}}
         load edge-provider:latest {{.EDGE_NODES}}
+        load masque-provider:latest {{.EDGE_NODES}}
 
   "deploy:system":
     desc: Install CRDs, namespace, and RBAC
@@ -1237,6 +1244,15 @@ tasks:
     dir: ../..
     cmds:
       - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig go test -count=1 -v -timeout 90m -run TestConformance ./tests/edgeconformance/
+
+  # Not part of verify: it takes about 15 minutes and deletes and replaces
+  # its own provider pods on dfw-worker2. Results land beside the
+  # conformance suite's in bin/edge-conformance/.
+  "verify:masque-conformance":
+    desc: Run the MASQUE packet-access rows against dfw with the MASQUE fixture provider
+    dir: ../..
+    cmds:
+      - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig go test -count=1 -v -timeout 40m -run TestMASQUE ./tests/edgeconformance/
 
   "verify:ns10":
     desc: Verify ns10 ping (IPv6-only, 3-site mesh)
