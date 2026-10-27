@@ -251,6 +251,11 @@ Per rule, each gateway node's `<node>/Programmed` condition, which stays
 The rule-wide `BackendsReady` condition reports each of them as a backend
 problem, as it reports `BackendsUnresolved`.
 
+A rule with `failurePolicy: FailClosed` is not loaded while no backend has a
+current `Healthy` result. Its `<node>/Programmed` condition is then `False`
+with reason `NoHealthyBackends`, its VIPs are withdrawn, and the rule-wide
+`Programmed` and `Ready` conditions carry the same reason.
+
 ## Rollout and rollback
 
 1. Install the CRDs that carry `spec.healthCheck`,

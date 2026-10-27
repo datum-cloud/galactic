@@ -57,9 +57,10 @@ const (
 	reasonReady = "Ready"
 )
 
-// backendProblemReasons are the Programmed reasons, all reported with status
-// True, that say a gateway node loaded the rule but not over every backend as
-// intended.
+// backendProblemReasons are the Programmed reasons that, with status True, say
+// a gateway node loaded the rule but not over every backend as intended.
+// NoHealthyBackends is also reported with status False for a FailClosed rule
+// that is not loaded; that node is not in programmed, so it is not read here.
 var backendProblemReasons = map[string]bool{
 	reasonBackendsUnresolved:     true,
 	reasonBackendsUnhealthy:      true,
