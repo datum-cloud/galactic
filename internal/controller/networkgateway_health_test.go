@@ -473,8 +473,10 @@ func TestBuildDesiredRuleFailClosedHealth(t *testing.T) {
 				if got := backendAddrs(dr.Backends); !slices.Equal(got, []string{testHealthyAddr}) {
 					t.Fatalf("backends: %v", got)
 				}
-			} else if !errors.Is(err, errNoHealthyBackends) {
-				t.Fatalf("err = %v, want %v", err, errNoHealthyBackends)
+			} else if err == nil {
+				t.Fatal("expected no serving backends")
+			} else if errors.Is(err, errNoHealthyBackends) == tc.disabled {
+				t.Fatalf("err = %v, want errNoHealthyBackends only when health is applied", err)
 			}
 		})
 	}
