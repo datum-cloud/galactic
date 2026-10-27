@@ -51,6 +51,7 @@ jobs:
       - name: Install eBPF build dependencies
         # `task lint` type-checks the whole module, which needs
         # internal/plumbing/ebpf/prog's bpf2go output regenerated first.
+        timeout-minutes: 6
         uses: ./.github/actions/install-ebpf-deps
 
       - name: Run lint
@@ -75,6 +76,7 @@ jobs:
       - name: Install eBPF build dependencies
         # `task test:unit` builds internal/plumbing/ebpf/prog, which needs
         # its bpf2go output regenerated first.
+        timeout-minutes: 6
         uses: ./.github/actions/install-ebpf-deps
 
       - name: Install envtest binaries
@@ -167,6 +169,7 @@ jobs:
         # unprivileged runner user -- it's the regeneration below, run as
         # root, that needs clang-18 and llvm-strip-18 on root's PATH and
         # BPF2GO_CC in root's environment, both passed explicitly there.
+        timeout-minutes: 6
         uses: ./.github/actions/install-ebpf-deps
 
       - name: Install envtest binaries
@@ -207,6 +210,7 @@ jobs:
         # `task build`'s build:ebpf step regenerates
         # internal/plumbing/ebpf/prog's bpf2go output before it builds any
         # binary -- see the composite action for the package pins.
+        timeout-minutes: 6
         uses: ./.github/actions/install-ebpf-deps
 
       - name: Build binary
@@ -285,6 +289,7 @@ jobs:
         # inside containers/galactic-cni/Dockerfile's builder stage), which
         # needs internal/plumbing/ebpf/prog's bpf2go output regenerated
         # first.
+        timeout-minutes: 6
         uses: ./.github/actions/install-ebpf-deps
 
       - name: Run E2E tests

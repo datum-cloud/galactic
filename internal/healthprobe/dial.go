@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -22,7 +23,8 @@ var ErrUnavailable = errors.New("probe cannot run")
 // Dial opens a TCP connection to addr:port over the host-side interface iface,
 // from iface's link-local address, and closes it as soon as the handshake
 // completes, sending no data. It returns nil when the handshake completes
-// within timeout, an error wrapping ErrUnavailable when iface or its
+// within timeout, retrying connection refusals at most twice 250 ms apart.
+// It returns an error wrapping ErrUnavailable when iface or its
 // link-local address is missing, and the dial error otherwise.
 //
 // The link-local source keeps the backend's reply out of the VIP rewrite the
@@ -31,6 +33,8 @@ var ErrUnavailable = errors.New("probe cannot run")
 // unchanged. Binding to the address also binds the socket to iface, so the
 // route lookup uses the VRF iface is enslaved to.
 func Dial(ctx context.Context, iface string, addr netip.Addr, port uint16, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	local, err := linkLocalAddr(iface)
 	if err != nil {
 		return err
@@ -39,16 +43,38 @@ func Dial(ctx context.Context, iface string, addr netip.Addr, port uint16, timeo
 		Timeout:   timeout,
 		LocalAddr: &net.TCPAddr{IP: local.AsSlice(), Zone: iface},
 	}
-	conn, err := dialer.DialContext(ctx, "tcp6", net.JoinHostPort(addr.String(), strconv.Itoa(int(port))))
-	if err != nil {
-		return err
+	return retryRefused(ctx, func() error {
+		conn, err := dialer.DialContext(ctx, "tcp6", net.JoinHostPort(addr.String(), strconv.Itoa(int(port))))
+		if err != nil {
+			return err
+		}
+		// Reset so probes leave no TIME_WAIT sockets on the node.
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.SetLinger(0)
+		}
+		return conn.Close()
+	})
+}
+
+// retryRefused retries connection refusals at most twice, 250 ms apart, within
+// ctx's deadline. Other errors and cancellation stop the probe immediately.
+func retryRefused(ctx context.Context, attempt func() error) error {
+	for i := 0; ; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := attempt()
+		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || i == 2 {
+			return err
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
-	// Reset rather than close, so probes leave no TIME_WAIT sockets behind
-	// on the node.
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		_ = tcp.SetLinger(0)
-	}
-	return conn.Close()
 }
 
 // linkLocalAddr returns iface's IPv6 link-local address.

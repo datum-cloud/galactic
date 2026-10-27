@@ -48,13 +48,20 @@ runs:
     - name: Install clang/llvm/linux-libc-dev
       shell: bash
       run: |
-        # -o Acquire::Retries/::*::Timeout: bare `apt-get update` has no
-        # per-request timeout, so a stalled connection to GitHub's default
-        # regional mirror (azure.archive.ubuntu.com has been observed
-        # hanging outright) blocks until the job's own timeout-minutes
-        # finally kills it -- burning the whole budget on jobs #424/#425
-        # both hit. These bound each attempt and retry instead, so a bad
-        # mirror fails in seconds rather than minutes.
+        # The Azure mirror can keep transferring slowly enough to exhaust
+        # the job budget without triggering apt's inactivity timeout.
+        # Replace only that mirror, including runner mirror-list sources;
+        # retain the distribution, components and signature verification.
+        shopt -s nullglob
+        sources=(/etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources)
+        for source in /etc/apt/sources.list /etc/apt/apt-mirrors.txt; do
+          if [[ -f "$source" ]]; then sources+=("$source"); fi
+        done
+        if (( ${#sources[@]} )); then
+          sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "${sources[@]}"
+        fi
+        # Bound inactive requests as well as total step time. Avoid LLVM's
+        # recommended development/docs packages, which bpf2go does not use.
         #
         # Dir::Cache::Archives points apt at the restored cache, so packages
         # already there are installed without downloading them; the
@@ -64,7 +71,7 @@ runs:
         sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
         sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 \
           -o Dir::Cache::Archives="$archives" -o APT::Keep-Downloaded-Packages=true \
-          install -y clang-18 llvm-18 linux-libc-dev
+          install -y --no-install-recommends clang-18 llvm-18 linux-libc-dev
         sudo rm -rf "$archives/partial" "$archives/lock"
         sudo chown -R "$(id -u):$(id -g)" "$archives"
 
