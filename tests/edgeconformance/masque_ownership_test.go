@@ -10,10 +10,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -61,10 +63,25 @@ func (m *masque) lastRenewal(t *testing.T) time.Duration {
 // gateWatch captures, on the fixture's packet device for mt, the probes
 // tenant mt's workload on the compute node sends into the connector /96
 // for d, while a request of mt's connector holds its route. A probe seen on
-// the device passed the route's forwarding gate.
+// the device passed the route's forwarding gate. It also polls the route's
+// advertisement for the moment the holder stops advertising it.
 type gateWatch struct {
 	sniff, probe, session *probeRun
+	stopPoll              chan struct{}
+	stopOnce              sync.Once
+	polled                chan withdrawal
 }
+
+// withdrawal is when a route's advertisement was first seen deleted or
+// reported not advertised, on CLOCK_BOOTTIME, and whether it was.
+type withdrawal struct {
+	at   time.Duration
+	seen bool
+}
+
+// advertisementPoll is how often gateWatch reads the route's
+// advertisement; it bounds the withdrawal measurement's resolution.
+const advertisementPoll = 200 * time.Millisecond
 
 func (m *masque) watchGate(t *testing.T, name string, mt *masqueTenant, d time.Duration) *gateWatch {
 	t.Helper()
@@ -72,6 +89,11 @@ func (m *masque) watchGate(t *testing.T, name string, mt *masqueTenant, d time.D
 	att := l.attachmentOf(t, m.pod, mt.svc)
 	session := m.connect(t, name+"-session", mt.token, mt.tn.vpc, mt.id, d+5*time.Second, m.workload(t, mt.tn, 2).addr)
 	m.waitAcceptedFor(t, 2*time.Second, mt)
+	r := l.route(t, masqueNS, mt.vpcUID, netip.MustParsePrefix(masquePrefix))
+	if r == nil {
+		t.Fatal("the connector's route is gone")
+	}
+	key := client.ObjectKey{Namespace: systemNS, Name: crdnames.EdgeAdvertisementName(string(r.UID))}
 	pid := podPID(t, edgeNode1, masqueNS, m.pod.Name)
 	sniff, err := startProbe(edgeNode1, pid, name+"-sniff", "sniff", "-iface", att.Status.PacketDevice,
 		"-port", strconv.Itoa(echoPort), "-duration", (d + 2*time.Second).String())
@@ -79,38 +101,56 @@ func (m *masque) watchGate(t *testing.T, name string, mt *masqueTenant, d time.D
 		t.Fatal(err)
 	}
 	probe := l.probe(t, mt.tn, computeNode, name+"-probe", "["+masqueInside+"]:"+strconv.Itoa(echoPort), d)
+	g := &gateWatch{sniff: sniff, probe: probe, session: session, stopPoll: make(chan struct{}),
+		polled: make(chan withdrawal, 1)}
+	go func() {
+		g.polled <- pollWithdrawal(l, key, g.stopPoll)
+	}()
+	// A row that fails before wait still stops the poll.
+	t.Cleanup(g.stop)
 	time.Sleep(3 * time.Second)
-	return &gateWatch{sniff: sniff, probe: probe, session: session}
+	return g
 }
 
-// wait returns the probes captured on the device, in time order, and the
-// client's events.
-func (g *gateWatch) wait(l *lab, t *testing.T) (seen, session []event) {
-	t.Helper()
-	g.probe.wait(l, t)
-	return windowed(g.sniff.wait(l, t)), g.session.wait(l, t)
-}
+// stop ends the advertisement poll; it may be called more than once.
+func (g *gateWatch) stop() { g.stopOnce.Do(func() { close(g.stopPoll) }) }
 
-// gateClosedAt returns when the holder's galactic-router reported the
-// advertisement of mt's route left out because its gate closed, on
-// CLOCK_BOOTTIME at the API's one-second resolution, and whether it did.
-func (m *masque) gateClosedAt(t *testing.T, mt *masqueTenant) (time.Duration, bool) {
-	t.Helper()
-	r := m.l.route(t, masqueNS, mt.vpcUID, netip.MustParsePrefix(masquePrefix))
-	if r == nil {
-		return 0, false
-	}
-	var adv networkv1alpha1.BGPAdvertisement
-	key := client.ObjectKey{Namespace: systemNS, Name: crdnames.EdgeAdvertisementName(string(r.UID))}
-	if err := m.l.c.Get(context.Background(), key, &adv); err != nil {
-		return 0, false
-	}
-	for _, c := range adv.Status.Conditions {
-		if c.Type == "Advertised" && c.Status == metav1.ConditionFalse && c.Reason == "GateClosed" {
-			return wallToBoot(c.LastTransitionTime.Time), true
+// pollWithdrawal reads the advertisement at key every advertisementPoll
+// until stop closes, and returns the first time it was deleted or reported
+// not advertised.
+func pollWithdrawal(l *lab, key client.ObjectKey, stop <-chan struct{}) withdrawal {
+	t := time.NewTicker(advertisementPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return withdrawal{}
+		case <-t.C:
+		}
+		var adv networkv1alpha1.BGPAdvertisement
+		now := boottime()
+		err := l.c.Get(context.Background(), key, &adv)
+		switch {
+		case apierrors.IsNotFound(err):
+			return withdrawal{at: now, seen: true}
+		case err != nil:
+			continue
+		}
+		if c := meta.FindStatusCondition(adv.Status.Conditions, "Advertised"); c != nil &&
+			c.Status == metav1.ConditionFalse {
+			return withdrawal{at: now, seen: true}
 		}
 	}
-	return 0, false
+}
+
+// wait returns the probes captured on the device, in time order, the
+// client's events and the route's withdrawal.
+func (g *gateWatch) wait(l *lab, t *testing.T) (seen, session []event, w withdrawal) {
+	t.Helper()
+	g.probe.wait(l, t)
+	seen, session = windowed(g.sniff.wait(l, t)), g.session.wait(l, t)
+	g.stop()
+	return seen, session, <-g.polled
 }
 
 // leaseDuration is the instance lease's duration: a node's gate stays open
@@ -121,9 +161,10 @@ const leaseDuration = 15 * time.Second
 // start the node can have applied, closed within localExpiry of it and no
 // earlier than the lease duration after earliest, the earliest renewal start
 // the node can have applied last, and stayed closed until resumed,
-// when the fault ended. It records the local cutoff and, when the holder's
-// router reported it before resumed, the local withdrawal after the cutoff.
-func (m *masque) requireCutoff(t *testing.T, seen []event, last, earliest, resumed time.Duration) {
+// when the fault ended. It records the local cutoff and the local
+// withdrawal, the advertisement deleted or reported not advertised, which
+// must follow the cutoff, within 1 s plus the poll interval.
+func (m *masque) requireCutoff(t *testing.T, seen []event, w withdrawal, last, earliest, resumed time.Duration) {
 	t.Helper()
 	l := m.l
 	if !slices.ContainsFunc(seen, func(e event) bool { return !e.last() && e.T >= last }) {
@@ -144,16 +185,17 @@ func (m *masque) requireCutoff(t *testing.T, seen []event, last, earliest, resum
 	if again, ok := resumeAfter(seen, stop+time.Second); ok && again < resumed {
 		t.Errorf("the gate reopened %v before the fault ended", resumed-again)
 	}
-	if closed, ok := m.gateClosedAt(t, m.a); ok && closed > stop-time.Second && closed < resumed {
-		// The condition time is truncated to a second.
-		l.record(t, "local withdrawal after the cutoff (1 s resolution)", closed-stop)
-		if closed-stop > 2*time.Second {
-			t.Errorf("the holder withdrew the route %v after the cutoff, bound 1 s plus 1 s resolution",
-				closed-stop)
+	switch {
+	case !w.seen:
+		t.Error("the route's advertisement was never withdrawn during the window")
+	case w.at < stop-advertisementPoll:
+		t.Errorf("the route was withdrawn %v before the cutoff, so the gate did not cause it", stop-w.at)
+	default:
+		l.record(t, "local withdrawal after the cutoff", w.at-stop)
+		if w.at-stop > time.Second+advertisementPoll {
+			t.Errorf("the route was withdrawn %v after the cutoff, bound 1 s plus the %v poll", w.at-stop,
+				advertisementPoll)
 		}
-	} else {
-		l.record(t, "local withdrawal", "the advertisement reports no GateClosed transition between the cutoff "+
-			"and the end of the fault")
 	}
 	l.record(t, "remote convergence", "not measured: the compute node's tenant routes are pinned eBPF map "+
 		"entries the lab cannot read")
@@ -231,8 +273,8 @@ func (m *masque) rowProviderStall(t *testing.T) {
 		t.Fatal(err)
 	}
 	resumed = true
-	seen, _ := g.wait(l, t)
-	m.requireCutoff(t, seen, last, last, cont)
+	seen, _, w := g.wait(l, t)
+	m.requireCutoff(t, seen, w, last, last, cont)
 	m.waitConnected(t, m.a)
 	m.waitConnected(t, m.b)
 }
@@ -263,8 +305,8 @@ func (m *masque) rowAgentStall(t *testing.T) {
 		t.Fatal(err)
 	}
 	resumed = true
-	seen, _ := g.wait(l, t)
-	m.requireCutoff(t, seen, last, last-timing.RenewInterval, cont)
+	seen, _, w := g.wait(l, t)
+	m.requireCutoff(t, seen, w, last, last-timing.RenewInterval, cont)
 	m.waitConnected(t, m.a)
 	m.waitConnected(t, m.b)
 }
@@ -275,17 +317,25 @@ func (m *masque) rowAgentStall(t *testing.T) {
 // forwarding within the local expiry bound, and the client's request ends.
 func (m *masque) rowAPIPartition(t *testing.T) {
 	l := m.l
-	apiserver, err := l.kubectl("get", "service", "kubernetes", "-n", "default", "-o", "jsonpath={.spec.clusterIP}")
+	// The pod's client dials the Service address, which the CNI may
+	// translate to an endpoint before the packet leaves the pod: drop both.
+	clusterIP, err := l.kubectl("get", "service", "kubernetes", "-n", "default", "-o", "jsonpath={.spec.clusterIP}")
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr, err := netip.ParseAddr(strings.TrimSpace(apiserver))
+	endpoints, err := l.kubectl("get", "endpointslices", "-n", "default", "-l",
+		"kubernetes.io/service-name=kubernetes", "-o", "jsonpath={.items[*].endpoints[*].addresses[*]}")
 	if err != nil {
 		t.Fatal(err)
 	}
-	family := "ip"
-	if addr.Is6() {
-		family = "ip6"
+	fields := strings.Fields(clusterIP + " " + endpoints)
+	apiservers := make([]netip.Addr, 0, len(fields))
+	for _, f := range fields {
+		addr, err := netip.ParseAddr(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		apiservers = append(apiservers, addr)
 	}
 	pid := strconv.Itoa(podPID(t, edgeNode1, masqueNS, m.pod.Name))
 	nft := func(args ...string) error {
@@ -309,15 +359,23 @@ func (m *masque) rowAPIPartition(t *testing.T) {
 		"priority", "0", ";", "}"); err != nil {
 		t.Fatal(err)
 	}
-	if err := nft("add", "rule", "inet", "masque-partition", "out", family, "daddr", addr.String(), "drop"); err != nil {
-		t.Fatal(err)
+	for _, addr := range apiservers {
+		family := "ip"
+		if addr.Is6() {
+			family = "ip6"
+		}
+		if err := nft("add", "rule", "inet", "masque-partition", "out", family, "daddr", addr.String(),
+			"drop"); err != nil {
+			t.Fatal(err)
+		}
 	}
+	l.record(t, "API server addresses dropped", apiservers)
 	last := m.lastRenewal(t)
 	time.Sleep(25 * time.Second)
 	cont := boottime()
 	heal()
-	seen, session := g.wait(l, t)
-	m.requireCutoff(t, seen, last, last, cont)
+	seen, session, w := g.wait(l, t)
+	m.requireCutoff(t, seen, w, last, last, cont)
 	rs := echoes(session, dst)
 	if len(rs) == 0 {
 		t.Fatal("the client's request never forwarded")
