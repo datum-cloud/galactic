@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,6 +68,7 @@ func (m *masque) lastRenewal(t *testing.T) time.Duration {
 type gateWatch struct {
 	sniff, probe, session *probeRun
 	stopPoll              chan struct{}
+	stopOnce              sync.Once
 	polled                chan withdrawal
 }
 
@@ -104,9 +106,14 @@ func (m *masque) watchGate(t *testing.T, name string, mt *masqueTenant, d time.D
 	go func() {
 		g.polled <- pollWithdrawal(l, key, g.stopPoll)
 	}()
+	// A row that fails before wait still stops the poll.
+	t.Cleanup(g.stop)
 	time.Sleep(3 * time.Second)
 	return g
 }
+
+// stop ends the advertisement poll; it may be called more than once.
+func (g *gateWatch) stop() { g.stopOnce.Do(func() { close(g.stopPoll) }) }
 
 // pollWithdrawal reads the advertisement at key every advertisementPoll
 // until stop closes, and returns the first time it was deleted or reported
@@ -142,7 +149,7 @@ func (g *gateWatch) wait(l *lab, t *testing.T) (seen, session []event, w withdra
 	t.Helper()
 	g.probe.wait(l, t)
 	seen, session = windowed(g.sniff.wait(l, t)), g.session.wait(l, t)
-	close(g.stopPoll)
+	g.stop()
 	return seen, session, <-g.polled
 }
 
@@ -155,8 +162,8 @@ const leaseDuration = 15 * time.Second
 // earlier than the lease duration after earliest, the earliest renewal start
 // the node can have applied last, and stayed closed until resumed,
 // when the fault ended. It records the local cutoff and the local
-// withdrawal, the advertisement deleted or reported not advertised, within
-// 1 s of the cutoff plus the poll interval.
+// withdrawal, the advertisement deleted or reported not advertised, which
+// must follow the cutoff, within 1 s plus the poll interval.
 func (m *masque) requireCutoff(t *testing.T, seen []event, w withdrawal, last, earliest, resumed time.Duration) {
 	t.Helper()
 	l := m.l
@@ -181,6 +188,8 @@ func (m *masque) requireCutoff(t *testing.T, seen []event, w withdrawal, last, e
 	switch {
 	case !w.seen:
 		t.Error("the route's advertisement was never withdrawn during the window")
+	case w.at < stop-advertisementPoll:
+		t.Errorf("the route was withdrawn %v before the cutoff, so the gate did not cause it", stop-w.at)
 	default:
 		l.record(t, "local withdrawal after the cutoff", w.at-stop)
 		if w.at-stop > time.Second+advertisementPoll {
