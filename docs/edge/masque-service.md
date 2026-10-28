@@ -122,4 +122,4 @@ Step 2 has 20 seconds, so give the pod a termination grace period of at least 30
 
 ## Metrics
 
-`/metrics` serves the instrumentation library's registry, including `galactic_connectip_packets_denied_total{direction, reason}` ([packet policy](masque-provider.md#packet-policy)).
+`/metrics` serves the instrumentation library's registry: the CONNECT-IP server's request, tunnel and packet metrics (`galactic_connectip_*`) and the adapter's admission, route claim and request state metrics (`galactic_masque_*`), listed in [the MASQUE metrics reference](../observability/masque.md). [Diagnose a MASQUE connector](troubleshooting.md#diagnose-a-masque-connector) uses them with the provider's log lines.
