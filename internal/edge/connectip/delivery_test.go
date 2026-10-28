@@ -145,3 +145,69 @@ func TestTUNQueueFullDropIsCounted(t *testing.T) {
 	}
 	pollUntil(t, "queue_full drops", func() bool { return queueFull()-before == extra })
 }
+
+// slowTunnel is a tunnel whose every write toward the client takes per, as
+// a QUIC connection to a stalled client drains one datagram per probe
+// timeout.
+type slowTunnel struct {
+	*narrowTunnel
+	per time.Duration
+}
+
+func (t *slowTunnel) WritePacket([]byte) ([]byte, error) {
+	select {
+	case <-time.After(t.per):
+		return nil, nil
+	case <-t.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+// TestBackToBackSlowWritesEndSession keeps one tunnel's writes slow without
+// any single write reaching deliveryTimeout. The session still ends, once
+// slow writes have run back to back for deliveryTimeout.
+func TestBackToBackSlowWritesEndSession(t *testing.T) {
+	shortenDeliveryTimeout(t, 400*time.Millisecond)
+	before := slowClientEnds()
+	tun := &slowTunnel{narrowTunnel: newNarrowTunnel(maxPacketSize), per: 150 * time.Millisecond}
+	sess, done := runProxySession(t, tun)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case sess.toClient <- echoRequest(t, policyTarget, firstClient, i, 200):
+			case <-stop:
+				return
+			case <-sess.closed:
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("session with back-to-back slow writes stayed open")
+	}
+	if got := slowClientEnds() - before; got != 1 {
+		t.Fatalf("slow_client count rose by %v, want 1", got)
+	}
+}
+
+// TestSpacedSlowWritesKeepSession sends packets far enough apart that the
+// writer waits for each one. Slow writes with idle time between them are a
+// slow link, not a stalled client, so the session stays open.
+func TestSpacedSlowWritesKeepSession(t *testing.T) {
+	shortenDeliveryTimeout(t, 400*time.Millisecond)
+	tun := &slowTunnel{narrowTunnel: newNarrowTunnel(maxPacketSize), per: 150 * time.Millisecond}
+	sess, done := runProxySession(t, tun)
+	for i := range 8 {
+		sess.inject(echoRequest(t, policyTarget, firstClient, i, 200))
+		time.Sleep(300 * time.Millisecond)
+	}
+	select {
+	case <-done:
+		t.Fatal("session with spaced slow writes ended")
+	default:
+	}
+}

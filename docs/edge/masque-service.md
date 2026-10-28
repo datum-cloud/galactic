@@ -79,8 +79,10 @@ The server applies the per-pod limits of the [MASQUE contract](../designs/masque
 | Authorization of one request             | 3 s                    | 503                                                                  |
 | Admitted requests                        | 64                     | 503                                                                  |
 | Queued packets toward one client         | 128 packets or 256 KiB | Packet dropped, counted as `queue_full`                              |
-| Blocked write toward one client          | 5 s                    | That request ends, counted as `slow_client`                          |
+| Stuck delivery toward one client         | 5 s                    | That request ends, counted as `slow_client`                          |
 | HTTP/2 connection with no request        | 30 s                   | Connection closed                                                    |
+
+Delivery is stuck when one write toward the client blocks for 5 s, or when writes that each take over 1.25 s run back to back for 5 s. The second case catches an HTTP/3 client that stopped reading, whose QUIC connection still sends one datagram per probe timeout.
 
 Both transports share every limit from the connection caps down: an HTTP/3 session and an HTTP/2 session each take one of the 64 admitted requests. A QUIC connection counts toward its source IP once its handshake completes, so spoofed packets cannot use up another client's slots. A TCP connection counts once it is accepted, because TCP's own handshake proves the address. The source-IP limit counts every client behind one NAT as one source.
 

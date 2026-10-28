@@ -603,13 +603,10 @@ func (s *Server) proxySession(
 			}
 		}
 	})
-	// writeStarted is when the write toward the client in progress began,
-	// as time since base plus one, or 0 between writes.
-	base := time.Now()
-	var writeStarted atomic.Int64
+	clock := &deliveryClock{base: time.Now()}
 	wg.Go(func() {
 		defer cancel()
-		watchDelivery(ctx, log, conn, base, &writeStarted)
+		watchDelivery(ctx, log, conn, clock)
 	})
 	wg.Go(func() {
 		defer cancel()
@@ -623,9 +620,9 @@ func (s *Server) proxySession(
 				deny(toClient, reason)
 				continue
 			}
-			writeStarted.Store(int64(time.Since(base)) + 1)
+			clock.start()
 			icmp, err := conn.WritePacket(buf[:n])
-			writeStarted.Store(0)
+			clock.done()
 			if err != nil {
 				return
 			}
@@ -665,13 +662,65 @@ func (s *Server) proxySession(
 	wg.Wait()
 }
 
-// watchDelivery ends a session whose write toward the client stays blocked
-// for deliveryTimeout, checked every quarter of it, and counts it as
-// denied with reason slow_client. Over HTTP/3 that closes the client's QUIC
-// connection, since a blocked datagram waits on the connection's send
-// queue; the connection's other request is stalled by the same client. It
-// returns when ctx is done or the session is aborted.
-func watchDelivery(ctx context.Context, log *slog.Logger, conn tunnel, base time.Time, writeStarted *atomic.Int64) {
+// deliveryClock times the writes toward one client for watchDelivery.
+// Times are durations since base plus one, so 0 means unset.
+type deliveryClock struct {
+	base time.Time
+	// writing is when the write in progress began.
+	writing atomic.Int64
+	// slowSince is when the current run of slow writes began. A slow write
+	// takes at least a quarter of deliveryTimeout; the run ends at a prompt
+	// write, or when the writer waits that long for a packet.
+	slowSince atomic.Int64
+	// lastEnd is when the last write returned. Only the writer uses it.
+	lastEnd int64
+}
+
+func (c *deliveryClock) now() int64 { return int64(time.Since(c.base)) + 1 }
+
+func (c *deliveryClock) start() {
+	now := c.now()
+	if c.lastEnd != 0 && time.Duration(now-c.lastEnd) >= deliveryTimeout/4 {
+		c.slowSince.Store(0)
+	}
+	c.writing.Store(now)
+}
+
+func (c *deliveryClock) done() {
+	now, began := c.now(), c.writing.Swap(0)
+	c.lastEnd = now
+	if time.Duration(now-began) < deliveryTimeout/4 {
+		c.slowSince.Store(0)
+		return
+	}
+	c.slowSince.CompareAndSwap(0, began)
+}
+
+// blocked returns how long delivery has been stuck while a write is in
+// progress: since the current run of slow writes began, or else since the
+// write began.
+func (c *deliveryClock) blocked() time.Duration {
+	began := c.writing.Load()
+	if began == 0 {
+		return 0
+	}
+	if slow := c.slowSince.Load(); slow != 0 {
+		began = slow
+	}
+	return time.Duration(c.now() - began)
+}
+
+// watchDelivery ends a session whose delivery toward the client has been
+// stuck for deliveryTimeout, checked every quarter of it, and counts it as
+// denied with reason slow_client. Stuck means one write blocked that long,
+// or back-to-back slow writes for that long: a QUIC connection to a client
+// that stopped reading still drains one datagram per probe timeout, and
+// those timeouts double from a fraction of a second. Over HTTP/3 ending the
+// session closes the client's QUIC connection, since a blocked datagram
+// waits on the connection's send queue; the connection's other request is
+// stalled by the same client. It returns when ctx is done or the session is
+// aborted.
+func watchDelivery(ctx context.Context, log *slog.Logger, conn tunnel, clock *deliveryClock) {
 	t := time.NewTicker(deliveryTimeout / 4)
 	defer t.Stop()
 	for {
@@ -680,8 +729,7 @@ func watchDelivery(ctx context.Context, log *slog.Logger, conn tunnel, base time
 			return
 		case <-t.C:
 		}
-		started := writeStarted.Load()
-		if started == 0 || time.Since(base)-time.Duration(started-1) < deliveryTimeout {
+		if clock.blocked() < deliveryTimeout {
 			continue
 		}
 		deny(toClient, reasonSlowClient)
