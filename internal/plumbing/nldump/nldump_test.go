@@ -184,17 +184,26 @@ func TestLister_ListsTheHandlesNamespace(t *testing.T) {
 	// the kernel adds and removes its own entries on the link, the
 	// all-routers multicast neighbor above all, between two dumps.
 	err = nsObj.Do(func(ns.NetNS) error {
-		if got, err := nldump.NeighList(link.Attrs().Index, netlink.FAMILY_V6); err != nil ||
-			!slices.ContainsFunc(got, func(n netlink.Neigh) bool { return n.IP.Equal(neighIP) }) {
-			return fmt.Errorf("package NeighList = %v, %v; want it to hold %s", got, err, neighIP)
+		got, err := nldump.NeighList(link.Attrs().Index, netlink.FAMILY_V6)
+		if err != nil {
+			return fmt.Errorf("package NeighList: %w", err)
 		}
-		if got, err := nldump.RuleList(netlink.FAMILY_V6); err != nil ||
-			!slices.ContainsFunc(got, func(r netlink.Rule) bool { return r.Priority == rule.Priority }) {
-			return fmt.Errorf("package RuleList = %v, %v; want it to hold priority %d", got, err, rule.Priority)
+		if !slices.ContainsFunc(got, func(n netlink.Neigh) bool { return n.IP.Equal(neighIP) }) {
+			return fmt.Errorf("package NeighList = %v; want it to hold %s", got, neighIP)
 		}
-		if got, err := nldump.RouteList(link, netlink.FAMILY_V6); err != nil ||
-			!slices.ContainsFunc(got, func(r netlink.Route) bool { return r.Dst != nil && r.Dst.Contains(ip) }) {
-			return fmt.Errorf("package RouteList = %v, %v; want it to hold a route for %s", got, err, ip)
+		gotRules, err := nldump.RuleList(netlink.FAMILY_V6)
+		if err != nil {
+			return fmt.Errorf("package RuleList: %w", err)
+		}
+		if !slices.ContainsFunc(gotRules, func(r netlink.Rule) bool { return r.Priority == rule.Priority }) {
+			return fmt.Errorf("package RuleList = %v; want it to hold priority %d", gotRules, rule.Priority)
+		}
+		gotRoutes, err := nldump.RouteList(link, netlink.FAMILY_V6)
+		if err != nil {
+			return fmt.Errorf("package RouteList: %w", err)
+		}
+		if !slices.ContainsFunc(gotRoutes, func(r netlink.Route) bool { return r.Dst != nil && r.Dst.Contains(ip) }) {
+			return fmt.Errorf("package RouteList = %v; want it to hold a route for %s", gotRoutes, ip)
 		}
 		return nil
 	})
