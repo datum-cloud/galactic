@@ -11,7 +11,14 @@
 // exclusive connector /96 lease on a programmed gVPC attachment. The server
 // validates the grant before opening its packet backend or accepting the tunnel.
 // Invalid credentials produce 401, denied gVPC access 403, and unavailable
-// authority or insufficient datagram capacity 503.
+// authority or insufficient datagram capacity 503. Only an admitted request
+// receives the inner MTU probe datagram.
+//
+// Config.Limits bounds the work before admission: open QUIC connections,
+// request streams per connection, requests inside Admit, and admitted
+// requests. A connection over its cap is closed with H3_EXCESSIVE_LOAD, and a
+// request over either request cap gets 503 before Admit runs. A TUNBackend
+// session queues at most 128 packets or 256 KiB toward its client.
 //
 // ADDRESS_ASSIGN communicates the delegated /96 and ROUTE_ADVERTISEMENT the
 // authorized destinations. Clients may use addresses throughout the /96,

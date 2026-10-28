@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	connectip "github.com/quic-go/connect-ip-go"
 	"github.com/quic-go/quic-go"
@@ -48,7 +49,44 @@ const (
 	probeContextID = 1
 
 	maxPacketSize = 65535
+
+	// errExcessiveLoad is the HTTP/3 H3_EXCESSIVE_LOAD error code.
+	errExcessiveLoad = 0x0107
 )
+
+// Default limits apply to each zero field of Limits. They are the initial
+// per-pod targets in docs/designs/masque/contract.md; MaxSessions covers 32
+// active connectors plus 32 replacements.
+const (
+	DefaultMaxConnections    = 128
+	DefaultMaxStreamsPerConn = 2
+	DefaultMaxAdmissions     = 16
+	DefaultMaxSessions       = 64
+)
+
+// Limits bound the work any client can make the server do before and after
+// admission. A zero field takes its default.
+type Limits struct {
+	// MaxConnections caps open QUIC connections. The server closes a
+	// connection over the cap with H3_EXCESSIVE_LOAD.
+	MaxConnections int
+	// MaxStreamsPerConn caps the concurrent request streams of one
+	// connection. It is QUIC's MaxIncomingStreams.
+	MaxStreamsPerConn int
+	// MaxAdmissions caps the requests waiting on Admission.Admit at once.
+	MaxAdmissions int
+	// MaxSessions caps the requests admitted at once.
+	MaxSessions int
+}
+
+func (l Limits) withDefaults() Limits {
+	return Limits{
+		MaxConnections:    cmp.Or(l.MaxConnections, DefaultMaxConnections),
+		MaxStreamsPerConn: cmp.Or(l.MaxStreamsPerConn, DefaultMaxStreamsPerConn),
+		MaxAdmissions:     cmp.Or(l.MaxAdmissions, DefaultMaxAdmissions),
+		MaxSessions:       cmp.Or(l.MaxSessions, DefaultMaxSessions),
+	}
+}
 
 // Config configures a Server.
 type Config struct {
@@ -56,9 +94,12 @@ type Config struct {
 	Authority string
 	// TLSConfig holds the server certificate.
 	TLSConfig *tls.Config
-	// QUICConfig is optional; datagrams are always enabled. When nil, the
-	// initial packet size is DefaultInitialPacketSize.
+	// QUICConfig is optional; datagrams are always enabled and
+	// MaxIncomingStreams is Limits.MaxStreamsPerConn. When nil, the initial
+	// packet size is DefaultInitialPacketSize.
 	QUICConfig *quic.Config
+	// Limits is optional; see Limits for the defaults.
+	Limits Limits
 	// Admission authenticates requests and supplies an authorized prefix lease.
 	Admission Admission
 	Backend   PacketBackend
@@ -74,6 +115,13 @@ type Server struct {
 	log       *slog.Logger
 	h3        *http3.Server
 	proxy     connectip.Proxy
+
+	// conns counts open QUIC connections; admitting and active hold one
+	// token per request in Admit and per admitted request.
+	maxConns  int64
+	conns     atomic.Int64
+	admitting chan struct{}
+	active    chan struct{}
 
 	mu       sync.Mutex
 	closed   bool
@@ -110,13 +158,18 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.QUICConfig != nil {
 		quicConf = cfg.QUICConfig.Clone()
 	}
+	limits := cfg.Limits.withDefaults()
 	quicConf.EnableDatagrams = true
+	quicConf.MaxIncomingStreams = int64(limits.MaxStreamsPerConn)
 
 	s := &Server{
 		template:  template,
 		admission: cfg.Admission,
 		backend:   cfg.Backend,
 		log:       log,
+		maxConns:  int64(limits.MaxConnections),
+		admitting: make(chan struct{}, limits.MaxAdmissions),
+		active:    make(chan struct{}, limits.MaxSessions),
 	}
 	s.h3 = &http3.Server{
 		Handler:         s,
@@ -125,6 +178,7 @@ func NewServer(cfg Config) (*Server, error) {
 		QUICConfig:      quicConf,
 		Logger:          log,
 		ConnContext: func(ctx context.Context, c *quic.Conn) context.Context {
+			s.countConn(c)
 			return context.WithValue(ctx, quicConnKey{}, c)
 		},
 	}
@@ -179,26 +233,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, http.StatusBadRequest, "request must name exactly one VPC", nil)
 		return
 	}
-	if err := probeInnerMTU(r); err != nil {
-		s.reject(w, http.StatusServiceUnavailable, "path cannot carry the minimum inner MTU", err)
-		return
-	}
 	if !s.startSession() {
 		s.reject(w, http.StatusServiceUnavailable, "server is closing", nil)
 		return
 	}
 	defer s.sessions.Done()
-
+	// Both caps are taken before Admit, so an unauthenticated client cannot
+	// queue work behind them.
+	if !tryAcquire(s.active) {
+		s.reject(w, http.StatusServiceUnavailable, "too many sessions", nil)
+		return
+	}
+	defer release(s.active)
+	if !tryAcquire(s.admitting) {
+		s.reject(w, http.StatusServiceUnavailable, "too many admissions in progress", nil)
+		return
+	}
 	lease, err := s.admission.Admit(r.Context(), token, vpcName)
+	release(s.admitting)
 	if err != nil {
-		status := http.StatusServiceUnavailable
-		if errors.Is(err, ErrUnauthenticated) {
-			status = http.StatusUnauthorized
-			w.Header().Set("WWW-Authenticate", "Bearer")
-		} else if errors.Is(err, ErrForbidden) {
-			status = http.StatusForbidden
-		}
-		s.reject(w, status, "admission rejected", err)
+		s.reject(w, admissionStatus(w, err), "admission rejected", err)
 		return
 	}
 	if lease == nil {
@@ -221,6 +275,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, http.StatusServiceUnavailable, "admission expired", nil)
 		return
 	default:
+	}
+	// Only an admitted client may receive the probe datagram.
+	if err := probeInnerMTU(r); err != nil {
+		s.reject(w, http.StatusServiceUnavailable, "path cannot carry the minimum inner MTU", err)
+		return
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -279,6 +338,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.proxySession(ctx, log, conn, sess, newPacketPolicy(info.Prefix, lease.Routes()))
 	log.Info("CONNECT-IP request ended")
 }
+
+// countConn counts c until it closes, and closes it at once when it would
+// exceed the connection cap.
+func (s *Server) countConn(c *quic.Conn) {
+	n := s.conns.Add(1)
+	context.AfterFunc(c.Context(), func() { s.conns.Add(-1) })
+	if n > s.maxConns {
+		s.log.Info("QUIC connection rejected", "reason", "too many connections", "remote", c.RemoteAddr())
+		_ = c.CloseWithError(errExcessiveLoad, "too many connections")
+	}
+}
+
+// tryAcquire takes a token from sem without waiting.
+func tryAcquire(sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func release(sem chan struct{}) { <-sem }
 
 // startSession registers a session with Close, or returns false once the
 // server is closing.
@@ -393,6 +475,20 @@ func answerAddressRequests(ctx context.Context, log *slog.Logger, conn *connecti
 			log.Warn("could not answer address request", "error", err)
 			return
 		}
+	}
+}
+
+// admissionStatus returns the HTTP status for an Admit error, and asks for a
+// bearer credential when the error is ErrUnauthenticated.
+func admissionStatus(w http.ResponseWriter, err error) int {
+	switch {
+	case errors.Is(err, ErrUnauthenticated):
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		return http.StatusUnauthorized
+	case errors.Is(err, ErrForbidden):
+		return http.StatusForbidden
+	default:
+		return http.StatusServiceUnavailable
 	}
 }
 
