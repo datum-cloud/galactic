@@ -25,8 +25,8 @@ func TestMetricsScrape(t *testing.T) {
 }
 
 func TestFlagsRequireGrantAuthority(t *testing.T) {
-	base := make([]string, 0, 6)
-	base = append(base, "--provider", "masque", "--authority", "masque.example.test")
+	// No spare capacity, so each case's append copies base.
+	base := []string{"--provider", "masque", "--authority", "masque.example.test"}
 	tests := []struct {
 		name string
 		args []string
@@ -35,7 +35,9 @@ func TestFlagsRequireGrantAuthority(t *testing.T) {
 		{"NoAuthorityURL", base, "--grant-authority-url"},
 		{"PlainHTTP", append(base, "--grant-authority-url", "http://authority.example.test"), "https://"},
 		{"NoProvider", []string{"--authority", "masque.example.test"}, "--provider"},
+		{"NoExtendedConnect", append(base, "--grant-authority-url", "https://authority.example.test"), "http2xconnect=1"},
 	}
+	t.Setenv("GODEBUG", "")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := newRootCommand()

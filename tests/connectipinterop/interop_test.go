@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/quic-go/quic-go/quicvarint"
 )
 
 type transport struct {
@@ -49,7 +47,7 @@ func TestXrayRoundTrip(t *testing.T) {
 			}
 			h.record(t, result{Check: "round trip", Transport: tr.name, Client: clientXray, Detail: detail})
 			before := h.counters(t)
-			alpnBefore, h2Before := h.alpnCount(tr.alpn), h.h2ProtoCount("HTTP/2.0")
+			alpnBefore, tcpBefore := h.alpnCount(tr.alpn), h.tcpAdmits()
 			x := h.startXray(t, "roundtrip-"+tr.alpn, c, tr.alpn, h.caFile)
 			udpErr := x.udpRoundTrips(udpRoundTrips, 10*time.Second)
 			// The UDP phase alone carries the packet-size evidence: the TCP
@@ -68,7 +66,7 @@ func TestXrayRoundTrip(t *testing.T) {
 			detail["backend_sessions"] = opened
 			detail["outer_udp443_packets"] = after[counterUDP443] - before[counterUDP443]
 			detail["outer_tcp443_packets"] = after[counterTCP443] - before[counterTCP443]
-			detail["http2_requests_as_HTTP2.0"] = h.h2ProtoCount("HTTP/2.0") - h2Before
+			detail["requests_admitted_over_tcp"] = h.tcpAdmits() - tcpBefore
 			t.Logf("%s: %v", tr.name, detail)
 
 			if udpErr != nil {
@@ -98,8 +96,8 @@ func TestXrayRoundTrip(t *testing.T) {
 				t.Errorf("outer packets: %s %d, %s %d; want only %s",
 					tr.counter, after[tr.counter]-before[tr.counter], other, after[other]-before[other], tr.counter)
 			}
-			if tr.alpn == "h2" && h.h2ProtoCount("HTTP/2.0") == h2Before {
-				t.Error("no request reached the HTTP/2 server as HTTP/2.0")
+			if admittedOverTCP := h.tcpAdmits() != tcpBefore; admittedOverTCP != (tr.alpn == "h2") {
+				t.Errorf("request admitted over the TCP listener: %v, want %v", admittedOverTCP, tr.alpn == "h2")
 			}
 		})
 	}
@@ -190,14 +188,14 @@ func TestHTTP2WithUDP443Blocked(t *testing.T) {
 // destination outside the advertised routes must be dropped without reaching
 // the VPC or ending either request. A hop limit of 1 is forwarded, because
 // the client decremented it on encapsulation. An oversized DATAGRAM capsule
-// ends the request on HTTP/2, where the server must buffer it to forward it;
-// on HTTP/3, connect-ip-go discards stream DATAGRAM capsules as they arrive,
-// so the request stays open with nothing buffered.
+// on the stream is discarded as it arrives on both transports, so the request
+// stays open with nothing buffered.
 func TestMalformedRequestLeavesSiblingIntact(t *testing.T) {
 	h := requireFixture(t)
 	datagram := appendDatagram(nil, make([]byte, 100))
-	oversized := quicvarint.Append(nil, capsuleDatagram)
-	oversized = quicvarint.Append(oversized, 1<<20)
+	// The whole 1 MiB value is sent: over HTTP/2 the request's later
+	// datagrams follow it on the same stream.
+	oversized := appendCapsule(nil, capsuleDatagram, make([]byte, 1<<20))
 	badRequest := appendCapsule(nil, capsuleAddressRequest, []byte{0x01, 0x05, 0xff})
 	for _, tr := range transports {
 		for _, tc := range []struct {
@@ -208,7 +206,7 @@ func TestMalformedRequestLeavesSiblingIntact(t *testing.T) {
 			// must reach the VPC.
 			forwarded int
 		}{
-			{"oversized capsule", func(r *rawRequest) error { return r.writeStream(oversized) }, tr.alpn == "h2", 0},
+			{"oversized capsule", func(r *rawRequest) error { return r.writeStream(oversized) }, false, 0},
 			{"malformed ADDRESS_REQUEST", func(r *rawRequest) error { return r.writeStream(badRequest) }, true, 0},
 			{"capsule truncated by FIN", func(r *rawRequest) error {
 				if err := r.writeStream(datagram[:len(datagram)-10]); err != nil {

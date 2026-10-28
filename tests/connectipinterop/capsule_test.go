@@ -24,8 +24,14 @@ const (
 	capsuleRouteAdvertisement = 0x03
 )
 
-// maxCapsuleLen bounds one capsule's value: a context ID and the largest IPv6
-// packet the prototype forwards. Longer capsules end the request.
+// maxPacketSize is the largest IP packet the clients read from a capsule.
+const maxPacketSize = 1500
+
+// protocolConnectIP is the Extended CONNECT protocol of RFC 9484.
+const protocolConnectIP = "connect-ip"
+
+// maxCapsuleLen bounds one capsule's value the raw clients read: a context
+// ID and the largest IPv6 packet the server sends.
 const maxCapsuleLen = 8 + maxPacketSize
 
 var errCapsuleTooLarge = errors.New("capsule exceeds the size limit")
@@ -148,32 +154,6 @@ func parseAddressEntries(v []byte) ([]assignment, error) {
 		out = append(out, assignment{requestID: id, prefix: p})
 	}
 	return out, nil
-}
-
-// appendRouteAdvertisement advertises each prefix for every IP protocol.
-func appendRouteAdvertisement(b []byte, prefixes []netip.Prefix) []byte {
-	var v []byte
-	for _, p := range prefixes {
-		if p.Addr().Is4() {
-			v = append(v, 4)
-		} else {
-			v = append(v, 6)
-		}
-		v = append(v, p.Masked().Addr().AsSlice()...)
-		v = append(v, lastAddr(p).AsSlice()...)
-		v = append(v, 0)
-	}
-	return appendCapsule(b, capsuleRouteAdvertisement, v)
-}
-
-// lastAddr returns the highest address in p.
-func lastAddr(p netip.Prefix) netip.Addr {
-	b := p.Masked().Addr().AsSlice()
-	for bit := p.Bits(); bit < len(b)*8; bit++ {
-		b[bit/8] |= 0x80 >> (bit % 8)
-	}
-	addr, _ := netip.AddrFromSlice(b)
-	return addr
 }
 
 func TestCapsuleReaderSplitAndCoalesced(t *testing.T) {

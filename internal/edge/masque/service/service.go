@@ -5,7 +5,7 @@
 //go:build linux
 
 // Package service runs one MASQUE provider pod: a CONNECT-IP server over
-// HTTP/3 (internal/edge/connectip) in front of the provider adapter
+// HTTP/3 and HTTP/2 (internal/edge/connectip) in front of the provider adapter
 // (internal/edge/masque), and an HTTP server for its probes and metrics.
 // cmd/masque-provider and the conformance fixture both run it, and differ
 // only in their Authorizer.
@@ -54,6 +54,10 @@ type Config struct {
 	Authority string
 	// Listen is the UDP address the HTTP/3 server listens on.
 	Listen string
+	// ListenTCP is the TCP address the HTTP/2 server listens on. Empty
+	// serves HTTP/3 only. HTTP/2 needs the process to start with GODEBUG
+	// containing http2xconnect=1; Run fails without it.
+	ListenTCP string
 	// HealthListen is the TCP address serving /healthz, /readyz and
 	// /metrics. Empty serves none of them.
 	HealthListen string
@@ -72,8 +76,9 @@ type Config struct {
 }
 
 // Run serves until ctx is done or a component fails. It holds the pod's
-// EdgeInstance lease through the adapter, serves CONNECT-IP on Listen, and
-// reports ready on /readyz while the listener is open and the lease held.
+// EdgeInstance lease through the adapter, serves CONNECT-IP over HTTP/3 on
+// Listen and over HTTP/2 on ListenTCP, and reports ready on /readyz while
+// the listeners are open and the lease held.
 // On return the server has ended every session, then the adapter released
 // the routes, deleted the attachments and released the lease.
 func Run(ctx context.Context, cfg Config) error {
@@ -82,6 +87,8 @@ func Run(ctx context.Context, cfg Config) error {
 		return errors.New("client, authorizer and certificate source are required")
 	case cfg.Listen == "":
 		return errors.New("listen address is required")
+	case cfg.ListenTCP != "" && !connectip.ExtendedConnectEnabled():
+		return connectip.ErrExtendedConnectDisabled
 	}
 	log := cfg.Log
 	if log == nil {
@@ -108,7 +115,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	// Both sockets open before the instance is registered, so a port that
+	// Every socket opens before the instance is registered, so a port that
 	// cannot be bound leaves nothing behind in the API.
 	var listening atomic.Bool
 	health, err := serveHealth(ctx, cfg.HealthListen, func() bool { return listening.Load() && a.Ready() }, log)
@@ -119,22 +126,41 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return errors.Join(err, health.close())
 	}
+	var ln net.Listener
+	if cfg.ListenTCP != "" {
+		if ln, err = (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.ListenTCP); err != nil {
+			return errors.Join(err, pc.Close(), health.close())
+		}
+	}
+	closeSockets := func() error {
+		if ln == nil {
+			return pc.Close()
+		}
+		return errors.Join(pc.Close(), ln.Close())
+	}
 	if err := a.Start(ctx); err != nil {
-		return errors.Join(err, pc.Close(), health.close())
+		return errors.Join(err, closeSockets(), health.close())
 	}
 	listening.Store(true)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(pc) }()
+	serveTCPErr := make(chan error, 1)
+	if ln != nil {
+		go func() { serveTCPErr <- srv.ServeTLS(ln) }()
+	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	runErr := make(chan error, 1)
 	go func() { runErr <- a.Run(runCtx) }()
-	log.Info("serving CONNECT-IP", "listen", cfg.Listen, "authority", cfg.Authority, "provider", cfg.Provider)
+	log.Info("serving CONNECT-IP", "listen", cfg.Listen, "listenTCP", cfg.ListenTCP, "authority", cfg.Authority,
+		"provider", cfg.Provider)
 
 	var stopped error
 	select {
 	case <-ctx.Done():
 	case err := <-serveErr:
 		stopped = fmt.Errorf("HTTP/3 server stopped: %w", err)
+	case err := <-serveTCPErr:
+		stopped = fmt.Errorf("HTTP/2 server stopped: %w", err)
 	case err := <-health.errc:
 		stopped = fmt.Errorf("health server stopped: %w", err)
 	case err := <-runErr:

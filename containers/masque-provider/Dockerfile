@@ -37,5 +37,9 @@ FROM scratch
 WORKDIR /
 COPY --from=builder /workspace/masque-provider .
 USER 65532:65532
+# net/http offers HTTP/2 Extended CONNECT, which the TCP fallback needs, only
+# when GODEBUG holds this at process start. The provider refuses to start
+# with --listen-tcp set and this missing.
+ENV GODEBUG=http2xconnect=1
 
 ENTRYPOINT ["/masque-provider"]

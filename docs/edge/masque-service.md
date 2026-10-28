@@ -1,6 +1,6 @@
 # MASQUE connector service
 
-`cmd/masque-provider` is the CONNECT-IP service a MASQUE connector reaches. It serves CONNECT-IP ([RFC 9484](https://www.rfc-editor.org/rfc/rfc9484)) over HTTP/3 on UDP and runs as an unprivileged Galactic Edge provider. It forwards each admitted connector's packets into the connector's gVPC through the [provider adapter](masque-provider.md). The [grant authority](masque-authority.md) authorizes every request. The service accepts no credential of its own.
+`cmd/masque-provider` is the CONNECT-IP service a MASQUE connector reaches. It serves CONNECT-IP ([RFC 9484](https://www.rfc-editor.org/rfc/rfc9484)) over HTTP/3 on UDP, and over HTTP/2 with TLS on TCP for clients whose UDP is blocked. It runs as an unprivileged Galactic Edge provider. It forwards each admitted connector's packets into the connector's gVPC through the [provider adapter](masque-provider.md). The [grant authority](masque-authority.md) authorizes every request. The service accepts no credential of its own.
 
 The service and the conformance fixture (`tests/edgeconformance/masqueprovider`) run the same code, `internal/edge/masque/service`. They differ only in where grants come from: the fixture can also use static test credentials.
 
@@ -19,7 +19,7 @@ Images:
 | ------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `config/masque`           | Namespace `masque-system`, both ServiceAccounts, the authority's RBAC, and the `EdgeProvider` named `masque` | Nothing                                                                                                                               |
 | `config/masque/authority` | The `masque-authority` Deployment and Service                                                                | `--cell`, and Secret `masque-authority-tls` for `masque-authority.masque-system.svc`                                                  |
-| `config/masque/provider`  | The `masque-provider` Deployment and UDP/443 Service                                                         | `--authority`, Secret `masque-provider-tls` for that name, ConfigMap `masque-authority-ca` (`ca.crt`), and how the Service is exposed |
+| `config/masque/provider`  | The `masque-provider` Deployment and UDP/443 + TCP/443 Service                                               | `--authority`, Secret `masque-provider-tls` for that name, ConfigMap `masque-authority-ca` (`ca.crt`), and how the Service is exposed |
 
 The bases leave out `--cell` and `--authority`, so a pod started without its overlay exits at startup instead of serving a wrong name. An overlay appends them, for example:
 
@@ -53,6 +53,7 @@ To take MASQUE out of a cell, delete the provider overlay first so its pods rele
 | `--provider`              | none, required                            | The `EdgeProvider` the pod runs as                                                    |
 | `--authority`             | none, required                            | The `host[:port]` clients send as `:authority`; a request naming another one gets 400 |
 | `--listen`                | `:8443`                                   | UDP address of the HTTP/3 server                                                      |
+| `--listen-tcp`            | `:8443`                                   | TCP address of the HTTP/2 server; empty serves HTTP/3 only                            |
 | `--health-listen`         | `:9188`                                   | TCP address of `/healthz`, `/readyz` and `/metrics`                                   |
 | `--tls-cert`, `--tls-key` | `/etc/masque-provider/tls/tls.{crt,key}`  | Server certificate and key, reread when either file changes                           |
 | `--grant-authority-url`   | none, required                            | `https://` base URL of `masque-authority serve`                                       |
@@ -60,28 +61,41 @@ To take MASQUE out of a cell, delete the provider overlay first so its pods rele
 | `--grant-authority-token` | `/var/run/secrets/masque-authority/token` | Projected ServiceAccount token with audience `masque-authority`, reread on every call |
 | `--log-level`             | `LOG_LEVEL`, then `info`                  | Log level                                                                             |
 
+The HTTP/2 server needs Extended CONNECT ([RFC 8441](https://www.rfc-editor.org/rfc/rfc8441)), which Go's `net/http` offers only when the process starts with `GODEBUG` containing `http2xconnect=1`. The image sets it. With `--listen-tcp` set and the variable missing, the provider exits at startup rather than serve a listener no client can use. An overlay that sets `GODEBUG` for another reason must keep `http2xconnect=1` in it.
+
 The pod also needs the downward-API variables `POD_NAMESPACE`, `POD_NAME`, `POD_UID` and `NODE_NAME`, the in-cluster API credentials of its ServiceAccount, and a TUN device from a device plugin. The [adapter's setup](masque-provider.md#setup) lists the cluster side.
 
 The server applies the per-pod limits of the [MASQUE contract](../designs/masque/contract.md#resource-budgets-and-benchmark-contract) with these values:
 
-| Limit                                | Value                  | Over the limit                             |
-| ------------------------------------ | ---------------------- | ------------------------------------------ |
-| Open QUIC connections                | 128                    | Connection closed with `H3_EXCESSIVE_LOAD` |
-| Open QUIC connections per source IP  | 8                      | Connection closed with `H3_EXCESSIVE_LOAD` |
-| QUIC handshake                       | 5 s                    | Connection dropped                         |
-| Request streams per connection       | 2                      | QUIC refuses the stream                    |
-| Request header section               | 8 KiB                  | Request refused                            |
-| Requests in admission                | 16                     | 503                                        |
-| Requests in admission per credential | 2                      | 503                                        |
-| Authorization of one request         | 3 s                    | 503                                        |
-| Admitted requests                    | 64                     | 503                                        |
-| Queued packets toward one client     | 128 packets or 256 KiB | Packet dropped                             |
+| Limit                                    | Value                  | Over the limit                                                       |
+| ---------------------------------------- | ---------------------- | -------------------------------------------------------------------- |
+| Open QUIC and TCP connections            | 128                    | QUIC closed with `H3_EXCESSIVE_LOAD`; TCP closed when accepted       |
+| Open QUIC and TCP connections per source | 8                      | QUIC closed with `H3_EXCESSIVE_LOAD`; TCP closed when accepted       |
+| QUIC or TLS handshake                    | 5 s                    | Connection dropped                                                   |
+| Request streams per connection           | 2                      | QUIC refuses the stream; HTTP/2 advertises it and refuses the excess |
+| Request header section                   | 8 KiB                  | Request refused                                                      |
+| Requests in admission                    | 16                     | 503                                                                  |
+| Requests in admission per credential     | 2                      | 503                                                                  |
+| Authorization of one request             | 3 s                    | 503                                                                  |
+| Admitted requests                        | 64                     | 503                                                                  |
+| Queued packets toward one client         | 128 packets or 256 KiB | Packet dropped                                                       |
+| HTTP/2 capsule write toward one client   | 5 s                    | That request ends                                                    |
+| HTTP/2 connection with no request        | 30 s                   | Connection closed                                                    |
 
-A connection counts toward its source IP once its QUIC handshake completes, so spoofed packets cannot use up another client's slots. The source-IP limit counts every client behind one NAT as one source.
+Both transports share every limit from the connection caps down: an HTTP/3 session and an HTTP/2 session each take one of the 64 admitted requests. A QUIC connection counts toward its source IP once its handshake completes, so spoofed packets cannot use up another client's slots. A TCP connection counts once it is accepted, because TCP's own handshake proves the address. The source-IP limit counts every client behind one NAT as one source.
+
+## HTTP/2 fallback
+
+A client whose UDP/443 is blocked sends the same request over HTTP/2 with TLS on TCP/443: an Extended CONNECT with `:protocol: connect-ip`, the same path, bearer credential and `Galactic-VPC` header. Packets travel in DATAGRAM capsules on the request stream. The request goes through the same admission, grant checks, backend and [packet policy](masque-provider.md#packet-policy) as over HTTP/3. The service does not pick a transport for the client.
+
+- **Packet size.** The HTTP/2 path carries inner packets of up to 1500 bytes. A larger packet from the gVPC gets an ICMPv6 Packet Too Big with MTU 1280. A larger packet from the client is dropped and counted as `reason="too_large"`.
+- **Malformed input.** The server holds at most one DATAGRAM capsule per request. It discards larger DATAGRAM capsules and unknown capsules as they arrive. A malformed capsule or an oversized `ADDRESS_REQUEST` ends only its own request.
+- **Slow readers.** A capsule write that cannot finish in 5 seconds ends its request. Another request on the same connection keeps forwarding.
+- **Moving between transports.** A connector that reconnects over HTTP/2 while its HTTP/3 tunnel still exists is admitted again through the adapter. The adapter treats the new request as a [replacement](masque-provider.md#replacing-a-connectors-request): the old session ends before the new one forwards, so the connector never has two forwarding owners. A replacement on another pod goes through the grant authority's [cross-instance replacement](../designs/masque/contract.md#cross-instance-replacement-and-stale-cleanup).
 
 ## Startup and readiness
 
-At start the service registers the pod's `EdgeInstance`, opens its UDP listener and starts renewing the instance's Lease. `/readyz` answers 200 only while the listener is open and the pod holds the Lease at a valid epoch. A pod without its Lease admits no request, so a readiness gate keeps it out of a Service's endpoints until then. `/healthz` answers 200 while the process runs.
+At start the service registers the pod's `EdgeInstance`, opens its UDP and TCP listeners and starts renewing the instance's Lease. `/readyz` answers 200 only while the listeners are open and the pod holds the Lease at a valid epoch. A pod without its Lease admits no request, so a readiness gate keeps it out of a Service's endpoints until then. `/healthz` answers 200 while the process runs.
 
 A request is admitted only after the authority authorizes its credential and the adapter's attachment and route are ready ([readiness](masque-provider.md#readiness)). The first request of a connector on a pod can take several seconds while galactic-edge programs the attachment.
 
@@ -89,7 +103,7 @@ A request is admitted only after the authority authorizes its credential and the
 
 SIGTERM or SIGINT starts shutdown:
 
-1. `/readyz` fails and the UDP listener closes, which ends every session.
+1. `/readyz` fails and both listeners close, which ends every session on either transport.
 2. The adapter stops renewing, releases each route claim, deletes its attachments and releases the Lease ([drain and shutdown](masque-provider.md#drain-and-shutdown)).
 
 Step 2 has 20 seconds, so give the pod a termination grace period of at least 30 seconds. A pod killed before it finishes leaves its routes to expire: galactic-edge closes their gates at the Lease deadline, and core reaps the pod's objects.
