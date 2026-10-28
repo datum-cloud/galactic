@@ -359,6 +359,24 @@ egress shard ever sees or translates it (see
 address is in `vip_addr_table` only on a node that loads IPv4 VIPs, so only
 such a node forwards its replies.
 
+Whether a reply crosses an edge node at all depends on the site:
+
+| Topology | Compute node's uplink neighbor | Reply path |
+|---|---|---|
+| containerlab | A site edge node (compute links only to edges) | Edge node's `edge_return` forwards it |
+| Datum production and staging | The hosting provider's (servers.com, AS7979) ToR/VRRP gateway, reached over `bond0` | Straight to the provider, never touching an edge |
+
+In a Datum site `bond0` is the compute node's first public uplink, and
+`usid_egress` rewrites the MACs and `bpf_redirect`s with no FIB lookup, so the
+reply goes to whatever `srv6.ResolvePublicUplink` resolved. The provider does
+not source-filter Datum prefixes on compute ports (checked 2026-10-28 in
+staging us-east-1: a spoofed-source probe from a compute node to `1.1.1.1` and
+`2606:4700:4700::1111` got SYN-ACKs back to the site edges). So in a Datum site
+the reply path needs no edge state. `edge_return` and `vip_addr_table` matter
+there only if `bond0` loses its neighbor and `ResolvePublicUplink` falls back to
+another interface whose first neighbor is an edge. Both edges still need IPv4
+VIPs on, for the forward path and for that failover case.
+
 Attached only to `GALACTIC_GATEWAY_INTERNAL_INTERFACES`, never the public
 uplink: on the uplink an external client could source a packet from a VIP
 address and have it forwarded unexamined. A node with no compute tier
