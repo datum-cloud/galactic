@@ -135,7 +135,7 @@ explains each failure its checks report.
   binary serves.
 - Register a collector that reads its values at scrape time, such as one over
   a BPF map, with `metrics.MustRegister`. The library can't check a custom
-  collector's label names, so review them by hand.
+  collector's label names; `TestCustomCollectorLabels` does.
 - Name labels with the constants in `go.miloapis.com/instrumentation/labels`
   where one fits, such as `labels.Reason` or `labels.ResourceName`. Use the
   same constants as log keys, so log lines join with metrics.
@@ -143,8 +143,7 @@ explains each failure its checks report.
   `namespace`, `pod`, `component` or `provider`. `labels.Reserved()` lists
   them all. The metric constructors panic on one, but log keys and
   `prometheus.Labels` maps passed to `With` or `DeletePartialMatch` aren't
-  checked, so use the constants there too. Existing metrics with reserved
-  labels are being renamed under #1150; don't add more.
+  checked, so use the constants there too.
 - Build a binary's logger only with `internal/logging`: `Options.BindFlags`
   and `Options.Setup` in `main`, before anything logs, or `SetupFile` for the
   CNI plugins. It installs one logger for `slog`, the `log` package,

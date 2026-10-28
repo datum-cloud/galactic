@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/labels"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 )
@@ -22,7 +23,7 @@ const (
 )
 
 var (
-	interfaceLabelNames = []string{"namespace", "vpc", labelAttachment, "interface", "interface_uid"}
+	interfaceLabelNames = []string{labels.ResourceNamespace, "vpc", labelAttachment, "interface", "interface_uid"}
 	ruleLabels          = append(slices.Clone(interfaceLabelNames), labelDirection, "policy", "policy_uid", "rule",
 		labelAction)
 	fallbackLabels = append(slices.Clone(interfaceLabelNames), labelDirection, labelReason)

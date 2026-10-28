@@ -49,7 +49,7 @@ const (
 
 // Label names shared by the state gauges and the failure counter.
 const (
-	labelProvider = "provider"
+	labelProvider = "edge_provider"
 	labelReason   = "reason"
 )
 

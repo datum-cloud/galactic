@@ -50,6 +50,11 @@ The tests in `internal/instrumentation` enforce the rule in the unit suite:
   creates its metrics at startup rather than when a package loads, its test
   first creates them through the same function the command calls, and also
   runs the library's lint, which `TestMetricsLint` can't reach.
+- `TestCustomCollectorLabels` resolves the label names of every
+  `prometheus.NewDesc` in the module and fails on one the collection
+  pipeline reserves, which the library doesn't check for a custom collector.
+  It also fails when it can't resolve a descriptor's names, so build them
+  from string constants, literals, `append` and `slices.Clone`.
 
 ## Where the metrics come from
 
@@ -89,8 +94,8 @@ sidecar), `fabric-router-controller`, the fabric-api gateway,
 PodMonitors' relabeling of `__meta_kubernetes_pod_node_name` into `node`:
 every galactic metric is per node, and `node` is the label you group and
 alert by. `fabric-router-controller`'s fleet series name the node each
-deployment or router targets themselves, and their `namespace` is the
-object's, which its PodMonitor keeps with `honorLabels`.
+deployment or router targets in `target_node`, and the object's namespace
+in `resource_namespace`.
 
 The eBPF-backed metrics (`galactic_usid_*`, `galactic_cni_egress_shard_*`,
 `galactic_edge_*`, `galactic_edge_foundation_gate_drops_total`, `galactic_nat_*`) are read from BPF maps at scrape time,

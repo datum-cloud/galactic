@@ -140,7 +140,7 @@ else
   fail "ns20 dfw -> sjc TCP 8080 did not connect"
 fi
 before=$(metric_sum sjc-worker galactic_cni_traffic_policy_rule_hits_total \
-  namespace=ns20 direction=ingress rule=deny-discard)
+  resource_namespace=ns20 direction=ingress rule=deny-discard)
 listen "${SJC}" ns20 "${dst}" 9
 if tcp_reaches "${DFW}" ns20 "${src}" "${dst_ip}" 9; then
   fail "ns20 dfw -> sjc TCP 9 connected through a deny rule"
@@ -148,7 +148,7 @@ else
   echo "ok   ns20 dfw -> sjc TCP 9 is dropped"
 fi
 after=$(metric_sum sjc-worker galactic_cni_traffic_policy_rule_hits_total \
-  namespace=ns20 direction=ingress rule=deny-discard)
+  resource_namespace=ns20 direction=ingress rule=deny-discard)
 if [ "${after}" -gt "${before}" ]; then
   echo "ok   sjc counted the denial on ns20's ingress: deny-discard ${before} -> ${after}"
 else
@@ -164,14 +164,14 @@ else
 fi
 backend=$(pod_name "${DFW}" ns60 app=backend,instance=a)
 before=$(metric_sum dfw-worker galactic_cni_traffic_policy_fallback_packets_total \
-  namespace=ns60 attachment=backend-a direction=egress reason=no_match)
+  resource_namespace=ns60 attachment=backend-a direction=egress reason=no_match)
 if tcp_reaches "${DFW}" ns60 "${backend}" "${REMOTE_HOST}" 80; then
   fail "ns60 backend-a -> remote-host connected though its egress grants only PublicService"
 else
   echo "ok   ns60 backend-a -> remote-host is dropped"
 fi
 after=$(metric_sum dfw-worker galactic_cni_traffic_policy_fallback_packets_total \
-  namespace=ns60 attachment=backend-a direction=egress reason=no_match)
+  resource_namespace=ns60 attachment=backend-a direction=egress reason=no_match)
 if [ "${after}" -gt "${before}" ]; then
   echo "ok   dfw counted backend-a's egress as no_match: ${before} -> ${after}"
 else
@@ -208,7 +208,7 @@ if ! wait_policy_applied dfw ns60 lab-ingress; then
   fail "dfw did not install ns60's edited lab-ingress"
 fi
 before=$(metric_sum dfw-worker galactic_cni_traffic_policy_rule_hits_total \
-  namespace=ns60 direction=ingress rule=deny-udp)
+  resource_namespace=ns60 direction=ingress rule=deny-udp)
 if "${SCRIPT_DIR}/verify-gateway-ingress.sh" --node dfw-worker2 >"${out}" 2>&1; then
   fail "dfw's VIP passed its TCP and UDP check with UDP denied to its backends"
 elif grep -q 'udp from port .*: no reply' "${out}" && ! grep -q 'tcp from port' "${out}"; then
@@ -218,7 +218,7 @@ else
   sed 's/^/    /' "${out}" >&2
 fi
 after=$(metric_sum dfw-worker galactic_cni_traffic_policy_rule_hits_total \
-  namespace=ns60 direction=ingress rule=deny-udp)
+  resource_namespace=ns60 direction=ingress rule=deny-udp)
 if [ "${after}" -gt "${before}" ]; then
   echo "ok   dfw counted the VIP's UDP under deny-udp: ${before} -> ${after}"
 else
@@ -251,14 +251,14 @@ if [ "${got}" != "${BUILTIN_UID}" ]; then
   fail "ns30/private-b's ingress did not fall back to the built-in default (uid ${got:-none})"
 fi
 before=$(metric_sum dfw-worker galactic_cni_traffic_policy_rule_hits_total \
-  namespace=ns30 attachment=private-b direction=ingress policy_uid="${BUILTIN_UID}")
+  resource_namespace=ns30 attachment=private-b direction=ingress policy_uid="${BUILTIN_UID}")
 if docker exec "${DFW}" kubectl exec -n ns30 "${a}" -- ping -6 -c 3 -W 2 "${b_ip}" >/dev/null 2>&1; then
   fail "ns30 private -> private-b answered with private-b on the built-in default"
 else
   echo "ok   ns30 private -> private-b is dropped on the built-in default"
 fi
 after=$(metric_sum dfw-worker galactic_cni_traffic_policy_rule_hits_total \
-  namespace=ns30 attachment=private-b direction=ingress policy_uid="${BUILTIN_UID}")
+  resource_namespace=ns30 attachment=private-b direction=ingress policy_uid="${BUILTIN_UID}")
 if [ "${after}" -gt "${before}" ]; then
   echo "ok   dfw counted the default deny-all as a rule hit: ${before} -> ${after}"
 else
