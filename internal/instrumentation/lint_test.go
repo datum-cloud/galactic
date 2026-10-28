@@ -19,8 +19,12 @@ import (
 	"go.miloapis.com/instrumentation/instrumenttest"
 
 	// Every package that creates a metric through the library, so Lint sees
-	// it. TestLintLinksEveryMetric keeps this list complete.
+	// the ones a package creates when it loads; each command's scrape test
+	// lints the ones created at startup. TestLintLinksEveryMetric keeps this
+	// list complete.
 	_ "go.datum.net/galactic/internal/edge/diag"
+	_ "go.datum.net/galactic/internal/fabric/gateway"
+	_ "go.datum.net/galactic/internal/fabric/node"
 	_ "go.datum.net/galactic/internal/fabricconfig"
 	_ "go.datum.net/galactic/internal/gateway"
 	_ "go.datum.net/galactic/internal/ingresssidecar"

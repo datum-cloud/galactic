@@ -23,24 +23,11 @@ import (
 // moduleRoot is the repository root, relative to this package.
 const moduleRoot = "../.."
 
-// pending lists the directories, relative to the module root, that still
-// create or register metrics outside the instrumentation library. Both
-// adoption checks skip them. Remove a directory once it has moved; the
-// checks then fail on anything left behind.
-var pending = []string{
-	// #1149: serve controller-runtime's registry through library metrics.
-	"cmd/fabric-api",
-	// #1149: create metrics with the library's constructors instead of a
-	// registry parameter or a private registry.
-	"internal/fabric/gateway",
-	"internal/fabric/node",
-}
-
 // TestAdopted runs the instrumentation library's adoption check over the
 // module: nothing registers a metric outside the library, and every logger
 // is built by it.
 func TestAdopted(t *testing.T) {
-	instrumenttest.AssertAdopted(t, instrumenttest.SkipDir(pending...))
+	instrumenttest.AssertAdopted(t)
 }
 
 const promPath = "github.com/prometheus/client_golang/prometheus"
@@ -63,20 +50,10 @@ var outsideLibrary = []string{
 }
 
 // TestNoMetricsOutsideLibrary fails wherever the module's non-test source
-// outside pending creates a metric or a registry with prometheus directly.
+// creates a metric or a registry with prometheus directly.
 func TestNoMetricsOutsideLibrary(t *testing.T) {
-	skip := map[string]bool{}
-	for _, d := range pending {
-		if _, err := os.Stat(filepath.Join(moduleRoot, d)); err != nil {
-			t.Errorf("pending directory %s: %v", d, err)
-		}
-		skip[d] = true
-	}
 	fset := token.NewFileSet()
 	walkSource(t, func(rel string, f *ast.File) {
-		if skip[filepath.ToSlash(filepath.Dir(rel))] || underAny(rel, skip) {
-			return
-		}
 		for _, imp := range f.Imports {
 			if p, _ := strconv.Unquote(imp.Path.Value); p == promPath && imp.Name != nil && imp.Name.Name == "." {
 				t.Errorf("%s:%d: dot import of %s hides its constructors from this check",
@@ -91,17 +68,6 @@ func TestNoMetricsOutsideLibrary(t *testing.T) {
 			}
 		}
 	}, fset)
-}
-
-// underAny reports whether rel lies under one of dirs.
-func underAny(rel string, dirs map[string]bool) bool {
-	rel = filepath.ToSlash(rel)
-	for d := range dirs {
-		if strings.HasPrefix(rel, d+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 // walkSource parses every non-test Go file in the module, skipping nested

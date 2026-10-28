@@ -35,7 +35,7 @@ All are `severity: warning`, `service: galactic`, `team: connect`. A deployment 
 evaluates its own copy of the rules changes them here first, with their tests, then
 updates that copy.
 
-Node metrics (port 9345, a private registry with Go and process collectors):
+Node metrics (port 9345, beside the Go runtime and process series):
 `fabric_api_node_requests_total{type,outcome}`,
 `fabric_api_node_request_duration_seconds{type}`,
 `fabric_api_node_response_bytes{type}`,

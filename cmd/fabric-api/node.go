@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	grpchealth "google.golang.org/grpc/health"
@@ -250,7 +251,7 @@ func runNode(parent context.Context, o *nodeOptions) error {
 	if metricsAddr == "" {
 		metricsAddr = net.JoinHostPort(hostIP.String(), "9345")
 	}
-	stopMetrics := serveMetrics(metricsAddr, metrics.Handler())
+	stopMetrics := serveMetrics(metricsAddr, instmetrics.Handler())
 	defer stopMetrics()
 
 	slog.Info("starting fabric-api node", "version", metadata.Version, "nodeName", o.nodeName, "site", o.site,
@@ -318,12 +319,12 @@ func nodePermits(o *nodeOptions, creds *identity.Credentials, metrics *node.Metr
 func idleUnconfigured(parent context.Context, hostIP netip.Addr, o *nodeOptions) error {
 	ctx, stop := signalContext(parent)
 	defer stop()
-	metrics := node.NewMetrics()
+	node.NewMetrics()
 	addr := o.metricsAddress
 	if addr == "" {
 		addr = net.JoinHostPort(hostIP.String(), "9345")
 	}
-	stopMetrics := serveMetrics(addr, metrics.Handler())
+	stopMetrics := serveMetrics(addr, instmetrics.Handler())
 	defer stopMetrics()
 	slog.Error("fabric-api node is not configured: --cell (CELL) is empty; diagnostics are unavailable until it is set")
 	<-ctx.Done()

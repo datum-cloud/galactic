@@ -21,21 +21,28 @@ Create every metric with the constructors in
 [`go.miloapis.com/instrumentation/metrics`](https://github.com/milo-os/instrumentation),
 and register a collector that reads state at scrape time with its
 `metrics.MustRegister`. Both put the metric on controller-runtime's registry,
-which every controller-runtime manager serves and `galactic-cni` and
-`fabric-config-agent` serve with the library's `metrics.Handler`. The
-fabric-api node sidecar serves only its own registry, so a library metric
-linked into it is not exported until it serves the library's handler. The
-tests in `internal/instrumentation` enforce the rule in the unit suite:
+which every controller-runtime manager serves. `galactic-cni`,
+`fabric-config-agent` and the fabric-api node sidecar, which serve metrics
+without a manager, serve that registry with the library's `metrics.Handler`.
+
+A metric created when its package loads is exported by every binary that
+links the package. Where only some of them should export it, create it in a
+constructor the binary calls at startup instead. The library's registry keeps
+a series across calls, so a constructor that tests call repeatedly starts its
+vectors over, and creates a function metric, which the library allows only
+once per process, on its first call.
+
+The tests in `internal/instrumentation` enforce the rule in the unit suite:
 
 - `TestAdopted` runs the library's adoption check, which fails on a metric
   registered outside the library and on a logger the library didn't build.
 - `TestNoMetricsOutsideLibrary` fails on any metric constructor or registry
   from `client_golang`'s `prometheus` package, including one passed in as a
   `prometheus.Registerer`.
-- `TestMetricsLint` checks every library metric's name against Prometheus
-  conventions. It imports each package that defines one, and
-  `TestLintLinksEveryMetric` fails when a package is missing from that list
-  or defines its metrics in a command's `main` package.
+- `TestMetricsLint` checks the name of every library metric created when a
+  package loads against Prometheus conventions. It imports each package that
+  defines one, and `TestLintLinksEveryMetric` fails when a package is missing
+  from that list or creates a metric in a command's `main` package.
 - Each command that serves `/metrics` has a `TestMetricsScrape`, which fails
   when two registries export the same series. `TestEveryBinaryHasScrapeTest`
   requires one for every new command, but can't tell whether the test scrapes
@@ -43,10 +50,6 @@ tests in `internal/instrumentation` enforce the rule in the unit suite:
   creates its metrics at startup rather than when a package loads, its test
   first creates them through the same function the command calls, and also
   runs the library's lint, which `TestMetricsLint` can't reach.
-
-Both source checks skip the directories in `pending` in
-`internal/instrumentation/adoption_test.go`, which haven't moved to the
-library yet.
 
 ## Where the metrics come from
 
