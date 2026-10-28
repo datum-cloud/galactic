@@ -8,12 +8,15 @@ package diagtest
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"go.datum.net/galactic/internal/edge/diag"
 )
@@ -78,10 +81,38 @@ func (r *Recorder) Find(action diag.Stage, reason string) []Event {
 	return out
 }
 
-// New returns a diag.Recorder recording into a new Recorder and counting
-// into a new registry.
-func New(component string) (*diag.Recorder, *Recorder, *prometheus.Registry) {
+// New returns a diag.Recorder for role recording into a new Recorder and
+// counting from zero, and a Gatherer reading back only those counts.
+func New(role string) (*diag.Recorder, *Recorder, prometheus.Gatherer) {
 	events := &Recorder{}
-	reg := prometheus.NewRegistry()
-	return &diag.Recorder{Events: events, Metrics: diag.NewMetrics(reg, component)}, events, reg
+	rec := &diag.Recorder{Events: events, Metrics: diag.NewMetrics(role)}
+	return rec, events, prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
+		families, err := ctrlmetrics.Registry.Gather()
+		var out []*dto.MetricFamily
+		for _, f := range families {
+			if !slices.Contains(foundationCounters, f.GetName()) {
+				continue
+			}
+			var mine []*dto.Metric
+			for _, m := range f.GetMetric() {
+				if slices.ContainsFunc(m.GetLabel(), func(l *dto.LabelPair) bool {
+					return l.GetName() == diag.LabelRole && l.GetValue() == role
+				}) {
+					mine = append(mine, m)
+				}
+			}
+			if len(mine) > 0 {
+				f.Metric = mine
+				out = append(out, f)
+			}
+		}
+		return out, err
+	})
+}
+
+// foundationCounters are the series diag.Metrics exports.
+var foundationCounters = []string{
+	"galactic_edge_foundation_failures_total",
+	"galactic_edge_foundation_gate_closures_total",
+	"galactic_edge_foundation_cleanup_failures_total",
 }

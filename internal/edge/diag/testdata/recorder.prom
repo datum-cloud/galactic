@@ -1,9 +1,9 @@
 # HELP galactic_edge_foundation_failures_total Transitions of an attachment, route or service into a failed lifecycle stage, by stage and condition reason. Counted once per transition, not per retry.
 # TYPE galactic_edge_foundation_failures_total counter
-galactic_edge_foundation_failures_total{component="core",reason="UnknownProvider",stage="Admission"} 1
+galactic_edge_foundation_failures_total{edge_role="core",reason="UnknownProvider",stage="Admission"} 1
 # HELP galactic_edge_foundation_gate_closures_total Forwarding gates the node agent closed while they were open, by cause.
 # TYPE galactic_edge_foundation_gate_closures_total counter
-galactic_edge_foundation_gate_closures_total{cause="Expired",component="core"} 1
+galactic_edge_foundation_gate_closures_total{cause="Expired",edge_role="core"} 1
 # HELP galactic_edge_foundation_cleanup_failures_total Host state releases or gate sweeps that failed and are retried on the next pass.
 # TYPE galactic_edge_foundation_cleanup_failures_total counter
-galactic_edge_foundation_cleanup_failures_total{component="core"} 1
+galactic_edge_foundation_cleanup_failures_total{edge_role="core"} 1

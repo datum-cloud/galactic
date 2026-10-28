@@ -20,6 +20,7 @@ import (
 
 	// Every package that creates a metric through the library, so Lint sees
 	// it. TestLintLinksEveryMetric keeps this list complete.
+	_ "go.datum.net/galactic/internal/edge/diag"
 	_ "go.datum.net/galactic/internal/gateway"
 	_ "go.datum.net/galactic/internal/ingresssidecar"
 	_ "go.datum.net/galactic/internal/plumbing/ebpf/metrics"

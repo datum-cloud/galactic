@@ -31,11 +31,8 @@ var pending = []string{
 	// #1149: serve controller-runtime's registry through library metrics.
 	"cmd/fabric-api",
 	"cmd/fabric-router-controller",
-	"cmd/galactic-controller",
-	"cmd/galactic-edge",
 	// #1149: create metrics with the library's constructors instead of a
 	// registry parameter or a private registry.
-	"internal/edge/diag",
 	"internal/fabric/gateway",
 	"internal/fabric/node",
 	"internal/fabricconfig",

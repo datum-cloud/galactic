@@ -20,6 +20,7 @@ import (
 
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	"github.com/spf13/cobra"
+	"go.miloapis.com/instrumentation/metrics"
 	_ "golang.org/x/crypto/x509roots/fallback"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -28,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -177,11 +177,9 @@ func run(parent context.Context, o *options) error {
 	if o.edge {
 		rec := &edgediag.Recorder{
 			Events:  mgr.GetEventRecorder("galactic-controller"),
-			Metrics: edgediag.NewMetrics(ctrlmetrics.Registry, "core"),
+			Metrics: edgediag.NewMetrics(edgediag.RoleCore),
 		}
-		if err := ctrlmetrics.Registry.Register(&edgediag.StateCollector{Reader: mgr.GetClient()}); err != nil {
-			return fmt.Errorf("register edge state metrics: %w", err)
-		}
+		metrics.MustRegister(&edgediag.StateCollector{Reader: mgr.GetClient()})
 		if err := edgeattachment.Setup(mgr, &edgeattachment.Reconciler{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(),
 			Authority: admission.NewAuthority(o.edgeMaxSkew), MaxSkew: o.edgeMaxSkew, Diag: rec,
