@@ -102,7 +102,9 @@ type masque struct {
 // deployed agent creates the fixture's PacketAccess devices and the
 // unprivileged fixture opens them, two VPCs with identical connector /96s
 // stay isolated in both directions, NAT egress works from the attachment
-// node, two connectors share one attachment and ending one leaves the
+// node, return traffic reaches client-managed addresses in several
+// subdivisions of a connector's /96 through its one aggregate route, two
+// connectors share one attachment and ending one leaves the
 // other forwarding, a restarted provider process adopts its attachments,
 // router maintenance keeps an attachment in use, a connector's second
 // request replaces its first without both forwarding, a stalled provider,
@@ -127,6 +129,7 @@ func TestMASQUE(t *testing.T) {
 	t.Run("A06-packet-access-registration", m.rowRegistration)
 	t.Run("M07-isolation", func(t *testing.T) { m.isolation(t, "cold") })
 	t.Run("nat-egress", m.rowNATEgress)
+	t.Run("M12-aggregate-routing", m.rowAggregateRouting)
 	t.Run("A16-pod-link-route-drift", m.rowRouteDrift)
 	t.Run("shared-attachment-cancel", m.rowSharedCancel)
 	t.Run("maintenance-during-use", m.rowMaintenance)

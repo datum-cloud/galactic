@@ -45,12 +45,17 @@ func testScheme() *runtime.Scheme {
 	return s
 }
 
-func fakeLedgers(t *testing.T) (Ledgers, VPCRef) {
-	t.Helper()
-	vpc := &cloudv1alpha1.VPC{
+// testVPC returns the VPC the ledgers under test belong to.
+func testVPC() *cloudv1alpha1.VPC {
+	return &cloudv1alpha1.VPC{
 		ObjectMeta: metav1.ObjectMeta{Namespace: tenantNS, Name: vpcName, UID: "11111111-1111-1111-1111-111111111111"},
 		Spec:       cloudv1alpha1.VPCSpec{Networks: []cloudv1alpha1.Network{"fd20:a1b:2c3d::/48"}},
 	}
+}
+
+func fakeLedgers(t *testing.T) (Ledgers, VPCRef) {
+	t.Helper()
+	vpc := testVPC()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(vpc).Build()
 	l := Ledgers{Client: c, Namespace: testNS, Now: time.Now}
 	ref := VPCRef{Namespace: tenantNS, Name: vpcName, UID: string(vpc.UID)}

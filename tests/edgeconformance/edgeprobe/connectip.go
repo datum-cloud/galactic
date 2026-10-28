@@ -42,7 +42,8 @@ func connectIP(args []string) error {
 	token := fs.String("token", "", "bearer credential")
 	vpc := fs.String("vpc", "", "Galactic-VPC header value")
 	to := fs.String("to", "", "comma-separated echo destinations")
-	srcFlag := fs.String("src", "", "source address; default the first address after the assigned prefix's")
+	srcFlag := fs.String("src", "", "comma-separated source addresses, each sent to every destination; "+
+		"default the first address after the assigned prefix's")
 	id := fs.Int("id", os.Getpid()&0xffff, "ICMPv6 echo identifier")
 	size := fs.Int("size", 64, "IPv6 packet size in bytes")
 	interval := fs.Duration("interval", 50*time.Millisecond, "time between echo requests")
@@ -112,10 +113,15 @@ func connectIP(args []string) error {
 	}
 	prefix := assigned[0].IPPrefix
 	_ = out.Encode(cipEvent{T: boottime(), Assigned: prefix.String()})
-	src := prefix.Addr().Next()
+	srcs := []netip.Addr{prefix.Addr().Next()}
 	if *srcFlag != "" {
-		if src, err = netip.ParseAddr(*srcFlag); err != nil {
-			return fmt.Errorf("-src: %w", err)
+		srcs = nil
+		for _, a := range strings.Split(*srcFlag, ",") {
+			src, err := netip.ParseAddr(a)
+			if err != nil {
+				return fmt.Errorf("-src: %w", err)
+			}
+			srcs = append(srcs, src)
 		}
 	}
 
@@ -138,15 +144,17 @@ func connectIP(args []string) error {
 	sent := 0
 loop:
 	for time.Now().Before(deadline) {
-		for _, dst := range dsts {
-			pkt, err := echoRequest(src, dst, *id, sent, *size)
-			if err != nil {
-				return err
+		for _, src := range srcs {
+			for _, dst := range dsts {
+				pkt, err := echoRequest(src, dst, *id, sent, *size)
+				if err != nil {
+					return err
+				}
+				if _, err := conn.WritePacket(pkt); err != nil {
+					break loop
+				}
+				sent++
 			}
-			if _, err := conn.WritePacket(pkt); err != nil {
-				break loop
-			}
-			sent++
 		}
 		select {
 		case <-tick.C:
