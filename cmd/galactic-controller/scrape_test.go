@@ -5,6 +5,7 @@
 package main
 
 import (
+	"sync"
 	"testing"
 
 	"go.miloapis.com/instrumentation/instrumenttest"
@@ -17,15 +18,21 @@ import (
 	edgediag "go.datum.net/galactic/internal/edge/diag"
 )
 
+// startup registers the series once per test process, as run does once per
+// process, so repeated runs of TestMetricsScrape share them.
+var startup sync.Once
+
 // TestMetricsScrape scrapes what the manager serves at /metrics, the
 // instrumentation library's registry, once it holds what run adds with
 // --edge: the failure counters and the state collector, here reading an
 // empty cluster. It lints them too.
 func TestMetricsScrape(t *testing.T) {
-	scheme := runtime.NewScheme()
-	utilruntime.Must(galacticv1alpha1.AddToScheme(scheme))
-	edgediag.NewMetrics(edgediag.RoleCore)
-	metrics.MustRegister(&edgediag.StateCollector{Reader: fake.NewClientBuilder().WithScheme(scheme).Build()})
+	startup.Do(func() {
+		scheme := runtime.NewScheme()
+		utilruntime.Must(galacticv1alpha1.AddToScheme(scheme))
+		edgediag.NewMetrics(edgediag.RoleCore)
+		metrics.MustRegister(&edgediag.StateCollector{Reader: fake.NewClientBuilder().WithScheme(scheme).Build()})
+	})
 	instrumenttest.AssertScrapes(t, metrics.Handler())
 	instrumenttest.Lint(t)
 }
