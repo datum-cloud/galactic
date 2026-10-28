@@ -1,6 +1,6 @@
 # MASQUE provider adapter
 
-`internal/edge/masque` connects a CONNECT-IP server (`internal/edge/connectip`) to a tenant VPC through the [provider contract](provider-contract.md). It implements `connectip.Admission` and `connectip.PacketBackend`, so every transport uses the same attachment, route and packet checks. It has no command of its own: the service binary that embeds it is a separate deliverable of the [MASQUE connector design](../designs/masque/contract.md). The [grant authority](masque-authority.md) issues its grants, and `authority.Client` is its production `Authorizer`. The conformance fixture in `tests/edgeconformance/masqueprovider` runs it with static test credentials, or with the grant authority when configured.
+`internal/edge/masque` connects a CONNECT-IP server (`internal/edge/connectip`) to a tenant VPC through the [provider contract](provider-contract.md). It implements `connectip.Admission` and `connectip.PacketBackend`, so every transport uses the same attachment, route and packet checks. [`cmd/masque-provider`](masque-service.md) runs it. The [grant authority](masque-authority.md) issues its grants, and `authority.Client` is its production `Authorizer`. The conformance fixture in `tests/edgeconformance/masqueprovider` runs the same service code with static test credentials, or with the grant authority when configured.
 
 The adapter never touches host networking. galactic-edge programs and releases each attachment's host state, core accepts or refuses each route, and the adapter only writes what the contract assigns to a provider: its instance and Lease, its attachments and their `Ready` condition, and its route claims.
 
@@ -85,7 +85,7 @@ Every 5 seconds (`Config.Refresh`) the adapter calls `Authorizer.Refresh` for ea
 
 When core drains an attachment, after its service is deleted or its authority ends, the adapter ends that attachment's requests at its next check and serves no new request on it. Core deletes the attachment after the service's `drainSeconds`.
 
-On shutdown, stop the transports first so every request ends, then call `Shutdown`. It stops admitting, releases each route claim the adapter still holds, deletes its attachments and releases the instance Lease. A replacement can therefore take nothing over while this pod still forwards. Shutdown is bounded by the caller's context; the fixture gives it 20 seconds.
+On shutdown, stop the transports first so every request ends, then call `Shutdown`. It stops admitting, releases each route claim the adapter still holds, deletes its attachments and releases the instance Lease. A replacement can therefore take nothing over while this pod still forwards. Shutdown is bounded by the caller's context; the service and the fixture give it 20 seconds.
 
 ## Cleanup
 

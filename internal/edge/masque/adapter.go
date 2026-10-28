@@ -464,6 +464,14 @@ func (a *Adapter) Revoke(connector string) {
 	}
 }
 
+// Ready reports whether the adapter can admit a request now: it holds a
+// valid instance lease and Shutdown has not started. A readiness probe reads
+// it, so a pod without its lease takes no new clients.
+func (a *Adapter) Ready() bool {
+	_, held := a.heldLease()
+	return held && !a.isClosing()
+}
+
 // isClosing reports whether Shutdown has started.
 func (a *Adapter) isClosing() bool {
 	a.mu.Lock()

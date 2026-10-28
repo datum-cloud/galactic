@@ -123,6 +123,32 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
+  publish-masque-provider-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.22.0
+    with:
+      image-name: masque-provider
+      dockerfile-path: containers/masque-provider/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
+  publish-masque-authority-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.22.0
+    with:
+      image-name: masque-authority
+      dockerfile-path: containers/masque-authority/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
   # galactic-vrf, the #855 ingress sidecar, deliberately has no entry in
   # publish-kustomize-bundles below: it has no config/galactic-vrf base to
   # stamp an image into yet (the #856 deployment contract is still open).

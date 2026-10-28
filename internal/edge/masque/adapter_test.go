@@ -1153,6 +1153,26 @@ func TestRestartAdoptsOwnAttachments(t *testing.T) {
 // TestShutdownReleasesInOrder checks that shutdown ends every request
 // before releasing its claim, then deletes the attachment, then releases the
 // lease, and that nothing fails.
+func TestReady(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	if !h.a.Ready() {
+		t.Fatal("adapter holding its lease is not ready")
+	}
+	h.a.setLease(nil)
+	if h.a.Ready() {
+		t.Fatal("adapter without a lease is ready")
+	}
+	h.a.setLease(&claim.Lease{Key: provider.InstanceName(testPod), Holder: testHolder, Epoch: h.epoch(),
+		Incarnation: testIncarnation, Deadline: h.clock.read() + time.Hour})
+	if err := h.a.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if h.a.Ready() {
+		t.Fatal("adapter is ready after Shutdown")
+	}
+}
+
 func TestShutdownReleasesInOrder(t *testing.T) {
 	h := newHarness(t)
 	h.start()
