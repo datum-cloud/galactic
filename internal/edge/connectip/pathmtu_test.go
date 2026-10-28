@@ -53,6 +53,8 @@ func (t *narrowTunnel) receiveAddressRequest(ctx context.Context) (addressReques
 	return addressRequest{}, context.Canceled
 }
 
+func (t *narrowTunnel) abort() { _ = t.Close() }
+
 func (t *narrowTunnel) Close() error {
 	t.once.Do(func() { close(t.closed) })
 	return nil

@@ -133,7 +133,9 @@ func (b *TUNBackend) readLoop() {
 			}
 			continue
 		}
-		s.enqueue(buf[:n])
+		if !s.enqueue(buf[:n]) {
+			deny(toClient, reasonQueueFull)
+		}
 	}
 }
 

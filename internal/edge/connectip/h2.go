@@ -23,10 +23,6 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-// h2WriteTimeout bounds one capsule write toward an HTTP/2 client. A client
-// that stops reading for longer ends its own request. Tests shorten it.
-var h2WriteTimeout = 5 * time.Second
-
 const (
 	// h2IdleTimeout closes an HTTP/2 connection with no open request.
 	h2IdleTimeout = 30 * time.Second
@@ -276,7 +272,7 @@ func (t *h2Tunnel) WritePacket(b []byte) ([]byte, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	t.out = appendDatagram(t.out[:0], b)
-	return nil, t.writeLocked(t.out)
+	return nil, t.writeLocked(t.out, false)
 }
 
 // AssignAddresses sends an unsolicited ADDRESS_ASSIGN of prefixes.
@@ -339,15 +335,18 @@ func rejectedPrefix(p netip.Prefix) netip.Prefix {
 func (t *h2Tunnel) write(b []byte) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	return t.writeLocked(b)
+	return t.writeLocked(b, true)
 }
 
-// writeLocked writes b within h2WriteTimeout. It sets the deadline before
-// checking for Close, so Close's own deadline wins over a write in
-// progress. HTTP/2 resets a stream whose write deadline passes even with no
-// write pending, so a completed write clears it.
-func (t *h2Tunnel) writeLocked(b []byte) error {
-	_ = t.rc.SetWriteDeadline(time.Now().Add(h2WriteTimeout))
+// writeLocked writes b, within deliveryTimeout when timed. Packet writes are
+// untimed because proxySession's watchdog bounds them. A timed write sets
+// its deadline before checking for Close, so Close's own deadline wins over
+// a write in progress. HTTP/2 resets a stream whose write deadline passes
+// even with no write pending, so a completed write clears it.
+func (t *h2Tunnel) writeLocked(b []byte, timed bool) error {
+	if timed {
+		_ = t.rc.SetWriteDeadline(time.Now().Add(deliveryTimeout))
+	}
 	select {
 	case <-t.closed:
 		return net.ErrClosed
@@ -360,9 +359,13 @@ func (t *h2Tunnel) writeLocked(b []byte) error {
 	if err != nil {
 		return err
 	}
-	_ = t.rc.SetWriteDeadline(time.Time{})
+	if timed {
+		_ = t.rc.SetWriteDeadline(time.Time{})
+	}
 	return nil
 }
+
+func (t *h2Tunnel) abort() { _ = t.Close() }
 
 // Close stops every read and write on the stream. The handler's return
 // then ends the stream.

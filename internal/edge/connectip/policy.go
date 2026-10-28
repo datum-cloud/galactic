@@ -67,6 +67,12 @@ const (
 	// reasonPathMTU is a packet toward the client of at most MinInnerMTU
 	// bytes that the tunnel could not carry, which ends its session.
 	reasonPathMTU = "path_mtu"
+	// reasonQueueFull is a packet from the device dropped because its
+	// session's queue toward the client was full.
+	reasonQueueFull = "queue_full"
+	// reasonSlowClient is a packet toward the client whose write stayed
+	// blocked for deliveryTimeout, which ends its session.
+	reasonSlowClient = "slow_client"
 )
 
 var packetsDenied = metrics.NewCounterVec(prometheus.CounterOpts{

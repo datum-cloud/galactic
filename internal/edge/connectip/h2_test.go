@@ -386,18 +386,20 @@ func TestH2CancelledRequestLeavesSiblingRunning(t *testing.T) {
 }
 
 // TestH2SlowReaderEndsOnlyItsRequest stops granting one request flow-control
-// window. Its session ends once a capsule write blocks for h2WriteTimeout,
-// and a request on another connection keeps forwarding.
+// window. Its session ends once a packet write blocks for deliveryTimeout,
+// counted as slow_client, and a request on another connection keeps
+// forwarding.
 func TestH2SlowReaderEndsOnlyItsRequest(t *testing.T) {
-	old := h2WriteTimeout
-	h2WriteTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { h2WriteTimeout = old })
+	old := deliveryTimeout
+	deliveryTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { deliveryTimeout = old })
 	adm := newTestAdmission()
 	env := startServer(t, func(c *Config) { c.Admission = adm })
 	slow, _ := env.openH2(t, env.dialH2(t), tokenAlice, vpcBlue)
 	slowSess := env.backend.nextOpened(t)
 	fast, _ := env.openH2(t, env.dialH2(t), tokenBob, vpcGreen)
 	fastSess := env.backend.nextOpened(t)
+	before := slowClientEnds()
 	slow.pause()
 
 	// The default 64 KiB stream window holds about 50 of these; the rest
@@ -418,6 +420,9 @@ func TestH2SlowReaderEndsOnlyItsRequest(t *testing.T) {
 	defer func() { close(stop); wg.Wait() }()
 	slowSess.waitClosed(t)
 	adm.waitReleased(t, slowSess.info)
+	if got := slowClientEnds() - before; got != 1 {
+		t.Fatalf("slow_client count rose by %v, want 1", got)
+	}
 
 	fast.sendDatagram(t, echoRequest(t, fastSess.info.Prefix.Addr().Next(), testTarget, 60, MinInnerMTU))
 	if id := echoID(t, parseICMPv6(t, fast.readDatagram(t))); id != 60 {
@@ -426,16 +431,16 @@ func TestH2SlowReaderEndsOnlyItsRequest(t *testing.T) {
 }
 
 // TestH2IdleSessionOutlivesWriteTimeout keeps a session idle for longer
-// than h2WriteTimeout after the server's last write. HTTP/2 resets a stream
+// than deliveryTimeout after the server's last write. HTTP/2 resets a stream
 // whose write deadline passes even with no write pending.
 func TestH2IdleSessionOutlivesWriteTimeout(t *testing.T) {
-	old := h2WriteTimeout
-	h2WriteTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { h2WriteTimeout = old })
+	old := deliveryTimeout
+	deliveryTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { deliveryTimeout = old })
 	env := startServer(t, nil)
 	s, _ := env.openH2(t, env.dialH2(t), tokenAlice, vpcBlue)
 	for i := range 2 {
-		time.Sleep(3 * h2WriteTimeout)
+		time.Sleep(3 * deliveryTimeout)
 		s.sendDatagram(t, echoRequest(t, firstClient, testTarget, 90+i, 200))
 		if id := echoID(t, parseICMPv6(t, s.readDatagram(t))); id != 90+i {
 			t.Fatalf("reply id %d, want %d", id, 90+i)

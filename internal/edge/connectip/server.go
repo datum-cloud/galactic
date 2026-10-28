@@ -56,6 +56,11 @@ const (
 	errExcessiveLoad = 0x0107
 )
 
+// deliveryTimeout bounds one write toward a client, a packet or an HTTP/2
+// capsule. A client that stops receiving for longer ends its own session.
+// Tests shorten it.
+var deliveryTimeout = 5 * time.Second
+
 // Default limits apply to each zero field of Limits. They are the initial
 // per-pod targets in docs/designs/masque/contract.md; MaxSessions covers 32
 // active connectors plus 32 replacements.
@@ -319,6 +324,9 @@ type tunnel interface {
 	AdvertiseRoute(routes []connectip.IPRoute) error
 	receiveAddressRequest(ctx context.Context) (addressRequest, error)
 	Close() error
+	// abort closes whatever must close to unblock a WritePacket that the
+	// client has stopped draining.
+	abort()
 }
 
 // addressRequest is one ADDRESS_REQUEST. respond takes one assignment per
@@ -595,6 +603,14 @@ func (s *Server) proxySession(
 			}
 		}
 	})
+	// writeStarted is when the write toward the client in progress began,
+	// as time since base plus one, or 0 between writes.
+	base := time.Now()
+	var writeStarted atomic.Int64
+	wg.Go(func() {
+		defer cancel()
+		watchDelivery(ctx, log, conn, base, &writeStarted)
+	})
 	wg.Go(func() {
 		defer cancel()
 		buf := make([]byte, maxPacketSize)
@@ -607,7 +623,9 @@ func (s *Server) proxySession(
 				deny(toClient, reason)
 				continue
 			}
+			writeStarted.Store(int64(time.Since(base)) + 1)
 			icmp, err := conn.WritePacket(buf[:n])
+			writeStarted.Store(0)
 			if err != nil {
 				return
 			}
@@ -645,6 +663,32 @@ func (s *Server) proxySession(
 		log.Warn("could not stop backend session", "error", err)
 	}
 	wg.Wait()
+}
+
+// watchDelivery ends a session whose write toward the client stays blocked
+// for deliveryTimeout, checked every quarter of it, and counts it as
+// denied with reason slow_client. Over HTTP/3 that closes the client's QUIC
+// connection, since a blocked datagram waits on the connection's send
+// queue; the connection's other request is stalled by the same client. It
+// returns when ctx is done or the session is aborted.
+func watchDelivery(ctx context.Context, log *slog.Logger, conn tunnel, base time.Time, writeStarted *atomic.Int64) {
+	t := time.NewTicker(deliveryTimeout / 4)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		started := writeStarted.Load()
+		if started == 0 || time.Since(base)-time.Duration(started-1) < deliveryTimeout {
+			continue
+		}
+		deny(toClient, reasonSlowClient)
+		log.Warn("ending CONNECT-IP session: the client stopped receiving", "blocked", deliveryTimeout)
+		conn.abort()
+		return
+	}
 }
 
 // answerAddressRequests answers every ADDRESS_REQUEST with the request's one
@@ -746,10 +790,21 @@ func (h *h3Request) accept(w http.ResponseWriter) (tunnel, error) {
 	if err != nil {
 		return nil, err
 	}
-	return h3Tunnel{conn}, nil
+	qconn, _ := h.r.Context().Value(quicConnKey{}).(*quic.Conn)
+	return h3Tunnel{Conn: conn, qconn: qconn}, nil
 }
 
-type h3Tunnel struct{ *connectip.Conn }
+type h3Tunnel struct {
+	*connectip.Conn
+	qconn *quic.Conn
+}
+
+func (t h3Tunnel) abort() {
+	_ = t.Close()
+	if t.qconn != nil {
+		_ = t.qconn.CloseWithError(errExcessiveLoad, "client stopped receiving")
+	}
+}
 
 func (t h3Tunnel) receiveAddressRequest(ctx context.Context) (addressRequest, error) {
 	req, err := t.ReceiveAddressRequest(ctx)
