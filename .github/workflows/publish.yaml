@@ -16,7 +16,7 @@ jobs:
     with:
       image-name: galactic-cni
       dockerfile-path: containers/galactic-cni/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   publish-galactic-router-image:
@@ -29,7 +29,7 @@ jobs:
     with:
       image-name: galactic-router
       dockerfile-path: containers/galactic-router/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   publish-galactic-gateway-image:
@@ -42,7 +42,7 @@ jobs:
     with:
       image-name: galactic-gateway
       dockerfile-path: containers/galactic-gateway/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   publish-fabric-router-image:
@@ -55,7 +55,7 @@ jobs:
     with:
       image-name: fabric-router
       dockerfile-path: containers/fabric-router/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   publish-fabric-api-image:
@@ -68,7 +68,7 @@ jobs:
     with:
       image-name: fabric-api
       dockerfile-path: containers/fabric-api/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   publish-fabric-router-controller-image:
@@ -81,7 +81,7 @@ jobs:
     with:
       image-name: fabric-router-controller
       dockerfile-path: containers/fabric-router-controller/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   publish-galactic-controller-image:
@@ -94,7 +94,7 @@ jobs:
     with:
       image-name: galactic-controller
       dockerfile-path: containers/galactic-controller/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   publish-galactic-nat-image:
@@ -107,7 +107,7 @@ jobs:
     with:
       image-name: galactic-nat
       dockerfile-path: containers/galactic-nat/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   publish-galactic-edge-image:
@@ -120,7 +120,7 @@ jobs:
     with:
       image-name: galactic-edge
       dockerfile-path: containers/galactic-edge/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   publish-masque-provider-image:
@@ -133,7 +133,7 @@ jobs:
     with:
       image-name: masque-provider
       dockerfile-path: containers/masque-provider/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   publish-masque-authority-image:
@@ -146,7 +146,7 @@ jobs:
     with:
       image-name: masque-authority
       dockerfile-path: containers/masque-authority/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   # galactic-vrf, the #855 ingress sidecar, deliberately has no entry in
@@ -163,7 +163,7 @@ jobs:
     with:
       image-name: galactic-vrf
       dockerfile-path: containers/galactic-vrf/Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
     secrets: inherit
 
   # galactic-debug has no config/galactic-debug base and no entry in
