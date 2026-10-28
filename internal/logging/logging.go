@@ -61,6 +61,7 @@ var Binaries = []string{
 	"galactic-router",
 	"galactic-vrf",
 	"masque-authority",
+	"masque-provider",
 }
 
 // Options holds the --log-level value and controller-runtime's standard zap

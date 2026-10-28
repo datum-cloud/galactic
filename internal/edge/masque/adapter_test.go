@@ -93,6 +93,9 @@ type harness struct {
 	calls []string
 	// refresh answers Refresh; nil renews the grant for another hour.
 	refresh func(Grant) (Grant, error)
+	// authorize, when set, runs before each Authorize and fails it with
+	// its error.
+	authorize func(context.Context) error
 	// retired holds the connectors whose grants were retired.
 	retired map[string]bool
 }
@@ -250,7 +253,12 @@ func (h *harness) wall() time.Time {
 
 // Authorize implements Authorizer from grants, with grants expiring an
 // hour after the harness's wall clock.
-func (h *harness) Authorize(_ context.Context, credential, vpc string) (Grant, error) {
+func (h *harness) Authorize(ctx context.Context, credential, vpc string) (Grant, error) {
+	if h.authorize != nil {
+		if err := h.authorize(ctx); err != nil {
+			return Grant{}, err
+		}
+	}
 	g, ok := grants[credential]
 	if !ok {
 		return Grant{}, connectip.ErrUnauthenticated
@@ -926,6 +934,23 @@ func TestQueuedRequestHonorsDeadline(t *testing.T) {
 	}
 }
 
+func TestAuthorizeTimeout(t *testing.T) {
+	h := newHarness(t)
+	h.authorize = func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	h.start()
+	h.a.cfg.AuthorizeTimeout = 50 * time.Millisecond
+	start := time.Now()
+	if _, err := h.a.Admit(context.Background(), credA1, testVPCName); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Admit with a stalled authorizer = %v, want its deadline exceeded", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("Admit waited %v on a stalled authorizer", d)
+	}
+}
+
 func TestOpenRejectsUnknownRequest(t *testing.T) {
 	h := newHarness(t)
 	h.start()
@@ -1128,6 +1153,26 @@ func TestRestartAdoptsOwnAttachments(t *testing.T) {
 // TestShutdownReleasesInOrder checks that shutdown ends every request
 // before releasing its claim, then deletes the attachment, then releases the
 // lease, and that nothing fails.
+func TestReady(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	if !h.a.Ready() {
+		t.Fatal("adapter holding its lease is not ready")
+	}
+	h.a.setLease(nil)
+	if h.a.Ready() {
+		t.Fatal("adapter without a lease is ready")
+	}
+	h.a.setLease(&claim.Lease{Key: provider.InstanceName(testPod), Holder: testHolder, Epoch: h.epoch(),
+		Incarnation: testIncarnation, Deadline: h.clock.read() + time.Hour})
+	if err := h.a.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if h.a.Ready() {
+		t.Fatal("adapter is ready after Shutdown")
+	}
+}
+
 func TestShutdownReleasesInOrder(t *testing.T) {
 	h := newHarness(t)
 	h.start()

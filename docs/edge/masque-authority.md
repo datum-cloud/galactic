@@ -1,6 +1,6 @@
 # MASQUE grant authority
 
-`internal/edge/masque/authority` and `cmd/masque-authority` authenticate MASQUE connector credentials and issue the finite `EdgeService` of each connector authorization. The [MASQUE provider adapter](masque-provider.md) consumes them through `authority.Client`, its `masque.Authorizer`. The design is in the [MASQUE connector contract](../designs/masque/contract.md#authority-and-durable-allocations). This page covers what is built and how to operate it. No image, manifest or published release ships it yet.
+`internal/edge/masque/authority` and `cmd/masque-authority` authenticate MASQUE connector credentials and issue the finite `EdgeService` of each connector authorization. The [MASQUE provider adapter](masque-provider.md) consumes them through `authority.Client`, its `masque.Authorizer`. The design is in the [MASQUE connector contract](../designs/masque/contract.md#authority-and-durable-allocations). This page covers what is built and how to operate it. `.github/workflows/publish.yaml` publishes its image, `ghcr.io/datum-cloud/masque-authority`, and `config/masque` deploys it ([deployment](masque-service.md#deployment)).
 
 The authority runs under its own ServiceAccount. It holds no provider token and no host access. The provider can't write grant records, ledgers or EdgeServices; it receives each grant from the authority.
 
@@ -112,6 +112,4 @@ The conformance fixture uses the authority when its configuration sets `grantAut
 Not yet covered:
 
 - the HTTP/2 transport ([#981](https://github.com/datum-cloud/galactic/issues/981));
-- refusing tenant packets and MTU probes before admission ([#980](https://github.com/datum-cloud/galactic/issues/980), [#981](https://github.com/datum-cloud/galactic/issues/981));
-- deployment manifests and an image ([#980](https://github.com/datum-cloud/galactic/issues/980));
 - lab or target-platform measurements of the revocation and expiry bounds ([#985](https://github.com/datum-cloud/galactic/issues/985)).

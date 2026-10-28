@@ -1,0 +1,77 @@
+# masque-authority serve answers the provider pods' Authorize, Refresh and
+# Retire calls. It keeps no state in memory, so a restarted or second
+# replica rereads everything before it issues anything.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: masque-authority
+  namespace: masque-system
+  labels:
+    app.kubernetes.io/name: masque-authority
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: masque-authority
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: masque-authority
+    spec:
+      serviceAccountName: masque-authority
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: masque-authority
+          # ":latest" is a placeholder the overlay replaces with a published
+          # tag. CI does not stamp it into the galactic-kustomize bundle
+          # until the #980 lab run passes.
+          image: ghcr.io/datum-cloud/masque-authority:latest
+          args:
+            - serve
+            - --provider=masque
+            - --provider-service-account=masque-system/masque-provider
+            # An overlay appends --cell=<cell name>; only grant records for
+            # that cell are honored. Without it the authority refuses to
+            # start.
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Reread when cert-manager or an operator rewrites the Secret.
+            - name: tls
+              mountPath: /etc/masque-authority/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: masque-authority-tls
