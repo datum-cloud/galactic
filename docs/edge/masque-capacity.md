@@ -39,7 +39,7 @@ After every scenario the harness closes all clients. It then waits up to 40 s fo
 
 ## Results: loopback, 2026-10-28
 
-Host: Intel Core i7-10710U, 12 CPUs, Linux 7.1, Go 1.26.5. Server code at `f7008a48` ([#1210](https://github.com/datum-cloud/galactic/pull/1210)). Warm-up 2 s, measured 10 s, 3 runs of each scenario, every run passed. The tables give the median of the three runs, except peak RSS, which is the largest.
+Host: Intel Core i7-10710U, 12 CPUs, Linux 7.1, Go 1.26.5. Server code at `f7008a48` ([#1210](https://github.com/datum-cloud/galactic/pull/1210)); later #1210 commits change only tests and comments. Warm-up 2 s, measured 10 s, 3 runs of each scenario, every run passed. The tables give the median of the three runs, except peak RSS, which is the largest.
 
 These numbers come from one host with clients and server sharing its CPUs. They show how the server behaves under load and that it holds its limits. They do not show capacity on an edge node.
 
@@ -84,7 +84,7 @@ The overload runs admitted 64 flood requests each, which held free session slots
 | HTTP/2 goodput at least 100 Mbit/s per pod              | 2971 Mbit/s at 32 connectors                                        | Exceeded on loopback; unproven on edge nodes                        |
 | Provider RSS at most 1 GiB                              | 136 MiB peak, client included                                       | Within target                                                       |
 | Average CPU at most 3.2 cores                           | 7.7 to 9.8 cores at saturation, client included                     | Not comparable: the harness offers as much load as the host absorbs |
-| 5 s blocked-delivery timeout                            | 5.5 s on HTTP/2, 6.8 to 8.0 s on HTTP/3                             | HTTP/3 misses by up to 3 s; see Findings                            |
+| 5 s blocked-delivery timeout                            | 5.5 s on HTTP/2, 6.8 to 8.0 s on HTTP/3                             | Missed on both; see Findings                                        |
 | Overload rejects bounded work                           | Refused with 503 or a closed connection; queues held at 128 packets | Met                                                                 |
 | Expiry under load                                       | Revoked sessions ended within 4 ms under a flood                    | Met                                                                 |
 | Recovery after clients leave                            | Every run recovered                                                 | Met                                                                 |
@@ -93,6 +93,7 @@ The overload runs admitted 64 flood requests each, which held free session slots
 ## Findings
 
 - The first blocked-delivery watchdog let a stalled HTTP/3 client hold its session for 13.3 s. A QUIC connection to a client that stopped reading still sends two datagrams per probe timeout, so no single write blocked for 5 s. [#1210](https://github.com/datum-cloud/galactic/pull/1210) now ends a session after slow writes keep recurring for 5 s. The probe timeouts start below the 1.25 s that counts as slow, so the HTTP/3 session ends after 6.8 to 8.0 s rather than 5.
+- Neither transport meets the 5 s target exactly. The watchdog checks every 1.25 s, so a session blocked for 5 s ends within 6.25 s; HTTP/2 measured 5.5 s. The harness fails a run only past 10 s, so it shows the timeout is bounded, not that 5 s is met. Meeting 5 s exactly would mean checking more often, or treating the target as 5 s plus one check interval; that choice belongs to the target review #984 asks for.
 - The harness reaches the contract's 32 connectors per pod with headroom on both transports. Latency grows with the connector count because each connector keeps 32 packets in flight: the p99 is 23.6 ms at 32 connectors over HTTP/3.
 
 ## Still open
