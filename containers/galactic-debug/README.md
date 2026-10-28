@@ -4,8 +4,11 @@ An incident-response toolbox image, built on `nicolaka/netshoot` plus the
 tools that debugging Galactic's datapath and routing needs and netshoot
 doesn't already have: `bpftool`, `vtysh` (FRR client), the `gobgp` CLI,
 `crictl`, `yq`, and `galactic-usid` (this repo's base62/hex uSID codec,
-`cmd/galactic-usid`). The image also ships `kubectl` and `bpftrace`, which
-don't work from a debug pod today (see [What doesn't work](#what-doesnt-work)).
+`cmd/galactic-usid`).
+
+The image has no `kubectl`: a node debug pod runs as its namespace's
+`default` service account, which has no RBAC. It has no `bpftrace` either,
+because the pod doesn't mount tracefs. Run `kubectl` from your workstation.
 
 Published as `ghcr.io/datum-cloud/galactic-debug`. Not deployed as a
 standing workload: attach it on demand as a node debug pod.
@@ -47,8 +50,6 @@ kubectl -n galactic-system exec -it <debug-pod> -- bash
   ```
   kubectl -n galactic-system delete pod <debug-pod>
   ```
-
-Run `kubectl` from your workstation, not from inside the pod.
 
 ## Inside the pod
 
@@ -112,13 +113,6 @@ without changing the target pod. Some workloads (Kata, Unikraft) sit
 behind a tap interface: from the host you see the host-side interface,
 never the guest.
 
-## What doesn't work
-
-| Tool       | Why                                                                                                                            | Tracked in                                                   |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
-| `kubectl`  | The pod runs as the namespace's `default` service account, which has no RBAC. Run `kubectl` from your workstation              | [#1158](https://github.com/datum-cloud/galactic/issues/1158) |
-| `bpftrace` | Needs tracefs, which the pod doesn't mount. Even with `mount -t tracefs tracefs /sys/kernel/tracing` it isn't verified to work | [#1158](https://github.com/datum-cloud/galactic/issues/1158) |
-
 ## Known caveats to re-check every time
 
 - **A service reachable through more than one region needs testing in
@@ -147,6 +141,9 @@ never the guest.
 version `galactic-router` embeds (`go.mod`'s `github.com/osrg/gobgp/v4`).
 Renovate bumps both in the same pull request.
 
-`KUBECTL_VERSION`/`CRICTL_VERSION`/`YQ_VERSION` build args pin the rest;
-bump periodically, roughly tracking the Kubernetes minor version of the
-Galactic edge clusters the image is used on.
+The `nicolaka/netshoot` base is pinned by tag and digest, so every build of
+a commit gets the same base. Renovate proposes base updates.
+
+`CRICTL_VERSION`/`YQ_VERSION` build args pin the rest; bump periodically,
+roughly tracking the Kubernetes minor version of the Galactic edge clusters
+the image is used on.
