@@ -49,6 +49,11 @@ type Grant struct {
 	Routes []netip.Prefix
 	// NotAfter is when the grant stops authorizing forwarding.
 	NotAfter time.Time
+	// Authorization identifies the authorization incarnation the authority
+	// issued; Refresh and Retire name it.
+	Authorization string
+	// Revision is the credential revision the grant was issued under.
+	Revision int64
 }
 
 // Authorizer authenticates a CONNECT-IP request's credential and authorizes
@@ -73,11 +78,13 @@ type Authorizer interface {
 }
 
 // sameAuthority reports whether a refreshed grant r still authorizes what g
-// did: the same connector, principal, VPC, service, /96 and routes. Only
-// the deadline may change.
+// did: the same connector, principal, VPC, service, /96, routes,
+// authorization incarnation and credential revision. Only the deadline may
+// change.
 func (g *Grant) sameAuthority(r *Grant) bool {
 	return g.Connector == r.Connector && g.Principal == r.Principal && g.VPC == r.VPC && g.VPCUID == r.VPCUID &&
-		g.VPCID == r.VPCID && g.Service == r.Service && g.Prefix == r.Prefix && slices.Equal(g.Routes, r.Routes)
+		g.VPCID == r.VPCID && g.Service == r.Service && g.Prefix == r.Prefix && slices.Equal(g.Routes, r.Routes) &&
+		g.Authorization == r.Authorization && g.Revision == r.Revision
 }
 
 // validate reports why g cannot admit a request for vpc at now.

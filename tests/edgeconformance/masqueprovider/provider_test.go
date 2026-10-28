@@ -16,6 +16,7 @@ import (
 
 	"go.datum.net/galactic/internal/edge/connectip"
 	"go.datum.net/galactic/internal/edge/masque"
+	"go.datum.net/galactic/internal/edge/masque/authority"
 )
 
 const (
@@ -38,9 +39,21 @@ func validConfig() *Config {
 	}
 }
 
+// tokenPath is a token file path in configurations under test.
+const tokenPath = "token"
+
 func TestConfigValidate(t *testing.T) {
 	if err := validConfig().Validate(); err != nil {
 		t.Fatalf("identical /96s in different services: %v", err)
+	}
+	ga := validConfig()
+	ga.Services, ga.Connectors = nil, nil
+	ga.GrantAuthority = &GrantAuthority{URL: "https://authority", CAFile: "ca", TokenFile: tokenPath}
+	if err := ga.Validate(); err != nil {
+		t.Fatalf("grant authority configuration: %v", err)
+	}
+	if _, ok := ga.Authorizer().(*authority.Client); !ok {
+		t.Fatalf("Authorizer() = %T with a grant authority, want *authority.Client", ga.Authorizer())
 	}
 	for _, tc := range []struct {
 		name   string
@@ -60,6 +73,13 @@ func TestConfigValidate(t *testing.T) {
 		{"unmasked route", func(c *Config) {
 			c.Connectors[0].Routes = []netip.Prefix{netip.MustParsePrefix("fd20::1/32")}
 		}, "route"},
+		{"grant authority beside static connectors", func(c *Config) {
+			c.GrantAuthority = &GrantAuthority{URL: "https://authority", CAFile: "ca", TokenFile: tokenPath}
+		}, "come from the grant authority"},
+		{"grant authority over plain HTTP", func(c *Config) {
+			c.Services, c.Connectors = nil, nil
+			c.GrantAuthority = &GrantAuthority{URL: "http://authority", CAFile: "ca", TokenFile: tokenPath}
+		}, "https://"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := validConfig()
