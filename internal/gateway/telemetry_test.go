@@ -56,6 +56,8 @@ func TestPrometheusTelemetryEmitter_RuleAppliedAndRemovedDoNotPanic(t *testing.T
 
 func TestPrometheusTelemetryEmitter_DropObservedIncrementsCounter(t *testing.T) {
 	e := NewPrometheusTelemetryEmitter()
+	// The counter lives on the shared registry; start this test without any.
+	e.controlPlaneDrops.Reset()
 	e.DropObserved(context.Background(), testRuleKeyR1, "quota_exceeded")
 	e.DropObserved(context.Background(), testRuleKeyR1, "quota_exceeded")
 
@@ -73,8 +75,11 @@ func TestPrometheusTelemetryEmitter_DropObservedIncrementsCounter(t *testing.T) 
 	}
 }
 
-func TestPrometheusTelemetryEmitter_MustRegisterIsIdempotentPerInstance(t *testing.T) {
-	e := NewPrometheusTelemetryEmitter()
-	reg := prometheus.NewRegistry()
-	e.MustRegister(reg) // must not panic
+// TestPrometheusTelemetryEmitter_EmittersShareTheCounter: a second emitter
+// gets the counter the first created rather than panicking on a duplicate.
+func TestPrometheusTelemetryEmitter_EmittersShareTheCounter(t *testing.T) {
+	first, second := NewPrometheusTelemetryEmitter(), NewPrometheusTelemetryEmitter()
+	if first.controlPlaneDrops != second.controlPlaneDrops {
+		t.Error("two emitters hold different counters")
+	}
 }

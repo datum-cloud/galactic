@@ -8,6 +8,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
+
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 )
 
@@ -63,4 +66,17 @@ func ResolveUplinks(override []string) ([]string, error) {
 		return nil, ErrNoUplinks
 	}
 	return targets, nil
+}
+
+// NewUplinkResolveErrors creates <namespace>_uplink_resolve_errors_total on
+// the instrumentation library's registry: how often re-resolving the uplinks
+// after a link or route change failed. namespace is the caller's own metric
+// prefix.
+func NewUplinkResolveErrors(namespace string) prometheus.Counter {
+	return metrics.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "uplink_resolve_errors_total",
+		Help: "Times re-resolving this node's uplinks after a link or route change failed. The shard keeps " +
+			"its previous coverage, so a steady rise means uplinks that appeared since are not covered.",
+	})
 }

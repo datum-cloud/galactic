@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 )
 
 // String names slot as its metrics label: "gateway_lb", "gateway_return",
@@ -41,19 +42,20 @@ type LeaseMetrics struct {
 	now      func() time.Time
 }
 
-// NewLeaseMetrics builds the lease series under namespace, the caller's own
-// metric prefix: <namespace>_dispatch_lease_renewals_total{slot, result} and
+// NewLeaseMetrics creates the lease series on the instrumentation library's
+// registry under namespace, the caller's own metric prefix:
+// <namespace>_dispatch_lease_renewals_total{slot, result} and
 // <namespace>_dispatch_lease_expiry_timestamp_seconds{slot}.
 func NewLeaseMetrics(namespace string) *LeaseMetrics {
 	return &LeaseMetrics{
-		renewals: prometheus.NewCounterVec(prometheus.CounterOpts{
+		renewals: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "dispatch_lease",
 			Name:      "renewals_total",
 			Help: "Renewals of this process's XDP dispatcher slot leases, by slot and result. A slot whose " +
 				"renewals keep failing is skipped by the dispatcher once its lease expires.",
 		}, []string{"slot", "result"}),
-		expiry: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		expiry: metrics.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: "dispatch_lease",
 			Name:      "expiry_timestamp_seconds",
@@ -62,14 +64,6 @@ func NewLeaseMetrics(namespace string) *LeaseMetrics {
 		}, []string{"slot"}),
 		now: time.Now,
 	}
-}
-
-// Register registers m's series with reg.
-func (m *LeaseMetrics) Register(reg prometheus.Registerer) error {
-	if err := reg.Register(m.renewals); err != nil {
-		return err
-	}
-	return reg.Register(m.expiry)
 }
 
 // Observe returns the onRenew callback for Lease on slot: it records each

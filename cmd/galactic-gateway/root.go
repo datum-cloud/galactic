@@ -20,7 +20,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
@@ -177,7 +176,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 			return err
 		}
 		gwDatapath, err = setupGatewayDatapath(ctx, cfg.PublicInterface, cfg.InternalInterfaces, encapSrc,
-			cfg.XDPAttach, ipv4, ctrlmetrics.Registry, coverage)
+			cfg.XDPAttach, ipv4, coverage)
 		if err != nil {
 			return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 		}
@@ -186,7 +185,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		// is load-balanced here, but backend nodes can still send replies
 		// through it, which only edge_return lets past connection tracking.
 		turnOffDatapath(ctx, xdpdispatch.PinDir, xdpdispatch.SlotGatewayLB)
-		rp, err := setupReturnPath(ctx, cfg.InternalInterfaces, cfg.XDPAttach, ipv4, ctrlmetrics.Registry, coverage)
+		rp, err := setupReturnPath(ctx, cfg.InternalInterfaces, cfg.XDPAttach, ipv4, coverage)
 		if err != nil {
 			return fmt.Errorf("setup edge gateway return path: %w", err)
 		}
@@ -205,7 +204,6 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// comments for what each does and does not cover.
 	gwQuota := gateway.NewNodeQuotaEnforcer(gateway.DefaultMaxRulesPerTenant, gateway.DefaultMaxRuleTableEntries)
 	gwTelemetry := gateway.NewPrometheusTelemetryEmitter()
-	gwTelemetry.MustRegister(ctrlmetrics.Registry)
 	gwEngine := gateway.NewEngine(gwDatapath, gwQuota, gwTelemetry)
 
 	// The gateway engine reconciler. No SRv6 address is passed: this datapath

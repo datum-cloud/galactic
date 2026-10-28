@@ -9,16 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestLeaseMetricsObserve(t *testing.T) {
 	m := NewLeaseMetrics("test")
-	reg := prometheus.NewPedanticRegistry()
-	if err := m.Register(reg); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
+	// The series live on the shared registry; start this test without any.
+	m.renewals.Reset()
+	m.expiry.Reset()
 	renewedAt := time.Unix(1_000_000, 0)
 	m.now = func() time.Time { return renewedAt }
 
