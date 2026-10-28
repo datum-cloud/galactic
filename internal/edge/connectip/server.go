@@ -725,11 +725,11 @@ func (c *deliveryClock) blocked() time.Duration {
 // denied with reason slow_client. Stuck means one write blocked that long,
 // or back-to-back slow writes for that long: a QUIC connection to a client
 // that stopped reading still drains one datagram per probe timeout, and
-// those timeouts double from a fraction of a second; see deliveryClock. Over HTTP/3 ending the
-// session closes the client's QUIC connection, since a blocked datagram
-// waits on the connection's send queue; the connection's other request is
-// stalled by the same client. It returns when ctx is done or the session is
-// aborted.
+// those timeouts double from a fraction of a second; see deliveryClock.
+// Over HTTP/3 ending the session closes the client's QUIC connection, since
+// a blocked datagram waits on the connection's send queue; the
+// connection's other request is stalled by the same client. It returns when
+// ctx is done or the session is aborted.
 func watchDelivery(ctx context.Context, log *slog.Logger, conn tunnel, clock *deliveryClock) {
 	t := time.NewTicker(deliveryTimeout / 4)
 	defer t.Stop()

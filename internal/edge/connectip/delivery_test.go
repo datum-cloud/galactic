@@ -148,17 +148,17 @@ func TestTUNQueueFullDropIsCounted(t *testing.T) {
 
 // slowTunnel is a tunnel whose writes toward the client take per, as a QUIC
 // connection to a stalled client drains its datagram queue once per probe
-// timeout. With alternate set, every other write returns at once, as the
-// second datagram a probe timeout frees does.
+// timeout. After each slow write, the next prompt writes return at once, as
+// the second datagram a probe timeout frees does.
 type slowTunnel struct {
 	*narrowTunnel
-	per       time.Duration
-	alternate bool
-	writes    atomic.Int64
+	per    time.Duration
+	prompt int64
+	writes atomic.Int64
 }
 
 func (t *slowTunnel) WritePacket([]byte) ([]byte, error) {
-	if t.alternate && t.writes.Add(1)%2 == 0 {
+	if (t.writes.Add(1)-1)%(t.prompt+1) != 0 {
 		return nil, nil
 	}
 	select {
@@ -176,7 +176,7 @@ func (t *slowTunnel) WritePacket([]byte) ([]byte, error) {
 func TestBackToBackSlowWritesEndSession(t *testing.T) {
 	shortenDeliveryTimeout(t, 400*time.Millisecond)
 	before := slowClientEnds()
-	tun := &slowTunnel{narrowTunnel: newNarrowTunnel(maxPacketSize), per: 150 * time.Millisecond, alternate: true}
+	tun := &slowTunnel{narrowTunnel: newNarrowTunnel(maxPacketSize), per: 150 * time.Millisecond, prompt: 1}
 	sess, done := runProxySession(t, tun)
 	stop := make(chan struct{})
 	defer close(stop)
@@ -198,6 +198,34 @@ func TestBackToBackSlowWritesEndSession(t *testing.T) {
 	}
 	if got := slowClientEnds() - before; got != 1 {
 		t.Fatalf("slow_client count rose by %v, want 1", got)
+	}
+}
+
+// TestPromptStreakResetsRun answers promptStreak writes at once after each
+// slow one, as a congested but healthy client drains its queue between
+// stalls. Each streak ends the run of slow writes, so the session stays open.
+func TestPromptStreakResetsRun(t *testing.T) {
+	shortenDeliveryTimeout(t, 400*time.Millisecond)
+	tun := &slowTunnel{narrowTunnel: newNarrowTunnel(maxPacketSize), per: 150 * time.Millisecond,
+		prompt: promptStreak}
+	sess, done := runProxySession(t, tun)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case sess.toClient <- echoRequest(t, policyTarget, firstClient, i, 200):
+			case <-stop:
+				return
+			case <-sess.closed:
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+		t.Fatal("session ended although every slow write was followed by a prompt streak")
+	case <-time.After(2 * time.Second):
 	}
 }
 
