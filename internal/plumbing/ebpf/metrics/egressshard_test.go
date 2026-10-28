@@ -12,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -113,23 +114,28 @@ func TestEgressShardCollectorReportsNothingUnpublished(t *testing.T) {
 }
 
 func TestEgressControlSeries(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	c := NewEgressControl(reg)
+	c := NewEgressControl()
+	before := map[string]float64{}
+	for _, m := range collectNamed(t, gathererCollector{ctrlmetrics.Registry}) {
+		before[m.name] = m.value
+	}
 	c.SetMode("hashed", "ordered", "hashed")
 	c.SetWatchSynced(false)
 	c.SetGroupRoutes(map[string]int{"nat66": 4})
 	c.SweepError("refresh")
 	got := map[string]float64{}
-	for _, m := range collectNamed(t, registryCollector{reg}) {
+	for _, m := range collectNamed(t, gathererCollector{ctrlmetrics.Registry}) {
 		got[m.name] = m.value
 	}
+	const refreshErrors, applyErrors = `galactic_cni_egress_sweep_errors_total{stage="refresh"}`,
+		`galactic_cni_egress_sweep_errors_total{stage="apply"}`
 	for name, value := range map[string]float64{
-		`galactic_cni_egress_mode{mode="hashed"}`:                 1,
-		`galactic_cni_egress_mode{mode="ordered"}`:                0,
-		`galactic_cni_egress_shard_watch_synced`:                  0,
-		`galactic_cni_egress_group_routes{class="nat66"}`:         4,
-		`galactic_cni_egress_sweep_errors_total{stage="refresh"}`: 1,
-		`galactic_cni_egress_sweep_errors_total{stage="apply"}`:   0,
+		`galactic_cni_egress_mode{mode="hashed"}`:         1,
+		`galactic_cni_egress_mode{mode="ordered"}`:        0,
+		`galactic_cni_egress_shard_watch_synced`:          0,
+		`galactic_cni_egress_group_routes{class="nat66"}`: 4,
+		refreshErrors: before[refreshErrors] + 1,
+		applyErrors:   before[applyErrors],
 	} {
 		if v, ok := got[name]; !ok || v != value {
 			t.Errorf("%s = %v (present %v), want %v", name, v, ok, value)
@@ -139,13 +145,14 @@ func TestEgressControlSeries(t *testing.T) {
 	nilControl.SweepError("apply") // must not panic
 }
 
-// registryCollector adapts a registry to prometheus.Collector for collectNamed.
-type registryCollector struct{ reg *prometheus.Registry }
+// gathererCollector adapts a gatherer to prometheus.Collector for
+// collectNamed.
+type gathererCollector struct{ g prometheus.Gatherer }
 
-func (r registryCollector) Describe(chan<- *prometheus.Desc) {}
+func (r gathererCollector) Describe(chan<- *prometheus.Desc) {}
 
-func (r registryCollector) Collect(ch chan<- prometheus.Metric) {
-	families, _ := r.reg.Gather()
+func (r gathererCollector) Collect(ch chan<- prometheus.Metric) {
+	families, _ := r.g.Gather()
 	for _, f := range families {
 		for _, m := range f.GetMetric() {
 			labels := map[string]string{}

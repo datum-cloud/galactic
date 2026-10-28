@@ -15,11 +15,12 @@ import (
 	"time"
 
 	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"go.datum.net/galactic/internal/plumbing/nldump"
+	// Creates the counters counts reads.
+	_ "go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // Listing kinds, the kind label values of nldump's counters.
@@ -138,12 +139,11 @@ func UntilInterrupted(t testing.TB, netns ns.NetNS, kinds []string, minPasses in
 	return passes
 }
 
-// counts returns metric's value per kind label.
+// counts returns metric's value per kind label, from the instrumentation
+// library's registry.
 func counts(t testing.TB, metric string) map[string]float64 {
 	t.Helper()
-	reg := prometheus.NewRegistry()
-	nldump.MustRegister(reg)
-	families, err := reg.Gather()
+	families, err := ctrlmetrics.Registry.Gather()
 	if err != nil {
 		t.Fatalf("gather netlink dump metrics: %v", err)
 	}

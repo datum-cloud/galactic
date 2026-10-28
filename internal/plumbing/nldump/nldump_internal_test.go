@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 // errInterrupted is how netlink reports a dump the kernel flagged interrupted.
@@ -129,13 +129,11 @@ func TestRetry_ReturnsOtherErrorsAtOnce(t *testing.T) {
 	}
 }
 
-// TestMustRegister_ExposesEveryKind pins that a scrape shows both counters
+// TestMetrics_ExposeEveryKind pins that a scrape shows both counters
 // for every listing kind from startup, before any listing is interrupted, so
 // a rate over them is defined from the first scrape.
-func TestMustRegister_ExposesEveryKind(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	MustRegister(reg)
-	families, err := reg.Gather()
+func TestMetrics_ExposeEveryKind(t *testing.T) {
+	families, err := ctrlmetrics.Registry.Gather()
 	if err != nil {
 		t.Fatalf("gather: %v", err)
 	}

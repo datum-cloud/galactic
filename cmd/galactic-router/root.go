@@ -41,7 +41,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
 	"go.datum.net/galactic/internal/plumbing/loaddr"
-	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/gobgp"
@@ -122,7 +121,6 @@ func runCmd(cfg *config.RouterConfig) error {
 	}
 	serviceRouteMetrics := serviceroute.NewMetrics()
 	serviceRouteMetrics.MustRegister(ctrlmetrics.Registry)
-	nldump.MustRegister(ctrlmetrics.Registry)
 
 	// ctx carries a cause so an ordinary signal-triggered shutdown can be told
 	// apart from the health server's own Serve failure below. See the cause

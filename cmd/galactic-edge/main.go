@@ -45,7 +45,6 @@ import (
 	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
-	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 type options struct {
@@ -178,7 +177,6 @@ func run(parent context.Context, o *options) error {
 			Metrics: diag.NewMetrics(ctrlmetrics.Registry, "node"),
 		},
 	}
-	nldump.MustRegister(ctrlmetrics.Registry)
 	if err := ctrlmetrics.Registry.Register(agent.Collector{Agent: a}); err != nil {
 		return fmt.Errorf("register edge node metrics: %w", err)
 	}

@@ -20,6 +20,8 @@ import (
 
 	// Every package that creates a metric through the library, so Lint sees
 	// it. TestLintLinksEveryMetric keeps this list complete.
+	_ "go.datum.net/galactic/internal/plumbing/ebpf/metrics"
+	_ "go.datum.net/galactic/internal/plumbing/nldump"
 	_ "go.datum.net/galactic/internal/runtime/gobgp"
 )
 

@@ -45,13 +45,8 @@ var pending = []string{
 	"internal/fabricconfig",
 	"internal/gateway",
 	"internal/ingresssidecar",
-	"internal/plumbing/ebpf/metrics",
 	"internal/plumbing/ebpf/xdpdispatch",
-	"internal/plumbing/nldump",
 	"internal/serviceroute",
-	// #1149: its manager disables metrics, which passes once any binary
-	// serves the library's handler.
-	"tests/psc/fixture",
 }
 
 // TestAdopted runs the instrumentation library's adoption check over the

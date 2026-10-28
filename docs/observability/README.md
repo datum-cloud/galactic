@@ -21,11 +21,11 @@ Create every metric with the constructors in
 [`go.miloapis.com/instrumentation/metrics`](https://github.com/milo-os/instrumentation),
 and register a collector that reads state at scrape time with its
 `metrics.MustRegister`. Both put the metric on controller-runtime's registry,
-which every controller-runtime manager serves. `galactic-cni`,
-`fabric-config-agent` and the fabric-api node sidecar serve only their own
-registries, so a library metric linked into them is not exported until they
-serve the library's handler. The tests in `internal/instrumentation` enforce
-the rule in the unit suite:
+which every controller-runtime manager serves and `galactic-cni` serves with
+the library's `metrics.Handler`. `fabric-config-agent` and the fabric-api node
+sidecar serve only their own registries, so a library metric linked into them
+is not exported until they serve the library's handler. The tests in
+`internal/instrumentation` enforce the rule in the unit suite:
 
 - `TestAdopted` runs the library's adoption check, which fails on a metric
   registered outside the library and on a logger the library didn't build.
@@ -39,7 +39,10 @@ the rule in the unit suite:
 - Each command that serves `/metrics` has a `TestMetricsScrape`, which fails
   when two registries export the same series. `TestEveryBinaryHasScrapeTest`
   requires one for every new command, but can't tell whether the test scrapes
-  the handler the command serves; reviewers check that.
+  the handler the command serves; reviewers check that. Where a command
+  creates its metrics at startup rather than when a package loads, its test
+  first creates them through the same function the command calls, and also
+  runs the library's lint, which `TestMetricsLint` can't reach.
 
 Both source checks skip the directories in `pending` in
 `internal/instrumentation/adoption_test.go`, which haven't moved to the

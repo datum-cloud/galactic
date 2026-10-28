@@ -30,7 +30,6 @@ import (
 	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
-	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
@@ -142,7 +141,6 @@ func runCmd(cfg *config.NATConfig) error {
 	if err != nil {
 		return fmt.Errorf("setup egress translation eBPF datapath: %w", err)
 	}
-	nldump.MustRegister(ctrlmetrics.Registry)
 	if err := ctrlmetrics.Registry.Register(
 		newShardStateCollector(datapath, cfg.DatapathEnabled, cfg.XDPAttach)); err != nil {
 		return fmt.Errorf("register egress shard state metrics: %w", err)
