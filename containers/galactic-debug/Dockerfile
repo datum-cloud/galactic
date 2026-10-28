@@ -55,28 +55,22 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
       go install "github.com/osrg/gobgp/v4/cmd/gobgp@${GOBGP_VERSION}" \
     && find "$(go env GOPATH)/bin" -name gobgp -exec cp {} /workspace/gobgp \;
 
-FROM nicolaka/netshoot:latest
+FROM nicolaka/netshoot:v0.16@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70
 ARG TARGETARCH
-ARG KUBECTL_VERSION=v1.34.0
 ARG CRICTL_VERSION=v1.34.0
 ARG YQ_VERSION=v4.44.3
 
-# bpftool/bpftrace: eBPF map/prog introspection, which nodes do not
-# otherwise provide, for dumping galactic-cni's usid_egress and
-# egress_route_table maps directly.
+# bpftool: eBPF map/prog introspection, which nodes do not otherwise
+# provide, for dumping galactic-cni's usid_egress and egress_route_table
+# maps directly.
 # frr: ships vtysh, for querying fabric-router's FRR instance directly.
+# No kubectl (a node debug pod has no RBAC) and no bpftrace (the pod has no
+# tracefs); see the README.
 RUN apk add --no-cache \
       bpftool \
-      bpftrace \
       frr
 
-# kubectl: correlating with the EndpointSlice state that drives
-# vpc-vrf-sidecar's route installs.
-RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
-      -o /usr/local/bin/kubectl \
-    && chmod +x /usr/local/bin/kubectl
-
-# crictl: CRI-level container/pod inspection alongside kubectl.
+# crictl: CRI-level container/pod inspection.
 RUN curl -fsSL "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${TARGETARCH}.tar.gz" \
     | tar xz -C /usr/local/bin
 
