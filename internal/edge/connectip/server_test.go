@@ -264,7 +264,7 @@ func TestProxyEnforcesPacketPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Proto = "connect-ip"
+	req.Proto = connectIPProtocol
 	req.Host = req.URL.Host
 	req.Header = authHeaders(tokenAlice, vpcBlue)
 	if err := rstr.SendRequestHeader(req); err != nil {

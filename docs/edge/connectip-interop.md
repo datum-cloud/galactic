@@ -142,6 +142,8 @@ The prototype proves the stack. #981 owns the production listener, which needs:
 
 ## Carried from #991
 
+The table records this proof's findings. Since then, `connectip.Server` has applied `Config.Limits` before admission and has sent the MTU probe only after admission (#991). The HTTP/2 listener must match both.
+
 | Finding                                  | Status in this proof                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | No limit ahead of admission              | Open on both transports. The prototype adds none; #980/#981 own it.                                                                                                                                                                                                                                                                                                                   |
