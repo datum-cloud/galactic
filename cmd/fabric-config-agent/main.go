@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -375,11 +376,10 @@ func writerLock(opts *options, metrics *fabricconfig.AgentMetrics, writer string
 	return fabricconfig.TimedLock{Locker: lock, Metrics: metrics, Writer: writer}
 }
 
-// newMetrics builds the registry served at /metrics, holding the next-hop
-// guard's and the activation path's metrics.
+// newMetrics creates the next-hop guard's and the activation path's metrics,
+// which /metrics serves from the instrumentation library's registry.
 func newMetrics() (*fabricconfig.NextHopMetrics, *fabricconfig.AgentMetrics) {
-	m := fabricconfig.NewNextHopMetrics()
-	return m, fabricconfig.NewAgentMetrics(m.Registry)
+	return fabricconfig.NewNextHopMetrics(), fabricconfig.NewAgentMetrics()
 }
 
 // watchWithGuard runs a.Watch alongside a NextHopGuard over the same FRR
@@ -421,7 +421,7 @@ func watchWithGuard(ctx context.Context, a *fabricconfig.Agent, opts *options) e
 
 	if opts.metricsBindAddress != "" {
 		mux := http.NewServeMux()
-		mux.Handle("/metrics", metrics.Handler())
+		mux.Handle("/metrics", instmetrics.Handler())
 		srv := &http.Server{
 			Addr:              opts.metricsBindAddress,
 			Handler:           mux,

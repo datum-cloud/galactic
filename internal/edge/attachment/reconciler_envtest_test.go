@@ -64,7 +64,7 @@ type fixture struct {
 	vpc    *cloudv1alpha1.VPC
 	// events and metrics are what the controller's diagnostics recorded.
 	events  *diagtest.Recorder
-	metrics *prometheus.Registry
+	metrics prometheus.Gatherer
 }
 
 func startFixture(t *testing.T) *fixture {
@@ -675,7 +675,7 @@ func expectCorrelation(t *testing.T, e diagtest.Event, want map[string]string) {
 	}
 }
 
-func expectFailures(t *testing.T, reg *prometheus.Registry, stage, reason string, want float64) {
+func expectFailures(t *testing.T, reg prometheus.Gatherer, stage, reason string, want float64) {
 	t.Helper()
 	families, err := reg.Gather()
 	if err != nil {

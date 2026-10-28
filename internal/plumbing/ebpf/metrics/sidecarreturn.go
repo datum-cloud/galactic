@@ -5,10 +5,12 @@
 package metrics
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
 )
 
 // sidecarReturnNamespace and sidecarReturnSubsystem name galactic-cni's series
@@ -108,9 +110,11 @@ func (c *sidecarReturnSnapshot) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.completed, prometheus.GaugeValue, ts)
 }
 
-// NewSidecarReturn builds the series and registers them with reg.
-func NewSidecarReturn(reg prometheus.Registerer) *SidecarReturn {
-	snapshot := &sidecarReturnSnapshot{
+// sidecarReturnPasses is the snapshot every SidecarReturn reports through.
+// A collector can be registered only once, so it is shared, and registered by
+// the first NewSidecarReturn.
+var (
+	sidecarReturnPasses = &sidecarReturnSnapshot{
 		endpoints: prometheus.NewDesc(
 			prometheus.BuildFQName(sidecarReturnNamespace, sidecarReturnSubsystem, "endpoints"),
 			"Ingress sidecar gateway endpoints on this node as of the last pass that listed them: desired "+
@@ -123,21 +127,28 @@ func NewSidecarReturn(reg prometheus.Registerer) *SidecarReturn {
 				"result; 0 before the first.",
 			nil, nil),
 	}
-	snapshot.last.Store(&sidecarReturnPass{})
+	registerSidecarReturnPasses sync.Once
+)
+
+// NewSidecarReturn creates the series on the instrumentation library's
+// registry. The endpoint snapshot is process-wide and starts over with each
+// call, so a process builds one SidecarReturn.
+func NewSidecarReturn() *SidecarReturn {
+	registerSidecarReturnPasses.Do(func() { instmetrics.MustRegister(sidecarReturnPasses) })
+	sidecarReturnPasses.last.Store(&sidecarReturnPass{})
 	m := &SidecarReturn{
-		snapshot: snapshot,
-		reconciles: prometheus.NewCounterVec(prometheus.CounterOpts{
+		snapshot: sidecarReturnPasses,
+		reconciles: instmetrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: sidecarReturnNamespace, Subsystem: sidecarReturnSubsystem, Name: "reconcile_total",
 			Help: "Sidecar return path passes by result: success, partial (an endpoint or the prune failed), " +
 				"waiting_identity (no SRv6 locator for this node yet) or error (nothing could be installed).",
 		}, []string{"result"}),
-		operations: prometheus.NewCounterVec(prometheus.CounterOpts{
+		operations: instmetrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: sidecarReturnNamespace, Subsystem: sidecarReturnSubsystem, Name: "operations_total",
 			Help: "Sidecar return path steps by operation (install per endpoint, register per pass, prune, reap) " +
 				"and result (success, error).",
 		}, []string{"operation", "result"}),
 	}
-	reg.MustRegister(m.snapshot, m.reconciles, m.operations)
 	for _, r := range sidecarReturnResults {
 		m.reconciles.WithLabelValues(r)
 	}

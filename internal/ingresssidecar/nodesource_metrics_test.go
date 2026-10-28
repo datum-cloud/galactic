@@ -199,7 +199,7 @@ func TestSweepRestoresNodeSourceAddress(t *testing.T) {
 
 func TestNodeSourceMetricsSeries(t *testing.T) {
 	reg := prometheus.NewPedanticRegistry()
-	NewNodeSourceMetrics().MustRegister(reg)
+	reg.MustRegister(NewNodeSourceMetrics().collectors()...)
 	n, err := testutil.GatherAndCount(reg)
 	if err != nil {
 		t.Fatal(err)

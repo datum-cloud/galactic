@@ -14,10 +14,10 @@ import (
 	"testing"
 
 	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/nldump/nldumptest"
@@ -216,9 +216,7 @@ func TestLister_ListsTheHandlesNamespace(t *testing.T) {
 // label values the counters carry, so the helper never waits on a series
 // that does not exist.
 func TestNldumptest_KindsMatchMetricLabels(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	nldump.MustRegister(reg)
-	families, err := reg.Gather()
+	families, err := ctrlmetrics.Registry.Gather()
 	if err != nil {
 		t.Fatalf("gather: %v", err)
 	}

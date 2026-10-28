@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 )
 
 // A desired VRF's return-path gateway state, as gateway_vrfs counts them.
@@ -55,34 +56,36 @@ type GatewayMetrics struct {
 	now func() time.Time
 }
 
-// NewGatewayMetrics builds unregistered gateway metrics for a sidecar whose
-// gateway publication and gateway address assignment are enabled as given.
+// NewGatewayMetrics creates gateway metrics on the instrumentation library's
+// registry for a sidecar whose gateway publication and gateway address
+// assignment are enabled as given. The registry keeps the series across
+// calls, so each call starts them over.
 func NewGatewayMetrics(publicationEnabled, addressAssignmentEnabled bool) *GatewayMetrics {
 	m := &GatewayMetrics{
-		publicationEnabled: prometheus.NewGauge(prometheus.GaugeOpts{
+		publicationEnabled: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "gateway_publication_enabled",
 			Help:      "1 when this sidecar publishes a return-path gateway advertisement per VPC.",
 		}),
-		addressAssignmentEnabled: prometheus.NewGauge(prometheus.GaugeOpts{
+		addressAssignmentEnabled: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "gateway_address_assignment_enabled",
 			Help:      "1 when this sidecar assigns each VPC's gateway address itself, from its gateway prefix.",
 		}),
-		vrfs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		vrfs: metrics.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "gateway_vrfs",
 			Help: "Installed, non-draining VRFs by return-path gateway state: awaiting_address, " +
 				"awaiting_publication, or published (locally, not proof any peer has the route). " +
 				"All zero while publication is disabled.",
 		}, []string{"state"}),
-		oldest: prometheus.NewGauge(prometheus.GaugeOpts{
+		oldest: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "gateway_oldest_pending_timestamp_seconds",
 			Help: "Unix time the longest-unpublished desired VRF started waiting; 0 when none is waiting. " +
 				"Retries do not reset it.",
 		}),
-		operations: prometheus.NewCounterVec(prometheus.CounterOpts{
+		operations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "gateway_operations_total",
 			Help: "Gateway operations by operation and result: resolve (success, error, not_provisioned), " +
@@ -90,6 +93,9 @@ func NewGatewayMetrics(publicationEnabled, addressAssignmentEnabled bool) *Gatew
 		}, []string{"operation", resultLabel}),
 		now: time.Now,
 	}
+	m.oldest.Set(0)
+	m.vrfs.Reset()
+	m.operations.Reset()
 	m.publicationEnabled.Set(boolGauge(publicationEnabled))
 	m.addressAssignmentEnabled.Set(boolGauge(addressAssignmentEnabled))
 	for _, s := range gatewayStates {
@@ -101,12 +107,6 @@ func NewGatewayMetrics(publicationEnabled, addressAssignmentEnabled bool) *Gatew
 		}
 	}
 	return m
-}
-
-// MustRegister registers every gateway metric against reg, panicking on a
-// duplicate. Call it once per process.
-func (m *GatewayMetrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.publicationEnabled, m.addressAssignmentEnabled, m.vrfs, m.oldest, m.operations)
 }
 
 func (m *GatewayMetrics) operation(op, result string) {

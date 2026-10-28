@@ -5,22 +5,16 @@
 package metrics
 
 import (
-	"net/http"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
 
-// Metrics bundles this datapath's Prometheus instrumentation into one private
-// registry, plus an HTTP handler for the caller to serve so it needs no
-// Prometheus imports of its own. A private registry rather than the global one,
-// so constructing more than one in a process cannot panic on duplicate
-// registration.
+// Metrics bundles this datapath's Prometheus instrumentation, created on the
+// instrumentation library's registry, which the caller serves with that
+// library's metrics.Handler.
 type Metrics struct {
-	Registry *prometheus.Registry
-	Events   *EventCounters
+	Events *EventCounters
 	// Egress is galactic-cni's egress shard group control-loop state.
 	Egress *EgressControl
 	// SidecarReturn is the ingress sidecar's host-side return path.
@@ -30,27 +24,18 @@ type Metrics struct {
 	EndpointSliceRepair *EndpointSliceRepair
 }
 
-// New builds a Metrics with the event counters already registered. Call
+// New creates every series that does not read loaded eBPF objects. Call
 // RegisterDatapathCollector once the datapath is loaded to also expose live map
-// state.
+// state. A process calls New once.
 func New() *Metrics {
-	reg := prometheus.NewRegistry()
-	events := NewEventCounters()
-	events.MustRegister(reg)
 	return &Metrics{
-		Registry: reg, Events: events, Egress: NewEgressControl(reg), SidecarReturn: NewSidecarReturn(reg),
-		EndpointSliceRepair: NewEndpointSliceRepair(reg),
+		Events: NewEventCounters(), Egress: NewEgressControl(), SidecarReturn: NewSidecarReturn(),
+		EndpointSliceRepair: NewEndpointSliceRepair(),
 	}
 }
 
 // RegisterDatapathCollector registers a collector reading live map state from
 // objs at every scrape. Call it once, after the datapath is loaded.
-func (m *Metrics) RegisterDatapathCollector(objs *prog.UsidObjects) error {
-	return m.Registry.Register(NewCollectorFromObjects(objs))
-}
-
-// Handler returns the http.Handler serving this Metrics' registry in the
-// Prometheus text exposition format.
-func (m *Metrics) Handler() http.Handler {
-	return promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{})
+func (m *Metrics) RegisterDatapathCollector(objs *prog.UsidObjects) {
+	instmetrics.MustRegister(NewCollectorFromObjects(objs))
 }

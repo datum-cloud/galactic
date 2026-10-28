@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	forwardv1 "go.datum.net/galactic/api/fabric/forward/v1"
 	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
@@ -206,8 +206,7 @@ func TestServiceTelemetryCarriesNoPayload(t *testing.T) {
 	nodes := &routerNodes{answers: map[string]routerAnswer{routerB: failAnswer(errcode.FRRUnavailable)}}
 	svc := newService(t, routerPods(routerA, routerB), nodes, 8)
 	adm := withAdmission(t, svc, limit.Defaults())
-	reg := prometheus.NewRegistry()
-	m := NewMetrics(reg, func() float64 { return 0 })
+	m := NewMetrics(func() float64 { return 0 })
 	m.RegisterService(svc.Switch)
 	m.RegisterAdmission(adm, func() error { return nil })
 	svc.Metrics, svc.Runner.Metrics, adm.Metrics = m, m, m
@@ -253,7 +252,7 @@ func TestServiceTelemetryCarriesNoPayload(t *testing.T) {
 
 	forbidden := []string{testProject, testRequestID[:8], "2606:4700", routerA, routerB, podA, "raw failure",
 		testService}
-	families, err := reg.Gather()
+	families, err := ctrlmetrics.Registry.Gather()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +284,7 @@ func TestServiceTelemetryCarriesNoPayload(t *testing.T) {
 // A follower counts a request it refused itself, and the leader one it ran
 // or refused after forwarding, so each request is counted once in the cell.
 func TestServiceRequestCountedOnce(t *testing.T) {
-	m := NewMetrics(prometheus.NewRegistry(), func() float64 { return 0 })
+	m := NewMetrics(func() float64 { return 0 })
 	svc := &Service{Cell: testSite, Allowlist: testAllowlist, Elected: func() bool { return false }, Metrics: m}
 	bad := validRequest(time.Now())
 	bad.ApiMajor = 2

@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/cilium/ebpf"
-	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -990,8 +989,7 @@ func TestSweepHashed_EmptyMembershipKeepsRoutesOnGroups(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			static := shardSIDFor(0x10)
 			f := newFixture(t, testHashed, []string{static}, []netip.Prefix{testNSP})
-			reg := prometheus.NewRegistry()
-			f.g.ctl = metrics.NewEgressControl(reg)
+			f.g.ctl = metrics.NewEgressControl()
 			lister := &fakeLister{shards: []bgpv1alpha1.EgressShard{dual("dual", 0x10)}, synced: true}
 			f.g.shards = lister
 
@@ -1029,22 +1027,19 @@ func TestSweepHashed_EmptyMembershipKeepsRoutesOnGroups(t *testing.T) {
 				}
 			}
 			want := map[string]float64{egressroutemap.NAT66Class.String(): 3, nat64NSP.String(): 1}
-			if got := groupRoutes(t, reg); !maps.Equal(got, want) {
+			if got := groupRoutes(t); !maps.Equal(got, want) {
 				t.Errorf("group_routes = %v, want %v", got, want)
 			}
 		})
 	}
 }
 
-// groupRoutes reads galactic_cni_egress_group_routes from reg, by class.
-func groupRoutes(t *testing.T, reg *prometheus.Registry) map[string]float64 {
+// groupRoutes reads galactic_cni_egress_group_routes from the instrumentation
+// library's registry, by class.
+func groupRoutes(t *testing.T) map[string]float64 {
 	t.Helper()
-	families, err := reg.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
 	got := map[string]float64{}
-	for _, mf := range families {
+	for _, mf := range gatherPrefixed(t, "galactic_cni_egress_group_routes") {
 		if mf.GetName() != "galactic_cni_egress_group_routes" {
 			continue
 		}

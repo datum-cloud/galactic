@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
 )
 
 // egressSubsystem names galactic-cni's egress control-loop series.
@@ -29,34 +30,34 @@ type EgressControl struct {
 	lastSweep   prometheus.Gauge
 }
 
-// NewEgressControl builds the series and registers them with reg.
-func NewEgressControl(reg prometheus.Registerer) *EgressControl {
+// NewEgressControl creates the series on the instrumentation library's
+// registry.
+func NewEgressControl() *EgressControl {
 	c := &EgressControl{
-		mode: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		mode: instmetrics.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: egressNamespace, Subsystem: egressSubsystem, Name: "mode",
 			Help: "1 for the egress mode galactic-cni is configured with (GALACTIC_CNI_EGRESS_MODE), 0 for the other.",
 		}, []string{"mode"}),
-		watchSynced: prometheus.NewGauge(prometheus.GaugeOpts{
+		watchSynced: instmetrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: egressNamespace, Subsystem: egressSubsystem, Name: "shard_watch_synced",
 			Help: "1 once galactic-cni's EgressShard watch has listed the cluster, else 0. Hashed mode keeps the " +
 				"shard groups it last published until then.",
 		}),
-		groupRoutes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		groupRoutes: instmetrics.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: egressNamespace, Subsystem: egressSubsystem, Name: "group_routes",
 			Help: "egress_route_table entries naming an egress shard group after the last successful sweep, by " +
 				"translation class. Must be 0 before rolling back to a release that predates shard groups.",
 		}, []string{labelClass}),
-		sweepErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+		sweepErrors: instmetrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: egressNamespace, Subsystem: egressSubsystem, Name: "sweep_errors_total",
 			Help: "Egress route sweep failures, by stage: apply (publishing a shard group), refresh (reading or " +
 				"rewriting egress_route_table), watch (listing EgressShards), close and disable (retiring groups).",
 		}, []string{"stage"}),
-		lastSweep: prometheus.NewGauge(prometheus.GaugeOpts{
+		lastSweep: instmetrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: egressNamespace, Subsystem: egressSubsystem, Name: "last_successful_sweep_timestamp_seconds",
 			Help: "Unix time of the last egress route sweep that finished without an error.",
 		}),
 	}
-	reg.MustRegister(c.mode, c.watchSynced, c.groupRoutes, c.sweepErrors, c.lastSweep)
 	for _, stage := range []string{"apply", "refresh", "watch", "close", "disable"} {
 		c.sweepErrors.WithLabelValues(stage)
 	}

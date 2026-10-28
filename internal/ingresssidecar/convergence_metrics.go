@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 )
 
 // Backend operations, as operations_total labels them.
@@ -52,41 +53,47 @@ type ConvergenceMetrics struct {
 	operations   *prometheus.CounterVec
 }
 
-// NewConvergenceMetrics builds unregistered convergence metrics, every series
-// at zero.
+// NewConvergenceMetrics creates convergence metrics on the instrumentation
+// library's registry, every series at zero. The registry keeps the series
+// across calls, so each call sets them back to zero.
 func NewConvergenceMetrics() *ConvergenceMetrics {
 	m := &ConvergenceMetrics{
-		desired: prometheus.NewGauge(prometheus.GaugeOpts{
+		desired: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "route_claims_desired",
 			Help: "Route claims, one per selected and ready EndpointSlice, that this sidecar wants installed, " +
 				"including any whose install failed.",
 		}),
-		applyPending: prometheus.NewGauge(prometheus.GaugeOpts{
+		applyPending: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "route_claims_apply_pending",
 			Help: "Desired route claims whose latest update is not applied yet, whether or not an earlier " +
 				"version of the route is installed.",
 		}),
-		oldest: prometheus.NewGauge(prometheus.GaugeOpts{
+		oldest: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "route_apply_oldest_pending_timestamp_seconds",
 			Help: "Unix time the longest-pending desired claim stopped being applied; 0 when none is pending. " +
 				"Retries and newer updates of a pending claim do not reset it.",
 		}),
-		overdue: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		overdue: metrics.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "teardown_overdue",
 			Help: "Routes or VRFs, by resource, whose own grace period has run out but whose removal has not " +
 				"completed, as of the last sweep.",
 		}, []string{"resource"}),
-		operations: prometheus.NewCounterVec(prometheus.CounterOpts{
+		operations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "operations_total",
 			Help: "Completed backend operations, by operation (ensure_vrf, ensure_route, remove_vrf, " +
 				"remove_route, reapply_vrf, reapply_route) and result (success, error).",
 		}, []string{"operation", resultLabel}),
 	}
+	for _, g := range []prometheus.Gauge{m.desired, m.applyPending, m.oldest} {
+		g.Set(0)
+	}
+	m.overdue.Reset()
+	m.operations.Reset()
 	for _, r := range teardownResources {
 		m.overdue.WithLabelValues(r)
 	}
@@ -96,12 +103,6 @@ func NewConvergenceMetrics() *ConvergenceMetrics {
 		}
 	}
 	return m
-}
-
-// MustRegister registers every convergence metric against reg, panicking on a
-// duplicate. Call it once per process.
-func (m *ConvergenceMetrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.desired, m.applyPending, m.oldest, m.overdue, m.operations)
 }
 
 // operation records one completed backend operation.

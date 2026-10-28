@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 )
 
 // Datapath checks each sweep makes: reading the shared eBPF datapath's
@@ -72,35 +73,41 @@ type DatapathMetrics struct {
 	now func() time.Time
 }
 
-// NewDatapathMetrics builds unregistered datapath metrics, every check's
-// status unknown.
+// NewDatapathMetrics creates datapath metrics on the instrumentation
+// library's registry, every check's status unknown. The registry keeps the
+// series across calls, so each call starts them over. MustRegister exports
+// the check statuses.
 func NewDatapathMetrics() *DatapathMetrics {
 	m := &DatapathMetrics{
-		checks: prometheus.NewCounterVec(prometheus.CounterOpts{
+		checks: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "datapath_checks_total",
 			Help: "Completed datapath checks, by check (generation, registration_rows) and result (ok, " +
 				"missing for registration_rows, error when the read failed).",
 		}, []string{checkLabel, resultLabel}),
 		status: newCheckStatusCollector(),
-		lastCompleted: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		lastCompleted: metrics.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "datapath_check_last_completed_timestamp_seconds",
 			Help:      "Unix time each check last completed, whatever its result; 0 before the first.",
 		}, []string{checkLabel}),
-		reapplies: prometheus.NewCounterVec(prometheus.CounterOpts{
+		reapplies: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "datapath_reapply_total",
 			Help: "Reapply passes over every tracked VRF and route, by reason (generation_changed, " +
 				"rows_missing, retry of a failed pass) and result (success when every reapply succeeded).",
 		}, []string{"reason", resultLabel}),
-		pending: prometheus.NewGauge(prometheus.GaugeOpts{
+		pending: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "datapath_reapply_pending",
 			Help:      "1 while a reapply pass left something unapplied, until a later pass succeeds.",
 		}),
 		now: time.Now,
 	}
+	m.checks.Reset()
+	m.lastCompleted.Reset()
+	m.reapplies.Reset()
+	m.pending.Set(0)
 	for _, check := range datapathChecks {
 		m.lastCompleted.WithLabelValues(check)
 		for _, result := range checkResults[check] {
@@ -115,10 +122,10 @@ func NewDatapathMetrics() *DatapathMetrics {
 	return m
 }
 
-// MustRegister registers every datapath metric against reg, panicking on a
-// duplicate. Call it once per process.
-func (m *DatapathMetrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.checks, m.status, m.lastCompleted, m.reapplies, m.pending)
+// MustRegister registers m's check status collector on the instrumentation
+// library's registry. Call it once per process.
+func (m *DatapathMetrics) MustRegister() {
+	metrics.MustRegister(m.status)
 }
 
 // checked records a completed check of check with result. The counter,

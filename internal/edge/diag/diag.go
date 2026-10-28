@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -179,37 +180,54 @@ func Note(message string, c Correlation) string {
 	return message + correlationSeparator + corr
 }
 
-// Metrics are the foundation's failure counters. Each process registers its
-// own.
+// LabelRole is the constant label naming the role of the process emitting
+// the failure counters: RoleCore or RoleNode.
+const LabelRole = "edge_role"
+
+// The process roles LabelRole names.
+const (
+	// RoleCore is galactic-controller's Edge controllers.
+	RoleCore = "core"
+	// RoleNode is the galactic-edge node agent.
+	RoleNode = "node"
+)
+
+// Metrics are the foundation's failure counters.
 type Metrics struct {
 	failures     *prometheus.CounterVec
 	gateClosures *prometheus.CounterVec
 	cleanup      prometheus.Counter
 }
 
-// NewMetrics registers the counters with reg. component is the emitting
-// process's role, core or node, and becomes a constant label.
-func NewMetrics(reg prometheus.Registerer, component string) *Metrics {
-	labels := prometheus.Labels{"component": component}
+// NewMetrics creates the counters on the instrumentation library's registry.
+// role is the emitting process's role, RoleCore or RoleNode, and becomes the
+// LabelRole constant label. The registry keeps role's series across calls, so
+// each call starts them over.
+func NewMetrics(role string) *Metrics {
+	labels := prometheus.Labels{LabelRole: role}
+	// A vector with no labels, so it can be reset like the others.
+	cleanup := metrics.NewCounterVec(prometheus.CounterOpts{
+		Name:        "galactic_edge_foundation_cleanup_failures_total",
+		Help:        "Host state releases or gate sweeps that failed and are retried on the next pass.",
+		ConstLabels: labels,
+	}, nil)
 	m := &Metrics{
-		failures: prometheus.NewCounterVec(prometheus.CounterOpts{
+		failures: metrics.NewCounterVec(prometheus.CounterOpts{
 			Name: "galactic_edge_foundation_failures_total",
 			Help: "Transitions of an attachment, route or service into a failed lifecycle stage, by stage and " +
 				"condition reason. Counted once per transition, not per retry.",
 			ConstLabels: labels,
 		}, []string{"stage", labelReason}),
-		gateClosures: prometheus.NewCounterVec(prometheus.CounterOpts{
+		gateClosures: metrics.NewCounterVec(prometheus.CounterOpts{
 			Name:        "galactic_edge_foundation_gate_closures_total",
 			Help:        "Forwarding gates the node agent closed while they were open, by cause.",
 			ConstLabels: labels,
 		}, []string{"cause"}),
-		cleanup: prometheus.NewCounter(prometheus.CounterOpts{
-			Name:        "galactic_edge_foundation_cleanup_failures_total",
-			Help:        "Host state releases or gate sweeps that failed and are retried on the next pass.",
-			ConstLabels: labels,
-		}),
 	}
-	reg.MustRegister(m.failures, m.gateClosures, m.cleanup)
+	m.failures.Reset()
+	m.gateClosures.Reset()
+	cleanup.Reset()
+	m.cleanup = cleanup.WithLabelValues()
 	return m
 }
 

@@ -29,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	fabricapi "go.datum.net/galactic/internal/fabric/api/v1alpha1"
@@ -268,7 +267,7 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	}
 
 	executor := gateway.NewExecutor(o.slots, o.expensiveSlots, o.queue)
-	metrics := gateway.NewMetrics(ctrlmetrics.Registry, func() float64 { return float64(executor.Depth()) })
+	metrics := gateway.NewMetrics(func() float64 { return float64(executor.Depth()) })
 	var admission *gateway.Admission
 	if o.aggregateBudgets {
 		admission, err = gateway.NewAdmission(o.limits, &limit.Authority{
