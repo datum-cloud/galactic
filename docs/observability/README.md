@@ -15,6 +15,36 @@ Metrics, scrape configuration, shipped alert rules and log format. Use the subsy
 - [Shipped alerts](alerts.md)
 - [Logging](logging.md)
 
+## Adding a metric
+
+Create every metric with the constructors in
+[`go.miloapis.com/instrumentation/metrics`](https://github.com/milo-os/instrumentation),
+and register a collector that reads state at scrape time with its
+`metrics.MustRegister`. Both put the metric on controller-runtime's registry,
+which every controller-runtime manager serves. `galactic-cni`,
+`fabric-config-agent` and the fabric-api node sidecar serve only their own
+registries, so a library metric linked into them is not exported until they
+serve the library's handler. The tests in `internal/instrumentation` enforce
+the rule in the unit suite:
+
+- `TestAdopted` runs the library's adoption check, which fails on a metric
+  registered outside the library and on a logger the library didn't build.
+- `TestNoMetricsOutsideLibrary` fails on any metric constructor or registry
+  from `client_golang`'s `prometheus` package, including one passed in as a
+  `prometheus.Registerer`.
+- `TestMetricsLint` checks every library metric's name against Prometheus
+  conventions. It imports each package that defines one, and
+  `TestLintLinksEveryMetric` fails when a package is missing from that list
+  or defines its metrics in a command's `main` package.
+- Each command that serves `/metrics` has a `TestMetricsScrape`, which fails
+  when two registries export the same series. `TestEveryBinaryHasScrapeTest`
+  requires one for every new command, but can't tell whether the test scrapes
+  the handler the command serves; reviewers check that.
+
+Both source checks skip the directories in `pending` in
+`internal/instrumentation/adoption_test.go`, which haven't moved to the
+library yet.
+
 ## Where the metrics come from
 
 The dataplane and fabric-router DaemonSets use `hostNetwork: true`, so
