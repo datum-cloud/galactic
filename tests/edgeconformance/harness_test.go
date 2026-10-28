@@ -38,6 +38,7 @@ import (
 	authv1 "k8s.io/api/authentication/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -98,7 +99,8 @@ func newLab(kubeconfig string) (*lab, error) {
 		return nil, err
 	}
 	s := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, appsv1.AddToScheme,
+	for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, appsv1.AddToScheme, authv1.AddToScheme,
+		rbacv1.AddToScheme,
 		coordinationv1.AddToScheme, galacticv1alpha1.AddToScheme, cloudv1alpha1.AddToScheme,
 		networkv1alpha1.AddToScheme} {
 		if err := add(s); err != nil {
@@ -259,10 +261,13 @@ type probeRun struct {
 	events []event
 }
 
+// nsenter enters a pod's namespaces from its node.
+const nsenter = "nsenter"
+
 // startProbe runs edgeprobe with args in the network namespace of the pod
 // whose sandbox has pid on node.
 func startProbe(node string, pid int, name string, args ...string) (*probeRun, error) {
-	full := append([]string{"exec", node, "nsenter", "-t", strconv.Itoa(pid), "-n", "/usr/local/bin/edgeprobe"},
+	full := append([]string{"exec", node, nsenter, "-t", strconv.Itoa(pid), "-n", "/usr/local/bin/edgeprobe"},
 		args...)
 	p := &probeRun{cmd: exec.CommandContext(context.Background(), "docker", full...), name: name}
 	p.cmd.Stdout = &p.out

@@ -18,6 +18,8 @@
 //	edgeprobe connectip -server [addr]:port -authority host:port -ca file \
 //	        -token T -vpc V -to addr -duration 5s
 //	    pings addr through one CONNECT-IP request (see connectIP)
+//	edgeprobe egresskind -iface link
+//	    prints the uSID datapath's delivery kind for a host link (see egressKind)
 package main
 
 import (
@@ -38,7 +40,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: edgeprobe send|sniff|connectip [flags]")
+		fmt.Fprintln(os.Stderr, "usage: edgeprobe send|sniff|connectip|egresskind [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -49,6 +51,8 @@ func main() {
 		err = sniff(os.Args[2:])
 	case "connectip":
 		err = connectIP(os.Args[2:])
+	case "egresskind":
+		err = egressKind(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}

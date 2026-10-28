@@ -122,8 +122,12 @@ func TestMASQUE(t *testing.T) {
 		t.FailNow()
 	}
 	t.Run("M16-unprivileged-provider", m.rowUnprivileged)
+	t.Run("M16-refused-requests", m.rowRefusedRequests)
+	t.Run("M16-missing-device", m.rowMissingDevice)
+	t.Run("A06-packet-access-registration", m.rowRegistration)
 	t.Run("M07-isolation", func(t *testing.T) { m.isolation(t, "cold") })
 	t.Run("nat-egress", m.rowNATEgress)
+	t.Run("A16-pod-link-route-drift", m.rowRouteDrift)
 	t.Run("shared-attachment-cancel", m.rowSharedCancel)
 	t.Run("maintenance-during-use", m.rowMaintenance)
 	t.Run("process-restart", m.rowProcessRestart)
@@ -218,7 +222,7 @@ func (m *masque) setup(t *testing.T) {
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		mt.vpcUID, mt.vpcID = l.vpcUID(t, mt.tn), l.vpcID(t, mt.tn)
 		mt.svc = l.grantService(t, mt.tn, masqueService, func(s *galacticv1alpha1.EdgeService) {
-			s.Spec.Capabilities = []string{"PacketAccess", "PrefixReachability"}
+			s.Spec.Capabilities = []string{capPacket, "PrefixReachability"}
 			s.Spec.Prefixes = []string{masqueGrant}
 			s.Spec.ClientPool = masquePool
 		})
@@ -298,7 +302,7 @@ func marshalConfig(svcs []fixtureService, conns []fixtureConnector) string {
 
 // deploy runs the fixture's Deployment name on node with cfg and returns its
 // running pod.
-func (m *masque) deploy(t *testing.T, name, node, cfg string) *corev1.Pod {
+func (m *masque) deploy(t *testing.T, name, node, cfg string, patches ...string) *corev1.Pod {
 	t.Helper()
 	l := m.l
 	secret := &corev1.Secret{
@@ -339,7 +343,7 @@ patches:
       - op: add
         path: /spec/selector/matchLabels/edge-conformance~1instance
         value: %s
-`, masqueNS, name, name, node, name, name, name), nil)
+`, masqueNS, name, name, node, name, name, name)+strings.Join(patches, ""), nil)
 	return l.waitProviderPod(t, masqueNS, name, node)
 }
 
@@ -351,6 +355,16 @@ func (m *masque) waitServing(t *testing.T, pod *corev1.Pod) {
 		att := m.l.waitServing(t, pod, mt.svc)
 		m.links[att.Name] = att.Status.HostLink
 	}
+}
+
+// inUse connects both tenants and waits until the fixture serves their
+// attachments. The adapter deletes an attachment that has had no request
+// for its idle period, so a row that reads the attachments calls this first.
+func (m *masque) inUse(t *testing.T) {
+	t.Helper()
+	m.waitConnected(t, m.a)
+	m.waitConnected(t, m.b)
+	m.waitServing(t, m.pod)
 }
 
 // waitConnected waits until mt's connector is admitted and its tenant's
@@ -883,6 +897,7 @@ func (m *masque) rowSharedCancel(t *testing.T) {
 // after collection is set up and answered.
 func (m *masque) rowMaintenance(t *testing.T) {
 	l, ctx := m.l, context.Background()
+	m.inUse(t)
 	atts := map[*masqueTenant]*galacticv1alpha1.EdgeAttachment{}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		atts[mt] = l.attachmentOf(t, m.pod, mt.svc)
@@ -990,6 +1005,7 @@ func (m *masque) rowMaintenance(t *testing.T) {
 // attachment objects, under a later lease epoch.
 func (m *masque) rowProcessRestart(t *testing.T) {
 	l, ctx := m.l, context.Background()
+	m.inUse(t)
 	atts := map[*masqueTenant]types.UID{}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		atts[mt] = l.attachmentOf(t, m.pod, mt.svc).UID
@@ -1223,7 +1239,7 @@ func (m *masque) teardown(t *testing.T) {
 	if m.pod != nil {
 		m.currentLinks(t)
 	}
-	if _, err := l.kubectl("-n", masqueNS, "delete", "deployment,replicaset", "--all", "--wait=true",
+	if _, err := l.kubectl("-n", masqueNS, "delete", "deployment,replicaset,pod", "--all", "--wait=true",
 		"--timeout=120s"); err != nil {
 		t.Error(err)
 	}

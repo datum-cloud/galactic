@@ -518,8 +518,8 @@ func configureHostLink(
 			LinkIndex: idx, Table: int(table), Dst: prefixNet(p), Gw: a.Address.AsSlice(),
 		})
 	}
-	if err := pruneRoutes(h, link.Attrs().Index, table, hostPrefixes(a)); err != nil {
-		return err
+	if err := pruneRoutes(h, link.Attrs().Index, table, hostRoutes(a), connected()); err != nil {
+		return fmt.Errorf("hostattach: host link %q: %w", a.HostLink, err)
 	}
 	for _, r := range routes {
 		if err := checkRouteOwner(h, r); err != nil {
@@ -578,6 +578,16 @@ func configurePodLink(h *netlink.Handle, link netlink.Link, a Attachment, hostMA
 	}); err != nil {
 		return fmt.Errorf("hostattach: neighbor %s on %q: %w", hostLinkLocal, a.PodLink, err)
 	}
+	// The pod link carries only the node's addresses and the default route
+	// toward the host. Any other address brings a connected route, and any
+	// other route sends pod VRF traffic past the uSID datapath's view of the
+	// attachment.
+	if err := pruneAddrs(h, link, []netip.Addr{a.Address}); err != nil {
+		return fmt.Errorf("hostattach: pod link %q: %w", a.PodLink, err)
+	}
+	if err := pruneRoutes(h, idx, a.PodTable, podRoutes, connected(a.Address)); err != nil {
+		return fmt.Errorf("hostattach: pod link %q: %w", a.PodLink, err)
+	}
 	def := &netlink.Route{
 		LinkIndex: idx, Table: int(a.PodTable),
 		Dst: &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}, Gw: hostLinkLocal.AsSlice(),
@@ -629,8 +639,11 @@ func ensureTUN(h *netlink.Handle, pod *Namespace, a Attachment) error {
 	if err := h.LinkSetUp(tun); err != nil {
 		return fmt.Errorf("hostattach: set TUN %q up: %w", a.TUN.Name, err)
 	}
-	if err := pruneRoutes(h, tun.Attrs().Index, a.PodTable, a.Prefixes); err != nil {
-		return err
+	if err := pruneAddrs(h, tun, nil); err != nil {
+		return fmt.Errorf("hostattach: TUN %q: %w", a.TUN.Name, err)
+	}
+	if err := pruneRoutes(h, tun.Attrs().Index, a.PodTable, tunRoutes(a), connected()); err != nil {
+		return fmt.Errorf("hostattach: TUN %q: %w", a.TUN.Name, err)
 	}
 	for _, p := range a.Prefixes {
 		r := &netlink.Route{LinkIndex: tun.Attrs().Index, Table: int(a.PodTable), Dst: prefixNet(p)}
