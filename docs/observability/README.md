@@ -50,6 +50,11 @@ The tests in `internal/instrumentation` enforce the rule in the unit suite:
   creates its metrics at startup rather than when a package loads, its test
   first creates them through the same function the command calls, and also
   runs the library's lint, which `TestMetricsLint` can't reach.
+- `TestCustomCollectorLabels` resolves the label names of every
+  `prometheus.NewDesc` in the module and fails on one the collection
+  pipeline reserves, which the library doesn't check for a custom collector.
+  It also fails when it can't resolve a descriptor's names, so build them
+  from string constants, literals, `append` and `slices.Clone`.
 
 ## Where the metrics come from
 
