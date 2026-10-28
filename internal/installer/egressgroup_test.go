@@ -16,7 +16,6 @@ import (
 
 	"github.com/cilium/ebpf"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
@@ -1039,12 +1038,8 @@ func TestSweepHashed_EmptyMembershipKeepsRoutesOnGroups(t *testing.T) {
 // library's registry, by class.
 func groupRoutes(t *testing.T) map[string]float64 {
 	t.Helper()
-	families, err := ctrlmetrics.Registry.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
 	got := map[string]float64{}
-	for _, mf := range families {
+	for _, mf := range gatherPrefixed(t, "galactic_cni_egress_group_routes") {
 		if mf.GetName() != "galactic_cni_egress_group_routes" {
 			continue
 		}

@@ -13,12 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
@@ -129,12 +127,8 @@ func twoGatewayAdvs() []client.Object {
 // instrumentation library's registry, keyed by seriesKey.
 func sidecarReturnSeries(t *testing.T) map[string]float64 {
 	t.Helper()
-	families, err := ctrlmetrics.Registry.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
 	out := map[string]float64{}
-	for _, f := range families {
+	for _, f := range gatherPrefixed(t, "galactic_sidecar_return_") {
 		name, ok := strings.CutPrefix(f.GetName(), "galactic_sidecar_return_")
 		if !ok {
 			continue
@@ -299,11 +293,9 @@ func TestSidecarReturnFailedDiscoveryKeepsTheSnapshot(t *testing.T) {
 // total is fixed.
 func TestSidecarReturnSeries(t *testing.T) {
 	metrics.NewSidecarReturn()
-	n, err := testutil.GatherAndCount(ctrlmetrics.Registry, "galactic_sidecar_return_endpoints",
-		"galactic_sidecar_return_last_completed_timestamp_seconds", "galactic_sidecar_return_reconcile_total",
-		"galactic_sidecar_return_operations_total")
-	if err != nil {
-		t.Fatal(err)
+	n := 0
+	for _, f := range gatherPrefixed(t, "galactic_sidecar_return_") {
+		n += len(f.GetMetric())
 	}
 	// 3 endpoint states, 1 timestamp, 4 results, 4 operations x 2 results.
 	if n != 16 {
@@ -382,10 +374,7 @@ func TestSidecarReturnScrapeSeesOnePass(t *testing.T) {
 			return
 		default:
 		}
-		families, err := ctrlmetrics.Registry.Gather()
-		if err != nil {
-			t.Fatal(err)
-		}
+		families := gatherPrefixed(t, "galactic_sidecar_return_")
 		vals := map[string]float64{}
 		var ts float64
 		for _, f := range families {
