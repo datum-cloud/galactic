@@ -572,6 +572,26 @@ func TestTenantService_DeletedWithNoGateway(t *testing.T) {
 	}
 }
 
+// TestTenantService_DeletedWhileSwitchedOff covers a project rule accepted
+// while project services were on and deleted after they were turned off: its
+// advertisements live in the gateway namespace, so they are withdrawn there
+// before the finalizer is released.
+func TestTenantService_DeletedWhileSwitchedOff(t *testing.T) {
+	ctx := context.Background()
+	rule, adv := deletingTenantRule()
+	c := newTenantClient(t, rule, adv)
+	key := client.ObjectKeyFromObject(rule)
+
+	reconcileServiceIn(t, c, key, ServiceScope{GatewayNamespace: testNamespace})
+	advs := &bgpv1alpha1.BGPAdvertisementList{}
+	if err := c.List(ctx, advs, ruleSelector(rule, testNamespace)); err != nil || len(advs.Items) != 0 {
+		t.Errorf("advertisements = %d (%v), want the route withdrawn", len(advs.Items), err)
+	}
+	if err := c.Get(ctx, key, &bgpv1alpha1.NetworkService{}); !apierrors.IsNotFound(err) {
+		t.Errorf("get rule: %v, want it gone with its finalizer", err)
+	}
+}
+
 // TestTenantService_SwitchedOffWithdrawsRoutes covers turning project
 // services off while a project rule is served: the gateway stops loading it
 // and withdraws its route, though the rule still exists.

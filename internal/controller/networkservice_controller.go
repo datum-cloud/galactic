@@ -285,8 +285,10 @@ func (r *NetworkServiceReconciler) reconcileUnserved(
 	if len(nodes) > 0 {
 		return ctrl.Result{}, nil
 	}
+	// A project rule's advertisements live in the gateway namespace whether
+	// the switch is on or off: they may have been made while it was on.
 	objNS := rule.Namespace
-	if r.Scope.ProjectServices {
+	if r.Scope.isProjectService(rule) {
 		objNS = r.Scope.GatewayNamespace
 	}
 	return r.reconcileDelete(ctx, rule, objNS)
