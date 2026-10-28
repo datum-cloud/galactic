@@ -493,7 +493,8 @@ func TestClearNodeRuleConditions_RefreshesSummary(t *testing.T) {
 		WithObjects(rule).
 		Build()
 
-	if err := clearNodeRuleConditions(context.Background(), fakeClient, testNamespace, testNodeGWA); err != nil {
+	err := clearNodeRuleConditions(context.Background(), fakeClient, ServiceScope{}, testNamespace, testNodeGWA)
+	if err != nil {
 		t.Fatalf("clearNodeRuleConditions: %v", err)
 	}
 	got := &bgpv1alpha1.NetworkService{}

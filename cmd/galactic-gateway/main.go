@@ -52,23 +52,17 @@ func main() {
 
 // checkWatchPermissions issues an access review for the watch verb on each
 // resource the manager watches. A denial means the informer cache never syncs
-// and every reconciler is silently blocked, so this logs a clear, actionable
-// message at startup instead.
+// and every reconciler is silently blocked, so a denied watch fails startup
+// with the resources it names. A review that cannot be made is logged and
+// skipped: the manager's own cache sync reports a real outage.
 //
 // BGPRouter is included even though this binary has no BGP client of its own:
 // resolving a backend's uSID lists those CRDs directly, so read access to them
-// is a real requirement here. ServiceVIPBinding is not checked here: the
-// manager watches it only with IPv4 VIPs on, and ipv4VIPsAllowed decides that.
-func checkWatchPermissions(mgr ctrl.Manager) {
-	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
-	if err != nil {
-		ctrl.Log.Error(err, "RBAC pre-flight: cannot create client, skipping check")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
+// is a real requirement here. VPCs are checked only with projectServices on,
+// the only case the manager watches them. ServiceVIPBinding is not checked
+// here: the manager watches it only with IPv4 VIPs on, and ipv4VIPsAllowed
+// decides that.
+func checkWatchPermissions(ctx context.Context, c client.Client, projectServices bool) error {
 	logger := ctrl.Log.WithName("rbac-preflight")
 
 	type watchedResource struct{ group, version, resource string }
@@ -79,9 +73,13 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPRouters},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPVRFInstances},
 		{group: cloudAPIGroup, version: cloudAPIVersion, resource: resourceVPCAttachments},
-		{group: cloudAPIGroup, version: cloudAPIVersion, resource: resourceVPCs},
+	}
+	if projectServices {
+		resources = append(resources,
+			watchedResource{group: cloudAPIGroup, version: cloudAPIVersion, resource: resourceVPCs})
 	}
 
+	var denied []string
 	for _, r := range resources {
 		review := &authorizationv1.SelfSubjectAccessReview{
 			Spec: authorizationv1.SelfSubjectAccessReviewSpec{
@@ -97,12 +95,15 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 			logger.Error(err, "RBAC pre-flight: failed to submit access review for "+r.resource, "verb", "watch")
 			continue
 		}
-		if review.Status.Allowed {
-			continue
+		if !review.Status.Allowed {
+			denied = append(denied, r.resource+"."+r.group)
 		}
-		logger.Error(nil, "missing watch RBAC for "+r.resource,
-			"verb", "watch", "detail", "informer cache will not sync; add resource to ServiceAccount ClusterRole and restart")
 	}
+	if len(denied) > 0 {
+		return fmt.Errorf("the gateway's ClusterRole does not grant watch on %s: the informer cache would "+
+			"never sync, so grant it and restart", strings.Join(denied, ", "))
+	}
+	return nil
 }
 
 // errIPv4AccessDenied is ipv4VIPsAllowed's error when the access reviews

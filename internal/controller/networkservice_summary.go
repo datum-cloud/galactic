@@ -386,7 +386,9 @@ func applySummaryConditions(rule *bgpv1alpha1.NetworkService, gatewayNodes []str
 // settle. It reads through reader, uncached, so it computes from the write
 // that triggered it rather than a cache that has not seen it yet. A rule being
 // deleted is left alone, as is one deleted mid-pass.
-func updateSummaryConditions(ctx context.Context, c client.Client, reader client.Reader, key client.ObjectKey) error {
+func updateSummaryConditions(
+	ctx context.Context, c client.Client, reader client.Reader, scope ServiceScope, key client.ObjectKey,
+) error {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &bgpv1alpha1.NetworkService{}
 		if err := reader.Get(ctx, key, current); err != nil {
@@ -395,7 +397,7 @@ func updateSummaryConditions(ctx context.Context, c client.Client, reader client
 		if !current.DeletionTimestamp.IsZero() {
 			return nil
 		}
-		nodes, err := servingGatewayNodeNames(ctx, c, current.Namespace)
+		nodes, err := scope.servingGatewayNodeNames(ctx, c, current.Namespace)
 		if err != nil {
 			return err
 		}
