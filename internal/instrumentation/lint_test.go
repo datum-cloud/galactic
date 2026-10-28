@@ -23,6 +23,7 @@ import (
 	_ "go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	_ "go.datum.net/galactic/internal/plumbing/nldump"
 	_ "go.datum.net/galactic/internal/runtime/gobgp"
+	_ "go.datum.net/galactic/internal/serviceroute"
 )
 
 const (
@@ -44,8 +45,10 @@ func TestLintLinksEveryMetric(t *testing.T) {
 	linked := blankImports(t, "lint_test.go")
 	fset := token.NewFileSet()
 	walkSource(t, func(rel string, f *ast.File) {
+		// metrics.MustRegister doesn't count: Lint checks only the metrics
+		// the library's constructors create, never a custom collector.
 		creates := slices.ContainsFunc(selectors(f, metricsPath), func(sel *ast.SelectorExpr) bool {
-			return strings.HasPrefix(sel.Sel.Name, "New") || sel.Sel.Name == "MustRegister"
+			return strings.HasPrefix(sel.Sel.Name, "New")
 		})
 		if !creates {
 			return

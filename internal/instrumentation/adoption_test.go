@@ -35,7 +35,6 @@ var pending = []string{
 	"cmd/galactic-edge",
 	"cmd/galactic-gateway",
 	"cmd/galactic-nat",
-	"cmd/galactic-router",
 	"cmd/galactic-vrf",
 	// #1149: create metrics with the library's constructors instead of a
 	// registry parameter or a private registry.
@@ -46,7 +45,6 @@ var pending = []string{
 	"internal/gateway",
 	"internal/ingresssidecar",
 	"internal/plumbing/ebpf/xdpdispatch",
-	"internal/serviceroute",
 }
 
 // TestAdopted runs the instrumentation library's adoption check over the

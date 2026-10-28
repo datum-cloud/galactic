@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.miloapis.com/instrumentation/metrics"
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -24,7 +25,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
@@ -120,7 +120,6 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("create manager: %w", err)
 	}
 	serviceRouteMetrics := serviceroute.NewMetrics()
-	serviceRouteMetrics.MustRegister(ctrlmetrics.Registry)
 
 	// ctx carries a cause so an ordinary signal-triggered shutdown can be told
 	// apart from the health server's own Serve failure below. See the cause
@@ -459,9 +458,7 @@ func setupTrafficPolicyController(mgr ctrl.Manager, nodeName string) error {
 	if err := rec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup traffic policy controller: %w", err)
 	}
-	if err := ctrlmetrics.Registry.Register(rec); err != nil {
-		return fmt.Errorf("register traffic policy metrics: %w", err)
-	}
+	metrics.MustRegister(rec)
 	return nil
 }
 
