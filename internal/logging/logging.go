@@ -41,13 +41,16 @@ var (
 	Levels = []string{"debug", "info", "warn", "error"}
 	// Formats are the accepted --log-format values.
 	Formats = []string{FormatJSON, FormatText}
-	// Binaries are the commands under cmd/ that call Setup. Each publishes an
-	// image of the same name, so a manifest check uses this list to find the
-	// containers whose LOG_LEVEL, LOG_FORMAT, --log-level and --log-format
-	// these rules govern.
+	// Binaries are the commands under cmd/ that call Setup. A manifest check
+	// uses this list to find the containers whose LOG_LEVEL, LOG_FORMAT,
+	// --log-level and --log-format these rules govern: by image name, as most
+	// publish an image of their own, or by command, as fabric-config-agent
+	// ships in the fabric-router image.
 	Binaries = []string{
 		"fabric-api",
+		"fabric-config-agent",
 		"fabric-router-controller",
+		"galactic-cni",
 		"galactic-controller",
 		"galactic-edge",
 		"galactic-gateway",

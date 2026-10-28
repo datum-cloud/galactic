@@ -1,12 +1,15 @@
 # Logging
 
-Every Galactic binary that runs controller-runtime (`galactic-router`,
-`galactic-gateway`, `galactic-nat`, `galactic-vrf`, `galactic-controller`,
-`galactic-edge`, `fabric-router-controller` and `fabric-api`) installs one
-logger at startup through `internal/logging`. The same handler writes the
-binary's own `slog` lines, the standard `log` package, controller-runtime
-(reconciler errors, cache and leader election) and klog (client-go), so every
-line has one format and one level threshold.
+Every long-running Galactic binary (`galactic-router`, `galactic-gateway`,
+`galactic-nat`, `galactic-vrf`, `galactic-controller`, `galactic-edge`,
+`galactic-cni`, `fabric-router-controller`, `fabric-api` and
+`fabric-config-agent`) installs one logger at startup through
+`internal/logging`. The same handler writes the binary's own `slog` lines, the
+standard `log` package, controller-runtime (reconciler errors, cache and leader
+election) and klog (client-go), so every line has one format and one level
+threshold. For `galactic-cni` that covers the `install-cni` init container and
+the `credential-refresh` daemon; for `fabric-config-agent`, the `frr-init` init
+container and the `config-agent` sidecar.
 
 | Flag           | Env          | Default | Meaning                            |
 | -------------- | ------------ | ------- | ---------------------------------- |
@@ -31,8 +34,10 @@ it:
 kustomize build <overlay> | go run go.datum.net/galactic/hack/check-log-settings@<version> -
 ```
 
-It recognizes a Galactic container by its image repository name, and checks
-only literal values, not ones read from a ConfigMap or Secret. An empty
+It recognizes a Galactic container by its image repository name, or by a
+command that runs one of these binaries: `fabric-config-agent` ships in the
+`fabric-router` image, run directly by `config-agent` and from a shell script
+by `frr-init`. It checks only literal values, not ones read from a ConfigMap or Secret. An empty
 `LOG_LEVEL` or `LOG_FORMAT` counts as unset. In source YAML that isn't
 rendered, such as the containerlab overlays, it reads strategic-merge patches
 but not JSON 6902 patches.
@@ -43,13 +48,20 @@ Production runs the defaults: one JSON object per line on stderr, with
 only at `--log-level=debug`. klog keeps its own verbosity setting, which these
 flags don't change, so client-go's `klog.V(n)` lines stay off.
 
+A binary that fails after reading its flags logs the error as one `error`
+line through the same handler, then exits 1. A bad flag or an invalid
+`--log-level` or `--log-format` fails before the handler exists, so that one
+line is Go's default text.
+
 For local runs, `--log-format=text --log-level=debug` gives readable output
 with the verbose lines. No binary enables controller-runtime's zap development
 mode: `internal/logging`'s `TestBinariesUseThisPackage` fails when a command
 under `cmd/` imports controller-runtime's zap package or calls `SetLogger`
-itself.
+itself, and `TestLongRunningBinariesInstallTheHandler` fails when a command
+under `cmd/` doesn't import `internal/logging` at all.
 
-The CNI plugins, the `galactic-cni` installer and `fabric-config-agent` don't
-run controller-runtime's logger and configure their logging separately; see
-the [CNI environment variables](../cni/environment-variables.md) for the
-plugins' log file.
+Two kinds of command are exempt. The CNI plugins (`galactic-veth`,
+`galactic-tap`, `galactic-ipam`, `galactic-bgp` and `galactic-route`) run once
+per CNI call and write JSON to their own log file; see the
+[CNI environment variables](../cni/environment-variables.md).
+`galactic-usid` is a one-shot codec command in the debug image.

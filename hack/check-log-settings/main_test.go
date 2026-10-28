@@ -129,6 +129,33 @@ patches:
 `,
 			want: []string{`inline patch: DaemonSet fabric-router: container fabric-api: --log-level "chatty"`},
 		},
+		{
+			name: "fabric-config-agent in the fabric-router image, run directly or from a script",
+			yaml: `
+kind: DaemonSet
+metadata: {name: fabric-router}
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: frr-init
+          image: ghcr.io/example/fabric-router:v1
+          command: [sh, -ec, "install -d /run/frr\nexec fabric-config-agent init\n"]
+          env: [{name: LOG_LEVEL, value: noisy}]
+      containers:
+        - name: config-agent
+          image: ghcr.io/example/fabric-router:v1
+          command: [fabric-config-agent, watch, --log-format=xml]
+        - name: frr
+          image: ghcr.io/example/fabric-router:v1
+          command: [/usr/lib/frr/docker-start]
+          env: [{name: LOG_LEVEL, value: noisy}]
+`,
+			want: []string{
+				`container config-agent: --log-format "xml"`,
+				`container frr-init: LOG_LEVEL "noisy"`,
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := check(strings.NewReader(tc.yaml))
@@ -155,13 +182,32 @@ func TestIsGalactic(t *testing.T) {
 		{"x", "ghcr.io/example/galactic-gateway:v1", true},
 		{"x", "localhost:5000/fabric-api", true},
 		{"x", "galactic-vrf@sha256:00", true},
-		{"x", "ghcr.io/example/galactic-cni:v1", false},
+		{"x", "ghcr.io/example/galactic-cni:v1", true},
+		{"x", "ghcr.io/example/galactic-usid:v1", false},
 		{"x", "ghcr.io/example/galactic-router-extra:v1", false},
 		{"galactic-edge", "", true},
 		{"frr", "", false},
 	} {
 		if got := isGalactic(tc.name, tc.image); got != tc.want {
 			t.Errorf("isGalactic(%q, %q) = %v, want %v", tc.name, tc.image, got, tc.want)
+		}
+	}
+}
+
+func TestRunsGalactic(t *testing.T) {
+	for _, tc := range []struct {
+		command []any
+		want    bool
+	}{
+		{[]any{"fabric-config-agent", "watch"}, true},
+		{[]any{"/usr/local/bin/galactic-cni", "run"}, true},
+		{[]any{"sh", "-ec", "set -x\nexec fabric-config-agent init"}, true},
+		{[]any{"/usr/lib/frr/docker-start"}, false},
+		{[]any{"galactic-usid", "decode"}, false},
+		{nil, false},
+	} {
+		if got := runsGalactic(tc.command); got != tc.want {
+			t.Errorf("runsGalactic(%q) = %v, want %v", tc.command, got, tc.want)
 		}
 	}
 }
