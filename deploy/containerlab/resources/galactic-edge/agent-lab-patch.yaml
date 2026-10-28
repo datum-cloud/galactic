@@ -9,12 +9,6 @@ spec:
         - name: galactic-edge
           image: galactic-edge:latest
           imagePullPolicy: Never
-          # The lab's uplinks are 1500, so the underlay carries at most 1460
-          # bytes once encapsulated, the ceiling galactic-edge checks --mtu
-          # against. A strategic merge replaces args whole, so both are here.
-          args:
-            - --mtu=1460
-            - --proc-sys-path=/host/proc/sys
           # The agent creates each packet-access attachment's TUN device
           # through /dev/net/tun, which config/galactic-edge/base does not
           # give its container. The lab hands it the device through the

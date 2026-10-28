@@ -1,6 +1,5 @@
 # The lab's galactic-edge node agent: config/galactic-edge/base, copied in
-# as agent/ by scripts/deploy-galactic-edge.sh, with the lab image and
-# --mtu=1460, the 1500-byte uplink less the 40-byte encapsulation header.
+# as agent/ by scripts/deploy-galactic-edge.sh, with the lab image.
 resources:
   - agent
 patches:
@@ -8,3 +7,13 @@ patches:
     target:
       kind: DaemonSet
       name: galactic-edge
+  # The lab's uplinks are 1500, so the underlay carries at most 1460 bytes
+  # once encapsulated (1500 less the 40-byte header), the ceiling
+  # galactic-edge checks --mtu against.
+  - target:
+      kind: DaemonSet
+      name: galactic-edge
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args/0
+        value: --mtu=1460
