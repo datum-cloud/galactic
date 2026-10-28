@@ -105,7 +105,8 @@ type Attachment struct {
 	// fit without reporting Packet Too Big. A smaller limit further in, such
 	// as a TUN device's, is reported by the pod's own forwarding. It must
 	// not exceed what the fabric underlay carries once a packet is
-	// encapsulated, which the provisioner cannot see.
+	// encapsulated, which the provisioner cannot see: galactic-edge checks
+	// it against the datapath's encap_mtu_table before provisioning.
 	MTU int
 	// Address is the attachment's own address in the VPC: the source of the
 	// pod's sockets and the next hop the host table routes Prefixes through.

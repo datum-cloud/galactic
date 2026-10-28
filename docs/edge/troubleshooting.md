@@ -141,6 +141,13 @@ container, through the node's `/dev/net/tun`, which the DaemonSet mounts as a
   `Programmed` False, reason `ProvisionFailed`, and a `hostattach: create TUN`
   message reporting the denied open.
 
+The agent's `--mtu` must be no larger than the fabric uplink MTU less the
+40-byte encapsulation header, the limit `galactic-cni` writes to
+`encap_mtu_table`. A larger one fails every attachment on the node with
+`Programmed` False, reason `MTUExceedsUnderlay`, and a message naming both
+values. The [provider contract](provider-contract.md#attachment) gives the
+bounds.
+
 ## Telling failures apart
 
 | What happened                 | Where it shows                                                                                                                                                          | What sets it apart                                                                                               |

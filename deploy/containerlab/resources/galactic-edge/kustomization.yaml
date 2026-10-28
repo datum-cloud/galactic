@@ -1,6 +1,6 @@
 # The lab's galactic-edge node agent: config/galactic-edge/base, copied in
-# as agent/ by scripts/deploy-galactic-edge.sh, with the lab image. The
-# base's --mtu=1500 is the lab's tenant MTU, so it is left as it is.
+# as agent/ by scripts/deploy-galactic-edge.sh, with the lab image and
+# --mtu=1460, the 1500-byte uplink less the 40-byte encapsulation header.
 resources:
   - agent
 patches:
