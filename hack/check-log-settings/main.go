@@ -3,8 +3,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Command check-log-settings fails when a manifest gives a Galactic container
-// a LOG_LEVEL, LOG_FORMAT, --log-level or --log-format value that
-// internal/logging rejects, which would stop the binary at startup.
+// a LOG_LEVEL or --log-level value that internal/logging rejects, or the
+// removed --log-format flag, either of which would stop the binary at startup.
+// It also fails on the removed LOG_FORMAT variable, which no binary reads, and
+// on --zap-devel, the local-only console format.
 //
 // It reads YAML streams from the named files, or from stdin for "-": rendered
 // kustomize output, or source YAML such as a patch file or a kustomization
@@ -196,6 +198,16 @@ func inlinePatches(doc any) []string {
 	return patches
 }
 
+// envFormat is the variable that chose JSON or text output before the
+// binaries moved to the instrumentation library's logger.
+const envFormat = "LOG_FORMAT"
+
+var (
+	errFormatRemoved = errors.New(
+		"removed: production output is always JSON; use --zap-devel for console output in local runs")
+	errDevel = errors.New("console output at debug level is for local runs only")
+)
+
 func checkContainer(c map[string]any) []string {
 	name, _ := c["name"].(string)
 	image, _ := c["image"].(string)
@@ -221,10 +233,8 @@ func checkContainer(c map[string]any) []string {
 			if err := logging.ValidateLevel(value); err != nil {
 				report(key, value, err)
 			}
-		case logging.EnvFormat:
-			if err := logging.ValidateFormat(value); err != nil {
-				report(key, value, err)
-			}
+		case envFormat:
+			report(key, value, errFormatRemoved)
 		}
 	}
 	for _, key := range []string{"command", "args"} {
@@ -232,6 +242,12 @@ func checkContainer(c map[string]any) []string {
 		for i, a := range list {
 			arg, _ := a.(string)
 			flagName, value, found := strings.Cut(arg, "=")
+			if flagName == "--"+logging.DevelFlag {
+				if value != "false" {
+					findings = append(findings, fmt.Sprintf("container %s: %s: %v", name, arg, errDevel))
+				}
+				continue
+			}
 			if flagName != "--log-level" && flagName != "--log-format" {
 				continue
 			}
@@ -244,11 +260,11 @@ func checkContainer(c map[string]any) []string {
 			if strings.Contains(value, "$(") {
 				continue
 			}
-			validate := logging.ValidateLevel
 			if flagName == "--log-format" {
-				validate = logging.ValidateFormat
+				report(flagName, value, errFormatRemoved)
+				continue
 			}
-			if err := validate(value); err != nil {
+			if err := logging.ValidateLevel(value); err != nil {
 				report(flagName, value, err)
 			}
 		}

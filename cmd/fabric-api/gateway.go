@@ -404,7 +404,7 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	// manager shuts down.
 	defer context.AfterFunc(ctx, gs.Stop)()
 
-	slog.Info("starting fabric-api gateway", "version", metadata.Version, "site", o.site, "cluster", o.clusterName,
+	slog.Info("starting fabric-api gateway", "version", metadata.Version, "site", o.site, "clusterName", o.clusterName,
 		"cell", o.cell, "debug", debugAddr)
 	return mgr.Start(ctx)
 }

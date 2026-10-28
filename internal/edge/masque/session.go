@@ -97,7 +97,7 @@ func (a *Adapter) newSession(g *Grant, e *attachment, r *route, began uint64) (c
 	s.setDeadline(g.NotAfter)
 	go s.refreshLoop()
 	a.log.Info("request admitted", "session", s.info.ID, "connector", g.Connector, "principal", g.Principal,
-		"service", g.Service.UID, "attachment", e.name, "attachmentUID", e.uid, "route", r.name, "claimEpoch",
+		"serviceUID", g.Service.UID, "attachment", e.name, "attachmentUID", e.uid, "route", r.name, "claimEpoch",
 		r.epoch, "instanceEpoch", l.Epoch)
 	return s, nil
 }

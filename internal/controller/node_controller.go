@@ -58,7 +58,7 @@ func nodeToRouterRequests(ctx context.Context, c client.Client, obj client.Objec
 	if err := c.List(ctx, routerList,
 		client.MatchingFields{BGPRouterByTargetName: node.Name},
 	); err != nil {
-		logger.Error(err, "list BGPRouters for node change", "node", node.Name)
+		logger.Error(err, "list BGPRouters for node change", "nodeName", node.Name)
 		return nil
 	}
 

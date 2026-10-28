@@ -335,10 +335,10 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			// most likely already gone.
 			withdrawErr := withdrawNodeAdvertisements(ctx, r.Client, req.Namespace, req.Name)
 			if withdrawErr != nil {
-				logger.Error(withdrawErr, "withdraw BGPAdvertisements for departed gateway node", "node", req.Name)
+				logger.Error(withdrawErr, "withdraw BGPAdvertisements for departed gateway node", "nodeName", req.Name)
 			}
 			if clearErr := clearNodeRuleConditions(ctx, r.Client, req.Namespace, req.Name); clearErr != nil {
-				logger.Error(clearErr, "clear Programmed conditions for departed gateway node", "node", req.Name)
+				logger.Error(clearErr, "clear Programmed conditions for departed gateway node", "nodeName", req.Name)
 				withdrawErr = errors.Join(withdrawErr, clearErr)
 			}
 
@@ -460,9 +460,9 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	switch {
 	case routerErr != nil:
-		logger.Error(routerErr, "skipping BGPAdvertisement wiring", "node", r.NodeName)
+		logger.Error(routerErr, "skipping BGPAdvertisement wiring", "nodeName", r.NodeName)
 	case routerName == "":
-		logger.Info("no BGPRouter targets this node; skipping BGPAdvertisement wiring", "node", r.NodeName)
+		logger.Info("no BGPRouter targets this node; skipping BGPAdvertisement wiring", "nodeName", r.NodeName)
 	}
 
 	advErr, ruleStatusErr := r.publishRuleOutcomes(ctx, gw.Namespace, outcomes, status, routerName)

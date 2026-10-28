@@ -81,10 +81,10 @@ func resolveEncapSource(ctx context.Context, reader client.Reader, nodeName, con
 		switch {
 		case errors.As(err, &listRoutersError{}):
 			slog.Warn("Listing BGPRouters to derive the edge gateway SRv6 encapsulation source failed; retrying",
-				"node", nodeName, "retryIn", delay, "error", err)
+				"nodeName", nodeName, "retryIn", delay, "error", err)
 		case errors.As(err, &noRouterYetError{}):
 			slog.Info("Waiting for this node's BGPRouter to derive the edge gateway SRv6 encapsulation source",
-				"node", nodeName, "retryIn", delay)
+				"nodeName", nodeName, "retryIn", delay)
 		default:
 			return "", err
 		}

@@ -36,7 +36,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 
 	slog.Info("ADD: starting", "containerID", args.ContainerID,
 		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment,
-		"ifaceType", ifaceType, "namespace", namespace, "nodeName", nodeName)
+		"ifaceType", ifaceType, "resource_namespace", namespace, "nodeName", nodeName)
 
 	tracker := &resourceTracker{
 		vpc:           pluginConf.VPC,

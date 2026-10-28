@@ -46,6 +46,7 @@ import (
 	"go.datum.net/galactic/internal/edge/masque"
 	"go.datum.net/galactic/internal/edge/provider"
 	"go.datum.net/galactic/internal/edge/timing"
+	"go.datum.net/galactic/internal/logging"
 )
 
 func main() {
@@ -60,7 +61,8 @@ func run() error {
 	certPath := flag.String("tls-cert", "/etc/masque/tls/tls.crt", "server certificate")
 	keyPath := flag.String("tls-key", "/etc/masque/tls/tls.key", "server key")
 	flag.Parse()
-	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	logging.SetupFile(os.Stderr, slog.LevelInfo)
+	log := slog.Default()
 
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
@@ -97,7 +99,7 @@ func run() error {
 	}
 	a, err := masque.New(masque.Config{
 		Client: c, Provider: cfg.Provider, Pod: pod, Authorizer: cfg, Claims: claims,
-		OpenDevice: masque.OpenTUN, Log: log.With("pod", pod.Name),
+		OpenDevice: masque.OpenTUN, Log: log.With("podName", pod.Name),
 	})
 	if err != nil {
 		return err

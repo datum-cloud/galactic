@@ -199,7 +199,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 		}
 		a.log.Info("adopted attachment", "attachment", att.Name)
 	}
-	a.log.Info("instance registered", "instance", inst.Name)
+	a.log.Info("instance registered", "instanceName", inst.Name)
 	return nil
 }
 

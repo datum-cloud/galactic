@@ -14,7 +14,7 @@ flag name — the mapping is defined in `internal/config` (see `RouterConfig`
 and the `EnvRouter*` constants). Always use the exact name from the table
 below.
 
-Logging takes `--log-level` (`LOG_LEVEL`) and `--log-format` (`LOG_FORMAT`), without the `GALACTIC_ROUTER` prefix; see [Logging](../observability/logging.md).
+Logging takes `--log-level` (`LOG_LEVEL`), without the `GALACTIC_ROUTER` prefix and the standard `--zap-*` flags; see [Logging](../observability/logging.md).
 
 | Option                   | Environment Variable                       | CLI Flag                     | Default                     |
 | ------------------------ | ------------------------------------------ | ---------------------------- | --------------------------- |

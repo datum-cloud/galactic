@@ -111,7 +111,7 @@ func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace s
 		}
 		return fmt.Errorf("patch NetworkAttachmentDefinition %s/%s: %w", nadNamespace, nadName, err)
 	}
-	slog.Debug("NAD annotated", "name", nadName, "namespace", nadNamespace, "annotations", annotations)
+	slog.Debug("NAD annotated", "resource_name", nadName, "resource_namespace", nadNamespace, "annotations", annotations)
 	return nil
 }
 

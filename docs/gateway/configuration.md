@@ -9,7 +9,7 @@ flags, or a combination of both (CLI flags take precedence), with the
 `GALACTIC_GATEWAY` env prefix — the same three-tier precedence pattern
 `galactic-router` uses (see [docs/router/configuration.md](../router/configuration.md)).
 
-Logging takes `--log-level` (`LOG_LEVEL`) and `--log-format` (`LOG_FORMAT`), without the `GALACTIC_GATEWAY` prefix; see [Logging](../observability/logging.md).
+Logging takes `--log-level` (`LOG_LEVEL`), without the `GALACTIC_GATEWAY` prefix and the standard `--zap-*` flags; see [Logging](../observability/logging.md).
 
 | Option              | Environment Variable                   | CLI Flag                        | Default     | Required      |
 | ------------------- | -------------------------------------- | ------------------------------- | ----------- | ------------- |

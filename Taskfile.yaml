@@ -231,8 +231,9 @@ tasks:
     # fail to build.
     #
     # Those fixtures and every kustomization under config/ and deploy/,
-    # except Components, are rendered and checked for a LOG_LEVEL,
-    # LOG_FORMAT, --log-level or --log-format that internal/logging rejects.
+    # except Components, are rendered and checked for a LOG_LEVEL or
+    # --log-level that internal/logging rejects, and for the removed
+    # LOG_FORMAT and --log-format or the local-only --zap-devel.
     # The containerlab overlays under deploy/containerlab/resources build
     # only once the lab scripts copy config/ onto a node, so they are not
     # rendered here; their source YAML, inline patches included, is checked
@@ -250,11 +251,11 @@ tasks:
             echo "FAIL: $dir does not build"; status=1; continue
           fi
           if ! printf '%s\n' "$out" | {{.LOCALBIN}}/check-log-settings -label "$dir" -; then
-            echo "FAIL: $dir sets an unsupported log level or format"; status=1
+            echo "FAIL: $dir sets an unsupported log setting"; status=1
           fi
         done
         if ! find config deploy tests/manifests -name '*.yaml' -print0 | xargs -0 {{.LOCALBIN}}/check-log-settings; then
-          echo "FAIL: source YAML sets an unsupported log level or format"; status=1
+          echo "FAIL: source YAML sets an unsupported log setting"; status=1
         fi
         for dir in tests/manifests/invalid/*/; do
           if {{.KUSTOMIZE}} build "$dir" > /dev/null 2>&1; then

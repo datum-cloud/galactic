@@ -77,13 +77,14 @@ func deleteEndpointSliceBestEffort(args *skel.CmdArgs) {
 	deleted, err := podslice.Delete(ctx, k8sClient, podNamespace, podName, args.ContainerID)
 	if err != nil {
 		slog.Error("DEL: failed to delete EndpointSlice, cleanup deferred to GC",
-			"err", err, "containerID", args.ContainerID, "podName", podName, "namespace", podNamespace)
+			"err", err, "containerID", args.ContainerID, "podName", podName, "podNamespace", podNamespace)
 		return
 	}
 	if !deleted {
 		slog.Info("DEL: EndpointSlice absent or written by another sandbox, left in place",
-			"containerID", args.ContainerID, "podName", podName, "namespace", podNamespace)
+			"containerID", args.ContainerID, "podName", podName, "podNamespace", podNamespace)
 		return
 	}
-	slog.Info("DEL: EndpointSlice deleted", "containerID", args.ContainerID, "podName", podName, "namespace", podNamespace)
+	slog.Info("DEL: EndpointSlice deleted",
+		"containerID", args.ContainerID, "podName", podName, "podNamespace", podNamespace)
 }

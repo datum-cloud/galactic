@@ -233,7 +233,7 @@ func run(parent context.Context, opts *options, fn func(*fabricconfig.Agent, con
 
 	opts.restCfg = restCfg
 
-	slog.Info("starting "+appName, "version", metadata.Version, "node", opts.nodeName, "namespace", opts.namespace,
+	slog.Info("starting "+appName, "version", metadata.Version, "nodeName", opts.nodeName, "podNamespace", opts.namespace,
 		"activation", opts.activation, "configMaps", opts.configMaps)
 	return fn(agent, ctx)
 }

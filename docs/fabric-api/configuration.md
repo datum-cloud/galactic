@@ -32,14 +32,14 @@ syntax (`10m`).
 
 ### Global (all subcommands)
 
-| Flag              | Env          | Default | Meaning                                      |
-| ----------------- | ------------ | ------- | -------------------------------------------- |
-| `--log-level`     | `LOG_LEVEL`  | `info`  | `debug`, `info`, `warn` or `error`           |
-| `--log-format`    | `LOG_FORMAT` | `json`  | `json` or `text`                             |
-| `--version`, `-V` |              |         | Print the version and exit (root only)       |
-| `--build-info`    |              |         | Print build information and exit (root only) |
+| Flag              | Env         | Default | Meaning                                      |
+| ----------------- | ----------- | ------- | -------------------------------------------- |
+| `--log-level`     | `LOG_LEVEL` | `info`  | `debug`, `info`, `warn` or `error`           |
+| `--zap-*`         |             |         | Standard zap flags, such as `--zap-devel`    |
+| `--version`, `-V` |             |         | Print the version and exit (root only)       |
+| `--build-info`    |             |         | Print build information and exit (root only) |
 
-[Logging](../observability/logging.md) describes what these two flags cover.
+[Logging](../observability/logging.md) describes what the logging flags cover.
 
 Tracing is enabled only when `OTEL_EXPORTER_OTLP_ENDPOINT` or
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set; the standard OpenTelemetry exporter

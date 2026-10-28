@@ -661,7 +661,7 @@ func startHashedEgress(ctx context.Context, g *egressGroup, namespace string) {
 	}
 	go g.watchShardReachability(ctx)
 	slog.Info("Hashed egress mode: spreading tenant egress across the cluster's EgressShards",
-		"namespace", namespace, "hash", g.cfg.Hash, "pinIdle", g.cfg.PinIdle)
+		"resource_namespace", namespace, "hash", g.cfg.Hash, "pinIdle", g.cfg.PinIdle)
 }
 
 // loadEgressShardSIDs parses the host conflist's egress shard list for the
