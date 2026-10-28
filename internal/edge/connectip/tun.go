@@ -109,13 +109,24 @@ func (b *TUNBackend) readLoop() {
 			return
 		}
 		dst, ok := packetDestination(buf[:n])
-		if !ok {
+		switch {
+		case !ok:
+			deny(toClient, reasonMalformed)
+			continue
+		case !dst.Is6():
+			deny(toClient, reasonIPv4)
 			continue
 		}
 		b.mu.Lock()
 		s := b.sessions[netip.PrefixFrom(dst, 96).Masked()]
 		b.mu.Unlock()
 		if s == nil {
+			// The kernel sends its own multicast and link-local traffic,
+			// such as MLD reports, on the device; only count what was
+			// routed here.
+			if !dst.IsMulticast() && !dst.IsLinkLocalUnicast() {
+				deny(toClient, reasonNoSession)
+			}
 			continue
 		}
 		select {

@@ -22,6 +22,7 @@ import (
 	// the ones a package creates when it loads; each command's scrape test
 	// lints the ones created at startup. TestLintLinksEveryMetric keeps this
 	// list complete.
+	_ "go.datum.net/galactic/internal/edge/connectip"
 	_ "go.datum.net/galactic/internal/edge/diag"
 	_ "go.datum.net/galactic/internal/fabric/gateway"
 	_ "go.datum.net/galactic/internal/fabric/node"

@@ -43,6 +43,32 @@ A replacement on another provider pod is not done by the adapter. The grant auth
 
 A request forwards a packet, in either direction, only while its instance Lease is held at the epoch it was admitted under and before the Lease's deadline, before its grant's deadline, and while the request is open. Every second the adapter also checks each attachment and route it uses. It ends the requests on an attachment that is deleted, replaced, draining, no longer programmed or reprogrammed, and the requests on a route whose claim core no longer accepts, whose gate the node closed, or whose claim moved to another attachment. Losing the lease ends every request. A full device drops the packet and counts it instead of ending the request. These checks are in addition to the foundation's: galactic-edge closes a route's gate at the Lease deadline even if the provider stops.
 
+## Packet policy
+
+The CONNECT-IP proxy (`internal/edge/connectip`) checks every packet of a request against the request's grant before forwarding it in either direction. It applies the parsing profile in the [MASQUE connector design](../designs/masque/contract.md#interfaces-and-session-transitions):
+
+- Only complete IPv6 packets pass. The payload length must match the packet, so jumbograms are refused.
+- The proxy walks at most 8 extension headers and 256 extension header bytes. Hop-by-Hop must come first.
+- Any Fragment header is refused, atomic fragments included, as is a Routing header with segments left, a Mobility, HIP or Shim6 header, or an experimental one.
+- A packet toward the gVPC must come from the connector's /96, ICMPv6 errors included, and go to an advertised route.
+- A packet toward the client must go to the /96 and come from an advertised route. The one exception is an ICMPv6 error (types 1 to 4), such as Packet Too Big from a gVPC router, that quotes a packet sent from the /96 to a route.
+- The Packet Too Big that connect-ip-go builds for a packet the tunnel cannot carry goes through the same checks as the client's own packets.
+
+A grant that routes IPv4 is refused with 503, so the proxy never advertises IPv4. A route change at refresh ends the request ([Grant refresh and revocation](#grant-refresh-and-revocation)). gVPC traffic policy is enforced by the foundation on the attachment, not here.
+
+`galactic_connectip_packets_denied_total{direction, reason}` counts every refused packet. `direction` is `to_vpc` or `to_client`. `reason` is one of these:
+
+- `malformed`
+- `ipv4_unsupported`
+- `fragment`
+- `extension_headers`
+- `routing_header`
+- `source`
+- `destination`
+- `no_session`, a device packet for a /96 with no open request. The kernel's own multicast and link-local packets on the device are dropped without being counted
+
+connect-ip-go runs its own address checks first on client packets and drops what it refuses with a log line. Those drops are not counted.
+
 ## Grant refresh and revocation
 
 Every 5 seconds (`Config.Refresh`) the adapter calls `Authorizer.Refresh` for each open request, with a 2 second deadline. A refreshed grant with the same connector, VPC, service, /96, routes, authorization and credential revision moves the request's deadline. Any other answer has one of these results:

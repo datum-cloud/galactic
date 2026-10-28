@@ -1204,7 +1204,7 @@ func TestConcurrentRequestsOfOneConnector(t *testing.T) {
 
 // TestGrantRefresh refreshes an open request's grant: a refreshed deadline
 // keeps it forwarding past the first, a failed refresh keeps the deadline
-// it had, a changed grant ends it, and a revoked one ends only that
+// it had, a changed grant or route set ends it, and a revoked one ends only that
 // connector's request while others on the instance and the same attachment
 // keep forwarding.
 func TestGrantRefresh(t *testing.T) {
@@ -1265,6 +1265,23 @@ func TestGrantRefresh(t *testing.T) {
 		l := h.admit(credA1)
 		defer func() { _ = l.Close() }()
 		expectDone(t, l, "a refresh changing the grant's /96")
+	})
+	// The CONNECT-IP proxy checks packets against the routes it advertised
+	// at admission, so narrowing them must end the request.
+	t.Run("routes changed", func(t *testing.T) {
+		h := newHarness(t)
+		h.start()
+		h.a.cfg.Refresh = 2 * time.Millisecond
+		setRefresh(h, func(g Grant) (Grant, error) {
+			g.Routes, g.NotAfter = []netip.Prefix{netip.MustParsePrefix("fd00:20::/64")}, g.NotAfter.Add(time.Hour)
+			return g, nil
+		})
+		l := h.admit(credA1)
+		defer func() { _ = l.Close() }()
+		expectDone(t, l, "a refresh changing the grant's routes")
+		if l.(*session).forwarding() {
+			t.Fatal("a request whose routes changed still forwards")
+		}
 	})
 	t.Run("revoked", func(t *testing.T) {
 		h := newHarness(t)
