@@ -68,6 +68,7 @@ func TestTelemetryAdmissionOutcomes(t *testing.T) {
 		setup                          func(h *harness)
 		wantErr                        error
 		claimOutcome                   string
+		cancelClient                   bool
 	}{
 		{name: "admitted", credential: credA1, outcome: admitAdmitted, claimOutcome: claimAccepted},
 		{name: "unauthenticated", credential: "nope", outcome: admitUnauthenticated,
@@ -91,6 +92,8 @@ func TestTelemetryAdmissionOutcomes(t *testing.T) {
 			claimOutcome: claimRefused, setup: func(h *harness) { h.setCore(h.programmed, refuseRoute) }},
 		{name: "route not accepted", credential: credA1, outcome: admitRouteFailed, wantErr: ErrUnavailable,
 			claimOutcome: claimFailed, setup: func(h *harness) { h.setCore(h.programmed, nil) }},
+		{name: "client cancelled", credential: credA1, outcome: admitCancelled, wantErr: ErrUnavailable,
+			cancelClient: true, setup: func(h *harness) { h.setCore(h.programmed, nil) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -108,7 +111,15 @@ func TestTelemetryAdmissionOutcomes(t *testing.T) {
 			if tc.claimOutcome != "" {
 				claimBefore = claims(tc.claimOutcome)
 			}
-			l, err := h.a.Admit(context.Background(), tc.credential, vpc)
+			failedBefore := claims(claimFailed)
+			ctx := context.Background()
+			if tc.cancelClient {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				defer cancel()
+				time.AfterFunc(50*time.Millisecond, cancel)
+			}
+			l, err := h.a.Admit(ctx, tc.credential, vpc)
 			if l != nil {
 				defer func() { _ = l.Close() }()
 			}
@@ -117,6 +128,11 @@ func TestTelemetryAdmissionOutcomes(t *testing.T) {
 			}
 			if got := admissions(tc.outcome) - before; got != 1 {
 				t.Fatalf("%s admissions rose by %v, want 1 (err %v)", tc.outcome, got, err)
+			}
+			if tc.cancelClient {
+				if got := claims(claimFailed) - failedBefore; got != 0 {
+					t.Fatalf("a cancelled claim counted as failed %v times", got)
+				}
 			}
 			if tc.claimOutcome != "" {
 				if got := claims(tc.claimOutcome) - claimBefore; got != 1 {

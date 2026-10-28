@@ -349,7 +349,12 @@ func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.
 	admissionsTotal.WithLabelValues(outcome).Inc()
 	if err != nil {
 		// The error names the connector but never the credential.
-		a.log.Info("admission refused", "outcome", outcome, "vpc", vpc, "error", err)
+		// A client's bad credential is routine, so it is logged below Info.
+		if outcome == admitUnauthenticated || outcome == admitForbidden {
+			a.log.Debug("admission refused", "outcome", outcome, "vpc", vpc, "error", err)
+		} else {
+			a.log.Info("admission refused", "outcome", outcome, "vpc", vpc, "error", err)
+		}
 	}
 	return l, err
 }
@@ -399,18 +404,25 @@ func (a *Adapter) admit(ctx context.Context, credential, vpc string) (connectip.
 		a.admitting.Done()
 	}()
 
+	caller := ctx
 	ctx, cancel := context.WithTimeout(ctx, a.cfg.Prepare)
 	defer cancel()
 	defer context.AfterFunc(a.stop, cancel)()
 	att, err := a.acquireAttachment(ctx, &g)
 	if err != nil {
+		if errors.Is(caller.Err(), context.Canceled) {
+			return nil, admitCancelled, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
+		}
 		return nil, admitAttachmentFailed, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
 	}
 	rt, err := a.acquireRoute(ctx, &g, att)
 	if err != nil {
 		a.releaseAttachment(att)
 		outcome := admitRouteFailed
-		if errors.Is(err, errRouteRefused) {
+		switch {
+		case errors.Is(caller.Err(), context.Canceled):
+			outcome = admitCancelled
+		case errors.Is(err, errRouteRefused):
 			outcome = admitRouteRefused
 		}
 		return nil, outcome, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)

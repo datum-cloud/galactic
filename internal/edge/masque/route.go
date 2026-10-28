@@ -84,12 +84,14 @@ func (a *Adapter) acquireRoute(ctx context.Context, g *Grant, e *attachment) (*r
 var errRouteRefused = errors.New("core refuses route")
 
 // claim waits until core accepts r's claim for e, and counts a claim that
-// fails.
+// fails. A cancelled claim is not counted.
 func (a *Adapter) claim(ctx context.Context, g *Grant, e *attachment, r *route) error {
 	err := a.claimRoute(ctx, g, e, r)
 	switch {
 	case errors.Is(err, errRouteRefused):
 		routeClaims.WithLabelValues(claimRefused).Inc()
+	case errors.Is(err, context.Canceled):
+		// A cancelled claim is a client that went away, not a failed claim.
 	case err != nil:
 		routeClaims.WithLabelValues(claimFailed).Inc()
 	}

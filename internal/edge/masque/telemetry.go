@@ -30,6 +30,10 @@ const (
 	admitShuttingDown = "shutting_down"
 	// admitBusy is a connector with another request being admitted.
 	admitBusy = "busy"
+	// admitCancelled is a request whose client went away during
+	// preparation. It counts under neither attachment_failed nor
+	// route_failed.
+	admitCancelled = "cancelled"
 	// admitAttachmentFailed is an attachment that was refused, or not
 	// programmed and served within the preparation time.
 	admitAttachmentFailed = "attachment_failed"
