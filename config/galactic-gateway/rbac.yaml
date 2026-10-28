@@ -70,9 +70,10 @@ rules:
     resources:
       - vpcattachments
     verbs: ["get", "list", "watch"]
-  # A NetworkService in a project namespace, one holding no NetworkGateway, is
-  # accepted only when a VPC in that namespace carries its vpcRef, so the
-  # gateway reads VPCs and re-checks its services when one changes.
+  # With GALACTIC_GATEWAY_PROJECT_SERVICES on, a NetworkService in a project
+  # namespace is accepted only when a VPC in that namespace carries its
+  # vpcRef, so the gateway reads VPCs and re-checks its services when one
+  # changes. A gateway with the switch on and no watch here fails startup.
   - apiGroups: ["galactic.datumapis.com"]
     resources:
       - vpcs

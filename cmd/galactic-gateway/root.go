@@ -117,8 +117,18 @@ func runCmd(cfg *config.GatewayConfig) error {
 		return fmt.Errorf("register field indexes: %w", err)
 	}
 
-	// Pre-flight RBAC check.
-	checkWatchPermissions(mgr)
+	// Pre-flight RBAC check: a watch the role denies fails startup.
+	rbacCtx, cancelRBAC := context.WithTimeout(ctx, 10*time.Second)
+	err = checkWatchPermissions(rbacCtx, mgr.GetClient(), cfg.ProjectServices)
+	cancelRBAC()
+	if err != nil {
+		return err
+	}
+	scope := controller.ServiceScope{
+		ProjectServices:  cfg.ProjectServices,
+		GatewayNamespace: cfg.Namespace,
+		VIPPrefixes:      cfg.ProjectVIPPrefixes,
+	}
 
 	// IPv4 VIPs and backend health need read access to ServiceVIPBindings;
 	// without it they stay off for this process rather than stalling the
@@ -215,6 +225,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		BackendHealth: backendHealth,
 		// Forwarding follows need: on only once an IPv4 VIP is about to load.
 		EnsureIPv4Forwarding: ipv4.enable,
+		Scope:                scope,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
@@ -226,6 +237,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		Scheme:    mgr.GetScheme(),
 		NodeName:  nodeName,
 		APIReader: mgr.GetAPIReader(),
+		Scope:     scope,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkService controller: %w", err)
 	}
@@ -324,6 +336,15 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().String("gateway-proc-sys-path", config.DefaultProcSysPath,
 		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
 			"of the host's /proc/sys/net at <path>/net")
+	cmd.Flags().Bool("gateway-project-services", false,
+		"Serve NetworkServices in project namespaces, after checking their VIP addresses, VPC and claims, "+
+			"and trust only NetworkGateways in --gateway-namespace")
+	cmd.Flags().String("gateway-namespace", "",
+		"The gateway namespace, whose NetworkGateways and NetworkServices are trusted "+
+			"(required with --gateway-project-services)")
+	cmd.Flags().String("gateway-project-vip-prefixes", "",
+		"Comma-separated prefixes the platform allocates load balancer addresses from; a project "+
+			"NetworkService with a VIP outside them is refused (required with --gateway-project-services)")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	logOpts.BindFlags(cmd.PersistentFlags())

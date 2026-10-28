@@ -86,6 +86,15 @@ spec:
                   fieldPath: spec.nodeName
             - name: GALACTIC_GATEWAY_GRPC_HEALTH_PORT
               value: "5181"
+            # The gateway namespace, whose NetworkGateways and
+            # NetworkServices are trusted. Read only with
+            # GALACTIC_GATEWAY_PROJECT_SERVICES on, which, with
+            # GALACTIC_GATEWAY_PROJECT_VIP_PREFIXES, a deployment sets to
+            # serve load balancers in project namespaces.
+            - name: GALACTIC_GATEWAY_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             # An unprivileged container gets /proc/sys read-only, so the
             # forwarding sysctls the datapath's FIB lookup needs are written
             # through the host's /proc/sys/net, mounted below. hostNetwork

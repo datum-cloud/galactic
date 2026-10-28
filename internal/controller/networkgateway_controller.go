@@ -131,6 +131,11 @@ type NetworkGatewayReconciler struct {
 	// whose replies to it would be dropped. Nil means nothing to turn on.
 	EnsureIPv4Forwarding func() error
 
+	// Scope is which NetworkServices this node serves and which
+	// NetworkGateways it trusts. With Scope.ProjectServices on, a
+	// NetworkGateway outside Scope.GatewayNamespace is ignored.
+	Scope ServiceScope
+
 	// drain keeps a deleted rule loaded until its route is withdrawn. See
 	// ruleDrainTracker.
 	drain ruleDrainTracker
@@ -309,7 +314,19 @@ const (
 )
 
 // Reconcile reconciles a single NetworkGateway.
+//
+// A NetworkGateway outside the trusted gateway namespace is not one: a project
+// able to create it must not make its own services trusted, and its deletion
+// must not stop this node's engine. It is ignored.
 func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if !r.Scope.trustsGateway(req.Namespace) {
+		return ctrl.Result{}, nil
+	}
+	return r.reconcileGateway(ctx, req)
+}
+
+// reconcileGateway reconciles a single trusted NetworkGateway.
+func (r *NetworkGatewayReconciler) reconcileGateway(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	gw := &bgpv1alpha1.NetworkGateway{}
@@ -337,7 +354,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			if withdrawErr != nil {
 				logger.Error(withdrawErr, "withdraw BGPAdvertisements for departed gateway node", "nodeName", req.Name)
 			}
-			if clearErr := clearNodeRuleConditions(ctx, r.Client, req.Namespace, req.Name); clearErr != nil {
+			if clearErr := clearNodeRuleConditions(ctx, r.Client, r.Scope, req.Namespace, req.Name); clearErr != nil {
 				logger.Error(clearErr, "clear Programmed conditions for departed gateway node", "nodeName", req.Name)
 				withdrawErr = errors.Join(withdrawErr, clearErr)
 			}
@@ -375,7 +392,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			logger.Error(withdrawErr, "withdraw BGPAdvertisements for terminating NetworkGateway",
 				"networkGateway", req.NamespacedName)
 		}
-		if clearErr := clearNodeRuleConditions(ctx, r.Client, gw.Namespace, gw.Name); clearErr != nil {
+		if clearErr := clearNodeRuleConditions(ctx, r.Client, r.Scope, gw.Namespace, gw.Name); clearErr != nil {
 			logger.Error(clearErr, "clear Programmed conditions for terminating NetworkGateway",
 				"networkGateway", req.NamespacedName)
 			withdrawErr = errors.Join(withdrawErr, clearErr)
@@ -401,7 +418,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if r.Disabled {
 		withdrawErr := errors.Join(
 			withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName),
-			clearNodeRuleConditions(ctx, r.Client, gw.Namespace, r.NodeName),
+			clearNodeRuleConditions(ctx, r.Client, r.Scope, gw.Namespace, r.NodeName),
 			r.syncReturnPath(ctx, gw.Namespace),
 		)
 		gwCopy := gw.DeepCopy()
@@ -423,7 +440,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// cutoff must be captured before desired's NetworkService CRDs are listed.
 	cutoff := r.Engine.DatapathGeneration()
 
-	served, allRules, err := listServedNetworkServices(ctx, r.Client, gw.Namespace)
+	served, allRules, err := r.Scope.listServedNetworkServices(ctx, r.Client, gw.Namespace)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("list NetworkServices for NetworkGateway %s: %w", req.NamespacedName, err)
 	}
@@ -525,7 +542,7 @@ func (r *NetworkGatewayReconciler) syncReturnPath(ctx context.Context, namespace
 	if r.ReturnPath == nil {
 		return nil
 	}
-	rules, _, err := listServedNetworkServices(ctx, r.Client, namespace)
+	rules, _, err := r.Scope.listServedNetworkServices(ctx, r.Client, namespace)
 	if err != nil {
 		return fmt.Errorf("list NetworkServices for the return path: %w", err)
 	}
@@ -723,6 +740,13 @@ func (r *NetworkGatewayReconciler) gatherRules(
 			outcomes = append(outcomes, ruleOutcome{rule: rule, unaccepted: true})
 			continue
 		}
+		if ruleIsTenant(rule, namespace) {
+			if ok, vip := r.Scope.vipsInPool(rule); !ok {
+				err := fmt.Errorf("%w: %s", errVIPOutsidePool, vip)
+				outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err, ipv4: ipv4Off})
+				continue
+			}
+		}
 		if owner, lost := vipLost[client.ObjectKeyFromObject(rule)]; lost {
 			err := fmt.Errorf("%w: NetworkService %s already serves one of its VIP addresses on %s port %d",
 				errVIPClaimed, owner, rule.Spec.Protocol, rule.Spec.Port)
@@ -866,7 +890,8 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 				advErrs = append(advErrs, fmt.Errorf("networkRule %s: %w", o.rule.Name, err))
 			}
 			if hasNodeRuleConditions(o.rule, r.NodeName) {
-				if err := clearRuleNodeConditions(ctx, r.Client, client.ObjectKeyFromObject(o.rule), r.NodeName); err != nil {
+				key := client.ObjectKeyFromObject(o.rule)
+				if err := clearRuleNodeConditions(ctx, r.Client, r.Scope, key, r.NodeName); err != nil {
 					statusErrs = append(statusErrs, fmt.Errorf("networkRule %s status: %w", o.rule.Name, err))
 				}
 			}
@@ -927,6 +952,8 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 			cond.Reason = reasonUnservedProtocol
 		case errors.Is(o.buildErr, errVIPClaimed):
 			cond.Reason = reasonVIPClaimed
+		case errors.Is(o.buildErr, errVIPOutsidePool):
+			cond.Reason = reasonVIPOutsidePool
 		case errors.Is(o.buildErr, errNoHealthyBackends):
 			cond.Reason = reasonNoHealthyBackends
 		}
@@ -1321,8 +1348,8 @@ func (r *NetworkGatewayReconciler) departedGatewayNodes(
 // write: when node was the last gateway node, no reconciler is left to do it.
 // A write retries on conflict against a fresh read, and a rule deleted
 // mid-pass counts as cleared.
-func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, node string) error {
-	rules, _, err := listServedNetworkServices(ctx, c, namespace)
+func clearNodeRuleConditions(ctx context.Context, c client.Client, scope ServiceScope, namespace, node string) error {
+	rules, _, err := scope.listServedNetworkServices(ctx, c, namespace)
 	if err != nil {
 		return fmt.Errorf("list NetworkServices to clear node %s conditions: %w", node, err)
 	}
@@ -1343,8 +1370,10 @@ func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, no
 // clearRuleNodeConditions removes node's Programmed, Advertised and IPv4Served
 // conditions from the rule known by key, which node no longer serves, and
 // recomputes its summary conditions over the gateway nodes serving it.
-func clearRuleNodeConditions(ctx context.Context, c client.Client, key client.ObjectKey, node string) error {
-	nodes, err := servingGatewayNodeNames(ctx, c, key.Namespace)
+func clearRuleNodeConditions(
+	ctx context.Context, c client.Client, scope ServiceScope, key client.ObjectKey, node string,
+) error {
+	nodes, err := scope.servingGatewayNodeNames(ctx, c, key.Namespace)
 	if err != nil {
 		return fmt.Errorf("list gateway nodes to clear node %s conditions: %w", node, err)
 	}
@@ -2012,7 +2041,7 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&bgpv1alpha1.NetworkGateway{}).
 		Watches(&bgpv1alpha1.NetworkService{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
-				return ruleToGatewayRequests(ctx, r.Client, obj)
+				return ruleToGatewayRequests(ctx, r.Client, r.Scope, obj)
 			}),
 		).
 		// Backend uSIDs resolve from BGPRouter, BGPAdvertisement, and
@@ -2157,12 +2186,14 @@ func isRuleAdvertisement(obj client.Object) bool {
 // advertises every VIP identically (anycast), so every gateway node in the
 // rule's PoP must re-evaluate its own engine state whenever any rule changes.
 // The broadcast is intentional rather than a missing index.
-func ruleToGatewayRequests(ctx context.Context, c client.Client, obj client.Object) []ctrlreconcile.Request {
+func ruleToGatewayRequests(
+	ctx context.Context, c client.Client, scope ServiceScope, obj client.Object,
+) []ctrlreconcile.Request {
 	rule, ok := obj.(*bgpv1alpha1.NetworkService)
 	if !ok {
 		return nil
 	}
-	gws, err := servingGateways(ctx, c, rule.Namespace)
+	gws, err := scope.servingGateways(ctx, c, rule.Namespace)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "list NetworkGateways for change", "sourceKind", "NetworkService",
 			"sourceName", rule.Name)
@@ -2328,7 +2359,9 @@ func isNodeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, nodeName string) boo
 //
 // A rule missing from rules is looked up through APIReader first and kept if it
 // still exists, so a cache that has not yet seen a new rule never withdraws a
-// live route.
+// live route. The exception is a project rule's advertisement while
+// Scope.ProjectServices is off: nothing serves that rule any more, so its
+// route is withdrawn whether or not the rule exists.
 func (r *NetworkGatewayReconciler) sweepOrphanedAdvertisements(
 	ctx context.Context, namespace string, rules []bgpv1alpha1.NetworkService,
 ) error {
@@ -2355,8 +2388,10 @@ func (r *NetworkGatewayReconciler) sweepOrphanedAdvertisements(
 		if known[ruleName] {
 			continue
 		}
+		unserved := !r.Scope.ProjectServices && ruleName.Namespace != adv.Namespace
 		err := r.APIReader.Get(ctx, ruleName, &bgpv1alpha1.NetworkService{})
 		switch {
+		case unserved:
 		case err == nil:
 			continue
 		case !apierrors.IsNotFound(err):

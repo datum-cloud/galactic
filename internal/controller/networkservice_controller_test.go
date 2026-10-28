@@ -381,7 +381,7 @@ func TestNetworkServiceReconciler_GatewayAppearanceRequeuesParkedRule(t *testing
 	if err := fakeClient.Create(ctx, gwA); err != nil {
 		t.Fatalf("create gateway: %v", err)
 	}
-	reqs := gatewayToRuleRequests(ctx, fakeClient, gwA)
+	reqs := gatewayToRuleRequests(ctx, fakeClient, ServiceScope{}, gwA)
 	want := testRuleKey(testRuleName)
 	found := false
 	for _, req := range reqs {
@@ -394,7 +394,7 @@ func TestNetworkServiceReconciler_GatewayAppearanceRequeuesParkedRule(t *testing
 	}
 
 	// Non-NetworkGateway objects must map to nothing.
-	if got := gatewayToRuleRequests(ctx, fakeClient, rule); got != nil {
+	if got := gatewayToRuleRequests(ctx, fakeClient, ServiceScope{}, rule); got != nil {
 		t.Fatalf("gatewayToRuleRequests on a non-NetworkGateway = %v, want nil", got)
 	}
 
