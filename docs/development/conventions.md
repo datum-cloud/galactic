@@ -120,6 +120,49 @@ if len(errs) > 0 {
 
 Define sentinel / limit values as typed or untyped constants at package level, grouped in a `const (...)` block when there are several related ones. Re-exported BGP API enums live in `internal/model` (e.g. `BGPPolicyDirectionImport = bgpv1alpha1.BGPPolicyDirectionImport`).
 
+### Metrics and logging
+
+Every metric and logger goes through the shared Milo instrumentation library,
+[`go.miloapis.com/instrumentation`](https://github.com/milo-os/instrumentation).
+Its [adoption guide](https://github.com/milo-os/instrumentation/blob/main/ADOPTING.md)
+explains each failure its checks report.
+
+- Create a metric with a constructor from
+  `go.miloapis.com/instrumentation/metrics`, such as `metrics.NewCounterVec`,
+  in a package-level `var`. Don't call `prometheus.New*`, take a
+  `prometheus.Registerer` parameter, or build a registry of your own. The
+  library registers the metric on controller-runtime's registry, which the
+  binary serves.
+- Register a collector that reads its values at scrape time, such as one over
+  a BPF map, with `metrics.MustRegister`. The library can't check a custom
+  collector's label names, so review them by hand.
+- Name labels with the constants in `go.miloapis.com/instrumentation/labels`
+  where one fits, such as `labels.Reason` or `labels.ResourceName`. Use the
+  same constants as log keys, so log lines join with metrics.
+- Never set a label the collection pipeline reserves, such as `node`,
+  `namespace`, `pod`, `component` or `provider`. `labels.Reserved()` lists
+  them all. The metric constructors panic on one, but log keys and
+  `prometheus.Labels` maps passed to `With` or `DeletePartialMatch` aren't
+  checked, so use the constants there too. Existing metrics with reserved
+  labels are being renamed under #1150; don't add more.
+- Build a binary's logger only with `internal/logging`: `Options.BindFlags`
+  and `Options.Setup` in `main`, before anything logs, or `SetupFile` for the
+  CNI plugins. It installs one logger for `slog`, the `log` package,
+  controller-runtime and klog. Library code logs through `slog` or
+  controller-runtime's `log.FromContext`. Don't call `slog.New`, `zap.New` or
+  `SetLogger` yourself, and never set `Development: true`; `--zap-devel` is
+  for local runs.
+- A new command that serves `/metrics` needs a `TestMetricsScrape`, and a new
+  package that defines a library metric must be imported by
+  `internal/instrumentation/lint_test.go`.
+
+The tests in `internal/instrumentation` enforce these rules in
+`task test:unit`. They skip the directories in its `pending` list, which haven't
+moved to the library yet (#1149). Don't add to that list; a new directory
+must pass. The [observability guide](../observability/README.md#adding-a-metric)
+describes each test, and [Logging](../observability/logging.md) describes the
+log format and flags.
+
 ### Linting
 
 Run `task lint` before every PR. The enabled linters, formatters and narrow

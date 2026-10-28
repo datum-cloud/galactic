@@ -48,6 +48,19 @@ qualification.
 - Align Markdown tables as required by the coding conventions.
 - Use Conventional Commits. Keep the subject at most 72 characters.
 
+## Metrics and logs
+
+Create every metric and logger through go.miloapis.com/instrumentation, naming
+labels with its labels constants. The instrumentation adoption test enforces
+this. When it fails, follow its message, which links to
+https://github.com/milo-os/instrumentation/blob/main/ADOPTING.md.
+
+In Galactic, binaries build their logger with `internal/logging`, and
+`internal/instrumentation` holds the adoption tests. The
+[conventions](docs/development/conventions.md#metrics-and-logging) give the
+full rule, and [Adding a metric](docs/observability/README.md#adding-a-metric)
+lists the tests.
+
 ## Ownership and deployment constraints
 
 Galactic reads and writes the consolidated `galactic.datumapis.com` resources.
