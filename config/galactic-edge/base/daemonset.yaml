@@ -54,7 +54,8 @@ spec:
           command:
             - /galactic-edge
           args:
-            # The fabric's tenant MTU; an overlay sets the real value.
+            # The fabric's tenant MTU, at most the uplink MTU less the 40-byte
+            # encapsulation header; an overlay sets the real value.
             - --mtu=1500
             - --proc-sys-path=/host/proc/sys
           env:

@@ -83,7 +83,9 @@ func newRootCommand() *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.nodeName, "node-name", os.Getenv("NODE_NAME"), "This node's name (env NODE_NAME)")
-	f.IntVar(&o.mtu, "mtu", 0, "MTU of every attachment link: at least the fabric's tenant MTU (required)")
+	f.IntVar(&o.mtu, "mtu", 0,
+		"MTU of every attachment link: at least the fabric's tenant MTU, and at most the uplink MTU "+
+			"less the 40-byte encapsulation header (required)")
 	f.StringVar(&o.pinDir, "pin-dir", attach.PinDir, "Directory the uSID datapath's maps and programs are pinned in")
 	f.StringVar(&o.ownershipDir, "ownership-dir", ownership.DefaultDir,
 		"Host directory of the node's write-fence records; it must outlive every writer")
@@ -168,6 +170,7 @@ func run(parent context.Context, o *options) error {
 		Namespaces: pods,
 		Datapath:   agent.PinnedDatapath{PinDir: o.pinDir},
 		MTU:        o.mtu,
+		EncapMTU:   agent.PinnedDatapath{PinDir: o.pinDir}.EncapMTU,
 		APIReader:  mgr.GetAPIReader(),
 		Gates:      agent.PinnedGates{PinDir: o.pinDir},
 		Params:     params,

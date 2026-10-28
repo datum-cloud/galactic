@@ -6,6 +6,7 @@ package mssclamp
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -172,6 +173,41 @@ func TestWriteEncapMTU_SingleEntryLayout(t *testing.T) {
 	}
 	if len(table.puts) != 1 || table.keys[0] != uint32(0) || table.puts[0] != 1460 {
 		t.Errorf("WriteEncapMTU made puts %v with keys %v, want 1460 at key uint32(0)", table.puts, table.keys)
+	}
+}
+
+// Lookup reads back the last Put, as the kernel's single-entry array does.
+func (f *encapTable) Lookup(key, valueOut any) error {
+	if f.err != nil {
+		return f.err
+	}
+	if key != uint32(0) {
+		return fmt.Errorf("key %v, want uint32(0)", key)
+	}
+	*valueOut.(*uint32) = 0
+	if n := len(f.puts); n > 0 {
+		*valueOut.(*uint32) = f.puts[n-1]
+	}
+	return nil
+}
+
+// TestReadEncapMTU_ReadsWhatWriteEncapMTUWrote checks the reader and writer
+// agree on the entry's key and value type, and that an unwritten table reads
+// zero, the limit off.
+func TestReadEncapMTU_ReadsWhatWriteEncapMTUWrote(t *testing.T) {
+	var table encapTable
+	if got, err := ReadEncapMTU(&table); err != nil || got != 0 {
+		t.Fatalf("ReadEncapMTU of an unwritten table = %d, %v; want 0, nil", got, err)
+	}
+	if err := WriteEncapMTU(&table, Values{MaxPacket: 1460}); err != nil {
+		t.Fatalf("WriteEncapMTU: %v", err)
+	}
+	if got, err := ReadEncapMTU(&table); err != nil || got != 1460 {
+		t.Errorf("ReadEncapMTU = %d, %v; want 1460, nil", got, err)
+	}
+	table.err = errors.New("map closed")
+	if _, err := ReadEncapMTU(&table); err == nil {
+		t.Error("ReadEncapMTU hid a failed lookup")
 	}
 }
 
