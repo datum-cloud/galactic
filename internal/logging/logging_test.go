@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
-	"go.miloapis.com/instrumentation/instrumenttest"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -230,13 +229,6 @@ func TestValidateLevel(t *testing.T) {
 			t.Errorf("ValidateLevel(%q) = nil, want an error", level)
 		}
 	}
-}
-
-// TestLoggerAdopted runs the instrumentation library's logger check over the
-// whole module: every logger is built by its logging package, and nothing
-// turns on development mode.
-func TestLoggerAdopted(t *testing.T) {
-	instrumenttest.AssertStandardLogger(t)
 }
 
 // TestBinariesListsEveryCaller keeps Binaries, which the manifest check uses

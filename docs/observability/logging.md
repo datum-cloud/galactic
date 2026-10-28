@@ -85,9 +85,9 @@ text.
 
 For local runs, `--zap-devel --log-level=debug` gives console output with the
 verbose lines. No binary turns on development mode itself:
-`internal/logging`'s `TestLoggerAdopted` runs the instrumentation library's
-logger check over the whole module, which fails on any logger not built by the
-library and on development mode turned on in source.
+`internal/instrumentation`'s `TestAdopted` runs the instrumentation library's
+adoption check over the whole module, which fails on any logger not built by
+the library and on development mode turned on in source.
 `TestBinariesUseThisPackage` fails when a command under `cmd/` imports
 controller-runtime's zap package or calls `SetLogger` itself, and
 `TestLongRunningBinariesInstallTheHandler` fails when a command under `cmd/`

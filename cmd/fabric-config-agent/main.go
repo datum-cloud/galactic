@@ -375,14 +375,20 @@ func writerLock(opts *options, metrics *fabricconfig.AgentMetrics, writer string
 	return fabricconfig.TimedLock{Locker: lock, Metrics: metrics, Writer: writer}
 }
 
+// newMetrics builds the registry served at /metrics, holding the next-hop
+// guard's and the activation path's metrics.
+func newMetrics() (*fabricconfig.NextHopMetrics, *fabricconfig.AgentMetrics) {
+	m := fabricconfig.NewNextHopMetrics()
+	return m, fabricconfig.NewAgentMetrics(m.Registry)
+}
+
 // watchWithGuard runs a.Watch alongside a NextHopGuard over the same FRR
 // instance, and serves the guard's and the activation path's metrics, and
 // the boot source init recorded, when opts asks for them. With the
 // ConfigMap path retired it runs only the deployment agent and the guard
 // until ctx ends.
 func watchWithGuard(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
-	metrics := fabricconfig.NewNextHopMetrics()
-	agentMetrics := fabricconfig.NewAgentMetrics(metrics.Registry)
+	metrics, agentMetrics := newMetrics()
 	if rec, err := fabricconfig.ReadBootRecord(opts.bootRecord); err == nil {
 		agentMetrics.SetBoot(rec.Source)
 	} else {

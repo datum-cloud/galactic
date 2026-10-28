@@ -1075,6 +1075,14 @@ func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
 		"err", failure.err, "hostInterface", failure.iface, "failures", p.failures, "retryIn", backoff)
 }
 
+// NewMetrics builds the registry the run daemon serves at /metrics, before
+// the datapath collectors that need loaded eBPF objects are added.
+func NewMetrics() *metrics.Metrics {
+	m := metrics.New()
+	nldump.MustRegister(m.Registry)
+	return m
+}
+
 // Run executes the CNI installer main container tasks:
 //  1. Loads, pins, and attaches the eBPF uSID datapath and keeps its attachment
 //     set re-evaluated against netlink events for the life of ctx. This is the
@@ -1109,8 +1117,7 @@ func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
 func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	slog.Info("Starting CNI installer run daemon", "grpcHealthPort", grpcHealthPort, "metricsPort", metricsPort)
 
-	m := metrics.New()
-	nldump.MustRegister(m.Registry)
+	m := NewMetrics()
 
 	ebpfState, datapath, err := startEBPFDatapath(ctx, m)
 	if err != nil {

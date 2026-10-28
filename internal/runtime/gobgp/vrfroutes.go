@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	"go.miloapis.com/instrumentation/metrics"
 
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
@@ -44,14 +44,10 @@ const labelRouter = "router"
 // routes in a VRF's egress_route_table and "plain" for routes with no route
 // target. A value that stays above zero means part of a VPC, or an egress shard
 // or VIP, is unreachable from this node.
-var routeInstallFailing = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+var routeInstallFailing = metrics.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "galactic_router_route_install_failing",
 	Help: "Routes whose best path is known but whose last install into the kernel or datapath failed.",
 }, []string{labelRouter, "kind"})
-
-func init() {
-	ctrlmetrics.Registry.MustRegister(routeInstallFailing)
-}
 
 // installFailingReporter returns a report func setting router's
 // routeInstallFailing gauge for kind.
