@@ -212,7 +212,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 	info := lease.Info()
 	routes, err := routeRanges(lease.Routes())
-	if err != nil || !validGrant(info, vpcName) || lease.Done() == nil {
+	if err != nil || !validGrant(info, lease.Routes(), vpcName) || lease.Done() == nil {
 		s.reject(w, http.StatusServiceUnavailable, "invalid admission grant", err)
 		return
 	}
@@ -267,8 +267,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	defer stopExpiry()
-	assigned := info.Prefix
-	if err := conn.AssignAddresses([]netip.Prefix{assigned}); err != nil {
+	if err := conn.AssignAddresses([]netip.Prefix{info.Prefix}); err != nil {
 		log.Warn("could not assign address", "error", err)
 		return
 	}
@@ -277,7 +276,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Info("CONNECT-IP request accepted")
-	s.proxySession(ctx, log, conn, sess, assigned)
+	s.proxySession(ctx, log, conn, sess, newPacketPolicy(info.Prefix, lease.Routes()))
 	log.Info("CONNECT-IP request ended")
 }
 
@@ -293,17 +292,20 @@ func (s *Server) startSession() bool {
 	return true
 }
 
-// proxySession forwards packets in both directions and answers address
-// requests until any of them stops, which happens when the request stream or
-// its connection ends.
+// proxySession forwards the packets policy allows in both directions and
+// answers address requests until any of them stops, which happens when the
+// request stream or its connection ends. A refused packet is dropped and
+// counted. connect-ip-go checks a packet's addresses as well, before this
+// policy sees a client packet and after it passes a gVPC one; it drops
+// what it refuses without counting it.
 func (s *Server) proxySession(
-	ctx context.Context, log *slog.Logger, conn *connectip.Conn, sess BackendSession, assigned netip.Prefix,
+	ctx context.Context, log *slog.Logger, conn *connectip.Conn, sess BackendSession, policy *packetPolicy,
 ) {
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		defer cancel()
-		answerAddressRequests(ctx, log, conn, assigned)
+		answerAddressRequests(ctx, log, conn, policy.prefix)
 	})
 	wg.Go(func() {
 		defer cancel()
@@ -312,6 +314,10 @@ func (s *Server) proxySession(
 			n, err := conn.ReadPacket(buf)
 			if err != nil {
 				return
+			}
+			if reason := policy.fromClient(buf[:n]); reason != "" {
+				deny(toVPC, reason)
+				continue
 			}
 			if err := sess.WritePacket(buf[:n]); err != nil {
 				log.Warn("could not write packet to backend", "error", err)
@@ -327,11 +333,21 @@ func (s *Server) proxySession(
 			if err != nil {
 				return
 			}
+			if reason := policy.toClient(buf[:n]); reason != "" {
+				deny(toClient, reason)
+				continue
+			}
 			icmp, err := conn.WritePacket(buf[:n])
 			if err != nil {
 				return
 			}
 			if icmp == nil {
+				continue
+			}
+			// The library's Packet Too Big comes from the client's address,
+			// so it passes the same checks as the client's own packets.
+			if reason := policy.fromClient(icmp); reason != "" {
+				deny(toVPC, reason)
 				continue
 			}
 			if err := sess.WritePacket(icmp); err != nil {
@@ -399,8 +415,14 @@ func bearerToken(r *http.Request) (string, bool) {
 	return token, token != ""
 }
 
-func validGrant(info SessionInfo, vpc string) bool {
+// validGrant reports whether admission returned a complete grant for vpc.
+// Only IPv6 is carried, so a grant that routes IPv4 is refused rather than
+// advertised.
+func validGrant(info SessionInfo, routes []netip.Prefix, vpc string) bool {
 	p := info.Prefix
+	if slices.ContainsFunc(routes, func(r netip.Prefix) bool { return !r.Addr().Is6() || r.Addr().Is4In6() }) {
+		return false
+	}
 	return info.VPC == vpc && info.Principal != "" && info.Connector != "" && info.Attachment != "" &&
 		info.Claim != "" && info.Epoch != 0 && p.IsValid() && p.Addr().Is6() && !p.Addr().Is4In6() &&
 		p.Bits() == 96 && p == p.Masked()
