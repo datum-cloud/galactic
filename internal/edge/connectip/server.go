@@ -278,7 +278,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case 2:
 		s.serveH2(w, r)
 	default:
-		s.reject(w, http.StatusHTTPVersionNotSupported, "CONNECT-IP needs HTTP/3 or HTTP/2", nil)
+		s.reject(w, r, http.StatusHTTPVersionNotSupported, outcomeBadRequest, "CONNECT-IP needs HTTP/3 or HTTP/2", nil)
 	}
 }
 
@@ -294,11 +294,11 @@ func (s *Server) serveH3(w http.ResponseWriter, r *http.Request) {
 		if perr, ok := errors.AsType[*connectip.ProxyRequestParseError](err); ok {
 			status = perr.HTTPStatus
 		}
-		s.reject(w, status, "invalid CONNECT-IP request", err)
+		s.reject(w, r, status, outcomeBadRequest, "invalid CONNECT-IP request", err)
 		return
 	}
 	if r.URL.Path != TemplatePath {
-		s.reject(w, http.StatusNotFound, "unknown path", nil)
+		s.reject(w, r, http.StatusNotFound, outcomeBadRequest, "unknown path", nil)
 		return
 	}
 	s.serve(w, r, &h3Request{r: r, preq: preq, proxy: &s.proxy})
@@ -342,16 +342,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, t transport) {
 	token, ok := bearerToken(r)
 	if !ok {
 		w.Header().Set("WWW-Authenticate", "Bearer")
-		s.reject(w, http.StatusUnauthorized, "missing or unknown credential", nil)
+		s.reject(w, r, http.StatusUnauthorized, outcomeUnauthenticated, "missing or unknown credential", nil)
 		return
 	}
 	vpcName, ok := requestedVPC(r)
 	if !ok {
-		s.reject(w, http.StatusBadRequest, "request must name exactly one VPC", nil)
+		s.reject(w, r, http.StatusBadRequest, outcomeBadRequest, "request must name exactly one VPC", nil)
 		return
 	}
 	if !s.startSession() {
-		s.reject(w, http.StatusServiceUnavailable, "server is closing", nil)
+		s.reject(w, r, http.StatusServiceUnavailable, outcomeUnavailable, "server is closing", nil)
 		return
 	}
 	defer s.sessions.Done()
@@ -359,25 +359,28 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, t transport) {
 	// queue work behind them. The global caps come first, so a flood of
 	// credentials spends no digest work.
 	if !tryAcquire(s.active) {
-		s.reject(w, http.StatusServiceUnavailable, "too many sessions", nil)
+		s.reject(w, r, http.StatusServiceUnavailable, outcomeLimited, "too many sessions", nil)
 		return
 	}
 	defer release(s.active)
 	if !tryAcquire(s.admitting) {
-		s.reject(w, http.StatusServiceUnavailable, "too many admissions in progress", nil)
+		s.reject(w, r, http.StatusServiceUnavailable, outcomeLimited, "too many admissions in progress", nil)
 		return
 	}
-	lease, admitted, err := s.admit(r.Context(), token, vpcName)
+	transport := transportOf(r)
+	lease, admitted, err := s.admit(r.Context(), transport, token, vpcName)
 	if !admitted {
-		s.reject(w, http.StatusServiceUnavailable, "too many admissions in progress for one credential", nil)
+		s.reject(w, r, http.StatusServiceUnavailable, outcomeLimited,
+			"too many admissions in progress for one credential", nil)
 		return
 	}
 	if err != nil {
-		s.reject(w, admissionStatus(w, err), "admission rejected", err)
+		status, outcome := admissionStatus(w, err)
+		s.reject(w, r, status, outcome, "admission rejected", err)
 		return
 	}
 	if lease == nil {
-		s.reject(w, http.StatusServiceUnavailable, "missing admission lease", nil)
+		s.reject(w, r, http.StatusServiceUnavailable, outcomeInvalidGrant, "missing admission lease", nil)
 		return
 	}
 	defer func() {
@@ -388,18 +391,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, t transport) {
 	info := lease.Info()
 	routes, err := routeRanges(lease.Routes())
 	if err != nil || !validGrant(info, lease.Routes(), vpcName) || lease.Done() == nil {
-		s.reject(w, http.StatusServiceUnavailable, "invalid admission grant", err)
+		s.reject(w, r, http.StatusServiceUnavailable, outcomeInvalidGrant, "invalid admission grant", err)
 		return
 	}
 	select {
 	case <-lease.Done():
-		s.reject(w, http.StatusServiceUnavailable, "admission expired", nil)
+		s.reject(w, r, http.StatusServiceUnavailable, outcomeExpired, "admission expired", nil)
 		return
 	default:
 	}
 	// Only an admitted client may receive the probe datagram.
 	if err := t.probe(); err != nil {
-		s.reject(w, http.StatusServiceUnavailable, "path cannot carry the minimum inner MTU", err)
+		s.reject(w, r, http.StatusServiceUnavailable, outcomeMTU, "path cannot carry the minimum inner MTU", err)
 		return
 	}
 	ctx, cancel := context.WithCancel(r.Context())
@@ -414,10 +417,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, t transport) {
 		}
 	}()
 	defer func() { cancel(); <-watchDone }()
-	log := s.log.With("session", info.ID, "principal", info.Principal, "vpc", info.VPC, "prefix", info.Prefix)
+	log := s.log.With("transport", transport, "session", info.ID, "connector", info.Connector,
+		"principal", info.Principal, "vpc", info.VPC, "prefix", info.Prefix, "attachment", info.Attachment,
+		"claim", info.Claim, "epoch", info.Epoch)
 	sess, err := s.backend.Open(ctx, info)
 	if err != nil {
-		s.reject(w, http.StatusServiceUnavailable, "backend unavailable", err)
+		s.reject(w, r, http.StatusServiceUnavailable, outcomeBackendUnavailable, "backend unavailable", err)
 		return
 	}
 	defer func() {
@@ -427,14 +432,26 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, t transport) {
 	}()
 
 	if err := ctx.Err(); err != nil {
-		s.reject(w, http.StatusServiceUnavailable, "admission expired during setup", err)
+		s.reject(w, r, http.StatusServiceUnavailable, outcomeExpired, "admission expired during setup", err)
 		return
 	}
 	conn, err := t.accept(w)
 	if err != nil {
-		log.Warn("could not accept request", "error", err)
+		requestsTotal.WithLabelValues(transport, outcomeAcceptFailed).Inc()
+		log.Warn("could not accept request", "outcome", outcomeAcceptFailed, "error", err)
 		return
 	}
+	requestsTotal.WithLabelValues(transport, outcomeAccepted).Inc()
+	tunnels := openTunnels.WithLabelValues(transport)
+	tunnels.Inc()
+	defer tunnels.Dec()
+	accepted := time.Now()
+	cause := causeSetupFailed
+	defer func() {
+		cause = s.endCause(lease, cause)
+		tunnelEnds.WithLabelValues(transport, cause).Inc()
+		log.Info("CONNECT-IP request ended", "cause", cause, "duration", time.Since(accepted))
+	}()
 	defer func() {
 		if err := conn.Close(); err != nil {
 			log.Debug("could not close CONNECT-IP stream cleanly", "error", err)
@@ -456,8 +473,26 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, t transport) {
 		return
 	}
 	log.Info("CONNECT-IP request accepted")
-	s.proxySession(ctx, log, conn, sess, newPacketPolicy(info.Prefix, lease.Routes()))
-	log.Info("CONNECT-IP request ended")
+	cause = s.proxySession(ctx, log, conn, sess, newPacketPolicy(info.Prefix, lease.Routes()),
+		newForwardCounters(transport))
+}
+
+// endCause returns why an accepted request ended: the lease ending or the
+// server closing, which also break the tunnel, take precedence over cause,
+// what the tunnel itself saw.
+func (s *Server) endCause(lease Lease, cause string) string {
+	select {
+	case <-lease.Done():
+		return causeLeaseEnded
+	default:
+	}
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return causeServerClosed
+	}
+	return cause
 }
 
 // countConn counts c until it closes, and closes it at once when it would
@@ -466,9 +501,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, t transport) {
 // spoofed Initial packets cannot spend a victim's per-source slots.
 func (s *Server) countConn(c *quic.Conn) {
 	n := s.conns.Add(1)
-	context.AfterFunc(c.Context(), func() { s.conns.Add(-1) })
+	open := openConnections.WithLabelValues(transportH3)
+	open.Inc()
+	context.AfterFunc(c.Context(), func() {
+		s.conns.Add(-1)
+		open.Dec()
+	})
 	if n > int64(s.limits.MaxConnections) {
-		s.closeConn(c, "too many connections")
+		s.closeConn(c, connReasonTotal)
 		return
 	}
 	go func() {
@@ -490,12 +530,13 @@ func (s *Server) countConn(c *quic.Conn) {
 			}
 		})
 		if fromSrc > s.limits.MaxConnectionsPerSource {
-			s.closeConn(c, "too many connections from one source")
+			s.closeConn(c, connReasonPerSource)
 		}
 	}()
 }
 
 func (s *Server) closeConn(c *quic.Conn, reason string) {
+	connsRejected.WithLabelValues(transportH3, reason).Inc()
 	s.log.Info("QUIC connection rejected", "reason", reason, "remote", c.RemoteAddr())
 	_ = c.CloseWithError(errExcessiveLoad, reason)
 }
@@ -504,13 +545,18 @@ func (s *Server) closeConn(c *quic.Conn, reason string) {
 // admission slots, and releases it and the global admission slot the caller
 // took, even if Admit panics. admitted is false when the credential has no
 // slot free; Admit then did not run.
-func (s *Server) admit(ctx context.Context, token, vpc string) (lease Lease, admitted bool, err error) {
+func (s *Server) admit(ctx context.Context, transport, token, vpc string) (lease Lease, admitted bool, err error) {
 	defer release(s.admitting)
 	digest := sha256.Sum256([]byte(token))
 	if !s.acquireCredential(digest) {
 		return nil, false, nil
 	}
 	defer s.releaseCredential(digest)
+	inProgress := admissionsInProgress.WithLabelValues(transport)
+	inProgress.Inc()
+	defer inProgress.Dec()
+	start := time.Now()
+	defer func() { admissionSeconds.WithLabelValues(transport).Observe(time.Since(start).Seconds()) }()
 	lease, err = s.admission.Admit(ctx, token, vpc)
 	return lease, true, err
 }
@@ -575,11 +621,20 @@ func (s *Server) startSession() bool {
 // request stream or its connection ends. A refused packet is dropped and
 // counted. connect-ip-go checks a packet's addresses as well, before this
 // policy sees a client packet and after it passes a gVPC one; it drops
-// what it refuses without counting it.
+// what it refuses without counting it. It returns the cause of the first
+// direction to stop: causePathMTU, causeSlowClient, causeBackendError or
+// causeClientClosed.
 func (s *Server) proxySession(
 	ctx context.Context, log *slog.Logger, conn tunnel, sess BackendSession, policy *packetPolicy,
-) {
+	fwd forwardCounters,
+) string {
 	ctx, cancel := context.WithCancel(ctx)
+	var causeOnce sync.Once
+	cause := causeClientClosed
+	stop := func(c string) {
+		causeOnce.Do(func() { cause = c })
+		cancel()
+	}
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		defer cancel()
@@ -591,6 +646,7 @@ func (s *Server) proxySession(
 		for {
 			n, err := conn.ReadPacket(buf)
 			if err != nil {
+				stop(causeClientClosed)
 				return
 			}
 			if reason := policy.fromClient(buf[:n]); reason != "" {
@@ -599,14 +655,16 @@ func (s *Server) proxySession(
 			}
 			if err := sess.WritePacket(buf[:n]); err != nil {
 				log.Warn("could not write packet to backend", "error", err)
+				stop(causeBackendError)
 				return
 			}
+			fwd.toVPC(n)
 		}
 	})
 	clock := &deliveryClock{base: time.Now()}
 	wg.Go(func() {
 		defer cancel()
-		watchDelivery(ctx, log, conn, clock)
+		watchDelivery(ctx, log, conn, clock, stop)
 	})
 	wg.Go(func() {
 		defer cancel()
@@ -614,6 +672,14 @@ func (s *Server) proxySession(
 		for {
 			n, err := sess.ReadPacket(ctx, buf)
 			if err != nil {
+				// A cancelled context is another direction's stop, which
+				// set the cause, or the request or lease ending, which
+				// serve tells apart.
+				if ctx.Err() != nil {
+					stop(causeClientClosed)
+				} else {
+					stop(causeBackendError)
+				}
 				return
 			}
 			if reason := policy.toClient(buf[:n]); reason != "" {
@@ -624,9 +690,11 @@ func (s *Server) proxySession(
 			icmp, err := conn.WritePacket(buf[:n])
 			clock.done()
 			if err != nil {
+				stop(causeClientClosed)
 				return
 			}
 			if icmp == nil {
+				fwd.toClient(n)
 				continue
 			}
 			// A packet no larger than MinInnerMTU that does not fit means the
@@ -637,6 +705,7 @@ func (s *Server) proxySession(
 				deny(toClient, reasonPathMTU)
 				log.Warn("ending CONNECT-IP session: path cannot carry the minimum inner MTU",
 					"packet", n, "minimum", MinInnerMTU)
+				stop(causePathMTU)
 				return
 			}
 			// The library's Packet Too Big comes from the client's address,
@@ -647,8 +716,10 @@ func (s *Server) proxySession(
 			}
 			if err := sess.WritePacket(icmp); err != nil {
 				log.Warn("could not return ICMP error to backend", "error", err)
+				stop(causeBackendError)
 				return
 			}
+			fwd.toVPC(len(icmp))
 		}
 	})
 	<-ctx.Done()
@@ -660,6 +731,7 @@ func (s *Server) proxySession(
 		log.Warn("could not stop backend session", "error", err)
 	}
 	wg.Wait()
+	return cause
 }
 
 // deliveryClock times the writes toward one client for watchDelivery.
@@ -730,7 +802,9 @@ func (c *deliveryClock) blocked() time.Duration {
 // a blocked datagram waits on the connection's send queue; the
 // connection's other request is stalled by the same client. It returns when
 // ctx is done or the session is aborted.
-func watchDelivery(ctx context.Context, log *slog.Logger, conn tunnel, clock *deliveryClock) {
+func watchDelivery(
+	ctx context.Context, log *slog.Logger, conn tunnel, clock *deliveryClock, stop func(cause string),
+) {
 	t := time.NewTicker(deliveryTimeout / 4)
 	defer t.Stop()
 	for {
@@ -744,6 +818,7 @@ func watchDelivery(ctx context.Context, log *slog.Logger, conn tunnel, clock *de
 		}
 		deny(toClient, reasonSlowClient)
 		log.Warn("ending CONNECT-IP session: the client stopped receiving", "blocked", deliveryTimeout)
+		stop(causeSlowClient)
 		conn.abort()
 		return
 	}
@@ -778,22 +853,27 @@ func answerAddressRequests(ctx context.Context, log *slog.Logger, conn tunnel, a
 	}
 }
 
-// admissionStatus returns the HTTP status for an Admit error, and asks for a
-// bearer credential when the error is ErrUnauthenticated.
-func admissionStatus(w http.ResponseWriter, err error) int {
+// admissionStatus returns the HTTP status and outcome for an Admit error,
+// and asks for a bearer credential when the error is ErrUnauthenticated.
+func admissionStatus(w http.ResponseWriter, err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrUnauthenticated):
 		w.Header().Set("WWW-Authenticate", "Bearer")
-		return http.StatusUnauthorized
+		return http.StatusUnauthorized, outcomeUnauthenticated
 	case errors.Is(err, ErrForbidden):
-		return http.StatusForbidden
+		return http.StatusForbidden, outcomeForbidden
 	default:
-		return http.StatusServiceUnavailable
+		return http.StatusServiceUnavailable, outcomeUnavailable
 	}
 }
 
-func (s *Server) reject(w http.ResponseWriter, status int, reason string, err error) {
-	s.log.Info("CONNECT-IP request rejected", "status", status, "reason", reason, "error", err)
+// reject answers r with status and counts it under outcome. reason is the
+// log's free text; err may carry identities and stays out of every metric.
+func (s *Server) reject(w http.ResponseWriter, r *http.Request, status int, outcome, reason string, err error) {
+	transport := transportOf(r)
+	requestsTotal.WithLabelValues(transport, outcome).Inc()
+	s.log.Info("CONNECT-IP request rejected", "transport", transport, "status", status, "outcome", outcome,
+		"reason", reason, "error", err)
 	w.WriteHeader(status)
 }
 

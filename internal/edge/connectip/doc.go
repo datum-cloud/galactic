@@ -60,6 +60,14 @@
 // TUNBackend checks no authority of its own: serve it only through a wrapper
 // that does, as internal/edge/masque does for every packet.
 //
+// The server counts every answered request by transport (h3, h2) and
+// outcome, every accepted request's end by cause, its open connections,
+// admissions and tunnels, and the packets and bytes it forwards. Metric
+// labels are only the transport, direction and fixed enums. The connector,
+// principal, VPC, prefix, attachment, claim and epoch go to the session's
+// log lines, which carry the same session ID as the admission authority's.
+// Neither carries a credential or packet contents.
+//
 // This package provides the protocol component and integration interfaces,
 // not a production admission authority or host attachment controller. A
 // connector that moves from HTTP/3 to HTTP/2 is admitted again through the

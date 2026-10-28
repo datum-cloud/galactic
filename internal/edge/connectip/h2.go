@@ -85,12 +85,15 @@ func (l *limitListener) Accept() (net.Conn, error) {
 func (s *Server) countTCP(c net.Conn) (net.Conn, bool) {
 	src := sourceAddr(c.RemoteAddr())
 	n := s.conns.Add(1)
+	open := openConnections.WithLabelValues(transportH2)
+	open.Inc()
 	s.countMu.Lock()
 	s.sources[src]++
 	fromSrc := s.sources[src]
 	s.countMu.Unlock()
 	counted := &countedConn{Conn: c, done: func() {
 		s.conns.Add(-1)
+		open.Dec()
 		s.countMu.Lock()
 		defer s.countMu.Unlock()
 		if s.sources[src]--; s.sources[src] == 0 {
@@ -100,12 +103,13 @@ func (s *Server) countTCP(c net.Conn) (net.Conn, bool) {
 	reason := ""
 	switch {
 	case n > int64(s.limits.MaxConnections):
-		reason = "too many connections"
+		reason = connReasonTotal
 	case fromSrc > s.limits.MaxConnectionsPerSource:
-		reason = "too many connections from one source"
+		reason = connReasonPerSource
 	default:
 		return counted, true
 	}
+	connsRejected.WithLabelValues(transportH2, reason).Inc()
 	s.log.Info("TCP connection rejected", "reason", reason, "remote", c.RemoteAddr())
 	_ = counted.Close()
 	return nil, false
@@ -128,19 +132,22 @@ func (c *countedConn) Close() error {
 func (s *Server) serveH2(w http.ResponseWriter, r *http.Request) {
 	// net/http exposes the :protocol pseudo-header as a request header.
 	if r.Method != http.MethodConnect || r.Header.Get(protocolPseudoHeader) != connectIPProtocol {
-		s.reject(w, http.StatusBadRequest, "invalid CONNECT-IP request", errors.New("not an Extended CONNECT for connect-ip"))
+		s.reject(w, r, http.StatusBadRequest, outcomeBadRequest, "invalid CONNECT-IP request",
+			errors.New("not an Extended CONNECT for connect-ip"))
 		return
 	}
 	if r.Host != s.authority {
-		s.reject(w, http.StatusBadRequest, "invalid CONNECT-IP request", errors.New("unknown authority"))
+		s.reject(w, r, http.StatusBadRequest, outcomeBadRequest, "invalid CONNECT-IP request",
+			errors.New("unknown authority"))
 		return
 	}
 	if r.URL.Path != TemplatePath {
-		s.reject(w, http.StatusNotFound, "unknown path", nil)
+		s.reject(w, r, http.StatusNotFound, outcomeBadRequest, "unknown path", nil)
 		return
 	}
 	if !capsuleProtocolAllowed(r.Header) {
-		s.reject(w, http.StatusBadRequest, "invalid CONNECT-IP request", errors.New("invalid Capsule-Protocol header"))
+		s.reject(w, r, http.StatusBadRequest, outcomeBadRequest, "invalid CONNECT-IP request",
+			errors.New("invalid Capsule-Protocol header"))
 		return
 	}
 	s.serve(w, r, &h2Request{r: r})

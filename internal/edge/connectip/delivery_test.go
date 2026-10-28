@@ -76,7 +76,7 @@ func TestH3StalledClientEndsOnlyItsSession(t *testing.T) {
 	fast := open(t, newClientConn(t, env.dialQUIC(t)), env.newRequest(t, authHeaders(tokenBob, vpcGreen)))
 	fastSess := env.backend.nextOpened(t)
 
-	before := slowClientEnds()
+	before, endsBefore := slowClientEnds(), ends(transportH3, causeSlowClient)
 	sc.stalled.Store(true)
 	start := time.Now()
 	stop := make(chan struct{})
@@ -101,6 +101,9 @@ func TestH3StalledClientEndsOnlyItsSession(t *testing.T) {
 	if got := slowClientEnds() - before; got != 1 {
 		t.Fatalf("slow_client count rose by %v, want 1", got)
 	}
+	eventually(t, "a slow_client tunnel end", func() bool {
+		return ends(transportH3, causeSlowClient)-endsBefore == 1
+	})
 
 	if _, err := fast.conn.WritePacket(echoRequest(t, fast.address, testTarget, 70, 200)); err != nil {
 		t.Fatalf("WritePacket: %v", err)
