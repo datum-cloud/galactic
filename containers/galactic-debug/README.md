@@ -8,7 +8,7 @@ doesn't already have: `bpftool`, `vtysh` (FRR client), the `gobgp` CLI,
 
 The image has no `kubectl`: a node debug pod runs as its namespace's
 `default` service account, which has no RBAC. It has no `bpftrace` either,
-because the pod doesn't mount tracefs.
+because the pod doesn't mount tracefs. Run `kubectl` from your workstation.
 
 Published as `ghcr.io/datum-cloud/galactic-debug`. Not deployed as a
 standing workload: attach it on demand as a node debug pod.
@@ -50,8 +50,6 @@ kubectl -n galactic-system exec -it <debug-pod> -- bash
   ```
   kubectl -n galactic-system delete pod <debug-pod>
   ```
-
-Run `kubectl` from your workstation, not from inside the pod.
 
 ## Inside the pod
 

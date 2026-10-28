@@ -64,8 +64,6 @@ ARG YQ_VERSION=v4.44.3
 # provide, for dumping galactic-cni's usid_egress and egress_route_table
 # maps directly.
 # frr: ships vtysh, for querying fabric-router's FRR instance directly.
-# No kubectl (a node debug pod has no RBAC) and no bpftrace (the pod has no
-# tracefs); see the README.
 RUN apk add --no-cache \
       bpftool \
       frr
