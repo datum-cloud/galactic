@@ -26,6 +26,8 @@ Only then does the request get its packet path. The request waits up to 30 secon
 
 Connectors of one service share its attachment and device.
 
+The route is the connector's whole /96, and it is the only route the connector gets. The client numbers addresses and longer subprefixes inside the /96 itself. The device delivers a packet for any address inside the /96 to that connector's request, so no subdivision needs its own route or allocation.
+
 ## Replacing a connector's request
 
 A connector forwards through at most one request. A new request for a connector that already has one open, such as a reconnect or an HTTP/3 to HTTP/2 fallback, replaces it:
