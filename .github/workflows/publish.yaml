@@ -6,7 +6,16 @@ on:
     types: ['published']
 
 jobs:
+  platforms:
+    runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.select.outputs.platforms }}
+    steps:
+      - id: select
+        run: echo "platforms=${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}" >> "$GITHUB_OUTPUT"
+
   publish-galactic-cni-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -16,10 +25,11 @@ jobs:
     with:
       image-name: galactic-cni
       dockerfile-path: containers/galactic-cni/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   publish-galactic-router-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -29,10 +39,11 @@ jobs:
     with:
       image-name: galactic-router
       dockerfile-path: containers/galactic-router/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   publish-galactic-gateway-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -42,10 +53,11 @@ jobs:
     with:
       image-name: galactic-gateway
       dockerfile-path: containers/galactic-gateway/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   publish-fabric-router-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -55,10 +67,11 @@ jobs:
     with:
       image-name: fabric-router
       dockerfile-path: containers/fabric-router/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   publish-fabric-api-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -68,10 +81,11 @@ jobs:
     with:
       image-name: fabric-api
       dockerfile-path: containers/fabric-api/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   publish-fabric-router-controller-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -81,10 +95,11 @@ jobs:
     with:
       image-name: fabric-router-controller
       dockerfile-path: containers/fabric-router-controller/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   publish-galactic-controller-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -94,10 +109,11 @@ jobs:
     with:
       image-name: galactic-controller
       dockerfile-path: containers/galactic-controller/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   publish-galactic-nat-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -107,10 +123,11 @@ jobs:
     with:
       image-name: galactic-nat
       dockerfile-path: containers/galactic-nat/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   publish-galactic-edge-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -120,10 +137,11 @@ jobs:
     with:
       image-name: galactic-edge
       dockerfile-path: containers/galactic-edge/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   publish-masque-provider-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -133,10 +151,11 @@ jobs:
     with:
       image-name: masque-provider
       dockerfile-path: containers/masque-provider/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   publish-masque-authority-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -146,7 +165,7 @@ jobs:
     with:
       image-name: masque-authority
       dockerfile-path: containers/masque-authority/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   # galactic-vrf, the #855 ingress sidecar, deliberately has no entry in
@@ -154,6 +173,7 @@ jobs:
   # stamp an image into yet (the #856 deployment contract is still open).
   # Publishing the image is what unblocks that work.
   publish-galactic-vrf-image:
+    needs: platforms
     permissions:
       id-token: write
       contents: read
@@ -163,7 +183,7 @@ jobs:
     with:
       image-name: galactic-vrf
       dockerfile-path: containers/galactic-vrf/Dockerfile
-      platforms: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+      platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
   # galactic-debug has no config/galactic-debug base and no entry in
