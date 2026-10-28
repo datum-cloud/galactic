@@ -1,0 +1,17 @@
+# Reached only by the provider pods, at
+# https://masque-authority.masque-system.svc.
+apiVersion: v1
+kind: Service
+metadata:
+  name: masque-authority
+  namespace: masque-system
+  labels:
+    app.kubernetes.io/name: masque-authority
+spec:
+  selector:
+    app.kubernetes.io/name: masque-authority
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
