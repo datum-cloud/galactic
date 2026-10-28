@@ -669,12 +669,19 @@ type deliveryClock struct {
 	// writing is when the write in progress began.
 	writing atomic.Int64
 	// slowSince is when the current run of slow writes began. A slow write
-	// takes at least a quarter of deliveryTimeout; the run ends at a prompt
-	// write, or when the writer waits that long for a packet.
+	// takes at least a quarter of deliveryTimeout. The run ends after
+	// promptStreak prompt writes in a row, or when the writer waits that
+	// long for a packet. Each QUIC probe timeout frees two datagram slots, so
+	// a stalled client's slow writes alternate with prompt ones.
 	slowSince atomic.Int64
-	// lastEnd is when the last write returned. Only the writer uses it.
+	// lastEnd is when the last write returned, and prompt counts the prompt
+	// writes since the last slow one. Only the writer uses them.
 	lastEnd int64
+	prompt  int
 }
+
+// promptStreak is how many prompt writes in a row end a run of slow ones.
+const promptStreak = 16
 
 func (c *deliveryClock) now() int64 { return int64(time.Since(c.base)) + 1 }
 
@@ -690,9 +697,12 @@ func (c *deliveryClock) done() {
 	now, began := c.now(), c.writing.Swap(0)
 	c.lastEnd = now
 	if time.Duration(now-began) < deliveryTimeout/4 {
-		c.slowSince.Store(0)
+		if c.prompt++; c.prompt >= promptStreak {
+			c.slowSince.Store(0)
+		}
 		return
 	}
+	c.prompt = 0
 	c.slowSince.CompareAndSwap(0, began)
 }
 
@@ -715,7 +725,7 @@ func (c *deliveryClock) blocked() time.Duration {
 // denied with reason slow_client. Stuck means one write blocked that long,
 // or back-to-back slow writes for that long: a QUIC connection to a client
 // that stopped reading still drains one datagram per probe timeout, and
-// those timeouts double from a fraction of a second. Over HTTP/3 ending the
+// those timeouts double from a fraction of a second; see deliveryClock. Over HTTP/3 ending the
 // session closes the client's QUIC connection, since a blocked datagram
 // waits on the connection's send queue; the connection's other request is
 // stalled by the same client. It returns when ctx is done or the session is

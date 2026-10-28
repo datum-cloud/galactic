@@ -146,15 +146,21 @@ func TestTUNQueueFullDropIsCounted(t *testing.T) {
 	pollUntil(t, "queue_full drops", func() bool { return queueFull()-before == extra })
 }
 
-// slowTunnel is a tunnel whose every write toward the client takes per, as
-// a QUIC connection to a stalled client drains one datagram per probe
-// timeout.
+// slowTunnel is a tunnel whose writes toward the client take per, as a QUIC
+// connection to a stalled client drains its datagram queue once per probe
+// timeout. With alternate set, every other write returns at once, as the
+// second datagram a probe timeout frees does.
 type slowTunnel struct {
 	*narrowTunnel
-	per time.Duration
+	per       time.Duration
+	alternate bool
+	writes    atomic.Int64
 }
 
 func (t *slowTunnel) WritePacket([]byte) ([]byte, error) {
+	if t.alternate && t.writes.Add(1)%2 == 0 {
+		return nil, nil
+	}
 	select {
 	case <-time.After(t.per):
 		return nil, nil
@@ -164,12 +170,13 @@ func (t *slowTunnel) WritePacket([]byte) ([]byte, error) {
 }
 
 // TestBackToBackSlowWritesEndSession keeps one tunnel's writes slow without
-// any single write reaching deliveryTimeout. The session still ends, once
-// slow writes have run back to back for deliveryTimeout.
+// any single write reaching deliveryTimeout, with a prompt write after each
+// slow one. The session still ends, once slow writes have run back to back
+// for deliveryTimeout.
 func TestBackToBackSlowWritesEndSession(t *testing.T) {
 	shortenDeliveryTimeout(t, 400*time.Millisecond)
 	before := slowClientEnds()
-	tun := &slowTunnel{narrowTunnel: newNarrowTunnel(maxPacketSize), per: 150 * time.Millisecond}
+	tun := &slowTunnel{narrowTunnel: newNarrowTunnel(maxPacketSize), per: 150 * time.Millisecond, alternate: true}
 	sess, done := runProxySession(t, tun)
 	stop := make(chan struct{})
 	defer close(stop)
