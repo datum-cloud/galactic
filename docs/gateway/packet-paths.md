@@ -361,9 +361,9 @@ such a node forwards its replies.
 
 Whether a reply crosses an edge node at all depends on the site:
 
-| Topology                     | Compute node's first uplink neighbor                                 | Reply path                                          |
-|------------------------------|----------------------------------------------------------------------|-----------------------------------------------------|
-| containerlab                 | A site edge node (compute links only to edges)                       | The edge node's `edge_return` forwards it           |
+| Topology                     | Compute node's first uplink neighbor                                      | Reply path                                             |
+|------------------------------|---------------------------------------------------------------------------|--------------------------------------------------------|
+| containerlab                 | A site edge node (compute links only to edges)                            | The edge node's `edge_return` forwards it              |
 | Datum production and staging | The hosting provider's (servers.com, AS7979) ToR/VRRP gateway, on `bond0` | Leaves for the provider's gateway, not through an edge |
 
 `usid_egress` rewrites the MACs and `bpf_redirect`s with no FIB lookup, so the
