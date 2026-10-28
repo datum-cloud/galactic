@@ -24,6 +24,7 @@ import (
 	// list complete.
 	_ "go.datum.net/galactic/internal/edge/connectip"
 	_ "go.datum.net/galactic/internal/edge/diag"
+	_ "go.datum.net/galactic/internal/edge/masque"
 	_ "go.datum.net/galactic/internal/fabric/gateway"
 	_ "go.datum.net/galactic/internal/fabric/node"
 	_ "go.datum.net/galactic/internal/fabricconfig"

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"k8s.io/apimachinery/pkg/types"
 
 	"go.datum.net/galactic/internal/edge/connectip"
 )
@@ -34,6 +35,7 @@ type session struct {
 	// are the generations the request was admitted on.
 	att        *attachment
 	attGen     uint64
+	attUID     types.UID
 	rt         *route
 	rtGen      uint64
 	leaseKey   string
@@ -86,7 +88,7 @@ func (a *Adapter) newSession(g *Grant, e *attachment, r *route, began uint64) (c
 	}
 	defer a.mu.Unlock()
 	s := &session{
-		a: a, grant: *g, att: e, attGen: r.attGen, rt: r, rtGen: r.gen, leaseKey: l.Key, leaseEpoch: l.Epoch,
+		a: a, grant: *g, att: e, attGen: r.attGen, attUID: e.uid, rt: r, rtGen: r.gen, leaseKey: l.Key, leaseEpoch: l.Epoch,
 		done: make(chan struct{}), closed: make(chan struct{}),
 		info: connectip.SessionInfo{
 			ID: a.nextID.Add(1), Principal: g.Principal, VPC: g.VPC, Prefix: g.Prefix, Connector: g.Connector,
@@ -117,8 +119,12 @@ func (s *session) end(reason string) {
 	s.endOnce.Do(func() {
 		s.ended.Store(true)
 		close(s.done)
+		label := endReason(reason)
+		requestEnds.WithLabelValues(label).Inc()
 		s.a.log.Info("request ended", "session", s.info.ID, "connector", s.info.Connector, "reason", reason,
-			"drops", s.drops.Load())
+			"endReason", label, "serviceUID", s.grant.Service.UID, "attachment", s.info.Attachment,
+			"attachmentUID", s.attUID, "route", s.info.Claim, "claimEpoch", s.info.Epoch,
+			"instanceEpoch", s.leaseEpoch, "drops", s.drops.Load())
 	})
 }
 
@@ -137,7 +143,7 @@ func (s *session) Close() error {
 // so packets the device queued for this request are discarded with it.
 func (s *session) close(ctx context.Context) {
 	s.closeOnce.Do(func() {
-		s.end("closed")
+		s.end(reasonClosed)
 		s.timerMu.Lock()
 		s.timer.Stop()
 		s.timerMu.Unlock()
@@ -165,7 +171,7 @@ func (s *session) setDeadline(notAfter time.Time) {
 	if s.ended.Load() {
 		return
 	}
-	s.timer = time.AfterFunc(notAfter.Sub(s.a.cfg.Now()), func() { s.end("grant expired") })
+	s.timer = time.AfterFunc(notAfter.Sub(s.a.cfg.Now()), func() { s.end(reasonGrantExpired) })
 }
 
 // refreshTimeout bounds one Refresh call; a slower answer is discarded.
@@ -206,7 +212,7 @@ func (s *session) refresh() string {
 	g, err := s.a.cfg.Authorizer.Refresh(ctx, s.grant)
 	switch {
 	case errors.Is(err, connectip.ErrUnauthenticated), errors.Is(err, connectip.ErrForbidden):
-		return "grant revoked"
+		return reasonGrantRevoked
 	case err != nil:
 		s.a.log.Warn("grant refresh failed; the request keeps its deadline", "session", s.info.ID,
 			"connector", s.info.Connector, "error", err)
@@ -215,9 +221,9 @@ func (s *session) refresh() string {
 		// An answer that arrived after its deadline is not fresh authority.
 		return ""
 	case !s.grant.sameAuthority(&g):
-		return "grant changed"
+		return reasonGrantChanged
 	case g.validate(s.grant.VPC, s.a.cfg.Now()) != nil:
-		return "refreshed grant is invalid"
+		return reasonGrantInvalid
 	}
 	s.setDeadline(g.NotAfter)
 	return ""
@@ -284,6 +290,7 @@ func (p *packetSession) WritePacket(pkt []byte) error {
 	err := p.inner.WritePacket(pkt)
 	if errors.Is(err, unix.EAGAIN) {
 		p.s.drops.Add(1)
+		deviceDrops.Inc()
 		return nil
 	}
 	return err

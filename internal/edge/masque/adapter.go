@@ -206,6 +206,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 		a.log.Info("adopted attachment", "attachment", att.Name)
 	}
 	a.log.Info("instance registered", "instanceName", inst.Name)
+	track(a)
 	return nil
 }
 
@@ -263,7 +264,7 @@ func (a *Adapter) renew(ctx context.Context) error {
 	l := a.lease.Load()
 	now := in.Clock()
 	if l != nil && !l.Valid(now) {
-		a.loseLease("lease expired")
+		a.loseLease(errors.New("lease expired"))
 		l = nil
 	}
 	if l == nil {
@@ -285,7 +286,7 @@ func (a *Adapter) renew(ctx context.Context) error {
 	got, err := in.Renew(ctx, *l)
 	switch {
 	case errors.Is(err, claim.ErrLost):
-		a.loseLease(err.Error())
+		a.loseLease(err)
 	case err != nil:
 		a.log.Warn("lease renewal failed; the lease holds until its deadline", "error", err)
 	default:
@@ -314,16 +315,17 @@ func (a *Adapter) heldLease() (claim.Lease, bool) {
 
 // loseLease ends every request: each route was claimed under the lost
 // epoch.
-func (a *Adapter) loseLease(reason string) {
+func (a *Adapter) loseLease(cause error) {
 	a.setLease(nil)
-	a.log.Warn("lease lost", "reason", reason)
+	leaseLosses.Inc()
+	a.log.Warn("lease lost", "reason", cause)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, r := range a.routes {
-		a.deactivate(r, reason)
+		a.deactivate(r, reasonLeaseLost)
 	}
 	for _, s := range a.sessions {
-		s.end(reason)
+		s.end(reasonLeaseLost)
 	}
 }
 
@@ -343,20 +345,36 @@ const quiesceTimeout = time.Second
 // another of the same connector is being admitted is refused as
 // unavailable.
 func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.Lease, error) {
+	l, outcome, err := a.admit(ctx, credential, vpc)
+	admissionsTotal.WithLabelValues(outcome).Inc()
+	if err != nil {
+		// The error names the connector but never the credential.
+		a.log.Info("admission refused", "outcome", outcome, "vpc", vpc, "error", err)
+	}
+	return l, err
+}
+
+// admit is Admit, returning the outcome it is counted under.
+func (a *Adapter) admit(ctx context.Context, credential, vpc string) (connectip.Lease, string, error) {
 	a.mu.Lock()
 	began := a.revokeSeq
 	a.mu.Unlock()
 	actx, stopAuthorize := context.WithTimeout(ctx, a.cfg.AuthorizeTimeout)
 	g, err := a.cfg.Authorizer.Authorize(actx, credential, vpc)
 	stopAuthorize()
-	if err != nil {
-		return nil, err
+	switch {
+	case errors.Is(err, connectip.ErrUnauthenticated):
+		return nil, admitUnauthenticated, err
+	case errors.Is(err, connectip.ErrForbidden):
+		return nil, admitForbidden, err
+	case err != nil:
+		return nil, admitAuthorizerFailed, err
 	}
 	if err := g.validate(vpc, a.cfg.Now()); err != nil {
-		return nil, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
+		return nil, admitInvalidGrant, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
 	}
 	if _, ok := a.heldLease(); !ok {
-		return nil, fmt.Errorf("%w: the instance holds no lease", ErrUnavailable)
+		return nil, admitNoLease, fmt.Errorf("%w: the instance holds no lease", ErrUnavailable)
 	}
 	a.mu.Lock()
 	closing, busy := a.closing, a.pending[g.Connector]
@@ -367,10 +385,10 @@ func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.
 	a.mu.Unlock()
 	switch {
 	case closing:
-		return nil, fmt.Errorf("%w: the provider is shutting down", ErrUnavailable)
+		return nil, admitShuttingDown, fmt.Errorf("%w: the provider is shutting down", ErrUnavailable)
 	case busy:
-		return nil, fmt.Errorf("%w: connector %s already has a request being admitted", ErrUnavailable,
-			g.Connector)
+		return nil, admitBusy, fmt.Errorf("%w: connector %s already has a request being admitted",
+			ErrUnavailable, g.Connector)
 	}
 	// The connector's reservation ends once its request is registered or
 	// refused.
@@ -386,21 +404,29 @@ func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.
 	defer context.AfterFunc(a.stop, cancel)()
 	att, err := a.acquireAttachment(ctx, &g)
 	if err != nil {
-		return nil, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
+		return nil, admitAttachmentFailed, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
 	}
 	rt, err := a.acquireRoute(ctx, &g, att)
 	if err != nil {
 		a.releaseAttachment(att)
-		return nil, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
+		outcome := admitRouteFailed
+		if errors.Is(err, errRouteRefused) {
+			outcome = admitRouteRefused
+		}
+		return nil, outcome, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
 	}
 	if err := a.replace(&g); err != nil {
 		rctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
 		defer cancel()
 		a.releaseRoute(rctx, rt)
 		a.releaseAttachment(att)
-		return nil, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
+		return nil, admitReplaceFailed, fmt.Errorf("%w: connector %s: %w", ErrUnavailable, g.Connector, err)
 	}
-	return a.newSession(&g, att, rt, began)
+	l, err := a.newSession(&g, att, rt, began)
+	if err != nil {
+		return nil, admitChanged, err
+	}
+	return l, admitAdmitted, nil
 }
 
 // replace ends the open requests of g's connector and waits, up to
@@ -427,7 +453,7 @@ func (a *Adapter) replace(g *Grant) error {
 	t := time.NewTimer(quiesceTimeout)
 	defer t.Stop()
 	for _, s := range old {
-		s.end("replaced")
+		s.end(reasonReplaced)
 		a.log.Info("replacing request", "session", s.info.ID, "connector", g.Connector)
 	}
 	for _, s := range old {
@@ -459,7 +485,7 @@ func (a *Adapter) Revoke(connector string) {
 	a.revokedAt[connector] = a.revokeSeq
 	for _, s := range a.sessions {
 		if s.grant.Connector == connector {
-			s.end("revoked")
+			s.end(reasonRevoked)
 		}
 	}
 }
@@ -485,6 +511,7 @@ func (a *Adapter) isClosing() bool {
 // that nothing is taken over while this pod still forwards. Call it after
 // Run returned and the transports stopped serving.
 func (a *Adapter) Shutdown(ctx context.Context) error {
+	defer untrack(a)
 	a.mu.Lock()
 	a.closing = true
 	a.mu.Unlock()
@@ -538,7 +565,7 @@ func (a *Adapter) Shutdown(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("delete attachment %s: %w", e.name, err))
 			continue
 		}
-		a.closeAttachment(e, "shutting down")
+		a.closeAttachment(e, reasonShuttingDown)
 		if err := a.deleteAttachment(ctx, e); err != nil {
 			errs = append(errs, err)
 		}
