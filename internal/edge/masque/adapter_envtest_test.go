@@ -591,6 +591,45 @@ func TestAgainstCore(t *testing.T) {
 			t.Fatal("one connector's service expiring changed the shared instance's lease")
 		}
 	})
+	t.Run("renewing the service keeps forwarding", func(t *testing.T) {
+		// The grant authority renews a connector's service by moving its
+		// validUntil forward in place. Each renewal is a new generation;
+		// the connector keeps its attachment, route and epoch past the
+		// first deadline.
+		svc := f.service("renewed", "fd00:10:0:e::600/120", Capabilities, "fd00:10:0:1:8::/96")
+		renew := func(ahead time.Duration) {
+			t.Helper()
+			if err := f.admin.Get(context.Background(), client.ObjectKeyFromObject(svc), svc); err != nil {
+				t.Fatal(err)
+			}
+			svc.Spec.ValidUntil = &metav1.Time{Time: time.Now().Add(shortParams.MaxSkew + ahead)}
+			if err := f.admin.Update(context.Background(), svc); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Admission takes a few seconds; validUntil carries whole seconds.
+		renew(6 * time.Second)
+		first, deadline := svc.Generation, svc.Spec.ValidUntil.Time
+		f.connector("c8", svc, "fd00:10:0:1:8::/96")
+		l := f.admit(a, "c8")
+		defer func() { _ = l.Close() }()
+		attUID := f.attachment(l.Info().Attachment).UID
+		epoch := f.route(l.Info().Claim).Spec.Claim.Epoch
+		for time.Now().Before(deadline.Add(2 * time.Second)) {
+			time.Sleep(time.Second)
+			renew(4 * time.Second)
+		}
+		expectLive(t, l, "renewing the connector's service")
+		att := f.attachment(l.Info().Attachment)
+		rt := f.route(l.Info().Claim)
+		if svc.Generation <= first+2 || att == nil || att.UID != attUID ||
+			!meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentAdmitted) ||
+			rt.Spec.Claim.Released || rt.Spec.Claim.Epoch != epoch ||
+			!acceptedFor(rt, l.Info().Attachment, attUID, mustLease(t, a)) {
+			t.Fatalf("after renewals to generation %d: attachment %+v, claim %+v", svc.Generation, att, rt.Spec.Claim)
+		}
+		expectLive(t, l2, "renewing another connector's service")
+	})
 	t.Run("replacement keeps the claim", func(t *testing.T) {
 		svc := f.service("handoff", "fd00:10:0:e::500/120", Capabilities, "fd00:10:0:1:7::/96")
 		f.connector("c7", svc, "fd00:10:0:1:7::/96")
