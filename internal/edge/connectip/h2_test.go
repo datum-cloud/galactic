@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/quic-go/quic-go/quicvarint"
 	"golang.org/x/net/http2"
+	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv6"
 )
 
@@ -229,7 +230,8 @@ func TestH2EnforcesPacketPolicy(t *testing.T) {
 }
 
 // TestH2ReturnsPacketTooBig injects a gVPC packet over maxH2Packet and
-// checks that its Packet Too Big passes the policy and reaches the sender.
+// checks that its Packet Too Big reports maxH2Packet, passes the policy and
+// reaches the sender.
 func TestH2ReturnsPacketTooBig(t *testing.T) {
 	env := startServer(t, nil)
 	s, _ := env.openH2(t, env.dialH2(t), tokenAlice, vpcBlue)
@@ -243,6 +245,9 @@ func TestH2ReturnsPacketTooBig(t *testing.T) {
 				}
 				if len(pkt) != MinInnerMTU {
 					t.Fatalf("Packet Too Big has %d bytes, want %d", len(pkt), MinInnerMTU)
+				}
+				if mtu := p.msg.Body.(*icmp.PacketTooBig).MTU; mtu != maxH2Packet {
+					t.Fatalf("Packet Too Big reports MTU %d, want %d", mtu, maxH2Packet)
 				}
 				return true
 			}

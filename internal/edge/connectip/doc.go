@@ -43,9 +43,12 @@
 // reverse delivery is restricted to it. TUN demultiplexing uses the delegated
 // prefix within one gVPC, allowing overlapping addresses across gVPCs.
 // Oversized packets toward a client produce ICMP Packet Too Big toward the
-// backend: over HTTP/3 above the path's datagram size, over HTTP/2 above
-// 1500 bytes. Every admitted path must support a 1280-byte inner IPv6
-// packet.
+// backend: over HTTP/3 above the path's datagram size, reporting 1280, and
+// over HTTP/2 above 1500 bytes, reporting 1500. Every admitted path must
+// support a 1280-byte inner IPv6 packet. When an HTTP/3 path shrinks so that
+// a packet of at most 1280 bytes no longer fits, the request ends (RFC 9484
+// section 10.1) rather than answering with an error its sender cannot act
+// on.
 //
 // The admission adapter owns authentication, allocation, connector identity,
 // claim epochs, route authority and reconnect semantics. It signals expiry or

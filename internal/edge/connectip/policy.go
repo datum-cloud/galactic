@@ -64,6 +64,9 @@ const (
 	// reasonNoSession is a packet from the device for a /96 with no open
 	// session.
 	reasonNoSession = "no_session"
+	// reasonPathMTU is a packet toward the client of at most MinInnerMTU
+	// bytes that the tunnel could not carry, which ends its session.
+	reasonPathMTU = "path_mtu"
 )
 
 var packetsDenied = metrics.NewCounterVec(prometheus.CounterOpts{

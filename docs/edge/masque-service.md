@@ -84,11 +84,21 @@ The server applies the per-pod limits of the [MASQUE contract](../designs/masque
 
 Both transports share every limit from the connection caps down: an HTTP/3 session and an HTTP/2 session each take one of the 64 admitted requests. A QUIC connection counts toward its source IP once its handshake completes, so spoofed packets cannot use up another client's slots. A TCP connection counts once it is accepted, because TCP's own handshake proves the address. The source-IP limit counts every client behind one NAT as one source.
 
+## Packet size
+
+Every admitted request carries 1280-byte inner IPv6 packets in both directions. Over HTTP/3, admission sends a 1280-byte probe datagram after authorization and answers 503 when the QUIC path cannot carry it.
+
+- A gVPC packet larger than the current QUIC datagram size gets an ICMPv6 Packet Too Big with MTU 1280, which passes the [packet policy](masque-provider.md#packet-policy) and goes to the sender.
+- When the path shrinks mid-tunnel so that a packet of 1280 bytes or less no longer fits, the request ends and the packet is counted as `reason="path_mtu"`. The sender cannot shrink below 1280 bytes, so RFC 9484 section 10.1 calls for termination over an error. The connector reconnects, and the admission probe refuses it while the path stays too small.
+- The HTTP/2 limits are under [HTTP/2 fallback](#http2-fallback).
+
+The device, SRv6 and underlay limits are set by the foundation, not here. `galactic-edge --mtu` sets the attachment MTU.
+
 ## HTTP/2 fallback
 
 A client whose UDP/443 is blocked sends the same request over HTTP/2 with TLS on TCP/443: an Extended CONNECT with `:protocol: connect-ip`, the same path, bearer credential and `Galactic-VPC` header. Packets travel in DATAGRAM capsules on the request stream. The request goes through the same admission, grant checks, backend and [packet policy](masque-provider.md#packet-policy) as over HTTP/3. The service does not pick a transport for the client.
 
-- **Packet size.** The HTTP/2 path carries inner packets of up to 1500 bytes. A larger packet from the gVPC gets an ICMPv6 Packet Too Big with MTU 1280. A larger packet from the client is dropped and counted as `reason="too_large"`.
+- **Packet size.** The HTTP/2 path carries inner packets of up to 1500 bytes. A larger packet from the gVPC gets an ICMPv6 Packet Too Big with MTU 1500. A larger packet from the client is dropped and counted as `reason="too_large"`.
 - **Malformed input.** The server holds at most one DATAGRAM capsule per request. It discards larger DATAGRAM capsules and unknown capsules as they arrive. A malformed capsule or an oversized `ADDRESS_REQUEST` ends only its own request.
 - **Slow readers.** A capsule write that cannot finish in 5 seconds ends its request. Another request on the same connection keeps forwarding.
 - **Moving between transports.** A connector that reconnects over HTTP/2 while its HTTP/3 tunnel still exists is admitted again through the adapter. The adapter treats the new request as a [replacement](masque-provider.md#replacing-a-connectors-request): the old session ends before the new one forwards, so the connector never has two forwarding owners. A replacement on another pod goes through the grant authority's [cross-instance replacement](../designs/masque/contract.md#cross-instance-replacement-and-stale-cleanup).

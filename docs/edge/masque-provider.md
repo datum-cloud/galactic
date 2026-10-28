@@ -67,6 +67,7 @@ A grant that routes IPv4 is refused with 503, so the proxy never advertises IPv4
 - `routing_header`
 - `source`
 - `destination`
+- `path_mtu`, a packet of at most 1280 bytes toward the client that the tunnel can no longer carry. The request ends, as [Packet size](masque-service.md#packet-size) describes
 - `no_session`, a device packet for a /96 with no open request. The kernel's own multicast and link-local packets on the device are dropped without being counted
 
 connect-ip-go runs its own address checks first on client packets and drops what it refuses with a log line. Those drops are not counted.

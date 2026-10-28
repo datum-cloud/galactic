@@ -614,6 +614,16 @@ func (s *Server) proxySession(
 			if icmp == nil {
 				continue
 			}
+			// A packet no larger than MinInnerMTU that does not fit means the
+			// path can no longer carry the IPv6 minimum. Its sender cannot
+			// go smaller, so a Packet Too Big would only black-hole it: RFC
+			// 9484 section 10.1 ends the tunnel instead.
+			if n <= MinInnerMTU {
+				deny(toClient, reasonPathMTU)
+				log.Warn("ending CONNECT-IP session: path cannot carry the minimum inner MTU",
+					"packet", n, "minimum", MinInnerMTU)
+				return
+			}
 			// The library's Packet Too Big comes from the client's address,
 			// so it passes the same checks as the client's own packets.
 			if reason := policy.fromClient(icmp); reason != "" {

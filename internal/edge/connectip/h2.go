@@ -269,7 +269,7 @@ func (t *h2Tunnel) WritePacket(b []byte) ([]byte, error) {
 		return nil, nil
 	}
 	if len(b) > maxH2Packet {
-		ptb, err := packetTooBig(b, MinInnerMTU)
+		ptb, err := packetTooBig(b, maxH2Packet)
 		return ptb, err
 	}
 	b[7]--
