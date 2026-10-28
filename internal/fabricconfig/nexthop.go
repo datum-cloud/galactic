@@ -9,13 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/netip"
 	"sort"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.miloapis.com/instrumentation/metrics"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/events"
 )
@@ -49,41 +48,36 @@ type BGP interface {
 	ResetNeighbor(ctx context.Context, neighbor string) error
 }
 
-// NextHopMetrics holds NextHopGuard's Prometheus instrumentation in a private
-// registry.
+// NextHopMetrics holds NextHopGuard's Prometheus instrumentation.
 type NextHopMetrics struct {
-	Registry *prometheus.Registry
-
 	mapped      *prometheus.GaugeVec
 	resets      *prometheus.CounterVec
 	uninstalled *prometheus.GaugeVec
 }
 
-// NewNextHopMetrics builds a NextHopMetrics with every metric registered.
+// NewNextHopMetrics creates NextHopMetrics on the instrumentation library's
+// registry. The registry keeps the series across calls, so each call starts
+// them over.
 func NewNextHopMetrics() *NextHopMetrics {
 	m := &NextHopMetrics{
-		Registry: prometheus.NewRegistry(),
-		mapped: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		mapped: metrics.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "fabric_router_bgp_mapped_nexthop",
 			Help: "1 when an established session sourced from a global IPv6 address announces an IPv4-mapped " +
 				"next hop, 0 when it announces a usable one.",
 		}, []string{"peer"}),
-		resets: prometheus.NewCounterVec(prometheus.CounterOpts{
+		resets: metrics.NewCounterVec(prometheus.CounterOpts{
 			Name: "fabric_router_bgp_mapped_nexthop_resets_total",
 			Help: "Hard resets of sessions that announced an IPv4-mapped next hop.",
 		}, []string{"peer"}),
-		uninstalled: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		uninstalled: metrics.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "fabric_router_bgp_uninstalled_routes",
 			Help: "Prefixes with a BGP route in zebra and no route of any protocol installed in the kernel.",
 		}, []string{"afi"}),
 	}
-	m.Registry.MustRegister(m.mapped, m.resets, m.uninstalled)
+	m.mapped.Reset()
+	m.resets.Reset()
+	m.uninstalled.Reset()
 	return m
-}
-
-// Handler returns the http.Handler serving the registry.
-func (m *NextHopMetrics) Handler() http.Handler {
-	return promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{})
 }
 
 // NextHopGuard finds IPv6 sessions announcing an IPv4-mapped next hop and

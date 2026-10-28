@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 )
 
 // Activation outcomes the agent counts.
@@ -127,7 +128,7 @@ func ReadBootRecord(path string) (BootRecord, error) {
 }
 
 // AgentMetrics is the activation path's and the writer lock's
-// instrumentation. Register it on the registry the watch container serves.
+// instrumentation.
 type AgentMetrics struct {
 	activations *prometheus.CounterVec
 	duration    *prometheus.HistogramVec
@@ -136,39 +137,45 @@ type AgentMetrics struct {
 	boot        *prometheus.GaugeVec
 }
 
-// NewAgentMetrics builds the agent's metrics and registers them on reg.
-func NewAgentMetrics(reg prometheus.Registerer) *AgentMetrics {
+// NewAgentMetrics creates the agent's metrics on the instrumentation
+// library's registry. The registry keeps the series across calls, so each
+// call starts them over.
+func NewAgentMetrics() *AgentMetrics {
 	m := &AgentMetrics{
-		activations: prometheus.NewCounterVec(prometheus.CounterOpts{
+		activations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Name: "fabric_router_activations_total",
 			Help: "Activations by outcome. committed, recovered, degraded and refused count each epoch once " +
 				"per agent process, so a restarted agent may count an epoch it meets again; error counts every " +
 				"failed attempt.",
 		}, []string{"outcome"}),
-		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		duration: metrics.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "fabric_router_activation_duration_seconds",
 			Help: "Time the agent took to commit, recover or degrade an activation, its stabilization window " +
 				"included.",
 			Buckets: []float64{1, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600},
 		}, []string{"outcome"}),
-		staging: prometheus.NewCounterVec(prometheus.CounterOpts{
+		staging: metrics.NewCounterVec(prometheus.CounterOpts{
 			Name: "fabric_router_staging_runs_total",
 			Help: "Candidate revisions the agent validated and diffed without applying, by result: staged, " +
 				"rejected or revision_not_found.",
 		}, []string{"result"}),
-		lockWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		lockWait: metrics.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "fabric_router_writer_lock_wait_seconds",
 			Help: "Time each FRR writer waited for the node's writer lock, by result: acquired, timeout or " +
 				"error. The lock is retried every 100ms.",
 			Buckets: []float64{.1, .5, 1, 5, 10, 30, 60, 120, 300, 900},
 		}, []string{"writer", "result"}),
-		boot: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		boot: metrics.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "fabric_router_boot_source",
 			Help: "1 for where the pod's init container took the configuration FRR started with: configmap, " +
 				"checkpoint_offline, checkpoint_online or active_revision.",
 		}, []string{"source"}),
 	}
-	reg.MustRegister(m.activations, m.duration, m.staging, m.lockWait, m.boot)
+	m.activations.Reset()
+	m.duration.Reset()
+	m.staging.Reset()
+	m.lockWait.Reset()
+	m.boot.Reset()
 	return m
 }
 

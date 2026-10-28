@@ -8,10 +8,14 @@ import (
 	"testing"
 
 	"go.miloapis.com/instrumentation/instrumenttest"
+	"go.miloapis.com/instrumentation/metrics"
 )
 
-// TestMetricsScrape scrapes the registry the agent serves at /metrics.
+// TestMetricsScrape scrapes what the agent serves at /metrics, the
+// instrumentation library's registry, once newMetrics has created the
+// agent's series, and lints them.
 func TestMetricsScrape(t *testing.T) {
-	m, _ := newMetrics()
-	instrumenttest.AssertScrapes(t, m.Handler())
+	newMetrics()
+	instrumenttest.AssertScrapes(t, metrics.Handler())
+	instrumenttest.Lint(t)
 }

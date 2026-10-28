@@ -9,11 +9,15 @@ import (
 
 	"go.miloapis.com/instrumentation/instrumenttest"
 	"go.miloapis.com/instrumentation/metrics"
+
+	routingmetrics "go.datum.net/galactic/internal/fabric/routing/metrics"
 )
 
-// TestMetricsScrape scrapes what the manager serves at /metrics:
-// controller-runtime's registry, which metrics.Handler serves unchanged,
-// holding every metric this command's packages register when linked.
+// TestMetricsScrape scrapes what the manager serves at /metrics, the
+// instrumentation library's registry, with the fleet collector run
+// registers. Only the leader's collector emits series, so this one, never
+// started, checks that its descriptors fit beside the others.
 func TestMetricsScrape(t *testing.T) {
+	metrics.MustRegister(&routingmetrics.Collector{})
 	instrumenttest.AssertScrapes(t, metrics.Handler())
 }

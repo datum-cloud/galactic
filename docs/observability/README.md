@@ -21,11 +21,11 @@ Create every metric with the constructors in
 [`go.miloapis.com/instrumentation/metrics`](https://github.com/milo-os/instrumentation),
 and register a collector that reads state at scrape time with its
 `metrics.MustRegister`. Both put the metric on controller-runtime's registry,
-which every controller-runtime manager serves and `galactic-cni` serves with
-the library's `metrics.Handler`. `fabric-config-agent` and the fabric-api node
-sidecar serve only their own registries, so a library metric linked into them
-is not exported until they serve the library's handler. The tests in
-`internal/instrumentation` enforce the rule in the unit suite:
+which every controller-runtime manager serves and `galactic-cni` and
+`fabric-config-agent` serve with the library's `metrics.Handler`. The
+fabric-api node sidecar serves only its own registry, so a library metric
+linked into it is not exported until it serves the library's handler. The
+tests in `internal/instrumentation` enforce the rule in the unit suite:
 
 - `TestAdopted` runs the library's adoption check, which fails on a metric
   registered outside the library and on a logger the library didn't build.
