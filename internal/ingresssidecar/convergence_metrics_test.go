@@ -61,9 +61,9 @@ func newConvergenceStore(t *testing.T, grace time.Duration) *convergenceStore {
 	t.Helper()
 	reg := prometheus.NewPedanticRegistry()
 	m := NewConvergenceMetrics()
-	m.MustRegister(reg)
+	reg.MustRegister(m.collectors()...)
 	legacy := NewMetrics()
-	legacy.MustRegister(reg)
+	reg.MustRegister(legacy.collectors()...)
 	backend := newFakeBackend()
 	store := NewStore(backend, grace, legacy)
 	clock := &stepClock{t: t0}
@@ -134,7 +134,7 @@ func route(t *testing.T, prefix, sid string) *DesiredRoute {
 
 func TestConvergenceMetricsInitialState(t *testing.T) {
 	reg := prometheus.NewPedanticRegistry()
-	NewConvergenceMetrics().MustRegister(reg)
+	reg.MustRegister(NewConvergenceMetrics().collectors()...)
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatal(err)

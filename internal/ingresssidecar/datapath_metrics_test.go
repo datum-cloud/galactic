@@ -37,7 +37,7 @@ func newDatapathStore(t *testing.T) *datapathStore {
 	m := NewDatapathMetrics()
 	m.now = func() time.Time { return time.Unix(testCheckTime, 0) }
 	reg := prometheus.NewPedanticRegistry()
-	m.MustRegister(reg)
+	reg.MustRegister(m.collectors()...)
 	backend := newFakeBackend()
 	backend.generation = testGenLoaded
 	store := NewStore(backend, time.Hour, nil)

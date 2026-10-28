@@ -53,7 +53,7 @@ func newGatewayStore(t *testing.T, enabled bool) *gatewayStore {
 		defer g.mu.Unlock()
 		return g.now
 	}
-	m.MustRegister(g.reg)
+	g.reg.MustRegister(m.collectors()...)
 	g.Store = NewStore(g.backend, time.Minute, nil)
 	if enabled {
 		g.SetGatewayPublisher(g.pub, g.resolver)
@@ -263,7 +263,7 @@ func TestSetGatewayMetricsCountsExistingVRFs(t *testing.T) {
 	}
 	m := NewGatewayMetrics(true, true)
 	reg := prometheus.NewPedanticRegistry()
-	m.MustRegister(reg)
+	reg.MustRegister(m.collectors()...)
 	store.SetGatewayMetrics(m)
 	if v := testutil.ToFloat64(m.vrfs.WithLabelValues(GatewayAwaitingAddress)); v != 1 {
 		t.Errorf("gateway_vrfs{state=awaiting_address} = %v, want the existing VRF counted", v)

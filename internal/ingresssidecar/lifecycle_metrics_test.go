@@ -75,7 +75,7 @@ func newLifecycleRegistry(t *testing.T) (*LifecycleMetrics, *prometheus.Registry
 	t.Helper()
 	m := NewLifecycleMetrics(5*time.Second, 30*time.Second)
 	reg := prometheus.NewPedanticRegistry()
-	m.MustRegister(reg)
+	reg.MustRegister(m.collectors()...)
 	return m, reg
 }
 
@@ -428,7 +428,7 @@ func TestRunSweepsRecordsEverySweep(t *testing.T) {
 func TestScrapeDuringBlockedSweep(t *testing.T) {
 	m, reg := newLifecycleRegistry(t)
 	legacy := NewMetrics()
-	legacy.MustRegister(reg)
+	reg.MustRegister(legacy.collectors()...)
 	store := NewStore(newFakeBackend(), time.Hour, legacy)
 
 	const blocked = 100 * time.Millisecond

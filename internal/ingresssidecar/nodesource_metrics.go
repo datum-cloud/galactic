@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 )
@@ -147,8 +148,10 @@ func (c *nodeSourceCheckCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.at, prometheus.GaugeValue, at)
 }
 
-// NewNodeSourceMetrics builds unregistered node source address metrics, with
-// the status unknown.
+// NewNodeSourceMetrics creates node source address metrics with the status
+// unknown and no repairs. The repair count is on the instrumentation
+// library's registry, which keeps it across calls, so each call starts it
+// over; MustRegister exports the status.
 func NewNodeSourceMetrics() *NodeSourceMetrics {
 	check := &nodeSourceCheckCollector{
 		status: prometheus.NewDesc(
@@ -167,7 +170,7 @@ func NewNodeSourceMetrics() *NodeSourceMetrics {
 	check.last.Store(&nodeSourceCheck{status: NodeSourceUnknown})
 	return &NodeSourceMetrics{
 		check: check,
-		repairs: prometheus.NewCounter(prometheus.CounterOpts{
+		repairs: newCounter(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "node_source_address_repairs_total",
 			Help: "Sweeps that found node_src_addr_table unset or holding another address and wrote this " +
@@ -176,10 +179,10 @@ func NewNodeSourceMetrics() *NodeSourceMetrics {
 	}
 }
 
-// MustRegister registers every node source address metric against reg,
-// panicking on a duplicate. Call it once per process.
-func (m *NodeSourceMetrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.check, m.repairs)
+// MustRegister registers m's status collector on the instrumentation
+// library's registry. Call it once per process.
+func (m *NodeSourceMetrics) MustRegister() {
+	metrics.MustRegister(m.check)
 }
 
 // observe records one check at now.

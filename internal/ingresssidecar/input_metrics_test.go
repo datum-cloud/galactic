@@ -33,7 +33,7 @@ func inputRegistry(t *testing.T) (*InputMetrics, *prometheus.Registry) {
 	t.Helper()
 	m := NewInputMetrics()
 	reg := prometheus.NewPedanticRegistry()
-	m.MustRegister(reg)
+	reg.MustRegister(m.collectors()...)
 	return m, reg
 }
 

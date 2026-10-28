@@ -33,14 +33,12 @@ var pending = []string{
 	"cmd/fabric-router-controller",
 	"cmd/galactic-controller",
 	"cmd/galactic-edge",
-	"cmd/galactic-vrf",
 	// #1149: create metrics with the library's constructors instead of a
 	// registry parameter or a private registry.
 	"internal/edge/diag",
 	"internal/fabric/gateway",
 	"internal/fabric/node",
 	"internal/fabricconfig",
-	"internal/ingresssidecar",
 }
 
 // TestAdopted runs the instrumentation library's adoption check over the
