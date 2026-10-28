@@ -1,6 +1,6 @@
 # MASQUE provider adapter
 
-`internal/edge/masque` connects a CONNECT-IP server (`internal/edge/connectip`) to a tenant VPC through the [provider contract](provider-contract.md). It implements `connectip.Admission` and `connectip.PacketBackend`, so every transport uses the same attachment, route and packet checks. It has no command of its own: the service binary that embeds it, and the grant authority that issues its grants, are separate deliverables of the [MASQUE connector design](../designs/masque/contract.md). The conformance fixture in `tests/edgeconformance/masqueprovider` runs it with static test credentials.
+`internal/edge/masque` connects a CONNECT-IP server (`internal/edge/connectip`) to a tenant VPC through the [provider contract](provider-contract.md). It implements `connectip.Admission` and `connectip.PacketBackend`, so every transport uses the same attachment, route and packet checks. It has no command of its own: the service binary that embeds it is a separate deliverable of the [MASQUE connector design](../designs/masque/contract.md). The [grant authority](masque-authority.md) issues its grants, and `authority.Client` is its production `Authorizer`. The conformance fixture in `tests/edgeconformance/masqueprovider` runs it with static test credentials, or with the grant authority when configured.
 
 The adapter never touches host networking. galactic-edge programs and releases each attachment's host state, core accepts or refuses each route, and the adapter only writes what the contract assigns to a provider: its instance and Lease, its attachments and their `Ready` condition, and its route claims.
 
@@ -9,7 +9,7 @@ The adapter never touches host networking. galactic-edge programs and releases e
 The cell must run galactic-controller with `--edge` and the galactic-edge DaemonSet on the provider's node ([deployment](provider-contract.md)). The provider's node also needs a TUN device plugin, and the VPC needs a workload on that node, because an attachment joins the VPC's existing host VRF.
 
 1. Register the provider: an `EdgeProvider` that lists contract version `v1alpha1`, `PacketAccess/v1` and `PrefixReachability/v1`, and names the provider's ServiceAccount. An operator approves it (`status.approved`). galactic-controller then binds the provider role and admission policy to that ServiceAccount.
-2. Grant each connector an `EdgeService` in its VPC's namespace. It grants `PacketAccess` and `PrefixReachability`, lists the connector's /96 in `prefixes`, and sets a `clientPool` outside every connector /96. A service that lacks `PrefixReachability` gets an attachment, but core refuses every route on it.
+2. Grant each connector an `EdgeService` in its VPC's namespace. The [grant authority](masque-authority.md) issues one per connector authorization. It grants `PacketAccess` and `PrefixReachability`, lists the connector's /96 in `prefixes`, and sets a `clientPool` outside every connector /96. A service that lacks `PrefixReachability` gets an attachment, but core refuses every route on it.
 3. Run the provider pod as that ServiceAccount, with a pod-bound token, the downward-API pod name, namespace, UID and node name, a device-plugin TUN, and no host namespace, hostPath, `NET_ADMIN` or BPF access. `tests/edgeconformance/masqueprovider/deploy/` is a worked example.
 
 The adapter's `Authorizer` turns a request's credential and VPC selector into a `Grant`: connector ID, VPC UID and base62 identifier, the `EdgeService` reference, the connector /96, the routes to advertise and an absolute deadline. A grant the adapter cannot use (wrong VPC, no service, not a masked IPv6 /96, already expired) is refused. The `Authorizer` also refreshes an open request's grant (`Refresh`) and retires a grant (`Retire`); see [Grant refresh and revocation](#grant-refresh-and-revocation).
@@ -45,7 +45,7 @@ A request forwards a packet, in either direction, only while its instance Lease 
 
 ## Grant refresh and revocation
 
-Every 5 seconds (`Config.Refresh`) the adapter calls `Authorizer.Refresh` for each open request, with a 2 second deadline. A refreshed grant with the same connector, VPC, service, /96 and routes moves the request's deadline. Any other answer has one of these results:
+Every 5 seconds (`Config.Refresh`) the adapter calls `Authorizer.Refresh` for each open request, with a 2 second deadline. A refreshed grant with the same connector, VPC, service, /96, routes, authorization and credential revision moves the request's deadline. Any other answer has one of these results:
 
 - Unauthenticated or forbidden: the connector's grant was revoked, retired or rotated, and only that connector's request ends.
 - A changed grant: the request ends.

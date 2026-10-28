@@ -13,8 +13,10 @@
 // packets on the packet device galactic-edge creates in the pod. It needs
 // no host namespace, hostPath, NET_ADMIN or BPF.
 //
-// Authorization is a test fixture, not a product authority: each connector
-// is a static bearer credential bound to one service's VPC and one /96.
+// By default authorization is a test fixture, not a product authority: each
+// connector is a static bearer credential bound to one service's VPC and
+// one /96. With grantAuthority set, the fixture authorizes through a MASQUE
+// grant authority (cmd/masque-authority) instead.
 //
 // SIGTERM stops the server, which ends every session, then the adapter
 // releases the routes, deletes the attachments and releases the lease.
@@ -98,7 +100,7 @@ func run() error {
 		Store: provider.InstanceStore{Client: c, Namespace: pod.Namespace, Duration: timing.Params.Duration},
 	}
 	a, err := masque.New(masque.Config{
-		Client: c, Provider: cfg.Provider, Pod: pod, Authorizer: cfg, Claims: claims,
+		Client: c, Provider: cfg.Provider, Pod: pod, Authorizer: cfg.Authorizer(), Claims: claims,
 		OpenDevice: masque.OpenTUN, Log: log.With("podName", pod.Name),
 	})
 	if err != nil {
