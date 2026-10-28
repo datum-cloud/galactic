@@ -72,8 +72,10 @@ type h2Stream struct {
 	pw      *io.PipeWriter
 	once    sync.Once
 	paused  bool
-	// queue carries DATA payloads in order to pw.
-	queue chan []byte
+	// queue carries DATA payloads in order to pw. Only the read loop sends
+	// on it and closes it; queueClosed, guarded by c.mu, records that.
+	queue       chan []byte
+	queueClosed bool
 	// cr reads capsules from body.
 	cr *capsuleReader
 }
@@ -95,15 +97,30 @@ func (e *testEnv) tryDialH2(t *testing.T) (*h2Client, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
+	c, err := e.dialH2From(ctx, nil)
+	if c != nil {
+		t.Cleanup(func() { _ = c.conn.Close() })
+	}
+	return c, err
+}
+
+// dialH2From is tryDialH2 from local, or any address when local is nil. The
+// caller closes the connection, which it gets back with any error after the
+// TLS handshake.
+func (e *testEnv) dialH2From(ctx context.Context, local net.IP) (*h2Client, error) {
 	cfg := e.clientTLS()
 	cfg.NextProtos = []string{"h2"}
-	conn, err := (&tls.Dialer{Config: cfg}).DialContext(ctx, "tcp", e.tcpAddr)
+	d := &tls.Dialer{Config: cfg}
+	if local != nil {
+		d.NetDialer = &net.Dialer{LocalAddr: &net.TCPAddr{IP: local}}
+	}
+	conn, err := d.DialContext(ctx, "tcp", e.tcpAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dial TLS: %w", err)
 	}
 	tc := conn.(*tls.Conn)
-	t.Cleanup(func() { _ = tc.Close() })
 	if p := tc.ConnectionState().NegotiatedProtocol; p != "h2" {
+		_ = tc.Close()
 		return nil, fmt.Errorf("ALPN %q, want h2", p)
 	}
 	c := &h2Client{
@@ -114,14 +131,17 @@ func (e *testEnv) tryDialH2(t *testing.T) (*h2Client, error) {
 	c.fr.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
 	c.henc = hpack.NewEncoder(&c.hbuf)
 	if _, err := io.WriteString(tc, http2.ClientPreface); err != nil {
+		_ = tc.Close()
 		return nil, err
 	}
 	if err := c.fr.WriteSettings(); err != nil {
+		_ = tc.Close()
 		return nil, err
 	}
 	// Open the connection window wide, so only stream windows limit the
 	// server.
 	if err := c.fr.WriteWindowUpdate(0, 1<<30); err != nil {
+		_ = tc.Close()
 		return nil, err
 	}
 	go c.readLoop()
@@ -133,8 +153,10 @@ func (e *testEnv) tryDialH2(t *testing.T) (*h2Client, error) {
 		c.settings <- s
 		return c, nil
 	case <-c.done:
+		_ = tc.Close()
 		return nil, errors.New("connection closed before SETTINGS")
 	case <-ctx.Done():
+		_ = tc.Close()
 		return nil, errors.New("no SETTINGS from the server")
 	}
 }
@@ -146,6 +168,10 @@ func (c *h2Client) readLoop() {
 		defer c.mu.Unlock()
 		for _, s := range c.streams {
 			s.end(io.ErrUnexpectedEOF)
+			if !s.queueClosed {
+				s.queueClosed = true
+				close(s.queue)
+			}
 		}
 	}()
 	for {
@@ -196,6 +222,9 @@ func (c *h2Client) readLoop() {
 				}
 			}
 			if f.StreamEnded() {
+				c.mu.Lock()
+				s.queueClosed = true
+				c.mu.Unlock()
 				close(s.queue)
 			}
 		case *http2.RSTStreamFrame:
@@ -222,6 +251,17 @@ func (c *h2Client) get(id uint32) *h2Stream {
 // headers, and returns the stream and its response status.
 func (c *h2Client) request(t *testing.T, authority string, headers http.Header) (*h2Stream, int) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	defer cancel()
+	s, status, err := c.tryRequest(ctx, authority, headers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, status
+}
+
+// tryRequest is request returning an error rather than failing a test.
+func (c *h2Client) tryRequest(ctx context.Context, authority string, headers http.Header) (*h2Stream, int, error) {
 	pr, pw := io.Pipe()
 	s := &h2Stream{c: c, headers: make(chan []hpack.HeaderField, 1), body: pr, pw: pw, queue: make(chan []byte, 1024)}
 	s.cr = newCapsuleReader(pr)
@@ -259,7 +299,7 @@ func (c *h2Client) request(t *testing.T, authority string, headers http.Header) 
 		return err
 	})
 	if err != nil {
-		t.Fatalf("write HEADERS: %v", err)
+		return nil, 0, fmt.Errorf("write HEADERS: %w", err)
 	}
 	select {
 	case got := <-s.headers:
@@ -267,14 +307,15 @@ func (c *h2Client) request(t *testing.T, authority string, headers http.Header) 
 			if f.Name == ":status" {
 				var status int
 				_, _ = fmt.Sscan(f.Value, &status)
-				return s, status
+				return s, status, nil
 			}
 		}
-		t.Fatal("response has no :status")
-	case <-time.After(testTimeout):
-		t.Fatal("no response HEADERS")
+		return nil, 0, errors.New("response has no :status")
+	case <-c.done:
+		return nil, 0, errors.New("connection closed before response HEADERS")
+	case <-ctx.Done():
+		return nil, 0, errors.New("no response HEADERS")
 	}
-	return nil, 0
 }
 
 // open sends a valid request with token and vpc and requires 200 plus the
@@ -402,21 +443,32 @@ func (s *h2Stream) waitEnded(t *testing.T) {
 // ADDRESS_REQUEST layout but allow request ID 0.
 func parseAssignments(t *testing.T, v []byte) []assignment {
 	t.Helper()
+	out, err := parseAssignmentsErr(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func parseAssignmentsErr(v []byte) ([]assignment, error) {
 	var out []assignment
 	for len(v) > 0 {
 		id, n, err := quicvarint.Parse(v)
 		if err != nil {
-			t.Fatalf("parse request ID: %v", err)
+			return nil, fmt.Errorf("parse request ID: %w", err)
 		}
 		size := 4
-		if v[n] == 6 {
+		if len(v) > n && v[n] == 6 {
 			size = 16
+		}
+		if len(v) < n+2+size {
+			return nil, errors.New("truncated ADDRESS_ASSIGN")
 		}
 		addr, _ := netip.AddrFromSlice(v[n+1 : n+1+size])
 		out = append(out, assignment{requestID: id, prefix: netip.PrefixFrom(addr, int(v[n+1+size]))})
 		v = v[n+2+size:]
 	}
-	return out
+	return out, nil
 }
 
 // pollUntil retries cond until it holds or testTimeout passes.
