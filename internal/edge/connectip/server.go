@@ -73,21 +73,24 @@ const (
 // Limits bound the work any client can make the server do before and after
 // admission. A zero field takes its default.
 type Limits struct {
-	// MaxConnections caps open QUIC connections. The server closes a
-	// connection over the cap with H3_EXCESSIVE_LOAD.
+	// MaxConnections caps open QUIC and TCP connections together. The
+	// server closes a QUIC connection over the cap with H3_EXCESSIVE_LOAD,
+	// and a TCP connection as soon as it is accepted.
 	MaxConnections int
-	// MaxConnectionsPerSource caps the open QUIC connections from one
-	// source IP address, closing the rest the same way. A connection counts
-	// once its handshake completes. Clients behind one NAT share it.
+	// MaxConnectionsPerSource caps the open QUIC and TCP connections from
+	// one source IP address, closing the rest the same way. A QUIC
+	// connection counts once its handshake completes, a TCP connection once
+	// it is accepted. Clients behind one NAT share it.
 	MaxConnectionsPerSource int
 	// MaxStreamsPerConn caps the concurrent request streams of one
-	// connection. It is QUIC's MaxIncomingStreams.
+	// connection. It is QUIC's MaxIncomingStreams and HTTP/2's
+	// SETTINGS_MAX_CONCURRENT_STREAMS.
 	MaxStreamsPerConn int
 	// MaxHeaderBytes caps the size of a request's header section.
 	MaxHeaderBytes int
 	// HandshakeTimeout bounds a QUIC handshake from the client's first
-	// packet. quic-go allows a handshake twice its HandshakeIdleTimeout, so
-	// that is set to half of HandshakeTimeout.
+	// packet, and a TLS handshake on TCP. quic-go allows a handshake twice
+	// its HandshakeIdleTimeout, so that is set to half of HandshakeTimeout.
 	HandshakeTimeout time.Duration
 	// MaxAdmissions caps the requests waiting on Admission.Admit at once.
 	MaxAdmissions int
@@ -131,13 +134,15 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// Server terminates CONNECT-IP requests over HTTP/3.
+// Server terminates CONNECT-IP requests over HTTP/3 and HTTP/2.
 type Server struct {
+	authority string
 	template  *uritemplate.Template
 	admission Admission
 	backend   PacketBackend
 	log       *slog.Logger
 	h3        *http3.Server
+	h2        *http.Server
 	proxy     connectip.Proxy
 
 	// limits has every default applied. conns counts open QUIC
@@ -195,6 +200,7 @@ func NewServer(cfg Config) (*Server, error) {
 	quicConf.HandshakeIdleTimeout = limits.HandshakeTimeout / 2
 
 	s := &Server{
+		authority:  cfg.Authority,
 		template:   template,
 		admission:  cfg.Admission,
 		backend:    cfg.Backend,
@@ -217,10 +223,30 @@ func NewServer(cfg Config) (*Server, error) {
 			return context.WithValue(ctx, quicConnKey{}, c)
 		},
 	}
+	var h2Only http.Protocols
+	h2Only.SetHTTP2(true)
+	h2TLS := cfg.TLSConfig.Clone()
+	h2TLS.NextProtos = []string{"h2"}
+	s.h2 = &http.Server{
+		Handler:   s,
+		TLSConfig: h2TLS,
+		Protocols: &h2Only,
+		// net/http bounds the TLS handshake by ReadHeaderTimeout. HTTP/2
+		// streams then run without a read or write deadline.
+		ReadHeaderTimeout: limits.HandshakeTimeout,
+		IdleTimeout:       h2IdleTimeout,
+		MaxHeaderBytes:    limits.MaxHeaderBytes,
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams: limits.MaxStreamsPerConn,
+			SendPingTimeout:      h2PingTimeout,
+			PingTimeout:          h2PingTimeout,
+		},
+		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelDebug),
+	}
 	return s, nil
 }
 
-// Serve serves HTTP/3 on conn until the server is closed.
+// Serve serves CONNECT-IP over HTTP/3 on conn until the server is closed.
 func (s *Server) Serve(conn net.PacketConn) error {
 	return s.h3.Serve(conn)
 }
@@ -231,14 +257,27 @@ func (s *Server) Close() error {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
-	err := s.h3.Close()
+	err := errors.Join(s.h3.Close(), s.h2.Close())
 	s.sessions.Wait()
 	return err
 }
 
-// ServeHTTP admits a CONNECT-IP request and, once admitted, proxies its
-// packets until the request or its connection ends.
+// ServeHTTP admits a CONNECT-IP request over HTTP/3 or HTTP/2 and, once
+// admitted, proxies its packets until the request or its connection ends.
+// Both transports share every step after parsing: limits, admission, grant
+// checks, the backend session and the packet policy.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.ProtoMajor {
+	case 3:
+		s.serveH3(w, r)
+	case 2:
+		s.serveH2(w, r)
+	default:
+		s.reject(w, http.StatusHTTPVersionNotSupported, "CONNECT-IP needs HTTP/3 or HTTP/2", nil)
+	}
+}
+
+func (s *Server) serveH3(w http.ResponseWriter, r *http.Request) {
 	// The connect-ip upgrade token implies the Capsule Protocol, so RFC 9484
 	// does not require clients to send Capsule-Protocol, but the parser does.
 	if _, ok := r.Header[http3.CapsuleProtocolHeader]; !ok && r.Proto == connectIPProtocol {
@@ -257,6 +296,41 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, http.StatusNotFound, "unknown path", nil)
 		return
 	}
+	s.serve(w, r, &h3Request{r: r, preq: preq, proxy: &s.proxy})
+}
+
+// transport is what one request's HTTP version supplies to serve.
+type transport interface {
+	// probe checks, after admission, that the path can carry a
+	// MinInnerMTU packet toward the client.
+	probe() error
+	// accept answers the request with 2xx and returns its tunnel.
+	accept(w http.ResponseWriter) (tunnel, error)
+}
+
+// tunnel is an accepted CONNECT-IP request. ReadPacket returns client
+// packets and WritePacket sends packets to the client, returning an ICMP
+// error for the backend when the packet cannot be sent. Close must be
+// idempotent and unblock every other method.
+type tunnel interface {
+	ReadPacket(b []byte) (int, error)
+	WritePacket(b []byte) (icmp []byte, err error)
+	AssignAddresses(prefixes []netip.Prefix) error
+	AdvertiseRoute(routes []connectip.IPRoute) error
+	receiveAddressRequest(ctx context.Context) (addressRequest, error)
+	Close() error
+}
+
+// addressRequest is one ADDRESS_REQUEST. respond takes one assignment per
+// requested prefix, where the zero Prefix rejects it, and any unsolicited
+// assignments.
+type addressRequest struct {
+	prefixes []netip.Prefix
+	respond  func(assigned, additional []netip.Prefix) error
+}
+
+// serve runs the transport-neutral part of a parsed request.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, t transport) {
 	token, ok := bearerToken(r)
 	if !ok {
 		w.Header().Set("WWW-Authenticate", "Bearer")
@@ -316,7 +390,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 	// Only an admitted client may receive the probe datagram.
-	if err := probeInnerMTU(r); err != nil {
+	if err := t.probe(); err != nil {
 		s.reject(w, http.StatusServiceUnavailable, "path cannot carry the minimum inner MTU", err)
 		return
 	}
@@ -348,7 +422,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, http.StatusServiceUnavailable, "admission expired during setup", err)
 		return
 	}
-	conn, err := s.proxy.Proxy(w, preq)
+	conn, err := t.accept(w)
 	if err != nil {
 		log.Warn("could not accept request", "error", err)
 		return
@@ -436,8 +510,11 @@ func (s *Server) admit(ctx context.Context, token, vpc string) (lease Lease, adm
 // sourceAddr returns the IP address a connection comes from, with an
 // IPv4-mapped IPv6 address unmapped, so one client counts once.
 func sourceAddr(a net.Addr) netip.Addr {
-	if u, ok := a.(*net.UDPAddr); ok {
-		return u.AddrPort().Addr().Unmap()
+	switch a := a.(type) {
+	case *net.UDPAddr:
+		return a.AddrPort().Addr().Unmap()
+	case *net.TCPAddr:
+		return a.AddrPort().Addr().Unmap()
 	}
 	return netip.Addr{}
 }
@@ -492,7 +569,7 @@ func (s *Server) startSession() bool {
 // policy sees a client packet and after it passes a gVPC one; it drops
 // what it refuses without counting it.
 func (s *Server) proxySession(
-	ctx context.Context, log *slog.Logger, conn *connectip.Conn, sess BackendSession, policy *packetPolicy,
+	ctx context.Context, log *slog.Logger, conn tunnel, sess BackendSession, policy *packetPolicy,
 ) {
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -564,15 +641,15 @@ func (s *Server) proxySession(
 // assigned prefix: the first IPv6 request receives it, every other request is
 // rejected, and the prefix stays assigned either way. It returns when the
 // stream closes or ctx is done.
-func answerAddressRequests(ctx context.Context, log *slog.Logger, conn *connectip.Conn, assigned netip.Prefix) {
+func answerAddressRequests(ctx context.Context, log *slog.Logger, conn tunnel, assigned netip.Prefix) {
 	for {
-		req, err := conn.ReceiveAddressRequest(ctx)
+		req, err := conn.receiveAddressRequest(ctx)
 		if err != nil {
 			return
 		}
-		answers := make([]netip.Prefix, len(req.Prefixes))
+		answers := make([]netip.Prefix, len(req.prefixes))
 		var given bool
-		for i, p := range req.Prefixes {
+		for i, p := range req.prefixes {
 			if !given && p.Addr().Is6() {
 				answers[i] = assigned
 				given = true
@@ -582,7 +659,7 @@ func answerAddressRequests(ctx context.Context, log *slog.Logger, conn *connecti
 		if !given {
 			additional = []netip.Prefix{assigned}
 		}
-		if err := req.Respond(answers, additional); err != nil {
+		if err := req.respond(answers, additional); err != nil {
 			log.Warn("could not answer address request", "error", err)
 			return
 		}
@@ -643,6 +720,33 @@ func requestedVPC(r *http.Request) (string, bool) {
 	}
 	name := strings.TrimSpace(values[0])
 	return name, name != ""
+}
+
+// h3Request is a CONNECT-IP request over HTTP/3, served by connect-ip-go.
+type h3Request struct {
+	r     *http.Request
+	preq  *connectip.ProxyRequest
+	proxy *connectip.Proxy
+}
+
+func (h *h3Request) probe() error { return probeInnerMTU(h.r) }
+
+func (h *h3Request) accept(w http.ResponseWriter) (tunnel, error) {
+	conn, err := h.proxy.Proxy(w, h.preq)
+	if err != nil {
+		return nil, err
+	}
+	return h3Tunnel{conn}, nil
+}
+
+type h3Tunnel struct{ *connectip.Conn }
+
+func (t h3Tunnel) receiveAddressRequest(ctx context.Context) (addressRequest, error) {
+	req, err := t.ReceiveAddressRequest(ctx)
+	if err != nil {
+		return addressRequest{}, err
+	}
+	return addressRequest{prefixes: req.Prefixes, respond: req.Respond}, nil
 }
 
 // probeInnerMTU sends the client a datagram on the request's stream that is as

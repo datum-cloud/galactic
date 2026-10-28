@@ -58,12 +58,14 @@ type testEnv struct {
 	server   *Server
 	backend  *memoryBackend
 	addr     string
+	tcpAddr  string
 	template *uritemplate.Template
 	roots    *x509.CertPool
 }
 
-// startServer runs a Server on a loopback UDP socket with a fresh self-signed
-// certificate. mutate may adjust the config before the server is built.
+// startServer runs a Server on a loopback UDP socket for HTTP/3 and a
+// loopback TCP socket for HTTP/2, with a fresh self-signed certificate.
+// mutate may adjust the config before the server is built.
 func startServer(t *testing.T, mutate func(*Config)) *testEnv {
 	t.Helper()
 	pconn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -86,20 +88,31 @@ func startServer(t *testing.T, mutate func(*Config)) *testEnv {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	served := make(chan struct{})
+	tcp, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen TCP: %v", err)
+	}
+	served := make(chan struct{}, 2)
 	go func() {
-		defer close(served)
+		defer func() { served <- struct{}{} }()
 		_ = srv.Serve(pconn)
+	}()
+	go func() {
+		defer func() { served <- struct{}{} }()
+		_ = srv.ServeTLS(tcp)
 	}()
 	t.Cleanup(func() {
 		_ = srv.Close()
 		<-served
+		<-served
 		_ = pconn.Close()
+		_ = tcp.Close()
 	})
 	return &testEnv{
 		server:   srv,
 		backend:  backend,
 		addr:     pconn.LocalAddr().String(),
+		tcpAddr:  tcp.Addr().String(),
 		template: uritemplate.MustNew("https://" + pconn.LocalAddr().String() + TemplatePath),
 		roots:    roots,
 	}

@@ -55,6 +55,12 @@ const (
 	reasonSource = "source"
 	// reasonDestination is a destination the session does not own or route.
 	reasonDestination = "destination"
+	// reasonTooLarge is an HTTP/2 DATAGRAM capsule from the client over
+	// the transport's packet limit.
+	reasonTooLarge = "too_large"
+	// reasonHopLimit is a packet toward the client whose hop limit would
+	// reach zero on encapsulation.
+	reasonHopLimit = "hop_limit"
 	// reasonNoSession is a packet from the device for a /96 with no open
 	// session.
 	reasonNoSession = "no_session"
