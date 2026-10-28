@@ -2,108 +2,168 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package logging installs one process-wide logger for a Galactic binary. The
-// same slog handler backs slog's default logger, the standard log package,
-// controller-runtime's logger and klog, so every line a binary writes has one
-// format and one level threshold. Production output is JSON at info level;
-// readable debug output for local runs is the explicit opt-in
-// --log-format=text --log-level=debug.
+// Package logging installs one process-wide logger for a Galactic binary,
+// built by go.miloapis.com/instrumentation/logging. The same logger backs
+// slog's default logger, the standard log package, controller-runtime's logger
+// and klog, so every line a binary writes has one format and one level
+// threshold. Production output is JSON at info level, with UTC timestamps and
+// the binary's and the library's versions on every line. Console output for
+// local runs is the explicit opt-in --zap-devel.
 package logging
 
 import (
+	"context"
+	goflag "flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"slices"
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/pflag"
+	"go.miloapis.com/instrumentation/buildinfo"
+	"go.miloapis.com/instrumentation/logging"
+	uberzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"k8s.io/klog/v2"
-	ctrl "sigs.k8s.io/controller-runtime"
+	crlog "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"go.datum.net/galactic/internal/metadata"
 )
 
 const (
-	// FormatJSON is the production format and the default.
-	FormatJSON = "json"
-	// FormatText is the human-readable format for local runs.
-	FormatText = "text"
+	// EnvLevel supplies --log-level's default.
+	EnvLevel = "LOG_LEVEL"
 
-	// EnvLevel and EnvFormat supply the flags' defaults.
-	EnvLevel  = "LOG_LEVEL"
-	EnvFormat = "LOG_FORMAT"
+	// DevelFlag is the standard opt-in for console output at debug level.
+	DevelFlag = "zap-devel"
 )
 
-var (
-	// Levels are the documented --log-level values. ValidateLevel also
-	// accepts what slog parses beyond them: any case, and an offset such as
-	// info+2.
-	Levels = []string{"debug", "info", "warn", "error"}
-	// Formats are the accepted --log-format values.
-	Formats = []string{FormatJSON, FormatText}
-	// Binaries are the commands under cmd/ that call Setup. A manifest check
-	// uses this list to find the containers whose LOG_LEVEL, LOG_FORMAT,
-	// --log-level and --log-format these rules govern: by image name, as most
-	// publish an image of their own, or by command, as fabric-config-agent
-	// ships in the fabric-router image.
-	Binaries = []string{
-		"fabric-api",
-		"fabric-config-agent",
-		"fabric-router-controller",
-		"galactic-cni",
-		"galactic-controller",
-		"galactic-edge",
-		"galactic-gateway",
-		"galactic-nat",
-		"galactic-router",
-		"galactic-vrf",
-	}
-)
+// Levels are the documented --log-level values. ValidateLevel also accepts
+// what slog parses beyond them: any case, and an offset such as info+2.
+var Levels = []string{"debug", "info", "warn", "error"}
 
-// Options holds the --log-level and --log-format flag values.
-type Options struct {
-	Level  string
-	Format string
+// Binaries are the commands under cmd/ that call Setup. A manifest check uses
+// this list to find the containers whose LOG_LEVEL, --log-level and
+// --zap-devel these rules govern: by image name, as most publish an image of
+// their own, or by command, as fabric-config-agent ships in the fabric-router
+// image.
+var Binaries = []string{
+	"fabric-api",
+	"fabric-config-agent",
+	"fabric-router-controller",
+	"galactic-cni",
+	"galactic-controller",
+	"galactic-edge",
+	"galactic-gateway",
+	"galactic-nat",
+	"galactic-router",
+	"galactic-vrf",
 }
 
-// BindFlags adds --log-level and --log-format to fs, defaulting from
-// LOG_LEVEL and LOG_FORMAT, then info and json.
+// Options holds the --log-level value and controller-runtime's standard zap
+// flags.
+type Options struct {
+	Level string
+	zap   zap.Options
+}
+
+// BindFlags adds --log-level, defaulting from LOG_LEVEL then info, and the
+// standard zap flags (--zap-devel, --zap-encoder, --zap-log-level,
+// --zap-stacktrace-level and --zap-time-encoding) to fs. An explicit
+// --zap-log-level takes precedence over --log-level.
 func (o *Options) BindFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.Level, "log-level", envOr(EnvLevel, "info"),
 		"Log level: debug, info, warn, error (env "+EnvLevel+")")
-	fs.StringVar(&o.Format, "log-format", envOr(EnvFormat, FormatJSON),
-		"Log format: json or text (env "+EnvFormat+")")
+	zfs := goflag.NewFlagSet("zap", goflag.ContinueOnError)
+	o.zap.BindFlags(zfs)
+	fs.AddGoFlagSet(zfs)
 }
 
 // Setup installs the logger o describes, writing to stderr.
 func (o *Options) Setup() error {
-	return Setup(os.Stderr, o.Level, o.Format)
+	return o.setup(os.Stderr)
 }
 
-// Setup builds one slog handler writing to w and installs it as slog's
-// default, which also routes the standard log package through it, and as
-// controller-runtime's and klog's logger. controller-runtime's V(n) lines map
-// to slog level -n, so they appear only at --log-level=debug or below.
-// controller-runtime keeps the logger from its first SetLogger call, so a
-// binary calls Setup once, before it builds a manager.
-func Setup(w io.Writer, level, format string) error {
-	l, err := parseLevel(level)
-	if err != nil {
-		return err
+func (o *Options) setup(w io.Writer) error {
+	opts := o.zap
+	opts.DestWriter = w
+	if opts.Level == nil {
+		l, err := parseLevel(o.Level)
+		if err != nil {
+			return err
+		}
+		opts.Level = l
 	}
-	if err := ValidateFormat(format); err != nil {
-		return err
-	}
-	opts := &slog.HandlerOptions{Level: l}
-	var h slog.Handler = slog.NewJSONHandler(w, opts)
-	if format == FormatText {
-		h = slog.NewTextHandler(w, opts)
-	}
-	logger := slog.New(h)
-	slog.SetDefault(logger)
-	ctrl.SetLogger(logr.FromSlogHandler(h))
-	klog.SetSlogLogger(logger)
+	install(&opts)
 	return nil
+}
+
+// SetupFile installs the production logger at level, writing to w. The CNI
+// plugins use it to log to their own file.
+func SetupFile(w io.Writer, level slog.Level) {
+	install(&zap.Options{DestWriter: w, Level: zapLevel(level)})
+}
+
+// install sets the binary's version, builds the library's logger from opts
+// and installs it as controller-runtime's and klog's logger and, through a
+// slog bridge, as slog's default, which also routes the standard log package
+// through it. controller-runtime keeps the logger from its first SetLogger
+// call, so a binary installs it once, before it builds a manager.
+func install(opts *zap.Options) {
+	buildinfo.SetVersion(metadata.Version)
+	opts.EncoderConfigOptions = append(opts.EncoderConfigOptions, verboseAsDebug)
+	logger := logging.New(opts)
+	crlog.SetLogger(logger)
+	klog.SetLogger(logger)
+	slog.SetDefault(slog.New(logr.ToSlogHandler(logr.New(wrap(logger.GetSink())))))
+}
+
+// slogSink passes slog's warn lines to zap whatever the threshold. logr has
+// no warn level, so its slog bridge asks whether V(0) is enabled before it
+// hands over a warn line, and at --log-level=warn it isn't. zap checks the
+// level of every line the bridge hands over, so it still drops info lines.
+type slogSink struct {
+	logr.LogSink
+	slog logr.SlogSink
+}
+
+func wrap(sink logr.LogSink) logr.LogSink {
+	if ss, ok := sink.(logr.SlogSink); ok {
+		return slogSink{sink, ss}
+	}
+	return sink
+}
+
+// Init does nothing: the wrapped sink was initialized when the library built
+// it, and initializing it again would add a second caller skip.
+func (slogSink) Init(logr.RuntimeInfo) {}
+
+func (s slogSink) Enabled(level int) bool {
+	return level == 0 || s.LogSink.Enabled(level)
+}
+
+func (s slogSink) WithValues(kv ...any) logr.LogSink { return wrap(s.LogSink.WithValues(kv...)) }
+func (s slogSink) WithName(name string) logr.LogSink { return wrap(s.LogSink.WithName(name)) }
+
+func (s slogSink) Handle(ctx context.Context, r slog.Record) error { return s.slog.Handle(ctx, r) }
+
+func (s slogSink) WithAttrs(attrs []slog.Attr) logr.SlogSink {
+	return wrap(s.slog.WithAttrs(attrs).(logr.LogSink)).(logr.SlogSink)
+}
+
+func (s slogSink) WithGroup(name string) logr.SlogSink {
+	return wrap(s.slog.WithGroup(name).(logr.LogSink)).(logr.SlogSink)
+}
+
+// verboseAsDebug names every level below zap's debug level, which slog.Debug
+// and controller-runtime's V(2) and up produce, debug instead of Level(-n).
+func verboseAsDebug(c *zapcore.EncoderConfig) {
+	encode := c.EncodeLevel
+	c.EncodeLevel = func(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+		encode(max(l, zapcore.DebugLevel), enc)
+	}
 }
 
 // ValidateLevel returns the error Setup returns for level, or nil if Setup
@@ -113,21 +173,25 @@ func ValidateLevel(level string) error {
 	return err
 }
 
-// ValidateFormat returns the error Setup returns for format, or nil if Setup
-// accepts it.
-func ValidateFormat(format string) error {
-	if !slices.Contains(Formats, format) {
-		return fmt.Errorf("--log-format must be %s or %s, not %q", FormatJSON, FormatText, format)
-	}
-	return nil
-}
-
-func parseLevel(level string) (slog.Level, error) {
+// parseLevel maps a --log-level value to the zap level that keeps its
+// meaning.
+func parseLevel(level string) (uberzap.AtomicLevel, error) {
 	var l slog.Level
 	if err := l.UnmarshalText([]byte(level)); err != nil {
-		return 0, fmt.Errorf("--log-level: %w", err)
+		return uberzap.AtomicLevel{}, fmt.Errorf("--log-level: %w", err)
 	}
-	return l, nil
+	return zapLevel(l), nil
+}
+
+// zapLevel maps a slog level to the zap threshold that admits the same
+// lines. Through the bridge, slog's info, warn and error become zap's info,
+// warn and error, while a level below info passes through unchanged:
+// slog.Debug arrives as zap level -4, and controller-runtime's V(n) as -n.
+func zapLevel(l slog.Level) uberzap.AtomicLevel {
+	if l < slog.LevelInfo {
+		return uberzap.NewAtomicLevelAt(zapcore.Level(l))
+	}
+	return uberzap.NewAtomicLevelAt(zapcore.Level(l / 4))
 }
 
 func envOr(key, def string) string {

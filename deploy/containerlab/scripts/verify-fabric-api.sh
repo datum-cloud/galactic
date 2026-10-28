@@ -83,7 +83,7 @@ node_targets() {
       echo "${node} $(awk -v n="${node}" '$1 == n {print $2}' <<<"${certs}") ${hostip} ${frpod}"
     done
 }
-q() { "${FA}" --log-format text --log-level warn query --cell "${site}" --operator lab-verify \
+q() { "${FA}" --log-level warn query --cell "${site}" --operator lab-verify \
   --tls-cert "${creds}/tls.crt" --tls-key "${creds}/tls.key" --tls-ca "${creds}/ca.crt" "$@"; }
 
 # wait_info prints a node's Info, retrying for up to 90s: right after a

@@ -19,6 +19,7 @@ import (
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/hostconf"
+	"go.datum.net/galactic/internal/logging"
 )
 
 // PluginConf is the CNI plugin configuration passed on stdin to either master
@@ -142,9 +143,7 @@ func SetupLogging(logPath, logLevel string) {
 		slog.Warn("Failed to open log file, falling back to Stderr", "path", logPath, "err", err)
 		return
 	}
-	// Use JSON handler for structured logging to file.
-	handler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: level})
-	slog.SetDefault(slog.New(handler))
+	logging.SetupFile(file, level)
 }
 
 // statusConf holds the minimal config fields STATUS validation needs. STATUS

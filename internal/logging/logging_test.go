@@ -23,32 +23,39 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/go-logr/logr"
+	"github.com/spf13/pflag"
+	"go.miloapis.com/instrumentation/instrumenttest"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	"go.datum.net/galactic/internal/metadata"
 )
 
-// emitEnv makes the test binary run emitLines instead of its tests.
-// controller-runtime keeps the first logger it is given, so the lines are
-// written by a fresh process each time, whatever -count or -shuffle says.
+// emitEnv makes the test binary run emitLines at the level it names instead
+// of its tests. controller-runtime keeps the first logger it is given, so the
+// lines are written by a fresh process each time, whatever -count or -shuffle
+// says.
 const emitEnv = "GALACTIC_LOGGING_TEST_EMIT"
 
 func TestMain(m *testing.M) {
-	if os.Getenv(emitEnv) != "" {
-		emitLines()
+	if level := os.Getenv(emitEnv); level != "" {
+		emitLines(level)
 		return
 	}
 	os.Exit(m.Run())
 }
 
-// emitLines installs the production logger on stdout and writes one line
-// through each logger Setup covers.
-func emitLines() {
-	if err := Setup(os.Stdout, "info", FormatJSON); err != nil {
+// emitLines installs the logger at level on stdout and writes lines through
+// each logger Setup covers.
+func emitLines(level string) {
+	o := Options{Level: level}
+	if err := o.setup(os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	slog.Debug("slog debug")
 	slog.Info("from slog", "k", "v")
 	ctrl.Log.WithName("controller-runtime").Info("from controller-runtime", "k", "v")
 	ctrl.Log.V(1).Info("controller-runtime debug")
@@ -58,78 +65,164 @@ func emitLines() {
 	klog.Flush()
 }
 
-func TestSetupRoutesEveryLoggerThroughOneJSONHandler(t *testing.T) {
+// emitted runs emitLines at level in a fresh process and returns its lines,
+// each parsed as JSON.
+func emitted(t *testing.T, level string) []map[string]any {
+	t.Helper()
 	cmd := exec.CommandContext(t.Context(), os.Args[0])
-	cmd.Env = append(os.Environ(), emitEnv+"=1")
+	cmd.Env = append(os.Environ(), emitEnv+"="+level)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("emitting process: %v", err)
 	}
-	buf := bytes.NewBuffer(out)
-
-	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-	info, errLevel := slog.LevelInfo.String(), slog.LevelError.String()
-	want := []struct{ msg, level string }{
-		{"from slog", info},
-		{"from controller-runtime", info},
-		{"from controller-runtime error", errLevel},
-		{"from the log package", info},
-		{"from klog", info},
-	}
-	if len(lines) != len(want) {
-		t.Fatalf("got %d lines, want %d (V(1) must be dropped at info):\n%s", len(lines), len(want), buf.String())
-	}
-	for i, line := range lines {
+	split := strings.Split(strings.TrimSpace(string(out)), "\n")
+	recs := make([]map[string]any, 0, len(split))
+	for i, line := range split {
 		var rec map[string]any
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("line %d is not JSON: %v\n%s", i, err, line)
 		}
-		for _, key := range []string{slog.TimeKey, slog.LevelKey, slog.MessageKey} {
-			if _, ok := rec[key]; !ok {
-				t.Errorf("line %d has no %q field: %s", i, key, line)
-			}
+		recs = append(recs, rec)
+	}
+	return recs
+}
+
+// The level names a line carries, which are also the --log-level values.
+const (
+	lvDebug = "debug"
+	lvInfo  = "info"
+	lvWarn  = "warn"
+	lvError = "error"
+)
+
+type line struct{ msg, level string }
+
+func lines(recs []map[string]any) []line {
+	out := make([]line, 0, len(recs))
+	for _, rec := range recs {
+		msg, _ := rec["msg"].(string)
+		level, _ := rec["level"].(string)
+		out = append(out, line{msg, level})
+	}
+	return out
+}
+
+func TestSetupRoutesEveryLoggerThroughTheLibrary(t *testing.T) {
+	recs := emitted(t, lvInfo)
+
+	want := []line{
+		{"from slog", lvInfo},
+		{"from controller-runtime", lvInfo},
+		{"from controller-runtime error", lvError},
+		{"from the log package", lvInfo},
+		{"from klog", lvInfo},
+	}
+	if got := lines(recs); !slices.Equal(got, want) {
+		t.Fatalf("lines = %v, want %v (debug lines must be dropped at info)", got, want)
+	}
+	for i, rec := range recs {
+		if rec["build_version"] != metadata.Version {
+			t.Errorf("line %d build_version = %v, want %q", i, rec["build_version"], metadata.Version)
 		}
-		if rec[slog.MessageKey] != want[i].msg || rec[slog.LevelKey] != want[i].level {
-			t.Errorf("line %d = %s %q, want %s %q", i, rec[slog.LevelKey], rec[slog.MessageKey], want[i].level, want[i].msg)
+		if v, _ := rec["instrumentation_version"].(string); v == "" {
+			t.Errorf("line %d has no instrumentation_version", i)
 		}
+		ts, _ := rec["ts"].(string)
+		if _, err := time.Parse(time.RFC3339Nano, ts); err != nil || !strings.HasSuffix(ts, "Z") {
+			t.Errorf("line %d ts = %q, want an RFC 3339 UTC timestamp", i, ts)
+		}
+	}
+	if _, ok := recs[2]["stacktrace"]; !ok {
+		t.Error("error line has no stacktrace")
 	}
 }
 
-func TestSetupDebugTextShowsVerboseLines(t *testing.T) {
+func TestSetupDebugShowsVerboseLinesAsDebug(t *testing.T) {
+	want := []line{
+		{"slog debug", lvDebug},
+		{"from slog", lvInfo},
+		{"from controller-runtime", lvInfo},
+		{"controller-runtime debug", lvDebug},
+		{"from controller-runtime error", lvError},
+		{"from the log package", lvInfo},
+		{"from klog", lvInfo},
+	}
+	if got := lines(emitted(t, lvDebug)); !slices.Equal(got, want) {
+		t.Errorf("lines = %v, want %v", got, want)
+	}
+}
+
+func TestSetupLevels(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{nil, []string{lvInfo, lvWarn, lvError}},
+		{[]string{"--log-level=warn"}, []string{lvWarn, lvError}},
+		{[]string{"--log-level=ERROR"}, []string{lvError}},
+		{[]string{"--log-level=debug", "--zap-log-level=error"}, []string{lvError}},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			t.Cleanup(restoreDefaults(t))
+			t.Setenv(EnvLevel, "")
+			var o Options
+			fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			o.BindFlags(fs)
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			var buf bytes.Buffer
+			if err := o.setup(&buf); err != nil {
+				t.Fatal(err)
+			}
+			slog.Debug(lvDebug)
+			slog.Info(lvInfo)
+			slog.Warn(lvWarn)
+			slog.Error(lvError)
+
+			split := strings.Split(strings.TrimSpace(buf.String()), "\n")
+			got := make([]string, 0, len(split))
+			for _, l := range split {
+				var rec map[string]any
+				if err := json.Unmarshal([]byte(l), &rec); err != nil {
+					t.Fatalf("line is not JSON: %v\n%s", err, l)
+				}
+				got = append(got, rec["msg"].(string))
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("lines = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetupFileWritesJSON(t *testing.T) {
 	t.Cleanup(restoreDefaults(t))
 	var buf bytes.Buffer
-	if err := Setup(&buf, "debug", FormatText); err != nil {
-		t.Fatal(err)
-	}
+	SetupFile(&buf, slog.LevelWarn)
+	slog.Info("dropped")
+	slog.Warn("kept", "k", "v")
 
-	// controller-runtime keeps the first logger it is given, so this checks
-	// the installed handler through the same slog-to-logr bridge.
-	logr.FromSlogHandler(slog.Default().Handler()).V(1).Info("controller-runtime debug")
-	if got := buf.String(); !strings.Contains(got, `msg="controller-runtime debug"`) {
-		t.Errorf("debug text output missing the V(1) line: %q", got)
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("output is not one JSON line: %v\n%s", err, buf.String())
 	}
-}
-
-func TestSetupRejectsInvalidOptions(t *testing.T) {
-	for _, tc := range []struct{ level, format string }{
-		{"loud", FormatJSON},
-		{"info", "console"},
-	} {
-		if err := Setup(&bytes.Buffer{}, tc.level, tc.format); err == nil {
-			t.Errorf("Setup(%q, %q) succeeded, want an error", tc.level, tc.format)
-		}
+	if rec["msg"] != "kept" || rec["level"] != lvWarn || rec["build_version"] != metadata.Version {
+		t.Errorf("line = %v, want kept at warn with build_version %q", rec, metadata.Version)
 	}
 }
 
-func TestValidateMatchesSetup(t *testing.T) {
+func TestSetupRejectsInvalidLevel(t *testing.T) {
+	o := Options{Level: "loud"}
+	if err := o.setup(&bytes.Buffer{}); err == nil {
+		t.Error("setup with --log-level=loud succeeded, want an error")
+	}
+}
+
+func TestValidateLevel(t *testing.T) {
 	for _, level := range append(slices.Clone(Levels), "INFO", "info+2") {
 		if err := ValidateLevel(level); err != nil {
 			t.Errorf("ValidateLevel(%q) = %v, want nil", level, err)
-		}
-	}
-	for _, format := range Formats {
-		if err := ValidateFormat(format); err != nil {
-			t.Errorf("ValidateFormat(%q) = %v, want nil", format, err)
 		}
 	}
 	for _, level := range []string{"loud", "verbose", "", "trace"} {
@@ -137,11 +230,13 @@ func TestValidateMatchesSetup(t *testing.T) {
 			t.Errorf("ValidateLevel(%q) = nil, want an error", level)
 		}
 	}
-	for _, format := range []string{"console", "JSON", ""} {
-		if ValidateFormat(format) == nil {
-			t.Errorf("ValidateFormat(%q) = nil, want an error", format)
-		}
-	}
+}
+
+// TestLoggerAdopted runs the instrumentation library's logger check over the
+// whole module: every logger is built by its logging package, and nothing
+// turns on development mode.
+func TestLoggerAdopted(t *testing.T) {
+	instrumenttest.AssertStandardLogger(t)
 }
 
 // TestBinariesListsEveryCaller keeps Binaries, which the manifest check uses
@@ -260,7 +355,7 @@ func TestLongRunningBinariesInstallTheHandler(t *testing.T) {
 		case uses && unmanagedBinaries[d.Name()]:
 			t.Errorf("cmd/%s imports %s; remove it from unmanagedBinaries", d.Name(), pkg)
 		case !uses && !unmanagedBinaries[d.Name()]:
-			t.Errorf("cmd/%s doesn't import %s; call logging.Setup from its root command", d.Name(), pkg)
+			t.Errorf("cmd/%s doesn't import %s; call Options.Setup from its root command", d.Name(), pkg)
 		}
 	}
 }

@@ -16,7 +16,7 @@ func TestCheck(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "unsupported env level on a Galactic image",
+			name: "unsupported env level and the removed format variable on a Galactic image",
 			yaml: `
 apiVersion: apps/v1
 kind: DaemonSet
@@ -31,10 +31,13 @@ spec:
             - {name: LOG_LEVEL, value: verbose}
             - {name: LOG_FORMAT, value: json}
 `,
-			want: []string{`DaemonSet galactic-router: container router: LOG_LEVEL "verbose"`},
+			want: []string{
+				`DaemonSet galactic-router: container router: LOG_FORMAT "json": removed`,
+				`DaemonSet galactic-router: container router: LOG_LEVEL "verbose"`,
+			},
 		},
 		{
-			name: "unsupported env format",
+			name: "removed env format",
 			yaml: `
 kind: Deployment
 metadata: {name: c}
@@ -71,9 +74,22 @@ spec:
 containers:
   - name: n
     image: galactic-nat
-    args: [--log-level=debug, --log-format=text]
+    args: [--log-level=debug, --zap-devel=false]
     env: [{name: LOG_LEVEL, value: WARN}]
 `,
+		},
+		{
+			name: "development mode",
+			yaml: `
+containers:
+  - name: nat
+    image: galactic-nat
+    args: [--zap-devel]
+  - name: router
+    image: galactic-router
+    args: [--zap-devel=true]
+`,
+			want: []string{`container nat: --zap-devel: console output`, `container router: --zap-devel=true: console output`},
 		},
 		{
 			name: "other images keep their own log settings",

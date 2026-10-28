@@ -528,7 +528,7 @@ func (l *lab) load(ctx context.Context, s spec) ([]Record, []json.RawMessage, er
 // the lab's operator identity, as the legacy operator interface.
 func (l *lab) operator(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{dockerExec, clientNode, clientDir + "/fabric-api",
-		"--log-format", "text", "--log-level", "warn",
+		"--log-level", "warn",
 		"query", "--cell", cell, "--operator", "lab-verify",
 		"--tls-cert", clientDir + "/operator/tls.crt", "--tls-key", clientDir + "/operator/tls.key",
 		"--tls-ca", clientDir + "/operator/ca.crt"}, args...)

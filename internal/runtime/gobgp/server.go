@@ -9,20 +9,14 @@ package gobgp
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync/atomic"
 
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
 )
 
-const defaultLogLevel = "panic"
-
 // Config holds configuration for the embedded GoBGP server.
 type Config struct {
-	// LogLevel controls GoBGP's internal log verbosity.
-	// Valid values: debug, info, warn, error, panic. Defaults to panic.
-	LogLevel string
 	// APISocket, when non-empty, is the unix socket path the server serves
 	// the GoBGP API on, read-only, for the gobgp CLI. Empty serves no API.
 	APISocket string
@@ -37,9 +31,6 @@ type Server struct {
 
 // newServer creates a Server with the given config. Call Start to run it.
 func newServer(cfg Config) *Server {
-	if cfg.LogLevel == "" {
-		cfg.LogLevel = defaultLogLevel
-	}
 	return &Server{
 		cfg:   cfg,
 		ready: make(chan struct{}),
@@ -92,14 +83,13 @@ func (s *Server) newBgpServer() *gobgpserver.BgpServer {
 }
 
 // buildServerOptions assembles the ServerOption slice for NewBgpServer.
-// Exported for testing.
+// GoBGP logs through the process's slog default, which internal/logging
+// installs, under the name gobgp, so its lines share the binary's format and
+// level. GoBGP's SetLogLevel API gets no level to change; the API socket
+// refuses it anyway. Exported for testing.
 func (s *Server) buildServerOptions() []gobgpserver.ServerOption {
-	level := parseLogLevel(s.cfg.LogLevel)
-	levelVar := &slog.LevelVar{}
-	levelVar.Set(level)
-	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: levelVar}))
-	opts := []gobgpserver.ServerOption{gobgpserver.LoggerOption(logger, levelVar)}
-	return opts
+	logger := slog.Default().With("logger", "gobgp")
+	return []gobgpserver.ServerOption{gobgpserver.LoggerOption(logger, nil)}
 }
 
 // WaitReady blocks until the GoBGP server is initialized or ctx is cancelled.
@@ -109,20 +99,5 @@ func (s *Server) WaitReady(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("gobgp not ready: %w", ctx.Err())
-	}
-}
-
-func parseLogLevel(level string) slog.Level {
-	switch level {
-	case "debug":
-		return slog.LevelDebug
-	case "info":
-		return slog.LevelInfo
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelError + 4 // above error — effectively silent
 	}
 }
