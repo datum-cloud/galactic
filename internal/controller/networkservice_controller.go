@@ -387,7 +387,7 @@ func (r *NetworkServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func namespaceRules(ctx context.Context, c client.Client, namespace string) []ctrlreconcile.Request {
 	list := &bgpv1alpha1.NetworkServiceList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		log.FromContext(ctx).Error(err, "list NetworkServices for VPC change", "namespace", namespace)
+		log.FromContext(ctx).Error(err, "list NetworkServices for VPC change", "resource_namespace", namespace)
 		return nil
 	}
 	reqs := make([]ctrlreconcile.Request, 0, len(list.Items))

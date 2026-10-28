@@ -138,7 +138,7 @@ func (a *Adapter) prepareOnce(ctx context.Context, e *attachment, g *Grant) (str
 			}
 			return "attachment not created: " + err.Error(), nil
 		}
-		a.log.Info("attachment requested", "attachment", created.Name, "service", g.Service.Name)
+		a.log.Info("attachment requested", "attachment", created.Name, "serviceName", g.Service.Name)
 		return "attachment requested", nil
 	case err != nil:
 		return "attachment not read: " + err.Error(), nil

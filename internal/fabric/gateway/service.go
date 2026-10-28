@@ -807,7 +807,7 @@ func (s *Service) finish(caller identity.ID, req *servicev1.RunDiagnosticRequest
 	elapsed := s.now().Sub(rec.started)
 	s.Metrics.serviceRequest(req, errcode.Code(reason))
 	if rec.inventory == nil {
-		slog.Debug("Looking Glass request refused", "service", caller.Name, "project", req.GetProjectId(),
+		slog.Debug("Looking Glass request refused", "caller", caller.Name, "project", req.GetProjectId(),
 			"requestID", req.GetRequestId(), labelOperation, op, labelReason, reason)
 		return
 	}
@@ -815,7 +815,7 @@ func (s *Service) finish(caller identity.ID, req *servicev1.RunDiagnosticRequest
 		s.Metrics.serviceDuration.WithLabelValues(op).Observe(elapsed.Seconds())
 	}
 	attrs := []any{
-		"service", caller.Name, "project", req.GetProjectId(), "requestID", req.GetRequestId(),
+		"caller", caller.Name, "project", req.GetProjectId(), "requestID", req.GetRequestId(),
 		labelOperation, op, labelReason, reason, "routers", len(rec.inventory.Routers),
 		"selected", selectedCount(rec.inventory.Routers), "duration", elapsed,
 	}

@@ -253,7 +253,7 @@ func runNode(parent context.Context, o *nodeOptions) error {
 	stopMetrics := serveMetrics(metricsAddr, metrics.Handler())
 	defer stopMetrics()
 
-	slog.Info("starting fabric-api node", "version", metadata.Version, "node", o.nodeName, "site", o.site,
+	slog.Info("starting fabric-api node", "version", metadata.Version, "nodeName", o.nodeName, "site", o.site,
 		"listen", addr, "metrics", metricsAddr, "probeSources", sources, "expensiveQueries", o.enableExpensive)
 	errc := make(chan error, 1)
 	go func() { errc <- gs.Serve(lis) }()

@@ -50,7 +50,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	slog.Info("ADD: starting",
 		"containerID", args.ContainerID, "netns", args.Netns, "ifName", args.IfName,
 		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment,
-		"namespace", namespace, "nodeName", nodeName)
+		"resource_namespace", namespace, "nodeName", nodeName)
 
 	// Definition check, before any kernel state is created: a conflist missing
 	// the BGP plugin would otherwise attach successfully with no path to its

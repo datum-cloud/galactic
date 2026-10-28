@@ -86,9 +86,9 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 		if err := rt.k8s.Delete(ctx, adv); client.IgnoreNotFound(err) != nil {
 			slog.Error("Rollback: failed to delete BGPAdvertisement", "err", err,
-				"name", adv.Name, "namespace", rt.namespace)
+				"resource_name", adv.Name, "resource_namespace", rt.namespace)
 		} else {
-			slog.Debug("Rollback: deleted BGPAdvertisement", "name", adv.Name, "namespace", rt.namespace)
+			slog.Debug("Rollback: deleted BGPAdvertisement", "resource_name", adv.Name, "resource_namespace", rt.namespace)
 		}
 	}
 
@@ -101,9 +101,10 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 		if err := rt.k8s.Delete(ctx, vrfInst); client.IgnoreNotFound(err) != nil {
 			slog.Error("Rollback: failed to delete freshly-created BGPVRFInstance", "err", err,
-				"name", vrfInst.Name, "namespace", rt.namespace)
+				"resource_name", vrfInst.Name, "resource_namespace", rt.namespace)
 		} else {
-			slog.Debug("Rollback: deleted freshly-created BGPVRFInstance", "name", vrfInst.Name, "namespace", rt.namespace)
+			slog.Debug("Rollback: deleted freshly-created BGPVRFInstance",
+				"resource_name", vrfInst.Name, "resource_namespace", rt.namespace)
 		}
 	}
 }

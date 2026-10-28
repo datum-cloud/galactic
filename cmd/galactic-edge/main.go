@@ -194,7 +194,7 @@ func run(parent context.Context, o *options) error {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return err
 	}
-	slog.Info("starting galactic-edge", "node", o.nodeName, "owner", a.Owner,
+	slog.Info("starting galactic-edge", "nodeName", o.nodeName, "owner", a.Owner,
 		"version", metadata.Version)
 	return mgr.Start(ctx)
 }

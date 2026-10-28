@@ -121,7 +121,7 @@ func repairEndpointSlices(
 		statuses, err := networkStatuses(pod)
 		if err != nil {
 			slog.Warn("EndpointSlice repair: skipping pod with an unreadable network-status annotation",
-				"pod", client.ObjectKeyFromObject(pod), "err", err)
+				"podRef", client.ObjectKeyFromObject(pod), "err", err)
 			result.Skipped++
 			continue
 		}
@@ -144,7 +144,7 @@ func repairEndpointSlices(
 		att, addr, err := lastGalacticIPv6Attachment(ctx, k8s, nads, statuses, defaultNamespace)
 		if err != nil {
 			slog.Warn("EndpointSlice repair: skipping pod whose attachment cannot be resolved",
-				"pod", client.ObjectKeyFromObject(pod), "err", err)
+				"podRef", client.ObjectKeyFromObject(pod), "err", err)
 			result.Skipped++
 			continue
 		}
@@ -155,14 +155,14 @@ func repairEndpointSlices(
 		node, err := identities.get(ctx, k8s, att.namespace, nodeName)
 		if err != nil {
 			slog.Warn("EndpointSlice repair: skipping pod with no SRv6 identity to publish",
-				"pod", client.ObjectKeyFromObject(pod), "err", err)
+				"podRef", client.ObjectKeyFromObject(pod), "err", err)
 			result.Skipped++
 			continue
 		}
 		sid, err := attachmentSID(ctx, k8s, node, att, nodeName)
 		if err != nil {
 			slog.Warn("EndpointSlice repair: skipping pod whose SRv6 SID cannot be computed",
-				"pod", client.ObjectKeyFromObject(pod), "err", err)
+				"podRef", client.ObjectKeyFromObject(pod), "err", err)
 			result.Skipped++
 			continue
 		}
@@ -176,7 +176,7 @@ func repairEndpointSlices(
 		}
 		if created {
 			slog.Info("EndpointSlice repair: recreated missing EndpointSlice",
-				"pod", client.ObjectKeyFromObject(pod), "vpc", att.vpc, "vpcAttachment", att.vpcAttachment)
+				"podRef", client.ObjectKeyFromObject(pod), "vpc", att.vpc, "vpcAttachment", att.vpcAttachment)
 			result.Restored++
 		}
 	}

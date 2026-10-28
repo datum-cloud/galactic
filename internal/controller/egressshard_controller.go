@@ -186,7 +186,7 @@ func (r *EgressShardReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if err := r.syncNode(ctx); err != nil {
-		logger.Error(err, "sync egress translation datapath", "node", r.NodeName)
+		logger.Error(err, "sync egress translation datapath", "nodeName", r.NodeName)
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -650,7 +650,7 @@ func (r *EgressShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		if err := r.syncNode(ctx); err != nil {
 			// Not fatal: the next EgressShard event syncs again.
-			log.FromContext(ctx).Error(err, "initial egress translation datapath sync", "node", r.NodeName)
+			log.FromContext(ctx).Error(err, "initial egress translation datapath sync", "nodeName", r.NodeName)
 		}
 		return nil
 	})); err != nil {
@@ -680,7 +680,7 @@ func (r *EgressShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *EgressShardReconciler) nodeShardRequests(ctx context.Context) []ctrlreconcile.Request {
 	shardList := &bgpv1alpha1.EgressShardList{}
 	if err := r.List(ctx, shardList); err != nil {
-		log.FromContext(ctx).Error(err, "list EgressShards for datapath coverage change", "node", r.NodeName)
+		log.FromContext(ctx).Error(err, "list EgressShards for datapath coverage change", "nodeName", r.NodeName)
 		return nil
 	}
 	var reqs []ctrlreconcile.Request
