@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/vishvananda/netlink"
+	"go.miloapis.com/instrumentation/labels"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -397,8 +398,8 @@ func stepMetrics(t *testing.T, r *Reconciler) {
 		t.Fatal(err)
 	}
 	if !hasSeries(families, "galactic_cni_traffic_policy_rule_hits_total", map[string]string{
-		"namespace": testNS, labelAttachment: testAtt, "vpc": testVPC, labelDirection: "egress", "policy": webPolicy,
-		"rule": "http", labelAction: "allow",
+		labels.ResourceNamespace: testNS, labelAttachment: testAtt, "vpc": testVPC, labelDirection: "egress",
+		"policy": webPolicy, "rule": "http", labelAction: "allow",
 	}) {
 		t.Errorf("no rule hit series for web/http")
 	}

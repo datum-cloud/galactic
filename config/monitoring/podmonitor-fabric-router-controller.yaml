@@ -19,7 +19,3 @@ spec:
   podMetricsEndpoints:
     - port: metrics
       interval: 30s
-      # The fleet series carry the namespace of the object they describe,
-      # which must not be renamed to exported_namespace for the controller
-      # pod's own.
-      honorLabels: true

@@ -103,17 +103,17 @@ was given.
 
    ```promql
    # Would be denied by no matching rule, or by a missing binding.
-   sum by (namespace, attachment, direction, reason) (
+   sum by (resource_namespace, attachment, direction, reason) (
      increase(galactic_cni_traffic_policy_fallback_packets_total[1h])
    ) > 0
 
    # Would be denied by a rule, including the built-in default.
-   sum by (namespace, attachment, direction, policy, rule) (
+   sum by (resource_namespace, attachment, direction, policy, rule) (
      increase(galactic_cni_traffic_policy_rule_hits_total{action="deny"}[1h])
    ) > 0
 
    # Interfaces still on the built-in default.
-   count by (namespace, attachment, direction) (
+   count by (resource_namespace, attachment, direction) (
      galactic_cni_traffic_policy_rule_hits_total{policy_uid="builtin:default-deny-all:v1"}
    )
    ```

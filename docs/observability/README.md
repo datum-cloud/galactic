@@ -89,8 +89,8 @@ sidecar), `fabric-router-controller`, the fabric-api gateway,
 PodMonitors' relabeling of `__meta_kubernetes_pod_node_name` into `node`:
 every galactic metric is per node, and `node` is the label you group and
 alert by. `fabric-router-controller`'s fleet series name the node each
-deployment or router targets themselves, and their `namespace` is the
-object's, which its PodMonitor keeps with `honorLabels`.
+deployment or router targets in `target_node`, and the object's namespace
+in `resource_namespace`.
 
 The eBPF-backed metrics (`galactic_usid_*`, `galactic_cni_egress_shard_*`,
 `galactic_edge_*`, `galactic_edge_foundation_gate_drops_total`, `galactic_nat_*`) are read from BPF maps at scrape time,

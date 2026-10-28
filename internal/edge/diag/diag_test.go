@@ -33,7 +33,7 @@ const secret = "Bearer eyJhbGciOiJSUzI1NiJ9.c2VjcmV0"
 const (
 	prefixConflict = "PrefixConflict"
 	other          = "Other"
-	providerLabel  = "provider"
+	providerLabel  = "edge_provider"
 	alpha          = "alpha"
 	beta           = "beta"
 )
@@ -104,7 +104,7 @@ func TestRecorderFailureAndGateClosed(t *testing.T) {
 		t.Fatalf("failure event %+v", e)
 	}
 	corr := e.Correlation()
-	for k, v := range map[string]string{providerLabel: "p", "attachment": "edge/a", "attachmentUID": "uid-a",
+	for k, v := range map[string]string{"provider": "p", "attachment": "edge/a", "attachmentUID": "uid-a",
 		"podUID": "pod-a", "service": "tenant/svc", "serviceUID": "svc-uid", "node": "n1"} {
 		if corr[k] != v {
 			t.Errorf("correlation %s=%q, want %q (%q)", k, corr[k], v, e.Note)

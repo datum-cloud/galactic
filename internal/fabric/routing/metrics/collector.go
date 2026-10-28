@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/labels"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,7 +32,9 @@ import (
 const (
 	prefix = "galactic_fabric_routing_"
 
-	labelNamespace = "namespace"
+	// labelTargetNode is the node a deployment or router targets, never the
+	// node the controller runs on.
+	labelTargetNode = "target_node"
 
 	// defaultTimeout bounds the cache reads of one scrape.
 	defaultTimeout = 5 * time.Second
@@ -50,7 +53,7 @@ var deploymentConditions = []string{
 }
 
 var (
-	deploymentLabels = []string{labelNamespace, "deployment", "node"}
+	deploymentLabels = []string{labels.ResourceNamespace, "deployment", labelTargetNode}
 
 	deploymentInfo = prometheus.NewDesc(prefix+"deployment_info",
 		"1 for each FabricRouterDeployment: its node, the source its spec asks for and the source the node agent "+
@@ -82,16 +85,16 @@ var (
 
 	releases = prometheus.NewDesc(prefix+"releases",
 		"FabricReleaseAuthorizations by routing domain, phase and whether a failed one's recovery was verified.",
-		[]string{labelNamespace, "routing_domain", "phase", "recovery_verified"}, nil)
+		[]string{labels.ResourceNamespace, "routing_domain", "phase", "recovery_verified"}, nil)
 	releaseOutstanding = prometheus.NewDesc(prefix+"release_outstanding",
 		"1 for each release still blocking its routing domain: Pending, Started, Unknown, or Failed without "+
 			"verified recovery.",
-		[]string{labelNamespace, "release", "routing_domain", "type", "phase"}, nil)
+		[]string{labels.ResourceNamespace, "release", "routing_domain", "type", "phase"}, nil)
 
 	routerAccepted = prometheus.NewDesc(prefix+"router_accepted",
 		"1 when a fabric router's latest inputs compiled into a revision, 0 when the controller refused them; "+
 			"reason is the Accepted condition's.",
-		[]string{labelNamespace, "router", "node", "reason"}, nil)
+		[]string{labels.ResourceNamespace, "router", labelTargetNode, "reason"}, nil)
 
 	collectSuccess = prometheus.NewDesc(prefix+"collect_success",
 		"1 when this scrape read every object of the kind from the cache, 0 when the read failed and the "+
