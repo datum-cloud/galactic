@@ -172,6 +172,26 @@ func (s Ledgers) Init(ctx context.Context, vpc VPCRef, cell string, connectors, 
 	return nil
 }
 
+// holding returns every ledger with an entry for connector.
+func (s Ledgers) holding(ctx context.Context, connector string) ([]*Ledger, error) {
+	var cms corev1.ConfigMapList
+	if err := s.Client.List(ctx, &cms, client.InNamespace(s.Namespace),
+		client.MatchingLabels{LabelLedger: yes}); err != nil {
+		return nil, fmt.Errorf("list ledgers: %w", err)
+	}
+	var out []*Ledger
+	for _, cm := range cms.Items {
+		var l Ledger
+		if err := json.Unmarshal([]byte(cm.Data[ledgerKey]), &l); err != nil {
+			return nil, fmt.Errorf("decode ledger %s: %w", cm.Name, err)
+		}
+		if _, ok := l.Lookup(connector); ok {
+			out = append(out, &l)
+		}
+	}
+	return out, nil
+}
+
 // inNetworks reports whether p lies inside one of networks.
 func inNetworks(networks []cloudv1alpha1.Network, p netip.Prefix) bool {
 	for _, n := range networks {

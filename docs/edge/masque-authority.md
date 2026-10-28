@@ -73,6 +73,8 @@ masque-authority grant retire  <connector>   # revoke and tombstone the allocati
 
 `ledger init` refuses ranges that aren't masked IPv6 /80s inside one of the VPC's networks, or that overlap each other. It also refuses ranges that overlap those of another cell's ledger for the same VPC, so two cells are never handed overlapping /80s. And it refuses while any EdgeService the authority issued for the VPC in that cell still exists, so a recreated ledger can't hand out a /96 or pool that one still holds. Issued services of other cells don't block it. Choose ranges that overlap no workload subnet; core refuses a delegated route that does.
 
+`grant create` allocates the /96 before it writes the grant record. If the record write fails, the error names the connector and its /96. Run `grant create` again with `--connector <connector>` to keep that /96, or `grant retire <connector>` to tombstone it. A plain retry allocates another /96. If the error says the connector already has a grant record, the write succeeded but its reply was lost: run `grant rotate <connector>` for a credential.
+
 Run the server with:
 
 ```sh

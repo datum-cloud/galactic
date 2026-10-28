@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -68,6 +69,11 @@ func (g Grants) expiry(lifetime time.Duration) (time.Time, error) {
 // Create allocates the connector's /96 in the ledger of its VPC and cell,
 // writes its grant record with a new credential and returns that
 // credential. It refuses a connector that already has a record.
+//
+// The allocation is written before the record. When the record write
+// fails, the error names the connector: creating it again with the same
+// Connector reuses its allocation rather than taking another /96, and
+// Retire tombstones it.
 func (g Grants) Create(ctx context.Context, req CreateRequest) (Issued, error) {
 	expires, err := g.expiry(req.Lifetime)
 	if err != nil {
@@ -98,7 +104,12 @@ func (g Grants) Create(ctx context.Context, req CreateRequest) (Issued, error) {
 		return Issued{}, fmt.Errorf("allocate connector %s: %w", r.Connector, err)
 	}
 	if err := g.Client.Create(ctx, s); err != nil {
-		return Issued{}, fmt.Errorf("create grant record %s: %w", s.Name, err)
+		if apierrors.IsAlreadyExists(err) {
+			return Issued{}, fmt.Errorf("connector %s already has a grant record; rotate it for a new credential: %w",
+				r.Connector, err)
+		}
+		return Issued{}, fmt.Errorf("create grant record of connector %s, which holds %s; create it again with "+
+			"this connector to keep that /96, or retire it: %w", r.Connector, e.Prefix, err)
 	}
 	return Issued{Connector: r.Connector, Credential: cred, Revision: r.Revision, VPC: r.VPC.Selector(),
 		Prefix: e.Prefix, Expires: expires}, nil
@@ -153,9 +164,13 @@ func (g Grants) Disable(ctx context.Context, connector string) error {
 }
 
 // Retire disables the connector and tombstones its allocation, so its /96
-// and attachment pool are never allocated again.
+// and attachment pool are never allocated again. A connector whose record
+// was never written, because Create failed after allocating, has its
+// allocation tombstoned in whichever of the authority's ledgers holds it.
 func (g Grants) Retire(ctx context.Context, connector string) error {
-	if err := g.Disable(ctx, connector); err != nil {
+	if err := g.Disable(ctx, connector); apierrors.IsNotFound(err) {
+		return g.retireUnrecorded(ctx, connector, err)
+	} else if err != nil {
 		return err
 	}
 	r, _, err := readRecord(ctx, g.Client, g.Namespace, connector)
@@ -163,6 +178,30 @@ func (g Grants) Retire(ctx context.Context, connector string) error {
 		return err
 	}
 	return g.ledgers().Retire(ctx, r.VPC.UID, r.Cell, connector)
+}
+
+// retireUnrecorded tombstones the allocations of connector, which has no
+// record. notFound is the error reading the record returned, for a
+// connector no ledger holds either.
+func (g Grants) retireUnrecorded(ctx context.Context, connector string, notFound error) error {
+	held, err := g.ledgers().holding(ctx, connector)
+	if err != nil {
+		return err
+	}
+	if len(held) == 0 {
+		return notFound
+	}
+	for _, l := range held {
+		if err := g.ledgers().Retire(ctx, l.VPC.UID, l.Cell, connector); err != nil {
+			return err
+		}
+	}
+	// A Create that wrote the record since Disable found none leaves it
+	// enabled; disable it as Retire does a recorded connector.
+	if err := g.Disable(ctx, connector); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // update applies change to a fresh read of the connector's record and
