@@ -59,8 +59,8 @@ func TestLintLinksEveryMetric(t *testing.T) {
 }
 
 // noMetricsEndpoint lists the commands that serve no metrics: the CNI
-// plugins, exec'd once per call by the container runtime, and the one-shot
-// galactic-usid codec.
+// plugins, exec'd once per call by the container runtime, the one-shot
+// galactic-usid codec, and the masque-authority grant service.
 var noMetricsEndpoint = []string{
 	"galactic-bgp",
 	"galactic-ipam",
@@ -68,6 +68,7 @@ var noMetricsEndpoint = []string{
 	"galactic-tap",
 	"galactic-usid",
 	"galactic-veth",
+	"masque-authority",
 }
 
 // TestEveryBinaryHasScrapeTest fails when a command that serves metrics has
