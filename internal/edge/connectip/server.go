@@ -7,6 +7,7 @@ package connectip
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
 	"github.com/quic-go/quic-go"
@@ -58,10 +60,14 @@ const (
 // per-pod targets in docs/designs/masque/contract.md; MaxSessions covers 32
 // active connectors plus 32 replacements.
 const (
-	DefaultMaxConnections    = 128
-	DefaultMaxStreamsPerConn = 2
-	DefaultMaxAdmissions     = 16
-	DefaultMaxSessions       = 64
+	DefaultMaxConnections             = 128
+	DefaultMaxConnectionsPerSource    = 8
+	DefaultMaxStreamsPerConn          = 2
+	DefaultMaxHeaderBytes             = 8 << 10
+	DefaultHandshakeTimeout           = 5 * time.Second
+	DefaultMaxAdmissions              = 16
+	DefaultMaxAdmissionsPerCredential = 2
+	DefaultMaxSessions                = 64
 )
 
 // Limits bound the work any client can make the server do before and after
@@ -70,21 +76,39 @@ type Limits struct {
 	// MaxConnections caps open QUIC connections. The server closes a
 	// connection over the cap with H3_EXCESSIVE_LOAD.
 	MaxConnections int
+	// MaxConnectionsPerSource caps the open QUIC connections from one
+	// source IP address, closing the rest the same way. A connection counts
+	// once its handshake completes. Clients behind one NAT share it.
+	MaxConnectionsPerSource int
 	// MaxStreamsPerConn caps the concurrent request streams of one
 	// connection. It is QUIC's MaxIncomingStreams.
 	MaxStreamsPerConn int
+	// MaxHeaderBytes caps the size of a request's header section.
+	MaxHeaderBytes int
+	// HandshakeTimeout bounds a QUIC handshake from the client's first
+	// packet. quic-go allows a handshake twice its HandshakeIdleTimeout, so
+	// that is set to half of HandshakeTimeout.
+	HandshakeTimeout time.Duration
 	// MaxAdmissions caps the requests waiting on Admission.Admit at once.
 	MaxAdmissions int
+	// MaxAdmissionsPerCredential caps the requests waiting on
+	// Admission.Admit at once with one bearer credential. It is checked
+	// after MaxSessions and MaxAdmissions.
+	MaxAdmissionsPerCredential int
 	// MaxSessions caps the requests admitted at once.
 	MaxSessions int
 }
 
 func (l Limits) withDefaults() Limits {
 	return Limits{
-		MaxConnections:    cmp.Or(l.MaxConnections, DefaultMaxConnections),
-		MaxStreamsPerConn: cmp.Or(l.MaxStreamsPerConn, DefaultMaxStreamsPerConn),
-		MaxAdmissions:     cmp.Or(l.MaxAdmissions, DefaultMaxAdmissions),
-		MaxSessions:       cmp.Or(l.MaxSessions, DefaultMaxSessions),
+		MaxConnections:             cmp.Or(l.MaxConnections, DefaultMaxConnections),
+		MaxConnectionsPerSource:    cmp.Or(l.MaxConnectionsPerSource, DefaultMaxConnectionsPerSource),
+		MaxStreamsPerConn:          cmp.Or(l.MaxStreamsPerConn, DefaultMaxStreamsPerConn),
+		MaxHeaderBytes:             cmp.Or(l.MaxHeaderBytes, DefaultMaxHeaderBytes),
+		HandshakeTimeout:           cmp.Or(l.HandshakeTimeout, DefaultHandshakeTimeout),
+		MaxAdmissions:              cmp.Or(l.MaxAdmissions, DefaultMaxAdmissions),
+		MaxAdmissionsPerCredential: cmp.Or(l.MaxAdmissionsPerCredential, DefaultMaxAdmissionsPerCredential),
+		MaxSessions:                cmp.Or(l.MaxSessions, DefaultMaxSessions),
 	}
 }
 
@@ -94,9 +118,9 @@ type Config struct {
 	Authority string
 	// TLSConfig holds the server certificate.
 	TLSConfig *tls.Config
-	// QUICConfig is optional; datagrams are always enabled and
-	// MaxIncomingStreams is Limits.MaxStreamsPerConn. When nil, the initial
-	// packet size is DefaultInitialPacketSize.
+	// QUICConfig is optional; datagrams are always enabled, and
+	// MaxIncomingStreams and HandshakeIdleTimeout come from Limits. When
+	// nil, the initial packet size is DefaultInitialPacketSize.
 	QUICConfig *quic.Config
 	// Limits is optional; see Limits for the defaults.
 	Limits Limits
@@ -116,12 +140,19 @@ type Server struct {
 	h3        *http3.Server
 	proxy     connectip.Proxy
 
-	// conns counts open QUIC connections; admitting and active hold one
-	// token per request in Admit and per admitted request.
-	maxConns  int64
+	// limits has every default applied. conns counts open QUIC
+	// connections; admitting and active hold one token per request in Admit
+	// and per admitted request.
+	limits    Limits
 	conns     atomic.Int64
 	admitting chan struct{}
 	active    chan struct{}
+
+	// countMu guards the open connections of each source address and the
+	// requests in Admit of each credential digest.
+	countMu    sync.Mutex
+	sources    map[netip.Addr]int
+	credential map[[sha256.Size]byte]int
 
 	mu       sync.Mutex
 	closed   bool
@@ -161,19 +192,23 @@ func NewServer(cfg Config) (*Server, error) {
 	limits := cfg.Limits.withDefaults()
 	quicConf.EnableDatagrams = true
 	quicConf.MaxIncomingStreams = int64(limits.MaxStreamsPerConn)
+	quicConf.HandshakeIdleTimeout = limits.HandshakeTimeout / 2
 
 	s := &Server{
-		template:  template,
-		admission: cfg.Admission,
-		backend:   cfg.Backend,
-		log:       log,
-		maxConns:  int64(limits.MaxConnections),
-		admitting: make(chan struct{}, limits.MaxAdmissions),
-		active:    make(chan struct{}, limits.MaxSessions),
+		template:   template,
+		admission:  cfg.Admission,
+		backend:    cfg.Backend,
+		log:        log,
+		limits:     limits,
+		admitting:  make(chan struct{}, limits.MaxAdmissions),
+		active:     make(chan struct{}, limits.MaxSessions),
+		sources:    map[netip.Addr]int{},
+		credential: map[[sha256.Size]byte]int{},
 	}
 	s.h3 = &http3.Server{
 		Handler:         s,
 		EnableDatagrams: true,
+		MaxHeaderBytes:  limits.MaxHeaderBytes,
 		TLSConfig:       http3.ConfigureTLSConfig(cfg.TLSConfig),
 		QUICConfig:      quicConf,
 		Logger:          log,
@@ -238,8 +273,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.sessions.Done()
-	// Both caps are taken before Admit, so an unauthenticated client cannot
-	// queue work behind them.
+	// Every cap is taken before Admit, so an unauthenticated client cannot
+	// queue work behind them. The global caps come first, so a flood of
+	// credentials spends no digest work.
 	if !tryAcquire(s.active) {
 		s.reject(w, http.StatusServiceUnavailable, "too many sessions", nil)
 		return
@@ -249,8 +285,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, http.StatusServiceUnavailable, "too many admissions in progress", nil)
 		return
 	}
-	lease, err := s.admission.Admit(r.Context(), token, vpcName)
-	release(s.admitting)
+	lease, admitted, err := s.admit(r.Context(), token, vpcName)
+	if !admitted {
+		s.reject(w, http.StatusServiceUnavailable, "too many admissions in progress for one credential", nil)
+		return
+	}
 	if err != nil {
 		s.reject(w, admissionStatus(w, err), "admission rejected", err)
 		return
@@ -340,13 +379,85 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // countConn counts c until it closes, and closes it at once when it would
-// exceed the connection cap.
+// exceed the connection cap. Its source address counts only once the
+// handshake completes, which proves the client receives at that address, so
+// spoofed Initial packets cannot spend a victim's per-source slots.
 func (s *Server) countConn(c *quic.Conn) {
 	n := s.conns.Add(1)
 	context.AfterFunc(c.Context(), func() { s.conns.Add(-1) })
-	if n > s.maxConns {
-		s.log.Info("QUIC connection rejected", "reason", "too many connections", "remote", c.RemoteAddr())
-		_ = c.CloseWithError(errExcessiveLoad, "too many connections")
+	if n > int64(s.limits.MaxConnections) {
+		s.closeConn(c, "too many connections")
+		return
+	}
+	go func() {
+		select {
+		case <-c.HandshakeComplete():
+		case <-c.Context().Done():
+			return
+		}
+		src := sourceAddr(c.RemoteAddr())
+		s.countMu.Lock()
+		s.sources[src]++
+		fromSrc := s.sources[src]
+		s.countMu.Unlock()
+		context.AfterFunc(c.Context(), func() {
+			s.countMu.Lock()
+			defer s.countMu.Unlock()
+			if s.sources[src]--; s.sources[src] == 0 {
+				delete(s.sources, src)
+			}
+		})
+		if fromSrc > s.limits.MaxConnectionsPerSource {
+			s.closeConn(c, "too many connections from one source")
+		}
+	}()
+}
+
+func (s *Server) closeConn(c *quic.Conn, reason string) {
+	s.log.Info("QUIC connection rejected", "reason", reason, "remote", c.RemoteAddr())
+	_ = c.CloseWithError(errExcessiveLoad, reason)
+}
+
+// admit calls Admission.Admit while holding one of the credential's
+// admission slots, and releases it and the global admission slot the caller
+// took, even if Admit panics. admitted is false when the credential has no
+// slot free; Admit then did not run.
+func (s *Server) admit(ctx context.Context, token, vpc string) (lease Lease, admitted bool, err error) {
+	defer release(s.admitting)
+	digest := sha256.Sum256([]byte(token))
+	if !s.acquireCredential(digest) {
+		return nil, false, nil
+	}
+	defer s.releaseCredential(digest)
+	lease, err = s.admission.Admit(ctx, token, vpc)
+	return lease, true, err
+}
+
+// sourceAddr returns the IP address a connection comes from, with an
+// IPv4-mapped IPv6 address unmapped, so one client counts once.
+func sourceAddr(a net.Addr) netip.Addr {
+	if u, ok := a.(*net.UDPAddr); ok {
+		return u.AddrPort().Addr().Unmap()
+	}
+	return netip.Addr{}
+}
+
+// acquireCredential takes one of digest's admission slots without waiting.
+func (s *Server) acquireCredential(digest [sha256.Size]byte) bool {
+	s.countMu.Lock()
+	defer s.countMu.Unlock()
+	if s.credential[digest] >= s.limits.MaxAdmissionsPerCredential {
+		return false
+	}
+	s.credential[digest]++
+	return true
+}
+
+func (s *Server) releaseCredential(digest [sha256.Size]byte) {
+	s.countMu.Lock()
+	defer s.countMu.Unlock()
+	if s.credential[digest]--; s.credential[digest] == 0 {
+		delete(s.credential, digest)
 	}
 }
 

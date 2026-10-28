@@ -77,6 +77,9 @@ type Config struct {
 	// and how often a request waits between reads while they are prepared.
 	// Zero means one second.
 	Poll time.Duration
+	// AuthorizeTimeout bounds each Authorizer.Authorize call, the part of
+	// admission an unauthenticated client can start. Zero means 3 seconds.
+	AuthorizeTimeout time.Duration
 	// Prepare bounds how long a request waits for its attachment to be
 	// programmed and its route accepted. Zero means 30 seconds.
 	Prepare time.Duration
@@ -142,6 +145,9 @@ func New(cfg Config) (*Adapter, error) {
 	}
 	if cfg.Poll == 0 {
 		cfg.Poll = time.Second
+	}
+	if cfg.AuthorizeTimeout == 0 {
+		cfg.AuthorizeTimeout = 3 * time.Second
 	}
 	if cfg.Prepare == 0 {
 		cfg.Prepare = 30 * time.Second
@@ -340,7 +346,9 @@ func (a *Adapter) Admit(ctx context.Context, credential, vpc string) (connectip.
 	a.mu.Lock()
 	began := a.revokeSeq
 	a.mu.Unlock()
-	g, err := a.cfg.Authorizer.Authorize(ctx, credential, vpc)
+	actx, stopAuthorize := context.WithTimeout(ctx, a.cfg.AuthorizeTimeout)
+	g, err := a.cfg.Authorizer.Authorize(actx, credential, vpc)
+	stopAuthorize()
 	if err != nil {
 		return nil, err
 	}
