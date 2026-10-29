@@ -295,6 +295,21 @@ tasks:
       - go test -c -race -o {{.LOCALBIN}}/connectip-interop.test ./tests/connectipinterop/
       - rm -rf {{.ARTIFACTS}}
       - sudo env CONNECTIP_INTEROP_XRAY={{.XRAY_DIR}}/xray CONNECTIP_INTEROP_ARTIFACTS={{.ARTIFACTS}} {{.LOCALBIN}}/connectip-interop.test -test.v -test.count=1 -test.timeout=10m
+  test:connectip-load:
+    desc: Measure CONNECT-IP capacity per transport on loopback (see docs/edge/masque-capacity.md)
+    # Not part of ci: one run takes about 15 minutes and loads every CPU.
+    # CONNECTIP_LOAD_DURATION, _WARMUP, _RUNS and _CONNECTORS override the
+    # defaults. The report lands in bin/connectip-load (report.md and
+    # report.json).
+    vars:
+      ARTIFACTS: '{{.LOCALBIN}}/connectip-load'
+    env:
+      CONNECTIP_LOAD: '1'
+      CONNECTIP_LOAD_RUNS: '{{.CONNECTIP_LOAD_RUNS | default "3"}}'
+      CONNECTIP_LOAD_REPORT: '{{.ARTIFACTS}}/report.md'
+    cmds:
+      - mkdir -p {{.ARTIFACTS}}
+      - go test ./internal/edge/connectip -run '^TestLoad$' -count=1 -v -timeout 90m
   test:fabric-parity:
     desc: Compile every fabric frr.conf back through the typed API and diff it with the pinned FRR's frr-reload
     # Needs Docker, so it is not part of ci. The synthetic fixtures always

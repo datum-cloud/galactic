@@ -53,6 +53,8 @@ func (t *narrowTunnel) receiveAddressRequest(ctx context.Context) (addressReques
 	return addressRequest{}, context.Canceled
 }
 
+func (t *narrowTunnel) abort() { _ = t.Close() }
+
 func (t *narrowTunnel) Close() error {
 	t.once.Do(func() { close(t.closed) })
 	return nil
@@ -69,8 +71,8 @@ func (t *narrowTunnel) isClosed() bool {
 
 // runProxySession runs proxySession over tun and a fresh backend session
 // until the test ends or the session does, which closes the returned
-// channel.
-func runProxySession(t *testing.T, tun tunnel) (*memorySession, <-chan struct{}) {
+// channel after sending the session's end cause on it.
+func runProxySession(t *testing.T, tun tunnel) (*memorySession, <-chan string) {
 	t.Helper()
 	bs, err := newMemoryBackend().Open(t.Context(), SessionInfo{})
 	if err != nil {
@@ -78,11 +80,11 @@ func runProxySession(t *testing.T, tun tunnel) (*memorySession, <-chan struct{})
 	}
 	sess := bs.(*memorySession)
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
+	done := make(chan string, 1)
 	go func() {
 		defer close(done)
-		(&Server{}).proxySession(ctx, slog.Default(), tun, sess,
-			newPacketPolicy(firstPrefix, []netip.Prefix{policyRoute}))
+		done <- (&Server{}).proxySession(ctx, slog.Default(), tun, sess,
+			newPacketPolicy(firstPrefix, []netip.Prefix{policyRoute}), newForwardCounters(transportH3))
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -101,7 +103,10 @@ func TestProxyEndsSessionBelowMinimumMTU(t *testing.T) {
 	sess, done := runProxySession(t, tun)
 	sess.inject(echoRequest(t, policyTarget, firstClient, 1, MinInnerMTU))
 	select {
-	case <-done:
+	case cause := <-done:
+		if cause != causePathMTU {
+			t.Errorf("session ended with cause %q, want %q", cause, causePathMTU)
+		}
 	case <-time.After(testTimeout):
 		t.Fatalf("session still open after a %d-byte packet could not be sent", MinInnerMTU)
 	}

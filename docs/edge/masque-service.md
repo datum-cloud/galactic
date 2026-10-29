@@ -78,9 +78,11 @@ The server applies the per-pod limits of the [MASQUE contract](../designs/masque
 | Requests in admission per credential     | 2                      | 503                                                                  |
 | Authorization of one request             | 3 s                    | 503                                                                  |
 | Admitted requests                        | 64                     | 503                                                                  |
-| Queued packets toward one client         | 128 packets or 256 KiB | Packet dropped                                                       |
-| HTTP/2 capsule write toward one client   | 5 s                    | That request ends                                                    |
+| Queued packets toward one client         | 128 packets or 256 KiB | Packet dropped, counted as `queue_full`                              |
+| Stuck delivery toward one client         | 5 s                    | That request ends, counted as `slow_client`                          |
 | HTTP/2 connection with no request        | 30 s                   | Connection closed                                                    |
+
+Delivery is stuck when one write toward the client blocks for 5 s, or when writes that each take over 1.25 s keep recurring for 5 s, with fewer than 16 prompt writes in a row between them. The second case catches an HTTP/3 client that stopped reading, whose QUIC connection still sends two datagrams per probe timeout.
 
 Both transports share every limit from the connection caps down: an HTTP/3 session and an HTTP/2 session each take one of the 64 admitted requests. A QUIC connection counts toward its source IP once its handshake completes, so spoofed packets cannot use up another client's slots. A TCP connection counts once it is accepted, because TCP's own handshake proves the address. The source-IP limit counts every client behind one NAT as one source.
 
@@ -100,7 +102,7 @@ A client whose UDP/443 is blocked sends the same request over HTTP/2 with TLS on
 
 - **Packet size.** The HTTP/2 path carries inner packets of up to 1500 bytes. A larger packet from the gVPC gets an ICMPv6 Packet Too Big with MTU 1500. A larger packet from the client is dropped and counted as `reason="too_large"`.
 - **Malformed input.** The server holds at most one DATAGRAM capsule per request. It discards larger DATAGRAM capsules and unknown capsules as they arrive. A malformed capsule or an oversized `ADDRESS_REQUEST` ends only its own request.
-- **Slow readers.** A capsule write that cannot finish in 5 seconds ends its request. Another request on the same connection keeps forwarding.
+- **Slow readers.** A capsule write that cannot finish in 5 seconds ends its request. Another request on the same connection keeps forwarding. Over HTTP/3, every request on a QUIC connection shares one datagram send queue, so a blocked packet write closes the client's whole QUIC connection.
 - **Moving between transports.** A connector that reconnects over HTTP/2 while its HTTP/3 tunnel still exists is admitted again through the adapter. The adapter treats the new request as a [replacement](masque-provider.md#replacing-a-connectors-request): the old session ends before the new one forwards, so the connector never has two forwarding owners. A replacement on another pod goes through the grant authority's [cross-instance replacement](../designs/masque/contract.md#cross-instance-replacement-and-stale-cleanup).
 
 ## Startup and readiness
@@ -120,4 +122,4 @@ Step 2 has 20 seconds, so give the pod a termination grace period of at least 30
 
 ## Metrics
 
-`/metrics` serves the instrumentation library's registry, including `galactic_connectip_packets_denied_total{direction, reason}` ([packet policy](masque-provider.md#packet-policy)).
+`/metrics` serves the instrumentation library's registry: the CONNECT-IP server's request, tunnel and packet metrics (`galactic_connectip_*`) and the adapter's admission, route claim and request state metrics (`galactic_masque_*`), listed in [the MASQUE metrics reference](../observability/masque.md). [Diagnose a MASQUE connector](troubleshooting.md#diagnose-a-masque-connector) uses them with the provider's log lines.

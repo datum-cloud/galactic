@@ -7,6 +7,7 @@ Metrics, scrape configuration, shipped alert rules and log format. Use the subsy
 - [VPC ingress — `galactic_ingress_sidecar_*`](vpc-ingress.md)
 - [Edge load balancer — `galactic_edge_*`](gateway.md)
 - [Galactic Edge foundation — `galactic_edge_foundation_*`](edge.md)
+- [MASQUE connector — `galactic_connectip_*` and `galactic_masque_*`](masque.md)
 - [Traffic policy — `galactic_cni_traffic_policy_*`](traffic-policy.md)
 - [Routing](routing.md)
 - [NAT66 / NAT64 — `galactic_nat_*`](nat.md)

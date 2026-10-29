@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"golang.org/x/sys/unix"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -228,6 +229,7 @@ func (h *harness) start() {
 		}
 	}()
 	h.t.Cleanup(func() {
+		untrack(a)
 		cancel()
 		<-done
 		h.mu.Lock()
@@ -865,7 +867,7 @@ func TestLeaseChangeEndsRequests(t *testing.T) {
 	h := newHarness(t)
 	h.start()
 	l1 := h.admit(credA1)
-	h.a.loseLease("test")
+	h.a.loseLease(errors.New("test"))
 	expectDone(t, l1, "losing the lease")
 	h.a.setLease(&claim.Lease{Key: provider.InstanceName(testPod), Holder: testHolder, Epoch: 4,
 		Incarnation: testIncarnation, Deadline: h.clock.read() + time.Hour})
@@ -978,7 +980,7 @@ func TestForwardingStops(t *testing.T) {
 		stop  func(h *harness)
 		check bool
 	}{
-		{name: "lease lost", stop: func(h *harness) { h.a.loseLease("test") }},
+		{name: "lease lost", stop: func(h *harness) { h.a.loseLease(errors.New("test")) }},
 		{name: "lease expired", stop: func(h *harness) { h.clock.advance(2 * time.Hour) }},
 		{name: "grant expired", stop: func(h *harness) {
 			h.mu.Lock()
@@ -1060,6 +1062,7 @@ func TestFullDeviceDropsPackets(t *testing.T) {
 	}
 	defer func() { _ = s.Close() }()
 	pkt := packet("fd00:10::5")
+	dropped := testutil.ToFloat64(deviceDrops)
 	for range 10000 {
 		if err := s.WritePacket(pkt); err != nil {
 			t.Fatalf("a full device ended the request: %v", err)
@@ -1070,6 +1073,9 @@ func TestFullDeviceDropsPackets(t *testing.T) {
 	}
 	if l.(*session).drops.Load() == 0 {
 		t.Fatal("the device never filled")
+	}
+	if got := testutil.ToFloat64(deviceDrops) - dropped; got != float64(l.(*session).drops.Load()) {
+		t.Fatalf("device drops rose by %v, want %d", got, l.(*session).drops.Load())
 	}
 	expectLive(t, l, "a full device")
 }

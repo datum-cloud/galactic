@@ -186,7 +186,7 @@ func (a *Adapter) prepareOnce(ctx context.Context, e *attachment, g *Grant) (str
 	e.backend, e.vpcID, e.programmed = b, att.Status.VPC, programmedKey(&att)
 	a.mu.Unlock()
 	if err := a.setReady(ctx, &att, true, "Serving", "the provider is serving the attachment"); err != nil {
-		a.closeAttachment(e, "Ready not reported")
+		a.closeAttachment(e, reasonNotReady)
 		return "", fmt.Errorf("report attachment %s Ready: %w", att.Name, err)
 	}
 	a.log.Info("serving attachment", "attachment", att.Name, "uid", att.UID, "device", att.Status.PacketDevice)
@@ -312,7 +312,7 @@ func (a *Adapter) checkAttachment(ctx context.Context, e *attachment) {
 		e.backend != nil
 	a.mu.Unlock()
 	if refs == 0 && idle >= a.cfg.Idle {
-		a.closeAttachment(e, "idle")
+		a.closeAttachment(e, reasonIdle)
 		if err := a.deleteAttachment(ctx, e); err != nil {
 			a.log.Warn("could not delete idle attachment", "attachment", e.name, "error", err)
 		}
@@ -324,7 +324,7 @@ func (a *Adapter) checkAttachment(ctx context.Context, e *attachment) {
 	var att galacticv1alpha1.EdgeAttachment
 	err := a.cfg.Client.Get(ctx, client.ObjectKey{Namespace: a.cfg.Pod.Namespace, Name: e.name}, &att)
 	if apierrors.IsNotFound(err) {
-		a.closeAttachment(e, "attachment deleted")
+		a.closeAttachment(e, reasonAttachmentDeleted)
 		return
 	}
 	if err != nil {
@@ -333,15 +333,15 @@ func (a *Adapter) checkAttachment(ctx context.Context, e *attachment) {
 	var reason string
 	switch {
 	case att.UID != uid:
-		reason = "attachment replaced"
+		reason = reasonAttachmentReplaced
 	case att.DeletionTimestamp != nil:
-		reason = "attachment deleted"
+		reason = reasonAttachmentDeleted
 	case meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentDraining):
-		reason = "attachment draining"
+		reason = reasonAttachmentDraining
 	case !meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentProgrammed):
-		reason = "attachment no longer programmed"
+		reason = reasonAttachmentUnprogrammed
 	case programmedKey(&att) != programmed:
-		reason = "attachment reprogrammed"
+		reason = reasonAttachmentReprogrammed
 	default:
 		return
 	}
