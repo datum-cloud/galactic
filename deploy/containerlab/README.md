@@ -260,6 +260,13 @@ its behalf.
 | iad-worker2 – tr3:bond1   | 2001:db8:1:32::/64   | 2001:db8:1:32::1   | 2001:db8:1:32::2   | 10.1.32.0/24   | 10.1.32.1    | 10.1.32.2      |
 | remote-host – tr4:eth4    | 2001:db8:1:40::/64   | 2001:db8:1:40::1   | 2001:db8:1:40::2   | 11.1.40.0/24   | 11.1.40.1    | 11.1.40.2      |
 
+`remote-host` also takes `2c0f:40::2/64` on the same link. fabric-api's public probe
+policy refuses `2001:db8::/32`, so a Looking Glass ping or traceroute over IPv6 needs a
+global destination, and this is it. `tr4` also originates `11.1.42.0/24` and `2c0f:42::/64`
+and drops them without an ICMP error: a probe there is lost and a traceroute ends in silent
+hops, keeping its routers busy for about 20 s (`verify:looking-glass` cancels, expires and
+fails over such probes). None of these prefixes leave the lab.
+
 ### Site-internal links (numbered, iBGP to the site's edge node)
 
 Same convention with the edge node in the router's seat: it takes `::1`/`.1`, the worker
@@ -507,6 +514,8 @@ task deploy
 | `build:remote-host`              | Build the off-fabric nginx host image                                                                                                       |
 | `build:galactic-controller`      | Build the galactic-controller image (traffic policy's cell role)                                                                            |
 | `build:fabric-router-controller` | Build the fabric-router-controller image (typed fabric routing)                                                                             |
+| `build:masque-service`           | Build the MASQUE CONNECT-IP service image (`containers/masque-provider`), tagged `masque-service:latest`                                    |
+| `build:masque-authority`         | Build the MASQUE grant authority image (`containers/masque-authority`)                                                                      |
 | `deploy`                         | Build images, apply host sysctls, and deploy the lab                                                                                        |
 | `deploy:topology`                | Deploy the ContainerLab topology (transit routers)                                                                                          |
 | `deploy:clusters`                | Create the three Kind clusters and export their kubeconfigs                                                                                 |
@@ -552,6 +561,10 @@ task deploy
 | `verify:ns30`                    | Verify ns30 ping (dfw only, 2 pods)                                                                                                         |
 | `verify:ns40`                    | Verify ns40 ping (iad only, 2 pods)                                                                                                         |
 | `verify:traffic-policy`          | Every binding installed; each path forwards what it grants and drops, and counts, what it does not                                          |
+| `verify:masque-service`          | Run the shipped MASQUE service and grant authority against dfw's gVPC workloads (about 20 min; restarts dfw-worker2; not in `verify`)       |
+| `deploy:looking-glass`           | Enable the Looking Glass service on dfw in the documented order (restarts dfw's FRR twice); issue its test certificates                     |
+| `verify:looking-glass`           | Qualify the Looking Glass service on dfw with the independent client, with faults (about 45 min; not in `verify`)                           |
+| `undeploy:looking-glass`         | Switch the Looking Glass service off on dfw and roll its enabling steps back (restarts dfw's FRR twice)                                     |
 | `destroy`                        | Destroy the lab and remove all Kind clusters                                                                                                |
 | `restart`                        | Full rebuild — destroy then redeploy                                                                                                        |
 | `rebuild`                        | Full rebuild — clean (destroy + delete images/artifacts) then redeploy                                                                      |
@@ -599,6 +612,44 @@ Quick smoke test:
 ```bash
 task verify  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
 ```
+
+### MASQUE service
+
+`task verify:masque-service` runs the shipped MASQUE CONNECT-IP service and
+its grant authority against dfw's gVPC workloads (`TestMASQUEService` in
+`tests/edgeconformance`). It needs Galactic Edge on dfw (`deploy:galactic-edge`),
+the `ns10` and `ns20` scenarios, and both images on the nodes:
+
+```bash
+task build:masque-service build:masque-authority
+task deploy:images   # or load just these two, as deploy:images does
+task verify:masque-service
+```
+
+The suite applies `resources/masque-service/`, the lab overlays of
+`config/masque`, after creating the TLS Secrets and the authority's CA from a
+CA it generates. It approves the `masque` EdgeProvider, creates each VPC's
+ledger and the connectors' grants with `masque-authority ledger init` and
+`grant create` run in the authority's pod, and removes everything in the
+reverse order when it ends. The overlays differ from `config/masque` only
+where the lab must:
+
+- The images are `masque-service:latest` and `masque-authority:latest`, never
+  pulled. `masque-provider:latest` stays the conformance fixture of
+  `verify:masque-conformance`.
+- The provider pod runs on dfw-worker2 and clients send `:authority`
+  `masque.dfw.lab.test:443`. The probe dials the pod from its own node.
+- Pods on one worker cannot reach pod addresses or the cluster DNS on
+  another, so the authority runs on dfw-worker's host network behind a
+  Service with a fixed address, and the provider pod resolves the authority's
+  name to it through a host alias.
+
+Its node-restart row restarts dfw-worker2's container with
+`scripts/restart-node.sh`, which `docker restart`s a Kind node and restores
+what lived in its network namespace: its gvpc.clab.yaml links (through
+`containerlab tools veth create`, so it needs passwordless `sudo`), its
+sysctls and exec commands, its peers' bonds, the pass-through XDP programs and
+its addresses. The script works for any Kind node of the topology.
 
 ## Notes
 

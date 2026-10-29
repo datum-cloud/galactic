@@ -429,7 +429,7 @@ func publishBGPState(
 		if op == controllerutil.OperationResultCreated {
 			result.vrfInstanceCreated = true
 		}
-		slog.Debug("BGP: BGPVRFInstance applied", "name", vrfName, "namespace", namespace,
+		slog.Debug("BGP: BGPVRFInstance applied", "resource_name", vrfName, "resource_namespace", namespace,
 			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName, "operation", op)
 
 		// A collision means allocateArgument's read-then-write raced another
@@ -516,7 +516,7 @@ func publishBGPState(
 		if advOp == controllerutil.OperationResultCreated {
 			result.advertisementCreated = true
 		}
-		slog.Debug("BGP: BGPAdvertisement applied", "name", adv.Name, "namespace", namespace,
+		slog.Debug("BGP: BGPAdvertisement applied", "resource_name", adv.Name, "resource_namespace", namespace,
 			"prefixes", mergedPrefixes, "addedPrefixes", prefixes, "containerID", args.ContainerID, "operation", advOp)
 
 		slog.Info("ADD: BGP state published", "containerID", args.ContainerID,

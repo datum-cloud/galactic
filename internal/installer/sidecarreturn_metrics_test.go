@@ -7,12 +7,12 @@ package installer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -123,38 +123,46 @@ func twoGatewayAdvs() []client.Object {
 	}
 }
 
-// sidecarReturnSeries reads one series back from reg's text exposition.
-func sidecarReturnSeries(t *testing.T, reg *prometheus.Registry, name string, labels ...string) float64 {
+// sidecarReturnSeries returns every galactic_sidecar_return_ series on the
+// instrumentation library's registry, keyed by seriesKey.
+func sidecarReturnSeries(t *testing.T) map[string]float64 {
 	t.Helper()
-	families, err := reg.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range families {
-		if f.GetName() != "galactic_sidecar_return_"+name {
+	out := map[string]float64{}
+	for _, f := range gatherPrefixed(t, "galactic_sidecar_return_") {
+		name, ok := strings.CutPrefix(f.GetName(), "galactic_sidecar_return_")
+		if !ok {
 			continue
 		}
-	next:
 		for _, m := range f.GetMetric() {
-			for i := 0; i+1 < len(labels); i += 2 {
-				found := false
-				for _, lp := range m.GetLabel() {
-					if lp.GetName() == labels[i] && lp.GetValue() == labels[i+1] {
-						found = true
-					}
-				}
-				if !found {
-					continue next
-				}
+			labels := make([]string, 0, 2*len(m.GetLabel()))
+			for _, lp := range m.GetLabel() {
+				labels = append(labels, lp.GetName(), lp.GetValue())
 			}
+			v := m.GetCounter().GetValue()
 			if m.GetGauge() != nil {
-				return m.GetGauge().GetValue()
+				v = m.GetGauge().GetValue()
 			}
-			return m.GetCounter().GetValue()
+			out[seriesKey(name, labels...)] = v
 		}
 	}
-	t.Fatalf("no series galactic_sidecar_return_%s%v", name, labels)
-	return 0
+	return out
+}
+
+// seriesKey names the series name{labels}, the galactic_sidecar_return_
+// prefix left off, with labels as name, value pairs in label-name order.
+func seriesKey(name string, labels ...string) string {
+	return name + fmt.Sprint(labels)
+}
+
+// sidecarReturnValue returns the series in got that seriesKey names, failing
+// the test when it is absent.
+func sidecarReturnValue(t *testing.T, got map[string]float64, name string, labels ...string) float64 {
+	t.Helper()
+	v, ok := got[seriesKey(name, labels...)]
+	if !ok {
+		t.Fatalf("no series galactic_sidecar_return_%s%v", name, labels)
+	}
+	return v
 }
 
 // TestSidecarReturnPassAccounting: each pass's result and endpoint counts
@@ -195,12 +203,16 @@ func TestSidecarReturnPassAccounting(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(h)
 			}
-			reg := prometheus.NewPedanticRegistry()
-			rec := metrics.NewSidecarReturn(reg)
+			rec := metrics.NewSidecarReturn()
+			before := sidecarReturnSeries(t)
 			err := ensureSidecarReturnPath(context.Background(), sidecarReturnClient(t, nil, tc.objs...),
 				testNamespace, testSidecarNode, rec, clock)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error = %v, want error %v", err, tc.wantErr)
+			}
+			after := sidecarReturnSeries(t)
+			counted := func(name string, labels ...string) float64 {
+				return sidecarReturnValue(t, after, name, labels...) - sidecarReturnValue(t, before, name, labels...)
 			}
 			for _, r := range []string{metrics.SidecarReturnSuccess, metrics.SidecarReturnPartial,
 				metrics.SidecarReturnWaitingIdentity, metrics.SidecarReturnError} {
@@ -208,7 +220,7 @@ func TestSidecarReturnPassAccounting(t *testing.T) {
 				if r == tc.result {
 					want = 1
 				}
-				if got := sidecarReturnSeries(t, reg, "reconcile_total", "result", r); got != want {
+				if got := counted("reconcile_total", "result", r); got != want {
 					t.Errorf("reconcile_total{result=%q} = %v, want %v", r, got, want)
 				}
 			}
@@ -220,7 +232,7 @@ func TestSidecarReturnPassAccounting(t *testing.T) {
 				{"applied", tc.applied},
 				{"pending", tc.desired - tc.applied},
 			} {
-				if got := sidecarReturnSeries(t, reg, "endpoints", "state", c.label); got != c.want {
+				if got := sidecarReturnValue(t, after, "endpoints", "state", c.label); got != c.want {
 					t.Errorf("endpoints{state=%q} = %v, want %v", c.label, got, c.want)
 				}
 			}
@@ -234,11 +246,11 @@ func TestSidecarReturnPassAccounting(t *testing.T) {
 				{metrics.SidecarReturnOpPrune, opError, tc.pruneErrs},
 				{metrics.SidecarReturnOpPrune, opSuccess, 1 - tc.pruneErrs},
 			} {
-				if got := sidecarReturnSeries(t, reg, "operations_total", "operation", c.op, "result", c.result); got != c.want {
+				if got := counted("operations_total", "operation", c.op, "result", c.result); got != c.want {
 					t.Errorf("operations_total{%s,%s} = %v, want %v", c.op, c.result, got, c.want)
 				}
 			}
-			if got := sidecarReturnSeries(t, reg, "last_completed_timestamp_seconds"); got != float64(at.Unix()) {
+			if got := sidecarReturnValue(t, after, "last_completed_timestamp_seconds"); got != float64(at.Unix()) {
 				t.Errorf("last completed = %v, want the pass's end", got)
 			}
 		})
@@ -250,8 +262,7 @@ func TestSidecarReturnPassAccounting(t *testing.T) {
 // and the timestamp stay at the last pass that listed them.
 func TestSidecarReturnFailedDiscoveryKeepsTheSnapshot(t *testing.T) {
 	newSidecarReturnHarness(t)
-	reg := prometheus.NewPedanticRegistry()
-	rec := metrics.NewSidecarReturn(reg)
+	rec := metrics.NewSidecarReturn()
 	first := time.Unix(1_700_000_000, 0)
 	objs := append(twoGatewayAdvs(), router(testSidecarNode, testLocator, 6))
 	if err := ensureSidecarReturnPath(context.Background(), sidecarReturnClient(t, nil, objs...),
@@ -259,36 +270,38 @@ func TestSidecarReturnFailedDiscoveryKeepsTheSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	before := sidecarReturnSeries(t)
 	err := ensureSidecarReturnPath(context.Background(), sidecarReturnClient(t, errSidecarReturnTest, objs...),
 		testNamespace, testSidecarNode, rec, func() time.Time { return first.Add(time.Minute) })
 	if err == nil {
 		t.Fatal("a failed list returned no error")
 	}
-	if got := sidecarReturnSeries(t, reg, "endpoints", "state", "desired"); got != 2 {
+	after := sidecarReturnSeries(t)
+	if got := sidecarReturnValue(t, after, "endpoints", "state", "desired"); got != 2 {
 		t.Errorf("desired = %v after a failed list, want the last listed 2", got)
 	}
-	if got := sidecarReturnSeries(t, reg, "last_completed_timestamp_seconds"); got != float64(first.Unix()) {
+	if got := sidecarReturnValue(t, after, "last_completed_timestamp_seconds"); got != float64(first.Unix()) {
 		t.Errorf("last completed = %v, want the pass before the failure", got)
 	}
-	if got := sidecarReturnSeries(t, reg, "reconcile_total", "result", metrics.SidecarReturnError); got != 1 {
-		t.Errorf("reconcile_total{error} = %v, want 1", got)
+	if got := sidecarReturnValue(t, after, "reconcile_total", "result", metrics.SidecarReturnError) -
+		sidecarReturnValue(t, before, "reconcile_total", "result", metrics.SidecarReturnError); got != 1 {
+		t.Errorf("reconcile_total{error} rose by %v, want 1", got)
 	}
 }
 
 // TestSidecarReturnSeries: every series exists from the start, and the
 // total is fixed.
 func TestSidecarReturnSeries(t *testing.T) {
-	reg := prometheus.NewPedanticRegistry()
-	metrics.NewSidecarReturn(reg)
-	n, err := testutil.GatherAndCount(reg)
-	if err != nil {
-		t.Fatal(err)
+	metrics.NewSidecarReturn()
+	n := 0
+	for _, f := range gatherPrefixed(t, "galactic_sidecar_return_") {
+		n += len(f.GetMetric())
 	}
 	// 3 endpoint states, 1 timestamp, 4 results, 4 operations x 2 results.
 	if n != 16 {
 		t.Errorf("%d series, want 16", n)
 	}
-	if got := sidecarReturnSeries(t, reg, "last_completed_timestamp_seconds"); got != 0 {
+	if got := sidecarReturnValue(t, sidecarReturnSeries(t), "last_completed_timestamp_seconds"); got != 0 {
 		t.Errorf("last completed = %v before any pass, want 0", got)
 	}
 	var nilRec *metrics.SidecarReturn
@@ -303,18 +316,21 @@ func TestSidecarReturnSeries(t *testing.T) {
 func TestSidecarReturnPruneFailureWhileWaiting(t *testing.T) {
 	h := newSidecarReturnHarness(t)
 	h.pruneErr = errSidecarReturnTest
-	reg := prometheus.NewPedanticRegistry()
-	rec := metrics.NewSidecarReturn(reg)
+	rec := metrics.NewSidecarReturn()
+	before := sidecarReturnSeries(t)
 	if err := ensureSidecarReturnPath(context.Background(), sidecarReturnClient(t, nil, twoGatewayAdvs()...),
 		testNamespace, testSidecarNode, rec, time.Now); err != nil {
 		t.Fatal(err)
 	}
-	if got := sidecarReturnSeries(t, reg, "reconcile_total", "result", metrics.SidecarReturnWaitingIdentity); got != 1 {
-		t.Errorf("reconcile_total{waiting_identity} = %v, want 1", got)
+	after := sidecarReturnSeries(t)
+	counted := func(name string, labels ...string) float64 {
+		return sidecarReturnValue(t, after, name, labels...) - sidecarReturnValue(t, before, name, labels...)
 	}
-	if got := sidecarReturnSeries(t, reg, "operations_total",
-		"operation", metrics.SidecarReturnOpPrune, "result", opError); got != 1 {
-		t.Errorf("operations_total{prune,error} = %v, want 1", got)
+	if got := counted("reconcile_total", "result", metrics.SidecarReturnWaitingIdentity); got != 1 {
+		t.Errorf("reconcile_total{waiting_identity} rose by %v, want 1", got)
+	}
+	if got := counted("operations_total", "operation", metrics.SidecarReturnOpPrune, "result", opError); got != 1 {
+		t.Errorf("operations_total{prune,error} rose by %v, want 1", got)
 	}
 }
 
@@ -322,26 +338,28 @@ func TestSidecarReturnPruneFailureWhileWaiting(t *testing.T) {
 // reaper's outcome as well as the pass.
 func TestReconcileSidecarReturnPathCountsReap(t *testing.T) {
 	newSidecarReturnHarness(t)
-	reg := prometheus.NewPedanticRegistry()
 	st := ebpfDatapathState{
 		k8sClient: sidecarReturnClient(t, nil), namespace: testNamespace, nodeName: testSidecarNode,
-		sidecarReap: &sidecarReaper{}, sidecarReturn: metrics.NewSidecarReturn(reg),
+		sidecarReap: &sidecarReaper{}, sidecarReturn: metrics.NewSidecarReturn(),
 	}
+	before := sidecarReturnSeries(t)
 	reconcileSidecarReturnPath(context.Background(), st)
-	if got := sidecarReturnSeries(t, reg, "operations_total",
-		"operation", metrics.SidecarReturnOpReap, "result", opSuccess); got != 1 {
-		t.Errorf("operations_total{reap,success} = %v, want 1", got)
+	after := sidecarReturnSeries(t)
+	counted := func(name string, labels ...string) float64 {
+		return sidecarReturnValue(t, after, name, labels...) - sidecarReturnValue(t, before, name, labels...)
 	}
-	if got := sidecarReturnSeries(t, reg, "reconcile_total", "result", metrics.SidecarReturnSuccess); got != 1 {
-		t.Errorf("reconcile_total{success} = %v, want 1", got)
+	if got := counted("operations_total", "operation", metrics.SidecarReturnOpReap, "result", opSuccess); got != 1 {
+		t.Errorf("operations_total{reap,success} rose by %v, want 1", got)
+	}
+	if got := counted("reconcile_total", "result", metrics.SidecarReturnSuccess); got != 1 {
+		t.Errorf("reconcile_total{success} rose by %v, want 1", got)
 	}
 }
 
 // TestSidecarReturnScrapeSeesOnePass: a scrape during a run of passes always
 // reads counts that partition desired and come from one pass.
 func TestSidecarReturnScrapeSeesOnePass(t *testing.T) {
-	reg := prometheus.NewPedanticRegistry()
-	rec := metrics.NewSidecarReturn(reg)
+	rec := metrics.NewSidecarReturn()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -356,10 +374,7 @@ func TestSidecarReturnScrapeSeesOnePass(t *testing.T) {
 			return
 		default:
 		}
-		families, err := reg.Gather()
-		if err != nil {
-			t.Fatal(err)
-		}
+		families := gatherPrefixed(t, "galactic_sidecar_return_")
 		vals := map[string]float64{}
 		var ts float64
 		for _, f := range families {

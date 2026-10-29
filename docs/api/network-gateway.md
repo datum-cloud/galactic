@@ -398,15 +398,18 @@ see NetworkGateway's doc comment). vpcRef is an opaque string identifier
 because this kind carries identifiers from the VPC API in api/cloud/v1alpha1
 without a Kubernetes object reference.
 
-A NetworkService lives in one of two kinds of namespace. In a gateway
-namespace, one holding NetworkGateways (galactic-system), it is written by
-the platform API that serves tenants, which verifies the tenant owns vpcRef
-before it writes the service; RBAC on the namespace decides who else may
-write it, and Accepted reports only that a gateway node is registered
-there. In a project namespace, one holding no NetworkGateway, it is served
-by every NetworkGateway in the cluster and trusted for nothing: it is
-Accepted (OwnershipVerified) only while a VPC in its own namespace carries
-its vpcRef (OwnershipDenied otherwise), and only while no other service
+A NetworkService lives in one of two kinds of namespace. In the gateway
+namespace, the one holding NetworkGateways (galactic-system), it is written
+by the platform API that serves tenants, which verifies the tenant owns
+vpcRef before it writes the service; RBAC on the namespace decides who else
+may write it, and Accepted reports only that a gateway node is registered
+there. In a project namespace, any other, it is served only where the
+gateways have project services turned on, by every NetworkGateway in the
+gateway namespace, and trusted for nothing: it is Accepted
+(OwnershipVerified) only while every VIP address falls in a prefix the
+platform allocates load balancer addresses from (VIPOutsidePool
+otherwise), a VPC in its own namespace carries its vpcRef (OwnershipDenied
+otherwise), and no other service
 already serves one of its VIP addresses on its protocol and port
 (VIPClaimed); its backends come only from VPCAttachments in its own
 namespace. Either way, the BGPAdvertisements and ServiceVIPBindings made for

@@ -13,13 +13,17 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
 
-// tunQueueLen bounds the packets buffered per session; the reader drops a
-// packet for a session whose queue is full.
-const tunQueueLen = 256
+// tunQueueLen and tunQueueBytes bound the packets and bytes buffered per
+// session; the reader drops a packet for a session whose queue is full.
+const (
+	tunQueueLen   = 128
+	tunQueueBytes = 256 << 10
+)
 
 // TUNBackend is a PacketBackend for one VPC that exchanges packets with a
 // Linux TUN device. Packets from clients are written to the device, and
@@ -109,18 +113,28 @@ func (b *TUNBackend) readLoop() {
 			return
 		}
 		dst, ok := packetDestination(buf[:n])
-		if !ok {
+		switch {
+		case !ok:
+			deny(toClient, reasonMalformed)
+			continue
+		case !dst.Is6():
+			deny(toClient, reasonIPv4)
 			continue
 		}
 		b.mu.Lock()
 		s := b.sessions[netip.PrefixFrom(dst, 96).Masked()]
 		b.mu.Unlock()
 		if s == nil {
+			// The kernel sends its own multicast and link-local traffic,
+			// such as MLD reports, on the device; only count what was
+			// routed here.
+			if !dst.IsMulticast() && !dst.IsLinkLocalUnicast() {
+				deny(toClient, reasonNoSession)
+			}
 			continue
 		}
-		select {
-		case s.in <- append([]byte(nil), buf[:n]...):
-		default:
+		if !s.enqueue(buf[:n]) {
+			deny(toClient, reasonQueueFull)
 		}
 	}
 }
@@ -139,8 +153,25 @@ type tunSession struct {
 	backend   *TUNBackend
 	prefix    netip.Prefix
 	in        chan []byte
+	queued    atomic.Int64
 	closed    chan struct{}
 	closeOnce sync.Once
+}
+
+// enqueue queues a copy of pkt for the client, or drops it when the queue
+// is full by packets or bytes.
+func (s *tunSession) enqueue(pkt []byte) bool {
+	if s.queued.Add(int64(len(pkt))) > tunQueueBytes {
+		s.queued.Add(-int64(len(pkt)))
+		return false
+	}
+	select {
+	case s.in <- append([]byte(nil), pkt...):
+		return true
+	default:
+		s.queued.Add(-int64(len(pkt)))
+		return false
+	}
 }
 
 func (s *tunSession) WritePacket(pkt []byte) error {
@@ -172,6 +203,7 @@ func (s *tunSession) WritePacket(pkt []byte) error {
 func (s *tunSession) ReadPacket(ctx context.Context, buf []byte) (int, error) {
 	select {
 	case pkt := <-s.in:
+		s.queued.Add(-int64(len(pkt)))
 		return copy(buf, pkt), nil
 	case <-s.closed:
 		return 0, errors.New("session closed")

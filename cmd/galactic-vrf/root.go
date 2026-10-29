@@ -16,15 +16,13 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/ingresssidecar"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
-	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 const (
@@ -35,6 +33,37 @@ const (
  Find more information at: https://www.datum.net/docs`
 )
 
+// sidecarMetrics are the sidecar's metrics, all on the instrumentation
+// library's registry.
+type sidecarMetrics struct {
+	store       *ingresssidecar.Metrics
+	lifecycle   *ingresssidecar.LifecycleMetrics
+	convergence *ingresssidecar.ConvergenceMetrics
+	inputs      *ingresssidecar.InputMetrics
+	datapath    *ingresssidecar.DatapathMetrics
+	nodeSource  *ingresssidecar.NodeSourceMetrics
+	gateway     *ingresssidecar.GatewayMetrics
+}
+
+// newSidecarMetrics creates every metric the sidecar serves, configured from
+// cfg, and registers the collectors among them. runCmd calls it once.
+func newSidecarMetrics(cfg *config.VRFConfig) sidecarMetrics {
+	m := sidecarMetrics{
+		store:       ingresssidecar.NewMetrics(),
+		lifecycle:   ingresssidecar.NewLifecycleMetrics(cfg.SweepInterval, cfg.TeardownGracePeriod),
+		convergence: ingresssidecar.NewConvergenceMetrics(),
+		inputs:      ingresssidecar.NewInputMetrics(),
+		datapath:    ingresssidecar.NewDatapathMetrics(),
+		nodeSource:  ingresssidecar.NewNodeSourceMetrics(),
+		gateway: ingresssidecar.NewGatewayMetrics(cfg.NodeName != "",
+			cfg.NodeName != "" && cfg.GatewayPrefix != ""),
+	}
+	m.lifecycle.MustRegister()
+	m.datapath.MustRegister()
+	m.nodeSource.MustRegister()
+	return m
+}
+
 // runCmd is the application startup: it registers the ingress sidecar's
 // reconciler against a cluster-scoped EndpointSlice watch, then seeds the store
 // from live API state and runs its startup inventory and periodic sweep.
@@ -43,8 +72,6 @@ const (
 // optional gateway publisher below can read routers and instances and write
 // advertisements, which stays off while no node name is configured.
 func runCmd(cfg *config.VRFConfig) error {
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
-
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
@@ -66,26 +93,14 @@ func runCmd(cfg *config.VRFConfig) error {
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 
-	metrics := ingresssidecar.NewMetrics()
-	metrics.MustRegister(ctrlmetrics.Registry)
-	nldump.MustRegister(ctrlmetrics.Registry)
-	lifecycle := ingresssidecar.NewLifecycleMetrics(cfg.SweepInterval, cfg.TeardownGracePeriod)
-	lifecycle.MustRegister(ctrlmetrics.Registry)
+	m := newSidecarMetrics(cfg)
 
 	backend := ingresssidecar.NewKernelBackend()
-	store := ingresssidecar.NewStore(backend, cfg.TeardownGracePeriod, metrics)
-	convergence := ingresssidecar.NewConvergenceMetrics()
-	convergence.MustRegister(ctrlmetrics.Registry)
-	store.SetConvergenceMetrics(convergence)
-	inputs := ingresssidecar.NewInputMetrics()
-	inputs.MustRegister(ctrlmetrics.Registry)
-	store.SetInputMetrics(inputs)
-	datapath := ingresssidecar.NewDatapathMetrics()
-	datapath.MustRegister(ctrlmetrics.Registry)
-	store.SetDatapathMetrics(datapath)
-	nodeSourceMetrics := ingresssidecar.NewNodeSourceMetrics()
-	nodeSourceMetrics.MustRegister(ctrlmetrics.Registry)
-	store.SetNodeSourceMetrics(nodeSourceMetrics)
+	store := ingresssidecar.NewStore(backend, cfg.TeardownGracePeriod, m.store)
+	store.SetConvergenceMetrics(m.convergence)
+	store.SetInputMetrics(m.inputs)
+	store.SetDatapathMetrics(m.datapath)
+	store.SetNodeSourceMetrics(m.nodeSource)
 
 	// Return-path gateway advertisement is opt-in on the node name alone,
 	// and leaving it unset is fully inert. The cached client is fine here:
@@ -131,9 +146,7 @@ func runCmd(cfg *config.VRFConfig) error {
 			"return-path gateway advertisement publishing is disabled", config.EnvVRFNodeName)
 	}
 
-	gateway := ingresssidecar.NewGatewayMetrics(cfg.NodeName != "", cfg.NodeName != "" && cfg.GatewayPrefix != "")
-	gateway.MustRegister(ctrlmetrics.Registry)
-	store.SetGatewayMetrics(gateway)
+	store.SetGatewayMetrics(m.gateway)
 
 	if err := (&ingresssidecar.Reconciler{Store: store}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup EndpointSlice controller: %w", err)
@@ -149,7 +162,7 @@ func runCmd(cfg *config.VRFConfig) error {
 	// controller's own reconciles have drained the workqueue that list
 	// fed, so on a busy node at boot the two race. Seeding uses the
 	// manager's uncached reader, which depends on neither.
-	go ingresssidecar.RunStartup(ctx, mgr.GetAPIReader(), store, cfg.SweepInterval, lifecycle)
+	go ingresssidecar.RunStartup(ctx, mgr.GetAPIReader(), store, cfg.SweepInterval, m.lifecycle)
 
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
@@ -167,10 +180,14 @@ func runCmd(cfg *config.VRFConfig) error {
 // newRootCommand builds the root cobra command with all flags and the
 // application startup logic.
 func newRootCommand() *cobra.Command {
+	var logOpts logging.Options
 	cmd := &cobra.Command{
 		Use:   appName,
 		Short: strings.Split(appDesc, "\n")[0],
 		Long:  appDesc,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("build-info"); ok {
 				fmt.Println(metadata.BuildInfo(appName))
@@ -211,5 +228,6 @@ func newRootCommand() *cobra.Command {
 			config.EnvVRFGatewayPrefix+")")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
+	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
 }

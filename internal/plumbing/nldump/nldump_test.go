@@ -14,10 +14,10 @@ import (
 	"testing"
 
 	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/nldump/nldumptest"
@@ -179,16 +179,31 @@ func TestLister_ListsTheHandlesNamespace(t *testing.T) {
 		t.Errorf("RuleList = %v, %v; want it to hold priority %d", rules, err, rule.Priority)
 	}
 
-	// The package-level forms list the calling thread's namespace.
+	// The package-level forms list the calling thread's namespace, so each
+	// must hold the objects this test made in it. Membership, not a count:
+	// the kernel adds and removes its own entries on the link, the
+	// all-routers multicast neighbor above all, between two dumps.
 	err = nsObj.Do(func(ns.NetNS) error {
-		if got, err := nldump.NeighList(link.Attrs().Index, netlink.FAMILY_V6); err != nil || len(got) != len(neighs) {
-			return fmt.Errorf("package NeighList = %v, %w; want %d entries", got, err, len(neighs))
+		got, err := nldump.NeighList(link.Attrs().Index, netlink.FAMILY_V6)
+		if err != nil {
+			return fmt.Errorf("package NeighList: %w", err)
 		}
-		if got, err := nldump.RuleList(netlink.FAMILY_V6); err != nil || len(got) != len(rules) {
-			return fmt.Errorf("package RuleList = %v, %w; want %d rules", got, err, len(rules))
+		if !slices.ContainsFunc(got, func(n netlink.Neigh) bool { return n.IP.Equal(neighIP) }) {
+			return fmt.Errorf("package NeighList = %v; want it to hold %s", got, neighIP)
 		}
-		if got, err := nldump.RouteList(link, netlink.FAMILY_V6); err != nil || len(got) != len(routes) {
-			return fmt.Errorf("package RouteList = %v, %w; want %d routes", got, err, len(routes))
+		gotRules, err := nldump.RuleList(netlink.FAMILY_V6)
+		if err != nil {
+			return fmt.Errorf("package RuleList: %w", err)
+		}
+		if !slices.ContainsFunc(gotRules, func(r netlink.Rule) bool { return r.Priority == rule.Priority }) {
+			return fmt.Errorf("package RuleList = %v; want it to hold priority %d", gotRules, rule.Priority)
+		}
+		gotRoutes, err := nldump.RouteList(link, netlink.FAMILY_V6)
+		if err != nil {
+			return fmt.Errorf("package RouteList: %w", err)
+		}
+		if !slices.ContainsFunc(gotRoutes, func(r netlink.Route) bool { return r.Dst != nil && r.Dst.Contains(ip) }) {
+			return fmt.Errorf("package RouteList = %v; want it to hold a route for %s", gotRoutes, ip)
 		}
 		return nil
 	})
@@ -201,9 +216,7 @@ func TestLister_ListsTheHandlesNamespace(t *testing.T) {
 // label values the counters carry, so the helper never waits on a series
 // that does not exist.
 func TestNldumptest_KindsMatchMetricLabels(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	nldump.MustRegister(reg)
-	families, err := reg.Gather()
+	families, err := ctrlmetrics.Registry.Gather()
 	if err != nil {
 		t.Fatalf("gather: %v", err)
 	}

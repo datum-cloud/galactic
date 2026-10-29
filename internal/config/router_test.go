@@ -55,6 +55,9 @@ func TestRouterConfigDefaults(t *testing.T) {
 	if cfg.BMPStatisticsInterval != DefaultRouterBMPStatisticsInterval {
 		t.Errorf("BMPStatisticsInterval = %v, want %v", cfg.BMPStatisticsInterval, DefaultRouterBMPStatisticsInterval)
 	}
+	if cfg.GoBGPAPIDir != "" {
+		t.Errorf("GoBGPAPIDir = %q, want empty", cfg.GoBGPAPIDir)
+	}
 }
 
 func TestRouterConfigEnvOverride(t *testing.T) {
@@ -69,6 +72,7 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvRouterBMPStations, "gobmp.galactic-system.svc:5000, [2001:db8::5]:5000,")
 	t.Setenv(EnvRouterBMPPolicy, "local-rib")
 	t.Setenv(EnvRouterBMPStatisticsInterval, "0s")
+	t.Setenv(EnvRouterGoBGPAPIDir, "/run/galactic-router")
 
 	cfg := NewRouterConfig()
 
@@ -105,6 +109,9 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	}
 	if cfg.BMPStatisticsInterval != 0 {
 		t.Errorf("BMPStatisticsInterval = %v, want 0", cfg.BMPStatisticsInterval)
+	}
+	if cfg.GoBGPAPIDir != "/run/galactic-router" {
+		t.Errorf("GoBGPAPIDir = %q, want /run/galactic-router", cfg.GoBGPAPIDir)
 	}
 }
 

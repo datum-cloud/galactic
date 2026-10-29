@@ -33,7 +33,7 @@ func activations(m *AgentMetrics, outcome string) float64 {
 // often the agent sees the epoch again.
 func TestAgentMetricsActivations(t *testing.T) {
 	h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
-	m := NewAgentMetrics(prometheus.NewRegistry())
+	m := NewAgentMetrics()
 	h.agent.Metrics = m
 	if err := h.client.Create(context.Background(), release(h.revs[0], h.revs[1])); err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestErrorOutcome(t *testing.T) {
 // validates a candidate, not each sync that finds it already staged.
 func TestAgentMetricsStaging(t *testing.T) {
 	h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceShadow))
-	m := NewAgentMetrics(prometheus.NewRegistry())
+	m := NewAgentMetrics()
 	h.agent.Metrics = m
 	h.frr.running = rendered(t, h.revs[0])
 	h.update(func(d *networkv1alpha1.FabricRouterDeployment) {
@@ -157,8 +157,9 @@ func (l slowLock) Lock(context.Context) (func(), error) {
 // TestTimedLock observes every wait under its writer and how it ended:
 // acquired, ended by its deadline, or failed otherwise.
 func TestTimedLock(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	m := NewAgentMetrics(reg)
+	m := NewAgentMetrics()
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(m.lockWait)
 	for _, l := range []struct {
 		writer string
 		err    error
@@ -207,7 +208,7 @@ func TestTimedLock(t *testing.T) {
 // TestActivationCounterOnce counts a finished or refused epoch once per
 // process, and every failed attempt.
 func TestActivationCounterOnce(t *testing.T) {
-	m := NewAgentMetrics(prometheus.NewRegistry())
+	m := NewAgentMetrics()
 	d := &DeploymentAgent{Metrics: m}
 	for range 3 {
 		d.count("uid", 1, OutcomeRefused, 0)
@@ -250,7 +251,7 @@ func TestBootRecord(t *testing.T) {
 		t.Errorf("ClearBootRecord of nothing = %v", err)
 	}
 
-	m := NewAgentMetrics(prometheus.NewRegistry())
+	m := NewAgentMetrics()
 	m.SetBoot(BootConfigMap)
 	m.SetBoot(got.Source)
 	if n := testutil.CollectAndCount(m.boot); n != 1 {

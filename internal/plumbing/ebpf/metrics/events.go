@@ -6,6 +6,7 @@ package metrics
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 )
@@ -19,16 +20,17 @@ type EventCounters struct {
 	attach *prometheus.CounterVec
 }
 
-// NewEventCounters builds a fresh, unregistered set of event counters.
+// NewEventCounters creates the event counters on the instrumentation
+// library's registry.
 func NewEventCounters() *EventCounters {
 	return &EventCounters{
-		load: prometheus.NewCounterVec(prometheus.CounterOpts{
+		load: instmetrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "datapath",
 			Name:      "load_events_total",
 			Help:      "BPF program load attempts (internal/plumbing/ebpf/attach.Load), by result.",
 		}, []string{labelResult}),
-		attach: prometheus.NewCounterVec(prometheus.CounterOpts{
+		attach: instmetrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "datapath",
 			Name:      "attach_events_total",
@@ -36,13 +38,6 @@ func NewEventCounters() *EventCounters {
 				"subsequent netlink-driven re-attachment ('reload') Watch performs -- by interface, action, and result.",
 		}, []string{"interface", "action", labelResult}),
 	}
-}
-
-// MustRegister registers every counter this type owns against reg, panicking on
-// a duplicate as the underlying registry does. Callers do this once per process,
-// at startup.
-func (c *EventCounters) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(c.load, c.attach)
 }
 
 // Hooks returns the attach.Hooks wiring these counters. Pass the result to

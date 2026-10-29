@@ -15,6 +15,7 @@ vars:
   KUSTOMIZE_VERSION: v5.8.1
   GO_LICENSES_VERSION: v1.6.0
   PROMETHEUS_VERSION: v3.15.0
+  YQ_VERSION: 4.53.6
   XRAY_VERSION: v26.10.21
   XRAY_SHA256: 0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978
 tasks:
@@ -52,8 +53,10 @@ tasks:
     deps: [golangci-lint, yamlfmt, yaml-ext, 'build:ebpf']
     cmds:
       - '{{.GOLANGCI_LINT}} run'
-      # examples/edge-provider is its own module, which the root run skips.
+      # examples/edge-provider and examples/looking-glass-client are their
+      # own modules, which the root run skips.
       - cd examples/edge-provider && {{.GOLANGCI_LINT}} run --config ../../.golangci.yaml
+      - cd examples/looking-glass-client && {{.GOLANGCI_LINT}} run --config ../../.golangci.yaml
       - '{{.YAMLFMT}} -lint'
   lint-fix:
     desc: Lint and apply fixes
@@ -181,6 +184,7 @@ tasks:
     cmds:
       - bash scripts/ci.sh unittest
       - task: test:edge-provider
+      - task: test:looking-glass-client
   test:edge-provider:
     desc: Build, vet and unit-test the reference edge provider (examples/edge-provider, its own module)
     dir: examples/edge-provider
@@ -188,6 +192,19 @@ tasks:
       - go build ./...
       - go vet ./...
       - go test -race ./...
+  test:looking-glass-client:
+    desc: Build, vet and unit-test the independent Looking Glass client (examples/looking-glass-client, its own module)
+    dir: examples/looking-glass-client
+    cmds:
+      - go build ./...
+      - go vet ./...
+      - go test -race ./...
+      # The client must build from the published service API alone.
+      - |
+        if go list -deps ./... | grep -E '^go\.datum\.net/galactic/' | grep -vxE 'go\.datum\.net/galactic/api/fabric/(service/)?v1'; then
+          echo "the client imports Galactic packages beyond the published service API" >&2
+          exit 1
+        fi
   test:unit-root:
     desc: Re-run just the requireRoot(t)-gated unit tests, as root
     deps: ['build:ebpf']
@@ -208,20 +225,39 @@ tasks:
       - CGO_ENABLED=0 GOBIN={{.GOBGP_BIN}} go install github.com/osrg/gobgp/v4/cmd/gobgpd@v4.10.0 github.com/osrg/gobgp/v4/cmd/gobgp@v4.10.0
       - go run ./hack/fabric-api-loadtest --mrt {{.MRT}} --gobgp-bin {{.GOBGP_BIN}} {{.CLI_ARGS}}
   test:manifests:
-    desc: Render the opt-in Component fixtures in tests/manifests
+    desc: Render the opt-in Component fixtures in tests/manifests and check every manifest's log settings
     # Every fixture under tests/manifests/fabric-api composes Components the
     # way a cell overlay does and must build; every fixture under
     # tests/manifests/invalid omits a Component another requires and must
     # fail to build.
+    #
+    # Those fixtures and every kustomization under config/ and deploy/,
+    # except Components, are rendered and checked for a LOG_LEVEL or
+    # --log-level that internal/logging rejects, and for the removed
+    # LOG_FORMAT and --log-format or the local-only --zap-devel.
+    # The containerlab overlays under deploy/containerlab/resources build
+    # only once the lab scripts copy config/ onto a node, so they are not
+    # rendered here; their source YAML, inline patches included, is checked
+    # instead.
     deps: [kustomize]
     cmds:
+      - go build -o {{.LOCALBIN}}/check-log-settings ./hack/check-log-settings
       - |
         status=0
-        for dir in tests/manifests/fabric-api/*/; do
-          if ! {{.KUSTOMIZE}} build "$dir" > /dev/null; then
-            echo "FAIL: $dir does not build"; status=1
+        for file in $(find config deploy tests/manifests -name kustomization.yaml | sort); do
+          dir=$(dirname "$file")
+          case "$dir" in deploy/containerlab/resources/*|tests/manifests/invalid/*) continue ;; esac
+          grep -q '^kind: Component$' "$file" && continue
+          if ! out=$({{.KUSTOMIZE}} build "$dir"); then
+            echo "FAIL: $dir does not build"; status=1; continue
+          fi
+          if ! printf '%s\n' "$out" | {{.LOCALBIN}}/check-log-settings -label "$dir" -; then
+            echo "FAIL: $dir sets an unsupported log setting"; status=1
           fi
         done
+        if ! find config deploy tests/manifests -name '*.yaml' -print0 | xargs -0 {{.LOCALBIN}}/check-log-settings; then
+          echo "FAIL: source YAML sets an unsupported log setting"; status=1
+        fi
         for dir in tests/manifests/invalid/*/; do
           if {{.KUSTOMIZE}} build "$dir" > /dev/null 2>&1; then
             echo "FAIL: $dir builds, but omits a required Component"; status=1
@@ -231,13 +267,13 @@ tasks:
   test:alerts:
     desc: Unit-test the alert rules in config/monitoring/ with promtool
     # promtool reads plain rule files, so the PrometheusRule's spec is
-    # extracted first. Both tools run from their images, so nothing needs
-    # installing; not part of ci, which has no Docker-image dependency of its own.
+    # extracted first. Both tools run from pinned images, so nothing needs
+    # installing. CI runs it in its own job rather than through ci.
     vars:
       ALERTS_DIR: '{{.LOCALBIN}}/alerts-test'
     cmds:
       - mkdir -p {{.ALERTS_DIR}}
-      - docker run --rm -i mikefarah/yq:4 '.spec' < config/monitoring/prometheusrule.yaml > {{.ALERTS_DIR}}/rules.yaml
+      - docker run --rm -i mikefarah/yq:{{.YQ_VERSION}} '.spec' < config/monitoring/prometheusrule.yaml > {{.ALERTS_DIR}}/rules.yaml
       - cp config/monitoring/tests/rules-test.yaml {{.ALERTS_DIR}}/
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} check rules rules.yaml
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} test rules rules-test.yaml
@@ -260,6 +296,21 @@ tasks:
       - go test -c -race -o {{.LOCALBIN}}/connectip-interop.test ./tests/connectipinterop/
       - rm -rf {{.ARTIFACTS}}
       - sudo env CONNECTIP_INTEROP_XRAY={{.XRAY_DIR}}/xray CONNECTIP_INTEROP_ARTIFACTS={{.ARTIFACTS}} {{.LOCALBIN}}/connectip-interop.test -test.v -test.count=1 -test.timeout=10m
+  test:connectip-load:
+    desc: Measure CONNECT-IP capacity per transport on loopback (see docs/edge/masque-capacity.md)
+    # Not part of ci: one run takes about 15 minutes and loads every CPU.
+    # CONNECTIP_LOAD_DURATION, _WARMUP, _RUNS and _CONNECTORS override the
+    # defaults. The report lands in bin/connectip-load (report.md and
+    # report.json).
+    vars:
+      ARTIFACTS: '{{.LOCALBIN}}/connectip-load'
+    env:
+      CONNECTIP_LOAD: '1'
+      CONNECTIP_LOAD_RUNS: '{{.CONNECTIP_LOAD_RUNS | default "3"}}'
+      CONNECTIP_LOAD_REPORT: '{{.ARTIFACTS}}/report.md'
+    cmds:
+      - mkdir -p {{.ARTIFACTS}}
+      - go test ./internal/edge/connectip -run '^TestLoad$' -count=1 -v -timeout 90m
   test:fabric-parity:
     desc: Compile every fabric frr.conf back through the typed API and diff it with the pinned FRR's frr-reload
     # Needs Docker, so it is not part of ci. The synthetic fixtures always

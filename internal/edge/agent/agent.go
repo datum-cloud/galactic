@@ -61,6 +61,7 @@ const (
 	ReasonReadbackFailed       = "ReadbackFailed"
 	ReasonDatapathFailed       = "DatapathFailed"
 	ReasonOwnershipUnavailable = "OwnershipUnavailable"
+	ReasonMTUExceedsUnderlay   = "MTUExceedsUnderlay"
 )
 
 // ownerPrefix starts every owner ID galactic-edge uses for a scope, so a new
@@ -107,6 +108,12 @@ type Agent struct {
 	Datapath Datapath
 	// MTU of every attachment link; at least the fabric's tenant MTU.
 	MTU int
+	// EncapMTU reads the largest packet the datapath encapsulates
+	// (encap_mtu_table): the fabric underlay's MTU less the outer header,
+	// or zero when galactic-cni has set no limit. An attachment is not
+	// programmed while MTU exceeds it, since usid_egress drops a larger
+	// packet from an edge link with no error sent. Nil checks nothing.
+	EncapMTU func() (int, error)
 
 	// APIReader reads every input of a gate decision from the API server.
 	APIReader ctrl.Reader
@@ -609,6 +616,9 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 	if err != nil {
 		return fail(ReasonProvisionFailed, err)
 	}
+	if reason, err := a.checkUnderlay(); err != nil {
+		return fail(reason, err)
+	}
 	if link.ID == spec.ID {
 		spec.Prefixes = a.openPrefixes(link, att.Status.Address)
 	}
@@ -661,6 +671,28 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 	}
 	return outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed, status: metav1.ConditionTrue,
 		reason: ReasonProgrammed, message: fmt.Sprintf("host link %s in %s", spec.HostLink, spec.HostVRF), spec: &spec}
+}
+
+// checkUnderlay refuses a.MTU when it exceeds the largest packet the fabric
+// underlay carries once encapsulated. An edge host link has no gateway for
+// usid_egress to send Packet Too Big from, so such a packet would be dropped
+// silently. A limit that cannot be read refuses too: nothing is provisioned
+// past a check that did not run. A link an earlier pass programmed is left as
+// it is, neither reprogrammed nor released, and reported not programmed.
+func (a *Agent) checkUnderlay() (string, error) {
+	if a.EncapMTU == nil {
+		return "", nil
+	}
+	limit, err := a.EncapMTU()
+	switch {
+	case err != nil:
+		return ReasonDatapathFailed, fmt.Errorf("read the fabric's encapsulation MTU: %w", err)
+	case limit != 0 && a.MTU > limit:
+		return ReasonMTUExceedsUnderlay, fmt.Errorf(
+			"attachment MTU %d exceeds %d, the largest packet the fabric underlay carries once encapsulated",
+			a.MTU, limit)
+	}
+	return "", nil
 }
 
 // report writes one outcome, with the attachment's resourceVersion as

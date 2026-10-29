@@ -4,7 +4,10 @@
 
 package metrics
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
+)
 
 // EndpointSliceRepair reports galactic-cni's per-pod EndpointSlice repair: how
 // many missing slices it recreated, each one a pod whose HTTP ingress was down
@@ -15,23 +18,23 @@ type EndpointSliceRepair struct {
 	failures prometheus.Counter
 }
 
-// NewEndpointSliceRepair builds an EndpointSliceRepair registered in reg.
-func NewEndpointSliceRepair(reg prometheus.Registerer) *EndpointSliceRepair {
+// NewEndpointSliceRepair creates the counters on the instrumentation
+// library's registry.
+func NewEndpointSliceRepair() *EndpointSliceRepair {
 	r := &EndpointSliceRepair{
-		restored: prometheus.NewCounter(prometheus.CounterOpts{
+		restored: instmetrics.NewCounter(prometheus.CounterOpts{
 			Namespace: "galactic",
 			Subsystem: "endpointslice_repair",
 			Name:      "restored_total",
 			Help:      "Per-pod EndpointSlices the repair pass recreated after finding them missing.",
 		}),
-		failures: prometheus.NewCounter(prometheus.CounterOpts{
+		failures: instmetrics.NewCounter(prometheus.CounterOpts{
 			Namespace: "galactic",
 			Subsystem: "endpointslice_repair",
 			Name:      "failures_total",
 			Help:      "EndpointSlice repair passes that could not list this node's pods or write a slice.",
 		}),
 	}
-	reg.MustRegister(r.restored, r.failures)
 	return r
 }
 

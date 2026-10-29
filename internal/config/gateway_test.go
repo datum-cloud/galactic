@@ -270,3 +270,55 @@ func TestGatewayConfigBackendHealth(t *testing.T) {
 		t.Error("BackendHealth = false with the flag set to true over the env")
 	}
 }
+
+func TestGatewayConfigProjectServices(t *testing.T) {
+	t.Setenv(EnvGatewayNodeName, testGatewayNodeName)
+	t.Setenv(EnvGatewayDatapathEnabled, "false")
+	cfg := NewGatewayConfig()
+	if cfg.ProjectServices {
+		t.Error("ProjectServices = true by default, want false")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate with project services off: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		namespace string
+		prefixes  string
+		wantErr   string
+	}{
+		{name: "no namespace", prefixes: "2001:db8:5::/64", wantErr: EnvGatewayNamespace},
+		{name: "no prefixes", namespace: DefaultNamespace, wantErr: EnvGatewayProjectVIPPrefixes},
+		{name: "bad prefix", namespace: DefaultNamespace, prefixes: "2001:db8:5::", wantErr: "not a valid prefix"},
+		{name: "every address", namespace: DefaultNamespace, prefixes: "::/0", wantErr: "covers every address"},
+		{name: "valid", namespace: DefaultNamespace, prefixes: "2001:db8:5::1/64, 192.0.2.0/24"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(EnvGatewayProjectServices, "true")
+			t.Setenv(EnvGatewayNamespace, tt.namespace)
+			t.Setenv(EnvGatewayProjectVIPPrefixes, tt.prefixes)
+			cfg := NewGatewayConfig()
+			err := cfg.Validate()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Validate = %v, want an error naming %s", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			want := []string{"2001:db8:5::/64", "192.0.2.0/24"}
+			if len(cfg.ProjectVIPPrefixes) != len(want) {
+				t.Fatalf("ProjectVIPPrefixes = %v, want %v", cfg.ProjectVIPPrefixes, want)
+			}
+			for i, p := range cfg.ProjectVIPPrefixes {
+				if p.String() != want[i] {
+					t.Errorf("ProjectVIPPrefixes[%d] = %s, want %s", i, p, want[i])
+				}
+			}
+		})
+	}
+}

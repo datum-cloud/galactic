@@ -110,7 +110,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	start := time.Now()
 	resultLabel := "success"
 	defer func() { r.Metrics.ObserveReconcile(resultLabel, time.Since(start)) }()
-	logger := log.FromContext(ctx).WithValues("policy", req.String(), "node", r.NodeName)
+	logger := log.FromContext(ctx).WithValues("policy", req.String(), "nodeName", r.NodeName)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -161,7 +161,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, joined
 		}
 		resultLabel = reconcileResultError
-		logger.Error(err, "get ServiceEndpoint", "endpoint", policy.Spec.ServiceRef.Name)
+		logger.Error(err, "get ServiceEndpoint", "serviceEndpoint", policy.Spec.ServiceRef.Name)
 		return ctrl.Result{}, fmt.Errorf("get ServiceEndpoint %s/%s: %w", policy.Namespace, policy.Spec.ServiceRef.Name, err)
 	}
 	if endpoint.DeletionTimestamp != nil {
@@ -220,7 +220,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 				r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid"),
 			)
 			resultLabel = reconcileResultError
-			logger.Error(joined, "resolve service routing dependency", "endpoint", endpoint.Name)
+			logger.Error(joined, "resolve service routing dependency", "serviceEndpoint", endpoint.Name)
 			return ctrl.Result{}, joined
 		}
 		joined := errors.Join(
@@ -229,7 +229,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 			r.setAccepted(ctx, policy, metav1.ConditionFalse, "Invalid", err.Error()),
 		)
 		resultLabel = reconcileResultError
-		logger.Error(joined, "compile service eBPF policy", "endpoint", endpoint.Name)
+		logger.Error(joined, "compile service eBPF policy", "serviceEndpoint", endpoint.Name)
 		return ctrl.Result{}, joined
 	}
 	if len(intents) != 0 {
@@ -239,14 +239,14 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// is otherwise skipped by replacePolicy.
 		if err := r.Programmer.Initialize(); err != nil {
 			resultLabel = reconcileResultError
-			logger.Error(err, "refresh service route maps", "endpoint", endpoint.Name)
+			logger.Error(err, "refresh service route maps", "serviceEndpoint", endpoint.Name)
 			return ctrl.Result{}, fmt.Errorf("refresh service route maps: %w", err)
 		}
 	}
-	logger.Info("compiled service eBPF policy", "endpoint", endpoint.Name, "attachments", len(intents))
+	logger.Info("compiled service eBPF policy", "serviceEndpoint", endpoint.Name, "attachments", len(intents))
 	if err := r.replacePolicyLocked(req.NamespacedName, intents); err != nil {
 		resultLabel = reconcileResultError
-		logger.Error(err, "program service eBPF policy", "endpoint", endpoint.Name)
+		logger.Error(err, "program service eBPF policy", "serviceEndpoint", endpoint.Name)
 		return ctrl.Result{}, err
 	}
 	programmed = len(intents) != 0 && inputDigest != ""

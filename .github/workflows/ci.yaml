@@ -83,7 +83,7 @@ jobs:
         # The CRD schema tests (api/v1alpha1, internal/fabric/api/v1alpha1)
         # need a real kube-apiserver and etcd, and skip without them.
         run: |
-          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.24 use 1.35.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.25 use 1.37.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
           test -x "$assets/kube-apiserver"
           echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
 
@@ -176,7 +176,7 @@ jobs:
         # The traffic policy node reconciler's test needs a real API server
         # as well as root, and skips without one.
         run: |
-          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.24 use 1.35.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.25 use 1.37.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
           test -x "$assets/kube-apiserver"
           echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
 
@@ -245,7 +245,8 @@ jobs:
           cd dist && sha256sum -c SHA256SUMS
 
   # The opt-in Kustomize Components that must be listed in order fail their
-  # build when one is missing; tests/manifests renders each composition.
+  # build when one is missing; tests/manifests renders each composition. The
+  # same task checks every manifest's log level and format.
   manifests:
     name: Manifests
     runs-on: ubuntu-latest
@@ -262,8 +263,23 @@ jobs:
           version: ${{ env.TASK_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Render the Component fixtures
+      - name: Render the manifests and check log settings
         run: task test:manifests
+
+  alerts:
+    name: Alerts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: arduino/setup-task@v3.0.0
+        with:
+          version: ${{ env.TASK_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test the alert rules
+        run: task test:alerts
 
   # Tier 2: Integration tests (every PR, main branch, and releases)
   test-e2e:

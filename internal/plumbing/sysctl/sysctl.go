@@ -16,9 +16,17 @@ import (
 	gosysctl "github.com/lorenzosaino/go-sysctl"
 )
 
-// logger is the package-level logger. Defaults to slog.Default().
-// Override for testing.
-var logger *slog.Logger = slog.Default()
+// logger overrides the package's logger for testing. Nil means
+// slog.Default(), resolved at each call so the handler a binary installs at
+// startup applies.
+var logger *slog.Logger
+
+func log() *slog.Logger {
+	if logger != nil {
+		return logger
+	}
+	return slog.Default()
+}
 
 var interfaceSettings = []struct {
 	format string
@@ -39,7 +47,7 @@ func ConfigureInterfaceSysctls(iface string) error {
 	for _, entry := range interfaceSettings {
 		key := fmt.Sprintf(entry.format, iface)
 		if err := gosysctl.Set(key, entry.value); err != nil {
-			logger.Warn("failed to set sysctl (non-fatal)", "sysctl", key, "err", err)
+			log().Warn("failed to set sysctl (non-fatal)", "sysctl", key, "err", err)
 		}
 	}
 	return nil
@@ -140,7 +148,7 @@ func setForwarding(sysctls [][]string) error {
 		switch {
 		case readErr == nil && got == "1":
 			if writeErr != nil {
-				logger.Debug("sysctl already set; write failed", "sysctl", name, "err", writeErr)
+				log().Debug("sysctl already set; write failed", "sysctl", name, "err", writeErr)
 			}
 		case writeErr != nil:
 			return fmt.Errorf("set sysctl %s to 1: %w", name, writeErr)
@@ -192,7 +200,7 @@ func ConfigureTapSysctls(iface string) error {
 		name := fmt.Sprintf(entry.format, iface)
 		if err := gosysctl.Set(name, entry.value); err != nil {
 			// Non-fatal: a sysctl that does not exist is skipped.
-			logger.Debug("tap sysctl write failed", "sysctl", name, "err", err)
+			log().Debug("tap sysctl write failed", "sysctl", name, "err", err)
 		}
 	}
 	return nil

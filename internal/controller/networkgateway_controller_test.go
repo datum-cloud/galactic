@@ -1463,7 +1463,7 @@ func TestRuleToGatewayRequests_UsesRuleNamespace(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gw).Build()
 	rule := newTestRule(testRuleName, testVPCRef, testVIP)
 
-	reqs := ruleToGatewayRequests(context.Background(), fakeClient, rule)
+	reqs := ruleToGatewayRequests(context.Background(), fakeClient, ServiceScope{}, rule)
 
 	if len(reqs) != 1 || reqs[0].Name != testNodeGWA {
 		t.Errorf("reqs = %v, want exactly one request for %q", reqs, testNodeGWA)
@@ -1475,7 +1475,8 @@ func TestRuleToGatewayRequests_UsesRuleNamespace(t *testing.T) {
 // called with the watched type, but a defensive type assertion (rather
 // than a panic-inducing cast) is what makes that safe to rely on.
 func TestRuleToGatewayRequests_WrongTypeReturnsNil(t *testing.T) {
-	if reqs := ruleToGatewayRequests(context.Background(), nil, &bgpv1alpha1.NetworkGateway{}); reqs != nil {
+	reqs := ruleToGatewayRequests(context.Background(), nil, ServiceScope{}, &bgpv1alpha1.NetworkGateway{})
+	if reqs != nil {
 		t.Errorf("reqs = %v, want nil for a non-NetworkService object", reqs)
 	}
 }

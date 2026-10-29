@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +39,7 @@ import (
 	authv1 "k8s.io/api/authentication/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -98,7 +100,8 @@ func newLab(kubeconfig string) (*lab, error) {
 		return nil, err
 	}
 	s := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, appsv1.AddToScheme,
+	for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, appsv1.AddToScheme, authv1.AddToScheme,
+		rbacv1.AddToScheme,
 		coordinationv1.AddToScheme, galacticv1alpha1.AddToScheme, cloudv1alpha1.AddToScheme,
 		networkv1alpha1.AddToScheme} {
 		if err := add(s); err != nil {
@@ -171,7 +174,7 @@ func wallToBoot(w time.Time) time.Duration {
 
 // nodeExec runs a command in a node container.
 func nodeExec(node string, args ...string) (string, error) {
-	cmd := exec.CommandContext(context.Background(), "docker", append([]string{"exec", node}, args...)...)
+	cmd := exec.CommandContext(context.Background(), "docker", append([]string{execVerb, node}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("%s %v: %w: %s", node, args, err, out)
@@ -239,6 +242,20 @@ type event struct {
 	Dst   string        `json:"dst"`
 	Sent  int           `json:"sent"`
 	End   bool          `json:"end"`
+	// ID is a captured ICMPv6 echo request's identifier.
+	ID int `json:"id"`
+	// Status, Proto and Assigned are a CONNECT-IP request's response
+	// status, the ALPN protocol its connection negotiated (h3 or h2) and
+	// its assigned prefix.
+	Status   int    `json:"status"`
+	Proto    string `json:"proto"`
+	Assigned string `json:"assigned"`
+	// Len is the size of a packet a CONNECT-IP tunnel delivered.
+	Len int `json:"len"`
+	// Error is why a CONNECT-IP tunnel or a capture ended.
+	Error string `json:"error"`
+	// Paths is how many routes for a prefix a router's RIB held.
+	Paths *int `json:"paths"`
 }
 
 // last reports whether e marks the end of a probe's window: a send probe's
@@ -247,20 +264,33 @@ func (e event) last() bool { return e.End || e.Sent > 0 }
 
 // probeRun is an edgeprobe running in a pod's network namespace.
 type probeRun struct {
-	cmd    *exec.Cmd
-	out    bytes.Buffer
+	cmd *exec.Cmd
+	out bytes.Buffer
+	// stderr holds what the probe wrote to its standard error, which is
+	// also passed on to the test's.
+	stderr bytes.Buffer
 	name   string
 	events []event
 }
 
+// nsenter enters a pod's namespaces from its node.
+const nsenter = "nsenter"
+
+// execVerb is the exec subcommand of docker and kubectl.
+const execVerb = "exec"
+
+// otherReply marks a packet a CONNECT-IP tunnel delivered that is not an
+// echo reply to the probe.
+const otherReply = "other"
+
 // startProbe runs edgeprobe with args in the network namespace of the pod
 // whose sandbox has pid on node.
 func startProbe(node string, pid int, name string, args ...string) (*probeRun, error) {
-	full := append([]string{"exec", node, "nsenter", "-t", strconv.Itoa(pid), "-n", "/usr/local/bin/edgeprobe"},
+	full := append([]string{execVerb, node, nsenter, "-t", strconv.Itoa(pid), "-n", "/usr/local/bin/edgeprobe"},
 		args...)
 	p := &probeRun{cmd: exec.CommandContext(context.Background(), "docker", full...), name: name}
 	p.cmd.Stdout = &p.out
-	p.cmd.Stderr = os.Stderr
+	p.cmd.Stderr = io.MultiWriter(os.Stderr, &p.stderr)
 	return p, p.cmd.Start()
 }
 

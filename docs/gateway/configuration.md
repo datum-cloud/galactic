@@ -9,19 +9,24 @@ flags, or a combination of both (CLI flags take precedence), with the
 `GALACTIC_GATEWAY` env prefix — the same three-tier precedence pattern
 `galactic-router` uses (see [docs/router/configuration.md](../router/configuration.md)).
 
-| Option              | Environment Variable                   | CLI Flag                        | Default     | Required      |
-| ------------------- | -------------------------------------- | ------------------------------- | ----------- | ------------- |
-| Node name           | `GALACTIC_GATEWAY_NODE_NAME`           | `--node-name`, `-n`             | —           | Yes           |
-| Public interface    | `GALACTIC_GATEWAY_PUBLIC_INTERFACE`    | `--gateway-public-interface`    | —           | While enabled |
-| SRv6 address        | `GALACTIC_GATEWAY_SRV6_ADDRESS`        | `--gateway-srv6-address`        | Derived     | No            |
-| Internal interfaces | `GALACTIC_GATEWAY_INTERNAL_INTERFACES` | `--gateway-internal-interfaces` | —           | No            |
-| XDP attach mode     | `GALACTIC_GATEWAY_XDP_ATTACH`          | `--gateway-xdp-attach`          | `dispatch`  | No            |
-| Datapath enabled    | `GALACTIC_GATEWAY_DATAPATH_ENABLED`    | `--gateway-datapath-enabled`    | `true`      | No            |
-| IPv4 VIPs           | `GALACTIC_GATEWAY_IPV4_VIPS`           | `--gateway-ipv4-vips`           | `false`     | No            |
-| Backend health      | `GALACTIC_GATEWAY_BACKEND_HEALTH`      | `--gateway-backend-health`      | `false`     | No            |
-| Procfs sysctl root  | `GALACTIC_GATEWAY_PROC_SYS_PATH`       | `--gateway-proc-sys-path`       | `/proc/sys` | No            |
-| Metrics port        | `GALACTIC_GATEWAY_METRICS_PORT`        | `--metrics-port`                | `8081`      | No            |
-| gRPC health port    | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`    | `--grpc-health-port`            | `5181`      | No            |
+Logging takes `--log-level` (`LOG_LEVEL`), without the `GALACTIC_GATEWAY` prefix and the standard `--zap-*` flags; see [Logging](../observability/logging.md).
+
+| Option               | Environment Variable                    | CLI Flag                         | Default     | Required              |
+| -------------------- | --------------------------------------- | -------------------------------- | ----------- | --------------------- |
+| Node name            | `GALACTIC_GATEWAY_NODE_NAME`            | `--node-name`, `-n`              | —           | Yes                   |
+| Public interface     | `GALACTIC_GATEWAY_PUBLIC_INTERFACE`     | `--gateway-public-interface`     | —           | While enabled         |
+| SRv6 address         | `GALACTIC_GATEWAY_SRV6_ADDRESS`         | `--gateway-srv6-address`         | Derived     | No                    |
+| Internal interfaces  | `GALACTIC_GATEWAY_INTERNAL_INTERFACES`  | `--gateway-internal-interfaces`  | —           | No                    |
+| XDP attach mode      | `GALACTIC_GATEWAY_XDP_ATTACH`           | `--gateway-xdp-attach`           | `dispatch`  | No                    |
+| Datapath enabled     | `GALACTIC_GATEWAY_DATAPATH_ENABLED`     | `--gateway-datapath-enabled`     | `true`      | No                    |
+| IPv4 VIPs            | `GALACTIC_GATEWAY_IPV4_VIPS`            | `--gateway-ipv4-vips`            | `false`     | No                    |
+| Backend health       | `GALACTIC_GATEWAY_BACKEND_HEALTH`       | `--gateway-backend-health`       | `false`     | No                    |
+| Procfs sysctl root   | `GALACTIC_GATEWAY_PROC_SYS_PATH`        | `--gateway-proc-sys-path`        | `/proc/sys` | No                    |
+| Project services     | `GALACTIC_GATEWAY_PROJECT_SERVICES`     | `--gateway-project-services`     | `false`     | No                    |
+| Gateway namespace    | `GALACTIC_GATEWAY_NAMESPACE`            | `--gateway-namespace`            | —           | With project services |
+| Project VIP prefixes | `GALACTIC_GATEWAY_PROJECT_VIP_PREFIXES` | `--gateway-project-vip-prefixes` | —           | With project services |
+| Metrics port         | `GALACTIC_GATEWAY_METRICS_PORT`         | `--metrics-port`                 | `8081`      | No                    |
+| gRPC health port     | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`     | `--grpc-health-port`             | `5181`      | No                    |
 
 `GALACTIC_GATEWAY_XDP_ATTACH` is `dispatch` or `direct`. `dispatch` runs
 `edge_lb` and `edge_return` from the gateway slots of the node's shared,
@@ -509,11 +514,30 @@ drain delay, so traffic already on its way to the VIP is not dropped.
 #### Services in a project namespace
 
 A `NetworkService` can live in the gateway namespace (`galactic-system`) or in
-a project namespace, one holding no `NetworkGateway`. Every gateway serves
-both. A cluster runs one gateway namespace, the one `galactic-router`'s BGP
-objects live in (`GALACTIC_ROUTER_GC_NAMESPACE`), and the
-`BGPAdvertisement`s and `ServiceVIPBinding`s made for every service live
+a project namespace, any other. A cluster runs one gateway namespace, the one
+`galactic-router`'s BGP objects live in (`GALACTIC_ROUTER_GC_NAMESPACE`), and
+the `BGPAdvertisement`s and `ServiceVIPBinding`s made for every service live
 there, whatever namespace the service is in.
+
+The gateways serve project namespaces only with
+`GALACTIC_GATEWAY_PROJECT_SERVICES=true`, so a location can turn it on before
+others. It needs two more settings, and the gateway refuses to start without
+them:
+
+- `GALACTIC_GATEWAY_NAMESPACE` names the gateway namespace. The DaemonSet sets
+  it to the pod's own namespace. Whenever it is set, with the switch on or
+  off, only `NetworkGateway`s there are trusted: one created in any other
+  namespace is ignored, so it neither serves anything nor makes its
+  namespace's services trusted.
+- `GALACTIC_GATEWAY_PROJECT_VIP_PREFIXES` lists, comma-separated, the prefixes
+  the platform allocates load balancer addresses from.
+
+With the switch on, the gateway's role also needs `watch` on `vpcs`. A watch
+the role denies stops the gateway at startup. With the switch off, a gateway
+serves only the services in its own `NetworkGateway`'s namespace. It sets no
+finalizer or condition on any other service. A project service it accepted
+while the switch was on gets `Accepted=False` with reason
+`ProjectServicesOff`, and its routes are withdrawn.
 
 A service in the gateway namespace is trusted: the platform API that serves
 tenants writes it after checking that the tenant owns the VPC `vpcRef` names,
@@ -526,6 +550,7 @@ check it themselves:
 
 | Check                                                                                                                                       | Outcome when it fails                               |
 | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Every VIP address falls in `GALACTIC_GATEWAY_PROJECT_VIP_PREFIXES`                                                                          | `Accepted=False`, reason `VIPOutsidePool`           |
 | A `VPC` in the service's namespace has `status.vpc` equal to `vpcRef`                                                                       | `Accepted=False`, reason `OwnershipDenied`          |
 | No other service serves one of its VIP addresses on its protocol and port (a service in the gateway namespace always wins, then the oldest) | `Accepted=False`, reason `VIPClaimed`               |
 | Its backends are `VPCAttachment`s in its own namespace                                                                                      | Attachments elsewhere are never selected or claimed |
@@ -535,7 +560,9 @@ service that loses `Accepted` is unloaded and its routes withdrawn. Its
 generated objects carry the `galactic.datum.net/network-rule-namespace` label
 naming its namespace, and no owner reference, since one cannot cross
 namespaces: the service's finalizer and each gateway's sweep remove its
-advertisements, and each backend node removes its bindings.
+advertisements, and each backend node removes its bindings. A service deleted
+when no `NetworkGateway` is left to serve it is torn down by any running
+gateway process, so its namespace does not stay `Terminating`.
 
 ### `ServiceVIPBinding` — the backend-side half, generated by `galactic-router`
 

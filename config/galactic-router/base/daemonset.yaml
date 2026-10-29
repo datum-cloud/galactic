@@ -67,6 +67,11 @@ spec:
             # can't silently drift if the binary's default ever changes.
             - name: GALACTIC_ROUTER_GRPC_HEALTH_PORT
               value: "5179"
+            # Serves each BGPRouter's GoBGP API, read-only, as a root-only
+            # unix socket on the host, for the gobgp CLI in a galactic-debug
+            # node pod. See the gobgp-api volume below.
+            - name: GALACTIC_ROUTER_GOBGP_API_DIR
+              value: /run/galactic-router
           ports:
             - name: metrics
               containerPort: 9179
@@ -166,6 +171,8 @@ spec:
             # neither.
             - name: edge-ownership
               mountPath: /var/lib/galactic-edge/ownership
+            - name: gobgp-api
+              mountPath: /run/galactic-router
       volumes:
         - name: netns
           hostPath:
@@ -174,6 +181,13 @@ spec:
         - name: cni-state
           hostPath:
             path: /var/lib/cni
+            type: DirectoryOrCreate
+        # The GoBGP API sockets, one per BGPRouter, so the plain and rr
+        # DaemonSets can share the path. The router removes a stale socket
+        # before it listens.
+        - name: gobgp-api
+          hostPath:
+            path: /run/galactic-router
             type: DirectoryOrCreate
         # Never delete or restore this directory while a writer is alive.
         - name: edge-ownership

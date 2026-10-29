@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 )
 
 // Startup stages, in the order RunStartup runs them.
@@ -66,68 +67,72 @@ type LifecycleMetrics struct {
 	now func() time.Time
 }
 
-// NewLifecycleMetrics builds unregistered lifecycle metrics for a sidecar that
-// sweeps every interval and delays teardown by grace, with every startup
-// stage pending and no sweep completed.
+// NewLifecycleMetrics creates lifecycle metrics on the instrumentation
+// library's registry for a sidecar that sweeps every interval and delays
+// teardown by grace, with every startup stage pending and no sweep completed.
+// The registry keeps the series across calls, so each call starts them over.
+// MustRegister exports the stage statuses.
 func NewLifecycleMetrics(interval, grace time.Duration) *LifecycleMetrics {
 	m := &LifecycleMetrics{
 		stageStatus: newStageCollector(),
-		attempts: prometheus.NewCounterVec(prometheus.CounterOpts{
+		attempts: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "startup_attempts_total",
 			Help:      "Completed startup stage attempts, by stage and result (success, error).",
 		}, []string{"stage", resultLabel}),
-		complete: prometheus.NewGauge(prometheus.GaugeOpts{
+		complete: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "startup_complete",
 			Help: "1 once the seed succeeded, inventory and prune were handled and the sweep started. " +
 				"Startup procedure only: a failed inventory or prune still reports 1, and it says nothing " +
 				"about routes or traffic.",
 		}),
-		sweepLast: prometheus.NewGauge(prometheus.GaugeOpts{
+		sweepLast: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "sweep_last_completed_timestamp_seconds",
 			Help:      "Unix time the last sweep finished, whatever its operations' results; 0 before the first.",
 		}),
-		sweepDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+		sweepDuration: newHistogram(prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Name:      "sweep_duration_seconds",
 			Help: "Time each sweep took, including waiting for the store's lock. A sweep outlasting the " +
 				"interval absorbs the ticks it missed rather than queueing them.",
 			Buckets: sweepBucketsSec,
 		}),
-		sweepInterval: prometheus.NewGauge(prometheus.GaugeOpts{
+		sweepInterval: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "sweep_interval_seconds",
 			Help:      "Configured time between sweeps.",
 		}),
-		grace: prometheus.NewGauge(prometheus.GaugeOpts{
+		grace: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "teardown_grace_seconds",
 			Help:      "Configured teardown grace period, applied to a route and then to its VRF.",
 		}),
-		prunedRows: prometheus.NewCounter(prometheus.CounterOpts{
+		prunedRows: newCounter(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "pruned_rows_total",
 			Help:      "Shared eBPF map rows the startup prune removed, including those removed before it failed.",
 		}),
 		now: time.Now,
 	}
+	m.attempts.Reset()
 	for _, stage := range startupStages {
 		for _, result := range attemptResults {
 			m.attempts.WithLabelValues(stage, result)
 		}
 	}
+	m.complete.Set(0)
+	m.sweepLast.Set(0)
 	m.sweepInterval.Set(interval.Seconds())
 	m.grace.Set(grace.Seconds())
 	return m
 }
 
-// MustRegister registers every lifecycle metric against reg, panicking on a
-// duplicate. Call it once per process.
-func (m *LifecycleMetrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.stageStatus, m.attempts, m.complete, m.sweepLast, m.sweepDuration,
-		m.sweepInterval, m.grace, m.prunedRows)
+// MustRegister registers m's stage status collector on the instrumentation
+// library's registry. Call it once per process.
+func (m *LifecycleMetrics) MustRegister() {
+	metrics.MustRegister(m.stageStatus)
 }
 
 // setStage makes status the one current status of stage.

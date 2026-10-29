@@ -32,12 +32,14 @@ syntax (`10m`).
 
 ### Global (all subcommands)
 
-| Flag              | Env          | Default | Meaning                                      |
-| ----------------- | ------------ | ------- | -------------------------------------------- |
-| `--log-level`     | `LOG_LEVEL`  | `info`  | `debug`, `info`, `warn` or `error`           |
-| `--log-format`    | `LOG_FORMAT` | `json`  | `json` or `text`                             |
-| `--version`, `-V` |              |         | Print the version and exit (root only)       |
-| `--build-info`    |              |         | Print build information and exit (root only) |
+| Flag              | Env         | Default | Meaning                                      |
+| ----------------- | ----------- | ------- | -------------------------------------------- |
+| `--log-level`     | `LOG_LEVEL` | `info`  | `debug`, `info`, `warn` or `error`           |
+| `--zap-*`         |             |         | Standard zap flags, such as `--zap-devel`    |
+| `--version`, `-V` |             |         | Print the version and exit (root only)       |
+| `--build-info`    |             |         | Print build information and exit (root only) |
+
+[Logging](../observability/logging.md) describes what the logging flags cover.
 
 Tracing is enabled only when `OTEL_EXPORTER_OTLP_ENDPOINT` or
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set; the standard OpenTelemetry exporter
@@ -118,6 +120,7 @@ FRR, so it follows [Rollout](operations.md#rollout).
 | `--retention`                         |                                      | `1h`                                                   | Retention the stale-object count assumes; keep equal to the janitor's `--retention`                                                                                                                                                                                                         |
 | `--cleanup-grace`                     |                                      | `15m`                                                  | Cleanup grace the stale-object count assumes; keep equal to the janitor's `--grace`                                                                                                                                                                                                         |
 | `--service-identities`                |                                      |                                                        | Comma-separated names of the Looking Glass service identities allowed to call this gateway. Empty allows none                                                                                                                                                                               |
+| `--deny-prefixes`                     |                                      |                                                        | Comma-separated platform or management CIDRs no Looking Glass probe may target, refused before the snapshot. Set it to the nodes' `--deny-prefixes`; see [Destination](security.md#destination)                                                                                             |
 | `--service-config-map`                |                                      |                                                        | ConfigMap in `--namespace` whose key `service` turns Looking Glass execution on (`enabled`) or off while the gateway runs, read every second. Empty keeps it off. Needs `--aggregate-budgets`. See [Operating the Looking Glass service](operations.md#operating-the-looking-glass-service) |
 | `--aggregate-budgets`                 |                                      | `false`                                                | Enforce the cell's aggregate admission and probe packet budgets on every caller and issue probe permits. Requires `--cell-slots` at most 8. See [Aggregate probe budgets](#aggregate-probe-budgets)                                                                                         |
 | Limit flags                           |                                      | The contract's                                         | `--request-*`, `--packet-*`, `--principal-slots`, `--principal-queue`, `--service-streams`, `--project-streams` and `--queue-wait`: the aggregate limits, each only lowerable; need `--aggregate-budgets`. See [Limits and capacity](#limits-and-capacity)                                  |

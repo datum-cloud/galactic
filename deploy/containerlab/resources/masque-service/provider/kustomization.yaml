@@ -1,0 +1,38 @@
+# The lab's CONNECT-IP service: config/masque/provider with the lab image
+# (masque-service:latest; masque-provider:latest is the conformance
+# fixture), the :authority its clients send, and one pod pinned to
+# dfw-worker2. The Secret masque-provider-tls and the ConfigMap
+# masque-authority-ca come from the suite. The base's TUN resource,
+# devic.es/tun, is the one the lab's device plugin serves
+# (../galactic-edge/tun-device-plugin), so it is kept. Clients reach the pod
+# directly from its node, so the Service stays ClusterIP.
+#
+# The edge nodes cannot reach the cluster DNS, so the pod resolves the
+# authority's name through a host alias to the fixed address of its Service
+# (../authority/kustomization.yaml).
+resources:
+  - ../../../../../config/masque/provider
+images:
+  - name: ghcr.io/datum-cloud/masque-provider
+    newName: masque-service
+    newTag: latest
+patches:
+  - target:
+      kind: Deployment
+      name: masque-provider
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --authority=masque.dfw.lab.test:443
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: {kubernetes.io/hostname: dfw-worker2}
+      - op: add
+        path: /spec/template/spec/tolerations
+        value: [{key: galactic.datumapis.com/nat, operator: Exists, effect: NoSchedule}]
+      - op: add
+        path: /spec/template/spec/hostAliases
+        value: [{ip: "fd00:200::4d", hostnames: [masque-authority.masque-system.svc]}]

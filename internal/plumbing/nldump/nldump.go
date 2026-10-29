@@ -13,8 +13,8 @@
 // dump a bounded number of times and never return a partial result: an entry
 // missing from an interrupted dump would look absent. Every interrupted
 // attempt, and every dump still interrupted on its last attempt, is counted
-// in the metrics MustRegister exposes, so churn is visible before it fails a
-// caller.
+// in metrics created on the instrumentation library's registry when the
+// package loads, so churn is visible before it fails a caller.
 //
 // Each package-level function opens its own netlink socket in the calling
 // thread's network namespace, with the same send and receive timeout, as the
@@ -30,6 +30,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vishvananda/netlink"
+	"go.miloapis.com/instrumentation/metrics"
 	"golang.org/x/sys/unix"
 )
 
@@ -56,14 +57,14 @@ const (
 )
 
 var (
-	interrupted = prometheus.NewCounterVec(prometheus.CounterOpts{
+	interrupted = metrics.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "galactic",
 		Subsystem: "netlink_dump",
 		Name:      "interrupted_total",
 		Help: "Netlink listing attempts the kernel interrupted because the state they walked changed, " +
 			"by kind. Each is discarded and retried.",
 	}, []string{labelKind})
-	failures = prometheus.NewCounterVec(prometheus.CounterOpts{
+	failures = metrics.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "galactic",
 		Subsystem: "netlink_dump",
 		Name:      "failures_total",
@@ -76,13 +77,6 @@ func init() {
 		interrupted.WithLabelValues(kind)
 		failures.WithLabelValues(kind)
 	}
-}
-
-// MustRegister registers the interruption and failure counters against reg,
-// panicking on a duplicate as the underlying registry does. The counters are
-// process-wide, so a process registers them once, at startup.
-func MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(interrupted, failures)
 }
 
 // sleep is time.Sleep, replaced by tests.

@@ -7,8 +7,6 @@ package main
 import (
 	"context"
 	"testing"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 // TestSetupGatewayDatapath_InvalidAddressIsError covers the address-parse
@@ -19,7 +17,7 @@ import (
 // PublicInterface/SRv6Address before setupGatewayDatapath is ever called.
 func TestSetupGatewayDatapath_InvalidAddressIsError(t *testing.T) {
 	_, err := setupGatewayDatapath(context.Background(), "eth0", nil, "not-an-ip-address", "dispatch", nil,
-		prometheus.NewRegistry(), newDatapathCoverage(nil))
+		newDatapathCoverage(nil))
 	if err == nil {
 		t.Error("setupGatewayDatapath with an invalid SRv6 address: want an error, got nil")
 	}

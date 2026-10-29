@@ -7,13 +7,12 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"go.miloapis.com/instrumentation/metrics"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -57,7 +56,6 @@ deployment's and outstanding release's state as galactic_fabric_routing_*
 metrics on the metrics address.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctrl.SetLogger(zap.New())
 			scheme := runtime.NewScheme()
 			utilruntime.Must(corev1.AddToScheme(scheme))
 			utilruntime.Must(networkv1alpha1.AddToScheme(scheme))
@@ -100,9 +98,7 @@ metrics on the metrics address.`,
 			// The leader exports the fleet's state from its cache beside
 			// controller-runtime's own metrics.
 			fleet := &routingmetrics.Collector{Reader: mgr.GetClient(), Rollout: rolloutEnabled}
-			if err := ctrlmetrics.Registry.Register(fleet); err != nil {
-				return fmt.Errorf("register fleet metrics: %w", err)
-			}
+			metrics.MustRegister(fleet)
 			if err := mgr.Add(fleet); err != nil {
 				return fmt.Errorf("add fleet metrics: %w", err)
 			}

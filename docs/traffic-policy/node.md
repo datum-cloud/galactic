@@ -113,7 +113,7 @@ galactic-router writes no status for an edge attachment. galactic-controller
 reports whether the references resolve in the service's
 `TrafficPolicyResolved` condition, with reason `Default` while both
 directions take the built-in default and its attachments carry nothing, and
-the counters below show what each direction applies. Their `namespace` and `attachment` labels name the
+the counters below show what each direction applies. Their `resource_namespace` and `attachment` labels name the
 EdgeAttachment, `vpc` the service's VPC, and `interface` the host link.
 
 ## Status

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -577,12 +578,8 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 		if err := usidmap.NewRegistryFromObjects(objs).VRF.SyncTraffic(); err != nil {
 			slog.Warn("Failed to create per-VRF traffic counter rows; the next GC sweep retries", "err", err)
 		}
-		if err := m.RegisterDatapathCollector(objs); err != nil {
-			slog.Warn("Failed to register eBPF datapath metrics collector", "err", err)
-		}
-		if err := m.RegisterEgressShardCollector(objs, egressCfg.MinActive); err != nil {
-			slog.Warn("Failed to register egress shard metrics collector", "err", err)
-		}
+		m.RegisterDatapathCollector(objs)
+		m.RegisterEgressShardCollector(objs, egressCfg.MinActive)
 	}
 
 	// Best-effort setup for the eBPF map GC sweeps. Unlike the datapath start
@@ -661,7 +658,7 @@ func startHashedEgress(ctx context.Context, g *egressGroup, namespace string) {
 	}
 	go g.watchShardReachability(ctx)
 	slog.Info("Hashed egress mode: spreading tenant egress across the cluster's EgressShards",
-		"namespace", namespace, "hash", g.cfg.Hash, "pinIdle", g.cfg.PinIdle)
+		"resource_namespace", namespace, "hash", g.cfg.Hash, "pinIdle", g.cfg.PinIdle)
 }
 
 // loadEgressShardSIDs parses the host conflist's egress shard list for the
@@ -1075,6 +1072,13 @@ func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
 		"err", failure.err, "hostInterface", failure.iface, "failures", p.failures, "retryIn", backoff)
 }
 
+// NewMetrics creates the series the run daemon serves at /metrics, before the
+// datapath collectors that need loaded eBPF objects are added. Run calls it
+// once.
+func NewMetrics() *metrics.Metrics {
+	return metrics.New()
+}
+
 // Run executes the CNI installer main container tasks:
 //  1. Loads, pins, and attaches the eBPF uSID datapath and keeps its attachment
 //     set re-evaluated against netlink events for the life of ctx. This is the
@@ -1109,8 +1113,7 @@ func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
 func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	slog.Info("Starting CNI installer run daemon", "grpcHealthPort", grpcHealthPort, "metricsPort", metricsPort)
 
-	m := metrics.New()
-	nldump.MustRegister(m.Registry)
+	m := NewMetrics()
 
 	ebpfState, datapath, err := startEBPFDatapath(ctx, m)
 	if err != nil {
@@ -1142,7 +1145,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 
 	// Serve Prometheus metrics at the conventional /metrics scrape path.
 	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", m.Handler())
+	metricsMux.Handle("/metrics", instmetrics.Handler())
 	metricsSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", metricsPort),
 		Handler:           metricsMux,

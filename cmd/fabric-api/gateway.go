@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
@@ -30,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	fabricapi "go.datum.net/galactic/internal/fabric/api/v1alpha1"
@@ -55,6 +53,7 @@ type gatewayOptions struct {
 	maxInFlight                   int
 	retention, cleanupGrace       time.Duration
 	serviceIdentities             []string
+	denyPrefixes                  []string
 	serviceConfigMap              string
 	aggregateBudgets              bool
 	limits                        limit.Limits
@@ -108,6 +107,9 @@ func newGatewayCommand() *cobra.Command {
 	f.StringSliceVar(&o.serviceIdentities, "service-identities", nil,
 		"Names of the Looking Glass service identities (spiffe://fabric-api.datumapis.com/cell/<cell>/service/<name>) "+
 			"allowed to call this cell's gateway; empty allows none")
+	f.StringSliceVar(&o.denyPrefixes, "deny-prefixes", nil,
+		"Platform or management ranges no Looking Glass probe may target, refused before the snapshot; "+
+			"set it to the nodes' --deny-prefixes")
 	f.StringVar(&o.serviceConfigMap, "service-config-map", "",
 		"ConfigMap in --namespace whose key \"service\" turns Looking Glass execution on (\"enabled\") or off "+
 			"(\"disabled\") while the gateway runs, read every second; empty, missing, unreadable or any other "+
@@ -212,10 +214,13 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	if err != nil {
 		return fmt.Errorf("--service-identities: %w", err)
 	}
+	deny, err := query.ParsePrefixes(o.denyPrefixes)
+	if err != nil {
+		return fmt.Errorf("--deny-prefixes: %w", err)
+	}
 	ctx, stop := signalContext(parent)
 	defer stop()
 	defer setupTracing(ctx, "gateway")()
-	ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -262,7 +267,7 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	}
 
 	executor := gateway.NewExecutor(o.slots, o.expensiveSlots, o.queue)
-	metrics := gateway.NewMetrics(ctrlmetrics.Registry, func() float64 { return float64(executor.Depth()) })
+	metrics := gateway.NewMetrics(func() float64 { return float64(executor.Depth()) })
 	var admission *gateway.Admission
 	if o.aggregateBudgets {
 		admission, err = gateway.NewAdmission(o.limits, &limit.Authority{
@@ -361,12 +366,13 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	// enforces the aggregate budgets; otherwise it authenticates, validates
 	// and reports capabilities, and refuses execution with ServiceDisabled.
 	service := &gateway.Service{
-		Cell:      o.cell,
-		Switch:    serviceSwitch,
-		Metrics:   metrics,
-		Allowlist: allowlist,
-		Elected:   debug.Elected,
-		Leader:    debug,
+		Cell:         o.cell,
+		Switch:       serviceSwitch,
+		Metrics:      metrics,
+		Allowlist:    allowlist,
+		Destinations: query.DestinationPolicy{Deny: deny},
+		Elected:      debug.Elected,
+		Leader:       debug,
 		Discoverer: &gateway.Discoverer{
 			Reader: mgr.GetAPIReader(), Namespace: o.namespace, Selector: sel, CertsSelector: certsSel,
 		},
@@ -397,7 +403,7 @@ func runGateway(parent context.Context, o *gatewayOptions) error {
 	// manager shuts down.
 	defer context.AfterFunc(ctx, gs.Stop)()
 
-	slog.Info("starting fabric-api gateway", "version", metadata.Version, "site", o.site, "cluster", o.clusterName,
+	slog.Info("starting fabric-api gateway", "version", metadata.Version, "site", o.site, "clusterName", o.clusterName,
 		"cell", o.cell, "debug", debugAddr)
 	return mgr.Start(ctx)
 }

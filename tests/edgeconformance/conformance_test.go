@@ -309,7 +309,8 @@ func (l *lab) writeSummary(t *testing.T) {
 	dirty, _ := exec.CommandContext(context.Background(), "git", "-C", l.root, "status", "--porcelain").Output()
 	images := map[string]string{}
 	for _, img := range []string{"galactic-edge:latest", "galactic-controller:latest", "galactic-router:latest",
-		"galactic-cni:latest", "edge-provider:latest"} {
+		"galactic-cni:latest", "edge-provider:latest", "masque-provider:latest", "masque-service:latest",
+		"masque-authority:latest"} {
 		id, _ := exec.CommandContext(context.Background(), "docker", "image", "inspect", "--format", "{{.Id}}", img).Output()
 		images[img] = strings.TrimSpace(string(id))
 	}

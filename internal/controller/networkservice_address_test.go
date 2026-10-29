@@ -618,13 +618,16 @@ func TestTenantAddressAuthorityAdvertisementAndRetirement(t *testing.T) {
 	address.Name = "nlb-address-" + strings.Repeat("a", 64)
 	address.Namespace = "project-a"
 	rule.Namespace = address.Namespace
+	vpc := newTenantVPC(address.Spec.VPCRef)
+	vpc.Namespace = address.Namespace
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&api.NetworkService{}, &api.NetworkServiceAddress{}).
-		WithObjects(address, rule, newTestGateway(testNodeGWA)).
+		WithObjects(address, rule, vpc, newTestGateway(testNodeGWA)).
 		Build()
 	engine := &ownedTestEngine{fakeGatewayEngine: newFakeGatewayEngine()}
 	r := newGatewayReconciler(c, scheme, engine, testNodeGWA)
+	r.Scope = sharedAddressProjectScope()
 	inventory, err := r.prepareAddressInventory(ctx, testNamespace, []api.NetworkService{*rule})
 	if err != nil {
 		t.Fatal(err)
@@ -973,4 +976,225 @@ func (d *stoppedGatewayDatapath) ReconcileOrphans(_ context.Context, live []gate
 	}
 	d.persistedRows = 0
 	return nil
+}
+
+func sharedAddressProjectScope() ServiceScope {
+	return ServiceScope{ProjectServices: true, GatewayNamespace: testNamespace,
+		VIPPrefixes: []netip.Prefix{netip.MustParsePrefix("2001:db8::/64")}}
+}
+
+func TestAddressInventoryHonorsProjectScope(t *testing.T) {
+	for _, tc := range []struct {
+		name                                              string
+		enabled, ownsVPC, inPool, trustedGateway, allowed bool
+	}{
+		{"Enabled", true, true, true, true, true},
+		{"Disabled", false, true, true, true, false},
+		{"ForeignVPC", true, false, true, true, false},
+		{"OutsidePool", true, true, false, true, false},
+		{"UntrustedGateway", true, true, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			address, rule := sharedAddressFixture()
+			address.Namespace, rule.Namespace = testTenantNamespace, testTenantNamespace
+			vpc := newTenantVPC(address.Spec.VPCRef)
+			if !tc.ownsVPC {
+				vpc.Status.VPC = "someone-else"
+			}
+			rogue := newTestGateway("rogue-node")
+			rogue.Namespace = testTenantNamespace
+			c := newTenantClient(t, address, rule, vpc, rogue)
+			engine := &ownedTestEngine{fakeGatewayEngine: newFakeGatewayEngine()}
+			r := newGatewayReconciler(c, c.Scheme(), engine, testNodeGWA)
+			r.Scope = sharedAddressProjectScope()
+			r.Scope.ProjectServices = tc.enabled
+			if !tc.inPool {
+				r.Scope.VIPPrefixes = []netip.Prefix{netip.MustParsePrefix("2001:db8:9::/64")}
+			}
+			namespace := testNamespace
+			if !tc.trustedGateway {
+				namespace = testTenantNamespace
+			}
+			inventory, err := r.prepareAddressInventory(ctx, namespace, []api.NetworkService{*rule})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(inventory) != 0) != tc.allowed || (len(engine.owned) != 0) != tc.allowed {
+				t.Fatalf("allowed=%t inventory=%v guards=%v", tc.allowed, inventory, engine.owned)
+			}
+		})
+	}
+}
+
+func TestProjectAddressScopeDisableStillCleansRetirement(t *testing.T) {
+	ctx := context.Background()
+	address, _ := sharedAddressFixture()
+	address.Namespace = testTenantNamespace
+	address.Spec.Retired = true
+	address.Status.Conditions = []metav1.Condition{{Type: programmedConditionType(testNodeGWA),
+		Status: metav1.ConditionTrue, ObservedGeneration: address.Generation, Reason: "PreviouslyServed"}}
+	c := fake.NewClientBuilder().WithScheme(newRuleTestScheme(t)).WithStatusSubresource(address).
+		WithObjects(address, newTestGateway(testNodeGWA)).Build()
+	engine := &ownedTestEngine{fakeGatewayEngine: newFakeGatewayEngine()}
+	r := newGatewayReconciler(c, c.Scheme(), engine, testNodeGWA)
+	r.Scope = ServiceScope{GatewayNamespace: testNamespace}
+	inventory, err := r.prepareAddressInventory(ctx, testNamespace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory) != 0 || len(engine.owned) != 0 {
+		t.Fatal("disabled project anchor acquired a VIP guard")
+	}
+	announced, err := r.publishAddressOutcomes(
+		ctx, testNamespace, inventory, nil, gateway.EngineStatus{Healthy: true}, testRouterName,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if !addressRetirementAcknowledged(address) || len(announced) != 0 {
+		t.Fatalf("disabled cleanup stalled or overwrote active advertisements: %+v %v", address.Status, announced)
+	}
+}
+
+func TestPreemptiveProjectTombstoneRetiresWithLiveGateway(t *testing.T) {
+	ctx := context.Background()
+	address, rule := sharedAddressFixture()
+	address.Namespace, rule.Namespace = testTenantNamespace, testTenantNamespace
+	address.Spec.Retired = true
+	address.Spec.VPCRef = ""
+	address.Spec.Group.Listeners = nil
+	c := fake.NewClientBuilder().WithScheme(newRuleTestScheme(t)).WithStatusSubresource(address).
+		WithObjects(address, newTestGateway(testNodeGWA), newTenantVPC(rule.Spec.VPCRef)).Build()
+	engine := &ownedTestEngine{fakeGatewayEngine: newFakeGatewayEngine()}
+	r := newGatewayReconciler(c, c.Scheme(), engine, testNodeGWA)
+	r.Scope = sharedAddressProjectScope()
+	inventory, err := r.prepareAddressInventory(ctx, testNamespace, []api.NetworkService{*rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory) != 0 || len(engine.owned) != 0 {
+		t.Fatal("preemptive tombstone or delayed source acquired a VIP guard")
+	}
+	announced, err := r.publishAddressOutcomes(
+		ctx, testNamespace, inventory, nil, gateway.EngineStatus{Healthy: true}, testRouterName,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if !addressRetirementAcknowledged(address) || len(announced) != 0 {
+		t.Fatalf("preemptive retirement stalled or announced: %+v %v", address.Status, announced)
+	}
+}
+
+func TestProjectAnchorCannotDisplaceTrustedVIP(t *testing.T) {
+	for _, grouped := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Singleton", true: "Grouped"}[grouped], func(t *testing.T) {
+			ctx := context.Background()
+			address, project := sharedAddressFixture()
+			address.Namespace, project.Namespace = testTenantNamespace, testTenantNamespace
+			trusted := project.DeepCopy()
+			trusted.Namespace = testNamespace
+			if !grouped {
+				trusted.Spec.AddressGroup = nil
+			}
+			c := newTenantClient(t, address, project, trusted, newTenantVPC(project.Spec.VPCRef))
+			engine := &ownedTestEngine{fakeGatewayEngine: newFakeGatewayEngine()}
+			r := newGatewayReconciler(c, c.Scheme(), engine, testNodeGWA)
+			r.Scope = sharedAddressProjectScope()
+			inventory, err := r.prepareAddressInventory(ctx, testNamespace, []api.NetworkService{*project})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(inventory) != 0 || len(engine.owned) != 0 {
+				t.Fatal("tenant anchor or fallback rule displaced trusted VIP")
+			}
+		})
+	}
+}
+
+func TestDisabledProjectGroupedRuleCanFinishDeletion(t *testing.T) {
+	ctx := context.Background()
+	address, rule := sharedAddressFixture()
+	address.Namespace, rule.Namespace = testTenantNamespace, testTenantNamespace
+	address.Spec.Retired = true
+	rule.Finalizers = []string{networkRuleFinalizer}
+	for _, kind := range []string{programmedConditionType(testNodeGWA), advertisedConditionType(testNodeGWA)} {
+		rule.Status.Conditions = append(
+			rule.Status.Conditions,
+			metav1.Condition{Type: kind, Status: metav1.ConditionTrue,
+				ObservedGeneration: rule.Generation, Reason: "PreviouslyServed", LastTransitionTime: metav1.Now()},
+		)
+	}
+	address.Status.Conditions = append([]metav1.Condition(nil), rule.Status.Conditions...)
+	binding := newTestServiceVIPBinding(api.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+	binding.Labels = ruleLabels(rule, testNamespace)
+	binding.Labels[bindingNodeLabel] = testComputeNodeName
+	binding.Labels[bindingManagedByLabel] = bindingManagedByValue
+	binding.Spec.SourceRef = &api.ServiceVIPBindingSourceReference{Namespace: rule.Namespace, Name: rule.Name,
+		UID: rule.UID, Generation: rule.Generation, AllocationUID: rule.Spec.AddressGroup.UID}
+	c := newIndexedClientBuilder(newRuleTestScheme(t)).
+		WithStatusSubresource(&api.NetworkGateway{}, &api.NetworkService{}, &api.NetworkServiceAddress{}).
+		WithObjects(address, rule, binding, newTestGateway(testNodeGWA)).Build()
+	engine := &ownedTestEngine{fakeGatewayEngine: newFakeGatewayEngine()}
+	r := newGatewayReconciler(c, c.Scheme(), engine, testNodeGWA)
+	r.Scope = ServiceScope{GatewayNamespace: testNamespace}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.lastDesired.Rules) != 0 {
+		t.Fatal("disabled rule was programmed")
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(rule), rule); err != nil {
+		t.Fatal(err)
+	}
+	for i := range rule.Status.Conditions {
+		if rule.Status.Conditions[i].Type == programmedConditionType(testNodeGWA) ||
+			rule.Status.Conditions[i].Type == advertisedConditionType(testNodeGWA) {
+			if rule.Status.Conditions[i].Status != metav1.ConditionFalse {
+				t.Fatal("historical serving receipt was not withdrawn")
+			}
+			rule.Status.Conditions[i].LastTransitionTime = metav1.NewTime(time.Now().Add(-2 * time.Second))
+		}
+	}
+	if err := c.Status().Update(ctx, rule); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(ctx, rule); err != nil {
+		t.Fatal(err)
+	}
+	binder := &NetworkServiceBindingReconciler{
+		Client:    c,
+		APIReader: c,
+		NodeName:  testComputeNodeName,
+		Namespace: testNamespace,
+	}
+	if _, err := binder.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(rule)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(binding), binding); !apierrors.IsNotFound(err) {
+		t.Fatalf("binding not removed: %v", err)
+	}
+	service := &NetworkServiceReconciler{Client: c, APIReader: c, NodeName: testNodeGWA, Scope: r.Scope}
+	if _, err := service.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(rule)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(rule), rule); !apierrors.IsNotFound(err) {
+		t.Fatalf("rule finalizer stalled: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(address), address); err != nil {
+		t.Fatal(err)
+	}
+	if !addressRetirementAcknowledged(address) {
+		t.Fatal("retirement stalled after rule/binding teardown")
+	}
 }

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	grpchealth "google.golang.org/grpc/health"
@@ -25,7 +26,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	permitv1 "go.datum.net/galactic/api/fabric/permit/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/frr"
 	"go.datum.net/galactic/internal/fabric/gateway/limit"
@@ -251,10 +251,10 @@ func runNode(parent context.Context, o *nodeOptions) error {
 	if metricsAddr == "" {
 		metricsAddr = net.JoinHostPort(hostIP.String(), "9345")
 	}
-	stopMetrics := serveMetrics(metricsAddr, metrics.Handler())
+	stopMetrics := serveMetrics(metricsAddr, instmetrics.Handler())
 	defer stopMetrics()
 
-	slog.Info("starting fabric-api node", "version", metadata.Version, "node", o.nodeName, "site", o.site,
+	slog.Info("starting fabric-api node", "version", metadata.Version, "nodeName", o.nodeName, "site", o.site,
 		"listen", addr, "metrics", metricsAddr, "probeSources", sources, "expensiveQueries", o.enableExpensive)
 	errc := make(chan error, 1)
 	go func() { errc <- gs.Serve(lis) }()
@@ -299,14 +299,17 @@ func nodePermits(o *nodeOptions, creds *identity.Credentials, metrics *node.Metr
 	}
 	metrics.RegisterClock(limit.KernelClock)
 	if o.gatewayAddress != "" {
-		conn, err := grpc.NewClient(o.gatewayAddress,
-			grpc.WithTransportCredentials(credentials.NewTLS(creds.ClientConfig(identity.Gateway(o.cell)))),
-			// A permit request charges budgets; it is never replayed.
-			grpc.WithDisableRetry())
+		gw, err := node.NewGatewayConn(func() (*grpc.ClientConn, error) {
+			return grpc.NewClient(o.gatewayAddress,
+				grpc.WithTransportCredentials(credentials.NewTLS(creds.ClientConfig(identity.Gateway(o.cell)))),
+				// A permit request charges budgets; it is never replayed.
+				grpc.WithDisableRetry())
+		})
 		if err != nil {
 			return nil, fmt.Errorf("--gateway-address: %w", err)
 		}
-		p.Gateway = permitv1.NewPermitServiceClient(conn)
+		creds.OnLoad(func(*x509.Certificate) { gw.Redial() })
+		p.Gateway = gw
 	}
 	return p, nil
 }
@@ -316,12 +319,12 @@ func nodePermits(o *nodeOptions, creds *identity.Credentials, metrics *node.Metr
 func idleUnconfigured(parent context.Context, hostIP netip.Addr, o *nodeOptions) error {
 	ctx, stop := signalContext(parent)
 	defer stop()
-	metrics := node.NewMetrics()
+	node.NewMetrics()
 	addr := o.metricsAddress
 	if addr == "" {
 		addr = net.JoinHostPort(hostIP.String(), "9345")
 	}
-	stopMetrics := serveMetrics(addr, metrics.Handler())
+	stopMetrics := serveMetrics(addr, instmetrics.Handler())
 	defer stopMetrics()
 	slog.Error("fabric-api node is not configured: --cell (CELL) is empty; diagnostics are unavailable until it is set")
 	<-ctx.Done()

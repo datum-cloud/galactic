@@ -24,8 +24,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	"go.miloapis.com/instrumentation/metrics"
 	_ "golang.org/x/crypto/x509roots/fallback"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,7 +33,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
@@ -43,9 +42,9 @@ import (
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/route"
 	"go.datum.net/galactic/internal/edge/timing"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
-	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 type options struct {
@@ -69,18 +68,24 @@ func main() {
 
 func newRootCommand() *cobra.Command {
 	o := &options{}
+	var logOpts logging.Options
 	cmd := &cobra.Command{
 		Use:          "galactic-edge",
 		Short:        "Program and release Galactic Edge attachments on this node",
 		Version:      metadata.Version,
 		SilenceUsage: true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context(), o)
 		},
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.nodeName, "node-name", os.Getenv("NODE_NAME"), "This node's name (env NODE_NAME)")
-	f.IntVar(&o.mtu, "mtu", 0, "MTU of every attachment link: at least the fabric's tenant MTU (required)")
+	f.IntVar(&o.mtu, "mtu", 0,
+		"MTU of every attachment link: at least the fabric's tenant MTU, and at most the uplink MTU "+
+			"less the 40-byte encapsulation header (required)")
 	f.StringVar(&o.pinDir, "pin-dir", attach.PinDir, "Directory the uSID datapath's maps and programs are pinned in")
 	f.StringVar(&o.ownershipDir, "ownership-dir", ownership.DefaultDir,
 		"Host directory of the node's write-fence records; it must outlive every writer")
@@ -94,6 +99,7 @@ func newRootCommand() *cobra.Command {
 	f.StringVar(&o.bootIDPath, "boot-id-path", "/proc/sys/kernel/random/boot_id", "File holding this boot's ID")
 	f.StringVar(&o.metricsAddress, "metrics-bind-address", ":9186", "Address serving /metrics")
 	f.StringVar(&o.healthAddress, "health-probe-bind-address", ":9187", "Address serving /healthz and /readyz")
+	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
 }
 
@@ -109,7 +115,6 @@ func run(parent context.Context, o *options) error {
 	}
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 	hostattach.SysctlRoot = o.procSys
 
 	// A new owner ID per process start: a restarted agent must fence its
@@ -165,19 +170,17 @@ func run(parent context.Context, o *options) error {
 		Namespaces: pods,
 		Datapath:   agent.PinnedDatapath{PinDir: o.pinDir},
 		MTU:        o.mtu,
+		EncapMTU:   agent.PinnedDatapath{PinDir: o.pinDir}.EncapMTU,
 		APIReader:  mgr.GetAPIReader(),
 		Gates:      agent.PinnedGates{PinDir: o.pinDir},
 		Params:     params,
 		BootID:     strings.TrimSpace(string(bootID)),
 		Diag: &diag.Recorder{
 			Events:  mgr.GetEventRecorder("galactic-edge"),
-			Metrics: diag.NewMetrics(ctrlmetrics.Registry, "node"),
+			Metrics: diag.NewMetrics(diag.RoleNode),
 		},
 	}
-	nldump.MustRegister(ctrlmetrics.Registry)
-	if err := ctrlmetrics.Registry.Register(agent.Collector{Agent: a}); err != nil {
-		return fmt.Errorf("register edge node metrics: %w", err)
-	}
+	metrics.MustRegister(agent.Collector{Agent: a})
 	if err := a.SetupWithManager(mgr); err != nil {
 		return err
 	}
@@ -190,7 +193,7 @@ func run(parent context.Context, o *options) error {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return err
 	}
-	slog.Info("starting galactic-edge", "node", o.nodeName, "owner", a.Owner,
+	slog.Info("starting galactic-edge", "nodeName", o.nodeName, "owner", a.Owner,
 		"version", metadata.Version)
 	return mgr.Start(ctx)
 }

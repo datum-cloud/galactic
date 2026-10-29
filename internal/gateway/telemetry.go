@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 )
 
 const telemetryNamespace = "galactic_edge"
@@ -28,11 +29,11 @@ type PrometheusTelemetryEmitter struct {
 	controlPlaneDrops *prometheus.CounterVec
 }
 
-// NewPrometheusTelemetryEmitter builds a fresh, unregistered
-// PrometheusTelemetryEmitter. Call MustRegister once at process startup.
+// NewPrometheusTelemetryEmitter creates the emitter's counter on the
+// instrumentation library's registry.
 func NewPrometheusTelemetryEmitter() *PrometheusTelemetryEmitter {
 	return &PrometheusTelemetryEmitter{
-		controlPlaneDrops: prometheus.NewCounterVec(prometheus.CounterOpts{
+		controlPlaneDrops: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: telemetryNamespace,
 			Name:      "control_plane_drops_total",
 			Help: "Rule applications rejected before ever reaching the datapath (e.g. quota_exceeded), " +
@@ -40,13 +41,6 @@ func NewPrometheusTelemetryEmitter() *PrometheusTelemetryEmitter {
 				"traffic) are exposed separately by internal/plumbing/ebpf/edgemetrics's Collector.",
 		}, []string{labelRule, "reason"}),
 	}
-}
-
-// MustRegister registers every metric this type owns against reg, panicking on
-// a duplicate as the underlying registry does. Callers do this once per process,
-// at startup.
-func (e *PrometheusTelemetryEmitter) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(e.controlPlaneDrops)
 }
 
 // RuleApplied is a no-op: there is no per-rule placement fact left to record.

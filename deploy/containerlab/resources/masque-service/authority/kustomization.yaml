@@ -1,0 +1,54 @@
+# The lab's grant authority: config/masque/authority with the lab image and
+# dfw as its cell. The Secret masque-authority-tls comes from the suite.
+#
+# Pods on one lab worker cannot reach pod addresses on another over
+# Cilium's tunnel, and the provider pods run on the edge nodes while the
+# authority, which tolerates no edge taint, runs on dfw's compute node. So
+# the authority runs on the host network, as galactic-controller does
+# (../../galactic-controller/controller-lab-patch.yaml), where the provider
+# pods reach it through its Service. Port 8443 is free on the lab's workers.
+# A rolling update could never place a surge pod beside the old one, which
+# holds the port, so the pod is recreated instead.
+#
+# The edge nodes cannot reach the cluster DNS either, so the Service gets a
+# fixed address, which the provider overlay maps the authority's name to. It
+# is in the lowest 256 addresses of dfw's fd00:200::/108 Service range, the
+# band the API server reserves for fixed addresses and allocates
+# dynamically only once the rest is full; nothing else in the lab takes
+# that address.
+resources:
+  - ../../../../../config/masque/authority
+images:
+  - name: ghcr.io/datum-cloud/masque-authority
+    newName: masque-authority
+    newTag: latest
+patches:
+  - target:
+      kind: Deployment
+      name: masque-authority
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --cell=dfw
+      - op: add
+        path: /spec/template/spec/hostNetwork
+        value: true
+      - op: add
+        path: /spec/template/spec/dnsPolicy
+        value: ClusterFirstWithHostNet
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: {kubernetes.io/hostname: dfw-worker}
+      - op: add
+        path: /spec/strategy
+        value: {type: Recreate}
+  - target:
+      kind: Service
+      name: masque-authority
+    patch: |-
+      - op: add
+        path: /spec/clusterIP
+        value: fd00:200::4d

@@ -718,14 +718,14 @@ process that serves them. A row the collector cannot read is left out, not
 reported as zero, and counted in the `galactic_cni_traffic_policy_counter_read_errors`
 gauge.
 
-| Metric                                                    | Labels                                                                                            |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `galactic_cni_traffic_policy_rule_hits_total`             | namespace, vpc, attachment, interface, interface_uid, direction, policy, policy_uid, rule, action |
-| `galactic_cni_traffic_policy_rule_bytes_total`            | the same                                                                                          |
-| `galactic_cni_traffic_policy_fallback_packets_total`      | namespace, vpc, attachment, interface, interface_uid, direction, reason                           |
-| `galactic_cni_traffic_policy_fallback_bytes_total`        | the same                                                                                          |
-| `galactic_cni_traffic_policy_unattributed_drops_total`    | direction, reason                                                                                 |
-| `galactic_cni_traffic_policy_accounting_errors_total`     | direction, action, reason                                                                         |
+| Metric                                                 | Labels                                                                                                     |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `galactic_cni_traffic_policy_rule_hits_total`          | resource_namespace, vpc, attachment, interface, interface_uid, direction, policy, policy_uid, rule, action |
+| `galactic_cni_traffic_policy_rule_bytes_total`         | the same                                                                                                   |
+| `galactic_cni_traffic_policy_fallback_packets_total`   | resource_namespace, vpc, attachment, interface, interface_uid, direction, reason                           |
+| `galactic_cni_traffic_policy_fallback_bytes_total`     | the same                                                                                                   |
+| `galactic_cni_traffic_policy_unattributed_drops_total` | direction, reason                                                                                          |
+| `galactic_cni_traffic_policy_accounting_errors_total`  | direction, action, reason                                                                                  |
 
 - `reason` on the fallback metrics is one of `no_match`,
   `policy_unavailable`, `parse_error` or `classification_error`.

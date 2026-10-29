@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/prometheus/client_golang/prometheus"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -91,10 +92,11 @@ func NewEgressShardCollector(
 }
 
 // RegisterEgressShardCollector registers an EgressShardCollector reading objs'
-// maps, with minActive as the pool's expected floor.
-func (m *Metrics) RegisterEgressShardCollector(objs *prog.UsidObjects, minActive int) error {
+// maps, with minActive as the pool's expected floor. Call it once, after the
+// datapath is loaded.
+func (m *Metrics) RegisterEgressShardCollector(objs *prog.UsidObjects, minActive int) {
 	groups := egressroutemap.NewShardGroupTable(egressroutemap.NewKernelGroupStore(objs.EgressShardGroups))
-	return m.Registry.Register(
+	instmetrics.MustRegister(
 		NewEgressShardCollector(groups, objs.EgressShardCounters, objs.EgressShardStats, minActive))
 }
 

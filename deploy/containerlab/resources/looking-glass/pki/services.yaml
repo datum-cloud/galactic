@@ -1,0 +1,87 @@
+# Looking Glass service certificates for verify:looking-glass, issued by the
+# lab's fabric-api Issuer (resources/fabric-api/pki). CELL_NAME is replaced
+# with the site name by deploy-looking-glass.sh.
+#
+# - looking-glass: the service identity the gateway allows
+#   (config/fabric-api/components/service).
+# - looking-glass-unlisted: a valid service identity of this cell that the
+#   gateway does not list.
+# - looking-glass-other-cell: the allowed service name in another cell,
+#   signed by this cell's CA.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: lg-qualify-looking-glass
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/part-of: lg-qualify
+spec:
+  secretName: lg-qualify-looking-glass
+  secretTemplate:
+    labels:
+      app.kubernetes.io/part-of: lg-qualify
+  duration: 24h
+  renewBefore: 8h
+  uris:
+    - spiffe://fabric-api.datumapis.com/cell/CELL_NAME/service/looking-glass
+  usages:
+    - digital signature
+    - client auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: fabric-api
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: lg-qualify-unlisted
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/part-of: lg-qualify
+spec:
+  secretName: lg-qualify-unlisted
+  secretTemplate:
+    labels:
+      app.kubernetes.io/part-of: lg-qualify
+  duration: 24h
+  renewBefore: 8h
+  uris:
+    - spiffe://fabric-api.datumapis.com/cell/CELL_NAME/service/looking-glass-unlisted
+  usages:
+    - digital signature
+    - client auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: fabric-api
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: lg-qualify-other-cell
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/part-of: lg-qualify
+spec:
+  secretName: lg-qualify-other-cell
+  secretTemplate:
+    labels:
+      app.kubernetes.io/part-of: lg-qualify
+  duration: 24h
+  renewBefore: 8h
+  uris:
+    - spiffe://fabric-api.datumapis.com/cell/not-CELL_NAME/service/looking-glass
+  usages:
+    - digital signature
+    - client auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: fabric-api
+    kind: Issuer

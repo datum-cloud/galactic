@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"log/slog"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -16,6 +17,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
+	servicev1 "go.datum.net/galactic/api/fabric/service/v1"
 	fabricv1 "go.datum.net/galactic/api/fabric/v1"
 	"go.datum.net/galactic/internal/fabric/errcode"
 	"go.datum.net/galactic/internal/fabric/identity"
@@ -149,7 +151,7 @@ func (a *Authorizer) Unary() grpc.UnaryServerInterceptor {
 		if r, ok := req.(interface{ GetRequestId() string }); ok {
 			attrs = append(attrs, "requestID", r.GetRequestId())
 		}
-		logCall(attrs, err)
+		logCall(info.FullMethod, attrs, err)
 		return resp, err
 	}
 }
@@ -165,17 +167,29 @@ func (a *Authorizer) Stream() grpc.StreamServerInterceptor {
 		defer cancel()
 		start := time.Now()
 		err = handler(srv, &callerStream{ServerStream: ss, ctx: ctx})
-		logCall([]any{"method", info.FullMethod, "caller", id.URI(), "duration", time.Since(start)}, err)
+		logCall(info.FullMethod, []any{"method", info.FullMethod, "caller", id.URI(), "duration", time.Since(start)}, err)
 		return err
 	}
 }
 
-func logCall(attrs []any, err error) {
-	if err != nil {
-		slog.Info("rpc failed", append(attrs, "code", errcode.Of(err), "error", errcode.Message(err))...)
-	} else {
+// serviceMethodPrefix prefixes every Looking Glass service method. Errors
+// refusing a service request can quote its target, which the service
+// contract keeps out of routine logs, so their failures are logged by code
+// alone.
+var serviceMethodPrefix = "/" + servicev1.LookingGlassService_ServiceDesc.ServiceName + "/"
+
+func logCall(method string, attrs []any, err error) {
+	if err == nil {
 		slog.Debug("rpc", attrs...)
+		return
 	}
+	attrs = append(attrs, "code", errcode.Of(err))
+	if !strings.HasPrefix(method, serviceMethodPrefix) {
+		attrs = append(attrs, "error", errcode.Message(err))
+	} else if qc := errcode.Metadata(err)[errcode.MetadataQueryCode]; qc != "" {
+		attrs = append(attrs, "queryCode", qc)
+	}
+	slog.Info("rpc failed", attrs...)
 }
 
 // callerStream is a server stream whose context carries the caller and

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"go.miloapis.com/instrumentation/metrics"
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -21,16 +22,14 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
-	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
@@ -50,8 +49,6 @@ func runCmd(cfg *config.NATConfig) error {
 	nodeName := cfg.NodeName
 	metricsPort := cfg.MetricsPort
 	grpcHealthPort := cfg.GRPCHealthPort
-
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -131,7 +128,7 @@ func runCmd(cfg *config.NATConfig) error {
 		if err := sysctl.SetProcSysPath(cfg.ProcSysPath); err != nil {
 			return err
 		}
-		datapath, err = setupNatDatapath(ctx, cfg, ctrlmetrics.Registry, func() {
+		datapath, err = setupNatDatapath(ctx, cfg, func() {
 			select {
 			case coverageChanged <- struct{}{}:
 			default:
@@ -144,11 +141,7 @@ func runCmd(cfg *config.NATConfig) error {
 	if err != nil {
 		return fmt.Errorf("setup egress translation eBPF datapath: %w", err)
 	}
-	nldump.MustRegister(ctrlmetrics.Registry)
-	if err := ctrlmetrics.Registry.Register(
-		newShardStateCollector(datapath, cfg.DatapathEnabled, cfg.XDPAttach)); err != nil {
-		return fmt.Errorf("register egress shard state metrics: %w", err)
-	}
+	metrics.MustRegister(newShardStateCollector(datapath, cfg.DatapathEnabled, cfg.XDPAttach))
 	coverageEvents := make(chan event.GenericEvent, 1)
 	go followCoverage(ctx, datapath, healthSrv, coverageChanged, coverageEvents)
 
@@ -216,10 +209,14 @@ func followCoverage(ctx context.Context, datapath controller.EgressDatapath, hea
 // newRootCommand builds the root cobra command with all flags and the
 // application startup logic.
 func newRootCommand() *cobra.Command {
+	var logOpts logging.Options
 	cmd := &cobra.Command{
 		Use:   appName,
 		Short: strings.Split(appDesc, "\n")[0],
 		Long:  appDesc,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("build-info"); ok {
 				fmt.Println(metadata.BuildInfo(appName))
@@ -267,5 +264,6 @@ func newRootCommand() *cobra.Command {
 			"of the host's /proc/sys/net at <path>/net")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
+	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
 }

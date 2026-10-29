@@ -1,0 +1,67 @@
+# The grant authority's permissions, as docs/edge/masque-authority.md lists
+# them. It reads and writes its grant records (Secrets) and allocation
+# ledgers (ConfigMaps) in its own namespace, reviews the provider pods'
+# tokens, and lists every EdgeService for its revocation sweep.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: masque-authority
+  namespace: masque-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets, configmaps]
+    verbs: [get, list, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: masque-authority
+  namespace: masque-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: masque-authority
+subjects:
+  - kind: ServiceAccount
+    name: masque-authority
+    namespace: masque-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: masque-authority
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeservices]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: masque-authority
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: masque-authority
+subjects:
+  - kind: ServiceAccount
+    name: masque-authority
+    namespace: masque-system
+---
+# Issuing a connector's EdgeService in a tenant namespace. Nothing binds it
+# here: an operator binds it with a RoleBinding in each tenant namespace
+# the authority serves, so registration alone grants no tenant authority.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: masque-authority-tenant
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeservices]
+    verbs: [get, list, create, update, delete]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [vpcs]
+    verbs: [get]

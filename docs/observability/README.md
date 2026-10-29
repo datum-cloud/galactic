@@ -1,18 +1,61 @@
 # Observability
 
-Metrics, scrape configuration and shipped alert rules. Use the subsystem reference for metric names, labels and interpretation.
+Metrics, scrape configuration, shipped alert rules and log format. Use the subsystem reference for metric names, labels and interpretation.
 
 - [VPC dataplane — `galactic_usid_*`](vpc-dataplane.md)
 - [Tenant egress pool — `galactic_cni_egress_*`](egress-pool.md)
 - [VPC ingress — `galactic_ingress_sidecar_*`](vpc-ingress.md)
 - [Edge load balancer — `galactic_edge_*`](gateway.md)
 - [Galactic Edge foundation — `galactic_edge_foundation_*`](edge.md)
+- [MASQUE connector — `galactic_connectip_*` and `galactic_masque_*`](masque.md)
 - [Traffic policy — `galactic_cni_traffic_policy_*`](traffic-policy.md)
 - [Routing](routing.md)
 - [NAT66 / NAT64 — `galactic_nat_*`](nat.md)
 - [Fabric looking glass — `fabric_api_*`](fabric-api.md)
 - [Netlink listings — `galactic_netlink_dump_*`](netlink.md)
 - [Shipped alerts](alerts.md)
+- [Logging](logging.md)
+
+## Adding a metric
+
+Create every metric with the constructors in
+[`go.miloapis.com/instrumentation/metrics`](https://github.com/milo-os/instrumentation),
+and register a collector that reads state at scrape time with its
+`metrics.MustRegister`. Both put the metric on controller-runtime's registry,
+which every controller-runtime manager serves. `galactic-cni`,
+`fabric-config-agent` and the fabric-api node sidecar, which serve metrics
+without a manager, serve that registry with the library's `metrics.Handler`.
+
+A metric created when its package loads is exported by every binary that
+links the package. Where only some of them should export it, create it in a
+constructor the binary calls at startup instead. The library's registry keeps
+a series across calls, so a constructor that tests call repeatedly starts its
+vectors over, and creates a function metric, which the library allows only
+once per process, on its first call.
+
+The tests in `internal/instrumentation` enforce the rule in the unit suite:
+
+- `TestAdopted` runs the library's adoption check, which fails on a metric
+  registered outside the library and on a logger the library didn't build.
+- `TestNoMetricsOutsideLibrary` fails on any metric constructor or registry
+  from `client_golang`'s `prometheus` package, including one passed in as a
+  `prometheus.Registerer`.
+- `TestMetricsLint` checks the name of every library metric created when a
+  package loads against Prometheus conventions. It imports each package that
+  defines one, and `TestLintLinksEveryMetric` fails when a package is missing
+  from that list or creates a metric in a command's `main` package.
+- Each command that serves `/metrics` has a `TestMetricsScrape`, which fails
+  when two registries export the same series. `TestEveryBinaryHasScrapeTest`
+  requires one for every new command, but can't tell whether the test scrapes
+  the handler the command serves; reviewers check that. Where a command
+  creates its metrics at startup rather than when a package loads, its test
+  first creates them through the same function the command calls, and also
+  runs the library's lint, which `TestMetricsLint` can't reach.
+- `TestCustomCollectorLabels` resolves the label names of every
+  `prometheus.NewDesc` in the module and fails on one the collection
+  pipeline reserves, which the library doesn't check for a custom collector.
+  It also fails when it can't resolve a descriptor's names, so build them
+  from string constants, literals, `append` and `slices.Clone`.
 
 ## Where the metrics come from
 
@@ -43,17 +86,19 @@ the fabric-api gateway are Deployments, scraped per pod.
 | Fabric looking glass    | `fabric-api` node sidecar                                 | `fabric_api_node_*`, `fabric_api_*`                           | 9345           | `fabric-api-node`                        |
 | Fabric looking glass    | `fabric-api` cell gateway                                 | `fabric_api_gateway_*`, `fabric_api_*`                        | 9347           | `fabric-api-gateway`                     |
 | NAT66 / NAT64           | `galactic-nat` (one per egress shard)                     | `galactic_nat_*`                                              | 9182           | `galactic-nat`                           |
+| MASQUE connector        | `masque-provider`                                         | `galactic_connectip_*`, `galactic_masque_*`                   | 9188           | `masque-provider`                        |
 
 `config/monitoring/` ships PodMonitors for `galactic-cni`,
 `galactic-router`, `fabric-router` (including the opt-in fabric-api
 sidecar), `fabric-router-controller`, the fabric-api gateway,
-`galactic-nat`, `galactic-controller` and `galactic-edge`. Scraping
+`galactic-nat`, `galactic-controller`, `galactic-edge` and
+`masque-provider` (in the `masque-system` namespace). Scraping
 `galactic-vrf` or `galactic-gateway` needs a scrape object of your own. Copy the shipped
 PodMonitors' relabeling of `__meta_kubernetes_pod_node_name` into `node`:
 every galactic metric is per node, and `node` is the label you group and
 alert by. `fabric-router-controller`'s fleet series name the node each
-deployment or router targets themselves, and their `namespace` is the
-object's, which its PodMonitor keeps with `honorLabels`.
+deployment or router targets in `target_node`, and the object's namespace
+in `resource_namespace`.
 
 The eBPF-backed metrics (`galactic_usid_*`, `galactic_cni_egress_shard_*`,
 `galactic_edge_*`, `galactic_edge_foundation_gate_drops_total`, `galactic_nat_*`) are read from BPF maps at scrape time,

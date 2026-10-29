@@ -120,7 +120,7 @@ func (i *PodInterfaceInjector) Handle(ctx context.Context, req admission.Request
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 	ctrl.LoggerFrom(ctx).Info("injected network interfaces into pod",
-		"instance", instanceName, "interfaces", injected,
+		"instanceName", instanceName, "interfaces", injected,
 		"networks", pod.Annotations[MultusNetworksAnnotation],
 		"defaultNetwork", pod.Annotations[MultusDefaultNetworkAnnotation])
 	return admission.PatchResponseFromRaw(req.Object.Raw, patched)

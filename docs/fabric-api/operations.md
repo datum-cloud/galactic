@@ -35,7 +35,7 @@ All are `severity: warning`, `service: galactic`, `team: connect`. A deployment 
 evaluates its own copy of the rules changes them here first, with their tests, then
 updates that copy.
 
-Node metrics (port 9345, a private registry with Go and process collectors):
+Node metrics (port 9345, beside the Go runtime and process series):
 `fabric_api_node_requests_total{type,outcome}`,
 `fabric_api_node_request_duration_seconds{type}`,
 `fabric_api_node_response_bytes{type}`,
@@ -140,7 +140,9 @@ each step cell by cell:
    after `components/fabric-api-permits`. It adds `--require-probe-permits`
    and `--gateway-address=fabric-api-gateway.galactic-system.svc:9346` (the
    gateway Service), so direct operator probes are charged too. Another
-   routing rollout.
+   routing rollout. It also issues each node's certificate for client auth
+   as well as server auth, since the sidecar asks the gateway for those
+   permits as a TLS client; that recreates the `fabric-api-certs` pods.
 4. **The gateway serves the Looking Glass service, switched off.** Add
    `config/fabric-api/components/service` after
    `components/aggregate-budgets`. See
@@ -271,6 +273,9 @@ cd deploy/containerlab && task verify:fabric-api
 # underlay come up with diagnostics unavailable, then repair the Issuer.
 cd deploy/containerlab && task verify:fabric-api-bootstrap
 ```
+
+Before switching the Looking Glass service on in a cell, qualify the build
+with the [qualification suite](qualification.md).
 
 In a real cell, read the same facts from the cluster:
 

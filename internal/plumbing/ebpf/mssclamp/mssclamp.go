@@ -23,9 +23,11 @@ package mssclamp
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -149,6 +151,34 @@ func WriteEncapMTU(table Putter, v Values) error {
 		return fmt.Errorf("write encap_mtu_table: %w", err)
 	}
 	return nil
+}
+
+// Lookuper is the one operation ReadEncapMTU needs from its map, so tests can
+// substitute a fake. A loaded *ebpf.Map satisfies it.
+type Lookuper interface {
+	Lookup(key, valueOut any) error
+}
+
+// ReadEncapMTU returns encap_mtu_table's single entry: the largest tenant
+// packet the datapath encapsulates, or zero when the limit is off or no
+// galactic-cni has written it yet.
+func ReadEncapMTU(table Lookuper) (uint32, error) {
+	var limit uint32
+	if err := table.Lookup(uint32(0), &limit); err != nil {
+		return 0, fmt.Errorf("read encap_mtu_table: %w", err)
+	}
+	return limit, nil
+}
+
+// OpenPinnedEncapMTU opens encap_mtu_table from its pin under pinDir, for a
+// process other than galactic-cni that only reads it. The caller closes the
+// map. The error wraps os.ErrNotExist when no datapath has pinned it.
+func OpenPinnedEncapMTU(pinDir string) (*ebpf.Map, error) {
+	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapEncapMtuTable), &ebpf.LoadPinOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("open pinned map %q: %w", prog.UsidMapEncapMtuTable, err)
+	}
+	return m, nil
 }
 
 // LinkMTU returns the MTU of the named interface. A package-level override

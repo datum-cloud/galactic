@@ -1,0 +1,22 @@
+# The provider registration. An operator approves it by setting
+# status.approved; until then core refuses the provider's attachments.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: EdgeProvider
+metadata:
+  name: masque
+spec:
+  contractVersions:
+    - v1alpha1
+  capabilities:
+    - name: PacketAccess
+      version: v1
+    - name: PrefixReachability
+      version: v1
+  serviceAccounts:
+    - namespace: masque-system
+      name: masque-provider
+  # A connector's grant lives in the authority's grant records, not in an
+  # API kind; this names that format for admission's check.
+  configuration:
+    group: masque.galactic.datumapis.com
+    kind: MASQUEGrant

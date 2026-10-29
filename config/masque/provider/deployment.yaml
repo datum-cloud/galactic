@@ -1,0 +1,135 @@
+# One MASQUE provider instance per pod. The pod needs nothing from its
+# node: no host namespace, hostPath, NET_ADMIN or BPF. galactic-edge creates
+# its packet devices in the pod's own network namespace, and a device
+# plugin gives it /dev/net/tun.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: masque-provider
+  namespace: masque-system
+  labels:
+    app.kubernetes.io/name: masque-provider
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: masque-provider
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: masque-provider
+    spec:
+      serviceAccountName: masque-provider
+      # SIGTERM ends the sessions, then releases the routes and attachments
+      # and the Lease; the service gives that 20 seconds.
+      terminationGracePeriodSeconds: 30
+      # Only a node galactic-edge runs on can program the pod's attachments.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - edge
+                  - key: galactic.datumapis.com/edge
+                    operator: In
+                    values:
+                      - enabled
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: masque-provider
+          # ":latest" is a placeholder the overlay replaces with a published
+          # tag. CI does not stamp it into the galactic-kustomize bundle
+          # until the #980 lab run passes.
+          image: ghcr.io/datum-cloud/masque-provider:latest
+          args:
+            - --provider=masque
+            # An overlay appends --authority=<host clients connect to>.
+            # Without it the provider refuses to start.
+            - --grant-authority-url=https://masque-authority.masque-system.svc
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: connect-ip
+              containerPort: 8443
+              protocol: UDP
+            # HTTP/2 over TLS, for clients whose UDP is blocked.
+            - name: connect-ip-tcp
+              containerPort: 8443
+              protocol: TCP
+            - name: health
+              containerPort: 9188
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+          # Ready only while the pod holds its instance Lease, so a pod
+          # that cannot admit takes no new clients.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "1"
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+              # The TUN device plugin's resource; an overlay may rename it.
+              devic.es/tun: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/masque-provider/tls
+              readOnly: true
+            - name: authority-ca
+              mountPath: /etc/masque-provider/authority
+              readOnly: true
+            - name: authority-token
+              mountPath: /var/run/secrets/masque-authority
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: masque-provider-tls
+        - name: authority-ca
+          configMap:
+            name: masque-authority-ca
+        # The authority accepts only a token bound to one pod of this
+        # ServiceAccount, for its own audience.
+        - name: authority-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: masque-authority
+                  expirationSeconds: 3600
+                  path: token

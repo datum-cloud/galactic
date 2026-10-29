@@ -19,6 +19,7 @@ import (
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/hostconf"
+	"go.datum.net/galactic/internal/logging"
 )
 
 var ConfFile = config.DefaultConfFile
@@ -117,8 +118,7 @@ func setupLogging(logPath, logLevel string) {
 		slog.Warn("Failed to open log file, falling back to Stderr", "path", logPath, "err", err)
 		return
 	}
-	handler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: level})
-	slog.SetDefault(slog.New(handler))
+	logging.SetupFile(file, level)
 }
 
 // statusConf holds the minimal CNI config fields needed for STATUS validation.

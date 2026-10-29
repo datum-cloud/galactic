@@ -16,6 +16,8 @@ import (
 
 	api "github.com/osrg/gobgp/v4/api"
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 )
 
 const (
@@ -67,6 +69,28 @@ type BMPStation struct {
 // String returns the station as host:port, bracketing an IPv6 host.
 func (s BMPStation) String() string {
 	return net.JoinHostPort(s.Host, strconv.Itoa(int(s.Port)))
+}
+
+// bmpStationUp reports, per BGPRouter and BMP station, whether the router's
+// session to that collector is established. A station that is configured but
+// down, or whose host does not resolve, reads 0, so an alert can tell a
+// collector this router has lost apart from one it was never told about.
+var bmpStationUp = metrics.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "galactic_router_bmp_station_up",
+	Help: "Whether the router's BMP session to a collector is established (1) or not (0).",
+}, []string{labelRouter, "station"})
+
+// BMPStationGauge is a BMPStateObserver recording each station's state in
+// galactic_router_bmp_station_up.
+type BMPStationGauge struct{}
+
+// BMPStationState sets the station's gauge to 1 when up and 0 otherwise.
+func (BMPStationGauge) BMPStationState(router, station string, up bool) {
+	v := 0.0
+	if up {
+		v = 1
+	}
+	bmpStationUp.WithLabelValues(router, station).Set(v)
 }
 
 // BMPStateObserver is notified of each BMP station's session state every time

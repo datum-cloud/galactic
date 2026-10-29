@@ -41,6 +41,9 @@ const (
 	outside = "fd00:ed9e:200:1::/64"
 
 	capSocket = "SocketAccess"
+	capPacket = "PacketAccess"
+	// providerSA is the ServiceAccount every provider deployment runs as.
+	providerSA = "edge-provider"
 	// fixtureTag fills fields of objects the suite writes as a pod that
 	// runs no provider.
 	fixtureTag = "conformance"
@@ -105,11 +108,18 @@ patches:
 // examples/edge-provider/deploy's directories and applies it.
 func (l *lab) applyOverlay(t *testing.T, name, base, extra string, files map[string]string) {
 	t.Helper()
+	l.applyOverlayOf(t, filepath.Join(l.root, "examples", "edge-provider", "deploy", base), name, extra, files)
+}
+
+// applyOverlayOf renders a kustomization named name over the directory base
+// and applies it.
+func (l *lab) applyOverlayOf(t *testing.T, base, name, extra string, files map[string]string) {
+	t.Helper()
 	dir := filepath.Join(l.artifacts, "overlays", name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	rel, err := filepath.Rel(dir, filepath.Join(l.root, "examples", "edge-provider", "deploy", base))
+	rel, err := filepath.Rel(dir, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,6 +154,23 @@ func (l *lab) vpcUID(t *testing.T, tn tenant) string {
 		t.Fatalf("VPC %s/%s (task deploy:galactic-edge creates it): %v", tn.vpcNamespace, tn.vpc, err)
 	}
 	return string(v.UID)
+}
+
+// appLabel selects a tenant's edge-client pods.
+const appLabel = "app"
+
+// vpcID returns the base62 identifier of tn's VPC, as core reports it on
+// an admitted attachment.
+func (l *lab) vpcID(t *testing.T, tn tenant) string {
+	t.Helper()
+	var v cloudv1alpha1.VPC
+	if err := l.c.Get(context.Background(), client.ObjectKey{Namespace: tn.vpcNamespace, Name: tn.vpc}, &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Status.VPC == "" {
+		t.Fatalf("VPC %s/%s has no identifier yet", tn.vpcNamespace, tn.vpc)
+	}
+	return v.Status.VPC
 }
 
 // grantService creates or replaces the platform authority's grant of tn's
@@ -389,7 +416,7 @@ func (l *lab) clientPID(t *testing.T, tn tenant, node string) int {
 	i := map[string]string{computeNode: "1", edgeNode1: "2", edgeNode2: "3"}[node]
 	var pods corev1.PodList
 	if err := l.c.List(context.Background(), &pods, client.InNamespace(tn.vpcNamespace),
-		client.MatchingLabels{"app": "edge-client-" + i}); err != nil {
+		client.MatchingLabels{appLabel: "edge-client-" + i}); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range pods.Items {

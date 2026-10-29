@@ -1,0 +1,30 @@
+# The grant authority issues connector EdgeServices only in the tenant
+# namespaces an operator binds it in (docs/edge/masque-service.md, step 3):
+# here the two VPCs Galactic Edge runs in the lab, ns10 and ns20.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: masque-authority
+  namespace: ns10
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: masque-authority-tenant
+subjects:
+  - kind: ServiceAccount
+    name: masque-authority
+    namespace: masque-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: masque-authority
+  namespace: ns20
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: masque-authority-tenant
+subjects:
+  - kind: ServiceAccount
+    name: masque-authority
+    namespace: masque-system

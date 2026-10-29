@@ -348,7 +348,7 @@ type fixture struct {
 	// metrics.
 	diag    *diag.Recorder
 	events  *diagtest.Recorder
-	metrics *prometheus.Registry
+	metrics prometheus.Gatherer
 }
 
 func newFixture(t *testing.T) *fixture {

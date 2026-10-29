@@ -14,7 +14,7 @@ import (
 	"sync"
 
 	"github.com/cilium/ebpf/link"
-	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/gateway"
@@ -63,14 +63,14 @@ var gatewayDatapathKeepAlive struct {
 // See installGateway for the attachment itself.
 func setupGatewayDatapath(
 	ctx context.Context, publicInterface string, internalInterfaces []string, srv6Address, attachMode string,
-	ipv4 *ipv4Forwarding, metricsReg prometheus.Registerer, coverage *datapathCoverage,
+	ipv4 *ipv4Forwarding, coverage *datapathCoverage,
 ) (gateway.Datapath, error) {
 	encapSrc, err := netip.ParseAddr(srv6Address)
 	if err != nil {
 		return nil, fmt.Errorf("parse gateway SRv6 address %q: %w", srv6Address, err)
 	}
 	var datapath *gateway.KernelDatapath
-	err = installGateway(ctx, publicInterface, internalInterfaces, attachMode, ipv4, metricsReg, coverage,
+	err = installGateway(ctx, publicInterface, internalInterfaces, attachMode, ipv4, coverage,
 		func(objs *edgeprog.EdgedsrObjects) (edgemetrics.VPCAttribution, error) {
 			dp, err := gateway.NewKernelDatapath(objs, encapSrc)
 			if err != nil {
@@ -94,10 +94,10 @@ func setupGatewayDatapath(
 // leased. See installGateway for the attachment itself.
 func setupReturnPath(
 	ctx context.Context, internalInterfaces []string, attachMode string, ipv4 *ipv4Forwarding,
-	metricsReg prometheus.Registerer, coverage *datapathCoverage,
+	coverage *datapathCoverage,
 ) (*gateway.KernelReturnPath, error) {
 	var returnPath *gateway.KernelReturnPath
-	err := installGateway(ctx, "", internalInterfaces, attachMode, ipv4, metricsReg, coverage,
+	err := installGateway(ctx, "", internalInterfaces, attachMode, ipv4, coverage,
 		func(objs *edgeprog.EdgedsrObjects) (edgemetrics.VPCAttribution, error) {
 			returnPath = gateway.NewKernelReturnPath(objs)
 			return nil, nil
@@ -137,7 +137,7 @@ func setupReturnPath(
 // leaves the packet path unchanged.
 func installGateway(
 	ctx context.Context, publicInterface string, internalInterfaces []string, attachMode string,
-	ipv4 *ipv4Forwarding, metricsReg prometheus.Registerer, coverage *datapathCoverage,
+	ipv4 *ipv4Forwarding, coverage *datapathCoverage,
 	build func(*edgeprog.EdgedsrObjects) (edgemetrics.VPCAttribution, error),
 ) error {
 	withLB := publicInterface != ""
@@ -217,10 +217,6 @@ func installGateway(
 		leaseCtx, stopLeases := context.WithCancel(ctx)
 		var leaseDone <-chan struct{}
 		lease := xdpdispatch.NewLeaseMetrics(edgemetrics.Namespace)
-		if err := lease.Register(metricsReg); err != nil {
-			stopLeases()
-			return fmt.Errorf("register dispatcher lease metrics: %w", err)
-		}
 		objs, dispatcher, publicSet, returnSet, leaseDone, err = joinDispatcher(leaseCtx, xdpdispatch.PinDir,
 			edgeattach.PinDir, mode, withLB, len(returnTargets) > 0, lease)
 		if err != nil {
@@ -248,10 +244,7 @@ func installGateway(
 		abandon()
 		return err
 	}
-	if err := metricsReg.Register(edgemetrics.NewCollectorFromObjects(objs, attribution)); err != nil {
-		abandon()
-		return fmt.Errorf("register edge gateway metrics collector: %w", err)
-	}
+	metrics.MustRegister(edgemetrics.NewCollectorFromObjects(objs, attribution))
 
 	gatewayDatapathKeepAlive.objs = objs
 	gatewayDatapathKeepAlive.publicSet = publicSet

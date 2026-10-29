@@ -211,6 +211,13 @@ every call from the gateway identity, a destination is refused
 - inside a range listed in `--deny-prefixes`: add your management and platform
   ranges here.
 
+The gateway applies the same public policy to every Looking Glass service
+probe before its snapshot, using its own `--deny-prefixes`, and refuses a
+forbidden target with `DestinationNotAllowed` (`INVALID_ARGUMENT`) before it
+charges any token, slot or packet. Set the gateway's `--deny-prefixes` to the
+nodes' value: a range missing on the gateway is still refused by every node,
+but only after the request is admitted and charged.
+
 The **operator policy** applies to calls made directly to a node with an operator
 identity. It is the public policy plus `--operator-allow-prefixes`, and an allowed
 prefix bypasses every other rule, including `--deny-prefixes`. The lab uses it to

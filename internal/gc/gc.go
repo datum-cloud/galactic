@@ -354,12 +354,12 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 			}
 			if err := k8s.Delete(ctx, adv); err != nil {
 				slog.Error("GC: failed to delete orphaned BGPAdvertisement",
-					"name", o.Name, "namespace", o.Namespace, "err", err)
+					"resource_name", o.Name, "resource_namespace", o.Namespace, "err", err)
 				result.Errors++
 				continue
 			}
 			slog.Info("GC: removed orphaned BGPAdvertisement",
-				"name", o.Name, "namespace", o.Namespace, "containerID", o.ContainerID)
+				"resource_name", o.Name, "resource_namespace", o.Namespace, "containerID", o.ContainerID)
 			result.OrphanedCRDsRemoved++
 
 		case "BGPVRFInstance":
@@ -380,17 +380,17 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 			}
 			if errors.Is(err, maintenance.ErrInUse) {
 				slog.Info("GC: kept BGPVRFInstance an edge attachment uses",
-					"name", o.Name, "namespace", o.Namespace, "vpc", o.VPC)
+					"resource_name", o.Name, "resource_namespace", o.Namespace, "vpc", o.VPC)
 				continue
 			}
 			if err != nil {
 				slog.Error("GC: failed to delete orphaned BGPVRFInstance",
-					"name", o.Name, "namespace", o.Namespace, "err", err)
+					"resource_name", o.Name, "resource_namespace", o.Namespace, "err", err)
 				result.Errors++
 				continue
 			}
 			slog.Info("GC: removed orphaned BGPVRFInstance",
-				"name", o.Name, "namespace", o.Namespace)
+				"resource_name", o.Name, "resource_namespace", o.Namespace)
 			result.OrphanedCRDsRemoved++
 		}
 	}

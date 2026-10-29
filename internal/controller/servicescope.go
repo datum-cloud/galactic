@@ -23,20 +23,77 @@ import (
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
-// A NetworkService lives either in a gateway namespace, one holding
-// NetworkGateways, or in a tenant namespace, one holding none. A gateway
-// serves every service in its own namespace and every service in a tenant
-// namespace. The objects generated for a service, its BGPAdvertisements and
-// ServiceVIPBindings, always live in the gateway namespace, beside the
-// BGPRouters they hang off, so galactic-router finds them where it already
-// looks. A cluster runs one gateway namespace, the one galactic-router's
-// BGP objects live in.
+// A NetworkService lives either in the gateway namespace, the one holding
+// the cluster's NetworkGateways, or in a project namespace. A gateway serves
+// every service in its own namespace and, with ServiceScope.ProjectServices
+// on, every service in a project namespace. The objects generated for a
+// service, its BGPAdvertisements and ServiceVIPBindings, always live in the
+// gateway namespace, beside the BGPRouters they hang off, so galactic-router
+// finds them where it already looks. A cluster runs one gateway namespace,
+// the one galactic-router's BGP objects live in.
 //
-// A service in a tenant namespace is trusted for nothing the platform
-// verified: it is accepted only when a VPC in its own namespace carries its
-// vpcRef, its backends come only from VPCAttachments in its own namespace, and
-// it loses every VIP address, protocol and port another service already
-// serves.
+// A service in a project namespace is trusted for nothing the platform
+// verified: it is accepted only when every VIP address falls in a prefix the
+// platform allocates load balancer addresses from, a VPC in its own namespace
+// carries its vpcRef, its backends come only from VPCAttachments in its own
+// namespace, and it loses every VIP address, protocol and port another
+// service already serves.
+
+// ServiceScope is which NetworkServices a gateway serves and which it trusts.
+// The zero value trusts a NetworkGateway in any namespace and serves only the
+// services in its own namespace.
+type ServiceScope struct {
+	// ProjectServices turns on serving NetworkServices in project
+	// namespaces. Off, a gateway serves only those in its own namespace.
+	ProjectServices bool
+
+	// GatewayNamespace is the one namespace whose NetworkGateways and
+	// NetworkServices are trusted. A NetworkGateway anywhere else is
+	// ignored, and, with ProjectServices on, a NetworkService anywhere else
+	// is a project service. Empty trusts every namespace. Required with
+	// ProjectServices.
+	GatewayNamespace string
+
+	// VIPPrefixes are the prefixes the platform allocates load balancer
+	// addresses from. A project service with a VIP address outside them is
+	// refused (reasonVIPOutsidePool).
+	VIPPrefixes []netip.Prefix
+}
+
+// trustsGateway reports whether a NetworkGateway in namespace counts: only
+// one in GatewayNamespace does, once it is set.
+func (s ServiceScope) trustsGateway(namespace string) bool {
+	return s.GatewayNamespace == "" || namespace == s.GatewayNamespace
+}
+
+// isProjectService reports whether rule is in a project namespace, one this
+// scope serves only with ProjectServices on.
+func (s ServiceScope) isProjectService(rule *bgpv1alpha1.NetworkService) bool {
+	return s.GatewayNamespace != "" && rule.Namespace != s.GatewayNamespace
+}
+
+// vipsInPool reports whether every VIP address of rule falls in one of
+// s.VIPPrefixes, and names the first that does not.
+func (s ServiceScope) vipsInPool(rule *bgpv1alpha1.NetworkService) (bool, string) {
+	for _, v := range rule.Spec.VIPAddresses {
+		addr, err := netip.ParseAddr(v)
+		if err != nil {
+			return false, v
+		}
+		addr = addr.Unmap()
+		in := false
+		for _, p := range s.VIPPrefixes {
+			if p.Contains(addr) {
+				in = true
+				break
+			}
+		}
+		if !in {
+			return false, v
+		}
+	}
+	return true, ""
+}
 
 // networkRuleNamespaceLabel is set, beside networkRuleLabel, on every object
 // generated for a service in a tenant namespace, to that namespace. An object
@@ -47,6 +104,19 @@ const networkRuleNamespaceLabel = "galactic.datum.net/network-rule-namespace"
 // reason, for a tenant rule that claims a VIP address, protocol and port
 // another rule already serves.
 const reasonVIPClaimed = "VIPClaimed"
+
+// reasonVIPOutsidePool is the Accepted reason for a project rule with a VIP
+// address outside every prefix the platform allocates load balancer
+// addresses from (ServiceScope.VIPPrefixes).
+const reasonVIPOutsidePool = "VIPOutsidePool"
+
+// reasonProjectServicesOff is the Accepted reason for a project rule the
+// gateways accepted while project services were on, and no longer serve.
+const reasonProjectServicesOff = "ProjectServicesOff"
+
+// errVIPOutsidePool is the build error of a project rule with a VIP address
+// outside ServiceScope.VIPPrefixes.
+var errVIPOutsidePool = errors.New("VIP outside the allocated load balancer prefixes")
 
 // errVIPClaimed is the build error of a tenant rule that loses a VIP to
 // another rule (tenantVIPConflicts).
@@ -163,26 +233,30 @@ func setRuleOwner(rule *bgpv1alpha1.NetworkService, obj metav1.Object, scheme *r
 }
 
 // servingGateways returns the NetworkGateways that serve a service in
-// namespace: those in namespace, or, for a tenant namespace holding none,
-// every NetworkGateway in the cluster.
-func servingGateways(ctx context.Context, c client.Reader, namespace string) ([]bgpv1alpha1.NetworkGateway, error) {
+// namespace: those in namespace when it is trusted, or, with ProjectServices
+// on, those in the gateway namespace, wherever the service is.
+func (s ServiceScope) servingGateways(
+	ctx context.Context, c client.Reader, namespace string,
+) ([]bgpv1alpha1.NetworkGateway, error) {
+	switch {
+	case s.ProjectServices:
+		namespace = s.GatewayNamespace
+	case !s.trustsGateway(namespace):
+		return nil, nil
+	}
 	list := &bgpv1alpha1.NetworkGatewayList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list NetworkGateways in %s: %w", namespace, err)
-	}
-	if len(list.Items) > 0 {
-		return list.Items, nil
-	}
-	if err := c.List(ctx, list); err != nil {
-		return nil, fmt.Errorf("list NetworkGateways: %w", err)
 	}
 	return list.Items, nil
 }
 
 // servingGatewayNodeNames returns the target node of every NetworkGateway
 // that serves a service in namespace (servingGateways).
-func servingGatewayNodeNames(ctx context.Context, c client.Reader, namespace string) ([]string, error) {
-	gws, err := servingGateways(ctx, c, namespace)
+func (s ServiceScope) servingGatewayNodeNames(
+	ctx context.Context, c client.Reader, namespace string,
+) ([]string, error) {
+	gws, err := s.servingGateways(ctx, c, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -195,10 +269,10 @@ func servingGatewayNodeNames(ctx context.Context, c client.Reader, namespace str
 
 // nodeServingGateway returns the NetworkGateway targeting nodeName among
 // those serving a service in namespace, or nil when nodeName serves none.
-func nodeServingGateway(
+func (s ServiceScope) nodeServingGateway(
 	ctx context.Context, c client.Reader, namespace, nodeName string,
 ) (*bgpv1alpha1.NetworkGateway, error) {
-	gws, err := servingGateways(ctx, c, namespace)
+	gws, err := s.servingGateways(ctx, c, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -211,28 +285,27 @@ func nodeServingGateway(
 }
 
 // listServedNetworkServices returns every NetworkService a gateway in
-// gwNamespace serves, those in gwNamespace and those in every namespace
-// holding no NetworkGateway, and every NetworkService in the cluster.
-func listServedNetworkServices(
+// gwNamespace serves, and every NetworkService in the cluster. A gateway in
+// an untrusted namespace serves none. With ProjectServices off a gateway
+// serves those in gwNamespace. With it on, it serves every service in the
+// cluster.
+func (s ServiceScope) listServedNetworkServices(
 	ctx context.Context, c client.Reader, gwNamespace string,
 ) (served, all []bgpv1alpha1.NetworkService, err error) {
 	rules := &bgpv1alpha1.NetworkServiceList{}
 	if err := c.List(ctx, rules); err != nil {
 		return nil, nil, fmt.Errorf("list NetworkServices: %w", err)
 	}
-	gws := &bgpv1alpha1.NetworkGatewayList{}
-	if err := c.List(ctx, gws); err != nil {
-		return nil, nil, fmt.Errorf("list NetworkGateways: %w", err)
-	}
-	gatewayNamespaces := map[string]bool{gwNamespace: true}
-	for i := range gws.Items {
-		gatewayNamespaces[gws.Items[i].Namespace] = true
-	}
-	for i := range rules.Items {
-		ns := rules.Items[i].Namespace
-		if ns == gwNamespace || !gatewayNamespaces[ns] {
-			served = append(served, rules.Items[i])
+	switch {
+	case !s.trustsGateway(gwNamespace):
+	case !s.ProjectServices:
+		for i := range rules.Items {
+			if rules.Items[i].Namespace == gwNamespace {
+				served = append(served, rules.Items[i])
+			}
 		}
+	default:
+		served = rules.Items
 	}
 	return served, rules.Items, nil
 }

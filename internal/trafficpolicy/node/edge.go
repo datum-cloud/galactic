@@ -49,7 +49,7 @@ func (r *Reconciler) setupEdge(mgr ctrl.Manager) error {
 		for i := range services {
 			var list galacticv1alpha1.EdgeAttachmentList
 			if err := c.List(ctx, &list, client.MatchingFields{edgeServiceIndex: string(services[i].UID)}); err != nil {
-				ctrl.LoggerFrom(ctx).Error(err, "list edge attachments of service", "service", services[i].Name)
+				ctrl.LoggerFrom(ctx).Error(err, "list edge attachments of service", "serviceName", services[i].Name)
 				continue
 			}
 			for j := range list.Items {

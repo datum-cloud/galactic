@@ -1,0 +1,9 @@
+# The CONNECT-IP service; see ../kustomization.yaml for why it is not
+# applied as-is. An overlay appends --authority with the name clients use,
+# supplies the masque-provider-tls Secret (tls.crt, tls.key) for that name
+# and the masque-authority-ca ConfigMap (ca.crt) the grant authority's
+# certificate chains to, and chooses how the masque-provider Service is
+# exposed. It may also set the TUN device plugin's resource name.
+resources:
+  - deployment.yaml
+  - service.yaml

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 )
 
 const metricsNamespace = "galactic_service_route"
@@ -23,44 +24,39 @@ type Metrics struct {
 	producers       *prometheus.GaugeVec
 }
 
-// NewMetrics creates the service-route metrics. Call MustRegister once during
-// process startup.
+// NewMetrics creates the service-route metrics on the instrumentation
+// library's registry.
 func NewMetrics() *Metrics {
-	reconcileTime := prometheus.NewHistogram(prometheus.HistogramOpts{
+	reconcileTime := metrics.NewHistogram(prometheus.HistogramOpts{
 		Namespace: metricsNamespace,
 		Name:      "reconcile_duration_seconds",
 		Help:      "Time spent reconciling a ServiceRoutePolicy.",
 		Buckets:   prometheus.DefBuckets,
 	})
 	return &Metrics{
-		reconciliations: prometheus.NewCounterVec(prometheus.CounterOpts{
+		reconciliations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "reconciliations_total",
 			Help:      "ServiceRoutePolicy reconciliations by outcome.",
 		}, []string{"result"}),
 		reconcileTime: reconcileTime,
-		operations: prometheus.NewCounterVec(prometheus.CounterOpts{
+		operations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "route_operations_total",
 			Help:      "Service route dataplane operations by operation and outcome.",
 		}, []string{"operation", "result"}),
-		programmed: prometheus.NewGauge(prometheus.GaugeOpts{
+		programmed: metrics.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "programmed_routes",
 			Help:      "Number of attachment-scoped eBPF service paths currently tracked by the controller.",
 		}),
-		producers: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		producers: metrics.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "producers",
 			Help: "Producers of Spread ServiceEndpoints on this node, by health state. " +
 				"Each endpoint's status.producers names them.",
 		}, []string{"state"}),
 	}
-}
-
-// MustRegister registers all metrics owned by this package.
-func (m *Metrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.reconciliations, m.reconcileTime, m.operations, m.programmed, m.producers)
 }
 
 func (m *Metrics) ObserveReconcile(result string, duration time.Duration) {

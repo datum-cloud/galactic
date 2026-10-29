@@ -17,6 +17,7 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/safchain/ethtool"
+	"go.miloapis.com/instrumentation/metrics"
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
@@ -280,7 +281,7 @@ func (d *natDatapath) Programmed() (controller.EgressShardIdentity, bool) {
 // natDatapathKeepAlive rather than closed here: they, and the attachment
 // itself, must survive for the life of this process.
 func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
-	metricsReg prometheus.Registerer, onCoverage func()) (*natDatapath, error) {
+	onCoverage func()) (*natDatapath, error) {
 	uplinks, err := waitForUplinks(ctx, cfg.UplinkInterfaces)
 	if err != nil {
 		return nil, err
@@ -345,10 +346,6 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 		// The lease runs for the life of the process, so its done channel
 		// is not needed here.
 		lease := xdpdispatch.NewLeaseMetrics(metricsNamespace)
-		if err := lease.Register(metricsReg); err != nil {
-			_ = objs.Close()
-			return nil, fmt.Errorf("register dispatcher lease metrics: %w", err)
-		}
 		if dispatcher, dispatchSet, _, err = joinDispatcher(ctx, xdpdispatch.PinDir, mode, objs.NatIngress,
 			lease); err != nil {
 			_ = objs.Close()
@@ -372,26 +369,9 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 		}
 	}
 
-	collector := newNatCollector(objs)
-	if err := metricsReg.Register(collector); err != nil {
-		closeAll(xdpLinks)
-		_ = objs.Close()
-		return nil, fmt.Errorf("register egress shard metrics collector: %w", err)
-	}
-
-	registerUplinkQueueStats(metricsReg, d)
-
-	d.resolveErrors = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: metricsNamespace,
-		Name:      "uplink_resolve_errors_total",
-		Help: "Times re-resolving this node's uplinks after a link or route change failed. The shard keeps " +
-			"its previous coverage, so a steady rise means uplinks that appeared since are not covered.",
-	})
-	if err := metricsReg.Register(d.resolveErrors); err != nil {
-		closeAll(xdpLinks)
-		_ = objs.Close()
-		return nil, fmt.Errorf("register uplink resolve error metric: %w", err)
-	}
+	metrics.MustRegister(newNatCollector(objs))
+	registerUplinkQueueStats(d)
+	d.resolveErrors = natattach.NewUplinkResolveErrors(metricsNamespace)
 
 	natDatapathKeepAlive.objs = objs
 	natDatapathKeepAlive.set = set
@@ -413,16 +393,13 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 // before the datapath sees them, so drops_total stays flat through it (#673);
 // these counters are what show it. Failing to set them up costs only those
 // counters, so it is logged rather than failing the shard.
-func registerUplinkQueueStats(metricsReg prometheus.Registerer, d *natDatapath) {
+func registerUplinkQueueStats(d *natDatapath) {
 	et, err := ethtool.NewEthtool()
 	if err != nil {
 		slog.Warn("Cannot open ethtool; uplink receive queue metrics are disabled", "err", err)
 		return
 	}
-	if err := metricsReg.Register(nicstats.NewCollector(metricsNamespace, et, d.Uplinks)); err != nil {
-		et.Close()
-		slog.Warn("Cannot register uplink receive queue metrics", "err", err)
-	}
+	metrics.MustRegister(nicstats.NewCollector(metricsNamespace, et, d.Uplinks))
 }
 
 // joinDispatcher opens the node's XDP dispatcher, fills this shard's slot with

@@ -131,6 +131,19 @@ type GoBGPRuntime struct {
 	wg sync.WaitGroup
 }
 
+// FactoryOption sets an optional NewRuntimeFactory setting.
+type FactoryOption func(*factoryOptions)
+
+type factoryOptions struct {
+	apiDir string
+}
+
+// WithAPIDir serves each created runtime's GoBGP API, read-only, on a unix
+// socket in dir, so the gobgp CLI can query the live RIB. Empty serves no API.
+func WithAPIDir(dir string) FactoryOption {
+	return func(o *factoryOptions) { o.apiDir = dir }
+}
+
 // NewRuntimeFactory returns a RuntimeFactory that creates one GoBGPRuntime per
 // key.
 //
@@ -142,15 +155,21 @@ type GoBGPRuntime struct {
 // localAddress, when non-empty, is bound as the source address for outgoing BGP
 // connections. observer, when non-nil, is notified of every peer FSM transition
 // each created runtime detects. bmp configures BMP export from each created
-// runtime; its zero value disables it.
+// runtime; its zero value disables it. opts set the remaining, optional
+// settings.
 func NewRuntimeFactory(
 	listenPort int32, reflector bool, localAddress string, observer model.PeerStateObserver, bmp BMPConfig,
+	opts ...FactoryOption,
 ) runtime.RuntimeFactory {
+	var fo factoryOptions
+	for _, o := range opts {
+		o(&fo)
+	}
 	return func(key types.NamespacedName) (runtime.RouterRuntime, error) {
 		router := key.String()
 		return &GoBGPRuntime{
 			key:                   key,
-			server:                newServer(Config{}),
+			server:                newServer(Config{APISocket: apiSocketPath(fo.apiDir, key)}),
 			listenPort:            listenPort,
 			reflector:             reflector,
 			localAddress:          localAddress,

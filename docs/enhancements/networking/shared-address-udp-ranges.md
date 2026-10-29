@@ -34,6 +34,8 @@ The production pinned-map wrapper delegates range operations and discovers a ran
 
 The initial feature is IPv6 only. NSO's sharing and UDP-range admission gates default off. It requires current capability reports from every gateway in a selected cell before grouped services are emitted. Range forwarding additionally requires a matching current-generation backend binding, including the exact range; a Bound condition from an old router or a schema-pruned range cannot open the gate.
 
+NSO publishes shared services and address anchors in project namespaces. Gateways must also enable `GALACTIC_GATEWAY_PROJECT_SERVICES`, set `GALACTIC_GATEWAY_NAMESPACE` to the trusted gateway namespace, and configure `GALACTIC_GATEWAY_PROJECT_VIP_PREFIXES` with the actual load-balancer allocation pools. Project serving defaults off. Both listener services and address anchors must pass the pool and namespace-local VPC ownership checks before acquiring forwarding state or owned-VIP guards. Disabling project serving withdraws previous advertisements and preserves cleanup receipts; terminal tombstones remain observable for retirement without acquiring guards.
+
 Publish Galactic's API/controller/datapath commit first, then update NSO's Galactic dependency to that reachable commit. Install Galactic CRDs/RBAC, upgraded backend routers and gateways before enabling NSO admission. Do not enable gates until the full veth and tap workload paths and failure scenarios have been qualified in a disposable topology. During development, unpublished Galactic APIs require paired validation in an external workspace without committing machine-specific replaces:
 
 ```sh

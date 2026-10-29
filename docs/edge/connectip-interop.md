@@ -1,8 +1,8 @@
 # CONNECT-IP interoperability over HTTP/3 and HTTP/2
 
-This is the protocol feasibility proof for CONNECT-IP ([RFC 9484](https://www.rfc-editor.org/rfc/rfc9484)). It shows that an independent client can exchange 1280-byte inner IPv6 packets in both directions over HTTP/3 and over HTTP/2, and that HTTP/2 works with UDP/443 blocked. It also records the server and client stacks chosen for that proof, what they lack, and the work left before an HTTP/2 listener ships.
+This is the protocol feasibility proof for CONNECT-IP ([RFC 9484](https://www.rfc-editor.org/rfc/rfc9484)). It shows that an independent client can exchange 1280-byte inner IPv6 packets in both directions over HTTP/3 and over HTTP/2, and that HTTP/2 works with UDP/443 blocked. It also records the server and client stacks chosen for that proof and what they lack. The proof first ran against a test-only HTTP/2 prototype (#973); since #981 it runs against the production listener, `connectip.Server.ServeTLS`.
 
-The proof uses a test admission authority and a controlled packet backend. It is not Galactic Edge provider conformance ([provider contract](provider-contract.md)), platform qualification or a production listener. Nothing here grants foundation authority or programs host networking.
+The proof uses a test admission authority and a controlled packet backend. It is not Galactic Edge provider conformance ([provider contract](provider-contract.md)) or platform qualification. Nothing here grants foundation authority or programs host networking.
 
 ## Run it
 
@@ -15,7 +15,7 @@ task test:connectip-interop
 The task downloads Xray-core v26.10.21 (`Xray-linux-64.zip`) and checks it against the SHA-256 pinned in `Taskfile.yaml`. It then builds `tests/connectipinterop` with the race detector and runs it as root. `bin/connectip-interop/` receives:
 
 - `results.json`, with every check's outcome and measurements;
-- `servers.log`, from both servers;
+- `servers.log`, from the server;
 - `xray-<check>.log`, one per client run.
 
 Without `CONNECTIP_INTEROP_XRAY` or root, every fixture-backed test skips. Only the capsule codec's unit tests still run.
@@ -24,23 +24,23 @@ The fixture builds three network namespaces and removes them on exit:
 
 ```text
 client netns ── veth ── server netns   connectip.Server: HTTP/3 on UDP/443
-  (Xray)                  │            prototype:        HTTP/2 on TCP/443
+  (Xray)                  │                              HTTP/2 on TCP/443
                           │ connectip.TUNBackend
                           └── TUN device ── VPC netns (UDP and TCP echo)
 ```
 
-Each Xray process forwards a local TCP and UDP port to the echo server through its MASQUE outbound. Xray's own IP stack runs with a 1280-byte MTU, so each 1232-byte UDP payload becomes exactly one 1280-byte IPv6 packet inside the tunnel. A recording wrapper around the TUN backend counts every packet by size and direction. nftables counters in the server namespace count outer UDP/443 and TCP/443 packets, and the blocked-UDP check adds a counted drop rule. Each server's TLS configuration records the ALPN protocol of every handshake.
+Each Xray process forwards a local TCP and UDP port to the echo server through its MASQUE outbound. Xray's own IP stack runs with a 1280-byte MTU, so each 1232-byte UDP payload becomes exactly one 1280-byte IPv6 packet inside the tunnel. A recording wrapper around the TUN backend counts every packet by size and direction. nftables counters in the server namespace count outer UDP/443 and TCP/443 packets, and the blocked-UDP check adds a counted drop rule. The server's TLS configuration records the ALPN protocol of every handshake, and the test admission counts the requests that reach it through the TCP listener.
 
 ## Selections
 
-| Role                                | Selection                                                                         | Why                                                                                                                                                                                                                                           |
-| ----------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| HTTP/3 server                       | `internal/edge/connectip` on `quic-go/connect-ip-go` v0.6.0 and `quic-go` v0.63.0 | The existing server, unchanged.                                                                                                                                                                                                               |
-| HTTP/2 server                       | `net/http` Extended CONNECT plus a capsule codec, in `tests/connectipinterop`     | `connect-ip-go` only speaks HTTP/3: its `Conn` wraps an HTTP/3 stream, and its proxy needs `http3.HTTPStreamer`. HTTP/2 support upstream is an open request ([quic-go/connect-ip-go#41](https://github.com/quic-go/connect-ip-go/issues/41)). |
-| Independent client, both transports | Xray-core v26.10.21 MASQUE outbound (`alpn` `h3` or `h2`)                         | A released client that speaks CONNECT-IP over HTTP/3 and over HTTP/2. HTTP/2 arrived in [XTLS/Xray-core#6810](https://github.com/XTLS/Xray-core/pull/6810).                                                                                   |
-| Negative-path client                | Raw clients in the harness (`quic-go` `RequestStream`; `x/net/http2` framer)      | Malformed capsules, two requests on one connection and per-request cancellation need control no released client offers.                                                                                                                       |
+| Role                                | Selection                                                                                      | Why                                                                                                                                                                                                                                           |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HTTP/3 server                       | `internal/edge/connectip` on `quic-go/connect-ip-go` v0.6.0 and `quic-go` v0.63.0              | The existing server, unchanged.                                                                                                                                                                                                               |
+| HTTP/2 server                       | `internal/edge/connectip` (`ServeTLS`): `net/http` Extended CONNECT plus its own capsule codec | `connect-ip-go` only speaks HTTP/3: its `Conn` wraps an HTTP/3 stream, and its proxy needs `http3.HTTPStreamer`. HTTP/2 support upstream is an open request ([quic-go/connect-ip-go#41](https://github.com/quic-go/connect-ip-go/issues/41)). |
+| Independent client, both transports | Xray-core v26.10.21 MASQUE outbound (`alpn` `h3` or `h2`)                                      | A released client that speaks CONNECT-IP over HTTP/3 and over HTTP/2. HTTP/2 arrived in [XTLS/Xray-core#6810](https://github.com/XTLS/Xray-core/pull/6810).                                                                                   |
+| Negative-path client                | Raw clients in the harness (`quic-go` `RequestStream`; `x/net/http2` framer)                   | Malformed capsules, two requests on one connection and per-request cancellation need control no released client offers.                                                                                                                       |
 
-Xray's CONNECT-IP layer is a fork of `connect-ip-go`. Over HTTP/3 it therefore shares code lineage with the server's library, so a protocol misreading common to both would go unnoticed there. Over HTTP/2 the server side is the prototype's own codec, so the two ends are independent.
+Xray's CONNECT-IP layer is a fork of `connect-ip-go`. Over HTTP/3 it therefore shares code lineage with the server's library, so a protocol misreading common to both would go unnoticed there. Over HTTP/2 the server side is Galactic's own capsule codec, so the two ends are independent.
 
 ### Candidates that failed
 
@@ -72,7 +72,7 @@ done
 
 | Check                        | Proof                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Round trip                   | Xray sends 20 UDP echoes, then a 256 KiB TCP echo, all byte-exact. During the UDP phase alone, the backend must see at least 20 packets of exactly 1280 bytes each way, and none larger, so each datagram crossed as one unfragmented packet. One backend session opens. ALPN is `h3` or `h2` as configured. Outer packets appear only on that transport's port. The HTTP/2 server must see the request as `HTTP/2.0`.                                                                                                                                                                       |
+| Round trip                   | Xray sends 20 UDP echoes, then a 256 KiB TCP echo, all byte-exact. During the UDP phase alone, the backend must see at least 20 packets of exactly 1280 bytes each way, and none larger, so each datagram crossed as one unfragmented packet. One backend session opens. ALPN is `h3` or `h2` as configured. Outer packets appear only on that transport's port. Only the HTTP/2 run's request reaches admission through the TCP listener.                                                                                                                                                   |
 | Untrusted server certificate | Xray trusts an unrelated CA. No echo comes back, no backend session opens, and Xray reports `certificate signed by unknown authority`.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | HTTP/2 with UDP/443 blocked  | With the drop rule in place, an HTTP/3 client gets no echo or session, and the drop counter rises. Then a separate HTTP/2 client completes 20 echoes of 1280-byte packets each way over TCP/443, with no UDP/443 packet dropped during its run. No automatic fallback is involved.                                                                                                                                                                                                                                                                                                           |
 | Malformed input              | Two requests share one connection. One receives an oversized capsule, a malformed `ADDRESS_REQUEST`, a capsule cut off by FIN, or a datagram that is not IP or carries a spoofed source or a destination outside the advertised routes. The other must still complete a 1280-byte round trip. After the input, nothing from an ended request may reach the backend. A request that stays open sends one probe after the input, and only that probe may reach the backend. A packet with hop limit 1 must reach the backend, because RFC 9484 decrements the hop limit on encapsulation only. |
@@ -83,11 +83,23 @@ On connection setup, each raw client also requires the server's SETTINGS to enab
 Malformed capsules don't behave the same way on both servers:
 
 - **Malformed address capsule, or a capsule cut off by FIN:** both servers end the request.
-- **Oversized DATAGRAM capsule:** the HTTP/2 prototype ends the request, because it must buffer the capsule to forward the packet. The HTTP/3 server keeps the request open. `connect-ip-go` discards DATAGRAM and unknown capsules on the stream as they arrive, so nothing is buffered, and that request's QUIC datagrams keep flowing.
+- **Oversized DATAGRAM capsule:** both servers keep the request open and discard the capsule as it arrives, so nothing is buffered. The client sends the whole 1 MiB value, because over HTTP/2 the request's later packets follow it on the same stream.
 - **A datagram that is not IP or carries a spoofed source or a destination outside the routes:** both servers drop it without ending the request.
 - **Hop limit 1 from the client:** both servers forward it unchanged.
 
-## Recorded run
+## Recorded runs
+
+### Production HTTP/2 listener
+
+Recorded 2026-10-28 with `task test:connectip-interop` on the #981 branch, on the same host, Go and Xray versions as the run below. All 33 tests passed under the race detector, against one `connectip.Server` serving both transports. The HTTP/3 column of the table below still holds. These HTTP/2 results differ from the prototype's or add to them:
+
+| Check               | HTTP/2                                                                                      |
+| ------------------- | ------------------------------------------------------------------------------------------- |
+| Negotiated protocol | ALPN `h2`; request admitted through the TCP listener; 364 outer TCP/443 packets, no UDP/443 |
+| UDP/443 blocked     | 20 of 20 echoes, 1280 bytes each way; 35 TCP/443 packets; 0 UDP/443 dropped: passed         |
+| Oversized capsule   | Request stays open, nothing buffered; only the probe reached the VPC: passed                |
+
+### Prototype
 
 Recorded 2026-10-27 with `task test:connectip-interop`, on base commit `1a9d0f16` with this suite applied. The host ran Fedora 44, Linux 7.1.3, Go 1.26.5 and Xray 26.10.21 (built with Go 1.27.3). Five consecutive runs, the last on the published code, each passed all 33 tests under the race detector and removed every fixture namespace. The table shows the last run.
 
@@ -123,24 +135,22 @@ The production adapters behind these interfaces come from #975–#979:
 
 The harness's admission and recording TUN backend stand in for them, and prove nothing about foundation behavior.
 
-## Work before an HTTP/2 listener ships
+## From prototype to production listener
 
-The prototype proves the stack. #981 owns the production listener, which needs:
+The prototype left six items for the production listener. #981 closed them in `internal/edge/connectip`:
 
-1. **One shared request path.** The admission, lease watch, backend session and address-request handling in `connectip.Server` have to become transport-neutral. Then HTTP/2 can't gain a second admission path or a second forwarding owner. The prototype copies that logic instead.
-2. **Packet checks equal to HTTP/3's.**
-   - Over HTTP/3, `connect-ip-go` validates the packet that triggered an ICMP error. The prototype doesn't, so it drops any ICMPv6 error whose source lies outside the connector's /96.
-   - It also returns no ICMPv6 Packet Too Big for a packet over its 1500-byte limit.
-   - The listener needs both, plus a decision on IPv4, which the prototype drops.
-3. **An explicit Extended CONNECT opt-in.** `net/http` and `x/net/http2` offer `SETTINGS_ENABLE_CONNECT_PROTOCOL` only when `GODEBUG` contains `http2xconnect=1` at process start (golang/go#71128). Neither registers it as a `//go:debug` setting. The binary must set the variable before `net/http` initializes, and must fail startup when the server would not offer Extended CONNECT. Silently serving without it isn't acceptable.
-4. **Bounded resources on TCP.**
-   - Apply the #991 pre-admission limits per connection and in total: concurrent streams, handshakes in flight, in-flight admissions and queued bytes.
-   - Authenticate before doing any per-request work.
-   - The prototype bounds one capsule at 1508 bytes, and bounds each write with a 5-second deadline meant to end a stalled request. No check here exercises a client that stops reading. Both values need review and tests against the capacity targets in #980 and #984.
-5. **Protocol details the prototype simplifies.** It advertises routes in the order admission returns them, without the sorting and overlap check RFC 9484 requires; `connectip.Server` already does both. It accepts `Capsule-Protocol` only as the bare value `?1`, without structured-field parameters.
-6. **Reconnect behavior.** A new HTTP/2 tunnel that replaces a QUIC one must follow the continuity contract from #972, with no dual ownership.
+1. **One shared request path.** `Server.ServeHTTP` parses each transport's request, then runs one path for both: limits, `Admission`, grant checks, the backend session and `packetPolicy`.
+2. **Packet checks equal to HTTP/3's.** Both transports apply `packetPolicy` in both directions, including to the Packet Too Big the HTTP/2 tunnel returns for a packet over 1500 bytes. IPv4 is refused on both, as #979 decided.
+3. **An explicit Extended CONNECT opt-in.** `net/http` offers `SETTINGS_ENABLE_CONNECT_PROTOCOL` only when `GODEBUG` contains `http2xconnect=1` at process start (golang/go#71128). The masque-provider image sets it, and `ServeTLS` returns `ErrExtendedConnectDisabled` without it.
+4. **Bounded resources on TCP.** `Config.Limits` covers TCP connections in total and per source, HTTP/2 streams, headers and the TLS handshake. Admission and session caps are shared with HTTP/3. One DATAGRAM capsule of at most 1508 bytes is held per request, and a write that cannot finish in 5 seconds ends its request; unit tests cover a client that stops reading.
+5. **Protocol details.** Routes are sorted and checked for overlap as over HTTP/3. `Capsule-Protocol` accepts structured-field parameters.
+6. **Reconnect behavior.** A connector that reconnects over HTTP/2 is admitted again through the same adapter, which [replaces](masque-provider.md#replacing-a-connectors-request) its HTTP/3 request without dual ownership.
+
+[MASQUE connector service](masque-service.md#http2-fallback) documents the listener's behavior.
 
 ## Carried from #991
+
+The table records the prototype's findings. Since then, `connectip.Server` has applied `Config.Limits` before admission on both transports and has sent the HTTP/3 MTU probe only after admission (#991, #981).
 
 | Finding                                  | Status in this proof                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

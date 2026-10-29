@@ -113,7 +113,32 @@ const (
 	// DaemonSet mounts the host's /proc/sys/net at /host/proc/sys/net and sets
 	// this to /host/proc/sys.
 	EnvGatewayProcSysPath = "GALACTIC_GATEWAY_PROC_SYS_PATH"
+
+	// EnvGatewayProjectServices turns on serving NetworkServices in project
+	// namespaces. Optional, defaulting to false. Off, a gateway serves only
+	// the NetworkServices in its own NetworkGateway's namespace. On, it also
+	// serves every NetworkService elsewhere, after checking that its VIP
+	// addresses fall in EnvGatewayProjectVIPPrefixes, that a VPC in its
+	// namespace carries its vpcRef and that no other service already serves
+	// its VIPs, and it trusts only NetworkGateways in EnvGatewayNamespace.
+	// On, the gateway needs list and watch on VPCs.
+	EnvGatewayProjectServices = "GALACTIC_GATEWAY_PROJECT_SERVICES"
+
+	// EnvGatewayNamespace is the gateway namespace: the one whose
+	// NetworkGateways and NetworkServices are trusted. Required with
+	// EnvGatewayProjectServices. The DaemonSet sets it to the pod's own
+	// namespace.
+	EnvGatewayNamespace = "GALACTIC_GATEWAY_NAMESPACE"
+
+	// EnvGatewayProjectVIPPrefixes lists, comma-separated, the prefixes the
+	// platform allocates load balancer addresses from. A NetworkService in a
+	// project namespace with a VIP address outside them is refused. Required
+	// with EnvGatewayProjectServices.
+	EnvGatewayProjectVIPPrefixes = "GALACTIC_GATEWAY_PROJECT_VIP_PREFIXES"
 )
+
+// keyGatewayNamespace is EnvGatewayNamespace's key.
+const keyGatewayNamespace = "namespace"
 
 // EnvGatewayXDPAttach's values.
 const (
@@ -161,6 +186,19 @@ type GatewayConfig struct {
 
 	// ProcSysPath is EnvGatewayProcSysPath.
 	ProcSysPath string
+
+	// ProjectServices is EnvGatewayProjectServices.
+	ProjectServices bool
+
+	// Namespace is EnvGatewayNamespace.
+	Namespace string
+
+	// ProjectVIPPrefixes is EnvGatewayProjectVIPPrefixes, parsed by
+	// Validate.
+	ProjectVIPPrefixes []netip.Prefix
+
+	// projectVIPPrefixes is EnvGatewayProjectVIPPrefixes as given.
+	projectVIPPrefixes []string
 }
 
 // NewGatewayConfig creates a config resolver reading the GALACTIC_GATEWAY
@@ -181,6 +219,9 @@ func NewGatewayConfig() *GatewayConfig {
 	v.SetDefault("ipv4_vips", false)
 	v.SetDefault("backend_health", false)
 	v.SetDefault("proc_sys_path", DefaultProcSysPath)
+	v.SetDefault("project_services", false)
+	v.SetDefault(keyGatewayNamespace, "")
+	v.SetDefault("project_vip_prefixes", "")
 
 	cfg := &GatewayConfig{
 		v:      v,
@@ -208,6 +249,9 @@ func (c *GatewayConfig) BindFlags(flags *pflag.FlagSet) {
 		{"gateway-ipv4-vips", "ipv4_vips"},
 		{"gateway-backend-health", "backend_health"},
 		{"gateway-proc-sys-path", "proc_sys_path"},
+		{"gateway-project-services", "project_services"},
+		{"gateway-namespace", keyGatewayNamespace},
+		{"gateway-project-vip-prefixes", "project_vip_prefixes"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -233,6 +277,9 @@ func (c *GatewayConfig) readFields() {
 	c.IPv4VIPs = c.v.GetBool("ipv4_vips")
 	c.BackendHealth = c.v.GetBool("backend_health")
 	c.ProcSysPath = c.v.GetString("proc_sys_path")
+	c.ProjectServices = c.v.GetBool("project_services")
+	c.Namespace = c.v.GetString(keyGatewayNamespace)
+	c.projectVIPPrefixes = splitCommaList(c.v.GetString("project_vip_prefixes"))
 }
 
 // splitCommaList parses a comma-separated list, such as interface names or BMP
@@ -265,6 +312,9 @@ func (c *GatewayConfig) Validate() error {
 	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
 		return errors.New("grpc health port must be between 1 and 65535")
 	}
+	if err := c.validateProjectServices(); err != nil {
+		return err
+	}
 	if !c.DatapathEnabled {
 		return nil
 	}
@@ -285,6 +335,33 @@ func (c *GatewayConfig) Validate() error {
 	// problem instead of surfacing as a deeper kernel-datapath error.
 	if !addr.Is6() || addr.Is4In6() {
 		return fmt.Errorf("SRv6 address %q must be a native IPv6 address, not IPv4", c.SRv6Address)
+	}
+	return nil
+}
+
+// validateProjectServices checks the settings EnvGatewayProjectServices
+// needs and parses ProjectVIPPrefixes.
+func (c *GatewayConfig) validateProjectServices() error {
+	c.ProjectVIPPrefixes = nil
+	if !c.ProjectServices {
+		return nil
+	}
+	for _, raw := range c.projectVIPPrefixes {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %q is not a valid prefix: %w", EnvGatewayProjectVIPPrefixes, raw, err)
+		}
+		if p.Bits() == 0 {
+			return fmt.Errorf("%s: %q covers every address, so it would accept any VIP",
+				EnvGatewayProjectVIPPrefixes, raw)
+		}
+		c.ProjectVIPPrefixes = append(c.ProjectVIPPrefixes, p.Masked())
+	}
+	if c.Namespace == "" {
+		return fmt.Errorf("%s is required with %s", EnvGatewayNamespace, EnvGatewayProjectServices)
+	}
+	if len(c.ProjectVIPPrefixes) == 0 {
+		return fmt.Errorf("%s is required with %s", EnvGatewayProjectVIPPrefixes, EnvGatewayProjectServices)
 	}
 	return nil
 }

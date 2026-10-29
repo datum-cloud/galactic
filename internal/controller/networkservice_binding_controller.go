@@ -150,7 +150,11 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	if !rule.DeletionTimestamp.IsZero() || retired {
 		if rule.Spec.AddressGroup != nil {
-			nodes, err := servingGatewayNodeNames(ctx, r.Client, rule.Namespace)
+			namespace := r.Namespace
+			if namespace == "" {
+				namespace = rule.Namespace
+			}
+			nodes, err := gatewayNodeNames(ctx, r.authorityReader(), namespace)
 			if err != nil {
 				return ctrl.Result{}, err
 			}

@@ -1,0 +1,20 @@
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: EdgeProvider
+metadata:
+  name: masque-fixture
+spec:
+  contractVersions:
+    - v1alpha1
+  capabilities:
+    - name: PacketAccess
+      version: v1
+    - name: PrefixReachability
+      version: v1
+  serviceAccounts:
+    - namespace: edge-masque
+      name: edge-provider
+  # The fixture takes its connectors from its own configuration file, not
+  # from an API kind; this names that format for admission's check.
+  configuration:
+    group: conformance.galactic.datumapis.com
+    kind: MASQUEFixtureConfig

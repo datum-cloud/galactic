@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	instmetrics "go.miloapis.com/instrumentation/metrics"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,6 +43,7 @@ import (
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/fabricconfig"
 	"go.datum.net/galactic/internal/fabricconfig/activation"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 )
 
@@ -89,6 +91,7 @@ type options struct {
 
 func main() {
 	if err := newRootCommand().Execute(); err != nil {
+		slog.Error(appName+" failed", "error", err)
 		os.Exit(1)
 	}
 }
@@ -96,11 +99,16 @@ func main() {
 // newRootCommand builds the root command and its init and watch subcommands.
 func newRootCommand() *cobra.Command {
 	opts := &options{}
+	var logOpts logging.Options
 	cmd := &cobra.Command{
-		Use:          appName,
-		Short:        strings.Split(appDesc, "\n")[0],
-		Long:         appDesc,
-		SilenceUsage: true,
+		Use:           appName,
+		Short:         strings.Split(appDesc, "\n")[0],
+		Long:          appDesc,
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("build-info"); ok {
 				fmt.Println(metadata.BuildInfo(appName))
@@ -167,6 +175,7 @@ func newRootCommand() *cobra.Command {
 	watch.Flags().BoolVar(&opts.nextHopDetectOnly, "detect-only", false,
 		"Report IPv6 sessions announcing an IPv4-mapped next hop without resetting them")
 	cmd.AddCommand(watch)
+	logOpts.BindFlags(pf)
 	return cmd
 }
 
@@ -225,7 +234,7 @@ func run(parent context.Context, opts *options, fn func(*fabricconfig.Agent, con
 
 	opts.restCfg = restCfg
 
-	slog.Info("starting "+appName, "version", metadata.Version, "node", opts.nodeName, "namespace", opts.namespace,
+	slog.Info("starting "+appName, "version", metadata.Version, "nodeName", opts.nodeName, "podNamespace", opts.namespace,
 		"activation", opts.activation, "configMaps", opts.configMaps)
 	return fn(agent, ctx)
 }
@@ -367,14 +376,19 @@ func writerLock(opts *options, metrics *fabricconfig.AgentMetrics, writer string
 	return fabricconfig.TimedLock{Locker: lock, Metrics: metrics, Writer: writer}
 }
 
+// newMetrics creates the next-hop guard's and the activation path's metrics,
+// which /metrics serves from the instrumentation library's registry.
+func newMetrics() (*fabricconfig.NextHopMetrics, *fabricconfig.AgentMetrics) {
+	return fabricconfig.NewNextHopMetrics(), fabricconfig.NewAgentMetrics()
+}
+
 // watchWithGuard runs a.Watch alongside a NextHopGuard over the same FRR
 // instance, and serves the guard's and the activation path's metrics, and
 // the boot source init recorded, when opts asks for them. With the
 // ConfigMap path retired it runs only the deployment agent and the guard
 // until ctx ends.
 func watchWithGuard(ctx context.Context, a *fabricconfig.Agent, opts *options) error {
-	metrics := fabricconfig.NewNextHopMetrics()
-	agentMetrics := fabricconfig.NewAgentMetrics(metrics.Registry)
+	metrics, agentMetrics := newMetrics()
 	if rec, err := fabricconfig.ReadBootRecord(opts.bootRecord); err == nil {
 		agentMetrics.SetBoot(rec.Source)
 	} else {
@@ -407,7 +421,7 @@ func watchWithGuard(ctx context.Context, a *fabricconfig.Agent, opts *options) e
 
 	if opts.metricsBindAddress != "" {
 		mux := http.NewServeMux()
-		mux.Handle("/metrics", metrics.Handler())
+		mux.Handle("/metrics", instmetrics.Handler())
 		srv := &http.Server{
 			Addr:              opts.metricsBindAddress,
 			Handler:           mux,

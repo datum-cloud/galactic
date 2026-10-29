@@ -18,9 +18,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-logr/logr"
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	"github.com/spf13/cobra"
+	"go.miloapis.com/instrumentation/metrics"
 	_ "golang.org/x/crypto/x509roots/fallback"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -29,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -45,6 +44,7 @@ import (
 	edgediag "go.datum.net/galactic/internal/edge/diag"
 	edgeroute "go.datum.net/galactic/internal/edge/route"
 	"go.datum.net/galactic/internal/edge/timing"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/serviceaddress"
 	"go.datum.net/galactic/internal/trafficpolicy/cell"
@@ -83,11 +83,15 @@ func main() {
 
 func newRootCommand() *cobra.Command {
 	o := &options{}
+	var logOpts logging.Options
 	cmd := &cobra.Command{
 		Use:          "galactic-controller",
 		Short:        "Run Galactic's cell or fabric controllers",
 		Version:      metadata.Version,
 		SilenceUsage: true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context(), o)
 		},
@@ -116,6 +120,7 @@ func newRootCommand() *cobra.Command {
 	f.DurationVar(&o.edgeMaxSkew, "edge-max-skew", 2*time.Second,
 		"Cell role: maximum wall-clock error of any node; an EdgeService stops admitting this long before its "+
 			"validUntil. It must equal galactic-edge's --max-skew")
+	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
 }
 
@@ -134,7 +139,6 @@ func run(parent context.Context, o *options) error {
 	}
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -174,11 +178,9 @@ func run(parent context.Context, o *options) error {
 	if o.edge {
 		rec := &edgediag.Recorder{
 			Events:  mgr.GetEventRecorder("galactic-controller"),
-			Metrics: edgediag.NewMetrics(ctrlmetrics.Registry, "core"),
+			Metrics: edgediag.NewMetrics(edgediag.RoleCore),
 		}
-		if err := ctrlmetrics.Registry.Register(&edgediag.StateCollector{Reader: mgr.GetClient()}); err != nil {
-			return fmt.Errorf("register edge state metrics: %w", err)
-		}
+		metrics.MustRegister(&edgediag.StateCollector{Reader: mgr.GetClient()})
 		if err := edgeattachment.Setup(mgr, &edgeattachment.Reconciler{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(),
 			Authority: admission.NewAuthority(o.edgeMaxSkew), MaxSkew: o.edgeMaxSkew, Diag: rec,

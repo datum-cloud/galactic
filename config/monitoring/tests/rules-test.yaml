@@ -277,17 +277,17 @@ tests:
   # (ReassertFailed) and fires the generic alert after 15m.
   - interval: 30s
     input_series:
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Degraded",status="True",reason="NoEligibleRecovery"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="Degraded",status="True",reason="NoEligibleRecovery"}'
         values: "1x5 stale"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Degraded",status="True",reason="NoEligibleRecovery"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="Degraded",status="True",reason="NoEligibleRecovery"}'
         values: "_x8 1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-d",node="edge-d",type="Degraded",status="True",reason="NoEligibleRecovery"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-d",target_node="edge-d",type="Degraded",status="True",reason="NoEligibleRecovery"}'
         values: "1x5 stale _x1 1x12 stale"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Degraded",status="True",reason="Recovered"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",type="Degraded",status="True",reason="Recovered"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Degraded",status="True",reason="ReassertFailed"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c",type="Degraded",status="True",reason="ReassertFailed"}'
         values: "1x7 stale"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Degraded",status="True",reason="ReassertFailed"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c",type="Degraded",status="True",reason="ReassertFailed"}'
         values: "_x10 1x40"
     alert_rule_test:
       - eval_time: 4m
@@ -302,8 +302,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-a
-              node: edge-a
+              target_node: edge-a
             exp_annotations: &noRecoveryEdgeAAnnotations
               summary: "Fabric router edge-a on edge-a failed an activation and cannot recover"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingnoeligiblerecovery"
@@ -318,8 +319,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-d
-              node: edge-d
+              target_node: edge-d
             exp_annotations:
               summary: "Fabric router edge-d on edge-d failed an activation and cannot recover"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingnoeligiblerecovery"
@@ -345,8 +347,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-c
-              node: edge-c
+              target_node: edge-c
               reason: ReassertFailed
             exp_annotations:
               summary: "Fabric router edge-c on edge-c is degraded (ReassertFailed)"
@@ -360,11 +363,11 @@ tests:
   # to it (RecoveryConflict False) does not.
   - interval: 30s
     input_series:
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="RecoveryConflict",status="True",reason="RecoveryConflict"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="RecoveryConflict",status="True",reason="RecoveryConflict"}'
         values: "1x7 stale"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="RecoveryConflict",status="True",reason="RecoveryConflict"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="RecoveryConflict",status="True",reason="RecoveryConflict"}'
         values: "_x10 1x30"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="RecoveryConflict",status="False",reason="Bound"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",type="RecoveryConflict",status="False",reason="Bound"}'
         values: "1x30"
     alert_rule_test:
       - eval_time: 9m
@@ -379,8 +382,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-a
-              node: edge-a
+              target_node: edge-a
             exp_annotations:
               summary: "The node agent on edge-a refuses FabricRouterDeployment edge-a"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingrecoveryconflict"
@@ -399,31 +403,31 @@ tests:
   # activation Component on its node), do not: nothing waits on them.
   - interval: 30s
     input_series:
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",source="CRD",effective_source="CRD"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",source="CRD",effective_source="CRD"}'
         values: "1x30"
-      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a"}'
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a"}'
         values: "0+30x30"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",source="Shadow",effective_source="Shadow"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",source="Shadow",effective_source="Shadow"}'
         values: "1x7 stale"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-b",node="edge-b",source="Shadow",effective_source="Shadow"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",source="Shadow",effective_source="Shadow"}'
         values: "_x10 1x30"
-      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b"}'
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b"}'
         values: "0x7 stale"
-      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-b",node="edge-b"}'
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b"}'
         values: "_x10 0x30"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",source="ConfigMap",effective_source="ConfigMap"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c",source="ConfigMap",effective_source="ConfigMap"}'
         values: "1x30"
-      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c"}'
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c"}'
         values: "0x30"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-d",node="edge-d",source="CRD"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-d",target_node="edge-d",source="CRD"}'
         values: "1x7 stale"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-d",node="edge-d",source="CRD"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-d",target_node="edge-d",source="CRD"}'
         values: "_x10 1x30"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-e",node="edge-e",source="ConfigMap",effective_source="CRD"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-e",target_node="edge-e",source="ConfigMap",effective_source="CRD"}'
         values: "1x30"
-      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-e",node="edge-e"}'
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-e",target_node="edge-e"}'
         values: "0x30"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-f",node="edge-f",source="ConfigMap"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-f",target_node="edge-f",source="ConfigMap"}'
         values: "1x30"
     alert_rule_test:
       - eval_time: 4m
@@ -438,8 +442,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-d
-              node: edge-d
+              target_node: edge-d
             exp_annotations: &heartbeatEdgeD
               summary: "The node agent on edge-d has stopped reporting on edge-d"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingagentheartbeatstale"
@@ -457,8 +462,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-b
-              node: edge-b
+              target_node: edge-b
             exp_annotations:
               summary: "The node agent on edge-b has stopped reporting on edge-b"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingagentheartbeatstale"
@@ -473,8 +479,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-d
-              node: edge-d
+              target_node: edge-d
             exp_annotations: *heartbeatEdgeD
           - exp_labels:
               severity: warning
@@ -482,8 +489,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-e
-              node: edge-e
+              target_node: edge-e
             exp_annotations:
               summary: "The node agent on edge-e has stopped reporting on edge-e"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingagentheartbeatstale"
@@ -501,17 +509,17 @@ tests:
   # nothing. A cell with no releases exports none of these series at all.
   - interval: 1m
     input_series:
-      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r2",routing_domain="fabric",type="Release",phase="Failed"}'
+      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",release="r2",routing_domain="fabric",type="Release",phase="Failed"}'
         values: "1x7 stale"
-      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",release="r2",routing_domain="fabric",type="Release",phase="Failed"}'
+      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",release="r2",routing_domain="fabric",type="Release",phase="Failed"}'
         values: "_x9 1x26 stale"
-      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r4",routing_domain="fabric",type="Release",phase="Unknown"}'
+      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",release="r4",routing_domain="fabric",type="Release",phase="Unknown"}'
         values: "1x7 stale"
-      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",release="r4",routing_domain="fabric",type="Release",phase="Unknown"}'
+      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",release="r4",routing_domain="fabric",type="Release",phase="Unknown"}'
         values: "_x9 1x40"
-      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r5",routing_domain="edge",type="Release",phase="Started"}'
+      - series: 'galactic_fabric_routing_release_outstanding{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",release="r5",routing_domain="edge",type="Release",phase="Started"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_releases{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",routing_domain="fabric",phase="Failed",recovery_verified="true"}'
+      - series: 'galactic_fabric_routing_releases{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",routing_domain="fabric",phase="Failed",recovery_verified="true"}'
         values: "1x40"
     alert_rule_test:
       - eval_time: 29m
@@ -526,6 +534,7 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               release: r2
               routing_domain: fabric
             exp_annotations:
@@ -551,6 +560,7 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               release: r4
               routing_domain: fabric
             exp_annotations:
@@ -566,13 +576,13 @@ tests:
   # (Accepted False, WaitingForPromotion) does not.
   - interval: 30s
     input_series:
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Accepted",status="False",reason="HandoffPending"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="Accepted",status="False",reason="HandoffPending"}'
         values: "1x7 stale"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Accepted",status="False",reason="HandoffPending"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="Accepted",status="False",reason="HandoffPending"}'
         values: "_x10 1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Accepted",status="False",reason="WaitingForPromotion"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",type="Accepted",status="False",reason="WaitingForPromotion"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Accepted",status="False",reason="ConfigMapRetired"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c",type="Accepted",status="False",reason="ConfigMapRetired"}'
         values: "1x40"
     alert_rule_test:
       - eval_time: 14m
@@ -587,8 +597,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-a
-              node: edge-a
+              target_node: edge-a
               reason: HandoffPending
             exp_annotations:
               summary: "Fabric router edge-a on edge-a is stuck handing back to its ConfigMap"
@@ -605,8 +616,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-c
-              node: edge-c
+              target_node: edge-c
               reason: ConfigMapRetired
             exp_annotations:
               summary: "Fabric router edge-c on edge-c is stuck handing back to its ConfigMap"
@@ -623,21 +635,21 @@ tests:
   # staged its candidate and does not.
   - interval: 30s
     input_series:
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Staged",status="False",reason="Rejected"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="Staged",status="False",reason="Rejected"}'
         values: "1x7 stale"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Staged",status="False",reason="Rejected"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="Staged",status="False",reason="Rejected"}'
         values: "_x10 1x40"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",source="Shadow",effective_source="Shadow"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",source="Shadow",effective_source="Shadow"}'
         values: "1x7 stale"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",source="Shadow",effective_source="Shadow"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",source="Shadow",effective_source="Shadow"}'
         values: "_x10 1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Staged",status="False",reason="Rejected"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",type="Staged",status="False",reason="Rejected"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",source="ConfigMap",effective_source="ConfigMap"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",source="ConfigMap",effective_source="ConfigMap"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Staged",status="True",reason="Staged"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c",type="Staged",status="True",reason="Staged"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",source="CRD",effective_source="CRD"}'
+      - series: 'galactic_fabric_routing_deployment_info{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c",source="CRD",effective_source="CRD"}'
         values: "1x40"
     alert_rule_test:
       - eval_time: 14m
@@ -652,8 +664,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-a
-              node: edge-a
+              target_node: edge-a
               reason: Rejected
             exp_annotations:
               summary: "Fabric router edge-a on edge-a cannot stage its candidate (Rejected)"
@@ -667,15 +680,15 @@ tests:
   # controller refused for a moment while its references were created.
   - interval: 30s
     input_series:
-      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-a",node="edge-a",reason="UnresolvedRef"}'
+      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",router="edge-a",target_node="edge-a",reason="UnresolvedRef"}'
         values: "0x7 stale"
-      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",router="edge-a",node="edge-a",reason="UnresolvedRef"}'
+      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",router="edge-a",target_node="edge-a",reason="UnresolvedRef"}'
         values: "_x10 0x40"
-      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-b",node="edge-b",reason="Compiled"}'
+      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",router="edge-b",target_node="edge-b",reason="Compiled"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-c",node="edge-c",reason="UnresolvedRef"}'
+      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",router="edge-c",target_node="edge-c",reason="UnresolvedRef"}'
         values: "0x4 _x36"
-      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-c",node="edge-c",reason="Compiled"}'
+      - series: 'galactic_fabric_routing_router_accepted{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",router="edge-c",target_node="edge-c",reason="Compiled"}'
         values: "_x4 1x36"
     alert_rule_test:
       - eval_time: 14m
@@ -690,8 +703,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               router: edge-a
-              node: edge-a
+              target_node: edge-a
               reason: UnresolvedRef
             exp_annotations:
               summary: "Fabric router edge-a on edge-a does not compile (UnresolvedRef)"
@@ -707,17 +721,17 @@ tests:
   # waiting for its first promotion.
   - interval: 30s
     input_series:
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Accepted",status="False",reason="PromotionRefused"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="Accepted",status="False",reason="PromotionRefused"}'
         values: "1x7 stale"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Accepted",status="False",reason="PromotionRefused"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="Accepted",status="False",reason="PromotionRefused"}'
         values: "_x10 1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Accepted",status="False",reason="NotAuthorized"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",type="Accepted",status="False",reason="NotAuthorized"}'
         values: "1x5 stale"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Accepted",status="True",reason="Committed"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",type="Accepted",status="True",reason="Committed"}'
         values: "_x6 1x34"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Accepted",status="False",reason="WaitingForPromotion"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c",type="Accepted",status="False",reason="WaitingForPromotion"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-d",node="edge-d",type="Accepted",status="False",reason="NotAuthorized"}'
+      - series: 'galactic_fabric_routing_deployment_condition{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-d",target_node="edge-d",type="Accepted",status="False",reason="NotAuthorized"}'
         values: "1x40"
     alert_rule_test:
       - eval_time: 14m
@@ -732,8 +746,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-a
-              node: edge-a
+              target_node: edge-a
               reason: PromotionRefused
             exp_annotations:
               summary: "The node agent on edge-a will not activate edge-a's promotion (PromotionRefused)"
@@ -749,8 +764,9 @@ tests:
               team: connect
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-d
-              node: edge-d
+              target_node: edge-d
               reason: NotAuthorized
             exp_annotations:
               summary: "The node agent on edge-d will not activate edge-d's promotion (NotAuthorized)"
@@ -766,13 +782,13 @@ tests:
   # not. Routers always read: does not.
   - interval: 30s
     input_series:
-      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",kind="fabricrouterdeployments"}'
+      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",kind="fabricrouterdeployments"}'
         values: "0x7 stale"
-      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-2",namespace="galactic-system",kind="fabricrouterdeployments"}'
+      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",kind="fabricrouterdeployments"}'
         values: "_x10 0x30"
-      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",kind="fabricreleaseauthorizations"}'
+      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",kind="fabricreleaseauthorizations"}'
         values: "0x6 1x24"
-      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-1",namespace="galactic-system",kind="bgprouters"}'
+      - series: 'galactic_fabric_routing_collect_success{job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",kind="bgprouters"}'
         values: "1x30"
     alert_rule_test:
       - eval_time: 9m
@@ -811,41 +827,41 @@ tests:
   # and cluster a's edge-b is not stale, since nothing waits on it.
   - interval: 30s
     input_series:
-      - series: 'galactic_fabric_routing_collect_success{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",kind="fabricrouterdeployments"}'
+      - series: 'galactic_fabric_routing_collect_success{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",kind="fabricrouterdeployments"}'
         values: "0x7 stale"
-      - series: 'galactic_fabric_routing_collect_success{cluster="a",job="fabric-router-controller",pod="frc-2",namespace="galactic-system",kind="fabricrouterdeployments"}'
+      - series: 'galactic_fabric_routing_collect_success{cluster="a",job="fabric-router-controller",pod="frc-2",node="ctl-2",namespace="galactic-system",kind="fabricrouterdeployments"}'
         values: "_x10 0x30"
-      - series: 'galactic_fabric_routing_collect_success{cluster="b",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",kind="fabricrouterdeployments"}'
+      - series: 'galactic_fabric_routing_collect_success{cluster="b",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",kind="fabricrouterdeployments"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Degraded",status="True",reason="NoEligibleRecovery"}'
+      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="Degraded",status="True",reason="NoEligibleRecovery"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{cluster="b",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",type="Degraded",status="False",reason="Committed"}'
+      - series: 'galactic_fabric_routing_deployment_condition{cluster="b",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",type="Degraded",status="False",reason="Committed"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_info{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",source="Shadow",effective_source="Shadow"}'
+      - series: 'galactic_fabric_routing_deployment_info{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",source="Shadow",effective_source="Shadow"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a"}'
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a"}'
         values: "0x40"
-      - series: 'galactic_fabric_routing_deployment_info{cluster="b",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a",source="Shadow",effective_source="Shadow"}'
+      - series: 'galactic_fabric_routing_deployment_info{cluster="b",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a",source="Shadow",effective_source="Shadow"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{cluster="b",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-a",node="edge-a"}'
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{cluster="b",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-a",target_node="edge-a"}'
         values: "0+30x40"
-      - series: 'galactic_fabric_routing_deployment_info{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",source="Shadow"}'
+      - series: 'galactic_fabric_routing_deployment_info{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c",source="Shadow"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_info{cluster="b",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",source="Shadow",effective_source="Shadow"}'
+      - series: 'galactic_fabric_routing_deployment_info{cluster="b",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c",source="Shadow",effective_source="Shadow"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{cluster="b",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c"}'
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{cluster="b",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c"}'
         values: "0+30x40"
-      - series: 'galactic_fabric_routing_deployment_info{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",source="ConfigMap",effective_source="ConfigMap"}'
+      - series: 'galactic_fabric_routing_deployment_info{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",source="ConfigMap",effective_source="ConfigMap"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b"}'
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b"}'
         values: "0x40"
-      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Staged",status="False",reason="Rejected"}'
+      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",type="Staged",status="False",reason="Rejected"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_condition{cluster="b",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",type="Staged",status="False",reason="Rejected"}'
+      - series: 'galactic_fabric_routing_deployment_condition{cluster="b",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",type="Staged",status="False",reason="Rejected"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_info{cluster="b",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b",source="Shadow",effective_source="Shadow"}'
+      - series: 'galactic_fabric_routing_deployment_info{cluster="b",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b",source="Shadow",effective_source="Shadow"}'
         values: "1x40"
-      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{cluster="b",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-b",node="edge-b"}'
+      - series: 'galactic_fabric_routing_deployment_heartbeat_timestamp_seconds{cluster="b",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-b",target_node="edge-b"}'
         values: "0+30x40"
     alert_rule_test:
       - eval_time: 11m
@@ -876,8 +892,9 @@ tests:
               cluster: a
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-a
-              node: edge-a
+              target_node: edge-a
             exp_annotations: *noRecoveryEdgeAAnnotations
       - eval_time: 11m
         alertname: FabricRoutingAgentHeartbeatStale
@@ -889,8 +906,9 @@ tests:
               cluster: a
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-a
-              node: edge-a
+              target_node: edge-a
             exp_annotations:
               summary: "The node agent on edge-a has stopped reporting on edge-a"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingagentheartbeatstale"
@@ -906,8 +924,9 @@ tests:
               cluster: a
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-c
-              node: edge-c
+              target_node: edge-c
             exp_annotations:
               summary: "The node agent on edge-c has stopped reporting on edge-c"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingagentheartbeatstale"
@@ -926,8 +945,9 @@ tests:
               cluster: b
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-b
-              node: edge-b
+              target_node: edge-b
               reason: Rejected
             exp_annotations:
               summary: "Fabric router edge-b on edge-b cannot stage its candidate (Rejected)"
@@ -941,19 +961,19 @@ tests:
   # cluster a only, and its alert must carry cluster="a".
   - interval: 30s
     input_series:
-      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-c",node="edge-c",type="Degraded",status="True",reason="ReassertFailed"}'
+      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-c",target_node="edge-c",type="Degraded",status="True",reason="ReassertFailed"}'
         values: "1x70"
-      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-d",node="edge-d",type="RecoveryConflict",status="True",reason="RecoveryConflict"}'
+      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-d",target_node="edge-d",type="RecoveryConflict",status="True",reason="RecoveryConflict"}'
         values: "1x70"
-      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-e",node="edge-e",type="Accepted",status="False",reason="HandoffPending"}'
+      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-e",target_node="edge-e",type="Accepted",status="False",reason="HandoffPending"}'
         values: "1x70"
-      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",deployment="edge-f",node="edge-f",type="Accepted",status="False",reason="PromotionRefused"}'
+      - series: 'galactic_fabric_routing_deployment_condition{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",deployment="edge-f",target_node="edge-f",type="Accepted",status="False",reason="PromotionRefused"}'
         values: "1x70"
-      - series: 'galactic_fabric_routing_router_accepted{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",router="edge-g",node="edge-g",reason="UnresolvedRef"}'
+      - series: 'galactic_fabric_routing_router_accepted{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",router="edge-g",target_node="edge-g",reason="UnresolvedRef"}'
         values: "0x70"
-      - series: 'galactic_fabric_routing_release_outstanding{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r7",routing_domain="fabric",type="Release",phase="Failed"}'
+      - series: 'galactic_fabric_routing_release_outstanding{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",release="r7",routing_domain="fabric",type="Release",phase="Failed"}'
         values: "1x70"
-      - series: 'galactic_fabric_routing_release_outstanding{cluster="a",job="fabric-router-controller",pod="frc-1",namespace="galactic-system",release="r8",routing_domain="fabric",type="Release",phase="Unknown"}'
+      - series: 'galactic_fabric_routing_release_outstanding{cluster="a",job="fabric-router-controller",pod="frc-1",node="ctl-1",namespace="galactic-system",resource_namespace="galactic-system",release="r8",routing_domain="fabric",type="Release",phase="Unknown"}'
         values: "1x70"
     alert_rule_test:
       - eval_time: 31m
@@ -966,8 +986,9 @@ tests:
               cluster: a
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-c
-              node: edge-c
+              target_node: edge-c
               reason: ReassertFailed
             exp_annotations:
               summary: "Fabric router edge-c on edge-c is degraded (ReassertFailed)"
@@ -983,8 +1004,9 @@ tests:
               cluster: a
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-d
-              node: edge-d
+              target_node: edge-d
             exp_annotations:
               summary: "The node agent on edge-d refuses FabricRouterDeployment edge-d"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutingrecoveryconflict"
@@ -999,8 +1021,9 @@ tests:
               cluster: a
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-e
-              node: edge-e
+              target_node: edge-e
               reason: HandoffPending
             exp_annotations:
               summary: "Fabric router edge-e on edge-e is stuck handing back to its ConfigMap"
@@ -1016,8 +1039,9 @@ tests:
               cluster: a
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               deployment: edge-f
-              node: edge-f
+              target_node: edge-f
               reason: PromotionRefused
             exp_annotations:
               summary: "The node agent on edge-f will not activate edge-f's promotion (PromotionRefused)"
@@ -1033,8 +1057,9 @@ tests:
               cluster: a
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               router: edge-g
-              node: edge-g
+              target_node: edge-g
               reason: UnresolvedRef
             exp_annotations:
               summary: "Fabric router edge-g on edge-g does not compile (UnresolvedRef)"
@@ -1050,6 +1075,7 @@ tests:
               cluster: a
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               release: r7
               routing_domain: fabric
             exp_annotations:
@@ -1066,6 +1092,7 @@ tests:
               cluster: a
               job: fabric-router-controller
               namespace: galactic-system
+              resource_namespace: galactic-system
               release: r8
               routing_domain: fabric
             exp_annotations:
@@ -2324,13 +2351,13 @@ tests:
   # both replicas; a short Pending blip and Active attachments do not.
   - interval: 30s
     input_series:
-      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-0",provider="alpha",state="Programming",reason="NamespaceUnavailable"}'
+      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-0",edge_provider="alpha",state="Programming",reason="NamespaceUnavailable"}'
         values: "3x40"
-      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-1",provider="alpha",state="Programming",reason="NamespaceUnavailable"}'
+      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-1",edge_provider="alpha",state="Programming",reason="NamespaceUnavailable"}'
         values: "2x40"
-      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-0",provider="beta",state="Programming",reason="Pending"}'
+      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-0",edge_provider="beta",state="Programming",reason="Pending"}'
         values: "1x4 0x36"
-      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-0",provider="beta",state="Active",reason=""}'
+      - series: 'galactic_edge_foundation_attachments{job="galactic-controller",pod="gc-0",edge_provider="beta",state="Active",reason=""}'
         values: "9x40"
     alert_rule_test:
       - eval_time: 10m
@@ -2343,7 +2370,7 @@ tests:
               severity: warning
               service: galactic
               team: connect
-              provider: alpha
+              edge_provider: alpha
               reason: NamespaceUnavailable
             exp_annotations:
               summary: "Edge attachments of alpha are not programmed (NamespaceUnavailable)"
@@ -2356,9 +2383,9 @@ tests:
   # An unresolved service policy fires after 10m; a resolved one does not.
   - interval: 30s
     input_series:
-      - series: 'galactic_edge_foundation_services{job="galactic-controller",pod="gc-0",provider="alpha",policy="Unresolved",reason="NotFound"}'
+      - series: 'galactic_edge_foundation_services{job="galactic-controller",pod="gc-0",edge_provider="alpha",policy="Unresolved",reason="NotFound"}'
         values: "1x30"
-      - series: 'galactic_edge_foundation_services{job="galactic-controller",pod="gc-0",provider="beta",policy="Resolved",reason=""}'
+      - series: 'galactic_edge_foundation_services{job="galactic-controller",pod="gc-0",edge_provider="beta",policy="Resolved",reason=""}'
         values: "4x30"
     alert_rule_test:
       - eval_time: 5m
@@ -2371,7 +2398,7 @@ tests:
               severity: warning
               service: galactic
               team: connect
-              provider: alpha
+              edge_provider: alpha
               reason: NotFound
             exp_annotations:
               summary: "Edge services of alpha have no resolvable traffic policy"
@@ -2431,6 +2458,32 @@ tests:
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgecleanupfailing"
               description: >-
                 galactic-edge on edge-1 has failed more than twice in every 15-minute window for 15 minutes
+                to release an attachment's host state or sweep expired gates. Deleted attachments stay held by their
+                finalizer and their addresses stay allocated. The agent's log names the error.
+
+  # The threshold is more than two failures per window: about 1.5 per 15
+  # minutes stays quiet, about 3 fires.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_edge_foundation_cleanup_failures_total{job="galactic-edge",node="edge-1"}'
+        values: "0+0.05x120"
+      - series: 'galactic_edge_foundation_cleanup_failures_total{job="galactic-edge",node="edge-2"}'
+        values: "0+0.1x120"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: GalacticEdgeCleanupFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-edge
+              node: edge-2
+            exp_annotations:
+              summary: "galactic-edge on edge-2 keeps failing to release host state"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgecleanupfailing"
+              description: >-
+                galactic-edge on edge-2 has failed more than twice in every 15-minute window for 15 minutes
                 to release an attachment's host state or sweep expired gates. Deleted attachments stay held by their
                 finalizer and their addresses stay allocated. The agent's log names the error.
 
@@ -2587,3 +2640,241 @@ tests:
                 100% of the Looking Glass requests galactic-system executed in the
                 last 30 minutes ended ExecutionFailed, NoNodesAvailable, OwnershipLost or Internal.
                 fabric_api_gateway_service_router_outcomes_total gives each router's failure or omission reason.
+
+  # Half of one pod's requests refused as unavailable fires, and so does a
+  # pod whose accepted tunnels keep failing on the device. Tenant refusals,
+  # a 10% failure share and too few requests do not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a",transport="h3",outcome="unavailable"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a",transport="h3",outcome="accepted"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",transport="h2",outcome="accepted"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_tunnel_ends_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",transport="h2",cause="backend_error"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-c",node="edge-c",transport="h3",outcome="forbidden"}'
+        values: "0+5x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-c",node="edge-c",transport="h3",outcome="accepted"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-d",node="edge-d",transport="h3",outcome="unavailable"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-d",node="edge-d",transport="h3",outcome="accepted"}'
+        values: "0+9x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-e",node="edge-e",transport="h3",outcome="backend_unavailable"}'
+        values: "0 1 2 3 4 4x55"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticMasqueRequestsFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: GalacticMasqueRequestsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+            exp_annotations:
+              summary: "MASQUE provider masque-a fails a large share of CONNECT-IP requests"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquerequestsfailing"
+              description: >-
+                50% of the CONNECT-IP requests masque-a answered in the last 30
+                minutes failed on the provider's side: refused as unavailable or backend_unavailable, or ended by a
+                backend_error or setup_failed. galactic_masque_admissions_total by outcome names the stage that refused
+                them (authorizer_failed, attachment_failed, route_refused, route_failed or replace_failed).
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-b
+              node: edge-b
+            exp_annotations:
+              summary: "MASQUE provider masque-b fails a large share of CONNECT-IP requests"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquerequestsfailing"
+              description: >-
+                100% of the CONNECT-IP requests masque-b answered in the last 30
+                minutes failed on the provider's side: refused as unavailable or backend_unavailable, or ended by a
+                backend_error or setup_failed. galactic_masque_admissions_total by outcome names the stage that refused
+                them (authorizer_failed, attachment_failed, route_refused, route_failed or replace_failed).
+
+  # Refused claims in every 15-minute window fire; two failed claims and
+  # accepted claims do not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_masque_route_claims_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a",outcome="refused"}'
+        values: "0+1x60"
+      - series: 'galactic_masque_route_claims_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",outcome="failed"}'
+        values: "0 1 2 2x57"
+      - series: 'galactic_masque_route_claims_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",outcome="accepted"}'
+        values: "0+5x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticMasqueRouteClaimsFailing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GalacticMasqueRouteClaimsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+              outcome: refused
+            exp_annotations:
+              summary: "MASQUE provider masque-a keeps failing connector route claims (refused)"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquerouteclaimsfailing"
+              description: >-
+                masque-a has had more than two connector /96 route claims refused in every
+                15-minute window for 15 minutes. refused means core refuses the prefix for good, usually because
+                another forwarder holds it; failed means core did not accept the claim in time. The connectors
+                behind them cannot be admitted. The adapter's admission refused log lines name the route.
+
+  # No Lease for 5m fires; a pod that holds its Lease does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_masque_lease_held{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a"}'
+        values: "1x10 0x20"
+      - series: 'galactic_masque_lease_held{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GalacticMasqueLeaseNotHeld
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: GalacticMasqueLeaseNotHeld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+            exp_annotations:
+              summary: "MASQUE provider masque-a holds no instance Lease"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasqueleasenotheld"
+              description: >-
+                masque-a has held no valid instance Lease for 5 minutes. It refuses every request with
+                no_lease and is not ready. If no other provider pod holds its Lease, the MASQUE service in
+                masque-system admits no connector. The pod's lease log lines give the error.
+
+  # Two Lease losses in an hour fire; one does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_masque_lease_losses_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a"}'
+        values: "0x10 1x10 2x20"
+      - series: 'galactic_masque_lease_losses_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b"}'
+        values: "0x10 1x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GalacticMasqueLeaseLost
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GalacticMasqueLeaseLost
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+            exp_annotations:
+              summary: "MASQUE provider masque-a keeps losing its instance Lease"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasqueleaselost"
+              description: >-
+                masque-a lost its instance Lease 2 times in the last hour. Each loss
+                ended every request on the pod with lease_lost, and their connectors had to reconnect. The pod's
+                lease renewal failed log lines give the error.
+
+  # Half of the probed requests refused with mtu fires, and so do accepted
+  # tunnels that keep ending with path_mtu. A 10% share does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a",transport="h3",outcome="mtu"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a",transport="h3",outcome="accepted"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",transport="h3",outcome="accepted"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_tunnel_ends_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",transport="h3",cause="path_mtu"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-c",node="edge-c",transport="h3",outcome="mtu"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-c",node="edge-c",transport="h3",outcome="accepted"}'
+        values: "0+9x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticMasquePathMTUTooSmall
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: GalacticMasquePathMTUTooSmall
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+            exp_annotations:
+              summary: "MASQUE provider masque-a sees paths too small for 1280-byte packets"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquepathmtutoosmall"
+              description: >-
+                In the last 30 minutes, the HTTP/3 path of 50% of the requests
+                masque-a accepted or probed could not carry a 1280-byte inner packet: refused with mtu or
+                ended with path_mtu. Check the MTU of every hop in front of the pod, such as the load balancer and
+                the node's uplink. Clients can fall back to HTTP/2.
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-b
+              node: edge-b
+            exp_annotations:
+              summary: "MASQUE provider masque-b sees paths too small for 1280-byte packets"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquepathmtutoosmall"
+              description: >-
+                In the last 30 minutes, the HTTP/3 path of 100% of the requests
+                masque-b accepted or probed could not carry a 1280-byte inner packet: refused with mtu or
+                ended with path_mtu. Check the MTU of every hop in front of the pod, such as the load balancer and
+                the node's uplink. Clients can fall back to HTTP/2.
+
+  # A scrape down for 5m fires.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a"}'
+        values: "1x5 0x20"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GalacticMasqueMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+            exp_annotations:
+              summary: "masque-provider metrics on masque-a cannot be scraped"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquemetricsdown"
+              description: >-
+                Prometheus cannot scrape masque-provider on masque-a, so the other MASQUE alerts cannot fire
+                for it.

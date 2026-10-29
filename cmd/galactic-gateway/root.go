@@ -20,8 +20,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
@@ -29,9 +27,9 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/gateway"
+	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
-	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
@@ -51,8 +49,6 @@ func runCmd(cfg *config.GatewayConfig) error {
 	nodeName := cfg.NodeName
 	metricsPort := cfg.MetricsPort
 	grpcHealthPort := cfg.GRPCHealthPort
-
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -119,8 +115,18 @@ func runCmd(cfg *config.GatewayConfig) error {
 		return fmt.Errorf("register field indexes: %w", err)
 	}
 
-	// Pre-flight RBAC check.
-	checkWatchPermissions(mgr)
+	// Pre-flight RBAC check: a watch the role denies fails startup.
+	rbacCtx, cancelRBAC := context.WithTimeout(ctx, 10*time.Second)
+	err = checkWatchPermissions(rbacCtx, mgr.GetClient(), cfg.ProjectServices)
+	cancelRBAC()
+	if err != nil {
+		return err
+	}
+	scope := controller.ServiceScope{
+		ProjectServices:  cfg.ProjectServices,
+		GatewayNamespace: cfg.Namespace,
+		VIPPrefixes:      cfg.ProjectVIPPrefixes,
+	}
 
 	// IPv4 VIPs and backend health need read access to ServiceVIPBindings;
 	// without it they stay off for this process rather than stalling the
@@ -170,7 +176,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 			return err
 		}
 		gwDatapath, err = setupGatewayDatapath(ctx, cfg.PublicInterface, cfg.InternalInterfaces, encapSrc,
-			cfg.XDPAttach, ipv4, ctrlmetrics.Registry, coverage)
+			cfg.XDPAttach, ipv4, coverage)
 		if err != nil {
 			return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 		}
@@ -179,7 +185,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		// is load-balanced here, but backend nodes can still send replies
 		// through it, which only edge_return lets past connection tracking.
 		turnOffDatapath(ctx, xdpdispatch.PinDir, xdpdispatch.SlotGatewayLB)
-		rp, err := setupReturnPath(ctx, cfg.InternalInterfaces, cfg.XDPAttach, ipv4, ctrlmetrics.Registry, coverage)
+		rp, err := setupReturnPath(ctx, cfg.InternalInterfaces, cfg.XDPAttach, ipv4, coverage)
 		if err != nil {
 			return fmt.Errorf("setup edge gateway return path: %w", err)
 		}
@@ -198,8 +204,6 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// comments for what each does and does not cover.
 	gwQuota := gateway.NewNodeQuotaEnforcer(gateway.DefaultMaxRulesPerTenant, gateway.DefaultMaxRuleTableEntries)
 	gwTelemetry := gateway.NewPrometheusTelemetryEmitter()
-	gwTelemetry.MustRegister(ctrlmetrics.Registry)
-	nldump.MustRegister(ctrlmetrics.Registry)
 	gwEngine := gateway.NewEngine(gwDatapath, gwQuota, gwTelemetry)
 
 	// The gateway engine reconciler. No SRv6 address is passed: this datapath
@@ -217,6 +221,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		BackendHealth: backendHealth,
 		// Forwarding follows need: on only once an IPv4 VIP is about to load.
 		EnsureIPv4Forwarding: ipv4.enable,
+		Scope:                scope,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
@@ -228,6 +233,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		Scheme:    mgr.GetScheme(),
 		NodeName:  nodeName,
 		APIReader: mgr.GetAPIReader(),
+		Scope:     scope,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkService controller: %w", err)
 	}
@@ -269,10 +275,14 @@ func followCoverage(ctx context.Context, coverage *datapathCoverage, healthSrv *
 // newRootCommand builds the root cobra command with all flags and the
 // application startup logic.
 func newRootCommand() *cobra.Command {
+	var logOpts logging.Options
 	cmd := &cobra.Command{
 		Use:   appName,
 		Short: strings.Split(appDesc, "\n")[0],
 		Long:  appDesc,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			return logOpts.Setup()
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("build-info"); ok {
 				fmt.Println(metadata.BuildInfo(appName))
@@ -322,7 +332,17 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().String("gateway-proc-sys-path", config.DefaultProcSysPath,
 		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
 			"of the host's /proc/sys/net at <path>/net")
+	cmd.Flags().Bool("gateway-project-services", false,
+		"Serve NetworkServices in project namespaces, after checking their VIP addresses, VPC and claims, "+
+			"and trust only NetworkGateways in --gateway-namespace")
+	cmd.Flags().String("gateway-namespace", "",
+		"The gateway namespace, whose NetworkGateways and NetworkServices are trusted "+
+			"(required with --gateway-project-services)")
+	cmd.Flags().String("gateway-project-vip-prefixes", "",
+		"Comma-separated prefixes the platform allocates load balancer addresses from; a project "+
+			"NetworkService with a VIP outside them is refused (required with --gateway-project-services)")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
+	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
 }

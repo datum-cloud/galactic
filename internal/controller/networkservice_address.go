@@ -45,7 +45,7 @@ func (r *NetworkGatewayReconciler) prepareAddressInventory(
 	namespace string,
 	rules []bgpv1alpha1.NetworkService,
 ) (addressInventory, error) {
-	list, err := servedAddressInventories(ctx, r.Client, namespace)
+	list, err := r.servedAddressInventories(ctx, r.Client, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -54,6 +54,16 @@ func (r *NetworkGatewayReconciler) prepareAddressInventory(
 	retiredUIDs := map[string]bool{}
 	for i := range list.Items {
 		address := &list.Items[i]
+		if address.Spec.Retired {
+			retiredUIDs[address.Spec.Group.UID] = true
+		}
+		allowed, err := r.addressInScope(ctx, r.Client, address, namespace)
+		if err != nil {
+			return nil, err
+		}
+		if !allowed {
+			continue
+		}
 		vip, err := netip.ParseAddr(address.Spec.VIPAddress)
 		if err != nil || !vip.Is6() || vip.Is4In6() {
 			return nil, fmt.Errorf("invalid shared VIP %q", address.Spec.VIPAddress)
@@ -82,6 +92,15 @@ func (r *NetworkGatewayReconciler) prepareAddressInventory(
 			continue
 		}
 		for _, value := range rule.Spec.VIPAddresses {
+			authority := &bgpv1alpha1.NetworkServiceAddress{ObjectMeta: metav1.ObjectMeta{Namespace: rule.Namespace},
+				Spec: bgpv1alpha1.NetworkServiceAddressSpec{VPCRef: rule.Spec.VPCRef, VIPAddress: value}}
+			allowed, err := r.addressInScope(ctx, r.Client, authority, namespace)
+			if err != nil {
+				return nil, err
+			}
+			if !allowed {
+				continue
+			}
 			if vip, err := netip.ParseAddr(value); err == nil {
 				owned = append(owned, vip)
 			}
@@ -299,7 +318,7 @@ func (r *NetworkGatewayReconciler) publishAddressOutcomes(
 		}
 	}
 	var errs []error
-	all, err := servedAddressInventories(ctx, r.Client, namespace)
+	all, err := r.servedAddressInventories(ctx, r.Client, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -308,33 +327,31 @@ func (r *NetworkGatewayReconciler) publishAddressOutcomes(
 		if addressRetirementAcknowledged(address) {
 			continue
 		}
+		allowed, scopeErr := r.addressInScope(ctx, r.Client, address, namespace)
+		if scopeErr != nil {
+			errs = append(errs, scopeErr)
+			continue
+		}
 		vip := canonicalVIP(address.Spec.VIPAddress)
 		snapshot, known := addresses[vip]
-		if !known || snapshot != nil && !sameAddressRevision(snapshot, address) {
+		if allowed && (!known || snapshot != nil && !sameAddressRevision(snapshot, address)) {
 			errs = append(errs, errors.New("address revision changed after programming"))
 			_, err := r.reconcileAddressAdvertisement(ctx, address, router, false, namespace)
 			errs = append(errs, err)
 			continue
 		}
-		serve := false
-		for _, o := range outcomes {
-			if o.rule.Spec.AddressGroup == nil || o.rule.Spec.AddressGroup.UID != address.Spec.Group.UID ||
-				o.buildErr != nil || o.unaccepted || o.draining || !o.rule.DeletionTimestamp.IsZero() {
-				continue
-			}
-			if !failed[o.desired.Key] && len(o.desired.Backends) > 0 {
-				serve = true
-			}
-		}
+		serve := addressHasServingOutcome(address, outcomes, failed)
 		// Any failed apply/removal can leave an obsolete match on this address.
-		if !status.Healthy || validAddressInventory(address) != nil || addresses[vip] == nil {
+		if !allowed || !status.Healthy || validAddressInventory(address) != nil || addresses[vip] == nil {
 			serve = false
 		}
 		installed, err := r.reconcileAddressAdvertisement(ctx, address, router, serve, namespace)
 		if err != nil {
 			errs = append(errs, err)
 		}
-		announced[vip] = installed
+		if allowed {
+			announced[vip] = installed
+		}
 		if err := r.reportAddressNode(ctx, address, serve, installed, status.Healthy); err != nil {
 			errs = append(errs, err)
 		}
@@ -405,7 +422,7 @@ func (r *NetworkGatewayReconciler) finalizeAddress(
 	if current.UID != address.UID || (!current.Spec.Retired && current.DeletionTimestamp.IsZero()) {
 		return nil
 	}
-	gateways, err := servingGateways(ctx, reader, address.Namespace)
+	gateways, err := r.addressGateways(ctx, reader, address.Namespace)
 	if err != nil {
 		return err
 	}
@@ -663,13 +680,20 @@ func (r *NetworkGatewayReconciler) confirmAddressSnapshot(
 	if reader == nil {
 		reader = r.Client
 	}
-	list, err := servedAddressInventories(ctx, reader, namespace)
+	list, err := r.servedAddressInventories(ctx, reader, namespace)
 	if err != nil {
 		return err
 	}
 	current := addressInventory{}
 	for i := range list.Items {
 		address := &list.Items[i]
+		allowed, err := r.addressInScope(ctx, reader, address, namespace)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			continue
+		}
 		if addressRetirementAcknowledged(address) {
 			continue
 		}
@@ -785,7 +809,7 @@ func (r *NetworkGatewayReconciler) acknowledgeStoppedGateway(ctx context.Context
 	if len(ads.Items) > 0 {
 		return true, nil
 	}
-	addresses, err := servedAddressInventories(ctx, reader, namespace)
+	addresses, err := r.servedAddressInventories(ctx, reader, namespace)
 	if err != nil {
 		return true, err
 	}
@@ -841,7 +865,7 @@ func (r *NetworkGatewayReconciler) acknowledgeStoppedGateway(ctx context.Context
 	return false, nil
 }
 
-func servedAddressInventories(
+func (r *NetworkGatewayReconciler) servedAddressInventories(
 	ctx context.Context,
 	reader client.Reader,
 	gatewayNamespace string,
@@ -850,17 +874,17 @@ func servedAddressInventories(
 	if err := reader.List(ctx, addresses); err != nil {
 		return nil, err
 	}
-	gateways := &bgpv1alpha1.NetworkGatewayList{}
-	if err := reader.List(ctx, gateways); err != nil {
-		return nil, err
-	}
-	gatewayNamespaces := map[string]bool{}
-	for _, gw := range gateways.Items {
-		gatewayNamespaces[gw.Namespace] = true
-	}
 	served := &bgpv1alpha1.NetworkServiceAddressList{}
+	if !r.Scope.trustsGateway(gatewayNamespace) {
+		return served, nil
+	}
 	for _, address := range addresses.Items {
-		if address.Namespace == gatewayNamespace || !gatewayNamespaces[address.Namespace] {
+		allowed, err := r.addressInScope(ctx, reader, &address, gatewayNamespace)
+		if err != nil {
+			return nil, err
+		}
+		// Historical receipts remain visible for teardown after scope changes.
+		if allowed || address.Spec.Retired || hasAddressNodeHistory(&address, r.NodeName) {
 			served.Items = append(served.Items, address)
 		}
 	}
@@ -882,4 +906,113 @@ func addressKeyFromAdvertisement(ad *bgpv1alpha1.BGPAdvertisement) types.Namespa
 		name = ad.Labels[serviceAddressLabel]
 	}
 	return types.NamespacedName{Namespace: namespace, Name: name}
+}
+
+// addressInScope applies the same namespace, pool and VPC checks as service admission.
+func (r *NetworkGatewayReconciler) addressInScope(
+	ctx context.Context, reader client.Reader, address *bgpv1alpha1.NetworkServiceAddress, namespace string,
+) (bool, error) {
+	if !r.Scope.trustsGateway(namespace) {
+		return false, nil
+	}
+	if address.Namespace == namespace {
+		return true, nil
+	}
+	if !r.Scope.ProjectServices {
+		return false, nil
+	}
+	rule := &bgpv1alpha1.NetworkService{ObjectMeta: metav1.ObjectMeta{Namespace: address.Namespace},
+		Spec: bgpv1alpha1.NetworkServiceSpec{
+			VPCRef:       address.Spec.VPCRef,
+			VIPAddresses: []string{address.Spec.VIPAddress},
+		}}
+	if allowed, _ := r.Scope.vipsInPool(rule); !allowed {
+		return false, nil
+	}
+	owned, _, err := ruleOwnsVPC(ctx, reader, rule)
+	if err != nil || !owned {
+		return false, err
+	}
+	return projectAddressUnclaimed(ctx, reader, namespace, address.Spec.VIPAddress)
+}
+
+// projectAddressUnclaimed gives gateway-namespace services and anchors priority
+// over project anchors, including an anchor that has no listener services yet.
+func projectAddressUnclaimed(ctx context.Context, reader client.Reader, namespace, vip string) (bool, error) {
+	rules := &bgpv1alpha1.NetworkServiceList{}
+	if err := reader.List(ctx, rules, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for _, rule := range rules.Items {
+		for _, value := range rule.Spec.VIPAddresses {
+			if canonicalVIP(value) == canonicalVIP(vip) {
+				return false, nil
+			}
+		}
+	}
+	addresses := &bgpv1alpha1.NetworkServiceAddressList{}
+	if err := reader.List(ctx, addresses, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range addresses.Items {
+		address := &addresses.Items[i]
+		if !addressRetirementAcknowledged(address) && canonicalVIP(address.Spec.VIPAddress) == canonicalVIP(vip) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func hasAddressNodeHistory(address *bgpv1alpha1.NetworkServiceAddress, node string) bool {
+	for _, condition := range address.Status.Conditions {
+		if observed, ok := gatewayNodeConditionNode(condition.Type); ok && observed == node {
+			return true
+		}
+	}
+	return meta.FindStatusCondition(address.Status.Conditions, stoppedGatewayConditionType(node)) != nil
+}
+
+// appendUnservedGroupedOutcomes keeps withdrawal receipts current for listeners
+// excluded by a scope change, without adding them to desired forwarding state.
+func appendUnservedGroupedOutcomes(outcomes []ruleOutcome, served, all []bgpv1alpha1.NetworkService) []ruleOutcome {
+	included := make(map[types.NamespacedName]bool, len(served))
+	for i := range served {
+		included[client.ObjectKeyFromObject(&served[i])] = true
+	}
+	for i := range all {
+		rule := &all[i]
+		if rule.Spec.AddressGroup == nil || included[client.ObjectKeyFromObject(rule)] {
+			continue
+		}
+		outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: errors.New("project services are disabled")})
+	}
+	return outcomes
+}
+
+func addressHasServingOutcome(
+	address *bgpv1alpha1.NetworkServiceAddress,
+	outcomes []ruleOutcome,
+	failed map[string]bool,
+) bool {
+	for _, outcome := range outcomes {
+		if outcome.rule.Spec.AddressGroup == nil || outcome.rule.Spec.AddressGroup.UID != address.Spec.Group.UID ||
+			outcome.buildErr != nil || outcome.unaccepted || outcome.draining || !outcome.rule.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if !failed[outcome.desired.Key] && len(outcome.desired.Backends) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *NetworkGatewayReconciler) addressGateways(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+) ([]bgpv1alpha1.NetworkGateway, error) {
+	if r.Scope.GatewayNamespace != "" {
+		namespace = r.Scope.GatewayNamespace
+	}
+	return (ServiceScope{}).servingGateways(ctx, reader, namespace)
 }

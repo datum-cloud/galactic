@@ -483,7 +483,7 @@ func startSidecar(work, bin, searchSource string) error {
 	for _, s := range [][]string{
 		{"cp", bin, routerC + ":/fabric-api"},
 		{"cp", filepath.Join(work, "node"), routerC + ":/tls"},
-		{dockerExec, "-d", routerC, "sh", "-c", "/fabric-api --log-format text node --node-name r0 --namespace " + namespace +
+		{dockerExec, "-d", routerC, "sh", "-c", "/fabric-api node --node-name r0 --namespace " + namespace +
 			" --pod-name r0 --cell " + cell + " --host-ip " + routerV4 + " --frr-socket-dir /var/run/frr" +
 			" --tls-cert /tls/tls.crt --tls-key /tls/tls.key --tls-ca /tls/ca.crt --probe-source-interface ''" +
 			" --enable-expensive-queries --expensive-breaker-cooldown 5s --search-source " + searchSource +

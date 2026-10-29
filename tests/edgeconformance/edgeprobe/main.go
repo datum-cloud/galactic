@@ -13,6 +13,17 @@
 //	edgeprobe sniff -iface link -port 7777 -duration 30s
 //	    prints each IPv6 UDP datagram to port on link: {"t","src","dst"},
 //	    then {"t","end"} when the capture ends
+//	edgeprobe sniff -iface link -icmp -duration 30s
+//	    prints each ICMPv6 echo request on link instead: {"t","src","dst","id"}
+//	edgeprobe connectip -server [addr]:port -authority host:port -ca file \
+//	        -token T -vpc V -to addr -duration 5s [-transport h3|h2]
+//	    pings addr through one CONNECT-IP request over HTTP/3, or over
+//	    HTTP/2 with -transport h2 (see connectIP)
+//	edgeprobe egresskind -iface link
+//	    prints the uSID datapath's delivery kind for a host link (see egressKind)
+//	edgeprobe rib -socket path -prefix p -interval 200ms -duration 30s
+//	    counts a galactic-router's EVPN routes for p through its GoBGP API
+//	    socket on every poll and prints each change: {"t","paths"} (see rib)
 package main
 
 import (
@@ -33,7 +44,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: edgeprobe send|sniff [flags]")
+		fmt.Fprintln(os.Stderr, "usage: edgeprobe send|sniff|connectip|egresskind|rib [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -42,6 +53,12 @@ func main() {
 		err = send(os.Args[2:])
 	case "sniff":
 		err = sniff(os.Args[2:])
+	case "connectip":
+		err = connectIP(os.Args[2:])
+	case "egresskind":
+		err = egressKind(os.Args[2:])
+	case "rib":
+		err = rib(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -114,6 +131,7 @@ func sniff(args []string) error {
 	fs := flag.NewFlagSet("sniff", flag.ExitOnError)
 	iface := fs.String("iface", "", "link to capture on")
 	port := fs.Uint("port", 7777, "UDP destination port")
+	echo := fs.Bool("icmp", false, "capture ICMPv6 echo requests instead of UDP")
 	duration := fs.Duration("duration", 10*time.Second, "how long to capture")
 	_ = fs.Parse(args)
 	ifi, err := net.InterfaceByName(*iface)
@@ -156,13 +174,18 @@ func sniff(args []string) error {
 		}
 		t := boottime()
 		p := buf[:n]
-		if len(p) < 48 || p[0]>>4 != 6 || p[6] != unix.IPPROTO_UDP ||
-			uint(binary.BigEndian.Uint16(p[42:44])) != *port {
+		if len(p) < 48 || p[0]>>4 != 6 {
 			continue
 		}
 		src, _ := netip.AddrFromSlice(p[8:24])
 		dst, _ := netip.AddrFromSlice(p[24:40])
-		_ = out.Encode(map[string]any{"t": t, "src": src.String(), "dst": dst.String()})
+		switch {
+		case *echo && p[6] == unix.IPPROTO_ICMPV6 && p[40] == 128:
+			_ = out.Encode(map[string]any{"t": t, "src": src.String(), "dst": dst.String(),
+				"id": binary.BigEndian.Uint16(p[44:46])})
+		case !*echo && p[6] == unix.IPPROTO_UDP && uint(binary.BigEndian.Uint16(p[42:44])) == *port:
+			_ = out.Encode(map[string]any{"t": t, "src": src.String(), "dst": dst.String()})
+		}
 	}
 	return out.Encode(map[string]any{"t": boottime(), "end": true})
 }

@@ -15,28 +15,11 @@ source "${SCRIPT_DIR}/lib.sh"
 # ConfigMap via NODE_NAME and each site's kustomization generates one such
 # ConfigMap per matching node. Re-running this after editing one node's
 # frr.conf changes only that node's ConfigMap, which its config-agent
-# sidecar reloads in place -- no pod restarts. Copied onto the node at deploy time nested under
-# the overlay's own root so its "fabric" resource reference resolves
-# (kustomize requires resources in or below the overlay root).
-FABRIC_DIR=$(cd "${SCRIPT_DIR}/../../../config/fabric-router" && pwd)
-
-# copy_fabric_config NODE copies config/fabric-router/ onto NODE, nested under
-# resources/fabric-router/base/ so the base overlay's "fabric" resource
-# reference resolves. rm -rf first: like deploy-galactic-router.sh's
-# copy_router_config, docker cp nests SRC inside an already-existing DEST
-# dir instead of overwriting it, so a rerun against an already-provisioned
-# node would silently keep serving the prior copy from underneath the new
-# one -- kubectl would then report the DaemonSet "unchanged" even after a
-# real manifest edit (found live: a fabric-lab-patch.yaml affinity fix
-# never took effect on a redeploy until this guard was added).
-copy_fabric_config() {
-  local node="$1"
-  docker exec "${node}" rm -rf /galactic/resources/fabric-router/base/fabric
-  docker cp "${FABRIC_DIR}" "${node}:/galactic/resources/fabric-router/base/fabric"
-}
-
-# copy_to (lib.sh) replaces an already-provisioned node's copy, and
-# copy_fabric_config then fills in base/fabric -- see its comment.
+# sidecar reloads in place -- no pod restarts. copy_to (lib.sh) copies
+# resources/fabric-router/ onto the control-plane node, replacing an
+# already-provisioned copy, and copy_fabric_config (lib.sh) nests
+# config/fabric-router/ under it as base/fabric, inside the overlay's own
+# root, since kustomize requires resources in or below that root.
 for site in dfw iad sjc; do
   node=$(control_plane "${site}")
   copy_to "${node}" fabric-router

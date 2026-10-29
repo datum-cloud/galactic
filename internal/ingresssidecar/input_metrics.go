@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 	discoveryv1 "k8s.io/api/discovery/v1"
 )
 
@@ -77,16 +78,18 @@ type InputMetrics struct {
 	watched map[string]struct{}
 }
 
-// NewInputMetrics builds unregistered input metrics with no slices seen.
+// NewInputMetrics creates input metrics on the instrumentation library's
+// registry with no slices seen. The registry keeps the series across calls,
+// so each call starts them over.
 func NewInputMetrics() *InputMetrics {
 	m := &InputMetrics{
-		slices: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		slices: metrics.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "endpoint_slices",
 			Help: "Selected EndpointSlices, by state: ready (parses into a route), waiting_sid (no SID " +
 				"annotation yet) or invalid (cannot be parsed; any route it had is kept).",
 		}, []string{"state"}),
-		evaluations: prometheus.NewCounterVec(prometheus.CounterOpts{
+		evaluations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "endpoint_slice_evaluations_total",
 			Help: "EndpointSlice evaluations, by source (seed, watch) and result (ready, waiting_sid, " +
@@ -96,6 +99,8 @@ func NewInputMetrics() *InputMetrics {
 		state:  map[string]string{},
 		counts: map[string]int{},
 	}
+	m.slices.Reset()
+	m.evaluations.Reset()
 	for _, s := range inputStates {
 		m.slices.WithLabelValues(s)
 	}
@@ -105,12 +110,6 @@ func NewInputMetrics() *InputMetrics {
 		}
 	}
 	return m
-}
-
-// MustRegister registers every input metric against reg, panicking on a
-// duplicate. Call it once per process.
-func (m *InputMetrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.slices, m.evaluations)
 }
 
 // beginSeed marks the start of a seed attempt. Call it before the seed lists

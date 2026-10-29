@@ -21,6 +21,7 @@
 //     ordinary counters incremented in place through the attach package's
 //     hooks, wired once at process startup.
 //
-// Metrics bundles both into one registry plus an HTTP handler, so the caller
-// constructs it once and needs no Prometheus imports of its own.
+// Both are created on the instrumentation library's registry, which the
+// caller serves with that library's metrics.Handler. Metrics bundles them, so
+// the caller constructs it once and needs no Prometheus imports of its own.
 package metrics
