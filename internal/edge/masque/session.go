@@ -113,14 +113,15 @@ func (s *session) Routes() []netip.Prefix { return s.grant.Routes }
 // Done implements connectip.Lease.
 func (s *session) Done() <-chan struct{} { return s.done }
 
-// end stops the request's forwarding and signals Done. It may be called
-// with Adapter.mu held.
+// end stops the request's forwarding and signals Done. The end is counted
+// before Done closes, so anyone who sees Done also sees the count. It may be
+// called with Adapter.mu held.
 func (s *session) end(reason string) {
 	s.endOnce.Do(func() {
 		s.ended.Store(true)
-		close(s.done)
 		label := endReason(reason)
 		requestEnds.WithLabelValues(label).Inc()
+		close(s.done)
 		s.a.log.Info("request ended", "session", s.info.ID, "connector", s.info.Connector, "reason", reason,
 			"endReason", label, "serviceUID", s.grant.Service.UID, "attachment", s.info.Attachment,
 			"attachmentUID", s.attUID, "route", s.info.Claim, "claimEpoch", s.info.Epoch,
