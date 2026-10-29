@@ -98,7 +98,7 @@ The overload runs admitted 64 flood requests each, which held free session slots
 
 ## Still open
 
-Closing #984 needs the qualification run the contract specifies, on the containerlab gvpc lab rather than loopback. `task verify:masque-capacity`, run from `deploy/containerlab`, is that run. It puts the provider on one dfw edge node and the load client on the other, with real gVPC workloads behind the TUN device, a 2-minute warm-up, a 10-minute measurement, three runs, and an untunneled baseline over the same path. It covers what this harness does not:
+Closing #984 needs the qualification run the contract specifies, on the containerlab gvpc lab rather than loopback. That run is being added under #984 as `task verify:masque-capacity`, run from `deploy/containerlab`. It puts the provider on one dfw edge node and the load client on the other, with real gVPC workloads behind the TUN device, a 2-minute warm-up, a 10-minute measurement, three runs, and an untunneled baseline over the same path. It covers what this harness does not:
 
 - the TUN device, attachments, EdgeRoutes and map occupancy;
 - grant authority and lease-renewal API budgets;
