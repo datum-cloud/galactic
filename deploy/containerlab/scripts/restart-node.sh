@@ -1,5 +1,5 @@
 #!/bin/bash
-# restart-node.sh NODE — restart one Kind node container with `docker
+# restart-node.sh NODE: restart one Kind node container with `docker
 # restart` and put back the lab plumbing that lived in its network
 # namespace, which the restart replaces:
 #
@@ -56,20 +56,28 @@ execs() {
   '
 }
 
-# links prints "A IFA B IFB MTU" for every link with an end on NODE.
+# links prints "A IFA B IFB MTU" for every link with an end on NODE. MTU is
+# "-" for a link with no mtu line, which keeps containerlab's default.
 links() {
   awk -v n="${node}" '
-    /endpoints:/ {
-      line = $0
-      gsub(/[\[\]",]/, " ", line)
-      split(line, f, " ")
-      a = f[3]; b = f[4]; mtu = 1500
-      if ((getline nxt) > 0 && nxt ~ /mtu:/) { split(nxt, m, " "); mtu = m[2] }
-      if (index(a, n ":") == 1 || index(b, n ":") == 1) {
+    function emit() {
+      if (a != "" && (index(a, n ":") == 1 || index(b, n ":") == 1)) {
         split(a, x, ":"); split(b, y, ":")
         print x[1], x[2], y[1], y[2], mtu
       }
+      a = ""
     }
+    /endpoints:/ {
+      emit()
+      line = $0
+      gsub(/[\[\]",]/, " ", line)
+      split(line, f, " ")
+      a = f[3]; b = f[4]; mtu = "-"
+      next
+    }
+    a != "" && /^ *mtu:/ { mtu = $2; next }
+    { emit() }
+    END { emit() }
   ' "${TOPO}"
 }
 
@@ -83,8 +91,10 @@ echo "boot ID after: $(boot_id)"
 peers=()
 while read -r a ia b ib mtu; do
   echo "link ${a}:${ia} <-> ${b}:${ib} (mtu ${mtu})"
-  sudo -n containerlab tools veth create -a "$(container "${a}"):${ia}" -b "$(container "${b}"):${ib}" -m "${mtu}" \
-    >/dev/null
+  mtu_flag=()
+  if [ "${mtu}" != - ]; then mtu_flag=(-m "${mtu}"); fi
+  sudo -n containerlab tools veth create -a "$(container "${a}"):${ia}" -b "$(container "${b}"):${ib}" \
+    "${mtu_flag[@]}" >/dev/null
   if [ "${a}" = "${node}" ]; then peers+=("${b}:${ib}"); else peers+=("${a}:${ia}"); fi
 done < <(links)
 
