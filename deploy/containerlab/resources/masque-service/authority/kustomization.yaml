@@ -11,7 +11,11 @@
 # holds the port, so the pod is recreated instead.
 #
 # The edge nodes cannot reach the cluster DNS either, so the Service gets a
-# fixed address, which the provider overlay maps the authority's name to.
+# fixed address, which the provider overlay maps the authority's name to. It
+# is in the lowest 256 addresses of dfw's fd00:200::/108 Service range, the
+# band the API server reserves for fixed addresses and allocates
+# dynamically only once the rest is full; nothing else in the lab takes
+# that address.
 resources:
   - ../../../../../config/masque/authority
 images:
@@ -47,4 +51,4 @@ patches:
     patch: |-
       - op: add
         path: /spec/clusterIP
-        value: fd00:200::f:443
+        value: fd00:200::4d

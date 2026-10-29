@@ -35,4 +35,4 @@ patches:
         value: [{key: galactic.datumapis.com/nat, operator: Exists, effect: NoSchedule}]
       - op: add
         path: /spec/template/spec/hostAliases
-        value: [{ip: "fd00:200::f:443", hostnames: [masque-authority.masque-system.svc]}]
+        value: [{ip: "fd00:200::4d", hostnames: [masque-authority.masque-system.svc]}]
