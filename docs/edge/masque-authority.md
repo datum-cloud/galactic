@@ -112,4 +112,4 @@ The conformance fixture uses the authority when its configuration sets `grantAut
 Not yet covered:
 
 - the HTTP/2 transport ([#981](https://github.com/datum-cloud/galactic/issues/981));
-- lab or target-platform measurements of the revocation and expiry bounds ([#985](https://github.com/datum-cloud/galactic/issues/985)).
+- lab measurements of the revocation and expiry bounds ([#985](https://github.com/datum-cloud/galactic/issues/985)).

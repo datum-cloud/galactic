@@ -112,4 +112,4 @@ On shutdown, stop the transports first so every request ends, then call `Shutdow
   - partial setup, recreation and single-connector revocation
   - teardown
 
-  The lab cannot read the compute node's tenant routes, so it does not measure remote convergence. A lab result is not target-platform qualification.
+  The lab cannot read the compute node's tenant routes, so it does not measure remote convergence.

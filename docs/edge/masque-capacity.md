@@ -1,6 +1,6 @@
 # MASQUE capacity
 
-The [MASQUE contract](../designs/masque/contract.md#resource-budgets-and-benchmark-contract) sets initial capacity targets for the CONNECT-IP service and asks for measured results per transport. This page describes the load harness, records the first run, and lists what still needs the target environment. Issue [#984](https://github.com/datum-cloud/galactic/issues/984) tracks the qualification.
+The [MASQUE contract](../designs/masque/contract.md#resource-budgets-and-benchmark-contract) sets initial capacity targets for the CONNECT-IP service and asks for measured results per transport. This page describes the load harness, records the first run, and lists what the qualification run on the containerlab lab covers beyond it. Issue [#984](https://github.com/datum-cloud/galactic/issues/984) tracks the qualification.
 
 ## The harness
 
@@ -80,8 +80,8 @@ The overload runs admitted 64 flood requests each, which held free session slots
 
 | Contract target                                         | Loopback result                                                     | Status                                                              |
 | ------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| HTTP/3 goodput at least 250 Mbit/s per pod              | 2403 Mbit/s at 32 connectors                                        | Exceeded on loopback; unproven on edge nodes                        |
-| HTTP/2 goodput at least 100 Mbit/s per pod              | 2971 Mbit/s at 32 connectors                                        | Exceeded on loopback; unproven on edge nodes                        |
+| HTTP/3 goodput at least 250 Mbit/s per pod              | 2403 Mbit/s at 32 connectors                                        | Exceeded on loopback; reported on the lab, not gated                |
+| HTTP/2 goodput at least 100 Mbit/s per pod              | 2971 Mbit/s at 32 connectors                                        | Exceeded on loopback; reported on the lab, not gated                |
 | Provider RSS at most 1 GiB                              | 136 MiB peak, client included                                       | Within target                                                       |
 | Average CPU at most 3.2 cores                           | 7.7 to 9.8 cores at saturation, client included                     | Not comparable: the harness offers as much load as the host absorbs |
 | 5 s blocked-delivery timeout                            | 5.5 s on HTTP/2, 6.8 to 8.0 s on HTTP/3                             | Missed on both; see Findings                                        |
@@ -98,11 +98,11 @@ The overload runs admitted 64 flood requests each, which held free session slots
 
 ## Still open
 
-Closing #984 needs the run the contract specifies. That means two physical edge nodes and a separate load host at 10 Gbit/s, with real gVPC workloads behind the TUN device, a 2-minute warm-up, a 10-minute measurement, and an untunneled baseline for the added-RTT and loss targets. This harness does not cover:
+Closing #984 needs the qualification run the contract specifies, on the containerlab gvpc lab rather than loopback. That run is being added under #984 as `task verify:masque-capacity`, run from `deploy/containerlab`. It puts the provider on one dfw edge node and the load client on the other, with real gVPC workloads behind the TUN device, a 2-minute warm-up, a 10-minute measurement, three runs, and an untunneled baseline over the same path. It covers what this harness does not:
 
 - the TUN device, attachments, EdgeRoutes and map occupancy;
 - grant authority and lease-renewal API budgets;
-- HTTP/2 under loss or added delay, which needs network emulation;
-- CPU per pod with the client on another host.
+- HTTP/2 and HTTP/3 under 1% loss and 50 ms added delay from `tc netem`;
+- CPU per pod with the client on another node.
 
-Any change to a target needs review before #984 closes.
+The run gates on limits, overload rejection, recovery, expiry under load, isolation and RSS. It reports throughput, p99 added RTT, loss and CPU as measured on the lab host without gating them, because they depend on the hardware. Any change to a target needs review before #984 closes.
