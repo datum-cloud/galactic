@@ -80,8 +80,8 @@ The overload runs admitted 64 flood requests each, which held free session slots
 
 | Contract target                                         | Loopback result                                                     | Status                                                              |
 | ------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| HTTP/3 goodput at least 250 Mbit/s per pod              | 2403 Mbit/s at 32 connectors                                        | Exceeded on loopback; unproven on edge nodes                        |
-| HTTP/2 goodput at least 100 Mbit/s per pod              | 2971 Mbit/s at 32 connectors                                        | Exceeded on loopback; unproven on edge nodes                        |
+| HTTP/3 goodput at least 250 Mbit/s per pod              | 2403 Mbit/s at 32 connectors                                        | Exceeded on loopback; reported on the lab, not gated                |
+| HTTP/2 goodput at least 100 Mbit/s per pod              | 2971 Mbit/s at 32 connectors                                        | Exceeded on loopback; reported on the lab, not gated                |
 | Provider RSS at most 1 GiB                              | 136 MiB peak, client included                                       | Within target                                                       |
 | Average CPU at most 3.2 cores                           | 7.7 to 9.8 cores at saturation, client included                     | Not comparable: the harness offers as much load as the host absorbs |
 | 5 s blocked-delivery timeout                            | 5.5 s on HTTP/2, 6.8 to 8.0 s on HTTP/3                             | Missed on both; see Findings                                        |
