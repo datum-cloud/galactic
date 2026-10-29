@@ -4,10 +4,9 @@
 
 // Package connectipinterop proves CONNECT-IP interoperability over HTTP/3 and
 // HTTP/2 between Galactic's servers and an independent client, Xray-core's
-// MASQUE outbound. connectip.Server serves HTTP/3; h2Server, a prototype on
-// net/http's Extended CONNECT, serves HTTP/2. Both use the same test admission
-// and a connectip.TUNBackend whose device sits in a VPC network namespace with
-// UDP and TCP echo servers.
+// MASQUE outbound. One connectip.Server serves HTTP/3 on UDP/443 and HTTP/2
+// on TCP/443, with a test admission and a connectip.TUNBackend whose device
+// sits in a VPC network namespace with UDP and TCP echo servers.
 //
 // The fixture needs root, nftables and the pinned Xray binary named by
 // CONNECTIP_INTEROP_XRAY; without them every test skips. task
@@ -201,13 +200,11 @@ type harness struct {
 	caFile, otherCAFile  string
 	admission            *admission
 	backend              *recordingBackend
-	h3                   *connectip.Server
-	h2                   *http.Server
+	srv                  *connectip.Server
 	closers              []func()
 	closeOnce            sync.Once
 	clients              sync.Map // *xrayClient still running
 	alpn                 sync.Map // negotiated ALPN protocol -> count
-	h2Protos             sync.Map // HTTP/2 request proto -> count
 	results              resultLog
 	nextPort             atomic.Int32
 }
@@ -590,48 +587,29 @@ func (h *harness) echoServers() error {
 	return nil
 }
 
-// servers starts connectip.Server on UDP/443 and h2Server on TCP/443 in the
-// server namespace. The TLS configuration records each handshake's ALPN.
+// servers starts connectip.Server on UDP/443 and TCP/443 in the server
+// namespace. The TLS configuration records each handshake's ALPN.
 func (h *harness) servers(cert tls.Certificate) error {
 	h.admission = &admission{active: map[netip.Prefix]bool{}}
 	log := slog.New(slog.NewTextHandler(h.logFile("servers.log"), &slog.HandlerOptions{Level: slog.LevelDebug}))
-	tlsConf := func(protos ...string) *tls.Config {
-		return &tls.Config{
+	var err error
+	h.srv, err = connectip.NewServer(connectip.Config{
+		Authority: serverName,
+		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS13,
-			NextProtos:   protos,
 			VerifyConnection: func(cs tls.ConnectionState) error {
 				n, _ := h.alpn.LoadOrStore(cs.NegotiatedProtocol, new(atomic.Int64))
 				n.(*atomic.Int64).Add(1)
 				return nil
 			},
-		}
-	}
-	authority := serverName
-	var err error
-	h.h3, err = connectip.NewServer(connectip.Config{
-		Authority: authority,
-		TLSConfig: tlsConf(),
+		},
 		Admission: h.admission,
 		Backend:   h.backend,
 		Logger:    log,
 	})
 	if err != nil {
 		return err
-	}
-	h.h2 = &http.Server{
-		Handler: &h2Server{
-			authority: authority,
-			admission: h.admission,
-			backend:   h.backend,
-			log:       log,
-			observe: func(proto string) {
-				n, _ := h.h2Protos.LoadOrStore(proto, new(atomic.Int64))
-				n.(*atomic.Int64).Add(1)
-			},
-		},
-		TLSConfig: tlsConf("h2"),
-		ErrorLog:  slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 	addr := net.JoinHostPort(serverAddr.String(), "443")
 	var udp net.PacketConn
@@ -647,11 +625,10 @@ func (h *harness) servers(cert tls.Certificate) error {
 	if err != nil {
 		return err
 	}
-	go func() { _ = h.h3.Serve(udp) }()
-	go func() { _ = h.h2.ServeTLS(tcp, "", "") }()
+	go func() { _ = h.srv.Serve(udp) }()
+	go func() { _ = h.srv.ServeTLS(tcp) }()
 	h.closers = append(h.closers, func() {
-		_ = h.h2.Close()
-		_ = h.h3.Close()
+		_ = h.srv.Close()
 		_ = udp.Close()
 	})
 	return nil
@@ -673,22 +650,26 @@ func (h *harness) alpnCount(proto string) int64 {
 	return 0
 }
 
-func (h *harness) h2ProtoCount(proto string) int64 {
-	if n, ok := h.h2Protos.Load(proto); ok {
-		return n.(*atomic.Int64).Load()
-	}
-	return 0
-}
+// tcpAdmits counts the requests admitted through the HTTP/2 listener.
+func (h *harness) tcpAdmits() int64 { return h.admission.tcpAdmits.Load() }
 
 // admission is the test authority: each connector's token admits it to
 // vpcName with its own /96, one session at a time.
 type admission struct {
-	mu     sync.Mutex
-	active map[netip.Prefix]bool
-	nextID uint64
+	// tcpAdmits counts the requests that reached Admit through the HTTP/2
+	// listener.
+	tcpAdmits atomic.Int64
+	mu        sync.Mutex
+	active    map[netip.Prefix]bool
+	nextID    uint64
 }
 
-func (a *admission) Admit(_ context.Context, credential, vpc string) (connectip.Lease, error) {
+func (a *admission) Admit(ctx context.Context, credential, vpc string) (connectip.Lease, error) {
+	// net/http puts the TCP listener's address in an HTTP/2 request's
+	// context; an HTTP/3 request carries none.
+	if _, ok := ctx.Value(http.LocalAddrContextKey).(*net.TCPAddr); ok {
+		a.tcpAdmits.Add(1)
+	}
 	c, ok := connectorByToken(credential)
 	if !ok {
 		return nil, connectip.ErrUnauthenticated

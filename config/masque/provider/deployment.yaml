@@ -75,6 +75,10 @@ spec:
             - name: connect-ip
               containerPort: 8443
               protocol: UDP
+            # HTTP/2 over TLS, for clients whose UDP is blocked.
+            - name: connect-ip-tcp
+              containerPort: 8443
+              protocol: TCP
             - name: health
               containerPort: 9188
               protocol: TCP

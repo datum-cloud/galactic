@@ -7,12 +7,19 @@
 package service
 
 import (
+	"crypto/tls"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"go.datum.net/galactic/internal/edge/connectip"
+	"go.datum.net/galactic/internal/edge/masque"
 )
 
 func TestHealthHandler(t *testing.T) {
@@ -56,3 +63,17 @@ func TestPodFromEnv(t *testing.T) {
 		t.Fatal("pod without NODE_NAME was accepted")
 	}
 }
+
+func TestRunRequiresExtendedConnectForTCP(t *testing.T) {
+	t.Setenv("GODEBUG", "")
+	err := Run(t.Context(), Config{
+		Client: fake.NewClientBuilder().Build(), Authorizer: nilAuthorizer{}, Listen: "127.0.0.1:0", ListenTCP: "127.0.0.1:0",
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return nil, nil },
+	})
+	if !errors.Is(err, connectip.ErrExtendedConnectDisabled) {
+		t.Fatalf("Run = %v, want ErrExtendedConnectDisabled", err)
+	}
+}
+
+// nilAuthorizer is never called: Run must fail before admitting anything.
+type nilAuthorizer struct{ masque.Authorizer }
