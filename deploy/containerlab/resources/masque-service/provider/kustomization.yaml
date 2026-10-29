@@ -1,8 +1,9 @@
 # The lab's CONNECT-IP service: config/masque/provider with the lab image
 # (masque-service:latest; masque-provider:latest is the conformance
 # fixture), the :authority its clients send, and one pod pinned to
-# dfw-worker2. The Secret masque-provider-tls and the ConfigMap
-# masque-authority-ca come from the suite. The base's TUN resource,
+# dfw-worker2. The Secret masque-provider-tls comes from the suite, and the
+# pods trust the CA cert-manager signed the authority's certificate with
+# (../authority/kustomization.yaml). The base's TUN resource,
 # devic.es/tun, is the one the lab's device plugin serves
 # (../galactic-edge/tun-device-plugin), so it is kept. Clients reach the pod
 # directly from its node, so the Service stays ClusterIP.
@@ -12,6 +13,8 @@
 # (../authority/kustomization.yaml).
 resources:
   - ../../../../../config/masque/provider
+components:
+  - ../../../../../config/masque/provider/components/cert-manager
 images:
   - name: ghcr.io/datum-cloud/masque-provider
     newName: masque-service

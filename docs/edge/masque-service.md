@@ -21,6 +21,8 @@ Images:
 | `config/masque/authority` | The `masque-authority` Deployment and Service                                                                | `--cell`, and Secret `masque-authority-tls` for `masque-authority.masque-system.svc`                                                  |
 | `config/masque/provider`  | The `masque-provider` Deployment and UDP/443 + TCP/443 Service                                               | `--authority`, Secret `masque-provider-tls` for that name, ConfigMap `masque-authority-ca` (`ca.crt`), and how the Service is exposed |
 
+The [certificates](#certificates) section covers both Secrets and the CA.
+
 The bases leave out `--cell` and `--authority`, so a pod started without its overlay exits at startup instead of serving a wrong name. An overlay appends them, for example:
 
 ```yaml
@@ -45,6 +47,60 @@ To bring up a cell:
 The provider Deployment uses a rolling update. A connector that moves to a new pod gets a new authorization: the authority retires the old pod's incarnation and core releases its route before the new pod forwards ([cross-instance replacement](../designs/masque/contract.md#cross-instance-replacement-and-stale-cleanup)). The resource requests are starting values; [#984](https://github.com/datum-cloud/galactic/issues/984) qualifies the pod's size.
 
 To take MASQUE out of a cell, delete the provider overlay first so its pods release their routes, then the authority overlay, then `config/masque`.
+
+### Certificates
+
+The provider pods need two certificates and one CA:
+
+- `masque-provider-tls`, the connector service's certificate, for the name in `--authority`. Clients verify it, so it comes from whatever CA the cell's clients trust. No component in `config/masque` issues it.
+- `masque-authority-tls`, the grant authority's certificate, for `masque-authority.masque-system.svc`. Only the provider pods connect to it.
+- The CA that signed `masque-authority-tls`, as `ca.crt` in the provider's `authority-ca` volume. The provider trusts no other root for the authority.
+
+The authority and the provider reread their files when the Secret or ConfigMap changes, so a renewed certificate needs no restart.
+
+**With cert-manager.** Include `components/cert-manager` in both overlays:
+
+```yaml
+# authority overlay
+resources:
+  - ../../config/masque/authority
+components:
+  - ../../config/masque/authority/components/cert-manager
+---
+# provider overlay
+resources:
+  - ../../config/masque/provider
+components:
+  - ../../config/masque/provider/components/cert-manager
+```
+
+The authority component creates a self-signed CA used only for the authority (Certificate and Issuer `masque-authority-root`) and issues `masque-authority-tls` from it. The provider component reads `ca.crt` from that Secret, so the pods trust exactly the CA that signed the certificate the authority serves. The authority's key is not mounted in the provider pods. The CA keeps its key when cert-manager renews it, so serving certificates issued before a renewal still verify.
+
+**With another CA.** Supply `masque-authority-tls` yourself, and the CA as ConfigMap `masque-authority-ca` with key `ca.crt`. If the cell's CA tooling publishes the bundle under another name or key, replace the volume's sources with a strategic merge patch on the volume's name. The patch replaces the whole `sources` list, whatever the volume's position:
+
+```yaml
+patches:
+  - target: {kind: Deployment, name: masque-provider}
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: masque-provider
+      spec:
+        template:
+          spec:
+            volumes:
+              - name: authority-ca
+                projected:
+                  sources:
+                    - configMap:
+                        name: cell-trust-bundle
+                        items:
+                          - key: bundle.pem
+                            path: ca.crt
+```
+
+A `secret` source works the same way. Keep `path: ca.crt`, or set `--grant-authority-ca` to the path you mount instead.
 
 ## Configuration
 

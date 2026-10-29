@@ -226,8 +226,9 @@ tasks:
       - go run ./hack/fabric-api-loadtest --mrt {{.MRT}} --gobgp-bin {{.GOBGP_BIN}} {{.CLI_ARGS}}
   test:manifests:
     desc: Render the opt-in Component fixtures in tests/manifests and check every manifest's log settings
-    # Every fixture under tests/manifests/fabric-api composes Components the
-    # way a cell overlay does and must build; every fixture under
+    # Every fixture under tests/manifests/fabric-api and
+    # tests/manifests/masque composes Components the way a cell overlay does
+    # and must build; every fixture under
     # tests/manifests/invalid omits a Component another requires and must
     # fail to build.
     #

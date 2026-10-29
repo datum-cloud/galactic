@@ -1,5 +1,6 @@
 # The lab's grant authority: config/masque/authority with the lab image and
-# dfw as its cell. The Secret masque-authority-tls comes from the suite.
+# dfw as its cell, and its certificate from cert-manager
+# (scripts/deploy-cert-manager.sh installs it).
 #
 # Pods on one lab worker cannot reach pod addresses on another over
 # Cilium's tunnel, and the provider pods run on the edge nodes while the
@@ -18,6 +19,8 @@
 # that address.
 resources:
   - ../../../../../config/masque/authority
+components:
+  - ../../../../../config/masque/authority/components/cert-manager
 images:
   - name: ghcr.io/datum-cloud/masque-authority
     newName: masque-authority

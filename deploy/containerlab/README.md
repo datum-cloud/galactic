@@ -627,9 +627,11 @@ task verify:masque-service
 ```
 
 The suite applies `resources/masque-service/`, the lab overlays of
-`config/masque`, after creating the TLS Secrets and the authority's CA from a
-CA it generates. It approves the `masque` EdgeProvider, creates each VPC's
-ledger and the connectors' grants with `masque-authority ledger init` and
+`config/masque`, after creating the service's TLS Secret from a CA it
+generates. The overlays include both `components/cert-manager`, so
+cert-manager (`deploy:cert-manager`) issues the authority's certificate and
+the provider pod trusts its CA. It approves the `masque` EdgeProvider,
+creates each VPC's ledger and the connectors' grants with `masque-authority ledger init` and
 `grant create` run in the authority's pod, and removes everything in the
 reverse order when it ends. The overlays differ from `config/masque` only
 where the lab must:

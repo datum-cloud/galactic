@@ -1,0 +1,58 @@
+# Only the provider pods trust this CA, so it is self-signed and used for
+# nothing but the authority's serving certificate. Its key never rotates:
+# a renewed CA certificate still verifies the serving certificates issued
+# before it.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: masque-authority-selfsigned
+  namespace: masque-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: masque-authority-root
+  namespace: masque-system
+spec:
+  isCA: true
+  commonName: masque-authority-root
+  secretName: masque-authority-root
+  duration: 26280h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Never
+  issuerRef:
+    kind: Issuer
+    name: masque-authority-selfsigned
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: masque-authority-root
+  namespace: masque-system
+spec:
+  ca:
+    secretName: masque-authority-root
+---
+# The name the provider pods dial (config/masque/provider/deployment.yaml,
+# --grant-authority-url). The Secret's ca.crt is the root above, so the
+# provider pods trust exactly the CA that signed the certificate served.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: masque-authority
+  namespace: masque-system
+spec:
+  secretName: masque-authority-tls
+  dnsNames:
+    - masque-authority.masque-system.svc
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    kind: Issuer
+    name: masque-authority-root

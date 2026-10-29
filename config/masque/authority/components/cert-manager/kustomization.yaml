@@ -1,0 +1,20 @@
+# Opt-in certificates for the grant authority, for a cell that runs
+# cert-manager. Include it from the overlay of config/masque/authority:
+#
+#   resources:
+#     - ../../config/masque/authority
+#   components:
+#     - ../../config/masque/authority/components/cert-manager
+#
+# It creates a CA for the authority alone and issues the masque-authority-tls
+# Secret from it, with ca.crt beside tls.crt and tls.key. Include
+# config/masque/provider/components/cert-manager in the provider overlay so
+# the provider pods trust that ca.crt.
+#
+# The connector service's certificate, masque-provider-tls, is not issued
+# here: its name is the one clients connect to, so the deployment chooses its
+# issuer.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - certificate.yaml
