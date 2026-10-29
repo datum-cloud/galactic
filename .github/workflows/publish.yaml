@@ -219,6 +219,8 @@ jobs:
         publish-galactic-edge-image,
         publish-galactic-controller-image,
         publish-fabric-router-controller-image,
+        publish-masque-provider-image,
+        publish-masque-authority-image,
       ]
     permissions:
       id-token: write
@@ -253,6 +255,11 @@ jobs:
         - { path: config/galactic-controller/base, name: ghcr.io/datum-cloud/galactic-controller, tag: "${{ needs.publish-galactic-controller-image.outputs.tag }}" }
         - { path: config/galactic-controller/fabric, name: ghcr.io/datum-cloud/galactic-controller, tag: "${{ needs.publish-galactic-controller-image.outputs.tag }}" }
         - { path: config/fabric-router-controller/base, name: ghcr.io/datum-cloud/fabric-router-controller, tag: "${{ needs.publish-fabric-router-controller-image.outputs.tag }}" }
+        # config/masque/provider and config/masque/authority are opt-in and
+        # need per-cell names, TLS and the authority's CA, like
+        # config/galactic-edge/base.
+        - { path: config/masque/provider, name: ghcr.io/datum-cloud/masque-provider, tag: "${{ needs.publish-masque-provider-image.outputs.tag }}" }
+        - { path: config/masque/authority, name: ghcr.io/datum-cloud/masque-authority, tag: "${{ needs.publish-masque-authority-image.outputs.tag }}" }
     secrets: inherit
 
   # The Looking Glass service API (protobuf sources, a descriptor set with
