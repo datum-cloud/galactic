@@ -1,0 +1,178 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: serviceendpointproducerreports.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    kind: ServiceEndpointProducerReport
+    listKind: ServiceEndpointProducerReportList
+    plural: serviceendpointproducerreports
+    shortNames:
+    - svcproducerreport
+    singular: serviceendpointproducerreport
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.endpointName
+      name: ENDPOINT
+      type: string
+    - jsonPath: .spec.node
+      name: NODE
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ServiceEndpointProducerReport holds one node's health decisions for the
+          producers of one Spread ServiceEndpoint on that node. The galactic-router on
+          that node is its only writer: it creates the report in the endpoint's
+          namespace, owned by the endpoint, renews its entries every
+          ServiceEndpointProducerReportRenewInterval, and deletes it when the node
+          has no producers of the endpoint left. A node with producers of the
+          endpoint deletes another node's report none of whose entries was renewed
+          within ServiceEndpointProducerReportRetention, because that node is gone.
+          When no node has producers of the endpoint left, nothing sweeps, and its
+          reports, whose entries readers ignore once expired, go when the endpoint
+          does. Each report holds at most ServiceEndpointMaxProducersPerNode
+          entries, so an endpoint's producers can span any number of nodes.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ServiceEndpointProducerReportSpec is one node's report for
+              one endpoint.
+            properties:
+              endpointName:
+                description: |-
+                  EndpointName is the name of the ServiceEndpoint, in the report's
+                  namespace, whose producers the report describes.
+                maxLength: 253
+                minLength: 1
+                type: string
+              endpointUID:
+                description: |-
+                  EndpointUID is the UID of that ServiceEndpoint. Readers ignore a report
+                  whose EndpointUID does not match the current endpoint.
+                type: string
+              node:
+                description: Node is the node that hosts and probes the producers.
+                maxLength: 253
+                minLength: 1
+                type: string
+              producers:
+                description: |-
+                  Producers holds the health decision of each producer of the endpoint on
+                  Node.
+                items:
+                  description: ServiceEndpointProducerStatus is one producer's health
+                    decision.
+                  properties:
+                    attachmentUID:
+                      description: AttachmentUID is the UID of the VPCAttachment that
+                        was probed.
+                      type: string
+                    lastTransitionTime:
+                      description: LastTransitionTime is when State last changed.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is the last probe error, when there is
+                        one.
+                      maxLength: 1024
+                      type: string
+                    name:
+                      description: Name is the producer VPCAttachment's name.
+                      minLength: 1
+                      type: string
+                    namespace:
+                      description: Namespace is the producer VPCAttachment's namespace.
+                      minLength: 1
+                      type: string
+                    node:
+                      description: Node is the node that hosts the producer and probes
+                        it.
+                      minLength: 1
+                      type: string
+                    port:
+                      description: Port is the TCP port that was probed.
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    reason:
+                      description: Reason is ProbeSucceeded, ProbeFailed, Pending
+                        or ProbeUnavailable.
+                      maxLength: 64
+                      type: string
+                    renewTime:
+                      description: |-
+                        RenewTime is when the producer's node last confirmed this entry. The
+                        entry is current for 60 seconds after it, and expired after that or
+                        when RenewTime is unset.
+                      format: date-time
+                      type: string
+                    state:
+                      description: |-
+                        State is the decision. Healthy and Unknown producers receive new
+                        flows; Unhealthy ones do not, unless every producer on the node is
+                        Unhealthy.
+                      enum:
+                      - Healthy
+                      - Unhealthy
+                      - Unknown
+                      type: string
+                  required:
+                  - attachmentUID
+                  - lastTransitionTime
+                  - name
+                  - namespace
+                  - node
+                  - port
+                  - reason
+                  - state
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - namespace
+                - name
+                x-kubernetes-list-type: map
+            required:
+            - endpointName
+            - endpointUID
+            - node
+            type: object
+            x-kubernetes-validations:
+            - message: endpointName, endpointUID and node are immutable
+              rule: self.endpointName == oldSelf.endpointName && self.endpointUID
+                == oldSelf.endpointUID && self.node == oldSelf.node
+            - message: every producer entry must name the report's node
+              rule: '!has(self.producers) || self.producers.all(p, p.node == self.node)'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

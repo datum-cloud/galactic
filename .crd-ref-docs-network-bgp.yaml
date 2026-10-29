@@ -24,6 +24,7 @@ processor:
     - "[.]NetworkGatewayList$"
     - "[.]NetworkServiceList$"
     - "[.]ServiceEndpointList$"
+    - "[.]ServiceEndpointProducerReportList$"
     - "[.]ServiceRoutePolicyList$"
     - "[.]ServiceVIPBindingList$"
     # The revision's configuration lists every BGP spec by name; walking

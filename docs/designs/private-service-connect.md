@@ -360,7 +360,7 @@ Service owners of a `Single` endpoint withdraw unhealthy producers through the
 endpoint's selection contract. Galactic's attachment readiness checks establish
 network eligibility; they do not substitute for service health. A `Spread`
 endpoint's producers are probed over TCP by their own node, which publishes
-each decision in the endpoint's `status.producers`; see
+each decision in its `ServiceEndpointProducerReport` for the endpoint; see
 [Private service routes](../private-services/README.md#several-producers-on-one-node).
 
 ### Status and lifecycle

@@ -29,6 +29,7 @@ resources:
   - galactic.datumapis.com_networkfabricidentities.yaml
   - galactic.datumapis.com_networkgateways.yaml
   - galactic.datumapis.com_networkservices.yaml
+  - galactic.datumapis.com_serviceendpointproducerreports.yaml
   - galactic.datumapis.com_serviceendpoints.yaml
   - galactic.datumapis.com_serviceroutepolicies.yaml
   - galactic.datumapis.com_servicevipbindings.yaml

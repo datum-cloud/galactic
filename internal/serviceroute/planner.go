@@ -403,6 +403,61 @@ const (
 	producerUnhealthy
 )
 
+// producerEntryKey identifies a producer entry by the producer and the node
+// that wrote it.
+type producerEntryKey struct {
+	namespace, name, node string
+}
+
+// WithProducerReports returns a copy of endpoint whose status.producers holds
+// every entry the planner reads: the entries of reports, a namespace's
+// ServiceEndpointProducerReports, that describe endpoint by name and UID, and
+// the entries of endpoint's own status.producers, which galactic-routers that
+// predate reports write. Where both hold an entry for the same producer and
+// node, the one renewed later is kept, the report's on a tie, so a node rolled
+// back to such a router is read from what it writes now. The copy is never
+// written back.
+func WithProducerReports(endpoint *networkv1alpha1.ServiceEndpoint,
+	reports []networkv1alpha1.ServiceEndpointProducerReport,
+) *networkv1alpha1.ServiceEndpoint {
+	view := endpoint.DeepCopy()
+	if !spread(endpoint) {
+		return view
+	}
+	var keys []producerEntryKey
+	chosen := make(map[producerEntryKey]networkv1alpha1.ServiceEndpointProducerStatus)
+	offer := func(entry networkv1alpha1.ServiceEndpointProducerStatus) {
+		key := producerEntryKey{entry.Namespace, entry.Name, entry.Node}
+		held, ok := chosen[key]
+		if !ok {
+			keys = append(keys, key)
+		} else if entry.RenewTime == nil || (held.RenewTime != nil && !entry.RenewTime.After(held.RenewTime.Time)) {
+			return
+		}
+		chosen[key] = *entry.DeepCopy()
+	}
+	for i := range reports {
+		report := &reports[i]
+		if report.Namespace != endpoint.Namespace || report.Spec.EndpointName != endpoint.Name ||
+			report.Spec.EndpointUID != endpoint.UID {
+			continue
+		}
+		for _, entry := range report.Spec.Producers {
+			if entry.Node == report.Spec.Node {
+				offer(entry)
+			}
+		}
+	}
+	for _, entry := range endpoint.Status.Producers {
+		offer(entry)
+	}
+	view.Status.Producers = nil
+	for _, key := range keys {
+		view.Status.Producers = append(view.Status.Producers, chosen[key])
+	}
+	return view
+}
+
 // producersHealth classifies a Spread endpoint's producers by the status entry
 // their own node wrote for that same attachment, as of now. A producer with
 // no such entry is eligible.
@@ -412,16 +467,16 @@ func producersHealth(endpoint *networkv1alpha1.ServiceEndpoint,
 	if !spread(endpoint) {
 		return nil
 	}
-	reported := make(map[types.NamespacedName]networkv1alpha1.ServiceEndpointProducerStatus,
+	reported := make(map[producerEntryKey]networkv1alpha1.ServiceEndpointProducerStatus,
 		len(endpoint.Status.Producers))
 	for _, entry := range endpoint.Status.Producers {
-		reported[types.NamespacedName{Namespace: entry.Namespace, Name: entry.Name}] = entry
+		reported[producerEntryKey{entry.Namespace, entry.Name, entry.Node}] = entry
 	}
 	health := make(map[types.UID]producerHealth, len(producers))
 	for _, producer := range producers {
-		entry, ok := reported[types.NamespacedName{Namespace: producer.Namespace, Name: producer.Name}]
+		entry, ok := reported[producerEntryKey{producer.Namespace, producer.Name, producer.Status.Node}]
 		switch {
-		case !ok || entry.AttachmentUID != producer.UID || entry.Node != producer.Status.Node:
+		case !ok || entry.AttachmentUID != producer.UID:
 		case !ProducerReportCurrent(entry, now):
 			health[producer.UID] = producerReportExpired
 		case entry.State == networkv1alpha1.BackendHealthUnhealthy:

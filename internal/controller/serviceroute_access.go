@@ -72,6 +72,10 @@ func (r *ServiceRoutePolicyReconciler) conflictingPolicies(
 		}, endpoint); err != nil {
 			continue
 		}
+		endpoint, err := r.withProducerReports(ctx, endpoint)
+		if err != nil {
+			return nil, err
+		}
 		identity, err := r.consumerVPCIdentity(ctx, p)
 		if err != nil {
 			continue
