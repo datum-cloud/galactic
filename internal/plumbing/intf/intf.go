@@ -8,10 +8,16 @@ package intf
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/kenshaw/baseconv"
 )
+
+// hostLinkNameRegex matches the host-side interface name produced by
+// GenerateInterfaceNameHost, "G%09s%03sH": the zero-padded base62 VPC and
+// VPCAttachment.
+var hostLinkNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})([A-Za-z0-9]{3})H$`)
 
 const interfaceNameTemplate = "G%09s%03s%s"
 
@@ -51,4 +57,23 @@ func HexToBase62(value string) (string, error) {
 // Base62ToHex converts a base62 string to lowercase hex.
 func Base62ToHex(value string) (string, error) {
 	return baseconv.Convert(value, baseconv.Digits62, baseconv.DigitsHex)
+}
+
+// ParseInterfaceNameHost reports the unpadded VPC and attachment IDs encoded
+// in a host-side link name produced by GenerateInterfaceNameHost.
+func ParseInterfaceNameHost(name string) (vpc, vpcAttachment string, ok bool) {
+	m := hostLinkNameRegex.FindStringSubmatch(name)
+	if m == nil {
+		return "", "", false
+	}
+	return unpad(m[1]), unpad(m[2]), true
+}
+
+// unpad reverses the zero padding an interface name applies to a base62
+// identifier, which CRD names do not carry.
+func unpad(s string) string {
+	if t := strings.TrimLeft(s, "0"); t != "" {
+		return t
+	}
+	return "0"
 }
