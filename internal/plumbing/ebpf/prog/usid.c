@@ -5007,17 +5007,18 @@ static USID_ALWAYS_INLINE __u64 service_rendezvous_score(__u32 hash, __u64 token
 // service_select_producer picks the producer of the LocalSet route under
 // s->route for the packet s describes, arriving on ifindex. A TCP packet keeps
 // the producer its flow is pinned to while that producer is still a member,
-// draining or not. Without a live pin, a packet other than an opening SYN
-// keeps the member whose live reverse row shows it already carries this
-// consumer's flow, since service_reverse_table holds four times the flows
+// draining or not. Without a live pin, a packet other than an opening SYN keeps
+// the member whose live reverse row shows it already carries this consumer's
+// flow, since service_reverse_table holds four times the flows
 // service_flow_table does; an opening SYN skips that row, so a reused tuple
-// cannot reach a draining producer. Otherwise, and for a new TCP flow, it takes the eligible producer that rendezvous hashing of the
-// flow ranks first, and pins it. A UDP packet takes an eligible producer at
-// random, so the requests of one socket spread too. A member whose interface
-// identity no longer matches its token is never kept or pinned, so a flow
-// retried while the router repairs the set is not held to it. It returns
-// nonzero when the route has no producer set, no eligible producer, or picked
-// a member with a stale identity. It overwrites s->reverse.
+// cannot reach a draining producer. Otherwise, and for a new TCP flow, it takes
+// the eligible producer that rendezvous hashing of the flow ranks first, and
+// pins it. A UDP packet takes an eligible producer at random, so the requests
+// of one socket spread too. A member whose interface identity no longer matches
+// its token is never kept or pinned, so a flow retried while the router repairs
+// the set is not held to it. It returns nonzero when the route has no producer
+// set, no eligible producer, or picked a member with a stale identity. It
+// overwrites s->reverse.
 static USID_NOINLINE int service_select_producer(struct service_fib_scratch_value *s, __u32 ifindex,
 						 __u32 *target_ifindex, __u64 *producer_token, int opening)
 {
