@@ -1,0 +1,66 @@
+zebra: do not reuse an NHG that keeps a nexthop its owner removed
+
+When a route's nexthop goes inactive with its interface and the owning
+protocol then re-sends the route without that nexthop, zebra compared the
+new group with the old one while skipping the old group's inactive
+members, found them equal, and kept the old group. The removed nexthop
+stayed in the route, and zebra installed it again as soon as its
+interface came back up, forwarding onto a path the protocol had withdrawn
+(FRRouting/frr#22752). An eBGP ECMP route resurrected this way sends
+traffic to a peer whose session is not even established.
+
+Skip an inactive old nexthop only together with the same nexthop in the
+new group, so the old group is reused only when the owner still carries
+every one of its nexthops.
+
+--- a/zebra/zebra_nhg.c
++++ b/zebra/zebra_nhg.c
+@@ -3073,8 +3073,12 @@
+ 					   __func__, rn);
+ 
+ 			/*
+-			 * If the new nexthop is not active and the old nexthop is also not active,
+-			 * then we know that we can skip both the old and new nexthops.
++			 * An inactive old nexthop can be skipped only together
++			 * with the same, equally inactive nexthop in the new
++			 * group. One the new group no longer carries was
++			 * removed by its owner, and reusing the old group would
++			 * keep it, to be installed again once its interface
++			 * comes back up.
+ 			 */
+ 			if (!CHECK_FLAG(nhop->flags, NEXTHOP_FLAG_ACTIVE) &&
+ 			    nexthop_same_no_ifindex(nhop, old_nhop)) {
+@@ -3082,9 +3086,11 @@
+ 					zlog_debug("%s: %pRN new is not active going to the next one",
+ 						   __func__, rn);
+ 				nhop = nhop->next;
++				old_nhop = old_nhop->next;
++				continue;
+ 			}
+-			old_nhop = old_nhop->next;
+-			continue;
++			same = false;
++			break;
+ 		}
+ 
+ 		if (nexthop_same(nhop, old_nhop)) {
+@@ -3135,18 +3141,8 @@
+ 		}
+ 	}
+ 
+-	if (nhop)
++	if (nhop || old_nhop)
+ 		same = false;
+-	else if (old_nhop) {
+-		while (old_nhop) {
+-			if (CHECK_FLAG(old_nhop->flags, NEXTHOP_FLAG_ACTIVE))
+-				break;
+-			old_nhop = old_nhop->next;
+-		}
+-
+-		if (old_nhop)
+-			same = false;
+-	}
+ 
+ 	return same;
+ }
