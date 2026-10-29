@@ -4,7 +4,8 @@
 # config agent (and its opt-in fabric-api sidecar), fabric-router-controller,
 # galactic-router's metrics port, galactic-nat's metrics port and the
 # fabric-api gateway, galactic-controller's and galactic-edge's Galactic Edge
-# state, and the alert rules built on them. Requires the Prometheus Operator CRDs
+# state, masque-provider's CONNECT-IP and adapter metrics (scraped in
+# masque-system), and the alert rules built on them. Requires the Prometheus Operator CRDs
 # (monitoring.coreos.com), which this repo does not install, so it is not
 # part of config/kustomization.yaml's default resources.
 #
@@ -22,4 +23,5 @@ resources:
   - podmonitor-galactic-edge.yaml
   - podmonitor-galactic-nat.yaml
   - podmonitor-galactic-router.yaml
+  - podmonitor-masque-provider.yaml
   - prometheusrule.yaml

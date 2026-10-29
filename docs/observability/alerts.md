@@ -6,8 +6,8 @@ See [scraping and component ports](README.md#where-the-metrics-come-from) and [s
 unit-tested with `task test:alerts`) covers routing, fabric routing through
 the API, the NAT session table
 and ports, the egress shards' state, drop ratio and uplinks, the compute
-nodes' egress shard groups, the fabric-api looking glass and the Galactic
-Edge foundation. Every alert
+nodes' egress shard groups, the fabric-api looking glass, the Galactic
+Edge foundation and the MASQUE connector's provider pods. Every alert
 carries `service: galactic`, `team: connect` and a `runbook_url`.
 
 | Alert                                  | Fires when                                                                  | For   | Severity   |
@@ -73,3 +73,9 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticEdgeScopeLost                  | `galactic_edge_foundation_scopes_lost > 0`                                  | 5m    | warning    |
 | GalacticEdgeCleanupFailing             | more than two cleanup failures in every 15-minute window                    | 15m   | warning    |
 | GalacticEdgeMetricsDown                | `galactic-edge` or `galactic-controller` scrape down                        | 5m    | warning    |
+| GalacticMasqueRequestsFailing          | over a quarter of 10+ requests in 30m fail on the provider's side           | 15m   | warning    |
+| GalacticMasqueRouteClaimsFailing       | more than two refused or failed route claims in every 15m window            | 15m   | warning    |
+| GalacticMasqueLeaseNotHeld             | `galactic_masque_lease_held == 0`                                           | 5m    | warning    |
+| GalacticMasqueLeaseLost                | the instance lost its Lease twice or more in an hour                        | 0     | warning    |
+| GalacticMasquePathMTUTooSmall          | over a quarter of 10+ probed requests in 30m cannot carry 1280 bytes        | 15m   | warning    |
+| GalacticMasqueMetricsDown              | `masque-provider` scrape down                                               | 5m    | warning    |
