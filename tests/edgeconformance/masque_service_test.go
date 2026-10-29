@@ -141,16 +141,58 @@ func TestMASQUEService(t *testing.T) {
 	if !t.Run("setup", s.setup) {
 		t.FailNow()
 	}
-	t.Run("readiness", s.rowReadiness)
-	t.Run("lifecycle-h3", func(t *testing.T) { s.lifecycle(t, "h3") })
-	t.Run("authorization-h3", func(t *testing.T) { s.authorization(t, "h3") })
-	t.Run("tls-validation", s.rowTLS)
-	t.Run("subdivisions", s.rowSubdivisions)
-	t.Run("grant-disable", s.rowDisable)
-	t.Run("grant-expiry", func(t *testing.T) { s.expiry(t, "h3") })
-	t.Run("lease-readiness", s.rowLeaseReadiness)
-	t.Run("process-restart", s.rowProcessRestart)
-	t.Run("drain", s.rowDrain)
+	s.row(t, "readiness", s.rowReadiness)
+	s.row(t, "lifecycle-h3", func(t *testing.T) { s.lifecycle(t, "h3") })
+	s.row(t, "h2-lifecycle", s.rowH2Lifecycle)
+	s.row(t, "authorization-h3", func(t *testing.T) { s.authorization(t, "h3") })
+	s.row(t, "spoofing-isolation-h3", s.rowSpoofingIsolationH3)
+	s.row(t, "h2-authz-isolation", s.rowH2AuthzIsolation)
+	s.row(t, "tls-validation", s.rowTLS)
+	s.row(t, "subdivisions", s.rowSubdivisions)
+	s.row(t, "mtu-1280-both", s.rowMTU1280)
+	s.row(t, "grant-disable", s.rowDisable)
+	s.row(t, "grant-expiry", func(t *testing.T) { s.expiry(t, "h3") })
+	s.row(t, "h3-to-h2-same-pod", s.rowSamePodH3ToH2)
+	s.row(t, "h3-to-h2-cross-node", s.rowCrossNodeH3ToH2)
+	s.row(t, "remote-convergence", s.rowRemoteConvergence)
+	s.row(t, "mtu-live-drop", s.rowMTULiveDrop)
+	s.row(t, "diagnostics-walk", s.rowDiagnosticsWalk)
+	s.row(t, "lease-readiness", s.rowLeaseReadiness)
+	s.row(t, "process-restart", s.rowProcessRestart)
+	s.row(t, "drain", s.rowDrain)
+	s.row(t, "node-restart", s.rowNodeRestart)
+}
+
+// row runs fn as subtest name once every connector is authorized and, when
+// it fails, saves the provider pods' logs with its artifacts.
+func (s *service) row(t *testing.T, name string, fn func(*testing.T)) {
+	t.Helper()
+	t.Run(name, func(t *testing.T) {
+		defer func() {
+			if !t.Failed() {
+				return
+			}
+			var pods corev1.PodList
+			if err := s.l.c.List(context.Background(), &pods, client.InNamespace(svcNS)); err != nil {
+				return
+			}
+			for _, p := range pods.Items {
+				if logs, err := s.l.kubectl("-n", svcNS, "logs", p.Name, "--all-containers"); err == nil {
+					s.l.save(t, p.Name+".log", []byte(logs))
+				}
+			}
+		}()
+		// A connector idle for longer than its authorization's validUntil,
+		// at most 28 s, gets a new authorization on its next request, and
+		// the authority answers 503 until the old one is released. Each row
+		// starts with every connector authorized, so none measures that.
+		for _, c := range []*svcConnector{s.c10, s.c10b, s.c20} {
+			if c != nil && s.pod != nil {
+				s.waitConnected(t, c)
+			}
+		}
+		fn(t)
+	})
 }
 
 // overlay is the lab overlay directory of the service.
@@ -367,8 +409,9 @@ func proto(evs []event) string {
 // returns the packets from each workload that were not echo replies, which
 // the caller accounts for.
 func (s *service) requireDelivered(t *testing.T, what string, c *svcConnector, transport string, evs []event,
-	d time.Duration, ws ...workloadRef) map[string][]event {
+	ws ...workloadRef) map[string][]event {
 	t.Helper()
+	d := lifecycleWindow
 	requireSessionFor(t, what, evs, d, len(ws), c.issued.Prefix)
 	if p := proto(evs); p != transport {
 		t.Errorf("%s: negotiated %q, want %s", what, p, transport)
@@ -392,7 +435,7 @@ func (s *service) requireDelivered(t *testing.T, what string, c *svcConnector, t
 	}
 	stray := 0
 	for _, e := range evs {
-		if e.Reply != "other" {
+		if e.Reply != otherReply {
 			continue
 		}
 		if _, ok := inbound[e.From]; ok && e.Dst == c.addr() {
@@ -418,7 +461,8 @@ type pinger struct {
 // pingFrom starts count packetSize-byte pings, 100 ms apart, from tenant
 // tn's edge client i to dst. Nothing answers them: the client reports each
 // one it receives.
-func (s *service) pingFrom(t *testing.T, tn tenant, i int, dst string, count int) *pinger {
+func (s *service) pingFrom(t *testing.T, tn tenant, i int, dst string) *pinger {
+	count := lifecyclePings
 	t.Helper()
 	pod := s.l.clientPod(t, tn, i)
 	node := map[int]string{1: computeNode, 2: edgeNode1, 3: edgeNode2}[i]
@@ -480,15 +524,15 @@ func (s *service) lifecycle(t *testing.T, transport string) {
 		time.Sleep(pingDelay)
 		pings := map[*svcConnector][]*pinger{}
 		for _, c := range conns {
-			pings[c] = []*pinger{s.pingFrom(t, c.tn, 2, c.addr(), lifecyclePings),
-				s.pingFrom(t, c.tn, 1, c.addr(), lifecyclePings)}
+			pings[c] = []*pinger{s.pingFrom(t, c.tn, 2, c.addr()),
+				s.pingFrom(t, c.tn, 1, c.addr())}
 		}
 		ended := map[*svcConnector]time.Time{}
 		for _, c := range conns {
 			evs := runs[c].wait(l, t)
 			ended[c] = time.Now()
 			what := fmt.Sprintf("%s %s of %s", transport, round, c.name)
-			inbound := s.requireDelivered(t, what, c, transport, evs, lifecycleWindow, ws[c]...)
+			inbound := s.requireDelivered(t, what, c, transport, evs, ws[c]...)
 			for _, p := range pings[c] {
 				s.requireInbound(t, what+": gVPC pings", p, inbound[p.w.addr])
 			}
@@ -612,6 +656,9 @@ func (s *service) stopsWhileOtherForwards(t *testing.T, label string, c *svcConn
 	d time.Duration, act func() time.Time) ([]event, time.Time) {
 	t.Helper()
 	l := s.l
+	// The other connector's authorization may have lapsed while it was
+	// idle; the authority answers 503 until it has replaced it.
+	s.waitConnected(t, s.c10b)
 	dst := l.workloadOn(t, c.tn, edgeNode1).addr
 	other := l.workloadOn(t, s.c10b.tn, edgeNode1).addr
 	before, epoch := s.lease(t, s.pod)

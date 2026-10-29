@@ -252,6 +252,10 @@ type event struct {
 	Assigned string `json:"assigned"`
 	// Len is the size of a packet a CONNECT-IP tunnel delivered.
 	Len int `json:"len"`
+	// Error is why a CONNECT-IP tunnel or a capture ended.
+	Error string `json:"error"`
+	// Paths is how many routes for a prefix a router's RIB held.
+	Paths *int `json:"paths"`
 }
 
 // last reports whether e marks the end of a probe's window: a send probe's
@@ -274,6 +278,10 @@ const nsenter = "nsenter"
 
 // execVerb is the exec subcommand of docker and kubectl.
 const execVerb = "exec"
+
+// otherReply marks a packet a CONNECT-IP tunnel delivered that is not an
+// echo reply to the probe.
+const otherReply = "other"
 
 // startProbe runs edgeprobe with args in the network namespace of the pod
 // whose sandbox has pid on node.

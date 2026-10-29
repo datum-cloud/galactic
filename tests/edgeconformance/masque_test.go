@@ -500,7 +500,7 @@ func echoes(evs []event, dst string) []event {
 func others(evs []event) int {
 	n := 0
 	for _, e := range evs {
-		if e.Reply == "other" {
+		if e.Reply == otherReply {
 			n++
 		}
 	}
@@ -759,72 +759,99 @@ func (m *masque) recordVersions(t *testing.T) {
 // answer; nothing reaches the other tenant's workloads, whose links are
 // captured, and no client receives a packet that is not its own reply.
 func (m *masque) isolation(t *testing.T, label string) {
-	l := m.l
-	wl := map[*masqueTenant][]workloadRef{}
+	clients := make([]isoClient, 0, 2)
 	for _, mt := range []*masqueTenant{m.a, m.b} {
-		wl[mt] = []workloadRef{m.workload(t, mt.tn, 1), m.workload(t, mt.tn, 2)}
-		for _, w := range wl[mt] {
+		clients = append(clients, isoClient{vpc: mt.tn.vpc, id: mt.id,
+			own: []workloadRef{m.workload(t, mt.tn, 1), m.workload(t, mt.tn, 2)},
+			start: func(name string, d time.Duration, dsts []string) *probeRun {
+				return m.connect(t, name, mt.token, mt.tn.vpc, mt.id, d, dsts...)
+			},
+			session: func(t *testing.T, what string, evs []event, d time.Duration, n int) {
+				requireSession(t, what, evs, d, n)
+			}})
+	}
+	m.l.isolation(t, label, m.currentLinks(t), clients[0], clients[1])
+}
+
+// isoClient is one tenant's CONNECT-IP client in an isolation check: its
+// VPC, the echo identifier it sends, its tenant's workloads, how to start
+// its request to dsts for d, and the check that the request ran its whole
+// window to n destinations.
+type isoClient struct {
+	vpc     string
+	id      int
+	own     []workloadRef
+	start   func(name string, d time.Duration, dsts []string) *probeRun
+	session func(t *testing.T, what string, evs []event, d time.Duration, n int)
+}
+
+// isolation sends from a's and b's clients at once to their own workloads
+// and to the other's, with the workloads' neighbor caches and those of
+// links, host links on the provider's node, flushed first. Each client's
+// own workloads answer; nothing reaches the other tenant's workloads, whose
+// links are captured, and no client receives a packet that is not its own
+// reply.
+func (l *lab) isolation(t *testing.T, label string, links []string, a, b isoClient) {
+	t.Helper()
+	for _, c := range []isoClient{a, b} {
+		for _, w := range c.own {
 			if _, err := nodeExec(w.node, "nsenter", "-t", strconv.Itoa(w.pid), "-n", "ip", "-6", "neigh", "flush",
 				"all"); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-	for _, link := range m.currentLinks(t) {
+	for _, link := range links {
 		if _, err := nodeExec(edgeNode1, "ip", "-6", "neigh", "flush", "dev", link); err != nil {
 			t.Fatal(err)
 		}
 	}
 	type sniffer struct {
-		w  workloadRef
-		mt *masqueTenant
-		p  *probeRun
+		w   workloadRef
+		vpc string
+		id  int
+		p   *probeRun
 	}
 	var sniffs []sniffer
-	for _, mt := range []*masqueTenant{m.a, m.b} {
-		for _, w := range wl[mt] {
-			p, err := startProbe(w.node, w.pid, label+"-sniff-"+mt.tn.vpc+"-"+w.node, "sniff", "-iface", w.iface,
+	for _, c := range []isoClient{a, b} {
+		for _, w := range c.own {
+			p, err := startProbe(w.node, w.pid, label+"-sniff-"+c.vpc+"-"+w.node, "sniff", "-iface", w.iface,
 				"-icmp", "-duration", "9s")
 			if err != nil {
 				t.Fatal(err)
 			}
-			sniffs = append(sniffs, sniffer{w, mt, p})
+			sniffs = append(sniffs, sniffer{w, c.vpc, c.id, p})
 		}
 	}
 	time.Sleep(time.Second)
-	runs := map[*masqueTenant]*probeRun{}
-	for _, mt := range []*masqueTenant{m.a, m.b} {
-		other := m.b
-		if mt == m.b {
-			other = m.a
-		}
-		dsts := []string{wl[mt][0].addr, wl[mt][1].addr, wl[other][0].addr, wl[other][1].addr}
-		runs[mt] = m.connect(t, label+"-vpc-"+mt.tn.vpc, mt.token, mt.tn.vpc, mt.id, 5*time.Second, dsts...)
+	pairs := [][2]isoClient{{a, b}, {b, a}}
+	runs := make([]*probeRun, len(pairs))
+	for i, p := range pairs {
+		c, other := p[0], p[1]
+		dsts := []string{c.own[0].addr, c.own[1].addr, other.own[0].addr, other.own[1].addr}
+		runs[i] = c.start(label+"-vpc-"+c.vpc, 5*time.Second, dsts)
 	}
-	for _, mt := range []*masqueTenant{m.a, m.b} {
-		other := m.b
-		if mt == m.b {
-			other = m.a
-		}
-		evs := runs[mt].wait(l, t)
-		requireSession(t, "VPC "+mt.tn.vpc+"'s request", evs, 5*time.Second, 4)
+	for i, p := range pairs {
+		c, other := p[0], p[1]
+		evs := runs[i].wait(l, t)
+		c.session(t, "VPC "+c.vpc+"'s request", evs, 5*time.Second, 4)
 		perDst := sentCount(evs) / 4
-		for _, w := range wl[mt] {
+		for _, w := range c.own {
 			n := len(echoes(evs, w.addr))
-			l.record(t, fmt.Sprintf("VPC %s to its workload on %s", mt.tn.vpc, w.node), fmt.Sprintf("%d/%d", n, perDst))
+			l.record(t, fmt.Sprintf("VPC %s to its workload on %s", c.vpc, w.node), fmt.Sprintf("%d/%d", n, perDst))
 			if perDst == 0 || n < perDst*9/10 {
-				t.Errorf("VPC %s to its workload on %s: %d of %d answered", mt.tn.vpc, w.node, n, perDst)
+				t.Errorf("VPC %s to its workload on %s: %d of %d answered", c.vpc, w.node, n, perDst)
 			}
 		}
-		for _, w := range wl[other] {
+		for _, w := range other.own {
 			n := len(echoes(evs, w.addr))
-			l.record(t, fmt.Sprintf("VPC %s to VPC %s's workload on %s", mt.tn.vpc, other.tn.vpc, w.node), n)
+			l.record(t, fmt.Sprintf("VPC %s to VPC %s's workload on %s", c.vpc, other.vpc, w.node), n)
 			if n > 0 {
-				t.Errorf("VPC %s reached VPC %s's workload on %s: %d replies", mt.tn.vpc, other.tn.vpc, w.node, n)
+				t.Errorf("VPC %s reached VPC %s's workload on %s: %d replies", c.vpc, other.vpc, w.node, n)
 			}
 		}
 		if n := others(evs); n > 0 {
-			t.Errorf("VPC %s's client received %d packets that were not its replies", mt.tn.vpc, n)
+			t.Errorf("VPC %s's client received %d packets that were not its replies", c.vpc, n)
 		}
 	}
 	for _, s := range sniffs {
@@ -832,21 +859,19 @@ func (m *masque) isolation(t *testing.T, label string) {
 		own, foreign := 0, 0
 		for _, e := range evs {
 			switch e.ID {
-			case s.mt.id:
+			case s.id:
 				own++
-			case m.a.id, m.b.id:
+			case a.id, b.id:
 				foreign++
 			}
 		}
-		l.record(t, fmt.Sprintf("echo requests on VPC %s's workload on %s", s.mt.tn.vpc, s.w.node),
+		l.record(t, fmt.Sprintf("echo requests on VPC %s's workload on %s", s.vpc, s.w.node),
 			fmt.Sprintf("%d own, %d from the other VPC's client", own, foreign))
 		if foreign > 0 {
-			t.Errorf("VPC %s's workload on %s received %d of the other VPC's echo requests", s.mt.tn.vpc, s.w.node,
-				foreign)
+			t.Errorf("VPC %s's workload on %s received %d of the other VPC's echo requests", s.vpc, s.w.node, foreign)
 		}
 		if own < int(5*time.Second/probeInterval)/2 {
-			t.Errorf("capture on VPC %s's workload on %s saw only %d of its own tenant's requests", s.mt.tn.vpc,
-				s.w.node, own)
+			t.Errorf("capture on VPC %s's workload on %s saw only %d of its own tenant's requests", s.vpc, s.w.node, own)
 		}
 	}
 }

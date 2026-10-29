@@ -108,6 +108,4 @@ The conformance fixture uses the authority when its configuration sets `grantAut
 
   `TestOverHTTPS` runs `authority.Client` against `Server` on TLS 1.3.
 - `go test ./internal/edge/masque/ -run TestAgainstCore` includes the in-place renewal check against core.
-- `task verify:masque-service` runs the authority with the [MASQUE service](masque-service.md#verification) in the lab. It creates ledgers and grants with the operator commands, and measures `grant disable` and credential expiry against forwarding over HTTP/3.
-
-Not yet covered: the same measurements over the HTTP/2 transport ([#981](https://github.com/datum-cloud/galactic/issues/981)).
+- `task verify:masque-service` runs the authority with the [MASQUE service](masque-service.md#verification) in the lab. It creates ledgers and grants with the operator commands, measures `grant disable` and credential expiry against forwarding over HTTP/3, and credential expiry over HTTP/2.

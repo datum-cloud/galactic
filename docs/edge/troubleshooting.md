@@ -181,7 +181,7 @@ The [MASQUE service](masque-service.md) adds per-request telemetry on top of the
 - `request admitted` from the adapter: `session`, `connector`, `principal`, `serviceUID`, `attachment`, `attachmentUID`, `route`, `claimEpoch` and `instanceEpoch`.
 - `CONNECT-IP request accepted` from the server: `transport`, `session`, `connector`, `vpc`, `prefix`, `attachment`, `claim` and `epoch`.
 
-Their ends are `request ended` (with `endReason`) and `CONNECT-IP request ended` (with `cause` and `duration`). A refused request logs `CONNECT-IP request rejected` with `transport` and `outcome`, and `admission refused` with the adapter's `outcome`. No log line or metric carries a credential or packet contents.
+Their ends are `request ended` (with `endReason`) and `CONNECT-IP request ended` (with `cause` and `duration`). A refused request logs `CONNECT-IP request rejected` with `transport` and `outcome`, and `admission refused` with the adapter's `outcome`. The adapter logs a refusal as `unauthenticated` or `forbidden` at debug level only, since bad credentials are routine; the server's line and `galactic_masque_admissions_total` still record it. No log line or metric carries a credential or packet contents.
 
 1. Find the connector's latest request:
 
@@ -200,7 +200,8 @@ Their ends are `request ended` (with `endReason`) and `CONNECT-IP request ended`
    | `route_refused`, `route_failed` | Core: the connector's /96 route claim | [Find who forwards the prefix](#4-find-who-forwards-a-prefix) and read the route's Events  |
    | `mtu`                           | The path                              | The client's path cannot carry a 1280-byte inner packet over HTTP/3; HTTP/2 can            |
 
-3. If it was admitted but does not forward, `galactic_masque_requests` says how far it got. `programmed` with `galactic_masque_lease_held` at 0 is a lost lease. `programmed` with the lease held is a grant past its deadline, or a packet path not yet open. `admitted` is an attachment or route claim no longer current; follow [the workflow](#workflow) with the logged `attachmentUID` and `route`.
+3. If it was admitted but does not forward, `galactic_masque_requests` says how far it got. `programmed` with `galactic_masque_lease_held` at 0 is a lost lease. `programmed` with the lease held is a grant past its deadline, or a packet path not yet open. `admitted` is an attachment or route claim no longer current; follow [the workflow](#workflow) with the logged `attachmentUID` and `route`. These states last only until the adapter's next check, at most a second, or one lease renewal attempt after a lost lease, when it ends the request; a scrape rarely catches them. Once the request has ended, step 4's end reasons name the same cause.
+
 4. If it ended, read both end lines. The server's `cause` says what broke the tunnel and the adapter's `endReason` says why:
 
    | `cause`         | `endReason`                                                                   | Meaning                                                              |
@@ -214,6 +215,8 @@ Their ends are `request ended` (with `endReason`) and `CONNECT-IP request ended`
    | `slow_client`   | `closed`                                                                      | The client stopped receiving for 5 seconds                           |
    | `backend_error` | `closed`                                                                      | The packet device failed a read or write                             |
    | `client_closed` | `closed`                                                                      | The client or its connection ended the request                       |
+
+   A grant that expires because its refreshes fail, for example while the authority is out of reach, can end as `attachment_*` rather than `grant_expired`: core drains the attachment 2 s (MaxSkew) before the grant's deadline, which comes before the adapter's own end at the deadline. The `grant refresh failed; the request keeps its deadline` lines before the end tell it apart from a drain for another cause.
 
 5. If it forwards but traffic is lost, check `galactic_connectip_packets_denied_total` for packet policy drops, `galactic_masque_device_drops_total` for a full device, and the traffic policy and route publication rows of [Telling failures apart](#telling-failures-apart) for the gVPC side.
 

@@ -21,6 +21,9 @@
 //	    HTTP/2 with -transport h2 (see connectIP)
 //	edgeprobe egresskind -iface link
 //	    prints the uSID datapath's delivery kind for a host link (see egressKind)
+//	edgeprobe rib -socket path -prefix p -interval 200ms -duration 30s
+//	    counts a galactic-router's EVPN routes for p through its GoBGP API
+//	    socket on every poll and prints each change: {"t","paths"} (see rib)
 package main
 
 import (
@@ -41,7 +44,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: edgeprobe send|sniff|connectip|egresskind [flags]")
+		fmt.Fprintln(os.Stderr, "usage: edgeprobe send|sniff|connectip|egresskind|rib [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -54,6 +57,8 @@ func main() {
 		err = connectIP(os.Args[2:])
 	case "egresskind":
 		err = egressKind(os.Args[2:])
+	case "rib":
+		err = rib(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}

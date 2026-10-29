@@ -163,10 +163,11 @@ const leaseDuration = 15 * time.Second
 // the node can have applied last, and stayed closed until resumed,
 // when the fault ended. It records the local cutoff and the local
 // withdrawal, the advertisement deleted or reported not advertised, which
-// must follow the cutoff, within 1 s plus the poll interval.
-func (m *masque) requireCutoff(t *testing.T, seen []event, w withdrawal, last, earliest, resumed time.Duration) {
+// must follow the cutoff, within 1 s plus the poll interval, and returns
+// the cutoff.
+func (l *lab) requireCutoff(t *testing.T, seen []event, w withdrawal, last, earliest, resumed time.Duration,
+) time.Duration {
 	t.Helper()
-	l := m.l
 	if !slices.ContainsFunc(seen, func(e event) bool { return !e.last() && e.T >= last }) {
 		t.Fatal("no probe reached the packet device after the last renewal start: the gate was never seen open")
 	}
@@ -197,8 +198,7 @@ func (m *masque) requireCutoff(t *testing.T, seen []event, w withdrawal, last, e
 				advertisementPoll)
 		}
 	}
-	l.record(t, "remote convergence", "not measured: the compute node's tenant routes are pinned eBPF map "+
-		"entries the lab cannot read")
+	return stop
 }
 
 // rowReplace opens a second request of a connector while its first is
@@ -274,7 +274,7 @@ func (m *masque) rowProviderStall(t *testing.T) {
 	}
 	resumed = true
 	seen, _, w := g.wait(l, t)
-	m.requireCutoff(t, seen, w, last, last, cont)
+	l.requireCutoff(t, seen, w, last, last, cont)
 	m.waitConnected(t, m.a)
 	m.waitConnected(t, m.b)
 }
@@ -306,7 +306,7 @@ func (m *masque) rowAgentStall(t *testing.T) {
 	}
 	resumed = true
 	seen, _, w := g.wait(l, t)
-	m.requireCutoff(t, seen, w, last, last-timing.RenewInterval, cont)
+	l.requireCutoff(t, seen, w, last, last-timing.RenewInterval, cont)
 	m.waitConnected(t, m.a)
 	m.waitConnected(t, m.b)
 }
@@ -326,7 +326,7 @@ func (m *masque) rowAPIPartition(t *testing.T) {
 	cont := boottime()
 	heal()
 	seen, session, w := g.wait(l, t)
-	m.requireCutoff(t, seen, w, last, last, cont)
+	l.requireCutoff(t, seen, w, last, last, cont)
 	rs := echoes(session, dst)
 	if len(rs) == 0 {
 		t.Fatal("the client's request never forwarded")
