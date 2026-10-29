@@ -22,8 +22,9 @@ import (
 )
 
 // errStopped is returned by a request's packet I/O once it may no longer
-// forward.
-var errStopped = errors.New("masque: forwarding stopped")
+// forward. The request has ended by then, so it wraps
+// connectip.ErrLeaseEnded and the server counts the end as the lease's.
+var errStopped = fmt.Errorf("masque: forwarding stopped: %w", connectip.ErrLeaseEnded)
 
 // session is one admitted request: its connectip.Lease and the identities
 // its packets are bound to.
@@ -234,13 +235,38 @@ func (s *session) refresh() string {
 // not ended, the instance lease it was admitted under is still held and
 // valid, and its grant has not expired.
 func (s *session) forwarding() bool {
-	if s.ended.Load() {
-		return false
-	}
+	return !s.ended.Load() && s.stopReason() == ""
+}
+
+// stopReason returns why the request's authority no longer lets it carry a
+// packet, or "" while it does.
+func (s *session) stopReason() string {
 	a := s.a
 	l := a.lease.Load()
-	return l != nil && l.Key == s.leaseKey && l.Epoch == s.leaseEpoch &&
-		int64(a.cfg.Claims.Clock()) < a.deadline.Load() && a.cfg.Now().UnixNano() < s.notAfter.Load()
+	switch {
+	case l == nil || l.Key != s.leaseKey || l.Epoch != s.leaseEpoch ||
+		int64(a.cfg.Claims.Clock()) >= a.deadline.Load():
+		return reasonLeaseLost
+	case a.cfg.Now().UnixNano() >= s.notAfter.Load():
+		return reasonGrantExpired
+	}
+	return ""
+}
+
+// stopped returns errStopped once the request may no longer forward, and
+// nil while it may. The packet path can see the lease or grant deadline
+// pass before the renewal loop or the grant timer does; stopped then ends
+// the request itself with that reason, so Done is closed before the server
+// sees the error and the request's Close cannot record it as closed.
+func (s *session) stopped() error {
+	if s.ended.Load() {
+		return errStopped
+	}
+	if reason := s.stopReason(); reason != "" {
+		s.end(reason)
+		return errStopped
+	}
+	return nil
 }
 
 // Open implements connectip.PacketBackend. It opens the packet path of an
@@ -285,8 +311,8 @@ type packetSession struct {
 // WritePacket forwards a client packet. A full device drops the packet and
 // counts it rather than ending the request.
 func (p *packetSession) WritePacket(pkt []byte) error {
-	if !p.s.forwarding() {
-		return errStopped
+	if err := p.s.stopped(); err != nil {
+		return err
 	}
 	err := p.inner.WritePacket(pkt)
 	if errors.Is(err, unix.EAGAIN) {
@@ -301,10 +327,13 @@ func (p *packetSession) WritePacket(pkt []byte) error {
 // may no longer forward.
 func (p *packetSession) ReadPacket(ctx context.Context, buf []byte) (int, error) {
 	n, err := p.inner.ReadPacket(ctx, buf)
-	if err == nil && !p.s.forwarding() {
-		return 0, errStopped
+	if err != nil {
+		return n, err
 	}
-	return n, err
+	if err := p.s.stopped(); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // Close ends this request's packet registration only.

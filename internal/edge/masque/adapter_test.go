@@ -1049,6 +1049,77 @@ func TestForwardingStops(t *testing.T) {
 	}
 }
 
+// TestPacketPathEndsRequest passes the lease's or the grant's deadline with
+// a request forwarding and lets its packet path notice first, before the
+// renewal loop or the grant timer. The path's error must report the lease
+// ending, Done must already be closed when it returns, as the server reads
+// it next, and the request must be counted under the deadline that passed
+// rather than as closed (issue #1239).
+func TestPacketPathEndsRequest(t *testing.T) {
+	leaseExpires := func(h *harness) { h.clock.advance(2 * time.Hour) }
+	grantExpires := func(h *harness) {
+		h.mu.Lock()
+		h.now = h.now.Add(2 * time.Hour)
+		h.mu.Unlock()
+	}
+	write := func(_ *testing.T, _ *harness, s connectip.BackendSession) error {
+		return s.WritePacket(packet("fd00:10::5"))
+	}
+	read := func(t *testing.T, h *harness, s connectip.BackendSession) error {
+		if _, err := h.host(deviceName(h.attachment(svcA))).Write(packet("fd00:10:0:1:1::9")); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := s.ReadPacket(ctx, make([]byte, 1500))
+		return err
+	}
+	for _, tc := range []struct {
+		name   string
+		stop   func(*harness)
+		io     func(*testing.T, *harness, connectip.BackendSession) error
+		reason string
+	}{
+		{name: "lease expired on write", stop: leaseExpires, io: write, reason: endLeaseLost},
+		{name: "lease expired on read", stop: leaseExpires, io: read, reason: endLeaseLost},
+		{name: "grant expired on write", stop: grantExpires, io: write, reason: endGrantExpired},
+		{name: "grant expired on read", stop: grantExpires, io: read, reason: endGrantExpired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.start()
+			l := h.admit(credA1)
+			s, err := h.a.Open(context.Background(), l.Info())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.WritePacket(packet("fd00:10::5")); err != nil {
+				t.Fatal(err)
+			}
+			h.setCore(nil, nil)
+			want0, closed0 := ends(tc.reason), ends(endClosed)
+			tc.stop(h)
+			err = tc.io(t, h, s)
+			if !errors.Is(err, errStopped) || !errors.Is(err, connectip.ErrLeaseEnded) {
+				t.Errorf("packet I/O = %v, want %v wrapping %v", err, errStopped, connectip.ErrLeaseEnded)
+			}
+			select {
+			case <-l.Done():
+			default:
+				t.Error("Done is open when the packet path reports the stop")
+			}
+			_ = s.Close()
+			_ = l.Close()
+			if got := ends(tc.reason) - want0; got != 1 {
+				t.Errorf("%s request ends rose by %v, want 1", tc.reason, got)
+			}
+			if got := ends(endClosed) - closed0; got != 0 {
+				t.Errorf("closed request ends rose by %v, want 0", got)
+			}
+		})
+	}
+}
+
 // TestFullDeviceDropsPackets fills the device and checks that the request
 // counts the drops and keeps forwarding.
 func TestFullDeviceDropsPackets(t *testing.T) {

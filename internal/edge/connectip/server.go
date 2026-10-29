@@ -622,8 +622,8 @@ func (s *Server) startSession() bool {
 // counted. connect-ip-go checks a packet's addresses as well, before this
 // policy sees a client packet and after it passes a gVPC one; it drops
 // what it refuses without counting it. It returns the cause of the first
-// direction to stop: causePathMTU, causeSlowClient, causeBackendError or
-// causeClientClosed.
+// direction to stop: causeLeaseEnded, causePathMTU, causeSlowClient,
+// causeBackendError or causeClientClosed.
 func (s *Server) proxySession(
 	ctx context.Context, log *slog.Logger, conn tunnel, sess BackendSession, policy *packetPolicy,
 	fwd forwardCounters,
@@ -654,8 +654,7 @@ func (s *Server) proxySession(
 				continue
 			}
 			if err := sess.WritePacket(buf[:n]); err != nil {
-				log.Warn("could not write packet to backend", "error", err)
-				stop(causeBackendError)
+				stop(backendCause(log, "could not write packet to backend", err))
 				return
 			}
 			fwd.toVPC(n)
@@ -678,7 +677,7 @@ func (s *Server) proxySession(
 				if ctx.Err() != nil {
 					stop(causeClientClosed)
 				} else {
-					stop(causeBackendError)
+					stop(backendCause(log, "could not read packet from backend", err))
 				}
 				return
 			}
@@ -715,8 +714,7 @@ func (s *Server) proxySession(
 				continue
 			}
 			if err := sess.WritePacket(icmp); err != nil {
-				log.Warn("could not return ICMP error to backend", "error", err)
-				stop(causeBackendError)
+				stop(backendCause(log, "could not return ICMP error to backend", err))
 				return
 			}
 			fwd.toVPC(len(icmp))
@@ -732,6 +730,18 @@ func (s *Server) proxySession(
 	}
 	wg.Wait()
 	return cause
+}
+
+// backendCause returns the end cause of a backend read or write that failed
+// with err. A backend that stopped because the request's lease ended
+// reports ErrLeaseEnded, which is the lease's end and not a device fault.
+func backendCause(log *slog.Logger, msg string, err error) string {
+	if errors.Is(err, ErrLeaseEnded) {
+		log.Debug(msg, "error", err)
+		return causeLeaseEnded
+	}
+	log.Warn(msg, "error", err)
+	return causeBackendError
 }
 
 // deliveryClock times the writes toward one client for watchDelivery.
