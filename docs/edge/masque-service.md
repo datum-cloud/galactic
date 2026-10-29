@@ -123,3 +123,18 @@ Step 2 has 20 seconds, so give the pod a termination grace period of at least 30
 ## Metrics
 
 `/metrics` serves the instrumentation library's registry: the CONNECT-IP server's request, tunnel and packet metrics (`galactic_connectip_*`) and the adapter's admission, route claim and request state metrics (`galactic_masque_*`), listed in [the MASQUE metrics reference](../observability/masque.md). [Diagnose a MASQUE connector](troubleshooting.md#diagnose-a-masque-connector) uses them with the provider's log lines.
+
+## Verification
+
+`task verify:masque-service`, run from `deploy/containerlab`, deploys this service and the grant authority from `config/masque` in the lab, through the overlays in `deploy/containerlab/resources/masque-service`, and grants its connectors with the [operator commands](masque-authority.md#operator-tasks). Its rows run against real gVPC workloads and cover:
+
+- independent clients connecting, exchanging 1280-byte packets in both directions with a workload on the provider's node and one on the compute node, disconnecting and reconnecting;
+- 401 for an unknown credential and 403 for another VPC's selection;
+- a client refusing a certificate from another CA or for another name, on both transports;
+- return traffic to client-managed addresses in subdivisions of a connector's /96;
+- `grant disable` and credential expiry stopping one connector within their bounds while another keeps forwarding through the same instance;
+- readiness only while the pod holds its Lease;
+- process restart and drain on SIGTERM.
+
+The [lab README](../../deploy/containerlab/README.md#masque-service) lists what the overlays change for the lab.
+
