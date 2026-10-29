@@ -15,6 +15,7 @@ vars:
   KUSTOMIZE_VERSION: v5.8.1
   GO_LICENSES_VERSION: v1.6.0
   PROMETHEUS_VERSION: v3.15.0
+  YQ_VERSION: 4.53.6
   XRAY_VERSION: v26.10.21
   XRAY_SHA256: 0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978
 tasks:
@@ -266,13 +267,13 @@ tasks:
   test:alerts:
     desc: Unit-test the alert rules in config/monitoring/ with promtool
     # promtool reads plain rule files, so the PrometheusRule's spec is
-    # extracted first. Both tools run from their images, so nothing needs
-    # installing; not part of ci, which has no Docker-image dependency of its own.
+    # extracted first. Both tools run from pinned images, so nothing needs
+    # installing. CI runs it in its own job rather than through ci.
     vars:
       ALERTS_DIR: '{{.LOCALBIN}}/alerts-test'
     cmds:
       - mkdir -p {{.ALERTS_DIR}}
-      - docker run --rm -i mikefarah/yq:4 '.spec' < config/monitoring/prometheusrule.yaml > {{.ALERTS_DIR}}/rules.yaml
+      - docker run --rm -i mikefarah/yq:{{.YQ_VERSION}} '.spec' < config/monitoring/prometheusrule.yaml > {{.ALERTS_DIR}}/rules.yaml
       - cp config/monitoring/tests/rules-test.yaml {{.ALERTS_DIR}}/
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} check rules rules.yaml
       - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} test rules rules-test.yaml

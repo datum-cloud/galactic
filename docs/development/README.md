@@ -75,7 +75,10 @@ maintaining copies of those commands or dependency versions in component docs.
 ## CI and release artifacts
 
 The [CI workflow](../../.github/workflows/ci.yaml) separates lint, ordinary unit
-tests, privileged unit tests, builds and e2e checks. The privileged job loads
+tests, privileged unit tests, builds, manifest rendering, alert rule tests and
+e2e checks. `task ci` runs neither the manifest nor the alert job; run
+`task test:manifests` and `task test:alerts` locally when changing those
+files. The privileged job loads
 kernel support and runs root-gated tests that the ordinary unit job cannot
 exercise. The eBPF compiler is pinned in CI because verifier behavior depends
 on the generated program as well as its C source.
