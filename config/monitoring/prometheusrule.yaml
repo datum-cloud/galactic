@@ -2,13 +2,13 @@
 # fabric-config-agent), on fabric routing through the API
 # (fabric-router-controller's deployments, releases and compile results), on
 # galactic-router's BMP export and route installs, on the galactic-nat egress
-# shards' session tables, masquerade ports and uplink NICs, on the
-# fabric-api looking glass's gateway and node sidecars, and on the Galactic
-# Edge foundation's attachments, services and node agents, and on the MASQUE
-# connector's provider pods. A BGP session that drops is also streamed to the BMP collector as
-# a Peer Down carrying the reason and any NOTIFICATION; these rules are the
-# Prometheus-side signal for the same events, so an alert does not depend on
-# the collector or the log pipeline behind it.
+# shards' session tables, masquerade ports and uplink NICs, on the fabric-api
+# looking glass's gateway and node sidecars, and on the Galactic Edge
+# foundation's attachments, services and node agents, and on the MASQUE
+# connector's provider pods. A BGP session that drops is also streamed to the
+# BMP collector as a Peer Down carrying the reason and any NOTIFICATION; these
+# rules are the Prometheus-side signal for the same events, so an alert does
+# not depend on the collector or the log pipeline behind it.
 #
 # This file is the tested source for these rules, not necessarily where they
 # run. A deployment that evaluates its own copy elsewhere changes the rules

@@ -234,8 +234,10 @@ alerts nothing. Each alert names the pod; start from its logs as in
 
 ### GalacticMasqueRequestsFailing
 
-Over a quarter of the pod's requests fail on the provider's side. Find the
-stage that refuses them:
+Over a quarter of the pod's requests fail on the provider's side. A server
+that is closing also refuses with `unavailable`, so first check whether the
+alert follows a rollout or restart of the pod. Otherwise find the stage
+that refuses them:
 
 ```promql
 sum by (outcome) (increase(galactic_masque_admissions_total{pod="<pod>"}[30m]))
