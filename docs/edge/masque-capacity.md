@@ -1,6 +1,6 @@
 # MASQUE capacity
 
-The [MASQUE contract](../designs/masque/contract.md#resource-budgets-and-benchmark-contract) sets initial capacity targets for the CONNECT-IP service and asks for measured results per transport. This page describes the load harness, records the first run, and lists what still needs the target environment. Issue [#984](https://github.com/datum-cloud/galactic/issues/984) tracks the qualification.
+The [MASQUE contract](../designs/masque/contract.md#resource-budgets-and-benchmark-contract) sets initial capacity targets for the CONNECT-IP service and asks for measured results per transport. This page describes the load harness, records the first run, and lists what the qualification run on the containerlab lab covers beyond it. Issue [#984](https://github.com/datum-cloud/galactic/issues/984) tracks the qualification.
 
 ## The harness
 
@@ -98,11 +98,11 @@ The overload runs admitted 64 flood requests each, which held free session slots
 
 ## Still open
 
-Closing #984 needs the run the contract specifies. That means two physical edge nodes and a separate load host at 10 Gbit/s, with real gVPC workloads behind the TUN device, a 2-minute warm-up, a 10-minute measurement, and an untunneled baseline for the added-RTT and loss targets. This harness does not cover:
+Closing #984 needs the qualification run the contract specifies, on the containerlab gvpc lab rather than loopback. `task verify:masque-capacity`, run from `deploy/containerlab`, is that run. It puts the provider on one dfw edge node and the load client on the other, with real gVPC workloads behind the TUN device, a 2-minute warm-up, a 10-minute measurement, three runs, and an untunneled baseline over the same path. It covers what this harness does not:
 
 - the TUN device, attachments, EdgeRoutes and map occupancy;
 - grant authority and lease-renewal API budgets;
-- HTTP/2 under loss or added delay, which needs network emulation;
-- CPU per pod with the client on another host.
+- HTTP/2 and HTTP/3 under 1% loss and 50 ms added delay from `tc netem`;
+- CPU per pod with the client on another node.
 
-Any change to a target needs review before #984 closes.
+The run gates on limits, overload rejection, recovery, expiry under load, isolation and RSS. It reports throughput, p99 added RTT, loss and CPU as measured on the lab host without gating them, because they depend on the hardware. Any change to a target needs review before #984 closes.
