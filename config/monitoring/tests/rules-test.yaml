@@ -2461,6 +2461,32 @@ tests:
                 to release an attachment's host state or sweep expired gates. Deleted attachments stay held by their
                 finalizer and their addresses stay allocated. The agent's log names the error.
 
+  # The threshold is more than two failures per window: about 1.5 per 15
+  # minutes stays quiet, about 3 fires.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_edge_foundation_cleanup_failures_total{job="galactic-edge",node="edge-1"}'
+        values: "0+0.05x120"
+      - series: 'galactic_edge_foundation_cleanup_failures_total{job="galactic-edge",node="edge-2"}'
+        values: "0+0.1x120"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: GalacticEdgeCleanupFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-edge
+              node: edge-2
+            exp_annotations:
+              summary: "galactic-edge on edge-2 keeps failing to release host state"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticedgecleanupfailing"
+              description: >-
+                galactic-edge on edge-2 has failed more than twice in every 15-minute window for 15 minutes
+                to release an attachment's host state or sweep expired gates. Deleted attachments stay held by their
+                finalizer and their addresses stay allocated. The agent's log names the error.
+
   # Either job's scrape down fires; other jobs do not.
   - interval: 30s
     input_series:
