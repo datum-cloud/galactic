@@ -24,7 +24,7 @@ import (
 	connectip "github.com/quic-go/connect-ip-go"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/quic-go/quic-go/qlogwriter"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -39,9 +39,10 @@ const (
 	// able to carry toward the client.
 	MinInnerMTU = 1280
 
-	// DefaultInitialPacketSize is the QUIC packet size the server starts with
-	// when Config.QUICConfig is nil. It leaves room for a MinInnerMTU packet
-	// plus QUIC, HTTP Datagram and context ID overhead.
+	// DefaultInitialPacketSize is the QUIC packet size the server uses when
+	// Config.QUICConfig is nil. It leaves room for a MinInnerMTU packet
+	// plus QUIC, HTTP Datagram and context ID overhead. The server never
+	// grows it; see pathwatch.go.
 	DefaultInitialPacketSize = 1350
 
 	connectIPProtocol = "connect-ip"
@@ -126,9 +127,11 @@ type Config struct {
 	Authority string
 	// TLSConfig holds the server certificate.
 	TLSConfig *tls.Config
-	// QUICConfig is optional; datagrams are always enabled, and
-	// MaxIncomingStreams and HandshakeIdleTimeout come from Limits. When
-	// nil, the initial packet size is DefaultInitialPacketSize.
+	// QUICConfig is optional; datagrams are always enabled, path MTU
+	// discovery is always disabled, and MaxIncomingStreams and
+	// HandshakeIdleTimeout come from Limits. Its InitialPacketSize is the
+	// fixed QUIC packet size, DefaultInitialPacketSize when nil. A Tracer
+	// still receives every event.
 	QUICConfig *quic.Config
 	// Limits is optional; see Limits for the defaults.
 	Limits Limits
@@ -171,6 +174,9 @@ type Server struct {
 
 type quicConnKey struct{}
 
+// pathWatchKey is the request context key of its connection's pathWatch.
+type pathWatchKey struct{}
+
 // NewServer validates cfg and returns a Server. It returns an error when the
 // authority, TLS config, admission authority or backend is missing.
 func NewServer(cfg Config) (*Server, error) {
@@ -201,6 +207,17 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	limits := cfg.Limits.withDefaults()
 	quicConf.EnableDatagrams = true
+	// quic-go never shrinks a size it discovered, so a path that shrank
+	// would drop packets the Packet Too Big check let through.
+	quicConf.DisablePathMTUDiscovery = true
+	innerTracer := quicConf.Tracer
+	quicConf.Tracer = func(ctx context.Context, isClient bool, id quic.ConnectionID) qlogwriter.Trace {
+		var inner qlogwriter.Trace
+		if innerTracer != nil {
+			inner = innerTracer(ctx, isClient, id)
+		}
+		return newPathWatch(inner, log)
+	}
 	quicConf.MaxIncomingStreams = int64(limits.MaxStreamsPerConn)
 	quicConf.HandshakeIdleTimeout = limits.HandshakeTimeout / 2
 
@@ -225,6 +242,10 @@ func NewServer(cfg Config) (*Server, error) {
 		Logger:          log,
 		ConnContext: func(ctx context.Context, c *quic.Conn) context.Context {
 			s.countConn(c)
+			if w, ok := c.QlogTrace().(*pathWatch); ok {
+				w.attach(c)
+				ctx = context.WithValue(ctx, pathWatchKey{}, w)
+			}
 			return context.WithValue(ctx, quicConnKey{}, c)
 		},
 	}
@@ -308,7 +329,7 @@ func (s *Server) serveH3(w http.ResponseWriter, r *http.Request) {
 type transport interface {
 	// probe checks, after admission, that the path can carry a
 	// MinInnerMTU packet toward the client.
-	probe() error
+	probe(ctx context.Context) error
 	// accept answers the request with 2xx and returns its tunnel.
 	accept(w http.ResponseWriter) (tunnel, error)
 }
@@ -323,6 +344,10 @@ type tunnel interface {
 	AssignAddresses(prefixes []netip.Prefix) error
 	AdvertiseRoute(routes []connectip.IPRoute) error
 	receiveAddressRequest(ctx context.Context) (addressRequest, error)
+	// pathLost returns a channel closed once the path toward the client
+	// stops carrying MinInnerMTU packets, or nil when the transport cannot
+	// lose them silently.
+	pathLost() <-chan struct{}
 	Close() error
 	// abort closes whatever must close to unblock a WritePacket that the
 	// client has stopped draining.
@@ -401,7 +426,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, t transport) {
 	default:
 	}
 	// Only an admitted client may receive the probe datagram.
-	if err := t.probe(); err != nil {
+	if err := t.probe(r.Context()); err != nil {
 		s.reject(w, r, http.StatusServiceUnavailable, outcomeMTU, "path cannot carry the minimum inner MTU", err)
 		return
 	}
@@ -660,6 +685,20 @@ func (s *Server) proxySession(
 			fwd.toVPC(n)
 		}
 	})
+	if lost := conn.pathLost(); lost != nil {
+		wg.Go(func() {
+			select {
+			case <-ctx.Done():
+			case <-lost:
+				// The path drops MinInnerMTU packets without an error, so
+				// the dropped packet is counted here, as one.
+				deny(toClient, reasonPathMTU)
+				log.Warn("ending CONNECT-IP session: path stopped carrying the minimum inner MTU",
+					"minimum", MinInnerMTU)
+				stop(causePathMTU)
+			}
+		})
+	}
 	clock := &deliveryClock{base: time.Now()}
 	wg.Go(func() {
 		defer cancel()
@@ -986,21 +1025,43 @@ type h3Request struct {
 	proxy *connectip.Proxy
 }
 
-func (h *h3Request) probe() error { return probeInnerMTU(h.r) }
+// probe sends the client MinInnerMTU probes on the request's stream and
+// waits until the path acknowledges one; see pathWatch.confirm.
+func (h *h3Request) probe(ctx context.Context) error {
+	w, ok := h.r.Context().Value(pathWatchKey{}).(*pathWatch)
+	if !ok {
+		return errors.New("request has no QUIC path watch")
+	}
+	id, err := requestStreamID(h.r)
+	if err != nil {
+		return err
+	}
+	return w.confirm(ctx, id)
+}
 
 func (h *h3Request) accept(w http.ResponseWriter) (tunnel, error) {
 	conn, err := h.proxy.Proxy(w, h.preq)
 	if err != nil {
 		return nil, err
 	}
-	qconn, _ := h.r.Context().Value(quicConnKey{}).(*quic.Conn)
-	return h3Tunnel{Conn: conn, qconn: qconn}, nil
+	t := h3Tunnel{Conn: conn}
+	t.qconn, _ = h.r.Context().Value(quicConnKey{}).(*quic.Conn)
+	if watch, ok := h.r.Context().Value(pathWatchKey{}).(*pathWatch); ok {
+		if id, err := requestStreamID(h.r); err == nil {
+			watch.useStream(id)
+		}
+		t.lost = watch.pathLost()
+	}
+	return t, nil
 }
 
 type h3Tunnel struct {
 	*connectip.Conn
 	qconn *quic.Conn
+	lost  <-chan struct{}
 }
+
+func (t h3Tunnel) pathLost() <-chan struct{} { return t.lost }
 
 func (t h3Tunnel) abort() {
 	_ = t.Close()
@@ -1017,30 +1078,13 @@ func (t h3Tunnel) receiveAddressRequest(ctx context.Context) (addressRequest, er
 	return addressRequest{prefixes: req.Prefixes, respond: req.Respond}, nil
 }
 
-// probeInnerMTU sends the client a datagram on the request's stream that is as
-// large as a MinInnerMTU packet in context 0, but in an unregistered context
-// so the client drops it. It returns an error when the QUIC connection cannot
-// currently send a datagram of that size.
-func probeInnerMTU(r *http.Request) error {
-	conn, ok := r.Context().Value(quicConnKey{}).(*quic.Conn)
-	if !ok {
-		return errors.New("request has no QUIC connection")
-	}
+// requestStreamID returns the QUIC stream ID of an HTTP/3 request.
+func requestStreamID(r *http.Request) (quic.StreamID, error) {
 	body, ok := r.Body.(interface{ StreamID() quic.StreamID })
 	if !ok {
-		return errors.New("request has no stream ID")
+		return 0, errors.New("request has no stream ID")
 	}
-	probe := quicvarint.Append(nil, uint64(body.StreamID()/4))
-	probe = quicvarint.Append(probe, probeContextID)
-	probe = append(probe, make([]byte, MinInnerMTU)...)
-	if err := conn.SendDatagram(probe); err != nil {
-		if tooLarge, ok := errors.AsType[*quic.DatagramTooLargeError](err); ok {
-			return fmt.Errorf("datagram of %d bytes exceeds the current maximum of %d bytes",
-				len(probe), tooLarge.MaxDatagramPayloadSize)
-		}
-		return fmt.Errorf("could not send MTU probe: %w", err)
-	}
-	return nil
+	return body.StreamID(), nil
 }
 
 // routeRanges converts prefixes into a route advertisement sorted as RFC 9484

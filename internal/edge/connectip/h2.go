@@ -175,7 +175,7 @@ type h2Request struct {
 
 // probe accepts every path: a TCP stream carries a capsule of any size, and
 // the tunnel itself sends Packet Too Big above maxH2Packet.
-func (*h2Request) probe() error { return nil }
+func (*h2Request) probe(context.Context) error { return nil }
 
 func (h *h2Request) accept(w http.ResponseWriter) (tunnel, error) {
 	w.Header().Set(capsuleProtocolHeader, "?1")
@@ -373,6 +373,9 @@ func (t *h2Tunnel) writeLocked(b []byte, timed bool) error {
 }
 
 func (t *h2Tunnel) abort() { _ = t.Close() }
+
+// pathLost is nil: TCP carries a capsule of any size or fails visibly.
+func (*h2Tunnel) pathLost() <-chan struct{} { return nil }
 
 // Close stops every read and write on the stream. The handler's return
 // then ends the stream.

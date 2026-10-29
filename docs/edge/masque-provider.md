@@ -67,7 +67,7 @@ A grant that routes IPv4 is refused with 503, so the proxy never advertises IPv4
 - `routing_header`
 - `source`
 - `destination`
-- `path_mtu`, a packet of at most 1280 bytes toward the client that the tunnel can no longer carry. The request ends, as [Packet size](masque-service.md#packet-size) describes
+- `path_mtu`, a packet of at most 1280 bytes toward the client that the tunnel can no longer carry, or, once the HTTP/3 path loses such packets, one for each request it ends. The request ends, as [Packet size](masque-service.md#packet-size) describes
 - `no_session`, a device packet for a /96 with no open request. The kernel's own multicast and link-local packets on the device are dropped without being counted
 - `queue_full`, a device packet dropped because its request's queue toward the client already holds 128 packets or 256 KiB
 - `slow_client`, a packet toward the client whose write stayed blocked for 5 seconds. The request ends, as the [service limits](masque-service.md#configuration) describe

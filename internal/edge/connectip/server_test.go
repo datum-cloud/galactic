@@ -294,10 +294,11 @@ func TestProxyEnforcesPacketPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReceiveDatagram: %v", err)
 		}
-		// Skip the admission MTU probe, which uses an unregistered context ID.
+		// Skip the admission MTU probes, which use an unregistered context
+		// ID: one as large as a MinInnerMTU packet, then an empty one.
 		if data[0] != 0 {
-			if len(data) != 1+MinInnerMTU {
-				t.Errorf("probe datagram has %d bytes, want %d", len(data), 1+MinInnerMTU)
+			if len(data) != 1+MinInnerMTU && len(data) != 1 {
+				t.Errorf("probe datagram has %d bytes, want %d or 1", len(data), 1+MinInnerMTU)
 			}
 			continue
 		}

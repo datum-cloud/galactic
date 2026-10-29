@@ -19,8 +19,8 @@
 // exclusive connector /96 lease on a programmed gVPC attachment. The server
 // validates the grant before opening its packet backend or accepting the tunnel.
 // Invalid credentials produce 401, denied gVPC access 403, and unavailable
-// authority or insufficient datagram capacity 503. Only an admitted HTTP/3
-// request receives the inner MTU probe datagram.
+// authority or a path that does not acknowledge an inner MTU probe 503. Only
+// an admitted HTTP/3 request receives the inner MTU probe datagrams.
 //
 // Config.Limits bounds the work before admission: open QUIC and TCP
 // connections, in total and per source address, the handshake time, request
@@ -43,12 +43,12 @@
 // reverse delivery is restricted to it. TUN demultiplexing uses the delegated
 // prefix within one gVPC, allowing overlapping addresses across gVPCs.
 // Oversized packets toward a client produce ICMP Packet Too Big toward the
-// backend: over HTTP/3 above the path's datagram size, reporting 1280, and
-// over HTTP/2 above 1500 bytes, reporting 1500. Every admitted path must
-// support a 1280-byte inner IPv6 packet. When an HTTP/3 path shrinks so that
-// a packet of at most 1280 bytes no longer fits, the request ends (RFC 9484
-// section 10.1) rather than answering with an error its sender cannot act
-// on.
+// backend: over HTTP/3 above the fixed QUIC packet's datagram size,
+// reporting 1280, and over HTTP/2 above 1500 bytes, reporting 1500. Every
+// admitted path must support a 1280-byte inner IPv6 packet. When an HTTP/3
+// path shrinks so that a packet of at most 1280 bytes no longer fits or no
+// longer arrives, the request ends (RFC 9484 section 10.1) rather than
+// answering with an error its sender cannot act on; see pathwatch.go.
 //
 // The admission adapter owns authentication, allocation, connector identity,
 // claim epochs, route authority and reconnect semantics. It signals expiry or
