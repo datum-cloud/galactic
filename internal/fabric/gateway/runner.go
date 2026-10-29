@@ -273,8 +273,9 @@ func requestErr(ctx context.Context, err error, expired bool) error {
 // one runs q on node n through the cell's executor. request is the request
 // context every node's job shares; it guards the start against a grant the
 // executor hands a queued job after the request ended.
-func (r *Runner) one(request, ctx context.Context, project, requestID string, wire *fabricv1.Query, q query.Query, n Node,
-	budgets *fabricv1.Budgets, expires, deadline time.Time, opts runOptions) (*fabricv1.Observation, error) {
+func (r *Runner) one(request, ctx context.Context, project, requestID string, wire *fabricv1.Query,
+	q query.Query, n Node, budgets *fabricv1.Budgets, expires, deadline time.Time,
+	opts runOptions) (*fabricv1.Observation, error) {
 	actx := ctx
 	if opts.queueWait > 0 {
 		var cancel context.CancelFunc
@@ -326,21 +327,8 @@ func (r *Runner) one(request, ctx context.Context, project, requestID string, wi
 	req := &fabricv1.ExecuteRequest{
 		RequestId: requestID, Node: n.Name, Query: wire, Budgets: budgets, ExpiresAt: timestamppb.New(expires),
 	}
-	if a := r.Admission; a != nil {
-		switch {
-		case q.Type.Probe():
-			if err := r.checkPermits(ctx, c, n); err != nil {
-				return nil, err
-			}
-			if req.Permit, err = a.permit(ctx, project, requestID, n.Name, q, deadline); err != nil {
-				return nil, err
-			}
-		case opts.checkOwnership:
-			if _, _, err := a.Authority.Check(ctx); err != nil {
-				a.Metrics.refused(project, err)
-				return nil, err
-			}
-		}
+	if err := r.admit(ctx, c, n, req, project, requestID, q, deadline, opts.checkOwnership); err != nil {
+		return nil, err
 	}
 	start := r.now()
 	resp, err := c.Execute(ctx, req)
@@ -370,6 +358,34 @@ func (r *Runner) one(request, ctx context.Context, project, requestID string, wi
 		return nil, err
 	}
 	return resp.GetObservation(), nil
+}
+
+// admit fills the admission data on req before the node call: a probe gets a
+// single-attempt permit, and a job that must prove ownership checks the
+// authority. It returns the refusal's error, or nil when the job may start.
+func (r *Runner) admit(ctx context.Context, c fabricv1.FabricServiceClient, n Node, req *fabricv1.ExecuteRequest,
+	project, requestID string, q query.Query, deadline time.Time, checkOwnership bool) error {
+	a := r.Admission
+	if a == nil {
+		return nil
+	}
+	switch {
+	case q.Type.Probe():
+		if err := r.checkPermits(ctx, c, n); err != nil {
+			return err
+		}
+		permit, err := a.permit(ctx, project, requestID, n.Name, q, deadline)
+		if err != nil {
+			return err
+		}
+		req.Permit = permit
+	case checkOwnership:
+		if _, _, err := a.Authority.Check(ctx); err != nil {
+			a.Metrics.refused(project, err)
+			return err
+		}
+	}
+	return nil
 }
 
 // checkPermits refuses a node whose sidecar does not enforce probe permits:
