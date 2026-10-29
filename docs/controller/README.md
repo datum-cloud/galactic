@@ -4,14 +4,14 @@
 
 ## Responsibilities
 
-| Process                                  | Responsibility                                                                                                                                                           |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| NSO cell manager                         | VPC, subnet-status and attachment reconciliation, attachment identifiers and NetworkAttachmentDefinitions when Galactic integration is enabled                           |
-| `galactic-controller --role=cell`        | TrafficPolicy admission, default policies and binding resolution; pod-interface injection; projection of BGP programming status to attachments and NSO interfaces/claims |
-| `galactic-controller --role=cell --edge` | The cell role plus admission, allocation and draining of Edge attachments and acceptance/revocation of Edge route claims                                                 |
-| `galactic-controller --role=fabric`      | Central NetworkFabricIdentity allocation using the federation hub and platform IPAM                                                                                      |
-| `galactic-router`                        | Node BGP and traffic-policy programming and node-owned status                                                                                                            |
-| `galactic-edge`                          | Node-side Edge attachment programming, fencing and release                                                                                                               |
+| Process                                  | Responsibility                                                                                                                                                                                                                                       |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| NSO cell manager                         | VPC, subnet-status and attachment reconciliation, attachment identifiers and NetworkAttachmentDefinitions when Galactic integration is enabled                                                                                                       |
+| `galactic-controller --role=cell`        | TrafficPolicy admission, default policies and binding resolution; pod-interface injection; projection of BGP programming status to attachments and NSO interfaces/claims; [running instances' attachment state](../observability/vpc-attachments.md) |
+| `galactic-controller --role=cell --edge` | The cell role plus admission, allocation and draining of Edge attachments and acceptance/revocation of Edge route claims                                                                                                                             |
+| `galactic-controller --role=fabric`      | Central NetworkFabricIdentity allocation using the federation hub and platform IPAM                                                                                                                                                                  |
+| `galactic-router`                        | Node BGP and traffic-policy programming and node-owned status                                                                                                                                                                                        |
+| `galactic-edge`                          | Node-side Edge attachment programming, fencing and release                                                                                                                                                                                           |
 
 The ownership split above is reflected in `cmd/galactic-controller/main.go` (`SetupCloud`, `Setup`) and `fabric.go`. The [API consolidation migration](../operations/migrations/galactic-api-consolidation.md) describes the transition from the previous cloud controller. Do not run two attachment writers during that transition.
 
