@@ -290,7 +290,7 @@ patches:
 }
 
 // tunPatch is how the lab gives a provider pod /dev/net/tun; see
-// deploy/containerlab/resources/galactic-edge/tun-device-plugin.
+// config/galactic-edge/tun-device-plugin.
 var tunPatch = `  - target:
       kind: Deployment
     patch: |-

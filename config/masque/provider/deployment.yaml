@@ -1,7 +1,7 @@
 # One MASQUE provider instance per pod. The pod needs nothing from its
 # node: no host namespace, hostPath, NET_ADMIN or BPF. galactic-edge creates
 # its packet devices in the pod's own network namespace, and a device
-# plugin gives it /dev/net/tun.
+# plugin (config/galactic-edge/tun-device-plugin) gives it /dev/net/tun.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

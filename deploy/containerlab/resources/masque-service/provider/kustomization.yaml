@@ -4,9 +4,9 @@
 # dfw-worker2. The Secret masque-provider-tls comes from the suite, and the
 # pods trust the CA cert-manager signed the authority's certificate with
 # (../authority/kustomization.yaml). The base's TUN resource,
-# devic.es/tun, is the one the lab's device plugin serves
-# (../galactic-edge/tun-device-plugin), so it is kept. Clients reach the pod
-# directly from its node, so the Service stays ClusterIP.
+# devic.es/tun, is the one the device plugin serves
+# (config/galactic-edge/tun-device-plugin), so it is kept. Clients reach the
+# pod directly from its node, so the Service stays ClusterIP.
 #
 # The edge nodes cannot reach the cluster DNS, so the pod resolves the
 # authority's name through a host alias to the fixed address of its Service
