@@ -1,8 +1,9 @@
-# Scrapes galactic-controller --role=cell's metrics port (metrics, 9184). With
-# --edge it serves the Galactic Edge foundation's state, read from its cache
-# by every replica: attachments, routes and services by provider, state and
-# reason, and core's admission, allocation, policy and route failures. Rules
-# aggregate the replicas with max.
+# Scrapes galactic-controller --role=cell's metrics port (metrics, 9184). It
+# serves whether each running instance's VPC attachments are programmed, and
+# with --edge also the Galactic Edge foundation's state: attachments, routes
+# and services by provider, state and reason, and core's admission,
+# allocation, policy and route failures. Every replica reads the state from
+# its cache, so rules aggregate the replicas with max.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:

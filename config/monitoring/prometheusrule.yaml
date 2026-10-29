@@ -3,10 +3,11 @@
 # (fabric-router-controller's deployments, releases and compile results), on
 # galactic-router's BMP export and route installs, on the galactic-nat egress
 # shards' session tables, masquerade ports and uplink NICs, on the fabric-api
-# looking glass's gateway and node sidecars, and on the Galactic Edge
-# foundation's attachments, services and node agents, and on the MASQUE
-# connector's provider pods. A BGP session that drops is also streamed to the
-# BMP collector as a Peer Down carrying the reason and any NOTIFICATION; these
+# looking glass's gateway and node sidecars, on the Galactic Edge
+# foundation's attachments, services and node agents, on the MASQUE
+# connector's provider pods, and on running instances whose VPC attachments
+# are not programmed. A BGP session that drops is also streamed to the BMP
+# collector as a Peer Down carrying the reason and any NOTIFICATION; these
 # rules are the Prometheus-side signal for the same events, so an alert does
 # not depend on the collector or the log pipeline behind it.
 #
@@ -1449,3 +1450,67 @@ spec:
             description: >-
               Prometheus cannot scrape masque-provider on {{ $labels.pod }}, so the other MASQUE alerts cannot fire
               for it.
+    # Running instances whose VPC attachment their pod or the data plane does
+    # not hold. galactic-controller --role=cell follows every Running pod of a
+    # compute Instance to its VPCAttachments and checks that the pod's Multus
+    # network-status lists each one and that it is Programmed on the pod's
+    # node. A pod that started on the cluster's default network without
+    # Multus, such as during a node boot, can be Ready while it has no VPC
+    # connectivity; only this comparison sees it.
+    # Every replica exports the state, so the rules aggregate with max.
+    - name: galactic-vpc-attachments
+      rules:
+        - alert: GalacticInstanceAttachmentNotProgrammed
+          expr: >-
+            max by (instance_namespace, compute_instance, interface, vpc, attachment, instance_node, location, reason)
+            (galactic_vpc_instance_interface_unprogrammed{job="galactic-controller"}) > 0
+          for: 10m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Instance {{ $labels.instance_namespace }}/{{ $labels.compute_instance }} runs without its {{ $labels.interface }} VPC attachment"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticinstanceattachmentnotprogrammed"
+            description: >-
+              Instance {{ $labels.instance_namespace }}/{{ $labels.compute_instance }} in location
+              {{ $labels.location }} has been Running on {{ $labels.instance_node }} for 10 minutes without
+              interface {{ $labels.interface }}: VPC "{{ $labels.vpc }}", attachment "{{ $labels.attachment }}",
+              reason {{ $labels.reason }}. The interface has no VPC connectivity. PodNotAttached means the pod's
+              Multus network-status does not list the attachment, which a pod started on the default network
+              without Multus leaves; recreating the pod attaches it again. AwaitingDataPlane and NodeMismatch mean
+              the data plane has not advertised it from the pod's node. InterfaceUnbound and AttachmentMissing mean
+              the control plane never finished preparing it.
+        - alert: GalacticInstanceAttachmentStateIncomplete
+          expr: >-
+            max by (pod) (galactic_vpc_instance_interfaces_collect_errors{job="galactic-controller"}) > 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "galactic-controller on {{ $labels.pod }} cannot read instance attachment state"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticinstanceattachmentstateincomplete"
+            description: >-
+              galactic-controller on {{ $labels.pod }} has failed for 10 minutes to list {{ $value }} of the kinds
+              it compares (Pods, Instances, NetworkInterfaces and VPCAttachments). It exports no per-interface
+              state meanwhile, so GalacticInstanceAttachmentNotProgrammed cannot fire from it. Its log names the
+              failing list, which is usually missing RBAC or a CRD that is not installed.
+        # Evaluate this rule only where galactic-controller --role=cell runs:
+        # elsewhere the series is always absent.
+        - alert: GalacticInstanceAttachmentStateAbsent
+          expr: >-
+            absent(galactic_vpc_instance_interfaces_collect_errors{job="galactic-controller"})
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "No galactic-controller exports instance attachment state"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticinstanceattachmentstateabsent"
+            description: >-
+              No galactic-controller replica has exported galactic_vpc_instance_interfaces_collect_errors for 15
+              minutes. The controller is not running, is not scraped, or runs a release without the instance
+              attachment comparison. GalacticInstanceAttachmentNotProgrammed cannot fire until it returns.

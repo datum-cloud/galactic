@@ -3,6 +3,7 @@
 Metrics, scrape configuration, shipped alert rules and log format. Use the subsystem reference for metric names, labels and interpretation.
 
 - [VPC dataplane — `galactic_usid_*`](vpc-dataplane.md)
+- [Instance VPC attachments — `galactic_vpc_instance_*`](vpc-attachments.md)
 - [Tenant egress pool — `galactic_cni_egress_*`](egress-pool.md)
 - [VPC ingress — `galactic_ingress_sidecar_*`](vpc-ingress.md)
 - [Edge load balancer — `galactic_edge_*`](gateway.md)
@@ -78,6 +79,7 @@ the fabric-api gateway are Deployments, scraped per pod.
 | Private service routes  | `galactic-router` (plain mode only)                       | `galactic_service_route_*`                                    | 9179           | `galactic-router`                        |
 | Traffic policy          | `galactic-router` with `GALACTIC_ROUTER_TRAFFIC_POLICY`   | `galactic_cni_traffic_policy_*`                               | 9179           | `galactic-router`                        |
 | Traffic policy webhook  | `galactic-controller`                                     | controller-runtime                                            | 9184           | `galactic-controller`                    |
+| Instance attachments    | `galactic-controller --role=cell`                         | `galactic_vpc_instance_*`                                     | 9184           | `galactic-controller`                    |
 | Galactic Edge (core)    | `galactic-controller --role=cell --edge`                  | `galactic_edge_foundation_*`                                  | 9184           | `galactic-controller`                    |
 | Galactic Edge (node)    | `galactic-edge`                                           | `galactic_edge_foundation_*`, controller-runtime              | 9186           | `galactic-edge`                          |
 | Underlay routing (FRR)  | `fabric-router` `frr-exporter` sidecar                    | `frr_*`                                                       | 9342           | `fabric-router`                          |
