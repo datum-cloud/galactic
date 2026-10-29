@@ -137,4 +137,3 @@ Step 2 has 20 seconds, so give the pod a termination grace period of at least 30
 - process restart and drain on SIGTERM.
 
 The [lab README](../../deploy/containerlab/README.md#masque-service) lists what the overlays change for the lab.
-
