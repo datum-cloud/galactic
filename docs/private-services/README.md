@@ -68,7 +68,9 @@ How flows are spread:
 
 - A TCP connection goes to the producer that received its first packet and
   stays there while that producer is in the node's set, even after its health
-  check fails. A new connection goes to a producer chosen by its flow hash.
+  check fails. A new connection goes to the eligible producer that rendezvous
+  hashing of its flow ranks first, so a producer joining or leaving moves only
+  the connections it gains or loses.
 - Each UDP datagram picks a producer at random, so the requests of one socket
   spread too. This suits request/response protocols such as DNS. It does not
   suit a protocol that needs a UDP flow to stay on one producer, such as QUIC;
@@ -121,26 +123,30 @@ longest request, then stop it. Its in-flight requests and open connections
 finish while new ones go to the other producers.
 
 When the consumer's node has no producer, `PreferNodeLocal` sends the consumer
-to one remote producer, through the SRv6 service tunnel as with `Single`. It is
-the first producer by namespace and name whose node currently reports it
-`Healthy` or `Unknown`, or has no entry for it. If there is none, it is the
-first producer whose entry expired, and failing that the first producer. So
-when a node goes down while its producers' attachments still read ready,
-consumers on other nodes move off those producers within 60 seconds of the
-node's last renewal, as long as another node currently reports a producer that
-can take them. A remote consumer does not spread. While a health change reaches the
+to one remote producer, through the SRv6 service tunnel as with `Single`.
+Rendezvous hashing of the consumer's and each producer's attachment UID picks
+it, among the producers whose node currently reports them `Healthy` or
+`Unknown`, or has no entry for them. If there are none, it picks among the
+producers whose entry expired, and failing that among all producers. So
+consumers spread across the remote producers, and a producer joining, leaving
+or turning `Unhealthy` moves only the consumers it gains or loses. When a node
+goes down while its producers' attachments still read ready, its consumers move
+to other producers within 60 seconds of the node's last renewal, as long as
+another node currently reports a producer that can take them. Each consumer's
+requests all go to its one remote producer. While a health change reaches the
 consumer's node and the producer's node at different moments, the two can
 briefly disagree on that producer, and its requests are refused until they
 agree.
 
-A TCP connection keeps its producer only while its pin lasts. A pin ends after
-300 seconds without traffic, the same idle limit replies already have, or when
-the node evicts it under load or reloads the datapath. A packet of an
-established connection with no pin goes to the producer its hash picks among
-the current eligible ones, so if that set changed since the connection opened,
-the connection resets. Changing an endpoint between `Single` and `Spread`
-replaces its routes, which can drop a request in flight and moves existing TCP
-connections.
+A TCP connection's pin ends after 300 seconds without traffic, the same idle
+limit replies have, or when the node evicts it under load or reloads the
+datapath. A packet of an established connection with no pin stays with the
+producer whose reply row, which the node keeps for four times as many flows,
+shows it already carries the connection. Only a connection with neither is
+placed by its hash again: it stays with its producer unless a producer that
+joined since ranks first for it. Changing an endpoint between `Single` and
+`Spread` replaces its routes, which can drop a request in flight and moves
+existing TCP connections.
 
 A `galactic-router` without report renewal writes no `renewTime`, so while
 routers are being upgraded, consumers on upgraded nodes treat the entries of

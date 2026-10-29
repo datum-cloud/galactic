@@ -169,16 +169,19 @@ func TestCompileSpreadFallsBackToHealthyRemoteProducer(t *testing.T) {
 		return got[0].ProducerAttachment
 	}
 
-	if got := remote(); got.Name != firstRemoteProducer {
-		t.Fatalf("remote producer = %s, want a-remote", got)
+	chosen := remote()
+	other := map[string]*cloudv1alpha1.VPCAttachment{first.Name: last, last.Name: first}[chosen.Name]
+	if other == nil {
+		t.Fatalf("remote producer = %s, want a-remote or z-remote", chosen)
 	}
-	reportHealth(endpoint, first, networkv1alpha1.BackendHealthUnhealthy)
-	if got := remote(); got.Name != "z-remote" {
-		t.Fatalf("remote producer with a-remote Unhealthy = %s, want z-remote", got)
+	reportHealth(endpoint, map[string]*cloudv1alpha1.VPCAttachment{first.Name: first, last.Name: last}[chosen.Name],
+		networkv1alpha1.BackendHealthUnhealthy)
+	if got := remote(); got.Name != other.Name {
+		t.Fatalf("remote producer with %s Unhealthy = %s, want %s", chosen.Name, got, other.Name)
 	}
-	reportHealth(endpoint, last, networkv1alpha1.BackendHealthUnhealthy)
-	if got := remote(); got.Name != firstRemoteProducer {
-		t.Fatalf("remote producer with both Unhealthy = %s, want a-remote", got)
+	reportHealth(endpoint, other, networkv1alpha1.BackendHealthUnhealthy)
+	if got := remote(); got != chosen {
+		t.Fatalf("remote producer with both Unhealthy = %s, want %s again", got, chosen)
 	}
 
 	// Two producers on one remote node are told apart by their SIDs.
@@ -186,8 +189,9 @@ func TestCompileSpreadFallsBackToHealthyRemoteProducer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compile on the producer node: %v", err)
 	}
-	if len(got) != 1 || got[0].Kind != RouteIntentRemoteProducer || got[0].ServiceDevice != "remote-a" {
-		t.Fatalf("producer node intents = %+v, want one RemoteProducer half through remote-a", got)
+	want := map[string]string{first.Name: "remote-a", last.Name: "remote-z"}[chosen.Name]
+	if len(got) != 1 || got[0].Kind != RouteIntentRemoteProducer || got[0].ServiceDevice != want {
+		t.Fatalf("producer node intents = %+v, want one RemoteProducer half through %s", got, want)
 	}
 }
 
@@ -268,9 +272,15 @@ func TestCompileSpreadAvoidsRemoteProducersWithExpiredReports(t *testing.T) {
 		t.Fatalf("remote producer with z-remote Unhealthy = %s, want a-remote", got)
 	}
 	endpoint.Status.Producers[1].State = networkv1alpha1.BackendHealthHealthy
+	// With every report expired, the consumer goes where it would with no
+	// reports at all.
 	expireReport(endpoint)
-	if got := remote(); got != firstRemoteProducer {
-		t.Fatalf("remote producer with every report expired = %s, want a-remote", got)
+	reports := endpoint.Status.Producers
+	endpoint.Status.Producers = nil
+	unreported := remote()
+	endpoint.Status.Producers = reports
+	if got := remote(); got != unreported {
+		t.Fatalf("remote producer with every report expired = %s, want %s as with no reports", got, unreported)
 	}
 }
 
@@ -323,5 +333,114 @@ func TestCompileSpreadRefusesMoreProducersThanASetHolds(t *testing.T) {
 		!strings.Contains(err.Error(), `node "node-a"`) {
 		t.Fatalf("Compile with %d producers on one node: err=%v, want a refusal naming the node",
 			len(attachments)-1, err)
+	}
+}
+
+// remoteAssignments compiles policy on testNodeName and returns the remote
+// producer each consumer there is sent to.
+func remoteAssignments(t *testing.T, policy *networkv1alpha1.ServiceRoutePolicy,
+	endpoint *networkv1alpha1.ServiceEndpoint, attachments []*cloudv1alpha1.VPCAttachment,
+) map[string]string {
+	t.Helper()
+	resolver := func(attachment *cloudv1alpha1.VPCAttachment) (net.IP, error) {
+		return net.ParseIP("fd00::1"), nil
+	}
+	intents, err := Compile(policy, endpoint, attachments, testNodeName, resolver)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := map[string]string{}
+	for _, intent := range intents {
+		if intent.Kind != RouteIntentRemoteConsumer {
+			t.Fatalf("intent = %+v, want RemoteConsumer", intent)
+		}
+		got[intent.Attachment.Name] = intent.ProducerAttachment.Name
+	}
+	return got
+}
+
+// Consumers with no producer on their node spread across the remote
+// producers, and a producer joining, leaving or turning Unhealthy moves only
+// the consumers it gains or loses.
+func TestCompileSpreadSpreadsConsumersAcrossRemoteProducers(t *testing.T) {
+	policy, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+	consumers := make([]*cloudv1alpha1.VPCAttachment, 0, 64)
+	producers := make([]*cloudv1alpha1.VPCAttachment, 0, 5)
+	for i := range cap(consumers) {
+		consumers = append(consumers, readyAttachment(eligibilityNamespace, fmt.Sprintf("consumer-%02d", i),
+			fmt.Sprintf("consumer-uid-%02d", i), testNodeName, fmt.Sprintf("consumer%d", i),
+			testLabels(testAccessLabel, "yes")))
+	}
+	for i := range cap(producers) {
+		producers = append(producers, readyAttachment(spreadProducerNamespace, fmt.Sprintf("producer-%d", i),
+			fmt.Sprintf("producer-uid-%d", i), fmt.Sprintf("node-p%d", i), fmt.Sprintf("remote%d", i),
+			testLabels(testProducerLabel, "yes")))
+	}
+	all := slices.Concat(consumers, producers[:4])
+	before := remoteAssignments(t, policy, endpoint, all)
+	if len(before) != len(consumers) {
+		t.Fatalf("assignments = %d, want %d", len(before), len(consumers))
+	}
+	load := map[string]int{}
+	for _, producer := range before {
+		load[producer]++
+	}
+	for _, producer := range producers[:4] {
+		if load[producer.Name] == 0 {
+			t.Fatalf("producer %s took no consumer: %v", producer.Name, load)
+		}
+	}
+
+	// moved returns the consumers whose producer changed, failing if any
+	// moved for a reason other than allowed.
+	moved := func(after map[string]string, allowed func(from, to string) bool) int {
+		t.Helper()
+		n := 0
+		for consumer, from := range before {
+			to := after[consumer]
+			if from == to {
+				continue
+			}
+			if !allowed(from, to) {
+				t.Fatalf("consumer %s moved from %s to %s", consumer, from, to)
+			}
+			n++
+		}
+		return n
+	}
+
+	// Each producer's node installs the producer half of exactly the
+	// pairings the consumer's node chose.
+	for _, producer := range producers[:4] {
+		intents, err := Compile(policy, endpoint, all, producer.Status.Node,
+			func(*cloudv1alpha1.VPCAttachment) (net.IP, error) { return net.ParseIP("fd00::1"), nil })
+		if err != nil {
+			t.Fatalf("Compile on %s: %v", producer.Status.Node, err)
+		}
+		if len(intents) != load[producer.Name] {
+			t.Fatalf("%s has %d producer halves, want %d", producer.Name, len(intents), load[producer.Name])
+		}
+		for _, intent := range intents {
+			if intent.Kind != RouteIntentRemoteProducer || before[intent.Attachment.Name] != producer.Name {
+				t.Fatalf("%s installs %+v, but the consumer's node chose %s",
+					producer.Name, intent, before[intent.Attachment.Name])
+			}
+		}
+	}
+
+	joined := remoteAssignments(t, policy, endpoint, slices.Concat(consumers, producers))
+	if moved(joined, func(_, to string) bool { return to == producers[4].Name }) == 0 {
+		t.Fatalf("producer-4 joined but took no consumer")
+	}
+	left := remoteAssignments(t, policy, endpoint, slices.Concat(consumers, producers[1:4]))
+	fromFirst := func(from, _ string) bool { return from == producers[0].Name }
+	if got := moved(left, fromFirst); got != load[producers[0].Name] {
+		t.Fatalf("producer-0 left: %d consumers moved, want its %d", got, load[producers[0].Name])
+	}
+	reportHealth(endpoint, producers[1], networkv1alpha1.BackendHealthUnhealthy)
+	unhealthy := remoteAssignments(t, policy, endpoint, all)
+	fromSecond := func(from, _ string) bool { return from == producers[1].Name }
+	if got := moved(unhealthy, fromSecond); got != load[producers[1].Name] {
+		t.Fatalf("producer-1 Unhealthy: %d consumers moved, want its %d", got, load[producers[1].Name])
 	}
 }

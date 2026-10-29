@@ -81,7 +81,7 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 			continue
 		}
 		selected++
-		local, p := selectProducers(endpoint, a.Status.Node, producers, health)
+		local, p := selectProducers(endpoint, a, producers, health)
 		if len(local) != 0 {
 			p = local[0]
 		}

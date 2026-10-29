@@ -250,6 +250,7 @@ static long (*bpf_skb_change_head)(struct __sk_buff *skb, __u32 len, __u64 flags
 // bytes, the space a 4-bit data offset leaves after the 20-byte fixed header.
 #define USID_TCP_FLAGS_OFFSET 13
 #define USID_TCP_FLAG_SYN 0x02
+#define USID_TCP_FLAG_ACK 0x10
 #define USID_TCP_MAX_OPTIONS_LEN 40
 // How many options clamp_tcp_mss walks before giving up, NOPs included. The
 // verifier's cost for the walk grows linearly up to about 20 steps and then
@@ -1571,8 +1572,8 @@ struct {
 // service_reverse_table: a pin only chooses among the route's current
 // members, so a stale one grants nothing. An LRU map is always preallocated,
 // and galactic-cni's memory cgroup pays for it, so it holds a quarter of the
-// reverse table's flows; an evicted pin's next packet takes the producer its
-// hash picks, the same one while the set is unchanged.
+// reverse table's flows; an evicted pin's next packet keeps the producer its
+// reverse row names, and only a flow with neither is placed by its hash.
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 32768);
@@ -3962,7 +3963,7 @@ static USID_ALWAYS_INLINE int parse_service_packet(struct __sk_buff *skb, __be16
 						    struct service_fib_scratch_value *scratch);
 static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_value *s);
 static USID_NOINLINE int service_select_producer(struct service_fib_scratch_value *s, __u32 ifindex,
-						 __u32 *target_ifindex, __u64 *producer_token);
+						 __u32 *target_ifindex, __u64 *producer_token, int opening);
 static USID_ALWAYS_INLINE int service_local_route_has_producer(const struct service_route_key *key,
 							       const struct service_route_value *route,
 							       __u32 producer_ifindex, __u64 producer_token);
@@ -4975,19 +4976,51 @@ static USID_ALWAYS_INLINE __u32 service_flow_hash(const struct service_reverse_k
 	return h;
 }
 
+// service_load_flow_key fills s->reverse with the consumer flow's forward
+// tuple on ifindex, the key of its pin in service_flow_table.
+static USID_ALWAYS_INLINE void service_load_flow_key(struct service_fib_scratch_value *s, __u32 ifindex)
+{
+	__builtin_memset(&s->reverse, 0, sizeof(s->reverse));
+	s->reverse.ingress_ifindex = ifindex;
+	s->reverse.family = s->meta_family;
+	s->reverse.protocol = s->protocol;
+	s->reverse.source_port = s->source_port;
+	s->reverse.dest_port = s->dest_port;
+	__builtin_memcpy(s->reverse.source_addr, s->source_addr, 16);
+	__builtin_memcpy(s->reverse.dest_addr, s->dest_addr, 16);
+}
+
+// service_rendezvous_score ranks member token for a flow hash. The member with
+// the highest score takes the flow, so a member joining or leaving the
+// eligible set moves only the flows it gains or loses. The SplitMix64
+// finalizer spreads tokens that differ in few bits.
+static USID_ALWAYS_INLINE __u64 service_rendezvous_score(__u32 hash, __u64 token)
+{
+	__u64 x = ((__u64) hash * 0x9e3779b97f4a7c15ULL) ^ token;
+	x ^= x >> 30;
+	x *= 0xbf58476d1ce4e5b9ULL;
+	x ^= x >> 27;
+	x *= 0x94d049bb133111ebULL;
+	return x ^ (x >> 31);
+}
+
 // service_select_producer picks the producer of the LocalSet route under
 // s->route for the packet s describes, arriving on ifindex. A TCP packet keeps
 // the producer its flow is pinned to while that producer is still a member,
-// draining or not; otherwise, and for a new TCP flow, it takes an eligible
-// producer by the flow's hash and pins it. A UDP packet takes an eligible
-// producer at random, so the requests of one socket spread too. A member
-// whose interface identity no longer matches its token is never kept or
-// pinned, so a flow retried while the router repairs the set is not held to
-// it. It returns nonzero when the route has no producer set, no eligible
-// producer, or picked a member with a stale identity. It overwrites
-// s->reverse.
+// draining or not. Without a live pin, a packet other than an opening SYN keeps
+// the member whose live reverse row shows it already carries this consumer's
+// flow, since service_reverse_table holds four times the flows
+// service_flow_table does; an opening SYN skips that row, so a reused tuple
+// cannot reach a draining producer. Otherwise, and for a new TCP flow, it takes
+// the eligible producer that rendezvous hashing of the flow ranks first, and
+// pins it. A UDP packet takes an eligible producer at random, so the requests
+// of one socket spread too. A member whose interface identity no longer matches
+// its token is never kept or pinned, so a flow retried while the router repairs
+// the set is not held to it. It returns nonzero when the route has no producer
+// set, no eligible producer, or picked a member with a stale identity. It
+// overwrites s->reverse.
 static USID_NOINLINE int service_select_producer(struct service_fib_scratch_value *s, __u32 ifindex,
-						 __u32 *target_ifindex, __u64 *producer_token)
+						 __u32 *target_ifindex, __u64 *producer_token, int opening)
 {
 	struct service_producer_set_value *set = bpf_map_lookup_elem(&service_producer_set_table, &s->route);
 	if (!set)
@@ -4997,15 +5030,9 @@ static USID_NOINLINE int service_select_producer(struct service_fib_scratch_valu
 		return -1;
 	__u64 now = bpf_ktime_get_ns();
 	int tcp = s->protocol == USID_IPPROTO_TCP;
+	__u32 index = SERVICE_PRODUCER_SET_MAX;
 	if (tcp) {
-		__builtin_memset(&s->reverse, 0, sizeof(s->reverse));
-		s->reverse.ingress_ifindex = ifindex;
-		s->reverse.family = s->meta_family;
-		s->reverse.protocol = s->protocol;
-		s->reverse.source_port = s->source_port;
-		s->reverse.dest_port = s->dest_port;
-		__builtin_memcpy(s->reverse.source_addr, s->source_addr, 16);
-		__builtin_memcpy(s->reverse.dest_addr, s->dest_addr, 16);
+		service_load_flow_key(s, ifindex);
 		struct service_flow_value *pin = bpf_map_lookup_elem(&service_flow_table, &s->reverse);
 		if (pin && now - pin->last_seen_ns <= SERVICE_FLOW_TIMEOUT_NS) {
 #pragma unroll
@@ -5020,17 +5047,58 @@ static USID_NOINLINE int service_select_producer(struct service_fib_scratch_valu
 				}
 			}
 		}
+
+		// Probe each member for the reply row this flow's packets left.
+		if (opening)
+			goto place;
+		__builtin_memset(&s->reverse, 0, sizeof(s->reverse));
+		s->reverse.family = s->meta_family;
+		s->reverse.protocol = s->protocol;
+		s->reverse.source_port = s->dest_port;
+		s->reverse.dest_port = s->source_port;
+		__builtin_memcpy(s->reverse.source_addr, s->dest_addr, 16);
+		__builtin_memcpy(s->reverse.dest_addr, s->source_addr, 16);
+#pragma unroll
+		for (int i = 0; i < SERVICE_PRODUCER_SET_MAX; i++) {
+			if ((__u32) i >= count || index != SERVICE_PRODUCER_SET_MAX)
+				continue;
+			s->reverse.ingress_ifindex = set->members[i].ifindex;
+			struct service_reverse_value *row = bpf_map_lookup_elem(&service_reverse_table, &s->reverse);
+			if (row && row->mode == SERVICE_ROUTE_MODE_LOCAL && row->consumer_ifindex == ifindex &&
+			    row->producer_token == set->members[i].token &&
+			    now - row->last_seen_ns <= SERVICE_FLOW_TIMEOUT_NS &&
+			    service_identity_matches(set->members[i].ifindex, set->members[i].token))
+				index = i;
+		}
+place:
+		service_load_flow_key(s, ifindex);
 	}
-	__u32 eligible = set->eligible_count;
-	if (eligible == 0 || eligible > count)
-		return -1;
-	__u32 slot = (tcp ? service_flow_hash(&s->reverse) : bpf_get_prandom_u32()) % eligible;
-	// The compiler knows slot < 16 and drops a plain mask, which the verifier
+	if (index == SERVICE_PRODUCER_SET_MAX) {
+		__u32 eligible = set->eligible_count;
+		if (eligible == 0 || eligible > count)
+			return -1;
+		__u32 hash = tcp ? service_flow_hash(&s->reverse) : bpf_get_prandom_u32();
+		__u64 best = 0;
+#pragma unroll
+		for (int i = 0; i < SERVICE_PRODUCER_SET_MAX; i++) {
+			if ((__u32) i >= eligible)
+				continue;
+			__u32 candidate = set->eligible[i];
+			if (candidate >= count)
+				return -1;
+			USID_BARRIER_VAR(candidate);
+			__u64 score = service_rendezvous_score(hash,
+				set->members[candidate & (SERVICE_PRODUCER_SET_MAX - 1)].token);
+			if (index == SERVICE_PRODUCER_SET_MAX || score > best) {
+				index = candidate;
+				best = score;
+			}
+		}
+		if (index >= count)
+			return -1;
+	}
+	// The compiler knows index < 16 and drops a plain mask, which the verifier
 	// needs to bound the map value offsets.
-	USID_BARRIER_VAR(slot);
-	__u32 index = set->eligible[slot & (SERVICE_PRODUCER_SET_MAX - 1)];
-	if (index >= count)
-		return -1;
 	USID_BARRIER_VAR(index);
 	struct service_producer_member *member = &set->members[index & (SERVICE_PRODUCER_SET_MAX - 1)];
 	if (!service_identity_matches(member->ifindex, member->token))
@@ -5325,7 +5393,14 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	__u32 target_ifindex = route->target_ifindex;
 	__u64 producer_token = route->producer_token;
 	if (route->mode == SERVICE_ROUTE_MODE_LOCAL_SET) {
-		if (service_select_producer(s, ifindex, &target_ifindex, &producer_token) ||
+		__u8 flags = 0;
+		if (s->protocol == USID_IPPROTO_TCP &&
+		    bpf_skb_load_bytes(skb, s->l4_offset + USID_TCP_FLAGS_OFFSET, &flags, 1)) {
+			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+			return TC_ACT_SHOT;
+		}
+		int opening = (flags & (USID_TCP_FLAG_SYN | USID_TCP_FLAG_ACK)) == USID_TCP_FLAG_SYN;
+		if (service_select_producer(s, ifindex, &target_ifindex, &producer_token, opening) ||
 		    !service_identity_matches(target_ifindex, producer_token)) {
 			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 			return TC_ACT_SHOT;
