@@ -45,9 +45,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: masque-provider
-          # ":latest" is a placeholder the overlay replaces with a published
-          # tag. CI does not stamp it into the galactic-kustomize bundle
-          # until the #980 lab run passes.
+          # ":latest" is a placeholder: CI stamps the published tag into the
+          # galactic-kustomize bundle (.github/workflows/publish.yaml).
           image: ghcr.io/datum-cloud/masque-provider:latest
           args:
             - --provider=masque

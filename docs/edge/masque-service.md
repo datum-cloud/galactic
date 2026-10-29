@@ -13,7 +13,7 @@ Images:
 
 ## Deployment
 
-`config/masque` holds the manifests. None of them is in the root `config/kustomization.yaml`, and until the [#980](https://github.com/datum-cloud/galactic/issues/980) lab run passes CI does not stamp their image tags into the `galactic-kustomize` bundle. The bundle carries them with `:latest`, so an overlay pins both image tags itself.
+`config/masque` holds the manifests. None of them is in the root `config/kustomization.yaml`. CI stamps both images into the `galactic-kustomize` bundle at the tag of the same build, so an overlay of that bundle needs no image pin.
 
 | Path                      | Applies                                                                                                      | Needs from an overlay                                                                                                                 |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
