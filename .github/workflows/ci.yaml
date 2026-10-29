@@ -266,7 +266,6 @@ jobs:
       - name: Render the manifests and check log settings
         run: task test:manifests
 
-  # promtool unit tests for config/monitoring/prometheusrule.yaml.
   alerts:
     name: Alerts
     runs-on: ubuntu-latest
