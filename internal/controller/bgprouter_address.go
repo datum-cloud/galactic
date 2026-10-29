@@ -5,70 +5,82 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	api "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/reconcile"
 )
 
-func (r *BGPRouterReconciler) prepareCoordinatedAdvertisements(ctx context.Context, router *api.BGPRouter) error {
+func (r *BGPRouterReconciler) prepareCoordinatedAdvertisements(
+	ctx context.Context, router *api.BGPRouter,
+) (map[string]bool, error) {
 	if router.Spec.TargetRef.Name != r.NodeName {
-		return nil
+		return nil, nil
 	}
+	advertisements := &api.BGPAdvertisementList{}
+	if err := r.List(ctx, advertisements, client.InNamespace(router.Namespace),
+		client.MatchingFields{BGPAdvByRouterName: router.Name}); err != nil {
+		return nil, err
+	}
+	fenced := make(map[string]bool)
+	for i := range advertisements.Items {
+		advertisement := &advertisements.Items[i]
+		if advertisement.Labels[serviceAddressLabel] == "" {
+			continue
+		}
+		if err := r.prepareCoordinatedAdvertisement(ctx, router, advertisement); err != nil {
+			fenced[advertisement.Name] = true
+			log.FromContext(ctx).Error(err, "fence coordinated advertisement after preparation failure",
+				"advertisement", client.ObjectKeyFromObject(advertisement))
+		}
+	}
+	return fenced, nil
+}
+
+func (r *BGPRouterReconciler) prepareCoordinatedAdvertisement(
+	ctx context.Context, router *api.BGPRouter, candidate *api.BGPAdvertisement,
+) error {
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
-	advertisements := &api.BGPAdvertisementList{}
-	if err := reader.List(ctx, advertisements, client.InNamespace(router.Namespace)); err != nil {
+	advertisement := &api.BGPAdvertisement{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(candidate), advertisement); err != nil {
 		return err
 	}
-	for i := range advertisements.Items {
-		advertisement := &advertisements.Items[i]
-		if advertisement.Spec.RouterRef.Name != router.Name || advertisement.Labels[serviceAddressLabel] == "" {
-			continue
-		}
-		guarded := controllerutil.ContainsFinalizer(advertisement, reconcile.CoordinatedAdvertisementFinalizer)
-		if advertisement.DeletionTimestamp.IsZero() {
-			if guarded {
-				continue
-			}
-			base := advertisement.DeepCopy()
-			controllerutil.AddFinalizer(advertisement, reconcile.CoordinatedAdvertisementFinalizer)
-			patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
-			if err := r.Patch(ctx, advertisement, patch); err != nil {
-				return err
-			}
-			continue
-		}
-		if !guarded {
-			continue
-		}
-		status, err := r.RuntimeManager.Status(ctx, client.ObjectKeyFromObject(router))
-		if err != nil {
-			return err
-		}
-		installed := false
-		for _, owner := range status.Advertisements {
-			if owner.Name == advertisement.Name {
-				installed = true
-				break
-			}
-		}
-		if installed {
-			continue
+	if advertisement.UID != candidate.UID || advertisement.Spec.RouterRef.Name != router.Name ||
+		advertisement.Labels[serviceAddressLabel] == "" {
+		return errors.New("advertisement identity changed during preparation")
+	}
+	guarded := controllerutil.ContainsFinalizer(advertisement, reconcile.CoordinatedAdvertisementFinalizer)
+	if advertisement.DeletionTimestamp.IsZero() {
+		if guarded {
+			return nil
 		}
 		base := advertisement.DeepCopy()
-		controllerutil.RemoveFinalizer(advertisement, reconcile.CoordinatedAdvertisementFinalizer)
-		patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
-		if err := r.Patch(ctx, advertisement, patch); err != nil {
-			return err
+		controllerutil.AddFinalizer(advertisement, reconcile.CoordinatedAdvertisementFinalizer)
+		return r.Patch(ctx, advertisement, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	}
+	if !guarded {
+		return nil
+	}
+	status, err := r.RuntimeManager.Status(ctx, client.ObjectKeyFromObject(router))
+	if err != nil {
+		return err
+	}
+	for _, owner := range status.Advertisements {
+		if owner.Name == advertisement.Name {
+			return nil
 		}
 	}
-	return nil
+	base := advertisement.DeepCopy()
+	controllerutil.RemoveFinalizer(advertisement, reconcile.CoordinatedAdvertisementFinalizer)
+	return r.Patch(ctx, advertisement, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 func (r *BGPRouterReconciler) releaseStoppedRouterAdvertisements(ctx context.Context, key types.NamespacedName) error {

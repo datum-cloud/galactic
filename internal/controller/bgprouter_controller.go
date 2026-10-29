@@ -114,12 +114,13 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.prepareCoordinatedAdvertisements(ctx, router); err != nil {
+	fenced, err := r.prepareCoordinatedAdvertisements(ctx, router)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Build desired state.
-	desired, err := r.Reconciler.BuildDesiredRouter(ctx, router)
+	desired, err := r.Reconciler.BuildDesiredRouterExcluding(ctx, router, fenced)
 	if err != nil {
 		routerCopy := router.DeepCopy()
 		setRouterPhase(routerCopy, bgpv1alpha1.BGPRouterPhaseFailed)
@@ -693,6 +694,9 @@ func (r *BGPRouterReconciler) advertisementRequeueAfter(
 	}
 	delay := peerStatusRequeue
 	for _, adv := range advertisements.Items {
+		if adv.Labels[serviceAddressLabel] != "" {
+			delay = min(delay, advertisementLeaseRequeue)
+		}
 		if adv.Spec.ExpiresAt == nil {
 			continue
 		}

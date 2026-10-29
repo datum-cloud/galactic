@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
@@ -83,6 +84,13 @@ func New(c client.Client, nodeName, localAddress string) *Reconciler {
 func (r *Reconciler) BuildDesiredRouter(
 	ctx context.Context, router *bgpv1alpha1.BGPRouter,
 ) (*model.DesiredRouter, error) {
+	return r.BuildDesiredRouterExcluding(ctx, router, nil)
+}
+
+// BuildDesiredRouterExcluding also fences advertisements whose preparation failed.
+func (r *Reconciler) BuildDesiredRouterExcluding(
+	ctx context.Context, router *bgpv1alpha1.BGPRouter, excluded map[string]bool,
+) (*model.DesiredRouter, error) {
 	// Node and owner check: skip routers that don't target this node, and
 	// routers naming a routerClassName, which belong to another
 	// implementation (the fabric underlay) even on this node.
@@ -116,9 +124,14 @@ func (r *Reconciler) BuildDesiredRouter(
 	active := advList.Items[:0]
 	now := time.Now()
 	for _, adv := range advList.Items {
+		if excluded[adv.Name] {
+			continue
+		}
 		current, allowed, err := r.coordinatedAdvertisement(ctx, &adv)
 		if err != nil {
-			return nil, err
+			log.FromContext(ctx).Error(err, "fence advertisement with unreadable allocation authority",
+				"advertisement", client.ObjectKeyFromObject(&adv))
+			continue
 		}
 		if allowed && !AdvertisementLeaseExpired(current, now) {
 			active = append(active, *current)
