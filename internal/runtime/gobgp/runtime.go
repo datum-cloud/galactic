@@ -79,6 +79,13 @@ type GoBGPRuntime struct {
 	advertisementMu       sync.Mutex
 	appliedAdvertisements map[string]model.DesiredAdvertisement
 	advertisementOwners   map[string]model.DesiredAdvertisement
+	// Route claimants are indexed while applying desired state, including
+	// owners whose routes have not yet installed when an Apply fails.
+	advertisementRouteOwners map[evpnRouteKey][]string
+	advertisementLeaseExpiry time.Time
+	// An interrupted Apply/expiry pass can leave unclaimed installed routes,
+	// even when no owner has a lease. Keep retrying their withdrawal.
+	advertisementCleanupPending bool
 	// appliedRoutes tracks each EVPN route currently announced, by route rather
 	// than by advertisement, since several advertisements can claim one route
 	// and withdrawing it on behalf of one would drop it for all.
@@ -554,7 +561,7 @@ func sameEVPNRoute(a, b evpnRoute) bool {
 // the same route, the one sorting first by name supplies its attributes.
 func desiredEVPNRoutes(
 	advs []model.DesiredAdvertisement, routerID string,
-) (map[evpnRouteKey]evpnRoute, map[string]model.DesiredAdvertisement, error) {
+) (map[evpnRouteKey]evpnRoute, map[string]model.DesiredAdvertisement, map[evpnRouteKey][]string, error) {
 	evpn := make([]model.DesiredAdvertisement, 0, len(advs))
 	for _, adv := range advs {
 		if adv.AddressFamily.AFI == afiL2VPN {
@@ -567,15 +574,17 @@ func desiredEVPNRoutes(
 
 	routes := make(map[evpnRouteKey]evpnRoute)
 	byName := make(map[string]model.DesiredAdvertisement, len(evpn))
+	owners := make(map[evpnRouteKey][]string)
 	for _, adv := range evpn {
 		byName[adv.Name] = adv
 		rd := deriveRD(routerID, adv.VRFID)
 		for _, prefixStr := range adv.Prefixes {
 			prefix, err := netip.ParsePrefix(prefixStr)
 			if err != nil {
-				return nil, nil, fmt.Errorf("parse prefix %q of EVPN advertisement %s: %w", prefixStr, adv.Name, err)
+				return nil, nil, nil, fmt.Errorf("parse prefix %q of EVPN advertisement %s: %w", prefixStr, adv.Name, err)
 			}
 			key := evpnRouteKey{rd: rd, prefix: prefix}
+			owners[key] = append(owners[key], adv.Name)
 			if _, claimed := routes[key]; claimed {
 				continue
 			}
@@ -584,7 +593,7 @@ func desiredEVPNRoutes(
 			routes[key] = evpnRoute{adv: single, routerID: routerID}
 		}
 	}
-	return routes, byName, nil
+	return routes, byName, owners, nil
 }
 
 // applyEVPN converges the local EVPN paths to the routes claimed by the desired
@@ -606,11 +615,14 @@ func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredA
 		active = append(active, adv)
 	}
 	advs = active
-	desired, byName, err := desiredEVPNRoutes(advs, routerID)
+	desired, byName, owners, err := desiredEVPNRoutes(advs, routerID)
 	if err != nil {
 		return err
 	}
 	r.advertisementOwners = byName
+	r.advertisementRouteOwners = owners
+	r.advertisementLeaseExpiry = nextAdvertisementExpiry(byName)
+	r.advertisementCleanupPending = true
 
 	for key, applied := range r.appliedRoutes {
 		if _, ok := desired[key]; ok {
@@ -634,6 +646,7 @@ func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredA
 	}
 
 	r.appliedAdvertisements = byName
+	r.advertisementCleanupPending = false
 	return nil
 }
 

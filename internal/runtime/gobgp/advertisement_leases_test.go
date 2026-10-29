@@ -163,3 +163,104 @@ func TestAdvertisementStatusIncludesPartialInstalledOwner(t *testing.T) {
 		t.Fatal("withdrawn partial owner retained")
 	}
 }
+
+// Failed Apply can leave an unclaimed route even with no leases. The idle fast
+// path must not suppress its retry once the routing error clears.
+func TestAdvertisementLeaseRetriesUnleasedPartialWithdrawal(t *testing.T) {
+	b := newTestBgpServer(t)
+	r := leaseTestRuntime(t)
+	adv := evpnAdv("legacy", testSID1, testSharedPrefix)
+	if err := r.applyEVPN(b, []model.DesiredAdvertisement{adv}, testRouterID1); err != nil {
+		t.Fatal(err)
+	}
+	var key evpnRouteKey
+	var installed evpnRoute
+	for key, installed = range r.appliedRoutes {
+		break
+	}
+	broken := installed
+	broken.adv.NextHop = "invalid-next-hop"
+	r.appliedRoutes[key] = broken
+	if err := r.applyEVPN(b, nil, testRouterID1); err == nil {
+		t.Fatal("invalid withdrawal unexpectedly succeeded")
+	}
+	if err := r.expireAdvertisementLeases(b, time.Now()); err == nil {
+		t.Fatal("failed withdrawal was not retried")
+	}
+	r.appliedRoutes[key] = installed
+	if err := r.expireAdvertisementLeases(b, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if paths := localEVPNPaths(t, b); len(paths) != 0 {
+		t.Fatalf("unclaimed legacy route retained: %v", paths)
+	}
+	if len(r.advertisementStatuses()) != 0 {
+		t.Fatal("withdrawn owner retained in status")
+	}
+}
+
+func TestAdvertisementLeaseFailedWithdrawalCannotBeRevived(t *testing.T) {
+	b := newTestBgpServer(t)
+	r := leaseTestRuntime(t)
+	adv := evpnAdv("leased", testSID1, testSharedPrefix)
+	adv.ExpiresAt = time.Now().Add(time.Minute)
+	if err := r.applyEVPN(b, []model.DesiredAdvertisement{adv}, testRouterID1); err != nil {
+		t.Fatal(err)
+	}
+	// Move this live owner's deadline into the past through the supported refresh
+	// path, then inject a failure while withdrawing the installed route.
+	adv.ExpiresAt = time.Now().Add(-time.Second)
+	r.RefreshAdvertisementLeases([]model.DesiredAdvertisement{adv})
+	var key evpnRouteKey
+	var installed evpnRoute
+	for key, installed = range r.appliedRoutes {
+		break
+	}
+	broken := installed
+	broken.adv.NextHop = "invalid-next-hop"
+	r.appliedRoutes[key] = broken
+	if err := r.expireAdvertisementLeases(b, time.Now()); err == nil {
+		t.Fatal("invalid withdrawal unexpectedly succeeded")
+	}
+	adv.ExpiresAt = time.Now().Add(time.Hour)
+	r.RefreshAdvertisementLeases([]model.DesiredAdvertisement{adv})
+	if !advertisementExpired(r.advertisementOwners[adv.Name], time.Now()) {
+		t.Fatal("refresh revived expired owner")
+	}
+	r.appliedRoutes[key] = installed
+	if err := r.expireAdvertisementLeases(b, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if paths := localEVPNPaths(t, b); len(paths) != 0 {
+		t.Fatalf("expired route retained after retry: %v", paths)
+	}
+}
+
+func TestAdvertisementLeaseIndexKeepsDistinctVRFOwnership(t *testing.T) {
+	b := newTestBgpServer(t)
+	r := leaseTestRuntime(t)
+	leased := evpnAdv("leased", testSID1, testSharedPrefix)
+	leased.ExpiresAt = time.Now().Add(time.Minute)
+	legacy := leased
+	legacy.Name, legacy.ExpiresAt, legacy.VRFID = "legacy", time.Time{}, ptrInt32Test(8)
+	if err := r.applyEVPN(b, []model.DesiredAdvertisement{leased, legacy}, testRouterID1); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.expireAdvertisementLeases(b, time.Now().Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.appliedRoutes) != 1 {
+		t.Fatalf("routes=%d want only legacy VRF", len(r.appliedRoutes))
+	}
+	for key, route := range r.appliedRoutes {
+		if key.rd != deriveRD(testRouterID1, legacy.VRFID) || route.adv.Name != legacy.Name {
+			t.Fatalf("wrong survivor: %+v", route)
+		}
+	}
+	if err := r.expireAdvertisementLeases(b, time.Now().Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.appliedRoutes) != 1 {
+		t.Fatal("idle pass withdrew legacy survivor")
+	}
+}

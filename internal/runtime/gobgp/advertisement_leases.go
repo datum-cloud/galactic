@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"reflect"
 	"time"
 
@@ -23,6 +22,7 @@ func (r *GoBGPRuntime) RefreshAdvertisementLeases(advertisements []model.Desired
 	r.advertisementMu.Lock()
 	defer r.advertisementMu.Unlock()
 	now := time.Now()
+	refreshed := make(map[string]time.Time)
 	for _, desired := range advertisements {
 		current, ok := r.appliedAdvertisements[desired.Name]
 		if !ok || (!current.ExpiresAt.IsZero() && !current.ExpiresAt.After(now)) {
@@ -42,13 +42,18 @@ func (r *GoBGPRuntime) RefreshAdvertisementLeases(advertisements []model.Desired
 			sameEVPNRoute(evpnRoute{adv: owner}, evpnRoute{adv: desired}) {
 			r.advertisementOwners[desired.Name] = current
 		}
-		for key, route := range r.appliedRoutes {
-			if route.adv.Name == desired.Name {
-				route.adv.ExpiresAt = current.ExpiresAt
-				r.appliedRoutes[key] = route
-			}
+		refreshed[desired.Name] = current.ExpiresAt
+	}
+	if len(refreshed) == 0 {
+		return
+	}
+	for key, route := range r.appliedRoutes {
+		if expiry, ok := refreshed[route.adv.Name]; ok {
+			route.adv.ExpiresAt = expiry
+			r.appliedRoutes[key] = route
 		}
 	}
+	r.advertisementLeaseExpiry = nextAdvertisementExpiry(r.advertisementOwners)
 }
 
 func (r *GoBGPRuntime) runAdvertisementLeases(ctx context.Context) {
@@ -72,31 +77,31 @@ func advertisementExpired(adv model.DesiredAdvertisement, now time.Time) bool {
 	return !adv.ExpiresAt.IsZero() && !adv.ExpiresAt.After(now)
 }
 
-func advertisementClaimsRoute(adv model.DesiredAdvertisement, key evpnRouteKey, routerID string) bool {
-	if adv.AddressFamily.AFI != afiL2VPN || deriveRD(routerID, adv.VRFID) != key.rd {
-		return false
-	}
-	for _, value := range adv.Prefixes {
-		prefix, err := netip.ParsePrefix(value)
-		if err == nil && prefix == key.prefix {
-			return true
+func nextAdvertisementExpiry(owners map[string]model.DesiredAdvertisement) time.Time {
+	var earliest time.Time
+	for _, owner := range owners {
+		if !owner.ExpiresAt.IsZero() && (earliest.IsZero() || owner.ExpiresAt.Before(earliest)) {
+			earliest = owner.ExpiresAt
 		}
 	}
-	return false
+	return earliest
 }
 
 // expireAdvertisementLeases only withdraws unclaimed routes, including partial Apply results.
 func (r *GoBGPRuntime) expireAdvertisementLeases(b *gobgpserver.BgpServer, now time.Time) error {
 	r.advertisementMu.Lock()
 	defer r.advertisementMu.Unlock()
-	owners := r.advertisementOwners
-	if owners == nil {
-		owners = r.appliedAdvertisements
+	if !r.advertisementCleanupPending &&
+		(r.advertisementLeaseExpiry.IsZero() || r.advertisementLeaseExpiry.After(now)) {
+		return nil
 	}
+	r.advertisementCleanupPending = true
+	owners := r.advertisementOwners
 	for key, route := range r.appliedRoutes {
 		claimed := false
-		for _, owner := range owners {
-			if !advertisementExpired(owner, now) && advertisementClaimsRoute(owner, key, route.routerID) {
+		for _, name := range r.advertisementRouteOwners[key] {
+			owner, exists := owners[name]
+			if exists && !advertisementExpired(owner, now) {
 				route.adv.Name, route.adv.ExpiresAt = owner.Name, owner.ExpiresAt
 				r.appliedRoutes[key] = route
 				claimed = true
@@ -122,6 +127,8 @@ func (r *GoBGPRuntime) expireAdvertisementLeases(b *gobgpserver.BgpServer, now t
 			delete(r.advertisementOwners, name)
 		}
 	}
+	r.advertisementLeaseExpiry = nextAdvertisementExpiry(owners)
+	r.advertisementCleanupPending = false
 	return nil
 }
 
