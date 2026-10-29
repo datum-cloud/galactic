@@ -39,9 +39,10 @@ const (
 	// able to carry toward the client.
 	MinInnerMTU = 1280
 
-	// DefaultInitialPacketSize is the QUIC packet size the server starts with
-	// when Config.QUICConfig is nil. It leaves room for a MinInnerMTU packet
-	// plus QUIC, HTTP Datagram and context ID overhead.
+	// DefaultInitialPacketSize is the QUIC packet size the server uses when
+	// Config.QUICConfig is nil. It leaves room for a MinInnerMTU packet
+	// plus QUIC, HTTP Datagram and context ID overhead. The server never
+	// grows it.
 	DefaultInitialPacketSize = 1350
 
 	connectIPProtocol = "connect-ip"
@@ -126,9 +127,10 @@ type Config struct {
 	Authority string
 	// TLSConfig holds the server certificate.
 	TLSConfig *tls.Config
-	// QUICConfig is optional; datagrams are always enabled, and
-	// MaxIncomingStreams and HandshakeIdleTimeout come from Limits. When
-	// nil, the initial packet size is DefaultInitialPacketSize.
+	// QUICConfig is optional; datagrams are always enabled, path MTU
+	// discovery is always disabled, and MaxIncomingStreams and
+	// HandshakeIdleTimeout come from Limits. Its InitialPacketSize is the
+	// fixed QUIC packet size, DefaultInitialPacketSize when nil or 0.
 	QUICConfig *quic.Config
 	// Limits is optional; see Limits for the defaults.
 	Limits Limits
@@ -195,12 +197,17 @@ func NewServer(cfg Config) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	quicConf := &quic.Config{InitialPacketSize: DefaultInitialPacketSize}
+	quicConf := &quic.Config{}
 	if cfg.QUICConfig != nil {
 		quicConf = cfg.QUICConfig.Clone()
 	}
+	if quicConf.InitialPacketSize == 0 {
+		quicConf.InitialPacketSize = DefaultInitialPacketSize
+	}
 	limits := cfg.Limits.withDefaults()
 	quicConf.EnableDatagrams = true
+	// quic-go never shrinks a discovered size, so a shrunk path would drop it.
+	quicConf.DisablePathMTUDiscovery = true
 	quicConf.MaxIncomingStreams = int64(limits.MaxStreamsPerConn)
 	quicConf.HandshakeIdleTimeout = limits.HandshakeTimeout / 2
 
