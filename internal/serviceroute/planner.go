@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"sort"
 	"time"
@@ -157,7 +158,7 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 		if !consumerMatchesVPC(policy, consumer, consumerVPCIdentity) {
 			continue
 		}
-		local, producer := selectProducers(endpoint, consumer.Status.Node, producers, health)
+		local, producer := selectProducers(endpoint, consumer, producers, health)
 		consumerKey := types.NamespacedName{Namespace: consumer.Namespace, Name: consumer.Name}
 		if len(local) != 0 {
 			if consumer.Status.Node == localNode {
@@ -342,17 +343,20 @@ func spread(endpoint *networkv1alpha1.ServiceEndpoint) bool {
 }
 
 // selectProducers returns, for a Spread endpoint, every producer on
-// consumerNode as local. Otherwise, or when consumerNode has none, it returns
-// the one producer a consumer there is sent to, or nil. A Spread endpoint's
-// remote producer is the first one whose node currently reports it Healthy or
-// Unknown, or has never reported it; failing that, the first one whose report
-// expired, since its node may be down; failing that, the first one.
-func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumerNode string,
+// consumer's node as local. Otherwise, or when that node has none, it returns
+// the one producer the consumer is sent to, or nil. A Spread endpoint's remote
+// producer is chosen by rendezvous hashing of the consumer's UID with each
+// candidate's UID (see rendezvousKey), among the producers whose node currently reports them
+// Healthy or Unknown, or has never reported them; failing that, among those
+// whose report expired, since their node may be down; failing that, among all
+// of them. A producer joining or leaving a candidate set then moves only the
+// consumers it gains or loses.
+func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv1alpha1.VPCAttachment,
 	producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth,
 ) (local []*cloudv1alpha1.VPCAttachment, remote *cloudv1alpha1.VPCAttachment) {
 	if spread(endpoint) {
 		for _, producer := range producers {
-			if producer.Status.Node == consumerNode {
+			if producer.Status.Node == consumer.Status.Node {
 				local = append(local, producer)
 			}
 		}
@@ -364,15 +368,58 @@ func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumerNode str
 			return nil, nil
 		}
 		for _, want := range []producerHealth{producerEligible, producerReportExpired} {
-			for _, producer := range producers {
-				if health[producer.UID] == want {
-					return nil, producer
-				}
+			if producer := rendezvousProducer(consumer, producers, func(p *cloudv1alpha1.VPCAttachment) bool {
+				return health[p.UID] == want
+			}); producer != nil {
+				return nil, producer
 			}
 		}
-		return nil, producers[0]
+		return nil, rendezvousProducer(consumer, producers, func(*cloudv1alpha1.VPCAttachment) bool { return true })
 	}
-	return nil, chooseProducer(endpoint.Spec.DeliveryMode, consumerNode, producers)
+	return nil, chooseProducer(endpoint.Spec.DeliveryMode, consumer.Status.Node, producers)
+}
+
+// rendezvousProducer returns the producer accepted by include with the highest
+// score for consumer, or nil when include accepts none. Producers are sorted
+// by name, so equal scores resolve the same way on every node.
+func rendezvousProducer(consumer *cloudv1alpha1.VPCAttachment, producers []*cloudv1alpha1.VPCAttachment,
+	include func(*cloudv1alpha1.VPCAttachment) bool,
+) *cloudv1alpha1.VPCAttachment {
+	var best *cloudv1alpha1.VPCAttachment
+	var bestScore uint64
+	for _, producer := range producers {
+		if !include(producer) {
+			continue
+		}
+		hash := fnv.New64a()
+		_, _ = hash.Write([]byte(rendezvousKey(consumer)))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(rendezvousKey(producer)))
+		if score := mix64(hash.Sum64()); best == nil || score > bestScore {
+			best, bestScore = producer, score
+		}
+	}
+	return best
+}
+
+// rendezvousKey identifies attachment for rendezvous hashing: its UID, or its
+// namespace and name when it has none.
+func rendezvousKey(attachment *cloudv1alpha1.VPCAttachment) string {
+	if attachment.UID != "" {
+		return string(attachment.UID)
+	}
+	return attachment.Namespace + "/" + attachment.Name
+}
+
+// mix64 is the SplitMix64 finalizer. FNV-1a alone leaves inputs that differ
+// only in their last bytes with correlated high bits, which would bias the
+// rendezvous comparison.
+func mix64(x uint64) uint64 {
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	return x ^ x>>31
 }
 
 func chooseProducer(mode networkv1alpha1.ServiceEndpointDeliveryMode, consumerNode string,
