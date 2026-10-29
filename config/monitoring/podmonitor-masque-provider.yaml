@@ -1,0 +1,27 @@
+# Scrapes each masque-provider pod's health port (health, 9188), which serves
+# the CONNECT-IP server's request and tunnel metrics (galactic_connectip_*)
+# and the provider adapter's admission, route claim and lease metrics
+# (galactic_masque_*). The pods run in masque-system, so the PodMonitor names
+# that namespace. A pod without its instance Lease is not ready but is still
+# scraped, which the lease alert relies on.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: masque-provider
+  labels:
+    app.kubernetes.io/name: masque-provider
+spec:
+  # job="masque-provider", which the alert rules match on.
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - masque-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: masque-provider
+  podMetricsEndpoints:
+    - port: health
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

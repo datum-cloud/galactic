@@ -2640,3 +2640,241 @@ tests:
                 100% of the Looking Glass requests galactic-system executed in the
                 last 30 minutes ended ExecutionFailed, NoNodesAvailable, OwnershipLost or Internal.
                 fabric_api_gateway_service_router_outcomes_total gives each router's failure or omission reason.
+
+  # Half of one pod's requests refused as unavailable fires, and so does a
+  # pod whose accepted tunnels keep failing on the device. Tenant refusals,
+  # a 10% failure share and too few requests do not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a",transport="h3",outcome="unavailable"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a",transport="h3",outcome="accepted"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",transport="h2",outcome="accepted"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_tunnel_ends_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",transport="h2",cause="backend_error"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-c",node="edge-c",transport="h3",outcome="forbidden"}'
+        values: "0+5x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-c",node="edge-c",transport="h3",outcome="accepted"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-d",node="edge-d",transport="h3",outcome="unavailable"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-d",node="edge-d",transport="h3",outcome="accepted"}'
+        values: "0+9x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-e",node="edge-e",transport="h3",outcome="backend_unavailable"}'
+        values: "0 1 2 3 4 4x55"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticMasqueRequestsFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: GalacticMasqueRequestsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+            exp_annotations:
+              summary: "MASQUE provider masque-a fails a large share of CONNECT-IP requests"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquerequestsfailing"
+              description: >-
+                50% of the CONNECT-IP requests masque-a answered in the last 30
+                minutes failed on the provider's side: refused as unavailable or backend_unavailable, or ended by a
+                backend_error or setup_failed. galactic_masque_admissions_total by outcome names the stage that refused
+                them (authorizer_failed, attachment_failed, route_refused, route_failed or replace_failed).
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-b
+              node: edge-b
+            exp_annotations:
+              summary: "MASQUE provider masque-b fails a large share of CONNECT-IP requests"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquerequestsfailing"
+              description: >-
+                100% of the CONNECT-IP requests masque-b answered in the last 30
+                minutes failed on the provider's side: refused as unavailable or backend_unavailable, or ended by a
+                backend_error or setup_failed. galactic_masque_admissions_total by outcome names the stage that refused
+                them (authorizer_failed, attachment_failed, route_refused, route_failed or replace_failed).
+
+  # Refused claims in every 15-minute window fire; two failed claims and
+  # accepted claims do not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_masque_route_claims_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a",outcome="refused"}'
+        values: "0+1x60"
+      - series: 'galactic_masque_route_claims_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",outcome="failed"}'
+        values: "0 1 2 2x57"
+      - series: 'galactic_masque_route_claims_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",outcome="accepted"}'
+        values: "0+5x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticMasqueRouteClaimsFailing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GalacticMasqueRouteClaimsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+              outcome: refused
+            exp_annotations:
+              summary: "MASQUE provider masque-a keeps failing connector route claims (refused)"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquerouteclaimsfailing"
+              description: >-
+                masque-a has had more than two connector /96 route claims refused in every
+                15-minute window for 15 minutes. refused means core refuses the prefix for good, usually because
+                another forwarder holds it; failed means core did not accept the claim in time. The connectors
+                behind them cannot be admitted. The adapter's admission refused log lines name the route.
+
+  # No Lease for 5m fires; a pod that holds its Lease does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_masque_lease_held{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a"}'
+        values: "1x10 0x20"
+      - series: 'galactic_masque_lease_held{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GalacticMasqueLeaseNotHeld
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: GalacticMasqueLeaseNotHeld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+            exp_annotations:
+              summary: "MASQUE provider masque-a holds no instance Lease"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasqueleasenotheld"
+              description: >-
+                masque-a has held no valid instance Lease for 5 minutes. It refuses every request with
+                no_lease and is not ready. If no other provider pod holds its Lease, the MASQUE service in
+                masque-system admits no connector. The pod's lease log lines give the error.
+
+  # Two Lease losses in an hour fire; one does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_masque_lease_losses_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a"}'
+        values: "0x10 1x10 2x20"
+      - series: 'galactic_masque_lease_losses_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b"}'
+        values: "0x10 1x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GalacticMasqueLeaseLost
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GalacticMasqueLeaseLost
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+            exp_annotations:
+              summary: "MASQUE provider masque-a keeps losing its instance Lease"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasqueleaselost"
+              description: >-
+                masque-a lost its instance Lease 2 times in the last hour. Each loss
+                ended every request on the pod with lease_lost, and their connectors had to reconnect. The pod's
+                lease renewal failed log lines give the error.
+
+  # Half of the probed requests refused with mtu fires, and so do accepted
+  # tunnels that keep ending with path_mtu. A 10% share does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a",transport="h3",outcome="mtu"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a",transport="h3",outcome="accepted"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",transport="h3",outcome="accepted"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_tunnel_ends_total{job="masque-provider",namespace="masque-system",pod="masque-b",node="edge-b",transport="h3",cause="path_mtu"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-c",node="edge-c",transport="h3",outcome="mtu"}'
+        values: "0+1x60"
+      - series: 'galactic_connectip_requests_total{job="masque-provider",namespace="masque-system",pod="masque-c",node="edge-c",transport="h3",outcome="accepted"}'
+        values: "0+9x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticMasquePathMTUTooSmall
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: GalacticMasquePathMTUTooSmall
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+            exp_annotations:
+              summary: "MASQUE provider masque-a sees paths too small for 1280-byte packets"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquepathmtutoosmall"
+              description: >-
+                In the last 30 minutes, the HTTP/3 path of 50% of the requests
+                masque-a accepted or probed could not carry a 1280-byte inner packet: refused with mtu or
+                ended with path_mtu. Check the MTU of every hop in front of the pod, such as the load balancer and
+                the node's uplink. Clients can fall back to HTTP/2.
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-b
+              node: edge-b
+            exp_annotations:
+              summary: "MASQUE provider masque-b sees paths too small for 1280-byte packets"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquepathmtutoosmall"
+              description: >-
+                In the last 30 minutes, the HTTP/3 path of 100% of the requests
+                masque-b accepted or probed could not carry a 1280-byte inner packet: refused with mtu or
+                ended with path_mtu. Check the MTU of every hop in front of the pod, such as the load balancer and
+                the node's uplink. Clients can fall back to HTTP/2.
+
+  # A scrape down for 5m fires.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="masque-provider",namespace="masque-system",pod="masque-a",node="edge-a"}'
+        values: "1x5 0x20"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GalacticMasqueMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: masque-provider
+              namespace: masque-system
+              pod: masque-a
+              node: edge-a
+            exp_annotations:
+              summary: "masque-provider metrics on masque-a cannot be scraped"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticmasquemetricsdown"
+              description: >-
+                Prometheus cannot scrape masque-provider on masque-a, so the other MASQUE alerts cannot fire
+                for it.

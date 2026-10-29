@@ -86,11 +86,13 @@ the fabric-api gateway are Deployments, scraped per pod.
 | Fabric looking glass    | `fabric-api` node sidecar                                 | `fabric_api_node_*`, `fabric_api_*`                           | 9345           | `fabric-api-node`                        |
 | Fabric looking glass    | `fabric-api` cell gateway                                 | `fabric_api_gateway_*`, `fabric_api_*`                        | 9347           | `fabric-api-gateway`                     |
 | NAT66 / NAT64           | `galactic-nat` (one per egress shard)                     | `galactic_nat_*`                                              | 9182           | `galactic-nat`                           |
+| MASQUE connector        | `masque-provider`                                         | `galactic_connectip_*`, `galactic_masque_*`                   | 9188           | `masque-provider`                        |
 
 `config/monitoring/` ships PodMonitors for `galactic-cni`,
 `galactic-router`, `fabric-router` (including the opt-in fabric-api
 sidecar), `fabric-router-controller`, the fabric-api gateway,
-`galactic-nat`, `galactic-controller` and `galactic-edge`. Scraping
+`galactic-nat`, `galactic-controller`, `galactic-edge` and
+`masque-provider` (in the `masque-system` namespace). Scraping
 `galactic-vrf` or `galactic-gateway` needs a scrape object of your own. Copy the shipped
 PodMonitors' relabeling of `__meta_kubernetes_pod_node_name` into `node`:
 every galactic metric is per node, and `node` is the label you group and

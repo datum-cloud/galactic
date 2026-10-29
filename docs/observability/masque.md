@@ -56,3 +56,15 @@ sum by (reason) (increase(galactic_masque_request_ends_total[1h]))
 # Throughput per transport and direction, for capacity runs
 sum by (transport, direction) (rate(galactic_connectip_bytes_total[1m]))
 ```
+
+## Alerts
+
+The `masque-provider` group in `config/monitoring/prometheusrule.yaml` alerts on these metrics, per provider pod, through the `masque-provider` PodMonitor. [Shipped alerts](alerts.md) gives each condition and [the troubleshooting guide](../edge/troubleshooting.md#alerts) the response.
+
+- `GalacticMasqueRequestsFailing`: requests refused as `unavailable` or `backend_unavailable`, or tunnels ended by `backend_error` or `setup_failed`.
+- `GalacticMasqueRouteClaimsFailing`: route claims `refused` or `failed`.
+- `GalacticMasqueLeaseNotHeld` and `GalacticMasqueLeaseLost`: `galactic_masque_lease_held` and `galactic_masque_lease_losses_total`.
+- `GalacticMasquePathMTUTooSmall`: requests refused with `mtu` and tunnels ended with `path_mtu`.
+- `GalacticMasqueMetricsDown`: the scrape itself.
+
+Requests refused for the client's or grant's own reasons, `slow_client` and `queue_full` drops, and `galactic_masque_device_drops_total` alert nothing: none of them carries a connector label, so a rule cannot tell one misbehaving client from a provider fault.

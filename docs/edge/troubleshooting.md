@@ -226,3 +226,62 @@ foundation itself stopped doing: attachments not programmed, services
 without a resolvable policy, lost ownership scopes, failing cleanup and
 unreachable metrics. A refused admission is a tenant or provider decision
 and alerts nothing.
+
+The `masque-provider` alert group fires on a MASQUE provider pod failing
+requests on its own side. A request the client or its grant gets wrong
+alerts nothing. Each alert names the pod; start from its logs as in
+[Diagnose a MASQUE connector](#diagnose-a-masque-connector).
+
+### GalacticMasqueRequestsFailing
+
+Over a quarter of the pod's requests fail on the provider's side. A server
+that is closing also refuses with `unavailable`, so first check whether the
+alert follows a rollout or restart of the pod. Otherwise find the stage
+that refuses them:
+
+```promql
+sum by (outcome) (increase(galactic_masque_admissions_total{pod="<pod>"}[30m]))
+```
+
+- `authorizer_failed`: the pod cannot reach the grant authority, or it times out. Check the `masque-authority` pods and the provider's projected token.
+- `attachment_failed`: follow [the workflow](#workflow) from the attachment in the `admission refused` log line.
+- `route_refused`, `route_failed`: see [GalacticMasqueRouteClaimsFailing](#galacticmasquerouteclaimsfailing).
+- `replace_failed`: the connector's previous request did not stop in time. Read that request's log lines by its session ID.
+
+When admissions succeed, `galactic_connectip_tunnel_ends_total` with `cause` `backend_error` or `setup_failed` points at the packet device or address assignment. Read the `CONNECT-IP request ended` lines and check the node as in [step 5](#5-check-the-node).
+
+### GalacticMasqueRouteClaimsFailing
+
+Core keeps refusing connector /96 claims (`refused`) or not accepting them
+in time (`failed`). For a refusal, [find who forwards the
+prefix](#4-find-who-forwards-a-prefix) named in the `admission refused`
+line; another forwarder holds it. For a failure, check that the core
+controller (`galactic-controller --role=cell --edge`) runs, and read the
+route's Events with `kubectl describe edgeroutes -n masque-system`.
+
+### GalacticMasqueLeaseNotHeld
+
+The pod holds no instance Lease, so it admits nothing and is not ready.
+Read its `lease` log lines for the error. Its Lease writes can be refused
+by the provider's RBAC or the `galactic-edge-lease` admission policy, or
+fail when the API server is unhealthy.
+
+### GalacticMasqueLeaseLost
+
+The pod keeps losing and reacquiring its Lease, ending every request each
+time. Its `lease renewal failed` and `lease lost` lines give the error,
+such as Lease writes the API server refused or timed out.
+
+### GalacticMasquePathMTUTooSmall
+
+The HTTP/3 path of many requests cannot carry a 1280-byte inner packet.
+When it affects most clients, the cut is in front of the pod: check the
+MTU of the load balancer, any tunnel and the node's uplink. Clients can
+still connect over HTTP/2.
+
+### GalacticMasqueMetricsDown
+
+Prometheus cannot scrape the pod's `health` port (9188). Check that the
+pod runs and that the `masque-provider` PodMonitor from
+`config/monitoring/` is applied and can reach the `masque-system`
+namespace.
