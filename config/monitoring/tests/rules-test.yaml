@@ -2897,7 +2897,7 @@ tests:
         alertname: GalacticInstanceAttachmentNotProgrammed
         exp_alerts:
           - exp_labels:
-              severity: critical
+              severity: warning
               service: galactic
               team: connect
               instance_namespace: tenant

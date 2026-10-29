@@ -74,7 +74,7 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticEdgeScopeLost                     | `galactic_edge_foundation_scopes_lost > 0`                                  | 5m    | warning    |
 | GalacticEdgeCleanupFailing                | more than two cleanup failures in every 15-minute window                    | 15m   | warning    |
 | GalacticEdgeMetricsDown                   | `galactic-edge` or `galactic-controller` scrape down                        | 5m    | warning    |
-| GalacticInstanceAttachmentNotProgrammed   | a running instance's interface missing from its pod or not programmed       | 10m   | critical   |
+| GalacticInstanceAttachmentNotProgrammed   | a running instance's interface missing from its pod or not programmed       | 10m   | warning    |
 | GalacticInstanceAttachmentStateIncomplete | a `galactic-controller` replica cannot list the kinds it compares           | 10m   | warning    |
 | GalacticInstanceAttachmentStateAbsent     | no `galactic-controller` exports the instance attachment state              | 15m   | warning    |
 | GalacticMasqueRequestsFailing             | over a quarter of 10+ requests in 30m fail on the provider's side           | 15m   | warning    |

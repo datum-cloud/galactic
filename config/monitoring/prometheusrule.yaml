@@ -1466,7 +1466,7 @@ spec:
             (galactic_vpc_instance_interface_unprogrammed{job="galactic-controller"}) > 0
           for: 10m
           labels:
-            severity: critical
+            severity: warning
             service: galactic
             team: connect
           annotations:
