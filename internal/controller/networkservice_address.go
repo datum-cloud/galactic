@@ -26,6 +26,8 @@ import (
 	"go.datum.net/galactic/internal/gateway"
 )
 
+const reasonAddressWithdrawn = "Withdrawn"
+
 const serviceAddressFinalizer = "galactic.datum.net/address-withdrawal"
 const serviceAddressLabel = "galactic.datum.net/service-address"
 const serviceAddressNamespaceLabel = "galactic.datum.net/service-address-namespace"
@@ -484,7 +486,7 @@ func (r *NetworkGatewayReconciler) finalizeAddress(
 	if current.Spec.Retired {
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: bgpv1alpha1.ConditionTypeAddressRetired, Status: metav1.ConditionTrue,
-			Reason: "Withdrawn", Message: "The allocation has been permanently retired and forwarding is withdrawn",
+			Reason: reasonAddressWithdrawn, Message: "The allocation has been permanently retired and forwarding is withdrawn",
 			ObservedGeneration: current.Generation,
 		})
 		current.Status.ObservedGeneration = current.Generation

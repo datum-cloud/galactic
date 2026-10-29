@@ -127,3 +127,62 @@ func TestVIPRangeEgressPreservesPublicPort(t *testing.T) {
 		}
 	}
 }
+
+func TestVIPRangeIngressBoundedSelectionAndExactPrecedence(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID,
+		function: uformat.FunctionEndDT46, argument: 0x765, slot: 1}
+	setUpVIPIngress(t, objs, usid)
+	vip := netip.MustParseAddr("2001:db8:6060::1")
+	backend := netip.MustParseAddr("fd20:60::1")
+	exactBackend := netip.MustParseAddr("fd20:60::2")
+	client := netip.MustParseAddr("2001:db8:ffff::1")
+	key := UsidVipXlatKey{Block: usid.block, Argument: usid.argument, Slot: usid.slot, Proto: ipProtoUDP, Addr: vip.As16()}
+	value := UsidVipXlatRangeValue{Count: 16}
+	for i := range value.Ranges {
+		start := uint16(10000 + i*100)
+		value.Ranges[i] = UsidVipXlatRange{Start: start, End: start + 31, Rewrite: UsidVipXlatValue{Addr: backend.As16()}}
+	}
+	check := func(port uint16, want netip.Addr) {
+		t.Helper()
+		udp := udpTo(client, vip, port)
+		pkt := buildPacketWithUDPInner(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), client, vip, udp)
+		_, out, err := objs.UsidIngress.Test(pkt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := netip.AddrFromSlice(out[ethHeaderLen+24 : ethHeaderLen+40])
+		if got != want {
+			t.Fatalf("port %d destination %s want %s", port, got, want)
+		}
+	}
+	if err := objs.VipXlatRangeTable.Put(key, value); err != nil {
+		t.Fatal(err)
+	}
+	for _, port := range []uint16{10000, 10815, 11531} {
+		check(port, backend)
+	}
+	for _, port := range []uint16{9999, 10032, 11532} {
+		check(port, vip)
+	}
+	// The scalar map retains precedence, even if stale interval coverage overlaps.
+	exactKey := key
+	exactKey.Port = bswap16(10815)
+	if err := objs.VipXlatTable.Put(exactKey, UsidVipXlatValue{Addr: exactBackend.As16()}); err != nil {
+		t.Fatal(err)
+	}
+	check(10815, exactBackend)
+	// A corrupted count cannot extend the scan outside its fixed map array.
+	value.Count = 17
+	if err := objs.VipXlatRangeTable.Put(key, value); err != nil {
+		t.Fatal(err)
+	}
+	check(11531, backend)
+	check(11600, vip)
+	value.Count = 0
+	if err := objs.VipXlatRangeTable.Put(key, value); err != nil {
+		t.Fatal(err)
+	}
+	check(10000, vip)
+}

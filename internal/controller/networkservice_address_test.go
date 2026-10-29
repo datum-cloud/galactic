@@ -225,7 +225,7 @@ func TestGroupedWithdrawalRequiresAllNodesAndCurrentGeneration(t *testing.T) {
 				metav1.Condition{
 					Type:               kind,
 					Status:             metav1.ConditionFalse,
-					Reason:             "Withdrawn",
+					Reason:             reasonAddressWithdrawn,
 					ObservedGeneration: r.Generation,
 					LastTransitionTime: old,
 				},
@@ -334,7 +334,7 @@ func TestAddressRetirementConflictsWithConcurrentActivation(t *testing.T) {
 			metav1.Condition{
 				Type:               kind,
 				Status:             metav1.ConditionFalse,
-				Reason:             "Withdrawn",
+				Reason:             reasonAddressWithdrawn,
 				ObservedGeneration: a.Generation,
 				LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Minute)),
 			},

@@ -2980,6 +2980,22 @@ static USID_ALWAYS_INLINE void apply_nptv6(__u8 *addr, const struct nptv6_value 
 	*word = __builtin_bswap16((__u16) sum);
 }
 
+// Verify the bounded scan once, independently of each packet path. Returning
+// a scalar index keeps its sixteen success branches from multiplying the
+// caller's checksum and routing states. The caller checks the index before
+// using it as a map-value offset; an absent match is the out-of-range sentinel.
+__attribute__((noinline)) int vip_range_match(struct vip_xlat_range_value *ranges, __u32 port)
+{
+	if (!ranges)
+		return USID_VIP_MAX_RANGES;
+#pragma unroll
+	for (int i = 0; i < USID_VIP_MAX_RANGES; i++) {
+		if (i < ranges->count && port >= ranges->ranges[i].start && port <= ranges->ranges[i].end)
+			return i;
+	}
+	return USID_VIP_MAX_RANGES;
+}
+
 // lookup_vip_xlat returns the vip_xlat_table row for (block, argument, slot,
 // proto, direction, port, addr), or a null pointer if there is none. slot is
 // the outer destination's backend slot for an ingress lookup and 0 for an
@@ -3012,13 +3028,11 @@ static USID_ALWAYS_INLINE struct vip_xlat_value *lookup_vip_xlat(__u64 block, __
 	struct vip_xlat_range_value *ranges = bpf_map_lookup_elem(&vip_xlat_range_table, key);
 	if (!ranges)
 		return (void *) 0;
-	__u16 p = __builtin_bswap16(port);
-#pragma unroll
-	for (int i = 0; i < USID_VIP_MAX_RANGES; i++) {
-		if (i < ranges->count && p >= ranges->ranges[i].start && p <= ranges->ranges[i].end)
-			return &ranges->ranges[i].rewrite;
-	}
-	return (void *) 0;
+	__u32 match = vip_range_match(ranges, __builtin_bswap16(port));
+	USID_BARRIER_VAR(match);
+	if (match >= USID_VIP_MAX_RANGES)
+		return (void *) 0;
+	return &ranges->ranges[match].rewrite;
 }
 
 // apply_vip_xlat rewrites the 16-byte address at addr_off and the 2-byte port
