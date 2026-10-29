@@ -220,7 +220,7 @@ func (r *Runner) fanOut(ctx context.Context, project, requestID string, q query.
 		wg.Go(func() {
 			nctx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
-			obs, err := r.one(nctx, project, requestID, wire, q, n, budgets, expires, deadline, opts)
+			obs, err := r.one(ctx, nctx, project, requestID, wire, q, n, budgets, expires, deadline, opts)
 			if opts.requestCodes {
 				// When the request's expiration is the node's deadline, the
 				// node's timer can fire before ctx's: both mean the request
@@ -270,7 +270,10 @@ func requestErr(ctx context.Context, err error, expired bool) error {
 	return errcode.Status(errcode.Cancelled, "the request was cancelled before the router finished")
 }
 
-func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabricv1.Query, q query.Query, n Node,
+// one runs q on node n through the cell's executor. request is the request
+// context every node's job shares; it guards the start against a grant the
+// executor hands a queued job after the request ended.
+func (r *Runner) one(request, ctx context.Context, project, requestID string, wire *fabricv1.Query, q query.Query, n Node,
 	budgets *fabricv1.Budgets, expires, deadline time.Time, opts runOptions) (*fabricv1.Observation, error) {
 	actx := ctx
 	if opts.queueWait > 0 {
@@ -299,6 +302,15 @@ func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabri
 			return nil, errcode.Status(errcode.QueueTimeout, "waited too long for a cell execution slot")
 		}
 		return nil, errcode.Status(errcode.Timeout, "deadline passed waiting for a cell execution slot")
+	}
+	// The executor hands a queued job its slot from the releasing job's
+	// goroutine, and that grant can arrive before this job's own derived
+	// context observes the request ending. Re-check the request itself, so
+	// a queued job never starts node work for a request the caller already
+	// cancelled or that already expired.
+	if request.Err() != nil {
+		release()
+		return nil, errcode.Status(errcode.Timeout, "the request ended before the router started")
 	}
 	held := false
 	defer func() {
