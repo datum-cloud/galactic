@@ -1321,9 +1321,9 @@ tasks:
     desc: Run the MASQUE packet-access rows against dfw with the MASQUE fixture provider
     dir: ../..
     cmds:
-      - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig go test -count=1 -v -timeout 40m -run TestMASQUE ./tests/edgeconformance/
+      - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig go test -count=1 -v -timeout 40m -run '^TestMASQUE$' ./tests/edgeconformance/
 
-  # Not part of verify: it takes about 6 minutes, deploys the shipped MASQUE
+  # Not part of verify: it takes about 20 minutes, deploys the shipped MASQUE
   # service from config/masque through resources/masque-service (images from
   # build:masque-service and build:masque-authority, loaded by
   # deploy:images), and removes it when it ends. Results land beside the
@@ -1332,7 +1332,7 @@ tasks:
     desc: Run the shipped MASQUE service and grant authority against dfw's gVPC workloads
     dir: ../..
     cmds:
-      - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig go test -count=1 -v -timeout 40m -run TestMASQUEService ./tests/edgeconformance/
+      - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig go test -count=1 -v -timeout 60m -run '^TestMASQUEService$' ./tests/edgeconformance/
 
   "verify:ns10":
     desc: Verify ns10 ping (IPv6-only, 3-site mesh)

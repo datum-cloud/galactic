@@ -134,6 +134,13 @@ Step 2 has 20 seconds, so give the pod a termination grace period of at least 30
 - return traffic to client-managed addresses in subdivisions of a connector's /96;
 - `grant disable` and credential expiry stopping one connector within their bounds while another keeps forwarding through the same instance;
 - readiness only while the pod holds its Lease;
-- process restart and drain on SIGTERM.
+- process restart and drain on SIGTERM;
+- the same lifecycle, denials, spoofing, cross-tenant isolation and expiry over HTTP/2 with the client's UDP to the provider blocked;
+- 1280-byte packets in both directions over each transport, to local and remote workloads and through NAT egress;
+- an HTTP/3 request replaced by an HTTP/2 one on the same pod, and moved to a pod on the other edge node, never with two forwarding at once;
+- local cutoff, local withdrawal and remote convergence measured separately, the last by polling the compute node's router through its GoBGP API;
+- a live path MTU reduction during an HTTP/3 tunnel ([#1237](https://github.com/datum-cloud/galactic/issues/1237));
+- each connector state of [the diagnostic workflow](troubleshooting.md#diagnose-a-masque-connector) as the provider's metrics and logs report it;
+- a restart of the provider's node container (`scripts/restart-node.sh` restores the lab links the restart removes).
 
 The [lab README](../../deploy/containerlab/README.md#masque-service) lists what the overlays change for the lab.

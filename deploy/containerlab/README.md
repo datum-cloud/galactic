@@ -561,7 +561,7 @@ task deploy
 | `verify:ns30`                    | Verify ns30 ping (dfw only, 2 pods)                                                                                                         |
 | `verify:ns40`                    | Verify ns40 ping (iad only, 2 pods)                                                                                                         |
 | `verify:traffic-policy`          | Every binding installed; each path forwards what it grants and drops, and counts, what it does not                                          |
-| `verify:masque-service`          | Run the shipped MASQUE service and grant authority against dfw's gVPC workloads (about 6 min; not in `verify`)                              |
+| `verify:masque-service`          | Run the shipped MASQUE service and grant authority against dfw's gVPC workloads (about 20 min; restarts dfw-worker2; not in `verify`)       |
 | `deploy:looking-glass`           | Enable the Looking Glass service on dfw in the documented order (restarts dfw's FRR twice); issue its test certificates                     |
 | `verify:looking-glass`           | Qualify the Looking Glass service on dfw with the independent client, with faults (about 45 min; not in `verify`)                           |
 | `undeploy:looking-glass`         | Switch the Looking Glass service off on dfw and roll its enabling steps back (restarts dfw's FRR twice)                                     |
@@ -643,6 +643,13 @@ where the lab must:
   another, so the authority runs on dfw-worker's host network behind a
   Service with a fixed address, and the provider pod resolves the authority's
   name to it through a host alias.
+
+Its node-restart row restarts dfw-worker2's container with
+`scripts/restart-node.sh`, which `docker restart`s a Kind node and restores
+what lived in its network namespace: its gvpc.clab.yaml links (through
+`containerlab tools veth create`, so it needs passwordless `sudo`), its
+sysctls and exec commands, its peers' bonds, the pass-through XDP programs and
+its addresses. The script works for any Kind node of the topology.
 
 ## Notes
 
