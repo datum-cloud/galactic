@@ -903,7 +903,9 @@ func (m *masque) rowSharedCancel(t *testing.T) {
 //
 // A collection pass that keeps everything logs nothing, so the row plants an
 // orphaned canary VRF on the node: the pass that removes it is the one the
-// VRFs and attachments must survive.
+// VRFs and attachments must survive. Which branch of collection keeps them
+// is covered by internal/gc's TestEdgeAttachmentKeepsVRF and
+// TestInUseVRFIsNotRemoved.
 func (m *masque) rowMaintenance(t *testing.T) {
 	l, ctx := m.l, context.Background()
 	for _, mt := range []*masqueTenant{m.a, m.b} {
@@ -963,7 +965,7 @@ func (m *masque) rowMaintenance(t *testing.T) {
 	router := l.podOn(t, systemNS, "galactic-router", edgeNode1)
 	interval := l.gcInterval(t)
 	l.record(t, "galactic-router GC interval", interval)
-	d := interval + 75*time.Second
+	d := interval + 90*time.Second
 	started := time.Now()
 	runs := map[*masqueTenant]*probeRun{}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
