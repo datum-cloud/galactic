@@ -16,8 +16,9 @@
 //	edgeprobe sniff -iface link -icmp -duration 30s
 //	    prints each ICMPv6 echo request on link instead: {"t","src","dst","id"}
 //	edgeprobe connectip -server [addr]:port -authority host:port -ca file \
-//	        -token T -vpc V -to addr -duration 5s
-//	    pings addr through one CONNECT-IP request (see connectIP)
+//	        -token T -vpc V -to addr -duration 5s [-transport h3|h2]
+//	    pings addr through one CONNECT-IP request over HTTP/3, or over
+//	    HTTP/2 with -transport h2 (see connectIP)
 //	edgeprobe egresskind -iface link
 //	    prints the uSID datapath's delivery kind for a host link (see egressKind)
 package main
