@@ -472,6 +472,36 @@ func TestServiceCancellationBounds(t *testing.T) {
 	})
 }
 
+// endedRequest is the request context a cancelled request presents: Err
+// reports the end, but Done is nil, so a context derived from it has not
+// observed the end yet. It stands in for the lag between a request's cancel
+// and a derived job context, during which the executor can hand a queued job
+// its slot.
+type endedRequest struct{ context.Context }
+
+func (endedRequest) Err() error            { return context.Canceled }
+func (endedRequest) Done() <-chan struct{} { return nil }
+
+// A job the executor grants after the request ended hands its slot back
+// instead of starting node work. The grant arrives from the releasing job's
+// goroutine, before this job's own derived context observes the end, so the
+// runner re-checks the request context itself.
+func TestRunnerRefusesGrantAfterRequestEnded(t *testing.T) {
+	nodes := &routerNodes{}
+	r := &Runner{Clients: nodes, Executor: NewExecutor(1, 0, 0), QueueWait: time.Minute}
+	q := node.QueryFromProto(&fabricv1.Query{Type: fabricv1.QueryType_QUERY_TYPE_BGP_SUMMARY,
+		AddressFamily: fabricv1.AddressFamily_ADDRESS_FAMILY_IPV4})
+	routers := []Node{{Name: routerA, Selected: true}}
+	r.Stream(endedRequest{Context: t.Context()}, "p", "id", q, routers, nil,
+		time.Now().Add(time.Minute), nil, func(Outcome) {})
+	if n := nodes.total(); n != 0 {
+		t.Errorf("the router ran %d times after the request ended", n)
+	}
+	if d := r.Executor.Depth(); d != 0 {
+		t.Errorf("queue depth = %d, want 0", d)
+	}
+}
+
 // Stopping the gateway server cancels a running service request's routers
 // within releaseBound.
 func TestGatewayStopCancelsServiceWork(t *testing.T) {
