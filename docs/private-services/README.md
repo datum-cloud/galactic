@@ -121,14 +121,17 @@ longest request, then stop it. Its in-flight requests and open connections
 finish while new ones go to the other producers.
 
 When the consumer's node has no producer, `PreferNodeLocal` sends the consumer
-to one remote producer, through the SRv6 service tunnel as with `Single`. It is
-the first producer by namespace and name whose node currently reports it
-`Healthy` or `Unknown`, or has no entry for it. If there is none, it is the
-first producer whose entry expired, and failing that the first producer. So
-when a node goes down while its producers' attachments still read ready,
-consumers on other nodes move off those producers within 60 seconds of the
-node's last renewal, as long as another node currently reports a producer that
-can take them. A remote consumer does not spread. While a health change reaches the
+to one remote producer, through the SRv6 service tunnel as with `Single`.
+Rendezvous hashing of the consumer's and each producer's attachment UID picks
+it, among the producers whose node currently reports them `Healthy` or
+`Unknown`, or has no entry for them. If there are none, it picks among the
+producers whose entry expired, and failing that among all producers. So
+consumers spread across the remote producers, and a producer joining, leaving
+or turning `Unhealthy` moves only the consumers it gains or loses. When a node
+goes down while its producers' attachments still read ready, its consumers move
+to other producers within 60 seconds of the node's last renewal, as long as
+another node currently reports a producer that can take them. Each consumer's
+requests all go to its one remote producer. While a health change reaches the
 consumer's node and the producer's node at different moments, the two can
 briefly disagree on that producer, and its requests are refused until they
 agree.
