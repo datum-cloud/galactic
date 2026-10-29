@@ -485,8 +485,9 @@ func runSlowReader(t *testing.T, cfg loadConfig, res loadResult) loadResult {
 		time.Sleep(10 * time.Millisecond)
 	}
 	res.SlowClientEndSec = time.Since(start).Seconds()
-	if sess == nil || !sess.isClosed() || res.SlowClientEndSec > 2*deliveryTimeout.Seconds() {
-		t.Errorf("stalled session lasted %.1fs, want at most %v", res.SlowClientEndSec, 2*deliveryTimeout)
+	if limit := deliveryTimeout + checkInterval(); sess == nil || !sess.isClosed() ||
+		res.SlowClientEndSec > limit.Seconds() {
+		t.Errorf("stalled session lasted %.2fs, want at most %v", res.SlowClientEndSec, limit)
 	}
 	time.Sleep(max(cfg.Duration-time.Since(start), 0))
 	w.end(&res)
