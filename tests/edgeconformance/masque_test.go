@@ -816,12 +816,14 @@ func (m *masque) rowPartial(t *testing.T) {
 		Credential: token, Service: m.a.serviceKey(), Prefix: masquePartial}})
 	pod := m.deploy(t, "partial", edgeNode1, b)
 	// Its only connector's request gets the attachment set up, and is
-	// refused once core refuses the route.
+	// refused once core refuses the route. A request before the new
+	// instance holds its Lease is refused too, without an attachment, so
+	// only a refusal after the attachment exists counts.
 	var evs []event
 	eventually(t, 2*time.Minute, 2*time.Second, "partial instance's request refused", func() (bool, error) {
 		var err error
 		evs, err = connectOnceTo(pod, token, "10", 1, time.Second, dst)
-		return err == nil && status(evs) == 503, err
+		return err == nil && status(evs) == 503 && l.attachmentOf(t, pod, m.a.svc) != nil, err
 	})
 	att := l.waitServing(t, pod, m.a.svc)
 	m.links[att.Name] = att.Status.HostLink
@@ -898,12 +900,13 @@ func (m *masque) rowSharedCancel(t *testing.T) {
 // tenant reaches its workload on the compute node. The VRFs, the
 // attachments and the requests survive it, and a connector's first request
 // after collection is set up and answered.
+//
+// A collection pass that keeps everything logs nothing, so the row plants an
+// orphaned canary VRF on the node: the pass that removes it is the one the
+// VRFs and attachments must survive.
 func (m *masque) rowMaintenance(t *testing.T) {
 	l, ctx := m.l, context.Background()
-	m.inUse(t)
-	atts := map[*masqueTenant]*galacticv1alpha1.EdgeAttachment{}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
-		atts[mt] = l.attachmentOf(t, m.pod, mt.svc)
 		old := m.client(t, mt.tn, 2)
 		key := client.ObjectKey{Namespace: mt.tn.vpcNamespace, Name: "edge-client-2"}
 		scale := func(n int32) error {
@@ -958,30 +961,44 @@ func (m *masque) rowMaintenance(t *testing.T) {
 		})
 	}
 	router := l.podOn(t, systemNS, "galactic-router", edgeNode1)
-	since := time.Now().UTC().Format(time.RFC3339)
 	interval := l.gcInterval(t)
 	l.record(t, "galactic-router GC interval", interval)
-	d := interval + 45*time.Second
+	d := interval + 75*time.Second
+	started := time.Now()
 	runs := map[*masqueTenant]*probeRun{}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		runs[mt] = m.connect(t, "maintenance-vpc-"+mt.tn.vpc, mt.token, mt.tn.vpc, mt.id, d,
 			m.workload(t, mt.tn, 1).addr)
 	}
-	time.Sleep(interval + 30*time.Second)
-	logs, err := l.kubectl("-n", systemNS, "logs", router, "--since-time="+since)
-	if err != nil {
-		t.Fatal(err)
+	// The adapter deletes an attachment idle for 30 s, so the attachments
+	// are read while the row's requests hold them.
+	atts := map[*masqueTenant]*galacticv1alpha1.EdgeAttachment{}
+	for _, mt := range []*masqueTenant{m.a, m.b} {
+		atts[mt] = l.waitServing(t, m.pod, mt.svc)
 	}
+	// The probes must outlast collection, which can take interval+30s
+	// from here.
+	if setup := time.Since(started); setup > d-interval-30*time.Second {
+		t.Fatalf("attachments took %v to serve, leaving the probes too little time to span a collection pass", setup)
+	}
+	since := time.Now().UTC().Format(time.RFC3339)
+	canary := plantCanaryVRF(t, edgeNode1)
+	planted := time.Now()
+	eventually(t, interval+30*time.Second, 2*time.Second, "a collection pass removed canary VRF "+canary,
+		func() (bool, error) {
+			logs, err := l.kubectl("-n", systemNS, "logs", router, "--since-time="+since)
+			return slices.ContainsFunc(strings.Split(logs, "\n"), func(line string) bool {
+				return strings.Contains(line, "GC: removed orphaned VRF") && strings.Contains(line, canary)
+			}), err
+		})
+	l.record(t, "canary VRF collected after", time.Since(planted).Round(time.Second))
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		vrf := fmt.Sprintf("G%09sV", atts[mt].Status.VPC)
 		if _, err := nodeExec(edgeNode1, "ip", "link", "show", vrf); err != nil {
 			t.Errorf("VPC %s's VRF %s is gone with the fixture's attachment still on it: %v", mt.tn.vpc, vrf, err)
 		}
-		// A collection pass ran and kept the VRF for the attachment.
-		if !slices.ContainsFunc(strings.Split(logs, "\n"), func(line string) bool {
-			return strings.Contains(line, "GC: kept VRF an edge attachment uses") && strings.Contains(line, vrf)
-		}) {
-			t.Errorf("no garbage collection pass kept VPC %s's VRF %s during the row", mt.tn.vpc, vrf)
+		if cur := l.attachmentOf(t, m.pod, mt.svc); cur == nil || cur.UID != atts[mt].UID {
+			t.Errorf("VPC %s's attachment did not survive garbage collection", mt.tn.vpc)
 		}
 	}
 	dst := m.workload(t, m.a.tn, 1).addr
@@ -996,10 +1013,38 @@ func (m *masque) rowMaintenance(t *testing.T) {
 	for mt, p := range runs {
 		m.requireAnswered(t, "VPC "+mt.tn.vpc+" across garbage collection", p.wait(l, t), d,
 			m.workload(t, mt.tn, 1).addr)
-		if cur := l.attachmentOf(t, m.pod, mt.svc); cur == nil || cur.UID != atts[mt].UID {
-			t.Errorf("VPC %s's attachment did not survive garbage collection", mt.tn.vpc)
-		}
 	}
+}
+
+const (
+	// canaryVPC names the VPC of the canary VRF plantCanaryVRF creates. No
+	// tenant, advertisement or attachment uses it, so collection removes it.
+	canaryVPC = "zzzzzzzzz"
+	// canaryTableBase is the first routing table plantCanaryVRF tries. It
+	// sits above every table Galactic allocates: VPC VRFs and the ingress
+	// sidecar's tables end below 0x11000.
+	canaryTableBase = 0xffff0
+)
+
+// plantCanaryVRF creates an orphaned VRF on node, on a routing table no
+// other VRF there uses, and returns its name. The test deletes it on
+// cleanup if no collection pass did.
+func plantCanaryVRF(t *testing.T, node string) string {
+	t.Helper()
+	name := "G" + canaryVPC + "V"
+	out, err := nodeExec(node, "ip", "-d", "link", "show", "type", "vrf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := canaryTableBase
+	for strings.Contains(out, "table "+strconv.Itoa(table)+" ") {
+		table++
+	}
+	if _, err := nodeExec(node, "ip", "link", "add", name, "type", "vrf", "table", strconv.Itoa(table)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = nodeExec(node, "ip", "link", "del", name) })
+	return name
 }
 
 // rowProcessRestart kills the fixture's process without shutdown. The
@@ -1154,10 +1199,16 @@ func (m *masque) waitAcceptedFor(t *testing.T, d time.Duration, tenants ...*masq
 // old pod's shutdown leaves the replacement's routes alone.
 func (m *masque) rowRecreation(t *testing.T) {
 	l := m.l
+	m.inUse(t)
 	old := m.pod
 	oldAtts := make([]*galacticv1alpha1.EdgeAttachment, 0, 2)
 	for _, mt := range []*masqueTenant{m.a, m.b} {
-		oldAtts = append(oldAtts, l.attachmentOf(t, old, mt.svc))
+		att := l.attachmentOf(t, old, mt.svc)
+		if att == nil {
+			t.Fatalf("pod %s's attachment to VPC %s's service was deleted as idle before the row read it",
+				old.Name, mt.tn.vpc)
+		}
+		oldAtts = append(oldAtts, att)
 	}
 	if _, err := l.kubectl("-n", masqueNS, "delete", "pod", old.Name, "--wait=false"); err != nil {
 		t.Fatal(err)
