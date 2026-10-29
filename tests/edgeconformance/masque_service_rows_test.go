@@ -5,10 +5,12 @@
 package edgeconformance_test
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/netip"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -827,6 +830,65 @@ func mtuWindow(evs []event, ptbs []time.Duration, dst string, from, to time.Dura
 	return replies, big, ptb
 }
 
+// capturePacketTooBig captures the ICMPv6 Packet Too Big messages w receives
+// for up to d, returning once tcpdump listens. The returned function waits for
+// the capture to end and returns tcpdump's output, one message per line.
+func capturePacketTooBig(t *testing.T, w workloadRef, d time.Duration) func() string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	cmd := exec.CommandContext(ctx, "docker", "exec", w.node, "timeout", strconv.Itoa(int(d.Seconds())),
+		"nsenter", "-t", strconv.Itoa(w.pid), "-n", "tcpdump", "-n", "-l", "-tt", "-i", w.iface,
+		"icmp6 and ip6[40] == 2")
+	var out strings.Builder
+	cmd.Stdout = &out
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	listening, stderrDone := make(chan struct{}), make(chan struct{})
+	var startup strings.Builder
+	go func() {
+		defer close(stderrDone)
+		sc := bufio.NewScanner(stderr)
+		for sc.Scan() {
+			if strings.HasPrefix(sc.Text(), "listening on") {
+				close(listening)
+				_, _ = io.Copy(io.Discard, stderr)
+				return
+			}
+			startup.WriteString(sc.Text())
+			startup.WriteByte('\n')
+		}
+	}()
+	var once sync.Once
+	wait := func() string {
+		once.Do(func() {
+			// Wait closes the pipe, so the reader must finish first.
+			<-stderrDone
+			_ = cmd.Wait()
+			cancel()
+		})
+		return out.String()
+	}
+	t.Cleanup(func() {
+		cancel()
+		wait()
+	})
+	select {
+	case <-listening:
+	case <-stderrDone:
+		t.Fatalf("tcpdump exited before listening at the workload: %s", startup.String())
+	case <-time.After(30 * time.Second):
+		t.Fatal("tcpdump did not start listening at the workload")
+	}
+	return wait
+}
+
 // rowMTULiveDrop lowers the MTU of the provider pod's host-side veth step
 // by step during an HTTP/3 tunnel of VPC 10's connector, which exchanges
 // 1280-byte echo requests and replies with its workload on the provider's
@@ -835,7 +897,9 @@ func mtuWindow(evs []event, ptbs []time.Duration, dst string, from, to time.Dura
 // MTU, how many 1280-byte replies and oversize-byte packets arrived, the
 // ICMPv6 Packet Too Big messages the workload received, and whether the
 // tunnel was open. Above the floor, an oversize-byte packet the path no
-// longer carries must draw a Packet Too Big to the workload; below it, the
+// longer carries must draw a Packet Too Big to the workload. The workload
+// caches the reported MTU and stops sending oversize-byte packets (RFC
+// 8201), so each step's window opens by flushing that cache; below it, the
 // tunnel must end with the provider counting path_mtu. The second
 // connector must never receive a Packet Too Big or anything else not its
 // own. The MTU is restored on cleanup.
@@ -857,22 +921,20 @@ func (s *service) rowMTULiveDrop(t *testing.T) {
 	run := s.connect(t, "mtu-live-drop", c, "h3", total, w.addr)
 	other := s.connect(t, "mtu-live-drop-other", s.c10b, "h3", total, w.addr)
 	time.Sleep(4 * time.Second)
-	ptbCtx, cancel := context.WithTimeout(context.Background(), total)
-	defer cancel()
-	ptbCmd := exec.CommandContext(ptbCtx, "docker", "exec", w.node, "timeout", strconv.Itoa(int(total.Seconds())),
-		"nsenter", "-t", strconv.Itoa(w.pid), "-n", "tcpdump", "-n", "-l", "-tt", "-i", w.iface,
-		"icmp6 and ip6[40] == 2")
-	var ptbOut strings.Builder
-	ptbCmd.Stdout = &ptbOut
-	if err := ptbCmd.Start(); err != nil {
-		t.Fatal(err)
+	ptbWait := capturePacketTooBig(t, w, total)
+	flushPMTU := func() error {
+		_, err := nodeExec(w.node, "nsenter", "-t", strconv.Itoa(w.pid), "-n", "ip", "-6", "route", "flush", "cache")
+		return err
 	}
 	pod10 := l.clientPod(t, c.tn, 2)
 	pinging := make(chan struct{})
 	go func() {
 		defer close(pinging)
-		_, _ = l.kubectl("-n", pod10.Namespace, execVerb, pod10.Name, "--", "ping", "-6", "-n", "-q", "-i", "0.2",
-			"-w", strconv.Itoa(int((total - 6*time.Second).Seconds())), "-s", strconv.Itoa(oversize-48), c.addr())
+		// timeout bounds the ping instead of -w, with which iputils ping
+		// exits at its first error, the Packet Too Big.
+		_, _ = l.kubectl("-n", pod10.Namespace, execVerb, pod10.Name, "--", "timeout",
+			strconv.Itoa(int((total - 6*time.Second).Seconds())), "ping", "-6", "-n", "-q", "-i", "0.2",
+			"-s", strconv.Itoa(oversize-48), c.addr())
 	}()
 	starts := make([]time.Duration, len(mtuSteps))
 	for i, m := range mtuSteps {
@@ -880,7 +942,14 @@ func (s *service) rowMTULiveDrop(t *testing.T) {
 			t.Fatal(err)
 		}
 		starts[i] = boottime()
-		time.Sleep(mtuStep)
+		time.Sleep(time.Second)
+		// mtuWindow has just opened, so the window's next oversize-byte
+		// packet leaves the workload whatever an earlier step's Packet Too
+		// Big left in its cache.
+		if err := flushPMTU(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(starts[i] + mtuStep - boottime())
 	}
 	if err := setMTU(1500); err != nil {
 		t.Error(err)
@@ -888,10 +957,10 @@ func (s *service) rowMTULiveDrop(t *testing.T) {
 	evs := run.wait(l, t)
 	oevs := other.wait(l, t)
 	<-pinging
-	_ = ptbCmd.Wait()
-	l.save(t, "packet-too-big.txt", []byte(ptbOut.String()))
+	ptbOut := ptbWait()
+	l.save(t, "packet-too-big.txt", []byte(ptbOut))
 	var ptbs []time.Duration
-	for _, line := range strings.Split(ptbOut.String(), "\n") {
+	for _, line := range strings.Split(ptbOut, "\n") {
 		if f := strings.Fields(line); len(f) > 0 {
 			if sec, err := strconv.ParseFloat(f[0], 64); err == nil {
 				ptbs = append(ptbs, wallToBoot(time.Unix(0, int64(sec*1e9))))
