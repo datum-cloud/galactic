@@ -317,58 +317,9 @@ func (m *masque) rowAgentStall(t *testing.T) {
 // forwarding within the local expiry bound, and the client's request ends.
 func (m *masque) rowAPIPartition(t *testing.T) {
 	l := m.l
-	// The pod's client dials the Service address, which the CNI may
-	// translate to an endpoint before the packet leaves the pod: drop both.
-	clusterIP, err := l.kubectl("get", "service", "kubernetes", "-n", "default", "-o", "jsonpath={.spec.clusterIP}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	endpoints, err := l.kubectl("get", "endpointslices", "-n", "default", "-l",
-		"kubernetes.io/service-name=kubernetes", "-o", "jsonpath={.items[*].endpoints[*].addresses[*]}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fields := strings.Fields(clusterIP + " " + endpoints)
-	apiservers := make([]netip.Addr, 0, len(fields))
-	for _, f := range fields {
-		addr, err := netip.ParseAddr(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		apiservers = append(apiservers, addr)
-	}
-	pid := strconv.Itoa(podPID(t, edgeNode1, masqueNS, m.pod.Name))
-	nft := func(args ...string) error {
-		_, err := nodeExec(edgeNode1, append([]string{"nsenter", "-t", pid, "-n", "nft"}, args...)...)
-		return err
-	}
 	dst := m.workload(t, m.a.tn, 2).addr
 	g := m.watchGate(t, "api-partition", m.a, 45*time.Second)
-	if err := nft("add", "table", "inet", "masque-partition"); err != nil {
-		t.Fatal(err)
-	}
-	healed := false
-	heal := func() {
-		if !healed {
-			healed = true
-			_ = nft("delete", "table", "inet", "masque-partition")
-		}
-	}
-	defer heal()
-	if err := nft("add", "chain", "inet", "masque-partition", "out", "{", "type", "filter", "hook", "output",
-		"priority", "0", ";", "}"); err != nil {
-		t.Fatal(err)
-	}
-	for _, addr := range apiservers {
-		family := "ip"
-		if addr.Is6() {
-			family = "ip6"
-		}
-		if err := nft("add", "rule", "inet", "masque-partition", "out", family, "daddr", addr.String(),
-			"drop"); err != nil {
-			t.Fatal(err)
-		}
-	}
+	apiservers, heal := l.partitionAPI(t, edgeNode1, podPID(t, edgeNode1, masqueNS, m.pod.Name))
 	l.record(t, "API server addresses dropped", apiservers)
 	last := m.lastRenewal(t)
 	time.Sleep(25 * time.Second)
@@ -391,6 +342,59 @@ func (m *masque) rowAPIPartition(t *testing.T) {
 	}
 	m.waitConnected(t, m.a)
 	m.waitConnected(t, m.b)
+}
+
+// partitionAPI drops the traffic of the pod whose sandbox has pid on node
+// to every API server address, leaving its clients and its packet devices
+// reachable. It returns the addresses and a function that heals the
+// partition, which the test's cleanup also calls.
+func (l *lab) partitionAPI(t *testing.T, node string, pid int) ([]netip.Addr, func()) {
+	t.Helper()
+	// The pod's client dials the Service address, which the CNI may
+	// translate to an endpoint before the packet leaves the pod: drop both.
+	clusterIP, err := l.kubectl("get", "service", "kubernetes", "-n", "default", "-o", "jsonpath={.spec.clusterIP}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoints, err := l.kubectl("get", "endpointslices", "-n", "default", "-l",
+		"kubernetes.io/service-name=kubernetes", "-o", "jsonpath={.items[*].endpoints[*].addresses[*]}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(clusterIP + " " + endpoints)
+	apiservers := make([]netip.Addr, 0, len(fields))
+	for _, f := range fields {
+		addr, err := netip.ParseAddr(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		apiservers = append(apiservers, addr)
+	}
+	nft := func(args ...string) error {
+		_, err := nodeExec(node, append([]string{"nsenter", "-t", strconv.Itoa(pid), "-n", "nft"}, args...)...)
+		return err
+	}
+	if err := nft("add", "table", "inet", "masque-partition"); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	heal := func() { once.Do(func() { _ = nft("delete", "table", "inet", "masque-partition") }) }
+	t.Cleanup(heal)
+	if err := nft("add", "chain", "inet", "masque-partition", "out", "{", "type", "filter", "hook", "output",
+		"priority", "0", ";", "}"); err != nil {
+		t.Fatal(err)
+	}
+	for _, addr := range apiservers {
+		family := "ip"
+		if addr.Is6() {
+			family = "ip6"
+		}
+		if err := nft("add", "rule", "inet", "masque-partition", "out", family, "daddr", addr.String(),
+			"drop"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return apiservers, heal
 }
 
 // rowConnectorRevocation ends one connector's grant while another

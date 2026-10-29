@@ -146,16 +146,7 @@ func TestMASQUE(t *testing.T) {
 func newMasque(t *testing.T, l *lab) *masque {
 	t.Helper()
 	certPEM, keyPEM, caPEM := masqueCerts(t)
-	ca := filepath.Join(l.artifacts, "masque-ca.pem")
-	if err := os.WriteFile(ca, caPEM, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for _, n := range []string{computeNode, edgeNode1, edgeNode2} {
-		cp := exec.CommandContext(context.Background(), "docker", "cp", ca, n+":"+masqueCA)
-		if out, err := cp.CombinedOutput(); err != nil {
-			t.Fatalf("copy CA to %s: %v: %s", n, err, out)
-		}
-	}
+	l.copyToNodes(t, "masque-ca.pem", masqueCA, caPEM)
 	return &masque{
 		l: l,
 		a: &masqueTenant{tn: tenant{vpcNamespace: "ns10", vpc: "10", provider: masqueProvider},
@@ -167,34 +158,74 @@ func newMasque(t *testing.T, l *lab) *masque {
 	}
 }
 
+// copyToNodes writes b to path on every dfw node, through an artifact named
+// name.
+func (l *lab) copyToNodes(t *testing.T, name, path string, b []byte) {
+	t.Helper()
+	src := filepath.Join(l.artifacts, name)
+	if err := os.WriteFile(src, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{computeNode, edgeNode1, edgeNode2} {
+		cp := exec.CommandContext(context.Background(), "docker", "cp", src, n+":"+path)
+		if out, err := cp.CombinedOutput(); err != nil {
+			t.Fatalf("copy %s to %s: %v: %s", name, n, err, out)
+		}
+	}
+}
+
 // masqueCerts returns a server certificate for the authority's host, its
 // key, and the CA that signed it.
 func masqueCerts(t *testing.T) (certPEM, keyPEM, caPEM []byte) {
 	t.Helper()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caTmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "masque conformance CA"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour), IsCA: true,
-		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caCert, err := x509.ParseCertificate(caDER)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ca := newTestCA(t, "masque conformance CA")
+	certPEM, keyPEM = ca.issue(t, strings.Split(masqueAuthority, ":")[0])
+	return certPEM, keyPEM, ca.pem
+}
+
+// testCA is a CA a run creates to sign its servers' certificates.
+type testCA struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	pem  []byte
+}
+
+// newTestCA creates a CA named name, valid for a day.
+func newTestCA(t *testing.T, name string) *testCA {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := strings.Split(masqueAuthority, ":")[0]
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: host},
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: name},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour), IsCA: true,
+		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &testCA{cert: cert, key: key, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
+}
+
+// issue returns a server certificate for host, signed by ca, and its key.
+func (ca *testCA) issue(t *testing.T, host string) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: host},
 		DNSNames: []string{host}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,8 +234,7 @@ func masqueCerts(t *testing.T) (certPEM, keyPEM, caPEM []byte) {
 		t.Fatal(err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 }
 
 func (m *masque) setup(t *testing.T) {
@@ -398,8 +428,24 @@ func (m *masque) connect(t *testing.T, name, token, vpc string, id int, d time.D
 }
 
 func connectArgs(pod *corev1.Pod, token, vpc string, id int, d time.Duration, dsts []string) []string {
-	return []string{"connectip", "-server", "[" + pod.Status.PodIP + "]:" + strconv.Itoa(masquePort),
-		"-authority", masqueAuthority, "-ca", masqueCA, "-token", token, "-vpc", vpc, "-id", strconv.Itoa(id),
+	return cipServer{pod: pod, port: masquePort, authority: masqueAuthority, ca: masqueCA}.args(token, vpc, id, d, dsts)
+}
+
+// cipServer is a CONNECT-IP server edgeprobe dials from its pod's node: the
+// pod, the port it serves on, the :authority its certificate names and the
+// file on the node holding the CA that signed it.
+type cipServer struct {
+	pod       *corev1.Pod
+	port      int
+	authority string
+	ca        string
+}
+
+// args are edgeprobe's arguments for one request to s with credential
+// token, selecting vpc, that pings dsts for d with echo identifier id.
+func (s cipServer) args(token, vpc string, id int, d time.Duration, dsts []string) []string {
+	return []string{"connectip", "-server", "[" + s.pod.Status.PodIP + "]:" + strconv.Itoa(s.port),
+		"-authority", s.authority, "-ca", s.ca, "-token", token, "-vpc", vpc, "-id", strconv.Itoa(id),
 		"-to", strings.Join(dsts, ","), "-interval", probeInterval.String(), "-duration", d.String()}
 }
 
@@ -411,12 +457,18 @@ func (m *masque) connectOnce(token, vpc string, id int, d time.Duration, dsts ..
 
 // connectOnceTo runs one short session to pod and returns its events.
 func connectOnceTo(pod *corev1.Pod, token, vpc string, id int, d time.Duration, dsts ...string) ([]event, error) {
-	p, err := startProbe(pod.Spec.NodeName, 1, "once", connectArgs(pod, token, vpc, id, d, dsts)...)
+	return runProbe(pod.Spec.NodeName, connectArgs(pod, token, vpc, id, d, dsts))
+}
+
+// runProbe runs edgeprobe with args in node's host network namespace and
+// returns its events.
+func runProbe(node string, args []string) ([]event, error) {
+	p, err := startProbe(node, 1, "once", args...)
 	if err != nil {
 		return nil, err
 	}
 	if err := p.cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("connectip: %w: %s", err, p.out.String())
+		return nil, fmt.Errorf("edgeprobe %s: %w: %s%s", args[0], err, p.out.String(), p.stderr.String())
 	}
 	var evs []event
 	for _, line := range strings.Split(strings.TrimSpace(p.out.String()), "\n") {
@@ -520,8 +572,13 @@ type workloadRef struct {
 // the fixture's node.
 func (m *masque) workload(t *testing.T, tn tenant, i int) workloadRef {
 	t.Helper()
-	node := map[int]string{1: computeNode, 2: edgeNode1}[i]
-	pid := m.l.clientPID(t, tn, node)
+	return m.l.workloadOn(t, tn, map[int]string{1: computeNode, 2: edgeNode1}[i])
+}
+
+// workloadOn returns tenant tn's edge client on node.
+func (l *lab) workloadOn(t *testing.T, tn tenant, node string) workloadRef {
+	t.Helper()
+	pid := l.clientPID(t, tn, node)
 	out, err := nodeExec(node, "nsenter", "-t", strconv.Itoa(pid), "-n", "ip", "-6", "-o", "addr", "show",
 		"scope", "global")
 	if err != nil {
@@ -533,15 +590,21 @@ func (m *masque) workload(t *testing.T, tn tenant, i int) workloadRef {
 			return workloadRef{node: node, pid: pid, iface: f[1], addr: strings.Split(f[3], "/")[0]}
 		}
 	}
-	t.Fatalf("no VPC %s address on edge-client-%d: %s", tn.vpc, i, out)
+	t.Fatalf("no VPC %s address on the edge client on %s: %s", tn.vpc, node, out)
 	return workloadRef{}
 }
 
 // client returns tenant tn's running edge-client-i pod.
 func (m *masque) client(t *testing.T, tn tenant, i int) *corev1.Pod {
 	t.Helper()
+	return m.l.clientPod(t, tn, i)
+}
+
+// clientPod returns tenant tn's running edge-client-i pod.
+func (l *lab) clientPod(t *testing.T, tn tenant, i int) *corev1.Pod {
+	t.Helper()
 	var pods corev1.PodList
-	if err := m.l.c.List(context.Background(), &pods, client.InNamespace(tn.vpcNamespace),
+	if err := l.c.List(context.Background(), &pods, client.InNamespace(tn.vpcNamespace),
 		client.MatchingLabels{appLabel: "edge-client-" + strconv.Itoa(i)}); err != nil {
 		t.Fatal(err)
 	}
@@ -1270,22 +1333,50 @@ func linkPresent(node, name string) (bool, error) {
 	return false, nil
 }
 
-// waitNamespaceEmpty waits until no EdgeAttachment, EdgeInstance, Lease or
-// EdgeRoute remains in the fixture's namespace.
-func (m *masque) waitNamespaceEmpty(t *testing.T) {
+// waitEdgeObjectsGone waits until no EdgeAttachment, EdgeInstance, Lease or
+// EdgeRoute remains in a provider's namespace.
+func (l *lab) waitEdgeObjectsGone(t *testing.T, namespace string) {
 	t.Helper()
 	ctx := context.Background()
-	eventually(t, 3*time.Minute, 2*time.Second, "fixture objects removed", func() (bool, error) {
+	eventually(t, 3*time.Minute, 2*time.Second, "provider objects removed from "+namespace, func() (bool, error) {
 		left := 0
 		for _, list := range []client.ObjectList{&galacticv1alpha1.EdgeAttachmentList{},
 			&galacticv1alpha1.EdgeInstanceList{}, &coordinationv1.LeaseList{}, &galacticv1alpha1.EdgeRouteList{}} {
-			if err := m.l.c.List(ctx, list, client.InNamespace(masqueNS)); err != nil {
+			if err := l.c.List(ctx, list, client.InNamespace(namespace)); err != nil {
 				return false, err
 			}
 			left += meta.LenList(list)
 		}
 		return left == 0, fmt.Errorf("%d objects remain", left)
 	})
+}
+
+// requireNoEdgeAdvertisements fails for every BGPAdvertisement left of a
+// route in a provider's namespace.
+func (l *lab) requireNoEdgeAdvertisements(t *testing.T, namespace string) {
+	t.Helper()
+	var advs networkv1alpha1.BGPAdvertisementList
+	if err := l.c.List(context.Background(), &advs, client.InNamespace(systemNS)); err != nil {
+		t.Error(err)
+	}
+	for _, a := range advs.Items {
+		if strings.HasPrefix(a.Annotations["galactic.datumapis.com/edge-route"], namespace+"/") {
+			t.Errorf("BGPAdvertisement %s of route %s remains", a.Name, a.Annotations["galactic.datumapis.com/edge-route"])
+		}
+	}
+}
+
+// requireLinksGone fails for each host link of links, attachment to link,
+// still present on an edge node.
+func requireLinksGone(t *testing.T, links map[string]string) {
+	t.Helper()
+	for att, link := range links {
+		for _, n := range []string{edgeNode1, edgeNode2} {
+			if present, err := linkPresent(n, link); err != nil || present {
+				t.Errorf("host link %s of attachment %s on %s: present=%t, %v", link, att, n, present, err)
+			}
+		}
+	}
 }
 
 // teardown removes the fixture and fails the run unless everything it
@@ -1310,29 +1401,14 @@ func (m *masque) teardown(t *testing.T) {
 	}
 	// The provider and core must remove what the run created before the
 	// namespace's deletion would remove it for them.
-	m.waitNamespaceEmpty(t)
+	l.waitEdgeObjectsGone(t, masqueNS)
 	if _, err := l.kubectl("delete", "namespace", masqueNS, "--wait=true", "--timeout=180s"); err != nil {
 		t.Error(err)
 	}
 	l.deleteAndWait(t, &galacticv1alpha1.EdgeProvider{ObjectMeta: metav1.ObjectMeta{Name: masqueProvider}})
 
-	var advs networkv1alpha1.BGPAdvertisementList
-	if err := l.c.List(ctx, &advs, client.InNamespace(systemNS)); err != nil {
-		t.Error(err)
-	}
-	for _, a := range advs.Items {
-		if strings.HasPrefix(a.Annotations["galactic.datumapis.com/edge-route"], masqueNS+"/") {
-			t.Errorf("BGPAdvertisement %s of the fixture's route %s remains", a.Name,
-				a.Annotations["galactic.datumapis.com/edge-route"])
-		}
-	}
-	for att, link := range m.links {
-		for _, n := range []string{edgeNode1, edgeNode2} {
-			if present, err := linkPresent(n, link); err != nil || present {
-				t.Errorf("host link %s of attachment %s on %s: present=%t, %v", link, att, n, present, err)
-			}
-		}
-	}
+	l.requireNoEdgeAdvertisements(t, masqueNS)
+	requireLinksGone(t, m.links)
 	for _, n := range []string{computeNode, edgeNode1, edgeNode2} {
 		if _, err := nodeExec(n, "rm", "-f", masqueCA); err != nil {
 			t.Error(err)
