@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"strings"
@@ -26,14 +27,15 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-// connectIP opens one CONNECT-IP request over HTTP/3 and sends ICMPv6 echo
-// requests through it from an address in its assigned /96, one to each
-// destination of -to on every tick. It prints the
-// response status {"t","status"}, the assignment {"t","assigned"}, each echo
-// reply {"t","seq","from","dst","reply":"echo"}, every other packet the
-// tunnel delivers {"t","from","dst","reply":"other"}, the end of a tunnel
-// the server closed {"t","end","error"} and the count {"t","sent"}. A
-// refused request exits 0 after printing its status.
+// connectIP opens one CONNECT-IP request over HTTP/3, or over HTTP/2 with
+// -transport h2, and sends ICMPv6 echo requests through it from an address
+// in its assigned /96, one to each destination of -to on every tick. It
+// prints the response status and the ALPN protocol the connection
+// negotiated {"t","status","proto"}, the assignment {"t","assigned"}, each
+// echo reply {"t","seq","from","dst","len","reply":"echo"}, every other
+// packet the tunnel delivers {"t","from","dst","len","reply":"other"}, the
+// end of a tunnel the server closed {"t","end","error"} and the count
+// {"t","sent"}. A refused request exits 0 after printing its status.
 func connectIP(args []string) error {
 	fs := flag.NewFlagSet("connectip", flag.ExitOnError)
 	server := fs.String("server", "", "server [address]:port")
@@ -41,6 +43,7 @@ func connectIP(args []string) error {
 	caFile := fs.String("ca", "", "PEM file of the CA that signed the server's certificate")
 	token := fs.String("token", "", "bearer credential")
 	vpc := fs.String("vpc", "", "Galactic-VPC header value")
+	transport := fs.String("transport", "h3", "h3 for HTTP/3 over QUIC, h2 for HTTP/2 over TLS")
 	to := fs.String("to", "", "comma-separated echo destinations")
 	srcFlag := fs.String("src", "", "comma-separated source addresses, each sent to every destination; "+
 		"default the first address after the assigned prefix's")
@@ -49,6 +52,15 @@ func connectIP(args []string) error {
 	interval := fs.Duration("interval", 50*time.Millisecond, "time between echo requests")
 	duration := fs.Duration("duration", 5*time.Second, "how long to send")
 	_ = fs.Parse(args)
+	var dial dialFunc
+	switch *transport {
+	case "h3":
+		dial = dialH3
+	case "h2":
+		dial = dialH2
+	default:
+		return fmt.Errorf("-transport %q: want h3 or h2", *transport)
+	}
 	var dsts []netip.Addr
 	for _, a := range strings.Split(*to, ",") {
 		dst, err := netip.ParseAddr(a)
@@ -73,45 +85,36 @@ func connectIP(args []string) error {
 	if err != nil {
 		return err
 	}
+	req := cipRequest{
+		server:   *server,
+		tls:      &tls.Config{ServerName: host, RootCAs: roots, MinVersion: tls.VersionTLS13},
+		template: tmpl,
+		header:   http.Header{},
+	}
+	req.header.Set("Authorization", "Bearer "+*token)
+	req.header.Set("Galactic-VPC", *vpc)
 
 	ctx, cancel := context.WithTimeout(context.Background(), *duration+30*time.Second)
 	defer cancel()
-	qconn, err := quic.DialAddr(ctx, *server, &tls.Config{ServerName: host, RootCAs: roots,
-		NextProtos: []string{http3.NextProtoH3}, MinVersion: tls.VersionTLS13},
-		&quic.Config{EnableDatagrams: true, InitialPacketSize: 1350})
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", *server, err)
-	}
-	defer func() { _ = qconn.CloseWithError(0, "") }()
-	cc, err := (&connectip.Transport{}).NewClientConn(qconn)
-	if err != nil {
-		return err
-	}
-	req, err := connectip.NewRequest(ctx, tmpl)
-	if err != nil {
-		return err
-	}
-	req.Header().Set("Authorization", "Bearer "+*token)
-	req.Header().Set("Galactic-VPC", *vpc)
-	conn, rsp, err := cc.Dial(req)
-	if rsp != nil {
-		_ = out.Encode(cipEvent{T: boottime(), Status: rsp.StatusCode})
+	tun, rsp, err := dial(ctx, req)
+	if rsp.Status != 0 {
+		_ = out.Encode(cipEvent{T: boottime(), Status: rsp.Status, Proto: rsp.Proto})
 	}
 	if err != nil {
-		if rsp != nil {
+		if rsp.Status != 0 {
 			return nil
 		}
 		return err
 	}
-	defer func() { _ = conn.Close() }()
-	assigned, err := conn.ReceiveAddressAssignment(ctx)
+	defer func() { _ = tun.Close() }()
+	assigned, err := tun.assigned(ctx)
 	if err != nil {
 		return err
 	}
 	if len(assigned) != 1 {
 		return fmt.Errorf("assigned %v, want one prefix", assigned)
 	}
-	prefix := assigned[0].IPPrefix
+	prefix := assigned[0]
 	_ = out.Encode(cipEvent{T: boottime(), Assigned: prefix.String()})
 	srcs := []netip.Addr{prefix.Addr().Next()}
 	if *srcFlag != "" {
@@ -130,7 +133,7 @@ func connectIP(args []string) error {
 		defer close(done)
 		buf := make([]byte, 65535)
 		for {
-			n, err := conn.ReadPacket(buf)
+			n, err := tun.ReadPacket(buf)
 			if err != nil {
 				_ = out.Encode(cipEvent{T: boottime(), End: true, Error: err.Error()})
 				return
@@ -150,7 +153,7 @@ loop:
 				if err != nil {
 					return err
 				}
-				if _, err := conn.WritePacket(pkt); err != nil {
+				if err := tun.WritePacket(pkt); err != nil {
 					break loop
 				}
 				sent++
@@ -166,43 +169,151 @@ loop:
 	case <-done:
 	case <-time.After(500 * time.Millisecond):
 	}
-	_ = conn.Close()
+	_ = tun.Close()
 	<-done
 	return out.Encode(cipEvent{T: boottime(), Sent: sent})
 }
 
-// cipEvent is one line connectIP prints.
-type cipEvent struct {
-	T        int64  `json:"t"`
-	Status   int    `json:"status,omitempty"`
-	Assigned string `json:"assigned,omitempty"`
-	Seq      *int   `json:"seq,omitempty"`
-	From     string `json:"from,omitempty"`
-	Dst      string `json:"dst,omitempty"`
-	Reply    string `json:"reply,omitempty"`
-	End      bool   `json:"end,omitempty"`
-	Error    string `json:"error,omitempty"`
-	Sent     int    `json:"sent,omitempty"`
+// cipRequest is what both transports send: the server to dial, the TLS
+// settings without ALPN, the URI template and the request headers.
+type cipRequest struct {
+	server   string
+	tls      *tls.Config
+	template *uritemplate.Template
+	header   http.Header
+}
+
+// cipResponse is what a transport learned before the tunnel opened: the ALPN
+// protocol the connection negotiated and the response status, 0 when no
+// response arrived.
+type cipResponse struct {
+	Proto  string
+	Status int
+}
+
+// dialFunc opens one CONNECT-IP request. An error with a nonzero
+// cipResponse.Status means the server answered and refused the request.
+type dialFunc func(ctx context.Context, r cipRequest) (cipTunnel, cipResponse, error)
+
+// cipTunnel is an accepted CONNECT-IP request on either transport. assigned
+// is called once, before ReadPacket. ReadPacket returns an error once the
+// tunnel ends and only the one reading goroutine calls it; WritePacket is
+// called from one other goroutine.
+type cipTunnel interface {
+	assigned(ctx context.Context) ([]netip.Prefix, error)
+	ReadPacket(b []byte) (int, error)
+	WritePacket(pkt []byte) error
+	Close() error
+}
+
+// dialH3 opens the request on a QUIC connection with connect-ip-go.
+func dialH3(ctx context.Context, r cipRequest) (cipTunnel, cipResponse, error) {
+	cfg := r.tls.Clone()
+	cfg.NextProtos = []string{http3.NextProtoH3}
+	qconn, err := quic.DialAddr(ctx, r.server, cfg, &quic.Config{EnableDatagrams: true, InitialPacketSize: 1350})
+	if err != nil {
+		return nil, cipResponse{}, fmt.Errorf("dial %s: %w", r.server, err)
+	}
+	rsp := cipResponse{Proto: qconn.ConnectionState().TLS.NegotiatedProtocol}
+	cc, err := (&connectip.Transport{}).NewClientConn(qconn)
+	if err != nil {
+		_ = qconn.CloseWithError(0, "")
+		return nil, rsp, err
+	}
+	req, err := connectip.NewRequest(ctx, r.template)
+	if err != nil {
+		_ = qconn.CloseWithError(0, "")
+		return nil, rsp, err
+	}
+	for k, vs := range r.header {
+		for _, v := range vs {
+			req.Header().Add(k, v)
+		}
+	}
+	conn, hrsp, err := cc.Dial(req)
+	if hrsp != nil {
+		rsp.Status = hrsp.StatusCode
+	}
+	if err != nil {
+		_ = qconn.CloseWithError(0, "")
+		return nil, rsp, err
+	}
+	return &h3Tunnel{conn: conn, qconn: qconn}, rsp, nil
+}
+
+// h3Tunnel carries packets as HTTP/3 datagrams.
+type h3Tunnel struct {
+	conn  *connectip.Conn
+	qconn *quic.Conn
+}
+
+func (t *h3Tunnel) assigned(ctx context.Context) ([]netip.Prefix, error) {
+	a, err := t.conn.ReceiveAddressAssignment(ctx)
+	if err != nil {
+		return nil, err
+	}
+	prefixes := make([]netip.Prefix, len(a))
+	for i, p := range a {
+		prefixes[i] = p.IPPrefix
+	}
+	return prefixes, nil
+}
+
+func (t *h3Tunnel) ReadPacket(b []byte) (int, error) { return t.conn.ReadPacket(b) }
+
+// WritePacket ignores the Packet Too Big connect-ip-go returns for a packet
+// over the path's datagram size: the probe only counts what it sent.
+func (t *h3Tunnel) WritePacket(pkt []byte) error {
+	_, err := t.conn.WritePacket(pkt)
+	return err
+}
+
+func (t *h3Tunnel) Close() error {
+	err := t.conn.Close()
+	_ = t.qconn.CloseWithError(0, "")
+	return err
 }
 
 // report prints one packet the tunnel delivered.
 func report(p []byte, id int) {
 	t := boottime()
 	if len(p) < ipv6.HeaderLen || p[0]>>4 != 6 {
-		_ = out.Encode(cipEvent{T: t, Reply: "other"})
+		_ = out.Encode(cipEvent{T: t, Len: len(p), Reply: replyOther})
 		return
 	}
 	src, _ := netip.AddrFromSlice(p[8:24])
 	dst, _ := netip.AddrFromSlice(p[24:40])
-	ev := cipEvent{T: t, From: src.String(), Dst: dst.String(), Reply: "other"}
+	ev := cipEvent{T: t, From: src.String(), Dst: dst.String(), Len: len(p), Reply: replyOther}
 	if p[6] == 58 {
 		if m, err := icmp.ParseMessage(58, p[ipv6.HeaderLen:]); err == nil && m.Type == ipv6.ICMPTypeEchoReply {
 			if e, ok := m.Body.(*icmp.Echo); ok && e.ID == id {
-				ev.Reply, ev.Seq = "echo", &e.Seq
+				ev.Reply, ev.Seq = replyEcho, &e.Seq
 			}
 		}
 	}
 	_ = out.Encode(ev)
+}
+
+// Values of cipEvent.Reply.
+const (
+	replyEcho  = "echo"
+	replyOther = "other"
+)
+
+// cipEvent is one line connectIP prints.
+type cipEvent struct {
+	T        int64  `json:"t"`
+	Status   int    `json:"status,omitempty"`
+	Proto    string `json:"proto,omitempty"`
+	Assigned string `json:"assigned,omitempty"`
+	Seq      *int   `json:"seq,omitempty"`
+	From     string `json:"from,omitempty"`
+	Dst      string `json:"dst,omitempty"`
+	Len      int    `json:"len,omitempty"`
+	Reply    string `json:"reply,omitempty"`
+	End      bool   `json:"end,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Sent     int    `json:"sent,omitempty"`
 }
 
 // echoRequest builds an IPv6 ICMPv6 echo request of size bytes.

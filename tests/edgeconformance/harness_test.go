@@ -243,10 +243,14 @@ type event struct {
 	End   bool          `json:"end"`
 	// ID is a captured ICMPv6 echo request's identifier.
 	ID int `json:"id"`
-	// Status and Assigned are a CONNECT-IP request's response status and
-	// assigned prefix.
+	// Status, Proto and Assigned are a CONNECT-IP request's response
+	// status, the ALPN protocol its connection negotiated (h3 or h2) and
+	// its assigned prefix.
 	Status   int    `json:"status"`
+	Proto    string `json:"proto"`
 	Assigned string `json:"assigned"`
+	// Len is the size of a packet a CONNECT-IP tunnel delivered.
+	Len int `json:"len"`
 }
 
 // last reports whether e marks the end of a probe's window: a send probe's
