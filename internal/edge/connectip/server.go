@@ -736,31 +736,51 @@ func (s *Server) proxySession(
 
 // deliveryClock times the writes toward one client for watchDelivery.
 // Times are durations since base plus one, so 0 means unset.
+//
+// A stall is timed from the first write that waited, not from the first
+// slow one. A slow write takes at least a quarter of deliveryTimeout, and a
+// waiting write at least 1/256 of it. A QUIC connection to a client that
+// stopped reading still drains a datagram per probe timeout, and those
+// timeouts double from below the slow threshold, so a stall's first writes
+// wait without being slow. Since they double, the writes before the first
+// slow one span less than half of deliveryTimeout, which bounds how far back
+// a stall is timed from.
 type deliveryClock struct {
 	base time.Time
 	// writing is when the write in progress began.
 	writing atomic.Int64
-	// slowSince is when the current run of slow writes began. A slow write
-	// takes at least a quarter of deliveryTimeout. The run ends after
-	// promptStreak prompt writes in a row, or when the writer waits that
-	// long for a packet. Each QUIC probe timeout frees two datagram slots, so
-	// a stalled client's slow writes alternate with prompt ones.
+	// waiting is when the first waiting write of the current run began. The
+	// run ends after promptStreak writes in a row that are not slow, after
+	// quickStreak writes in a row that do not wait, or when the writer waits
+	// a quarter of deliveryTimeout for a packet. Each QUIC probe timeout
+	// frees two datagram slots, so a stalled client's waiting writes
+	// alternate with ones that do not wait.
+	waiting atomic.Int64
+	// slowSince is when the run's stall began, once the run has a slow write.
 	slowSince atomic.Int64
-	// lastEnd is when the last write returned, and prompt counts the prompt
-	// writes since the last slow one. Only the writer uses them.
+	// lastEnd is when the last write returned, prompt counts the writes in a
+	// row since the run's last slow write that were not slow, and quick
+	// counts the writes in a row that did not wait. Only the writer uses
+	// them.
 	lastEnd int64
 	prompt  int
+	quick   int
 }
 
-// promptStreak is how many prompt writes in a row end a run of slow ones.
-const promptStreak = 16
+const (
+	// promptStreak is how many prompt writes in a row end a run of slow ones.
+	promptStreak = 16
+	// quickStreak is how many writes in a row that do not wait end a run. A
+	// stalled QUIC connection never returns two in a row.
+	quickStreak = 3
+)
 
 func (c *deliveryClock) now() int64 { return int64(time.Since(c.base)) + 1 }
 
 func (c *deliveryClock) start() {
 	now := c.now()
 	if c.lastEnd != 0 && time.Duration(now-c.lastEnd) >= deliveryTimeout/4 {
-		c.slowSince.Store(0)
+		c.endRun()
 	}
 	c.writing.Store(now)
 }
@@ -768,36 +788,71 @@ func (c *deliveryClock) start() {
 func (c *deliveryClock) done() {
 	now, began := c.now(), c.writing.Swap(0)
 	c.lastEnd = now
-	if time.Duration(now-began) < deliveryTimeout/4 {
-		if c.prompt++; c.prompt >= promptStreak {
-			c.slowSince.Store(0)
+	took := time.Duration(now - began)
+	if took < deliveryTimeout/256 {
+		if c.quick++; c.quick >= quickStreak {
+			c.endRun()
+			return
+		}
+	} else {
+		c.quick = 0
+		c.waiting.CompareAndSwap(0, began)
+	}
+	if took < deliveryTimeout/4 {
+		if c.waiting.Load() != 0 {
+			if c.prompt++; c.prompt >= promptStreak {
+				c.endRun()
+			}
 		}
 		return
 	}
 	c.prompt = 0
-	c.slowSince.CompareAndSwap(0, began)
+	c.slowSince.CompareAndSwap(0, c.stallStart(began))
+}
+
+func (c *deliveryClock) endRun() {
+	c.waiting.Store(0)
+	c.slowSince.Store(0)
+	c.prompt = 0
+	c.quick = 0
+}
+
+// stallStart returns when the stall around a slow write that began at began
+// started: at the run's first waiting write, or at began when the run has
+// none yet, and at most half of deliveryTimeout before began.
+func (c *deliveryClock) stallStart(began int64) int64 {
+	w := c.waiting.Load()
+	if w == 0 {
+		w = began
+	}
+	return max(w, began-int64(deliveryTimeout/2))
 }
 
 // blocked returns how long delivery has been stuck while a write is in
-// progress: since the current run of slow writes began, or else since the
-// write began.
+// progress: since the current stall began once the run or the write in
+// progress is slow, or else since the write began.
 func (c *deliveryClock) blocked() time.Duration {
 	began := c.writing.Load()
 	if began == 0 {
 		return 0
 	}
+	now := c.now()
 	if slow := c.slowSince.Load(); slow != 0 {
-		began = slow
+		return time.Duration(now - slow)
 	}
-	return time.Duration(c.now() - began)
+	if time.Duration(now-began) >= deliveryTimeout/4 {
+		return time.Duration(now - c.stallStart(began))
+	}
+	return time.Duration(now - began)
 }
 
 // watchDelivery ends a session whose delivery toward the client has been
 // stuck for deliveryTimeout, checked every quarter of it, and counts it as
 // denied with reason slow_client. Stuck means one write blocked that long,
-// or back-to-back slow writes for that long: a QUIC connection to a client
-// that stopped reading still drains one datagram per probe timeout, and
-// those timeouts double from a fraction of a second; see deliveryClock.
+// or back-to-back waiting writes, at least one of them slow, for that long:
+// a QUIC connection to a client that stopped reading still drains one
+// datagram per probe timeout, and those timeouts double from a fraction of a
+// second; see deliveryClock.
 // Over HTTP/3 ending the session closes the client's QUIC connection, since
 // a blocked datagram waits on the connection's send queue; the
 // connection's other request is stalled by the same client. It returns when
