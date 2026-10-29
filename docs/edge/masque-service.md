@@ -88,10 +88,12 @@ Both transports share every limit from the connection caps down: an HTTP/3 sessi
 
 ## Packet size
 
-Every admitted request carries 1280-byte inner IPv6 packets in both directions. Over HTTP/3, admission sends a 1280-byte probe datagram after authorization and answers 503 when the QUIC path cannot carry it.
+Every admitted request carries 1280-byte inner IPv6 packets in both directions. Over HTTP/3, admission sends a 1280-byte probe datagram after authorization and answers 503 when the QUIC connection cannot fit it.
 
-- A gVPC packet larger than the current QUIC datagram size gets an ICMPv6 Packet Too Big with MTU 1280, which passes the [packet policy](masque-provider.md#packet-policy) and goes to the sender.
-- When the path shrinks mid-tunnel so that a packet of 1280 bytes or less no longer fits, the request ends and the packet is counted as `reason="path_mtu"`. The sender cannot shrink below 1280 bytes, so RFC 9484 section 10.1 calls for termination over an error. The connector reconnects, and the admission probe refuses it while the path stays too small.
+- The server sends QUIC packets of a fixed 1350 bytes and does not run path MTU discovery. quic-go never shrinks a size that discovery found, so a path that shrank later would drop the larger packets without an error. A 1350-byte QUIC packet carries an inner packet of about 1310 bytes.
+- A gVPC packet larger than that gets an ICMPv6 Packet Too Big with MTU 1280, which passes the [packet policy](masque-provider.md#packet-policy) and goes to the sender. This holds on any path that carries 1350-byte QUIC packets, however its MTU changes.
+- When the QUIC connection cannot fit a packet of 1280 bytes or less, the request ends and the packet is counted as `reason="path_mtu"`. The sender cannot shrink below 1280 bytes, so RFC 9484 section 10.1 calls for termination over an error.
+- A path that shrinks below 1350 bytes after admission drops every larger QUIC packet, 1280-byte inner packets included, without an error, and the tunnel stays open until the connector reconnects. The admission probe checks only the server's packet size, not delivery, so it does not refuse such a path either. [#1247](https://github.com/datum-cloud/galactic/issues/1247) tracks this.
 - The HTTP/2 limits are under [HTTP/2 fallback](#http2-fallback).
 
 The device, SRv6 and underlay limits are set by the foundation, not here. `galactic-edge --mtu` sets the attachment MTU.

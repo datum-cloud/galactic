@@ -395,6 +395,20 @@ func TestRejectsPathBelowMinimumInnerMTU(t *testing.T) {
 	}
 }
 
+// TestQUICConfigWithoutPacketSizeCarriesMinimum checks that a QUICConfig
+// leaving InitialPacketSize unset still gets DefaultInitialPacketSize, which
+// carries a MinInnerMTU packet, rather than quic-go's smaller default.
+func TestQUICConfigWithoutPacketSizeCarriesMinimum(t *testing.T) {
+	env := startServer(t, func(c *Config) { c.QUICConfig = &quic.Config{} })
+	cc := newClientConn(t, env.dialQUIC(t))
+	s := open(t, cc, env.newRequest(t, authHeaders(tokenAlice, vpcBlue)))
+	sess := env.backend.nextOpened(t)
+	sess.inject(echoRequest(t, testTarget, s.address, 1, MinInnerMTU))
+	if got := len(readPacket(t, s.conn)); got != MinInnerMTU {
+		t.Fatalf("delivered %d bytes, want %d", got, MinInnerMTU)
+	}
+}
+
 func TestNoIrohDependency(t *testing.T) {
 	gobin, err := exec.LookPath("go")
 	if err != nil {
