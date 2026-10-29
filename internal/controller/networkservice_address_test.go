@@ -118,6 +118,7 @@ type ownedTestEngine struct {
 }
 
 func (e *ownedTestEngine) SetBlockedVIPs(context.Context, []netip.Addr) error { return nil }
+func (e *ownedTestEngine) RenewVIPs(context.Context, []netip.Addr) error      { return nil }
 func (e *ownedTestEngine) SetOwnedVIPs(_ context.Context, owned []netip.Addr) error {
 	e.owned = owned
 	return nil
@@ -419,10 +420,10 @@ type renewalTestEngine struct {
 	renewals int
 }
 
-func (e *renewalTestEngine) SetBlockedVIPs(_ context.Context, blocked []netip.Addr) error {
-	if len(blocked) == 0 {
-		e.renewals++
-	}
+func (e *renewalTestEngine) SetBlockedVIPs(context.Context, []netip.Addr) error { return nil }
+func (e *renewalTestEngine) SetOwnedVIPs(context.Context, []netip.Addr) error   { return nil }
+func (e *renewalTestEngine) RenewVIPs(_ context.Context, addresses []netip.Addr) error {
+	e.renewals += len(addresses)
 	return nil
 }
 
@@ -440,20 +441,24 @@ func TestSharedServingLeaseRenewalRequiresConfirmedCleanup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newRuleTestScheme(t)
 			gw := newTestGateway(testNodeGWA)
+			address, _ := sharedAddressFixture()
 			c := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithStatusSubresource(&api.NetworkGateway{}).
-				WithObjects(gw).
+				WithObjects(gw, address).
 				Build()
 			engine := &renewalTestEngine{fakeGatewayEngine: newFakeGatewayEngine()}
 			engine.orphansErr = tc.sweepErr
 			r := newGatewayReconciler(c, scheme, engine, testNodeGWA)
+			r.ownedAddresses = []netip.Addr{netip.MustParseAddr(address.Spec.VIPAddress)}
+			r.desiredOwnedAddresses = r.ownedAddresses
 			err := r.finishAddressConvergence(
 				context.Background(),
 				gw,
 				gateway.EngineState{},
-				gateway.EngineStatus{Healthy: tc.healthy},
+				&gateway.EngineStatus{Healthy: tc.healthy},
 				0,
+				addressInventory{address.Spec.VIPAddress: address},
 			)
 			if (err != nil) != (tc.sweepErr != nil) {
 				t.Fatalf("error=%v", err)
@@ -849,6 +854,11 @@ func assertRetiredAddressReuse(
 		t.Fatal(err)
 	}
 	inventory, err = r.prepareAddressInventory(ctx, testNamespace, []api.NetworkService{*rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := gateway.EngineStatus{Healthy: true}
+	err = r.finishAddressConvergence(ctx, newTestGateway(testNodeGWA), gateway.EngineState{}, &status, 0, inventory)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -175,3 +175,37 @@ func SetBlockedVIPs(table Table, addrs []netip.Addr) error {
 	}
 	return it.Err()
 }
+
+// RenewVIPs acknowledges convergence only for the supplied owned VIPs. An empty
+// list is a no-op; all other addresses retain their block state and deadline.
+func RenewVIPs(table Table, addrs []netip.Addr) error {
+	for _, addr := range addrs {
+		raw, err := toWireAddr(addr)
+		if err != nil {
+			return err
+		}
+		key := edgeprog.EdgedsrVipAddrKey{Vip: raw}
+		var value edgeprog.EdgedsrVipOwnedValue
+		if err := table.Lookup(key, &value); err != nil {
+			return err
+		}
+		value.Blocked = 0
+		value.ExpiresAtNs = clockFn() + OwnedVIPLease
+		if err := table.Put(key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// OwnedVIPs lists existing guards without changing their block or lease state.
+func OwnedVIPs(table Table) ([]netip.Addr, error) {
+	var addresses []netip.Addr
+	it := table.Iterate()
+	var key edgeprog.EdgedsrVipAddrKey
+	var value edgeprog.EdgedsrVipOwnedValue
+	for it.Next(&key, &value) {
+		addresses = append(addresses, netip.AddrFrom16(key.Vip))
+	}
+	return addresses, it.Err()
+}

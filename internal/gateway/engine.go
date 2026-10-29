@@ -97,17 +97,7 @@ func (e *Engine) Reconcile(ctx context.Context, desired EngineState) (EngineStat
 	}
 	for _, key := range toApply {
 		rule := desired.Rules[key]
-		blocked := false
-		for _, removed := range toRemove {
-			if old, exists := e.active[removed]; exists && rulesOverlap(old, rule) {
-				blocked = true
-			}
-		}
-		for oldKey, old := range e.pending {
-			if oldKey != key && rulesOverlap(old, rule) {
-				blocked = true
-			}
-		}
+		blocked := e.ruleConflictsLocked(key, rule, toRemove)
 		if blocked {
 			statuses = append(statuses, RuleStatus{Key: key, Error: "conflicting prior rule has not withdrawn"})
 			continue
@@ -142,6 +132,7 @@ func (e *Engine) Reconcile(ctx context.Context, desired EngineState) (EngineStat
 			break
 		}
 	}
+	annotateRuleVIPs(statuses, inventory, e.active, desired.Rules)
 	return EngineStatus{Healthy: healthy, Rules: statuses}, nil
 }
 
@@ -299,4 +290,107 @@ func (e *Engine) SetBlockedVIPs(ctx context.Context, addrs []netip.Addr) error {
 		return errors.New("datapath does not support owned VIP blocking")
 	}
 	return guard.SetBlockedVIPs(ctx, addrs)
+}
+
+// ChangedVIPs includes every old and new address whose rule must be written or
+// removed, and every address whose earlier write or rollback remains dirty.
+func (e *Engine) ChangedVIPs(desired EngineState) []netip.Addr {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	addresses := map[netip.Addr]bool{}
+	inventory := make(map[string]DesiredRule, len(e.active)+len(e.pending))
+	for key, rule := range e.active {
+		inventory[key] = rule
+	}
+	for key, rule := range e.pending {
+		inventory[key] = rule
+	}
+	apply, remove := diffRuleKeys(inventory, desired.Rules)
+	keys := append(apply, remove...)
+	for key := range e.dirty {
+		keys = append(keys, key)
+	}
+	for key := range e.pending {
+		keys = append(keys, key)
+	}
+	for _, key := range keys {
+		for _, addr := range inventory[key].VIPAddresses {
+			addresses[addr] = true
+		}
+		for _, addr := range e.active[key].VIPAddresses {
+			addresses[addr] = true
+		}
+		for _, addr := range desired.Rules[key].VIPAddresses {
+			addresses[addr] = true
+		}
+	}
+	result := make([]netip.Addr, 0, len(addresses))
+	for addr := range addresses {
+		result = append(result, addr)
+	}
+	return result
+}
+
+// RenewVIPs unblocks and renews only explicitly confirmed owned addresses.
+func (e *Engine) RenewVIPs(ctx context.Context, addresses []netip.Addr) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	guard, ok := e.datapath.(interface {
+		RenewVIPs(context.Context, []netip.Addr) error
+	})
+	if !ok {
+		if len(addresses) == 0 {
+			return nil
+		}
+		return errors.New("datapath does not support selective owned VIP renewal")
+	}
+	return guard.RenewVIPs(ctx, addresses)
+}
+
+// OwnedVIPs discovers pinned guards, including those left by an earlier process.
+func (e *Engine) OwnedVIPs() ([]netip.Addr, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	guard, ok := e.datapath.(interface{ OwnedVIPs() ([]netip.Addr, error) })
+	if !ok {
+		return nil, nil
+	}
+	return guard.OwnedVIPs()
+}
+
+func annotateRuleVIPs(statuses []RuleStatus, inventory, active, desired map[string]DesiredRule) {
+	for i := range statuses {
+		old := inventory[statuses[i].Key]
+		current := desired[statuses[i].Key]
+		statuses[i].VIPAddresses = slices.Clone(old.VIPAddresses)
+		current.VIPAddresses = append(slices.Clone(current.VIPAddresses), active[statuses[i].Key].VIPAddresses...)
+		for _, addr := range current.VIPAddresses {
+			if !slices.Contains(statuses[i].VIPAddresses, addr) {
+				statuses[i].VIPAddresses = append(statuses[i].VIPAddresses, addr)
+			}
+		}
+	}
+}
+
+// ruleConflictsLocked fences replacement writes until every overlapping old
+// active or partially applied form has been removed.
+func (e *Engine) ruleConflictsLocked(key string, rule DesiredRule, toRemove []string) bool {
+	for _, removed := range toRemove {
+		if old, exists := e.active[removed]; exists && rulesOverlap(old, rule) {
+			return true
+		}
+	}
+	for oldKey, old := range e.active {
+		_, dirty := e.dirty[oldKey]
+		_, pending := e.pending[oldKey]
+		if oldKey != key && (dirty || pending) && rulesOverlap(old, rule) {
+			return true
+		}
+	}
+	for oldKey, old := range e.pending {
+		if oldKey != key && rulesOverlap(old, rule) {
+			return true
+		}
+	}
+	return false
 }

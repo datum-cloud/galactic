@@ -134,3 +134,42 @@ func TestRangeAndSingletonShareReturnAddressLifetime(t *testing.T) {
 		t.Fatal("final rule retained return address")
 	}
 }
+
+func TestSelectiveOwnedVIPRenewalPreservesOtherGuards(t *testing.T) {
+	raw := newFakeMap[edgeprog.EdgedsrVipAddrKey, edgeprog.EdgedsrVipOwnedValue]()
+	a, b := netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("2001:db8::2")
+	if err := ReplaceOwnedVIPs(raw, []netip.Addr{a, b}, 1); err != nil {
+		t.Fatal(err)
+	}
+	keyA, keyB := edgeprog.EdgedsrVipAddrKey{Vip: a.As16()}, edgeprog.EdgedsrVipAddrKey{Vip: b.As16()}
+	beforeB := raw.entries[keyB]
+	if err := RenewVIPs(raw, []netip.Addr{a}); err != nil {
+		t.Fatal(err)
+	}
+	first := raw.entries[keyA]
+	if first.Blocked != 0 || first.ExpiresAtNs == 0 || raw.entries[keyB] != beforeB {
+		t.Fatal("selective renewal touched blocked sibling")
+	}
+	if err := ReplaceOwnedVIPs(raw, []netip.Addr{a, b}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if raw.entries[keyA].Blocked != 0 {
+		t.Fatal("steady ownership refresh blocked serving VIP")
+	}
+	if err := RenewVIPs(raw, nil); err != nil {
+		t.Fatal(err)
+	}
+	if raw.entries[keyB].Blocked != 1 || raw.entries[keyB].ExpiresAtNs != 0 {
+		t.Fatal("empty renewal opened unrelated guard")
+	}
+	if err := RenewVIPs(raw, []netip.Addr{a}); err != nil {
+		t.Fatal(err)
+	}
+	if raw.entries[keyA].ExpiresAtNs < first.ExpiresAtNs {
+		t.Fatal("renewal shortened deadline")
+	}
+	discovered, err := OwnedVIPs(raw)
+	if err != nil || len(discovered) != 2 {
+		t.Fatalf("guard discovery failed: %v %v", discovered, err)
+	}
+}

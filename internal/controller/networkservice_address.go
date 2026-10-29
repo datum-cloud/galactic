@@ -108,15 +108,8 @@ func (r *NetworkGatewayReconciler) prepareAddressInventory(
 			}
 		}
 	}
-	if engine, ok := r.Engine.(ownedVIPEngine); ok {
-		if err := engine.SetOwnedVIPs(ctx, owned); err != nil {
-			return nil, err
-		}
-		if err := engine.SetBlockedVIPs(ctx, owned); err != nil {
-			return nil, err
-		}
-	} else if len(owned) > 0 {
-		return nil, errors.New("gateway lacks shared-address isolation")
+	if err := r.prepareOwnedAddresses(ctx, addresses, owned); err != nil {
+		return nil, err
 	}
 	return addresses, nil
 }
@@ -344,7 +337,8 @@ func (r *NetworkGatewayReconciler) publishAddressOutcomes(
 		}
 		serve := addressHasServingOutcome(address, outcomes, failed)
 		// Any failed apply/removal can leave an obsolete match on this address.
-		if !allowed || !status.Healthy || validAddressInventory(address) != nil || addresses[vip] == nil {
+		converged := status.VIPConverged(netip.MustParseAddr(vip))
+		if !allowed || !converged || validAddressInventory(address) != nil || addresses[vip] == nil {
 			serve = false
 		}
 		installed, err := r.reconcileAddressAdvertisement(ctx, address, router, serve, namespace)
@@ -354,10 +348,10 @@ func (r *NetworkGatewayReconciler) publishAddressOutcomes(
 		if allowed {
 			announced[vip] = installed
 		}
-		if err := r.reportAddressNode(ctx, address, serve, installed, status.Healthy); err != nil {
+		if err := r.reportAddressNode(ctx, address, serve, installed, converged); err != nil {
 			errs = append(errs, err)
 		}
-		if (address.Spec.Retired || !address.DeletionTimestamp.IsZero()) && status.Healthy {
+		if (address.Spec.Retired || !address.DeletionTimestamp.IsZero()) && converged {
 			if err := r.finalizeAddress(ctx, address); err != nil {
 				errs = append(errs, err)
 			}
@@ -673,25 +667,24 @@ func sameAddressRevision(a, b *bgpv1alpha1.NetworkServiceAddress) bool {
 		a.DeletionTimestamp.Equal(b.DeletionTimestamp)
 }
 
-func (r *NetworkGatewayReconciler) confirmAddressSnapshot(
+func (r *NetworkGatewayReconciler) currentAddressInventory(
 	ctx context.Context,
 	namespace string,
-	snapshot addressInventory,
-) error {
+) (addressInventory, error) {
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
 	list, err := r.servedAddressInventories(ctx, reader, namespace)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	current := addressInventory{}
 	for i := range list.Items {
 		address := &list.Items[i]
 		allowed, err := r.addressInScope(ctx, reader, address, namespace)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !allowed {
 			continue
@@ -706,16 +699,7 @@ func (r *NetworkGatewayReconciler) confirmAddressSnapshot(
 			current[vip] = address
 		}
 	}
-	if len(current) != len(snapshot) {
-		return errors.New("address inventory changed before forwarding activation")
-	}
-	for vip, previous := range snapshot {
-		fresh, ok := current[vip]
-		if !ok || (fresh == nil) != (previous == nil) || fresh != nil && !sameAddressRevision(previous, fresh) {
-			return errors.New("address revision changed before forwarding activation")
-		}
-	}
-	return nil
+	return current, nil
 }
 
 func retiredRuleAllocation(
@@ -1017,4 +1001,167 @@ func (r *NetworkGatewayReconciler) addressGateways(
 		namespace = r.Scope.GatewayNamespace
 	}
 	return (ServiceScope{}).servingGateways(ctx, reader, namespace)
+}
+
+func (r *NetworkGatewayReconciler) prepareOwnedAddresses(
+	ctx context.Context,
+	snapshot addressInventory,
+	owned []netip.Addr,
+) error {
+	engine, ok := r.Engine.(ownedVIPEngine)
+	if !ok {
+		if len(owned) == 0 {
+			return nil
+		}
+		return errors.New("gateway lacks shared-address isolation")
+	}
+	r.desiredOwnedAddresses = slices.Clone(owned)
+	retained := slices.Clone(r.ownedAddresses)
+	if discovery, ok := r.Engine.(interface{ OwnedVIPs() ([]netip.Addr, error) }); ok {
+		pinned, err := discovery.OwnedVIPs()
+		if err != nil {
+			return err
+		}
+		for _, addr := range pinned {
+			if !slices.Contains(retained, addr) {
+				retained = append(retained, addr)
+			}
+		}
+	}
+	for _, addr := range owned {
+		if !slices.Contains(retained, addr) {
+			retained = append(retained, addr)
+		}
+	}
+	// Record all attempted guards even on partial failure; no cleanup receipt
+	// may forget a row the datapath might already have installed.
+	r.ownedAddresses = retained
+	if err := engine.SetOwnedVIPs(ctx, retained); err != nil {
+		return err
+	}
+	var changed []netip.Addr
+	for _, addr := range retained {
+		current, confirmed := snapshot[addr.String()], r.confirmedAddresses[addr.String()]
+		if current == nil || confirmed == nil || !sameAddressRevision(current, confirmed) {
+			changed = append(changed, addr)
+		}
+	}
+	if len(changed) > 0 {
+		return engine.SetBlockedVIPs(ctx, changed)
+	}
+	return nil
+}
+
+func (r *NetworkGatewayReconciler) blockChangedAddressRules(ctx context.Context, desired gateway.EngineState) error {
+	blocker, ok := r.Engine.(ownedVIPEngine)
+	if !ok {
+		return nil
+	}
+	changed := r.ownedAddresses
+	if engine, ok := r.Engine.(interface {
+		ChangedVIPs(gateway.EngineState) []netip.Addr
+	}); ok {
+		changed = nil
+		for _, addr := range engine.ChangedVIPs(desired) {
+			if slices.Contains(r.ownedAddresses, addr) {
+				changed = append(changed, addr)
+			}
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	return blocker.SetBlockedVIPs(ctx, changed)
+}
+
+func ruleVIPsConverged(rule *bgpv1alpha1.NetworkService, status gateway.EngineStatus) bool {
+	for _, value := range rule.Spec.VIPAddresses {
+		addr, err := netip.ParseAddr(value)
+		if err != nil || !status.VIPConverged(addr) {
+			return false
+		}
+	}
+	return true
+}
+
+func markVIPFailure(status *gateway.EngineStatus, addr netip.Addr, err error) {
+	status.Healthy = false
+	status.Rules = append(status.Rules, gateway.RuleStatus{VIPAddresses: []netip.Addr{addr}, Error: err.Error()})
+}
+
+func (r *NetworkGatewayReconciler) finishOwnedAddresses(
+	ctx context.Context,
+	namespace string,
+	snapshot addressInventory,
+	status *gateway.EngineStatus,
+) error {
+	current, err := r.currentAddressInventory(ctx, namespace)
+	if err != nil {
+		return err
+	}
+	blocker, ok := r.Engine.(ownedVIPEngine)
+	if !ok {
+		return nil
+	}
+	var changed []netip.Addr
+	for vip, before := range snapshot {
+		after, exists := current[vip]
+		if !exists || (after == nil) != (before == nil) || after != nil && !sameAddressRevision(before, after) {
+			changed = append(changed, netip.MustParseAddr(vip))
+		}
+	}
+	for vip := range current {
+		if _, exists := snapshot[vip]; !exists {
+			changed = append(changed, netip.MustParseAddr(vip))
+		}
+	}
+	for _, addr := range changed {
+		if !slices.Contains(r.ownedAddresses, addr) {
+			r.ownedAddresses = append(r.ownedAddresses, addr)
+		}
+		markVIPFailure(status, addr, errors.New("address revision changed before forwarding activation"))
+	}
+	if len(changed) > 0 {
+		if err := blocker.SetOwnedVIPs(ctx, r.ownedAddresses); err != nil {
+			return err
+		}
+		if err := blocker.SetBlockedVIPs(ctx, changed); err != nil {
+			return err
+		}
+	}
+	renewer, ok := r.Engine.(interface {
+		RenewVIPs(context.Context, []netip.Addr) error
+	})
+	if !ok && len(r.ownedAddresses) > 0 {
+		return errors.New("gateway lacks selective address renewal")
+	}
+	if r.confirmedAddresses == nil {
+		r.confirmedAddresses = addressInventory{}
+	}
+	retained := make([]netip.Addr, 0, len(r.ownedAddresses))
+	for _, addr := range r.ownedAddresses {
+		if !status.VIPConverged(addr) || slices.Contains(r.desiredOwnedAddresses, addr) {
+			retained = append(retained, addr)
+		}
+		address := snapshot[addr.String()]
+		if !status.VIPConverged(addr) || validAddressInventory(address) != nil {
+			continue
+		}
+		if err := renewer.RenewVIPs(ctx, []netip.Addr{addr}); err != nil {
+			markVIPFailure(status, addr, err)
+			delete(r.confirmedAddresses, addr.String())
+			continue
+		}
+		r.confirmedAddresses[addr.String()] = address.DeepCopy()
+	}
+	if err := blocker.SetOwnedVIPs(ctx, retained); err != nil {
+		return err
+	}
+	r.ownedAddresses = retained
+	for vip := range r.confirmedAddresses {
+		if !slices.Contains(retained, netip.MustParseAddr(vip)) {
+			delete(r.confirmedAddresses, vip)
+		}
+	}
+	return nil
 }

@@ -303,7 +303,10 @@ func TestEngine_ReconcileQuotaDeniedSkipsApply(t *testing.T) {
 	telem := &fakeTelemetry{}
 	e := NewEngine(dp, &fakeQuota{deny: true}, telem)
 
-	status, err := e.Reconcile(context.Background(), EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}}})
+	status, err := e.Reconcile(
+		context.Background(),
+		EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}}},
+	)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -323,7 +326,10 @@ func TestEngine_ReconcileApplyErrorReportsUnhealthyKeepsGoing(t *testing.T) {
 	dp.applyErr = errors.New("simulated datapath failure")
 	e := NewEngine(dp, &fakeQuota{}, &fakeTelemetry{})
 
-	status, err := e.Reconcile(context.Background(), EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}}})
+	status, err := e.Reconcile(
+		context.Background(),
+		EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}}},
+	)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -507,5 +513,50 @@ func TestEngineFailedPartialApplyRetainsOwnershipUntilCleanup(t *testing.T) {
 	}
 	if total, _ := quota.Stats(); total != 1 {
 		t.Fatalf("reservation leak: %d", total)
+	}
+}
+
+func TestPendingChangedVIPRetainsOldFailureOwnership(t *testing.T) {
+	ctx := context.Background()
+	d := newFakeDatapath()
+	e := NewEngine(d, NoopQuotaEnforcer{}, NoopTelemetryEmitter{})
+	a, b := netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("2001:db8::2")
+	rule := DesiredRule{Key: "changing", VIPAddresses: []netip.Addr{a}, Protocol: "tcp", Port: 443}
+	if _, err := e.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{rule.Key: rule}}); err != nil {
+		t.Fatal(err)
+	}
+	rule.VIPAddresses = []netip.Addr{b}
+	desired := EngineState{Rules: map[string]DesiredRule{rule.Key: rule}}
+	d.applyErr, d.removeErr = errors.New("partial apply"), errors.New("rollback failed")
+	for range 2 {
+		status, err := e.Reconcile(ctx, desired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.VIPConverged(a) || status.VIPConverged(b) {
+			t.Fatalf("failure lost old or new VIP: %+v", status)
+		}
+		changed := e.ChangedVIPs(desired)
+		if !slices.Contains(changed, a) || !slices.Contains(changed, b) {
+			t.Fatalf("dirty VIP inventory lost old address: %v", changed)
+		}
+	}
+	d.applyErr = nil
+	replacement := rule
+	replacement.Key = "replacement"
+	replacement.VIPAddresses = []netip.Addr{a}
+	desired.Rules[replacement.Key] = replacement
+	status, err := e.Reconcile(ctx, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ruleStatus := range status.Rules {
+		if ruleStatus.Key == replacement.Key && ruleStatus.Applied {
+			t.Fatal("replacement claimed old VIP before dirty owner cleanup")
+		}
+	}
+	d.removeErr = nil
+	if status, err := e.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{}}); err != nil || !status.Healthy {
+		t.Fatalf("cleanup failed: %+v %v", status, err)
 	}
 }

@@ -136,6 +136,12 @@ type NetworkGatewayReconciler struct {
 	// NetworkGateway outside Scope.GatewayNamespace is ignored.
 	Scope ServiceScope
 
+	// Owned guards outlive failed removals; confirmed revisions are process-local
+	// so a restarted writer fences every owned address before recovery.
+	ownedAddresses        []netip.Addr
+	desiredOwnedAddresses []netip.Addr
+	confirmedAddresses    addressInventory
+
 	// drain keeps a deleted rule loaded until its route is withdrawn. See
 	// ruleDrainTracker.
 	drain ruleDrainTracker
@@ -510,6 +516,9 @@ func (r *NetworkGatewayReconciler) reconcileServingGateway(ctx context.Context, 
 	r.gateAddressRules(addresses, &desired, outcomes, leaseSupport)
 	outcomes = appendUnservedGroupedOutcomes(outcomes, served, allRules)
 	desired, fwdErr := r.ensureIPv4Forwarding(desired, outcomes)
+	if err := r.blockChangedAddressRules(ctx, desired); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.primeGroupedServing(ctx, addresses, desired, outcomes); err != nil {
 		return ctrl.Result{}, errors.Join(err, withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName))
 	}
@@ -525,7 +534,7 @@ func (r *NetworkGatewayReconciler) reconcileServingGateway(ctx context.Context, 
 		logger.Info("no BGPRouter targets this node; skipping BGPAdvertisement wiring", "nodeName", r.NodeName)
 	}
 
-	if err := r.finishAddressConvergence(ctx, gw, desired, status, cutoff, addresses); err != nil {
+	if err := r.finishAddressConvergence(ctx, gw, desired, &status, cutoff, addresses); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -980,7 +989,7 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 		}
 		cond := programmedCondition(r.NodeName, o, loadErrs)
 		if o.rule.Spec.AddressGroup != nil {
-			if !status.Healthy {
+			if !ruleVIPsConverged(o.rule, status) {
 				cond.Status = metav1.ConditionUnknown
 				cond.Reason = "CleanupUnconfirmed"
 				cond.Message = "Shared address remains blocked until forwarding cleanup is confirmed"
@@ -2607,37 +2616,18 @@ func needsBindingConfirmation(rule *bgpv1alpha1.NetworkService, family addrFamil
 }
 
 func (r *NetworkGatewayReconciler) finishAddressConvergence(ctx context.Context, gw *bgpv1alpha1.NetworkGateway,
-	desired gateway.EngineState, status gateway.EngineStatus, cutoff uint64, snapshots ...addressInventory) error {
+	desired gateway.EngineState, status *gateway.EngineStatus, cutoff uint64, snapshots ...addressInventory) error {
 	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
 		copy := gw.DeepCopy()
 		copy.Status.ObservedGeneration = gw.Generation
-		setGatewayCondition(
-			copy,
-			metav1.Condition{
-				Type:    bgpv1alpha1.ConditionTypeReady,
-				Status:  metav1.ConditionFalse,
-				Reason:  "OrphanCleanupFailed",
-				Message: err.Error(),
-			},
-		)
-		return errors.Join(
-			err,
-			r.Status().Update(ctx, copy),
-			withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName),
-		)
+		setGatewayCondition(copy, metav1.Condition{Type: bgpv1alpha1.ConditionTypeReady,
+			Status: metav1.ConditionFalse, Reason: "OrphanCleanupFailed", Message: err.Error()})
+		return errors.Join(err, r.Status().Update(ctx, copy),
+			withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName))
 	}
-	if status.Healthy {
-		for _, snapshot := range snapshots {
-			if err := r.confirmAddressSnapshot(ctx, gw.Namespace, snapshot); err != nil {
-				return errors.Join(err, withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName))
-			}
-		}
-		if blocker, ok := r.Engine.(interface {
-			SetBlockedVIPs(context.Context, []netip.Addr) error
-		}); ok {
-			if err := blocker.SetBlockedVIPs(ctx, nil); err != nil {
-				return errors.Join(err, withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName))
-			}
+	for _, snapshot := range snapshots {
+		if err := r.finishOwnedAddresses(ctx, gw.Namespace, snapshot, status); err != nil {
+			return err
 		}
 	}
 	return nil

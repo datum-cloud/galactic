@@ -187,9 +187,13 @@ func NewKernelDatapath(objs *edgeprog.EdgedsrObjects, encapSrc netip.Addr) (*Ker
 
 	return &KernelDatapath{
 		vipTable: edgemap.NewVIPTable(
-			edgemap.KernelTable{Map: objs.VipTable}, edgemap.KernelTable{Map: objs.VipStatsTable},
+			edgemap.KernelTable{Map: objs.VipTable},
+			edgemap.KernelTable{Map: objs.VipStatsTable},
 			edgemap.KernelTable{Map: objs.VipAddrTable},
-			edgemap.KernelTable{Map: objs.VipReturnStatsTable}).WithPeerTable(edgemap.KernelTable{Map: objs.VipRangeBackends}),
+			edgemap.KernelTable{
+				Map: objs.VipReturnStatsTable,
+			},
+		).WithPeerTable(edgemap.KernelTable{Map: objs.VipRangeBackends}),
 
 		rangeVIPTable: edgemap.NewVIPTable(edgemap.KernelTable{Map: objs.VipRangeBackends},
 			edgemap.KernelTable{Map: objs.VipStatsTable},
@@ -495,3 +499,21 @@ func (d *KernelDatapath) SetBlockedVIPs(_ context.Context, addrs []netip.Addr) e
 	return edgemap.SetBlockedVIPs(d.owned, addrs)
 }
 func (d *KernelDatapath) SupportsOwnedVIPs() bool { return d.owned != nil }
+
+func (d *KernelDatapath) RenewVIPs(_ context.Context, addresses []netip.Addr) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.owned == nil {
+		return errors.New("owned VIP protection is unavailable")
+	}
+	return edgemap.RenewVIPs(d.owned, addresses)
+}
+
+func (d *KernelDatapath) OwnedVIPs() ([]netip.Addr, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.owned == nil {
+		return nil, nil
+	}
+	return edgemap.OwnedVIPs(d.owned)
+}
