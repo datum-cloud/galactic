@@ -7,6 +7,7 @@ package connectip
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"testing"
@@ -175,19 +176,50 @@ func TestTelemetryBackendError(t *testing.T) {
 	})
 }
 
-type brokenBackend struct{ *memoryBackend }
+// TestTelemetryBackendLeaseEnded counts a backend that stops a write
+// because the request's lease ended as lease_ended, even while the lease's
+// Done is still open (issue #1239).
+func TestTelemetryBackendLeaseEnded(t *testing.T) {
+	backend := &brokenBackend{memoryBackend: newMemoryBackend(),
+		err: fmt.Errorf("forwarding stopped: %w", ErrLeaseEnded)}
+	env := startServer(t, func(c *Config) { c.Backend = backend })
+	leaseEnded0, backendError0 := ends(transportH3, causeLeaseEnded), ends(transportH3, causeBackendError)
+	s := open(t, newClientConn(t, env.dialQUIC(t)), env.newRequest(t, authHeaders(tokenAlice, vpcBlue)))
+	if _, err := s.conn.WritePacket(echoRequest(t, s.address, testTarget, 1, 100)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "a lease_ended tunnel end", func() bool {
+		return ends(transportH3, causeLeaseEnded)-leaseEnded0 == 1
+	})
+	if got := ends(transportH3, causeBackendError) - backendError0; got != 0 {
+		t.Fatalf("backend_error tunnel ends rose by %v, want 0", got)
+	}
+}
+
+// brokenBackend opens sessions whose writes fail with err, or with a device
+// error when err is nil.
+type brokenBackend struct {
+	*memoryBackend
+	err error
+}
 
 func (b *brokenBackend) Open(ctx context.Context, info SessionInfo) (BackendSession, error) {
 	s, err := b.memoryBackend.Open(ctx, info)
 	if err != nil {
 		return nil, err
 	}
-	return brokenSession{s}, nil
+	if b.err != nil {
+		return brokenSession{s, b.err}, nil
+	}
+	return brokenSession{s, errors.New("device gone")}, nil
 }
 
-type brokenSession struct{ BackendSession }
+type brokenSession struct {
+	BackendSession
+	err error
+}
 
-func (brokenSession) WritePacket([]byte) error { return errors.New("device gone") }
+func (s brokenSession) WritePacket([]byte) error { return s.err }
 
 // TestTelemetryLabelsAreBounded fails when a server metric gains a label
 // that could carry a connector, principal, VPC, prefix, attachment or
