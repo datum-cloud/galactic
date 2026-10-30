@@ -54,9 +54,11 @@ spec:
           command:
             - /galactic-edge
           args:
-            # The fabric's tenant MTU, at most the uplink MTU less the 40-byte
-            # encapsulation header; an overlay sets the real value.
-            - --mtu=1500
+            # The attachment MTU comes from GALACTIC_EDGE_MTU, which an overlay
+            # sets on this container by name; the base gives no default. Left
+            # unset, the kubelet passes the reference through unexpanded and
+            # the agent exits on the unparsable --mtu.
+            - --mtu=$(GALACTIC_EDGE_MTU)
             - --proc-sys-path=/host/proc/sys
           env:
             - name: NODE_NAME

@@ -1,4 +1,5 @@
 # The node agent DaemonSet; see ../kustomization.yaml for why it is not
-# applied as-is. An overlay sets --mtu to the fabric's tenant MTU.
+# applied as-is. An overlay sets the GALACTIC_EDGE_MTU env var of the
+# galactic-edge container to the fabric's tenant MTU; see daemonset.yaml.
 resources:
   - daemonset.yaml
