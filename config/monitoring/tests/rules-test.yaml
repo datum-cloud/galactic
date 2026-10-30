@@ -253,11 +253,44 @@ tests:
               summary: "fabric-config-agent metrics on edge-3 cannot be scraped"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricconfigagentmetricsdown"
               description: >-
-                Prometheus cannot reach fabric-config-agent on edge-3 (port 9343), so FabricBGPMappedNextHop and
-                FabricBGPRoutesNotInstalled cannot fire for it.
+                Prometheus cannot reach fabric-config-agent on edge-3 (port 9343), so FabricBGPMappedNextHop,
+                FabricBGPRoutesNotInstalled and FabricConnectedRouteMissing cannot fire for it.
       - eval_time: 11m
         alertname: FabricRouterMetricsDown
         exp_alerts: []
+
+  # A loopback address missing its connected route for 5m fires; zero does
+  # not, and neither does a count that clears inside 5m.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_router_connected_routes_missing{job="fabric-config-agent",node="edge-4",afi="ipv6"}'
+        values: "1x20"
+      - series: 'fabric_router_connected_routes_missing{job="fabric-config-agent",node="edge-4",afi="ipv4"}'
+        values: "0x20"
+      - series: 'fabric_router_connected_routes_missing{job="fabric-config-agent",node="edge-5",afi="ipv6"}'
+        values: "1x6 0x14"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: FabricConnectedRouteMissing
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: FabricConnectedRouteMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: fabric-config-agent
+              node: edge-4
+              afi: ipv6
+            exp_annotations:
+              summary: "1 ipv6 loopback addresses on edge-4 have no connected route in zebra"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricconnectedroutemissing"
+              description: >-
+                1 global ipv6 addresses on lo on edge-4 have had no selected connected route in zebra for 5 minutes,
+                though the kernel holds them. redistribute connected does not export them, so the node no longer
+                announces its loopback to the underlay. This has been seen after an FRR restart. `show ipv6 route
+                connected` in the frr container shows which prefixes zebra holds.
 
   # fabric-routing: series from fabric-router-controller's leader. A label
   # set below is one deployment, router or release; `pod` is the replica

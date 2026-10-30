@@ -195,8 +195,11 @@ spec:
         # Every 30s it also hard-resets any IPv6 session announcing an
         # IPv4-mapped next hop, at most once per session per 10 minutes, and
         # raises a MappedNextHopReset event on this pod. --detect-only keeps
-        # the check's metrics without the resets. The metrics are served on
-        # the node's port 9343 (hostNetwork).
+        # the check's metrics without the resets. It also counts BGP routes
+        # zebra has not installed and the node's lo addresses zebra holds no
+        # connected route for; it reads lo over netlink, so it depends on
+        # hostNetwork to see the host's. The metrics are served on the node's
+        # port 9343 (hostNetwork).
         - name: config-agent
           image: ghcr.io/datum-cloud/fabric-router:latest
           command:

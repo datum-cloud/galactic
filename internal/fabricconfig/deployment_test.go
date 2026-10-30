@@ -161,6 +161,10 @@ func (f *fakeRouter) Neighbors(context.Context) ([]byte, error) {
 
 func (f *fakeRouter) Routes(context.Context, string) ([]byte, error) { return []byte("{}"), nil }
 
+func (f *fakeRouter) ConnectedRoutes(context.Context, string) ([]byte, error) {
+	return []byte("{}"), nil
+}
+
 func (f *fakeRouter) ResetNeighbor(context.Context, string) error { return nil }
 
 type harness struct {

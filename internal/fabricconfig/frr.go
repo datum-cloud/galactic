@@ -54,6 +54,11 @@ func (e ExecFRR) Routes(ctx context.Context, afi string) ([]byte, error) {
 	return output(ctx, e.Vtysh, "-c", "show "+afi+" route json")
 }
 
+// ConnectedRoutes runs `show <afi> route connected json` through vtysh.
+func (e ExecFRR) ConnectedRoutes(ctx context.Context, afi string) ([]byte, error) {
+	return output(ctx, e.Vtysh, "-c", "show "+afi+" route connected json")
+}
+
 // ResetNeighbor runs `clear bgp ipv6 <neighbor>` through vtysh, a hard reset
 // that tears the session down and recomputes its next hop when it comes back.
 func (e ExecFRR) ResetNeighbor(ctx context.Context, neighbor string) error {

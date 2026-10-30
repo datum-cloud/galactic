@@ -166,6 +166,24 @@ spec:
               route installed in the kernel for 10 minutes, usually because the next hop does not resolve.
               `show {{ $labels.afi }} route` in the frr container shows which. An IPv4-mapped next hop from the
               announcing node (FabricBGPMappedNextHop) is one cause.
+        # The agent reports this and changes nothing. A loopback address
+        # added moments before a check can be counted until zebra learns it,
+        # which 5 minutes absorbs.
+        - alert: FabricConnectedRouteMissing
+          expr: fabric_router_connected_routes_missing{job="fabric-config-agent"} > 0
+          for: 5m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $value }} {{ $labels.afi }} loopback addresses on {{ $labels.node }} have no connected route in zebra"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricconnectedroutemissing"
+            description: >-
+              {{ $value }} global {{ $labels.afi }} addresses on lo on {{ $labels.node }} have had no selected connected
+              route in zebra for 5 minutes, though the kernel holds them. redistribute connected does not export
+              them, so the node no longer announces its loopback to the underlay. This has been seen after an FRR
+              restart. `show {{ $labels.afi }} route connected` in the frr container shows which prefixes zebra holds.
         - alert: FabricConfigAgentMetricsDown
           expr: up{job="fabric-config-agent"} == 0
           for: 5m
@@ -178,7 +196,7 @@ spec:
             runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricconfigagentmetricsdown"
             description: >-
               Prometheus cannot reach fabric-config-agent on {{ $labels.node }} (port 9343), so
-              FabricBGPMappedNextHop and FabricBGPRoutesNotInstalled cannot fire for it.
+              FabricBGPMappedNextHop, FabricBGPRoutesNotInstalled and FabricConnectedRouteMissing cannot fire for it.
     # Fabric routing through the API, from fabric-router-controller (job
     # fabric-router-controller, port 9185). Only the leader exports the
     # galactic_fabric_routing_* series, and a leader change leaves them
