@@ -256,6 +256,16 @@ current `Healthy` result. Its `<node>/Programmed` condition is then `False`
 with reason `NoHealthyBackends`, its VIPs are withdrawn, and the rule-wide
 `Programmed` and `Ready` conditions carry the same reason.
 
+The rule's IPv4 VIP is the exception: it stays loaded over its backends but
+is not advertised, and `<node>/IPv4Served` reports `NoHealthyBackends`. Each
+backend node writes a rule's IPv4 bindings only while some gateway node has
+its IPv4 VIP loaded, and those bindings carry the health results, so an
+unloaded IPv4 VIP would never get one and never serve. While only the IPv4
+VIP is loaded this way, `<node>/Programmed` is `True` with reason
+`NoHealthyBackends`, and the rule-wide `BackendsReady` and `Ready`
+conditions carry that reason. The VIP is advertised once a backend reports
+`Healthy`.
+
 ## Rollout and rollback
 
 1. Install the CRDs that carry `spec.healthCheck`,
