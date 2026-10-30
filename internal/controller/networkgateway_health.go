@@ -29,7 +29,8 @@ const (
 
 	// reasonNoHealthyBackends: every backend of a VIP family is reported
 	// Unhealthy, so all of them are kept. A FailClosed rule reports it with
-	// status False instead, because it is not loaded.
+	// status False instead, because it is not loaded. Its IPv4Served
+	// condition then reports reasonIPv4NoHealthyBackends.
 	reasonNoHealthyBackends = "NoHealthyBackends"
 
 	// reasonHealthChecksNotApplied: some gateway node in the namespace does

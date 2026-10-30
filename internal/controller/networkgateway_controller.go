@@ -238,6 +238,13 @@ const (
 	// (ipv4LoadedOnSomeNode).
 	reasonIPv4BindingsNotBound = "BindingsNotBound"
 
+	// reasonIPv4NoHealthyBackends is the per-node IPv4Served reason for a
+	// FailClosed rule whose IPv4 VIP this node would load, but none of whose
+	// backends has a current Healthy result, so it is left out. galactic-router
+	// still writes the IPv4 bindings that carry those results
+	// (ipv4LoadedOnSomeNode), or the VIP could never become healthy.
+	reasonIPv4NoHealthyBackends = "NoHealthyBackends"
+
 	// reasonIPv4NoBackend is the per-node IPv4Served reason for a rule whose
 	// IPv4 VIPs IPv4VIPs would load but none of whose selected attachments has
 	// an IPv6 address that resolves to a backend for them, so they are left
@@ -272,17 +279,20 @@ const (
 )
 
 // ipv4LoadedReasons are the IPv4Served reasons that mean the reporting
-// gateway node has the rule's IPv4 VIP loaded. galactic-router writes a
-// rule's IPv4 bindings only while some node reports one of them
+// gateway node has the rule's IPv4 VIP loaded, or would load it once a
+// backend reports Healthy (reasonIPv4NoHealthyBackends). galactic-router
+// writes a rule's IPv4 bindings only while some node reports one of them
 // (ipv4LoadedOnSomeNode).
 var ipv4LoadedReasons = map[string]bool{
-	reasonIPv4NotAdvertised:    true,
-	reasonIPv4Advertised:       true,
-	reasonIPv4BindingsNotBound: true,
+	reasonIPv4NotAdvertised:     true,
+	reasonIPv4Advertised:        true,
+	reasonIPv4BindingsNotBound:  true,
+	reasonIPv4NoHealthyBackends: true,
 }
 
 // ipv4LoadedOnSomeNode reports whether any gateway node's IPv4Served
-// condition on rule says it loaded the rule's IPv4 VIP.
+// condition on rule says it loaded the rule's IPv4 VIP, or holds it out only
+// until a backend reports Healthy.
 func ipv4LoadedOnSomeNode(rule *bgpv1alpha1.NetworkService) bool {
 	for _, c := range rule.Status.Conditions {
 		if strings.HasSuffix(c.Type, "/"+conditionTypeIPv4Served) && ipv4LoadedReasons[c.Reason] {
@@ -306,6 +316,9 @@ const (
 	// backend, none of whose ServiceVIPBindings is Bound yet, so they
 	// are not advertised.
 	ipv4Unbound
+	// ipv4NoHealthyBackends: the rule's healthCheck is FailClosed and no
+	// backend has a current Healthy result, so they are left out.
+	ipv4NoHealthyBackends
 	// ipv4NoBackend: no IPv6 backend resolves for them, so they are left out.
 	ipv4NoBackend
 	// ipv4MultipleVIPs: the rule has more than one, so they are left out.
@@ -1317,6 +1330,10 @@ func ipv4ServedCondition(
 		reason = reasonIPv4BindingsNotBound
 		message = fmt.Sprintf("IPv4 VIP is loaded on node %s but not advertised: none of its backends' "+
 			"ServiceVIPBindings is Bound yet; the backend nodes' BackendsBound conditions say why", node)
+	case ipv4NoHealthyBackends:
+		reason = reasonIPv4NoHealthyBackends
+		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: the healthCheck is FailClosed and no "+
+			"backend has a current Healthy result; its ServiceVIPBindings' status.health says why", node)
 	case ipv4NoBackend:
 		reason = reasonIPv4NoBackend
 		message = fmt.Sprintf("IPv4 VIPs are not loaded on node %s: no selected attachment has an IPv6 "+
@@ -1668,7 +1685,8 @@ func hasIPv4VIP(rule *bgpv1alpha1.NetworkService) bool {
 // (serviceBindings.unhealthy), unless that is every one of them: a family
 // whose backends are all Unhealthy keeps them all, since an empty table would
 // drop every flow. rh says what health did. A family still waiting for its
-// first Bound binding is not filtered.
+// first Bound binding is not filtered. A FailClosed rule instead leaves out a
+// family with no healthy backend, its IPv4 VIPs as ipv4NoHealthyBackends.
 func buildDesiredRule(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment,
 	sidIndex *backendSIDIndex, owners backendOwners, serveIPv4 bool, bindings serviceBindings, health healthGate,
@@ -1759,7 +1777,7 @@ func buildDesiredRule(
 				firstFamilyError = err
 			}
 			if f.family == familyIPv4 {
-				ipv4 = ipv4NoBackend
+				ipv4 = unservedIPv4Family(err)
 			}
 			continue
 		}
@@ -1791,6 +1809,15 @@ func buildDesiredRule(
 		Backends:     v6Backends,
 		IPv4Backends: v4Backends,
 	}, unresolved, ipv4, rh, nil
+}
+
+// unservedIPv4Family returns the ipv4Family of IPv4 VIPs left out because
+// resolveFamilyBackends returned the *backendSelectionError err.
+func unservedIPv4Family(err error) ipv4Family {
+	if errors.Is(err, errNoHealthyBackends) {
+		return ipv4NoHealthyBackends
+	}
+	return ipv4NoBackend
 }
 
 // backendSelectionError is resolveFamilyBackends' error for a family none of
