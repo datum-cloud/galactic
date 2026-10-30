@@ -116,3 +116,27 @@ func TestHexBase62RoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestParseInterfaceNameHost(t *testing.T) {
+	cases := []struct {
+		name, in, vpc, att string
+		ok                 bool
+	}{
+		{"Padded", "G0000000jU00GH", "jU", "G", true},
+		{"RoundTrip", intf.GenerateInterfaceNameHost("kV7", "abc"), "kV7", "abc", true},
+		{"AllZeroAttachment", "G0000000jU000H", "jU", "0", true},
+		{"VRFLink", "G0000000jUV", "", "", false},
+		{"GuestLink", "G0000000jU00GG", "", "", false},
+		{"Other", "eth0", "", "", false},
+		{"WrongLength", "G00jU00GH", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vpc, att, ok := intf.ParseInterfaceNameHost(tc.in)
+			if ok != tc.ok || vpc != tc.vpc || att != tc.att {
+				t.Fatalf("ParseInterfaceNameHost(%q) = %q, %q, %v; want %q, %q, %v",
+					tc.in, vpc, att, ok, tc.vpc, tc.att, tc.ok)
+			}
+		})
+	}
+}

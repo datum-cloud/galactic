@@ -38,18 +38,16 @@ import (
 // its VPC; both VPCs' ledgers reserve the same ranges, so their first
 // connectors hold the same /96, as TestMASQUE's do.
 const (
-	svcNS        = "masque-system"
-	svcProvider  = "masque"
-	svcCell      = "dfw"
-	svcAuthority = "masque.dfw.lab.test:443"
-	// svcAuthorityHost is the name the authority's certificate carries.
-	svcAuthorityHost = "masque-authority.masque-system.svc"
-	svcPort          = 8443
-	svcHealthPort    = 9188
-	svcConnectors    = "fd00:ed9e:500::/80"
-	svcPools         = "fd00:ed9e:501::/80"
+	svcNS         = "masque-system"
+	svcProvider   = "masque"
+	svcCell       = "dfw"
+	svcAuthority  = "masque.dfw.lab.test:443"
+	svcPort       = 8443
+	svcHealthPort = 9188
+	svcConnectors = "fd00:ed9e:500::/80"
+	svcPools      = "fd00:ed9e:501::/80"
 	// svcCA and svcOtherCA are where the suite copies, onto every dfw node,
-	// the CA that signed the service's certificates and one that did not.
+	// the CA that signed the service's certificate and one that did not.
 	svcCA      = "/usr/local/share/masque-service-ca.pem"
 	svcOtherCA = "/usr/local/share/masque-service-other-ca.pem"
 	// packetSize is the IPv6 minimum MTU every admitted request carries in
@@ -217,28 +215,34 @@ func (s *service) setup(t *testing.T) {
 		"-p", `{"status":{"approved":true}}`); err != nil {
 		t.Fatal(err)
 	}
-	authCert, authKey := s.ca.issue(t, svcAuthorityHost)
+	// The authority's certificate and the CA the provider trusts come from
+	// cert-manager (config/masque/authority/components/cert-manager); the
+	// service's own certificate is the deployment's choice, so the suite
+	// issues it.
 	svcCert, svcKey := s.ca.issue(t, strings.Split(svcAuthority, ":")[0])
-	for _, obj := range []client.Object{
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: svcNS, Name: "masque-authority-tls"},
-			Type: corev1.SecretTypeTLS, Data: map[string][]byte{corev1.TLSCertKey: authCert, corev1.TLSPrivateKeyKey: authKey}},
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: svcNS, Name: "masque-provider-tls"},
-			Type: corev1.SecretTypeTLS, Data: map[string][]byte{corev1.TLSCertKey: svcCert, corev1.TLSPrivateKeyKey: svcKey}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: svcNS, Name: "masque-authority-ca"},
-			Data: map[string]string{"ca.crt": string(s.ca.pem)}},
-	} {
-		if err := l.c.Create(ctx, obj); err != nil && !apierrors.IsAlreadyExists(err) {
+	tlsSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: svcNS, Name: "masque-provider-tls"},
+		Type: corev1.SecretTypeTLS, Data: map[string][]byte{corev1.TLSCertKey: svcCert, corev1.TLSPrivateKeyKey: svcKey}}
+	if err := l.c.Create(ctx, tlsSecret); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	} else if err != nil {
+		if err := l.c.Update(ctx, tlsSecret); err != nil {
 			t.Fatal(err)
-		} else if err != nil {
-			if err := l.c.Update(ctx, obj); err != nil {
-				t.Fatal(err)
-			}
 		}
 	}
 	if _, err := l.kubectl("apply", "-k", s.overlay("authority")); err != nil {
 		t.Fatal(err)
 	}
 	s.waitReady(t, "masque-authority", computeNode, "")
+	var authTLS corev1.Secret
+	if err := l.c.Get(ctx, client.ObjectKey{Namespace: svcNS, Name: "masque-authority-tls"}, &authTLS); err != nil {
+		t.Fatal(err)
+	}
+	if got := authTLS.Annotations["cert-manager.io/issuer-name"]; got != "masque-authority-root" {
+		t.Fatalf("masque-authority-tls issued by %q, want cert-manager Issuer masque-authority-root", got)
+	}
+	if len(authTLS.Data["ca.crt"]) == 0 {
+		t.Fatal("masque-authority-tls has no ca.crt for the provider pods to trust")
+	}
 	for _, tn := range []tenant{svcTenant10, svcTenant20} {
 		if _, err := s.authority(t, "ledger", "init", "--vpc", tn.vpcNamespace+"/"+tn.vpc, "--cell", svcCell,
 			"--connectors", svcConnectors, "--pools", svcPools); err != nil {

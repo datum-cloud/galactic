@@ -28,6 +28,7 @@ else is).
 | `mtu`           | No       | `int`    | MTU for the host-side interface. For `galactic-veth` this applies to both veth endpoints; for `galactic-tap` it applies to the tap interface.                                                                                                                      |
 | `namespace`     | No       | `string` | Kubernetes namespace used for NAD lookup (and, for `galactic-bgp`'s own stanza, `BGPRouter`/BGP CRD lookup). Resolution order: this field → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace` → `galactic-system`.                                               |
 | `dan`           | No       | `bool`   | `galactic-tap` only. Write a Directly Attachable Network file for the sandbox, so a Kata runtime-rs shim adopts this tap instead of discovering a network of its own. Off unless set. See [Directly attachable networking](#directly-attachable-networking) below. |
+| `hostOnlyPorts` | No       | `[]int`  | `galactic-tap` only. Up to 4 TCP ports the guest serves only to its node. The datapath drops traffic to them unless it is addressed to the guest's link-local address. See [Host-only ports](#host-only-ports) below.                                              |
 | `ipam`          | No       | `IPAM`   | IPAM delegation block (see [IPAM Fields](#ipam-fields) below). Presence alone decides whether IPAM runs at all — no env var or sibling field can trigger or suppress it.                                                                                           |
 
 Standard CNI fields (`cniVersion`, `name`, `dns`, `runtimeConfig`) are also
@@ -108,6 +109,41 @@ host side of the tap is given the same treatment.
 A failed write fails ADD. Kata treats a missing file as "discover the network
 yourself", which produces a healthy-looking sandbox on the wrong network — a
 far worse outcome than an attachment that does not come up.
+
+#### Host-only ports
+
+Some runtimes put an agent of their own inside the guest, such as Unikraft's
+exec plugin, which listens on a TCP port on every guest address and asks for
+no credentials. On a VPC address, every other workload in the VPC can reach
+it. `"hostOnlyPorts"` lists those ports, and `tp_deliver` then drops TCP to
+them on this tap unless the packet is addressed to the guest's link-local
+address. Only the node can send to that address, because link-local traffic
+is never routed, so the runtime keeps its agent by dialing it there from the
+host.
+
+The check runs before traffic policy and whatever its mode, on every packet
+the host transmits to the tap: same-node delivery through the VRF, delivery
+from the fabric (`usid_ingress` redirects to a tap through its tc egress), and
+traffic the host itself sends. A non-first fragment carries no ports and
+passes, since its first fragment is judged. An IPv6 header chain the check
+cannot follow to the transport header is dropped rather than guessed.
+Refused packets are counted in `host_only_port_drops`.
+
+`galactic-tap` writes the list into `host_only_port_table` at ADD, before
+the tap is addressed, and removes it at DEL. ADD fails on an invalid list, or
+on a datapath that predates the table, rather than leaving a port open.
+`galactic-bgp` brings the tap up only with `tp_deliver` attached, so on a
+router with no SRv6 locator, which attaches none, an attachment listing
+host-only ports stays down and its ADD fails. The
+entry lives in the pinned map, so it survives agent restarts and program
+replacement; a datapath reload that recreates the map loses it until the
+attachment is added again.
+
+The check only refuses traffic; it grants nothing. While a node enforces
+[interface traffic policy](../designs/interface-traffic-policy.md), the
+host's link-local connection to the port and the guest's replies are ordinary
+Private traffic on that attachment, so whoever sets `"hostOnlyPorts"` also
+binds policies that allow them in both directions.
 
 DEL removes the file unconditionally, whether or not the attachment asked for
 one. Nothing in Kata removes it, so the CNI plugin owns it for the sandbox's

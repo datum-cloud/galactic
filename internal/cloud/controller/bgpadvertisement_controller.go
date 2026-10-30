@@ -42,6 +42,10 @@ import (
 	networkingv1alpha "go.datum.net/network-services-operator/api/v1alpha"
 )
 
+// ReasonAdvertisementWithdrawn is the Programmed reason of an attachment that
+// no tenant advertisement certifies any more.
+const ReasonAdvertisementWithdrawn = "AdvertisementWithdrawn"
+
 // IndexVPCAttachmentIdentity indexes a VPCAttachment by the "<vpc>-<attachment>"
 // pair galactic names its BGPAdvertisement after.
 const (
@@ -164,7 +168,7 @@ func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Con
 		attachment.Status.PodSubnet = ""
 		programmed := metav1.Condition{
 			Type: cloudv1alpha1.ConditionTypeProgrammed, Status: metav1.ConditionFalse,
-			Reason: "AdvertisementWithdrawn", Message: "the attachment has no network advertisement",
+			Reason: ReasonAdvertisementWithdrawn, Message: "the attachment has no network advertisement",
 			ObservedGeneration: attachment.Generation,
 		}
 		meta.SetStatusCondition(&attachment.Status.Conditions, programmed)

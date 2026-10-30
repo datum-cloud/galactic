@@ -1,0 +1,25 @@
+# The provider pods trusting a CA bundle that the cell's tooling publishes
+# under its own name and key, patched by the volume's name.
+resources:
+  - ../../../../config/masque/provider
+patches:
+  - target:
+      kind: Deployment
+      name: masque-provider
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: masque-provider
+      spec:
+        template:
+          spec:
+            volumes:
+              - name: authority-ca
+                projected:
+                  sources:
+                    - configMap:
+                        name: cell-trust-bundle
+                        items:
+                          - key: bundle.pem
+                            path: ca.crt

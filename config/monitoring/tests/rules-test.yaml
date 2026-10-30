@@ -2878,3 +2878,97 @@ tests:
               description: >-
                 Prometheus cannot scrape masque-provider on masque-a, so the other MASQUE alerts cannot fire
                 for it.
+
+  # An interface unprogrammed for 10m fires once, however many replicas
+  # export it; one unprogrammed for 5m does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_vpc_instance_interface_unprogrammed{job="galactic-controller",pod="gc-0",instance_namespace="tenant",compute_instance="web-0",interface="nic0",vpc="vpc-a",attachment="web-0-nic0",instance_node="node-a",location="location-a",reason="PodNotAttached"}'
+        values: "1x30"
+      - series: 'galactic_vpc_instance_interface_unprogrammed{job="galactic-controller",pod="gc-1",instance_namespace="tenant",compute_instance="web-0",interface="nic0",vpc="vpc-a",attachment="web-0-nic0",instance_node="node-a",location="location-a",reason="PodNotAttached"}'
+        values: "1x30"
+      - series: 'galactic_vpc_instance_interface_unprogrammed{job="galactic-controller",pod="gc-0",instance_namespace="tenant",compute_instance="web-1",interface="nic0",vpc="vpc-a",attachment="web-1-nic0",instance_node="node-b",location="location-a",reason="NodeMismatch"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GalacticInstanceAttachmentNotProgrammed
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: GalacticInstanceAttachmentNotProgrammed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              instance_namespace: tenant
+              compute_instance: web-0
+              interface: nic0
+              vpc: vpc-a
+              attachment: web-0-nic0
+              instance_node: node-a
+              location: location-a
+              reason: PodNotAttached
+            exp_annotations:
+              summary: "Instance tenant/web-0 runs without its nic0 VPC attachment"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticinstanceattachmentnotprogrammed"
+              description: >-
+                Instance tenant/web-0 in location location-a has been Running on node-a for 10 minutes without
+                interface nic0: VPC "vpc-a", attachment "web-0-nic0", reason PodNotAttached. The interface has no VPC
+                connectivity. PodNotAttached means the pod's Multus network-status does not list the attachment,
+                which a pod started on the default network without Multus leaves; recreating the pod attaches it
+                again. AwaitingDataPlane and NodeMismatch mean the data plane has not advertised it from the pod's
+                node. InterfaceUnbound and AttachmentMissing mean the control plane never finished preparing it.
+
+  # A replica that cannot list for 10m fires; a healthy one does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_vpc_instance_interfaces_collect_errors{job="galactic-controller",pod="gc-0"}'
+        values: "0x10 1x30"
+      - series: 'galactic_vpc_instance_interfaces_collect_errors{job="galactic-controller",pod="gc-1"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: GalacticInstanceAttachmentStateIncomplete
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: GalacticInstanceAttachmentStateIncomplete
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              pod: gc-0
+            exp_annotations:
+              summary: "galactic-controller on gc-0 cannot read instance attachment state"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticinstanceattachmentstateincomplete"
+              description: >-
+                galactic-controller on gc-0 has failed for 10 minutes to list 1 of the kinds it compares (Pods,
+                Instances, NetworkInterfaces and VPCAttachments). It exports no per-interface state meanwhile, so
+                GalacticInstanceAttachmentNotProgrammed cannot fire from it. Its log names the failing list, which
+                is usually missing RBAC or a CRD that is not installed.
+
+  # The state stops at 5m and goes stale 5m later; absent for 15m after that
+  # fires.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_vpc_instance_interfaces_collect_errors{job="galactic-controller",pod="gc-0"}'
+        values: "0x10 _x60"
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: GalacticInstanceAttachmentStateAbsent
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: GalacticInstanceAttachmentStateAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-controller
+            exp_annotations:
+              summary: "No galactic-controller exports instance attachment state"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticinstanceattachmentstateabsent"
+              description: >-
+                No galactic-controller replica has exported galactic_vpc_instance_interfaces_collect_errors for 15
+                minutes. The controller is not running, is not scraped, or runs a release without the instance
+                attachment comparison. GalacticInstanceAttachmentNotProgrammed cannot fire until it returns.

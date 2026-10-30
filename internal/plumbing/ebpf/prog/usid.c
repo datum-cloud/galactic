@@ -1876,6 +1876,34 @@ struct {
 	__type(value, struct tenant_gw_value);
 } tenant_gw_table SEC(".maps");
 
+#define HOST_ONLY_PORTS_MAX 4
+
+// struct host_only_ports_value lists the TCP ports, in host byte order, that
+// only the node may reach on one attachment: tp_deliver drops a packet for one
+// of them unless it is addressed to the guest's link-local address, which no
+// other workload can route to. Zero marks an unused slot.
+struct host_only_ports_value {
+	__u16 tcp[HOST_ONLY_PORTS_MAX];
+};
+
+// host_only_port_table: see struct host_only_ports_value. Keyed by the
+// host-side ifindex like tenant_gw_table, written by galactic-tap at CNI ADD
+// before the host side comes up, and removed at DEL.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u32); // ifindex
+	__type(value, struct host_only_ports_value);
+} host_only_port_table SEC(".maps");
+
+// host_only_port_drops counts the packets host_only_port_drop refused.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} host_only_port_drops SEC(".maps");
+
 // enum pmtu_stat indexes pmtu_stats: what usid_egress did with each packet too
 // big for the fabric. Every outcome other than the first two drops the packet
 // with no error sent.
@@ -6198,6 +6226,88 @@ int usid_egress(struct __sk_buff *skb)
 	return redirect_rc;
 }
 
+static USID_ALWAYS_INLINE int host_only_port_listed(const struct host_only_ports_value *v, __be16 port)
+{
+	__u16 p = __builtin_bswap16(port);
+
+	return p && (v->tcp[0] == p || v->tcp[1] == p || v->tcp[2] == p || v->tcp[3] == p);
+}
+
+// host_only_port_drop reports whether skb, about to be transmitted to ifindex's
+// guest, is TCP for one of that attachment's host-only ports and not addressed
+// to the guest's link-local address. A non-first fragment carries no ports and
+// passes, since its first fragment is judged. An IPv6 header chain it cannot
+// follow to the transport header is refused rather than guessed.
+static USID_ALWAYS_INLINE int host_only_port_drop(struct __sk_buff *skb, __u32 ifindex)
+{
+	struct host_only_ports_value *v = bpf_map_lookup_elem(&host_only_port_table, &ifindex);
+
+	if (!v)
+		return 0;
+	__be16 proto;
+
+	if (bpf_skb_load_bytes(skb, 12, &proto, sizeof(proto)))
+		return 0;
+	__be16 port;
+
+	if (proto == __builtin_bswap16(USID_ETH_P_IP)) {
+		struct usid_iphdr ip4;
+
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET, &ip4, sizeof(ip4)))
+			return 1;
+		if (ip4.protocol != USID_IPPROTO_TCP || (__builtin_bswap16(ip4.frag_off) & 0x1fff))
+			return 0;
+		__u32 off = USID_L3_OFFSET + ((__u32) (ip4.ver_ihl & 0x0f)) * 4;
+
+		if (bpf_skb_load_bytes(skb, off + 2, &port, sizeof(port)))
+			return 1;
+		return host_only_port_listed(v, port);
+	}
+	if (proto != __builtin_bswap16(USID_ETH_P_IPV6))
+		return 0;
+	struct usid_ip6hdr ip6;
+
+	if (bpf_skb_load_bytes(skb, USID_L3_OFFSET, &ip6, sizeof(ip6)))
+		return 1;
+	if (edge_addr_on_link(ip6.daddr))
+		return 0;
+	__u32 off = USID_L3_OFFSET + sizeof(ip6);
+	__u8 next = ip6.nexthdr;
+
+	for (int i = 0; i < TP_IPV6_MAX_EXT_HEADERS; i++) {
+		__u8 ext[4];
+
+		if (next == USID_IPPROTO_FRAGMENT) {
+			if (bpf_skb_load_bytes(skb, off, ext, sizeof(ext)))
+				return 1;
+			if (((((__u16) ext[2]) << 8) | ext[3]) & 0xfff8)
+				return 0;
+			next = ext[0];
+			off += 8;
+			continue;
+		}
+		if (next != USID_IPPROTO_HOPOPTS && next != USID_IPPROTO_DSTOPTS && next != USID_IPPROTO_ROUTING)
+			break;
+		if (bpf_skb_load_bytes(skb, off, ext, sizeof(ext)))
+			return 1;
+		off += ((__u32) ext[1] + 1) * 8;
+		next = ext[0];
+	}
+	switch (next) {
+	case USID_IPPROTO_HOPOPTS:
+	case USID_IPPROTO_DSTOPTS:
+	case USID_IPPROTO_ROUTING:
+	case USID_IPPROTO_FRAGMENT:
+	case USID_IPPROTO_AH:
+		return 1;
+	case USID_IPPROTO_TCP:
+		if (bpf_skb_load_bytes(skb, off + 2, &port, sizeof(port)))
+			return 1;
+		return host_only_port_listed(v, port);
+	}
+	return 0;
+}
+
 // tp_deliver is a managed interface's ingress traffic policy check, and an
 // edge host link's forwarding gate, for everything the host transmits to it: same-node delivery through the kernel
 // VRF, local private service delivery, a Packet Too Big usid_egress sends
@@ -6207,6 +6317,14 @@ int usid_egress(struct __sk_buff *skb)
 SEC("tc")
 int tp_deliver(struct __sk_buff *skb)
 {
+	if (host_only_port_drop(skb, skb->ifindex)) {
+		__u32 zero = 0;
+		__u64 *drops = bpf_map_lookup_elem(&host_only_port_drops, &zero);
+
+		if (drops)
+			*drops += 1;
+		return TC_ACT_SHOT;
+	}
 	__u32 edge_ifindex = skb->ifindex;
 	struct edge_link_value *edge_link = bpf_map_lookup_elem(&edge_link_table, &edge_ifindex);
 

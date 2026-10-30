@@ -1,0 +1,35 @@
+# The provider pods' trust in a grant authority whose certificate
+# config/masque/authority/components/cert-manager issues. Include it from the
+# overlay of config/masque/provider:
+#
+#   resources:
+#     - ../../config/masque/provider
+#   components:
+#     - ../../config/masque/provider/components/cert-manager
+#
+# The authority-ca volume then reads ca.crt from the authority's
+# masque-authority-tls Secret instead of the masque-authority-ca ConfigMap.
+# Only that key is mounted; the authority's key stays out of the pods.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: Deployment
+      name: masque-provider
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: masque-provider
+      spec:
+        template:
+          spec:
+            volumes:
+              - name: authority-ca
+                projected:
+                  sources:
+                    - secret:
+                        name: masque-authority-tls
+                        items:
+                          - key: ca.crt
+                            path: ca.crt
