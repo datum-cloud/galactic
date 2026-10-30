@@ -536,6 +536,8 @@ func (p *EBPFRouteProgrammer) rebuildDesired() error {
 func (p *EBPFRouteProgrammer) repairDesired() error {
 	expired := p.expiredDesiredKeys(time.Now())
 	needsRepair := p.generationIncomplete || len(expired) != 0
+	changed := make(map[string][][]appliedEntry)
+	completeRefs := true
 	for _, key := range sortedIntentKeys(p.desiredIntents) {
 		if _, isExpired := expired[key]; isExpired {
 			continue
@@ -543,21 +545,35 @@ func (p *EBPFRouteProgrammer) repairDesired() error {
 		intents := p.desiredIntents[key]
 		sets := p.appliedRefs[key]
 		if len(sets) != len(intents) {
+			completeRefs = false
 			needsRepair = true
-			continue
 		}
-		for index, intent := range intents {
+		freshSets := make([][]appliedEntry, 0, len(intents))
+		for _, intent := range intents {
 			fresh, err := p.recoverableEntries(intent)
 			if err != nil {
 				return fmt.Errorf("re-derive service route state %s: %w", key, err)
 			}
-			if reflect.DeepEqual(sets[index], fresh) {
-				continue
-			}
+			freshSets = append(freshSets, fresh)
+		}
+		if !reflect.DeepEqual(sets, freshSets) {
+			changed[key] = freshSets
 			needsRepair = true
 		}
 	}
 	if !needsRepair {
+		return nil
+	}
+	// Ordinary attachment churn must not close the node-wide forwarding gate.
+	// Keep the full fail-closed rebuild for expiry, inconsistent state or errors.
+	if !p.generationIncomplete && len(expired) == 0 && completeRefs && p.syncFailures == 0 {
+		if err := p.repairChangedEntries(changed); err != nil {
+			p.generationWasFinalized = p.policyFinalized
+			p.policyFinalized = false
+			p.generationIncomplete = true
+			p.markSyncFailure("__generation__")
+			return errors.Join(err, p.tables.SetPolicyEnabled(false))
+		}
 		return nil
 	}
 	// Value-bearing refs can share a kernel key. Transitioning them one intent
