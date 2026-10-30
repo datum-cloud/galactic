@@ -284,6 +284,9 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 	if err := atomicCopyFile(SourceTapBinary, filepath.Join(HostBinDir, "galactic-tap"), 0755); err != nil {
 		return fmt.Errorf("copy galactic-tap binary: %w", err)
 	}
+	if err := atomicCopyFile(SourceTapBinary, filepath.Join(HostBinDir, "galactic-tap-host-only"), 0755); err != nil {
+		return fmt.Errorf("copy galactic-tap-host-only binary: %w", err)
+	}
 	if err := atomicCopyFile(SourceIPAMBinary, filepath.Join(HostBinDir, "galactic-ipam"), 0755); err != nil {
 		return fmt.Errorf("copy galactic-ipam binary: %w", err)
 	}

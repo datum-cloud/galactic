@@ -142,6 +142,14 @@ alias (`galactic-host-only-tcp=<ports>`), and datapath repair writes back any
 entry a recreated map lost from it. The list is read only at ADD, so a
 change to it reaches an attachment only when it is added again.
 
+A node whose `galactic-tap` predates `"hostOnlyPorts"` ignores the field
+and would bring the guest up with the ports open. The installer therefore
+also installs the tap plugin as `galactic-tap-host-only`, and a conflist that
+lists host-only ports names that type instead of `galactic-tap`. The binary is
+the same; only its name tells the runtime the node can enforce the list. On an
+older node the runtime cannot find the plugin and ADD fails, so the guest
+does not start rather than starting exposed.
+
 The check only refuses traffic; it grants nothing. While a node enforces
 [interface traffic policy](../designs/interface-traffic-policy.md), the
 host's link-local connection to the port and the guest's replies are ordinary
