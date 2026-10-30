@@ -156,10 +156,7 @@ func startCore(t *testing.T) *coreFixture {
 		},
 	}
 	f.create(p)
-	p.Status.Approved = true
-	if err := admin.Status().Update(context.Background(), p); err != nil {
-		t.Fatal(err)
-	}
+	f.create(&galacticv1alpha1.EdgeProviderApproval{ObjectMeta: metav1.ObjectMeta{Name: coreProvider}})
 	f.startController()
 	f.startNode()
 	return f

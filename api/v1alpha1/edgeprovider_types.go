@@ -89,9 +89,11 @@ type EdgeProviderSpec struct {
 
 // EdgeProviderStatus records the operator's approval.
 type EdgeProviderStatus struct {
-	// Approved is set by the operator's approval. No provider identity may
-	// write it. An unapproved provider is refused admission, and clearing it
-	// revokes every authorization issued to the provider.
+	// Approved is whether an EdgeProviderApproval of the same name exists.
+	// galactic-controller sets it and reverts any other write, and no
+	// provider identity may write it. An unapproved provider is refused
+	// admission, and withdrawing approval revokes every authorization
+	// issued to the provider.
 	// +optional
 	Approved bool `json:"approved,omitempty"`
 }

@@ -1,0 +1,6 @@
+# The operator's approval of the registration in ../registration. It is a
+# separate directory so that applying the registration never approves it.
+# An overlay renames it to match the provider's EdgeProvider; deleting it
+# withdraws the approval.
+resources:
+  - approval.yaml

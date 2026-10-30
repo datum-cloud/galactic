@@ -59,6 +59,16 @@ rules:
   - apiGroups: [galactic.datumapis.com]
     resources: [edgeproviders/finalizers]
     verbs: [update]
+  # Approval: an EdgeProviderApproval, which the controller only reads,
+  # projected into the provider's status.approved. Creating or deleting an
+  # approval is the operator's privilege; no galactic or provider
+  # ServiceAccount holds it.
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeproviderapprovals]
+    verbs: [get, list, watch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeproviders/status]
+    verbs: [patch]
   - apiGroups: [admissionregistration.k8s.io]
     resources: [validatingadmissionpolicybindings]
     verbs: [get, list, watch, create, update, patch, delete]

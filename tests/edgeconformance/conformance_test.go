@@ -333,12 +333,14 @@ func teardown(t *testing.T, l *lab, sides ...*side) {
 		}
 		_ = l.c.Delete(ctx, &galacticv1alpha1.EdgeService{ObjectMeta: metav1.ObjectMeta{Namespace: s.tn.vpcNamespace,
 			Name: s.tn.service}})
+		l.unapprove(s.tn.provider)
 		_ = l.c.Delete(ctx, &galacticv1alpha1.EdgeProvider{ObjectMeta: metav1.ObjectMeta{Name: s.tn.provider}})
 	}
 	for _, n := range []string{"edge-conf-u", "edge-conf-v"} {
 		_, _ = l.kubectl("delete", "namespace", n, "--ignore-not-found", "--wait=true", "--timeout=180s")
 	}
 	for _, p := range []string{"conf-u", "conf-v"} {
+		l.unapprove(p)
 		_ = l.c.Delete(ctx, &galacticv1alpha1.EdgeProvider{ObjectMeta: metav1.ObjectMeta{Name: p}})
 	}
 }

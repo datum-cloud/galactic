@@ -1,10 +1,11 @@
 # The MASQUE connector service on dfw: config/masque's cell-wide
-# prerequisites plus the lab's tenant bindings. The authority and provider
-# Deployments are the overlays in authority/ and provider/, applied after
-# this one. TestMASQUEService (task verify:masque-service) applies all three
-# with kubectl from the host, creates the provider's TLS Secret first,
-# approves the EdgeProvider, and removes everything in the reverse order when
-# it ends.
+# prerequisites, the operator's approval of the provider
+# (config/masque/approval) and the lab's tenant bindings. The authority and
+# provider Deployments are the overlays in authority/ and provider/, applied
+# after this one. TestMASQUEService (task verify:masque-service) applies all
+# three with kubectl from the host, creates the provider's TLS Secret first,
+# and removes everything in the reverse order when it ends.
 resources:
   - ../../../../config/masque
+  - ../../../../config/masque/approval
   - tenant-bindings.yaml

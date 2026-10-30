@@ -5,8 +5,9 @@
 // Package v1alpha1 contains Galactic's own API, galactic.datumapis.com/v1alpha1:
 // TrafficPolicy and TrafficPolicyBinding, the per-interface ingress and
 // egress policy the CNI datapath enforces (see
-// docs/enhancements/networking/interface-traffic-policy), and EdgeProvider
-// and EdgeService, the Galactic Edge provider registration and tenant grant,
+// docs/enhancements/networking/interface-traffic-policy), and EdgeProvider,
+// EdgeProviderApproval and EdgeService, the Galactic Edge provider
+// registration, its operator approval and a tenant grant,
 // EdgeInstance and EdgeAttachment, a provider pod and its connection to a
 // granted VPC, and EdgeRoute and EdgeRouteIndex, a prefix's forwarding claim
 // and the record of every claim accepted in a VPC (see
@@ -37,6 +38,7 @@ func addKnownTypes(s *runtime.Scheme) error {
 		&TrafficPolicy{}, &TrafficPolicyList{},
 		&TrafficPolicyBinding{}, &TrafficPolicyBindingList{},
 		&EdgeProvider{}, &EdgeProviderList{},
+		&EdgeProviderApproval{}, &EdgeProviderApprovalList{},
 		&EdgeService{}, &EdgeServiceList{},
 		&EdgeInstance{}, &EdgeInstanceList{},
 		&EdgeAttachment{}, &EdgeAttachmentList{},

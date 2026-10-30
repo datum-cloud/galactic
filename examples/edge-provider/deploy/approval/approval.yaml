@@ -1,0 +1,4 @@
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: EdgeProviderApproval
+metadata:
+  name: example-echo

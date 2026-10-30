@@ -1,0 +1,7 @@
+# The operator's approval of EdgeProvider/masque. While it exists,
+# galactic-controller --edge binds the provider role and admission policy
+# to masque-system/masque-provider; deleting it withdraws both.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: EdgeProviderApproval
+metadata:
+  name: masque

@@ -13,6 +13,7 @@ resources:
   - galactic.datumapis.com_bgpvrfinstances.yaml
   - galactic.datumapis.com_edgeattachments.yaml
   - galactic.datumapis.com_edgeinstances.yaml
+  - galactic.datumapis.com_edgeproviderapprovals.yaml
   - galactic.datumapis.com_edgeproviders.yaml
   - galactic.datumapis.com_edgerouteindices.yaml
   - galactic.datumapis.com_edgeroutes.yaml

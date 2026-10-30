@@ -208,11 +208,9 @@ func (s *service) setup(t *testing.T) {
 	}
 	l.copyToNodes(t, "masque-service-ca.pem", svcCA, s.ca.pem)
 	l.copyToNodes(t, "masque-service-other-ca.pem", svcOtherCA, s.otherCA.pem)
+	// The overlay approves the provider with config/masque/approval, as a
+	// cell's Git source does.
 	if _, err := l.kubectl("apply", "-k", s.overlay()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := l.kubectl("patch", "edgeprovider", svcProvider, "--subresource=status", "--type=merge",
-		"-p", `{"status":{"approved":true}}`); err != nil {
 		t.Fatal(err)
 	}
 	// The authority's certificate and the CA the provider trusts come from
