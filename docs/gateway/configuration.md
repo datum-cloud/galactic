@@ -61,27 +61,23 @@ default and is set per gateway node. It does three things:
 - It advertises the IPv4 VIP (the rule's `-v4` `BGPAdvertisement`) once the
   readiness gate below holds, and withdraws it as soon as the gate closes.
 
-The gateway reads and watches `ServiceVIPBinding`s for the gate, so its
+The gateway reads and watches `ServiceVIPBinding`s for the gate, and for
+shared address and port range rules whatever the switch says, so its
 ClusterRole needs `get`, `list` and `watch` on `servicevipbindings`
-(`config/galactic-gateway/rbac.yaml`). At startup, with the switch on, the
-gateway checks that it can list and watch them. If the API server denies it,
-the gateway logs an error naming the missing access and runs with IPv4 VIPs
-off: it serves IPv6 as usual, loads and advertises no IPv4 VIP, and every rule
-with an IPv4 VIP reports `Unsupported` for the node. Grant the access and
-restart the pod to turn IPv4 VIPs on. If the check cannot be made at all, for
-example while the API server is unreachable, the gateway retries it for 30
-seconds and then exits, so the restart checks again. It does not turn IPv4 off
-on a failed check, because a node reporting IPv4 unloaded lets backend nodes
-remove their IPv4 bindings once no gateway reports it loaded. Without the
-check, a watch the gateway may not make would keep its cache from syncing, and
-the node would serve no rule at all.
+(`config/galactic-gateway/rbac.yaml`). Without list and watch the gateway
+fails startup with an error naming the missing access, as it does for every
+type it watches. If the check cannot be made at all, for example while the API
+server is unreachable, the gateway exits, so the restart checks again. It does
+not turn IPv4 off on a failed check, because a node reporting IPv4 unloaded
+lets backend nodes remove their IPv4 bindings once no gateway reports it
+loaded.
 
 Before turning the switch on for a gateway node:
 
 - Its ClusterRole must grant `get`, `list` and `watch` on
   `servicevipbindings`. Infra deploys its own copy of that ClusterRole, so
-  the grant has to land there. Otherwise the gateway runs with IPv4 VIPs
-  off and reports the missing permission, as the paragraph above describes.
+  the grant has to land there. Otherwise the gateway fails startup and
+  names the missing permission, as the paragraph above describes.
 - The underlay must originate the prefix each IPv4 VIP sits in, from the
   site's edge nodes, as it does each IPv6 VIP's. The gateway's `-v4`
   advertisement is an EVPN path inside Galactic's own mesh, which the

@@ -101,22 +101,8 @@ func runCmd(cfg *config.GatewayConfig) error {
 		grpcSrv.GracefulStop()
 	}()
 
-	// Register the field index the gateway reconciler queries. It is an index
-	// rather than a real API field, so it resolves only if this process's own
-	// manager registered it: every reconcile here fails outright without this,
-	// even though another binary registers the same index on its own manager.
-	//
-	// Only this one index, not the full set. This binary's reconcilers query no
-	// other, and registering the rest starts live informers for kinds this
-	// binary's role grants no access to, which wedges the manager permanently
-	// with every controller blocked on cache sync behind forbidden reflector
-	// errors.
-	if err := controller.RegisterBGPRouterTargetIndex(ctx, mgr); err != nil {
-		return fmt.Errorf("register field indexes: %w", err)
-	}
-
 	// Pre-flight RBAC check: a watch the role denies fails startup.
-	rbacCtx, cancelRBAC := context.WithTimeout(ctx, 10*time.Second)
+	rbacCtx, cancelRBAC := context.WithTimeout(ctx, 30*time.Second)
 	err = checkWatchPermissions(rbacCtx, mgr.GetClient(), cfg.ProjectServices)
 	cancelRBAC()
 	if err != nil {
@@ -128,10 +114,10 @@ func runCmd(cfg *config.GatewayConfig) error {
 		VIPPrefixes:      cfg.ProjectVIPPrefixes,
 	}
 
-	// IPv4 VIPs and backend health need read access to ServiceVIPBindings;
-	// without it they stay off for this process rather than stalling the
-	// manager's cache. A check that cannot be made fails startup instead, so
-	// the restart checks again.
+	// IPv4 VIPs and backend health need read access to ServiceVIPBindings.
+	// The pre-flight above already fails startup without it, since the
+	// gateway watches bindings for every rule; these reviews still fail
+	// startup when they cannot be made, so the restart checks again.
 	reviewCtx, cancelReview := context.WithTimeout(ctx, 30*time.Second)
 	ipv4VIPs, err := resolveIPv4VIPs(reviewCtx, mgr.GetClient(), cfg.IPv4VIPs)
 	if err != nil {
@@ -209,7 +195,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// The gateway engine reconciler. No SRv6 address is passed: this datapath
 	// rewrites nothing, so a gateway node has no translation source of its own
 	// to publish.
-	if err := (&controller.NetworkGatewayReconciler{
+	if err := setupControllers(ctx, mgr, &controller.NetworkGatewayReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		Engine:        gwEngine,
@@ -222,20 +208,14 @@ func runCmd(cfg *config.GatewayConfig) error {
 		// Forwarding follows need: on only once an IPv4 VIP is about to load.
 		EnsureIPv4Forwarding: ipv4.enable,
 		Scope:                scope,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup NetworkGateway controller: %w", err)
-	}
-
-	// The rule reconciler: finalizer-guarded teardown ordering and the Accepted
-	// condition.
-	if err := (&controller.NetworkServiceReconciler{
+	}, &controller.NetworkServiceReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		NodeName:  nodeName,
 		APIReader: mgr.GetAPIReader(),
 		Scope:     scope,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup NetworkService controller: %w", err)
+	}); err != nil {
+		return err
 	}
 
 	if err := mgr.Start(ctx); err != nil {
@@ -345,4 +325,35 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
+}
+
+// setupControllers registers the field index and controllers the manager
+// runs: gateways, the gateway engine reconciler, and rules, the rule
+// reconciler handling finalizer-guarded teardown ordering and the Accepted
+// condition. Every type they watch must be in watchedResources;
+// TestWatchedResourcesMatchControllers runs this function to check.
+func setupControllers(
+	ctx context.Context, mgr ctrl.Manager,
+	gateways *controller.NetworkGatewayReconciler, rules *controller.NetworkServiceReconciler,
+) error {
+	// Register the field index the gateway reconciler queries. It is an index
+	// rather than a real API field, so it resolves only if this process's own
+	// manager registered it: every reconcile here fails outright without this,
+	// even though another binary registers the same index on its own manager.
+	//
+	// Only this one index, not the full set. This binary's reconcilers query no
+	// other, and registering the rest starts live informers for kinds this
+	// binary's role grants no access to, which wedges the manager permanently
+	// with every controller blocked on cache sync behind forbidden reflector
+	// errors.
+	if err := controller.RegisterBGPRouterTargetIndex(ctx, mgr); err != nil {
+		return fmt.Errorf("register field indexes: %w", err)
+	}
+	if err := gateways.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup NetworkGateway controller: %w", err)
+	}
+	if err := rules.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup NetworkService controller: %w", err)
+	}
+	return nil
 }

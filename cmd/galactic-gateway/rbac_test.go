@@ -121,7 +121,8 @@ func TestResolveIPv4VIPs(t *testing.T) {
 }
 
 // TestCheckWatchPermissions covers the startup RBAC pre-flight: a denied
-// watch fails startup, and VPCs are checked only with project services on.
+// list or watch fails startup naming it, VPCs are checked only with project
+// services on, and a check the context cut off fails startup.
 func TestCheckWatchPermissions(t *testing.T) {
 	ctx := context.Background()
 	allowAll := func(string, string) bool { return true }
@@ -148,8 +149,24 @@ func TestCheckWatchPermissions(t *testing.T) {
 		t.Fatalf("all granted: %v, want nil", err)
 	}
 
+	denyAddressList := func(verb, resource string) bool {
+		return verb != verbList || resource != resourceNetworkServiceAddresses
+	}
+	c, _ = accessReviewClient(t, denyAddressList, nil)
+	err = checkWatchPermissions(ctx, c, false)
+	if err == nil || !strings.Contains(err.Error(), verbList+" on "+resourceNetworkServiceAddresses) {
+		t.Fatalf("list denied on %s: %v, want an error naming it", resourceNetworkServiceAddresses, err)
+	}
+
 	c, _ = accessReviewClient(t, allowAll, errors.New("unavailable"))
 	if err := checkWatchPermissions(ctx, c, true); err != nil {
 		t.Fatalf("reviews that cannot be made: %v, want nil", err)
+	}
+
+	ended, cancel := context.WithCancel(ctx)
+	cancel()
+	c, _ = accessReviewClient(t, allowAll, context.Canceled)
+	if err := checkWatchPermissions(ended, c, true); err == nil {
+		t.Fatal("reviews cut off by the context ending: nil, want an error")
 	}
 }

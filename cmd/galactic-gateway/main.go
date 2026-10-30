@@ -30,18 +30,28 @@ const (
 	networkAPIGroup   = "galactic.datumapis.com"
 	networkAPIVersion = "v1alpha1"
 
-	resourceNetworkGateways   = "networkgateways"
-	resourceNetworkServices   = "networkservices"
-	resourceBGPAdvertisements = "bgpadvertisements"
-	resourceBGPRouters        = "bgprouters"
-	resourceBGPVRFInstances   = "bgpvrfinstances"
-	resourceServiceVIPBinding = "servicevipbindings"
+	resourceNetworkGateways         = "networkgateways"
+	resourceNetworkServices         = "networkservices"
+	resourceNetworkServiceAddresses = "networkserviceaddresses"
+	resourceBGPAdvertisements       = "bgpadvertisements"
+	resourceBGPRouters              = "bgprouters"
+	resourceBGPVRFInstances         = "bgpvrfinstances"
+	resourceServiceVIPBinding       = "servicevipbindings"
 
 	cloudAPIGroup          = "galactic.datumapis.com"
 	cloudAPIVersion        = "v1alpha1"
 	resourceVPCAttachments = "vpcattachments"
 	resourceVPCs           = "vpcs"
 )
+
+// verbList and verbWatch are the verbs an informer needs on each type it
+// watches.
+const (
+	verbList  = "list"
+	verbWatch = "watch"
+)
+
+var informerVerbs = []string{verbList, verbWatch}
 
 func main() {
 	cmd := newRootCommand()
@@ -50,58 +60,82 @@ func main() {
 	}
 }
 
-// checkWatchPermissions issues an access review for the watch verb on each
-// resource the manager watches. A denial means the informer cache never syncs
-// and every reconciler is silently blocked, so a denied watch fails startup
-// with the resources it names. A review that cannot be made is logged and
-// skipped: the manager's own cache sync reports a real outage.
+// watchedResource is one type the gateway's manager watches: kind as the
+// controllers register it, resource as access reviews name it.
+type watchedResource struct{ group, version, kind, resource string }
+
+// watchedResources returns every type the gateway's controllers and field
+// indexes watch. TestWatchedResourcesMatchControllers fails when a controller
+// watches a type this list leaves out, so add the type here along with the
+// watch.
 //
 // BGPRouter is included even though this binary has no BGP client of its own:
 // resolving a backend's uSID lists those CRDs directly, so read access to them
-// is a real requirement here. VPCs are checked only with projectServices on,
-// the only case the manager watches them. ServiceVIPBinding is not checked
-// here: the manager watches it only with IPv4 VIPs on, and ipv4VIPsAllowed
-// decides that.
-func checkWatchPermissions(ctx context.Context, c client.Client, projectServices bool) error {
-	logger := ctrl.Log.WithName("rbac-preflight")
-
-	type watchedResource struct{ group, version, resource string }
+// is a real requirement here. VPCs are watched only with projectServices on.
+// ServiceVIPBindings are watched whatever the IPv4 VIP and backend health
+// switches say, since a shared address or port range rule reads them too.
+func watchedResources(projectServices bool) []watchedResource {
 	resources := []watchedResource{
-		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceNetworkGateways},
-		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceNetworkServices},
-		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPAdvertisements},
-		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPRouters},
-		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPVRFInstances},
-		{group: cloudAPIGroup, version: cloudAPIVersion, resource: resourceVPCAttachments},
+		{group: networkAPIGroup, version: networkAPIVersion, kind: "NetworkGateway", resource: resourceNetworkGateways},
+		{group: networkAPIGroup, version: networkAPIVersion, kind: "NetworkService", resource: resourceNetworkServices},
+		{
+			group: networkAPIGroup, version: networkAPIVersion, kind: "NetworkServiceAddress",
+			resource: resourceNetworkServiceAddresses,
+		},
+		{group: networkAPIGroup, version: networkAPIVersion, kind: "BGPAdvertisement", resource: resourceBGPAdvertisements},
+		{group: networkAPIGroup, version: networkAPIVersion, kind: "BGPRouter", resource: resourceBGPRouters},
+		{group: networkAPIGroup, version: networkAPIVersion, kind: "BGPVRFInstance", resource: resourceBGPVRFInstances},
+		{group: networkAPIGroup, version: networkAPIVersion, kind: "ServiceVIPBinding", resource: resourceServiceVIPBinding},
+		{group: cloudAPIGroup, version: cloudAPIVersion, kind: "VPCAttachment", resource: resourceVPCAttachments},
 	}
 	if projectServices {
 		resources = append(resources,
-			watchedResource{group: cloudAPIGroup, version: cloudAPIVersion, resource: resourceVPCs})
+			watchedResource{group: cloudAPIGroup, version: cloudAPIVersion, kind: "VPC", resource: resourceVPCs})
 	}
+	return resources
+}
+
+// checkWatchPermissions issues access reviews for the list and watch verbs on
+// each resource watchedResources names. A denial means the informer cache
+// never syncs and every reconciler is silently blocked, so a denied verb fails
+// startup with the resources it names. A review that cannot be made is logged
+// and skipped, since the manager's own cache sync reports a real outage, but
+// once ctx ends startup fails rather than passing a check it never finished.
+func checkWatchPermissions(ctx context.Context, c client.Client, projectServices bool) error {
+	logger := ctrl.Log.WithName("rbac-preflight")
 
 	var denied []string
-	for _, r := range resources {
-		review := &authorizationv1.SelfSubjectAccessReview{
-			Spec: authorizationv1.SelfSubjectAccessReviewSpec{
-				ResourceAttributes: &authorizationv1.ResourceAttributes{
-					Verb:     "watch",
-					Group:    r.group,
-					Version:  r.version,
-					Resource: r.resource,
+	for _, r := range watchedResources(projectServices) {
+		var missing []string
+		for _, verb := range informerVerbs {
+			review := &authorizationv1.SelfSubjectAccessReview{
+				Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+					ResourceAttributes: &authorizationv1.ResourceAttributes{
+						Verb:     verb,
+						Group:    r.group,
+						Version:  r.version,
+						Resource: r.resource,
+					},
 				},
-			},
+			}
+			if err := c.Create(ctx, review); err != nil {
+				logger.Error(err, "RBAC pre-flight: failed to submit access review for "+r.resource, "verb", verb)
+				continue
+			}
+			if !review.Status.Allowed {
+				missing = append(missing, verb)
+			}
 		}
-		if err := c.Create(ctx, review); err != nil {
-			logger.Error(err, "RBAC pre-flight: failed to submit access review for "+r.resource, "verb", "watch")
-			continue
-		}
-		if !review.Status.Allowed {
-			denied = append(denied, r.resource+"."+r.group)
+		if len(missing) > 0 {
+			denied = append(denied, strings.Join(missing, " and ")+" on "+r.resource+"."+r.group)
 		}
 	}
 	if len(denied) > 0 {
-		return fmt.Errorf("the gateway's ClusterRole does not grant watch on %s: the informer cache would "+
+		return fmt.Errorf("the gateway's ClusterRole does not grant %s: the informer cache would "+
 			"never sync, so grant it and restart", strings.Join(denied, ", "))
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("could not confirm the gateway's RBAC before startup: %w", err)
 	}
 	return nil
 }
@@ -118,7 +152,7 @@ var errIPv4AccessDenied = errors.New("IPv4 VIP access denied")
 // review could not be made.
 func ipv4VIPsAllowed(ctx context.Context, c client.Client) error {
 	var missing []string
-	for _, verb := range []string{"list", "watch"} {
+	for _, verb := range informerVerbs {
 		review := &authorizationv1.SelfSubjectAccessReview{
 			Spec: authorizationv1.SelfSubjectAccessReviewSpec{
 				ResourceAttributes: &authorizationv1.ResourceAttributes{
