@@ -5,6 +5,7 @@
 package attach
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -63,6 +64,23 @@ func stubNonBondLinks(t *testing.T) {
 func TestResolveInterfaces_EnvOverride(t *testing.T) {
 	stubNonBondLinks(t)
 
+	// No override case may fall through to auto-detection, which would
+	// otherwise read the host's routing table and make the result depend on
+	// the machine running the test. The stubs record the call and fail.
+	origRouteListFn, origLinkByIndexFn := routeListFn, linkByIndexFn
+	t.Cleanup(func() {
+		routeListFn, linkByIndexFn = origRouteListFn, origLinkByIndexFn
+	})
+	var autoDetected bool
+	routeListFn = func() ([]netlink.Route, error) {
+		autoDetected = true
+		return nil, errors.New("auto-detection reached from an override case")
+	}
+	linkByIndexFn = func(int) (netlink.Link, error) {
+		autoDetected = true
+		return nil, errFixtureNotFound
+	}
+
 	tests := []struct {
 		name      string
 		envValue  string
@@ -96,12 +114,17 @@ func TestResolveInterfaces_EnvOverride(t *testing.T) {
 		},
 		{"OnlyCommasIsError", ",,,", nil, true},
 		{"OnlyWhitespaceIsError", "   ", nil, true},
+		{"WhitespaceAndCommasIsError", " , \t, ", nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(config.EnvCNIEBPFInterfaces, tt.envValue)
+			autoDetected = false
 
 			got, err := ResolveInterfaces()
+			if autoDetected {
+				t.Fatalf("ResolveInterfaces() fell through to auto-detection for override %q", tt.envValue)
+			}
 			if (err != nil) != tt.wantError {
 				t.Fatalf("ResolveInterfaces() error = %v, wantError = %v", err, tt.wantError)
 			}
