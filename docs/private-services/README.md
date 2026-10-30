@@ -265,3 +265,18 @@ do not revoke a persistent path. `Accepted=True` means the policy is valid; it d
 that forwarding is installed. Reports cover network programming, not the
 health of the producer application. Startup withdraws previous local readiness
 before rebuilding the node's state.
+
+## CNI program reloads
+
+A CNI restart preserves the service-policy gate and attachment incarnation
+tokens when the live two-program chain uses exactly the same kernel map IDs
+as the replacement programs. Both resolver frontends can continue forwarding
+while those programs are replaced. Missing identities, incomplete chains and
+changed map generations require new tokens; old authorization cannot transfer
+to them. An incompatible map layout still drains authorization before replacing
+maps, and the router must rebuild the policy before forwarding resumes.
+
+This continuity applies to an unchanged set of referenced maps. A program that
+starts referencing another map conservatively requires reauthorization even
+if existing map layouts did not change. Router startup still performs its
+cache-synchronized policy rebuild and stale-entry sweep.

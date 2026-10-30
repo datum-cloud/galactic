@@ -96,15 +96,9 @@ func Start(pinDir string) (objs *prog.UsidObjects, ifaces []string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// Close the service-policy gate before rotating any attachment identity.
-	// The controller reopens it only after its cache-synchronized rebuild and
-	// sweep. Doing this here, rather than waiting for that controller runnable,
-	// prevents unchanged interfaces from continuing against the previous
-	// generation while startup reattach rotates their peers one by one.
-	if err := objs.ServicePolicyStateTable.Put(uint32(0), prog.UsidServicePolicyStateValue{}); err != nil {
-		_ = objs.Close()
-		return nil, nil, fmt.Errorf("attach: disable service policy before startup reattach: %w", err)
-	}
+	// Compatible reloads retain the pinned policy gate and attachment tokens.
+	// Load drains authorization before replacing incompatible maps, and a new
+	// gate defaults to disabled until the controller completes its startup sync.
 
 	ifaces, err = ResolveInterfaces()
 	if err != nil {

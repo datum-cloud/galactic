@@ -7,6 +7,7 @@ package attach
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
@@ -120,11 +121,23 @@ func reattachEgressLinkLocked(link netlink.Link, serviceProgram, legacyProgram *
 	if managedCount == 0 {
 		return false, nil
 	}
-	// Rotate on every startup, including an already-current chain. Policy
-	// remains disabled until the controller rebuilds values with this token.
-	if _, err := attachmentidentity.RotateMap(identityMap, uint32(link.Attrs().Index)); err != nil {
-		return false, fmt.Errorf("rotate attachment identity: %w", err)
+	// A program replacement is not a new interface incarnation. Keep its
+	// authorization only when the complete old chain shares the new programs'
+	// map generation. Orphaned maps and incomplete chains require a new token.
+	preserve, err := canPreserveEgressIdentity(filters, serviceProgram, legacyProgram, identityMap)
+	if err != nil {
+		return false, err
 	}
+	var token uint64
+	if err := identityMap.Lookup(uint32(link.Attrs().Index), &token); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return false, fmt.Errorf("lookup attachment identity: %w", err)
+	}
+	if !preserve || token == 0 {
+		if _, err := attachmentidentity.RotateMap(identityMap, uint32(link.Attrs().Index)); err != nil {
+			return false, fmt.Errorf("rotate attachment identity: %w", err)
+		}
+	}
+
 	if serviceMatches == 1 && legacyMatches == 1 && managedCount == 2 {
 		return false, nil
 	}
@@ -267,3 +280,79 @@ const (
 	linkTypeVeth   = "veth"
 	linkTypeTuntap = "tuntap"
 )
+
+// canPreserveEgressIdentity checks the live chain's ownership and map generation.
+func canPreserveEgressIdentity(
+	filters []netlink.Filter, service, legacy *ebpf.Program, identities *ebpf.Map,
+) (bool, error) {
+	var oldService, oldLegacy *netlink.BpfFilter
+	for _, filter := range filters {
+		f, ok := filter.(*netlink.BpfFilter)
+		if !ok {
+			continue
+		}
+		switch f.Name {
+		case serviceEgressFilterName:
+			if oldService != nil || f.Priority != filterPriorityFn() || f.Handle != netlink.MakeHandle(0, 1) {
+				return false, nil
+			}
+			oldService = f
+		case egressFilterName:
+			if oldLegacy != nil || f.Priority != filterPriorityFn()+1 || f.Handle != netlink.MakeHandle(0, 2) {
+				return false, nil
+			}
+			oldLegacy = f
+		}
+	}
+	if oldService == nil || oldLegacy == nil {
+		return false, nil
+	}
+	info, err := identities.Info()
+	if err != nil {
+		return false, fmt.Errorf("inspect attachment identity map: %w", err)
+	}
+	identityID, ok := info.ID()
+	if !ok {
+		return false, errors.New("attachment identity map ID unavailable")
+	}
+	for _, pair := range []struct {
+		old              int
+		current          *ebpf.Program
+		identityRequired bool
+	}{
+		{oldService.Id, service, true}, {oldLegacy.Id, legacy, false},
+	} {
+		previous, err := ebpf.NewProgramFromID(ebpf.ProgramID(pair.old))
+		if err != nil {
+			return false, fmt.Errorf("open previous egress program: %w", err)
+		}
+		same, err := sameProgramMaps(previous, pair.current, identityID, pair.identityRequired)
+		_ = previous.Close()
+		if err != nil || !same {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func sameProgramMaps(previous, current *ebpf.Program, identityID ebpf.MapID, identityRequired bool) (bool, error) {
+	oldInfo, err := previous.Info()
+	if err != nil {
+		return false, fmt.Errorf("inspect previous egress program: %w", err)
+	}
+	newInfo, err := current.Info()
+	if err != nil {
+		return false, fmt.Errorf("inspect replacement egress program: %w", err)
+	}
+	oldIDs, oldOK := oldInfo.MapIDs()
+	newIDs, newOK := newInfo.MapIDs()
+	if !oldOK || !newOK {
+		return false, errors.New("egress program map IDs unavailable")
+	}
+	if identityRequired && !slices.Contains(newIDs, identityID) {
+		return false, nil
+	}
+	slices.Sort(oldIDs)
+	slices.Sort(newIDs)
+	return slices.Equal(oldIDs, newIDs), nil
+}

@@ -24,6 +24,7 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) { //nolint
 	requireRoot(t)
 	const (
 		legacyLink      = "legacy0"
+		uplinkLink      = "uplink0"
 		tenantLink      = "tenant0"
 		serviceOnlyLink = "service0"
 		duplicateLink   = "dupsvc0"
@@ -48,7 +49,7 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) { //nolint
 			&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: tenantLink}, PeerName: "tenant0p"},
 			&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: serviceOnlyLink}, PeerName: "service0p"},
 			&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: duplicateLink}, PeerName: "dupsvc0p"},
-			&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "uplink0"}},
+			&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: uplinkLink}},
 		}
 		for _, l := range links {
 			if err := netlink.LinkAdd(l); err != nil {
@@ -82,7 +83,7 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) { //nolint
 			netlink.HANDLE_MIN_INGRESS, filterPriorityFn()+2, netlink.MakeHandle(0, 3)); err != nil {
 			return fmt.Errorf("attach second duplicate service filter: %w", err)
 		}
-		if err := Attach(previous.UsidIngress, []string{"uplink0"}); err != nil {
+		if err := Attach(previous.UsidIngress, []string{uplinkLink}); err != nil {
 			return fmt.Errorf("attach previous usid_ingress: %w", err)
 		}
 
@@ -103,9 +104,25 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) { //nolint
 			return fmt.Errorf("seed stale attachment identity: %w", err)
 		}
 
+		// A matching numeric token in a different pinned map generation must
+		// not authorize the old program chain.
+		oldTenant, err := netlink.LinkByName(tenantLink)
+		if err != nil {
+			return err
+		}
+		if err := current.AttachmentIdentityTable.Put(uint32(oldTenant.Attrs().Index), uint64(42)); err != nil {
+			return err
+		}
 		replaced, err := ReattachEgress(current.UsidServiceEgress, current.UsidEgress, current.AttachmentIdentityTable)
 		if err != nil {
 			return fmt.Errorf("ReattachEgress: %w", err)
+		}
+		var migratedToken uint64
+		if err := current.AttachmentIdentityTable.Lookup(uint32(oldTenant.Attrs().Index), &migratedToken); err != nil {
+			return err
+		}
+		if migratedToken == 0 || migratedToken == 42 {
+			t.Fatalf("different map generation retained stale token %d", migratedToken)
 		}
 		if replaced != 4 {
 			t.Errorf("first pass replaced %d attachment chains, want 4", replaced)
@@ -140,7 +157,7 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) { //nolint
 		if tokenAfter != tokenBefore {
 			t.Errorf("idempotent CNI ADD rotated token from %d to %d", tokenBefore, tokenAfter)
 		}
-		if got, want := filterProgID(t, "uplink0", filterName), progID(t, previous.UsidIngress); got != want {
+		if got, want := filterProgID(t, uplinkLink, filterName), progID(t, previous.UsidIngress); got != want {
 			t.Errorf("uplink0's usid_ingress filter runs program %d, want it untouched at %d", got, want)
 		}
 
