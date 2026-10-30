@@ -102,7 +102,9 @@ field; as of this writing it is still env-only.
 - **`GALACTIC_CNI_EBPF_INTERFACES`** — comma-separated list of interface
   names (whitespace trimmed, duplicates/empties removed) to attach the
   ingress hook to. When set, `attach.ResolveInterfaces` uses this list
-  directly and skips auto-detection entirely. When unset, the
+  directly and skips auto-detection entirely. A value that yields no
+  names, such as one made only of commas or only of whitespace, is an
+  error rather than a request to auto-detect. When unset or empty, the
   interface(s) carrying the default IPv6 route or a BGP-learned route are
   auto-detected, counting every nexthop of a multipath (ECMP) route. Either
   way, any resolved interface that is itself a Linux bonding master is

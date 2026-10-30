@@ -46,12 +46,13 @@ var (
 // ResolveInterfaces returns the interface names the uSID datapath should attach
 // its TC-BPF ingress hook to.
 //
-// When config.EnvCNIEBPFInterfaces is set it is parsed as a comma-separated
-// list, with whitespace trimmed and duplicates and empty entries removed, and
-// used as-is. That is the explicit override for multi-homed nodes where
-// auto-detection is ambiguous.
+// When config.EnvCNIEBPFInterfaces is non-empty it is parsed as a
+// comma-separated list, with whitespace trimmed and duplicates and empty
+// entries removed, and used as-is. That is the explicit override for
+// multi-homed nodes where auto-detection is ambiguous. A non-empty value that
+// yields no names, such as only commas or only whitespace, is an error.
 //
-// Otherwise interfaces are auto-detected: those carrying the default IPv6
+// When it is unset or empty, interfaces are auto-detected: those carrying the default IPv6
 // route first, then those carrying a BGP-learned route (every nexthop of a
 // multipath route counts), which is where a fabric
 // peer's SRv6 traffic arrives when locators travel over a segment the default
@@ -67,7 +68,10 @@ func ResolveInterfaces() ([]string, error) {
 		names []string
 		err   error
 	)
-	if override := strings.TrimSpace(os.Getenv(config.EnvCNIEBPFInterfaces)); override != "" {
+	// Whether the override is set is decided on the raw value, not the trimmed
+	// one: a value made only of whitespace is a malformed override, rejected
+	// like one made only of commas, rather than a request to auto-detect.
+	if override := os.Getenv(config.EnvCNIEBPFInterfaces); override != "" {
 		names = parseInterfaceList(override)
 		if len(names) == 0 {
 			return nil, fmt.Errorf("attach: %s is set to %q but contains no usable interface names",
