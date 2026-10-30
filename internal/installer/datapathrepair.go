@@ -34,6 +34,10 @@ var (
 // observe passes without a datapath or an API server.
 var repairDatapathFn = gc.RepairAttachmentDatapath
 
+// restoreHostOnlyPortsFn is restoreHostOnlyPorts, indirected so tests can
+// observe passes without a pinned host_only_port_table.
+var restoreHostOnlyPortsFn = restoreHostOnlyPorts
+
 // datapathRepairEnabled reports whether st has a loaded datapath and a
 // Kubernetes client, without which there is nothing to repair or nothing to
 // repair it from.
@@ -55,7 +59,8 @@ func isSidecarReturnTable(tableID uint32) bool {
 // anything, at Warn when it failed or left the public uplink unresolved, and
 // at Debug otherwise. It returns the pass's result and error.
 func runDatapathRepair(ctx context.Context, st ebpfDatapathState) (gc.DatapathRepairResult, error) {
-	result, err := repairDatapathFn(ctx, st.k8sClient, gc.DatapathRepairConfig{
+	repair, restoreHostOnly := repairDatapathFn, restoreHostOnlyPortsFn
+	result, err := repair(ctx, st.k8sClient, gc.DatapathRepairConfig{
 		Namespace:      st.namespace,
 		NodeName:       st.nodeName,
 		PinDir:         attach.PinDir,
@@ -78,7 +83,7 @@ func runDatapathRepair(ctx context.Context, st ebpfDatapathState) (gc.DatapathRe
 		slog.Debug("eBPF attachment datapath repair found nothing missing", attrs...)
 	}
 
-	restored, hostOnlyErr := restoreHostOnlyPorts(attach.PinDir)
+	restored, hostOnlyErr := restoreHostOnly(attach.PinDir)
 	switch {
 	case hostOnlyErr != nil:
 		slog.Warn("eBPF host-only port repair failed; a tap may accept its host-only ports from the VPC",
