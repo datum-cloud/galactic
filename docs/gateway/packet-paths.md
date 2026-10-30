@@ -361,27 +361,24 @@ such a node forwards its replies.
 
 Whether a reply crosses an edge node at all depends on the site:
 
-| Topology                     | Compute node's first uplink neighbor                                      | Reply path                                             |
-|------------------------------|---------------------------------------------------------------------------|--------------------------------------------------------|
-| containerlab                 | A site edge node (compute links only to edges)                            | The edge node's `edge_return` forwards it              |
-| Datum production and staging | The hosting provider's (servers.com, AS7979) ToR/VRRP gateway, on `bond0` | Leaves for the provider's gateway, not through an edge |
+| Topology             | Compute node's first uplink neighbor           | Reply path                                             |
+|----------------------|------------------------------------------------|--------------------------------------------------------|
+| containerlab         | A site edge node (compute links only to edges) | The edge node's `edge_return` forwards it              |
+| Provider-routed site | The hosting provider's ToR/VRRP gateway        | Leaves for the provider's gateway, not through an edge |
 
 `usid_egress` rewrites the MACs and `bpf_redirect`s with no FIB lookup, so the
 reply goes to whichever neighbor `srv6.ResolvePublicUplink` resolved first on
 the first interface from `attach.ResolveInterfaces`, which lists default-route
-interfaces first. In Datum sites that interface is `bond0`. Observed
-2026-10-28 in staging us-east-1: `bond0`'s neighbor on one compute node was the
-provider's VRRP gateway, and spoofed-source TCP probes from that node (sources
-in Datum prefixes, destinations `1.1.1.1` and `2606:4700:4700::1111`) got
-SYN-ACKs back at the site edges, so no source filtering was observed on compute
-ports. Production was not probed, and the probe does not show how the provider
-routes VIP prefixes.
+interfaces first. On a provider-routed site the reply leaves the node as
+ordinary routed traffic with the VIP as its source, so the site depends on the
+provider accepting VIP-sourced packets from compute ports and routing the
+replies to the client.
 
 Where the first uplink is the provider's gateway, the reply path needs no edge
 state. `edge_return` and `vip_addr_table` apply only if the resolved uplink is
-an edge. If `bond0` loses its neighbor and another listed interface has one,
-`ResolvePublicUplink` falls back to it; if none does, the row keeps its last
-value. Both edges still need IPv4 VIPs on for the forward path.
+an edge. If that interface loses its neighbor and another listed interface
+has one, `ResolvePublicUplink` falls back to it; if none does, the row keeps
+its last value. Both edges still need IPv4 VIPs on for the forward path.
 
 Attached only to `GALACTIC_GATEWAY_INTERNAL_INTERFACES`, never the public
 uplink: on the uplink an external client could source a packet from a VIP

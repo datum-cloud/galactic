@@ -548,8 +548,8 @@ knowing before you rely on this component in production:
   and a BGP session on that queue expires its hold timer
   ([#673](https://github.com/datum-cloud/galactic/issues/673)). It has only
   been seen on `bnxt_en` uplinks with this datapath attached, never on
-  `ixgbe` or on fabric links, which carry no XDP program. The trigger is not
-  known. The NIC drops the packets before the datapath runs, so
+  fabric links, which carry no XDP program. The trigger is not known. The
+  NIC drops the packets before the datapath runs, so
   `galactic_nat_drops_total` stays flat; the signal is one queue standing out
   in `galactic_nat_uplink_rx_queue_discards_total`, and
   `GalacticNatUplinkRxQueueStalled` (`config/monitoring/`) alerts on it.
