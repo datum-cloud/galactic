@@ -71,6 +71,27 @@ func RouteEgressDel(prefix *net.IPNet, tableID uint32) error {
 	return table.UnregisterUnlessPassThroughAs(tableID, prefix, egressroutemap.PassThroughEdge)
 }
 
+// RouteEgressDelIfSID is RouteEgressDel for an entry that still encapsulates
+// toward sid, and leaves any other entry for prefix in tableID alone. A caller
+// removing routes from a table it no longer owns uses it, so that an entry
+// another writer has since installed there is kept. The entry is read just
+// before it is deleted, as the map offers no compare-and-delete.
+func RouteEgressDelIfSID(prefix *net.IPNet, tableID uint32, sid net.IP) error {
+	if sid == nil || sid.IsUnspecified() {
+		return nil // no SID was ever installed toward, so no entry is this caller's
+	}
+	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
+	if err != nil {
+		return fmt.Errorf("srv6: RouteEgressDelIfSID: %w", err)
+	}
+	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
+	current, ok, err := table.Lookup(tableID, prefix)
+	if err != nil || !ok || !current.Equal(sid) {
+		return err
+	}
+	return table.UnregisterUnlessPassThroughAs(tableID, prefix, egressroutemap.PassThroughEdge)
+}
+
 // EgressDefaultRouteAdd installs egress_route_table's default (::/0) entry for
 // Linux VRF table tableID, encapsulating toward the first usable address in
 // shardSIDs. It gives a tenant VRF a route out for any destination with no

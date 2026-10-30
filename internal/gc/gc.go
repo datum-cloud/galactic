@@ -104,6 +104,16 @@ type CleanupResult struct {
 	// EBPFVRFEntriesRegistered counts vrf_table entries SweepEBPFVRFTable
 	// re-registered for a live BGPVRFInstance CRD that had no matching row.
 	EBPFVRFEntriesRegistered int
+	// EBPFVRFEntriesRewritten counts vrf_table entries SweepEBPFVRFTable
+	// rewrote because their table ID was not their kernel VRF's.
+	EBPFVRFEntriesRewritten int
+	// VRFTableReservationsReleased counts VRF table ID reservations
+	// SweepEBPFVRFTable released once nothing on the node referenced them.
+	VRFTableReservationsReleased int
+	// EgressRouteTablesRemoved counts table IDs whose egress_route_table
+	// entries SweepEBPFVRFTable removed, for a released reservation or a
+	// table no VRF and no reservation holds.
+	EgressRouteTablesRemoved int
 	// EBPFNPTv6EntriesRemoved counts stale eBPF uSID datapath nptv6_table
 	// map entries removed by SweepEBPFNPTv6Table.
 	EBPFNPTv6EntriesRemoved int
@@ -787,9 +797,9 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 		result.Errors++
 		return result
 	}
-	existingKeys := make(map[usidmap.VRFKey]struct{}, len(existing))
+	existingRows := make(map[usidmap.VRFKey]usidmap.VRFEntry, len(existing))
 	for _, e := range existing {
-		existingKeys[e.VRFKey] = struct{}{}
+		existingRows[e.VRFKey] = e
 		if e.Block == uformat.BlockIngressSidecar {
 			live[e.VRFKey] = struct{}{}
 		}
@@ -812,40 +822,7 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 		live[key] = struct{}{}
 	}
 
-	// Repair entries a live BGPVRFInstance expects but vrf_table lacks. A
-	// reload that changes vrf_table's layout recreates it empty, and CNI ADD
-	// never re-registers an attachment that already succeeded.
-	// RepairAttachmentDatapath, started on the same tick, rebuilds them from
-	// each attachment's interface; this covers a VRF it skipped, such as one
-	// whose attachment interface is mid-replacement.
-	for key, instName := range liveCRDNames {
-		if _, ok := existingKeys[key]; ok {
-			continue // already present -- Reconcile above is what handles this one
-		}
-		vrfTableID, egressKind, ok, err := resolveVRFKernelState(nodeName, instName)
-		if err != nil {
-			slog.Error("GC: failed to resolve kernel VRF state while repairing eBPF vrf_table entry",
-				"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
-			result.Errors++
-			continue
-		}
-		if !ok {
-			// No matching kernel VRF interface right now, because teardown is
-			// in flight or the CNI ADD that creates it has not run. Nothing
-			// to repopulate from this tick.
-			continue
-		}
-		if err := reg.VRF.Register(key.Block, key.Argument, vrfTableID, egressKind); err != nil {
-			slog.Error("GC: failed to repair missing eBPF vrf_table entry",
-				"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
-			result.Errors++
-			continue
-		}
-		slog.Info("GC: repaired missing eBPF vrf_table entry",
-			"vrfInstance", instName, "block", key.Block, "argument", key.Argument,
-			"vrfTableID", vrfTableID, "egressKind", egressKind)
-		result.EBPFVRFEntriesRegistered++
-	}
+	repairVRFRows(reg.VRF, nodeName, liveCRDNames, existingRows, &result)
 
 	removed, err := reg.VRF.Reconcile(live, cutoff)
 	for _, e := range removed {
@@ -872,7 +849,73 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 		result.Errors++
 	}
 
+	// Last, once the entries of VPCs gone from the node are removed above, so
+	// their table IDs can be released on this same pass.
+	instNames := make(map[string]struct{}, len(liveCRDNames))
+	for _, name := range liveCRDNames {
+		instNames[name] = struct{}{}
+	}
+	sweepVRFTableState(reg.VRF, pinDir, nodeName, instNames, &result)
+
 	return result
+}
+
+// repairVRFRows registers the vrf_table entry each live BGPVRFInstance in
+// liveCRDNames expects but vrf_table lacks. A reload that changes vrf_table's
+// layout recreates it empty, and CNI ADD never re-registers an attachment that
+// already succeeded. RepairAttachmentDatapath, started on the same tick,
+// rebuilds them from each attachment's interface; this covers a VRF it
+// skipped, such as one whose attachment interface is mid-replacement.
+//
+// It also rewrites an entry whose table ID is not its kernel VRF's: the VRF
+// was recreated on another table with no CNI ADD to re-register it, and the
+// datapath would otherwise route the VPC through a table another VPC can be
+// given (#1270). The egress kind the CNI wrote is kept.
+func repairVRFRows(table *usidmap.VRFTable, nodeName string, liveCRDNames map[usidmap.VRFKey]string,
+	existingRows map[usidmap.VRFKey]usidmap.VRFEntry, result *CleanupResult) {
+	if len(liveCRDNames) == 0 {
+		return
+	}
+	kernel, err := listKernelVRFs()
+	if err != nil {
+		slog.Error("GC: failed to list kernel VRFs while repairing eBPF vrf_table entries", "err", err)
+		result.Errors++
+		return
+	}
+	for key, instName := range liveCRDNames {
+		vrfTableID, egressKind, ok := kernel.resolve(nodeName, instName)
+		if !ok {
+			// No matching kernel VRF interface right now, because teardown is
+			// in flight or the CNI ADD that creates it has not run. Nothing
+			// to repopulate from this tick.
+			continue
+		}
+		row, present := existingRows[key]
+		switch {
+		case !present:
+			if err := table.Register(key.Block, key.Argument, vrfTableID, egressKind); err != nil {
+				slog.Error("GC: failed to repair missing eBPF vrf_table entry",
+					"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
+				result.Errors++
+				continue
+			}
+			slog.Info("GC: repaired missing eBPF vrf_table entry",
+				"vrfInstance", instName, "block", key.Block, "argument", key.Argument,
+				"vrfTableID", vrfTableID, "egressKind", egressKind)
+			result.EBPFVRFEntriesRegistered++
+		case row.VRFTableID != vrfTableID:
+			if err := table.Register(key.Block, key.Argument, vrfTableID, row.EgressKind); err != nil {
+				slog.Error("GC: failed to rewrite eBPF vrf_table entry with a stale table ID",
+					"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
+				result.Errors++
+				continue
+			}
+			slog.Warn("GC: rewrote eBPF vrf_table entry with a stale table ID",
+				"vrfInstance", instName, "block", key.Block, "argument", key.Argument,
+				"from", row.VRFTableID, "to", vrfTableID)
+			result.EBPFVRFEntriesRewritten++
+		}
+	}
 }
 
 // instanceVPC returns the VPC of the kernel VRF among links that the
@@ -964,13 +1007,42 @@ var (
 // yet falls back to EgressKindVeth, the common case and vrf_table's zero
 // value.
 func resolveVRFKernelState(nodeName, instName string) (vrfTableID uint32, egressKind uint32, ok bool, err error) {
-	links, err := listVRFLinksFn()
+	kernel, err := listKernelVRFs()
 	if err != nil {
-		return 0, 0, false, fmt.Errorf("list kernel VRF interfaces: %w", err)
+		return 0, 0, false, err
 	}
+	vrfTableID, egressKind, ok = kernel.resolve(nodeName, instName)
+	return vrfTableID, egressKind, ok, nil
+}
 
+// kernelVRFs is one listing of the node's kernel VRF interfaces and of every
+// link, so that resolving many BGPVRFInstances costs two link dumps rather
+// than two each.
+type kernelVRFs struct {
+	vrfs []*netlink.Vrf
+	all  []netlink.Link
+}
+
+// listKernelVRFs lists the node's kernel VRF interfaces and every link.
+func listKernelVRFs() (kernelVRFs, error) {
+	vrfs, err := listVRFLinksFn()
+	if err != nil {
+		return kernelVRFs{}, fmt.Errorf("list kernel VRF interfaces: %w", err)
+	}
+	if len(vrfs) == 0 {
+		return kernelVRFs{}, nil
+	}
+	all, err := listAllLinksFn()
+	if err != nil {
+		return kernelVRFs{}, fmt.Errorf("list kernel interfaces: %w", err)
+	}
+	return kernelVRFs{vrfs: vrfs, all: all}, nil
+}
+
+// resolve is resolveVRFKernelState against this listing.
+func (k kernelVRFs) resolve(nodeName, instName string) (vrfTableID uint32, egressKind uint32, ok bool) {
 	var match *netlink.Vrf
-	for _, link := range links {
+	for _, link := range k.vrfs {
 		vpc, vpcOK := parseVRFName(link.Name)
 		if !vpcOK {
 			continue
@@ -986,15 +1058,11 @@ func resolveVRFKernelState(nodeName, instName string) (vrfTableID uint32, egress
 		}
 	}
 	if match == nil {
-		return 0, 0, false, nil
+		return 0, 0, false
 	}
 
 	kind := usidmap.EgressKindVeth
-	allLinks, err := listAllLinksFn()
-	if err != nil {
-		return 0, 0, false, fmt.Errorf("list kernel interfaces: %w", err)
-	}
-	for _, l := range allLinks {
+	for _, l := range k.all {
 		if l.Attrs().MasterIndex != match.Attrs().Index {
 			continue
 		}
@@ -1004,7 +1072,7 @@ func resolveVRFKernelState(nodeName, instName string) (vrfTableID uint32, egress
 		break
 	}
 
-	return match.Table, kind, true, nil
+	return match.Table, kind, true
 }
 
 // SweepEBPFNPTv6Table reconciles the eBPF nptv6_table map against the NPTv6

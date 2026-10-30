@@ -1393,10 +1393,12 @@ func reportEBPFHealth(st ebpfDatapathState, healthSrv *health.Server, lastHealth
 // worth logging. Split out of Run's select to keep it within the gocyclo
 // budget.
 func logEBPFVRFSweepResult(result gc.CleanupResult) {
-	if result.EBPFVRFEntriesRemoved > 0 || result.EBPFVRFEntriesRegistered > 0 || result.Errors > 0 {
+	if result.EBPFVRFEntriesRemoved > 0 || result.EBPFVRFEntriesRegistered > 0 || result.EBPFVRFEntriesRewritten > 0 ||
+		result.VRFTableReservationsReleased > 0 || result.EgressRouteTablesRemoved > 0 || result.Errors > 0 {
 		slog.Info("eBPF vrf_table GC sweep complete",
 			"removed", result.EBPFVRFEntriesRemoved, "registered", result.EBPFVRFEntriesRegistered,
-			"errors", result.Errors)
+			"rewritten", result.EBPFVRFEntriesRewritten, "reservationsReleased", result.VRFTableReservationsReleased,
+			"egressTablesRemoved", result.EgressRouteTablesRemoved, "errors", result.Errors)
 	}
 }
 

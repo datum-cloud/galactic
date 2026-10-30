@@ -404,12 +404,43 @@ func (r *GoBGPRuntime) applyVRFs(
 
 	rtIndex := make(map[string]uint32, len(vrfs))
 	needsBackfill := false
+	var moved []movedVRFTable
+
+	// The kernel VRF can be deleted and recreated, on a different table,
+	// while it stays desired. Its remote routes must follow it rather than
+	// keep installing into the old table, which another VPC can be given
+	// (#1270). One VRF listing per reconcile serves every applied VRF.
+	var currentTable func(string) (uint32, error)
+	if len(r.appliedVRFs) > 0 {
+		snapshot, err := snapshotVRFTables()
+		if err != nil {
+			slog.Warn("applyVRFs: could not list kernel VRFs, keeping every applied VRF's table", "err", err)
+		}
+		currentTable = snapshot
+	}
+
 	for _, v := range vrfs {
 		if err := applyVRF(ctx, b, &v, routerID); err != nil {
 			return fmt.Errorf("apply VRF %s: %w", v.Name, err)
 		}
 
 		tableID, ok := r.appliedVRFs[v.Name]
+		if ok && currentTable != nil {
+			// Only a different table moves the VRF. One that is momentarily
+			// absent keeps its table, which its reservation keeps from any
+			// other VPC, and comes back on the same one; withdrawing its
+			// routes meanwhile would only cut its traffic.
+			if current, err := currentTable(v.Name); err == nil && current != tableID {
+				slog.Warn("applyVRFs: VRF's kernel table changed, moving its routes",
+					"vrf", v.Name, "from", tableID, "to", current)
+				moved = append(moved, movedVRFTable{
+					name: v.Name, tableID: tableID,
+					importRTs: append([]string(nil), r.appliedVRFImportRTs[v.Name]...),
+				})
+				delete(r.appliedVRFs, v.Name)
+				ok = false
+			}
+		}
 		if !ok {
 			var st model.VRFStatus
 			tableID, st = resolveVRF(v.Name)
@@ -438,6 +469,12 @@ func (r *GoBGPRuntime) applyVRFs(
 	r.rtIndexMu.Lock()
 	r.rtIndex = rtIndex
 	r.rtIndexMu.Unlock()
+
+	// Only once the index no longer names a moved VRF's old table, so the
+	// watcher installs nothing new there.
+	for _, m := range moved {
+		r.withdrawMovedVRFRoutes(b, m)
+	}
 
 	// A newly registered VRF's targets, or a changed set on an existing one, may
 	// match paths that were already best path before the index held that
