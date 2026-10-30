@@ -376,10 +376,14 @@ func publishBGPState(
 		// Allocated, written and checked for a collision under the node's
 		// Argument lock; see claimArgument.
 		siblings := func() ([]string, error) { return siblingHostLinks(cfg.vpc, cfg.vpcAttachment) }
+		release := func(argument int32) error {
+			return attachreg.ReleaseArgument(ebpfPinDir,
+				attachreg.Node{Locator: bgp.srv6Locator, NodeID: bgp.nodeID}, cfg.vpc, uint16(argument))
+		}
 		vrfID, created, err := claimArgument(ctx, k8s, namespace, bgp.routerName, vrfName,
 			result.vrfInstanceCreated, siblings, func(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec {
 				return buildVRFInstanceSpec(bgp.routerName, rtValue, vrfID)
-			})
+			}, release)
 		if created {
 			result.vrfInstanceCreated = true
 		}

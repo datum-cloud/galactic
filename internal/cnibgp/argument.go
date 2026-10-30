@@ -99,9 +99,15 @@ func lockArguments(ctx context.Context) (release func(), err error) {
 // The lock was released in between, so a sibling ADD may have reused it
 // since; it is moved only while siblings, the links of other attachments in
 // the VPC's VRF, reports none.
+//
+// After each move, releaseArgument is called with the Argument the instance left. An
+// earlier attempt may have registered the datapath under it, and the writer
+// now holding it must not have its traffic delivered into this VPC. A release
+// error fails the claim.
 func claimArgument(
 	ctx context.Context, k8s client.Client, namespace, routerName, vrfName string, createdBefore bool,
 	siblings func() ([]string, error), build func(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec,
+	releaseArgument func(argument int32) error,
 ) (vrfID int32, created bool, err error) {
 	release, err := lockArguments(ctx)
 	if err != nil {
@@ -158,12 +164,17 @@ func claimArgument(
 		slog.Warn("BGP: Argument taken by another writer, reallocating this ADD's BGPVRFInstance",
 			"resource_name", vrfName, "resource_namespace", namespace, "holder", holder,
 			"argument", vrfID, "next", next)
+		left := vrfID
 		vrfID = next
 		if _, err := controllerutil.CreateOrUpdate(ctx, k8s, vrfInst, func() error {
 			vrfInst.Spec = build(vrfID)
 			return nil
 		}); err != nil {
 			return vrfID, created, fmt.Errorf("reallocate BGPVRFInstance %s: %w", vrfName, err)
+		}
+		if err := releaseArgument(left); err != nil {
+			return vrfID, created, fmt.Errorf("release Argument %d after moving BGPVRFInstance %s: %w",
+				left, vrfName, err)
 		}
 	}
 }

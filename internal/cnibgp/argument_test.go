@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -27,10 +28,30 @@ import (
 
 const argTestRouter = "router-a"
 
-// claim runs claimArgument for the test router and namespace.
+// claim runs claimArgument for the test router and namespace, ignoring
+// released Arguments.
 func claim(k8s client.Client, name string, createdBefore bool, siblings func() ([]string, error)) (int32, bool, error) {
+	return claimReleasing(k8s, name, createdBefore, siblings, func(int32) error { return nil })
+}
+
+// claimReleasing runs claimArgument with releaseArgument as its release hook.
+func claimReleasing(
+	k8s client.Client, name string, createdBefore bool, siblings func() ([]string, error),
+	releaseArgument func(int32) error,
+) (int32, bool, error) {
 	ctx := context.Background()
-	return claimArgument(ctx, k8s, testNamespace, argTestRouter, name, createdBefore, siblings, argTestSpec)
+	return claimArgument(ctx, k8s, testNamespace, argTestRouter, name, createdBefore, siblings, argTestSpec,
+		releaseArgument)
+}
+
+// recordReleases returns a release hook that records each Argument it is
+// given, and the slice it records into.
+func recordReleases() (func(int32) error, *[]int32) {
+	var released []int32
+	return func(argument int32) error {
+		released = append(released, argument)
+		return nil
+	}, &released
 }
 
 // noSiblings reports no other attachment's link in the VPC's VRF.
@@ -213,6 +234,62 @@ func TestClaimArgument_EarlierAttemptSiblingReused(t *testing.T) {
 	}
 	if got := getInstance(t, k8s, mine).Spec.VRFID; got != collidingArgument {
 		t.Errorf("instance moved to %d under a sibling, want %d unchanged", got, collidingArgument)
+	}
+}
+
+// TestClaimArgument_ReleasesLeftArgument retries an ADD whose earlier
+// attempt created the instance and may have registered the datapath under
+// its Argument before another writer took it. Moving the instance releases
+// the Argument it left, so the other writer's traffic is not delivered into
+// this VPC.
+func TestClaimArgument_ReleasesLeftArgument(t *testing.T) {
+	mine := crdnames.BGPVRFInstanceName("va", testNodeName)
+	other := crdnames.BGPVRFInstanceName("vb", testNodeName)
+	k8s := fakeClient(argTestInstance(mine), argTestInstance(other))
+	releaseArgument, released := recordReleases()
+
+	vrfID, _, err := claimReleasing(k8s, mine, true, noSiblings, releaseArgument)
+	if err != nil {
+		t.Fatalf("claimArgument: %v", err)
+	}
+	if vrfID == collidingArgument {
+		t.Fatalf("Argument stayed %d, want it moved off the collision", collidingArgument)
+	}
+	if want := []int32{collidingArgument}; !slices.Equal(*released, want) {
+		t.Errorf("released %v, want %v", *released, want)
+	}
+}
+
+// TestClaimArgument_ReleasesNothingInPlace keeps an instance on its
+// Argument, uncontested or reused under a collision, and releases nothing.
+func TestClaimArgument_ReleasesNothingInPlace(t *testing.T) {
+	mine := crdnames.BGPVRFInstanceName("va", testNodeName)
+	other := crdnames.BGPVRFInstanceName("vb", testNodeName)
+	for name, k8s := range map[string]client.Client{
+		"uncontested":       fakeClient(),
+		"reused, colliding": fakeClient(argTestInstance(mine), argTestInstance(other)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			releaseArgument, released := recordReleases()
+			_, _, _ = claimReleasing(k8s, mine, false, noSiblings, releaseArgument)
+			if len(*released) != 0 {
+				t.Errorf("released %v, want nothing", *released)
+			}
+		})
+	}
+}
+
+// TestClaimArgument_ReleaseFailureFailsClaim fails the release hook. The
+// claim fails rather than leave the left Argument routed into this VPC.
+func TestClaimArgument_ReleaseFailureFailsClaim(t *testing.T) {
+	mine := crdnames.BGPVRFInstanceName("va", testNodeName)
+	other := crdnames.BGPVRFInstanceName("vb", testNodeName)
+	k8s := fakeClient(argTestInstance(mine), argTestInstance(other))
+	errRelease := errors.New("release failed")
+
+	_, _, err := claimReleasing(k8s, mine, true, noSiblings, func(int32) error { return errRelease })
+	if !errors.Is(err, errRelease) {
+		t.Fatalf("claimArgument = %v, want the release error", err)
 	}
 }
 

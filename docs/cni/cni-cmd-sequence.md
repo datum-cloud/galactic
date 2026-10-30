@@ -277,7 +277,11 @@ sequenceDiagram
   take the same value. A collision can then only come from a writer outside
   the lock. An instance this ADD created moves to the next free value, up to
   three times; a reused one already carries attachments, so the ADD fails
-  and names both instances.
+  and names both instances. After a move, the ADD removes the `vrf_table`
+  and `vpc_attribution_table` rows an earlier attempt registered under the
+  value it left, where they still point at this VPC's VRF, so the writer now
+  holding that value never has its traffic delivered into this VPC. If that
+  removal fails, the ADD fails.
 - **Failure rolls back only what that call created.** Every binary's own
   `cmdAdd` tracks what it created this invocation and calls
   `tracker.cleanup()` from a deferred function keyed on a non-nil named
