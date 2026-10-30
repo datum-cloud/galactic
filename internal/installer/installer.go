@@ -1232,8 +1232,13 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	// Size-1 semaphore, so at most one sweep runs at a time and a tick
 	// arriving during one is dropped instead of piling up behind it.
 	tapNeighSem := make(chan struct{}, 1)
+	hostLinkRepairSem := make(chan struct{}, 1)
 	sidecarReturnSem := make(chan struct{}, 1)
 	endpointSliceRepairSem := make(chan struct{}, 1)
+
+	// Once now, so a node restarting with a host link already stranded does
+	// not wait out the first tick.
+	startHostLinkRepair(hostLinkRepairSem, m.HostLinks)
 
 	egressRouteRefreshTicker := time.NewTicker(egressRouteRefreshInterval)
 	defer egressRouteRefreshTicker.Stop()
@@ -1316,6 +1321,10 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// and starve the credential refresh, GC sweeps, and health check
 			// with it.
 			startTapNeighborSweep(tapNeighSem)
+			// Re-enslave any host link whose VRF was deleted under it, on
+			// the same pace: until it is, the guest is routed outside its
+			// VPC.
+			startHostLinkRepair(hostLinkRepairSem, m.HostLinks)
 
 		case <-sidecarReturnTicker.C:
 			// Install and re-assert the host side of the ingress sidecar's

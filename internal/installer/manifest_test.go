@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"go.datum.net/galactic/internal/plumbing/radv"
+	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 // TestDaemonsetManifest_RunContainerMountsHostConflistDir is a regression
@@ -127,6 +128,27 @@ func TestDaemonsetManifest_RunContainerMountsRadvStateDir(t *testing.T) {
 	t.Errorf("container %q in %s does not mount %s (needed to read it via radv.ListAttachments; "+
 		"without it no tap attachment's Router Advertisement/Solicitation actor ever starts on any "+
 		"node); mounted paths: %v", c.Name, manifestPath, radv.DefaultStateDir, mountPaths)
+}
+
+// TestDaemonsetManifest_RunContainerMountsVRFLockDir requires the run
+// container to mount the node's VRF lock directory, writable, at its host
+// path. The host link repair re-enslaves a stranded link under that lock, and
+// CNI ADD and galactic-router's GC take it from the host. Without the mount
+// the repair would lock a file only it can see.
+func TestDaemonsetManifest_RunContainerMountsVRFLockDir(t *testing.T) {
+	c := findRunContainer(t)
+	for _, vm := range c.VolumeMounts {
+		if vm.MountPath != vrf.LockDir {
+			continue
+		}
+		if vm.ReadOnly {
+			t.Errorf("container %q in %s mounts %s read-only; taking the lock opens its file for writing",
+				c.Name, manifestPath, vrf.LockDir)
+		}
+		return
+	}
+	_, mountPaths := runContainerMountPaths(t)
+	t.Errorf("container %q in %s does not mount %s; mounted paths: %v", c.Name, manifestPath, vrf.LockDir, mountPaths)
 }
 
 // TestDaemonsetManifest_RunContainerHasNetRawCapability is a regression test

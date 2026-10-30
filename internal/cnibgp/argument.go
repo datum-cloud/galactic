@@ -20,6 +20,7 @@ import (
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 // argumentLockDir holds the node-local lock that serializes Argument
@@ -27,7 +28,7 @@ import (
 // the directory every Galactic component that touches host VRFs already
 // mounts. A variable so unprivileged tests can point it at a temporary
 // directory.
-var argumentLockDir = "/var/lib/cni/galactic-vrf"
+var argumentLockDir = vrf.LockDir
 
 const argumentLockFileName = "argument.lock"
 

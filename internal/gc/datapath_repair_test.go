@@ -603,13 +603,15 @@ func TestRepairAttachmentDatapath_AdvertisedPrefixes(t *testing.T) {
 }
 
 // TestRepairAttachmentDatapath_SkipsUnusable covers every interface the pass
-// must leave alone, either for good or, with wantPending, until its
-// BGPVRFInstance appears. None of them leaves a row in any map.
+// must leave alone, either for good, with wantPending until its
+// BGPVRFInstance appears, or with wantMasterless until galactic-cni
+// re-enslaves it. None of them leaves a row in any map.
 func TestRepairAttachmentDatapath_SkipsUnusable(t *testing.T) {
 	tests := []struct {
-		name        string
-		setup       func(f *repairFixture)
-		wantPending bool
+		name           string
+		setup          func(f *repairFixture)
+		wantPending    bool
+		wantMasterless bool
 	}{
 		{
 			name:        "MissingBGPVRFInstance",
@@ -637,7 +639,8 @@ func TestRepairAttachmentDatapath_SkipsUnusable(t *testing.T) {
 			},
 		},
 		{
-			name: "LinkWithoutMaster",
+			name:           "LinkWithoutMaster",
+			wantMasterless: true,
 			setup: func(f *repairFixture) {
 				f.addVRFInstance(crdnames.BGPVRFInstanceName("jU", repairNode), 0x21)
 				f.addHostLink(attachreg.InterfaceTypeVeth, "G0000000jUabcH", 11, nil)
@@ -671,13 +674,18 @@ func TestRepairAttachmentDatapath_SkipsUnusable(t *testing.T) {
 			if err != nil {
 				t.Fatalf("RepairAttachmentDatapath: %v", err)
 			}
-			wantSkipped, wantPending := 1, 0
-			if tt.wantPending {
+			wantSkipped, wantPending, wantMasterless := 1, 0, 0
+			switch {
+			case tt.wantPending:
 				wantSkipped, wantPending = 0, 1
+			case tt.wantMasterless:
+				wantSkipped, wantMasterless = 0, 1
 			}
-			if result.Attachments != 0 || result.Skipped != wantSkipped || result.Pending != wantPending {
-				t.Errorf("attachments %d skipped %d pending %d, want 0, %d and %d",
-					result.Attachments, result.Skipped, result.Pending, wantSkipped, wantPending)
+			if result.Attachments != 0 || result.Skipped != wantSkipped || result.Pending != wantPending ||
+				result.Masterless != wantMasterless {
+				t.Errorf("attachments %d skipped %d pending %d masterless %d, want 0, %d, %d and %d",
+					result.Attachments, result.Skipped, result.Pending, result.Masterless,
+					wantSkipped, wantPending, wantMasterless)
 			}
 			for name, n := range f.mem.rows() {
 				if n != 0 {

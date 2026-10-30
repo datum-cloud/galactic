@@ -23,6 +23,9 @@ type Metrics struct {
 	// EndpointSliceRepair counts the per-pod EndpointSlices galactic-cni's
 	// repair pass recreated and the passes that failed.
 	EndpointSliceRepair *EndpointSliceRepair
+	// HostLinks reports the host links galactic-cni found without a VRF
+	// master and re-enslaved.
+	HostLinks *HostLinks
 }
 
 // New creates every series that does not read loaded eBPF objects. Call
@@ -31,7 +34,7 @@ type Metrics struct {
 func New() *Metrics {
 	return &Metrics{
 		Events: NewEventCounters(), Egress: NewEgressControl(), SidecarReturn: NewSidecarReturn(),
-		EndpointSliceRepair: NewEndpointSliceRepair(),
+		EndpointSliceRepair: NewEndpointSliceRepair(), HostLinks: NewHostLinks(),
 	}
 }
 

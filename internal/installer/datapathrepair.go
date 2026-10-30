@@ -59,7 +59,8 @@ func runDatapathRepair(ctx context.Context, st ebpfDatapathState) (gc.DatapathRe
 	})
 
 	attrs := append([]any{"attachments", result.Attachments, "skipped", result.Skipped,
-		"pending", result.Pending, "rebuilt", result.Rebuilt.Total()}, result.Rebuilt.LogAttrs()...)
+		"pending", result.Pending, "masterless", result.Masterless, "rebuilt", result.Rebuilt.Total()},
+		result.Rebuilt.LogAttrs()...)
 	switch {
 	case err != nil:
 		slog.Warn("eBPF attachment datapath repair failed; rows CNI ADD wrote may still be missing",
