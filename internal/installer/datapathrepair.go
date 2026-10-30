@@ -6,11 +6,16 @@ package installer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // datapathRepairRetryInterval is the first wait between startup repair passes
@@ -72,7 +77,44 @@ func runDatapathRepair(ctx context.Context, st ebpfDatapathState) (gc.DatapathRe
 	default:
 		slog.Debug("eBPF attachment datapath repair found nothing missing", attrs...)
 	}
-	return result, err
+
+	restored, hostOnlyErr := restoreHostOnlyPorts(attach.PinDir)
+	switch {
+	case hostOnlyErr != nil:
+		slog.Warn("eBPF host-only port repair failed; a tap may accept its host-only ports from the VPC",
+			"restored", restored, "err", hostOnlyErr)
+	case restored > 0:
+		slog.Info("eBPF host-only port repair restored missing entries", "restored", restored)
+	}
+	return result, errors.Join(err, hostOnlyErr)
+}
+
+// restoreHostOnlyPorts writes back every host_only_port_table entry missing
+// for a link whose alias records host-only ports, and returns how many it
+// wrote. galactic-tap records the list in the alias at ADD, so it survives a
+// recreated table that CNI ADD alone would only refill attachment by
+// attachment. A datapath without the table has nothing to restore.
+func restoreHostOnlyPorts(pinDir string) (int, error) {
+	table, closer, err := ifindexvrfmap.OpenPinnedHostOnlyPorts(pinDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("open host-only port table: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+
+	links, err := nldump.LinkList()
+	if err != nil {
+		return 0, fmt.Errorf("list links: %w", err)
+	}
+	aliases := map[uint32]string{}
+	for _, l := range links {
+		if a := l.Attrs(); a.Alias != "" {
+			aliases[uint32(a.Index)] = a.Alias //nolint:gosec // a kernel ifindex
+		}
+	}
+	return table.Restore(aliases)
 }
 
 // startDatapathRepair runs datapath repair passes off Run's goroutine,

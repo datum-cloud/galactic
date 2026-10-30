@@ -127,7 +127,8 @@ from the fabric (`usid_ingress` redirects to a tap through its tc egress), and
 traffic the host itself sends. A non-first fragment carries no ports and
 passes, since its first fragment is judged. An IPv6 header chain the check
 cannot follow to the transport header is dropped rather than guessed.
-Refused packets are counted in `host_only_port_drops`.
+Refused packets are counted in `host_only_port_drops`, exported as
+`galactic_usid_host_only_port_drops_total`.
 
 `galactic-tap` writes the list into `host_only_port_table` at ADD, before
 the tap is addressed, and removes it at DEL. ADD fails on an invalid list, or
@@ -136,8 +137,10 @@ on a datapath that predates the table, rather than leaving a port open.
 router with no SRv6 locator, which attaches none, an attachment listing
 host-only ports stays down and its ADD fails. The
 entry lives in the pinned map, so it survives agent restarts and program
-replacement; a datapath reload that recreates the map loses it until the
-attachment is added again.
+replacement. `galactic-tap` also records the list in the tap's interface
+alias (`galactic-host-only-tcp=<ports>`), and datapath repair writes back any
+entry a recreated map lost from it. The list is read only at ADD, so a
+change to it reaches an attachment only when it is added again.
 
 The check only refuses traffic; it grants nothing. While a node enforces
 [interface traffic policy](../designs/interface-traffic-policy.md), the

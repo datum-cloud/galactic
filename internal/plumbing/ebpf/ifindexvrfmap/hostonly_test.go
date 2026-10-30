@@ -62,3 +62,50 @@ func TestHostOnlyPortTable_UnregisterIsIdempotent(t *testing.T) {
 		t.Error("entry still present after Unregister")
 	}
 }
+
+func TestHostOnlyAlias_RoundTrips(t *testing.T) {
+	alias := HostOnlyAlias([]uint16{20000, 20001})
+	ports, ok, err := ParseHostOnlyAlias(alias)
+	if err != nil || !ok || !slices.Equal(ports, []uint16{20000, 20001}) {
+		t.Errorf("ParseHostOnlyAlias(%q) = %v, %v, %v; want [20000 20001]", alias, ports, ok, err)
+	}
+	if HostOnlyAlias(nil) != "" {
+		t.Error("an attachment with no host-only ports has an alias")
+	}
+	if _, ok, err := ParseHostOnlyAlias("someone-else"); ok || err != nil {
+		t.Errorf("an unrelated alias parsed as host-only ports: ok %v, err %v", ok, err)
+	}
+	for _, bad := range []string{"galactic-host-only-tcp=", "galactic-host-only-tcp=0", "galactic-host-only-tcp=70000"} {
+		if _, _, err := ParseHostOnlyAlias(bad); err == nil {
+			t.Errorf("ParseHostOnlyAlias(%q) = nil error, want one", bad)
+		}
+	}
+}
+
+// A recreated table loses every entry; the aliases the links keep put the
+// missing ones back without touching an entry that survived.
+func TestHostOnlyPortTable_Restore(t *testing.T) {
+	const survivor, other = vethIfindex + 1, vethIfindex + 2
+	table := NewHostOnlyPortTable(newFakeTable())
+	if err := table.Register(survivor, []uint16{7000}); err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := table.Restore(map[uint32]string{
+		vethIfindex: HostOnlyAlias([]uint16{20000}),
+		survivor:    HostOnlyAlias([]uint16{20000}),
+		other:       "someone-else",
+	})
+	if err != nil || restored != 1 {
+		t.Fatalf("Restore = %d, %v; want 1, nil", restored, err)
+	}
+	if ports, _, _ := table.Get(vethIfindex); !slices.Equal(ports, []uint16{20000}) {
+		t.Errorf("restored entry = %v, want [20000]", ports)
+	}
+	if ports, _, _ := table.Get(survivor); !slices.Equal(ports, []uint16{7000}) {
+		t.Errorf("surviving entry = %v, want it left at [7000]", ports)
+	}
+	if _, ok, _ := table.Get(other); ok {
+		t.Error("an interface without a host-only alias got an entry")
+	}
+}

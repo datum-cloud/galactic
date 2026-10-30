@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/cilium/ebpf"
 
@@ -111,4 +113,72 @@ func ValidateHostOnlyPorts(ports []uint16) error {
 		}
 	}
 	return nil
+}
+
+// hostOnlyAliasPrefix starts the interface alias that records an attachment's
+// host-only ports on its host-side interface.
+const hostOnlyAliasPrefix = "galactic-host-only-tcp="
+
+// HostOnlyAlias returns the interface alias recording ports, or "" for none.
+// The alias lives with the link, so it outlasts a recreated
+// host_only_port_table and lets Restore rebuild the table's rows.
+func HostOnlyAlias(ports []uint16) string {
+	if len(ports) == 0 {
+		return ""
+	}
+	parts := make([]string, len(ports))
+	for i, p := range ports {
+		parts[i] = strconv.Itoa(int(p))
+	}
+	return hostOnlyAliasPrefix + strings.Join(parts, ",")
+}
+
+// ParseHostOnlyAlias reads the ports HostOnlyAlias recorded in alias,
+// reporting whether alias is one.
+func ParseHostOnlyAlias(alias string) ([]uint16, bool, error) {
+	list, ok := strings.CutPrefix(alias, hostOnlyAliasPrefix)
+	if !ok {
+		return nil, false, nil
+	}
+	var ports []uint16
+	for _, field := range strings.Split(list, ",") {
+		p, err := strconv.ParseUint(field, 10, 16)
+		if err != nil {
+			return nil, true, fmt.Errorf("host-only alias %q: %w", alias, err)
+		}
+		ports = append(ports, uint16(p))
+	}
+	if err := ValidateHostOnlyPorts(ports); err != nil {
+		return nil, true, fmt.Errorf("host-only alias %q: %w", alias, err)
+	}
+	return ports, true, nil
+}
+
+// Restore writes the entry for every interface in aliases, keyed by ifindex,
+// whose alias records host-only ports and whose entry is missing, and returns
+// how many it wrote. An entry that exists is left alone. Every interface is
+// attempted; the error joins every failure.
+func (t *HostOnlyPortTable) Restore(aliases map[uint32]string) (int, error) {
+	restored := 0
+	var errs []error
+	for ifindex, alias := range aliases {
+		ports, ok, err := ParseHostOnlyAlias(alias)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("ifindex=%d: %w", ifindex, err))
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if _, listed, err := t.Get(ifindex); err != nil || listed {
+			errs = append(errs, err)
+			continue
+		}
+		if err := t.Register(ifindex, ports); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		restored++
+	}
+	return restored, errors.Join(errs...)
 }
