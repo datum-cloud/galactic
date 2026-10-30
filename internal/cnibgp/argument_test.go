@@ -1,0 +1,238 @@
+// Copyright 2026 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package cnibgp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"testing"
+
+	"github.com/vishvananda/netlink"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/intf"
+)
+
+const argTestRouter = "router-a"
+
+func argTestSpec(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec {
+	return buildVRFInstanceSpec(argTestRouter, testRD65000_1, vrfID)
+}
+
+// collidingArgument is the Argument the collision tests' instances share.
+const collidingArgument = int32(7)
+
+func argTestInstance(name string) *bgpv1alpha1.BGPVRFInstance {
+	return &bgpv1alpha1.BGPVRFInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Spec:       argTestSpec(collidingArgument),
+	}
+}
+
+func getInstance(t *testing.T, k8s client.Client, name string) *bgpv1alpha1.BGPVRFInstance {
+	t.Helper()
+	inst := &bgpv1alpha1.BGPVRFInstance{}
+	if err := k8s.Get(context.Background(), client.ObjectKey{Name: name, Namespace: testNamespace}, inst); err != nil {
+		t.Fatalf("get BGPVRFInstance %s: %v", name, err)
+	}
+	return inst
+}
+
+// TestClaimArgument_ConcurrentFirstADDs runs the first ADDs of many VPCs on
+// one node at once, as separate galactic-bgp processes do. Each takes the
+// Argument lock, so every one succeeds with a distinct Argument.
+func TestClaimArgument_ConcurrentFirstADDs(t *testing.T) {
+	k8s := fakeClient()
+	const vpcs = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, vpcs)
+	for i := range vpcs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := crdnames.BGPVRFInstanceName(fmt.Sprintf("v%02d", i), testNodeName)
+			_, created, err := claimArgument(context.Background(), k8s, testNamespace, argTestRouter, name, false, argTestSpec)
+			if err == nil && !created {
+				err = fmt.Errorf("%s: not reported created", name)
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	list := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := k8s.List(context.Background(), list); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[int32]string{}
+	for _, inst := range list.Items {
+		if prev, ok := seen[inst.Spec.VRFID]; ok {
+			t.Errorf("Argument %d held by both %s and %s", inst.Spec.VRFID, prev, inst.Name)
+		}
+		seen[inst.Spec.VRFID] = inst.Name
+	}
+	if len(seen) != vpcs {
+		t.Errorf("%d distinct Arguments, want %d", len(seen), vpcs)
+	}
+}
+
+// racingWriter returns a client that, on this ADD's create of mine, also
+// creates other with the same Argument, as a writer outside the Argument
+// lock would.
+func racingWriter(t *testing.T, mine, other string) client.Client {
+	t.Helper()
+	base := fake.NewClientBuilder().WithScheme(testScheme).Build()
+	create := func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if err := c.Create(ctx, obj, opts...); err != nil {
+			return err
+		}
+		inst, ok := obj.(*bgpv1alpha1.BGPVRFInstance)
+		if !ok || inst.Name != mine {
+			return nil
+		}
+		return c.Create(ctx, &bgpv1alpha1.BGPVRFInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: other, Namespace: testNamespace},
+			Spec:       argTestSpec(inst.Spec.VRFID),
+		})
+	}
+	return interceptor.NewClient(base, interceptor.Funcs{Create: create})
+}
+
+// TestClaimArgument_ReallocatesOwnInstance has another writer take the same
+// Argument as this ADD's freshly created instance. The ADD moves its own
+// instance to the next free Argument rather than failing, and leaves the
+// other writer's alone.
+func TestClaimArgument_ReallocatesOwnInstance(t *testing.T) {
+	mine := crdnames.BGPVRFInstanceName("va", testNodeName)
+	other := crdnames.BGPVRFInstanceName("vb", testNodeName)
+	k8s := racingWriter(t, mine, other)
+
+	vrfID, created, err := claimArgument(context.Background(), k8s, testNamespace, argTestRouter, mine, false, argTestSpec)
+	if err != nil {
+		t.Fatalf("claimArgument: %v", err)
+	}
+	if !created {
+		t.Error("created = false, want true")
+	}
+	if want := int32(uformat.ArgumentMin) + 1; vrfID != want {
+		t.Errorf("Argument = %d, want %d, the next free one", vrfID, want)
+	}
+	if got := getInstance(t, k8s, mine).Spec.VRFID; got != vrfID {
+		t.Errorf("own instance holds %d, want %d", got, vrfID)
+	}
+	if got := getInstance(t, k8s, other).Spec.VRFID; got != int32(uformat.ArgumentMin) {
+		t.Errorf("other writer's instance holds %d, want %d unchanged", got, uformat.ArgumentMin)
+	}
+}
+
+// TestClaimArgument_ReusedInstanceCollisionFails reuses an existing
+// instance whose Argument another instance also holds. Attachments already
+// use the reused value, so the ADD fails, naming both, instead of moving it.
+func TestClaimArgument_ReusedInstanceCollisionFails(t *testing.T) {
+	mine := crdnames.BGPVRFInstanceName("va", testNodeName)
+	other := crdnames.BGPVRFInstanceName("vb", testNodeName)
+	k8s := fakeClient(
+		argTestInstance(mine),
+		argTestInstance(other),
+	)
+
+	_, created, err := claimArgument(context.Background(), k8s, testNamespace, argTestRouter, mine, false, argTestSpec)
+	if !errors.Is(err, errArgumentCollision) {
+		t.Fatalf("claimArgument = %v, want a collision error", err)
+	}
+	if created {
+		t.Error("created = true for a reused instance")
+	}
+	if got := getInstance(t, k8s, mine).Spec.VRFID; got != 7 {
+		t.Errorf("reused instance moved to %d, want 7 unchanged", got)
+	}
+}
+
+// TestClaimArgument_EarlierAttemptCreated retries an ADD whose earlier
+// attempt created the instance: the retry sees an update, but the instance
+// is still this ADD's to move.
+func TestClaimArgument_EarlierAttemptCreated(t *testing.T) {
+	mine := crdnames.BGPVRFInstanceName("va", testNodeName)
+	other := crdnames.BGPVRFInstanceName("vb", testNodeName)
+	k8s := fakeClient(
+		argTestInstance(mine),
+		argTestInstance(other),
+	)
+
+	vrfID, created, err := claimArgument(context.Background(), k8s, testNamespace, argTestRouter, mine, true, argTestSpec)
+	if err != nil {
+		t.Fatalf("claimArgument: %v", err)
+	}
+	if created {
+		t.Error("created = true, want false: this attempt updated")
+	}
+	if vrfID == 7 {
+		t.Errorf("Argument stayed 7, want it moved off the collision")
+	}
+}
+
+// withLinks substitutes links for the kernel's list of links.
+func withLinks(t *testing.T, links ...netlink.Link) {
+	t.Helper()
+	orig := listLinksFn
+	listLinksFn = func() ([]netlink.Link, error) { return links, nil }
+	t.Cleanup(func() { listLinksFn = orig })
+}
+
+// TestResourceTrackerCleanup_KeepsInstanceASiblingReused rolls back an ADD
+// that created the BGPVRFInstance after a sibling attachment's host link has
+// joined the VPC's VRF. The sibling has reused the instance, so it is kept.
+func TestResourceTrackerCleanup_KeepsInstanceASiblingReused(t *testing.T) {
+	vrfLink := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: intf.GenerateInterfaceNameVRF(testVPC), Index: 10}}
+	own := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{
+		Name: intf.GenerateInterfaceNameHost(testVPC, testAttachment), MasterIndex: 10,
+	}}
+	sibling := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{
+		Name: intf.GenerateInterfaceNameHost(testVPC, "ghi"), MasterIndex: 10,
+	}}
+	name := crdnames.BGPVRFInstanceName(testVPC, testNodeName)
+	newTracker := func(k8s client.Client) *resourceTracker {
+		return &resourceTracker{
+			vpc: testVPC, vpcAttachment: testAttachment, nodeName: testNodeName,
+			namespace: testNamespace, k8s: k8s,
+			publishResult: publishResult{vrfInstanceCreated: true},
+		}
+	}
+	instance := func() client.Object {
+		return &bgpv1alpha1.BGPVRFInstance{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}}
+	}
+
+	t.Run("a sibling's link keeps it", func(t *testing.T) {
+		withLinks(t, vrfLink, own, sibling)
+		k8s := fakeClient(instance())
+		newTracker(k8s).cleanup(context.Background())
+		getInstance(t, k8s, name)
+	})
+
+	t.Run("its own link alone does not", func(t *testing.T) {
+		withLinks(t, vrfLink, own)
+		k8s := fakeClient(instance())
+		newTracker(k8s).cleanup(context.Background())
+		err := k8s.Get(context.Background(), client.ObjectKey{Name: name, Namespace: testNamespace},
+			&bgpv1alpha1.BGPVRFInstance{})
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("BGPVRFInstance after cleanup: %v, want it deleted", err)
+		}
+	})
+}

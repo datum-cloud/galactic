@@ -157,9 +157,10 @@ sequenceDiagram
     BGP->>BGP: publishBGPState() — up to 3 attempts total,<br/>exponential backoff on transient k8s errors
     activate BGP
     BGP->>K8s: lookupBGPRouter(nodeName)
+    Note over BGP,K8s: claimArgument, under the node's Argument lock
     BGP->>K8s: allocateArgument() -> VRFID<br/>(reuses the existing value if this BGPVRFInstance already exists)
     BGP->>K8s: CreateOrUpdate BGPVRFInstance<br/>(RD/RT = routeTarget(vpc))
-    BGP->>K8s: checkArgumentCollision()
+    BGP->>K8s: re-list for another instance holding VRFID<br/>(moves an instance this ADD created, fails on a reused one)
     opt this node's BGPRouter has srv6Locator + nodeID
         BGP->>eBPF: registerEBPFDatapath(block, argument, vrfTableID, egressKind)
         activate eBPF
@@ -270,14 +271,21 @@ sequenceDiagram
   for this exact attachment name — an idempotent CNI ADD retry, or a repeat
   ADD on an attachment that's already live — and reuses its VRFID rather
   than allocating a new one; only a genuinely new attachment gets the
-  lowest unused value. `checkArgumentCollision` then re-lists to catch a
-  concurrent allocation race.
+  lowest unused value. Allocation, the write and a re-list for another
+  instance holding the same value all run under a node-local lock
+  (`argument.lock` beside the VRF lock), so two first ADDs on one node never
+  take the same value. A collision can then only come from a writer outside
+  the lock. An instance this ADD created moves to the next free value, up to
+  three times; a reused one already carries attachments, so the ADD fails
+  and names both instances.
 - **Failure rolls back only what that call created.** Every binary's own
   `cmdAdd` tracks what it created this invocation and calls
   `tracker.cleanup()` from a deferred function keyed on a non-nil named
   return `err`. This is strictly binary-local and per-call: it never
   deletes state another attachment might be depending on (e.g. a shared
-  `BGPVRFInstance` another pod on the same VPC already created) — the same
+  `BGPVRFInstance` another pod on the same VPC already created, or one this
+  ADD created that a sibling ADD has since reused, which rollback detects
+  from the sibling's host link in the VPC's VRF) — the same
   "don't race a concurrent user of shared state" principle DEL follows,
   covered next.
 

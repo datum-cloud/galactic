@@ -45,7 +45,6 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
-	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
@@ -175,46 +174,12 @@ func allocateArgument(
 		return 0, fmt.Errorf("list BGPVRFInstances in namespace %s: %w", namespace, err)
 	}
 
-	used := make(map[int32]struct{}, len(list.Items))
 	for _, inst := range list.Items {
-		if inst.Spec.RouterRef == nil || inst.Spec.RouterRef.Name != routerName {
-			continue
-		}
-		if inst.Name == vrfInstanceName {
+		if inst.Spec.RouterRef != nil && inst.Spec.RouterRef.Name == routerName && inst.Name == vrfInstanceName {
 			return inst.Spec.VRFID, nil
 		}
-		used[inst.Spec.VRFID] = struct{}{}
 	}
-
-	for arg := int32(uformat.ArgumentMin); arg <= int32(uformat.ArgumentMax); arg++ {
-		if _, ok := used[arg]; !ok {
-			return arg, nil
-		}
-	}
-	return 0, fmt.Errorf("allocate SID argument: router %s has no free Argument in [%#x,%#x] (all %d in use)",
-		routerName, uint16(uformat.ArgumentMin), uint16(uformat.ArgumentMax), len(used))
-}
-
-// checkArgumentCollision reports whether another BGPVRFInstance on the same
-// router already holds vrfID, which happens when two first attachments race
-// onto the same free slot. Any other instance still holding the value counts
-// as a collision.
-func checkArgumentCollision(
-	ctx context.Context, k8s client.Client, namespace, routerName, vrfName string, vrfID int32,
-) error {
-	list := &bgpv1alpha1.BGPVRFInstanceList{}
-	if err := k8s.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		return fmt.Errorf("list BGPVRFInstances to verify argument uniqueness: %w", err)
-	}
-	for _, inst := range list.Items {
-		if inst.Spec.RouterRef == nil || inst.Spec.RouterRef.Name != routerName {
-			continue
-		}
-		if inst.Name != vrfName && inst.Spec.VRFID == vrfID {
-			return fmt.Errorf("argument collision: VRFID %d claimed by both %s and %s, retrying", vrfID, inst.Name, vrfName)
-		}
-	}
-	return nil
+	return lowestFreeArgument(list.Items, routerName, vrfInstanceName)
 }
 
 // lookupBGPRouter finds the Galactic-owned BGPRouter (one with no
@@ -403,42 +368,25 @@ func publishBGPState(
 		// is shared by every attachment on this VPC on this node, so they all
 		// converge on one CRD and one Argument.
 		vrfName := crdnames.BGPVRFInstanceName(cfg.vpc, nodeName)
-		vrfID, err := allocateArgument(ctx, k8s, namespace, bgp.routerName, vrfName)
-		if err != nil {
-			return err
-		}
-
 		rtValue, err := routeTarget(int64(bgp.asNumber), vpcHex)
 		if err != nil {
 			return fmt.Errorf("compute route target: %w", err)
 		}
 
-		vrfInst := &bgpv1alpha1.BGPVRFInstance{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      vrfName,
-				Namespace: namespace,
-			},
-		}
-		op, err := controllerutil.CreateOrUpdate(ctx, k8s, vrfInst, func() error {
-			vrfInst.Spec = buildVRFInstanceSpec(bgp.routerName, rtValue, vrfID)
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("apply BGPVRFInstance: %w", err)
-		}
-		if op == controllerutil.OperationResultCreated {
+		// Allocated, written and checked for a collision under the node's
+		// Argument lock; see claimArgument.
+		vrfID, created, err := claimArgument(ctx, k8s, namespace, bgp.routerName, vrfName,
+			result.vrfInstanceCreated, func(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec {
+				return buildVRFInstanceSpec(bgp.routerName, rtValue, vrfID)
+			})
+		if created {
 			result.vrfInstanceCreated = true
 		}
-		slog.Debug("BGP: BGPVRFInstance applied", "resource_name", vrfName, "resource_namespace", namespace,
-			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName, "operation", op)
-
-		// A collision means allocateArgument's read-then-write raced another
-		// VPC's first attachment onto the same free slot. That is possible
-		// only on a genuine create, never when reusing a live sibling's CRD,
-		// whose VRFID was validated when it was created.
-		if err := checkArgumentCollision(ctx, k8s, namespace, bgp.routerName, vrfName, vrfID); err != nil {
+		if err != nil {
 			return err
 		}
+		slog.Debug("BGP: BGPVRFInstance applied", "resource_name", vrfName, "resource_namespace", namespace,
+			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName, "created", created)
 
 		// Advertise guest prefixes only. Gateway addresses stay host-local
 		// and are included separately in the eBPF pass-through routes.
