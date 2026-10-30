@@ -4,6 +4,34 @@
 
 The authority runs under its own ServiceAccount. It holds no provider token and no host access. The provider can't write grant records, ledgers or EdgeServices; it receives each grant from the authority.
 
+## Server configuration
+
+`masque-authority serve` accepts these options in addition to
+[shared logging](../observability/logging.md). The global `--namespace`
+selects the authority namespace and defaults to `POD_NAMESPACE`; one must be set.
+
+| Flag                         | Default                             | Meaning                                          |
+| ---------------------------- | ----------------------------------- | ------------------------------------------------ |
+| `--provider`                 | required                            | EdgeProvider named in issued EdgeServices.       |
+| `--provider-service-account` | required                            | Provider pod ServiceAccount as `namespace/name`. |
+| `--cell`                     | required                            | Cell whose grant records are honored.            |
+| `--listen`                   | `:8443`                             | HTTPS listener.                                  |
+| `--tls-cert`                 | `/etc/masque-authority/tls/tls.crt` | Server certificate, reread on change.            |
+| `--tls-key`                  | `/etc/masque-authority/tls/tls.key` | Server key, reread on change.                    |
+| `--audience`                 | `masque-authority`                  | Audience required on provider pod tokens.        |
+| `--sweep-interval`           | `1s`                                | Interval for sweeping revoked authorizations.    |
+
+Administrative commands also use the global namespace and Kubernetes client
+credentials. `ledger init` takes `--vpc` (`namespace/name`), `--cell`,
+`--connectors` (reserved connector IPv6 /80) and `--pools` (reserved attachment
+pool IPv6 /80); all are required. `grant create` takes required `--vpc` and
+`--cell`, optional `--connector` (UUID, generated when empty), `--lifetime`
+(default and maximum `24h`), repeatable `--route` (allowed destination prefix),
+`--ingress-policy` and `--egress-policy`. `grant rotate CONNECTOR` accepts
+`--lifetime` with the same default and maximum. `grant disable CONNECTOR` and
+`grant retire CONNECTOR` have no command-specific flags. See
+[operator tasks](#operator-tasks) for examples and lifecycle constraints.
+
 ## State
 
 All state is in the API. The authority keeps nothing in memory between calls, so a restarted or second instance rereads everything before it issues anything.

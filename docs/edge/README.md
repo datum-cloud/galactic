@@ -2,6 +2,7 @@
 
 Galactic Edge gives providers authorized attachments to tenant VPCs and controls which provider may forward each prefix. The provider owns its protocol and client sessions; Galactic owns attachment isolation, policy, route lifetime and forwarding ownership.
 
+- [Agent configuration](configuration.md): node-agent flags and defaults.
 - [Provider contract](provider-contract.md): resources, writers, lifecycle, timing assumptions and required failure evidence.
 - [Troubleshooting](troubleshooting.md): conditions, Events, metrics and locating the current prefix holder.
 - [MASQUE connector service](masque-service.md): the `masque-provider` command and image, its configuration, limits, readiness and shutdown.
