@@ -12,6 +12,8 @@ Use the [current egress rollout checklist](../nat/active-active-rollout.md). In 
 
 ## Measurements
 
+- [Guest DNS continuity, October 30](benchmarks/guest-dns-continuity-2026-10-30.md).
+
 - [fabric-api full-table measurements, October 7](benchmarks/fabric-api-2026-10-07.md).
 - [Looking Glass qualification on the lab, October 27](benchmarks/looking-glass-qualification-2026-10-27.md).
 

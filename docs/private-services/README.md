@@ -266,6 +266,18 @@ that forwarding is installed. Reports cover network programming, not the
 health of the producer application. Startup withdraws previous local readiness
 before rebuilding the node's state.
 
+## Attachment replacement continuity
+
+When an attachment disappears, reappears or changes identity, the router repairs
+only the affected service-route references. Unchanged attachments keep their
+forwarding entries and shared references throughout the repair, so replacing one
+instance does not interrupt another instance's private DNS requests.
+
+A failed repair closes the policy gate and retries a complete generation.
+Startup, authorization expiry and inconsistent state also retain the complete
+rebuild path. Attachment continuity therefore does not imply uninterrupted
+forwarding during a router restart or an incompatible map replacement.
+
 ## CNI program reloads
 
 A CNI restart preserves the service-policy gate and attachment incarnation
