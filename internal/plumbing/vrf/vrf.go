@@ -11,6 +11,7 @@ package vrf
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 
@@ -73,9 +74,11 @@ var ErrInUse = errors.New("vrf: a link is still enslaved to the VRF")
 // (see Locked).
 var vrfMu sync.Mutex
 
-// Add creates the Linux VRF interface for a base62-encoded VPC, allocating the
-// next available routing table ID in [HostTableIDMin, HostTableIDMax] and
-// applying the required sysctls.
+// Add creates the Linux VRF interface for a base62-encoded VPC, with a routing
+// table ID in [HostTableIDMin, HostTableIDMax], and applies the required
+// sysctls. The ID is the VPC's reserved one when it has a reservation on this
+// node, and otherwise the lowest that no VRF and no reservation holds (see
+// Reservation).
 //
 // The VRF is shared by every attachment on this VPC on this node, so concurrent
 // calls, from goroutines here or from separate plugin processes attaching
@@ -152,10 +155,17 @@ func addLocked(vpc string, minID, maxID uint32) (*netlink.Vrf, error) {
 			return nil, fmt.Errorf("VRF %q has table %d, not in [%d,%d]: %w",
 				name, existing.Table, minID, maxID, ErrTableOutOfRange)
 		}
+		// Record the table this VRF holds, so a VRF created before
+		// reservations existed keeps its table if it is ever recreated. A
+		// failure here does not fail an ADD onto a VRF that works.
+		if err := recordExistingTable(name, existing.Table, minID, maxID); err != nil {
+			slog.Warn("vrf: could not record existing VRF's table ID reservation",
+				"vrf", name, "table", existing.Table, "err", err)
+		}
 		return existing, ensureUnreachableDefaults(existing.Table)
 	}
 
-	vrfID, err := findNextAvailableVRFID(minID, maxID)
+	vrfID, err := reserveVRFTable(name, minID, maxID)
 	if err != nil {
 		return nil, err
 	}
@@ -240,24 +250,43 @@ func ensureUnreachableDefaults(tableID uint32) error {
 // every link in the VRF. Anything deleting a VRF in the host namespace, where
 // CNI ADDs enslave links concurrently, uses DeleteIfUnused instead.
 func Delete(vpc string) error {
+	return DeleteInRange(vpc, HostTableIDMin, HostTableIDMax)
+}
+
+// DeleteInRange is Delete for a VRF whose table was allocated from [minID,
+// maxID], as AddInRange does. Its table ID reservation in that range is
+// released whether or not the VRF still exists: the caller owns every link in
+// this namespace's VRF and removes the state keyed by its table itself, so the
+// table is released here rather than quarantined for garbage collection, and
+// a retry after a failed release still releases it.
+func DeleteInRange(vpc string, minID, maxID uint32) error {
 	return Locked(func() error {
 		name := intf.GenerateInterfaceNameVRF(vpc)
 
+		// Only a VRF known to be gone releases its table: one a failed
+		// listing could not see may still route through it.
 		vrfID, err := getVRFIDForInterface(name)
-		if err != nil {
-			return nil // VRF already gone — idempotent
-		}
-
-		if err := FlushTable(vrfID); err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+		case err != nil:
 			return err
+		default:
+			if err := FlushTable(vrfID); err != nil {
+				return err
+			}
+			link, err := netlink.LinkByName(name)
+			var notFound netlink.LinkNotFoundError
+			switch {
+			case errors.As(err, &notFound):
+			case err != nil:
+				return err
+			default:
+				if err := netlink.LinkDel(link); err != nil {
+					return err
+				}
+			}
 		}
-
-		link, err := netlink.LinkByName(name)
-		if err != nil {
-			return nil // interface already gone — idempotent
-		}
-
-		return netlink.LinkDel(link)
+		return releaseNameLocked(name, minID, maxID)
 	})
 }
 
@@ -388,17 +417,46 @@ func listVRFLinks() ([]*netlink.Vrf, error) {
 	return ListVRFLinks()
 }
 
-func findNextAvailableVRFID(minID, maxID uint32) (uint32, error) {
-	vrfs, err := listVRFLinks()
+// recordExistingTable records table as the reservation of the existing VRF
+// named name, writing the file only when that changes it (see recordTable).
+// Called with the lock held.
+func recordExistingTable(name string, table, minID, maxID uint32) error {
+	res, err := loadReservations()
+	if err != nil {
+		return err
+	}
+	res, changed := recordTable(res, name, table, minID, maxID)
+	if !changed {
+		return nil
+	}
+	return saveReservations(res)
+}
+
+// reserveVRFTable reserves the table ID in [minID, maxID] for a new VRF named
+// name, which is name's own earlier reservation when it has one (see
+// reserveTable). The reservation is saved before the caller creates the VRF,
+// so a VRF never exists without one. Called with the lock held.
+func reserveVRFTable(name string, minID, maxID uint32) (uint32, error) {
+	vrfs, err := listVRFLinksFn()
 	if err != nil {
 		return 0, err
 	}
-
-	used := make(map[uint32]struct{}, len(vrfs))
+	live := make(map[uint32]string, len(vrfs))
 	for _, vrf := range vrfs {
-		used[vrf.Table] = struct{}{}
+		live[vrf.Table] = vrf.Name
 	}
-	return nextFreeTableID(used, minID, maxID)
+	res, err := loadReservations()
+	if err != nil {
+		return 0, err
+	}
+	table, res, err := reserveTable(res, live, name, minID, maxID)
+	if err != nil {
+		return 0, err
+	}
+	if err := saveReservations(res); err != nil {
+		return 0, err
+	}
+	return table, nil
 }
 
 // nextFreeTableID returns the lowest table ID in [minID, maxID] that is

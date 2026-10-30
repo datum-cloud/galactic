@@ -168,6 +168,16 @@ A host link, the tap or the host end of a veth, must stay enslaved to its VPC's 
 
 The repair restores only what the link still carries when it runs. A VRF deletion flushes the VRF's table and cycles the link, which drops its IPv6 gateway address and its pod-subnet routes. Those come back with the attachment's next ADD, which carries the IPAM result the repair does not have.
 
+### VRF table IDs
+
+`vrf_table` rows, `egress_route_table` rows and `galactic-router`'s route installs are all keyed by a VRF's routing table ID, and they outlive the VRF that owned it. A table ID therefore stays with its VPC on a node until nothing references it (#1270):
+
+- **Table IDs are reserved per VPC.** `vrf.EnsureAndEnslave` and `vrf.Add` record each host VRF's table in `tables.json`, beside the VRF lock and changed only under it. A VRF recreated on the node gets its reserved table back, and a new VPC is given the lowest table that neither a VRF nor a reservation holds. A missing or unreadable file is rebuilt from the VRFs that exist, so a node needs no migration. The ingress sidecar reserves in its own range and releases its reservation when it deletes its VRF.
+- **GC releases a reservation once nothing references it.** On each eBPF GC tick, after the `vrf_table` sweep, `galactic-cni` takes the VRF lock and releases the reservation of every host VRF whose interface is gone, whose VPC no live `BGPVRFInstance` names, and whose table no `vrf_table` row maps to, once it has stayed that way for two minutes. The wait outlasts `galactic-router`'s 30-second reconcile, which keeps a deleted VPC's route targets mapped to its table until it runs. It removes the table's `egress_route_table` rows first. The same pass removes the `egress_route_table` rows of any host-range table no VRF and no reservation holds.
+- **Each holder follows the kernel's table.** The `vrf_table` sweep rewrites a row whose table ID is not its kernel VRF's, keeping the egress kind ADD wrote. `galactic-router` re-reads each applied VRF's table from one VRF listing per reconcile; when the table changed, it re-applies the VRF and withdraws its routes from the old table, removing only entries that still point at the SIDs it installed. A VRF that is only absent keeps its table, which its reservation holds for it.
+
+With reservations in place, the last two do not act in normal operation. They correct a VRF deleted outside Galactic, or a node whose reservation file was lost.
+
 ## Known Constraints
 
 - **No binary's `cmdDel` tears down shared kernel/CRD state.** By design (see Key Design Decisions above) — cleanup of the VRF, routes, the eBPF `vrf_table` entry, and BGP CRDs is deferred to `galactic-router`'s asynchronous GC controller, not performed synchronously in any chain binary's `cmdDel`. The per-attachment host veth/tap interface is the one exception: it is private, not shared, so `cmdDel` deletes it directly instead of deferring it.

@@ -109,15 +109,23 @@ func (kernelBackend) RemoveVRF(vpc string) error {
 		return fmt.Errorf("remove gateway reply redirect for vpc %s: %w", vpc, err)
 	}
 	tableID, err := vrf.TableID(vpc)
-	if err != nil {
-		return nil // VRF already gone — idempotent, matching vrf.Delete's own stance
+	switch {
+	case errors.Is(err, vrf.ErrNotFound):
+		// VRF already gone, which is idempotent, but a removal that failed
+		// after deleting it may have left its table ID reserved.
+		if err := vrf.DeleteInRange(vpc, sidecarTableIDMin, sidecarTableIDMax); err != nil {
+			return fmt.Errorf("release VRF table for vpc %s: %w", vpc, err)
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("resolve VRF table ID for vpc %s: %w", vpc, err)
 	}
 	// Torn down before the interface is removed below, while its ifindex can
 	// still be resolved.
 	if err := removeEgressDatapath(tableID); err != nil {
 		return fmt.Errorf("detach eBPF egress datapath for vpc %s: %w", vpc, err)
 	}
-	if err := vrf.Delete(vpc); err != nil {
+	if err := vrf.DeleteInRange(vpc, sidecarTableIDMin, sidecarTableIDMax); err != nil {
 		return fmt.Errorf("delete VRF for vpc %s: %w", vpc, err)
 	}
 	return nil
