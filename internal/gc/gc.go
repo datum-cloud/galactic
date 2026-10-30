@@ -14,6 +14,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -394,7 +395,13 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 			// Its name carries an encoded VPC, so the fence is found through
 			// the VRF it serves. With no VRF, no edge attachment can use it.
 			deleteInst := func() error {
-				return deleteInstanceIfUnoccupied(o, func() error { return k8s.Delete(ctx, vrfInst) })
+				return deleteInstanceIfUnoccupied(o, func() error {
+					// Bounded: the delete runs under the VRF lock, which
+					// every CNI ADD on the node waits for.
+					delCtx, cancel := context.WithTimeout(ctx, lockedDeleteTimeout)
+					defer cancel()
+					return k8s.Delete(delCtx, vrfInst)
+				})
 			}
 			var err error
 			if o.VPC == "" {
@@ -885,6 +892,10 @@ func instanceVPC(links []*netlink.Vrf, nodeName, instName string) string {
 	}
 	return ""
 }
+
+// lockedDeleteTimeout bounds a Kubernetes delete GC makes while holding the
+// node's VRF lock, so a slow API server cannot hold up CNI ADDs for long.
+const lockedDeleteTimeout = 10 * time.Second
 
 // vrfLockedFn runs a function under the VRF lock; a variable so unprivileged
 // tests, which cannot create the node-wide lock file, can run without it.

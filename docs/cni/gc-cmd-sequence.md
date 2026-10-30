@@ -217,7 +217,10 @@ sequenceDiagram
   node's VRF lock (`vrf.EnsureAndEnslave`), and GC re-checks for enslaved
   links under that same lock before deleting either, so no GC pass can find
   the VRF between its creation and its first link. A leaked host link keeps
-  its VRF alive; that is the fail-safe direction, and GC logs it.
+  its VRF alive; that is the fail-safe direction, and GC logs it. The guard
+  needs both sides: a router with this check against a CNI that still
+  enslaves outside the lock leaves the original window open, so roll out
+  `galactic-cni` and `galactic-router` together.
 - **This sweep never matches a per-attachment host veth/tap interface, by
   design.** Both the current and legacy name shapes above end in the VRF
   suffix (`V`); the host interface's own suffix (`H`) never matches either
