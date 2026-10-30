@@ -4,6 +4,11 @@
 # and the masque-authority-ca ConfigMap (ca.crt) the grant authority's
 # certificate chains to, and chooses how the masque-provider Service is
 # exposed. It may also set the TUN device plugin's resource name.
+#
+# With the authority's components/cert-manager, include components/cert-manager
+# here to trust the CA that issued it. A CA published under another name is
+# swapped in by patching the authority-ca volume's sources by name
+# (docs/edge/masque-service.md).
 resources:
   - deployment.yaml
   - service.yaml

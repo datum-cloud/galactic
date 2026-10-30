@@ -8,7 +8,8 @@
 #
 # Deliberately NOT included: authority/ and provider/, the two Deployments.
 # They need a per-cell name, :authority, TLS Secrets and the grant
-# authority's CA.
+# authority's CA; each has a components/cert-manager for the authority's
+# certificate and CA.
 #
 # Not part of the root config/kustomization.yaml: MASQUE is opt-in.
 resources:

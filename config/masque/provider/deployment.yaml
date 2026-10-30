@@ -120,9 +120,17 @@ spec:
         - name: tls
           secret:
             secretName: masque-provider-tls
+        # A projected volume, so an overlay can point it at a CA published
+        # under another name with a strategic merge patch on the volume's
+        # name, which replaces the whole sources list.
         - name: authority-ca
-          configMap:
-            name: masque-authority-ca
+          projected:
+            sources:
+              - configMap:
+                  name: masque-authority-ca
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
         # The authority accepts only a token bound to one pod of this
         # ServiceAccount, for its own audience.
         - name: authority-token
