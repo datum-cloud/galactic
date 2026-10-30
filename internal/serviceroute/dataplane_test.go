@@ -346,11 +346,12 @@ func TestInitializeRepairsRecreatedInterface(t *testing.T) {
 	if len(sets) != 1 || sets[0][0].access == nil || sets[0][0].access.ingressIfindex != 11 {
 		t.Fatalf("repaired entries = %#v, want consumer ifindex 11", sets)
 	}
-	if routes.deletes != 0 || routes.puts != 2 {
-		t.Fatalf("route deletes/puts = %d/%d, want 0/2 (fake iterator has no persisted rows)", routes.deletes, routes.puts)
+	if routes.deletes != 1 || routes.puts != 2 {
+		t.Fatalf("route deletes/puts = %d/%d, want 1/2 (withdraw old, install replacement)",
+			routes.deletes, routes.puts)
 	}
-	if access.deletes != 0 || access.puts != 6 {
-		t.Fatalf("access deletes/puts = %d/%d, want 0/6", access.deletes, access.puts)
+	if access.deletes != 3 || access.puts != 6 {
+		t.Fatalf("access deletes/puts = %d/%d, want 3/6", access.deletes, access.puts)
 	}
 }
 
@@ -627,8 +628,9 @@ func TestApplyRejectsExpiredAuthorization(t *testing.T) {
 // Unlike recordingTable, this table keeps actual keys so generation sweeps can
 // prove that expired grants disappear while unrelated tenants retain theirs.
 type persistedPolicyTable struct {
-	rows   map[any]any
-	putErr error
+	rows          map[any]any
+	putErr        error
+	afterMutation func()
 }
 
 func (table *persistedPolicyTable) Put(key, value any) error {
@@ -639,11 +641,17 @@ func (table *persistedPolicyTable) Put(key, value any) error {
 		table.rows = make(map[any]any)
 	}
 	table.rows[key] = value
+	if table.afterMutation != nil {
+		table.afterMutation()
+	}
 	return nil
 }
 
 func (table *persistedPolicyTable) Delete(key any) error {
 	delete(table.rows, key)
+	if table.afterMutation != nil {
+		table.afterMutation()
+	}
 	return nil
 }
 
@@ -956,4 +964,72 @@ func TestRepairPropagatesInterfaceLookupErrors(t *testing.T) {
 	if err := programmer.Initialize(); !errors.Is(err, lookupErr) {
 		t.Fatalf("Initialize = %v, want lookup error", err)
 	}
+}
+
+// Check every mutation: a brief forwarding gap loses UDP and delays TCP retries.
+func TestInterfaceChurnKeepsUnrelatedRoutesServing(t *testing.T) {
+	p, routes, _, gate := leasedTestProgrammer()
+	access := &persistedPolicyTable{}
+	p.tables = serviceroutemap.New(routes, access, &persistedPolicyTable{}, &persistedPolicyTable{},
+		&recordingTable{identityTokens: map[uint32]uint64{10: 100, 11: 110, 20: 200, 42: 420}}, gate, &persistedPolicyTable{})
+	missing := false
+	index := uint32(10)
+	lookup := p.targetIndexFn
+	p.targetIndexFn = func(name string) (uint32, error) {
+		if name == testConsumerDeviceName {
+			if missing {
+				return 0, netlink.LinkNotFoundError{}
+			}
+			return index, nil
+		}
+		return lookup(name)
+	}
+	changing := localTestIntent()
+	stable := localTestIntent()
+	stable.ConsumerDevice = testOtherConsumerDevice
+	for _, intent := range []RouteIntent{changing, changing, stable} {
+		if err := p.Apply(intent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	stableRows := map[any]any{}
+	for key, value := range routes.rows {
+		if reflect.ValueOf(key).FieldByName("IngressIfindex").Uint() == 42 {
+			stableRows[key] = value
+		}
+	}
+	if len(stableRows) == 0 {
+		t.Fatal("missing stable route in fixture")
+	}
+	observe := func() {
+		if !policyGateEnabled(gate) {
+			t.Error("interface churn disabled unrelated service forwarding")
+		}
+		for key, value := range stableRows {
+			if !reflect.DeepEqual(routes.rows[key], value) {
+				t.Error("interface churn removed or changed unrelated route")
+			}
+		}
+	}
+	routes.afterMutation, access.afterMutation, gate.afterMutation = observe, observe, observe
+	for _, state := range []bool{true, false, true, false} {
+		missing = state
+		if !missing {
+			index = 11
+		}
+		if err := p.Initialize(); err != nil {
+			t.Fatal(err)
+		}
+		observe()
+	}
+	if err := p.Remove(changing); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Remove(changing); err != nil {
+		t.Fatal(err)
+	}
+	observe()
 }
