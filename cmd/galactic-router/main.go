@@ -31,6 +31,7 @@ const (
 	resourceServiceVIPBindings = "servicevipbindings"
 	resourceNetworkServices    = "networkservices"
 	resourceServiceEndpoints   = "serviceendpoints"
+	resourceProducerReports    = "serviceendpointproducerreports"
 	resourceServiceRoutePolicy = "serviceroutepolicies"
 	resourceVPCAttachments     = "vpcattachments"
 	resourceSecrets            = "secrets"
@@ -74,6 +75,7 @@ func checkWatchPermissions(mgr ctrl.Manager, trafficPolicy bool) {
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceServiceVIPBindings},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceNetworkServices},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceServiceEndpoints},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceProducerReports},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceServiceRoutePolicy},
 		{group: "galactic.datumapis.com", version: "v1alpha1", resource: resourceVPCAttachments},
 		{version: "v1", resource: resourceSecrets},

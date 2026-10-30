@@ -24,6 +24,7 @@ processor:
     - "[.]NetworkGatewayList$"
     - "[.]NetworkServiceList$"
     - "[.]ServiceEndpointList$"
+    - "[.]ServiceEndpointProducerReportList$"
     - "[.]ServiceRoutePolicyList$"
     - "[.]ServiceVIPBindingList$"
     - "AFI"

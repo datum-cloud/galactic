@@ -81,13 +81,24 @@ on `healthCheck.port` (the endpoint's port when unset), through the producer's
 host-side interface and from that interface's link-local address. Where
 interface traffic policy is enforced, the producer's policy must allow that
 TCP connection from `fe80::/10` on the Private path. The node publishes the
-decision for each of its producers in the endpoint's `status.producers`:
+decision for each of its producers in its own `ServiceEndpointProducerReport`
+for the endpoint, in the endpoint's namespace and owned by it:
 
 ```console
-$ kubectl get serviceendpoint resolver -o jsonpath='{range .status.producers[*]}{.name}{"\t"}{.node}{"\t"}{.state}{"\t"}{.reason}{"\t"}{.renewTime}{"\n"}{end}'
-resolver-a   node-1   Healthy     ProbeSucceeded   2026-01-01T12:00:45Z
-resolver-b   node-1   Unhealthy   ProbeFailed      2026-01-01T12:00:45Z
+$ kubectl get svcproducerreport
+NAME                        ENDPOINT   NODE     AGE
+resolver-3f1c2a9d8e7b6a50   resolver   node-1   2d
+resolver-9b0e4d7c6a5f4e31   resolver   node-2   2d
+$ kubectl get svcproducerreport resolver-3f1c2a9d8e7b6a50 -o jsonpath='{range .spec.producers[*]}{.name}{"\t"}{.state}{"\t"}{.reason}{"\t"}{.renewTime}{"\n"}{end}'
+resolver-a   Healthy     ProbeSucceeded   2026-01-01T12:00:45Z
+resolver-b   Unhealthy   ProbeFailed      2026-01-01T12:00:45Z
 ```
+
+Each report holds at most the 16 producers one node may have, so an
+endpoint's producers can span any number of nodes. A node deletes its report
+when it has no producers of the endpoint left. A node that has producers of
+the endpoint deletes any other node's report whose newest entry was last
+renewed more than 10 minutes ago, because that node is gone.
 
 The node renews its entries every 15 seconds, whether or not a decision
 changed, and sets each entry's `renewTime`. An entry is current for 60 seconds
@@ -141,6 +152,19 @@ the current eligible ones, so if that set changed since the connection opened,
 the connection resets. Changing an endpoint between `Single` and `Spread`
 replaces its routes, which can drop a request in flight and moves existing TCP
 connections.
+
+Apply the `ServiceEndpointProducerReport` CRD and the `galactic-router`
+RBAC for it before upgrading `galactic-router` to a version that writes
+reports. Without the CRD that router cannot start its watches and does not
+start. A `galactic-router` that predates reports writes its entries into
+the endpoint's `status.producers` instead. An upgraded router removes its own
+entries there only once its report holds their replacements. While routers
+are being upgraded or rolled back, an upgraded router reads both, and for each
+producer keeps whichever entry its node renewed last, so producers on nodes
+that run the older router keep draining. A rolled-back router reads only
+`status.producers`, so it treats producers on nodes that still run the newer
+router as having no entry, and does not drain them, until those nodes are
+rolled back too.
 
 A `galactic-router` without report renewal writes no `renewTime`, so while
 routers are being upgraded, consumers on upgraded nodes treat the entries of
