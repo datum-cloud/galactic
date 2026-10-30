@@ -26,6 +26,10 @@ type MasterlessResult struct {
 	// Masterless is how many host links still have no master after the
 	// pass: their VPC's VRF does not exist, or re-enslaving failed.
 	Masterless int
+	// Complete is true when the pass listed the node's links and examined
+	// every one, so Masterless is a full count. A pass that could not take
+	// the lock or list links leaves it false.
+	Complete bool
 }
 
 // vrfLocked runs a function under the node's VRF lock; a variable so tests
@@ -68,6 +72,7 @@ func ReenslaveMasterlessHostLinks() (MasterlessResult, error) {
 			}
 		}
 		var errs []error
+		result.Complete = true
 		for _, link := range links {
 			attrs := link.Attrs()
 			vpc, _, ok := intf.ParseInterfaceNameHost(attrs.Name)

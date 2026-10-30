@@ -20,7 +20,7 @@ var reenslaveHostLinksFn = hostgw.ReenslaveMasterlessHostLinks
 // adds a line only for a pass that failed.
 func runHostLinkRepair(m *metrics.HostLinks) {
 	result, err := reenslaveHostLinksFn()
-	m.Pass(result.Reenslaved, result.Masterless)
+	m.Pass(result.Reenslaved, result.Masterless, result.Complete, err != nil)
 	if err != nil {
 		slog.Error("Host link repair failed; a host link may still have no VRF master",
 			"reenslaved", result.Reenslaved, "masterless", result.Masterless, "err", err)

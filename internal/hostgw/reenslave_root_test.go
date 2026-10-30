@@ -152,8 +152,8 @@ func TestReenslaveRestoresStrandedTap(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if res.Reenslaved != 1 || res.Masterless != 0 {
-			return fmt.Errorf("result = %+v, want one re-enslaved and none left", res)
+		if res.Reenslaved != 1 || res.Masterless != 0 || !res.Complete {
+			return fmt.Errorf("result = %+v, want a complete pass with one re-enslaved and none left", res)
 		}
 
 		link, v := hostLink(t, "a1"), vrfLink(t)
@@ -190,7 +190,7 @@ func TestReenslaveRestoresStrandedTap(t *testing.T) {
 
 		// A second pass finds nothing to do.
 		res, err = hostgw.ReenslaveMasterlessHostLinks()
-		if err != nil || res != (hostgw.MasterlessResult{}) {
+		if err != nil || res != (hostgw.MasterlessResult{Complete: true}) {
 			return fmt.Errorf("second pass = %+v, %w; want nothing to do", res, err)
 		}
 		return nil

@@ -46,16 +46,30 @@ func TestRunHostLinkRepairRecordsPass(t *testing.T) {
 	m := metrics.NewHostLinks()
 	reenslaved0 := hostLinkMetric(t, "galactic_cni_host_link_reenslaved_total")
 
+	failures0 := hostLinkMetric(t, "galactic_cni_host_link_repair_failures_total")
+
 	reenslaveHostLinksFn = func() (hostgw.MasterlessResult, error) {
-		return hostgw.MasterlessResult{Reenslaved: 2, Masterless: 1}, errors.New("one link failed")
+		return hostgw.MasterlessResult{Reenslaved: 2, Masterless: 1, Complete: true}, errors.New("one link failed")
 	}
 	runHostLinkRepair(m)
 	if got := hostLinkMetric(t, "galactic_cni_host_links_masterless"); got != 1 {
 		t.Errorf("masterless gauge = %v, want 1", got)
 	}
 
+	// A pass that could not list links keeps the gauge where it was.
 	reenslaveHostLinksFn = func() (hostgw.MasterlessResult, error) {
-		return hostgw.MasterlessResult{Reenslaved: 1}, nil
+		return hostgw.MasterlessResult{}, errors.New("lock unavailable")
+	}
+	runHostLinkRepair(m)
+	if got := hostLinkMetric(t, "galactic_cni_host_links_masterless"); got != 1 {
+		t.Errorf("masterless gauge after an incomplete pass = %v, want 1 kept", got)
+	}
+	if got := hostLinkMetric(t, "galactic_cni_host_link_repair_failures_total") - failures0; got != 2 {
+		t.Errorf("failures counter rose by %v, want 2", got)
+	}
+
+	reenslaveHostLinksFn = func() (hostgw.MasterlessResult, error) {
+		return hostgw.MasterlessResult{Reenslaved: 1, Complete: true}, nil
 	}
 	runHostLinkRepair(m)
 	if got := hostLinkMetric(t, "galactic_cni_host_links_masterless"); got != 0 {

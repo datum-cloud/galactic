@@ -205,10 +205,11 @@ repair enslaves it back to its VPC's VRF and restores the addresses, routes
 and neighbor entries the move drops. A link whose VPC has no VRF is only
 counted. See [host link repair](../cni/architecture.md#host-link-repair).
 
-| Metric                                      | Type      | Labels   | Meaning                                                                           |
-| ------------------------------------------- | --------- | -------- | --------------------------------------------------------------------------------- |
-| `galactic_cni_host_links_masterless`        | gauge     | none     | Host links still without a VRF master after the last pass                         |
-| `galactic_cni_host_link_reenslaved_total`   | counter   | none     | Host links the repair found without a VRF master and enslaved back to their VRF   |
+| Metric                                           | Type      | Labels   | Meaning                                                                               |
+| ------------------------------------------------ | --------- | -------- | ------------------------------------------------------------------------------------- |
+| `galactic_cni_host_links_masterless`             | gauge     | none     | Host links still without a VRF master after the last pass                             |
+| `galactic_cni_host_link_reenslaved_total`        | counter   | none     | Host links the repair found without a VRF master and enslaved back to their VRF       |
+| `galactic_cni_host_link_repair_failures_total`   | counter   | none     | Repair passes that failed; one that could not list links leaves the gauge as it was   |
 
 `GalacticHostLinkMasterless` fires when the gauge stays above zero for 10
 minutes. Any increase of the counter means a VRF was deleted with a link still

@@ -442,7 +442,10 @@ func discoverAttachments(
 			continue
 		}
 		if attrs.MasterIndex == 0 {
-			slog.Warn("Datapath repair: host interface has no VRF master; its guest is routed outside its VPC",
+			// Info, not Warn: this pass does not hold the VRF lock, so it
+			// can see a link an ADD has created and not yet enslaved.
+			// galactic-cni's host link repair, which does, warns.
+			slog.Info("Datapath repair: host interface has no VRF master; its guest is routed outside its VPC",
 				"hostInterface", attrs.Name, "vpc", vpc)
 			counts.masterless++
 			continue
