@@ -51,6 +51,9 @@ func cmdDel(args *skel.CmdArgs) error {
 	// before the interface is torn down, since there is nothing to resolve an
 	// ifindex from afterward.
 	unregisterIfindexVRFEntry(vpc, vpcAtt, args.ContainerID)
+	if link, err := netlink.LinkByName(intf.GenerateInterfaceNameHost(vpc, vpcAtt)); err == nil {
+		removeHostOnlyPorts(uint32(link.Attrs().Index))
+	}
 
 	// Stop the node daemon resending Router Advertisements for this attachment.
 	// Best-effort and unconditional: a missing record, from an attachment that
@@ -163,5 +166,20 @@ func removeRadvState(vpc, vpcAttachment, containerID string) {
 	if err := radv.RemoveAttachment(radv.DefaultStateDir, hostName); err != nil {
 		slog.Warn("DEL: failed to remove router advertisement state", "err", err,
 			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
+	}
+}
+
+// removeHostOnlyPorts removes ifindex's host-only port entry if there is one.
+// Left behind, it would close those ports on whatever attachment next reuses
+// the ifindex.
+func removeHostOnlyPorts(ifindex uint32) {
+	table, closer, err := ifindexvrfmap.OpenPinnedHostOnlyPorts(attach.PinDir)
+	if err != nil {
+		return
+	}
+	defer func() { _ = closer.Close() }()
+
+	if err := table.Unregister(ifindex); err != nil {
+		slog.Warn("failed to remove host-only ports", "err", err, "ifindex", ifindex)
 	}
 }
