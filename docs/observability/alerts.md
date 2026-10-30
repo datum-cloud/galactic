@@ -21,6 +21,7 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | FabricRouterMetricsDown                   | `fabric-router` scrape down                                                 | 5m    | warning    |
 | FabricBGPMappedNextHop                    | `fabric_router_bgp_mapped_nexthop == 1`                                     | 15m   | critical   |
 | FabricBGPRoutesNotInstalled               | `fabric_router_bgp_uninstalled_routes > 0`                                  | 10m   | warning    |
+| FabricConnectedRouteMissing               | `fabric_router_connected_routes_missing > 0`                                | 5m    | critical   |
 | FabricConfigAgentMetricsDown              | `fabric-config-agent` scrape down                                           | 5m    | warning    |
 | FabricRoutingNoEligibleRecovery           | `Degraded` with reason `NoEligibleRecovery`                                 | 5m    | critical   |
 | FabricRoutingDeploymentDegraded           | `Degraded` for another reason than that or `Recovered`                      | 15m   | warning    |

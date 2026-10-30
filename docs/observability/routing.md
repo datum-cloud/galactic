@@ -37,8 +37,11 @@ frr_bgp_peer_prefixes_received_count_total < 0.5 * (frr_bgp_peer_prefixes_receiv
 | `fabric_router_bgp_mapped_nexthop`                | gauge     | `peer`                   | `1` when a session from a global IPv6 address announces an IPv4-mapped next hop (`::ffff:<router-id>`); remote sites then lose their routes to this node's locators and NAT shards   |
 | `fabric_router_bgp_mapped_nexthop_resets_total`   | counter   | `peer`                   | Hard resets the agent issued to clear a mapped next hop                                                                                                                              |
 | `fabric_router_bgp_uninstalled_routes`            | gauge     | `afi` (`ipv4`, `ipv6`)   | Prefixes zebra has a BGP route for but that have no kernel route from any protocol                                                                                                   |
+| `fabric_router_connected_routes_missing`          | gauge     | `afi` (`ipv4`, `ipv6`)   | Global addresses on `lo` with no selected connected route in zebra, so `redistribute connected` does not announce them; detection only                                               |
 
-Both gauges refresh every 30s. On a node routed through the API the agent
+The gauges refresh every 30s. A count the agent cannot read, because vtysh or
+the netlink address listing fails, keeps its last value and the error is
+logged. On a node routed through the API the agent
 also exports `fabric_router_activations_total`,
 `fabric_router_activation_duration_seconds`,
 `fabric_router_staging_runs_total`, `fabric_router_writer_lock_wait_seconds`
