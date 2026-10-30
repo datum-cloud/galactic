@@ -484,7 +484,7 @@ status:
       sampleTime: "2026-10-07T18:00:01Z"
       durationMilliseconds: 14
       routerID: 192.0.2.10
-      asn: 64512
+      asn: 64500
       frrVersion: 10.7.1_git
       matched: 1
       matchedIsExact: true

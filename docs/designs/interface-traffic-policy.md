@@ -168,7 +168,7 @@ status:
     policy: {name: public-web-egress, uid: 91fa...}
     conditions: [...]
   nodes:
-    - node: dfw-compute-3
+    - node: dfw-worker
       ingress:
         policy: {name: private-web-ingress, uid: 6d1c..., generation: 4}
         state: Applied               # Applied, Pending or Failed

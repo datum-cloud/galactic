@@ -399,7 +399,7 @@ spec:
   routerRef:
     name: edge-a
   transport: private-mesh
-  asn: 64512
+  asn: 64500
   addresses:
     ipv6: 2001:db8:100::5
   failureDomain: zone-1
