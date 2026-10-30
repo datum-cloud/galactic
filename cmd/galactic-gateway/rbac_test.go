@@ -150,11 +150,11 @@ func TestCheckWatchPermissions(t *testing.T) {
 	}
 
 	denyAddressList := func(verb, resource string) bool {
-		return verb != "list" || resource != resourceNetworkServiceAddresses
+		return verb != verbList || resource != resourceNetworkServiceAddresses
 	}
 	c, _ = accessReviewClient(t, denyAddressList, nil)
 	err = checkWatchPermissions(ctx, c, false)
-	if err == nil || !strings.Contains(err.Error(), "list on "+resourceNetworkServiceAddresses) {
+	if err == nil || !strings.Contains(err.Error(), verbList+" on "+resourceNetworkServiceAddresses) {
 		t.Fatalf("list denied on %s: %v, want an error naming it", resourceNetworkServiceAddresses, err)
 	}
 

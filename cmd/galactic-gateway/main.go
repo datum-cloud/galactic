@@ -44,8 +44,14 @@ const (
 	resourceVPCs           = "vpcs"
 )
 
-// informerVerbs are the verbs an informer needs on each type it watches.
-var informerVerbs = []string{"list", "watch"}
+// verbList and verbWatch are the verbs an informer needs on each type it
+// watches.
+const (
+	verbList  = "list"
+	verbWatch = "watch"
+)
+
+var informerVerbs = []string{verbList, verbWatch}
 
 func main() {
 	cmd := newRootCommand()
