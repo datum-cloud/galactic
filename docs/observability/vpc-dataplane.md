@@ -181,6 +181,16 @@ sum by (node, result) (rate(galactic_usid_pmtu_packets_total{result!~"too_big_se
 galactic_usid_tcp_mss_clamp_limit_bytes == 0
 ```
 
+### Host-only ports
+
+| Metric                                     | Type    | Labels | Meaning                                                                  |
+| ------------------------------------------ | ------- | ------ | ------------------------------------------------------------------------ |
+| `galactic_usid_host_only_port_drops_total` | counter | none   | TCP packets to a tap's host-only port not sent to its link-local address |
+
+A tap that lists [host-only ports](../cni/conflist-reference.md#host-only-ports)
+refuses TCP to them from anything but its node. A rising count means something
+on the VPC is trying to reach a guest's agent port.
+
 ### Datapath lifecycle
 
 | Metric                                         | Type      | Labels                                                 | Meaning                                                              |

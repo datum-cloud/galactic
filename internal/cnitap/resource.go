@@ -56,9 +56,9 @@ type resourceTracker struct {
 	// left behind has the node daemon waiting on an interface that is gone.
 	radvHostInterface string
 
-	// hostOnlyIfindex is the tap's ifindex once ADD has set its host-only
-	// ports, zero before. A tap rollback deletes takes its entry with it, so
-	// the next interface on that ifindex inherits no ports.
+	// hostOnlyIfindex is the tap's ifindex once ADD starts setting its
+	// host-only ports, zero before. A tap rollback deletes takes its entry
+	// with it, so the next interface on that ifindex inherits no ports.
 	hostOnlyIfindex uint32
 }
 

@@ -49,6 +49,10 @@ type Collector struct {
 	// limit it checks, are collected too.
 	pmtuStats     DropReasonsReader
 	encapMTUTable DropReasonsReader
+
+	// hostOnlyPortDrops is nil unless set by WithHostOnlyPorts, in which case
+	// the packets tp_deliver refused for a host-only port are collected too.
+	hostOnlyPortDrops DropReasonsReader
 }
 
 // NewCollector builds a Collector from already-constructed tables and reader.
@@ -72,7 +76,8 @@ func NewCollectorFromObjects(objs *prog.UsidObjects) *Collector {
 		usidmap.NewVPCAttributionTable(usidmap.KernelTable{Map: objs.VpcAttributionTable}),
 	).WithMSSClamp(objs.MssClampStats, objs.MssClampTable).
 		WithPMTU(objs.PmtuStats, objs.EncapMtuTable).
-		WithVRFTraffic(usidmap.NewVRFTrafficTable(usidmap.KernelCounterTable{Map: objs.VrfTrafficCounters}))
+		WithVRFTraffic(usidmap.NewVRFTrafficTable(usidmap.KernelCounterTable{Map: objs.VrfTrafficCounters})).
+		WithHostOnlyPorts(objs.HostOnlyPortDrops)
 }
 
 // WithVRFTraffic adds vrf_traffic_counters to c, so each VRF's per-direction
@@ -94,6 +99,13 @@ func (c *Collector) WithMSSClamp(stats, table DropReasonsReader) *Collector {
 // counters, and table, the single-entry encap_mtu_table. It returns c.
 func (c *Collector) WithPMTU(stats, table DropReasonsReader) *Collector {
 	c.pmtuStats, c.encapMTUTable = stats, table
+	return c
+}
+
+// WithHostOnlyPorts adds host_only_port_drops, the per-CPU count of packets
+// tp_deliver refused for a host-only port, to c. It returns c.
+func (c *Collector) WithHostOnlyPorts(drops DropReasonsReader) *Collector {
+	c.hostOnlyPortDrops = drops
 	return c
 }
 
@@ -185,6 +197,12 @@ var (
 			"Zero means the check is off.",
 		nil, nil,
 	)
+	hostOnlyPortDropsDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "host_only_port", "drops_total"),
+		"TCP packets to a tap's host-only port that tp_deliver dropped because they were not addressed to the "+
+			"guest's link-local address (host_only_port_drops map).",
+		nil, nil,
+	)
 	blockArgumentUtilizationDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "block", "argument_utilization_ratio"),
 		"galactic_usid_block_arguments_used divided by 4095, the per-Block usable Argument capacity under "+
@@ -207,6 +225,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- mssClampLimitDesc
 	ch <- pmtuDesc
 	ch <- encapMTUDesc
+	ch <- hostOnlyPortDropsDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -215,6 +234,23 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.collectDrops(ch)
 	c.collectMSSClamp(ch)
 	c.collectPMTU(ch)
+	c.collectHostOnlyPorts(ch)
+}
+
+func (c *Collector) collectHostOnlyPorts(ch chan<- prometheus.Metric) {
+	if c.hostOnlyPortDrops == nil {
+		return
+	}
+	var perCPU []uint64
+	if err := c.hostOnlyPortDrops.Lookup(uint32(0), &perCPU); err != nil {
+		ch <- prometheus.NewInvalidMetric(hostOnlyPortDropsDesc, fmt.Errorf("lookup host_only_port_drops: %w", err))
+		return
+	}
+	var total uint64
+	for _, v := range perCPU {
+		total += v
+	}
+	ch <- prometheus.MustNewConstMetric(hostOnlyPortDropsDesc, prometheus.CounterValue, float64(total))
 }
 
 func (c *Collector) collectMSSClamp(ch chan<- prometheus.Metric) {

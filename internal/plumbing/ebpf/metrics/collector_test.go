@@ -523,6 +523,23 @@ func TestCollector_PMTU(t *testing.T) {
 	}
 }
 
+func TestCollector_HostOnlyPortDrops(t *testing.T) {
+	c := NewCollector(
+		usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}, nil,
+	).
+		WithHostOnlyPorts(fakeDropReasons{0: 7})
+
+	var drops []float64
+	for _, m := range collect(t, c) {
+		if len(m.GetLabel()) == 0 {
+			drops = append(drops, metricValue(m))
+		}
+	}
+	if len(drops) != 1 || drops[0] != 7 {
+		t.Errorf("host-only port drops = %v, want one series at 7", drops)
+	}
+}
+
 func TestCollector_EncapMTUTableErrorReportsInvalidMetric(t *testing.T) {
 	c := NewCollector(
 		usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}, nil,

@@ -19,17 +19,21 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
 
-// withRepairFn replaces repairDatapathFn for one test with fn and shrinks the
-// retry intervals so a retrying test finishes quickly.
+// withRepairFn replaces repairDatapathFn for one test with fn, stubs out the
+// host-only port restore, and shrinks the retry intervals so a retrying test
+// finishes quickly.
 func withRepairFn(
 	t *testing.T, fn func(context.Context, client.Client, gc.DatapathRepairConfig) (gc.DatapathRepairResult, error),
 ) {
 	t.Helper()
 	origFn, origRetry, origMax := repairDatapathFn, datapathRepairRetryInterval, datapathRepairMaxRetryInterval
+	origRestore := restoreHostOnlyPortsFn
 	t.Cleanup(func() {
 		repairDatapathFn, datapathRepairRetryInterval, datapathRepairMaxRetryInterval = origFn, origRetry, origMax
+		restoreHostOnlyPortsFn = origRestore
 	})
 	repairDatapathFn = fn
+	restoreHostOnlyPortsFn = func(string) (int, error) { return 0, nil }
 	datapathRepairRetryInterval = time.Millisecond
 	datapathRepairMaxRetryInterval = 4 * time.Millisecond
 }
@@ -223,5 +227,35 @@ func TestIsSidecarReturnTable(t *testing.T) {
 				t.Errorf("isSidecarReturnTable(%#x) = %v, want %v", tt.tableID, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStartDatapathRepair_RetriesUntilHostOnlyRestoreSucceeds(t *testing.T) {
+	var passes, restores atomic.Int32
+	done := make(chan struct{})
+	withRepairFn(t, func(context.Context, client.Client, gc.DatapathRepairConfig) (gc.DatapathRepairResult, error) {
+		passes.Add(1)
+		return gc.DatapathRepairResult{}, nil
+	})
+	restoreHostOnlyPortsFn = func(string) (int, error) {
+		if restores.Add(1) < 3 {
+			return 0, errors.New("transient")
+		}
+		close(done)
+		return 1, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startDatapathRepair(ctx, make(chan struct{}, 1), repairState())
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("host-only restore ran %d times, want it retried until the third succeeds", restores.Load())
+	}
+	time.Sleep(20 * time.Millisecond)
+	if n := passes.Load(); n != 3 {
+		t.Errorf("repair made %d passes, want exactly 3 (no pass after the restore succeeded)", n)
 	}
 }
