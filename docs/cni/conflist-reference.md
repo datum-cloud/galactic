@@ -137,10 +137,12 @@ on a datapath that predates the table, rather than leaving a port open.
 router with no SRv6 locator, which attaches none, an attachment listing
 host-only ports stays down and its ADD fails. The
 entry lives in the pinned map, so it survives agent restarts and program
-replacement. `galactic-tap` also records the list in the tap's interface
-alias (`galactic-host-only-tcp=<ports>`), and datapath repair writes back any
-entry a recreated map lost from it. The list is read only at ADD, so a
-change to it reaches an attachment only when it is added again.
+replacement. `galactic-tap` also records the list as an alternative name on
+the tap (`<tap>.host-only-tcp=<ports>`), and datapath repair writes back any
+entry a recreated map lost from it. The interface alias stays the owning
+container's ID, which DEL checks before it removes the tap. The list is read
+only at ADD, so a change to it reaches an attachment only when it is added
+again.
 
 A node whose `galactic-tap` predates `"hostOnlyPorts"` ignores the field
 and would bring the guest up with the ports open. The installer therefore
