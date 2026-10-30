@@ -7,17 +7,3 @@ patches:
     target:
       kind: DaemonSet
       name: galactic-edge
-  # The lab's uplinks are 1500, so the underlay carries at most 1460 bytes
-  # once encapsulated (1500 less the 40-byte header), the ceiling
-  # galactic-edge checks --mtu against. The test fails the build if the
-  # base moves --mtu off args/0, rather than replacing another argument.
-  - target:
-      kind: DaemonSet
-      name: galactic-edge
-    patch: |-
-      - op: test
-        path: /spec/template/spec/containers/0/args/0
-        value: --mtu=1500
-      - op: replace
-        path: /spec/template/spec/containers/0/args/0
-        value: --mtu=1460

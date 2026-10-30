@@ -148,6 +148,10 @@ The agent's `--mtu` must be no larger than the fabric uplink MTU less the
 values. The [provider contract](provider-contract.md#attachment) gives the
 bounds.
 
+An agent that exits at startup with `invalid argument "$(GALACTIC_EDGE_MTU)"
+for "--mtu" flag` runs from an overlay that does not set the
+`GALACTIC_EDGE_MTU` environment variable on the `galactic-edge` container.
+
 ## Telling failures apart
 
 | What happened                 | Where it shows                                                                                                                                                          | What sets it apart                                                                                               |

@@ -9,6 +9,12 @@ spec:
         - name: galactic-edge
           image: galactic-edge:latest
           imagePullPolicy: Never
+          # The lab's uplinks are 1500, so the underlay carries at most 1460
+          # bytes once encapsulated (1500 less the 40-byte header), the
+          # ceiling galactic-edge checks --mtu against.
+          env:
+            - name: GALACTIC_EDGE_MTU
+              value: "1460"
           # The agent creates each packet-access attachment's TUN device
           # through /dev/net/tun, which config/galactic-edge/base does not
           # give its container. The lab hands it the device through the
