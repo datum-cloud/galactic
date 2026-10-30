@@ -463,11 +463,17 @@ func TestDelete_ThenAddRecreates(t *testing.T) {
 // ErrDumpInterrupted; the retrying dump must not.
 //
 // A few hundred stable links keep each dump long enough for a change to land
-// inside it.
+// inside it. The churners change links in bursts on a shared clock and then
+// all stay quiet, as churn on a node comes in bursts: with no quiet gap, a
+// dump slower than the interval between changes, as on a loaded runner, is
+// interrupted on every attempt and no bounded retry can succeed.
 func TestListVRFLinks_SurvivesLinkChurn(t *testing.T) {
 	requireRoot(t)
 
-	const stable, churners = 300, 2
+	const (
+		stable, churners = 300, 2
+		burst, quiet     = 20 * time.Millisecond, 100 * time.Millisecond
+	)
 	for i := range stable {
 		link := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: fmt.Sprintf("vrfstab%d", i)}}
 		if err := netlink.LinkAdd(link); err != nil {
@@ -478,6 +484,7 @@ func TestListVRFLinks_SurvivesLinkChurn(t *testing.T) {
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
+	start := time.Now()
 	for c := range churners {
 		wg.Add(1)
 		go func() {
@@ -488,13 +495,14 @@ func TestListVRFLinks_SurvivesLinkChurn(t *testing.T) {
 					return
 				default:
 				}
+				if phase := time.Since(start) % (burst + quiet); phase >= burst {
+					time.Sleep(burst + quiet - phase)
+					continue
+				}
 				dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: fmt.Sprintf("vrfchurn%d_%d", c, i%4)}}
 				if err := netlink.LinkAdd(dummy); err == nil {
 					_ = netlink.LinkDel(dummy)
 				}
-				// Bursts of changes, not a saturated loop: a node sees link
-				// churn in bursts, and a loop that never pauses can outlast
-				// any bounded retry.
 				time.Sleep(2 * time.Millisecond)
 			}
 		}()
