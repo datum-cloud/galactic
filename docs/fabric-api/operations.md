@@ -35,47 +35,7 @@ All are `severity: warning`, `service: galactic`, `team: connect`. A deployment 
 evaluates its own copy of the rules changes them here first, with their tests, then
 updates that copy.
 
-Node metrics (port 9345, beside the Go runtime and process series):
-`fabric_api_node_requests_total{type,outcome}`,
-`fabric_api_node_request_duration_seconds{type}`,
-`fabric_api_node_response_bytes{type}`,
-`fabric_api_node_truncated_responses_total{type}`,
-`fabric_api_node_in_flight_requests`,
-`fabric_api_node_duplicate_requests_total`,
-`fabric_api_node_duplicate_cache_entries`,
-`fabric_api_node_diagnostics_available`,
-`fabric_api_node_frr_info{version,supported}`,
-`fabric_api_node_expensive_breaker_open`,
-`fabric_api_node_probe_packets_total`,
-`fabric_api_node_identity_refreshes_total{outcome}`,
-`fabric_api_node_permits_total{outcome}` (`accepted`, or why a permit was
-refused: `invalid`, `malformed`, `mismatch`, `expired`, `starting`, `clock`, `lease`,
-`epoch`, `replayed`, `full`),
-`fabric_api_certificate_expiry_timestamp_seconds` and
-`fabric_api_credentials_loaded`. With `--probe-permits` the node also exports
-`fabric_api_node_clock_synchronized`.
-
-Gateway metrics (port 9347, on controller-runtime's registry, so its own metrics
-appear too): `fabric_api_gateway_queries_total{type,reason}`,
-`fabric_api_gateway_node_outcomes_total{outcome}`,
-`fabric_api_gateway_node_rpc_duration_seconds{type,code}`,
-`fabric_api_gateway_queue_depth`, `fabric_api_gateway_status_writes_total{kind,outcome}`,
-`fabric_api_gateway_status_bytes`, `fabric_api_gateway_truncated_results_total`,
-`fabric_api_gateway_stage_latency_seconds{stage}` (`receipt`, `execution`,
-`completion`), `fabric_api_gateway_executions_in_flight`,
-`fabric_api_gateway_queue_wait_seconds` (time a node RPC waited for a cell slot),
-`fabric_api_gateway_stale_objects`, `fabric_api_certificate_expiry_timestamp_seconds`
-and `fabric_api_credentials_loaded`. For the Looking Glass service:
-`fabric_api_gateway_service_enabled`,
-`fabric_api_gateway_service_requests_total{operation,reason}`,
-`fabric_api_gateway_service_router_outcomes_total{operation,outcome}` and
-`fabric_api_gateway_service_request_duration_seconds{operation}`. With
-`--aggregate-budgets`: `fabric_api_gateway_admission_refusals_total{class,scope,reason}`,
-`fabric_api_gateway_probe_packets_charged_total{class}`,
-`fabric_api_gateway_limiter_state{state}`, `fabric_api_gateway_limiter_keys{kind}`,
-`fabric_api_gateway_service_streams` and `fabric_api_gateway_clock_synchronized`.
-Request, project and service IDs, node names and targets are never labels;
-[Telemetry and diagnosis](#telemetry-and-diagnosis) walks them.
+The [Fabric API metrics reference](../observability/fabric-api.md) defines each node and gateway metric, its type and meaning. [Telemetry and diagnosis](#telemetry-and-diagnosis) explains how to use them.
 
 ## Rollout
 

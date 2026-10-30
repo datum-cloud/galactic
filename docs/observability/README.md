@@ -2,6 +2,7 @@
 
 Metrics, scrape configuration, shipped alert rules and log format. Use the subsystem reference for metric names, labels and interpretation.
 
+- [Application metrics and endpoints](applications.md)
 - [VPC dataplane — `galactic_usid_*`](vpc-dataplane.md)
 - [Instance VPC attachments — `galactic_vpc_instance_*`](vpc-attachments.md)
 - [VPC attachment traffic — `galactic_vpc_attachment_*`](vpc-dataplane.md#per-attachment-traffic)
