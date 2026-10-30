@@ -83,9 +83,10 @@ rules:
   # With GALACTIC_GATEWAY_IPV4_VIPS on, a rule's IPv4 VIP is load-balanced
   # only over backends whose ServiceVIPBinding (written by galactic-router on
   # the backend's node) reports Bound, and advertised only while one does, so
-  # the reconciler reads and watches them. Read-only: the gateway never
-  # writes a binding. Without list and watch here, a gateway with the switch
-  # on logs the missing access at startup and runs with IPv4 VIPs off.
+  # the reconciler reads and watches them, as it does for shared address and
+  # port range rules whatever the switch says. Read-only: the gateway never
+  # writes a binding. Without list and watch here, the gateway fails startup
+  # naming the missing access.
   - apiGroups: ["galactic.datumapis.com"]
     resources:
       - servicevipbindings

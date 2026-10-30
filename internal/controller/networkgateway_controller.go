@@ -2264,8 +2264,8 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// over only the backends no binding reports Unhealthy, so a binding
 		// appearing, going, changing, becoming Bound or not, or changing its
 		// health changes some rule. Bindings live in the gateways' namespace.
-		// With neither IPv4VIPs nor BackendHealth nothing reads them, and the
-		// gateway needs no access to them.
+		// A shared address or port range rule reads them whatever IPv4VIPs
+		// and BackendHealth say, so they are always watched.
 		b = b.Watches(&bgpv1alpha1.ServiceVIPBinding{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "ServiceVIPBinding", obj.GetName())
