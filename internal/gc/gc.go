@@ -14,6 +14,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -38,6 +39,9 @@ import (
 // liveness signal GC reads.
 const annotationNetNS = "galactic.datum.net/netns"
 
+// kindBGPVRFInstance is OrphanedCRD.Kind for a BGPVRFInstance.
+const kindBGPVRFInstance = "BGPVRFInstance"
+
 // OrphanedCRD represents a BGP CRD that appears to be orphaned because its
 // associated container is no longer present on the node.
 type OrphanedCRD struct {
@@ -49,6 +53,9 @@ type OrphanedCRD struct {
 	// as the VRF's name gives it. Empty for a BGPAdvertisement, and for a
 	// BGPVRFInstance whose VRF is gone, which no edge attachment can use.
 	VPC string
+	// Node is the node a BGPVRFInstance was collected for. RemoveOrphanedCRDs
+	// uses it to find the instance's kernel VRF again under the VRF lock.
+	Node string
 }
 
 // EdgeUsers keeps garbage collection off the VPCs Galactic Edge attachments
@@ -225,10 +232,13 @@ func vpcInSet(set map[string]struct{}, vpc string) bool {
 //     adds annotations without removing old ones, so the object is orphaned
 //     only once every container that referenced it is gone.
 //   - It is a BGPVRFInstance, shared by every attachment on this VPC on this
-//     node, whose VPC has no surviving BGPAdvertisement and no edge
-//     attachment on this node. A BGPAdvertisement whose liveness this pass
-//     cannot determine, having no netns annotations, counts as surviving:
-//     GC must never guess that a shared VRF is safe to reclaim.
+//     node, whose VPC has no surviving BGPAdvertisement, no edge attachment
+//     on this node, and no link enslaved to its kernel VRF. A VPC's first
+//     ADD enslaves its host link before it writes the BGPVRFInstance and the
+//     BGPAdvertisement, so the kernel is what keeps the instance, and its SID
+//     Argument, during that window. A BGPAdvertisement whose liveness this
+//     pass cannot determine, having no netns annotations, counts as
+//     surviving: GC must never guess that a shared VRF is safe to reclaim.
 //
 // If edge's answer is unknown, no BGPVRFInstance is reported, the error is
 // returned, and the orphaned BGPAdvertisements are returned with it.
@@ -307,13 +317,23 @@ func CollectOrphanedCRDs(
 	for vpc := range edgeVPCs {
 		addVPC(vpcSurvives, vpc)
 	}
+	// Instances are listed before the kernel is read. A host link is
+	// enslaved before its ADD writes the instance, so any instance this list
+	// returns already had its link in place when the links are read below.
+	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := k8s.List(ctx, vrfList, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list BGPVRFInstances: %w", err)
+	}
 	vrfLinks, err := listVRFLinksFn()
 	if err != nil {
 		return orphaned, fmt.Errorf("list VRF links: %w", err)
 	}
-	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
-	if err := k8s.List(ctx, vrfList, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("list BGPVRFInstances: %w", err)
+	occupied, err := occupiedVPCs(vrfLinks)
+	if err != nil {
+		return orphaned, err
+	}
+	for vpc := range occupied {
+		addVPC(vpcSurvives, vpc)
 	}
 	for _, inst := range vrfList.Items {
 		if inst.Spec.RouterRef == nil {
@@ -328,8 +348,9 @@ func CollectOrphanedCRDs(
 		orphaned = append(orphaned, OrphanedCRD{
 			Name:      inst.Name,
 			Namespace: namespace,
-			Kind:      "BGPVRFInstance",
+			Kind:      kindBGPVRFInstance,
 			VPC:       instanceVPC(vrfLinks, nodeName, inst.Name),
+			Node:      nodeName,
 		})
 	}
 
@@ -339,7 +360,9 @@ func CollectOrphanedCRDs(
 // RemoveOrphanedCRDs deletes the given orphaned CRDs from Kubernetes.
 // Errors are logged but do not abort the cleanup — best-effort semantics.
 // A BGPVRFInstance is deleted through edge.Reclaim, so one an edge attachment
-// started using since it was collected is kept.
+// started using since it was collected is kept, and under the VRF lock only
+// while no link is enslaved to its VRF, so one a CNI ADD has started using
+// since is kept too.
 func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []OrphanedCRD, edge EdgeUsers) CleanupResult {
 	result := CleanupResult{}
 
@@ -362,7 +385,7 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 				"resource_name", o.Name, "resource_namespace", o.Namespace, "containerID", o.ContainerID)
 			result.OrphanedCRDsRemoved++
 
-		case "BGPVRFInstance":
+		case kindBGPVRFInstance:
 			vrfInst := &bgpv1alpha1.BGPVRFInstance{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      o.Name,
@@ -371,7 +394,15 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 			}
 			// Its name carries an encoded VPC, so the fence is found through
 			// the VRF it serves. With no VRF, no edge attachment can use it.
-			deleteInst := func() error { return k8s.Delete(ctx, vrfInst) }
+			deleteInst := func() error {
+				return deleteInstanceIfUnoccupied(o, func() error {
+					// Bounded: the delete runs under the VRF lock, which
+					// every CNI ADD on the node waits for.
+					delCtx, cancel := context.WithTimeout(ctx, lockedDeleteTimeout)
+					defer cancel()
+					return k8s.Delete(delCtx, vrfInst)
+				})
+			}
 			var err error
 			if o.VPC == "" {
 				err = deleteInst()
@@ -381,6 +412,11 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 			if errors.Is(err, maintenance.ErrInUse) {
 				slog.Info("GC: kept BGPVRFInstance an edge attachment uses",
 					"resource_name", o.Name, "resource_namespace", o.Namespace, "vpc", o.VPC)
+				continue
+			}
+			if errors.Is(err, vrf.ErrInUse) {
+				slog.Info("GC: kept BGPVRFInstance whose VRF a link joined since it was collected",
+					"resource_name", o.Name, "resource_namespace", o.Namespace, "reason", err.Error())
 				continue
 			}
 			if err != nil {
@@ -396,6 +432,39 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 	}
 
 	return result
+}
+
+// deleteInstanceIfUnoccupied runs del, which deletes the BGPVRFInstance o,
+// under the VRF lock, unless a link is now enslaved to the kernel VRF o
+// serves; then it returns an error wrapping vrf.ErrInUse.
+//
+// The VRF is looked up again under the lock rather than taken from o.VPC: a
+// VRF that was absent at collection may since have been created by an ADD
+// that reuses this instance. An ADD that enslaves its link after this returns
+// writes the instance again itself.
+func deleteInstanceIfUnoccupied(o OrphanedCRD, del func() error) error {
+	return vrfLockedFn(func() error {
+		vrfLinks, err := listVRFLinksFn()
+		if err != nil {
+			return fmt.Errorf("list VRF links: %w", err)
+		}
+		vpc := o.VPC
+		if o.Node != "" {
+			if found := instanceVPC(vrfLinks, o.Node, o.Name); found != "" {
+				vpc = found
+			}
+		}
+		if vpc != "" {
+			occupied, err := occupiedVPCs(vrfLinks)
+			if err != nil {
+				return err
+			}
+			if slaves, ok := occupied[vpc]; ok {
+				return fmt.Errorf("VRF for VPC %q holds %v: %w", vpc, slaves, vrf.ErrInUse)
+			}
+		}
+		return del()
+	})
 }
 
 // activeVPCsFromEndpointSlices returns every VPC named by an EndpointSlice
@@ -452,6 +521,10 @@ func activeVPCsFromEndpointSlices(ctx context.Context, k8s client.Client) (map[s
 //   - No EndpointSlice claims the VPC, per activeVPCsFromEndpointSlices.
 //   - No edge attachment uses the VPC on this node, per edge.VPCs. An edge
 //     attachment's host link is enslaved to this same VRF.
+//   - No link is enslaved to it. A VPC's first ADD enslaves its host link
+//     before its BGPAdvertisement exists, and a link whose VRF is deleted
+//     drops out of the VPC, so the kernel's answer overrides the objects'.
+//     RemoveOrphanedVRFs checks again under the VRF lock before deleting.
 func CollectOrphanedVRFs(
 	ctx context.Context, k8s client.Client, namespace, nodeName string, edge EdgeUsers,
 ) ([]string, error) {
@@ -495,6 +568,11 @@ func CollectOrphanedVRFs(
 		addVPC(activeVPCs, vpc)
 	}
 
+	occupied, err := occupiedVPCs(vrfs)
+	if err != nil {
+		return nil, err
+	}
+
 	var orphaned []string
 	for _, v := range vrfs {
 		vpc, ok := vpcFromVRFName(v.Name)
@@ -502,19 +580,51 @@ func CollectOrphanedVRFs(
 			// Not a Galactic VRF — skip.
 			continue
 		}
-
-		if !vpcInSet(activeVPCs, vpc) {
-			orphaned = append(orphaned, v.Name)
+		if vpcInSet(activeVPCs, vpc) {
+			continue
 		}
+		if slaves, ok := occupied[vpc]; ok {
+			slog.Info("GC: kept VRF with no Kubernetes owner that still holds links",
+				"name", v.Name, "vpc", vpc, "links", slaves)
+			continue
+		}
+		orphaned = append(orphaned, v.Name)
 	}
 
 	return orphaned, nil
 }
 
+// occupiedVPCs returns, for every Galactic VRF in vrfs with at least one link
+// enslaved to it, the VPC its name resolves to and the names of those links.
+func occupiedVPCs(vrfs []*netlink.Vrf) (map[string][]string, error) {
+	vpcByIndex := make(map[int]string, len(vrfs))
+	for _, v := range vrfs {
+		if vpc, ok := vpcFromVRFName(v.Name); ok {
+			vpcByIndex[v.Attrs().Index] = vpc
+		}
+	}
+	if len(vpcByIndex) == 0 {
+		return nil, nil
+	}
+	links, err := listAllLinksFn()
+	if err != nil {
+		return nil, fmt.Errorf("list links: %w", err)
+	}
+	occupied := make(map[string][]string)
+	for _, l := range links {
+		if vpc, ok := vpcByIndex[l.Attrs().MasterIndex]; ok && l.Attrs().MasterIndex != 0 {
+			occupied[vpc] = append(occupied[vpc], l.Attrs().Name)
+		}
+	}
+	return occupied, nil
+}
+
 // RemoveOrphanedVRFs deletes the named orphaned VRF interfaces from the
 // kernel. Errors are logged rather than returned; cleanup is best effort and
 // continues past a failure. Each VRF is deleted through edge.Reclaim, so one
-// an edge attachment started using since it was collected is kept.
+// an edge attachment started using since it was collected is kept, and only
+// while no link is enslaved to it, so one a CNI ADD has populated since is
+// kept too.
 func RemoveOrphanedVRFs(ctx context.Context, vrfNames []string, edge EdgeUsers) CleanupResult {
 	result := CleanupResult{}
 
@@ -535,6 +645,9 @@ func RemoveOrphanedVRFs(ctx context.Context, vrfNames []string, edge EdgeUsers) 
 		switch {
 		case errors.Is(err, maintenance.ErrInUse):
 			slog.Info("GC: kept VRF an edge attachment uses", "name", name, "vpc", vpc)
+		case errors.Is(err, vrf.ErrInUse):
+			slog.Info("GC: kept VRF that a link joined since it was collected", "name", name, "vpc", vpc,
+				"reason", err.Error())
 		case err != nil:
 			slog.Error("GC: failed to delete orphaned VRF", "name", name, "vpc", vpc, "err", err)
 			result.Errors++
@@ -547,45 +660,11 @@ func RemoveOrphanedVRFs(ctx context.Context, vrfNames []string, edge EdgeUsers) 
 	return result
 }
 
-// removeVRF deletes one VRF interface and flushes its routing table. removed
-// is false when the interface was already gone.
+// removeVRF deletes the VRF interface named name and flushes its routing
+// table, unless a link is enslaved to it, in which case the error wraps
+// vrf.ErrInUse. removed is false when the interface was already gone.
 func removeVRF(name string) (removed bool, err error) {
-	// Parse the name back to the VPC that vrf.Delete needs. Deliberately
-	// parseVRFName, not vpcFromVRFName: vrf.Delete rebuilds the current
-	// "G%09sV" name from the VPC, so a legacy interface resolved that way
-	// would be looked up under a name that does not exist and silently
-	// reported as removed.
-	if vpc, ok := parseVRFName(name); ok {
-		if err := vrf.Delete(vpc); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	// Not a current-shape name, so this is where a legacy VRF lands. Delete
-	// the interface actually observed, by name, flushing its routing table
-	// first in the same order vrf.Delete uses, so this path leaves the same
-	// state behind rather than leaning on Add's flush-on-reuse to clean up a
-	// table it skipped.
-	link, err := netlink.LinkByName(name)
-	if err != nil {
-		// Already gone — not an error.
-		return false, nil
-	}
-	if vrfLink, ok := link.(*netlink.Vrf); ok {
-		if err := vrf.FlushTable(vrfLink.Table); err != nil {
-			return false, fmt.Errorf("flush routing table %d: %w", vrfLink.Table, err)
-		}
-	} else {
-		// Names are only ever collected from vrf.ListVRFLinks, which filters
-		// to VRF links, so this means the interface changed kind between that
-		// scan and this delete. Nothing to flush.
-		slog.Warn("GC: orphaned VRF name no longer resolves to a VRF interface, skipping flush",
-			"name", name)
-	}
-	if err := netlink.LinkDel(link); err != nil {
-		return false, err
-	}
-	return true, nil
+	return vrf.DeleteIfUnused(name)
 }
 
 // SweepEBPFVRFTable removes eBPF vrf_table entries whose (Block, Argument) key
@@ -813,6 +892,14 @@ func instanceVPC(links []*netlink.Vrf, nodeName, instName string) string {
 	}
 	return ""
 }
+
+// lockedDeleteTimeout bounds a Kubernetes delete GC makes while holding the
+// node's VRF lock, so a slow API server cannot hold up CNI ADDs for long.
+const lockedDeleteTimeout = 10 * time.Second
+
+// vrfLockedFn runs a function under the VRF lock; a variable so unprivileged
+// tests, which cannot create the node-wide lock file, can run without it.
+var vrfLockedFn = vrf.Locked
 
 // listEdgeLinksFn lists the host links galactic-edge stamped for its
 // attachments; a variable so tests can substitute fabricated links.
@@ -1134,12 +1221,6 @@ func parseVRFName(name string) (vpc string, ok bool) {
 // both the current per-VPC name and the legacy pre-rename name. Both carry the
 // same base62 VPC in the same leading position, so a legacy VRF resolves to
 // exactly the VPC its BGPAdvertisements are named after.
-//
-// Only CollectOrphanedVRFs uses this. RemoveOrphanedVRFs keeps parseVRFName,
-// because it deletes through vrf.Delete, which rebuilds the current interface
-// name from the VPC and would silently no-op against a legacy interface.
-// Leaving a legacy name unresolved there routes it into the by-name fallback,
-// which deletes the interface actually observed.
 func vpcFromVRFName(name string) (vpc string, ok bool) {
 	if vpc, ok := parseVRFName(name); ok {
 		return vpc, true

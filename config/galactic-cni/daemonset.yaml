@@ -166,6 +166,11 @@ spec:
             # removes the record of a tap that has gone missing.
             - name: radv-state-dir
               mountPath: /var/lib/cni/ra
+            # The node's VRF lock, shared with host-executed CNI ADD and
+            # galactic-router's GC. The host link repair re-enslaves a
+            # stranded tap or veth under it. See config/galactic-cni/README.md.
+            - name: vrf-lock-dir
+              mountPath: /var/lib/cni/galactic-vrf
           # BPF map creation under load (image pull + verifier work on a
           # slow node) can outrun readinessProbe/livenessProbe's short
           # initialDelaySeconds, risking a liveness-triggered restart loop
@@ -215,6 +220,10 @@ spec:
         - name: radv-state-dir
           hostPath:
             path: /var/lib/cni/ra
+            type: DirectoryOrCreate
+        - name: vrf-lock-dir
+          hostPath:
+            path: /var/lib/cni/galactic-vrf
             type: DirectoryOrCreate
         - name: bpf-fs
           # Host bpffs for pinned-map continuity; `Directory` (not

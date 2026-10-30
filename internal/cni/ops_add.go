@@ -97,15 +97,20 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		}
 	}()
 
-	if err := vrf.Add(pluginConf.VPC); err != nil {
-		return fmt.Errorf("add VRF: %w", err)
+	// The VRF is created and the veth enslaved to it under one lock, so
+	// garbage collection never finds this VPC's VRF empty in between.
+	var addRes veth.AddResult
+	if err := vrf.EnsureAndEnslave(pluginConf.VPC, func(*netlink.Vrf) error {
+		var addErr error
+		addRes, addErr = veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, args.ContainerID, pluginConf.MTU)
+		if addErr != nil {
+			return fmt.Errorf("add veth: %w", addErr)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	slog.Debug("ADD: VRF ready", "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
-
-	addRes, err := veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, args.ContainerID, pluginConf.MTU)
-	if err != nil {
-		return fmt.Errorf("add veth: %w", err)
-	}
+	slog.Debug("ADD: VRF ready and veth enslaved", "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 	// Remember whether this ADD created the pair or took over one a
 	// predecessor left, so a later failure rolls the veth back correctly: a
 	// created pair is deleted, a taken-over one is handed back to its owner.

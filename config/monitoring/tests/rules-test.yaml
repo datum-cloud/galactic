@@ -1819,6 +1819,36 @@ tests:
                 every 10-minute window for 15 minutes. Shard group membership and next hops are going stale, and a
                 switch back to ordered mode leaves routes on the groups until it succeeds.
 
+  # A host link left masterless for 10m fires; one the repair fixes within
+  # minutes, and a node with none, do not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_cni_host_links_masterless{job="galactic-cni",node="worker-a"}'
+        values: "0x2 1x30"
+      - series: 'galactic_cni_host_links_masterless{job="galactic-cni",node="worker-b"}'
+        values: "0x2 1x8 0x20"
+      - series: 'galactic_cni_host_links_masterless{job="galactic-cni",node="worker-c"}'
+        values: "0x32"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GalacticHostLinkMasterless
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GalacticHostLinkMasterless
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              node: worker-a
+            exp_annotations:
+              summary: "1 Galactic host link(s) on worker-a have no VRF master"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galactichostlinkmasterless"
+              description: >-
+                galactic-cni on worker-a has found 1 tap or host-side veth link(s) with no VRF
+                master for 10 minutes and could not re-enslave them. Their guests' traffic is routed outside their
+                VPC. galactic-cni's log names each link and whether its VPC's VRF exists.
+
   - interval: 30s
     input_series:
       - series: 'up{job="galactic-cni",node="dfw-worker"}'

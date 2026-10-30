@@ -55,6 +55,7 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticEgressShardGroupDropping          | `group_empty`, `shard_dead` or `parse_failed` in every 5m window            | 10m   | warning    |
 | GalacticEgressShardWatchNotSynced         | hashed mode, `EgressShard` watch never listed                               | 10m   | warning    |
 | GalacticEgressSweepFailing                | sweep errors in every 10-minute window                                      | 15m   | warning    |
+| GalacticHostLinkMasterless                | `galactic_cni_host_links_masterless > 0`, a link galactic-cni cannot repair | 10m   | critical   |
 | GalacticCNIMetricsDown                    | `galactic-cni` scrape down                                                  | 5m    | warning    |
 | FabricAPIExecutionStalled                 | gateway has executions in flight, finished none in 10m                      | 10m   | warning    |
 | FabricAPINodeDiagnosticsUnavailable       | `fabric_api_node_diagnostics_available == 0`                                | 15m   | warning    |

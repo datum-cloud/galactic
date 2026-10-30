@@ -333,3 +333,52 @@ func TestFillVRF_TrafficRowFollowsVRFRow(t *testing.T) {
 		t.Errorf("traffic rows after RemoveVRFRows = %v, want none", traffic.memTable)
 	}
 }
+
+// TestReleaseArgumentRows releases an Argument this VPC's BGPVRFInstance
+// left. Rows still routing to this VPC go; rows another VPC wrote after
+// taking the Argument stay.
+func TestReleaseArgumentRows(t *testing.T) {
+	const (
+		argument   = uint16(0x21)
+		ownTable   = uint32(7)
+		ownVRF     = "Gvrf-own"
+		otherVRF   = "Gvrf-other"
+		otherTable = uint32(9)
+	)
+	tests := []struct {
+		name              string
+		table             uint32
+		vrfIface          string
+		wantVRF, wantAttr bool
+	}{
+		{name: "rows still ours", table: ownTable, vrfIface: ownVRF},
+		{name: "rows overwritten by the new holder", table: otherTable, vrfIface: otherVRF, wantVRF: true, wantAttr: true},
+		{name: "only vrf_table overwritten", table: otherTable, vrfIface: ownVRF, wantVRF: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newMemMaps(false)
+			if err := m.Registry.VRF.Register(testBlock, argument, tt.table, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.Registry.VPCAttribution.Register(testBlock, argument, 1, 1, tt.vrfIface); err != nil {
+				t.Fatal(err)
+			}
+			if err := releaseArgumentRows(m.Registry, testBlock, argument, ownTable, ownVRF); err != nil {
+				t.Fatalf("releaseArgumentRows: %v", err)
+			}
+			if _, ok, _ := m.Registry.VRF.Get(testBlock, argument); ok != tt.wantVRF {
+				t.Errorf("vrf_table row present = %v, want %v", ok, tt.wantVRF)
+			}
+			if _, ok, _ := m.Registry.VPCAttribution.Get(testBlock, argument); ok != tt.wantAttr {
+				t.Errorf("vpc_attribution_table row present = %v, want %v", ok, tt.wantAttr)
+			}
+		})
+	}
+
+	t.Run("no rows", func(t *testing.T) {
+		if err := releaseArgumentRows(newMemMaps(false).Registry, testBlock, argument, ownTable, ownVRF); err != nil {
+			t.Fatalf("releaseArgumentRows: %v", err)
+		}
+	})
+}

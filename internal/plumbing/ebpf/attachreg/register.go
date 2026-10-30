@@ -213,6 +213,59 @@ func RegisterDatapath(pinDir string, r Registration) (registered bool, err error
 	return true, nil
 }
 
+// ReleaseArgument removes the vrf_table and vpc_attribution_table rows for
+// argument that RegisterDatapath wrote for vpc, once vpc's BGPVRFInstance has
+// moved off argument. Another VPC may hold argument by then, and a row left
+// mapping it to vpc's VRF table would deliver that VPC's traffic into vpc.
+// A row naming another VRF is that VPC's own and stays. Nothing is removed,
+// with a nil error, when node has no SRv6 identity, since RegisterDatapath
+// then wrote nothing.
+func ReleaseArgument(pinDir string, node Node, vpc string, argument uint16) error {
+	if !node.Configured() {
+		return nil
+	}
+	block, err := node.Block()
+	if err != nil {
+		return err
+	}
+	vrfTableID, err := vrf.TableID(vpc)
+	if err != nil {
+		return fmt.Errorf("look up VRF table id to release Argument %d: %w", argument, err)
+	}
+	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	if err != nil {
+		return fmt.Errorf("open pinned eBPF uSID maps: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+	return releaseArgumentRows(registry, block, argument, vrfTableID, intf.GenerateInterfaceNameVRF(vpc))
+}
+
+// releaseArgumentRows removes (block, argument)'s vrf_table row if it routes
+// to vrfTableID, and its vpc_attribution_table row if it names vrfInterface.
+// The two are checked separately because a writer that took argument may
+// have overwritten either one.
+func releaseArgumentRows(
+	registry *usidmap.Registry, block uint64, argument uint16, vrfTableID uint32, vrfInterface string,
+) error {
+	entry, ok, err := registry.VRF.Get(block, argument)
+	if err != nil {
+		return err
+	}
+	if ok && entry.VRFTableID == vrfTableID {
+		if err := registry.VRF.Unregister(block, argument); err != nil {
+			return err
+		}
+	}
+	attr, ok, err := registry.VPCAttribution.Get(block, argument)
+	if err != nil {
+		return err
+	}
+	if ok && attr.VRFInterface == vrfInterface {
+		return registry.VPCAttribution.Unregister(block, argument)
+	}
+	return nil
+}
+
 // DecodeVPCIdentifiers decodes vpc and vpcAttachment, the base62 identifiers
 // CNI configuration carries, into the fixed-width numeric form
 // vpc_attribution_table stores: 48-bit VPC, 16-bit VPCAttachment. Leading

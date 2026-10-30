@@ -20,9 +20,9 @@ const testNodeName = "dfw-worker"
 const testNamespace = "galactic-system"
 
 // TestResourceTrackerCleanup_DeletesFreshlyCreatedVRFInstance covers the
-// regression this test guards against: allocateArgument's read-then-write
-// can race two different VPCs' first attachment on the same node onto the
-// same "lowest free slot," which checkArgumentCollision then rejects. If
+// regression this test guards against: a writer outside the Argument lock can
+// take the same "lowest free slot" as this ADD's new instance, which
+// claimArgument then rejects once it cannot move it. If
 // rollback never deleted the just-created (and now known-invalid)
 // BGPVRFInstance, every retry would hit the identical collision forever —
 // nothing else clears it, since GC only reclaims once every BGPAdvertisement

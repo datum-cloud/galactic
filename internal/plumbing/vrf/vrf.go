@@ -64,9 +64,13 @@ var ErrNotFound = errors.New("vrf: no VRF interface for this VPC in this network
 // ingress sidecar version that allocated from the host's range.
 var ErrTableOutOfRange = errors.New("vrf: existing VRF's table is outside the caller's range")
 
+// ErrInUse is wrapped by DeleteIfUnused when a link is still enslaved to the VRF.
+var ErrInUse = errors.New("vrf: a link is still enslaved to the VRF")
+
 // vrfMu serializes VRF creation and deletion within one process. It does not by
 // itself protect two separate CNI invocations racing on the same node, each
-// being its own process, so Add and Delete also take a cross-process lock.
+// being its own process, so every holder also takes a cross-process lock
+// (see Locked).
 var vrfMu sync.Mutex
 
 // Add creates the Linux VRF interface for a base62-encoded VPC, allocating the
@@ -92,6 +96,36 @@ func Add(vpc string) error {
 // range is an error: its table may collide with the other writer's, and
 // recreating it would strand whatever is already routed through it.
 func AddInRange(vpc string, minID, maxID uint32) error {
+	return Locked(func() error {
+		_, err := addLocked(vpc, minID, maxID)
+		return err
+	})
+}
+
+// EnsureAndEnslave creates or reuses vpc's VRF, as Add does, then calls
+// enslave with it while still holding the lock Add and DeleteIfUnused take.
+// enslave creates the caller's host link and enslaves it to the VRF.
+//
+// Holding the lock across both steps means DeleteIfUnused, which deletes a VRF
+// only when no link is enslaved to it, never sees the VRF between its creation
+// and the caller's enslavement. A VRF error is wrapped as "add VRF"; enslave's
+// error is returned unchanged.
+func EnsureAndEnslave(vpc string, enslave func(vrfLink *netlink.Vrf) error) error {
+	return Locked(func() error {
+		vrfLink, err := addLocked(vpc, HostTableIDMin, HostTableIDMax)
+		if err != nil {
+			return fmt.Errorf("add VRF: %w", err)
+		}
+		return enslave(vrfLink)
+	})
+}
+
+// Locked runs fn while holding the in-process and cross-process VRF locks
+// that Add, EnsureAndEnslave, Delete and DeleteIfUnused take. A caller that
+// decides from what is enslaved to a VRF uses it so that no EnsureAndEnslave
+// can change the answer before fn returns. fn must not call another function
+// in this package that takes the lock.
+func Locked(fn func() error) error {
 	vrfMu.Lock()
 	defer vrfMu.Unlock()
 
@@ -101,27 +135,33 @@ func AddInRange(vpc string, minID, maxID uint32) error {
 	}
 	defer func() { _ = lock.close() }()
 
+	return fn()
+}
+
+// addLocked is AddInRange's body, run with vrfMu and the cross-process lock
+// held. It returns the VRF link.
+func addLocked(vpc string, minID, maxID uint32) (*netlink.Vrf, error) {
 	name := intf.GenerateInterfaceNameVRF(vpc)
 
 	if link, err := netlink.LinkByName(name); err == nil {
 		existing, ok := link.(*netlink.Vrf)
 		if !ok {
-			return fmt.Errorf("interface %q exists but is a %s, not a VRF", name, link.Type())
+			return nil, fmt.Errorf("interface %q exists but is a %s, not a VRF", name, link.Type())
 		}
 		if existing.Table < minID || existing.Table > maxID {
-			return fmt.Errorf("VRF %q has table %d, not in [%d,%d]: %w",
+			return nil, fmt.Errorf("VRF %q has table %d, not in [%d,%d]: %w",
 				name, existing.Table, minID, maxID, ErrTableOutOfRange)
 		}
-		return ensureUnreachableDefaults(existing.Table)
+		return existing, ensureUnreachableDefaults(existing.Table)
 	}
 
 	vrfID, err := findNextAvailableVRFID(minID, maxID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := FlushTable(vrfID); err != nil {
-		return err
+		return nil, err
 	}
 
 	vrf := &netlink.Vrf{
@@ -132,20 +172,31 @@ func AddInRange(vpc string, minID, maxID uint32) error {
 	}
 
 	if err := netlink.LinkAdd(vrf); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := sysctl.ConfigureInterfaceSysctls(name); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Installed before the VRF comes up, so no packet is ever routed in it
 	// without the catch-all in place.
 	if err := ensureUnreachableDefaults(vrfID); err != nil {
-		return err
+		return nil, err
 	}
 
-	return netlink.LinkSetUp(vrf)
+	if err := netlink.LinkSetUp(vrf); err != nil {
+		return nil, err
+	}
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return nil, err
+	}
+	created, ok := link.(*netlink.Vrf)
+	if !ok {
+		return nil, fmt.Errorf("interface %q exists but is a %s, not a VRF", name, link.Type())
+	}
+	return created, nil
 }
 
 // ensureUnreachableDefaults installs an unreachable default route for IPv4
@@ -184,38 +235,87 @@ func ensureUnreachableDefaults(tableID uint32) error {
 // interface for a base62-encoded VPC. Idempotent: an absent interface returns
 // nil.
 //
-// Callers must only invoke it once no attachment on this VPC on this node
-// remains live, since deleting out from under a sibling breaks it. The CNI
-// teardown path never calls it for that reason; only garbage collection does,
-// after confirming through every advertisement for this VPC and node that none
-// is still in use.
+// It does not check what is enslaved to the VRF. Its production caller is
+// the ingress sidecar, inside its own pod's network namespace, where it owns
+// every link in the VRF. Anything deleting a VRF in the host namespace, where
+// CNI ADDs enslave links concurrently, uses DeleteIfUnused instead.
 func Delete(vpc string) error {
-	vrfMu.Lock()
-	defer vrfMu.Unlock()
+	return Locked(func() error {
+		name := intf.GenerateInterfaceNameVRF(vpc)
 
-	lock, err := acquireLock()
-	if err != nil {
-		return err
+		vrfID, err := getVRFIDForInterface(name)
+		if err != nil {
+			return nil // VRF already gone — idempotent
+		}
+
+		if err := FlushTable(vrfID); err != nil {
+			return err
+		}
+
+		link, err := netlink.LinkByName(name)
+		if err != nil {
+			return nil // interface already gone — idempotent
+		}
+
+		return netlink.LinkDel(link)
+	})
+}
+
+// DeleteIfUnused flushes the routing table of the VRF interface named name
+// and removes it, unless a link is still enslaved to it. It decides under the
+// same lock EnsureAndEnslave holds, so it never removes a VRF a concurrent
+// ADD has created but not yet populated. It takes the interface name rather
+// than the VPC so that garbage collection can remove a VRF under a legacy
+// name too.
+//
+// removed is false when the interface is already gone. The error wraps
+// ErrInUse when a link is enslaved, and is an error when name is not a VRF.
+func DeleteIfUnused(name string) (removed bool, err error) {
+	err = Locked(func() error {
+		links, err := nldump.LinkList()
+		if err != nil {
+			return fmt.Errorf("list links: %w", err)
+		}
+		var vrfLink *netlink.Vrf
+		for _, l := range links {
+			if l.Attrs().Name != name {
+				continue
+			}
+			v, ok := l.(*netlink.Vrf)
+			if !ok {
+				return fmt.Errorf("interface %q is a %s, not a VRF", name, l.Type())
+			}
+			vrfLink = v
+			break
+		}
+		if vrfLink == nil {
+			return nil
+		}
+		if slaves := EnslavedTo(links, vrfLink.Attrs().Index); len(slaves) > 0 {
+			return fmt.Errorf("VRF %q holds %d link(s) %v: %w", name, len(slaves), slaves, ErrInUse)
+		}
+		if err := FlushTable(vrfLink.Table); err != nil {
+			return fmt.Errorf("flush routing table %d: %w", vrfLink.Table, err)
+		}
+		if err := netlink.LinkDel(vrfLink); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	return removed, err
+}
+
+// EnslavedTo returns the names of the links in links whose master is the
+// interface with index masterIndex.
+func EnslavedTo(links []netlink.Link, masterIndex int) []string {
+	var names []string
+	for _, l := range links {
+		if l.Attrs().MasterIndex == masterIndex {
+			names = append(names, l.Attrs().Name)
+		}
 	}
-	defer func() { _ = lock.close() }()
-
-	name := intf.GenerateInterfaceNameVRF(vpc)
-
-	vrfID, err := getVRFIDForInterface(name)
-	if err != nil {
-		return nil // VRF already gone — idempotent
-	}
-
-	if err := FlushTable(vrfID); err != nil {
-		return err
-	}
-
-	link, err := netlink.LinkByName(name)
-	if err != nil {
-		return nil // interface already gone — idempotent
-	}
-
-	return netlink.LinkDel(link)
+	return names
 }
 
 // TableID returns the Linux routing table ID for a base62-encoded VPC's VRF.

@@ -76,6 +76,7 @@ the fabric-api gateway are Deployments, scraped per pod.
 | VPC ingress             | `galactic-vrf`                                            | `galactic_ingress_sidecar_*`                                  | 9182 (default) | none shipped                             |
 | VPC ingress return path | `galactic-cni` (`credential-refresh`)                     | `galactic_sidecar_return_*`                                   | 9180           | `galactic-cni`                           |
 | VPC ingress backends    | `galactic-cni` (`credential-refresh`)                     | `galactic_endpointslice_repair_*`                             | 9180           | `galactic-cni`                           |
+| VPC host link repair    | `galactic-cni` (`credential-refresh`)                     | `galactic_cni_host_link*`                                     | 9180           | `galactic-cni`                           |
 | Edge load balancer      | `galactic-gateway`                                        | `galactic_edge_*`, controller-runtime                         | 8081           | none shipped                             |
 | Tenant routing (GoBGP)  | `galactic-router`, `galactic-router-rr`                   | `galactic_router_*`, controller-runtime                       | 9179           | `galactic-router` / `galactic-router-rr` |
 | Private service routes  | `galactic-router` (plain mode only)                       | `galactic_service_route_*`                                    | 9179           | `galactic-router`                        |

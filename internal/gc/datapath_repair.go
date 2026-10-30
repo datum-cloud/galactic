@@ -61,10 +61,14 @@ type DatapathRepairResult struct {
 	// Attachments is how many attachments the pass matched to a
 	// BGPVRFInstance and examined.
 	Attachments int
-	// Skipped is how many host-named interfaces the pass left alone: not
-	// enslaved to a VRF, in a table another writer owns, of an unknown link
-	// type, or whose BGPVRFInstance has an out-of-range VRFID.
+	// Skipped is how many host-named interfaces the pass left alone: enslaved
+	// to something other than a VRF, in a table another writer owns, of an
+	// unknown link type, or whose BGPVRFInstance has an out-of-range VRFID.
 	Skipped int
+	// Masterless is how many host-named interfaces have no master at all.
+	// Their VRF was deleted under them, so their guest is routed outside
+	// its VPC. galactic-cni re-enslaves them on its own tick.
+	Masterless int
 	// Pending is how many attachment interfaces the pass could not repair yet
 	// because this node's BGPRouter or the VPC's BGPVRFInstance is not found.
 	// Either may still be on its way, so a caller wanting a prompt repair
@@ -169,7 +173,7 @@ func RepairAttachmentDatapath(
 	}
 
 	attachments, counts, err := discoverAttachments(cfg.NodeName, block, vrfIDs, advertised, foreign)
-	result.Skipped, result.Pending = counts.skipped, counts.pending
+	result.Skipped, result.Pending, result.Masterless = counts.skipped, counts.pending, counts.masterless
 	if err != nil {
 		return result, err
 	}
@@ -402,8 +406,9 @@ func mergePrefixes(kernel, advertised []string) []string {
 // discoveryCounts is how many host-named interfaces discoverAttachments did
 // not resolve into an attachment, by reason.
 type discoveryCounts struct {
-	skipped int
-	pending int
+	skipped    int
+	pending    int
+	masterless int
 }
 
 // discoverAttachments lists every interface named like an attachment's host
@@ -412,6 +417,7 @@ type discoveryCounts struct {
 // to a VRF, whose VRF table foreign claims, whose link type is neither veth
 // nor tap, or whose BGPVRFInstance's VRFID is out of range is counted as
 // skipped; one whose VPC has no BGPVRFInstance on this node yet as pending.
+// One with no master at all is counted, and logged, as masterless.
 // advertised, keyed by BGPAdvertisement name, adds the guest prefixes the
 // kernel does not route.
 func discoverAttachments(
@@ -433,6 +439,15 @@ func discoverAttachments(
 		attrs := link.Attrs()
 		vpc, vpcAttachment, ok := intf.ParseInterfaceNameHost(attrs.Name)
 		if !ok {
+			continue
+		}
+		if attrs.MasterIndex == 0 {
+			// Info, not Warn: this pass does not hold the VRF lock, so it
+			// can see a link an ADD has created and not yet enslaved.
+			// galactic-cni's host link repair, which does, warns.
+			slog.Info("Datapath repair: host interface has no VRF master; its guest is routed outside its VPC",
+				"hostInterface", attrs.Name, "vpc", vpc)
+			counts.masterless++
 			continue
 		}
 		master, ok := byIndex[attrs.MasterIndex].(*netlink.Vrf)

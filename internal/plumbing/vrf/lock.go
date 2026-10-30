@@ -20,7 +20,12 @@ import (
 // same node-wide table ID space. An in-process mutex does nothing across those
 // boundaries, and both processes then race in ID selection and link creation,
 // surfacing as a busy-device error from the kernel.
-const lockDir = "/var/lib/cni/galactic-vrf"
+const lockDir = LockDir
+
+// LockDir is the host-absolute directory holding the node's VRF lock. Every
+// process that takes the lock, including a container, must see the host's
+// directory at this path.
+const LockDir = "/var/lib/cni/galactic-vrf"
 
 const lockFileName = "lock"
 

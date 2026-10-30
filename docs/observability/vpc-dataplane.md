@@ -195,3 +195,28 @@ increase(galactic_usid_datapath_attach_events_total{result="failure"}[15m]) > 0
 # Re-attach churn: a flapping interface
 sum by (node, interface) (increase(galactic_usid_datapath_attach_events_total{action="attach"}[1h])) > 5
 ```
+
+### Host link repair
+
+`galactic-cni` checks every 30 seconds for a Galactic host link, a tap or the
+host end of a veth, with no VRF master. Such a link's VRF was deleted under
+it, so its guest's traffic is routed in the main table, outside its VPC. The
+repair enslaves it back to its VPC's VRF and restores the addresses, routes
+and neighbor entries the move drops. A link whose VPC has no VRF is only
+counted. See [host link repair](../cni/architecture.md#host-link-repair).
+
+| Metric                                           | Type      | Labels   | Meaning                                                                               |
+| ------------------------------------------------ | --------- | -------- | ------------------------------------------------------------------------------------- |
+| `galactic_cni_host_links_masterless`             | gauge     | none     | Host links still without a VRF master after the last pass                             |
+| `galactic_cni_host_link_reenslaved_total`        | counter   | none     | Host links the repair found without a VRF master and enslaved back to their VRF       |
+| `galactic_cni_host_link_repair_failures_total`   | counter   | none     | Repair passes that failed; one that could not list links leaves the gauge as it was   |
+
+`GalacticHostLinkMasterless` fires when the gauge stays above zero for 10
+minutes. Any increase of the counter means a VRF was deleted with a link still
+in it, which garbage collection no longer does, so it is worth a look even
+when the repair succeeded.
+
+```promql
+max by (node) (galactic_cni_host_links_masterless) > 0
+increase(galactic_cni_host_link_reenslaved_total[1h]) > 0
+```

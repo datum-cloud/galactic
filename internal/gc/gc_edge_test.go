@@ -100,6 +100,10 @@ func edgeTestClient(t *testing.T, vpcs ...string) client.Client {
 	return fake.NewClientBuilder().WithScheme(gcTestScheme(t)).WithObjects(objs...).Build()
 }
 
+// deadAdvertisementOrphan is how orphanNames reports the dead workload's
+// advertisement edgeTestClient leaves.
+const deadAdvertisementOrphan = "BGPAdvertisement/a-att"
+
 func orphanNames(orphans []OrphanedCRD) []string {
 	names := make([]string, 0, len(orphans))
 	for _, o := range orphans {
@@ -134,7 +138,7 @@ func TestEdgeAttachmentKeepsBGPVRFInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"BGPAdvertisement/a-att",
+		deadAdvertisementOrphan,
 		"BGPVRFInstance/" + crdnames.BGPVRFInstanceName("b", edgeTestNode),
 		"BGPVRFInstance/" + crdnames.BGPVRFInstanceName("c", edgeTestNode),
 	}
@@ -190,7 +194,7 @@ func TestUnknownEdgeUseKeepsBGPVRFInstances(t *testing.T) {
 	if err == nil {
 		t.Fatal("collection succeeded without knowing edge use")
 	}
-	if got := orphanNames(orphans); !slices.Equal(got, []string{"BGPAdvertisement/a-att"}) {
+	if got := orphanNames(orphans); !slices.Equal(got, []string{deadAdvertisementOrphan}) {
 		t.Fatalf("orphans = %v, want only the advertisement", got)
 	}
 }

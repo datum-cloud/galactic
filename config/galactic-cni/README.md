@@ -152,6 +152,19 @@ interface has been missing for 30 seconds, since nothing else would ever
 remove it once that tap's DEL has been missed. On a read-only mount every
 removal fails.
 
+## The `vrf-lock-dir` mount
+
+`/var/lib/cni/galactic-vrf` holds the node's VRF lock
+(`internal/plumbing/vrf`), which host-executed CNI ADD holds from creating a
+VPC's VRF until its host link is enslaved, and which `galactic-router`'s GC
+holds while it checks a VRF for enslaved links before deleting it.
+`credential-refresh` takes the same lock for its host link repair, which
+re-enslaves a tap or host-side veth that has lost its VRF master. Like
+`radv-state-dir`, it is mounted at its own host-absolute path, because the
+lock path is a constant every one of those processes shares. Without the
+mount, the repair would lock a file only it can see, and could re-enslave a
+link at the same moment an ADD or GC acts on its VRF.
+
 ## The `cni-net-dir` mount
 
 `credential-refresh` mounts the host's `/etc/cni/net.d` writable, as the

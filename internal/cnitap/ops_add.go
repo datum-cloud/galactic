@@ -106,15 +106,20 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		}
 	}()
 
-	if err := vrf.Add(pluginConf.VPC); err != nil {
-		return fmt.Errorf("add VRF: %w", err)
+	// The VRF is created and the tap enslaved to it under one lock, so
+	// garbage collection never finds this VPC's VRF empty in between.
+	var addRes tap.AddResult
+	if err := vrf.EnsureAndEnslave(pluginConf.VPC, func(*netlink.Vrf) error {
+		var addErr error
+		addRes, addErr = tap.Add(pluginConf.VPC, pluginConf.VPCAttachment, args.ContainerID, pluginConf.MTU)
+		if addErr != nil {
+			return fmt.Errorf("add tap: %w", addErr)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	slog.Debug("ADD: VRF ready", "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
-
-	addRes, err := tap.Add(pluginConf.VPC, pluginConf.VPCAttachment, args.ContainerID, pluginConf.MTU)
-	if err != nil {
-		return fmt.Errorf("add tap: %w", err)
-	}
+	slog.Debug("ADD: VRF ready and tap enslaved", "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 	tracker.tapAdopted = addRes.Adopted
 	tracker.tapPriorOwner = addRes.PriorOwner
 

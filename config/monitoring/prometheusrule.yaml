@@ -968,6 +968,26 @@ spec:
               galactic-cni on {{ $labels.node }} has failed its egress sweep at the {{ $labels.stage }} step in
               every 10-minute window for 15 minutes. Shard group membership and next hops are going stale, and a
               switch back to ordered mode leaves routes on the groups until it succeeds.
+        # A tap or host-side veth has had no VRF master for 10 minutes. Its
+        # VPC's VRF was deleted under it and galactic-cni's repair, which runs
+        # every 30 seconds, could not put it back: the VRF does not exist or
+        # re-enslaving keeps failing. The guest's traffic is routed in the
+        # main table, outside its VPC.
+        - alert: GalacticHostLinkMasterless
+          expr: |
+            max by (node) (galactic_cni_host_links_masterless{job="galactic-cni"}) > 0
+          for: 10m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $value }} Galactic host link(s) on {{ $labels.node }} have no VRF master"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galactichostlinkmasterless"
+            description: >-
+              galactic-cni on {{ $labels.node }} has found {{ $value }} tap or host-side veth link(s) with no VRF
+              master for 10 minutes and could not re-enslave them. Their guests' traffic is routed outside their
+              VPC. galactic-cni's log names each link and whether its VPC's VRF exists.
         - alert: GalacticCNIMetricsDown
           expr: up{job="galactic-cni"} == 0
           for: 5m
