@@ -98,13 +98,19 @@ func (c *Collector) WithPMTU(stats, table DropReasonsReader) *Collector {
 }
 
 // labelBlock is the Prometheus label name for a uSID Block, shared by every
-// metric below that carries one.
-const labelBlock = "block"
+// metric below that carries one. labelVPC and labelVPCAttachment name the
+// attachment a series belongs to, shared with the attachment series in
+// attachment.go.
+const (
+	labelBlock         = "block"
+	labelVPC           = "vpc"
+	labelVPCAttachment = "vpc_attachment"
+)
 
 // vrfLabels are the identity labels of every per-VRF series, and
 // vrfDirectionLabels adds the direction of travel.
 var (
-	vrfLabels          = []string{labelBlock, "argument", "vrf_table_id", "vpc", "vpc_attachment", "vrf_interface"}
+	vrfLabels          = []string{labelBlock, "argument", "vrf_table_id", labelVPC, labelVPCAttachment, "vrf_interface"}
 	vrfDirectionLabels = append(append([]string(nil), vrfLabels...), "direction")
 )
 

@@ -1,8 +1,0 @@
-# Kubernetes gives no unprivileged pod /dev/net/tun, and a provider gets no
-# hostPath or capability to reach it, so a packet-access provider pod needs
-# a device plugin that hands it the device as a resource. The lab uses
-# squat/generic-device-plugin (Apache-2.0) on the nodes that run
-# galactic-edge, advertising devic.es/tun; a provider pod requests one
-# devic.es/tun.
-resources:
-  - daemonset.yaml

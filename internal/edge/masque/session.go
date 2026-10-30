@@ -16,13 +16,15 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"k8s.io/apimachinery/pkg/types"
 
 	"go.datum.net/galactic/internal/edge/connectip"
 )
 
 // errStopped is returned by a request's packet I/O once it may no longer
-// forward.
-var errStopped = errors.New("masque: forwarding stopped")
+// forward. The request has ended by then, so it wraps
+// connectip.ErrLeaseEnded and the server counts the end as the lease's.
+var errStopped = fmt.Errorf("masque: forwarding stopped: %w", connectip.ErrLeaseEnded)
 
 // session is one admitted request: its connectip.Lease and the identities
 // its packets are bound to.
@@ -34,6 +36,7 @@ type session struct {
 	// are the generations the request was admitted on.
 	att        *attachment
 	attGen     uint64
+	attUID     types.UID
 	rt         *route
 	rtGen      uint64
 	leaseKey   string
@@ -86,7 +89,7 @@ func (a *Adapter) newSession(g *Grant, e *attachment, r *route, began uint64) (c
 	}
 	defer a.mu.Unlock()
 	s := &session{
-		a: a, grant: *g, att: e, attGen: r.attGen, rt: r, rtGen: r.gen, leaseKey: l.Key, leaseEpoch: l.Epoch,
+		a: a, grant: *g, att: e, attGen: r.attGen, attUID: e.uid, rt: r, rtGen: r.gen, leaseKey: l.Key, leaseEpoch: l.Epoch,
 		done: make(chan struct{}), closed: make(chan struct{}),
 		info: connectip.SessionInfo{
 			ID: a.nextID.Add(1), Principal: g.Principal, VPC: g.VPC, Prefix: g.Prefix, Connector: g.Connector,
@@ -111,14 +114,19 @@ func (s *session) Routes() []netip.Prefix { return s.grant.Routes }
 // Done implements connectip.Lease.
 func (s *session) Done() <-chan struct{} { return s.done }
 
-// end stops the request's forwarding and signals Done. It may be called
-// with Adapter.mu held.
+// end stops the request's forwarding and signals Done. The end is counted
+// before Done closes, so anyone who sees Done also sees the count. It may be
+// called with Adapter.mu held.
 func (s *session) end(reason string) {
 	s.endOnce.Do(func() {
 		s.ended.Store(true)
+		label := endReason(reason)
+		requestEnds.WithLabelValues(label).Inc()
 		close(s.done)
 		s.a.log.Info("request ended", "session", s.info.ID, "connector", s.info.Connector, "reason", reason,
-			"drops", s.drops.Load())
+			"endReason", label, "serviceUID", s.grant.Service.UID, "attachment", s.info.Attachment,
+			"attachmentUID", s.attUID, "route", s.info.Claim, "claimEpoch", s.info.Epoch,
+			"instanceEpoch", s.leaseEpoch, "drops", s.drops.Load())
 	})
 }
 
@@ -137,7 +145,7 @@ func (s *session) Close() error {
 // so packets the device queued for this request are discarded with it.
 func (s *session) close(ctx context.Context) {
 	s.closeOnce.Do(func() {
-		s.end("closed")
+		s.end(reasonClosed)
 		s.timerMu.Lock()
 		s.timer.Stop()
 		s.timerMu.Unlock()
@@ -165,7 +173,7 @@ func (s *session) setDeadline(notAfter time.Time) {
 	if s.ended.Load() {
 		return
 	}
-	s.timer = time.AfterFunc(notAfter.Sub(s.a.cfg.Now()), func() { s.end("grant expired") })
+	s.timer = time.AfterFunc(notAfter.Sub(s.a.cfg.Now()), func() { s.end(reasonGrantExpired) })
 }
 
 // refreshTimeout bounds one Refresh call; a slower answer is discarded.
@@ -206,7 +214,7 @@ func (s *session) refresh() string {
 	g, err := s.a.cfg.Authorizer.Refresh(ctx, s.grant)
 	switch {
 	case errors.Is(err, connectip.ErrUnauthenticated), errors.Is(err, connectip.ErrForbidden):
-		return "grant revoked"
+		return reasonGrantRevoked
 	case err != nil:
 		s.a.log.Warn("grant refresh failed; the request keeps its deadline", "session", s.info.ID,
 			"connector", s.info.Connector, "error", err)
@@ -215,9 +223,9 @@ func (s *session) refresh() string {
 		// An answer that arrived after its deadline is not fresh authority.
 		return ""
 	case !s.grant.sameAuthority(&g):
-		return "grant changed"
+		return reasonGrantChanged
 	case g.validate(s.grant.VPC, s.a.cfg.Now()) != nil:
-		return "refreshed grant is invalid"
+		return reasonGrantInvalid
 	}
 	s.setDeadline(g.NotAfter)
 	return ""
@@ -227,13 +235,38 @@ func (s *session) refresh() string {
 // not ended, the instance lease it was admitted under is still held and
 // valid, and its grant has not expired.
 func (s *session) forwarding() bool {
-	if s.ended.Load() {
-		return false
-	}
+	return !s.ended.Load() && s.stopReason() == ""
+}
+
+// stopReason returns why the request's authority no longer lets it carry a
+// packet, or "" while it does.
+func (s *session) stopReason() string {
 	a := s.a
 	l := a.lease.Load()
-	return l != nil && l.Key == s.leaseKey && l.Epoch == s.leaseEpoch &&
-		int64(a.cfg.Claims.Clock()) < a.deadline.Load() && a.cfg.Now().UnixNano() < s.notAfter.Load()
+	switch {
+	case l == nil || l.Key != s.leaseKey || l.Epoch != s.leaseEpoch ||
+		int64(a.cfg.Claims.Clock()) >= a.deadline.Load():
+		return reasonLeaseLost
+	case a.cfg.Now().UnixNano() >= s.notAfter.Load():
+		return reasonGrantExpired
+	}
+	return ""
+}
+
+// stopped returns errStopped once the request may no longer forward, and
+// nil while it may. The packet path can see the lease or grant deadline
+// pass before the renewal loop or the grant timer does; stopped then ends
+// the request itself with that reason, so Done is closed before the server
+// sees the error and the request's Close cannot record it as closed.
+func (s *session) stopped() error {
+	if s.ended.Load() {
+		return errStopped
+	}
+	if reason := s.stopReason(); reason != "" {
+		s.end(reason)
+		return errStopped
+	}
+	return nil
 }
 
 // Open implements connectip.PacketBackend. It opens the packet path of an
@@ -278,12 +311,13 @@ type packetSession struct {
 // WritePacket forwards a client packet. A full device drops the packet and
 // counts it rather than ending the request.
 func (p *packetSession) WritePacket(pkt []byte) error {
-	if !p.s.forwarding() {
-		return errStopped
+	if err := p.s.stopped(); err != nil {
+		return err
 	}
 	err := p.inner.WritePacket(pkt)
 	if errors.Is(err, unix.EAGAIN) {
 		p.s.drops.Add(1)
+		deviceDrops.Inc()
 		return nil
 	}
 	return err
@@ -293,10 +327,13 @@ func (p *packetSession) WritePacket(pkt []byte) error {
 // may no longer forward.
 func (p *packetSession) ReadPacket(ctx context.Context, buf []byte) (int, error) {
 	n, err := p.inner.ReadPacket(ctx, buf)
-	if err == nil && !p.s.forwarding() {
-		return 0, errStopped
+	if err != nil {
+		return n, err
 	}
-	return n, err
+	if err := p.s.stopped(); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // Close ends this request's packet registration only.

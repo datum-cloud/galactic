@@ -14,6 +14,10 @@ See [VPC dataplane — `galactic_usid_*`](observability/vpc-dataplane.md#vpc-dat
 
 See [Traffic](observability/vpc-dataplane.md#traffic).
 
+<a id="per-attachment-traffic"></a>
+
+See [Per-attachment traffic](observability/vpc-dataplane.md#per-attachment-traffic).
+
 <a id="drops"></a>
 
 See [Drops](observability/vpc-dataplane.md#drops).

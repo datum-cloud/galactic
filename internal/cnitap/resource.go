@@ -55,6 +55,11 @@ type resourceTracker struct {
 	// until it is written. The record names the tap, so it must go with it: one
 	// left behind has the node daemon waiting on an interface that is gone.
 	radvHostInterface string
+
+	// hostOnlyIfindex is the tap's ifindex once ADD has set its host-only
+	// ports, zero before. A tap rollback deletes takes its entry with it, so
+	// the next interface on that ifindex inherits no ports.
+	hostOnlyIfindex uint32
 }
 
 // cleanup rolls back the tracked resources in reverse creation order.
@@ -102,6 +107,9 @@ func (rt *resourceTracker) cleanup() {
 		// reclaim it, so it is deleted like one we created.
 		if rt.tapAdopted && rt.tapPriorOwner != "" {
 			return tap.RestoreOwner(vpc, vpcAttachment, rt.tapPriorOwner)
+		}
+		if rt.hostOnlyIfindex != 0 {
+			removeHostOnlyPorts(rt.hostOnlyIfindex)
 		}
 		return tap.Delete(vpc, vpcAttachment, rt.containerID)
 	})

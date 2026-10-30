@@ -266,6 +266,21 @@ jobs:
       - name: Render the manifests and check log settings
         run: task test:manifests
 
+  alerts:
+    name: Alerts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: arduino/setup-task@v3.0.0
+        with:
+          version: ${{ env.TASK_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test the alert rules
+        run: task test:alerts
+
   # Tier 2: Integration tests (every PR, main branch, and releases)
   test-e2e:
     name: E2E Tests

@@ -6,6 +6,7 @@ package cnitap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,6 +23,8 @@ import (
 	"go.datum.net/galactic/internal/hostconf"
 	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/nadpatch"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/radv"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -42,6 +45,11 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		if err := cnimaster.ValidatePrevResultAdd(pluginConf.PrevResult); err != nil {
 			return &types.Error{Code: 6, Msg: fmt.Sprintf("prevResult validation in ADD: %v", err)}
 		}
+	}
+
+	protectedPorts, err := hostOnlyPorts(args.StdinData)
+	if err != nil {
+		return &types.Error{Code: types.ErrDecodingFailure, Msg: err.Error()}
 	}
 
 	nodeName := os.Getenv("NODE_NAME")
@@ -115,6 +123,14 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	if err != nil {
 		return fmt.Errorf("get host interface %q: %w", hostName, err)
 	}
+	// Before anything addresses the tap, so the guest is never reachable on a
+	// host-only port. A list written here and then rolled back goes with the
+	// tap; an adopted tap's stale list is replaced, or cleared when this
+	// attachment asks for none.
+	if err := setHostOnlyPorts(uint32(hostLink.Attrs().Index), protectedPorts); err != nil {
+		return err
+	}
+	tracker.hostOnlyIfindex = uint32(hostLink.Attrs().Index)
 	hostMac := hostLink.Attrs().HardwareAddr.String()
 	hostMTU := hostLink.Attrs().MTU
 	slog.Debug("ADD: host interface ready", "name", hostName, "mac", hostMac, "mtu", hostMTU)
@@ -201,4 +217,27 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 	result := buildTapResult(pluginConf, ipamResult, resultIfName, hostMac, hostMTU)
 	return types.PrintResult(result, pluginConf.CNIVersion)
+}
+
+// setHostOnlyPorts writes ports as ifindex's host-only TCP ports, or removes
+// any entry when ports is empty. A datapath without the table cannot enforce a
+// list, so asking for one there fails ADD; asking for none is a no-op.
+func setHostOnlyPorts(ifindex uint32, ports []uint16) error {
+	table, closer, err := ifindexvrfmap.OpenPinnedHostOnlyPorts(attach.PinDir)
+	if err != nil {
+		if len(ports) == 0 && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("open host-only port table: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+
+	if len(ports) == 0 {
+		return table.Unregister(ifindex)
+	}
+	if err := table.Register(ifindex, ports); err != nil {
+		return err
+	}
+	slog.Debug("ADD: host-only ports set", "ifindex", ifindex, "ports", ports)
+	return nil
 }

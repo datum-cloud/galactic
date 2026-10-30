@@ -38,7 +38,10 @@ type PacketBackend interface {
 	Open(ctx context.Context, info SessionInfo) (BackendSession, error)
 }
 
-// BackendSession is one request's packet path into its VPC.
+// BackendSession is one request's packet path into its VPC. Once the
+// request's Lease has ended, its packet I/O returns an error wrapping
+// ErrLeaseEnded, so the server counts the request as ended by its lease
+// rather than by a backend failure.
 type BackendSession interface {
 	// WritePacket delivers one IP packet from the client, or an ICMP error
 	// generated on the client's behalf, into the VPC. The implementation must
@@ -51,6 +54,12 @@ type BackendSession interface {
 	// Close ends the session and unblocks pending I/O. It must be idempotent.
 	Close() error
 }
+
+// ErrLeaseEnded indicates that a BackendSession stopped because the
+// request's Lease ended: expiry, revocation or ownership loss. The backend
+// may notice the end before Lease.Done closes, so a packet in flight at the
+// deadline is attributed to the lease rather than to the device.
+var ErrLeaseEnded = errors.New("lease ended")
 
 // ErrUnauthenticated indicates a missing or invalid client identity.
 var ErrUnauthenticated = errors.New("unauthenticated")

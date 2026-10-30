@@ -5,6 +5,7 @@ package rollout
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -227,7 +229,7 @@ func asControllerServiceAccount(t *testing.T, cfg *rest.Config) *rest.Config {
 	return impersonated
 }
 
-func eventually(t *testing.T, what string, cond func() bool) {
+func eventually(t *testing.T, c client.Client, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -236,7 +238,59 @@ func eventually(t *testing.T, what string, cond func() bool) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s", what)
+	t.Fatalf("timed out waiting for %s; rollout state:%s", what, rolloutState(c))
+}
+
+// rolloutState renders what the controllers last wrote and what the node
+// agent last reported, so a timed-out wait names the state that stalled
+// instead of only the wait.
+func rolloutState(c client.Client) string {
+	ctx := context.Background()
+	var b strings.Builder
+	d := &networkv1alpha1.FabricRouterDeployment{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: testNode}, d); err != nil {
+		return fmt.Sprintf("\n  deployment %s: %v", testNode, err)
+	}
+	heartbeat := "<none>"
+	if d.Status.HeartbeatTime != nil {
+		heartbeat = d.Status.HeartbeatTime.UTC().Format(time.RFC3339Nano)
+	}
+	fmt.Fprintf(&b, "\n  deployment %s: source=%s epoch=%d activeRevision=%v authorization=%v",
+		testNode, d.Spec.Source, d.Spec.ActivationEpoch, d.Spec.ActiveRevisionRef, d.Spec.AuthorizationRef)
+	fmt.Fprintf(&b, " heartbeat=%s epochs=%v applied={epoch=%d revision=%q digest=%q}",
+		heartbeat, d.Status.Epochs, d.Status.AppliedEpoch, d.Status.AppliedRevision, d.Status.AppliedDigest)
+	releases := &networkv1alpha1.FabricReleaseAuthorizationList{}
+	if err := c.List(ctx, releases, client.InNamespace(testNS)); err != nil {
+		fmt.Fprintf(&b, "\n  releases: %v", err)
+		return b.String()
+	}
+	for _, a := range releases.Items {
+		fmt.Fprintf(&b, "\n  release %s: phase=%q outstanding=%t conditions=%v",
+			a.Name, a.Status.Phase, a.Status.Outstanding(), a.Status.Conditions)
+	}
+	return b.String()
+}
+
+// TestRolloutState keeps the timeout diagnostic honest: it must name the
+// deployment epoch and every release phase, which is what tells a stalled
+// wait apart from one the controllers never advanced.
+func TestRolloutState(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = networkv1alpha1.AddToScheme(scheme)
+	dep := &networkv1alpha1.FabricRouterDeployment{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: testNode}}
+	dep.Spec.ActivationEpoch = 2
+	dep.Status.AppliedEpoch = 1
+	release := &networkv1alpha1.FabricReleaseAuthorization{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: "r1"}}
+	release.Status.Phase = networkv1alpha1.FabricReleasePhaseStarted
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dep, release).Build()
+	got := rolloutState(c)
+	for _, want := range []string{
+		"deployment edge-a", "epoch=2", "applied={epoch=1", "release r1", "phase=\"Started\"",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rolloutState() missing %q in %q", want, got)
+		}
+	}
 }
 
 func getDeployment(t *testing.T, c client.Client) *networkv1alpha1.FabricRouterDeployment {
@@ -330,7 +384,7 @@ func rolloutEndToEnd(t *testing.T, c client.Client) {
 	peer := seed(t, c)
 	ctx := context.Background()
 
-	eventually(t, "the deployment with the first revision as candidate", func() bool {
+	eventually(t, c, "the deployment with the first revision as candidate", func() bool {
 		d := &networkv1alpha1.FabricRouterDeployment{}
 		err := c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: testNode}, d)
 		return err == nil && d.Spec.CandidateRevisionRef != nil
@@ -346,7 +400,7 @@ func rolloutEndToEnd(t *testing.T, c client.Client) {
 	if err := c.Create(ctx, newRelease("r0", 1, dep, rev1)); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "r0 cancelled", func() bool { return phase(c, "r0") == networkv1alpha1.FabricReleasePhaseCancelled })
+	eventually(t, c, "r0 cancelled", func() bool { return phase(c, "r0") == networkv1alpha1.FabricReleasePhaseCancelled })
 	if c := meta.FindStatusCondition(getRelease(t, c, "r0").Status.Conditions, ConditionProgressing); c == nil ||
 		c.Reason != reasonInvalidTarget {
 		t.Errorf("r0 condition = %+v", c)
@@ -361,7 +415,7 @@ func rolloutEndToEnd(t *testing.T, c client.Client) {
 	if err := c.Create(ctx, newRelease("r1", 2, dep, rev1)); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the epoch 1 promotion", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 1 })
+	eventually(t, c, "the epoch 1 promotion", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 1 })
 	dep = getDeployment(t, c)
 	r1 := getRelease(t, c, "r1")
 	if dep.Spec.ActiveRevisionRef.Name != rev1.Name || dep.Spec.AuthorizationRef.UID != string(r1.UID) ||
@@ -372,8 +426,8 @@ func rolloutEndToEnd(t *testing.T, c client.Client) {
 		t.Error("a started release has no finalizer")
 	}
 	report(t, c, networkv1alpha1.FabricStageCommitted, rev1)
-	eventually(t, "r1 completed", func() bool { return phase(c, "r1") == networkv1alpha1.FabricReleasePhaseCompleted })
-	eventually(t, "r1's finalizer removed", func() bool { return len(getRelease(t, c, "r1").Finalizers) == 0 })
+	eventually(t, c, "r1 completed", func() bool { return phase(c, "r1") == networkv1alpha1.FabricReleasePhaseCompleted })
+	eventually(t, c, "r1's finalizer removed", func() bool { return len(getRelease(t, c, "r1").Finalizers) == 0 })
 
 	// A new revision: change a peer's description.
 	p := &networkv1alpha1.BGPPeer{}
@@ -384,9 +438,9 @@ func rolloutEndToEnd(t *testing.T, c client.Client) {
 	if err := c.Update(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "a second revision", func() bool { return latestRevision(t, c).Name != rev1.Name })
+	eventually(t, c, "a second revision", func() bool { return latestRevision(t, c).Name != rev1.Name })
 	rev2 := latestRevision(t, c)
-	eventually(t, "the candidate follows", func() bool {
+	eventually(t, c, "the candidate follows", func() bool {
 		return getDeployment(t, c).Spec.CandidateRevisionRef.Name == rev2.Name
 	})
 
@@ -394,7 +448,7 @@ func rolloutEndToEnd(t *testing.T, c client.Client) {
 	if err := c.Create(ctx, newRelease("r-old", 1, dep, rev2)); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "r-old cancelled", func() bool {
+	eventually(t, c, "r-old cancelled", func() bool {
 		return phase(c,
 			"r-old") == networkv1alpha1.FabricReleasePhaseCancelled
 	})
@@ -403,7 +457,7 @@ func rolloutEndToEnd(t *testing.T, c client.Client) {
 	if err := c.Create(ctx, newRelease("r2", 3, dep, rev2)); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the epoch 2 promotion", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 2 })
+	eventually(t, c, "the epoch 2 promotion", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 2 })
 	dep = getDeployment(t, c)
 	if r := dep.Spec.Recovery; r == nil || r.TargetRevisionRef == nil || r.TargetRevisionRef.Name != rev1.Name ||
 		r.TargetDependencyDigest != rev1.Spec.ActivationDependencyDigest {
@@ -414,15 +468,15 @@ func rolloutEndToEnd(t *testing.T, c client.Client) {
 	if err := c.Create(ctx, newRelease("r3", 4, dep, rev1)); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "r3 pending", func() bool { return phase(c, "r3") == networkv1alpha1.FabricReleasePhasePending })
+	eventually(t, c, "r3 pending", func() bool { return phase(c, "r3") == networkv1alpha1.FabricReleasePhasePending })
 
 	report(t, c, networkv1alpha1.FabricStageRecovered, rev1)
-	eventually(t, "r2 failed and recovery verified", func() bool {
+	eventually(t, c, "r2 failed and recovery verified", func() bool {
 		a := getRelease(t, c, "r2")
 		return a.Status.Phase == networkv1alpha1.FabricReleasePhaseFailed && a.Status.RecoveryVerified
 	})
 	// r2 no longer blocks: r3 starts and promotes rev1 again at epoch 3.
-	eventually(t, "r3 promoting", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 3 })
+	eventually(t, c, "r3 promoting", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 3 })
 	if r := getDeployment(t, c).Spec.Recovery; r == nil || r.TargetRevisionRef != nil {
 		t.Errorf("a recovery to the revision being promoted: %+v", r)
 	}
@@ -442,7 +496,7 @@ func TestRolloutUnknownWhenSilent(t *testing.T) {
 	c := startRollout(t)
 	seed(t, c)
 	ctx := context.Background()
-	eventually(t, "the deployment", func() bool {
+	eventually(t, c, "the deployment", func() bool {
 		return c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: testNode},
 			&networkv1alpha1.FabricRouterDeployment{}) == nil
 	})
@@ -455,11 +509,11 @@ func TestRolloutUnknownWhenSilent(t *testing.T) {
 	if err := c.Create(ctx, newRelease("silent", 1, dep, rev)); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the promotion", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 1 })
+	eventually(t, c, "the promotion", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 1 })
 	// No heartbeat at all: silent.
-	eventually(t, "unknown", func() bool { return phase(c, "silent") == networkv1alpha1.FabricReleasePhaseUnknown })
+	eventually(t, c, "unknown", func() bool { return phase(c, "silent") == networkv1alpha1.FabricReleasePhaseUnknown })
 	report(t, c, networkv1alpha1.FabricStageAccepted, nil)
-	eventually(t, "started again", func() bool {
+	eventually(t, c, "started again", func() bool {
 		return phase(c,
 			"silent") == networkv1alpha1.FabricReleasePhaseStarted
 	})
@@ -475,7 +529,7 @@ func TestRolloutReactivation(t *testing.T) {
 	c := startRolloutAs(t, true)
 	peer := seed(t, c)
 	ctx := context.Background()
-	eventually(t, "the deployment", func() bool {
+	eventually(t, c, "the deployment", func() bool {
 		return c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: testNode},
 			&networkv1alpha1.FabricRouterDeployment{}) == nil
 	})
@@ -488,9 +542,9 @@ func TestRolloutReactivation(t *testing.T) {
 	if err := c.Create(ctx, newRelease("r1", 1, dep, rev1)); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "epoch 1", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 1 })
+	eventually(t, c, "epoch 1", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 1 })
 	report(t, c, networkv1alpha1.FabricStageCommitted, rev1)
-	eventually(t, "r1 completed", func() bool { return phase(c, "r1") == networkv1alpha1.FabricReleasePhaseCompleted })
+	eventually(t, c, "r1 completed", func() bool { return phase(c, "r1") == networkv1alpha1.FabricReleasePhaseCompleted })
 
 	p := &networkv1alpha1.BGPPeer{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: peer}, p); err != nil {
@@ -500,14 +554,14 @@ func TestRolloutReactivation(t *testing.T) {
 	if err := c.Update(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "a second revision", func() bool { return latestRevision(t, c).Name != rev1.Name })
+	eventually(t, c, "a second revision", func() bool { return latestRevision(t, c).Name != rev1.Name })
 	rev2 := latestRevision(t, c)
 	if err := c.Create(ctx, newRelease("r2", 2, dep, rev2)); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "epoch 2", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 2 })
+	eventually(t, c, "epoch 2", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 2 })
 	report(t, c, networkv1alpha1.FabricStageCommitted, rev2)
-	eventually(t, "r2 completed", func() bool { return phase(c, "r2") == networkv1alpha1.FabricReleasePhaseCompleted })
+	eventually(t, c, "r2 completed", func() bool { return phase(c, "r2") == networkv1alpha1.FabricReleasePhaseCompleted })
 
 	// Written for rev1 before r2 moved the router on: refused, not a rollback.
 	stale := newRelease("stale", 3, dep, rev1)
@@ -515,7 +569,7 @@ func TestRolloutReactivation(t *testing.T) {
 	if err := c.Create(ctx, stale); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "stale cancelled", func() bool {
+	eventually(t, c, "stale cancelled", func() bool {
 		return phase(c, "stale") == networkv1alpha1.FabricReleasePhaseCancelled
 	})
 	if cond := meta.FindStatusCondition(getRelease(t, c, "stale").Status.Conditions, ConditionProgressing); cond == nil ||
@@ -530,7 +584,7 @@ func TestRolloutReactivation(t *testing.T) {
 	if err := c.Create(ctx, newRelease("again", 4, dep, rev2)); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "again completed", func() bool {
+	eventually(t, c, "again completed", func() bool {
 		return phase(c, "again") == networkv1alpha1.FabricReleasePhaseCompleted
 	})
 	if e := getDeployment(t, c).Spec.ActivationEpoch; e != 2 {
@@ -542,7 +596,7 @@ func TestRolloutReactivation(t *testing.T) {
 	if err := c.Create(ctx, re); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the re-activation at epoch 3", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 3 })
+	eventually(t, c, "the re-activation at epoch 3", func() bool { return getDeployment(t, c).Spec.ActivationEpoch == 3 })
 	dep = getDeployment(t, c)
 	if dep.Spec.ActiveRevisionRef.Name != rev2.Name || dep.Spec.AuthorizationRef.UID != string(getRelease(t, c,
 		"reactivate").UID) {
@@ -552,7 +606,7 @@ func TestRolloutReactivation(t *testing.T) {
 		t.Errorf("recovery = %+v, want no target, not the earlier %s", dep.Spec.Recovery, rev1.Name)
 	}
 	report(t, c, networkv1alpha1.FabricStageCommitted, rev2)
-	eventually(t, "reactivate completed", func() bool {
+	eventually(t, c, "reactivate completed", func() bool {
 		return phase(c, "reactivate") == networkv1alpha1.FabricReleasePhaseCompleted
 	})
 }
@@ -566,7 +620,7 @@ func TestRolloutRefusesUnreadableCredential(t *testing.T) {
 	c := startRolloutAs(t, true)
 	seed(t, c)
 	ctx := context.Background()
-	eventually(t, "a revision", func() bool {
+	eventually(t, c, "a revision", func() bool {
 		r := &networkv1alpha1.BGPRouter{}
 		return c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: testNode}, r) == nil &&
 			r.Status.Fabric != nil && r.Status.Fabric.LatestRevision != ""
@@ -605,7 +659,7 @@ func TestRolloutRefusesUnreadableCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	var cond *metav1.Condition
-	eventually(t, "the release cancelled", func() bool {
+	eventually(t, c, "the release cancelled", func() bool {
 		a := &networkv1alpha1.FabricReleaseAuthorization{}
 		if err := c.Get(ctx, client.ObjectKey{Namespace: other, Name: rel.Name}, a); err != nil {
 			return false

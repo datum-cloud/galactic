@@ -3,10 +3,13 @@
 Metrics, scrape configuration, shipped alert rules and log format. Use the subsystem reference for metric names, labels and interpretation.
 
 - [VPC dataplane — `galactic_usid_*`](vpc-dataplane.md)
+- [Instance VPC attachments — `galactic_vpc_instance_*`](vpc-attachments.md)
+- [VPC attachment traffic — `galactic_vpc_attachment_*`](vpc-dataplane.md#per-attachment-traffic)
 - [Tenant egress pool — `galactic_cni_egress_*`](egress-pool.md)
 - [VPC ingress — `galactic_ingress_sidecar_*`](vpc-ingress.md)
 - [Edge load balancer — `galactic_edge_*`](gateway.md)
 - [Galactic Edge foundation — `galactic_edge_foundation_*`](edge.md)
+- [MASQUE connector — `galactic_connectip_*` and `galactic_masque_*`](masque.md)
 - [Traffic policy — `galactic_cni_traffic_policy_*`](traffic-policy.md)
 - [Routing](routing.md)
 - [NAT66 / NAT64 — `galactic_nat_*`](nat.md)
@@ -50,6 +53,11 @@ The tests in `internal/instrumentation` enforce the rule in the unit suite:
   creates its metrics at startup rather than when a package loads, its test
   first creates them through the same function the command calls, and also
   runs the library's lint, which `TestMetricsLint` can't reach.
+- `TestCustomCollectorLabels` resolves the label names of every
+  `prometheus.NewDesc` in the module and fails on one the collection
+  pipeline reserves, which the library doesn't check for a custom collector.
+  It also fails when it can't resolve a descriptor's names, so build them
+  from string constants, literals, `append` and `slices.Clone`.
 
 ## Where the metrics come from
 
@@ -63,6 +71,7 @@ the fabric-api gateway are Deployments, scraped per pod.
 | Area                    | Component                                                 | Metric prefix                                                 | Port           | `job` from `config/monitoring/`          |
 | ----------------------- | --------------------------------------------------------- | ------------------------------------------------------------- | -------------- | ---------------------------------------- |
 | VPC dataplane           | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_usid_*`                                             | 9180           | `galactic-cni`                           |
+| VPC attachment traffic  | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_vpc_attachment_*`                                   | 9180           | `galactic-cni`                           |
 | Tenant egress pool      | `galactic-cni`                                            | `galactic_cni_egress_*`                                       | 9180           | `galactic-cni`                           |
 | VPC ingress             | `galactic-vrf`                                            | `galactic_ingress_sidecar_*`                                  | 9182 (default) | none shipped                             |
 | VPC ingress return path | `galactic-cni` (`credential-refresh`)                     | `galactic_sidecar_return_*`                                   | 9180           | `galactic-cni`                           |
@@ -72,6 +81,7 @@ the fabric-api gateway are Deployments, scraped per pod.
 | Private service routes  | `galactic-router` (plain mode only)                       | `galactic_service_route_*`                                    | 9179           | `galactic-router`                        |
 | Traffic policy          | `galactic-router` with `GALACTIC_ROUTER_TRAFFIC_POLICY`   | `galactic_cni_traffic_policy_*`                               | 9179           | `galactic-router`                        |
 | Traffic policy webhook  | `galactic-controller`                                     | controller-runtime                                            | 9184           | `galactic-controller`                    |
+| Instance attachments    | `galactic-controller --role=cell`                         | `galactic_vpc_instance_*`                                     | 9184           | `galactic-controller`                    |
 | Galactic Edge (core)    | `galactic-controller --role=cell --edge`                  | `galactic_edge_foundation_*`                                  | 9184           | `galactic-controller`                    |
 | Galactic Edge (node)    | `galactic-edge`                                           | `galactic_edge_foundation_*`, controller-runtime              | 9186           | `galactic-edge`                          |
 | Underlay routing (FRR)  | `fabric-router` `frr-exporter` sidecar                    | `frr_*`                                                       | 9342           | `fabric-router`                          |
@@ -80,17 +90,19 @@ the fabric-api gateway are Deployments, scraped per pod.
 | Fabric looking glass    | `fabric-api` node sidecar                                 | `fabric_api_node_*`, `fabric_api_*`                           | 9345           | `fabric-api-node`                        |
 | Fabric looking glass    | `fabric-api` cell gateway                                 | `fabric_api_gateway_*`, `fabric_api_*`                        | 9347           | `fabric-api-gateway`                     |
 | NAT66 / NAT64           | `galactic-nat` (one per egress shard)                     | `galactic_nat_*`                                              | 9182           | `galactic-nat`                           |
+| MASQUE connector        | `masque-provider`                                         | `galactic_connectip_*`, `galactic_masque_*`                   | 9188           | `masque-provider`                        |
 
 `config/monitoring/` ships PodMonitors for `galactic-cni`,
 `galactic-router`, `fabric-router` (including the opt-in fabric-api
 sidecar), `fabric-router-controller`, the fabric-api gateway,
-`galactic-nat`, `galactic-controller` and `galactic-edge`. Scraping
+`galactic-nat`, `galactic-controller`, `galactic-edge` and
+`masque-provider` (in the `masque-system` namespace). Scraping
 `galactic-vrf` or `galactic-gateway` needs a scrape object of your own. Copy the shipped
 PodMonitors' relabeling of `__meta_kubernetes_pod_node_name` into `node`:
 every galactic metric is per node, and `node` is the label you group and
 alert by. `fabric-router-controller`'s fleet series name the node each
-deployment or router targets themselves, and their `namespace` is the
-object's, which its PodMonitor keeps with `honorLabels`.
+deployment or router targets in `target_node`, and the object's namespace
+in `resource_namespace`.
 
 The eBPF-backed metrics (`galactic_usid_*`, `galactic_cni_egress_shard_*`,
 `galactic_edge_*`, `galactic_edge_foundation_gate_drops_total`, `galactic_nat_*`) are read from BPF maps at scrape time,

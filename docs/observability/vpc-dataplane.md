@@ -76,6 +76,46 @@ sum by (vpc, direction) (rate(galactic_usid_vrf_dropped_packets_total[5m]))
 sum by (node) (rate(galactic_usid_vrf_forwarded_bytes_total{vpc=""}[5m]))
 ```
 
+### Per-attachment traffic
+
+Each VPC attachment has a host-side link on the node. These series read that
+link's kernel byte counters at scrape time, so each series is one attachment's
+own traffic, unlike the per-VRF series above. The collector registers when the
+datapath starts, so the series appear on the same `galactic-cni` port as
+`galactic_usid_*`.
+
+| Metric                                         | Type    | Labels                                      | Meaning                                                                                                              |
+| ---------------------------------------------- | ------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `galactic_vpc_attachment_receive_bytes_total`  | counter | `vpc`, `vpc_attachment`, `host_interface`   | Bytes delivered to the instance through this attachment, read from the host-side link's transmit counter            |
+| `galactic_vpc_attachment_transmit_bytes_total` | counter | same                                        | Bytes sent by the instance through this attachment, read from the host-side link's receive counter                  |
+
+- `vpc` and `vpc_attachment` are the unpadded base62 IDs, as in the series
+  above. `host_interface` is the name of the host-side link, as `ip link`
+  shows it.
+- Direction is from the instance's side. `receive` is what the host link
+  transmits toward the instance, and `transmit` is what the host link
+  receives from it.
+- The counters are link-layer frame bytes. They run about 14 bytes per packet
+  above `galactic_usid_vrf_forwarded_bytes_total`, which counts the IP packet
+  without the Ethernet header. The host link also counts frames the VRF
+  counters never see, such as ARP, Neighbor Discovery, and other link-local
+  traffic, and frames the datapath drops, so the gap is larger than the
+  per-packet header difference.
+- The counters reset when the link is recreated, which `rate()` copes with.
+  A series disappears with its link.
+- A link the kernel reports no statistics for is skipped. If the scrape can't
+  list links, the collector reports an invalid metric, and the `/metrics`
+  endpoint on port 9180 returns HTTP 500 for that scrape. Every
+  `galactic-cni` series is missing from that scrape, not only these, and `up`
+  is 0. `galactic_netlink_dump_*` shows whether link listings were interrupted;
+  see [Netlink listings](netlink.md).
+- Cardinality is two series per attachment on the node.
+
+```promql
+# Throughput per attachment as the instance receives it, bits/s
+sum by (vpc, vpc_attachment) (rate(galactic_vpc_attachment_receive_bytes_total[5m])) * 8
+```
+
 ### Drops
 
 `galactic_usid_drops_total{reason}` (counter) counts packets the uSID

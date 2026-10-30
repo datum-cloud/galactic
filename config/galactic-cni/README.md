@@ -100,6 +100,13 @@ The end-to-end check is loading the datapath in a memory cgroup: with a 32M
 limit it fails at `service_reverse_table` with `cannot allocate memory`, and
 with 96M it loads.
 
+The limit is 256Mi. After a reboot the daemon recreates the maps and refills
+the policy maps, and on 48- to 64-core hosts that took a working set of up to
+126Mi, which a 128Mi limit cannot hold: one staging host crash-looped out of
+memory under it. The map sizes grow with CPU count, which the unit test's
+12-CPU measurement does not show, so the limit keeps about twice the largest
+measured peak.
+
 ## The `bpf-fs` hostPath mount
 
 `/sys/fs/bpf` is the host's bpffs mount ("All maps pinned under

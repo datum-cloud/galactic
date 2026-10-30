@@ -49,7 +49,7 @@ func TestInstanceOwner(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{test.owner}}}
-			got, found := instanceOwner(pod)
+			got, found := InstanceOwner(pod)
 			if got != test.want || found != (test.want != "") {
 				t.Errorf("got (%q, %v), want (%q, %v)", got, found, test.want, test.want != "")
 			}

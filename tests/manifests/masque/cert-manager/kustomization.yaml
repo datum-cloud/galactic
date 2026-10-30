@@ -1,0 +1,8 @@
+# The grant authority's certificate issued by cert-manager, and the provider
+# pods trusting the CA that signed it.
+resources:
+  - ../../../../config/masque/authority
+  - ../../../../config/masque/provider
+components:
+  - ../../../../config/masque/authority/components/cert-manager
+  - ../../../../config/masque/provider/components/cert-manager

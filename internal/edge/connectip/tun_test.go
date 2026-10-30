@@ -12,9 +12,11 @@ import (
 	"net/netip"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -172,5 +174,85 @@ func TestTUNPrefixDemultiplexing(t *testing.T) {
 	defer cancel()
 	if _, err := replacement.ReadPacket(ctx, make([]byte, maxPacketSize)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// datagramBackend returns a TUNBackend for vpc over one end of a datagram
+// socket pair, and the other end, which stands in for the device's kernel
+// side.
+func datagramBackend(t *testing.T, vpc string) (*TUNBackend, *os.File) {
+	t.Helper()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := os.NewFile(uintptr(fds[0]), vpc)
+	peer := os.NewFile(uintptr(fds[1]), vpc+"-peer")
+	t.Cleanup(func() { _ = peer.Close() })
+	backend, err := NewTUNBackend(dev, vpc)
+	if err != nil {
+		_ = dev.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	return backend, peer
+}
+
+// TestTUNTenantsWithTheSamePrefix gives two VPCs a session for the same
+// /96 and checks that a packet read from one VPC's device never reaches the
+// other's session, and that packets no session takes are counted.
+func TestTUNTenantsWithTheSamePrefix(t *testing.T) {
+	blue, bluePeer := datagramBackend(t, vpcBlue)
+	red, redPeer := datagramBackend(t, vpcRed)
+	if _, err := blue.Open(t.Context(), SessionInfo{VPC: vpcRed, Prefix: firstPrefix}); err == nil {
+		t.Fatal("blue's backend opened a red session")
+	}
+	blueSess, err := blue.Open(t.Context(), SessionInfo{VPC: vpcBlue, Prefix: firstPrefix})
+	if err != nil {
+		t.Fatal(err)
+	}
+	redSess, err := red.Open(t.Context(), SessionInfo{VPC: vpcRed, Prefix: firstPrefix})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	counted := func(reason string) float64 {
+		return testutil.ToFloat64(packetsDenied.WithLabelValues(toClient, reason))
+	}
+	ipv4, noSession := counted(reasonIPv4)+1, counted(reasonNoSession)+1
+
+	if _, err := redPeer.Write(echoRequest(t, testTarget, firstClient, 1, 128)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := redPeer.Write(ipv4Packet()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bluePeer.Write(echoRequest(t, testTarget, sibling, 2, 128)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, maxPacketSize)
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	defer cancel()
+	n, err := redSess.ReadPacket(ctx, buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id := echoID(t, parseICMPv6(t, buf[:n])); id != 1 {
+		t.Fatalf("red session read echo id %d, want 1", id)
+	}
+	quiet, cancelQuiet := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancelQuiet()
+	if n, err := blueSess.ReadPacket(quiet, buf); err == nil {
+		t.Fatalf("blue session read red's packet: % x", buf[:n])
+	}
+	deadline := time.Now().Add(testTimeout)
+	for (counted(reasonIPv4) != ipv4 || counted(reasonNoSession) != noSession) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := counted(reasonIPv4); got != ipv4 {
+		t.Errorf("IPv4 denials = %v, want %v", got, ipv4)
+	}
+	if got := counted(reasonNoSession); got != noSession {
+		t.Errorf("no-session denials = %v, want %v", got, noSession)
 	}
 }

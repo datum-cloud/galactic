@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: tun-device-plugin
-  namespace: kube-system
+  namespace: galactic-system
   labels:
     app.kubernetes.io/name: tun-device-plugin
 spec:
@@ -15,8 +15,23 @@ spec:
         app.kubernetes.io/name: tun-device-plugin
     spec:
       priorityClassName: system-node-critical
-      nodeSelector:
-        galactic.datumapis.com/edge: enabled
+      # The nodes galactic-edge runs on, where packet-access provider pods
+      # schedule.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - edge
+                  - key: galactic.datumapis.com/edge
+                    operator: In
+                    values:
+                      - enabled
       tolerations:
         - operator: Exists
       containers:

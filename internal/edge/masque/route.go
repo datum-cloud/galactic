@@ -80,8 +80,25 @@ func (a *Adapter) acquireRoute(ctx context.Context, g *Grant, e *attachment) (*r
 	return r, nil
 }
 
-// claim waits until core accepts r's claim for e.
+// errRouteRefused is a claim core refuses for a reason no retry changes.
+var errRouteRefused = errors.New("core refuses route")
+
+// claim waits until core accepts r's claim for e, and counts a claim that
+// fails. A cancelled claim is not counted.
 func (a *Adapter) claim(ctx context.Context, g *Grant, e *attachment, r *route) error {
+	err := a.claimRoute(ctx, g, e, r)
+	switch {
+	case errors.Is(err, errRouteRefused):
+		routeClaims.WithLabelValues(claimRefused).Inc()
+	case errors.Is(err, context.Canceled):
+		// A cancelled claim is a client that went away, not a failed claim.
+	case err != nil:
+		routeClaims.WithLabelValues(claimFailed).Inc()
+	}
+	return err
+}
+
+func (a *Adapter) claimRoute(ctx context.Context, g *Grant, e *attachment, r *route) error {
 	if err := r.prep.lock(ctx); err != nil {
 		return err
 	}
@@ -113,7 +130,7 @@ func (a *Adapter) claimOnce(ctx context.Context, g *Grant, e *attachment, r *rou
 		}
 		// The claim is about to move to another attachment or lease: the
 		// requests admitted under the accepted one stop first.
-		a.deactivate(r, "route claimed again")
+		a.deactivate(r, reasonRouteMoved)
 	}
 	a.mu.Unlock()
 	if !served {
@@ -149,7 +166,7 @@ func (a *Adapter) claimOnce(ctx context.Context, g *Grant, e *attachment, r *rou
 	if !acceptedFor(&rt, e.name, attUID, l) {
 		if c := meta.FindStatusCondition(rt.Status.Conditions, galacticv1alpha1.EdgeRouteClaimed); c != nil &&
 			c.Status == metav1.ConditionFalse && refusals[c.Reason] {
-			return "", fmt.Errorf("core refuses route %s: %s: %s", rt.Name, c.Reason, c.Message)
+			return "", fmt.Errorf("%w %s: %s: %s", errRouteRefused, rt.Name, c.Reason, c.Message)
 		}
 		return "waiting for core to accept route " + rt.Name + routeState(&rt), nil
 	}
@@ -162,6 +179,7 @@ func (a *Adapter) claimOnce(ctx context.Context, g *Grant, e *attachment, r *rou
 		return "", errors.New("the instance's lease changed while the route was claimed")
 	}
 	r.active, r.att, r.attGen, r.attUID, r.epoch, r.lease = true, e, gen, attUID, rt.Spec.Claim.Epoch, l
+	routeClaims.WithLabelValues(claimAccepted).Inc()
 	a.log.Info("route accepted", "route", r.name, "prefix", r.prefix, "epoch", r.epoch, "attachment", e.name)
 	return "", nil
 }
@@ -227,7 +245,7 @@ func (a *Adapter) dropRoute(r *route) bool {
 	if r.refs > 0 {
 		return false
 	}
-	a.deactivate(r, "route released")
+	a.deactivate(r, reasonRouteReleased)
 	return true
 }
 
@@ -317,7 +335,8 @@ func (a *Adapter) checkRoute(ctx context.Context, r *route) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if r.gen == gen && r.active {
+		routeClaims.WithLabelValues(claimRevoked).Inc()
 		a.log.Info("route no longer accepted", "route", r.name, "epoch", epoch)
-		a.deactivate(r, "route no longer accepted")
+		a.deactivate(r, reasonRouteRevoked)
 	}
 }

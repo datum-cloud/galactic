@@ -102,7 +102,9 @@ type masque struct {
 // deployed agent creates the fixture's PacketAccess devices and the
 // unprivileged fixture opens them, two VPCs with identical connector /96s
 // stay isolated in both directions, NAT egress works from the attachment
-// node, two connectors share one attachment and ending one leaves the
+// node, return traffic reaches client-managed addresses in several
+// subdivisions of a connector's /96 through its one aggregate route, two
+// connectors share one attachment and ending one leaves the
 // other forwarding, a restarted provider process adopts its attachments,
 // router maintenance keeps an attachment in use, a connector's second
 // request replaces its first without both forwarding, a stalled provider,
@@ -127,6 +129,7 @@ func TestMASQUE(t *testing.T) {
 	t.Run("A06-packet-access-registration", m.rowRegistration)
 	t.Run("M07-isolation", func(t *testing.T) { m.isolation(t, "cold") })
 	t.Run("nat-egress", m.rowNATEgress)
+	t.Run("M12-aggregate-routing", m.rowAggregateRouting)
 	t.Run("A16-pod-link-route-drift", m.rowRouteDrift)
 	t.Run("shared-attachment-cancel", m.rowSharedCancel)
 	t.Run("maintenance-during-use", m.rowMaintenance)
@@ -143,16 +146,7 @@ func TestMASQUE(t *testing.T) {
 func newMasque(t *testing.T, l *lab) *masque {
 	t.Helper()
 	certPEM, keyPEM, caPEM := masqueCerts(t)
-	ca := filepath.Join(l.artifacts, "masque-ca.pem")
-	if err := os.WriteFile(ca, caPEM, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for _, n := range []string{computeNode, edgeNode1, edgeNode2} {
-		cp := exec.CommandContext(context.Background(), "docker", "cp", ca, n+":"+masqueCA)
-		if out, err := cp.CombinedOutput(); err != nil {
-			t.Fatalf("copy CA to %s: %v: %s", n, err, out)
-		}
-	}
+	l.copyToNodes(t, "masque-ca.pem", masqueCA, caPEM)
 	return &masque{
 		l: l,
 		a: &masqueTenant{tn: tenant{vpcNamespace: "ns10", vpc: "10", provider: masqueProvider},
@@ -164,34 +158,74 @@ func newMasque(t *testing.T, l *lab) *masque {
 	}
 }
 
+// copyToNodes writes b to path on every dfw node, through an artifact named
+// name.
+func (l *lab) copyToNodes(t *testing.T, name, path string, b []byte) {
+	t.Helper()
+	src := filepath.Join(l.artifacts, name)
+	if err := os.WriteFile(src, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{computeNode, edgeNode1, edgeNode2} {
+		cp := exec.CommandContext(context.Background(), "docker", "cp", src, n+":"+path)
+		if out, err := cp.CombinedOutput(); err != nil {
+			t.Fatalf("copy %s to %s: %v: %s", name, n, err, out)
+		}
+	}
+}
+
 // masqueCerts returns a server certificate for the authority's host, its
 // key, and the CA that signed it.
 func masqueCerts(t *testing.T) (certPEM, keyPEM, caPEM []byte) {
 	t.Helper()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caTmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "masque conformance CA"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour), IsCA: true,
-		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caCert, err := x509.ParseCertificate(caDER)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ca := newTestCA(t, "masque conformance CA")
+	certPEM, keyPEM = ca.issue(t, strings.Split(masqueAuthority, ":")[0])
+	return certPEM, keyPEM, ca.pem
+}
+
+// testCA is a CA a run creates to sign its servers' certificates.
+type testCA struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	pem  []byte
+}
+
+// newTestCA creates a CA named name, valid for a day.
+func newTestCA(t *testing.T, name string) *testCA {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := strings.Split(masqueAuthority, ":")[0]
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: host},
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: name},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour), IsCA: true,
+		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &testCA{cert: cert, key: key, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
+}
+
+// issue returns a server certificate for host, signed by ca, and its key.
+func (ca *testCA) issue(t *testing.T, host string) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: host},
 		DNSNames: []string{host}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,8 +234,7 @@ func masqueCerts(t *testing.T) (certPEM, keyPEM, caPEM []byte) {
 		t.Fatal(err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 }
 
 func (m *masque) setup(t *testing.T) {
@@ -395,8 +428,24 @@ func (m *masque) connect(t *testing.T, name, token, vpc string, id int, d time.D
 }
 
 func connectArgs(pod *corev1.Pod, token, vpc string, id int, d time.Duration, dsts []string) []string {
-	return []string{"connectip", "-server", "[" + pod.Status.PodIP + "]:" + strconv.Itoa(masquePort),
-		"-authority", masqueAuthority, "-ca", masqueCA, "-token", token, "-vpc", vpc, "-id", strconv.Itoa(id),
+	return cipServer{pod: pod, port: masquePort, authority: masqueAuthority, ca: masqueCA}.args(token, vpc, id, d, dsts)
+}
+
+// cipServer is a CONNECT-IP server edgeprobe dials from its pod's node: the
+// pod, the port it serves on, the :authority its certificate names and the
+// file on the node holding the CA that signed it.
+type cipServer struct {
+	pod       *corev1.Pod
+	port      int
+	authority string
+	ca        string
+}
+
+// args are edgeprobe's arguments for one request to s with credential
+// token, selecting vpc, that pings dsts for d with echo identifier id.
+func (s cipServer) args(token, vpc string, id int, d time.Duration, dsts []string) []string {
+	return []string{"connectip", "-server", "[" + s.pod.Status.PodIP + "]:" + strconv.Itoa(s.port),
+		"-authority", s.authority, "-ca", s.ca, "-token", token, "-vpc", vpc, "-id", strconv.Itoa(id),
 		"-to", strings.Join(dsts, ","), "-interval", probeInterval.String(), "-duration", d.String()}
 }
 
@@ -408,12 +457,18 @@ func (m *masque) connectOnce(token, vpc string, id int, d time.Duration, dsts ..
 
 // connectOnceTo runs one short session to pod and returns its events.
 func connectOnceTo(pod *corev1.Pod, token, vpc string, id int, d time.Duration, dsts ...string) ([]event, error) {
-	p, err := startProbe(pod.Spec.NodeName, 1, "once", connectArgs(pod, token, vpc, id, d, dsts)...)
+	return runProbe(pod.Spec.NodeName, connectArgs(pod, token, vpc, id, d, dsts))
+}
+
+// runProbe runs edgeprobe with args in node's host network namespace and
+// returns its events.
+func runProbe(node string, args []string) ([]event, error) {
+	p, err := startProbe(node, 1, "once", args...)
 	if err != nil {
 		return nil, err
 	}
 	if err := p.cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("connectip: %w: %s", err, p.out.String())
+		return nil, fmt.Errorf("edgeprobe %s: %w: %s%s", args[0], err, p.out.String(), p.stderr.String())
 	}
 	var evs []event
 	for _, line := range strings.Split(strings.TrimSpace(p.out.String()), "\n") {
@@ -445,7 +500,7 @@ func echoes(evs []event, dst string) []event {
 func others(evs []event) int {
 	n := 0
 	for _, e := range evs {
-		if e.Reply == "other" {
+		if e.Reply == otherReply {
 			n++
 		}
 	}
@@ -517,8 +572,13 @@ type workloadRef struct {
 // the fixture's node.
 func (m *masque) workload(t *testing.T, tn tenant, i int) workloadRef {
 	t.Helper()
-	node := map[int]string{1: computeNode, 2: edgeNode1}[i]
-	pid := m.l.clientPID(t, tn, node)
+	return m.l.workloadOn(t, tn, map[int]string{1: computeNode, 2: edgeNode1}[i])
+}
+
+// workloadOn returns tenant tn's edge client on node.
+func (l *lab) workloadOn(t *testing.T, tn tenant, node string) workloadRef {
+	t.Helper()
+	pid := l.clientPID(t, tn, node)
 	out, err := nodeExec(node, "nsenter", "-t", strconv.Itoa(pid), "-n", "ip", "-6", "-o", "addr", "show",
 		"scope", "global")
 	if err != nil {
@@ -530,15 +590,21 @@ func (m *masque) workload(t *testing.T, tn tenant, i int) workloadRef {
 			return workloadRef{node: node, pid: pid, iface: f[1], addr: strings.Split(f[3], "/")[0]}
 		}
 	}
-	t.Fatalf("no VPC %s address on edge-client-%d: %s", tn.vpc, i, out)
+	t.Fatalf("no VPC %s address on the edge client on %s: %s", tn.vpc, node, out)
 	return workloadRef{}
 }
 
 // client returns tenant tn's running edge-client-i pod.
 func (m *masque) client(t *testing.T, tn tenant, i int) *corev1.Pod {
 	t.Helper()
+	return m.l.clientPod(t, tn, i)
+}
+
+// clientPod returns tenant tn's running edge-client-i pod.
+func (l *lab) clientPod(t *testing.T, tn tenant, i int) *corev1.Pod {
+	t.Helper()
 	var pods corev1.PodList
-	if err := m.l.c.List(context.Background(), &pods, client.InNamespace(tn.vpcNamespace),
+	if err := l.c.List(context.Background(), &pods, client.InNamespace(tn.vpcNamespace),
 		client.MatchingLabels{appLabel: "edge-client-" + strconv.Itoa(i)}); err != nil {
 		t.Fatal(err)
 	}
@@ -693,72 +759,99 @@ func (m *masque) recordVersions(t *testing.T) {
 // answer; nothing reaches the other tenant's workloads, whose links are
 // captured, and no client receives a packet that is not its own reply.
 func (m *masque) isolation(t *testing.T, label string) {
-	l := m.l
-	wl := map[*masqueTenant][]workloadRef{}
+	clients := make([]isoClient, 0, 2)
 	for _, mt := range []*masqueTenant{m.a, m.b} {
-		wl[mt] = []workloadRef{m.workload(t, mt.tn, 1), m.workload(t, mt.tn, 2)}
-		for _, w := range wl[mt] {
+		clients = append(clients, isoClient{vpc: mt.tn.vpc, id: mt.id,
+			own: []workloadRef{m.workload(t, mt.tn, 1), m.workload(t, mt.tn, 2)},
+			start: func(name string, d time.Duration, dsts []string) *probeRun {
+				return m.connect(t, name, mt.token, mt.tn.vpc, mt.id, d, dsts...)
+			},
+			session: func(t *testing.T, what string, evs []event, d time.Duration, n int) {
+				requireSession(t, what, evs, d, n)
+			}})
+	}
+	m.l.isolation(t, label, m.currentLinks(t), clients[0], clients[1])
+}
+
+// isoClient is one tenant's CONNECT-IP client in an isolation check: its
+// VPC, the echo identifier it sends, its tenant's workloads, how to start
+// its request to dsts for d, and the check that the request ran its whole
+// window to n destinations.
+type isoClient struct {
+	vpc     string
+	id      int
+	own     []workloadRef
+	start   func(name string, d time.Duration, dsts []string) *probeRun
+	session func(t *testing.T, what string, evs []event, d time.Duration, n int)
+}
+
+// isolation sends from a's and b's clients at once to their own workloads
+// and to the other's, with the workloads' neighbor caches and those of
+// links, host links on the provider's node, flushed first. Each client's
+// own workloads answer; nothing reaches the other tenant's workloads, whose
+// links are captured, and no client receives a packet that is not its own
+// reply.
+func (l *lab) isolation(t *testing.T, label string, links []string, a, b isoClient) {
+	t.Helper()
+	for _, c := range []isoClient{a, b} {
+		for _, w := range c.own {
 			if _, err := nodeExec(w.node, "nsenter", "-t", strconv.Itoa(w.pid), "-n", "ip", "-6", "neigh", "flush",
 				"all"); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-	for _, link := range m.currentLinks(t) {
+	for _, link := range links {
 		if _, err := nodeExec(edgeNode1, "ip", "-6", "neigh", "flush", "dev", link); err != nil {
 			t.Fatal(err)
 		}
 	}
 	type sniffer struct {
-		w  workloadRef
-		mt *masqueTenant
-		p  *probeRun
+		w   workloadRef
+		vpc string
+		id  int
+		p   *probeRun
 	}
 	var sniffs []sniffer
-	for _, mt := range []*masqueTenant{m.a, m.b} {
-		for _, w := range wl[mt] {
-			p, err := startProbe(w.node, w.pid, label+"-sniff-"+mt.tn.vpc+"-"+w.node, "sniff", "-iface", w.iface,
+	for _, c := range []isoClient{a, b} {
+		for _, w := range c.own {
+			p, err := startProbe(w.node, w.pid, label+"-sniff-"+c.vpc+"-"+w.node, "sniff", "-iface", w.iface,
 				"-icmp", "-duration", "9s")
 			if err != nil {
 				t.Fatal(err)
 			}
-			sniffs = append(sniffs, sniffer{w, mt, p})
+			sniffs = append(sniffs, sniffer{w, c.vpc, c.id, p})
 		}
 	}
 	time.Sleep(time.Second)
-	runs := map[*masqueTenant]*probeRun{}
-	for _, mt := range []*masqueTenant{m.a, m.b} {
-		other := m.b
-		if mt == m.b {
-			other = m.a
-		}
-		dsts := []string{wl[mt][0].addr, wl[mt][1].addr, wl[other][0].addr, wl[other][1].addr}
-		runs[mt] = m.connect(t, label+"-vpc-"+mt.tn.vpc, mt.token, mt.tn.vpc, mt.id, 5*time.Second, dsts...)
+	pairs := [][2]isoClient{{a, b}, {b, a}}
+	runs := make([]*probeRun, len(pairs))
+	for i, p := range pairs {
+		c, other := p[0], p[1]
+		dsts := []string{c.own[0].addr, c.own[1].addr, other.own[0].addr, other.own[1].addr}
+		runs[i] = c.start(label+"-vpc-"+c.vpc, 5*time.Second, dsts)
 	}
-	for _, mt := range []*masqueTenant{m.a, m.b} {
-		other := m.b
-		if mt == m.b {
-			other = m.a
-		}
-		evs := runs[mt].wait(l, t)
-		requireSession(t, "VPC "+mt.tn.vpc+"'s request", evs, 5*time.Second, 4)
+	for i, p := range pairs {
+		c, other := p[0], p[1]
+		evs := runs[i].wait(l, t)
+		c.session(t, "VPC "+c.vpc+"'s request", evs, 5*time.Second, 4)
 		perDst := sentCount(evs) / 4
-		for _, w := range wl[mt] {
+		for _, w := range c.own {
 			n := len(echoes(evs, w.addr))
-			l.record(t, fmt.Sprintf("VPC %s to its workload on %s", mt.tn.vpc, w.node), fmt.Sprintf("%d/%d", n, perDst))
+			l.record(t, fmt.Sprintf("VPC %s to its workload on %s", c.vpc, w.node), fmt.Sprintf("%d/%d", n, perDst))
 			if perDst == 0 || n < perDst*9/10 {
-				t.Errorf("VPC %s to its workload on %s: %d of %d answered", mt.tn.vpc, w.node, n, perDst)
+				t.Errorf("VPC %s to its workload on %s: %d of %d answered", c.vpc, w.node, n, perDst)
 			}
 		}
-		for _, w := range wl[other] {
+		for _, w := range other.own {
 			n := len(echoes(evs, w.addr))
-			l.record(t, fmt.Sprintf("VPC %s to VPC %s's workload on %s", mt.tn.vpc, other.tn.vpc, w.node), n)
+			l.record(t, fmt.Sprintf("VPC %s to VPC %s's workload on %s", c.vpc, other.vpc, w.node), n)
 			if n > 0 {
-				t.Errorf("VPC %s reached VPC %s's workload on %s: %d replies", mt.tn.vpc, other.tn.vpc, w.node, n)
+				t.Errorf("VPC %s reached VPC %s's workload on %s: %d replies", c.vpc, other.vpc, w.node, n)
 			}
 		}
 		if n := others(evs); n > 0 {
-			t.Errorf("VPC %s's client received %d packets that were not its replies", mt.tn.vpc, n)
+			t.Errorf("VPC %s's client received %d packets that were not its replies", c.vpc, n)
 		}
 	}
 	for _, s := range sniffs {
@@ -766,21 +859,19 @@ func (m *masque) isolation(t *testing.T, label string) {
 		own, foreign := 0, 0
 		for _, e := range evs {
 			switch e.ID {
-			case s.mt.id:
+			case s.id:
 				own++
-			case m.a.id, m.b.id:
+			case a.id, b.id:
 				foreign++
 			}
 		}
-		l.record(t, fmt.Sprintf("echo requests on VPC %s's workload on %s", s.mt.tn.vpc, s.w.node),
+		l.record(t, fmt.Sprintf("echo requests on VPC %s's workload on %s", s.vpc, s.w.node),
 			fmt.Sprintf("%d own, %d from the other VPC's client", own, foreign))
 		if foreign > 0 {
-			t.Errorf("VPC %s's workload on %s received %d of the other VPC's echo requests", s.mt.tn.vpc, s.w.node,
-				foreign)
+			t.Errorf("VPC %s's workload on %s received %d of the other VPC's echo requests", s.vpc, s.w.node, foreign)
 		}
 		if own < int(5*time.Second/probeInterval)/2 {
-			t.Errorf("capture on VPC %s's workload on %s saw only %d of its own tenant's requests", s.mt.tn.vpc,
-				s.w.node, own)
+			t.Errorf("capture on VPC %s's workload on %s saw only %d of its own tenant's requests", s.vpc, s.w.node, own)
 		}
 	}
 }
@@ -813,12 +904,14 @@ func (m *masque) rowPartial(t *testing.T) {
 		Credential: token, Service: m.a.serviceKey(), Prefix: masquePartial}})
 	pod := m.deploy(t, "partial", edgeNode1, b)
 	// Its only connector's request gets the attachment set up, and is
-	// refused once core refuses the route.
+	// refused once core refuses the route. A request before the new
+	// instance holds its Lease is refused too, without an attachment, so
+	// only a refusal after the attachment exists counts.
 	var evs []event
 	eventually(t, 2*time.Minute, 2*time.Second, "partial instance's request refused", func() (bool, error) {
 		var err error
 		evs, err = connectOnceTo(pod, token, "10", 1, time.Second, dst)
-		return err == nil && status(evs) == 503, err
+		return err == nil && status(evs) == 503 && l.attachmentOf(t, pod, m.a.svc) != nil, err
 	})
 	att := l.waitServing(t, pod, m.a.svc)
 	m.links[att.Name] = att.Status.HostLink
@@ -895,12 +988,15 @@ func (m *masque) rowSharedCancel(t *testing.T) {
 // tenant reaches its workload on the compute node. The VRFs, the
 // attachments and the requests survive it, and a connector's first request
 // after collection is set up and answered.
+//
+// A collection pass that keeps everything logs nothing, so the row plants an
+// orphaned canary VRF on the node: the pass that removes it is the one the
+// VRFs and attachments must survive. Which branch of collection keeps them
+// is covered by internal/gc's TestEdgeAttachmentKeepsVRF and
+// TestInUseVRFIsNotRemoved.
 func (m *masque) rowMaintenance(t *testing.T) {
 	l, ctx := m.l, context.Background()
-	m.inUse(t)
-	atts := map[*masqueTenant]*galacticv1alpha1.EdgeAttachment{}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
-		atts[mt] = l.attachmentOf(t, m.pod, mt.svc)
 		old := m.client(t, mt.tn, 2)
 		key := client.ObjectKey{Namespace: mt.tn.vpcNamespace, Name: "edge-client-2"}
 		scale := func(n int32) error {
@@ -955,30 +1051,44 @@ func (m *masque) rowMaintenance(t *testing.T) {
 		})
 	}
 	router := l.podOn(t, systemNS, "galactic-router", edgeNode1)
-	since := time.Now().UTC().Format(time.RFC3339)
 	interval := l.gcInterval(t)
 	l.record(t, "galactic-router GC interval", interval)
-	d := interval + 45*time.Second
+	d := interval + 90*time.Second
+	started := time.Now()
 	runs := map[*masqueTenant]*probeRun{}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		runs[mt] = m.connect(t, "maintenance-vpc-"+mt.tn.vpc, mt.token, mt.tn.vpc, mt.id, d,
 			m.workload(t, mt.tn, 1).addr)
 	}
-	time.Sleep(interval + 30*time.Second)
-	logs, err := l.kubectl("-n", systemNS, "logs", router, "--since-time="+since)
-	if err != nil {
-		t.Fatal(err)
+	// The adapter deletes an attachment idle for 30 s, so the attachments
+	// are read while the row's requests hold them.
+	atts := map[*masqueTenant]*galacticv1alpha1.EdgeAttachment{}
+	for _, mt := range []*masqueTenant{m.a, m.b} {
+		atts[mt] = l.waitServing(t, m.pod, mt.svc)
 	}
+	// The probes must outlast collection, which can take interval+30s
+	// from here.
+	if setup := time.Since(started); setup > d-interval-30*time.Second {
+		t.Fatalf("attachments took %v to serve, leaving the probes too little time to span a collection pass", setup)
+	}
+	since := time.Now().UTC().Format(time.RFC3339)
+	canary := plantCanaryVRF(t, edgeNode1)
+	planted := time.Now()
+	eventually(t, interval+30*time.Second, 2*time.Second, "a collection pass removed canary VRF "+canary,
+		func() (bool, error) {
+			logs, err := l.kubectl("-n", systemNS, "logs", router, "--since-time="+since)
+			return slices.ContainsFunc(strings.Split(logs, "\n"), func(line string) bool {
+				return strings.Contains(line, "GC: removed orphaned VRF") && strings.Contains(line, canary)
+			}), err
+		})
+	l.record(t, "canary VRF collected after", time.Since(planted).Round(time.Second))
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		vrf := fmt.Sprintf("G%09sV", atts[mt].Status.VPC)
 		if _, err := nodeExec(edgeNode1, "ip", "link", "show", vrf); err != nil {
 			t.Errorf("VPC %s's VRF %s is gone with the fixture's attachment still on it: %v", mt.tn.vpc, vrf, err)
 		}
-		// A collection pass ran and kept the VRF for the attachment.
-		if !slices.ContainsFunc(strings.Split(logs, "\n"), func(line string) bool {
-			return strings.Contains(line, "GC: kept VRF an edge attachment uses") && strings.Contains(line, vrf)
-		}) {
-			t.Errorf("no garbage collection pass kept VPC %s's VRF %s during the row", mt.tn.vpc, vrf)
+		if cur := l.attachmentOf(t, m.pod, mt.svc); cur == nil || cur.UID != atts[mt].UID {
+			t.Errorf("VPC %s's attachment did not survive garbage collection", mt.tn.vpc)
 		}
 	}
 	dst := m.workload(t, m.a.tn, 1).addr
@@ -993,10 +1103,38 @@ func (m *masque) rowMaintenance(t *testing.T) {
 	for mt, p := range runs {
 		m.requireAnswered(t, "VPC "+mt.tn.vpc+" across garbage collection", p.wait(l, t), d,
 			m.workload(t, mt.tn, 1).addr)
-		if cur := l.attachmentOf(t, m.pod, mt.svc); cur == nil || cur.UID != atts[mt].UID {
-			t.Errorf("VPC %s's attachment did not survive garbage collection", mt.tn.vpc)
-		}
 	}
+}
+
+const (
+	// canaryVPC names the VPC of the canary VRF plantCanaryVRF creates. No
+	// tenant, advertisement or attachment uses it, so collection removes it.
+	canaryVPC = "zzzzzzzzz"
+	// canaryTableBase is the first routing table plantCanaryVRF tries. It
+	// sits above every table Galactic allocates: VPC VRFs and the ingress
+	// sidecar's tables end below 0x11000.
+	canaryTableBase = 0xffff0
+)
+
+// plantCanaryVRF creates an orphaned VRF on node, on a routing table no
+// other VRF there uses, and returns its name. The test deletes it on
+// cleanup if no collection pass did.
+func plantCanaryVRF(t *testing.T, node string) string {
+	t.Helper()
+	name := "G" + canaryVPC + "V"
+	out, err := nodeExec(node, "ip", "-d", "link", "show", "type", "vrf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := canaryTableBase
+	for strings.Contains(out, "table "+strconv.Itoa(table)+" ") {
+		table++
+	}
+	if _, err := nodeExec(node, "ip", "link", "add", name, "type", "vrf", "table", strconv.Itoa(table)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = nodeExec(node, "ip", "link", "del", name) })
+	return name
 }
 
 // rowProcessRestart kills the fixture's process without shutdown. The
@@ -1151,10 +1289,16 @@ func (m *masque) waitAcceptedFor(t *testing.T, d time.Duration, tenants ...*masq
 // old pod's shutdown leaves the replacement's routes alone.
 func (m *masque) rowRecreation(t *testing.T) {
 	l := m.l
+	m.inUse(t)
 	old := m.pod
 	oldAtts := make([]*galacticv1alpha1.EdgeAttachment, 0, 2)
 	for _, mt := range []*masqueTenant{m.a, m.b} {
-		oldAtts = append(oldAtts, l.attachmentOf(t, old, mt.svc))
+		att := l.attachmentOf(t, old, mt.svc)
+		if att == nil {
+			t.Fatalf("pod %s's attachment to VPC %s's service was deleted as idle before the row read it",
+				old.Name, mt.tn.vpc)
+		}
+		oldAtts = append(oldAtts, att)
 	}
 	if _, err := l.kubectl("-n", masqueNS, "delete", "pod", old.Name, "--wait=false"); err != nil {
 		t.Fatal(err)
@@ -1214,22 +1358,50 @@ func linkPresent(node, name string) (bool, error) {
 	return false, nil
 }
 
-// waitNamespaceEmpty waits until no EdgeAttachment, EdgeInstance, Lease or
-// EdgeRoute remains in the fixture's namespace.
-func (m *masque) waitNamespaceEmpty(t *testing.T) {
+// waitEdgeObjectsGone waits until no EdgeAttachment, EdgeInstance, Lease or
+// EdgeRoute remains in a provider's namespace.
+func (l *lab) waitEdgeObjectsGone(t *testing.T, namespace string) {
 	t.Helper()
 	ctx := context.Background()
-	eventually(t, 3*time.Minute, 2*time.Second, "fixture objects removed", func() (bool, error) {
+	eventually(t, 3*time.Minute, 2*time.Second, "provider objects removed from "+namespace, func() (bool, error) {
 		left := 0
 		for _, list := range []client.ObjectList{&galacticv1alpha1.EdgeAttachmentList{},
 			&galacticv1alpha1.EdgeInstanceList{}, &coordinationv1.LeaseList{}, &galacticv1alpha1.EdgeRouteList{}} {
-			if err := m.l.c.List(ctx, list, client.InNamespace(masqueNS)); err != nil {
+			if err := l.c.List(ctx, list, client.InNamespace(namespace)); err != nil {
 				return false, err
 			}
 			left += meta.LenList(list)
 		}
 		return left == 0, fmt.Errorf("%d objects remain", left)
 	})
+}
+
+// requireNoEdgeAdvertisements fails for every BGPAdvertisement left of a
+// route in a provider's namespace.
+func (l *lab) requireNoEdgeAdvertisements(t *testing.T, namespace string) {
+	t.Helper()
+	var advs networkv1alpha1.BGPAdvertisementList
+	if err := l.c.List(context.Background(), &advs, client.InNamespace(systemNS)); err != nil {
+		t.Error(err)
+	}
+	for _, a := range advs.Items {
+		if strings.HasPrefix(a.Annotations["galactic.datumapis.com/edge-route"], namespace+"/") {
+			t.Errorf("BGPAdvertisement %s of route %s remains", a.Name, a.Annotations["galactic.datumapis.com/edge-route"])
+		}
+	}
+}
+
+// requireLinksGone fails for each host link of links, attachment to link,
+// still present on an edge node.
+func requireLinksGone(t *testing.T, links map[string]string) {
+	t.Helper()
+	for att, link := range links {
+		for _, n := range []string{edgeNode1, edgeNode2} {
+			if present, err := linkPresent(n, link); err != nil || present {
+				t.Errorf("host link %s of attachment %s on %s: present=%t, %v", link, att, n, present, err)
+			}
+		}
+	}
 }
 
 // teardown removes the fixture and fails the run unless everything it
@@ -1254,29 +1426,14 @@ func (m *masque) teardown(t *testing.T) {
 	}
 	// The provider and core must remove what the run created before the
 	// namespace's deletion would remove it for them.
-	m.waitNamespaceEmpty(t)
+	l.waitEdgeObjectsGone(t, masqueNS)
 	if _, err := l.kubectl("delete", "namespace", masqueNS, "--wait=true", "--timeout=180s"); err != nil {
 		t.Error(err)
 	}
 	l.deleteAndWait(t, &galacticv1alpha1.EdgeProvider{ObjectMeta: metav1.ObjectMeta{Name: masqueProvider}})
 
-	var advs networkv1alpha1.BGPAdvertisementList
-	if err := l.c.List(ctx, &advs, client.InNamespace(systemNS)); err != nil {
-		t.Error(err)
-	}
-	for _, a := range advs.Items {
-		if strings.HasPrefix(a.Annotations["galactic.datumapis.com/edge-route"], masqueNS+"/") {
-			t.Errorf("BGPAdvertisement %s of the fixture's route %s remains", a.Name,
-				a.Annotations["galactic.datumapis.com/edge-route"])
-		}
-	}
-	for att, link := range m.links {
-		for _, n := range []string{edgeNode1, edgeNode2} {
-			if present, err := linkPresent(n, link); err != nil || present {
-				t.Errorf("host link %s of attachment %s on %s: present=%t, %v", link, att, n, present, err)
-			}
-		}
-	}
+	l.requireNoEdgeAdvertisements(t, masqueNS)
+	requireLinksGone(t, m.links)
 	for _, n := range []string{computeNode, edgeNode1, edgeNode2} {
 		if _, err := nodeExec(n, "rm", "-f", masqueCA); err != nil {
 			t.Error(err)

@@ -8,6 +8,7 @@ import (
 	instmetrics "go.miloapis.com/instrumentation/metrics"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
 // Metrics bundles this datapath's Prometheus instrumentation, created on the
@@ -38,4 +39,10 @@ func New() *Metrics {
 // objs at every scrape. Call it once, after the datapath is loaded.
 func (m *Metrics) RegisterDatapathCollector(objs *prog.UsidObjects) {
 	instmetrics.MustRegister(NewCollectorFromObjects(objs))
+}
+
+// RegisterAttachmentCollector registers a collector reading each attachment's
+// host-link byte counters at every scrape. Call it once.
+func (m *Metrics) RegisterAttachmentCollector() {
+	instmetrics.MustRegister(NewAttachmentCollector(nldump.LinkList))
 }

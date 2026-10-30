@@ -36,6 +36,13 @@
 // programs and releases host state, and core holds each attachment with a
 // finalizer until its node reports it released.
 //
+// The adapter counts admissions by outcome, request ends by reason, route
+// claims by outcome, device-full drops and lease losses, and reports at
+// scrape time how many requests are admitted, programmed or forwarding and
+// whether it holds its lease. Labels are only those enums. A request's log
+// lines name its session ID, connector, service UID, attachment and its
+// UID, route, claim epoch and lease epoch; none carries a credential.
+//
 // Authentication, connector /96 allocation and EdgeService issuance belong
 // to the Authorizer, not to this package.
 package masque

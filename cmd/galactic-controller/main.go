@@ -148,7 +148,10 @@ func run(parent context.Context, o *options) error {
 	utilruntime.Must(nadv1.AddToScheme(scheme))
 	utilruntime.Must(computev1alpha.AddToScheme(scheme))
 
-	var cacheOpts cache.Options
+	// The Edge controllers watch every Pod. Without them, only the instance
+	// attachment collector reads Pods, so the cache holds just the ones it
+	// lists.
+	cacheOpts := cache.Options{ByObject: cloudcontroller.InjectedPodCache()}
 	if o.edge {
 		cacheOpts.ByObject = edgeroute.LeaseCache()
 	}
@@ -202,7 +205,8 @@ func run(parent context.Context, o *options) error {
 	return mgr.Start(ctx)
 }
 
-// SetupCloud registers the Galactic data-plane status controller.
+// SetupCloud registers the Galactic data-plane status controller and the
+// collector comparing running instances' VPC attachments with that status.
 func SetupCloud(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &networkv1alpha1.BGPAdvertisement{},
 		cloudcontroller.IndexBGPAdvertisementIdentity, cloudcontroller.BGPAdvertisementIdentity); err != nil {
@@ -233,6 +237,7 @@ func SetupCloud(mgr ctrl.Manager) error {
 		}
 	}
 	(&cloudwebhook.PodInterfaceInjector{Client: mgr.GetClient()}).SetupWithManager(mgr)
+	metrics.MustRegister(&cloudcontroller.InstanceAttachmentCollector{Reader: mgr.GetClient()})
 	return nil
 }
 

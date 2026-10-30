@@ -25,6 +25,7 @@ import (
 	"go.datum.net/galactic/internal/edge/route"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/forwardgatemap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/mssclamp"
 )
 
 // PinnedDatapath is the node's uSID datapath, through its maps pinned under
@@ -82,6 +83,18 @@ func (d PinnedDatapath) Forget(ifindex uint32) error {
 // SyncRoutes implements Datapath (attachreg.SyncHostLinkRoutes).
 func (d PinnedDatapath) SyncRoutes(vrfTable uint32, want []netip.Prefix) error {
 	return attachreg.SyncHostLinkRoutes(d.PinDir, vrfTable, want)
+}
+
+// EncapMTU returns encap_mtu_table's limit, opening the map for every call
+// for the same reason as PinnedGates. It is an Agent's EncapMTU.
+func (d PinnedDatapath) EncapMTU() (int, error) {
+	m, err := mssclamp.OpenPinnedEncapMTU(d.PinDir)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = m.Close() }()
+	limit, err := mssclamp.ReadEncapMTU(m)
+	return int(limit), err
 }
 
 // PinnedGates is the node's forwarding gate, opened from PinDir for every

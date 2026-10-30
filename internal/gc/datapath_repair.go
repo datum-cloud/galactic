@@ -11,9 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"regexp"
 	"sort"
-	"strings"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -24,14 +22,10 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
-
-// hostLinkNameRegex matches the host-side interface name the master plugins
-// create for an attachment, "G%09s%03sH": the zero-padded base62 VPC and
-// VPCAttachment.
-var hostLinkNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})([A-Za-z0-9]{3})H$`)
 
 // The kernel and resolution calls RepairAttachmentDatapath makes, indirected so
 // tests can substitute fabricated state and in-memory maps.
@@ -317,7 +311,7 @@ func countHostAttachments() (int, error) {
 	}
 	n := 0
 	for _, l := range links {
-		if hostLinkNameRegex.MatchString(l.Attrs().Name) && vrfs[l.Attrs().MasterIndex] {
+		if _, _, ok := intf.ParseInterfaceNameHost(l.Attrs().Name); ok && vrfs[l.Attrs().MasterIndex] {
 			n++
 		}
 	}
@@ -405,15 +399,6 @@ func mergePrefixes(kernel, advertised []string) []string {
 	return merged
 }
 
-// unpad reverses the zero padding an interface name applies to a base62
-// identifier, which CRD names do not carry.
-func unpad(s string) string {
-	if t := strings.TrimLeft(s, "0"); t != "" {
-		return t
-	}
-	return "0"
-}
-
 // discoveryCounts is how many host-named interfaces discoverAttachments did
 // not resolve into an attachment, by reason.
 type discoveryCounts struct {
@@ -446,8 +431,8 @@ func discoverAttachments(
 	var errs []error
 	for _, link := range links {
 		attrs := link.Attrs()
-		m := hostLinkNameRegex.FindStringSubmatch(attrs.Name)
-		if m == nil {
+		vpc, vpcAttachment, ok := intf.ParseInterfaceNameHost(attrs.Name)
+		if !ok {
 			continue
 		}
 		master, ok := byIndex[attrs.MasterIndex].(*netlink.Vrf)
@@ -466,7 +451,6 @@ func discoverAttachments(
 			counts.skipped++
 			continue
 		}
-		vpc, vpcAttachment := unpad(m[1]), unpad(m[2])
 		argument, found, inRange := argumentForVPC(vrfIDs, vpc, nodeName)
 		if !found {
 			slog.Debug("Datapath repair: no BGPVRFInstance yet for attachment interface",

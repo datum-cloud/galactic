@@ -4,9 +4,11 @@ Galactic Edge gives providers authorized attachments to tenant VPCs and controls
 
 - [Provider contract](provider-contract.md): resources, writers, lifecycle, timing assumptions and required failure evidence.
 - [Troubleshooting](troubleshooting.md): conditions, Events, metrics and locating the current prefix holder.
+- [MASQUE connector service](masque-service.md): the `masque-provider` command and image, its configuration, limits, readiness and shutdown.
 - [MASQUE provider adapter](masque-provider.md): setup, readiness, drain and cleanup of the CONNECT-IP provider's attachments and routes.
 - [MASQUE grant authority](masque-authority.md): connector credentials, allocation ledgers, EdgeService issue, refresh and revocation, and the operator commands.
-- [CONNECT-IP interoperability](connectip-interop.md): HTTP/3 and HTTP/2 protocol proof with an independent client, selections and remaining HTTP/2 listener work.
+- [MASQUE capacity](masque-capacity.md): the CONNECT-IP load harness, its loopback results and what the containerlab qualification run adds.
+- [CONNECT-IP interoperability](connectip-interop.md): HTTP/3 and HTTP/2 protocol proof with an independent client, and the stacks selected for it.
 - [Foundation metrics](../observability/edge.md): lifecycle and forwarding-gate measurements.
 - [Design record](../designs/galactic-edge.md): motivation and design alternatives.
 - [Generated API](../api/galactic.md): exact resource fields and validation.

@@ -1,0 +1,24 @@
+# CONNECT-IP over HTTP/3 on UDP/443, and over HTTP/2 on TCP/443 for clients
+# whose UDP is blocked. ClusterIP is a placeholder: an overlay exposes it,
+# for example as a LoadBalancer. ClientIP affinity keeps a client's QUIC
+# packets on the pod that holds its connection.
+apiVersion: v1
+kind: Service
+metadata:
+  name: masque-provider
+  namespace: masque-system
+  labels:
+    app.kubernetes.io/name: masque-provider
+spec:
+  selector:
+    app.kubernetes.io/name: masque-provider
+  sessionAffinity: ClientIP
+  ports:
+    - name: connect-ip
+      port: 443
+      targetPort: connect-ip
+      protocol: UDP
+    - name: connect-ip-tcp
+      port: 443
+      targetPort: connect-ip-tcp
+      protocol: TCP

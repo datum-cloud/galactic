@@ -22,7 +22,9 @@ import (
 	// the ones a package creates when it loads; each command's scrape test
 	// lints the ones created at startup. TestLintLinksEveryMetric keeps this
 	// list complete.
+	_ "go.datum.net/galactic/internal/edge/connectip"
 	_ "go.datum.net/galactic/internal/edge/diag"
+	_ "go.datum.net/galactic/internal/edge/masque"
 	_ "go.datum.net/galactic/internal/fabric/gateway"
 	_ "go.datum.net/galactic/internal/fabric/node"
 	_ "go.datum.net/galactic/internal/fabricconfig"
@@ -74,8 +76,8 @@ func TestLintLinksEveryMetric(t *testing.T) {
 }
 
 // noMetricsEndpoint lists the commands that serve no metrics: the CNI
-// plugins, exec'd once per call by the container runtime, and the one-shot
-// galactic-usid codec.
+// plugins, exec'd once per call by the container runtime, the one-shot
+// galactic-usid codec, and the masque-authority grant service.
 var noMetricsEndpoint = []string{
 	"galactic-bgp",
 	"galactic-ipam",
@@ -83,6 +85,7 @@ var noMetricsEndpoint = []string{
 	"galactic-tap",
 	"galactic-usid",
 	"galactic-veth",
+	"masque-authority",
 }
 
 // TestEveryBinaryHasScrapeTest fails when a command that serves metrics has

@@ -22,7 +22,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +34,7 @@ import (
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	"go.datum.net/galactic/internal/certreload"
 	"go.datum.net/galactic/internal/edge/admission"
 	"go.datum.net/galactic/internal/edge/masque/authority"
 	"go.datum.net/galactic/internal/logging"
@@ -132,8 +132,8 @@ func serve(parent context.Context, namespace string, o *serveOptions) error {
 	if err != nil {
 		return err
 	}
-	certs := &certReloader{certFile: o.certFile, keyFile: o.keyFile}
-	if _, err := certs.get(nil); err != nil {
+	certs := &certreload.Reloader{CertFile: o.certFile, KeyFile: o.keyFile}
+	if _, err := certs.GetCertificate(nil); err != nil {
 		return err
 	}
 	a := &authority.Authority{
@@ -144,7 +144,7 @@ func serve(parent context.Context, namespace string, o *serveOptions) error {
 	srv := &http.Server{
 		Addr:              o.listen,
 		Handler:           (&authority.Server{Authority: a, Reviewer: reviewer}).Handler(),
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: certs.get},
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: certs.GetCertificate},
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      5 * time.Second,
@@ -162,37 +162,6 @@ func serve(parent context.Context, namespace string, o *serveOptions) error {
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdown)
-}
-
-// certReloader serves the certificate in certFile and keyFile, reloading it
-// when either file changes.
-type certReloader struct {
-	certFile, keyFile string
-	mu                sync.Mutex
-	stamp             string
-	cert              *tls.Certificate
-}
-
-func (r *certReloader) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	var stamp strings.Builder
-	for _, p := range []string{r.certFile, r.keyFile} {
-		fi, err := os.Stat(p)
-		if err != nil {
-			return nil, err
-		}
-		fmt.Fprintf(&stamp, "%d/%d;", fi.ModTime().UnixNano(), fi.Size())
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.cert != nil && r.stamp == stamp.String() {
-		return r.cert, nil
-	}
-	cert, err := tls.LoadX509KeyPair(r.certFile, r.keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load the server certificate: %w", err)
-	}
-	r.cert, r.stamp = &cert, stamp.String()
-	return r.cert, nil
 }
 
 func newLedgerCommand(namespace *string) *cobra.Command {

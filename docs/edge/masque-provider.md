@@ -1,18 +1,18 @@
 # MASQUE provider adapter
 
-`internal/edge/masque` connects a CONNECT-IP server (`internal/edge/connectip`) to a tenant VPC through the [provider contract](provider-contract.md). It implements `connectip.Admission` and `connectip.PacketBackend`, so every transport uses the same attachment, route and packet checks. It has no command of its own: the service binary that embeds it is a separate deliverable of the [MASQUE connector design](../designs/masque/contract.md). The [grant authority](masque-authority.md) issues its grants, and `authority.Client` is its production `Authorizer`. The conformance fixture in `tests/edgeconformance/masqueprovider` runs it with static test credentials, or with the grant authority when configured.
+`internal/edge/masque` connects a CONNECT-IP server (`internal/edge/connectip`) to a tenant VPC through the [provider contract](provider-contract.md). It implements `connectip.Admission` and `connectip.PacketBackend`, so every transport uses the same attachment, route and packet checks. [`cmd/masque-provider`](masque-service.md) runs it. The [grant authority](masque-authority.md) issues its grants, and `authority.Client` is its production `Authorizer`. The conformance fixture in `tests/edgeconformance/masqueprovider` runs the same service code with static test credentials, or with the grant authority when configured.
 
 The adapter never touches host networking. galactic-edge programs and releases each attachment's host state, core accepts or refuses each route, and the adapter only writes what the contract assigns to a provider: its instance and Lease, its attachments and their `Ready` condition, and its route claims.
 
 ## Setup
 
-The cell must run galactic-controller with `--edge` and the galactic-edge DaemonSet on the provider's node ([deployment](provider-contract.md)). The provider's node also needs a TUN device plugin, and the VPC needs a workload on that node, because an attachment joins the VPC's existing host VRF.
+The cell must run galactic-controller with `--edge` and the galactic-edge DaemonSet on the provider's node ([deployment](provider-contract.md)). The provider's node also needs a TUN device plugin (`config/galactic-edge/tun-device-plugin`), and the VPC needs a workload on that node, because an attachment joins the VPC's existing host VRF.
 
 1. Register the provider: an `EdgeProvider` that lists contract version `v1alpha1`, `PacketAccess/v1` and `PrefixReachability/v1`, and names the provider's ServiceAccount. An operator approves it (`status.approved`). galactic-controller then binds the provider role and admission policy to that ServiceAccount.
 2. Grant each connector an `EdgeService` in its VPC's namespace. The [grant authority](masque-authority.md) issues one per connector authorization. It grants `PacketAccess` and `PrefixReachability`, lists the connector's /96 in `prefixes`, and sets a `clientPool` outside every connector /96. A service that lacks `PrefixReachability` gets an attachment, but core refuses every route on it.
 3. Run the provider pod as that ServiceAccount, with a pod-bound token, the downward-API pod name, namespace, UID and node name, a device-plugin TUN, and no host namespace, hostPath, `NET_ADMIN` or BPF access. `tests/edgeconformance/masqueprovider/deploy/` is a worked example.
 
-The adapter's `Authorizer` turns a request's credential and VPC selector into a `Grant`: connector ID, VPC UID and base62 identifier, the `EdgeService` reference, the connector /96, the routes to advertise and an absolute deadline. A grant the adapter cannot use (wrong VPC, no service, not a masked IPv6 /96, already expired) is refused. The `Authorizer` also refreshes an open request's grant (`Refresh`) and retires a grant (`Retire`); see [Grant refresh and revocation](#grant-refresh-and-revocation).
+The adapter's `Authorizer` turns a request's credential and VPC selector into a `Grant`: connector ID, VPC UID and base62 identifier, the `EdgeService` reference, the connector /96, the routes to advertise and an absolute deadline. Each `Authorize` call has 3 seconds (`Config.AuthorizeTimeout`), since an unauthenticated client can start one. A grant the adapter cannot use (wrong VPC, no service, not a masked IPv6 /96, already expired) is refused. The `Authorizer` also refreshes an open request's grant (`Refresh`) and retires a grant (`Retire`); see [Grant refresh and revocation](#grant-refresh-and-revocation).
 
 ## Readiness
 
@@ -25,6 +25,8 @@ The adapter registers its instance at start and admits nothing until it holds th
 Only then does the request get its packet path. The request waits up to 30 seconds for these steps (`Config.Prepare`), including any wait behind another request preparing the same attachment or route, and is answered 503 if they do not complete. It fails at once, also with 503, when core refuses the attachment, the attachment is draining, its status names another VPC or node or no packet device, the device cannot be opened, or core refuses the route outright (for example `CapabilityNotGranted`, `PrefixNotGranted` or `PrefixConflict`). On a refusal after the device is known, the attachment reports `Ready=False` with reason `DataPlaneFailed`.
 
 Connectors of one service share its attachment and device.
+
+The route is the connector's whole /96, and it is the only route the connector gets. The client numbers addresses and longer subprefixes inside the /96 itself. The device delivers a packet for any address inside the /96 to that connector's request, so no subdivision needs its own route or allocation.
 
 ## Replacing a connector's request
 
@@ -43,6 +45,35 @@ A replacement on another provider pod is not done by the adapter. The grant auth
 
 A request forwards a packet, in either direction, only while its instance Lease is held at the epoch it was admitted under and before the Lease's deadline, before its grant's deadline, and while the request is open. Every second the adapter also checks each attachment and route it uses. It ends the requests on an attachment that is deleted, replaced, draining, no longer programmed or reprogrammed, and the requests on a route whose claim core no longer accepts, whose gate the node closed, or whose claim moved to another attachment. Losing the lease ends every request. A full device drops the packet and counts it instead of ending the request. These checks are in addition to the foundation's: galactic-edge closes a route's gate at the Lease deadline even if the provider stops.
 
+## Packet policy
+
+The CONNECT-IP proxy (`internal/edge/connectip`) checks every packet of a request against the request's grant before forwarding it in either direction. It applies the parsing profile in the [MASQUE connector design](../designs/masque/contract.md#interfaces-and-session-transitions):
+
+- Only complete IPv6 packets pass. The payload length must match the packet, so jumbograms are refused.
+- The proxy walks at most 8 extension headers and 256 extension header bytes. Hop-by-Hop must come first.
+- Any Fragment header is refused, atomic fragments included, as is a Routing header with segments left, a Mobility, HIP or Shim6 header, or an experimental one.
+- A packet toward the gVPC must come from the connector's /96, ICMPv6 errors included, and go to an advertised route.
+- A packet toward the client must go to the /96 and come from an advertised route. The one exception is an ICMPv6 error (types 1 to 4), such as Packet Too Big from a gVPC router, that quotes a packet sent from the /96 to a route.
+- The Packet Too Big that connect-ip-go builds for a packet the tunnel cannot carry goes through the same checks as the client's own packets.
+
+A grant that routes IPv4 is refused with 503, so the proxy never advertises IPv4. A route change at refresh ends the request ([Grant refresh and revocation](#grant-refresh-and-revocation)). gVPC traffic policy is enforced by the foundation on the attachment, not here.
+
+`galactic_connectip_packets_denied_total{direction, reason}` counts every refused packet. `direction` is `to_vpc` or `to_client`. `reason` is one of these:
+
+- `malformed`
+- `ipv4_unsupported`
+- `fragment`
+- `extension_headers`
+- `routing_header`
+- `source`
+- `destination`
+- `path_mtu`, a packet of at most 1280 bytes toward the client that the tunnel can no longer carry. The request ends, as [Packet size](masque-service.md#packet-size) describes
+- `no_session`, a device packet for a /96 with no open request. The kernel's own multicast and link-local packets on the device are dropped without being counted
+- `queue_full`, a device packet dropped because its request's queue toward the client already holds 128 packets or 256 KiB
+- `slow_client`, a packet toward the client whose write stayed blocked for 5 seconds. The request ends, as the [service limits](masque-service.md#configuration) describe
+
+connect-ip-go runs its own address checks first on client packets and drops what it refuses with a log line. Those drops are not counted.
+
 ## Grant refresh and revocation
 
 Every 5 seconds (`Config.Refresh`) the adapter calls `Authorizer.Refresh` for each open request, with a 2 second deadline. A refreshed grant with the same connector, VPC, service, /96, routes, authorization and credential revision moves the request's deadline. Any other answer has one of these results:
@@ -57,7 +88,7 @@ Every 5 seconds (`Config.Refresh`) the adapter calls `Authorizer.Refresh` for ea
 
 When core drains an attachment, after its service is deleted or its authority ends, the adapter ends that attachment's requests at its next check and serves no new request on it. Core deletes the attachment after the service's `drainSeconds`.
 
-On shutdown, stop the transports first so every request ends, then call `Shutdown`. It stops admitting, releases each route claim the adapter still holds, deletes its attachments and releases the instance Lease. A replacement can therefore take nothing over while this pod still forwards. Shutdown is bounded by the caller's context; the fixture gives it 20 seconds.
+On shutdown, stop the transports first so every request ends, then call `Shutdown`. It stops admitting, releases each route claim the adapter still holds, deletes its attachments and releases the instance Lease. A replacement can therefore take nothing over while this pod still forwards. Shutdown is bounded by the caller's context; the service and the fixture give it 20 seconds.
 
 ## Cleanup
 
@@ -81,4 +112,4 @@ On shutdown, stop the transports first so every request ends, then call `Shutdow
   - partial setup, recreation and single-connector revocation
   - teardown
 
-  The lab cannot read the compute node's tenant routes, so it does not measure remote convergence. A lab result is not target-platform qualification.
+  Remote convergence is measured by `task verify:masque-service`, against the shipped service ([verification](masque-service.md#verification)).

@@ -19,6 +19,7 @@ import (
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
@@ -253,6 +254,48 @@ func TestActivateTrafficPolicyModeChangedSinceMaster(t *testing.T) {
 	}
 	if !linkUp(t, host) {
 		t.Error("a link quarantined while policy was on stayed down after it turned off")
+	}
+}
+
+// TestActivateTrafficPolicyRefusesUnfencedHostOnlyPorts covers a router with
+// no SRv6 locator, which attaches no tp_deliver: an interface listing
+// host-only ports there is left down rather than brought up with nothing
+// enforcing them, and one listing none comes up as before.
+func TestActivateTrafficPolicyRefusesUnfencedHostOnlyPorts(t *testing.T) {
+	pinDir, host, _ := activationFixture(t, tpmap.State{Mode: tpmap.ModeOff}, false)
+	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, false, nil, nil); err != nil {
+		t.Fatalf("no host-only ports: %v", err)
+	}
+	if !linkUp(t, host) {
+		t.Fatal("an interface listing no host-only ports did not come up")
+	}
+
+	link, err := netlink.LinkByName(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table, closer, err := ifindexvrfmap.OpenPinnedHostOnlyPorts(pinDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+	if err := table.Register(uint32(link.Attrs().Index), []uint16{20000}); err != nil { //nolint:gosec // a kernel ifindex
+		t.Fatal(err)
+	}
+
+	err = activateTrafficPolicy(pinDir, testVPC, testAttachment, false, nil, nil)
+	if !errors.Is(err, errHostOnlyUnenforced) {
+		t.Fatalf("unregistered: err = %v, want errHostOnlyUnenforced", err)
+	}
+	if linkUp(t, host) {
+		t.Error("an interface whose host-only ports nothing enforces was left up")
+	}
+
+	if err := activateTrafficPolicy(pinDir, testVPC, testAttachment, true, nil, nil); err != nil {
+		t.Fatalf("registered: %v", err)
+	}
+	if !linkUp(t, host) {
+		t.Error("an interface with tp_deliver attached did not come up")
 	}
 }
 

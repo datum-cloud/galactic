@@ -163,10 +163,11 @@ const leaseDuration = 15 * time.Second
 // the node can have applied last, and stayed closed until resumed,
 // when the fault ended. It records the local cutoff and the local
 // withdrawal, the advertisement deleted or reported not advertised, which
-// must follow the cutoff, within 1 s plus the poll interval.
-func (m *masque) requireCutoff(t *testing.T, seen []event, w withdrawal, last, earliest, resumed time.Duration) {
+// must follow the cutoff, within 1 s plus the poll interval, and returns
+// the cutoff.
+func (l *lab) requireCutoff(t *testing.T, seen []event, w withdrawal, last, earliest, resumed time.Duration,
+) time.Duration {
 	t.Helper()
-	l := m.l
 	if !slices.ContainsFunc(seen, func(e event) bool { return !e.last() && e.T >= last }) {
 		t.Fatal("no probe reached the packet device after the last renewal start: the gate was never seen open")
 	}
@@ -197,8 +198,7 @@ func (m *masque) requireCutoff(t *testing.T, seen []event, w withdrawal, last, e
 				advertisementPoll)
 		}
 	}
-	l.record(t, "remote convergence", "not measured: the compute node's tenant routes are pinned eBPF map "+
-		"entries the lab cannot read")
+	return stop
 }
 
 // rowReplace opens a second request of a connector while its first is
@@ -274,7 +274,7 @@ func (m *masque) rowProviderStall(t *testing.T) {
 	}
 	resumed = true
 	seen, _, w := g.wait(l, t)
-	m.requireCutoff(t, seen, w, last, last, cont)
+	l.requireCutoff(t, seen, w, last, last, cont)
 	m.waitConnected(t, m.a)
 	m.waitConnected(t, m.b)
 }
@@ -306,7 +306,7 @@ func (m *masque) rowAgentStall(t *testing.T) {
 	}
 	resumed = true
 	seen, _, w := g.wait(l, t)
-	m.requireCutoff(t, seen, w, last, last-timing.RenewInterval, cont)
+	l.requireCutoff(t, seen, w, last, last-timing.RenewInterval, cont)
 	m.waitConnected(t, m.a)
 	m.waitConnected(t, m.b)
 }
@@ -317,6 +317,39 @@ func (m *masque) rowAgentStall(t *testing.T) {
 // forwarding within the local expiry bound, and the client's request ends.
 func (m *masque) rowAPIPartition(t *testing.T) {
 	l := m.l
+	dst := m.workload(t, m.a.tn, 2).addr
+	g := m.watchGate(t, "api-partition", m.a, 45*time.Second)
+	apiservers, heal := l.partitionAPI(t, edgeNode1, podPID(t, edgeNode1, masqueNS, m.pod.Name))
+	l.record(t, "API server addresses dropped", apiservers)
+	last := m.lastRenewal(t)
+	time.Sleep(25 * time.Second)
+	cont := boottime()
+	heal()
+	seen, session, w := g.wait(l, t)
+	l.requireCutoff(t, seen, w, last, last, cont)
+	rs := echoes(session, dst)
+	if len(rs) == 0 {
+		t.Fatal("the client's request never forwarded")
+	}
+	lastReply := rs[len(rs)-1].T
+	l.record(t, "client's last reply after the last renewal start", lastReply-last)
+	if lastReply-last > localExpiry {
+		t.Errorf("the client received replies %v after the last renewal start, bound %v", lastReply-last,
+			localExpiry)
+	}
+	if !slices.ContainsFunc(session, func(e event) bool { return e.End && e.T < cont }) {
+		t.Error("the adapter did not end the client's request while partitioned")
+	}
+	m.waitConnected(t, m.a)
+	m.waitConnected(t, m.b)
+}
+
+// partitionAPI drops the traffic of the pod whose sandbox has pid on node
+// to every API server address, leaving its clients and its packet devices
+// reachable. It returns the addresses and a function that heals the
+// partition, which the test's cleanup also calls.
+func (l *lab) partitionAPI(t *testing.T, node string, pid int) ([]netip.Addr, func()) {
+	t.Helper()
 	// The pod's client dials the Service address, which the CNI may
 	// translate to an endpoint before the packet leaves the pod: drop both.
 	clusterIP, err := l.kubectl("get", "service", "kubernetes", "-n", "default", "-o", "jsonpath={.spec.clusterIP}")
@@ -337,24 +370,16 @@ func (m *masque) rowAPIPartition(t *testing.T) {
 		}
 		apiservers = append(apiservers, addr)
 	}
-	pid := strconv.Itoa(podPID(t, edgeNode1, masqueNS, m.pod.Name))
 	nft := func(args ...string) error {
-		_, err := nodeExec(edgeNode1, append([]string{"nsenter", "-t", pid, "-n", "nft"}, args...)...)
+		_, err := nodeExec(node, append([]string{"nsenter", "-t", strconv.Itoa(pid), "-n", "nft"}, args...)...)
 		return err
 	}
-	dst := m.workload(t, m.a.tn, 2).addr
-	g := m.watchGate(t, "api-partition", m.a, 45*time.Second)
 	if err := nft("add", "table", "inet", "masque-partition"); err != nil {
 		t.Fatal(err)
 	}
-	healed := false
-	heal := func() {
-		if !healed {
-			healed = true
-			_ = nft("delete", "table", "inet", "masque-partition")
-		}
-	}
-	defer heal()
+	var once sync.Once
+	heal := func() { once.Do(func() { _ = nft("delete", "table", "inet", "masque-partition") }) }
+	t.Cleanup(heal)
 	if err := nft("add", "chain", "inet", "masque-partition", "out", "{", "type", "filter", "hook", "output",
 		"priority", "0", ";", "}"); err != nil {
 		t.Fatal(err)
@@ -369,28 +394,7 @@ func (m *masque) rowAPIPartition(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	l.record(t, "API server addresses dropped", apiservers)
-	last := m.lastRenewal(t)
-	time.Sleep(25 * time.Second)
-	cont := boottime()
-	heal()
-	seen, session, w := g.wait(l, t)
-	m.requireCutoff(t, seen, w, last, last, cont)
-	rs := echoes(session, dst)
-	if len(rs) == 0 {
-		t.Fatal("the client's request never forwarded")
-	}
-	lastReply := rs[len(rs)-1].T
-	l.record(t, "client's last reply after the last renewal start", lastReply-last)
-	if lastReply-last > localExpiry {
-		t.Errorf("the client received replies %v after the last renewal start, bound %v", lastReply-last,
-			localExpiry)
-	}
-	if !slices.ContainsFunc(session, func(e event) bool { return e.End && e.T < cont }) {
-		t.Error("the adapter did not end the client's request while partitioned")
-	}
-	m.waitConnected(t, m.a)
-	m.waitConnected(t, m.b)
+	return apiservers, heal
 }
 
 // rowConnectorRevocation ends one connector's grant while another

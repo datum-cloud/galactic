@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"golang.org/x/sys/unix"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -93,6 +94,9 @@ type harness struct {
 	calls []string
 	// refresh answers Refresh; nil renews the grant for another hour.
 	refresh func(Grant) (Grant, error)
+	// authorize, when set, runs before each Authorize and fails it with
+	// its error.
+	authorize func(context.Context) error
 	// retired holds the connectors whose grants were retired.
 	retired map[string]bool
 }
@@ -225,6 +229,7 @@ func (h *harness) start() {
 		}
 	}()
 	h.t.Cleanup(func() {
+		untrack(a)
 		cancel()
 		<-done
 		h.mu.Lock()
@@ -250,7 +255,12 @@ func (h *harness) wall() time.Time {
 
 // Authorize implements Authorizer from grants, with grants expiring an
 // hour after the harness's wall clock.
-func (h *harness) Authorize(_ context.Context, credential, vpc string) (Grant, error) {
+func (h *harness) Authorize(ctx context.Context, credential, vpc string) (Grant, error) {
+	if h.authorize != nil {
+		if err := h.authorize(ctx); err != nil {
+			return Grant{}, err
+		}
+	}
 	g, ok := grants[credential]
 	if !ok {
 		return Grant{}, connectip.ErrUnauthenticated
@@ -857,7 +867,7 @@ func TestLeaseChangeEndsRequests(t *testing.T) {
 	h := newHarness(t)
 	h.start()
 	l1 := h.admit(credA1)
-	h.a.loseLease("test")
+	h.a.loseLease(errors.New("test"))
 	expectDone(t, l1, "losing the lease")
 	h.a.setLease(&claim.Lease{Key: provider.InstanceName(testPod), Holder: testHolder, Epoch: 4,
 		Incarnation: testIncarnation, Deadline: h.clock.read() + time.Hour})
@@ -926,6 +936,23 @@ func TestQueuedRequestHonorsDeadline(t *testing.T) {
 	}
 }
 
+func TestAuthorizeTimeout(t *testing.T) {
+	h := newHarness(t)
+	h.authorize = func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	h.start()
+	h.a.cfg.AuthorizeTimeout = 50 * time.Millisecond
+	start := time.Now()
+	if _, err := h.a.Admit(context.Background(), credA1, testVPCName); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Admit with a stalled authorizer = %v, want its deadline exceeded", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("Admit waited %v on a stalled authorizer", d)
+	}
+}
+
 func TestOpenRejectsUnknownRequest(t *testing.T) {
 	h := newHarness(t)
 	h.start()
@@ -953,7 +980,7 @@ func TestForwardingStops(t *testing.T) {
 		stop  func(h *harness)
 		check bool
 	}{
-		{name: "lease lost", stop: func(h *harness) { h.a.loseLease("test") }},
+		{name: "lease lost", stop: func(h *harness) { h.a.loseLease(errors.New("test")) }},
 		{name: "lease expired", stop: func(h *harness) { h.clock.advance(2 * time.Hour) }},
 		{name: "grant expired", stop: func(h *harness) {
 			h.mu.Lock()
@@ -1022,6 +1049,77 @@ func TestForwardingStops(t *testing.T) {
 	}
 }
 
+// TestPacketPathEndsRequest passes the lease's or the grant's deadline with
+// a request forwarding and lets its packet path notice first, before the
+// renewal loop or the grant timer. The path's error must report the lease
+// ending, Done must already be closed when it returns, as the server reads
+// it next, and the request must be counted under the deadline that passed
+// rather than as closed (issue #1239).
+func TestPacketPathEndsRequest(t *testing.T) {
+	leaseExpires := func(h *harness) { h.clock.advance(2 * time.Hour) }
+	grantExpires := func(h *harness) {
+		h.mu.Lock()
+		h.now = h.now.Add(2 * time.Hour)
+		h.mu.Unlock()
+	}
+	write := func(_ *testing.T, _ *harness, s connectip.BackendSession) error {
+		return s.WritePacket(packet("fd00:10::5"))
+	}
+	read := func(t *testing.T, h *harness, s connectip.BackendSession) error {
+		if _, err := h.host(deviceName(h.attachment(svcA))).Write(packet("fd00:10:0:1:1::9")); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := s.ReadPacket(ctx, make([]byte, 1500))
+		return err
+	}
+	for _, tc := range []struct {
+		name   string
+		stop   func(*harness)
+		io     func(*testing.T, *harness, connectip.BackendSession) error
+		reason string
+	}{
+		{name: "lease expired on write", stop: leaseExpires, io: write, reason: endLeaseLost},
+		{name: "lease expired on read", stop: leaseExpires, io: read, reason: endLeaseLost},
+		{name: "grant expired on write", stop: grantExpires, io: write, reason: endGrantExpired},
+		{name: "grant expired on read", stop: grantExpires, io: read, reason: endGrantExpired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.start()
+			l := h.admit(credA1)
+			s, err := h.a.Open(context.Background(), l.Info())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.WritePacket(packet("fd00:10::5")); err != nil {
+				t.Fatal(err)
+			}
+			h.setCore(nil, nil)
+			want0, closed0 := ends(tc.reason), ends(endClosed)
+			tc.stop(h)
+			err = tc.io(t, h, s)
+			if !errors.Is(err, errStopped) || !errors.Is(err, connectip.ErrLeaseEnded) {
+				t.Errorf("packet I/O = %v, want %v wrapping %v", err, errStopped, connectip.ErrLeaseEnded)
+			}
+			select {
+			case <-l.Done():
+			default:
+				t.Error("Done is open when the packet path reports the stop")
+			}
+			_ = s.Close()
+			_ = l.Close()
+			if got := ends(tc.reason) - want0; got != 1 {
+				t.Errorf("%s request ends rose by %v, want 1", tc.reason, got)
+			}
+			if got := ends(endClosed) - closed0; got != 0 {
+				t.Errorf("closed request ends rose by %v, want 0", got)
+			}
+		})
+	}
+}
+
 // TestFullDeviceDropsPackets fills the device and checks that the request
 // counts the drops and keeps forwarding.
 func TestFullDeviceDropsPackets(t *testing.T) {
@@ -1035,6 +1133,7 @@ func TestFullDeviceDropsPackets(t *testing.T) {
 	}
 	defer func() { _ = s.Close() }()
 	pkt := packet("fd00:10::5")
+	dropped := testutil.ToFloat64(deviceDrops)
 	for range 10000 {
 		if err := s.WritePacket(pkt); err != nil {
 			t.Fatalf("a full device ended the request: %v", err)
@@ -1045,6 +1144,9 @@ func TestFullDeviceDropsPackets(t *testing.T) {
 	}
 	if l.(*session).drops.Load() == 0 {
 		t.Fatal("the device never filled")
+	}
+	if got := testutil.ToFloat64(deviceDrops) - dropped; got != float64(l.(*session).drops.Load()) {
+		t.Fatalf("device drops rose by %v, want %d", got, l.(*session).drops.Load())
 	}
 	expectLive(t, l, "a full device")
 }
@@ -1128,6 +1230,26 @@ func TestRestartAdoptsOwnAttachments(t *testing.T) {
 // TestShutdownReleasesInOrder checks that shutdown ends every request
 // before releasing its claim, then deletes the attachment, then releases the
 // lease, and that nothing fails.
+func TestReady(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	if !h.a.Ready() {
+		t.Fatal("adapter holding its lease is not ready")
+	}
+	h.a.setLease(nil)
+	if h.a.Ready() {
+		t.Fatal("adapter without a lease is ready")
+	}
+	h.a.setLease(&claim.Lease{Key: provider.InstanceName(testPod), Holder: testHolder, Epoch: h.epoch(),
+		Incarnation: testIncarnation, Deadline: h.clock.read() + time.Hour})
+	if err := h.a.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if h.a.Ready() {
+		t.Fatal("adapter is ready after Shutdown")
+	}
+}
+
 func TestShutdownReleasesInOrder(t *testing.T) {
 	h := newHarness(t)
 	h.start()
@@ -1204,7 +1326,7 @@ func TestConcurrentRequestsOfOneConnector(t *testing.T) {
 
 // TestGrantRefresh refreshes an open request's grant: a refreshed deadline
 // keeps it forwarding past the first, a failed refresh keeps the deadline
-// it had, a changed grant ends it, and a revoked one ends only that
+// it had, a changed grant or route set ends it, and a revoked one ends only that
 // connector's request while others on the instance and the same attachment
 // keep forwarding.
 func TestGrantRefresh(t *testing.T) {
@@ -1265,6 +1387,23 @@ func TestGrantRefresh(t *testing.T) {
 		l := h.admit(credA1)
 		defer func() { _ = l.Close() }()
 		expectDone(t, l, "a refresh changing the grant's /96")
+	})
+	// The CONNECT-IP proxy checks packets against the routes it advertised
+	// at admission, so narrowing them must end the request.
+	t.Run("routes changed", func(t *testing.T) {
+		h := newHarness(t)
+		h.start()
+		h.a.cfg.Refresh = 2 * time.Millisecond
+		setRefresh(h, func(g Grant) (Grant, error) {
+			g.Routes, g.NotAfter = []netip.Prefix{netip.MustParsePrefix("fd00:20::/64")}, g.NotAfter.Add(time.Hour)
+			return g, nil
+		})
+		l := h.admit(credA1)
+		defer func() { _ = l.Close() }()
+		expectDone(t, l, "a refresh changing the grant's routes")
+		if l.(*session).forwarding() {
+			t.Fatal("a request whose routes changed still forwards")
+		}
 	})
 	t.Run("revoked", func(t *testing.T) {
 		h := newHarness(t)

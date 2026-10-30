@@ -141,6 +141,13 @@ container, through the node's `/dev/net/tun`, which the DaemonSet mounts as a
   `Programmed` False, reason `ProvisionFailed`, and a `hostattach: create TUN`
   message reporting the denied open.
 
+The agent's `--mtu` must be no larger than the fabric uplink MTU less the
+40-byte encapsulation header, the limit `galactic-cni` writes to
+`encap_mtu_table`. A larger one fails every attachment on the node with
+`Programmed` False, reason `MTUExceedsUnderlay`, and a message naming both
+values. The [provider contract](provider-contract.md#attachment) gives the
+bounds.
+
 ## Telling failures apart
 
 | What happened                 | Where it shows                                                                                                                                                          | What sets it apart                                                                                               |
@@ -167,6 +174,52 @@ advertisement within its 250 ms gate poll. Remote convergence then depends
 on the route reflectors and the hold time, which the contract's Timing
 section bounds.
 
+## Diagnose a MASQUE connector
+
+The [MASQUE service](masque-service.md) adds per-request telemetry on top of the foundation's. Its metrics are in [the MASQUE metrics reference](../observability/masque.md). Two log lines of `masque-provider` name every identity of one request, and share its session ID:
+
+- `request admitted` from the adapter: `session`, `connector`, `principal`, `serviceUID`, `attachment`, `attachmentUID`, `route`, `claimEpoch` and `instanceEpoch`.
+- `CONNECT-IP request accepted` from the server: `transport`, `session`, `connector`, `vpc`, `prefix`, `attachment`, `claim` and `epoch`.
+
+Their ends are `request ended` (with `endReason`) and `CONNECT-IP request ended` (with `cause` and `duration`). A refused request logs `CONNECT-IP request rejected` with `transport` and `outcome`, and `admission refused` with the adapter's `outcome`. The adapter logs a refusal as `unauthenticated` or `forbidden` at debug level only, since bad credentials are routine; the server's line and `galactic_masque_admissions_total` still record it. No log line or metric carries a credential or packet contents.
+
+1. Find the connector's latest request:
+
+   ```sh
+   kubectl logs -n masque-system deploy/masque-provider | grep 'connector=<connector>'
+   ```
+
+2. If it was refused, the outcome says who refused it:
+
+   | Outcome                         | Refused by                            | Next step                                                                                  |
+   | ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------ |
+   | `unauthenticated`, `forbidden`  | The authority: the client's grant     | Check the connector's credential and VPC with the authority, not the node                  |
+   | `limited`, `max_connections*`   | The server's limits                   | `galactic_connectip_tunnels`, `_admissions` and `_connections` against the configured caps |
+   | `no_lease`, `shutting_down`     | The provider instance                 | `galactic_masque_lease_held`; the pod's readiness                                          |
+   | `attachment_failed`             | Core or the node: the attachment      | Steps 1 to 3 of [the workflow](#workflow) with the attachment the adapter logged           |
+   | `route_refused`, `route_failed` | Core: the connector's /96 route claim | [Find who forwards the prefix](#4-find-who-forwards-a-prefix) and read the route's Events  |
+   | `mtu`                           | The path                              | The client's path cannot carry a 1280-byte inner packet over HTTP/3; HTTP/2 can            |
+
+3. If it was admitted but does not forward, `galactic_masque_requests` says how far it got. `programmed` with `galactic_masque_lease_held` at 0 is a lost lease. `programmed` with the lease held is a grant past its deadline, or a packet path not yet open. `admitted` is an attachment or route claim no longer current; follow [the workflow](#workflow) with the logged `attachmentUID` and `route`. These states last only until the adapter's next check, at most a second, or one lease renewal attempt after a lost lease, when it ends the request; a scrape rarely catches them. Once the request has ended, step 4's end reasons name the same cause.
+
+4. If it ended, read both end lines. The server's `cause` says what broke the tunnel and the adapter's `endReason` says why:
+
+   | `cause`         | `endReason`                                                                   | Meaning                                                              |
+   | --------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+   | `lease_ended`   | `grant_expired`, `grant_revoked`, `grant_changed`, `grant_invalid`, `revoked` | The client's authority ended                                         |
+   | `lease_ended`   | `replaced`                                                                    | The connector reconnected, possibly over the other transport         |
+   | `lease_ended`   | `lease_lost`                                                                  | The provider instance lost its Lease; every request on the pod ended |
+   | `lease_ended`   | `route_revoked`, `route_moved`                                                | Core stopped accepting the /96 claim; see the route's `Route` Event  |
+   | `lease_ended`   | `attachment_*`                                                                | The attachment was drained, deleted or reprogrammed                  |
+   | `path_mtu`      | `closed`                                                                      | The client's path no longer carries a 1280-byte packet               |
+   | `slow_client`   | `closed`                                                                      | The client stopped receiving for 5 seconds                           |
+   | `backend_error` | `closed`                                                                      | The packet device failed a read or write                             |
+   | `client_closed` | `closed`                                                                      | The client or its connection ended the request                       |
+
+   A grant that expires because its refreshes fail, for example while the authority is out of reach, can end as `attachment_*` rather than `grant_expired`: core drains the attachment 2 s (MaxSkew) before the grant's deadline, which comes before the adapter's own end at the deadline. The `grant refresh failed; the request keeps its deadline` lines before the end tell it apart from a drain for another cause.
+
+5. If it forwards but traffic is lost, check `galactic_connectip_packets_denied_total` for packet policy drops, `galactic_masque_device_drops_total` for a full device, and the traffic policy and route publication rows of [Telling failures apart](#telling-failures-apart) for the gVPC side.
+
 ## Alerts
 
 `config/monitoring/` ships the PodMonitors for both components and the
@@ -176,3 +229,62 @@ foundation itself stopped doing: attachments not programmed, services
 without a resolvable policy, lost ownership scopes, failing cleanup and
 unreachable metrics. A refused admission is a tenant or provider decision
 and alerts nothing.
+
+The `masque-provider` alert group fires on a MASQUE provider pod failing
+requests on its own side. A request the client or its grant gets wrong
+alerts nothing. Each alert names the pod; start from its logs as in
+[Diagnose a MASQUE connector](#diagnose-a-masque-connector).
+
+### GalacticMasqueRequestsFailing
+
+Over a quarter of the pod's requests fail on the provider's side. A server
+that is closing also refuses with `unavailable`, so first check whether the
+alert follows a rollout or restart of the pod. Otherwise find the stage
+that refuses them:
+
+```promql
+sum by (outcome) (increase(galactic_masque_admissions_total{pod="<pod>"}[30m]))
+```
+
+- `authorizer_failed`: the pod cannot reach the grant authority, or it times out. Check the `masque-authority` pods and the provider's projected token.
+- `attachment_failed`: follow [the workflow](#workflow) from the attachment in the `admission refused` log line.
+- `route_refused`, `route_failed`: see [GalacticMasqueRouteClaimsFailing](#galacticmasquerouteclaimsfailing).
+- `replace_failed`: the connector's previous request did not stop in time. Read that request's log lines by its session ID.
+
+When admissions succeed, `galactic_connectip_tunnel_ends_total` with `cause` `backend_error` or `setup_failed` points at the packet device or address assignment. Read the `CONNECT-IP request ended` lines and check the node as in [step 5](#5-check-the-node).
+
+### GalacticMasqueRouteClaimsFailing
+
+Core keeps refusing connector /96 claims (`refused`) or not accepting them
+in time (`failed`). For a refusal, [find who forwards the
+prefix](#4-find-who-forwards-a-prefix) named in the `admission refused`
+line; another forwarder holds it. For a failure, check that the core
+controller (`galactic-controller --role=cell --edge`) runs, and read the
+route's Events with `kubectl describe edgeroutes -n masque-system`.
+
+### GalacticMasqueLeaseNotHeld
+
+The pod holds no instance Lease, so it admits nothing and is not ready.
+Read its `lease` log lines for the error. Its Lease writes can be refused
+by the provider's RBAC or the `galactic-edge-lease` admission policy, or
+fail when the API server is unhealthy.
+
+### GalacticMasqueLeaseLost
+
+The pod keeps losing and reacquiring its Lease, ending every request each
+time. Its `lease renewal failed` and `lease lost` lines give the error,
+such as Lease writes the API server refused or timed out.
+
+### GalacticMasquePathMTUTooSmall
+
+The HTTP/3 path of many requests cannot carry a 1280-byte inner packet.
+When it affects most clients, the cut is in front of the pod: check the
+MTU of the load balancer, any tunnel and the node's uplink. Clients can
+still connect over HTTP/2.
+
+### GalacticMasqueMetricsDown
+
+Prometheus cannot scrape the pod's `health` port (9188). Check that the
+pod runs and that the `masque-provider` PodMonitor from
+`config/monitoring/` is applied and can reach the `masque-system`
+namespace.

@@ -79,7 +79,7 @@ A field not listed is read-only to everyone but the control plane that owns the 
 
 A provider integrates in five steps, all through its own ServiceAccount. Its cell must also give it two things outside these resources:
 
-- **The packet device.** Kubernetes gives no unprivileged pod `/dev/net/tun`, and a provider has no hostPath or capability to reach it, so a cell that offers `PacketAccess` runs a device plugin that hands the device out as a resource, and a packet-access provider pod requests it.
+- **The packet device.** Kubernetes gives no unprivileged pod `/dev/net/tun`, and a provider has no hostPath or capability to reach it, so a cell that offers `PacketAccess` runs a device plugin that hands the device out as a resource, and a packet-access provider pod requests it. `config/galactic-edge/tun-device-plugin` serves it as `devic.es/tun` on the nodes galactic-edge runs on.
 - **The host VRF.** An attachment joins its gVPC's canonical host VRF on its node, which only CNI ADD creates, so a workload of the gVPC must run on the provider's node.
 
 [examples/edge-provider](../../examples/edge-provider) is a provider built only on this contract, with the deployment it needs.
@@ -168,17 +168,19 @@ stateDiagram-v2
     Refused --> [*]
 ```
 
-| Transition              | Writer | Guard                                                                                                                                               |
-| ----------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pending to Admitted     | Core   | Provider approved, versions supported, gVPC and capabilities granted, capacity available.                                                           |
-| Admitted to Allocated   | Core   | An address in the client pool that no other attachment holds.                                                                                       |
-| Allocated to Programmed | Node   | Pod is on this node with the recorded UID; `hostattach.Provision` and `Readback` succeed; traffic policy rows exist.                                |
-| Programmed to Active    | Node   | `Ready`, a lease valid on fresh reads, and a route whose accepted holder is this attachment and instance; core accepts a holder only after fencing. |
-| Active to Programmed    | Node   | The kernel deadline passed or the claim moved; the node closes the gate and records it.                                                             |
-| Any to Draining         | Core   | Deletion, `EdgeService` deleted or revoked, `validUntil` reached, or node maintenance.                                                              |
-| Draining to Released    | Node   | Gate closed, routes withdrawn locally, `hostattach.Release` done, policy rows removed.                                                              |
+| Transition              | Writer | Guard                                                                                                                                                |
+| ----------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pending to Admitted     | Core   | Provider approved, versions supported, gVPC and capabilities granted, capacity available.                                                            |
+| Admitted to Allocated   | Core   | An address in the client pool that no other attachment holds.                                                                                        |
+| Allocated to Programmed | Node   | Pod is on this node with the recorded UID; the link MTU fits the underlay; `hostattach.Provision` and `Readback` succeed; traffic policy rows exist. |
+| Programmed to Active    | Node   | `Ready`, a lease valid on fresh reads, and a route whose accepted holder is this attachment and instance; core accepts a holder only after fencing.  |
+| Active to Programmed    | Node   | The kernel deadline passed or the claim moved; the node closes the gate and records it.                                                              |
+| Any to Draining         | Core   | Deletion, `EdgeService` deleted or revoked, `validUntil` reached, or node maintenance.                                                               |
+| Draining to Released    | Node   | Gate closed, routes withdrawn locally, `hostattach.Release` done, policy rows removed.                                                               |
 
 A failed step leaves the attachment in its last state with a condition naming the reason. Partial host state carries the attachment ID in the host link's alias, so the node finds and finishes it on restart (`internal/edge/hostattach/inventory.go:33`).
+
+`galactic-edge --mtu` sets the MTU of every attachment link. It must be at least the fabric's tenant MTU, so a packet the node decapsulates fits the link, and at most the largest packet the fabric underlay carries once encapsulated: the uplink MTU less the 40-byte outer header, which `galactic-cni` writes to the datapath's `encap_mtu_table`. An edge host link has no gateway for `usid_egress` to send Packet Too Big from, so a larger packet would be dropped with no error. On every pass the node reads that limit and, while `--mtu` exceeds it, provisions nothing and reports `Programmed` False with reason `MTUExceedsUnderlay`, naming both values. A link programmed before the limit fell is left as it is, neither reprogrammed nor released, and its routes are not published while it is not `Programmed`. A limit of zero, which `GALACTIC_CNI_TCP_MSS_CLAMP=off` sets and a node reads before `galactic-cni` has written it, skips the check. A limit the node cannot read fails the attachment with `DatapathFailed`.
 
 The node provisions every attachment again at least once a minute (`agent.Resync`), which repairs host state that drifted under it. It removes every IPv6 unicast route through the host link, the pod link or the packet device in the table it owns, other than the ones it installs, matching destination, gateway and metric. The only kernel routes it leaves are the connected routes of the addresses it assigns itself, and it removes any other global address from the pod link and the packet device, so an address added in the pod brings no route of its own. A route or address that appears after that pass, or that the node fails to remove, fails `Readback`, and the attachment leaves `Programmed`. IPv4 routes, other tables and policy rules are outside this repair.
 

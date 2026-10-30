@@ -86,7 +86,7 @@ func (i *PodInterfaceInjector) Handle(ctx context.Context, req admission.Request
 	}
 
 	namespace := req.Namespace
-	instanceName, found := instanceOwner(pod)
+	instanceName, found := InstanceOwner(pod)
 	if !found {
 		return admission.Denied(fmt.Sprintf(
 			"pod carries %s but is not owned by a %s, so its interfaces cannot be resolved",
@@ -171,8 +171,8 @@ func interfaceRefFor(instance *computev1alpha.Instance, name string) string {
 	return ""
 }
 
-// instanceOwner returns the name of the Instance controlling a Pod.
-func instanceOwner(pod *corev1.Pod) (string, bool) {
+// InstanceOwner returns the name of the Instance controlling a Pod.
+func InstanceOwner(pod *corev1.Pod) (string, bool) {
 	for _, owner := range pod.OwnerReferences {
 		if owner.Kind != instanceKind || owner.Controller == nil || !*owner.Controller {
 			continue

@@ -1,6 +1,6 @@
 # MASQUE grant authority
 
-`internal/edge/masque/authority` and `cmd/masque-authority` authenticate MASQUE connector credentials and issue the finite `EdgeService` of each connector authorization. The [MASQUE provider adapter](masque-provider.md) consumes them through `authority.Client`, its `masque.Authorizer`. The design is in the [MASQUE connector contract](../designs/masque/contract.md#authority-and-durable-allocations). This page covers what is built and how to operate it. No image, manifest or published release ships it yet.
+`internal/edge/masque/authority` and `cmd/masque-authority` authenticate MASQUE connector credentials and issue the finite `EdgeService` of each connector authorization. The [MASQUE provider adapter](masque-provider.md) consumes them through `authority.Client`, its `masque.Authorizer`. The design is in the [MASQUE connector contract](../designs/masque/contract.md#authority-and-durable-allocations). This page covers what is built and how to operate it. `.github/workflows/publish.yaml` publishes its image, `ghcr.io/datum-cloud/masque-authority`, and `config/masque` deploys it ([deployment](masque-service.md#deployment)).
 
 The authority runs under its own ServiceAccount. It holds no provider token and no host access. The provider can't write grant records, ledgers or EdgeServices; it receives each grant from the authority.
 
@@ -73,6 +73,8 @@ masque-authority grant retire  <connector>   # revoke and tombstone the allocati
 
 `ledger init` refuses ranges that aren't masked IPv6 /80s inside one of the VPC's networks, or that overlap each other. It also refuses ranges that overlap those of another cell's ledger for the same VPC, so two cells are never handed overlapping /80s. And it refuses while any EdgeService the authority issued for the VPC in that cell still exists, so a recreated ledger can't hand out a /96 or pool that one still holds. Issued services of other cells don't block it. Choose ranges that overlap no workload subnet; core refuses a delegated route that does.
 
+`grant create` allocates the /96 before it writes the grant record. If the record write fails, the error names the connector and its /96. Run `grant create` again with `--connector <connector>` to keep that /96, or `grant retire <connector>` to tombstone it. A plain retry allocates another /96. If the error says the connector already has a grant record, the write succeeded but its reply was lost: run `grant rotate <connector>` for a credential.
+
 Run the server with:
 
 ```sh
@@ -106,10 +108,4 @@ The conformance fixture uses the authority when its configuration sets `grantAut
 
   `TestOverHTTPS` runs `authority.Client` against `Server` on TLS 1.3.
 - `go test ./internal/edge/masque/ -run TestAgainstCore` includes the in-place renewal check against core.
-
-Not yet covered:
-
-- the HTTP/2 transport ([#981](https://github.com/datum-cloud/galactic/issues/981));
-- refusing tenant packets and MTU probes before admission ([#980](https://github.com/datum-cloud/galactic/issues/980), [#981](https://github.com/datum-cloud/galactic/issues/981));
-- deployment manifests and an image ([#980](https://github.com/datum-cloud/galactic/issues/980));
-- lab or target-platform measurements of the revocation and expiry bounds ([#985](https://github.com/datum-cloud/galactic/issues/985)).
+- `task verify:masque-service` runs the authority with the [MASQUE service](masque-service.md#verification) in the lab. It creates ledgers and grants with the operator commands, measures `grant disable` and credential expiry against forwarding over HTTP/3, and credential expiry over HTTP/2.

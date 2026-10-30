@@ -220,7 +220,7 @@ func (r *Runner) fanOut(ctx context.Context, project, requestID string, q query.
 		wg.Go(func() {
 			nctx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
-			obs, err := r.one(nctx, project, requestID, wire, q, n, budgets, expires, deadline, opts)
+			obs, err := r.one(ctx, nctx, project, requestID, wire, q, n, budgets, expires, deadline, opts)
 			if opts.requestCodes {
 				// When the request's expiration is the node's deadline, the
 				// node's timer can fire before ctx's: both mean the request
@@ -270,8 +270,12 @@ func requestErr(ctx context.Context, err error, expired bool) error {
 	return errcode.Status(errcode.Cancelled, "the request was cancelled before the router finished")
 }
 
-func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabricv1.Query, q query.Query, n Node,
-	budgets *fabricv1.Budgets, expires, deadline time.Time, opts runOptions) (*fabricv1.Observation, error) {
+// one runs q on node n through the cell's executor. request is the request
+// context every node's job shares; it guards the start against a grant the
+// executor hands a queued job after the request ended.
+func (r *Runner) one(request, ctx context.Context, project, requestID string, wire *fabricv1.Query,
+	q query.Query, n Node, budgets *fabricv1.Budgets, expires, deadline time.Time,
+	opts runOptions) (*fabricv1.Observation, error) {
 	actx := ctx
 	if opts.queueWait > 0 {
 		var cancel context.CancelFunc
@@ -300,6 +304,15 @@ func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabri
 		}
 		return nil, errcode.Status(errcode.Timeout, "deadline passed waiting for a cell execution slot")
 	}
+	// The executor hands a queued job its slot from the releasing job's
+	// goroutine, and that grant can arrive before this job's own derived
+	// context observes the request ending. Re-check the request itself, so
+	// a queued job never starts node work for a request the caller already
+	// cancelled or that already expired.
+	if request.Err() != nil {
+		release()
+		return nil, errcode.Status(errcode.Timeout, "the request ended before the router started")
+	}
 	held := false
 	defer func() {
 		if !held {
@@ -314,21 +327,8 @@ func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabri
 	req := &fabricv1.ExecuteRequest{
 		RequestId: requestID, Node: n.Name, Query: wire, Budgets: budgets, ExpiresAt: timestamppb.New(expires),
 	}
-	if a := r.Admission; a != nil {
-		switch {
-		case q.Type.Probe():
-			if err := r.checkPermits(ctx, c, n); err != nil {
-				return nil, err
-			}
-			if req.Permit, err = a.permit(ctx, project, requestID, n.Name, q, deadline); err != nil {
-				return nil, err
-			}
-		case opts.checkOwnership:
-			if _, _, err := a.Authority.Check(ctx); err != nil {
-				a.Metrics.refused(project, err)
-				return nil, err
-			}
-		}
+	if err := r.admit(ctx, c, n, req, project, requestID, q, deadline, opts.checkOwnership); err != nil {
+		return nil, err
 	}
 	start := r.now()
 	resp, err := c.Execute(ctx, req)
@@ -358,6 +358,34 @@ func (r *Runner) one(ctx context.Context, project, requestID string, wire *fabri
 		return nil, err
 	}
 	return resp.GetObservation(), nil
+}
+
+// admit fills the admission data on req before the node call: a probe gets a
+// single-attempt permit, and a job that must prove ownership checks the
+// authority. It returns the refusal's error, or nil when the job may start.
+func (r *Runner) admit(ctx context.Context, c fabricv1.FabricServiceClient, n Node, req *fabricv1.ExecuteRequest,
+	project, requestID string, q query.Query, deadline time.Time, checkOwnership bool) error {
+	a := r.Admission
+	if a == nil {
+		return nil
+	}
+	switch {
+	case q.Type.Probe():
+		if err := r.checkPermits(ctx, c, n); err != nil {
+			return err
+		}
+		permit, err := a.permit(ctx, project, requestID, n.Name, q, deadline)
+		if err != nil {
+			return err
+		}
+		req.Permit = permit
+	case checkOwnership:
+		if _, _, err := a.Authority.Check(ctx); err != nil {
+			a.Metrics.refused(project, err)
+			return err
+		}
+	}
+	return nil
 }
 
 // checkPermits refuses a node whose sidecar does not enforce probe permits:

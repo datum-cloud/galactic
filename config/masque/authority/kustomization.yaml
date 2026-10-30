@@ -1,0 +1,8 @@
+# The grant authority; see ../kustomization.yaml for why it is not applied
+# as-is. An overlay appends --cell with the cell's name and supplies the
+# masque-authority-tls Secret (tls.crt, tls.key) whose certificate names
+# masque-authority.masque-system.svc, or includes components/cert-manager to
+# have cert-manager issue it.
+resources:
+  - deployment.yaml
+  - service.yaml
