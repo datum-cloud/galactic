@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,12 +39,17 @@ const maxArgumentReallocations = 3
 // BGPVRFInstance holds the same Argument and this ADD cannot move its own.
 var errArgumentCollision = errors.New("SID Argument collision")
 
-// lockArguments takes the node-local Argument lock, blocking until it is
-// free, and returns the function that releases it.
+// argumentLockPoll is how often lockArguments retries a held lock.
+const argumentLockPoll = 20 * time.Millisecond
+
+// lockArguments takes the node-local Argument lock, waiting until it is free
+// or ctx ends, and returns the function that releases it.
 //
 // Each CNI ADD is its own process, so two first ADDs for different VPCs on
-// one node otherwise read the same free Argument and both write it.
-func lockArguments() (release func(), err error) {
+// one node otherwise read the same free Argument and both write it. A holder
+// makes API calls under the lock, so a waiter gives up with ctx rather than
+// outliving its own ADD's budget behind a slow API server.
+func lockArguments(ctx context.Context) (release func(), err error) {
 	if err := os.MkdirAll(argumentLockDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create Argument lock dir %q: %w", argumentLockDir, err)
 	}
@@ -52,9 +58,21 @@ func lockArguments() (release func(), err error) {
 	if err != nil {
 		return nil, fmt.Errorf("open Argument lock file %q: %w", path, err)
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("flock Argument lock file %q: %w", path, err)
+	for {
+		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
+			_ = f.Close()
+			return nil, fmt.Errorf("flock Argument lock file %q: %w", path, err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, fmt.Errorf("wait for Argument lock file %q: %w", path, ctx.Err())
+		case <-time.After(argumentLockPoll):
+		}
 	}
 	return func() {
 		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
@@ -69,17 +87,23 @@ func lockArguments() (release func(), err error) {
 // Allocation, the write and the collision check all run under the node's
 // Argument lock, so no other galactic-bgp process on the node can take the
 // same free value in between. A collision can still come from a writer that
-// does not take the lock. When this ADD created the instance (createdBefore
-// says an earlier attempt of the same ADD did), the instance is moved to the
-// next free Argument, at most maxArgumentReallocations times, since nothing
-// has used its value yet. An instance this ADD reused already carries a value
-// other attachments use, so a collision there is an error wrapping
-// errArgumentCollision, naming both instances.
+// does not take the lock. When this attempt created the instance, the
+// instance is moved to the next free Argument, at most
+// maxArgumentReallocations times, since nothing has used its value yet: a
+// sibling ADD would need the lock this attempt holds to reuse it. An instance
+// this ADD reused already carries a value other attachments use, so a
+// collision there is an error wrapping errArgumentCollision, naming both
+// instances.
+//
+// createdBefore says an earlier attempt of this ADD created the instance.
+// The lock was released in between, so a sibling ADD may have reused it
+// since; it is moved only while siblings, the links of other attachments in
+// the VPC's VRF, reports none.
 func claimArgument(
 	ctx context.Context, k8s client.Client, namespace, routerName, vrfName string, createdBefore bool,
-	build func(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec,
+	siblings func() ([]string, error), build func(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec,
 ) (vrfID int32, created bool, err error) {
-	release, err := lockArguments()
+	release, err := lockArguments(ctx)
 	if err != nil {
 		return 0, false, err
 	}
@@ -100,7 +124,7 @@ func claimArgument(
 		return 0, false, fmt.Errorf("apply BGPVRFInstance: %w", err)
 	}
 	created = op == controllerutil.OperationResultCreated
-	ours := created || createdBefore
+	ours := created
 
 	for moves := 0; ; moves++ {
 		holder, err := argumentHolder(ctx, k8s, namespace, routerName, vrfName, vrfID)
@@ -109,6 +133,13 @@ func claimArgument(
 		}
 		if holder == "" {
 			return vrfID, created, nil
+		}
+		if !ours && createdBefore {
+			others, err := siblings()
+			if err != nil {
+				return vrfID, created, fmt.Errorf("check for siblings before moving BGPVRFInstance %s: %w", vrfName, err)
+			}
+			ours = len(others) == 0
 		}
 		if !ours {
 			return vrfID, created, fmt.Errorf(

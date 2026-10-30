@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -109,9 +110,12 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 			},
 		}
 		// Under the VRF lock, so no sibling ADD can enslave its link between
-		// the check and the delete. A sibling that enslaves after it writes
-		// the instance again itself.
-		err := vrfLockedFn(func() error {
+		// the check and the delete: a sibling that enslaved in that gap could
+		// reuse the instance before the delete lands. A sibling that enslaves
+		// after it writes the instance again itself. The delete is bounded,
+		// since every ADD on the node waits for this lock.
+		var deleteErr error
+		lockErr := vrfLockedFn(func() error {
 			siblings, err := siblingHostLinks(rt.vpc, rt.vpcAttachment)
 			if err != nil {
 				return fmt.Errorf("list links enslaved to the VRF: %w", err)
@@ -121,19 +125,30 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 					"resource_name", vrfInst.Name, "resource_namespace", rt.namespace, "links", siblings)
 				return nil
 			}
-			if err := rt.k8s.Delete(ctx, vrfInst); client.IgnoreNotFound(err) != nil {
-				return err
+			delCtx, cancel := context.WithTimeout(ctx, lockedDeleteTimeout)
+			defer cancel()
+			if err := rt.k8s.Delete(delCtx, vrfInst); client.IgnoreNotFound(err) != nil {
+				deleteErr = err
+				return nil
 			}
 			slog.Debug("Rollback: deleted freshly-created BGPVRFInstance",
 				"resource_name", vrfInst.Name, "resource_namespace", rt.namespace)
 			return nil
 		})
-		if err != nil {
-			slog.Error("Rollback: failed to delete freshly-created BGPVRFInstance", "err", err,
+		switch {
+		case lockErr != nil:
+			slog.Error("Rollback: kept freshly-created BGPVRFInstance, could not check its VRF for siblings; GC reclaims it",
+				"err", lockErr, "resource_name", vrfInst.Name, "resource_namespace", rt.namespace)
+		case deleteErr != nil:
+			slog.Error("Rollback: failed to delete freshly-created BGPVRFInstance", "err", deleteErr,
 				"resource_name", vrfInst.Name, "resource_namespace", rt.namespace)
 		}
 	}
 }
+
+// lockedDeleteTimeout bounds the instance delete rollback makes while holding
+// the node's VRF lock.
+const lockedDeleteTimeout = 5 * time.Second
 
 // vrfLockedFn runs a function under the node's VRF lock; a variable so
 // unprivileged tests, which cannot create the lock file, can run without it.

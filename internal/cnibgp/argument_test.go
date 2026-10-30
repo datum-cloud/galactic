@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,6 +26,15 @@ import (
 )
 
 const argTestRouter = "router-a"
+
+// claim runs claimArgument for the test router and namespace.
+func claim(k8s client.Client, name string, createdBefore bool, siblings func() ([]string, error)) (int32, bool, error) {
+	ctx := context.Background()
+	return claimArgument(ctx, k8s, testNamespace, argTestRouter, name, createdBefore, siblings, argTestSpec)
+}
+
+// noSiblings reports no other attachment's link in the VPC's VRF.
+func noSiblings() ([]string, error) { return nil, nil }
 
 func argTestSpec(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec {
 	return buildVRFInstanceSpec(argTestRouter, testRD65000_1, vrfID)
@@ -62,7 +72,7 @@ func TestClaimArgument_ConcurrentFirstADDs(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			name := crdnames.BGPVRFInstanceName(fmt.Sprintf("v%02d", i), testNodeName)
-			_, created, err := claimArgument(context.Background(), k8s, testNamespace, argTestRouter, name, false, argTestSpec)
+			_, created, err := claim(k8s, name, false, noSiblings)
 			if err == nil && !created {
 				err = fmt.Errorf("%s: not reported created", name)
 			}
@@ -123,7 +133,7 @@ func TestClaimArgument_ReallocatesOwnInstance(t *testing.T) {
 	other := crdnames.BGPVRFInstanceName("vb", testNodeName)
 	k8s := racingWriter(t, mine, other)
 
-	vrfID, created, err := claimArgument(context.Background(), k8s, testNamespace, argTestRouter, mine, false, argTestSpec)
+	vrfID, created, err := claim(k8s, mine, false, noSiblings)
 	if err != nil {
 		t.Fatalf("claimArgument: %v", err)
 	}
@@ -152,7 +162,7 @@ func TestClaimArgument_ReusedInstanceCollisionFails(t *testing.T) {
 		argTestInstance(other),
 	)
 
-	_, created, err := claimArgument(context.Background(), k8s, testNamespace, argTestRouter, mine, false, argTestSpec)
+	_, created, err := claim(k8s, mine, false, noSiblings)
 	if !errors.Is(err, errArgumentCollision) {
 		t.Fatalf("claimArgument = %v, want a collision error", err)
 	}
@@ -175,7 +185,7 @@ func TestClaimArgument_EarlierAttemptCreated(t *testing.T) {
 		argTestInstance(other),
 	)
 
-	vrfID, created, err := claimArgument(context.Background(), k8s, testNamespace, argTestRouter, mine, true, argTestSpec)
+	vrfID, created, err := claim(k8s, mine, true, noSiblings)
 	if err != nil {
 		t.Fatalf("claimArgument: %v", err)
 	}
@@ -185,6 +195,45 @@ func TestClaimArgument_EarlierAttemptCreated(t *testing.T) {
 	if vrfID == 7 {
 		t.Errorf("Argument stayed 7, want it moved off the collision")
 	}
+}
+
+// TestClaimArgument_EarlierAttemptSiblingReused retries an ADD whose earlier
+// attempt created the instance, after a sibling attachment's link joined the
+// VPC's VRF. The sibling may already use the Argument, so the collision fails
+// the ADD rather than moving the instance under it.
+func TestClaimArgument_EarlierAttemptSiblingReused(t *testing.T) {
+	mine := crdnames.BGPVRFInstanceName("va", testNodeName)
+	other := crdnames.BGPVRFInstanceName("vb", testNodeName)
+	k8s := fakeClient(argTestInstance(mine), argTestInstance(other))
+	sibling := func() ([]string, error) { return []string{"sibling-link"}, nil }
+
+	_, _, err := claim(k8s, mine, true, sibling)
+	if !errors.Is(err, errArgumentCollision) {
+		t.Fatalf("claimArgument = %v, want a collision error", err)
+	}
+	if got := getInstance(t, k8s, mine).Spec.VRFID; got != collidingArgument {
+		t.Errorf("instance moved to %d under a sibling, want %d unchanged", got, collidingArgument)
+	}
+}
+
+// TestLockArguments_WaitsForContext holds the Argument lock and has a second
+// caller give up when its context ends, then take the lock once released.
+func TestLockArguments_WaitsForContext(t *testing.T) {
+	release, err := lockArguments(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := lockArguments(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lockArguments while held = %v, want the context's deadline", err)
+	}
+	release()
+	release2, err := lockArguments(context.Background())
+	if err != nil {
+		t.Fatalf("lockArguments after release: %v", err)
+	}
+	release2()
 }
 
 // withLinks substitutes links for the kernel's list of links.
