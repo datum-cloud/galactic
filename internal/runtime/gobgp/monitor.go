@@ -38,11 +38,13 @@ var pinDir = attach.PinDir
 var errVRFNotInThisNetns = errors.New("kernel VRF interface is not in this process's network namespace")
 
 // resolveVRFTable and probeVRFDatapath are the kernel-facing steps applyVRFs
-// runs for a VRF not yet applied. Package vars so tests can make them fail
+// runs for a VRF not yet applied, and snapshotVRFTables the listing it
+// re-checks applied VRFs against. Package vars so tests can make them fail
 // and then succeed without real VRF devices or bpffs.
 var (
-	resolveVRFTable  = vrfTableID
-	probeVRFDatapath = probeEgressRouteWrite
+	resolveVRFTable   = vrfTableID
+	probeVRFDatapath  = probeEgressRouteWrite
+	snapshotVRFTables = vrfTableSnapshot
 )
 
 // startRIBMonitor starts the shared EVPN best-path watcher goroutine, once per
@@ -166,20 +168,7 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 		return
 	}
 
-	// The destination SID travels in the BGP Prefix-SID attribute, not the EVPN
-	// route's Gateway IP field. That field cannot carry an IPv6 SID for an IPv4
-	// prefix, since RFC 9136 requires the Gateway IP and Prefix to share an
-	// address family, so reading it installs a garbage segment for every IPv4
-	// VPC prefix. Fall back to the transit next hop for non-SRv6
-	// advertisements, which carry no Prefix-SID.
-	gw, ok := evpnPrefixSID(path.Attrs)
-	if !ok {
-		if nh := evpnMpReachNexthop(path.Attrs); nh != "" {
-			if addr, err := netip.ParseAddr(nh); err == nil {
-				gw = addrToNetIP(addr)
-			}
-		}
-	}
+	gw := evpnGateway(path.Attrs)
 
 	slog.Info(logPrefix+": installing route", "prefix", prefix, "gw", gw, "table", tableID, "plain", install.plain)
 	if install.plain {
@@ -190,6 +179,26 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 	// Retried by r.vrf until it installs or is withdrawn, since BGP will not
 	// deliver this path again unless it changes.
 	r.vrf.install(vrfRouteKey{tableID: tableID, prefix: routePrefix}, gw)
+}
+
+// evpnGateway returns the SID an EVPN Type 5 path's route encapsulates toward.
+//
+// The destination SID travels in the BGP Prefix-SID attribute, not the EVPN
+// route's Gateway IP field. That field cannot carry an IPv6 SID for an IPv4
+// prefix, since RFC 9136 requires the Gateway IP and Prefix to share an
+// address family, so reading it installs a garbage segment for every IPv4
+// VPC prefix. Fall back to the transit next hop for non-SRv6
+// advertisements, which carry no Prefix-SID.
+func evpnGateway(attrs []bgp.PathAttributeInterface) net.IP {
+	gw, ok := evpnPrefixSID(attrs)
+	if !ok {
+		if nh := evpnMpReachNexthop(attrs); nh != "" {
+			if addr, err := netip.ParseAddr(nh); err == nil {
+				gw = addrToNetIP(addr)
+			}
+		}
+	}
+	return gw
 }
 
 // routeInstall is matchTableID's result: which kernel table the route belongs
@@ -269,13 +278,9 @@ func (r *GoBGPRuntime) matchTableID(attrs []bgp.PathAttributeInterface) (routeIn
 // sidecar itself, and Envoy only connects to backends those slices published,
 // so there is nothing for this process to add.
 func vrfTableID(vrfName string) (uint32, error) {
-	parts := strings.SplitN(vrfName, "-", 2)
-	if len(parts) != 2 {
-		return 0, fmt.Errorf("VRF name %q does not contain '-'", vrfName)
-	}
-	vpc, err := intf.HexToBase62(parts[0])
+	vpc, err := vrfVPC(vrfName)
 	if err != nil {
-		return 0, fmt.Errorf("VRF name %q: could not decode VPC segment %q back to base62: %w", vrfName, parts[0], err)
+		return 0, err
 	}
 
 	tableID, err := vrfpkg.TableID(vpc)
@@ -286,6 +291,45 @@ func vrfTableID(vrfName string) (uint32, error) {
 		return 0, fmt.Errorf("VRF %q: %w", vrfName, err)
 	}
 	return tableID, nil
+}
+
+// vrfVPC returns the base62 VPC of a VRF named "{vpc}-{node}"; see
+// vrfTableID.
+func vrfVPC(vrfName string) (string, error) {
+	parts := strings.SplitN(vrfName, "-", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("VRF name %q does not contain '-'", vrfName)
+	}
+	vpc, err := intf.HexToBase62(parts[0])
+	if err != nil {
+		return "", fmt.Errorf("VRF name %q: could not decode VPC segment %q back to base62: %w", vrfName, parts[0], err)
+	}
+	return vpc, nil
+}
+
+// vrfTableSnapshot lists this namespace's VRFs once and returns a resolver
+// that answers as vrfTableID does from that listing, so applyVRFs re-checks
+// every applied VRF for the cost of one link dump.
+func vrfTableSnapshot() (func(vrfName string) (uint32, error), error) {
+	links, err := vrfpkg.ListVRFLinks()
+	if err != nil {
+		return nil, err
+	}
+	tables := make(map[string]uint32, len(links))
+	for _, l := range links {
+		tables[l.Name] = l.Table
+	}
+	return func(vrfName string) (uint32, error) {
+		vpc, err := vrfVPC(vrfName)
+		if err != nil {
+			return 0, err
+		}
+		table, ok := tables[intf.GenerateInterfaceNameVRF(vpc)]
+		if !ok {
+			return 0, fmt.Errorf("VRF %q: %w", vrfName, errVRFNotInThisNetns)
+		}
+		return table, nil
+	}, nil
 }
 
 // evpnMpReachNexthop returns the MpReachNLRI next-hop address from attrs, or ""

@@ -29,8 +29,12 @@ var testVRFRuntimeKey = types.NamespacedName{Namespace: "vrf-status", Name: "r1"
 // repeating.
 func stubVRFKernel(t *testing.T, resolve []error, probe []error) {
 	t.Helper()
-	origResolve, origProbe := resolveVRFTable, probeVRFDatapath
-	t.Cleanup(func() { resolveVRFTable, probeVRFDatapath = origResolve, origProbe })
+	origResolve, origProbe, origSnapshot := resolveVRFTable, probeVRFDatapath, snapshotVRFTables
+	t.Cleanup(func() { resolveVRFTable, probeVRFDatapath, snapshotVRFTables = origResolve, origProbe, origSnapshot })
+	// The re-check of applied VRFs answers from the same stubbed resolver.
+	snapshotVRFTables = func() (func(string) (uint32, error), error) {
+		return func(name string) (uint32, error) { return resolveVRFTable(name) }, nil
+	}
 
 	next := func(errs []error, i *int) error {
 		if len(errs) == 0 {
