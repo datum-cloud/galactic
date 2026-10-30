@@ -14,6 +14,15 @@ pages linked below.
 > `internal/cnitap/`, `internal/cniipam/`, `internal/cnibgp/`, `internal/cniroute/`,
 > and `internal/installer/installer.go`.
 
+## Installer command options
+
+`galactic-cni` is the installer, not a CNI plugin. `init --node-name` selects
+the node; if omitted, it uses `GALACTIC_CNI_NODE_NAME`, then `NODE_NAME`, and
+fails if none is set. `run --grpc-health-port` defaults to `5180` and
+`--metrics-port` to `9180`. Both commands accept the
+[shared logging options](../observability/logging.md). Node-local environment
+and persisted HostConf are described in the [environment guide](environment-variables.md).
+
 ## Chain structure
 
 Each `NetworkAttachmentDefinition` (or other Multus-driven config) supplies a

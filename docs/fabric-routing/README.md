@@ -2,6 +2,7 @@
 
 The fabric routing controller compiles typed BGP resources into immutable FRR revisions. The node's config agent validates and activates released revisions. These components manage the underlay; galactic-router distributes tenant EVPN routes separately.
 
+- [Process configuration](configuration.md): agent and controller options, defaults and environment variables.
 - [Operating through the API](operations.md): installation, source transitions, releases, recovery, topology rollout and ConfigMap retirement.
 - [Topology design](topology.md): endpoint records, generated sessions, ownership, cross-cell consistency, drain and remaining gaps.
 - [Routing metrics](../observability/routing.md): fleet, node activation, FRR and tenant router series.
