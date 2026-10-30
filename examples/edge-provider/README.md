@@ -48,9 +48,9 @@ beside the provider.
 | A workload of the VPC on the provider's node                                                                                                                                                              | An attachment joins the VPC's existing host VRF on its node; only CNI ADD creates that VRF                                                      | Tenant or platform |
 | An `EdgeService` granting the VPC to the provider                                                                                                                                                         | Authorizes the attachment and its prefixes                                                                                                      | Platform authority |
 
-The containerlab lab's `deploy:galactic-edge` task sets all of this up on dfw;
-see `deploy/containerlab/resources/galactic-edge/`, including the
-`tun-device-plugin` it uses.
+`config/galactic-edge/tun-device-plugin` is a device plugin that serves
+`devic.es/tun`. The containerlab lab's `deploy:galactic-edge` task sets all of
+this up on dfw; see `deploy/containerlab/scripts/deploy-galactic-edge.sh`.
 
 ## Register the provider (operator)
 

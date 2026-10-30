@@ -13,13 +13,14 @@ Images:
 
 ## Deployment
 
-`config/masque` holds the manifests. None of them is in the root `config/kustomization.yaml`. CI stamps both images into the `galactic-kustomize` bundle at the tag of the same build, so an overlay of that bundle needs no image pin.
+`config/masque` holds the manifests. None of them is in the root `config/kustomization.yaml`. CI stamps both images into the `galactic-kustomize` bundle at the tag of the same build, so an overlay of that bundle needs no image pin. The TUN device plugin's image is a third-party image pinned by digest, which CI does not stamp or mirror.
 
-| Path                      | Applies                                                                                                      | Needs from an overlay                                                                                                                 |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `config/masque`           | Namespace `masque-system`, both ServiceAccounts, the authority's RBAC, and the `EdgeProvider` named `masque` | Nothing                                                                                                                               |
-| `config/masque/authority` | The `masque-authority` Deployment and Service                                                                | `--cell`, and Secret `masque-authority-tls` for `masque-authority.masque-system.svc`                                                  |
-| `config/masque/provider`  | The `masque-provider` Deployment and UDP/443 + TCP/443 Service                                               | `--authority`, Secret `masque-provider-tls` for that name, ConfigMap `masque-authority-ca` (`ca.crt`), and how the Service is exposed |
+| Path                                     | Applies                                                                                                                                                                      | Needs from an overlay                                                                                                                 |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `config/galactic-edge/tun-device-plugin` | DaemonSet `galactic-system/tun-device-plugin`, which serves `devic.es/tun` on the nodes labeled `galactic.datumapis.com/node=edge` and `galactic.datumapis.com/edge=enabled` | Nothing                                                                                                                               |
+| `config/masque`                          | Namespace `masque-system`, both ServiceAccounts, the authority's RBAC, and the `EdgeProvider` named `masque`                                                                 | Nothing                                                                                                                               |
+| `config/masque/authority`                | The `masque-authority` Deployment and Service                                                                                                                                | `--cell`, and Secret `masque-authority-tls` for `masque-authority.masque-system.svc`                                                  |
+| `config/masque/provider`                 | The `masque-provider` Deployment and UDP/443 + TCP/443 Service                                                                                                               | `--authority`, Secret `masque-provider-tls` for that name, ConfigMap `masque-authority-ca` (`ca.crt`), and how the Service is exposed |
 
 The [certificates](#certificates) section covers both Secrets and the CA.
 
@@ -34,19 +35,22 @@ patches:
         value: --authority=masque.example.com
 ```
 
-The cell must already run Galactic Edge: CRDs, `config/galactic-edge`, galactic-controller with `--edge` and the galactic-edge DaemonSet on the edge nodes ([provider contract](provider-contract.md)). The provider pods schedule only on nodes labeled `galactic.datumapis.com/node=edge` and `galactic.datumapis.com/edge=enabled`, and each requests one `devic.es/tun` device from the node's TUN device plugin. An overlay can rename that resource.
+The cell must already run Galactic Edge: CRDs, `config/galactic-edge`, galactic-controller with `--edge` and the galactic-edge DaemonSet on the edge nodes ([provider contract](provider-contract.md)). The provider pods schedule only on nodes labeled `galactic.datumapis.com/node=edge` and `galactic.datumapis.com/edge=enabled`, and each requests one `devic.es/tun` device from the node's TUN device plugin. An overlay can rename that resource; the plugin must then serve the new name.
+
+The TUN device plugin runs [`squat/generic-device-plugin`](https://github.com/squat/generic-device-plugin) privileged, with the host's `/dev` and the kubelet's `/var/lib/kubelet/device-plugins`. It needs the `galactic-system` namespace (`config/galactic-system`) and the kernel's `tun` driver, with its device node at `/dev/net/tun`, on each edge node. Any `PacketAccess` provider in the cell can use it, not only MASQUE.
 
 To bring up a cell:
 
-1. Apply `config/masque`.
-2. Approve the provider by setting `status.approved` on `EdgeProvider/masque`, for example with `kubectl patch edgeprovider masque --subresource=status --type=merge -p '{"status":{"approved":true}}'`. galactic-controller then binds the provider role and admission policy to `masque-system/masque-provider`.
-3. In each tenant namespace the authority serves, bind ClusterRole `masque-authority-tenant` to `masque-system/masque-authority` with a RoleBinding. Without it the authority can't issue that namespace's EdgeServices.
-4. Apply the `authority` and `provider` overlays. Each provider pod reports ready once it holds its instance Lease.
-5. Create each VPC's ledger and the test connectors with the [operator commands](masque-authority.md#operator-tasks).
+1. Apply `config/galactic-edge/tun-device-plugin` and wait for its pods to be ready on the edge nodes. Until a node's plugin registers, `kubectl describe node` lists no `devic.es/tun` and provider pods stay Pending with `Insufficient devic.es/tun`.
+2. Apply `config/masque`.
+3. Approve the provider by setting `status.approved` on `EdgeProvider/masque`, for example with `kubectl patch edgeprovider masque --subresource=status --type=merge -p '{"status":{"approved":true}}'`. galactic-controller then binds the provider role and admission policy to `masque-system/masque-provider`.
+4. In each tenant namespace the authority serves, bind ClusterRole `masque-authority-tenant` to `masque-system/masque-authority` with a RoleBinding. Without it the authority can't issue that namespace's EdgeServices.
+5. Apply the `authority` and `provider` overlays. Each provider pod reports ready once it holds its instance Lease.
+6. Create each VPC's ledger and the test connectors with the [operator commands](masque-authority.md#operator-tasks).
 
 The provider Deployment uses a rolling update. A connector that moves to a new pod gets a new authorization: the authority retires the old pod's incarnation and core releases its route before the new pod forwards ([cross-instance replacement](../designs/masque/contract.md#cross-instance-replacement-and-stale-cleanup)). The resource requests are starting values; [#984](https://github.com/datum-cloud/galactic/issues/984) qualifies the pod's size.
 
-To take MASQUE out of a cell, delete the provider overlay first so its pods release their routes, then the authority overlay, then `config/masque`.
+To take MASQUE out of a cell, delete the provider overlay first so its pods release their routes, then the authority overlay, then `config/masque`. Delete `config/galactic-edge/tun-device-plugin` last, and only once no other `PacketAccess` provider in the cell requests `devic.es/tun`. Pods already running keep their device, but new ones stay Pending.
 
 ### Certificates
 

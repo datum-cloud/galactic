@@ -20,7 +20,7 @@ for everything else about a given binary.
 | `galactic.datumapis.com/node=edge`          | `galactic-vrf` (ingress sidecar pods); hosts `galactic-gateway`/`galactic-nat`   | primary role enum         |
 | `galactic.datumapis.com/gateway=enabled`    | `galactic-gateway`, on a `node=edge` node only                                   | opt-in flag (edge only)   |
 | `galactic.datumapis.com/nat=enabled`        | `galactic-nat`, on a `node=edge` node only                                       | opt-in flag (edge only)   |
-| `galactic.datumapis.com/edge=enabled`       | `galactic-edge`, on a `node=edge` node only                                      | opt-in flag (edge only)   |
+| `galactic.datumapis.com/edge=enabled`       | `galactic-edge` and `tun-device-plugin`, on a `node=edge` node only              | opt-in flag (edge only)   |
 | `galactic.datumapis.com/galactic=router`    | `galactic-cni`, `galactic-router` (plain/tenant mode)                            | mode enum                 |
 | `galactic.datumapis.com/galactic=control`   | `galactic-router-rr`                                                             | mode enum                 |
 | `galactic.datumapis.com/fabric=router`      | `fabric-router` (plain mode)                                                     | mode enum                 |

@@ -14,6 +14,9 @@
 # (config/galactic-router/base): an older router's garbage collection deletes
 # the VRFs edge attachments use, and nothing in the agent detects that.
 #
+# Also NOT included: tun-device-plugin/, a privileged DaemonSet that only a
+# cell with a PacketAccess provider needs.
+#
 # Not part of the root config/kustomization.yaml: Galactic Edge is opt-in.
 resources:
   - serviceaccount.yaml
