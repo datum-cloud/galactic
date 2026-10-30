@@ -131,8 +131,11 @@ Refused packets are counted in `host_only_port_drops`, exported as
 `galactic_usid_host_only_port_drops_total`.
 
 `galactic-tap` writes the list into `host_only_port_table` at ADD, before
-the tap is addressed, and removes it at DEL. ADD fails on an invalid list, or
-on a datapath that predates the table, rather than leaving a port open.
+the tap is addressed, and removes it at DEL. ADD fails on an invalid list, on
+a datapath that predates the table, or when the pinned `tp_deliver` does not
+reference the pinned table, rather than leaving a port open. The last covers
+a node rolled back to an older datapath, which keeps the newer table pinned
+while its `tp_deliver` never reads it.
 `galactic-bgp` brings the tap up only with `tp_deliver` attached, so on a
 router with no SRv6 locator, which attaches none, an attachment listing
 host-only ports stays down and its ADD fails. The
@@ -150,7 +153,11 @@ also installs the tap plugin as `galactic-tap-host-only`, and a conflist that
 lists host-only ports names that type instead of `galactic-tap`. The binary is
 the same; only its name tells the runtime the node can enforce the list. On an
 older node the runtime cannot find the plugin and ADD fails, so the guest
-does not start rather than starting exposed.
+does not start rather than starting exposed. A rollback leaves the newer
+`galactic-tap-host-only` on disk, and the `tp_deliver` check above still
+refuses the ports there. A node that has lost the file instead fails DEL for
+a sandbox whose conflist names it as well, so its teardown retries until the
+plugin is back.
 
 The check only refuses traffic; it grants nothing. While a node enforces
 [interface traffic policy](../designs/interface-traffic-policy.md), the
