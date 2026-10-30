@@ -41,6 +41,8 @@ const annotationConfigHash = "galactic.datum.net/config-hash"
 // is what keeps BGPPeer status current.
 const peerStatusRequeue = 30 * time.Second
 
+const advertisementLeaseRequeue = 5 * time.Second
+
 // reasonAccepted is the shared condition Reason used across this
 // reconciler's Accepted-condition updates below.
 const reasonAccepted = "Accepted"
@@ -53,6 +55,7 @@ const ReasonGateClosed = "GateClosed"
 type BGPRouterReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
+	APIReader      client.Reader
 	Reconciler     *reconcile.Reconciler
 	RuntimeManager galacticruntime.RuntimeManager
 	Hasher         func(model.DesiredRouter) (string, error)
@@ -72,9 +75,9 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if errors.IsNotFound(err) {
 			// Router deleted: stop its runtime.
 			if stopErr := r.RuntimeManager.Stop(ctx, req.NamespacedName); stopErr != nil {
-				logger.Error(stopErr, "stop runtime for deleted router", "router", req.NamespacedName)
+				return ctrl.Result{}, stopErr
 			}
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, r.releaseStoppedRouterAdvertisements(ctx, req.NamespacedName)
 		}
 		return ctrl.Result{}, fmt.Errorf("get BGPRouter %s: %w", req.NamespacedName, err)
 	}
@@ -88,8 +91,14 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Handle deletion.
 	if !router.DeletionTimestamp.IsZero() {
+		if router.Spec.TargetRef.Name != r.NodeName {
+			return ctrl.Result{}, nil
+		}
 		if stopErr := r.RuntimeManager.Stop(ctx, req.NamespacedName); stopErr != nil {
-			logger.Error(stopErr, "stop runtime for terminating router", "router", req.NamespacedName)
+			return ctrl.Result{}, stopErr
+		}
+		if err := r.releaseStoppedRouterAdvertisements(ctx, req.NamespacedName); err != nil {
+			return ctrl.Result{}, err
 		}
 		routerCopy := router.DeepCopy()
 		setRouterPhase(routerCopy, bgpv1alpha1.BGPRouterPhaseFailed)
@@ -105,8 +114,13 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
+	fenced, err := r.prepareCoordinatedAdvertisements(ctx, router)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Build desired state.
-	desired, err := r.Reconciler.BuildDesiredRouter(ctx, router)
+	desired, err := r.Reconciler.BuildDesiredRouterExcluding(ctx, router, fenced)
 	if err != nil {
 		routerCopy := router.DeepCopy()
 		setRouterPhase(routerCopy, bgpv1alpha1.BGPRouterPhaseFailed)
@@ -124,6 +138,15 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if desired == nil {
 		// Not for this node/role — skip silently.
 		return ctrl.Result{}, nil
+	}
+
+	requeueAfter, err := r.advertisementRequeueAfter(ctx, router, time.Now())
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.refreshAdvertisementLeases(ctx, req.NamespacedName, desired.Advertisements); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Hash the desired state to skip no-op reconciles.
@@ -161,7 +184,8 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// hash.
 	if router.Annotations[annotationConfigHash] == newHash && runtimeStatus.Healthy &&
 		allDesiredPeersPresent(desired.Peers, runtimeStatus) &&
-		allDesiredVRFsApplied(desired.VRFInstances, runtimeStatus) {
+		allDesiredVRFsApplied(desired.VRFInstances, runtimeStatus) &&
+		advertisementsMatchRuntime(desired.Advertisements, runtimeStatus) {
 		// True no-op: runtime is healthy with the current config.
 		routerCopy := router.DeepCopy()
 		routerCopy.Status.ObservedGeneration = router.Generation
@@ -173,7 +197,7 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// A Galactic Edge advertisement left out by a closed gate does not
 		// move the hash, so it is reported here too.
 		r.updateAdvertisementStatuses(ctx, router, runtimeStatus)
-		return ctrl.Result{RequeueAfter: peerStatusRequeue}, nil
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	// Apply to runtime.
@@ -231,11 +255,17 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Update per-VRF-instance BGPVRFInstance statuses.
 	r.updateVRFInstanceStatuses(ctx, router, postApplyStatus)
 
-	return ctrl.Result{RequeueAfter: peerStatusRequeue}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // updateRouterStatus updates the BGPRouter status from runtime status.
 func (r *BGPRouterReconciler) updateRouterStatus(router *bgpv1alpha1.BGPRouter, rs model.RuntimeStatus) {
+	router.Status.ObservedGeneration = router.Generation
+	router.Status.SupportsAdvertisementLeases = rs.Healthy
+	if rs.Healthy {
+		now := metav1.Now()
+		router.Status.LastSuccessfulReconcileTime = &now
+	}
 	if rs.Healthy {
 		setRouterPhase(router, bgpv1alpha1.BGPRouterPhaseReady)
 		setRouterCondition(router, metav1.Condition{
@@ -404,6 +434,12 @@ func (r *BGPRouterReconciler) updateAdvertisementStatuses(
 				Reason:  "Advertised",
 				Message: "Prefixes are being advertised",
 			})
+		} else if reconcile.AdvertisementLeaseExpired(adv, time.Now()) {
+			advCopy.Status.AdvertisedPrefixes = 0
+			setAdvertisementCondition(advCopy, metav1.Condition{
+				Type: ConditionAdvertised, Status: metav1.ConditionFalse,
+				Reason: "LeaseExpired", Message: "The serving lease expired and its prefixes were withdrawn",
+			})
 		} else if reconcile.IsEdgeAdvertisement(adv) && !r.Reconciler.EdgeGateOpen(adv) {
 			// Left out of the desired router because its forwarding
 			// gate is not open on this node.
@@ -565,6 +601,7 @@ func nptv6ConfiguredCondition(spec *bgpv1alpha1.NPTv6Spec) metav1.Condition {
 
 // SetupWithManager registers the BGPRouterReconciler with the manager.
 func (r *BGPRouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	b := ctrl.NewControllerManagedBy(mgr)
 	if r.Wake != nil {
 		b = b.WatchesRawSource(source.Channel(r.Wake, &handler.EnqueueRequestForObject{}))
@@ -645,4 +682,56 @@ func normalizeIP(s string) string {
 		return ip.String()
 	}
 	return s
+}
+
+func (r *BGPRouterReconciler) advertisementRequeueAfter(
+	ctx context.Context, router *bgpv1alpha1.BGPRouter, now time.Time,
+) (time.Duration, error) {
+	var advertisements bgpv1alpha1.BGPAdvertisementList
+	if err := r.List(ctx, &advertisements, client.InNamespace(router.Namespace),
+		client.MatchingFields{BGPAdvByRouterName: router.Name}); err != nil {
+		return 0, fmt.Errorf("list advertisement lease deadlines: %w", err)
+	}
+	delay := peerStatusRequeue
+	for _, adv := range advertisements.Items {
+		if adv.Labels[serviceAddressLabel] != "" {
+			delay = min(delay, advertisementLeaseRequeue)
+		}
+		if adv.Spec.ExpiresAt == nil {
+			continue
+		}
+		delay = min(delay, advertisementLeaseRequeue)
+		remaining := adv.Spec.ExpiresAt.Sub(now)
+		if remaining > 0 {
+			delay = min(delay, remaining)
+		}
+	}
+	return delay, nil
+}
+
+func advertisementsMatchRuntime(desired []model.DesiredAdvertisement, status model.RuntimeStatus) bool {
+	if len(desired) != len(status.Advertisements) {
+		return false
+	}
+	names := make(map[string]bool, len(status.Advertisements))
+	for _, advertisement := range status.Advertisements {
+		names[advertisement.Name] = true
+	}
+	for _, advertisement := range desired {
+		if !names[advertisement.Name] {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *BGPRouterReconciler) refreshAdvertisementLeases(
+	ctx context.Context,
+	key types.NamespacedName,
+	advertisements []model.DesiredAdvertisement,
+) error {
+	if leases, ok := r.RuntimeManager.(galacticruntime.AdvertisementLeaseManager); ok {
+		return leases.RefreshAdvertisementLeases(ctx, key, advertisements)
+	}
+	return nil
 }

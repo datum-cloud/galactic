@@ -148,3 +148,61 @@ func (p *PinnedVIPTranslationTable) UnregisterBindingAt(block uint64, argument, 
 	}
 	return t.UnregisterBindingAt(block, argument, slot, proto, vipAddr, vipPort, backendAddr, backendPort)
 }
+
+// RegisterIngressRange implements vipRangeTranslationTable.
+func (p *PinnedVIPTranslationTable) RegisterIngressRange(block uint64, argument, slot uint16, proto uint8,
+	vip net.IP, start, end uint16, backend net.IP,
+) error {
+	t, err := p.Table()
+	if err != nil {
+		return err
+	}
+	return t.RegisterIngressRange(block, argument, slot, proto, vip, start, end, backend)
+}
+
+// RegisterEgressRange implements vipRangeTranslationTable.
+func (p *PinnedVIPTranslationTable) RegisterEgressRange(block uint64, argument uint16, proto uint8,
+	backend net.IP, start, end uint16, vip net.IP,
+) error {
+	t, err := p.Table()
+	if err != nil {
+		return err
+	}
+	return t.RegisterEgressRange(block, argument, proto, backend, start, end, vip)
+}
+
+// UnregisterRangeBindingAt implements vipRangeTranslationTable.
+func (p *PinnedVIPTranslationTable) UnregisterRangeBindingAt(block uint64, argument, slot uint16, proto uint8,
+	vip net.IP, start, end uint16, backend net.IP,
+) error {
+	t, err := p.Table()
+	if err != nil {
+		return err
+	}
+	return t.UnregisterRangeBindingAt(block, argument, slot, proto, vip, start, end, backend)
+}
+
+// RangeBindingPresent implements vipRangeTranslationTable.
+func (p *PinnedVIPTranslationTable) RangeBindingPresent(block uint64, argument, slot uint16, proto uint8,
+	vip net.IP, start, end uint16, backend net.IP,
+) (bool, error) {
+	t, err := p.Table()
+	if err != nil {
+		return false, err
+	}
+	return t.RangeBindingPresent(block, argument, slot, proto, vip, start, end, backend)
+}
+
+// ListRanges implements vipRangeTranslationTable.
+func (p *PinnedVIPTranslationTable) ListRanges() ([]vipxlatmap.RangeEntry, error) {
+	t, err := p.Table()
+	if err != nil {
+		return nil, err
+	}
+	return t.ListRanges()
+}
+
+var (
+	_ VIPTranslationTable      = (*PinnedVIPTranslationTable)(nil)
+	_ vipRangeTranslationTable = (*PinnedVIPTranslationTable)(nil)
+)

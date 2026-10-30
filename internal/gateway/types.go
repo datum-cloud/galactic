@@ -62,6 +62,7 @@ type DesiredRule struct {
 	// galactic.datumapis.com/v1alpha1's NetworkServiceProtocol enum values.
 	Protocol string
 	Port     uint16
+	PortEnd  uint16
 
 	// Affinity is "None", "ClientIP" or "ClientIPAndProtocol", matching
 	// galactic.datumapis.com/v1alpha1's NetworkServiceSessionAffinity enum
@@ -100,9 +101,11 @@ type EngineState struct {
 // RuleStatus is the observed state of a single rule after a convergence
 // pass, analogous to model.AdvertisementStatus for the BGP runtime.
 type RuleStatus struct {
-	Key     string
-	Applied bool
-	Error   string
+	// VIPAddresses includes both old and desired addresses affected by this rule.
+	VIPAddresses []netip.Addr
+	Key          string
+	Applied      bool
+	Error        string
 }
 
 // EngineStatus is the observed state returned by Engine.Status, analogous
@@ -110,4 +113,25 @@ type RuleStatus struct {
 type EngineStatus struct {
 	Healthy bool
 	Rules   []RuleStatus
+}
+
+// VIPConverged reports whether every operation affecting vip completed. An
+// unscoped failure remains conservative, including engines without VIP metadata.
+func (s EngineStatus) VIPConverged(vip netip.Addr) bool {
+	failed := false
+	for _, rule := range s.Rules {
+		if rule.Error == "" && rule.Applied {
+			continue
+		}
+		failed = true
+		if len(rule.VIPAddresses) == 0 {
+			return false
+		}
+		for _, addr := range rule.VIPAddresses {
+			if addr == vip {
+				return false
+			}
+		}
+	}
+	return s.Healthy || failed
 }

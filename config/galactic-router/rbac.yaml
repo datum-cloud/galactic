@@ -4,24 +4,21 @@ metadata:
   name: galactic-router
 rules:
   - apiGroups: ["galactic.datumapis.com"]
+    resources: ["networkserviceaddresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgprouters
       - bgppeers
       - bgppolicies
     verbs: ["get", "list", "watch", "update", "patch"]
-  # bgpadvertisements/bgpvrfinstances need delete: the GC reconciler
-  # periodically removes orphaned CRDs left behind when CNI DEL never fires
-  # (e.g. a force-terminated container). No create/update/patch on either
-  # base resource: galactic-cni already owns creating/updating both
-  # (config/galactic-cni/rbac.yaml) via galactic-bgp, and this binary's own
-  # reconcilers only read them and write their /status subresource (see
-  # the rule below). NetworkGatewayReconciler/NetworkServiceReconciler need
-  # create/update/patch on bgpadvertisements, but that's galactic-gateway's
-  # ClusterRole (config/galactic-gateway/rbac.yaml), not this one.
+  # The router patches coordinated advertisement withdrawal finalizers.
+  # GC deletes orphaned advertisements and VRFs; CNI/gateway own their specs.
   - apiGroups: ["galactic.datumapis.com"]
-    resources:
-      - bgpadvertisements
-      - bgpvrfinstances
+    resources: ["bgpadvertisements"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
+  - apiGroups: ["galactic.datumapis.com"]
+    resources: ["bgpvrfinstances"]
     verbs: ["get", "list", "watch", "delete"]
   # servicevipbindings needs full CRUD on the base resource:
   # NetworkServiceBindingReconciler creates, updates and deletes this node's

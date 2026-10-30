@@ -124,6 +124,28 @@ spec:
                 maximum: 65535
                 minimum: 1
                 type: integer
+              portRange:
+                description: |-
+                  PortRange translates an inclusive IPv6 UDP interval without changing ports.
+                  It replaces Port and requires BackendPort to be omitted.
+                properties:
+                  end:
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  start:
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                required:
+                - end
+                - start
+                type: object
+                x-kubernetes-validations:
+                - message: port range start must not exceed end
+                  rule: self.start <= self.end
               protocol:
                 description: Protocol is the transport protocol this binding applies
                   to.
@@ -131,6 +153,40 @@ spec:
                 - tcp
                 - udp
                 type: string
+              sourceRef:
+                description: SourceRef binds generated coordinated translations to
+                  one source allocation.
+                properties:
+                  allocationUID:
+                    minLength: 1
+                    type: string
+                  generation:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  name:
+                    minLength: 1
+                    type: string
+                  namespace:
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    minLength: 1
+                    type: string
+                required:
+                - allocationUID
+                - generation
+                - name
+                - namespace
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: binding source authority is immutable
+                  rule: self == oldSelf
               targetRef:
                 description: TargetRef identifies the Node this binding applies to.
                 properties:
@@ -163,12 +219,20 @@ spec:
                 type: string
             required:
             - egressKind
-            - port
             - protocol
             - targetRef
             - vipAddress
             - vpcRef
             type: object
+            x-kubernetes-validations:
+            - message: exactly one of port and portRange is required
+              rule: has(self.port) != has(self.portRange)
+            - message: UDP ranges preserve ports and omit backendPort
+              rule: '!has(self.portRange) || self.protocol == ''udp'' && !has(self.backendPort)'
+            - message: range bindings are immutable; replace to change the translation
+              rule: '!has(oldSelf.portRange) || self == oldSelf'
+            - message: binding source authority presence is immutable
+              rule: has(self.sourceRef) == has(oldSelf.sourceRef)
           status:
             description: ServiceVIPBindingStatus defines the observed state of a ServiceVIPBinding.
             properties:
@@ -297,6 +361,10 @@ spec:
                   was computed from.
                 format: int64
                 type: integer
+              sourceAuthorityEnforced:
+                description: SourceAuthorityEnforced confirms terminal source-allocation
+                  checks before map writes.
+                type: boolean
             type: object
         type: object
     served: true

@@ -147,7 +147,8 @@ func (r *NetworkServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if !controllerutil.ContainsFinalizer(rule, networkRuleFinalizer) {
 		patchBase := rule.DeepCopy()
 		controllerutil.AddFinalizer(rule, networkRuleFinalizer)
-		if err := r.Patch(ctx, rule, client.MergeFrom(patchBase)); err != nil {
+		patch := client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})
+		if err := r.Patch(ctx, rule, patch); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer to NetworkService %s: %w", req.NamespacedName, err)
 		}
 	}
@@ -367,6 +368,34 @@ func (r *NetworkServiceReconciler) reconcileDelete(
 		return ctrl.Result{RequeueAfter: staleAdvertisementRequeue}, nil
 	}
 
+	if rule.Spec.AddressGroup != nil {
+		reader := r.APIReader
+		if reader == nil {
+			reader = r.Client
+		}
+		nodes, err := r.Scope.servingGatewayNodeNames(ctx, reader, rule.Namespace)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !groupedRuleWithdrawn(rule, nodes) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		bindings := &bgpv1alpha1.ServiceVIPBindingList{}
+		if err := reader.List(ctx, bindings, ruleSelector(rule, gwNamespace)); err != nil {
+			return ctrl.Result{}, err
+		}
+		if len(bindings.Items) > 0 {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		ads := &bgpv1alpha1.BGPAdvertisementList{}
+		if err := reader.List(ctx, ads, ruleSelector(rule, gwNamespace)); err != nil {
+			return ctrl.Result{}, err
+		}
+		if len(ads.Items) > 0 {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+	}
+
 	// TODO(edge-gateway): the QuotaEnforcer interface is real and wired, but
 	// the implementation behind it here is a no-op. Real per-tenant quota
 	// release is deferred.
@@ -380,9 +409,10 @@ func (r *NetworkServiceReconciler) reconcileDelete(
 
 	patchBase := rule.DeepCopy()
 	controllerutil.RemoveFinalizer(rule, networkRuleFinalizer)
-	// Another gateway process tearing the same rule down can remove the
-	// finalizer first, and the rule is then gone.
-	if err := client.IgnoreNotFound(r.Patch(ctx, rule, client.MergeFrom(patchBase))); err != nil {
+	// Another gateway can complete deletion first; retain the revision fence
+	// for every patch against an object that still exists.
+	patch := client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})
+	if err := client.IgnoreNotFound(r.Patch(ctx, rule, patch)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("remove finalizer from NetworkService %s/%s: %w", rule.Namespace, rule.Name, err)
 	}
 	return ctrl.Result{}, nil

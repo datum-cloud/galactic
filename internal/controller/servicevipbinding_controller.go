@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"reflect"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,7 +133,8 @@ type VIPTranslationTable interface {
 // error rather than a nil-pointer panic.
 type ServiceVIPBindingReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme    *runtime.Scheme
+	APIReader client.Reader
 
 	NodeName string
 
@@ -161,11 +164,22 @@ func (r *ServiceVIPBindingReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if !controllerutil.ContainsFinalizer(binding, serviceVIPBindingFinalizer) {
 		patchBase := binding.DeepCopy()
 		controllerutil.AddFinalizer(binding, serviceVIPBindingFinalizer)
-		if err := r.Patch(ctx, binding, client.MergeFrom(patchBase)); err != nil {
+		patch := client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})
+		if err := r.Patch(ctx, binding, patch); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer to ServiceVIPBinding %s: %w", req.NamespacedName, err)
 		}
 	}
 
+	allowed, err := r.bindingSourceAllowed(ctx, binding)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !allowed {
+		if err := r.Delete(ctx, binding, client.Preconditions{UID: &binding.UID}); client.IgnoreNotFound(err) != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if err := r.reconcileBind(ctx, binding); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -180,6 +194,7 @@ func (r *ServiceVIPBindingReconciler) reconcileBind(ctx context.Context, binding
 	bindErr := r.applyBind(ctx, binding)
 
 	bindingCopy := binding.DeepCopy()
+	bindingCopy.Status.SourceAuthorityEnforced = binding.Spec.SourceRef != nil
 	cond := metav1.Condition{Type: bgpv1alpha1.ConditionTypeBound}
 	var conflict *vipRowConflictError
 	if errors.As(bindErr, &conflict) {
@@ -273,6 +288,12 @@ func (r *ServiceVIPBindingReconciler) registerVIPTranslation(
 		}
 	}
 	if len(conflict.lost) > 0 {
+		if binding.Spec.PortRange != nil {
+			if err := r.unregisterVIPRange(ctx, binding); err != nil {
+				return err
+			}
+			return conflict
+		}
 		// A binding serves traffic only with both rows. Drop the one it alone
 		// claims, in case an earlier reconcile wrote it.
 		var errs []error
@@ -283,6 +304,12 @@ func (r *ServiceVIPBindingReconciler) registerVIPTranslation(
 			return err
 		}
 		return conflict
+	}
+	if binding.Spec.PortRange != nil {
+		if err := r.rememberRangeContext(ctx, binding, self.ingress.block, self.ingress.argument); err != nil {
+			return err
+		}
+		return r.registerVIPRange(self)
 	}
 
 	if err := r.VIPTranslationTable.RegisterIngress(
@@ -314,7 +341,8 @@ func (r *ServiceVIPBindingReconciler) reconcileDelete(
 
 	patchBase := binding.DeepCopy()
 	controllerutil.RemoveFinalizer(binding, serviceVIPBindingFinalizer)
-	if err := r.Patch(ctx, binding, client.MergeFrom(patchBase)); err != nil {
+	patch := client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})
+	if err := r.Patch(ctx, binding, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("remove finalizer from ServiceVIPBinding %s/%s: %w",
 			binding.Namespace, binding.Name, err)
 	}
@@ -380,6 +408,9 @@ func (r *ServiceVIPBindingReconciler) applyUnbind(ctx context.Context, binding *
 func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
 ) error {
+	if binding.Spec.PortRange != nil {
+		return r.unregisterVIPRange(ctx, binding)
+	}
 	if r.VIPTranslationTable == nil {
 		return fmt.Errorf("vip_xlat_table is not available on this node; cannot unregister a %s-kind ServiceVIPBinding",
 			binding.Spec.EgressKind)
@@ -421,7 +452,11 @@ func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 
 	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, binding.Spec.VPCRef)
 	if err != nil {
-		logger.Info("VRF context no longer resolves; skipped checking its vip_xlat_table location", "reason", err.Error())
+		logger.Info(
+			"VRF context no longer resolves; skipped checking its vip_xlat_table location",
+			"reason",
+			err.Error(),
+		)
 		return errors.Join(errs...)
 	}
 	if _, err := r.VIPTranslationTable.UnregisterBindingAt(
@@ -444,7 +479,8 @@ func (r *ServiceVIPBindingReconciler) liveTwin(
 	for _, b := range bindings {
 		bProto, err := ipProtocolNumber(b.Spec.Protocol)
 		if err != nil || bProto != proto ||
-			b.Spec.Port != binding.Spec.Port || b.Spec.BackendPort != binding.Spec.BackendPort {
+			b.Spec.Port != binding.Spec.Port || b.Spec.BackendPort != binding.Spec.BackendPort ||
+			b.Spec.VPCRef != binding.Spec.VPCRef || !reflect.DeepEqual(b.Spec.PortRange, binding.Spec.PortRange) {
 			continue
 		}
 		bVIP, bBackend, ok := xlatAddresses(b)
@@ -505,11 +541,17 @@ type vipRow struct {
 	proto     uint8
 	addr      netip.Addr
 	port      uint16
+	end       uint16
 }
 
 func (r vipRow) String() string {
 	if r.direction == vipxlatmap.DirectionIngress {
-		return fmt.Sprintf("ingress row for VRF %d slot %#04x %s", r.argument, r.slot, netip.AddrPortFrom(r.addr, r.port))
+		return fmt.Sprintf(
+			"ingress row for VRF %d slot %#04x %s",
+			r.argument,
+			r.slot,
+			netip.AddrPortFrom(r.addr, r.port),
+		)
 	}
 	return fmt.Sprintf("%s row for VRF %d %s", r.direction, r.argument, netip.AddrPortFrom(r.addr, r.port))
 }
@@ -520,6 +562,7 @@ type vipBindingRows struct {
 	ingress, egress      vipRow
 	vipAddr, backendAddr net.IP
 	vipPort, backendPort uint16
+	end                  uint16
 }
 
 // resolveVIPBindingRows resolves the two vip_xlat_table rows binding claims on
@@ -581,16 +624,32 @@ func parseVIPBindingRows(binding *bgpv1alpha1.ServiceVIPBinding) (vipBindingRows
 
 	vipPort := uint16(binding.Spec.Port)            //nolint:gosec // kubebuilder-validated 1-65535
 	backendPort := uint16(binding.Spec.BackendPort) //nolint:gosec // kubebuilder-validated 1-65535
+	var end uint16
+	if interval := binding.Spec.PortRange; interval != nil {
+		if proto != 17 || vipIP.Is4() || interval.Start < 1 || interval.End < interval.Start || interval.End > 65535 ||
+			binding.Spec.Port != 0 || binding.Spec.BackendPort != 0 {
+			return vipBindingRows{}, errors.New("invalid port-preserving IPv6 UDP binding range")
+		}
+		vipPort, backendPort, end = uint16(interval.Start), uint16(interval.Start), uint16(interval.End)
+	}
 
 	slot := srv6.BackendSlot(backendIP, backendPort)
 
 	return vipBindingRows{
-		ingress:     vipRow{direction: vipxlatmap.DirectionIngress, slot: slot, proto: proto, addr: vipIP, port: vipPort},
-		egress:      vipRow{direction: egress, proto: proto, addr: backendIP, port: backendPort},
+		ingress: vipRow{
+			direction: vipxlatmap.DirectionIngress,
+			slot:      slot,
+			proto:     proto,
+			addr:      vipIP,
+			port:      vipPort,
+			end:       end,
+		},
+		egress:      vipRow{direction: egress, proto: proto, addr: backendIP, port: backendPort, end: end},
 		vipAddr:     net.IP(vipIP.AsSlice()),
 		backendAddr: net.IP(backendIP.AsSlice()),
 		vipPort:     vipPort,
 		backendPort: backendPort,
+		end:         end,
 	}, nil
 }
 
@@ -669,7 +728,12 @@ func (r *ServiceVIPBindingReconciler) vipAddressShared(
 
 // claims reports whether rows includes row.
 func (rows vipBindingRows) claims(row vipRow) bool {
-	return rows.ingress == row || rows.egress == row
+	return vipRowsIntersect(rows.ingress, row) || vipRowsIntersect(rows.egress, row)
+}
+
+func vipRowsIntersect(a, b vipRow) bool {
+	return a.direction == b.direction && a.block == b.block && a.argument == b.argument && a.slot == b.slot &&
+		a.proto == b.proto && a.addr == b.addr && intervalsIntersect(a.port, a.end, b.port, b.end)
 }
 
 // rowOwner returns the peer that owns row ahead of self, or nil if self owns
@@ -726,7 +790,9 @@ func ipProtocolNumber(proto bgpv1alpha1.NetworkServiceProtocol) (uint8, error) {
 		return ipProtoUDP, nil
 	default:
 		return 0, fmt.Errorf(
-			"unsupported protocol %q (vip_xlat_table only supports tcp/udp, matching usid.c's USID_IPPROTO_TCP/UDP)", proto)
+			"unsupported protocol %q (vip_xlat_table only supports tcp/udp, matching usid.c's USID_IPPROTO_TCP/UDP)",
+			proto,
+		)
 	}
 }
 
@@ -877,8 +943,11 @@ func vrfInstanceTargetsRouter(vrf *bgpv1alpha1.BGPVRFInstance, router *bgpv1alph
 // bindings, so one written first converges without waiting for an unrelated
 // event. Advertisements buildBackendSIDIndex ignores are filtered out.
 func (r *ServiceVIPBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.ServiceVIPBinding{}).
+		Watches(&bgpv1alpha1.NetworkService{}, handler.EnqueueRequestsFromMapFunc(r.bindingAuthorityRequests)).
+		Watches(&bgpv1alpha1.NetworkServiceAddress{}, handler.EnqueueRequestsFromMapFunc(r.bindingAuthorityRequests)).
 		Watches(&bgpv1alpha1.ServiceVIPBinding{}, handler.EnqueueRequestsFromMapFunc(r.nodePeerRequests)).
 		Watches(&bgpv1alpha1.BGPAdvertisement{}, handler.EnqueueRequestsFromMapFunc(r.advertisementRequests),
 			builder.WithPredicates(bindingAdvertisementPredicate())).
@@ -962,4 +1031,33 @@ func (r *ServiceVIPBindingReconciler) nodePeerRequests(ctx context.Context, obj 
 		reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(peer)})
 	}
 	return reqs
+}
+
+func (r *ServiceVIPBindingReconciler) bindingAuthorityRequests(
+	ctx context.Context,
+	obj client.Object,
+) []ctrlreconcile.Request {
+	bindings := &bgpv1alpha1.ServiceVIPBindingList{}
+	if err := r.List(ctx, bindings); err != nil {
+		return nil
+	}
+	var requests []ctrlreconcile.Request
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		source := binding.Spec.SourceRef
+		if source == nil || binding.Spec.TargetRef.Name != r.NodeName {
+			continue
+		}
+		matches := false
+		switch authority := obj.(type) {
+		case *bgpv1alpha1.NetworkService:
+			matches = source.Namespace == authority.Namespace && source.Name == authority.Name
+		case *bgpv1alpha1.NetworkServiceAddress:
+			matches = source.Namespace == authority.Namespace && source.AllocationUID == authority.Spec.Group.UID
+		}
+		if matches {
+			requests = append(requests, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(binding)})
+		}
+	}
+	return requests
 }

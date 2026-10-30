@@ -73,7 +73,15 @@ const (
 )
 
 // ServiceVIPBindingSpec defines the desired VIP binding/translation state.
+// +kubebuilder:validation:XValidation:rule="has(self.port) != has(self.portRange)",message="exactly one of port and portRange is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.portRange) || self.protocol == 'udp' && !has(self.backendPort)",message="UDP ranges preserve ports and omit backendPort"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.portRange) || self == oldSelf",message="range bindings are immutable; replace to change the translation"
+// +kubebuilder:validation:XValidation:rule="has(self.sourceRef) == has(oldSelf.sourceRef)",message="binding source authority presence is immutable"
 type ServiceVIPBindingSpec struct {
+	// SourceRef binds generated coordinated translations to one source allocation.
+	// +optional
+	SourceRef *ServiceVIPBindingSourceReference `json:"sourceRef,omitempty"`
+
 	// TargetRef identifies the Node this binding applies to.
 	// +kubebuilder:validation:Required
 	TargetRef TargetRef `json:"targetRef"`
@@ -92,10 +100,15 @@ type ServiceVIPBindingSpec struct {
 	VIPAddress string `json:"vipAddress"`
 
 	// Port is the VIP-facing port traffic arrives on.
-	// +kubebuilder:validation:Required
+	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
-	Port int32 `json:"port"`
+	Port int32 `json:"port,omitempty"`
+
+	// PortRange translates an inclusive IPv6 UDP interval without changing ports.
+	// It replaces Port and requires BackendPort to be omitted.
+	// +optional
+	PortRange *PortRange `json:"portRange,omitempty"`
 
 	// Protocol is the transport protocol this binding applies to.
 	// +kubebuilder:validation:Required
@@ -128,6 +141,9 @@ type ServiceVIPBindingSpec struct {
 
 // ServiceVIPBindingStatus defines the observed state of a ServiceVIPBinding.
 type ServiceVIPBindingStatus struct {
+	// SourceAuthorityEnforced confirms terminal source-allocation checks before map writes.
+	// +optional
+	SourceAuthorityEnforced bool `json:"sourceAuthorityEnforced,omitempty"`
 	// ObservedGeneration is the .metadata.generation this status was computed from.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -223,4 +239,20 @@ type ServiceVIPBindingList struct {
 
 func init() {
 	SchemeBuilder.Register(&ServiceVIPBinding{}, &ServiceVIPBindingList{})
+}
+
+// ServiceVIPBindingSourceReference is immutable authority for a coordinated translation.
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="binding source authority is immutable"
+type ServiceVIPBindingSourceReference struct {
+	// +kubebuilder:validation:Minimum=1
+	Generation int64 `json:"generation"`
+	// +kubebuilder:validation:MinLength=1
+	Namespace string `json:"namespace"`
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MinLength=1
+	UID types.UID `json:"uid"`
+	// +kubebuilder:validation:MinLength=1
+	AllocationUID string `json:"allocationUID"`
 }

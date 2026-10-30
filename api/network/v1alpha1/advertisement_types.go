@@ -94,6 +94,11 @@ type BGPAdvertisement struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.aggregation) || ((!has(self.prefixes) || self.prefixes.size() == 0) && (!has(self.redistribute) || self.redistribute.size() == 0) && !has(self.originateFrom))",message="aggregation cannot be combined with prefixes, redistribute, or originateFrom"
 // +kubebuilder:validation:XValidation:rule="!has(self.aggregation) || !isCIDR(self.aggregation.prefix) || (self.addressFamily.afi == 'ipv4' && cidr(self.aggregation.prefix).ip().family() == 4) || (self.addressFamily.afi == 'ipv6' && cidr(self.aggregation.prefix).ip().family() == 6)",message="aggregation prefix must be in the advertisement's unicast address family"
 type BGPAdvertisementSpec struct {
+	// ExpiresAt is the serving lease deadline. The router withdraws the advertisement
+	// at or after this time unless the producer renews it. Unset preserves unleased behavior.
+	// +optional
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
+
 	// RouterRef targets a single BGPRouter by name.
 	// +kubebuilder:validation:Required
 	RouterRef RouterRef `json:"routerRef"`

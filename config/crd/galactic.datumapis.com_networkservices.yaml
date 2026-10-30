@@ -92,6 +92,96 @@ spec:
               NetworkServiceSpec defines the desired ingress load-balancing state for a
               tenant VPC.
             properties:
+              addressGroup:
+                description: AddressGroup binds this listener to a complete, authoritative
+                  address inventory.
+                properties:
+                  generation:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  listenerName:
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  listeners:
+                    items:
+                      description: NetworkServiceAddressListener describes one socket
+                        interval in an address group.
+                      properties:
+                        name:
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        port:
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        portRange:
+                          description: PortRange is an inclusive transport port interval.
+                          properties:
+                            end:
+                              format: int32
+                              maximum: 65535
+                              minimum: 1
+                              type: integer
+                            start:
+                              format: int32
+                              maximum: 65535
+                              minimum: 1
+                              type: integer
+                          required:
+                          - end
+                          - start
+                          type: object
+                          x-kubernetes-validations:
+                          - message: port range start must not exceed end
+                            rule: self.start <= self.end
+                        protocol:
+                          description: |-
+                            NetworkServiceProtocol is the IP protocol a VIP or endpoint matches.
+
+                            The set of values is open-ended. A client reading an object that carries
+                            this type must accept a value it does not recognise, preserve it when it
+                            writes the object back, and treat it as a protocol it cannot act on, never
+                            as tcp or udp. Each field of this type admits only the values it lists, and
+                            the API server refuses any other.
+                          enum:
+                          - tcp
+                          - udp
+                          type: string
+                      required:
+                      - name
+                      - protocol
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of port and portRange is required
+                        rule: has(self.port) != has(self.portRange)
+                      - message: ranges require UDP
+                        rule: '!has(self.portRange) || self.protocol == ''udp'''
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  revision:
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                  uid:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - generation
+                - revision
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: listenerName must identify a declared listener
+                  rule: '!has(self.listenerName) || (has(self.listeners) && self.listeners.exists(l,
+                    l.name == self.listenerName))'
               backendPort:
                 description: |-
                   BackendPort is the destination port on every selected backend, 1-65535.
@@ -243,13 +333,35 @@ spec:
               port:
                 description: |-
                   Port is the ingress port on VIPAddresses that this service load-balances,
-                  1-65535. It is required for a protocol with ports (tcp, udp and sctp)
+                  1-65535. It is required when PortRange is absent for tcp, udp and sctp
                   and must be unset for one without (esp, gre and icmp). Zero means unset
                   and is omitted when encoding, and an explicit 0 is refused.
                 format: int32
                 maximum: 65535
                 minimum: 1
                 type: integer
+              portRange:
+                description: |-
+                  PortRange replaces Port for an inclusive IPv6 UDP interval. Backend ports
+                  are preserved; BackendPort must be omitted.
+                properties:
+                  end:
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  start:
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                required:
+                - end
+                - start
+                type: object
+                x-kubernetes-validations:
+                - message: port range start must not exceed end
+                  rule: self.start <= self.end
               protocol:
                 description: |-
                   Protocol is the IP protocol this service load-balances on VIPAddresses.
@@ -353,10 +465,21 @@ spec:
             - vpcRef
             type: object
             x-kubernetes-validations:
-            - message: port is required for tcp, udp and sctp
-              rule: '!(self.protocol in [''tcp'', ''udp'', ''sctp'']) || has(self.port)'
-            - message: backendPort is required for tcp, udp and sctp
-              rule: '!(self.protocol in [''tcp'', ''udp'', ''sctp'']) || has(self.backendPort)'
+            - message: exactly one of port and portRange is required
+              rule: '!(self.protocol in [''tcp'', ''udp'', ''sctp'']) || has(self.port)
+                != has(self.portRange)'
+            - message: UDP ranges preserve ports and omit backendPort; singleton services
+                require backendPort
+              rule: 'has(self.portRange) ? !has(self.backendPort) && self.protocol
+                == ''udp'' : !(self.protocol in [''tcp'', ''udp'', ''sctp'']) || has(self.backendPort)'
+            - message: port ranges require IPv6 VIPs
+              rule: '!has(self.portRange) || self.vipAddresses.all(v, isIP(v) && ip(v).family()
+                == 6)'
+            - message: port ranges require a complete address group
+              rule: '!has(self.portRange) || has(self.addressGroup)'
+            - message: service address group requires a listener inventory
+              rule: '!has(self.addressGroup) || (has(self.addressGroup.listeners)
+                && size(self.addressGroup.listeners) > 0)'
             - message: port must not be set for esp, gre and icmp, which have no ports
               rule: '!(self.protocol in [''esp'', ''gre'', ''icmp'']) || !has(self.port)'
             - message: backendPort must not be set for esp, gre and icmp, which have

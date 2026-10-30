@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/trafficpolicy/cell"
 )
@@ -76,6 +77,7 @@ func startEnv(t *testing.T) *env {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(galacticv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(cloudv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(networkv1alpha1.AddToScheme(scheme))
 
 	userConfig := func(name string, groups ...string) *rest.Config {
 		u, err := te.AddUser(envtest.User{Name: name, Groups: groups}, cfg)
@@ -216,6 +218,7 @@ func TestCellRole(t *testing.T) {
 	t.Run("conflicting default is left alone", func(t *testing.T) { testConflictingDefault(t, e) })
 	t.Run("binding references resolve", func(t *testing.T) { testBindingResolution(t, e) })
 	t.Run("policy status", func(t *testing.T) { testPolicyStatus(t, e) })
+	t.Run("never-served address retirement", func(t *testing.T) { testAddressRetirement(t, e) })
 	t.Run("webhook unavailable fails closed", func(t *testing.T) { testFailsClosed(t, e) })
 }
 
@@ -412,4 +415,27 @@ func testFailsClosed(t *testing.T, e *env) {
 	if err == nil || !strings.Contains(err.Error(), "failed calling webhook") {
 		t.Errorf("err = %v, want the write refused because the webhook is down", err)
 	}
+}
+
+func testAddressRetirement(t *testing.T, e *env) {
+	ctx := context.Background()
+	address := &networkv1alpha1.NetworkServiceAddress{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "never-served"},
+		Spec: networkv1alpha1.NetworkServiceAddressSpec{
+			VIPAddress: "2001:db8::123", Retired: true,
+			Group: networkv1alpha1.NetworkServiceAddressGroup{UID: "retired-allocation", Generation: 1, Revision: "retired"},
+		},
+	}
+	if err := e.tenant.Create(ctx, address); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "terminal retirement receipt under shipped RBAC", func() bool {
+		current := &networkv1alpha1.NetworkServiceAddress{}
+		if err := e.tenant.Get(ctx, client.ObjectKeyFromObject(address), current); err != nil {
+			return false
+		}
+		condition := meta.FindStatusCondition(current.Status.Conditions, networkv1alpha1.ConditionTypeAddressRetired)
+		return len(current.Finalizers) > 0 && condition != nil && condition.Status == metav1.ConditionTrue &&
+			condition.ObservedGeneration == current.Generation
+	})
 }

@@ -44,3 +44,13 @@ type RuntimeManager interface {
 	// Returns an empty status (Healthy: false) if no runtime exists yet.
 	Status(ctx context.Context, key types.NamespacedName) (model.RuntimeStatus, error)
 }
+
+// AdvertisementLeaseManager refreshes only already installed advertisement owners.
+type AdvertisementLeaseManager interface {
+	RefreshAdvertisementLeases(context.Context, types.NamespacedName, []model.DesiredAdvertisement) error
+}
+
+// AdvertisementLeaseRuntime refreshes leases without reapplying router configuration.
+type AdvertisementLeaseRuntime interface {
+	RefreshAdvertisementLeases([]model.DesiredAdvertisement)
+}

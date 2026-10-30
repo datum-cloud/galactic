@@ -303,7 +303,10 @@ func TestEngine_ReconcileQuotaDeniedSkipsApply(t *testing.T) {
 	telem := &fakeTelemetry{}
 	e := NewEngine(dp, &fakeQuota{deny: true}, telem)
 
-	status, err := e.Reconcile(context.Background(), EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}}})
+	status, err := e.Reconcile(
+		context.Background(),
+		EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}}},
+	)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -323,7 +326,10 @@ func TestEngine_ReconcileApplyErrorReportsUnhealthyKeepsGoing(t *testing.T) {
 	dp.applyErr = errors.New("simulated datapath failure")
 	e := NewEngine(dp, &fakeQuota{}, &fakeTelemetry{})
 
-	status, err := e.Reconcile(context.Background(), EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}}})
+	status, err := e.Reconcile(
+		context.Background(),
+		EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}}},
+	)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -353,7 +359,7 @@ func TestEngine_ReconcileApplyErrorReleasesQuotaReservation(t *testing.T) {
 	}
 }
 
-func TestEngine_ReconcileRemoveErrorKeepsRuleActiveAndReleasesQuota(t *testing.T) {
+func TestEngine_ReconcileRemoveErrorKeepsRuleActiveAndReservation(t *testing.T) {
 	dp := newFakeDatapath()
 	quota := &fakeQuota{}
 	e := NewEngine(dp, quota, &fakeTelemetry{})
@@ -374,8 +380,8 @@ func TestEngine_ReconcileRemoveErrorKeepsRuleActiveAndReleasesQuota(t *testing.T
 	if len(status.Rules) != 1 || !strings.Contains(status.Rules[0].Error, "simulated teardown failure") {
 		t.Errorf("status.Rules = %+v, want one entry reporting the datapath error", status.Rules)
 	}
-	if len(quota.released) != 1 || quota.released[0] != testKeyA {
-		t.Errorf("quota.released = %v, want [%s] even though datapath removal failed", quota.released, testKeyA)
+	if len(quota.released) != 0 {
+		t.Errorf("quota released despite failed removal: %v", quota.released)
 	}
 
 	// The key stays active so the next pass retries the datapath teardown.
@@ -466,5 +472,91 @@ func TestEngine_DatapathGenerationDelegates(t *testing.T) {
 
 	if got := e.DatapathGeneration(); got != 12345 {
 		t.Errorf("DatapathGeneration() = %d, want 12345", got)
+	}
+}
+
+func TestEngineFailedPartialApplyRetainsOwnershipUntilCleanup(t *testing.T) {
+	ctx := context.Background()
+	dp := newFakeDatapath()
+	dp.applyErr = errors.New("partial write")
+	dp.removeErr = errors.New("cleanup failed")
+	quota := NewNodeQuotaEnforcer(64, 64)
+	engine := NewEngine(dp, quota, &fakeTelemetry{})
+	a := testDesiredRule(t, "a", "2001:db8::1")
+	a.Protocol = protocolUDP
+	a.Port = 10000
+	a.PortEnd = 10127
+	_, err := engine.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{"a": a}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total, _ := quota.Stats(); total != 1 {
+		t.Fatalf("lost failed rule reservation: %d", total)
+	}
+	dp.applyErr = nil
+	b := a
+	b.Key = "b"
+	status, err := engine.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{"b": b}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Healthy || len(dp.applyCalls) != 1 {
+		t.Fatalf("overlapping replacement applied: %+v %v", status, dp.applyCalls)
+	}
+	dp.removeErr = nil
+	status, err = engine.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{"b": b}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Healthy || len(dp.applyCalls) != 2 {
+		t.Fatalf("replacement failed after cleanup: %+v", status)
+	}
+	if total, _ := quota.Stats(); total != 1 {
+		t.Fatalf("reservation leak: %d", total)
+	}
+}
+
+func TestPendingChangedVIPRetainsOldFailureOwnership(t *testing.T) {
+	ctx := context.Background()
+	d := newFakeDatapath()
+	e := NewEngine(d, NoopQuotaEnforcer{}, NoopTelemetryEmitter{})
+	a, b := netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("2001:db8::2")
+	rule := DesiredRule{Key: "changing", VIPAddresses: []netip.Addr{a}, Protocol: "tcp", Port: 443}
+	if _, err := e.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{rule.Key: rule}}); err != nil {
+		t.Fatal(err)
+	}
+	rule.VIPAddresses = []netip.Addr{b}
+	desired := EngineState{Rules: map[string]DesiredRule{rule.Key: rule}}
+	d.applyErr, d.removeErr = errors.New("partial apply"), errors.New("rollback failed")
+	for range 2 {
+		status, err := e.Reconcile(ctx, desired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.VIPConverged(a) || status.VIPConverged(b) {
+			t.Fatalf("failure lost old or new VIP: %+v", status)
+		}
+		changed := e.ChangedVIPs(desired)
+		if !slices.Contains(changed, a) || !slices.Contains(changed, b) {
+			t.Fatalf("dirty VIP inventory lost old address: %v", changed)
+		}
+	}
+	d.applyErr = nil
+	replacement := rule
+	replacement.Key = "replacement"
+	replacement.VIPAddresses = []netip.Addr{a}
+	desired.Rules[replacement.Key] = replacement
+	status, err := e.Reconcile(ctx, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ruleStatus := range status.Rules {
+		if ruleStatus.Key == replacement.Key && ruleStatus.Applied {
+			t.Fatal("replacement claimed old VIP before dirty owner cleanup")
+		}
+	}
+	d.removeErr = nil
+	if status, err := e.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{}}); err != nil || !status.Healthy {
+		t.Fatalf("cleanup failed: %+v %v", status, err)
 	}
 }

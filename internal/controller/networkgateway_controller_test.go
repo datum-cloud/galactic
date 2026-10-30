@@ -1190,9 +1190,8 @@ func TestNetworkGatewayReconciler_ReturnsOrphanSweepFailure(t *testing.T) {
 	}
 
 	cond := gatewayReadyCondition(t, fakeClient)
-	if cond.Reason != reasonEngineHealthy {
-		t.Errorf("Ready reason = %q, want %q (status is written before the sweep runs)",
-			cond.Reason, reasonEngineHealthy)
+	if cond.Status != metav1.ConditionFalse || cond.Reason != "OrphanCleanupFailed" {
+		t.Errorf("Ready=%s/%s, want False/OrphanCleanupFailed", cond.Status, cond.Reason)
 	}
 }
 

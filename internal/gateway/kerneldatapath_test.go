@@ -288,8 +288,8 @@ func TestKernelDatapath_ApplyRuleTracksKeysWrittenBeforeAPartialFailure(t *testi
 	}
 
 	writtenKey := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: netip.MustParseAddr("2001:db8:1::10")}
-	if got := d.vipKeysByName[testKeyA]; len(got) != 1 || got[0] != writtenKey {
-		t.Fatalf("vipKeysByName[%s] = %v, want [%v] (only the key written before the failure)",
+	if got := d.vipKeysByName[testKeyA]; len(got) != 2 || got[0] != writtenKey {
+		t.Fatalf("vipKeysByName[%s] = %v, want [%v, attempted key] (Register can fail after a row write)",
 			testKeyA, got, writtenKey)
 	}
 	if _, ok, err := d.vipTable.Get(writtenKey); err != nil || !ok {

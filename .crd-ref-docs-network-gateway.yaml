@@ -22,6 +22,7 @@ processor:
     - "[.]FabricTopologyList$"
     - "[.]NetworkEgressPolicyList$"
     - "[.]NetworkGatewayList$"
+    - "[.]NetworkServiceAddressList$"
     - "[.]NetworkServiceList$"
     - "[.]ServiceEndpointList$"
     - "[.]ServiceEndpointProducerReportList$"

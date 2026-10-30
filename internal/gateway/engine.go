@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"sync"
 )
@@ -17,8 +18,9 @@ import (
 // state on each Reconcile. It holds no VRF state, this datapath having no VRF
 // dependency.
 type Engine struct {
-	mu     sync.Mutex
-	active map[string]DesiredRule
+	mu      sync.Mutex
+	active  map[string]DesiredRule
+	pending map[string]DesiredRule
 
 	// dirty holds active keys whose last apply or removal failed. Their
 	// datapath and quota state no longer match their active rule, so the
@@ -36,6 +38,7 @@ type Engine struct {
 func NewEngine(datapath Datapath, quota QuotaEnforcer, telemetry TelemetryEmitter) *Engine {
 	return &Engine{
 		active:    make(map[string]DesiredRule),
+		pending:   make(map[string]DesiredRule),
 		dirty:     make(map[string]struct{}),
 		datapath:  datapath,
 		quota:     quota,
@@ -58,7 +61,14 @@ func (e *Engine) Reconcile(ctx context.Context, desired EngineState) (EngineStat
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	toApply, toRemove := diffRuleKeys(e.active, desired.Rules)
+	inventory := make(map[string]DesiredRule, len(e.active)+len(e.pending))
+	for key, rule := range e.active {
+		inventory[key] = rule
+	}
+	for key, rule := range e.pending {
+		inventory[key] = rule
+	}
+	toApply, toRemove := diffRuleKeys(inventory, desired.Rules)
 	for key := range e.dirty {
 		if _, ok := desired.Rules[key]; ok && !slices.Contains(toApply, key) {
 			toApply = append(toApply, key)
@@ -76,13 +86,35 @@ func (e *Engine) Reconcile(ctx context.Context, desired EngineState) (EngineStat
 			statuses = append(statuses, RuleStatus{Key: key, Applied: true})
 		}
 	}
+	for _, key := range toRemove {
+		if err := e.removeRuleLocked(ctx, key); err != nil {
+			e.dirty[key] = struct{}{}
+			statuses = append(statuses, RuleStatus{Key: key, Applied: true, Error: err.Error()})
+			continue
+		}
+		delete(e.active, key)
+		delete(e.dirty, key)
+	}
 	for _, key := range toApply {
 		rule := desired.Rules[key]
+		blocked := e.ruleConflictsLocked(key, rule, toRemove)
+		if blocked {
+			statuses = append(statuses, RuleStatus{Key: key, Error: "conflicting prior rule has not withdrawn"})
+			continue
+		}
+		if _, pending := e.pending[key]; pending {
+			if err := e.removeRuleLocked(ctx, key); err != nil {
+				statuses = append(statuses, RuleStatus{Key: key, Error: err.Error()})
+				continue
+			}
+		}
 		if err := e.applyRuleLocked(ctx, rule); err != nil {
-			// A failed apply releases the key's quota and may leave its
-			// datapath entries half-written, so an active rule no longer
-			// matches what is programmed.
+			// Failed writes are rolled back or retained as pending cleanup.
+			// Either way an active rule must be rechecked before reporting success.
 			if _, ok := e.active[key]; ok {
+				e.dirty[key] = struct{}{}
+			}
+			if _, ok := e.pending[key]; ok {
 				e.dirty[key] = struct{}{}
 			}
 			statuses = append(statuses, RuleStatus{Key: key, Applied: false, Error: err.Error()})
@@ -93,16 +125,6 @@ func (e *Engine) Reconcile(ctx context.Context, desired EngineState) (EngineStat
 		statuses = append(statuses, RuleStatus{Key: key, Applied: true})
 	}
 
-	for _, key := range toRemove {
-		if err := e.removeRuleLocked(ctx, key); err != nil {
-			e.dirty[key] = struct{}{}
-			statuses = append(statuses, RuleStatus{Key: key, Applied: true, Error: err.Error()})
-			continue
-		}
-		delete(e.active, key)
-		delete(e.dirty, key)
-	}
-
 	healthy := true
 	for _, s := range statuses {
 		if s.Error != "" {
@@ -110,6 +132,7 @@ func (e *Engine) Reconcile(ctx context.Context, desired EngineState) (EngineStat
 			break
 		}
 	}
+	annotateRuleVIPs(statuses, inventory, e.active, desired.Rules)
 	return EngineStatus{Healthy: healthy, Rules: statuses}, nil
 }
 
@@ -133,7 +156,14 @@ func (e *Engine) Stop(ctx context.Context) error {
 	defer e.mu.Unlock()
 
 	var firstErr error
+	keys := make(map[string]struct{}, len(e.active)+len(e.pending))
 	for key := range e.active {
+		keys[key] = struct{}{}
+	}
+	for key := range e.pending {
+		keys[key] = struct{}{}
+	}
+	for key := range keys {
 		// A key whose teardown failed stays active whether or not an
 		// earlier key already failed; only the first error is returned.
 		if err := e.removeRuleLocked(ctx, key); err != nil {
@@ -168,17 +198,23 @@ func (e *Engine) applyRuleLocked(ctx context.Context, rule DesiredRule) error {
 		return fmt.Errorf("rule %s exceeds its per-tenant quota", rule.Key)
 	}
 
+	e.pending[rule.Key] = rule
 	if err := e.datapath.ApplyRule(ctx, rule); err != nil {
-		// Reconcile only adds the key to e.active on success, so no later
-		// removeRuleLocked would ever release the reservation made above.
-		if relErr := e.quota.Release(ctx, rule.Key); relErr != nil {
-			return errors.Join(
-				fmt.Errorf("apply datapath rule %s: %w", rule.Key, err),
-				fmt.Errorf("release quota for %s: %w", rule.Key, relErr),
-			)
+		// A failed write may have installed some rows. Retain inventory and quota
+		// until rollback really succeeds, so another listener cannot reuse them.
+		cleanupErr := e.datapath.RemoveRule(ctx, rule.Key)
+		if cleanupErr != nil {
+			return errors.Join(fmt.Errorf("apply datapath rule %s: %w",
+				rule.Key,
+				err),
+				fmt.Errorf("rollback rule %s: %w",
+					rule.Key,
+					cleanupErr))
 		}
-		return fmt.Errorf("apply datapath rule %s: %w", rule.Key, err)
+		delete(e.pending, rule.Key)
+		return errors.Join(fmt.Errorf("apply datapath rule %s: %w", rule.Key, err), e.quota.Release(ctx, rule.Key))
 	}
+	delete(e.pending, rule.Key)
 
 	e.telemetry.RuleApplied(ctx, rule)
 	return nil
@@ -187,20 +223,174 @@ func (e *Engine) applyRuleLocked(ctx context.Context, rule DesiredRule) error {
 // removeRuleLocked tears down a single rule's datapath and quota state.
 // Caller must hold e.mu.
 func (e *Engine) removeRuleLocked(ctx context.Context, key string) error {
-	// Quota is released even when datapath removal fails, so a reservation
-	// cannot outlive the rule. Release is a no-op for an already-released key,
-	// so a retry stays correct.
-	dpErr := e.datapath.RemoveRule(ctx, key)
-	if dpErr != nil {
-		dpErr = fmt.Errorf("remove datapath rule %s: %w", key, dpErr)
+	if err := e.datapath.RemoveRule(ctx, key); err != nil {
+		return fmt.Errorf("remove datapath rule %s: %w", key, err)
 	}
 	if err := e.quota.Release(ctx, key); err != nil {
-		return errors.Join(dpErr, fmt.Errorf("release quota for %s: %w", key, err))
+		return fmt.Errorf("release quota for %s: %w", key, err)
 	}
-	if dpErr != nil {
-		return dpErr
-	}
+	delete(e.pending, key)
 
 	e.telemetry.RuleRemoved(ctx, key)
 	return nil
+}
+
+func (e *Engine) SetOwnedVIPs(ctx context.Context, addrs []netip.Addr) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	guard, ok := e.datapath.(interface {
+		SetOwnedVIPs(context.Context, []netip.Addr) error
+	})
+	if !ok {
+		if len(addrs) == 0 {
+			return nil
+		}
+		return errors.New("datapath does not support owned VIP protection")
+	}
+	return guard.SetOwnedVIPs(ctx, addrs)
+}
+
+func (e *Engine) SupportsPortRanges() bool {
+	capability, ok := e.datapath.(interface{ SupportsPortRanges() bool })
+	return ok && capability.SupportsPortRanges()
+}
+
+func rulesOverlap(a, b DesiredRule) bool {
+	if a.Protocol != b.Protocol || a.Port > portEnd(b) || b.Port > portEnd(a) {
+		return false
+	}
+	for _, addr := range a.VIPAddresses {
+		if slices.Contains(b.VIPAddresses, addr) {
+			return true
+		}
+	}
+	return false
+}
+func (e *Engine) SupportsOwnedVIPs() bool {
+	if capability, ok := e.datapath.(interface{ SupportsOwnedVIPs() bool }); ok {
+		return capability.SupportsOwnedVIPs()
+	}
+	_, ok := e.datapath.(interface {
+		SetOwnedVIPs(context.Context, []netip.Addr) error
+	})
+	return ok
+}
+
+// SetBlockedVIPs suppresses owned-address traffic while controller state converges.
+func (e *Engine) SetBlockedVIPs(ctx context.Context, addrs []netip.Addr) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	guard, ok := e.datapath.(interface {
+		SetBlockedVIPs(context.Context, []netip.Addr) error
+	})
+	if !ok {
+		if len(addrs) == 0 {
+			return nil
+		}
+		return errors.New("datapath does not support owned VIP blocking")
+	}
+	return guard.SetBlockedVIPs(ctx, addrs)
+}
+
+// ChangedVIPs includes every old and new address whose rule must be written or
+// removed, and every address whose earlier write or rollback remains dirty.
+func (e *Engine) ChangedVIPs(desired EngineState) []netip.Addr {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	addresses := map[netip.Addr]bool{}
+	inventory := make(map[string]DesiredRule, len(e.active)+len(e.pending))
+	for key, rule := range e.active {
+		inventory[key] = rule
+	}
+	for key, rule := range e.pending {
+		inventory[key] = rule
+	}
+	apply, remove := diffRuleKeys(inventory, desired.Rules)
+	keys := append(apply, remove...)
+	for key := range e.dirty {
+		keys = append(keys, key)
+	}
+	for key := range e.pending {
+		keys = append(keys, key)
+	}
+	for _, key := range keys {
+		for _, addr := range inventory[key].VIPAddresses {
+			addresses[addr] = true
+		}
+		for _, addr := range e.active[key].VIPAddresses {
+			addresses[addr] = true
+		}
+		for _, addr := range desired.Rules[key].VIPAddresses {
+			addresses[addr] = true
+		}
+	}
+	result := make([]netip.Addr, 0, len(addresses))
+	for addr := range addresses {
+		result = append(result, addr)
+	}
+	return result
+}
+
+// RenewVIPs unblocks and renews only explicitly confirmed owned addresses.
+func (e *Engine) RenewVIPs(ctx context.Context, addresses []netip.Addr) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	guard, ok := e.datapath.(interface {
+		RenewVIPs(context.Context, []netip.Addr) error
+	})
+	if !ok {
+		if len(addresses) == 0 {
+			return nil
+		}
+		return errors.New("datapath does not support selective owned VIP renewal")
+	}
+	return guard.RenewVIPs(ctx, addresses)
+}
+
+// OwnedVIPs discovers pinned guards, including those left by an earlier process.
+func (e *Engine) OwnedVIPs() ([]netip.Addr, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	guard, ok := e.datapath.(interface{ OwnedVIPs() ([]netip.Addr, error) })
+	if !ok {
+		return nil, nil
+	}
+	return guard.OwnedVIPs()
+}
+
+func annotateRuleVIPs(statuses []RuleStatus, inventory, active, desired map[string]DesiredRule) {
+	for i := range statuses {
+		old := inventory[statuses[i].Key]
+		current := desired[statuses[i].Key]
+		statuses[i].VIPAddresses = slices.Clone(old.VIPAddresses)
+		current.VIPAddresses = append(slices.Clone(current.VIPAddresses), active[statuses[i].Key].VIPAddresses...)
+		for _, addr := range current.VIPAddresses {
+			if !slices.Contains(statuses[i].VIPAddresses, addr) {
+				statuses[i].VIPAddresses = append(statuses[i].VIPAddresses, addr)
+			}
+		}
+	}
+}
+
+// ruleConflictsLocked fences replacement writes until every overlapping old
+// active or partially applied form has been removed.
+func (e *Engine) ruleConflictsLocked(key string, rule DesiredRule, toRemove []string) bool {
+	for _, removed := range toRemove {
+		if old, exists := e.active[removed]; exists && rulesOverlap(old, rule) {
+			return true
+		}
+	}
+	for oldKey, old := range e.active {
+		_, dirty := e.dirty[oldKey]
+		_, pending := e.pending[oldKey]
+		if oldKey != key && (dirty || pending) && rulesOverlap(old, rule) {
+			return true
+		}
+	}
+	for oldKey, old := range e.pending {
+		if oldKey != key && rulesOverlap(old, rule) {
+			return true
+		}
+	}
+	return false
 }

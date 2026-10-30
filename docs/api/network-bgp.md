@@ -267,6 +267,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `expiresAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ExpiresAt is the serving lease deadline. The router withdraws the advertisement<br />at or after this time unless the producer renews it. Unset preserves unleased behavior. |  |  |
 | `routerRef` _[RouterRef](#routerref)_ | RouterRef targets a single BGPRouter by name. |  | Required: \{\} <br /> |
 | `addressFamily` _[AddressFamily](#addressfamily)_ | AddressFamily defines the AFI/SAFI for this advertisement. |  | Required: \{\} <br /> |
 | `prefixes` _[Prefix](#prefix) array_ | Prefixes is the list of CIDR prefixes to advertise.<br />At least one of Prefixes, Redistribute, or OriginateFrom must be specified. |  | MaxItems: 256 <br />MaxLength: 64 <br /> |
@@ -1292,6 +1293,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `supportsAdvertisementLeases` _boolean_ | SupportsAdvertisementLeases reports independent expiry enforcement by the router.<br />Consumers must also require current observedGeneration and a healthy router. |  |  |
+| `lastSuccessfulReconcileTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | LastSuccessfulReconcileTime is the last healthy apply or verified no-op reconciliation. |  |  |
 | `phase` _[BGPRouterPhase](#bgprouterphase)_ | Phase is the high-level lifecycle state of this router. |  |  |
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `peers` _[BGPRouterPeerSummary](#bgprouterpeersummary)_ | Peers summarizes peer session counts. |  |  |
@@ -3008,6 +3011,8 @@ _Appears in:_
 | `igp` |  |
 | `egp` |  |
 | `incomplete` |  |
+
+
 
 
 #### Prefix

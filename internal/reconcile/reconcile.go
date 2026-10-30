@@ -12,12 +12,14 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
@@ -39,6 +41,7 @@ type EdgeGate interface {
 // Reconciler assembles DesiredRouter values from BGP CRDs.
 type Reconciler struct {
 	client       client.Client
+	apiReader    client.Reader
 	nodeName     string
 	localAddress string
 	edgeGate     EdgeGate
@@ -81,6 +84,13 @@ func New(c client.Client, nodeName, localAddress string) *Reconciler {
 func (r *Reconciler) BuildDesiredRouter(
 	ctx context.Context, router *bgpv1alpha1.BGPRouter,
 ) (*model.DesiredRouter, error) {
+	return r.BuildDesiredRouterExcluding(ctx, router, nil)
+}
+
+// BuildDesiredRouterExcluding also fences advertisements whose preparation failed.
+func (r *Reconciler) BuildDesiredRouterExcluding(
+	ctx context.Context, router *bgpv1alpha1.BGPRouter, excluded map[string]bool,
+) (*model.DesiredRouter, error) {
 	// Node and owner check: skip routers that don't target this node, and
 	// routers naming a routerClassName, which belong to another
 	// implementation (the fabric underlay) even on this node.
@@ -110,6 +120,24 @@ func (r *Reconciler) BuildDesiredRouter(
 	); err != nil {
 		return nil, fmt.Errorf("list BGPAdvertisements for router %s/%s: %w", namespace, router.Name, err)
 	}
+
+	active := advList.Items[:0]
+	now := time.Now()
+	for _, adv := range advList.Items {
+		if excluded[adv.Name] {
+			continue
+		}
+		current, allowed, err := r.coordinatedAdvertisement(ctx, &adv)
+		if err != nil {
+			log.FromContext(ctx).Error(err, "fence advertisement with unreadable allocation authority",
+				"advertisement", client.ObjectKeyFromObject(&adv))
+			continue
+		}
+		if allowed && !AdvertisementLeaseExpired(current, now) {
+			active = append(active, *current)
+		}
+	}
+	advList.Items = active
 
 	// A node hosts one instance per VPC with at least one attachment here,
 	// shared by every attachment on that VPC, so every instance targeting this
@@ -192,6 +220,7 @@ func (r *Reconciler) BuildDesiredRouter(
 		}
 		desired.Advertisements = append(desired.Advertisements, model.DesiredAdvertisement{
 			Name:            adv.Name,
+			ExpiresAt:       advertisementDeadline(&adv),
 			AddressFamily:   adv.Spec.AddressFamily,
 			Prefixes:        prefixes,
 			Communities:     communities,
@@ -478,4 +507,16 @@ func validateTimers(holdTime, keepaliveTime *metav1.Duration) error {
 		return fmt.Errorf("keepaliveTime %v must be <= holdTime/3 (%v)", keepalive, maxKeepalive)
 	}
 	return nil
+}
+
+// AdvertisementLeaseExpired reports whether an advertisement's serving lease has ended.
+func AdvertisementLeaseExpired(adv *bgpv1alpha1.BGPAdvertisement, now time.Time) bool {
+	return adv.Spec.ExpiresAt != nil && !adv.Spec.ExpiresAt.After(now)
+}
+
+func advertisementDeadline(adv *bgpv1alpha1.BGPAdvertisement) time.Time {
+	if adv.Spec.ExpiresAt == nil {
+		return time.Time{}
+	}
+	return adv.Spec.ExpiresAt.Time
 }

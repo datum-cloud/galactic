@@ -6,12 +6,14 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"sort"
 	"strconv"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -119,8 +121,9 @@ const (
 // some node says so on the rule itself.
 type NetworkServiceBindingReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	NodeName string
+	Scheme    *runtime.Scheme
+	APIReader client.Reader
+	NodeName  string
 
 	// Namespace is the gateway namespace, where galactic-router's BGP objects
 	// live: every binding for a rule in another namespace is written here,
@@ -141,7 +144,36 @@ func (r *NetworkServiceBindingReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		return ctrl.Result{}, fmt.Errorf("get NetworkService %s: %w", req.NamespacedName, err)
 	}
-	if !rule.DeletionTimestamp.IsZero() {
+	retired, err := retiredRuleAllocation(ctx, r.authorityReader(), rule, rule.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !rule.DeletionTimestamp.IsZero() || retired {
+		if rule.Spec.AddressGroup != nil {
+			namespace := r.Namespace
+			if namespace == "" {
+				namespace = rule.Namespace
+			}
+			nodes, err := gatewayNodeNames(ctx, r.authorityReader(), namespace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !groupedRuleWithdrawn(rule, nodes) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			bindings, err := r.nodeBindings(ctx, rule)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			for _, binding := range bindings {
+				if err := r.Delete(ctx, &binding, client.Preconditions{UID: &binding.UID}); client.IgnoreNotFound(
+					err,
+				) != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		// The gateways keep serving a deleting rule until its routes are
 		// withdrawn and drained, so its bindings stay until the rule is gone
 		// and garbage collection removes them.
@@ -270,6 +302,22 @@ func generatedBinding(
 		name = crdnames.TenantServiceVIPBindingName(
 			rule.Namespace, rule.Name, node, vip.String(), b.addr.String(), int32(b.port))
 	}
+	var source *bgpv1alpha1.ServiceVIPBindingSourceReference
+	if group := rule.Spec.AddressGroup; group != nil {
+		source = &bgpv1alpha1.ServiceVIPBindingSourceReference{
+			Namespace:     rule.Namespace,
+			Name:          rule.Name,
+			UID:           rule.UID,
+			Generation:    rule.Generation,
+			AllocationUID: group.UID,
+		}
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%d/%s", name, rule.UID, rule.Generation, group.UID)))
+		name = fmt.Sprintf("svcvip-group-%x", sum[:16])
+	}
+	if interval := rule.Spec.PortRange; interval != nil {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%d/%d", name, interval.Start, interval.End)))
+		name = fmt.Sprintf("svcvip-range-%x", sum[:16])
+	}
 	l := ruleLabels(rule, objNS)
 	l[bindingNodeLabel] = gatewayNodeLabelValue(node)
 	l[bindingManagedByLabel] = bindingManagedByValue
@@ -280,13 +328,15 @@ func generatedBinding(
 			Labels:    l,
 		},
 		Spec: bgpv1alpha1.ServiceVIPBindingSpec{
+			SourceRef:      source,
 			TargetRef:      bgpv1alpha1.TargetRef{Kind: bindingTargetKind, Name: node},
 			VPCRef:         rule.Spec.VPCRef,
 			VIPAddress:     vip.String(),
 			Port:           rule.Spec.Port,
+			PortRange:      rule.Spec.PortRange.DeepCopy(),
 			Protocol:       rule.Spec.Protocol,
 			BackendAddress: b.addr.String(),
-			BackendPort:    int32(b.port),
+			BackendPort:    rule.Spec.BackendPort,
 			EgressKind:     b.egressKind,
 		},
 	}
@@ -504,6 +554,8 @@ func (r *NetworkServiceBindingReconciler) unboundBindings(
 func bindingUnboundReason(binding *bgpv1alpha1.ServiceVIPBinding) string {
 	bound := meta.FindStatusCondition(binding.Status.Conditions, bgpv1alpha1.ConditionTypeBound)
 	switch {
+	case binding.Spec.SourceRef != nil && !binding.Status.SourceAuthorityEnforced:
+		return "source allocation authority is not enforced"
 	case bound == nil || bound.ObservedGeneration != binding.Generation:
 		return "not reconciled yet"
 	case bound.Status != metav1.ConditionTrue:
@@ -548,11 +600,30 @@ func backendsBoundConditionType(node string) string {
 
 // SetupWithManager registers the NetworkServiceBindingReconciler with the manager.
 func (r *NetworkServiceBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		// A rule's bindings depend on its spec and on whether it is
 		// Accepted. Other status writes, including this reconciler's own
 		// conditions and the gateways' Programmed conditions, change neither.
 		For(&bgpv1alpha1.NetworkService{}, builder.WithPredicates(ruleBindingInputsChanged())).
+		Watches(&bgpv1alpha1.NetworkServiceAddress{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				address := obj.(*bgpv1alpha1.NetworkServiceAddress)
+				rules := &bgpv1alpha1.NetworkServiceList{}
+				if err := r.List(ctx, rules); err != nil {
+					return nil
+				}
+				var requests []ctrlreconcile.Request
+				for _, rule := range rules.Items {
+					if rule.Spec.AddressGroup != nil && rule.Spec.AddressGroup.UID == address.Spec.Group.UID {
+						requests = append(
+							requests,
+							ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(&rule)},
+						)
+					}
+				}
+				return requests
+			})).
 		// Rules in one VPC compete for backends, whatever their namespace, so
 		// a rule appearing, going, or changing its spec can give another rule
 		// a backend or take one away. Every rule in its VPC is re-queued; an
@@ -657,4 +728,11 @@ func (r *NetworkServiceBindingReconciler) bindingRuleRequests(obj client.Object)
 		return nil
 	}
 	return []ctrlreconcile.Request{{NamespacedName: key}}
+}
+
+func (r *NetworkServiceBindingReconciler) authorityReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }

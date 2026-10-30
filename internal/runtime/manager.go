@@ -7,7 +7,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"maps"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -40,29 +39,29 @@ func (m *runtimeManager) Apply(ctx context.Context, key types.NamespacedName, de
 
 func (m *runtimeManager) Stop(ctx context.Context, key types.NamespacedName) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	rt, ok := m.runtimes[key]
-	if ok {
-		delete(m.runtimes, key)
-	}
-	m.mu.Unlock()
-
 	if !ok {
 		return nil
 	}
-	return rt.Stop(ctx)
+	if err := rt.Stop(ctx); err != nil {
+		return err
+	}
+	delete(m.runtimes, key)
+	return nil
 }
 
 func (m *runtimeManager) StopAll(ctx context.Context) error {
 	m.mu.Lock()
-	rts := make(map[types.NamespacedName]RouterRuntime, len(m.runtimes))
-	maps.Copy(rts, m.runtimes)
-	m.runtimes = make(map[types.NamespacedName]RouterRuntime)
-	m.mu.Unlock()
-
+	defer m.mu.Unlock()
 	var firstErr error
-	for _, rt := range rts {
-		if err := rt.Stop(ctx); err != nil && firstErr == nil {
-			firstErr = err
+	for key, rt := range m.runtimes {
+		if err := rt.Stop(ctx); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
+			delete(m.runtimes, key)
 		}
 	}
 	return firstErr
@@ -102,4 +101,18 @@ func (m *runtimeManager) getOrCreate(key types.NamespacedName) (RouterRuntime, e
 	}
 	m.runtimes[key] = rt
 	return rt, nil
+}
+
+func (m *runtimeManager) RefreshAdvertisementLeases(
+	_ context.Context,
+	key types.NamespacedName,
+	advertisements []model.DesiredAdvertisement,
+) error {
+	m.mu.RLock()
+	rt := m.runtimes[key]
+	m.mu.RUnlock()
+	if leaseRuntime, ok := rt.(AdvertisementLeaseRuntime); ok {
+		leaseRuntime.RefreshAdvertisementLeases(advertisements)
+	}
+	return nil
 }

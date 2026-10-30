@@ -44,6 +44,7 @@ func rulesEqual(a, b DesiredRule) bool {
 		a.VPCRef == b.VPCRef &&
 		a.Protocol == b.Protocol &&
 		a.Port == b.Port &&
+		a.PortEnd == b.PortEnd &&
 		a.Affinity == b.Affinity &&
 		slices.Equal(a.VIPAddresses, b.VIPAddresses) &&
 		slices.Equal(a.Backends, b.Backends) &&

@@ -44,6 +44,7 @@ type VPCAttribution interface {
 // server return keeping no per-flow state to report.
 type Collector struct {
 	vipTable       *edgemap.VIPTable
+	rangeTable     *edgemap.VIPTable
 	dropReasons    DropReasonsReader
 	neighFallbacks DropReasonsReader
 	attribution    VPCAttribution
@@ -67,13 +68,18 @@ func (c *Collector) WithNeighFallbacks(m DropReasonsReader) *Collector {
 // NewCollectorFromObjects builds a Collector reading directly from a loaded
 // object set's maps.
 func NewCollectorFromObjects(objs *edgeprog.EdgedsrObjects, attribution VPCAttribution) *Collector {
-	return NewCollector(
+	collector := NewCollector(
 		edgemap.NewVIPTable(
 			edgemap.KernelTable{Map: objs.VipTable}, edgemap.KernelTable{Map: objs.VipStatsTable},
 			edgemap.KernelTable{Map: objs.VipAddrTable}, edgemap.KernelTable{Map: objs.VipReturnStatsTable}),
 		objs.DropReasons,
 		attribution,
 	).WithNeighFallbacks(objs.NeighFallbacks)
+	collector.rangeTable = edgemap.NewVIPTable(edgemap.KernelTable{Map: objs.VipRangeBackends},
+		edgemap.KernelTable{Map: objs.VipStatsTable},
+		edgemap.KernelTable{Map: objs.VipAddrTable},
+		edgemap.KernelTable{Map: objs.VipReturnStatsTable})
+	return collector
 }
 
 const (
@@ -209,6 +215,14 @@ func (c *Collector) collectRules(ch chan<- prometheus.Metric) {
 	if err != nil {
 		ch <- prometheus.NewInvalidMetric(rulePacketsDesc, fmt.Errorf("list vip_table: %w", err))
 		return
+	}
+	if c.rangeTable != nil {
+		ranges, err := c.rangeTable.List()
+		if err != nil {
+			ch <- prometheus.NewInvalidMetric(rulePacketsDesc, fmt.Errorf("list vip_range_backends: %w", err))
+			return
+		}
+		entries = append(entries, ranges...)
 	}
 	vpcs, _ := c.vpcs()
 

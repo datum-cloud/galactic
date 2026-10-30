@@ -590,6 +590,18 @@ struct vip_xlat_value {
 	__be16 port;
 };
 
+#define USID_VIP_MAX_RANGES 16
+struct vip_xlat_range {
+	__u16 start;
+	__u16 end;
+	struct vip_xlat_value rewrite;
+};
+struct vip_xlat_range_value {
+	__u32 count;
+	struct vip_xlat_range ranges[USID_VIP_MAX_RANGES];
+	__u64 generation;
+};
+
 // ---------------------------------------------------------------------
 // TC-BPF egress-routing extension: an in-program header push replacing kernel
 // SEG6 lwtunnel encapsulation, which reuses one dst_cache per route across its
@@ -1449,6 +1461,13 @@ struct {
 	__type(key, struct vip_xlat_key);
 	__type(value, struct vip_xlat_value);
 } vip_xlat_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 8192);
+	__type(key, struct vip_xlat_key);
+	__type(value, struct vip_xlat_range_value);
+} vip_xlat_range_table SEC(".maps");
 
 // vip_xlat_key_scratch holds the key lookup_vip_xlat builds, one slot per CPU.
 // The key is 32 bytes, and usid_egress's stack plus send_too_big's leaves no
@@ -2989,6 +3008,22 @@ static USID_ALWAYS_INLINE void apply_nptv6(__u8 *addr, const struct nptv6_value 
 	*word = __builtin_bswap16((__u16) sum);
 }
 
+// Verify the bounded scan once, independently of each packet path. Returning
+// a scalar index keeps its sixteen success branches from multiplying the
+// caller's checksum and routing states. The caller checks the index before
+// using it as a map-value offset; an absent match is the out-of-range sentinel.
+__attribute__((noinline)) int vip_range_match(struct vip_xlat_range_value *ranges, __u32 port)
+{
+	if (!ranges)
+		return USID_VIP_MAX_RANGES;
+#pragma unroll
+	for (int i = 0; i < USID_VIP_MAX_RANGES; i++) {
+		if (i < ranges->count && port >= ranges->ranges[i].start && port <= ranges->ranges[i].end)
+			return i;
+	}
+	return USID_VIP_MAX_RANGES;
+}
+
 // lookup_vip_xlat returns the vip_xlat_table row for (block, argument, slot,
 // proto, direction, port, addr), or a null pointer if there is none. slot is
 // the outer destination's backend slot for an ingress lookup and 0 for an
@@ -3014,7 +3049,18 @@ static USID_ALWAYS_INLINE struct vip_xlat_value *lookup_vip_xlat(__u64 block, __
 	key->slot = slot;
 	__builtin_memcpy(key->addr, addr, sizeof(key->addr));
 
-	return bpf_map_lookup_elem(&vip_xlat_table, key);
+	struct vip_xlat_value *exact = bpf_map_lookup_elem(&vip_xlat_table, key);
+	if (exact || proto != USID_IPPROTO_UDP || direction == USID_VIP_XLAT_DIR_EGRESS_XLAT)
+		return exact;
+	key->port = 0;
+	struct vip_xlat_range_value *ranges = bpf_map_lookup_elem(&vip_xlat_range_table, key);
+	if (!ranges)
+		return (void *) 0;
+	__u32 match = vip_range_match(ranges, __builtin_bswap16(port));
+	USID_BARRIER_VAR(match);
+	if (match >= USID_VIP_MAX_RANGES)
+		return (void *) 0;
+	return &ranges->ranges[match].rewrite;
 }
 
 // apply_vip_xlat rewrites the 16-byte address at addr_off and the 2-byte port
@@ -3050,7 +3096,7 @@ static USID_ALWAYS_INLINE long apply_vip_xlat(struct __sk_buff *skb, __u32 addr_
 	// arithmetic on a word, which needs host order, the checksum helper's
 	// from and to are a raw "what used to be there, what is there now" pair in
 	// the same wire order the address words use.
-	__be16 new_port = new_val->port;
+	__be16 new_port = new_val->port ? new_val->port : old_port;
 
 	__u64 flags = USID_BPF_F_PSEUDO_HDR | 4;
 	__u32 is_udp = proto == USID_IPPROTO_UDP;
@@ -6044,6 +6090,8 @@ int usid_egress(struct __sk_buff *skb)
 
 		if (!shard_scratch)
 			return TC_ACT_SHOT;
+		// Keep field-pointer arithmetic after the verifier-visible null check.
+		asm volatile("" : "+r"(shard_scratch));
 		rv = &shard_scratch->route;
 	}
 
