@@ -22,7 +22,8 @@ func TestRecordHostOnlyPorts_KeepsTheOwnerAlias(t *testing.T) {
 		t.Skip("skipping: requires root")
 	}
 	const name, owner = "ghotest0", "owner-container-id"
-	if err := netlink.LinkAdd(&netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: name}, Mode: netlink.TUNTAP_MODE_TAP}); err != nil {
+	tap := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: name}, Mode: netlink.TUNTAP_MODE_TAP}
+	if err := netlink.LinkAdd(tap); err != nil {
 		t.Fatalf("add tap: %v", err)
 	}
 	t.Cleanup(func() {
