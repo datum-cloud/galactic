@@ -43,7 +43,7 @@ To bring up a cell:
 
 1. Apply `config/galactic-edge/tun-device-plugin` and wait for its pods to be ready on the edge nodes. Until a node's plugin registers, `kubectl describe node` lists no `devic.es/tun` and provider pods stay Pending with `Insufficient devic.es/tun`.
 2. Apply `config/masque`.
-3. Approve the provider by setting `status.approved` on `EdgeProvider/masque`, for example with `kubectl patch edgeprovider masque --subresource=status --type=merge -p '{"status":{"approved":true}}'`. galactic-controller then binds the provider role and admission policy to `masque-system/masque-provider`.
+3. Approve the provider by applying `config/masque/approval`, the `EdgeProviderApproval` named `masque`. galactic-controller then sets `status.approved` on `EdgeProvider/masque` and binds the provider role and admission policy to `masque-system/masque-provider`. In a GitOps cell, include `config/masque/approval` in the same overlay as `config/masque`; removing it from the overlay, with pruning on, withdraws the approval and both bindings. Applying it needs write access to `edgeproviderapprovals`, which no MASQUE or galactic ServiceAccount holds. A manual write to `status.approved` is reverted.
 4. In each tenant namespace the authority serves, bind ClusterRole `masque-authority-tenant` to `masque-system/masque-authority` with a RoleBinding. Without it the authority can't issue that namespace's EdgeServices.
 5. Apply the `authority` and `provider` overlays. Each provider pod reports ready once it holds its instance Lease.
 6. Create each VPC's ledger and the test connectors with the [operator commands](masque-authority.md#operator-tasks).

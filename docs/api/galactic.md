@@ -13,8 +13,9 @@ Generated from `api/v1alpha1`. Edit the API comments or `.crd-ref-docs.yaml`, th
 Package v1alpha1 contains Galactic's own API, galactic.datumapis.com/v1alpha1:
 TrafficPolicy and TrafficPolicyBinding, the per-interface ingress and
 egress policy the CNI datapath enforces (see
-docs/enhancements/networking/interface-traffic-policy), and EdgeProvider
-and EdgeService, the Galactic Edge provider registration and tenant grant,
+docs/enhancements/networking/interface-traffic-policy), and EdgeProvider,
+EdgeProviderApproval and EdgeService, the Galactic Edge provider
+registration, its operator approval and a tenant grant,
 EdgeInstance and EdgeAttachment, a provider pod and its connection to a
 granted VPC, and EdgeRoute and EdgeRouteIndex, a prefix's forwarding claim
 and the record of every claim accepted in a VPC (see
@@ -24,6 +25,7 @@ docs/enhancements/networking/galactic-edge).
 - [EdgeAttachment](#edgeattachment)
 - [EdgeInstance](#edgeinstance)
 - [EdgeProvider](#edgeprovider)
+- [EdgeProviderApproval](#edgeproviderapproval)
 - [EdgeRoute](#edgeroute)
 - [EdgeRouteIndex](#edgerouteindex)
 - [EdgeService](#edgeservice)
@@ -325,6 +327,36 @@ the kind of its own configuration.
 | `status` _[EdgeProviderStatus](#edgeproviderstatus)_ |  |  |  |
 
 
+#### EdgeProviderApproval
+
+
+
+EdgeProviderApproval is the operator's approval of the EdgeProvider of the
+same name. While it exists, galactic-controller sets that provider's
+status.approved; deleting it withdraws the approval and every binding
+issued to the provider. It is a kind of its own, not a field of the
+EdgeProvider, so that approving a provider takes a privilege that
+registering one does not, and an operator can keep it in the same Git
+source that deploys the provider.
+
+An approval names a provider, not one registration of it: it also covers
+a later change to the provider's spec, or a provider deleted and
+registered again under the same name. Deleting a provider leaves its
+approval in place.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `EdgeProviderApproval` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+
+
 #### EdgeProviderReference
 
 
@@ -377,7 +409,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `approved` _boolean_ | Approved is set by the operator's approval. No provider identity may<br />write it. An unapproved provider is refused admission, and clearing it<br />revokes every authorization issued to the provider. |  |  |
+| `approved` _boolean_ | Approved is whether an EdgeProviderApproval of the same name exists.<br />galactic-controller sets it and reverts any other write, and no<br />provider identity may write it. An unapproved provider is refused<br />admission, and withdrawing approval revokes every authorization<br />issued to the provider. |  |  |
 
 
 #### EdgeRoute

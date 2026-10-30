@@ -2,11 +2,15 @@
 # that runs Galactic Edge (config/galactic-edge, galactic-controller --edge):
 # the masque-system namespace, both ServiceAccounts, the grant authority's
 # RBAC and the EdgeProvider registration. Nothing here serves traffic. The
-# registration grants nothing until an operator approves it
-# (status.approved), and the authority's tenant ClusterRole grants nothing
-# until it is bound in a tenant namespace (docs/edge/masque-service.md).
+# registration grants nothing until an operator approves it, and the
+# authority's tenant ClusterRole grants nothing until it is bound in a
+# tenant namespace (docs/edge/masque-service.md).
 #
-# Deliberately NOT included: authority/ and provider/, the two Deployments.
+# Deliberately NOT included: approval/, the operator's approval of the
+# provider, so that applying the registration never approves it. Include it
+# beside this directory in the cell's overlay.
+#
+# Also NOT included: authority/ and provider/, the two Deployments.
 # They need a per-cell name, :authority, TLS Secrets and the grant
 # authority's CA; each has a components/cert-manager for the authority's
 # certificate and CA.

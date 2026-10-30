@@ -1,7 +1,6 @@
 # The operator's half: the provider's EdgeProvider registration. Apply it,
-# then approve it with kubectl patch edgeprovider <name> --subresource=status
-# --type=merge -p '{"status":{"approved":true}}' (see the README). An overlay
-# sets the provider's name and the namespace of its ServiceAccount, which
-# kustomize does not rewrite inside spec.
+# then approve it with ../approval (see the README). An overlay sets the
+# provider's name and the namespace of its ServiceAccount, which kustomize
+# does not rewrite inside spec.
 resources:
   - edgeprovider.yaml

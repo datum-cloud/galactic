@@ -3,6 +3,7 @@ processor:
     # Exclude collection wrappers by name: BGPPrefixList is a resource.
     - "[.]EdgeAttachmentList$"
     - "[.]EdgeInstanceList$"
+    - "[.]EdgeProviderApprovalList$"
     - "[.]EdgeProviderList$"
     - "[.]EdgeRouteIndexList$"
     - "[.]EdgeRouteList$"

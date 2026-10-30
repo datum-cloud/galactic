@@ -55,17 +55,21 @@ this up on dfw; see `deploy/containerlab/scripts/deploy-galactic-edge.sh`.
 ## Register the provider (operator)
 
 `deploy/registration` holds the `EdgeProvider`. Overlay its name, the namespace
-of its ServiceAccount, and the contract and capability versions it implements,
-then approve it:
+of its ServiceAccount, and the contract and capability versions it implements.
+`deploy/approval` holds the operator's approval, an `EdgeProviderApproval`
+that must have the same name as the `EdgeProvider`:
 
 ```sh
 kubectl apply -k <your registration overlay>
-kubectl patch edgeprovider <name> --subresource=status --type=merge -p '{"status":{"approved":true}}'
+kubectl apply -k <your approval overlay>
 ```
 
-Approval makes `galactic-controller` bind the provider's ServiceAccounts to the
-`galactic-edge-provider` role and admission policy. Until then, every write
-the provider makes is refused.
+Both can live in the Git source that deploys the provider. Keep the approval
+in its own overlay so that applying the registration never approves it.
+Approval makes `galactic-controller` set the provider's `status.approved` and
+bind its ServiceAccounts to the `galactic-edge-provider` role and admission
+policy. Until then, every write the provider makes is refused. Deleting the
+approval withdraws both bindings.
 
 ## Configure
 

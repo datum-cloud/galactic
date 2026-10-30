@@ -97,11 +97,32 @@ patches:
         value: %s
 `, provider, namespace, versions), nil)
 	if approve {
-		if _, err := l.kubectl("patch", "edgeprovider", provider, "--subresource=status", "--type=merge",
-			"-p", `{"status":{"approved":true}}`); err != nil {
-			t.Fatal(err)
-		}
+		l.approve(t, provider)
 	}
+}
+
+// approve applies the operator's approval from
+// examples/edge-provider/deploy/approval, renamed to provider.
+func (l *lab) approve(t *testing.T, provider string) {
+	t.Helper()
+	l.applyOverlay(t, "approval-"+provider, "approval", fmt.Sprintf(`
+patches:
+  - target:
+      kind: EdgeProviderApproval
+      name: example-echo
+    options:
+      allowNameChange: true
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: %s
+`, provider), nil)
+}
+
+// unapprove deletes provider's approval.
+func (l *lab) unapprove(provider string) {
+	_ = l.c.Delete(context.Background(), &galacticv1alpha1.EdgeProviderApproval{
+		ObjectMeta: metav1.ObjectMeta{Name: provider}})
 }
 
 // applyOverlay renders a kustomization over one of

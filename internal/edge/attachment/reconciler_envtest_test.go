@@ -134,11 +134,23 @@ func startAPI(t *testing.T) *fixture {
 		},
 	}
 	f.create(provider)
-	provider.Status.Approved = true
-	if err := admin.Status().Update(context.Background(), provider); err != nil {
-		t.Fatal(err)
-	}
+	f.approve(providerSA)
 	return f
+}
+
+// approve approves the named provider the way an operator does, with an
+// EdgeProviderApproval.
+func (f *fixture) approve(provider string) {
+	f.create(&galacticv1alpha1.EdgeProviderApproval{ObjectMeta: metav1.ObjectMeta{Name: provider}})
+}
+
+// withdraw deletes the named provider's EdgeProviderApproval.
+func (f *fixture) withdraw(provider string) {
+	f.t.Helper()
+	approval := &galacticv1alpha1.EdgeProviderApproval{ObjectMeta: metav1.ObjectMeta{Name: provider}}
+	if err := f.admin.Delete(context.Background(), approval); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 // startController runs every core reconciler as galactic-controller, with
@@ -160,15 +172,20 @@ func (f *fixture) startBindings() {
 	f.run((&ProviderBindingReconciler{}).SetupWithManager)
 }
 
-// run starts a manager as galactic-controller with what setup registers.
-func (f *fixture) run(setup func(ctrl.Manager) error) {
-	t := f.t
+// controllerConfig acts as galactic-controller, with only the shipped RBAC.
+func (f *fixture) controllerConfig() *rest.Config {
 	as := rest.CopyConfig(f.cfg)
 	as.Impersonate = rest.ImpersonationConfig{
 		UserName: "system:serviceaccount:galactic-system:galactic-controller",
 		Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:galactic-system", authenticated},
 	}
-	mgr, err := ctrl.NewManager(as, ctrl.Options{
+	return as
+}
+
+// run starts a manager as galactic-controller with what setup registers.
+func (f *fixture) run(setup func(ctrl.Manager) error) {
+	t := f.t
+	mgr, err := ctrl.NewManager(f.controllerConfig(), ctrl.Options{
 		Scheme: f.scheme, Metrics: metricsserver.Options{BindAddress: "0"},
 		// Every test starts its own manager in this process.
 		Controller: config.Controller{SkipNameValidation: ptr.To(true)},
@@ -449,15 +466,7 @@ func TestMissingTenantStateFailsClosed(t *testing.T) {
 		string(admission.ProviderNotGranted))
 
 	// An unapproved provider is refused before allocation.
-	var provider galacticv1alpha1.EdgeProvider
-	ctx := context.Background()
-	if err := f.admin.Get(ctx, client.ObjectKey{Name: providerSA}, &provider); err != nil {
-		t.Fatal(err)
-	}
-	provider.Status.Approved = false
-	if err := f.admin.Status().Update(ctx, &provider); err != nil {
-		t.Fatal(err)
-	}
+	f.withdraw(providerSA)
 	other := f.service("svc-b", "fd00:10:0:d::/120", 30)
 	f.create(attachmentFor("unapproved", other, p))
 	f.waitCondition("unapproved", galacticv1alpha1.EdgeAttachmentAdmitted, metav1.ConditionFalse,

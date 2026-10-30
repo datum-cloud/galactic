@@ -1,0 +1,8 @@
+# Approves the MASQUE provider. Kept out of config/masque so that applying
+# the provider's registration never approves it: a cell's GitOps overlay
+# includes this beside config/masque once the operator decides to approve,
+# and removing it from the overlay (with pruning) withdraws the approval.
+# Applying it needs write access to edgeproviderapprovals, which neither
+# MASQUE ServiceAccount holds.
+resources:
+  - approval.yaml

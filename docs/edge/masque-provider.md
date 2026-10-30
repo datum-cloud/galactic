@@ -8,7 +8,7 @@ The adapter never touches host networking. galactic-edge programs and releases e
 
 The cell must run galactic-controller with `--edge` and the galactic-edge DaemonSet on the provider's node ([deployment](provider-contract.md)). The provider's node also needs a TUN device plugin (`config/galactic-edge/tun-device-plugin`), and the VPC needs a workload on that node, because an attachment joins the VPC's existing host VRF.
 
-1. Register the provider: an `EdgeProvider` that lists contract version `v1alpha1`, `PacketAccess/v1` and `PrefixReachability/v1`, and names the provider's ServiceAccount. An operator approves it (`status.approved`). galactic-controller then binds the provider role and admission policy to that ServiceAccount.
+1. Register the provider: an `EdgeProvider` that lists contract version `v1alpha1`, `PacketAccess/v1` and `PrefixReachability/v1`, and names the provider's ServiceAccount. An operator approves it with an `EdgeProviderApproval` of the same name (`config/masque/approval`). galactic-controller then binds the provider role and admission policy to that ServiceAccount.
 2. Grant each connector an `EdgeService` in its VPC's namespace. The [grant authority](masque-authority.md) issues one per connector authorization. It grants `PacketAccess` and `PrefixReachability`, lists the connector's /96 in `prefixes`, and sets a `clientPool` outside every connector /96. A service that lacks `PrefixReachability` gets an attachment, but core refuses every route on it.
 3. Run the provider pod as that ServiceAccount, with a pod-bound token, the downward-API pod name, namespace, UID and node name, a device-plugin TUN, and no host namespace, hostPath, `NET_ADMIN` or BPF access. `tests/edgeconformance/masqueprovider/deploy/` is a worked example.
 

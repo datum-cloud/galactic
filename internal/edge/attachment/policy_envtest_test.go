@@ -254,6 +254,26 @@ func TestProviderBindings(t *testing.T) {
 		t.Error("an unlisted ServiceAccount wrote an attachment")
 	}
 
+	// Approval is the operator's: neither the provider nor galactic-controller
+	// can approve a provider, and the provider cannot withdraw its approval.
+	controllerSA, err := client.New(f.controllerConfig(), client.Options{Scheme: f.scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]client.Client{
+		"the provider's ServiceAccount": provider, "galactic-controller": controllerSA,
+	} {
+		self := &galacticv1alpha1.EdgeProviderApproval{ObjectMeta: metav1.ObjectMeta{Name: "self-approved"}}
+		if err := c.Create(ctx, self); !apierrors.IsForbidden(err) {
+			t.Errorf("%s created an EdgeProviderApproval: %v, want Forbidden", name, err)
+		}
+	}
+	if err := provider.Delete(ctx, &galacticv1alpha1.EdgeProviderApproval{
+		ObjectMeta: metav1.ObjectMeta{Name: providerSA}}); !apierrors.IsForbidden(err) {
+		t.Errorf("the provider's ServiceAccount deleted its EdgeProviderApproval: %v, want Forbidden", err)
+	}
+
+	// status.approved follows the approval, not a write to status.
 	var p galacticv1alpha1.EdgeProvider
 	if err := f.admin.Get(ctx, client.ObjectKey{Name: providerSA}, &p); err != nil {
 		t.Fatal(err)
@@ -262,6 +282,17 @@ func TestProviderBindings(t *testing.T) {
 	if err := f.admin.Status().Update(ctx, &p); err != nil {
 		t.Fatal(err)
 	}
+	eventually(t, "status write reverted", func() bool {
+		return f.admin.Get(ctx, client.ObjectKey{Name: providerSA}, &p) == nil && p.Status.Approved
+	})
+	if err := f.admin.Get(ctx, client.ObjectKeyFromObject(&rb), &rbacv1.RoleBinding{}); err != nil {
+		t.Errorf("RoleBinding after a status write: %v", err)
+	}
+
+	f.withdraw(providerSA)
+	eventually(t, "approval withdrawn from status", func() bool {
+		return f.admin.Get(ctx, client.ObjectKey{Name: providerSA}, &p) == nil && !p.Status.Approved
+	})
 	eventually(t, "bindings removed", func() bool {
 		var vapb admissionregistrationv1.ValidatingAdmissionPolicyBinding
 		err1 := f.admin.Get(ctx, client.ObjectKey{Name: bindingName(providerSA)}, &vapb)
@@ -283,16 +314,13 @@ func TestProviderBindings(t *testing.T) {
 	}
 
 	// Deleting an approved provider withdraws its bindings before it goes.
-	if err := f.admin.Get(ctx, client.ObjectKey{Name: providerSA}, &p); err != nil {
-		t.Fatal(err)
-	}
-	p.Status.Approved = true
-	if err := f.admin.Status().Update(ctx, &p); err != nil {
-		t.Fatal(err)
-	}
+	f.approve(providerSA)
 	eventually(t, "bindings restored", func() bool {
 		return f.admin.Get(ctx, client.ObjectKeyFromObject(&rb), &rbacv1.RoleBinding{}) == nil
 	})
+	if err := f.admin.Get(ctx, client.ObjectKey{Name: providerSA}, &p); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.admin.Delete(ctx, &p); err != nil {
 		t.Fatal(err)
 	}

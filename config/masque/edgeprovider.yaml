@@ -1,5 +1,5 @@
-# The provider registration. An operator approves it by setting
-# status.approved; until then core refuses the provider's attachments.
+# The provider registration. It grants nothing until an operator approves
+# it with config/masque/approval; until then core refuses its attachments.
 apiVersion: galactic.datumapis.com/v1alpha1
 kind: EdgeProvider
 metadata:

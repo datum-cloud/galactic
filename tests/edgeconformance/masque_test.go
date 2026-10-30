@@ -248,10 +248,7 @@ func (m *masque) setup(t *testing.T) {
 	l.ensureNamespace(t, masqueNS)
 	l.applyOverlayOf(t, filepath.Join(l.root, "tests", "edgeconformance", "masqueprovider", "deploy", "registration"),
 		"masque-registration", "", nil)
-	if _, err := l.kubectl("patch", "edgeprovider", masqueProvider, "--subresource=status", "--type=merge",
-		"-p", `{"status":{"approved":true}}`); err != nil {
-		t.Fatal(err)
-	}
+	l.approve(t, masqueProvider)
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		mt.vpcUID, mt.vpcID = l.vpcUID(t, mt.tn), l.vpcID(t, mt.tn)
 		mt.svc = l.grantService(t, mt.tn, masqueService, func(s *galacticv1alpha1.EdgeService) {
@@ -1430,6 +1427,7 @@ func (m *masque) teardown(t *testing.T) {
 	if _, err := l.kubectl("delete", "namespace", masqueNS, "--wait=true", "--timeout=180s"); err != nil {
 		t.Error(err)
 	}
+	l.unapprove(masqueProvider)
 	l.deleteAndWait(t, &galacticv1alpha1.EdgeProvider{ObjectMeta: metav1.ObjectMeta{Name: masqueProvider}})
 
 	l.requireNoEdgeAdvertisements(t, masqueNS)

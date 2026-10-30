@@ -18,6 +18,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 )
@@ -45,6 +46,10 @@ const ProviderBindingFinalizer = "galactic.datumapis.com/edge-provider-bindings"
 // approved, or is being deleted, has neither, so RBAC refuses its writes
 // before the policy runs. The bindings are named after the provider, so a
 // provider recreated under the same name takes over its predecessor's.
+//
+// A provider is approved while an EdgeProviderApproval of the same name
+// exists. The reconciler projects that into status.approved, which
+// admission and the node agent read, and reverts any other write to it.
 type ProviderBindingReconciler struct {
 	Client client.Client
 }
@@ -55,11 +60,24 @@ func (r *ProviderBindingReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.Client.Get(ctx, req.NamespacedName, &p); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	err := r.Client.Get(ctx, req.NamespacedName, &galacticv1alpha1.EdgeProviderApproval{})
+	if client.IgnoreNotFound(err) != nil {
+		return ctrl.Result{}, err
+	}
 	deleting := !p.DeletionTimestamp.IsZero()
-	approved := p.Status.Approved && !deleting
+	approved := err == nil && !deleting
 	if approved && controllerutil.AddFinalizer(&p, ProviderBindingFinalizer) {
 		if err := r.Client.Update(ctx, &p); err != nil {
 			return ctrl.Result{}, err
+		}
+	}
+	// Withdrawal reaches admission and the node agent before the bindings
+	// go; neither binding exists before approval does.
+	if p.Status.Approved != approved {
+		base := p.DeepCopy()
+		p.Status.Approved = approved
+		if err := r.Client.Status().Patch(ctx, &p, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 	}
 	namespaces := map[string][]rbacv1.Subject{}
@@ -160,6 +178,8 @@ func sortedKeys(m map[string][]rbacv1.Subject) []string {
 }
 
 // SetupWithManager registers the reconciler. A nil Client is the manager's.
+// An EdgeProviderApproval is named after its provider, so its own request
+// names the provider to reconcile.
 func (r *ProviderBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Client == nil {
 		r.Client = mgr.GetClient()
@@ -167,6 +187,7 @@ func (r *ProviderBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("edge-provider-bindings").
 		For(&galacticv1alpha1.EdgeProvider{}).
+		Watches(&galacticv1alpha1.EdgeProviderApproval{}, &handler.EnqueueRequestForObject{}).
 		Owns(&admissionregistrationv1.ValidatingAdmissionPolicyBinding{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Complete(r)
