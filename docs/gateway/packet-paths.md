@@ -104,10 +104,10 @@ that converges this node's whole gateway engine:
    `<node>/IPv4Served` condition: `True` with reason
    `Advertised`, or `False` with `NotAdvertised` (loaded over Bound backends
    but the route not published), `BindingsNotBound` (loaded, no backend
-   Bound), `NoHealthyBackends` (loaded, FailClosed and no backend Healthy),
+   Bound), `NoHealthyBackends` (FailClosed, no backend Healthy, so left out),
    `Unsupported` (switch off), `NoBackend`, `MultipleVIPs` or
-   `NotLoaded` (the rule as a whole is not loaded). The first four mean
-   loaded (`ipv4LoadedReasons`), and `galactic-router` writes a rule's IPv4
+   `NotLoaded` (the rule as a whole is not loaded). The first four are
+   `ipv4LoadedReasons`, and `galactic-router` writes a rule's IPv4
    bindings only while some node reports one of them. Every pass also
    removes the `Programmed`, `Advertised` and `IPv4Served` conditions of any node no
    `NetworkGateway` in the namespace targets (`departedGatewayNodes`,

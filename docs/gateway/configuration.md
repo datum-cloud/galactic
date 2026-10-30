@@ -293,22 +293,23 @@ Each gateway node reports what it did with a rule's IPv4 VIPs as its
 | `True`  | `Advertised`           | loaded over the eligible backends whose bindings are `Bound`, at least one, and advertised                                      |
 | `False` | `NotAdvertised`        | loaded over `Bound` backends, but the route is not published: no `BGPRouter` targets the node, or the advertisement failed      |
 | `False` | `BindingsNotBound`     | loaded over every eligible backend, but none of their bindings is `Bound` yet, so not advertised                                |
-| `False` | `NoHealthyBackends`    | loaded, but the rule's health check is `FailClosed` and no backend has a current `Healthy` result, so not advertised            |
+| `False` | `NoHealthyBackends`    | left out: the rule's health check is `FailClosed` and no backend has a current `Healthy` result                                 |
 | `False` | `Unsupported`          | `GALACTIC_GATEWAY_IPV4_VIPS` is off, so they are left out of the datapath                                                       |
 | `False` | `NoBackend`            | the switch is on, but no selected attachment has an IPv6 address that is a backend of this IPv4 VIP (none, unresolved, claimed) |
 | `False` | `MultipleVIPs`         | the switch is on, but the rule has more than one IPv4 VIP, so none loads                                                        |
 | `False` | `NotLoaded`            | the switch is on, but the node did not load the rule at all                                                                     |
 | `False` | `IPv4ForwardingFailed` | the switch is on, but the node's IPv4 forwarding could not be turned on, so they are left out this pass                         |
 
-`Advertised`, `NotAdvertised`, `BindingsNotBound` and `NoHealthyBackends`
-mean the node has the IPv4 VIP loaded. The rule's IPv6 VIP keeps serving in every case. A rule whose
-every VIP is IPv4 is not loaded where none of them can be, and its
+`Advertised`, `NotAdvertised` and `BindingsNotBound` mean the node has the
+IPv4 VIP loaded, and `NoHealthyBackends` that it would load it once a
+backend is `Healthy`. The rule's IPv6 VIP keeps serving in every case. A
+rule whose every VIP is IPv4 is not loaded where none of them can be, and its
 `<gateway-node>/Programmed` condition reports `NoServedVIP` with the switch
 off and `InvalidRule` with it on. An IPv4 VIP's backends are the selected
 attachments' IPv6 addresses, the same ones as the IPv6 VIP's. Each backend
 node writes a binding for each of them, pairing the IPv4 `vipAddress` with the
 IPv6 `backendAddress`, but only while some gateway node reports one of the
-four loaded reasons for the rule, and deletes them once none does, so a cell
+four reasons above for the rule, and deletes them once none does, so a cell
 whose gateways leave IPv4 VIPs out has no IPv4 bindings or rows. Each gateway
 pass removes the `<node>/Programmed`, `<node>/Advertised` and
 `<node>/IPv4Served` conditions of any node that no `NetworkGateway` in the
