@@ -39,18 +39,19 @@ import (
 
 // ServiceProducerHealthReconciler probes the producers on its node of every
 // ServiceEndpoint whose distribution is Spread, and publishes their decisions
-// in the endpoint's status.producers. It runs in galactic-router on every
-// node, next to ServiceRoutePolicyReconciler, which reads those decisions to
-// keep new flows off Unhealthy producers.
+// in this node's ServiceEndpointProducerReport for the endpoint. It runs in
+// galactic-router on every node, next to ServiceRoutePolicyReconciler, which
+// reads those decisions to keep new flows off Unhealthy producers.
 //
-// Each node applies only its own producers' entries, under its own field
-// manager, so nodes never overwrite each other's entries, and an entry this
-// node stops applying is removed. Each producer has one probe loop, started
-// from the decision already published for the same attachment and port, so a
-// restarted galactic-router changes no producer set. A producer with no IPv6
-// address cannot be probed and is published as Unknown. The node renews its
-// entries every ServiceEndpointProducerReportRenewInterval, so other nodes stop
-// routing on them once it is down or its galactic-router stops.
+// Each node writes only its own report, so the size of any one object is
+// bounded by the producers of one node, whatever the number of nodes. Each
+// producer has one probe loop, started from the decision already published
+// for the same attachment and port, so a restarted galactic-router changes no
+// producer set. A producer with no IPv6 address cannot be probed and is
+// published as Unknown. The node renews its entries every
+// ServiceEndpointProducerReportRenewInterval, so other nodes stop routing on
+// them once it is down or its galactic-router stops, and it removes any
+// entries it still holds in the endpoint's status.producers.
 type ServiceProducerHealthReconciler struct {
 	client.Client
 	NodeName string
@@ -90,6 +91,10 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 		r.releaseExcept(req.NamespacedName, nil)
 		return r.publish(ctx, endpoint, nil, time.Now())
 	}
+	report, err := r.ownReport(ctx, endpoint)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	list := &cloudv1alpha1.VPCAttachmentList{}
 	if err := r.List(ctx, list); err != nil {
@@ -107,9 +112,18 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 		return r.publish(ctx, endpoint, nil, time.Now())
 	}
 
+	// Decisions this node published before, in the endpoint's status by a
+	// router that predates reports, or in its report, seed the probes.
 	published := make(map[types.NamespacedName]networkv1alpha1.ServiceEndpointProducerStatus)
 	for _, entry := range endpoint.Status.Producers {
-		published[types.NamespacedName{Namespace: entry.Namespace, Name: entry.Name}] = entry
+		if entry.Node == r.NodeName {
+			published[types.NamespacedName{Namespace: entry.Namespace, Name: entry.Name}] = entry
+		}
+	}
+	if report != nil {
+		for _, entry := range report.Spec.Producers {
+			published[types.NamespacedName{Namespace: entry.Namespace, Name: entry.Name}] = entry
+		}
 	}
 	port := producerHealthCheckPort(endpoint)
 	wanted := make(map[string]bool)
@@ -143,6 +157,13 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 		entries = append(entries, entry)
 	}
 	r.track(req.NamespacedName, wanted, entries)
+	// A node with producers reconciles every renew interval, so it sweeps
+	// regularly; one without has nothing to renew and does not.
+	if len(entries) != 0 {
+		if err := r.sweepReports(ctx, endpoint, time.Now()); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	return r.publish(ctx, endpoint, entries, time.Now())
 }
 
@@ -286,61 +307,199 @@ func (r *ServiceProducerHealthReconciler) recordStatesLocked(endpoint types.Name
 	r.Metrics.SetProducers(counts)
 }
 
-// publish applies entries as this node's part of endpoint's status.producers,
-// each renewed at now, unless this node's published entries already equal
-// them and were all renewed within the renew interval. It requeues for the
-// next renewal while entries is not empty.
+// ownReport returns this node's report for endpoint, or nil when there is
+// none. A report left by an earlier endpoint of the same name is deleted and
+// reported as none, since its endpointUID cannot change.
+func (r *ServiceProducerHealthReconciler) ownReport(ctx context.Context,
+	endpoint *networkv1alpha1.ServiceEndpoint,
+) (*networkv1alpha1.ServiceEndpointProducerReport, error) {
+	report := &networkv1alpha1.ServiceEndpointProducerReport{}
+	key := types.NamespacedName{Namespace: endpoint.Namespace, Name: producerReportName(endpoint.Name, r.NodeName)}
+	if err := r.Get(ctx, key, report); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get ServiceEndpointProducerReport %s: %w", key, err)
+	}
+	if report.Spec.EndpointUID == endpoint.UID && report.Spec.Node == r.NodeName {
+		return report, nil
+	}
+	if err := r.deleteReport(ctx, report, false); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// sweepReports deletes endpoint's reports from other nodes whose newest entry
+// was last renewed more than ServiceEndpointProducerReportRetention before
+// now, because their node is gone. A report with no renewed entry counts from
+// its creation.
+func (r *ServiceProducerHealthReconciler) sweepReports(ctx context.Context,
+	endpoint *networkv1alpha1.ServiceEndpoint, now time.Time,
+) error {
+	list := &networkv1alpha1.ServiceEndpointProducerReportList{}
+	if err := r.List(ctx, list, client.InNamespace(endpoint.Namespace)); err != nil {
+		return fmt.Errorf("list ServiceEndpointProducerReports in %s: %w", endpoint.Namespace, err)
+	}
+	for i := range list.Items {
+		report := &list.Items[i]
+		if report.Spec.EndpointName != endpoint.Name || report.Spec.Node == r.NodeName {
+			continue
+		}
+		var last time.Time
+		for _, entry := range report.Spec.Producers {
+			if entry.RenewTime != nil && entry.RenewTime.After(last) {
+				last = entry.RenewTime.Time
+			}
+		}
+		if last.IsZero() {
+			last = report.CreationTimestamp.Time
+		}
+		if now.Sub(last) <= networkv1alpha1.ServiceEndpointProducerReportRetention {
+			continue
+		}
+		if err := r.deleteReport(ctx, report, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteReport deletes report, and succeeds when it is already gone. With
+// unchanged, it deletes the report only as read and also succeeds when it has
+// changed since, so a node that renewed another node's report in between
+// keeps it; this node's own report is deleted whatever its version.
+func (r *ServiceProducerHealthReconciler) deleteReport(ctx context.Context,
+	report *networkv1alpha1.ServiceEndpointProducerReport, unchanged bool,
+) error {
+	preconditions := client.Preconditions{UID: &report.UID}
+	if unchanged {
+		preconditions.ResourceVersion = &report.ResourceVersion
+	}
+	err := r.Delete(ctx, report, preconditions)
+	if err == nil || apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+		return nil
+	}
+	return fmt.Errorf("delete ServiceEndpointProducerReport %s/%s: %w", report.Namespace, report.Name, err)
+}
+
+// publish makes entries, each renewed at now, this node's report for
+// endpoint, unless the report already holds them and all were renewed within
+// the renew interval. With no entries it deletes the report. It then removes
+// this node's entries from the endpoint's status.producers, only once the
+// report holds their replacements, so readers never lose a decision in
+// between. It requeues for the next renewal while entries is not empty.
 func (r *ServiceProducerHealthReconciler) publish(ctx context.Context, endpoint *networkv1alpha1.ServiceEndpoint,
 	entries []networkv1alpha1.ServiceEndpointProducerStatus, now time.Time,
 ) (ctrl.Result, error) {
-	var current []networkv1alpha1.ServiceEndpointProducerStatus
-	for _, entry := range endpoint.Status.Producers {
-		if entry.Node == r.NodeName {
-			current = append(current, entry)
+	report, err := r.ownReport(ctx, endpoint)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(entries) == 0 {
+		if report != nil {
+			if err := r.deleteReport(ctx, report, false); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
+		return ctrl.Result{}, r.clearStatusEntries(ctx, endpoint)
+	}
+	var current []networkv1alpha1.ServiceEndpointProducerStatus
+	if report != nil {
+		current = append(current, report.Spec.Producers...)
 	}
 	sortProducerEntries(current)
 	sortProducerEntries(entries)
-	renewIn := time.Duration(0)
-	if len(entries) != 0 {
-		renewIn = networkv1alpha1.ServiceEndpointProducerReportRenewInterval
-	}
+	renewIn := networkv1alpha1.ServiceEndpointProducerReportRenewInterval
 	if producerEntriesEqual(current, entries) {
-		if len(entries) == 0 {
-			return ctrl.Result{}, nil
-		}
 		if age, ok := oldestRenewal(current, now); ok && age < renewIn {
-			return ctrl.Result{RequeueAfter: max(renewIn-age, time.Second)}, nil
+			return ctrl.Result{RequeueAfter: max(renewIn-age, time.Second)}, r.clearStatusEntries(ctx, endpoint)
 		}
-	}
-	if entries == nil {
-		entries = []networkv1alpha1.ServiceEndpointProducerStatus{}
 	}
 	renewed := metav1.NewTime(now.Truncate(time.Second))
 	for i := range entries {
 		entries[i].RenewTime = &renewed
 	}
-	body, err := json.Marshal(map[string]any{
-		"apiVersion": networkv1alpha1.GroupVersion.String(),
-		"kind":       "ServiceEndpoint",
-		"metadata":   map[string]string{"name": endpoint.Name, "namespace": endpoint.Namespace},
-		"status":     map[string]any{"producers": entries},
-	})
+	name := producerReportName(endpoint.Name, r.NodeName)
+	body, err := applyBody("ServiceEndpointProducerReport", endpoint.Namespace, name,
+		[]metav1.OwnerReference{{
+			APIVersion: networkv1alpha1.GroupVersion.String(), Kind: "ServiceEndpoint",
+			Name: endpoint.Name, UID: endpoint.UID,
+		}},
+		"spec", networkv1alpha1.ServiceEndpointProducerReportSpec{
+			EndpointName: endpoint.Name, EndpointUID: endpoint.UID, Node: r.NodeName, Producers: entries,
+		})
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	obj := &networkv1alpha1.ServiceEndpointProducerReport{}
+	obj.Name, obj.Namespace = name, endpoint.Namespace
+	if err := r.Patch(ctx, obj, client.RawPatch(types.ApplyPatchType, body),
+		client.FieldOwner(nodeFieldOwner(r.NodeName)), client.ForceOwnership); err != nil {
+		return ctrl.Result{}, fmt.Errorf("apply ServiceEndpointProducerReport %s/%s: %w",
+			endpoint.Namespace, name, err)
+	}
+	return ctrl.Result{RequeueAfter: renewIn}, r.clearStatusEntries(ctx, endpoint)
+}
+
+// clearStatusEntries removes the entries this node holds in endpoint's
+// status.producers, written by a galactic-router that predates reports, by
+// applying an empty list under the field manager that wrote them.
+func (r *ServiceProducerHealthReconciler) clearStatusEntries(ctx context.Context,
+	endpoint *networkv1alpha1.ServiceEndpoint,
+) error {
+	held := false
+	for _, entry := range endpoint.Status.Producers {
+		held = held || entry.Node == r.NodeName
+	}
+	if !held {
+		return nil
+	}
+	body, err := statusProducersApplyBody(endpoint.Namespace, endpoint.Name, nil)
+	if err != nil {
+		return err
 	}
 	obj := &networkv1alpha1.ServiceEndpoint{}
 	obj.Name, obj.Namespace = endpoint.Name, endpoint.Namespace
 	err = r.Status().Patch(ctx, obj, client.RawPatch(types.ApplyPatchType, body),
 		client.FieldOwner(nodeFieldOwner(r.NodeName)), client.ForceOwnership)
-	if apierrors.IsNotFound(err) {
-		return ctrl.Result{}, nil
-	}
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("apply status.producers of ServiceEndpoint %s/%s: %w",
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("remove status.producers entries of ServiceEndpoint %s/%s: %w",
 			endpoint.Namespace, endpoint.Name, err)
 	}
-	return ctrl.Result{RequeueAfter: renewIn}, nil
+	return nil
+}
+
+// applyBody returns a server-side apply body for the galactic API object of
+// kind called name in namespace, with owners and with value as its field.
+func applyBody(kind, namespace, name string, owners []metav1.OwnerReference, field string, value any) ([]byte, error) {
+	meta := map[string]any{"name": name, "namespace": namespace}
+	if len(owners) != 0 {
+		meta["ownerReferences"] = owners
+	}
+	return json.Marshal(map[string]any{
+		"apiVersion": networkv1alpha1.GroupVersion.String(), "kind": kind, "metadata": meta, field: value,
+	})
+}
+
+// statusProducersApplyBody returns a server-side apply body that sets the
+// status.producers of the named ServiceEndpoint to entries.
+func statusProducersApplyBody(namespace, name string,
+	entries []networkv1alpha1.ServiceEndpointProducerStatus,
+) ([]byte, error) {
+	if entries == nil {
+		entries = []networkv1alpha1.ServiceEndpointProducerStatus{}
+	}
+	return applyBody("ServiceEndpoint", namespace, name, nil, "status", map[string]any{"producers": entries})
+}
+
+// producerReportName names node's report for the endpoint called endpoint: the
+// endpoint name, cut to fit, and a hash of both names, so two nodes or two
+// endpoints never share a report.
+func producerReportName(endpoint, node string) string {
+	sum := sha256.Sum256([]byte(endpoint + "\x00" + node))
+	prefix := strings.TrimRight(endpoint[:min(len(endpoint), 253-17)], ".-")
+	return prefix + "-" + hex.EncodeToString(sum[:8])
 }
 
 // oldestRenewal returns the age at now of the least recently renewed entry,

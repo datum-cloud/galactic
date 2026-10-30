@@ -19,6 +19,7 @@ Package v1alpha1 contains API Schema definitions for the galactic.datumapis.com/
 - [NetworkService](#networkservice)
 - [NetworkServiceAddress](#networkserviceaddress)
 - [ServiceEndpoint](#serviceendpoint)
+- [ServiceEndpointProducerReport](#serviceendpointproducerreport)
 - [ServiceRoutePolicy](#serviceroutepolicy)
 - [ServiceVIPBinding](#servicevipbinding)
 
@@ -789,6 +790,56 @@ _Appears in:_
 | `healthyThreshold` _integer_ | HealthyThreshold is the number of consecutive successful probes that<br />make a producer Healthy. | 3 | Maximum: 10 <br />Minimum: 1 <br /> |
 
 
+#### ServiceEndpointProducerReport
+
+
+
+ServiceEndpointProducerReport holds one node's health decisions for the
+producers of one Spread ServiceEndpoint on that node. The galactic-router on
+that node is its only writer: it creates the report in the endpoint's
+namespace, owned by the endpoint, renews its entries every
+ServiceEndpointProducerReportRenewInterval, and deletes it when the node
+has no producers of the endpoint left. A node with producers of the
+endpoint deletes another node's report none of whose entries was renewed
+within ServiceEndpointProducerReportRetention, because that node is gone.
+When no node has producers of the endpoint left, nothing sweeps, and its
+reports, whose entries readers ignore once expired, go when the endpoint
+does. Each report holds at most ServiceEndpointMaxProducersPerNode
+entries, so an endpoint's producers can span any number of nodes.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `ServiceEndpointProducerReport` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[ServiceEndpointProducerReportSpec](#serviceendpointproducerreportspec)_ |  |  |  |
+
+
+#### ServiceEndpointProducerReportSpec
+
+
+
+ServiceEndpointProducerReportSpec is one node's report for one endpoint.
+
+
+
+_Appears in:_
+- [ServiceEndpointProducerReport](#serviceendpointproducerreport)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `endpointName` _string_ | EndpointName is the name of the ServiceEndpoint, in the report's<br />namespace, whose producers the report describes. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `endpointUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | EndpointUID is the UID of that ServiceEndpoint. Readers ignore a report<br />whose EndpointUID does not match the current endpoint. |  | Required: \{\} <br /> |
+| `node` _string_ | Node is the node that hosts and probes the producers. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+| `producers` _[ServiceEndpointProducerStatus](#serviceendpointproducerstatus) array_ | Producers holds the health decision of each producer of the endpoint on<br />Node. |  | MaxItems: 16 <br /> |
+
+
 #### ServiceEndpointProducerStatus
 
 
@@ -798,6 +849,7 @@ ServiceEndpointProducerStatus is one producer's health decision.
 
 
 _Appears in:_
+- [ServiceEndpointProducerReportSpec](#serviceendpointproducerreportspec)
 - [ServiceEndpointStatus](#serviceendpointstatus)
 
 | Field | Description | Default | Validation |
@@ -853,7 +905,7 @@ _Appears in:_
 | `attachmentSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | AttachmentSelector selects the Cloud API VPCAttachments that host replicas<br />of this endpoint. Labels used here must be assigned by the platform service<br />controller, not by tenants. The dataplane selects ready replicas for each<br />consumer according to DeliveryMode and Distribution. |  |  |
 | `region` _string_ | Region limits endpoint selection to a region. An empty value means the<br />endpoint is not region-scoped. |  |  |
 | `distribution` _[ServiceEndpointDistribution](#serviceendpointdistribution)_ | Distribution says how a consumer's traffic reaches the producers on<br />its own node. Single, the default, allows one ready producer per node<br />and VPC and sends every consumer on that node to it; an endpoint that<br />selects more is refused. Spread sends new flows to any producer on the<br />consumer's node that its health check has not found Unhealthy: each<br />TCP connection stays with the producer that received its first packet,<br />and each UDP datagram picks a producer of its own, which suits<br />request/response protocols such as DNS but not ones that need a UDP<br />flow to stay on one producer. An Unhealthy producer keeps its existing<br />TCP connections and replies, and gets new flows again once it is<br />Healthy. When every producer on a node is Unhealthy, all of them stay<br />eligible. A node may hold at most 16 producers of a Spread endpoint. |  | Enum: [Single Spread] <br /> |
-| `healthCheck` _[ServiceEndpointHealthCheck](#serviceendpointhealthcheck)_ | HealthCheck configures the TCP health check of a Spread endpoint's<br />producers. Each producer's own node probes it and publishes the<br />decision in status.producers. Required when Distribution is Spread and<br />refused otherwise.<br />Where interface traffic policy is enforced, the producer's policy must<br />allow TCP from fe80::/10 to the health check port on the Private path,<br />and the replies back. |  |  |
+| `healthCheck` _[ServiceEndpointHealthCheck](#serviceendpointhealthcheck)_ | HealthCheck configures the TCP health check of a Spread endpoint's<br />producers. Each producer's own node probes it and publishes the<br />decision in that node's ServiceEndpointProducerReport for the endpoint.<br />Required when Distribution is Spread and refused otherwise.<br />Where interface traffic policy is enforced, the producer's policy must<br />allow TCP from fe80::/10 to the health check port on the Private path,<br />and the replies back. |  |  |
 
 
 #### ServiceEndpointStatus
@@ -869,7 +921,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `producers` _[ServiceEndpointProducerStatus](#serviceendpointproducerstatus) array_ | Producers holds the health decision of every producer of a Spread<br />endpoint. Each node writes the entries of the producers on that node,<br />under its own field manager, and removes them when the producer stops<br />being selected. An entry whose attachmentUID no longer matches the<br />attachment of that name describes an earlier attachment and is ignored.<br />Each node renews its entries every 15 seconds; an entry not renewed<br />for 60 seconds is expired, because its node or its galactic-router has<br />stopped, and no node routes on its state. |  | MaxItems: 4096 <br /> |
+| `producers` _[ServiceEndpointProducerStatus](#serviceendpointproducerstatus) array_ | Producers holds health decisions written by galactic-router versions<br />that do not write ServiceEndpointProducerReports. Each such node writes<br />the entries of the producers on that node, under its own field manager.<br />A current galactic-router removes its own entries here once its report<br />holds their replacements, and reads both: for each producer and node it<br />uses whichever entry was renewed later. An entry whose attachmentUID no<br />longer matches the attachment of that name describes an earlier<br />attachment and is ignored. An entry not renewed for 60 seconds is<br />expired, and no node routes on its state. |  | MaxItems: 4096 <br /> |
 
 
 #### ServiceRouteAuthorization

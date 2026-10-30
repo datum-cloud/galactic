@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -138,5 +139,44 @@ func TestProducerReportsOnlyRenewed(t *testing.T) {
 	added.Status.Producers[1].Name = "resolver-b"
 	if producerReportsOnlyRenewed(endpoint(networkv1alpha1.BackendHealthHealthy, renewedAt(time.Second)), added, now) {
 		t.Error("producerReportsOnlyRenewed accepted an added producer")
+	}
+}
+
+func TestProducerReportsOnlyRenewedForReports(t *testing.T) {
+	now := time.Now()
+	report := func(state networkv1alpha1.BackendHealthState,
+		ago time.Duration,
+	) *networkv1alpha1.ServiceEndpointProducerReport {
+		renewed := metav1.NewTime(now.Add(-ago))
+		return &networkv1alpha1.ServiceEndpointProducerReport{
+			ObjectMeta: metav1.ObjectMeta{Name: "report", Namespace: producerHealthNamespace, ResourceVersion: "1"},
+			Spec: networkv1alpha1.ServiceEndpointProducerReportSpec{
+				EndpointName: producerHealthEndpoint, EndpointUID: "endpoint-uid", Node: producerHealthNode,
+				Producers: []networkv1alpha1.ServiceEndpointProducerStatus{{
+					Namespace: producerHealthNamespace, Name: producerHealthFirst, AttachmentUID: "attachment-uid",
+					Node: producerHealthNode, Port: 8053, State: state, Reason: "ProbeSucceeded", RenewTime: &renewed,
+				}},
+			},
+		}
+	}
+	healthy, unhealthy := networkv1alpha1.BackendHealthHealthy, networkv1alpha1.BackendHealthUnhealthy
+	if !producerReportsOnlyRenewed(report(healthy, 20*time.Second), report(healthy, 0), now) {
+		t.Error("renewal of a current report counted as a change")
+	}
+	if producerReportsOnlyRenewed(report(healthy, 20*time.Second), report(unhealthy, 0), now) {
+		t.Error("changed decision counted as a renewal")
+	}
+	expired := networkv1alpha1.ServiceEndpointProducerReportLifetime + time.Second
+	if producerReportsOnlyRenewed(report(healthy, expired), report(healthy, 0), now) {
+		t.Error("renewal of an expired report counted as a renewal")
+	}
+	old, renewed := report(healthy, 20*time.Second), report(healthy, 0)
+	old.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "galactic-router/" + producerHealthNode}}
+	oldCopy, renewedCopy := old.DeepCopy(), renewed.DeepCopy()
+	if !producerReportsOnlyRenewed(old, renewed, now) {
+		t.Error("renewal with managed fields counted as a change")
+	}
+	if !equality.Semantic.DeepEqual(old, oldCopy) || !equality.Semantic.DeepEqual(renewed, renewedCopy) {
+		t.Error("producerReportsOnlyRenewed changed its arguments")
 	}
 }

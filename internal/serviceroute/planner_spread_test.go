@@ -24,6 +24,7 @@ const (
 	spreadConsumerName      = "consumer"
 	bothLocalProducers      = "producer-a,producer-z"
 	firstRemoteProducer     = "a-remote"
+	firstDraining           = "producer-a(draining),producer-z"
 )
 
 func spreadEndpoint(mode networkv1alpha1.ServiceEndpointDeliveryMode) (
@@ -122,7 +123,7 @@ func TestCompileSpreadDrainsUnhealthyProducers(t *testing.T) {
 
 	reportHealth(endpoint, first, networkv1alpha1.BackendHealthUnhealthy)
 	reportHealth(endpoint, last, networkv1alpha1.BackendHealthHealthy)
-	if got := compile(); got != "producer-a(draining),producer-z" {
+	if got := compile(); got != firstDraining {
 		t.Fatalf("producers = %s, want producer-a draining", got)
 	}
 
@@ -323,5 +324,75 @@ func TestCompileSpreadRefusesMoreProducersThanASetHolds(t *testing.T) {
 		!strings.Contains(err.Error(), `node "node-a"`) {
 		t.Fatalf("Compile with %d producers on one node: err=%v, want a refusal naming the node",
 			len(attachments)-1, err)
+	}
+}
+
+func TestWithProducerReportsPrefersReportsOverStatus(t *testing.T) {
+	policy, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal)
+	endpoint.UID = "endpoint-uid"
+	consumer := spreadConsumer()
+	first := readyAttachment(spreadProducerNamespace, "a-producer", "first-uid", testNodeName, "producer-a",
+		testLabels(testProducerLabel, "yes"))
+	last := readyAttachment(spreadProducerNamespace, "z-producer", "last-uid", testNodeName, "producer-z",
+		testLabels(testProducerLabel, "yes"))
+	attachments := []*cloudv1alpha1.VPCAttachment{consumer, first, last}
+	report := func(uid types.UID, producer *cloudv1alpha1.VPCAttachment,
+		state networkv1alpha1.BackendHealthState,
+	) networkv1alpha1.ServiceEndpointProducerReport {
+		entries := &networkv1alpha1.ServiceEndpoint{}
+		reportHealth(entries, producer, state)
+		return networkv1alpha1.ServiceEndpointProducerReport{
+			ObjectMeta: metav1.ObjectMeta{Namespace: endpoint.Namespace, Name: "report-" + string(uid)},
+			Spec: networkv1alpha1.ServiceEndpointProducerReportSpec{
+				EndpointName: endpoint.Name, EndpointUID: uid, Node: producer.Status.Node,
+				Producers: entries.Status.Producers,
+			},
+		}
+	}
+	compile := func(reports ...networkv1alpha1.ServiceEndpointProducerReport) string {
+		t.Helper()
+		view := WithProducerReports(endpoint, reports)
+		got, err := Compile(policy, view, attachments, testNodeName, nil)
+		if err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("intents = %+v, want one", got)
+		}
+		return producerSummary(got[0])
+	}
+
+	// A report drains its Unhealthy producer.
+	if got := compile(report(endpoint.UID, first, networkv1alpha1.BackendHealthUnhealthy)); got !=
+		firstDraining {
+		t.Fatalf("producers = %s, want producer-a draining", got)
+	}
+	// A report for an earlier endpoint of the same name is ignored.
+	if got := compile(report("earlier-uid", first, networkv1alpha1.BackendHealthUnhealthy)); got !=
+		bothLocalProducers {
+		t.Fatalf("producers with an earlier endpoint's report = %s, want all eligible", got)
+	}
+	// While routers are upgraded, a status entry still drains a producer no
+	// report describes, and a report overrides the status entry of the same
+	// producer and node.
+	reportHealth(endpoint, last, networkv1alpha1.BackendHealthUnhealthy)
+	reportHealth(endpoint, first, networkv1alpha1.BackendHealthUnhealthy)
+	if got := compile(report(endpoint.UID, first, networkv1alpha1.BackendHealthHealthy)); got !=
+		"producer-a,producer-z(draining)" {
+		t.Fatalf("producers = %s, want producer-z drained by its status entry, producer-a healthy by report", got)
+	}
+	if len(endpoint.Status.Producers) != 2 {
+		t.Fatalf("WithProducerReports changed the endpoint: %+v", endpoint.Status.Producers)
+	}
+
+	// A node rolled back to a router that writes status.producers leaves an
+	// expired report entry behind; its fresh status entry still drains.
+	endpoint.Status.Producers = nil
+	reportHealth(endpoint, first, networkv1alpha1.BackendHealthUnhealthy)
+	stale := report(endpoint.UID, first, networkv1alpha1.BackendHealthHealthy)
+	stale.Spec.Producers[0].RenewTime = ptr.To(metav1.NewTime(
+		time.Now().Add(-networkv1alpha1.ServiceEndpointProducerReportLifetime - time.Second)))
+	if got := compile(stale); got != firstDraining {
+		t.Fatalf("producers after rollback = %s, want producer-a drained by its newer status entry", got)
 	}
 }

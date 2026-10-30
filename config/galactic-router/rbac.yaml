@@ -43,6 +43,14 @@ rules:
       - serviceendpoints
       - serviceroutepolicies
     verbs: ["get", "list", "watch"]
+  # ServiceProducerHealthReconciler server-side applies this node's report
+  # for each Spread endpoint, deletes it once the node has no producers
+  # left, and deletes reports whose node stopped renewing them.
+  # ServiceRoutePolicyReconciler reads every report.
+  - apiGroups: ["galactic.datumapis.com"]
+    resources:
+      - serviceendpointproducerreports
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
   - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgprouters/status

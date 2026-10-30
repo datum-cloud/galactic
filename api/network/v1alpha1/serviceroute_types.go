@@ -102,8 +102,8 @@ type ServiceEndpointSpec struct {
 
 	// HealthCheck configures the TCP health check of a Spread endpoint's
 	// producers. Each producer's own node probes it and publishes the
-	// decision in status.producers. Required when Distribution is Spread and
-	// refused otherwise.
+	// decision in that node's ServiceEndpointProducerReport for the endpoint.
+	// Required when Distribution is Spread and refused otherwise.
 	//
 	// Where interface traffic policy is enforced, the producer's policy must
 	// allow TCP from fe80::/10 to the health check port on the Private path,
@@ -132,14 +132,19 @@ const ServiceEndpointMaxProducersPerNode = 16
 
 const (
 	// ServiceEndpointProducerReportRenewInterval is how often a node renews
-	// its entries in a Spread endpoint's status.producers while its decisions
-	// do not change.
+	// its entries in its ServiceEndpointProducerReport while its decisions do
+	// not change.
 	ServiceEndpointProducerReportRenewInterval = 15 * time.Second
 
 	// ServiceEndpointProducerReportLifetime is how long after its renewTime
-	// an entry in status.producers is current. Nodes route on an entry only
-	// while it is current.
+	// a producer entry is current. Nodes route on an entry only while it is
+	// current.
 	ServiceEndpointProducerReportLifetime = 60 * time.Second
+
+	// ServiceEndpointProducerReportRetention is how long after the last
+	// renewal of its newest entry a ServiceEndpointProducerReport is kept.
+	// After that its node is gone, and any node deletes it.
+	ServiceEndpointProducerReportRetention = 10 * time.Minute
 )
 
 // ServiceEndpointHealthCheck configures the TCP health check of an endpoint's
@@ -197,14 +202,15 @@ type ServiceEndpointHealthCheck struct {
 
 // ServiceEndpointStatus reports what the nodes observe of an endpoint.
 type ServiceEndpointStatus struct {
-	// Producers holds the health decision of every producer of a Spread
-	// endpoint. Each node writes the entries of the producers on that node,
-	// under its own field manager, and removes them when the producer stops
-	// being selected. An entry whose attachmentUID no longer matches the
-	// attachment of that name describes an earlier attachment and is ignored.
-	// Each node renews its entries every 15 seconds; an entry not renewed
-	// for 60 seconds is expired, because its node or its galactic-router has
-	// stopped, and no node routes on its state.
+	// Producers holds health decisions written by galactic-router versions
+	// that do not write ServiceEndpointProducerReports. Each such node writes
+	// the entries of the producers on that node, under its own field manager.
+	// A current galactic-router removes its own entries here once its report
+	// holds their replacements, and reads both: for each producer and node it
+	// uses whichever entry was renewed later. An entry whose attachmentUID no
+	// longer matches the attachment of that name describes an earlier
+	// attachment and is ignored. An entry not renewed for 60 seconds is
+	// expired, and no node routes on its state.
 	// +optional
 	// +listType=map
 	// +listMapKey=namespace

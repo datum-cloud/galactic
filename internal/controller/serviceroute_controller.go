@@ -168,6 +168,12 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, errors.Join(r.removePolicyLocked(req.NamespacedName), r.setAccepted(ctx, policy,
 			metav1.ConditionFalse, "EndpointDeleting", "service endpoint is deleting"))
 	}
+	endpoint, err := r.withProducerReports(ctx, endpoint)
+	if err != nil {
+		resultLabel = reconcileResultError
+		logger.Error(err, "read producer reports", "serviceEndpoint", endpoint.Name)
+		return ctrl.Result{}, err
+	}
 	vpcIdentity, err := r.consumerVPCIdentity(ctx, policy)
 	if err != nil {
 		joined := errors.Join(r.replacePolicyLocked(req.NamespacedName, nil),
@@ -317,9 +323,13 @@ func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		For(&networkv1alpha1.ServiceRoutePolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&networkv1alpha1.ServiceRoutePolicy{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		// A renewal of producer reports that are still current changes no
+		// A renewal of producer entries that are still current changes no
 		// route; expiry is handled by requeueing.
 		Watches(&networkv1alpha1.ServiceEndpoint{}, handler.EnqueueRequestsFromMapFunc(r.endpointPolicies),
+			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+				return !producerReportsOnlyRenewed(e.ObjectOld, e.ObjectNew, time.Now())
+			}})).
+		Watches(&networkv1alpha1.ServiceEndpointProducerReport{}, handler.EnqueueRequestsFromMapFunc(r.endpointPolicies),
 			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 				return !producerReportsOnlyRenewed(e.ObjectOld, e.ObjectNew, time.Now())
 			}})).
@@ -437,6 +447,9 @@ func (r *ServiceRoutePolicyReconciler) syncAllPolicies(ctx context.Context) erro
 			}
 			return startupSyncError(fmt.Errorf("get ServiceEndpoint %s for startup sync: %w", endpointKey, err), true)
 		}
+		if endpoint, err = r.withProducerReports(ctx, endpoint); err != nil {
+			return startupSyncError(err, true)
+		}
 		vpcIdentity, err := r.consumerVPCIdentity(ctx, policy)
 		if err != nil {
 			compiled = append(compiled, compiledPolicy{key: key})
@@ -535,34 +548,58 @@ func (r *ServiceRoutePolicyReconciler) consumerVPCIdentity(
 	return vpc.Status.VPC, nil
 }
 
-// producerReportsOnlyRenewed reports whether newObj differs from oldObj only
-// in the renewTime of status.producers entries that are current at now in
-// both.
+// producerReportsOnlyRenewed reports whether newObj, a ServiceEndpoint or a
+// ServiceEndpointProducerReport, differs from oldObj only in the renewTime of
+// producer entries that are current at now in both.
 func producerReportsOnlyRenewed(oldObj, newObj client.Object, now time.Time) bool {
-	oldEndpoint, ok := oldObj.(*networkv1alpha1.ServiceEndpoint)
+	entries := func(obj client.Object) (client.Object, []networkv1alpha1.ServiceEndpointProducerStatus, bool) {
+		switch o := obj.(type) {
+		case *networkv1alpha1.ServiceEndpoint:
+			o = o.DeepCopy()
+			return o, o.Status.Producers, true
+		case *networkv1alpha1.ServiceEndpointProducerReport:
+			o = o.DeepCopy()
+			return o, o.Spec.Producers, true
+		}
+		return nil, nil, false
+	}
+	oldCopy, oldEntries, ok := entries(oldObj)
 	if !ok {
 		return false
 	}
-	newEndpoint, ok := newObj.(*networkv1alpha1.ServiceEndpoint)
-	if !ok || len(oldEndpoint.Status.Producers) != len(newEndpoint.Status.Producers) {
+	newCopy, newEntries, ok := entries(newObj)
+	if !ok || len(oldEntries) != len(newEntries) {
 		return false
 	}
-	for _, endpoint := range []*networkv1alpha1.ServiceEndpoint{oldEndpoint, newEndpoint} {
-		for _, entry := range endpoint.Status.Producers {
-			if !serviceroute.ProducerReportCurrent(entry, now) {
+	for _, list := range [][]networkv1alpha1.ServiceEndpointProducerStatus{oldEntries, newEntries} {
+		for i := range list {
+			if !serviceroute.ProducerReportCurrent(list[i], now) {
 				return false
 			}
+			list[i].RenewTime = nil
 		}
 	}
-	strip := func(endpoint *networkv1alpha1.ServiceEndpoint) *networkv1alpha1.ServiceEndpoint {
-		endpoint = endpoint.DeepCopy()
-		endpoint.ResourceVersion, endpoint.ManagedFields = "", nil
-		for i := range endpoint.Status.Producers {
-			endpoint.Status.Producers[i].RenewTime = nil
-		}
-		return endpoint
+	for _, obj := range []client.Object{oldCopy, newCopy} {
+		obj.SetResourceVersion("")
+		obj.SetManagedFields(nil)
 	}
-	return equality.Semantic.DeepEqual(strip(oldEndpoint), strip(newEndpoint))
+	return equality.Semantic.DeepEqual(oldCopy, newCopy)
+}
+
+// withProducerReports returns endpoint with the producer entries of its
+// ServiceEndpointProducerReports, as serviceroute.WithProducerReports
+// describes.
+func (r *ServiceRoutePolicyReconciler) withProducerReports(ctx context.Context,
+	endpoint *networkv1alpha1.ServiceEndpoint,
+) (*networkv1alpha1.ServiceEndpoint, error) {
+	if endpoint.Spec.Distribution != networkv1alpha1.ServiceEndpointDistributionSpread {
+		return endpoint, nil
+	}
+	reports := &networkv1alpha1.ServiceEndpointProducerReportList{}
+	if err := r.List(ctx, reports, client.InNamespace(endpoint.Namespace)); err != nil {
+		return endpoint, fmt.Errorf("list ServiceEndpointProducerReports in %s: %w", endpoint.Namespace, err)
+	}
+	return serviceroute.WithProducerReports(endpoint, reports.Items), nil
 }
 
 func (r *ServiceRoutePolicyReconciler) endpointPolicies(ctx context.Context, obj client.Object) []ctrl.Request {
