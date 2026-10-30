@@ -4,6 +4,7 @@ Metrics, scrape configuration, shipped alert rules and log format. Use the subsy
 
 - [VPC dataplane — `galactic_usid_*`](vpc-dataplane.md)
 - [Instance VPC attachments — `galactic_vpc_instance_*`](vpc-attachments.md)
+- [VPC attachment traffic — `galactic_vpc_attachment_*`](vpc-dataplane.md#per-attachment-traffic)
 - [Tenant egress pool — `galactic_cni_egress_*`](egress-pool.md)
 - [VPC ingress — `galactic_ingress_sidecar_*`](vpc-ingress.md)
 - [Edge load balancer — `galactic_edge_*`](gateway.md)
@@ -70,6 +71,7 @@ the fabric-api gateway are Deployments, scraped per pod.
 | Area                    | Component                                                 | Metric prefix                                                 | Port           | `job` from `config/monitoring/`          |
 | ----------------------- | --------------------------------------------------------- | ------------------------------------------------------------- | -------------- | ---------------------------------------- |
 | VPC dataplane           | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_usid_*`                                             | 9180           | `galactic-cni`                           |
+| VPC attachment traffic  | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_vpc_attachment_*`                                   | 9180           | `galactic-cni`                           |
 | Tenant egress pool      | `galactic-cni`                                            | `galactic_cni_egress_*`                                       | 9180           | `galactic-cni`                           |
 | VPC ingress             | `galactic-vrf`                                            | `galactic_ingress_sidecar_*`                                  | 9182 (default) | none shipped                             |
 | VPC ingress return path | `galactic-cni` (`credential-refresh`)                     | `galactic_sidecar_return_*`                                   | 9180           | `galactic-cni`                           |

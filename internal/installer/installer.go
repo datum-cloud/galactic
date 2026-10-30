@@ -579,6 +579,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 			slog.Warn("Failed to create per-VRF traffic counter rows; the next GC sweep retries", "err", err)
 		}
 		m.RegisterDatapathCollector(objs)
+		m.RegisterAttachmentCollector()
 		m.RegisterEgressShardCollector(objs, egressCfg.MinActive)
 	}
 
