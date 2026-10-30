@@ -219,6 +219,7 @@ func TestBootstrap(t *testing.T) {
 		// Verify binaries copied
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-veth"), "cni-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-tap"), "tap-cni-content")
+		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-tap-host-only"), "tap-cni-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-ipam"), "ipam-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-bgp"), "bgp-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-route"), "route-content")

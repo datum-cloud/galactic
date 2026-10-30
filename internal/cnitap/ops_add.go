@@ -25,6 +25,7 @@ import (
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/radv"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -225,11 +226,12 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 }
 
 // setHostOnlyPorts writes ports as hostLink's host-only TCP ports, or removes
-// any entry when ports is empty. A datapath without the table cannot enforce a
-// list, so asking for one there fails ADD; asking for none is a no-op.
+// any entry when ports is empty. A datapath without the table, or whose
+// tp_deliver does not read it, cannot enforce a list, so asking for one there
+// fails ADD; asking for none is a no-op.
 //
-// The list is also recorded in hostLink's alias, which outlasts the table, so
-// datapath repair can restore an entry a recreated table lost.
+// The list is also recorded as an alternative name on hostLink, which outlasts
+// the table, so datapath repair can restore an entry a recreated table lost.
 func setHostOnlyPorts(hostLink netlink.Link, ports []uint16) error {
 	ifindex := uint32(hostLink.Attrs().Index) //nolint:gosec // a kernel ifindex
 	table, closer, err := ifindexvrfmap.OpenPinnedHostOnlyPorts(attach.PinDir)
@@ -245,20 +247,49 @@ func setHostOnlyPorts(hostLink netlink.Link, ports []uint16) error {
 		if err := table.Unregister(ifindex); err != nil {
 			return err
 		}
-		if _, ours, _ := ifindexvrfmap.ParseHostOnlyAlias(hostLink.Attrs().Alias); !ours {
-			return nil
+	} else {
+		reads, err := attach.DeliverReadsHostOnlyPorts(attach.PinDir, closer)
+		if err != nil {
+			return err
 		}
-		if err := netlink.LinkSetAlias(hostLink, ""); err != nil {
-			return fmt.Errorf("clear host-only alias on %s: %w", hostLink.Attrs().Name, err)
+		if !reads {
+			return fmt.Errorf("host-only ports %v cannot be enforced: this node's tp_deliver does not read %s",
+				ports, prog.UsidMapHostOnlyPortTable)
 		}
-		return nil
+		if err := table.Register(ifindex, ports); err != nil {
+			return err
+		}
 	}
-	if err := table.Register(ifindex, ports); err != nil {
+	if err := recordHostOnlyPorts(hostLink, ports); err != nil {
 		return err
 	}
-	if err := netlink.LinkSetAlias(hostLink, ifindexvrfmap.HostOnlyAlias(ports)); err != nil {
+	slog.Debug("ADD: host-only ports set", "ifindex", ifindex, "ports", ports)
+	return nil
+}
+
+// recordHostOnlyPorts leaves hostLink with exactly the host-only alternative
+// name for ports, or none when ports is empty. An adopted tap can carry the
+// name a previous ADD recorded.
+func recordHostOnlyPorts(hostLink netlink.Link, ports []uint16) error {
+	want := ifindexvrfmap.HostOnlyAltName(hostLink.Attrs().Name, ports)
+	have := false
+	for _, name := range hostLink.Attrs().AltNames {
+		if name == want {
+			have = true
+			continue
+		}
+		if _, ours, _ := ifindexvrfmap.ParseHostOnlyAltName(name); !ours {
+			continue
+		}
+		if err := netlink.LinkDelAltName(hostLink, name); err != nil {
+			return fmt.Errorf("remove %q from %s: %w", name, hostLink.Attrs().Name, err)
+		}
+	}
+	if want == "" || have {
+		return nil
+	}
+	if err := netlink.LinkAddAltName(hostLink, want); err != nil {
 		return fmt.Errorf("record host-only ports on %s: %w", hostLink.Attrs().Name, err)
 	}
-	slog.Debug("ADD: host-only ports set", "ifindex", ifindex, "ports", ports)
 	return nil
 }

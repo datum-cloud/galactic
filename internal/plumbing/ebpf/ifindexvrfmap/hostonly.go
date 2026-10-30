@@ -115,14 +115,16 @@ func ValidateHostOnlyPorts(ports []uint16) error {
 	return nil
 }
 
-// hostOnlyAliasPrefix starts the interface alias that records an attachment's
-// host-only ports on its host-side interface.
-const hostOnlyAliasPrefix = "galactic-host-only-tcp="
+// hostOnlyAltNameMarker separates a link's name from the host-only ports in
+// the alternative name that records them on the link. The interface alias is
+// not used: the tap and veth plugins keep the owning container's ID there.
+const hostOnlyAltNameMarker = ".host-only-tcp="
 
-// HostOnlyAlias returns the interface alias recording ports, or "" for none.
-// The alias lives with the link, so it outlasts a recreated
-// host_only_port_table and lets Restore rebuild the table's rows.
-func HostOnlyAlias(ports []uint16) string {
+// HostOnlyAltName returns the alternative name recording ports on the link
+// named linkName, or "" for none. Alternative names are unique per host, so
+// the link's own name leads. The name lives with the link, so it outlasts a
+// recreated host_only_port_table and lets Restore rebuild the table's rows.
+func HostOnlyAltName(linkName string, ports []uint16) string {
 	if len(ports) == 0 {
 		return ""
 	}
@@ -130,13 +132,13 @@ func HostOnlyAlias(ports []uint16) string {
 	for i, p := range ports {
 		parts[i] = strconv.Itoa(int(p))
 	}
-	return hostOnlyAliasPrefix + strings.Join(parts, ",")
+	return linkName + hostOnlyAltNameMarker + strings.Join(parts, ",")
 }
 
-// ParseHostOnlyAlias reads the ports HostOnlyAlias recorded in alias,
-// reporting whether alias is one.
-func ParseHostOnlyAlias(alias string) ([]uint16, bool, error) {
-	list, ok := strings.CutPrefix(alias, hostOnlyAliasPrefix)
+// ParseHostOnlyAltName reads the ports HostOnlyAltName recorded in altName,
+// reporting whether altName is one.
+func ParseHostOnlyAltName(altName string) ([]uint16, bool, error) {
+	_, list, ok := strings.Cut(altName, hostOnlyAltNameMarker)
 	if !ok {
 		return nil, false, nil
 	}
@@ -144,25 +146,25 @@ func ParseHostOnlyAlias(alias string) ([]uint16, bool, error) {
 	for _, field := range strings.Split(list, ",") {
 		p, err := strconv.ParseUint(field, 10, 16)
 		if err != nil {
-			return nil, true, fmt.Errorf("host-only alias %q: %w", alias, err)
+			return nil, true, fmt.Errorf("host-only alternative name %q: %w", altName, err)
 		}
 		ports = append(ports, uint16(p))
 	}
 	if err := ValidateHostOnlyPorts(ports); err != nil {
-		return nil, true, fmt.Errorf("host-only alias %q: %w", alias, err)
+		return nil, true, fmt.Errorf("host-only alternative name %q: %w", altName, err)
 	}
 	return ports, true, nil
 }
 
-// Restore writes the entry for every interface in aliases, keyed by ifindex,
-// whose alias records host-only ports and whose entry is missing, and returns
-// how many it wrote. An entry that exists is left alone. Every interface is
-// attempted; the error joins every failure.
-func (t *HostOnlyPortTable) Restore(aliases map[uint32]string) (int, error) {
+// Restore writes the entry for every interface in altNames, keyed by ifindex,
+// with an alternative name recording host-only ports and a missing entry, and
+// returns how many it wrote. An entry that exists is left alone. Every
+// interface is attempted; the error joins every failure.
+func (t *HostOnlyPortTable) Restore(altNames map[uint32][]string) (int, error) {
 	restored := 0
 	var errs []error
-	for ifindex, alias := range aliases {
-		ports, ok, err := ParseHostOnlyAlias(alias)
+	for ifindex, names := range altNames {
+		ports, ok, err := hostOnlyPortsOf(names)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("ifindex=%d: %w", ifindex, err))
 			continue
@@ -181,4 +183,15 @@ func (t *HostOnlyPortTable) Restore(aliases map[uint32]string) (int, error) {
 		restored++
 	}
 	return restored, errors.Join(errs...)
+}
+
+// hostOnlyPortsOf returns the ports the first host-only alternative name in
+// names records, reporting whether there is one.
+func hostOnlyPortsOf(names []string) ([]uint16, bool, error) {
+	for _, name := range names {
+		if ports, ok, err := ParseHostOnlyAltName(name); ok {
+			return ports, true, err
+		}
+	}
+	return nil, false, nil
 }
