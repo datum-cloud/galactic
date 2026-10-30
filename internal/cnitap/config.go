@@ -6,9 +6,11 @@ package cnitap
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 )
 
 var ConfFile = config.DefaultConfFile
@@ -52,4 +54,21 @@ func danRequested(data []byte) bool {
 		return false
 	}
 	return conf.DAN
+}
+
+// hostOnlyPorts returns the TCP ports this attachment's guest serves only to
+// the node, such as a runtime's in-guest agent. Like dan it follows the
+// workload, so it rides the CNI config. An invalid list fails ADD rather than
+// leaving a port open.
+func hostOnlyPorts(data []byte) ([]uint16, error) {
+	var conf struct {
+		HostOnlyPorts []uint16 `json:"hostOnlyPorts"`
+	}
+	if err := json.Unmarshal(data, &conf); err != nil {
+		return nil, fmt.Errorf("parse hostOnlyPorts: %w", err)
+	}
+	if err := ifindexvrfmap.ValidateHostOnlyPorts(conf.HostOnlyPorts); err != nil {
+		return nil, fmt.Errorf("hostOnlyPorts: %w", err)
+	}
+	return conf.HostOnlyPorts, nil
 }
