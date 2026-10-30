@@ -99,8 +99,9 @@ sequenceDiagram
         GC->>GC: record no BGPVRFInstance this pass
     else known
         GC->>K8s: List BGPVRFInstances in namespace
+        GC->>Kernel: list VRF interfaces and the links enslaved to them
         loop each BGPVRFInstance owned by one of routerNames
-            alt no surviving BGPAdvertisement and no edge attachment for this VPC
+            alt no surviving BGPAdvertisement, no edge attachment and no enslaved link for this VPC
                 GC->>GC: record BGPVRFInstance as orphaned
             end
         end
@@ -110,10 +111,12 @@ sequenceDiagram
         alt BGPAdvertisement
             GC->>K8s: Delete (best-effort — errors logged, sweep continues)
         else BGPVRFInstance whose VRF is gone
-            GC->>K8s: Delete — no edge attachment can use a VPC with no VRF
+            GC->>Kernel: under the VRF lock, look for its VRF again
+            GC->>K8s: Delete, only if its VRF is still absent or holds no link
         else BGPVRFInstance
             GC->>Edge: Reclaim(vpc of its VRF) — under the VPC's fence, check edge use again
-            Edge->>K8s: Delete, only if no edge attachment uses the VPC
+            Edge->>Kernel: under the VRF lock, check the VRF holds no link
+            Edge->>K8s: Delete, only if neither an edge attachment nor a link uses the VPC
         end
     end
 
@@ -127,7 +130,11 @@ sequenceDiagram
         GC->>GC: resolve VPC from interface name<br/>(current "G{vpc}V" shape or legacy "G{vpc}{att}V" shape)
         alt interface name doesn't match either Galactic shape
             GC->>GC: skip, not ours
-        else VPC not in activeVPCs
+        else VPC in activeVPCs
+            GC->>GC: keep
+        else a link is enslaved to the VRF
+            GC->>GC: keep, logged
+        else
             GC->>GC: record VRF as orphaned
         end
     end
@@ -136,10 +143,8 @@ sequenceDiagram
         GC->>Edge: Reclaim(vpc) — under the VPC's fence, check edge use again
         alt an edge attachment uses the VPC
             Edge-->>GC: ErrInUse, VRF kept
-        else current-shape name
-            Edge->>Kernel: vrf.Delete(vpc) — rebuilds and removes the current interface
-        else legacy pre-rename shape
-            Edge->>Kernel: delete the interface actually observed, by name
+        else
+            Edge->>Kernel: vrf.DeleteIfUnused(name) — under the VRF lock, delete the interface observed unless a link is enslaved to it
         end
     end
 
@@ -200,11 +205,19 @@ sequenceDiagram
   template (`G{9-char-vpc}{3-char-att}V`) carried a VPCAttachment segment
   the same way host/guest veth names still do. A node upgraded in place can
   still be running interfaces named the old way, and both resolve to the
-  same VPC for liveness purposes — but only the current-shape name is
-  reconstructible well enough to delete via `vrf.Delete(vpc)`; a legacy name
-  is deleted by the exact interface observed instead, since rebuilding the
-  *current* name from its VPC and deleting that would silently no-op against
-  the legacy interface.
+  same VPC for liveness purposes. Either is deleted by the exact interface
+  name observed, since rebuilding the *current* name from a legacy
+  interface's VPC would silently no-op against it.
+- **The kernel overrides the objects for a VRF that holds a link.** A VPC's
+  first ADD creates the VRF and enslaves its host link before `galactic-bgp`
+  writes the `BGPVRFInstance` and `BGPAdvertisement`, and the informer cache
+  can lag behind both. GC therefore keeps the VRF, and the `BGPVRFInstance`
+  with its SID Argument, of any VPC whose VRF still has a link enslaved to
+  it. The CNI creates or reuses the VRF and enslaves the host link under the
+  node's VRF lock (`vrf.EnsureAndEnslave`), and GC re-checks for enslaved
+  links under that same lock before deleting either, so no GC pass can find
+  the VRF between its creation and its first link. A leaked host link keeps
+  its VRF alive; that is the fail-safe direction, and GC logs it.
 - **This sweep never matches a per-attachment host veth/tap interface, by
   design.** Both the current and legacy name shapes above end in the VRF
   suffix (`V`); the host interface's own suffix (`H`) never matches either

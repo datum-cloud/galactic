@@ -123,11 +123,9 @@ func TestParseVRFName(t *testing.T) {
 			wantOk:  true,
 		},
 		{
-			// parseVRFName must keep rejecting the legacy shape: it feeds
-			// vrf.Delete, which rebuilds the current name from the VPC and
-			// would no-op against a legacy interface. RemoveOrphanedVRFs
-			// relies on this to route legacy names into its by-name fallback.
-			name:    "legacy VRF name is not resolvable to a deletable VPC",
+			// parseVRFName matches the current shape only; vpcFromVRFName
+			// is what also resolves a legacy name.
+			name:    "legacy VRF name does not match the current shape",
 			vrfName: testVRFNameLegacy,
 			wantOk:  false,
 		},

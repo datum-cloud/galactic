@@ -68,11 +68,10 @@ sequenceDiagram
     Note over Master: master is first in the chain — prevResult must be nil.<br/>A non-nil, structurally invalid prevResult here means<br/>a misconfigured conflist, and ADD fails
     Master->>Master: resourceTracker{vpc, attachment}
 
-    Master->>VRF: vrf.Add(vpc)
+    Master->>VRF: vrf.EnsureAndEnslave(vpc, host link step)
     activate VRF
+    Note over VRF,Iface: the node's VRF lock is held until the host link is enslaved,<br/>so GC never finds this VRF empty in between
     VRF->>VRF: create/reuse VRF interface, assign table ID
-    VRF-->>Master: ok
-    deactivate VRF
 
     alt galactic-veth
         Master->>Iface: veth.Add(vpc, attachment, mtu)
@@ -89,6 +88,8 @@ sequenceDiagram
         Iface-->>Master: ok
         deactivate Iface
     end
+    VRF-->>Master: ok, lock released
+    deactivate VRF
 
     Master->>Master: netlink.LinkByName(host) -> hostMac, hostMTU
 
