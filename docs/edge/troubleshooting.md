@@ -152,8 +152,10 @@ An attachment joins its gVPC's canonical host VRF on its node, which only a
 workload of the gVPC running there creates. Without one, the attachment
 reports `Programmed` False, reason `HostVRFMissing`, with a message naming the
 VRF and the VPC, and gets no host link. Run the provider on a node where the
-gVPC has a workload, or run one there; the agent programs the attachment on
-its next pass. The [provider contract](provider-contract.md#provider-interface)
+gVPC has a workload, or run one there. Nothing wakes the agent when the
+workload arrives, so it programs the attachment on its next resync, within a
+minute. Until then a provider that refuses on this reason, such as MASQUE,
+keeps refusing. The [provider contract](provider-contract.md#provider-interface)
 explains why.
 
 An agent that exits at startup with `invalid argument "$(GALACTIC_EDGE_MTU)"
