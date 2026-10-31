@@ -50,7 +50,7 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticNatDispatchLeaseFailing           | more than two lease renewal errors in every 5-minute window                 | 5m    | warning    |
 | GalacticNatDispatchLeaseExpiring          | no successful lease renewal in 2 minutes                                    | 0     | critical   |
 | GalacticNatMetricsDown                    | `galactic-nat` scrape down                                                  | 5m    | warning    |
-| GalacticEgressPoolEmpty                   | no active shard for a class while routes on the node name it                | 2m    | critical   |
+| GalacticEgressPoolEmpty                   | no active shard for a class while routes on the node name it                | 2m    | warning    |
 | GalacticEgressPoolBelowMinimum            | fewer active shards than `galactic_cni_egress_pool_min_active`              | 10m   | warning    |
 | GalacticEgressClassUnserved               | every shard ineligible for a class                                          | 15m   | warning    |
 | GalacticEgressShardGroupDropping          | `group_empty`, `shard_dead` or `parse_failed` in every 5m window            | 10m   | warning    |
