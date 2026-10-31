@@ -531,6 +531,18 @@ func TestAdmitServesProgrammedAttachment(t *testing.T) {
 	}
 }
 
+// notProgrammed admits an attachment and has galactic-edge report it not
+// programmed for reason.
+func notProgrammed(reason string) func(*galacticv1alpha1.EdgeAttachment) {
+	return func(att *galacticv1alpha1.EdgeAttachment) {
+		meta.SetStatusCondition(&att.Status.Conditions, metav1.Condition{
+			Type: galacticv1alpha1.EdgeAttachmentAdmitted, Status: metav1.ConditionTrue, Reason: "Admitted"})
+		meta.SetStatusCondition(&att.Status.Conditions, metav1.Condition{
+			Type: galacticv1alpha1.EdgeAttachmentProgrammed, Status: metav1.ConditionFalse, Reason: reason,
+			Message: "refused by galactic-edge"})
+	}
+}
+
 func TestAdmitFailsClosed(t *testing.T) {
 	refuse := func(reason string) func(*galacticv1alpha1.EdgeAttachment) {
 		return func(att *galacticv1alpha1.EdgeAttachment) {
@@ -601,6 +613,16 @@ func TestAdmitFailsClosed(t *testing.T) {
 					meta.SetStatusCondition(&att.Status.Conditions, metav1.Condition{
 						Type: galacticv1alpha1.EdgeAttachmentAdmitted, Status: metav1.ConditionTrue, Reason: "Admitted"})
 				}
+			}},
+		{name: "host VRF missing", credential: credA1, want: ErrUnavailable,
+			wantText: galacticv1alpha1.EdgeAttachmentReasonHostVRFMissing,
+			program: func(*harness) func(*galacticv1alpha1.EdgeAttachment) {
+				return notProgrammed(galacticv1alpha1.EdgeAttachmentReasonHostVRFMissing)
+			}},
+		{name: "MTU exceeds underlay", credential: credA1, want: ErrUnavailable,
+			wantText: galacticv1alpha1.EdgeAttachmentReasonMTUExceedsUnderlay,
+			program: func(*harness) func(*galacticv1alpha1.EdgeAttachment) {
+				return notProgrammed(galacticv1alpha1.EdgeAttachmentReasonMTUExceedsUnderlay)
 			}},
 		{name: "no lease", credential: credA1, noLease: true, want: ErrUnavailable, wantText: "no lease"},
 	} {

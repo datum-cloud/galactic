@@ -148,6 +148,14 @@ The agent's `--mtu` must be no larger than the fabric uplink MTU less the
 values. The [provider contract](provider-contract.md#attachment) gives the
 bounds.
 
+An attachment joins its gVPC's canonical host VRF on its node, which only a
+workload of the gVPC running there creates. Without one, the attachment
+reports `Programmed` False, reason `HostVRFMissing`, with a message naming the
+VRF and the VPC, and gets no host link. Run the provider on a node where the
+gVPC has a workload, or run one there; the agent programs the attachment on
+its next pass. The [provider contract](provider-contract.md#provider-interface)
+explains why.
+
 An agent that exits at startup with `invalid argument "$(GALACTIC_EDGE_MTU)"
 for "--mtu" flag` runs from an overlay that does not set the
 `GALACTIC_EDGE_MTU` environment variable on the `galactic-edge` container.

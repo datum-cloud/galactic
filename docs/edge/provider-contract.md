@@ -81,7 +81,7 @@ A field not listed is read-only to everyone but the control plane that owns the 
 A provider integrates in five steps, all through its own ServiceAccount. Its cell must also give it two things outside these resources:
 
 - **The packet device.** Kubernetes gives no unprivileged pod `/dev/net/tun`, and a provider has no hostPath or capability to reach it, so a cell that offers `PacketAccess` runs a device plugin that hands the device out as a resource, and a packet-access provider pod requests it. `config/galactic-edge/tun-device-plugin` serves it as `devic.es/tun` on the nodes galactic-edge runs on.
-- **The host VRF.** An attachment joins its gVPC's canonical host VRF on its node, which only CNI ADD creates, so a workload of the gVPC must run on the provider's node.
+- **The host VRF.** An attachment joins its gVPC's canonical host VRF on its node, which only CNI ADD creates, so a workload of the gVPC must run on the provider's node. Without one, the node reports the attachment `Programmed` False with reason `HostVRFMissing` and creates no link. The reason holds until a workload of the gVPC arrives, so a provider can refuse a request at once rather than wait for it. A `BGPVRFInstance` for the gVPC on the node does not show that the host VRF exists: the ingress sidecar publishes one for VRFs inside Envoy's network namespace.
 
 [examples/edge-provider](../../examples/edge-provider) is a provider built only on this contract, with the deployment it needs.
 

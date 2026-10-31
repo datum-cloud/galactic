@@ -159,7 +159,15 @@ func (a *Adapter) prepareOnce(ctx context.Context, e *attachment, g *Grant) (str
 	if meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentDraining) {
 		return "", fmt.Errorf("attachment %s is draining", att.Name)
 	}
-	if !meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentProgrammed) {
+	if c := meta.FindStatusCondition(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentProgrammed); c == nil ||
+		c.Status != metav1.ConditionTrue {
+		// These hold until the node changes, so waiting out the preparation
+		// would only end the request later. The agent keeps retrying, and a
+		// later request finds the attachment programmed.
+		if c != nil && (c.Reason == galacticv1alpha1.EdgeAttachmentReasonHostVRFMissing ||
+			c.Reason == galacticv1alpha1.EdgeAttachmentReasonMTUExceedsUnderlay) {
+			return "", fmt.Errorf("galactic-edge cannot program attachment %s: %s: %s", att.Name, c.Reason, c.Message)
+		}
 		return "waiting for galactic-edge to program attachment " + att.Name, nil
 	}
 	switch {
