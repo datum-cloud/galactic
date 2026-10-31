@@ -121,6 +121,22 @@ const (
 	EdgeAttachmentPublished  = "Published"
 )
 
+// Reasons the node agent gives for Programmed False that hold until the node
+// changes, so a provider can refuse a request at once instead of waiting.
+// The agent keeps retrying, and the attachment becomes Programmed once the
+// cause is gone.
+const (
+	// EdgeAttachmentReasonHostVRFMissing: the attachment's gVPC has no
+	// canonical host VRF on the node, or the node's uSID datapath has no
+	// entry for it. Only a workload of the gVPC running on the node creates
+	// both.
+	EdgeAttachmentReasonHostVRFMissing = "HostVRFMissing"
+	// EdgeAttachmentReasonMTUExceedsUnderlay: the node's attachment MTU
+	// exceeds the largest packet the fabric underlay carries once
+	// encapsulated.
+	EdgeAttachmentReasonMTUExceedsUnderlay = "MTUExceedsUnderlay"
+)
+
 // EdgeAttachmentFinalizer holds an attachment until its node confirms its
 // host state is released.
 const EdgeAttachmentFinalizer = "galactic.datumapis.com/edge-attachment"
