@@ -48,6 +48,7 @@ import (
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/timing"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
@@ -61,7 +62,8 @@ const (
 	ReasonReadbackFailed       = "ReadbackFailed"
 	ReasonDatapathFailed       = "DatapathFailed"
 	ReasonOwnershipUnavailable = "OwnershipUnavailable"
-	ReasonMTUExceedsUnderlay   = "MTUExceedsUnderlay"
+	ReasonMTUExceedsUnderlay   = galacticv1alpha1.EdgeAttachmentReasonMTUExceedsUnderlay
+	ReasonHostVRFMissing       = galacticv1alpha1.EdgeAttachmentReasonHostVRFMissing
 )
 
 // ownerPrefix starts every owner ID galactic-edge uses for a scope, so a new
@@ -630,6 +632,9 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 		return fail(ReasonNamespaceUnavailable, err)
 	}
 	defer func() { _ = pod.Close() }()
+	if reason, err := a.checkHostVRF(att.Status.VPC, spec.HostVRF); err != nil {
+		return fail(reason, err)
+	}
 	fresh := link.ID != spec.ID
 	var datapathErr error
 	register := func(res hostattach.Result) error {
@@ -657,6 +662,8 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 		}
 	}
 	switch {
+	case errors.Is(datapathErr, attachreg.ErrVRFNotRegistered):
+		return fail(ReasonHostVRFMissing, fmt.Errorf("%w: %s", err, noWorkload(att.Status.VPC)))
 	case datapathErr != nil:
 		return fail(ReasonDatapathFailed, err)
 	case errors.Is(err, hostattach.ErrNamespaceReplaced):
@@ -693,6 +700,25 @@ func (a *Agent) checkUnderlay() (string, error) {
 			a.MTU, limit)
 	}
 	return "", nil
+}
+
+// checkHostVRF refuses an attachment whose gVPC has no canonical host VRF on
+// the node. Only CNI ADD of a workload of the gVPC creates it, so the agent
+// cannot provision until one runs here, and keeps retrying until then.
+func (a *Agent) checkHostVRF(vpc, name string) (string, error) {
+	_, ok, err := hostattach.VRFTable(a.Host, name)
+	switch {
+	case err != nil:
+		return ReasonProvisionFailed, fmt.Errorf("look up canonical host VRF %s: %w", name, err)
+	case !ok:
+		return ReasonHostVRFMissing, fmt.Errorf("canonical host VRF %s is not on this node: %s", name, noWorkload(vpc))
+	}
+	return "", nil
+}
+
+// noWorkload says why a gVPC's host VRF or its uSID entry is missing.
+func noWorkload(vpc string) string {
+	return fmt.Sprintf("a workload of the VPC %s must run on the node", vpc)
 }
 
 // report writes one outcome, with the attachment's resourceVersion as
