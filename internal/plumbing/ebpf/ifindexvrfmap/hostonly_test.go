@@ -63,27 +63,30 @@ func TestHostOnlyPortTable_UnregisterIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestHostOnlyAlias_RoundTrips(t *testing.T) {
-	alias := HostOnlyAlias([]uint16{20000, 20001})
-	ports, ok, err := ParseHostOnlyAlias(alias)
+func TestHostOnlyAltName_RoundTrips(t *testing.T) {
+	name := HostOnlyAltName("Gtap0", []uint16{20000, 20001})
+	if name != "Gtap0.host-only-tcp=20000,20001" {
+		t.Errorf("HostOnlyAltName = %q, want the link name first", name)
+	}
+	ports, ok, err := ParseHostOnlyAltName(name)
 	if err != nil || !ok || !slices.Equal(ports, []uint16{20000, 20001}) {
-		t.Errorf("ParseHostOnlyAlias(%q) = %v, %v, %v; want [20000 20001]", alias, ports, ok, err)
+		t.Errorf("ParseHostOnlyAltName(%q) = %v, %v, %v; want [20000 20001]", name, ports, ok, err)
 	}
-	if HostOnlyAlias(nil) != "" {
-		t.Error("an attachment with no host-only ports has an alias")
+	if HostOnlyAltName("Gtap0", nil) != "" {
+		t.Error("an attachment with no host-only ports has an alternative name")
 	}
-	if _, ok, err := ParseHostOnlyAlias("someone-else"); ok || err != nil {
-		t.Errorf("an unrelated alias parsed as host-only ports: ok %v, err %v", ok, err)
+	if _, ok, err := ParseHostOnlyAltName("someone-else"); ok || err != nil {
+		t.Errorf("an unrelated alternative name parsed as host-only ports: ok %v, err %v", ok, err)
 	}
-	for _, bad := range []string{"galactic-host-only-tcp=", "galactic-host-only-tcp=0", "galactic-host-only-tcp=70000"} {
-		if _, _, err := ParseHostOnlyAlias(bad); err == nil {
-			t.Errorf("ParseHostOnlyAlias(%q) = nil error, want one", bad)
+	for _, bad := range []string{"Gtap0.host-only-tcp=", "Gtap0.host-only-tcp=0", "Gtap0.host-only-tcp=70000"} {
+		if _, _, err := ParseHostOnlyAltName(bad); err == nil {
+			t.Errorf("ParseHostOnlyAltName(%q) = nil error, want one", bad)
 		}
 	}
 }
 
-// A recreated table loses every entry; the aliases the links keep put the
-// missing ones back without touching an entry that survived.
+// A recreated table loses every entry; the alternative names the links keep
+// put the missing ones back without touching an entry that survived.
 func TestHostOnlyPortTable_Restore(t *testing.T) {
 	const survivor, other = vethIfindex + 1, vethIfindex + 2
 	table := NewHostOnlyPortTable(newFakeTable())
@@ -91,10 +94,10 @@ func TestHostOnlyPortTable_Restore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restored, err := table.Restore(map[uint32]string{
-		vethIfindex: HostOnlyAlias([]uint16{20000}),
-		survivor:    HostOnlyAlias([]uint16{20000}),
-		other:       "someone-else",
+	restored, err := table.Restore(map[uint32][]string{
+		vethIfindex: {"unrelated", HostOnlyAltName("Gtap0", []uint16{20000})},
+		survivor:    {HostOnlyAltName("Gtap1", []uint16{20000})},
+		other:       {"someone-else"},
 	})
 	if err != nil || restored != 1 {
 		t.Fatalf("Restore = %d, %v; want 1, nil", restored, err)
@@ -106,6 +109,6 @@ func TestHostOnlyPortTable_Restore(t *testing.T) {
 		t.Errorf("surviving entry = %v, want it left at [7000]", ports)
 	}
 	if _, ok, _ := table.Get(other); ok {
-		t.Error("an interface without a host-only alias got an entry")
+		t.Error("an interface without a host-only alternative name got an entry")
 	}
 }

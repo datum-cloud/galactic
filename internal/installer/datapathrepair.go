@@ -96,10 +96,10 @@ func runDatapathRepair(ctx context.Context, st ebpfDatapathState) (gc.DatapathRe
 }
 
 // restoreHostOnlyPorts writes back every host_only_port_table entry missing
-// for a link whose alias records host-only ports, and returns how many it
-// wrote. galactic-tap records the list in the alias at ADD, so it survives a
-// recreated table that CNI ADD alone would only refill attachment by
-// attachment. A datapath without the table has nothing to restore.
+// for a link whose alternative name records host-only ports, and returns how
+// many it wrote. galactic-tap records the list in that name at ADD, so it
+// survives a recreated table that CNI ADD alone would only refill attachment
+// by attachment. A datapath without the table has nothing to restore.
 func restoreHostOnlyPorts(pinDir string) (int, error) {
 	table, closer, err := ifindexvrfmap.OpenPinnedHostOnlyPorts(pinDir)
 	if err != nil {
@@ -114,13 +114,13 @@ func restoreHostOnlyPorts(pinDir string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("list links: %w", err)
 	}
-	aliases := map[uint32]string{}
+	altNames := map[uint32][]string{}
 	for _, l := range links {
-		if a := l.Attrs(); a.Alias != "" {
-			aliases[uint32(a.Index)] = a.Alias //nolint:gosec // a kernel ifindex
+		if a := l.Attrs(); len(a.AltNames) > 0 {
+			altNames[uint32(a.Index)] = a.AltNames //nolint:gosec // a kernel ifindex
 		}
 	}
-	return table.Restore(aliases)
+	return table.Restore(altNames)
 }
 
 // startDatapathRepair runs datapath repair passes off Run's goroutine,
