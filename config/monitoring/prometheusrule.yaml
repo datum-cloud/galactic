@@ -862,7 +862,7 @@ spec:
             sum by (node, class) (galactic_cni_egress_group_routes{job="galactic-cni"}) > 0
           for: 2m
           labels:
-            severity: critical
+            severity: warning
             service: galactic
             team: connect
           annotations:

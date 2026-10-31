@@ -1621,7 +1621,7 @@ tests:
         alertname: GalacticEgressPoolEmpty
         exp_alerts:
           - exp_labels:
-              severity: critical
+              severity: warning
               service: galactic
               team: connect
               node: dfw-worker
@@ -1671,7 +1671,7 @@ tests:
         alertname: GalacticEgressPoolEmpty
         exp_alerts:
           - exp_labels:
-              severity: critical
+              severity: warning
               service: galactic
               team: connect
               node: sjc-worker
