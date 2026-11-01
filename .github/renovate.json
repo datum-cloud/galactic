@@ -1,10 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
+    "local>datum-cloud/.github:renovate-config",
     "config:recommended",
     ":disableDependencyDashboard",
     ":semanticCommits"
   ],
+  "dependencyDashboardApproval": false,
   "schedule": ["before 6am on Monday"],
   "timezone": "America/New_York",
   "labels": ["dependencies"],
