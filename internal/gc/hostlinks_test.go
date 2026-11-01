@@ -19,6 +19,7 @@ import (
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
@@ -250,23 +251,33 @@ func TestHostLinkAlreadyGone(t *testing.T) {
 	}
 }
 
-func TestParseHostLinkName(t *testing.T) {
-	tests := []struct {
-		name, vpc, att string
-		ok             bool
+// TestHostOnlyTapReclaimed covers a VM tap with host-only ports, whose alias
+// records the ports as well as its owner. The dead owner's tap is reclaimed
+// through that alias, while a live owner's host-only tap on the same VPC is
+// kept. A host-only alias from a build before it kept the owner records none,
+// so that tap is reclaimed only by its exact name.
+func TestHostOnlyTapReclaimed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		alias string
 	}{
-		{intf.GenerateInterfaceNameHost("jU", "a1"), "jU", "a1", true},
-		{intf.GenerateInterfaceNameHost("123456789", "xyz"), "123456789", "xyz", true},
-		{intf.GenerateInterfaceNameHost("jU", "0"), "jU", "0", true},
-		{intf.GenerateInterfaceNameGuest("jU", "a1"), "", "", false},
-		{intf.GenerateInterfaceNameVRF("jU"), "", "", false},
-		{"eth0", "", "", false},
-	}
-	for _, tt := range tests {
-		vpc, att, ok := parseHostLinkName(tt.name)
-		if vpc != tt.vpc || att != tt.att || ok != tt.ok {
-			t.Errorf("parseHostLinkName(%q) = %q, %q, %v; want %q, %q, %v",
-				tt.name, vpc, att, ok, tt.vpc, tt.att, tt.ok)
-		}
+		{"owner recorded with the ports", ifindexvrfmap.HostOnlyAlias([]uint16{20000}, deadSandbox)},
+		{"ports alias without an owner", ifindexvrfmap.HostOnlyAlias([]uint16{20000}, "")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k8s := deadAttachmentClient(t)
+			advs := collectAdvertisements(t, k8s)
+			k := newFakeKernel(t,
+				hostTap(reclaimVPC, deadAttachment, tc.alias, 10),
+				hostTap(reclaimVPC, "b2", ifindexvrfmap.HostOnlyAlias([]uint16{20000}, liveSandbox), 11),
+			)
+
+			res := RemoveOrphanedCRDs(context.Background(), k8s, advs, using())
+
+			want := []string{intf.GenerateInterfaceNameHost(reclaimVPC, deadAttachment)}
+			if res.Errors != 0 || res.HostLinksRemoved != 1 || !slices.Equal(k.deleted, want) {
+				t.Fatalf("remove = %+v, deleted %v, want only %v", res, k.deleted, want)
+			}
+		})
 	}
 }

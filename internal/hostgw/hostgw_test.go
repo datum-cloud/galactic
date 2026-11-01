@@ -86,8 +86,8 @@ func TestDescribeRouteLink(t *testing.T) {
 		index int
 		want  string
 	}{
-		{10, ` (on tuntap "G0000000jU0a1H", owner c1)`},
-		{11, ` (on veth "G0000000jU0b2H", owner none)`},
+		{10, ` (on tuntap "G0000000jU0a1H", alias "c1")`},
+		{11, ` (on veth "G0000000jU0b2H", alias "")`},
 		{12, ""},
 		{0, ""},
 	}

@@ -8,18 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
-
-// hostLinkNameRegex matches the host-side link name a master plugin creates
-// for an attachment, intf.GenerateInterfaceNameHost's "G%09s%03sH": the
-// zero-padded base62 VPC, then the zero-padded base62 attachment.
-var hostLinkNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})([A-Za-z0-9]{3})H$`)
 
 // linkByNameFn and linkDelFn are the kernel lookups the host-link reclaim
 // makes under the VRF lock; variables so unprivileged tests can substitute
@@ -33,26 +29,6 @@ var (
 // fail the reclaim RemoveOrphanedCRDs runs before deleting an advertisement.
 var reclaimHostLinksFn = reclaimHostLinks
 
-// parseHostLinkName returns the base62 VPC and attachment a host link name
-// carries, with the template's zero padding removed, reporting whether name is
-// a host link name at all.
-func parseHostLinkName(name string) (vpc, attachment string, ok bool) {
-	m := hostLinkNameRegex.FindStringSubmatch(name)
-	if m == nil {
-		return "", "", false
-	}
-	return unpad(m[1]), unpad(m[2]), true
-}
-
-// unpad reverses the template's zero padding. Base62 has no leading zeros
-// except in the value zero itself, which padding would otherwise erase.
-func unpad(s string) string {
-	if t := strings.TrimLeft(s, "0"); t != "" {
-		return t
-	}
-	return "0"
-}
-
 // containerKey returns the form a container ID takes in a BGPAdvertisement's
 // netns annotation key, the key collectNetNSPaths reads back.
 func containerKey(containerID string) string {
@@ -64,25 +40,26 @@ func containerKey(containerID string) string {
 // o recorded, every one of which GC has found gone.
 //
 // A link the master plugin stamped belongs to o when it is on o's VPC and its
-// owner is among o's dead containers. A container ID names one sandbox, whose
+// owner, read through any host-only ports its alias also records
+// (ifindexvrfmap.AliasOwner), is among o's dead containers. A container ID names one sandbox, whose
 // netns every one of its attachments shares, so an owner o recorded as dead is
 // dead on every attachment. A link carrying no owner, which builds before the
 // stamp left, belongs to o only when its name maps to o's name exactly. A link
 // owned by any other container is never o's to reclaim: it may be a live pod
 // that has since taken the attachment over.
 func hostLinkBelongsTo(link netlink.Link, o OrphanedCRD) bool {
-	vpc, attachment, ok := parseHostLinkName(link.Attrs().Name)
+	vpc, attachment, ok := intf.ParseInterfaceNameHost(link.Attrs().Name)
 	if !ok {
 		return false
 	}
 	if !vpcInSet(map[string]struct{}{vpcFromName(o.Name): {}}, vpc) {
 		return false
 	}
-	alias := link.Attrs().Alias
-	if alias == "" {
+	owner := ifindexvrfmap.AliasOwner(link.Attrs().Alias)
+	if owner == "" {
 		return o.Node != "" && crdnames.BGPAdvertisementName(vpc, attachment, o.Node) == o.Name
 	}
-	_, dead := o.DeadContainers[containerKey(alias)]
+	_, dead := o.DeadContainers[containerKey(owner)]
 	return dead
 }
 

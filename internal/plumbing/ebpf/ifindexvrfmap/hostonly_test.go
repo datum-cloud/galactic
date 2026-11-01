@@ -63,14 +63,25 @@ func TestHostOnlyPortTable_UnregisterIsIdempotent(t *testing.T) {
 	}
 }
 
+// testAliasOwner is the container ID host-only aliases record in these tests.
+const testAliasOwner = "c0ffee"
+
 func TestHostOnlyAlias_RoundTrips(t *testing.T) {
-	alias := HostOnlyAlias([]uint16{20000, 20001})
-	ports, ok, err := ParseHostOnlyAlias(alias)
-	if err != nil || !ok || !slices.Equal(ports, []uint16{20000, 20001}) {
-		t.Errorf("ParseHostOnlyAlias(%q) = %v, %v, %v; want [20000 20001]", alias, ports, ok, err)
+	const owner = testAliasOwner
+	for _, alias := range []string{
+		HostOnlyAlias([]uint16{20000, 20001}, owner),
+		HostOnlyAlias([]uint16{20000, 20001}, ""),
+	} {
+		ports, ok, err := ParseHostOnlyAlias(alias)
+		if err != nil || !ok || !slices.Equal(ports, []uint16{20000, 20001}) {
+			t.Errorf("ParseHostOnlyAlias(%q) = %v, %v, %v; want [20000 20001]", alias, ports, ok, err)
+		}
 	}
-	if HostOnlyAlias(nil) != "" {
-		t.Error("an attachment with no host-only ports has an alias")
+	if got := HostOnlyAlias(nil, owner); got != owner {
+		t.Errorf("HostOnlyAlias(nil, %q) = %q, want the owner alone", owner, got)
+	}
+	if HostOnlyAlias(nil, "") != "" {
+		t.Error("an unowned attachment with no host-only ports has an alias")
 	}
 	if _, ok, err := ParseHostOnlyAlias("someone-else"); ok || err != nil {
 		t.Errorf("an unrelated alias parsed as host-only ports: ok %v, err %v", ok, err)
@@ -78,6 +89,21 @@ func TestHostOnlyAlias_RoundTrips(t *testing.T) {
 	for _, bad := range []string{"galactic-host-only-tcp=", "galactic-host-only-tcp=0", "galactic-host-only-tcp=70000"} {
 		if _, _, err := ParseHostOnlyAlias(bad); err == nil {
 			t.Errorf("ParseHostOnlyAlias(%q) = nil error, want one", bad)
+		}
+	}
+}
+
+// AliasOwner reads the owner back from every alias a host link carries.
+func TestAliasOwner(t *testing.T) {
+	for _, tt := range []struct{ alias, want string }{
+		{HostOnlyAlias([]uint16{22, 20000}, testAliasOwner), testAliasOwner},
+		{HostOnlyAlias([]uint16{22}, ""), ""},
+		{HostOnlyAlias(nil, testAliasOwner), testAliasOwner},
+		{testAliasOwner, testAliasOwner},
+		{"", ""},
+	} {
+		if got := AliasOwner(tt.alias); got != tt.want {
+			t.Errorf("AliasOwner(%q) = %q, want %q", tt.alias, got, tt.want)
 		}
 	}
 }
@@ -92,8 +118,8 @@ func TestHostOnlyPortTable_Restore(t *testing.T) {
 	}
 
 	restored, err := table.Restore(map[uint32]string{
-		vethIfindex: HostOnlyAlias([]uint16{20000}),
-		survivor:    HostOnlyAlias([]uint16{20000}),
+		vethIfindex: HostOnlyAlias([]uint16{20000}, testAliasOwner),
+		survivor:    HostOnlyAlias([]uint16{20000}, ""),
 		other:       "someone-else",
 	})
 	if err != nil || restored != 1 {

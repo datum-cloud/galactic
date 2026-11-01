@@ -119,18 +119,46 @@ func ValidateHostOnlyPorts(ports []uint16) error {
 // host-only ports on its host-side interface.
 const hostOnlyAliasPrefix = "galactic-host-only-tcp="
 
-// HostOnlyAlias returns the interface alias recording ports, or "" for none.
-// The alias lives with the link, so it outlasts a recreated
-// host_only_port_table and lets Restore rebuild the table's rows.
-func HostOnlyAlias(ports []uint16) string {
+// hostOnlyOwnerSep separates a host-only alias's port list from the owner it
+// carries.
+const hostOnlyOwnerSep = ";owner="
+
+// HostOnlyAlias returns the interface alias recording ports and owner, the
+// CNI container ID the link belongs to, or owner alone for no ports. The alias
+// lives with the link, so it outlasts a recreated host_only_port_table and
+// lets Restore rebuild the table's rows.
+//
+// The owner stays in the alias because the alias is also the link's ownership
+// stamp: a DEL removes a host link only while its owner is the DEL's own
+// container, and GC reclaims a dead attachment's link only while one of its
+// dead containers owns it. An alias holding only ports would leave a
+// host-only tap owned by no one, kept by its own DEL and left behind with its
+// pod-subnet route.
+func HostOnlyAlias(ports []uint16, owner string) string {
 	if len(ports) == 0 {
-		return ""
+		return owner
 	}
 	parts := make([]string, len(ports))
 	for i, p := range ports {
 		parts[i] = strconv.Itoa(int(p))
 	}
-	return hostOnlyAliasPrefix + strings.Join(parts, ",")
+	alias := hostOnlyAliasPrefix + strings.Join(parts, ",")
+	if owner != "" {
+		alias += hostOnlyOwnerSep + owner
+	}
+	return alias
+}
+
+// AliasOwner returns the owner a host link's alias records: the owner part of
+// a host-only alias, or the whole alias otherwise. A host-only alias written
+// before it carried an owner records none, and returns "".
+func AliasOwner(alias string) string {
+	rest, ok := strings.CutPrefix(alias, hostOnlyAliasPrefix)
+	if !ok {
+		return alias
+	}
+	_, owner, _ := strings.Cut(rest, hostOnlyOwnerSep)
+	return owner
 }
 
 // ParseHostOnlyAlias reads the ports HostOnlyAlias recorded in alias,
@@ -140,6 +168,7 @@ func ParseHostOnlyAlias(alias string) ([]uint16, bool, error) {
 	if !ok {
 		return nil, false, nil
 	}
+	list, _, _ = strings.Cut(list, hostOnlyOwnerSep)
 	var ports []uint16
 	for _, field := range strings.Split(list, ",") {
 		p, err := strconv.ParseUint(field, 10, 16)
