@@ -670,7 +670,11 @@ type radvTestEnv struct {
 	now   time.Time
 }
 
-type radvTestLink struct{ carrier bool }
+// radvTestLink is a fake interface. A zero index stands for index 1.
+type radvTestLink struct {
+	carrier bool
+	index   int
+}
 
 func newRadvTestEnv(t *testing.T) *radvTestEnv {
 	t.Helper()
@@ -681,9 +685,12 @@ func newRadvTestEnv(t *testing.T) *radvTestEnv {
 		radv.DefaultStateDir, radvLinkState, radvNow = origStateDir, origLinkState, origNow
 	})
 	radv.DefaultStateDir = t.TempDir()
-	radvLinkState = func(iface string) (bool, bool, error) {
+	radvLinkState = func(iface string) (bool, bool, int, error) {
 		link, ok := env.links[iface]
-		return ok, link.carrier, nil
+		if !ok {
+			return false, false, 0, nil
+		}
+		return true, link.carrier, max(link.index, 1), nil
 	}
 	radvNow = func() time.Time { return env.now }
 	return env
@@ -728,6 +735,13 @@ func awaitRadvFailure(t *testing.T, actors *radvActorSet) radvActorFailure {
 		t.Fatalf("actors.failed never received a report for %q", radvTestIface)
 	}
 	return radvActorFailure{}
+}
+
+// currentRadvFailure returns f as reported by the actor currently started on
+// its interface, as a test faking a failure report needs it to be.
+func currentRadvFailure(actors *radvActorSet, f radvActorFailure) radvActorFailure {
+	f.gen = actors.pending[f.iface].actorGen
+	return f
 }
 
 // testRadvCarrierLossCancelsRunningActor covers a guest that restarts: it loses
@@ -788,6 +802,100 @@ func testRadvCarrierLossCancelsRunningActor(t *testing.T, env *radvTestEnv, ctx 
 	awaitStarted(2)
 }
 
+// testRadvRecreatedInterfaceRestartsActor covers a tap deleted and recreated
+// under the same name between two reconciles, the new one already with
+// carrier: the running actor is bound to the deleted interface, so it is
+// replaced by one on the new tap at once (#1293).
+func testRadvRecreatedInterfaceRestartsActor(
+	t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet,
+) {
+	const iface = radvTestIface
+	started := make(chan struct{}, 4)
+	stopped := make(chan struct{}, 4)
+	orig := radvRunActor
+	t.Cleanup(func() { radvRunActor = orig })
+	radvRunActor = func(ctx context.Context, _ string, _ int) error {
+		started <- struct{}{}
+		<-ctx.Done()
+		stopped <- struct{}{}
+		return nil
+	}
+	await := func(ch <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("actor on %q not %s", iface, what)
+		}
+	}
+
+	env.links[iface] = radvTestLink{carrier: true, index: 7}
+	reconcileRadvActors(ctx, actors)
+	await(started, "started")
+
+	// Same interface on the next tick: left running.
+	reconcileRadvActors(ctx, actors)
+	select {
+	case <-stopped:
+		t.Fatalf("actor on unchanged %q stopped", iface)
+	default:
+	}
+
+	oldGen := actors.pending[iface].actorGen
+	env.links[iface] = radvTestLink{carrier: true, index: 8}
+	reconcileRadvActors(ctx, actors)
+	await(stopped, "stopped after its interface was recreated")
+	await(started, "restarted on the recreated interface")
+	if _, running := actors.cancel[iface]; !running {
+		t.Fatalf("no actor tracked on recreated %q", iface)
+	}
+
+	// A failure the replaced actor reports late must leave its successor,
+	// serving the new tap, running and its backoff untouched.
+	radvActorFailed(actors, radvActorFailure{iface: iface, gen: oldGen, err: errors.New("no such device")})
+	if _, running := actors.cancel[iface]; !running {
+		t.Fatalf("stale failure from the replaced actor cancelled the actor on recreated %q", iface)
+	}
+	if p := actors.pending[iface]; p.failures != 0 || p.notReady != 0 {
+		t.Errorf("failures = %d, notReady = %d after a stale report, want both 0", p.failures, p.notReady)
+	}
+	select {
+	case <-stopped:
+		t.Fatalf("actor on recreated %q stopped by a stale failure report", iface)
+	default:
+	}
+}
+
+// testRadvRecreatedInterfaceResetsBackoff covers a tap recreated under the same
+// name: it drops the backoff its predecessor built up, so the new guest is
+// served at once (#1293).
+func testRadvRecreatedInterfaceResetsBackoff(
+	t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet,
+) {
+	const iface = radvTestIface
+	env.links[iface] = radvTestLink{carrier: true}
+	for range 4 {
+		if p, ok := actors.pending[iface]; ok {
+			env.now = p.retryAt
+		}
+		reconcileRadvActors(ctx, actors)
+		radvActorFailed(actors, awaitRadvFailure(t, actors))
+	}
+	if p := actors.pending[iface]; p.failures != 4 || !p.retryAt.After(env.now) {
+		t.Fatalf("failures = %d, retryAt = %v, want 4 failures and a pending backoff", p.failures, p.retryAt)
+	}
+
+	env.links[iface] = radvTestLink{carrier: true, index: 2}
+	reconcileRadvActors(ctx, actors)
+	if _, running := actors.cancel[iface]; !running {
+		t.Fatalf("actor on recreated %q not started inside its predecessor's backoff", iface)
+	}
+	if p := actors.pending[iface]; p.failures != 0 {
+		t.Errorf("failures = %d after the interface was recreated, want 0", p.failures)
+	}
+	awaitRadvFailure(t, actors)
+}
+
 // testRadvAddrNotReadyBacksOff covers an interface with carrier that never gets
 // a usable link-local address: it retries at once at first, then warns and backs
 // off.
@@ -801,14 +909,14 @@ func testRadvAddrNotReadyBacksOff(t *testing.T, env *radvTestEnv, ctx context.Co
 		if _, running := actors.cancel[iface]; !running {
 			t.Fatalf("exhaustion %d: actor on %q not started", i, iface)
 		}
-		radvActorFailed(actors, notReady)
+		radvActorFailed(actors, currentRadvFailure(actors, notReady))
 		if p := actors.pending[iface]; !p.retryAt.IsZero() || p.failures != 0 {
 			t.Fatalf("exhaustion %d: retryAt = %v, failures = %d, want an immediate retry", i, p.retryAt, p.failures)
 		}
 	}
 
 	reconcileRadvActors(ctx, actors)
-	radvActorFailed(actors, notReady)
+	radvActorFailed(actors, currentRadvFailure(actors, notReady))
 	p := actors.pending[iface]
 	if got := p.retryAt.Sub(env.now); got != radvReconcileInterval {
 		t.Fatalf("backoff at the warning threshold = %v, want %v", got, radvReconcileInterval)
@@ -820,7 +928,7 @@ func testRadvAddrNotReadyBacksOff(t *testing.T, env *radvTestEnv, ctx context.Co
 
 	env.now = p.retryAt
 	reconcileRadvActors(ctx, actors)
-	radvActorFailed(actors, notReady)
+	radvActorFailed(actors, currentRadvFailure(actors, notReady))
 	if got := p.retryAt.Sub(env.now); got != 2*radvReconcileInterval {
 		t.Fatalf("second backoff = %v, want %v", got, 2*radvReconcileInterval)
 	}
@@ -946,6 +1054,8 @@ func TestReconcileRadvActors(t *testing.T) {
 			},
 		},
 		{name: "CarrierLossCancelsRunningActor", run: testRadvCarrierLossCancelsRunningActor},
+		{name: "RecreatedInterfaceRestartsActor", run: testRadvRecreatedInterfaceRestartsActor},
+		{name: "RecreatedInterfaceResetsBackoff", run: testRadvRecreatedInterfaceResetsBackoff},
 		{name: "AddrNotReadyBacksOffAfterRepeatedExhaustion", run: testRadvAddrNotReadyBacksOff},
 		{
 			// A record whose interface is gone is removed once the grace

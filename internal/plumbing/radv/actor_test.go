@@ -240,16 +240,24 @@ func TestResponseDestination(t *testing.T) {
 	}
 }
 
-// TestAddrNotReady checks EADDRNOTAVAIL is recognised through the wrapping the
-// net package puts around a failed bind.
+// TestAddrNotReady checks EADDRNOTAVAIL and ENODEV are recognised through the
+// wrapping the net package puts around a failed bind.
 func TestAddrNotReady(t *testing.T) {
-	bind := &net.OpError{Op: "listen", Err: os.NewSyscallError("bind", syscall.EADDRNOTAVAIL)}
-	if got := addrNotReady(bind); !errors.Is(got, ErrAddrNotReady) || !errors.Is(got, syscall.EADDRNOTAVAIL) {
-		t.Errorf("addrNotReady(%v) = %v, want it to wrap ErrAddrNotReady and EADDRNOTAVAIL", bind, got)
+	tests := []struct {
+		errno        syscall.Errno
+		wantNotReady bool
+	}{
+		{syscall.EADDRNOTAVAIL, true},
+		// A tap recreated under the same name after it was looked up (#1293).
+		{syscall.ENODEV, true},
+		{syscall.EACCES, false},
 	}
-
-	other := &net.OpError{Op: "listen", Err: os.NewSyscallError("bind", syscall.EACCES)}
-	if got := addrNotReady(other); errors.Is(got, ErrAddrNotReady) || !errors.Is(got, error(other)) {
-		t.Errorf("addrNotReady(%v) = %v, want it returned unchanged", other, got)
+	for _, tt := range tests {
+		bind := &net.OpError{Op: "listen", Err: os.NewSyscallError("bind", tt.errno)}
+		got := addrNotReady(bind)
+		if errors.Is(got, ErrAddrNotReady) != tt.wantNotReady || !errors.Is(got, tt.errno) {
+			t.Errorf("addrNotReady(%v) = %v, want wrapping ErrAddrNotReady %v and still %v",
+				bind, got, tt.wantNotReady, tt.errno)
+		}
 	}
 }

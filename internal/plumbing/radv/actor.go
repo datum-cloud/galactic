@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -20,10 +21,11 @@ import (
 )
 
 // ErrAddrNotReady is wrapped by RunActor's error when the interface has no
-// usable link-local address yet: the kernel has not assigned one, or duplicate
+// usable link-local address yet: the kernel has not assigned one, duplicate
 // address detection still holds it tentative and the kernel refuses to bind
-// it. Both clear on their own within moments of the interface gaining carrier,
-// so a caller should retry soon rather than count it as a failure.
+// it, or the interface was deleted and recreated between its lookup and the
+// bind. All clear on their own within moments of the interface gaining
+// carrier, so a caller should retry soon rather than count it as a failure.
 var ErrAddrNotReady = errors.New("link-local address not ready")
 
 // raWriter is the part of *ndp.Conn runActorLoop sends through, so a test can
@@ -74,6 +76,10 @@ func RunActor(ctx context.Context, iface string, mtu int) error {
 		return fmt.Errorf("join all-routers multicast group on %q: %w", iface, err)
 	}
 
+	// Logged at info so the moment a guest can first get its default route
+	// is visible without debug logging, including after failed starts.
+	slog.Info("Router advertisement actor started", "hostInterface", iface, "ifindex", ifi.Index)
+
 	rsCh := make(chan netip.Addr)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -89,6 +95,9 @@ func RunActor(ctx context.Context, iface string, mtu int) error {
 // listen opens the NDP connection on ifi's link-local address. ndp.Listen
 // reports a missing address only as an untyped error, so the address is looked
 // for here first to tell that case apart.
+//
+// The connection is opened on indexZoned(ifi), so its bind and every later
+// send and read name the interface by index rather than by name.
 func listen(ifi *net.Interface) (*ndp.Conn, error) {
 	addrs, err := ifi.Addrs()
 	if err != nil {
@@ -98,7 +107,7 @@ func listen(ifi *net.Interface) (*ndp.Conn, error) {
 		return nil, fmt.Errorf("no IPv6 link-local address assigned: %w", ErrAddrNotReady)
 	}
 
-	conn, _, err := ndp.Listen(ifi, ndp.LinkLocal)
+	conn, _, err := ndp.Listen(indexZoned(ifi), ndp.LinkLocal)
 	if err != nil {
 		// The kernel refuses to bind an address that duplicate address
 		// detection still holds tentative.
@@ -107,11 +116,27 @@ func listen(ifi *net.Interface) (*ndp.Conn, error) {
 	return conn, nil
 }
 
+// indexZoned returns a copy of ifi named by its decimal index, for ndp, which
+// uses the interface name as the IPv6 zone of the address it binds and of
+// every address it sends to. The net package resolves a zone name through a
+// process-wide cache it refreshes at most once a minute, so a tap deleted and
+// recreated under the same name would resolve to its old, deleted index, and
+// the bind or send would fail with ENODEV until the cache expired (#1293). A
+// numeric zone is never in that cache and resolves to the index it spells.
+// Host interface names are never purely numeric, so the two cannot collide.
+func indexZoned(ifi *net.Interface) *net.Interface {
+	c := *ifi
+	c.Name = strconv.Itoa(ifi.Index)
+	return &c
+}
+
 // addrNotReady wraps err in ErrAddrNotReady when it is the kernel refusing to
-// bind an address, however deeply the net package wrapped EADDRNOTAVAIL, and
-// returns it unchanged otherwise.
+// bind an address, however deeply the net package wrapped EADDRNOTAVAIL, or
+// reporting with ENODEV that the interface was deleted, as when it is recreated
+// under the same name after it was looked up. It returns err unchanged
+// otherwise.
 func addrNotReady(err error) error {
-	if errors.Is(err, syscall.EADDRNOTAVAIL) {
+	if errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.ENODEV) {
 		return fmt.Errorf("%w: %w", ErrAddrNotReady, err)
 	}
 	return err
