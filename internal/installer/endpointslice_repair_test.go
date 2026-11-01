@@ -7,6 +7,7 @@ package installer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -24,6 +25,7 @@ import (
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
@@ -169,6 +171,102 @@ func TestRepairEndpointSlicesLeavesExistingSlice(t *testing.T) {
 	if slice.Endpoints[0].Addresses[0] != "fd00:10::99" || slice.Annotations[crdnames.AnnotationSandboxID] != "sandbox" {
 		t.Errorf("existing EndpointSlice was modified: %+v", slice)
 	}
+}
+
+// withHostLinks makes this node hold exactly the host links of the given VPC
+// attachments of repairVPC for the rest of the test.
+func withHostLinks(t *testing.T, vpcAttachments ...string) {
+	t.Helper()
+	held := map[string]bool{}
+	for _, a := range vpcAttachments {
+		held[intf.GenerateInterfaceNameHost(repairVPC, a)] = true
+	}
+	prev := hostLinkExistsFn
+	hostLinkExistsFn = func(name string) (bool, error) { return held[name], nil }
+	t.Cleanup(func() { hostLinkExistsFn = prev })
+}
+
+// A VM attached under one VPC attachment keeps it when the definition is
+// rewritten for a replacement attachment after ADD. The pass reports the pod
+// as superseded whether the slice ADD wrote is still there or the pass has to
+// restore it, and only the restore rewrites the slice.
+func TestRepairEndpointSlicesReportsSupersededAttachment(t *testing.T) {
+	tenantID := crdnames.TenantIdentifier(repairVPC, repairAttachment)
+	attached := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "web-0", Namespace: repairPodNS,
+			Labels:      map[string]string{crdnames.LabelTenantID: tenantID},
+			Annotations: map[string]string{crdnames.AnnotationTenantID: tenantID},
+		},
+		AddressType: discoveryv1.AddressTypeIPv6,
+		Endpoints:   []discoveryv1.Endpoint{{Addresses: []string{repairPodAddr}}},
+	}
+	cases := map[string]struct {
+		slice        []client.Object
+		wantRestored int
+	}{
+		"slice from ADD": {slice: []client.Object{attached}},
+		"slice restored": {wantRestored: 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			withHostLinks(t, repairAttachment)
+			pod := repairPod("web-0", repairNode, corev1.PodRunning, defaultStatus(), galacticStatus(repairPodAddr))
+			replacement := repairNADObject(
+				fmt.Sprintf(`{"type":"galactic-bgp","vpc":%q,"vpcattachment":"ghi"}`, repairVPC))
+			objs := append(append(repairIdentity(), replacement, pod), tc.slice...)
+			k8s := repairClient(t, objs...)
+
+			result, err := repairEndpointSlices(context.Background(), k8s, testNamespace, repairNode)
+			if err != nil {
+				t.Fatalf("repairEndpointSlices() error = %v", err)
+			}
+			want := endpointSliceRepairResult{Restored: tc.wantRestored, Superseded: 1, Complete: true}
+			if result != want {
+				t.Fatalf("result = %+v, want %+v", result, want)
+			}
+		})
+	}
+}
+
+// A pod whose current attachment has its host link on this node is not
+// superseded. A definition that will never parse is skipped without holding
+// the count back, while a host link that cannot be read leaves it incomplete
+// rather than reporting nothing.
+func TestRepairEndpointSlicesSupersededCount(t *testing.T) {
+	t.Run("current attachment held", func(t *testing.T) {
+		withHostLinks(t, repairAttachment)
+		pod := repairPod("web-0", repairNode, corev1.PodRunning, galacticStatus(repairPodAddr))
+		k8s := repairClient(t, append(repairIdentity(), galacticNAD(), pod)...)
+		result, err := repairEndpointSlices(context.Background(), k8s, testNamespace, repairNode)
+		want := endpointSliceRepairResult{Restored: 1, Complete: true}
+		if err != nil || result != want {
+			t.Fatalf("repairEndpointSlices() = (%+v, %v), want %+v", result, err, want)
+		}
+	})
+	t.Run("definition unusable", func(t *testing.T) {
+		withHostLinks(t)
+		pod := repairPod("web-0", repairNode, corev1.PodRunning, galacticStatus(repairPodAddr))
+		broken := repairNADObject(`{"type":"galactic-bgp"}`)
+		k8s := repairClient(t, append(repairIdentity(), broken, pod)...)
+		result, err := repairEndpointSlices(context.Background(), k8s, testNamespace, repairNode)
+		want := endpointSliceRepairResult{Skipped: 1, Complete: true}
+		if err != nil || result != want {
+			t.Fatalf("repairEndpointSlices() = (%+v, %v), want %+v", result, err, want)
+		}
+	})
+	t.Run("host link unreadable", func(t *testing.T) {
+		prev := hostLinkExistsFn
+		hostLinkExistsFn = func(string) (bool, error) { return false, errors.New("netlink: dump interrupted") }
+		t.Cleanup(func() { hostLinkExistsFn = prev })
+		pod := repairPod("web-0", repairNode, corev1.PodRunning, galacticStatus(repairPodAddr))
+		k8s := repairClient(t, append(repairIdentity(), galacticNAD(), pod)...)
+		result, err := repairEndpointSlices(context.Background(), k8s, testNamespace, repairNode)
+		if err != nil || result.Superseded != 0 || result.Complete {
+			t.Fatalf("repairEndpointSlices() = (%+v, %v), want an incomplete pass with nothing superseded",
+				result, err)
+		}
+	})
 }
 
 func TestRepairEndpointSlicesSkipsPodsWithNothingToRepair(t *testing.T) {
