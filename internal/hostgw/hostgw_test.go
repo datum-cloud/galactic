@@ -66,6 +66,38 @@ func TestIPv4GatewayAddrParams(t *testing.T) {
 	}
 }
 
+// TestDescribeRouteLink covers the detail the conflict error adds: the link a
+// conflicting route leaves through and the container stamped on it as owner,
+// which tells a dead attachment's leftover tap from a live pod's link.
+func TestDescribeRouteLink(t *testing.T) {
+	orig := linkByIndex
+	t.Cleanup(func() { linkByIndex = orig })
+	links := map[int]netlink.Link{
+		10: &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: "G0000000jU0a1H", Alias: "c1"}},
+		11: &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "G0000000jU0b2H"}},
+	}
+	linkByIndex = func(i int) (netlink.Link, error) {
+		if l, ok := links[i]; ok {
+			return l, nil
+		}
+		return nil, netlink.LinkNotFoundError{}
+	}
+	tests := []struct {
+		index int
+		want  string
+	}{
+		{10, ` (on tuntap "G0000000jU0a1H", owner c1)`},
+		{11, ` (on veth "G0000000jU0b2H", owner none)`},
+		{12, ""},
+		{0, ""},
+	}
+	for _, tt := range tests {
+		if got := describeRouteLink(tt.index); got != tt.want {
+			t.Errorf("describeRouteLink(%d) = %q, want %q", tt.index, got, tt.want)
+		}
+	}
+}
+
 func TestRouteConflicts(t *testing.T) {
 	dst := mustParseCIDR(t, "fd00:10:ff01::1234/80")
 	gw1 := net.ParseIP("fd00:10:ff01::1")

@@ -42,6 +42,9 @@ const annotationNetNS = "galactic.datum.net/netns"
 // kindBGPVRFInstance is OrphanedCRD.Kind for a BGPVRFInstance.
 const kindBGPVRFInstance = "BGPVRFInstance"
 
+// kindBGPAdvertisement is OrphanedCRD.Kind for a BGPAdvertisement.
+const kindBGPAdvertisement = "BGPAdvertisement"
+
 // OrphanedCRD represents a BGP CRD that appears to be orphaned because its
 // associated container is no longer present on the node.
 type OrphanedCRD struct {
@@ -53,9 +56,14 @@ type OrphanedCRD struct {
 	// as the VRF's name gives it. Empty for a BGPAdvertisement, and for a
 	// BGPVRFInstance whose VRF is gone, which no edge attachment can use.
 	VPC string
-	// Node is the node a BGPVRFInstance was collected for. RemoveOrphanedCRDs
-	// uses it to find the instance's kernel VRF again under the VRF lock.
+	// Node is the node the CRD was collected for. RemoveOrphanedCRDs uses it
+	// to find a BGPVRFInstance's kernel VRF again under the VRF lock, and a
+	// BGPAdvertisement's unstamped host link by name.
 	Node string
+	// DeadContainers holds, for a BGPAdvertisement, the key of every container
+	// its netns annotations recorded, all of them found gone. Only a host link
+	// one of them still owns is reclaimed with it.
+	DeadContainers map[string]struct{}
 }
 
 // EdgeUsers keeps garbage collection off the VPCs Galactic Edge attachments
@@ -97,6 +105,9 @@ func (p *passEdgeUsers) VPCs(ctx context.Context) (map[string]struct{}, error) {
 type CleanupResult struct {
 	OrphanedCRDsRemoved int
 	OrphanedVRFsRemoved int
+	// HostLinksRemoved counts host links RemoveOrphanedCRDs removed with
+	// their dead attachment's BGPAdvertisement.
+	HostLinksRemoved int
 	// EBPFVRFEntriesRemoved counts stale eBPF vrf_table map entries removed by
 	// SweepEBPFVRFTable, a different resource from the kernel VRF interfaces
 	// OrphanedVRFsRemoved counts.
@@ -302,17 +313,23 @@ func CollectOrphanedCRDs(
 		}
 
 		// None of the recorded containers are alive. Report an arbitrary
-		// one purely for logging context.
+		// one purely for logging context, and keep them all so only a host
+		// link one of them still owns is reclaimed with the object.
 		var anyContainerID string
+		dead := make(map[string]struct{}, len(netnsPaths))
 		for containerID := range netnsPaths {
-			anyContainerID = containerID
-			break
+			if anyContainerID == "" {
+				anyContainerID = containerID
+			}
+			dead[containerID] = struct{}{}
 		}
 		orphaned = append(orphaned, OrphanedCRD{
-			Name:        adv.Name,
-			Namespace:   adv.Namespace,
-			Kind:        "BGPAdvertisement",
-			ContainerID: anyContainerID,
+			Name:           adv.Name,
+			Namespace:      adv.Namespace,
+			Kind:           kindBGPAdvertisement,
+			ContainerID:    anyContainerID,
+			Node:           nodeName,
+			DeadContainers: dead,
 		})
 	}
 
@@ -378,7 +395,20 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 
 	for _, o := range orphans {
 		switch o.Kind {
-		case "BGPAdvertisement":
+		case kindBGPAdvertisement:
+			// The attachment's host link goes first: once the object is
+			// deleted, nothing on the node can prove the link dead, and a
+			// leftover link's route blocks the next attachment given its
+			// address (see reclaimHostLinks). A link that could not be
+			// removed keeps the object, so the next pass retries.
+			links, err := reclaimHostLinksFn(o)
+			result.HostLinksRemoved += links
+			if err != nil {
+				slog.Error("GC: kept orphaned BGPAdvertisement whose host link could not be removed",
+					"resource_name", o.Name, "resource_namespace", o.Namespace, "err", err)
+				result.Errors++
+				continue
+			}
 			adv := &bgpv1alpha1.BGPAdvertisement{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      o.Name,
@@ -1223,6 +1253,7 @@ func RunGC(ctx context.Context, k8s client.Client, namespace, nodeName string, e
 		slog.Info("GC: found orphaned CRDs", "count", len(orphans))
 		crResult := RemoveOrphanedCRDs(ctx, k8s, orphans, edge)
 		result.OrphanedCRDsRemoved += crResult.OrphanedCRDsRemoved
+		result.HostLinksRemoved += crResult.HostLinksRemoved
 		result.Errors += crResult.Errors
 	}
 
@@ -1238,10 +1269,11 @@ func RunGC(ctx context.Context, k8s client.Client, namespace, nodeName string, e
 		result.Errors += vrfResult.Errors
 	}
 
-	if result.OrphanedCRDsRemoved > 0 || result.OrphanedVRFsRemoved > 0 {
+	if result.OrphanedCRDsRemoved > 0 || result.OrphanedVRFsRemoved > 0 || result.HostLinksRemoved > 0 {
 		slog.Info("GC: cleanup complete",
 			"crdsRemoved", result.OrphanedCRDsRemoved,
 			"vrfsRemoved", result.OrphanedVRFsRemoved,
+			"hostLinksRemoved", result.HostLinksRemoved,
 			"errors", result.Errors)
 	}
 

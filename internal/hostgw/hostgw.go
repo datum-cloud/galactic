@@ -256,8 +256,8 @@ func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tab
 			}
 			if routeConflicts(&r, desiredRoute) {
 				return fmt.Errorf(
-					"existing route %v to %s conflicts with desired route %v",
-					r, desiredRoute.Dst, desiredRoute,
+					"existing route %v to %s%s conflicts with desired route %v",
+					r, desiredRoute.Dst, describeRouteLink(r.LinkIndex), desiredRoute,
 				)
 			}
 			alreadyPresent = true
@@ -285,6 +285,31 @@ func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tab
 		return fmt.Errorf("add pod subnet route to VRF table: %w", err)
 	}
 	return nil
+}
+
+// linkByIndex resolves a conflicting route's link for describeRouteLink; a
+// variable so tests can substitute a fabricated link.
+var linkByIndex = netlink.LinkByIndex
+
+// describeRouteLink names the link a conflicting route leaves through, and the
+// container ID stamped on it as its owner, for the conflict error. A route
+// left by a pod that is gone is still on that pod's host link, and its name
+// and owner are what an operator needs to tell a dead leftover from a live
+// pod given an overlapping address. Empty when the link can't be read.
+func describeRouteLink(index int) string {
+	if index == 0 {
+		return ""
+	}
+	link, err := linkByIndex(index)
+	if err != nil {
+		return ""
+	}
+	attrs := link.Attrs()
+	owner := attrs.Alias
+	if owner == "" {
+		owner = "none"
+	}
+	return fmt.Sprintf(" (on %s %q, owner %s)", link.Type(), attrs.Name, owner)
 }
 
 // isPodSubnetRouteCandidate reports whether r could be a pod-subnet route this
