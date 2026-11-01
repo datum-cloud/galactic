@@ -737,6 +737,13 @@ func awaitRadvFailure(t *testing.T, actors *radvActorSet) radvActorFailure {
 	return radvActorFailure{}
 }
 
+// currentRadvFailure returns f as reported by the actor currently started on
+// its interface, as a test faking a failure report needs it to be.
+func currentRadvFailure(actors *radvActorSet, f radvActorFailure) radvActorFailure {
+	f.gen = actors.pending[f.iface].actorGen
+	return f
+}
+
 // testRadvCarrierLossCancelsRunningActor covers a guest that restarts: it loses
 // and regains carrier while its actor keeps running. The actor is cancelled on
 // the loss, so the carrier's return starts a fresh one, with its own initial
@@ -834,12 +841,28 @@ func testRadvRecreatedInterfaceRestartsActor(
 	default:
 	}
 
+	oldGen := actors.pending[iface].actorGen
 	env.links[iface] = radvTestLink{carrier: true, index: 8}
 	reconcileRadvActors(ctx, actors)
 	await(stopped, "stopped after its interface was recreated")
 	await(started, "restarted on the recreated interface")
 	if _, running := actors.cancel[iface]; !running {
 		t.Fatalf("no actor tracked on recreated %q", iface)
+	}
+
+	// A failure the replaced actor reports late must leave its successor,
+	// serving the new tap, running and its backoff untouched.
+	radvActorFailed(actors, radvActorFailure{iface: iface, gen: oldGen, err: errors.New("no such device")})
+	if _, running := actors.cancel[iface]; !running {
+		t.Fatalf("stale failure from the replaced actor cancelled the actor on recreated %q", iface)
+	}
+	if p := actors.pending[iface]; p.failures != 0 || p.notReady != 0 {
+		t.Errorf("failures = %d, notReady = %d after a stale report, want both 0", p.failures, p.notReady)
+	}
+	select {
+	case <-stopped:
+		t.Fatalf("actor on recreated %q stopped by a stale failure report", iface)
+	default:
 	}
 }
 
@@ -886,14 +909,14 @@ func testRadvAddrNotReadyBacksOff(t *testing.T, env *radvTestEnv, ctx context.Co
 		if _, running := actors.cancel[iface]; !running {
 			t.Fatalf("exhaustion %d: actor on %q not started", i, iface)
 		}
-		radvActorFailed(actors, notReady)
+		radvActorFailed(actors, currentRadvFailure(actors, notReady))
 		if p := actors.pending[iface]; !p.retryAt.IsZero() || p.failures != 0 {
 			t.Fatalf("exhaustion %d: retryAt = %v, failures = %d, want an immediate retry", i, p.retryAt, p.failures)
 		}
 	}
 
 	reconcileRadvActors(ctx, actors)
-	radvActorFailed(actors, notReady)
+	radvActorFailed(actors, currentRadvFailure(actors, notReady))
 	p := actors.pending[iface]
 	if got := p.retryAt.Sub(env.now); got != radvReconcileInterval {
 		t.Fatalf("backoff at the warning threshold = %v, want %v", got, radvReconcileInterval)
@@ -905,7 +928,7 @@ func testRadvAddrNotReadyBacksOff(t *testing.T, env *radvTestEnv, ctx context.Co
 
 	env.now = p.retryAt
 	reconcileRadvActors(ctx, actors)
-	radvActorFailed(actors, notReady)
+	radvActorFailed(actors, currentRadvFailure(actors, notReady))
 	if got := p.retryAt.Sub(env.now); got != 2*radvReconcileInterval {
 		t.Fatalf("second backoff = %v, want %v", got, 2*radvReconcileInterval)
 	}

@@ -740,6 +740,9 @@ type radvActorSet struct {
 	pending map[string]*radvPending
 	failed  chan radvActorFailure
 	wg      sync.WaitGroup
+	// lastGen numbers each actor started, so a failure reported by an actor
+	// that has since been replaced is told apart from one by its successor.
+	lastGen uint64
 }
 
 // radvPending is the retry state of one recorded attachment that has no running
@@ -770,13 +773,20 @@ type radvPending struct {
 	// ifindex is the interface index the last reconcile found, zero before
 	// the first. A change means the tap was recreated under the same name.
 	ifindex int
+	// actorGen is the generation of the actor last started on the interface.
+	// A failure report carrying any other generation comes from an actor
+	// already cancelled and replaced, and is ignored.
+	actorGen uint64
 }
 
 // radvActorFailure is an actor goroutine's report that radv.RunActor could not
 // start.
 type radvActorFailure struct {
 	iface string
-	err   error
+	// gen is the generation the actor was started with, matched against
+	// radvPending.actorGen.
+	gen uint64
+	err error
 }
 
 // radvStaleRecordGrace is how long a recorded attachment's host interface must
@@ -930,18 +940,20 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 
 		actorCtx, cancel := context.WithCancel(ctx)
 		actors.cancel[r.HostInterface] = cancel
+		actors.lastGen++
+		p.actorGen = actors.lastGen
 		actors.wg.Add(1)
-		go func(iface string, mtu int) {
+		go func(iface string, mtu int, gen uint64) {
 			defer actors.wg.Done()
 			if err := runRadvActor(actorCtx, iface, mtu); err != nil {
 				select {
-				case actors.failed <- radvActorFailure{iface: iface, err: err}:
+				case actors.failed <- radvActorFailure{iface: iface, gen: gen, err: err}:
 				default:
 					slog.Warn("Router advertisement failed-actor channel full, retry may be delayed",
 						"err", err, "hostInterface", iface)
 				}
 			}
-		}(r.HostInterface, r.MTU)
+		}(r.HostInterface, r.MTU, p.actorGen)
 	}
 
 	for iface, cancel := range actors.cancel {
@@ -1053,8 +1065,9 @@ func radvBackoff(n int) time.Duration {
 // radvActorFailed clears the map entry for an actor that could not start, so a
 // later reconcile sees the attachment as unserved and retries it once its
 // backoff has elapsed. Without it, reconcileRadvActors would stay convinced the
-// actor is running. A report for an attachment that is already gone is a safe
-// no-op.
+// actor is running. A report for an attachment that is already gone, or from an
+// actor since replaced by a newer one on the same name (a recreated tap), is a
+// safe no-op, so it cannot cancel the actor serving the new tap.
 //
 // A start that failed only because the interface's link-local address is not
 // usable yet (radv.ErrAddrNotReady) is retried on the next reconcile and does
@@ -1071,10 +1084,13 @@ func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
 	if !ok {
 		return
 	}
+	p := radvPendingFor(actors, failure.iface)
+	if failure.gen != p.actorGen {
+		return
+	}
 	cancel()
 	delete(actors.cancel, failure.iface)
 
-	p := radvPendingFor(actors, failure.iface)
 	if errors.Is(failure.err, radv.ErrAddrNotReady) {
 		p.notReady++
 		if p.notReady < radvWarnAfterFailures {

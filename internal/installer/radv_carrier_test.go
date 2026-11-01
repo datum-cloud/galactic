@@ -237,10 +237,10 @@ func TestRadvActorFailed_AddrNotReadyDoesNotBackOff(t *testing.T) {
 	env.now = actors.pending[radvTestIface].retryAt
 	reconcileRadvActors(ctx, actors)
 	awaitRadvFailure(t, actors)
-	radvActorFailed(actors, radvActorFailure{
+	radvActorFailed(actors, currentRadvFailure(actors, radvActorFailure{
 		iface: radvTestIface,
 		err:   fmt.Errorf("open NDP connection: %w", radv.ErrAddrNotReady),
-	})
+	}))
 
 	p := actors.pending[radvTestIface]
 	if p.failures != 1 {
