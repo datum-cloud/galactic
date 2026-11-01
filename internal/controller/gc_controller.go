@@ -46,11 +46,13 @@ func (r *GCReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Resu
 		slog.Info("GC: completed with errors",
 			"crdsRemoved", result.OrphanedCRDsRemoved,
 			"vrfsRemoved", result.OrphanedVRFsRemoved,
+			"hostLinksRemoved", result.HostLinksRemoved,
 			"errors", result.Errors)
-	} else if result.OrphanedCRDsRemoved > 0 || result.OrphanedVRFsRemoved > 0 {
+	} else if result.OrphanedCRDsRemoved > 0 || result.OrphanedVRFsRemoved > 0 || result.HostLinksRemoved > 0 {
 		slog.Info("GC: cleanup complete",
 			"crdsRemoved", result.OrphanedCRDsRemoved,
-			"vrfsRemoved", result.OrphanedVRFsRemoved)
+			"vrfsRemoved", result.OrphanedVRFsRemoved,
+			"hostLinksRemoved", result.HostLinksRemoved)
 	}
 
 	return ctrl.Result{RequeueAfter: r.Interval}, nil

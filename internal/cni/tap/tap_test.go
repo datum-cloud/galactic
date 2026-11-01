@@ -413,6 +413,13 @@ func TestOwnedBy(t *testing.T) {
 		{"empty alias is owned by anyone", "", "someone", true},
 		{"matching alias", ownerAlias, ownerAlias, true},
 		{"mismatched alias", ownerAlias, "def456", false},
+		// A tap with host-only ports used to lose its owner to the ports
+		// alias, so its own DEL refused it and it was left behind for good.
+		{"host-only alias keeps its owner", "galactic-host-only-tcp=22;owner=" + ownerAlias, ownerAlias, true},
+		{"host-only alias of another owner", "galactic-host-only-tcp=22;owner=" + ownerAlias, "def456", false},
+		// Every host-only tap an earlier build left carries one, a live
+		// successor's included, so no DEL may claim it.
+		{"ownerless host-only alias is owned by no DEL", "galactic-host-only-tcp=22", "someone", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

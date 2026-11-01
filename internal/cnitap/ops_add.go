@@ -133,7 +133,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	// tap; an adopted tap's stale list is replaced, or cleared when this
 	// attachment asks for none.
 	tracker.hostOnlyIfindex = uint32(hostLink.Attrs().Index)
-	if err := setHostOnlyPorts(hostLink, protectedPorts); err != nil {
+	if err := setHostOnlyPorts(hostLink, protectedPorts, args.ContainerID); err != nil {
 		return err
 	}
 	hostMac := hostLink.Attrs().HardwareAddr.String()
@@ -229,8 +229,11 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 // list, so asking for one there fails ADD; asking for none is a no-op.
 //
 // The list is also recorded in hostLink's alias, which outlasts the table, so
-// datapath repair can restore an entry a recreated table lost.
-func setHostOnlyPorts(hostLink netlink.Link, ports []uint16) error {
+// datapath repair can restore an entry a recreated table lost. The alias keeps
+// owner, the container ID tap.Add stamped, so the tap's own DEL, and GC once
+// its sandbox is gone, still recognise it as owner's (see
+// ifindexvrfmap.HostOnlyAlias).
+func setHostOnlyPorts(hostLink netlink.Link, ports []uint16, owner string) error {
 	ifindex := uint32(hostLink.Attrs().Index) //nolint:gosec // a kernel ifindex
 	table, closer, err := ifindexvrfmap.OpenPinnedHostOnlyPorts(attach.PinDir)
 	if err != nil {
@@ -248,7 +251,7 @@ func setHostOnlyPorts(hostLink netlink.Link, ports []uint16) error {
 		if _, ours, _ := ifindexvrfmap.ParseHostOnlyAlias(hostLink.Attrs().Alias); !ours {
 			return nil
 		}
-		if err := netlink.LinkSetAlias(hostLink, ""); err != nil {
+		if err := netlink.LinkSetAlias(hostLink, owner); err != nil {
 			return fmt.Errorf("clear host-only alias on %s: %w", hostLink.Attrs().Name, err)
 		}
 		return nil
@@ -256,7 +259,7 @@ func setHostOnlyPorts(hostLink netlink.Link, ports []uint16) error {
 	if err := table.Register(ifindex, ports); err != nil {
 		return err
 	}
-	if err := netlink.LinkSetAlias(hostLink, ifindexvrfmap.HostOnlyAlias(ports)); err != nil {
+	if err := netlink.LinkSetAlias(hostLink, ifindexvrfmap.HostOnlyAlias(ports, owner)); err != nil {
 		return fmt.Errorf("record host-only ports on %s: %w", hostLink.Attrs().Name, err)
 	}
 	slog.Debug("ADD: host-only ports set", "ifindex", ifindex, "ports", ports)

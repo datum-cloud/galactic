@@ -32,8 +32,24 @@ is safe. It used to be deferred the same way as the VRF, which was a real
 leak: GC's own kernel sweep below only ever recognizes VRF-shaped interface
 names, so a host interface deferred to GC was never actually reclaimed by
 anything, and was left behind enslaved to a VRF that no longer existed once
-GC collected it. Nothing in this document's diagrams covers the host
-veth/tap interface for that reason — it has no GC path at all, by design.
+GC collected it.
+
+The one exception is a host link whose DEL never removed it. A veth dies with
+its pod's netns, but a host-namespace tap (the Kata DAN and Unikraft path)
+survives its sandbox, stays enslaved to the VPC's VRF and keeps its
+pod-subnet route. When the control plane later gives that address to another
+attachment, the new attachment's route is refused as a conflict on every
+retry. So when GC reaps a dead attachment's `BGPAdvertisement`, it first
+removes that attachment's host link (`reclaimHostLinks`,
+`internal/gc/hostlinks.go`), and the kernel removes the link's routes with it.
+It removes only a link on the advertisement's VPC whose owner alias is one of
+the containers the advertisement recorded, all of which GC has just found
+gone, or an unstamped link whose name maps to the advertisement exactly. It
+decides again under the VRF lock, so a link a new container adopted since is
+kept. A link it cannot remove keeps the advertisement for the next pass,
+because once the advertisement is gone nothing on the node can prove the link
+dead. A link that leaked before this reclaim existed has no record left and
+is never touched.
 
 Both sweeps below are conceptually "GC" and live in the same `internal/gc`
 package, but run as two unrelated ticker loops in two different processes,
@@ -41,7 +57,7 @@ each reading only the liveness signal it can see for itself:
 
 | Sweep                                   | Process                            | Reads                                                                               | Removes                                                                                 |
 | --------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Orphaned CRD + kernel VRF sweep         | `galactic-router` (`GCReconciler`) | `/var/run/netns` on this node, `BGPRouter`/`BGPAdvertisement`/`BGPVRFInstance` CRDs | `BGPAdvertisement`, `BGPVRFInstance` CRDs; kernel VRF interfaces                        |
+| Orphaned CRD + kernel VRF sweep         | `galactic-router` (`GCReconciler`) | `/var/run/netns` on this node, `BGPRouter`/`BGPAdvertisement`/`BGPVRFInstance` CRDs | `BGPAdvertisement`, `BGPVRFInstance` CRDs; a dead attachment's host link; kernel VRFs   |
 | eBPF `vrf_table` sweep                  | `galactic-cni`'s `run` container   | the pinned eBPF `vrf_table` map, `BGPRouter`/`BGPVRFInstance` CRDs                  | stale `vrf_table` map entries (`Block`, `Argument` keys)                                |
 
 The loops have different ownership and liveness inputs. The installer loads and
@@ -109,7 +125,8 @@ sequenceDiagram
 
     loop each orphaned CRD
         alt BGPAdvertisement
-            GC->>K8s: Delete (best-effort — errors logged, sweep continues)
+            GC->>Kernel: under the VRF lock, delete the attachment's host link still owned by a recorded dead container
+            GC->>K8s: Delete, only if no such link remains (best-effort — errors logged, sweep continues)
         else BGPVRFInstance whose VRF is gone
             GC->>Kernel: under the VRF lock, look for its VRF again
             GC->>K8s: Delete, only if its VRF is still absent or holds no link
@@ -224,9 +241,10 @@ sequenceDiagram
 - **This sweep never matches a per-attachment host veth/tap interface, by
   design.** Both the current and legacy name shapes above end in the VRF
   suffix (`V`); the host interface's own suffix (`H`) never matches either
-  regex. That interface isn't orphaned state for this sweep to find at all —
-  `cmdDel` deletes it directly and immediately, see
-  [docs/cni/cni-cmd-sequence.md](cni-cmd-sequence.md#notes-on-del).
+  regex. `cmdDel` deletes that interface directly, see
+  [docs/cni/cni-cmd-sequence.md](cni-cmd-sequence.md#notes-on-del); its only
+  GC path is the dead-advertisement reclaim described in
+  [Why GC exists](#why-gc-exists).
 - **Node scoping matters because CRDs are namespace-, not node-, scoped.**
   `BGPAdvertisement`/`BGPVRFInstance` objects in a namespace can belong to
   routers on other nodes (e.g. the default and rr roles watching

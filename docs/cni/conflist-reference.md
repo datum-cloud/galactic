@@ -138,8 +138,11 @@ router with no SRv6 locator, which attaches none, an attachment listing
 host-only ports stays down and its ADD fails. The
 entry lives in the pinned map, so it survives agent restarts and program
 replacement. `galactic-tap` also records the list in the tap's interface
-alias (`galactic-host-only-tcp=<ports>`), and datapath repair writes back any
-entry a recreated map lost from it. The list is read only at ADD, so a
+alias (`galactic-host-only-tcp=<ports>;owner=<container ID>`), and datapath
+repair writes back any entry a recreated map lost from it. The alias keeps the
+owning container ID because it is also the tap's ownership stamp: its DEL, and
+GC once its sandbox is gone, remove the tap only while it records them as the
+owner. The list is read only at ADD, so a
 change to it reaches an attachment only when it is added again.
 
 The check only refuses traffic; it grants nothing. While a node enforces

@@ -19,6 +19,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cni/veth"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
@@ -218,9 +219,15 @@ func RestoreOwner(vpc, vpcAttachment, ownerID string) error {
 // predates this stamp -- created by an earlier build, or by an ADD that
 // failed before it got that far -- and refusing to clean those up would leak
 // an interface per attachment with nothing left to reclaim it.
+//
+// A tap with host-only ports records them in its alias alongside the owner,
+// which is read back from there. A host-only alias from a build before it
+// kept the owner records none and belongs to no DEL: every host-only tap
+// carried one, including a live successor's that a predecessor's delayed DEL
+// must not remove. GC reclaims such a tap once its attachment is dead.
 func OwnedBy(link netlink.Link, ownerID string) bool {
 	alias := link.Attrs().Alias
-	return alias == "" || alias == ownerID
+	return alias == "" || ifindexvrfmap.AliasOwner(alias) == ownerID
 }
 
 // Delete removes the tap interface and cleans up iptables rules, but only
