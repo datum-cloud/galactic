@@ -670,7 +670,11 @@ type radvTestEnv struct {
 	now   time.Time
 }
 
-type radvTestLink struct{ carrier bool }
+// radvTestLink is a fake interface. A zero index stands for index 1.
+type radvTestLink struct {
+	carrier bool
+	index   int
+}
 
 func newRadvTestEnv(t *testing.T) *radvTestEnv {
 	t.Helper()
@@ -681,9 +685,12 @@ func newRadvTestEnv(t *testing.T) *radvTestEnv {
 		radv.DefaultStateDir, radvLinkState, radvNow = origStateDir, origLinkState, origNow
 	})
 	radv.DefaultStateDir = t.TempDir()
-	radvLinkState = func(iface string) (bool, bool, error) {
+	radvLinkState = func(iface string) (bool, bool, int, error) {
 		link, ok := env.links[iface]
-		return ok, link.carrier, nil
+		if !ok {
+			return false, false, 0, nil
+		}
+		return true, link.carrier, max(link.index, 1), nil
 	}
 	radvNow = func() time.Time { return env.now }
 	return env
@@ -786,6 +793,84 @@ func testRadvCarrierLossCancelsRunningActor(t *testing.T, env *radvTestEnv, ctx 
 		t.Fatalf("no fresh actor on %q after carrier returned", iface)
 	}
 	awaitStarted(2)
+}
+
+// testRadvRecreatedInterfaceRestartsActor covers a tap deleted and recreated
+// under the same name between two reconciles, the new one already with
+// carrier: the running actor is bound to the deleted interface, so it is
+// replaced by one on the new tap at once (#1293).
+func testRadvRecreatedInterfaceRestartsActor(
+	t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet,
+) {
+	const iface = radvTestIface
+	started := make(chan struct{}, 4)
+	stopped := make(chan struct{}, 4)
+	orig := radvRunActor
+	t.Cleanup(func() { radvRunActor = orig })
+	radvRunActor = func(ctx context.Context, _ string, _ int) error {
+		started <- struct{}{}
+		<-ctx.Done()
+		stopped <- struct{}{}
+		return nil
+	}
+	await := func(ch <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("actor on %q not %s", iface, what)
+		}
+	}
+
+	env.links[iface] = radvTestLink{carrier: true, index: 7}
+	reconcileRadvActors(ctx, actors)
+	await(started, "started")
+
+	// Same interface on the next tick: left running.
+	reconcileRadvActors(ctx, actors)
+	select {
+	case <-stopped:
+		t.Fatalf("actor on unchanged %q stopped", iface)
+	default:
+	}
+
+	env.links[iface] = radvTestLink{carrier: true, index: 8}
+	reconcileRadvActors(ctx, actors)
+	await(stopped, "stopped after its interface was recreated")
+	await(started, "restarted on the recreated interface")
+	if _, running := actors.cancel[iface]; !running {
+		t.Fatalf("no actor tracked on recreated %q", iface)
+	}
+}
+
+// testRadvRecreatedInterfaceResetsBackoff covers a tap recreated under the same
+// name: it drops the backoff its predecessor built up, so the new guest is
+// served at once (#1293).
+func testRadvRecreatedInterfaceResetsBackoff(
+	t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet,
+) {
+	const iface = radvTestIface
+	env.links[iface] = radvTestLink{carrier: true}
+	for range 4 {
+		if p, ok := actors.pending[iface]; ok {
+			env.now = p.retryAt
+		}
+		reconcileRadvActors(ctx, actors)
+		radvActorFailed(actors, awaitRadvFailure(t, actors))
+	}
+	if p := actors.pending[iface]; p.failures != 4 || !p.retryAt.After(env.now) {
+		t.Fatalf("failures = %d, retryAt = %v, want 4 failures and a pending backoff", p.failures, p.retryAt)
+	}
+
+	env.links[iface] = radvTestLink{carrier: true, index: 2}
+	reconcileRadvActors(ctx, actors)
+	if _, running := actors.cancel[iface]; !running {
+		t.Fatalf("actor on recreated %q not started inside its predecessor's backoff", iface)
+	}
+	if p := actors.pending[iface]; p.failures != 0 {
+		t.Errorf("failures = %d after the interface was recreated, want 0", p.failures)
+	}
+	awaitRadvFailure(t, actors)
 }
 
 // testRadvAddrNotReadyBacksOff covers an interface with carrier that never gets
@@ -946,6 +1031,8 @@ func TestReconcileRadvActors(t *testing.T) {
 			},
 		},
 		{name: "CarrierLossCancelsRunningActor", run: testRadvCarrierLossCancelsRunningActor},
+		{name: "RecreatedInterfaceRestartsActor", run: testRadvRecreatedInterfaceRestartsActor},
+		{name: "RecreatedInterfaceResetsBackoff", run: testRadvRecreatedInterfaceResetsBackoff},
 		{name: "AddrNotReadyBacksOffAfterRepeatedExhaustion", run: testRadvAddrNotReadyBacksOff},
 		{
 			// A record whose interface is gone is removed once the grace

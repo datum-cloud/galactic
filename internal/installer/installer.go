@@ -767,6 +767,9 @@ type radvPending struct {
 	// removeFailed records that removing the stale record has failed, so the
 	// failure is warned about once rather than on every tick.
 	removeFailed bool
+	// ifindex is the interface index the last reconcile found, zero before
+	// the first. A change means the tap was recreated under the same name.
+	ifindex int
 }
 
 // radvActorFailure is an actor goroutine's report that radv.RunActor could not
@@ -811,20 +814,40 @@ var radvRunActor = radv.RunActor
 // radvNow is the clock reconcileRadvActors reads. A var so tests can move it.
 var radvNow = time.Now
 
-// radvLinkState reports whether iface exists and whether it has carrier. A tap
-// has carrier only while a VMM holds it open, and until then the kernel never
-// assigns it a link-local address, so an actor started on it cannot open its
-// NDP connection. A var so tests can fake the kernel.
-var radvLinkState = func(iface string) (exists, carrier bool, err error) {
+// radvLinkState reports whether iface exists, whether it has carrier, and its
+// interface index. A tap has carrier only while a VMM holds it open, and until
+// then the kernel never assigns it a link-local address, so an actor started on
+// it cannot open its NDP connection. The index tells a tap recreated under the
+// same name apart from the one it replaced. A var so tests can fake the kernel.
+var radvLinkState = func(iface string) (exists, carrier bool, index int, err error) {
 	link, err := netlink.LinkByName(iface)
 	if err != nil {
 		var notFound netlink.LinkNotFoundError
 		if errors.As(err, &notFound) {
-			return false, false, nil
+			return false, false, 0, nil
 		}
-		return false, false, err
+		return false, false, 0, err
 	}
-	return true, link.Attrs().RawFlags&unix.IFF_LOWER_UP != 0, nil
+	attrs := link.Attrs()
+	return true, attrs.RawFlags&unix.IFF_LOWER_UP != 0, attrs.Index, nil
+}
+
+// radvInterfaceReplaced records iface's current index in p and reports whether
+// it differs from the one last seen, meaning the interface was deleted and
+// recreated under the same name. The retry state belonged to the old interface,
+// so it is reset, giving the new tap's guest a fresh, fast retry cycle.
+func radvInterfaceReplaced(p *radvPending, iface string, index int) bool {
+	prev := p.ifindex
+	p.ifindex = index
+	if prev == 0 || prev == index {
+		return false
+	}
+	slog.Info("Router advertisement interface was recreated, restarting its actor",
+		"hostInterface", iface, "oldIfindex", prev, "ifindex", index)
+	p.failures = 0
+	p.notReady = 0
+	p.retryAt = time.Time{}
+	return true
 }
 
 // reconcileRadvActors starts one radv.RunActor per recorded tap attachment that
@@ -863,7 +886,7 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 	now := radvNow()
 	seen := make(map[string]struct{}, len(records))
 	for _, r := range records {
-		exists, carrier, err := radvLinkState(r.HostInterface)
+		exists, carrier, index, err := radvLinkState(r.HostInterface)
 		if err != nil {
 			// Unknown, so leave the attachment as it is until a tick can tell.
 			slog.Debug("Failed to look up router advertisement interface",
@@ -880,6 +903,15 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 		}
 		p.missingSince = time.Time{}
 		seen[r.HostInterface] = struct{}{}
+		if radvInterfaceReplaced(p, r.HostInterface, index) {
+			if cancel, running := actors.cancel[r.HostInterface]; running {
+				// Its connection is bound to the deleted interface and would
+				// never reach the new tap's guest. Stop it, so one is started
+				// on the new tap below as soon as that tap is ready.
+				cancel()
+				delete(actors.cancel, r.HostInterface)
+			}
+		}
 
 		if cancel, running := actors.cancel[r.HostInterface]; running {
 			if !carrier {

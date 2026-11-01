@@ -153,7 +153,7 @@ func SendRouterAdvertisement(iface string, mtu int) error {
 		return fmt.Errorf("look up interface %q: %w", iface, err)
 	}
 
-	conn, _, err := ndp.Listen(ifi, ndp.LinkLocal)
+	conn, _, err := ndp.Listen(indexZoned(ifi), ndp.LinkLocal)
 	if err != nil {
 		return fmt.Errorf("open NDP connection on %q: %w", iface, err)
 	}
