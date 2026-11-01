@@ -346,6 +346,25 @@ cannot be read is skipped, logged and retried on the next tick.
 `galactic_endpointslice_repair_restored_total` counts the slices recreated,
 and `galactic_endpointslice_repair_failures_total` the passes that failed.
 
+The same pass reports a pod left on a superseded VPC attachment. A pod keeps
+the attachment its ADD ran with, and ADD names the host link after it. When the
+NetworkAttachmentDefinition is rewritten for a replacement `VPCAttachment`
+while the pod runs, nothing attaches the pod under the new one: the
+replacement gets no host link and no `BGPAdvertisement`, so it is never
+`Programmed`, until the pod is recreated. The guest stays on the original
+attachment's host link and VRF. Node-side cleanup keys on that host link, the
+pod's netns and the VPC rather than on the `VPCAttachment`, so none of it
+removes the original attachment while the pod runs. For every Running pod with
+a galactic attachment, whether or not its slice exists, the pass checks that
+the node holds the host link of the `vpc`/`vpcattachment` the definition names
+now. When it does not, the pass logs a warning naming the pod, both
+identifiers and the missing link, and counts the pod in
+`galactic_endpointslice_repair_superseded_pods`. The gauge changes only after a
+pass that examined every pod; a definition whose config cannot be parsed is
+skipped without holding it back. A pod whose sandbox is being recreated misses
+its host link for a moment, so a single pass can count it. Deleting a
+superseded pod re-attaches it under the current attachment.
+
 Both the pod's name and its namespace are parsed from `K8S_POD_NAME`/
 `K8S_POD_NAMESPACE` in `CNI_ARGS` (`internal/nadpatch.ParsePodName`/
 `ParsePodNamespace`) — Multus always sets both for a real pod-scoped

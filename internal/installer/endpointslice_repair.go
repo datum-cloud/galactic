@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,6 +28,7 @@ import (
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/hostconf"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/podslice"
 )
@@ -43,6 +45,14 @@ type endpointSliceRepairResult struct {
 	// Skipped is how many attached pods the pass could not rebuild a slice
 	// for from what the API holds, each logged with its reason.
 	Skipped int
+	// Superseded is how many Running pods' NetworkAttachmentDefinitions name
+	// a VPC attachment this node holds no host link for.
+	Superseded int
+	// Complete is set when Superseded is a full count: the pod list
+	// succeeded, every definition and host link could be read from the API
+	// and the kernel, and the pass was not cut short. A definition whose
+	// config is unusable is skipped without making the pass incomplete.
+	Complete bool
 }
 
 // bgpAttachment is a galactic-bgp stanza's identifiers.
@@ -65,8 +75,8 @@ func repairEndpointSlicesOnTick(ctx context.Context, sem chan struct{}, st ebpfD
 			passCtx, cancel := context.WithTimeout(ctx, ebpfGCSweepInterval)
 			defer cancel()
 			result, err := repairEndpointSlices(passCtx, st.k8sClient, st.namespace, st.nodeName)
-			st.endpointSliceRepair.Pass(result.Restored, err != nil)
-			attrs := []any{"restored", result.Restored, "skipped", result.Skipped}
+			st.endpointSliceRepair.Pass(result.Restored, result.Superseded, result.Complete, err != nil)
+			attrs := []any{"restored", result.Restored, "skipped", result.Skipped, "superseded", result.Superseded}
 			switch {
 			case err != nil:
 				slog.Warn("EndpointSlice repair failed; pods may still lack their EndpointSlice",
@@ -95,6 +105,9 @@ func repairEndpointSlicesOnTick(ctx context.Context, sem chan struct{}, st ebpfD
 // than one galactic attachment gets the last one with an IPv6 address, the
 // one whose ADD runs last and so last writes the shared, per-pod slice.
 //
+// Every attached pod, with a slice or without, is also checked for a
+// superseded attachment; see superseded.
+//
 // It only creates; a slice that exists is left alone. The recreated slice
 // carries no sandbox annotation, so no DEL removes it; its owner reference
 // does once the pod is deleted, and the pod's next ADD takes it over. A pod
@@ -104,6 +117,7 @@ func repairEndpointSlices(
 	ctx context.Context, k8s client.Client, defaultNamespace, nodeName string,
 ) (endpointSliceRepairResult, error) {
 	var result endpointSliceRepairResult
+	incomplete := false
 
 	pods := &corev1.PodList{}
 	if err := k8s.List(ctx, pods, client.MatchingFields{podNodeNameField: nodeName}); err != nil {
@@ -130,9 +144,23 @@ func repairEndpointSlices(
 			continue
 		}
 
-		// The slice is read before the attachment is resolved, so a pod that
-		// has its slice costs one read and is never skipped for a definition
-		// that has since changed.
+		att, addr, attErr := lastGalacticIPv6Attachment(ctx, k8s, nads, statuses, defaultNamespace)
+		switch {
+		case attErr != nil && !errors.Is(attErr, errInvalidDefinition):
+			incomplete = true
+		case att != nil:
+			isSuperseded, err := superseded(pod, att)
+			if err != nil {
+				slog.Warn("EndpointSlice repair: cannot tell whether pod's attachment is on this node",
+					"podRef", client.ObjectKeyFromObject(pod), "err", err)
+				incomplete = true
+			} else if isSuperseded {
+				result.Superseded++
+			}
+		}
+
+		// A pod that has its slice is never skipped for a definition that
+		// cannot be resolved.
 		key := client.ObjectKey{Name: crdnames.EndpointSliceName(pod.Name), Namespace: pod.Namespace}
 		if err := k8s.Get(ctx, key, &discoveryv1.EndpointSlice{}); err == nil {
 			continue
@@ -141,10 +169,9 @@ func repairEndpointSlices(
 			continue
 		}
 
-		att, addr, err := lastGalacticIPv6Attachment(ctx, k8s, nads, statuses, defaultNamespace)
-		if err != nil {
+		if attErr != nil {
 			slog.Warn("EndpointSlice repair: skipping pod whose attachment cannot be resolved",
-				"podRef", client.ObjectKeyFromObject(pod), "err", err)
+				"podRef", client.ObjectKeyFromObject(pod), "err", attErr)
 			result.Skipped++
 			continue
 		}
@@ -180,7 +207,49 @@ func repairEndpointSlices(
 			result.Restored++
 		}
 	}
+	result.Complete = !incomplete && ctx.Err() == nil
 	return result, errors.Join(errs...)
+}
+
+// hostLinkExistsFn reports whether this node has a link named name. A
+// variable so tests can stand in for the kernel.
+var hostLinkExistsFn = func(name string) (bool, error) {
+	_, err := netlink.LinkByName(name)
+	if err == nil {
+		return true, nil
+	}
+	var notFound netlink.LinkNotFoundError
+	if errors.As(err, &notFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+// superseded reports whether this node holds no host link for att, the
+// attachment pod's NetworkAttachmentDefinition names now, and logs it when it
+// does not.
+//
+// A pod keeps the attachment its CNI ADD ran with, and ADD names the host link
+// after it. When the definition is rewritten for a new attachment while the
+// pod runs, nothing attaches the pod under the new one: it has no host link and
+// no BGPAdvertisement, so its VPCAttachment is never Programmed, until the pod
+// is attached again. A host link is also missing for a moment while a
+// sandbox is recreated, so one pass's count can include such a pod.
+//
+// The kernel is read rather than the pod's EndpointSlice, whose tenant label
+// this pass rewrites from the current definition when it restores a missing
+// slice.
+func superseded(pod *corev1.Pod, att *bgpAttachment) (bool, error) {
+	link := intf.GenerateInterfaceNameHost(att.vpc, att.vpcAttachment)
+	held, err := hostLinkExistsFn(link)
+	if err != nil || held {
+		return false, err
+	}
+	slog.Warn("Pod's NetworkAttachmentDefinition names a VPC attachment this node holds no host link for; "+
+		"the attachment stays unprogrammed until the pod is attached again",
+		"podRef", client.ObjectKeyFromObject(pod), "vpc", att.vpc, "vpcAttachment", att.vpcAttachment,
+		"hostLink", link)
+	return true, nil
 }
 
 // networkStatuses parses pod's Multus network-status annotation. A pod
@@ -267,6 +336,11 @@ func firstIPv6(ips []string) net.IP {
 	return nil
 }
 
+// errInvalidDefinition marks a NetworkAttachmentDefinition whose config this
+// pass cannot use, which every later pass would also fail on, unlike an API
+// read that may succeed next time.
+var errInvalidDefinition = errors.New("unusable NetworkAttachmentDefinition")
+
 // galacticBGPStanza reads the galactic-bgp stanza of the definition at key,
 // or nil when the definition chains none or no longer exists. A stanza naming
 // no namespace uses defaultNamespace, as galactic-bgp does.
@@ -283,7 +357,7 @@ func galacticBGPStanza(
 	}
 	configStr, _, err := unstructured.NestedString(nad.Object, "spec", "config")
 	if err != nil {
-		return nil, fmt.Errorf("NetworkAttachmentDefinition %s spec.config: %w", key, err)
+		return nil, fmt.Errorf("%w: NetworkAttachmentDefinition %s spec.config: %w", errInvalidDefinition, key, err)
 	}
 	var conflist struct {
 		Plugins []struct {
@@ -294,15 +368,15 @@ func galacticBGPStanza(
 		} `json:"plugins"`
 	}
 	if err := json.Unmarshal([]byte(configStr), &conflist); err != nil {
-		return nil, fmt.Errorf("parse NetworkAttachmentDefinition %s config: %w", key, err)
+		return nil, fmt.Errorf("%w: parse NetworkAttachmentDefinition %s config: %w", errInvalidDefinition, key, err)
 	}
 	for _, p := range conflist.Plugins {
 		if p.Type != hostconf.BGPPluginType {
 			continue
 		}
 		if p.VPC == "" || p.VPCAttachment == "" {
-			return nil, fmt.Errorf("NetworkAttachmentDefinition %s: %s stanza names no vpc or vpcattachment",
-				key, hostconf.BGPPluginType)
+			return nil, fmt.Errorf("%w: NetworkAttachmentDefinition %s: %s stanza names no vpc or vpcattachment",
+				errInvalidDefinition, key, hostconf.BGPPluginType)
 		}
 		ns := p.Namespace
 		if ns == "" {

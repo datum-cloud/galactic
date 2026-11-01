@@ -338,16 +338,25 @@ node that has a galactic IPv6 attachment but no slice, every 5 minutes (see
 The HTTP ingress sidecar finds a VPC backend only through that slice, so each
 recreated slice is a pod whose HTTP ingress was down until the pass.
 
-| Metric                                         | Type    | Labels | Meaning                                                                        |
-| ---------------------------------------------- | ------- | ------ | ------------------------------------------------------------------------------ |
-| `galactic_endpointslice_repair_restored_total` | counter | none   | Missing EndpointSlices the repair recreated                                    |
-| `galactic_endpointslice_repair_failures_total` | counter | none   | Passes that could not list the node's pods, or read or create an EndpointSlice |
+| Metric                                          | Type    | Labels | Meaning                                                                                                                                             |
+| ----------------------------------------------- | ------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_endpointslice_repair_restored_total`  | counter | none   | Missing EndpointSlices the repair recreated                                                                                                         |
+| `galactic_endpointslice_repair_superseded_pods` | gauge   | none   | Running pods whose NetworkAttachmentDefinition names a VPC attachment this node holds no host link for, as of the last pass that examined every pod |
+| `galactic_endpointslice_repair_failures_total`  | counter | none   | Passes that could not list the node's pods, or read or create an EndpointSlice                                                                      |
 
 A pod the pass cannot resolve (no NetworkAttachmentDefinition, `BGPRouter` or
 `BGPVRFInstance`) is logged and retried on the next pass, not counted as a
 failure.
 
+A superseded pod's current `VPCAttachment` stays unprogrammed until the pod is
+attached again; the `galactic-cni` log names each one (see
+[conflist-reference.md](../cni/conflist-reference.md#endpointslice-publish-http-ingress-backend-discovery)).
+
 ```promql
 # Slices going missing on a node: something removed them while their pods ran
 increase(galactic_endpointslice_repair_restored_total[1h]) > 0
+
+# Pods running on an attachment the control plane has replaced. A sandbox
+# being recreated misses its host link for one pass, so require two.
+max by (node) (min_over_time(galactic_endpointslice_repair_superseded_pods[10m])) > 0
 ```
