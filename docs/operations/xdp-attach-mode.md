@@ -132,13 +132,53 @@ capacity figures.
   they accept any live pinned link without checking its mode, so a node
   already migrated stays generic. To return such a node to native mode:
   1. Roll back the image.
-  2. Run `hack/xdp-dispatch-release.sh` on the node to detach the dispatcher.
+  2. [Detach the dispatcher](#detaching-the-dispatcher) from the node.
   3. Restart `galactic-gateway` and `galactic-nat`.
 
   Every uplink bounces once, so do this in a maintenance window.
 - **In direct mode, rolling back and restarting is enough.**
 - **There is no override variable.** The mode follows the host's NICs, so
   every datapath on a host always agrees.
+
+## Detaching the dispatcher
+
+The dispatcher's links are pinned, so it stays on the uplinks after
+`galactic-gateway` and `galactic-nat` stop or are removed. Detach it after
+removing both from a node for good, and before rolling either back to an image
+that predates the dispatcher, which would otherwise fail to attach with
+`EBUSY`.
+
+Removing a link pin detaches the dispatcher from that interface. Most drivers
+reset the interface once, and every datapath attached through the dispatcher
+on it stops seeing traffic at the same time, so do this in a maintenance
+window and only where neither `galactic-gateway` nor `galactic-nat` still
+serves that interface in dispatch mode. Work from a
+[galactic-debug](../../containers/galactic-debug/README.md) node pod, which
+mounts the host filesystem at `/host`, and delete the pod when you are done.
+
+Each pin is named after the interface index it holds. To detach one uplink:
+
+```sh
+rm -f /host/sys/fs/bpf/galactic-xdp/links/$(cat /sys/class/net/<uplink>/ifindex)
+```
+
+To detach every uplink:
+
+```sh
+rm -f /host/sys/fs/bpf/galactic-xdp/links/*
+```
+
+`ip -d link show <uplink>` no longer lists `prog/xdp ... name xdp_dispatch`
+once the dispatcher is detached. To also remove the dispatcher's pinned maps,
+root program and role rows once neither datapath will run on the node again,
+remove the whole directory:
+
+```sh
+rm -rf /host/sys/fs/bpf/galactic-xdp
+```
+
+Starting `galactic-gateway` or `galactic-nat` in dispatch mode attaches the
+dispatcher again.
 
 ## Validation
 
