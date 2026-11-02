@@ -23,6 +23,7 @@ import (
 // a route overlapping a workload subnet of the VPC is refused, and a subnet
 // created over an accepted route revokes it.
 func TestSubnetConflict(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
 	f.newRoute("r", prefixA)
@@ -66,6 +67,7 @@ func TestSubnetConflict(t *testing.T) {
 // address there, another service's client pool, or anything when an earlier
 // service's grant overlaps its own.
 func TestPoolAndGrantConflict(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
@@ -132,6 +134,7 @@ func TestPoolAndGrantConflict(t *testing.T) {
 // InvalidPrefix and never accepted or indexed, while another prefix of the
 // same holder is accepted.
 func TestOwnAddressRefused(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
 	f.update(f.svc, func(s *galacticv1alpha1.EdgeService) {
