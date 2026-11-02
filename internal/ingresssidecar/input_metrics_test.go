@@ -10,11 +10,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -25,8 +27,9 @@ import (
 )
 
 const (
-	mSlices      = "galactic_ingress_sidecar_endpoint_slices"
-	mEvaluations = "galactic_ingress_sidecar_endpoint_slice_evaluations_total"
+	mSlices       = "galactic_ingress_sidecar_endpoint_slices"
+	mEvaluations  = "galactic_ingress_sidecar_endpoint_slice_evaluations_total"
+	mObserveDelay = "galactic_ingress_sidecar_endpoint_slice_observe_delay_seconds"
 )
 
 func inputRegistry(t *testing.T) (*InputMetrics, *prometheus.Registry) {
@@ -99,7 +102,9 @@ func TestInputMetricsInitialState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]dto.MetricType{mSlices: dto.MetricType_GAUGE, mEvaluations: dto.MetricType_COUNTER}
+	want := map[string]dto.MetricType{
+		mSlices: dto.MetricType_GAUGE, mEvaluations: dto.MetricType_COUNTER, mObserveDelay: dto.MetricType_HISTOGRAM,
+	}
 	if len(families) != len(want) {
 		t.Errorf("exported %d families, want %d", len(families), len(want))
 	}
@@ -109,9 +114,102 @@ func TestInputMetricsInitialState(t *testing.T) {
 		}
 	}
 	sliceStates(t, reg, 0, 0, 0)
-	// 3 states, and 2 sources x 4 results.
-	if n := testutil.CollectAndCount(reg); n != 3+8 {
-		t.Errorf("%d series, want %d", n, 3+8)
+	// 3 states, 2 sources x 4 results, and 1 histogram.
+	if n := testutil.CollectAndCount(reg); n != 3+8+1 {
+		t.Errorf("%d series, want %d", n, 3+8+1)
+	}
+}
+
+// observeDelays is the observe-delay histogram's sample count and sum.
+func observeDelays(t *testing.T, reg *prometheus.Registry) (uint64, float64) {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() == mObserveDelay {
+			h := f.GetMetric()[0].GetHistogram()
+			return h.GetSampleCount(), h.GetSampleSum()
+		}
+	}
+	t.Fatalf("%s not exported", mObserveDelay)
+	return 0, 0
+}
+
+// TestObserveDelay: the watch times a slice's first ready observation
+// against its creationTimestamp, once per slice, counting a SID annotation
+// that arrives late. Slices created before the sidecar started, as the watch's
+// initial list delivers them, and slices without a creationTimestamp are
+// skipped. A slice deleted and recreated under its name is timed again,
+// whether or not a reconcile saw it gone in between.
+func TestObserveDelay(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	old := namedSlice("old", "fd00:99::1")
+	old.CreationTimestamp = metav1.NewTime(start.Add(-time.Hour))
+	late := namedSlice("late", "")
+	late.CreationTimestamp = metav1.NewTime(start.Add(10 * time.Second))
+	late.UID = testSliceUID1
+	c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(
+		old, late, namedSlice("unstamped", "fd00:99::1"),
+	).Build()
+	store := NewStore(newFakeBackend(), testGrace, nil)
+	m, reg := inputRegistry(t)
+	clock := &stepClock{t: start}
+	m.clock, m.startedAt = clock.now, start
+	store.SetInputMetrics(m)
+	r := &Reconciler{Client: c, Store: store}
+
+	reconcileSlice(t, r, "old")
+	reconcileSlice(t, r, "unstamped")
+	clock.step(15 * time.Second)
+	reconcileSlice(t, r, "late") // waiting for its SID: not ready yet
+	if n, _ := observeDelays(t, reg); n != 0 {
+		t.Fatalf("%d samples before any qualifying ready slice, want 0", n)
+	}
+
+	clock.step(30 * time.Second)
+	updateSlice(t, c, "late", func(s *discoveryv1.EndpointSlice) {
+		s.Annotations[crdnames.AnnotationSID] = "fd00:99::2"
+	})
+	reconcileSlice(t, r, "late")
+	reconcileSlice(t, r, "late")
+	if n, sum := observeDelays(t, reg); n != 1 || sum != 35 {
+		t.Fatalf("%d samples summing %v, want 1 summing 35", n, sum)
+	}
+
+	ctx := context.Background()
+	if err := c.Delete(ctx, namedSlice("late", "")); err != nil {
+		t.Fatal(err)
+	}
+	reconcileSlice(t, r, "late")
+	again := namedSlice("late", "fd00:99::2")
+	again.CreationTimestamp = metav1.NewTime(clock.now())
+	again.UID = testSliceUID2
+	if err := c.Create(ctx, again); err != nil {
+		t.Fatal(err)
+	}
+	clock.step(5 * time.Second)
+	reconcileSlice(t, r, "late")
+	if n, sum := observeDelays(t, reg); n != 2 || sum != 40 {
+		t.Fatalf("after recreation: %d samples summing %v, want 2 summing 40", n, sum)
+	}
+
+	// Deleted and recreated again, with the workqueue collapsing both events
+	// into one reconcile that never sees the slice gone: the new UID is timed.
+	if err := c.Delete(ctx, namedSlice("late", "")); err != nil {
+		t.Fatal(err)
+	}
+	third := namedSlice("late", "fd00:99::2")
+	third.CreationTimestamp = metav1.NewTime(clock.now())
+	third.UID = "uid-3"
+	if err := c.Create(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	clock.step(7 * time.Second)
+	reconcileSlice(t, r, "late")
+	if n, sum := observeDelays(t, reg); n != 3 || sum != 47 {
+		t.Errorf("after a collapsed recreation: %d samples summing %v, want 3 summing 47", n, sum)
 	}
 }
 

@@ -6,6 +6,7 @@ package ingresssidecar
 
 import (
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.miloapis.com/instrumentation/metrics"
@@ -67,15 +68,28 @@ func classifySlice(slice *discoveryv1.EndpointSlice) (string, *DesiredRoute, err
 // read from a lagging cache can briefly hold older data than the seed's list,
 // until the next event for that slice. The seed still applies its route for
 // such a key, as it always has; only these metrics prefer the watch.
+//
+// It also times how long each slice created after it took to reach the watch
+// as ready (observeReady): projection plus watch lag, before this sidecar
+// does anything with the slice.
 type InputMetrics struct {
-	slices      *prometheus.GaugeVec
-	evaluations *prometheus.CounterVec
+	slices       *prometheus.GaugeVec
+	evaluations  *prometheus.CounterVec
+	observeDelay prometheus.Histogram
 
 	mu      sync.Mutex
 	state   map[string]string
 	counts  map[string]int
 	seeding bool
 	watched map[string]struct{}
+
+	// clock and startedAt bound observeReady to slices created after these
+	// metrics, so the watch's initial list of existing slices is not
+	// mistaken for slow projection. readySeen holds the UID last timed for
+	// each key.
+	clock     func() time.Time
+	startedAt time.Time
+	readySeen map[string]string
 }
 
 // NewInputMetrics creates input metrics on the instrumentation library's
@@ -96,9 +110,20 @@ func NewInputMetrics() *InputMetrics {
 				"invalid, not_selected). Counts evaluations, including a reconcile retried after its route " +
 				"failed to apply, not distinct slices.",
 		}, []string{"source", resultLabel}),
-		state:  map[string]string{},
-		counts: map[string]int{},
+		observeDelay: newHistogram(prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Name:      "endpoint_slice_observe_delay_seconds",
+			Help: "Time from an EndpointSlice's creationTimestamp to this sidecar's watch first observing it " +
+				"ready: projection, SID annotation and watch lag. Only slices created after the sidecar " +
+				"started; second resolution, from the API server's clock.",
+			Buckets: delayBuckets,
+		}),
+		state:     map[string]string{},
+		counts:    map[string]int{},
+		clock:     time.Now,
+		readySeen: map[string]string{},
 	}
+	m.startedAt = m.clock()
 	m.slices.Reset()
 	m.evaluations.Reset()
 	for _, s := range inputStates {
@@ -161,6 +186,29 @@ func (m *InputMetrics) observeWatch(key, result string) {
 	m.setLocked(key, result)
 }
 
+// observeReady times the watch's first ready observation of the slice at key
+// with UID uid against its creationTimestamp, created. A new UID under a key
+// already timed, a slice deleted and recreated under its name, is timed
+// again even when no reconcile saw it gone. Slices with no creationTimestamp,
+// or created before these metrics, are skipped. creationTimestamp has whole
+// seconds, so startedAt is truncated to match; a negative delay from clock
+// skew counts as zero.
+func (m *InputMetrics) observeReady(key, uid string, created time.Time) {
+	if m == nil || created.IsZero() {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if seen, ok := m.readySeen[key]; ok && seen == uid {
+		return
+	}
+	m.readySeen[key] = uid
+	if created.Before(m.startedAt.Truncate(time.Second)) {
+		return
+	}
+	m.observeDelay.Observe(max(m.clock().Sub(created), 0).Seconds())
+}
+
 // forget removes key, whose slice the watch found deleted.
 func (m *InputMetrics) forget(key string) {
 	if m == nil {
@@ -170,6 +218,10 @@ func (m *InputMetrics) forget(key string) {
 	defer m.mu.Unlock()
 	m.markWatchedLocked(key)
 	m.setLocked(key, InputNotSelected)
+	// Only a deletion forgets the slice's timing. One that merely lost its
+	// tenant label keeps it, so regaining the label is not timed again from
+	// its original creationTimestamp; a recreation brings a new UID anyway.
+	delete(m.readySeen, key)
 }
 
 func (m *InputMetrics) markWatchedLocked(key string) {

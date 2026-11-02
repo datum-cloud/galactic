@@ -27,6 +27,7 @@ var (
 // routeState tracks one pod's route lifecycle, keyed by its EndpointSlice's
 // namespace/name.
 type routeState struct {
+	key       string
 	vpc       string
 	prefix    *net.IPNet
 	sid       net.IP
@@ -44,6 +45,17 @@ type routeState struct {
 	// or the zero Time while it is not both. A retry or a newer update of a
 	// route already pending keeps it: the claim has been unapplied since then.
 	pendingSince time.Time
+	// firstObserved is when this sidecar first had this route desired for its
+	// current EndpointSlice, whose creationTimestamp and UID are sliceCreated
+	// and sliceUID. announce holds until that slice's route first applies,
+	// for the first-install log. measure holds while the pending update is
+	// one route_apply_delay_seconds times: new, reactivated or changed.
+	// Diagnostics only.
+	firstObserved time.Time
+	sliceCreated  time.Time
+	sliceUID      string
+	announce      bool
+	measure       bool
 }
 
 // claim reports whether r counts as a desired route claim, and as one whose
@@ -194,6 +206,11 @@ func (s *Store) claimChangedLocked(r *routeState, wasDesired, wasPending bool) {
 		r.pendingSince = s.clock()
 		s.pendingQueue = append(s.pendingQueue, pendingEntry{r: r, since: r.pendingSince})
 	case !pending && wasPending:
+		if desired && r.measure {
+			// Still desired, so the claim was applied rather than withdrawn.
+			s.convergence.applied(s.clock().Sub(r.pendingSince))
+		}
+		r.measure = false
 		r.pendingSince = time.Time{} // its queue entry is now stale
 	}
 }
@@ -597,12 +614,26 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 	if ok {
 		wasDesired, wasPending = r.claim()
 	} else {
-		r = &routeState{}
+		r = &routeState{key: key}
 		s.routes[key] = r
+	}
+	// A new key, a reactivated one, or a slice recreated under the same name
+	// is a new slice to this sidecar: time it from now and log its install.
+	// Any of those, or a changed route, is an update worth timing; a
+	// reconcile that changes nothing is not, or it would drown the rest.
+	fresh := !ok || !wasDesired || (desired.SliceUID != "" && desired.SliceUID != r.sliceUID)
+	if fresh {
+		r.firstObserved = s.clock()
+		r.announce = true
+	}
+	if fresh || r.vpc != desired.VPC || r.prefix.String() != desired.Prefix.String() || !r.sid.Equal(desired.SID) {
+		r.measure = true
 	}
 	r.vpc = desired.VPC
 	r.prefix = desired.Prefix
 	r.sid = desired.SID
+	r.sliceCreated = desired.SliceCreated
+	r.sliceUID = desired.SliceUID
 	r.absentSince = time.Time{} // (re)activated -- cancel any pending teardown
 	r.pending = true
 	s.claimChangedLocked(r, wasDesired, wasPending)
@@ -650,7 +681,27 @@ func (s *Store) applyLocked(ctx context.Context, r *routeState) error {
 		r.installed = true
 		s.routeActiveDelta(1)
 	}
+	if r.announce {
+		r.announce = false
+		logFirstInstall(r, s.clock())
+	}
 	return nil
+}
+
+// logFirstInstall logs, at debug level, that r's route was applied for the
+// first time for its current EndpointSlice at now, with when that slice was
+// created and when this sidecar first observed it. The two delays split a
+// slow install between projection plus the watch (sinceCreated minus
+// sinceObserved) and this sidecar's own apply (sinceObserved).
+func logFirstInstall(r *routeState, now time.Time) {
+	attrs := []any{
+		"endpointslice", r.key, "vpc", r.vpc, "prefix", r.prefix.String(),
+		"observed", r.firstObserved, "installed", now, "sinceObserved", now.Sub(r.firstObserved),
+	}
+	if !r.sliceCreated.IsZero() {
+		attrs = append(attrs, "sliceCreated", r.sliceCreated, "sinceCreated", now.Sub(r.sliceCreated))
+	}
+	slog.Debug("ingresssidecar: applied route for new EndpointSlice", attrs...)
 }
 
 // retryPendingLocked applies every desired route an earlier SetDesired failed

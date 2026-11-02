@@ -7,6 +7,7 @@ package ingresssidecar
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net"
 	"strings"
@@ -25,6 +26,13 @@ const (
 	mOldestPending = "galactic_ingress_sidecar_route_apply_oldest_pending_timestamp_seconds"
 	mOverdue       = "galactic_ingress_sidecar_teardown_overdue"
 	mOperations    = "galactic_ingress_sidecar_operations_total"
+	mApplyDelay    = "galactic_ingress_sidecar_route_apply_delay_seconds"
+)
+
+// Slice UIDs for a slice and the one recreated under its name.
+const (
+	testSliceUID1 = "uid-1"
+	testSliceUID2 = "uid-2"
 )
 
 // stepClock is a clock tests move by hand.
@@ -145,6 +153,7 @@ func TestConvergenceMetricsInitialState(t *testing.T) {
 		mOldestPending: dto.MetricType_GAUGE,
 		mOverdue:       dto.MetricType_GAUGE,
 		mOperations:    dto.MetricType_COUNTER,
+		mApplyDelay:    dto.MetricType_HISTOGRAM,
 	}
 	if len(families) != len(types) {
 		t.Errorf("exported %d families, want %d", len(families), len(types))
@@ -154,15 +163,172 @@ func TestConvergenceMetricsInitialState(t *testing.T) {
 			t.Errorf("%s: type %v, help %q; want type %v and a help", f.GetName(), f.GetType(), f.GetHelp(), want)
 		}
 		for _, m := range f.GetMetric() {
-			if v := m.GetGauge().GetValue() + m.GetCounter().GetValue(); v != 0 {
+			if v := m.GetGauge().GetValue() + m.GetCounter().GetValue() +
+				float64(m.GetHistogram().GetSampleCount()); v != 0 {
 				t.Errorf("%s%v = %v at start, want 0", f.GetName(), m.GetLabel(), v)
 			}
 		}
 	}
-	// 3 scalars, 2 teardown resources, 6 operations x 2 results.
-	if n := testutil.CollectAndCount(reg); n != 3+2+12 {
-		t.Errorf("%d series, want %d", n, 3+2+12)
+	// 3 scalars, 2 teardown resources, 6 operations x 2 results, 1 histogram.
+	if n := testutil.CollectAndCount(reg); n != 3+2+12+1 {
+		t.Errorf("%d series, want %d", n, 3+2+12+1)
 	}
+}
+
+// applyDelays is the apply-delay histogram's sample count and sum.
+func (c *convergenceStore) applyDelays(t *testing.T) (uint64, float64) {
+	t.Helper()
+	families, err := c.reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() == mApplyDelay {
+			h := f.GetMetric()[0].GetHistogram()
+			return h.GetSampleCount(), h.GetSampleSum()
+		}
+	}
+	t.Fatalf("%s not exported", mApplyDelay)
+	return 0, 0
+}
+
+// TestApplyDelaySpansRetries: the apply delay runs from the moment a
+// claim first became pending through failed attempts to the apply that
+// succeeds, so a route stuck behind sweep retries shows its whole wait. Only
+// a new, reactivated or changed claim is timed, not a reconcile that changes
+// nothing. A claim withdrawn while pending is not counted as applied.
+func TestApplyDelaySpansRetries(t *testing.T) {
+	c := newConvergenceStore(t, time.Hour)
+	ctx := context.Background()
+
+	// Applied at once: one sample of zero.
+	if err := c.SetDesired(ctx, "ns/a", route(t, "fd00::1", "fd00:99::1")); err != nil {
+		t.Fatal(err)
+	}
+	if n, sum := c.applyDelays(t); n != 1 || sum != 0 {
+		t.Fatalf("after a prompt apply: %d samples summing %v, want 1 summing 0", n, sum)
+	}
+
+	// Reconciles that change nothing, as resyncs and the watch's initial list
+	// after the seed are, are not timed; a changed route is.
+	for range 3 {
+		if err := c.SetDesired(ctx, "ns/a", route(t, "fd00::1", "fd00:99::1")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, _ := c.applyDelays(t); n != 1 {
+		t.Fatalf("unchanged reconciles were timed: %d samples, want 1", n)
+	}
+	if err := c.SetDesired(ctx, "ns/a", route(t, "fd00::1", "fd00:99::9")); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := c.applyDelays(t); n != 2 {
+		t.Fatalf("a changed route was not timed: %d samples, want 2", n)
+	}
+
+	// Fails, retried by two sweeps a minute apart, then applies.
+	c.backend.mu.Lock()
+	c.backend.failEnsureRoute = errTest
+	c.backend.mu.Unlock()
+	_ = c.SetDesired(ctx, "ns/b", route(t, "fd00::2", "fd00:99::1"))
+	c.clock.step(time.Minute)
+	c.Sweep(ctx, c.clock.now())
+	if n, _ := c.applyDelays(t); n != 2 {
+		t.Fatalf("a failed retry was counted: %d samples, want 2", n)
+	}
+	c.backend.mu.Lock()
+	c.backend.failEnsureRoute = nil
+	c.backend.mu.Unlock()
+	c.clock.step(time.Minute)
+	c.Sweep(ctx, c.clock.now())
+	if n, sum := c.applyDelays(t); n != 3 || sum != 120 {
+		t.Fatalf("after the retried apply: %d samples summing %v, want 3 summing 120", n, sum)
+	}
+
+	// Pending, then withdrawn before it applies: no sample.
+	c.backend.mu.Lock()
+	c.backend.failEnsureRoute = errTest
+	c.backend.mu.Unlock()
+	_ = c.SetDesired(ctx, "ns/c", route(t, "fd00::3", "fd00:99::1"))
+	c.clock.step(time.Minute)
+	if err := c.SetDesired(ctx, "ns/c", nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := c.applyDelays(t); n != 3 {
+		t.Errorf("a withdrawn claim was counted as applied: %d samples, want 3", n)
+	}
+}
+
+// TestFirstInstallLog: a route's first install logs, at debug level,
+// its slice, when the slice was created and first observed, and both delays.
+// A later update of the same slice does not log again. A slice recreated
+// under the same name, as a replaced pod's is, logs as new even when its
+// predecessor's route never left the store.
+func TestFirstInstallLog(t *testing.T) {
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&syncWriter{w: &buf}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	c := newConvergenceStore(t, time.Hour)
+	ctx := context.Background()
+	c.backend.mu.Lock()
+	c.backend.failEnsureRoute = errTest
+	c.backend.mu.Unlock()
+	r := route(t, "fd00::1", "fd00:99::1")
+	r.SliceCreated = t0.Add(-45 * time.Second)
+	r.SliceUID = testSliceUID1
+	_ = c.SetDesired(ctx, "ns/a", r)
+	c.clock.step(30 * time.Second)
+	c.backend.mu.Lock()
+	c.backend.failEnsureRoute = nil
+	c.backend.mu.Unlock()
+	c.Sweep(ctx, c.clock.now())
+	update := route(t, "fd00::1", "fd00:99::2")
+	update.SliceUID = testSliceUID1
+	_ = c.SetDesired(ctx, "ns/a", update)
+
+	out := buf.String()
+	if n := strings.Count(out, "applied route for new EndpointSlice"); n != 1 {
+		t.Fatalf("logged %d first installs, want 1:\n%s", n, out)
+	}
+	for _, want := range []string{
+		"endpointslice=ns/a", "vpc=" + testVPC1, "prefix=fd00::1/128",
+		"sinceObserved=30s", "sinceCreated=1m15s", "sliceCreated=", "observed=", "installed=",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("first-install log lacks %q:\n%s", want, out)
+		}
+	}
+
+	// The pod is replaced: same slice name, new UID, no reconcile in between
+	// that saw the old slice gone.
+	c.clock.step(time.Minute)
+	replaced := route(t, "fd00::1", "fd00:99::2")
+	replaced.SliceUID = testSliceUID2
+	replaced.SliceCreated = c.clock.now().Add(-10 * time.Second)
+	if err := c.SetDesired(ctx, "ns/a", replaced); err != nil {
+		t.Fatal(err)
+	}
+	out = buf.String()
+	if n := strings.Count(out, "applied route for new EndpointSlice"); n != 2 {
+		t.Fatalf("logged %d first installs after a replacement, want 2:\n%s", n, out)
+	}
+	if !strings.Contains(out, "sinceObserved=0s sliceCreated=") || !strings.Contains(out, "sinceCreated=10s") {
+		t.Errorf("replacement not timed from its own observation and creation:\n%s", out)
+	}
+}
+
+// syncWriter serializes writes to w.
+type syncWriter struct {
+	mu sync.Mutex
+	w  *strings.Builder
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // TestPendingAgeSurvivesRetries: a claim that cannot be applied stays pending
