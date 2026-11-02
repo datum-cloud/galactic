@@ -15,8 +15,9 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// Package controller holds the galactic-controller reconcilers that project
-// data-plane state onto the Datum API and allocate fabric identities.
+// Package controller holds the galactic-controller reconcilers and metrics
+// collector that project data-plane state onto the Datum API and allocate
+// fabric identities.
 //
 // It creates no VPC, VPCAttachment or NetworkAttachmentDefinition. When
 // Galactic integration is enabled the network-services-operator cell manager
