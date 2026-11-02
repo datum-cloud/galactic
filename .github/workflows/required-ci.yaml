@@ -1,0 +1,16 @@
+name: Required CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: datum-cloud/actions/.github/workflows/ci-basic.yaml@v1.26.0
+    with:
+      skip: build, test, docker
+      run: bash scripts/required-ci.sh
