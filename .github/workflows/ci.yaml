@@ -60,7 +60,9 @@ jobs:
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The race-enabled suite plus the example modules take about 12 minutes on
+    # a typical runner and over 15 on a slow one.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
 

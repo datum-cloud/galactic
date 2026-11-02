@@ -15,14 +15,23 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// Package controller reconciles VPC and VPCAttachment in a POP cell: it turns a
-// NetworkContext into a VPC identity, creates the attachment and the
-// NetworkAttachmentDefinition when a NetworkInterface claim is fulfilled,
-// reports Prepared, and projects what the galactic data plane published back
-// onto the Datum API.
+// Package controller holds the galactic-controller reconcilers and metrics
+// collector that project data-plane state onto the Datum API and allocate
+// fabric identities.
+//
+// It creates no VPC, VPCAttachment or NetworkAttachmentDefinition. When
+// Galactic integration is enabled the network-services-operator cell manager
+// owns those, and docs/controller/README.md describes the split.
+//
+// With --role=cell, BGPAdvertisementReconciler projects the BGPAdvertisement
+// galactic-router publishes onto VPCAttachment, NetworkInterface and
+// NetworkInterfaceClaim as Programmed, and InstanceAttachmentCollector reports
+// running instances' attachment state. The pod-interface webhook is in
+// internal/cloud/webhook. With --role=fabric, NetworkFabricIdentityReconciler
+// allocates each network's NetworkFabricIdentity on the federation hub.
 package controller
 
-// Leader election is what serializes identifier allocation, so the lease and
+// Leader election elects the one replica that reconciles, so the lease and
 // event permissions below are load-bearing rather than boilerplate.
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
