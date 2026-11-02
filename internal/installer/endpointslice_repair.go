@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
@@ -31,6 +32,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/podslice"
+	"go.datum.net/galactic/internal/virtualnode"
 )
 
 // podNodeNameField is the pod field the repair lists this node's pods by.
@@ -92,18 +94,24 @@ func repairEndpointSlicesOnTick(ctx context.Context, sem chan struct{}, st ebpfD
 }
 
 // repairEndpointSlices recreates the per-pod EndpointSlice of every Running
-// pod on nodeName that has a galactic attachment with an IPv6 address but no
-// slice. Only CNI ADD otherwise writes the slice, so one removed while its
-// pod lives would stay missing, and the pod unreachable through HTTP ingress,
-// until the pod is recreated.
+// pod attached on nodeName that has a galactic attachment with an IPv6
+// address but no slice. Only CNI ADD otherwise writes the slice, so one
+// removed while its pod lives would stay missing, and the pod unreachable
+// through HTTP ingress, until the pod is recreated.
+//
+// The pods attached on nodeName are those bound to it and those bound to a
+// virtual kubelet Node it hosts (see podNodes), such as a Unikraft instance's:
+// their taps and host links are on this node.
 //
 // A pod's attachments come from its Multus network-status annotation: each
 // entry names the NetworkAttachmentDefinition whose galactic-bgp stanza gives
 // the VPC, the attachment and the namespace of its BGP objects, and carries
-// the addresses the attachment received. The slice's SID comes from this
-// node's BGPRouter and the VPC's BGPVRFInstance, as on ADD. A pod with more
-// than one galactic attachment gets the last one with an IPv6 address, the
-// one whose ADD runs last and so last writes the shared, per-pod slice.
+// the addresses the attachment received. The default network's entry counts
+// too, as a compute instance's Galactic attachment is its default network.
+// The slice's SID comes from this node's BGPRouter and the VPC's
+// BGPVRFInstance, as on ADD. A pod with more than one galactic attachment
+// gets the last one with an IPv6 address, the one whose ADD runs last and so
+// last writes the shared, per-pod slice.
 //
 // Every attached pod, with a slice or without, is also checked for a
 // superseded attachment; see superseded.
@@ -119,16 +127,31 @@ func repairEndpointSlices(
 	var result endpointSliceRepairResult
 	incomplete := false
 
-	pods := &corev1.PodList{}
-	if err := k8s.List(ctx, pods, client.MatchingFields{podNodeNameField: nodeName}); err != nil {
-		return result, fmt.Errorf("list pods on node %s: %w", nodeName, err)
+	var errs []error
+	nodes, err := podNodes(ctx, k8s, nodeName)
+	if err != nil {
+		// This node's own pods are still covered; only the count is partial.
+		incomplete = true
+		errs = append(errs, err)
+	}
+	var pods []corev1.Pod
+	for _, n := range nodes {
+		list := &corev1.PodList{}
+		if err := k8s.List(ctx, list, client.MatchingFields{podNodeNameField: n}); err != nil {
+			if n == nodeName {
+				return result, fmt.Errorf("list pods on node %s: %w", n, err)
+			}
+			incomplete = true
+			errs = append(errs, fmt.Errorf("list pods on virtual node %s: %w", n, err))
+			continue
+		}
+		pods = append(pods, list.Items...)
 	}
 
 	nads := map[client.ObjectKey]*bgpAttachment{}
 	identities := nodeIdentities{}
-	var errs []error
-	for i := range pods.Items {
-		pod := &pods.Items[i]
+	for i := range pods {
+		pod := &pods[i]
 		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
@@ -140,7 +163,7 @@ func repairEndpointSlices(
 			continue
 		}
 
-		if !hasSecondaryIPv6(statuses) {
+		if !hasIPv6(statuses) {
 			continue
 		}
 
@@ -266,12 +289,33 @@ func networkStatuses(pod *corev1.Pod) ([]nadv1.NetworkStatus, error) {
 	return statuses, nil
 }
 
-// hasSecondaryIPv6 reports whether any non-default entry of statuses carries
-// an IPv6 address, the precondition for any galactic attachment to need a
-// slice.
-func hasSecondaryIPv6(statuses []nadv1.NetworkStatus) bool {
+// podNodes returns nodeName and the virtual kubelet Nodes it hosts, sorted,
+// whose pods this node attaches. On error it returns nodeName alone with the
+// error, so a pass still covers this node's own pods.
+func podNodes(ctx context.Context, k8s client.Client, nodeName string) ([]string, error) {
+	host := corev1.Node{}
+	if err := k8s.Get(ctx, client.ObjectKey{Name: nodeName}, &host); err != nil {
+		return []string{nodeName}, fmt.Errorf("get node %s: %w", nodeName, err)
+	}
+	virtual := &corev1.NodeList{}
+	if err := k8s.List(ctx, virtual, client.MatchingLabels(virtualnode.Selector())); err != nil {
+		return []string{nodeName}, fmt.Errorf("list virtual kubelet nodes: %w", err)
+	}
+	var hosted []string
+	for name, h := range virtualnode.Hosts(append(virtual.Items, host)) {
+		if h == nodeName {
+			hosted = append(hosted, name)
+		}
+	}
+	slices.Sort(hosted)
+	return slices.Insert(hosted, 0, nodeName), nil
+}
+
+// hasIPv6 reports whether any entry of statuses carries an IPv6 address, the
+// precondition for any galactic attachment to need a slice.
+func hasIPv6(statuses []nadv1.NetworkStatus) bool {
 	for _, st := range statuses {
-		if !st.Default && firstIPv6(st.IPs) != nil {
+		if firstIPv6(st.IPs) != nil {
 			return true
 		}
 	}
@@ -280,17 +324,17 @@ func hasSecondaryIPv6(statuses []nadv1.NetworkStatus) bool {
 
 // lastGalacticIPv6Attachment returns the last entry of statuses that names a
 // definition chaining galactic-bgp and carries an IPv6 address, with that
-// address. It returns nil when there is none. nads caches each definition's
-// stanza for the pass, nil for one that chains no galactic-bgp.
+// address. It returns nil when there is none. The default network's entry,
+// which Multus lists first, is considered like any other: it is a compute
+// instance's Galactic attachment, and a cluster network chains no
+// galactic-bgp. nads caches each definition's stanza for the pass, nil for
+// one that chains no galactic-bgp.
 func lastGalacticIPv6Attachment(
 	ctx context.Context, k8s client.Client, nads map[client.ObjectKey]*bgpAttachment,
 	statuses []nadv1.NetworkStatus, defaultNamespace string,
 ) (*bgpAttachment, net.IP, error) {
 	for i := len(statuses) - 1; i >= 0; i-- {
 		st := statuses[i]
-		if st.Default {
-			continue
-		}
 		addr := firstIPv6(st.IPs)
 		if addr == nil {
 			continue

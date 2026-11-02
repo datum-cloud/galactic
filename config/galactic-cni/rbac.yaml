@@ -23,10 +23,13 @@ rules:
     resources:
       - network-attachment-definitions
     verbs: ["get", "patch"]
+  # nodes (read only): get for the startup identity check; list for the
+  # EndpointSlice repair, which selects virtual kubelet Nodes by label and
+  # also repairs the pods of those sharing this node's internal address.
   - apiGroups: [""]
     resources:
       - nodes
-    verbs: ["get"]
+    verbs: ["get", "list"]
   # discovery.k8s.io/endpointslices: galactic-bgp's per-pod EndpointSlice
   # publish (ADD), delete (DEL), and CHECK, and galactic-cni run's repair of
   # a missing one.
@@ -38,8 +41,9 @@ rules:
   # EndpointSlice's ownerReference, so the k8s garbage collector reclaims
   # a force-deleted/never-DEL'd pod's EndpointSlice as a backstop; list for
   # the EndpointSlice repair. RBAC cannot scope list to a node, so this grants
-  # listing every pod; the repair asks only for its own node's (field
-  # selector spec.nodeName). This SA never writes a Pod.
+  # listing every pod; the repair asks only for the pods of its own node and
+  # of the virtual kubelet Nodes it hosts (field selector spec.nodeName).
+  # This SA never writes a Pod.
   - apiGroups: [""]
     resources:
       - pods
