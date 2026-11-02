@@ -47,6 +47,11 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
+  # A virtual kubelet Node's pods are programmed on the host Node sharing its
+  # internal address.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
   # The webhook allows the namespace controller to delete default-deny-all
   # while its namespace is being torn down.
   - apiGroups: [""]

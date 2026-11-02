@@ -15,7 +15,10 @@ as programmed when a pod meets every condition below:
    interface's NetworkAttachmentDefinition, which has the same name as the
    `NetworkInterface`.
 5. The attachment's `Programmed` condition is True, and its `status.node` is
-   the pod's node.
+   the pod's node. For a pod on a virtual kubelet node, such as a Unikraft
+   instance, it may instead be the host, the Node without the
+   `unikraft.com/virtual-kubelet` label that shares the virtual node's internal
+   address.
 
 The controller copies `Programmed` from the `Advertised` condition that
 `galactic-router` sets on the attachment's `BGPAdvertisement` from live
@@ -34,7 +37,8 @@ carries the newest pod's node and reason.
 
 Every replica reads its cache at scrape time, so aggregate replicas with
 `max`. Without `--edge`, the controller caches only pods that carry the
-injection label. The Edge controllers watch every pod.
+injection label. The Edge controllers watch every pod. Every Node is cached,
+to find the host behind each virtual kubelet node.
 
 | Metric                                            | Type  | Labels                                                                                                            | Meaning                                                                                         |
 | ------------------------------------------------- | ----- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -42,7 +46,8 @@ injection label. The Edge controllers watch every pod.
 | `galactic_vpc_instance_interface_unprogrammed`    | gauge | `instance_namespace`, `compute_instance`, `interface`, `vpc`, `attachment`, `instance_node`, `location`, `reason` | 1 for each interface that no running pod holds programmed. Programmed interfaces have no series |
 | `galactic_vpc_instance_interfaces_collect_errors` | gauge | none                                                                                                              | Kinds the last scrape could not list. While above 0, no interface series are exported           |
 
-`instance_node` is the newest running pod's node, and `location` is the
+`instance_node` is the newest running pod's node, the virtual node rather
+than its host for a Unikraft instance, and `location` is the
 instance's `spec.location`. `vpc` and `attachment` are empty when the
 interface does not resolve to an attachment. `reason` takes one of these
 values:
@@ -52,7 +57,7 @@ values:
 | `PodNotAttached`          | The pod's network-status lists no network for the attachment, or the pod has no network-status                                                                                        |
 | `NetworkStatusUnreadable` | The pod's network-status is not valid JSON                                                                                                                                            |
 | `AwaitingDataPlane`       | The pod is attached, but no node ever advertised the attachment                                                                                                                       |
-| `NodeMismatch`            | The attachment is programmed, but from a node other than the pod's                                                                                                                    |
+| `NodeMismatch`            | The attachment is programmed, but from a node other than the pod's, or for a pod on a virtual kubelet node, its host                                                                  |
 | `InterfaceUnbound`        | The instance has no bound `NetworkInterface` for the declared interface                                                                                                               |
 | `AttachmentMissing`       | The `NetworkInterface` names no Galactic `VPCAttachment`, or the attachment it names does not exist. That includes an interface that still references the former attachment API group |
 | any other value           | The attachment's `Programmed` reason, as `galactic-router` reported it, such as `AdvertisementWithdrawn`                                                                              |

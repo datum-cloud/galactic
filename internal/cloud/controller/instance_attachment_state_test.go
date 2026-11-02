@@ -72,6 +72,21 @@ type instanceFixture struct {
 	pod        *corev1.Pod
 	iface      *networkingv1alpha.NetworkInterface
 	attachment *cloudv1alpha1.VPCAttachment
+	nodes      []*corev1.Node
+}
+
+// node returns a Node with internal address addr, labelled as a virtual
+// kubelet node when virtual is set.
+func node(name, addr string, virtual bool) *corev1.Node {
+	n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	if virtual {
+		n.Labels = map[string]string{VirtualKubeletLabel: labelTrue}
+	}
+	n.Status.Addresses = []corev1.NodeAddress{
+		{Type: corev1.NodeHostName, Address: name},
+		{Type: corev1.NodeInternalIP, Address: addr},
+	}
+	return n
 }
 
 func newInstanceFixture(name string) instanceFixture {
@@ -112,6 +127,9 @@ func (f instanceFixture) objects() []client.Object {
 	objs := []client.Object{f.instance, f.pod, f.iface}
 	if f.attachment != nil {
 		objs = append(objs, f.attachment)
+	}
+	for _, n := range f.nodes {
+		objs = append(objs, n)
 	}
 	return objs
 }
@@ -231,6 +249,64 @@ func TestInstanceAttachmentState(t *testing.T) {
 			reason: ReasonNodeMismatch,
 		},
 		{
+			name: "unikraft pod programmed on its virtual node's host",
+			mutate: func(f *instanceFixture) {
+				f.pod.Spec.NodeName = "kraftlet-node-a"
+				f.nodes = []*corev1.Node{
+					node(podNode, "192.0.2.10", false), node("kraftlet-node-a", "192.0.2.10", true),
+				}
+			},
+		},
+		{
+			// A dual-stack host lists its IPv6 address first, while the
+			// virtual node shares only its IPv4 address.
+			name: "unikraft pod programmed on a dual-stack host",
+			mutate: func(f *instanceFixture) {
+				f.pod.Spec.NodeName = "kraftlet-node-a"
+				host := node(podNode, "192.0.2.10", false)
+				host.Status.Addresses = []corev1.NodeAddress{
+					{Type: corev1.NodeInternalIP, Address: "2001:db8::10"},
+					{Type: corev1.NodeInternalIP, Address: "192.0.2.10"},
+				}
+				f.nodes = []*corev1.Node{host, node("kraftlet-node-a", "192.0.2.10", true)}
+			},
+		},
+		{
+			name: "unikraft pod programmed on another host",
+			mutate: func(f *instanceFixture) {
+				f.pod.Spec.NodeName = "kraftlet-node-a"
+				f.attachment.Status.Node = "node-b"
+				f.nodes = []*corev1.Node{
+					node(podNode, "192.0.2.10", false), node("node-b", "192.0.2.11", false),
+					node("kraftlet-node-a", "192.0.2.10", true),
+				}
+			},
+			reason: ReasonNodeMismatch,
+		},
+		{
+			name: "virtual node without a host",
+			mutate: func(f *instanceFixture) {
+				f.pod.Spec.NodeName = "kraftlet-node-a"
+				f.nodes = []*corev1.Node{
+					node(podNode, "192.0.2.10", false), node("kraftlet-node-a", "192.0.2.20", true),
+				}
+			},
+			reason: ReasonNodeMismatch,
+		},
+		{
+			// A pod on a real node is never matched to another node by
+			// address, even one backing a virtual kubelet node.
+			name: "kata pod with its attachment programmed on another node",
+			mutate: func(f *instanceFixture) {
+				f.attachment.Status.Node = "node-b"
+				f.nodes = []*corev1.Node{
+					node(podNode, "192.0.2.10", false), node("node-b", "192.0.2.11", false),
+					node("kraftlet-node-b", "192.0.2.11", true),
+				}
+			},
+			reason: ReasonNodeMismatch,
+		},
+		{
 			name:   "interface not bound",
 			mutate: func(f *instanceFixture) { f.instance.Status.NetworkInterfaces = nil },
 			reason: ReasonInterfaceUnbound,
@@ -329,7 +405,7 @@ func TestInstanceAttachmentState(t *testing.T) {
 			labels := unprogrammed[0].labels
 			want := map[string]string{
 				"instance_namespace": tenantNamespace, "compute_instance": "web-0", "interface": "nic0",
-				"instance_node": podNode, "location": "location-a", "reason": test.reason,
+				"instance_node": f.pod.Spec.NodeName, "location": "location-a", "reason": test.reason,
 			}
 			for k, v := range want {
 				if labels[k] != v {
@@ -433,7 +509,7 @@ func TestInstanceAttachmentStateEmptyCluster(t *testing.T) {
 func TestInstanceAttachmentStateListFailure(t *testing.T) {
 	for _, failing := range []client.ObjectList{
 		&corev1.PodList{}, &computev1alpha.InstanceList{},
-		&networkingv1alpha.NetworkInterfaceList{}, &cloudv1alpha1.VPCAttachmentList{},
+		&networkingv1alpha.NetworkInterfaceList{}, &cloudv1alpha1.VPCAttachmentList{}, &corev1.NodeList{},
 	} {
 		t.Run(fmt.Sprintf("%T", failing), func(t *testing.T) {
 			f := newInstanceFixture("web-0")
