@@ -22,7 +22,7 @@ ARG GIT_URL=https://github.com/datum-cloud/galactic
 # not built from this module's go.sum, so Renovate bumps it through a custom
 # manager grouped with the go.mod update (see .github/renovate.json).
 # renovate: datasource=go depName=github.com/osrg/gobgp/v4
-ARG GOBGP_VERSION=v4.10.0
+ARG GOBGP_VERSION=v4.11.0
 
 WORKDIR /workspace
 
