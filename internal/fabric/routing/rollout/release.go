@@ -448,7 +448,10 @@ func (r *ReleaseReconciler) survey(ctx context.Context,
 	var sum releaseSurvey
 	for _, t := range auth.Spec.Deployments {
 		dep := &networkv1alpha1.FabricRouterDeployment{}
-		if err := r.getConfirmed(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Deployment}, dep); err != nil {
+		// From the API server: the cache may not show a promotion this
+		// release just made, and a stale read would promote the same
+		// deployment again, moving an activating epoch.
+		if err := r.reader().Get(ctx, types.NamespacedName{Namespace: auth.Namespace, Name: t.Deployment}, dep); err != nil {
 			if apierrors.IsNotFound(err) {
 				sum.failed = append(sum.failed, t.Deployment+": deployment deleted")
 				continue
