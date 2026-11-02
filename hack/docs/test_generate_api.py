@@ -7,8 +7,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import yaml
+
 from check import parse_document
-from generate_api import format_validation_patterns, generate, REFERENCES
+from generate_api import CONFIG, format_validation_patterns, generate
 
 
 class GenerationTests(unittest.TestCase):
@@ -21,15 +23,29 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(format_validation_patterns(rendered), rendered)
 
     def test_check_detects_drift_without_editing_checkout(self):
+        configs = {}
+
         def render(args, **kwargs):
-            output = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--output-path="))
-            Path(output).write_text("# API Reference\n\n")
+            flags = dict(arg[2:].split("=", 1) for arg in args if arg.startswith("--") and "=" in arg)
+            configs[flags["source-path"]] = yaml.safe_load(Path(flags["config"]).read_text())
+            Path(flags["output-path"]).write_text("# API Reference\n\n")
 
         with tempfile.TemporaryDirectory() as temporary, patch("generate_api.subprocess.run", side_effect=render):
             root = Path(temporary)
+            (root / CONFIG).write_text(
+                "render: {markdown: {mediaWidth: 80}}\n"
+                "references:\n"
+                "  - {name: one, source: api/one, processor: {ignoreTypes: [OneList]}}\n"
+                "  - {name: two, source: api/two, processor: {ignoreTypes: [TwoList]}}\n"
+            )
             self.assertTrue(generate(root, check=False))
+            render_settings = {"markdown": {"mediaWidth": 80}}
+            self.assertEqual(configs, {
+                "api/one": {"processor": {"ignoreTypes": ["OneList"]}, "render": render_settings},
+                "api/two": {"processor": {"ignoreTypes": ["TwoList"]}, "render": render_settings},
+            })
             self.assertTrue(generate(root, check=True))
-            target = root / "docs/api" / f"{REFERENCES[0][1]}.md"
+            target = root / "docs/api/one.md"
             target.write_text("# Stale reference\n")
             before = {path: path.read_bytes() for path in (root / "docs/api").glob("*.md")}
             with redirect_stdout(StringIO()):

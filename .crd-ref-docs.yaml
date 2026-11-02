@@ -1,19 +1,178 @@
-processor:
-  ignoreTypes:
-    # Exclude collection wrappers by name: BGPPrefixList is a resource.
-    - "[.]EdgeAttachmentList$"
-    - "[.]EdgeInstanceList$"
-    - "[.]EdgeProviderApprovalList$"
-    - "[.]EdgeProviderList$"
-    - "[.]EdgeRouteIndexList$"
-    - "[.]EdgeRouteList$"
-    - "[.]EdgeServiceList$"
-    - "[.]TrafficPolicyBindingList$"
-    - "[.]TrafficPolicyList$"
-
+# API reference configuration for hack/docs/generate_api.py, which runs
+# crd-ref-docs once per reference with the shared render settings and that
+# reference's processor settings. Filters match qualified Go type names.
 render:
   kubernetes: {}
   markdown:
     mediaWidth: 80
     anchorLink: true
     tableHideEmpty: true
+references:
+  - name: galactic
+    source: api/v1alpha1
+    processor:
+      ignoreTypes:
+        # Exclude collection wrappers by name: BGPPrefixList is a resource.
+        - "[.]EdgeAttachmentList$"
+        - "[.]EdgeInstanceList$"
+        - "[.]EdgeProviderApprovalList$"
+        - "[.]EdgeProviderList$"
+        - "[.]EdgeRouteIndexList$"
+        - "[.]EdgeRouteList$"
+        - "[.]EdgeServiceList$"
+        - "[.]TrafficPolicyBindingList$"
+        - "[.]TrafficPolicyList$"
+  - name: cloud
+    source: api/cloud/v1alpha1
+    processor:
+      ignoreTypes:
+        # Exclude collection wrappers by name: BGPPrefixList is a resource.
+        - "[.]NetworkFabricIdentityList$"
+        - "[.]VPCAttachmentList$"
+        - "[.]VPCList$"
+  - name: network-bgp
+    source: api/network/v1alpha1
+    processor:
+      ignoreTypes:
+        # Exclude collection wrappers by name: BGPPrefixList is a resource.
+        - "[.]BGPAdvertisementList$"
+        - "[.]BGPCommunitySetList$"
+        - "[.]BGPPeerList$"
+        - "[.]BGPPeerProfileList$"
+        - "[.]BGPPolicyList$"
+        - "[.]BGPPrefixListList$"
+        - "[.]BGPRouterClassList$"
+        - "[.]BGPRouterList$"
+        - "[.]BGPStaticRouteList$"
+        - "[.]BGPVRFInstanceList$"
+        - "[.]EgressShardList$"
+        - "[.]FRRRouterParametersList$"
+        - "[.]FabricEndpointList$"
+        - "[.]FabricReleaseAuthorizationList$"
+        - "[.]FabricRolloutPolicyList$"
+        - "[.]FabricRouterDeploymentList$"
+        - "[.]FabricRouterRevisionList$"
+        - "[.]FabricTopologyList$"
+        - "[.]NetworkEgressPolicyList$"
+        - "[.]NetworkGatewayList$"
+        - "[.]NetworkServiceList$"
+        - "[.]ServiceEndpointList$"
+        - "[.]ServiceEndpointProducerReportList$"
+        - "[.]ServiceRoutePolicyList$"
+        - "[.]ServiceVIPBindingList$"
+        # The revision's configuration lists every BGP spec by name; walking
+        # those wrappers first would hide the policy types from their sections.
+        - "FabricNamed.*"
+        # Egress and service resources have their own reference.
+        - "[.]EgressShard.*"
+        - "[.]ServiceEndpoint.*"
+        - "[.]ServiceRoutePolicy.*"
+        - "[.]ServiceVIPBinding.*"
+        - "NetworkGateway"
+        - "NetworkGatewaySpec"
+        - "NetworkGatewayStatus"
+        - "NetworkService"
+        - "NetworkServiceProtocol"
+        - "NetworkServiceSpec"
+        - "NetworkServiceStatus"
+        - "NetworkEgressPolicy"
+        - "NetworkEgressPolicySpec"
+        - "NetworkEgressPolicyStatus"
+  - name: network-gateway
+    source: api/network/v1alpha1
+    processor:
+      ignoreTypes:
+        # Exclude collection wrappers by name: BGPPrefixList is a resource.
+        - "[.]BGPAdvertisementList$"
+        - "[.]BGPCommunitySetList$"
+        - "[.]BGPPeerList$"
+        - "[.]BGPPeerProfileList$"
+        - "[.]BGPPolicyList$"
+        - "[.]BGPPrefixListList$"
+        - "[.]BGPRouterClassList$"
+        - "[.]BGPRouterList$"
+        - "[.]BGPStaticRouteList$"
+        - "[.]BGPVRFInstanceList$"
+        - "[.]EgressShardList$"
+        - "[.]FRRRouterParametersList$"
+        - "[.]FabricEndpointList$"
+        - "[.]FabricReleaseAuthorizationList$"
+        - "[.]FabricRolloutPolicyList$"
+        - "[.]FabricRouterDeploymentList$"
+        - "[.]FabricRouterRevisionList$"
+        - "[.]FabricTopologyList$"
+        - "[.]NetworkEgressPolicyList$"
+        - "[.]NetworkGatewayList$"
+        - "[.]NetworkServiceAddressList$"
+        - "[.]NetworkServiceList$"
+        - "[.]ServiceEndpointList$"
+        - "[.]ServiceEndpointProducerReportList$"
+        - "[.]ServiceRoutePolicyList$"
+        - "[.]ServiceVIPBindingList$"
+        - "AFI"
+        - "SAFI"
+        - "AddressFamily"
+        - "SRv6Function"
+        - "OriginType"
+        - "RouterRef"
+        - "RouterSelector"
+        - "RouterTarget"
+        - "LocalSecretRef"
+        - "RouterStatus"
+        - "ResolvedRouterConfig"
+        - "BGPPeerBFD"
+        - "BGPPeerGracefulRestart"
+        - "BGPPeerAuthentication"
+        - "Community"
+        - "Prefix"
+        - "RedistributeSource"
+        - "AdvertisementOriginateType"
+        - "AdvertisementOriginateFrom"
+        - "AdvertisementPolicyRef"
+        - "BGPAdvertisement"
+        - "BGPAdvertisementSpec"
+        - "BGPAdvertisementStatus"
+        - "BGPCommunitySet"
+        - "BGPCommunitySetType"
+        - "BGPCommunitySetSpec"
+        - "BGPCommunitySetStatus"
+        - "BGPPeerState"
+        - "SendCommunityType"
+        - "MaxPrefixShutdownAction"
+        - "BGPMaximumPrefix"
+        - "BGPPeer"
+        - "BGPPeerSpec"
+        - "BGPPeerStatus"
+        - "BGPRouterPhase"
+        - "BGPRouter"
+        - "BGPStaticRoute.*"
+        - "BMP.*"
+        - "FRR.*"
+        - "Fabric.*"
+        - "BGPRouterSpec"
+        - "BGPRouterStatus"
+        - "BGPRouterPeerSummary"
+        - "BGPVRFInstance"
+        - "BGPVRFInstanceSpec"
+        - "BGPVRFInstanceStatus"
+        - "RouteTarget"
+        - "BGPPolicyDirection"
+        - "BGPPolicyAction"
+        - "BGPPolicy"
+        - "BGPPolicySpec"
+        - "BGPPolicyTerm"
+        - "BGPPolicyMatch"
+        - "BGPPolicySetActions"
+        - "BGPPolicyStatus"
+        - "ASPathMatchType"
+        - "ASPathFilter"
+        - "EVPNRouteType"
+        - "BGPOrigin"
+        - "AsPathSet"
+        - "NextHopSet"
+        - "CommunitySet"
+        - "ExtendedCommunitySet"
+        - "BGPPrefixList"
+        - "BGPPrefixListEntry"
+        - "BGPPrefixListSpec"
+        - "BGPPrefixListStatus"

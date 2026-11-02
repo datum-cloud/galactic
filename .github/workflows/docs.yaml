@@ -29,7 +29,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-      - name: Install Markdown parser
+      - name: Install documentation tools
         run: |
           python3 -m venv "$RUNNER_TEMP/docs-venv"
           "$RUNNER_TEMP/docs-venv/bin/python" -m pip install -r hack/docs/requirements.txt
@@ -38,4 +38,5 @@ jobs:
           "$RUNNER_TEMP/docs-venv/bin/python" -m unittest discover -s hack/docs -p 'test_*.py'
           "$RUNNER_TEMP/docs-venv/bin/python" hack/docs/check.py
       - name: Check generated API references
-        run: python3 hack/docs/generate_api.py --check
+        run: |-
+          "$RUNNER_TEMP/docs-venv/bin/python" hack/docs/generate_api.py --check

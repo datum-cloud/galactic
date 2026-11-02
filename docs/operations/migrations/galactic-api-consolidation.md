@@ -73,9 +73,31 @@ for a workload whose CNI ADD ran before the new group was installed. Their old
 `Ready` conditions may be stale; do not treat that status as proof that the new
 router still advertises their routes.
 
-Run `hack/audit-legacy-bgp.py --context <cell>` for every migrated cell. It
-flags old-only objects, different specs, and new counterparts without a Ready
-condition. For each result, check whether its workload still needs a route.
+Audit every migrated cell with `kubectl` and `jq`. The loop is read-only and
+prints each old object that has no new counterpart, whose new counterpart has
+a different spec, or whose new counterpart is not `Ready`. It stops with
+`audit failed` when a listing fails. Any other output is a result to resolve,
+and no output at all means the cell is clean:
+
+```sh
+dir=$(mktemp -d)
+for kind in bgpadvertisements bgpvrfinstances; do
+  kubectl --context <cell> get "$kind.network.datumapis.com" -A -o json > "$dir/old.json" &&
+    kubectl --context <cell> get "$kind.galactic.datumapis.com" -A -o json > "$dir/new.json" ||
+    { echo "audit failed: $kind" >&2; break; }
+  jq -r --slurpfile new "$dir/new.json" --arg kind "$kind" '
+    ($new[0].items | map({key: "\(.metadata.namespace)/\(.metadata.name)", value: .}) | from_entries) as $n
+    | .items[] | "\(.metadata.namespace)/\(.metadata.name)" as $k
+    | if $n[$k] == null then "\($kind) \($k): old only"
+      elif $n[$k].spec != .spec then "\($kind) \($k): spec differs"
+      elif ([$n[$k].status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) == 0
+        then "\($kind) \($k): new object not Ready"
+      else empty end' "$dir/old.json"
+done
+rm -r "$dir"
+```
+
+For each result, check whether its workload still needs a route.
 Reattach or restart a live workload and confirm the new-group advertisement
 and VRF become ready before removing the old object. Once the
 old group has no users, export its objects for the migration record, remove the

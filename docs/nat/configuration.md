@@ -124,7 +124,9 @@ the gateway joins the dispatcher.
   fails to start and names the uplink, since detaching the dispatcher would
   cut that datapath's traffic. Only the uplinks resolved at startup are
   released: an uplink found later that still carries the dispatcher is
-  reported missing until `hack/xdp-dispatch-release.sh` frees it.
+  reported missing until you
+  [detach the dispatcher](../operations/xdp-attach-mode.md#detaching-the-dispatcher)
+  from that uplink.
 - **`dispatch`** puts the node's shared XDP dispatcher on every resolved
   uplink and runs `nat_ingress` from the dispatcher's egress slot. The
   dispatcher is one small root program, `xdp_dispatch`, that holds the hook
@@ -156,9 +158,9 @@ the gateway joins the dispatcher.
   the same lock, keeping every slot, lease and role.
 
   The dispatcher stays attached after the shard is removed from a node.
-  `hack/xdp-dispatch-release.sh` detaches it. Run it before rolling back to
-  an image that predates dispatch mode, which would otherwise fail to attach
-  with `EBUSY`.
+  [Detach it](../operations/xdp-attach-mode.md#detaching-the-dispatcher)
+  before rolling back to an image that predates dispatch mode, which would
+  otherwise fail to attach with `EBUSY`.
 **`--nat-datapath-enabled` / `GALACTIC_NAT_DATAPATH_ENABLED`**
 Whether the shard runs its datapath. On by default. Off, the process stays
 up and its pod ready, but it attaches nothing, empties its dispatcher slot if
@@ -562,7 +564,8 @@ knowing before you rely on this component in production:
   discards stop at once. Nothing bounces it automatically.
 - **The dispatcher outlives the shard.** In dispatch mode the root stays on
   the uplinks after the shard is removed, passing every packet once the
-  slot's lease lapses. `hack/xdp-dispatch-release.sh` detaches it.
+  slot's lease lapses.
+  [Detach it](../operations/xdp-attach-mode.md#detaching-the-dispatcher) by hand.
 - **In ordered mode the CNI's shard list is a second copy of every shard
   SID.** `GALACTIC_CNI_EGRESS_SHARD_SIDS` is set by hand and is not derived
   from `EgressShard` status, so the two can disagree. Hashed mode reads the
