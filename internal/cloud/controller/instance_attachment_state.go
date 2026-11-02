@@ -64,9 +64,15 @@ const (
 	// Programmed condition was never set, so no node advertised it.
 	ReasonAwaitingDataPlane = "AwaitingDataPlane"
 	// ReasonNodeMismatch: the attachment is programmed on a node other than
-	// the one the pod runs on.
+	// the one the pod runs on, or, for a pod on a virtual kubelet node, its
+	// host.
 	ReasonNodeMismatch = "NodeMismatch"
 )
+
+// VirtualKubeletLabel marks a Node that a virtual kubelet registers for the
+// host it shares an internal address with. The host, not the virtual node,
+// programs the attachments of the virtual node's pods.
+const VirtualKubeletLabel = "unikraft.com/virtual-kubelet"
 
 const (
 	stateProgrammed    = "Programmed"
@@ -76,7 +82,7 @@ const (
 var (
 	instanceInterfacesDesc = prometheus.NewDesc("galactic_vpc_instance_interfaces",
 		"Interfaces of running instances by whether a running pod of the instance holds the interface's VPC "+
-			"attachment, programmed on the pod's node.",
+			"attachment, programmed on the pod's node or the host behind a virtual kubelet node.",
 		[]string{"state"}, nil)
 	instanceInterfaceUnprogrammedDesc = prometheus.NewDesc("galactic_vpc_instance_interface_unprogrammed",
 		"1 for each interface of a running instance that no running pod of the instance holds programmed, with the "+
@@ -107,8 +113,8 @@ func InjectedPodCache() map[client.Object]cache.ByObject {
 // otherwise with the reason for the newest pod. Every replica exports the
 // series; aggregate with max.
 type InstanceAttachmentCollector struct {
-	// Reader lists Pods, Instances, NetworkInterfaces and VPCAttachments,
-	// normally the manager's cached client.
+	// Reader lists Pods, Instances, NetworkInterfaces, VPCAttachments and
+	// Nodes, normally the manager's cached client.
 	Reader client.Reader
 }
 
@@ -142,6 +148,10 @@ func (c *InstanceAttachmentCollector) Collect(ch chan<- prometheus.Metric) {
 	if err := c.Reader.List(ctx, &attachments); err != nil {
 		failed++
 	}
+	var nodes corev1.NodeList
+	if err := c.Reader.List(ctx, &nodes); err != nil {
+		failed++
+	}
 	ch <- prometheus.MustNewConstMetric(instanceInterfacesCollectErrorsDesc, prometheus.GaugeValue, float64(failed))
 	if failed > 0 {
 		return
@@ -151,6 +161,7 @@ func (c *InstanceAttachmentCollector) Collect(ch chan<- prometheus.Metric) {
 		instances:   map[types.NamespacedName]*computev1alpha.Instance{},
 		interfaces:  map[types.NamespacedName]*networkingv1alpha.NetworkInterface{},
 		attachments: map[types.NamespacedName]*cloudv1alpha1.VPCAttachment{},
+		hosts:       virtualNodeHosts(nodes.Items),
 	}
 	for i := range instances.Items {
 		view.instances[client.ObjectKeyFromObject(&instances.Items[i])] = &instances.Items[i]
@@ -222,6 +233,43 @@ type clusterView struct {
 	instances   map[types.NamespacedName]*computev1alpha.Instance
 	interfaces  map[types.NamespacedName]*networkingv1alpha.NetworkInterface
 	attachments map[types.NamespacedName]*cloudv1alpha1.VPCAttachment
+	// hosts maps each virtual kubelet Node to its host Node.
+	hosts map[string]string
+}
+
+// virtualNodeHosts maps each Node labelled VirtualKubeletLabel to the
+// unlabelled Node sharing one of its internal addresses.
+func virtualNodeHosts(nodes []corev1.Node) map[string]string {
+	byAddress := map[string]string{}
+	for _, node := range nodes {
+		if node.Labels[VirtualKubeletLabel] == labelTrue {
+			continue
+		}
+		for _, addr := range node.Status.Addresses {
+			if addr.Type == corev1.NodeInternalIP {
+				byAddress[addr.Address] = node.Name
+			}
+		}
+	}
+	hosts := map[string]string{}
+	for _, node := range nodes {
+		if node.Labels[VirtualKubeletLabel] != labelTrue {
+			continue
+		}
+		for _, addr := range node.Status.Addresses {
+			if host, ok := byAddress[addr.Address]; ok && addr.Type == corev1.NodeInternalIP {
+				hosts[node.Name] = host
+				break
+			}
+		}
+	}
+	return hosts
+}
+
+// programmedOn reports whether an attachment programmed on node serves a pod
+// on podNode: the same node, or the host behind a virtual kubelet node.
+func (v clusterView) programmedOn(node, podNode string) bool {
+	return node == podNode || (node != "" && node == v.hosts[podNode])
 }
 
 // liveInstance returns the Instance controlling pod when pod is scheduled,
@@ -249,7 +297,7 @@ type interfaceState struct {
 
 // interfaceState follows an instance's declared interface to its VPCAttachment
 // and checks that pod is attached to it and that it is programmed on pod's
-// node.
+// node or that node's host.
 func (v clusterView) interfaceState(instance *computev1alpha.Instance, declared string, pod *corev1.Pod) interfaceState {
 	ref := ""
 	for _, status := range instance.Status.NetworkInterfaces {
@@ -282,7 +330,7 @@ func (v clusterView) interfaceState(instance *computev1alpha.Instance, declared 
 		s.reason = ReasonAwaitingDataPlane
 	case condition.Status != metav1.ConditionTrue:
 		s.reason = condition.Reason
-	case attachment.Status.Node != pod.Spec.NodeName:
+	case !v.programmedOn(attachment.Status.Node, pod.Spec.NodeName):
 		s.reason = ReasonNodeMismatch
 	}
 	return s
