@@ -192,7 +192,7 @@ func (c *convergenceStore) applyDelays(t *testing.T) (uint64, float64) {
 	return 0, 0
 }
 
-// TestApplyDelaySpansRetries (#1321): the apply delay runs from the moment a
+// TestApplyDelaySpansRetries: the apply delay runs from the moment a
 // claim first became pending through failed attempts to the apply that
 // succeeds, so a route stuck behind sweep retries shows its whole wait. Only
 // a new, reactivated or changed claim is timed, not a reconcile that changes
@@ -259,7 +259,7 @@ func TestApplyDelaySpansRetries(t *testing.T) {
 	}
 }
 
-// TestFirstInstallLog (#1321): a route's first install logs, at debug level,
+// TestFirstInstallLog: a route's first install logs, at debug level,
 // its slice, when the slice was created and first observed, and both delays.
 // A later update of the same slice does not log again. A slice recreated
 // under the same name, as a replaced pod's is, logs as new even when its
@@ -289,7 +289,7 @@ func TestFirstInstallLog(t *testing.T) {
 	_ = c.SetDesired(ctx, "ns/a", update)
 
 	out := buf.String()
-	if n := strings.Count(out, "installed route for EndpointSlice"); n != 1 {
+	if n := strings.Count(out, "applied route for new EndpointSlice"); n != 1 {
 		t.Fatalf("logged %d first installs, want 1:\n%s", n, out)
 	}
 	for _, want := range []string{
@@ -311,7 +311,7 @@ func TestFirstInstallLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	out = buf.String()
-	if n := strings.Count(out, "installed route for EndpointSlice"); n != 2 {
+	if n := strings.Count(out, "applied route for new EndpointSlice"); n != 2 {
 		t.Fatalf("logged %d first installs after a replacement, want 2:\n%s", n, out)
 	}
 	if !strings.Contains(out, "sinceObserved=0s sliceCreated=") || !strings.Contains(out, "sinceCreated=10s") {

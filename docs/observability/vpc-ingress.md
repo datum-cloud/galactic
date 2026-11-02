@@ -118,8 +118,8 @@ share one kernel route.
   backlog drains between scrapes. It times only updates that matter: a new
   slice, one recreated under the same name, one reactivated during its grace
   period, or a changed VPC, prefix or SID. Reconciles that change nothing,
-  such as resyncs, are not timed. A sidecar restart times each slice once, near
-  zero. A claim withdrawn before it applies is not recorded. Its buckets run
+  such as resyncs, are not timed. A sidecar restart times each slice once,
+  near zero unless the shared eBPF datapath is not loaded yet. A claim withdrawn before it applies is not recorded. Its buckets run
   from 50 ms to 10 min.
 - These add 33 fixed series per sidecar: 17, plus 16 for the histogram.
 
@@ -152,11 +152,13 @@ EndpointSlice exists, two signals split the wait on that edge:
   the route being applied.
 
 For one slice, set the sidecar's [log level](logging.md) to `debug`. The
-first install for each slice then logs `installed route for EndpointSlice`.
-That includes a slice recreated under the same name, as a replaced pod's is.
-The log line carries the slice key, `vpc`, `prefix`, `sliceCreated`,
-`observed`, `installed`, `sinceCreated` and `sinceObserved`. If both delays are short on the edge serving the requests,
-look past this sidecar: at the request path and at which edge received it.
+first apply for each slice then logs `applied route for new EndpointSlice`.
+That includes a slice recreated under the same name, as a replaced pod's is,
+even when its predecessor's route is still installed. The log line carries
+the slice key, `vpc`, `prefix`, `sliceCreated`, `observed`, `installed`,
+`sinceCreated` and `sinceObserved`. If both delays are short on the edge
+serving the requests, look past this sidecar: at the request path and at
+which edge received it.
 
 ### EndpointSlice inputs
 

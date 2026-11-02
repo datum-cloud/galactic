@@ -218,6 +218,10 @@ func (m *InputMetrics) forget(key string) {
 	defer m.mu.Unlock()
 	m.markWatchedLocked(key)
 	m.setLocked(key, InputNotSelected)
+	// Only a deletion forgets the slice's timing. One that merely lost its
+	// tenant label keeps it, so regaining the label is not timed again from
+	// its original creationTimestamp; a recreation brings a new UID anyway.
+	delete(m.readySeen, key)
 }
 
 func (m *InputMetrics) markWatchedLocked(key string) {
@@ -238,7 +242,6 @@ func (m *InputMetrics) setLocked(key, result string) {
 		delete(m.state, key)
 	}
 	if result == InputNotSelected {
-		delete(m.readySeen, key) // a slice recreated under this name is timed again
 		return
 	}
 	m.state[key] = result

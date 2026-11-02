@@ -137,7 +137,7 @@ func observeDelays(t *testing.T, reg *prometheus.Registry) (uint64, float64) {
 	return 0, 0
 }
 
-// TestObserveDelay (#1321): the watch times a slice's first ready observation
+// TestObserveDelay: the watch times a slice's first ready observation
 // against its creationTimestamp, once per slice, counting a SID annotation
 // that arrives late. Slices created before the sidecar started, as the watch's
 // initial list delivers them, and slices without a creationTimestamp are

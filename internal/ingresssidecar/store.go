@@ -701,7 +701,7 @@ func logFirstInstall(r *routeState, now time.Time) {
 	if !r.sliceCreated.IsZero() {
 		attrs = append(attrs, "sliceCreated", r.sliceCreated, "sinceCreated", now.Sub(r.sliceCreated))
 	}
-	slog.Debug("ingresssidecar: installed route for EndpointSlice", attrs...)
+	slog.Debug("ingresssidecar: applied route for new EndpointSlice", attrs...)
 }
 
 // retryPendingLocked applies every desired route an earlier SetDesired failed
