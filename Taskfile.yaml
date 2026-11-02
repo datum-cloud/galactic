@@ -108,7 +108,7 @@ tasks:
       - controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/network/v1alpha1/...
       - controller-gen crd paths=./api/network/v1alpha1/... output:crd:artifacts:config=config/crd
   generate:api-docs:
-    desc: Regenerate Galactic, cloud, BGP and gateway API references
+    desc: Regenerate Galactic, cloud, BGP and gateway API references (install hack/docs/requirements.txt first)
     cmds:
       - python3 hack/docs/generate_api.py
   docs:check:
@@ -117,7 +117,7 @@ tasks:
       - python3 -m unittest discover -s hack/docs -p 'test_*.py'
       - python3 hack/docs/check.py
   docs:check-generated:
-    desc: Check generated API references without changing tracked files
+    desc: Check generated API references without changing tracked files (install hack/docs/requirements.txt first)
     cmds:
       - python3 hack/docs/generate_api.py --check
   build:ebpf:

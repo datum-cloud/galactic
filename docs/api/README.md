@@ -23,13 +23,14 @@ rollout guide.
 ## Updating the generated references
 
 Edit the Go API comments and validation markers. When assigning a new resource
-to a reference, update the corresponding `.crd-ref-docs*.yaml` filter. The BGP
+to a reference, update that reference's filter in `.crd-ref-docs.yaml`. The BGP
 and gateway references partition the network resources; shared field types may
 appear in both, but each resource must appear in exactly one resource index.
 Filters match qualified Go type names. Exclude collection wrappers explicitly:
 `BGPPrefixList` is a resource, while `BGPPrefixListList` is its collection.
 
-From the repository root, with Go and Task installed:
+From the repository root, with Go, Task and `hack/docs/requirements.txt`
+installed:
 
 ```sh
 task generate:api-docs

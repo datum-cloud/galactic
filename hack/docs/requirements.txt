@@ -1,3 +1,5 @@
 # CommonMark parsing keeps examples, code spans and reference links accurate.
 markdown-it-py==4.2.0
 mdurl==0.1.2
+# PyYAML reads the API reference configuration in .crd-ref-docs.yaml.
+PyYAML==6.0.3
