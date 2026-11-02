@@ -15,7 +15,7 @@ require (
 	github.com/mdlayher/genetlink v1.4.0
 	github.com/mdlayher/ndp v1.1.0
 	github.com/mdlayher/netlink v1.11.2
-	github.com/osrg/gobgp/v4 v4.10.0
+	github.com/osrg/gobgp/v4 v4.11.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/quic-go/connect-ip-go v0.6.0
@@ -24,10 +24,10 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
-	github.com/vishvananda/netlink v1.3.2-0.20261027142342-e536899290fe
+	github.com/vishvananda/netlink v1.3.2-0.20261102090517-2cd1a50c5846
 	github.com/vishvananda/netns v0.0.5
 	github.com/yosida95/uritemplate/v3 v3.0.2
-	go.datum.net/compute v0.14.1
+	go.datum.net/compute v0.14.2
 	go.datum.net/network-services-operator v0.34.1
 	go.miloapis.com/instrumentation v0.6.0
 	go.miloapis.com/ipam v0.5.5
@@ -37,7 +37,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.uber.org/zap v1.28.0
-	golang.org/x/crypto/x509roots/fallback v0.0.0-20261029161132-16804593e8b0
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20261030153154-30a33513ff6d
 	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
