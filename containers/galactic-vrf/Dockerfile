@@ -10,7 +10,7 @@
 # config/galactic-vrf kustomize base yet, so unlike the others it is not
 # stamped into the galactic-kustomize bundle -- the #856 deployment
 # contract is still an open, flagged dependency (§9 item 3 of the plan).
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
