@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -187,8 +188,16 @@ type BuildError struct {
 func (e *BuildError) Error() string { return e.Err.Error() + ": " + e.Stderr }
 func (e *BuildError) Unwrap() error { return e.Err }
 
+// propagation bounds how long Check waits for the API server's RBAC
+// authorizer, which reads Roles and bindings from an informer cache, to see
+// objects that were just created.
+const propagation = 30 * time.Second
+
 // Check asks whether user may make each call, and fails the test for each
-// allowed call that is denied and each denied call that is allowed.
+// allowed call that is denied and each denied call that is allowed. Allowed
+// calls are retried until propagation elapses, since the authorizer may not
+// yet see the bindings that grant them. Denied calls are asked once, after
+// the allowed ones.
 func Check(t *testing.T, c client.Client, user string, groups []string, allowed, denied []Access) {
 	t.Helper()
 	ask := func(a Access) bool {
@@ -204,8 +213,14 @@ func Check(t *testing.T, c client.Client, user string, groups []string, allowed,
 		}
 		return review.Status.Allowed
 	}
+	deadline := time.Now().Add(propagation)
 	for _, a := range allowed {
-		if !ask(a) {
+		ok := ask(a)
+		for !ok && time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			ok = ask(a)
+		}
+		if !ok {
 			t.Errorf("%s may not %s", user, a)
 		}
 	}
