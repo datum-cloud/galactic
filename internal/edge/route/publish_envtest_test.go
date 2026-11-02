@@ -28,6 +28,7 @@ import (
 // router's own report on the advertisement, and the attachment's Published
 // follows its routes.
 func TestPublication(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")

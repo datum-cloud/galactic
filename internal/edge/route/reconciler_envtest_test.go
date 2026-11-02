@@ -38,6 +38,7 @@ const prefixA = "fd00:10:0:f::/80"
 // the first claim is accepted only after the takeover interval, then
 // committed to the index before the route's status.
 func TestFirstClaimWaitsForNewIndex(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
 	f.newRoute("r", prefixA)
@@ -73,6 +74,7 @@ func TestFirstClaimWaitsForNewIndex(t *testing.T) {
 // long that goes on, and is accepted the takeover interval after the holder
 // stops, measured from the leader's first read of the unchanged lease.
 func TestEarlyTakeover(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
 	f.newRoute("r", prefixA)
@@ -109,6 +111,7 @@ func TestEarlyTakeover(t *testing.T) {
 // read the API server, not a cache, so a renewal it has not been told about
 // still restarts the takeover wait.
 func TestStaleLeaderView(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
 	f.newRoute("r", prefixA)
@@ -160,6 +163,7 @@ func (r *renewingReader) Get(ctx context.Context, key client.ObjectKey, obj clie
 // one route and keeps renewing its instance. Another attachment's claim is
 // accepted only once the holder's node records the gate closed.
 func TestReleaseWhileRenewing(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
 	f.newRoute("r", prefixA)
@@ -183,6 +187,7 @@ func TestReleaseWhileRenewing(t *testing.T) {
 // accepted, with nothing in its accepted holder or Accepted condition
 // changed, so no node changes its gate.
 func TestSpecSwapWithoutAcceptance(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeA, "fd00:10:0:e::2")
 	f.newRoute("r", prefixA)
@@ -211,6 +216,7 @@ func TestSpecSwapWithoutAcceptance(t *testing.T) {
 // claim, until the takeover interval after the leader recorded the
 // deletion.
 func TestRemovalFencing(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
 	f.newRoute("r", prefixA)
@@ -249,6 +255,7 @@ func TestRemovalFencing(t *testing.T) {
 // prefix is revoked. Its index entry blocks other claims until its node
 // records the gate closed; the holder itself must claim a new epoch.
 func TestRevocation(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
@@ -296,6 +303,7 @@ func TestRevocation(t *testing.T) {
 // is refused once the grant's validUntil is within the maximum skew, and an
 // accepted holder is revoked then.
 func TestGrantCeiling(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
@@ -329,6 +337,7 @@ func TestGrantCeiling(t *testing.T) {
 // TestOverlapRefused: a route overlapping another accepted route of the VPC
 // is refused, whoever claims it.
 func TestOverlapRefused(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
 	f.newRoute("r", prefixA)
@@ -353,6 +362,7 @@ func TestOverlapRefused(t *testing.T) {
 // restarted provider process reacquires its instance at a new epoch and
 // claims its routes again, which are accepted at once: same attachment.
 func TestRestartInPlace(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
 	f.newRoute("r", prefixA)
@@ -375,6 +385,7 @@ func TestRestartInPlace(t *testing.T) {
 // not ready, a lease at another epoch and a prefix outside the grant are
 // each refused with their reason.
 func TestRefusals(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
@@ -435,6 +446,7 @@ func TestRefusals(t *testing.T) {
 // accepted when the provider also lists one core implements, and revoked when
 // the provider drops that version again.
 func TestUnsupportedCapabilityVersion(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
@@ -482,6 +494,7 @@ func TestUnsupportedCapabilityVersion(t *testing.T) {
 // interval after the leader first saw its record unchanged, and a route
 // whose attachment and instance are gone is deleted.
 func TestReaping(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
@@ -601,8 +614,10 @@ func eventually(t *testing.T, what string, cond func() bool) {
 // stops blocking overlapping routes once its node records the gate closed,
 // or the takeover interval after the leader marked it.
 func TestReleasedRouteLeavesIndex(t *testing.T) {
+	t.Parallel()
 	for _, confirmed := range []bool{true, false} {
 		t.Run(fmt.Sprintf("confirmed=%t", confirmed), func(t *testing.T) {
+			t.Parallel()
 			f := startAPI(t)
 			a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
 			f.newRoute("r", prefixA)
@@ -654,6 +669,7 @@ func (c *pausingClock) read() time.Duration {
 // previous holder fenced by waiting, with no lease left to fence, does not
 // commit on that proof.
 func TestLeaderPauseBeforeCommit(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
 	f.newRoute("r", prefixA)
@@ -706,6 +722,7 @@ func (r *leaseRenewingReader) Get(ctx context.Context, key client.ObjectKey, obj
 // fence then fails; once the holder stops, the fence lands and a renewal from
 // before it fails, so it can never extend the old gate past the takeover.
 func TestRenewalAfterFinalRead(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
@@ -761,6 +778,7 @@ func TestRenewalAfterFinalRead(t *testing.T) {
 // TestIndexFull: a route is refused, not retried forever, once its VPC's
 // index holds its limit.
 func TestIndexFull(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	a := f.newHolder("a", nodeA, "fd00:10:0:e::1")
 	idx := &galacticv1alpha1.EdgeRouteIndex{
@@ -788,6 +806,7 @@ func TestIndexFull(t *testing.T) {
 // released, the takeover interval after the leader marked it. While the
 // claim is still pending, it stays.
 func TestAbandonedEntryLeavesIndex(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
@@ -832,6 +851,7 @@ func TestAbandonedEntryLeavesIndex(t *testing.T) {
 // the route's earlier accepted holder may still forward, and is removed only
 // once that holder's node confirms its gate closed.
 func TestAbandonedEntryWaitsForEarlierHolder(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
@@ -900,6 +920,7 @@ func TestAbandonedEntryWaitsForEarlierHolder(t *testing.T) {
 // naming the provider, route, prefix and epoch, however often decided; a
 // claim waiting to fence the previous holder emits none.
 func TestRouteDiagnostics(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")

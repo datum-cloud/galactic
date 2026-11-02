@@ -72,7 +72,15 @@ containerd socket:
 
 ```
 export CONTAINER_RUNTIME_ENDPOINT=unix:///host/run/containerd/containerd.sock
-crictl ps --name galactic-cni
+crictl ps --name credential-refresh
+```
+
+The galactic-cni DaemonSet runs the long-running `credential-refresh`
+container after its `install-cni` init container exits. Add `-a` to list
+exited containers, such as the init container:
+
+```
+crictl ps -a --name install-cni
 ```
 
 **vtysh** needs fabric-router's FRR sockets, which are in its container
