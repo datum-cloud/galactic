@@ -105,6 +105,7 @@ func routeObject(name, prefix, vpcUID string) *galacticv1alpha1.EdgeRoute {
 // closedEpoch of routes accepted on its own node, never lowered or past the
 // accepted epoch.
 func TestRoutePolicies(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
@@ -191,6 +192,7 @@ func TestRoutePolicies(t *testing.T) {
 // never decreases, a release holds until a new epoch, and its protocol
 // annotations stay well formed.
 func TestLeasePolicies(t *testing.T) {
+	t.Parallel()
 	f := startAPI(t)
 	ctx := context.Background()
 	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
