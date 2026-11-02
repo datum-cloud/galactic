@@ -37,6 +37,7 @@ import (
 	computev1alpha "go.datum.net/compute/api/v1alpha"
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	"go.datum.net/galactic/internal/cloud/webhook"
+	"go.datum.net/galactic/internal/virtualnode"
 	networkingv1alpha "go.datum.net/network-services-operator/api/v1alpha"
 )
 
@@ -72,7 +73,7 @@ const (
 // VirtualKubeletLabel marks a Node that a virtual kubelet registers for the
 // host it shares an internal address with. The host, not the virtual node,
 // programs the attachments of the virtual node's pods.
-const VirtualKubeletLabel = "unikraft.com/virtual-kubelet"
+const VirtualKubeletLabel = virtualnode.Label
 
 const (
 	stateProgrammed    = "Programmed"
@@ -161,7 +162,7 @@ func (c *InstanceAttachmentCollector) Collect(ch chan<- prometheus.Metric) {
 		instances:   map[types.NamespacedName]*computev1alpha.Instance{},
 		interfaces:  map[types.NamespacedName]*networkingv1alpha.NetworkInterface{},
 		attachments: map[types.NamespacedName]*cloudv1alpha1.VPCAttachment{},
-		hosts:       virtualNodeHosts(nodes.Items),
+		hosts:       virtualnode.Hosts(nodes.Items),
 	}
 	for i := range instances.Items {
 		view.instances[client.ObjectKeyFromObject(&instances.Items[i])] = &instances.Items[i]
@@ -235,35 +236,6 @@ type clusterView struct {
 	attachments map[types.NamespacedName]*cloudv1alpha1.VPCAttachment
 	// hosts maps each virtual kubelet Node to its host Node.
 	hosts map[string]string
-}
-
-// virtualNodeHosts maps each Node labelled VirtualKubeletLabel to the
-// unlabelled Node sharing one of its internal addresses.
-func virtualNodeHosts(nodes []corev1.Node) map[string]string {
-	byAddress := map[string]string{}
-	for _, node := range nodes {
-		if node.Labels[VirtualKubeletLabel] == labelTrue {
-			continue
-		}
-		for _, addr := range node.Status.Addresses {
-			if addr.Type == corev1.NodeInternalIP {
-				byAddress[addr.Address] = node.Name
-			}
-		}
-	}
-	hosts := map[string]string{}
-	for _, node := range nodes {
-		if node.Labels[VirtualKubeletLabel] != labelTrue {
-			continue
-		}
-		for _, addr := range node.Status.Addresses {
-			if host, ok := byAddress[addr.Address]; ok && addr.Type == corev1.NodeInternalIP {
-				hosts[node.Name] = host
-				break
-			}
-		}
-	}
-	return hosts
 }
 
 // programmedOn reports whether an attachment programmed on node serves a pod

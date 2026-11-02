@@ -335,17 +335,24 @@ annotations.
 
 `galactic-cni run` recreates a missing EndpointSlice every 5 minutes, on the
 same tick as its eBPF map sweeps
-(`internal/installer/endpointslice_repair.go`). For each Running pod on its
-node, it reads the Multus `k8s.v1.cni.cncf.io/network-status` annotation,
-takes the last entry whose NetworkAttachmentDefinition chains `galactic-bgp`
-and carries an IPv6 address, and creates the slice from that definition's
+(`internal/installer/endpointslice_repair.go`). It covers each Running pod
+bound to its node or to a virtual kubelet Node the node hosts: a Node labelled
+`unikraft.com/virtual-kubelet=true` that shares one of the node's
+`InternalIP` addresses, which is where a Unikraft instance's pod is bound
+while its tap and host link are on the host. For each pod, it reads the
+Multus `k8s.v1.cni.cncf.io/network-status` annotation, takes the last entry
+whose NetworkAttachmentDefinition chains `galactic-bgp` and carries an IPv6
+address, the default network's entry included, as a compute instance's
+Galactic attachment is its default network, and creates the slice from that definition's
 `vpc`, `vpcattachment` and `namespace`, with the SID computed from the node's
 `BGPRouter` and the VPC's `BGPVRFInstance`. It only creates: an existing slice
 is never rewritten, and an ADD that loses its create to the repair retries as
 an update. A recreated slice has no `sandbox-id` annotation until the pod's
 next ADD. An attachment whose definition no longer exists is passed over for
 the pod's earlier one. A pod whose definition, `BGPRouter` or `BGPVRFInstance`
-cannot be read is skipped, logged and retried on the next tick.
+cannot be read is skipped, logged and retried on the next tick. When the
+virtual kubelet Nodes cannot be listed, the pass still covers the node's own
+pods but counts as failed.
 `galactic_endpointslice_repair_restored_total` counts the slices recreated,
 and `galactic_endpointslice_repair_failures_total` the passes that failed.
 

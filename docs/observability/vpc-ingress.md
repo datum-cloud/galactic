@@ -333,7 +333,8 @@ time() - galactic_sidecar_return_last_completed_timestamp_seconds > 300
 ### Backend EndpointSlice repair — `galactic_endpointslice_repair_*`
 
 `galactic-cni` recreates the per-pod EndpointSlice of any Running pod on its
-node that has a galactic IPv6 attachment but no slice, every 5 minutes (see
+node, or on a virtual kubelet Node it hosts, that has a galactic IPv6
+attachment but no slice, every 5 minutes (see
 [conflist-reference.md](../cni/conflist-reference.md#endpointslice-publish-http-ingress-backend-discovery)).
 The HTTP ingress sidecar finds a VPC backend only through that slice, so each
 recreated slice is a pod whose HTTP ingress was down until the pass.
@@ -342,7 +343,7 @@ recreated slice is a pod whose HTTP ingress was down until the pass.
 | ----------------------------------------------- | ------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `galactic_endpointslice_repair_restored_total`  | counter | none   | Missing EndpointSlices the repair recreated                                                                                                         |
 | `galactic_endpointslice_repair_superseded_pods` | gauge   | none   | Running pods whose NetworkAttachmentDefinition names a VPC attachment this node holds no host link for, as of the last pass that examined every pod |
-| `galactic_endpointslice_repair_failures_total`  | counter | none   | Passes that could not list the node's pods, or read or create an EndpointSlice                                                                      |
+| `galactic_endpointslice_repair_failures_total`  | counter | none   | Passes that could not list the node's pods or virtual kubelet Nodes, or read or create an EndpointSlice                                             |
 
 A pod the pass cannot resolve (no NetworkAttachmentDefinition, `BGPRouter` or
 `BGPVRFInstance`) is logged and retried on the next pass, not counted as a

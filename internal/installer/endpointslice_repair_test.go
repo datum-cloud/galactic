@@ -22,11 +22,13 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
+	"go.datum.net/galactic/internal/virtualnode"
 )
 
 const (
@@ -36,20 +38,43 @@ const (
 	repairAttachment = "def"
 	repairNAD        = "vpc-net"
 	repairPodAddr    = "fd00:10::5"
+	repairSecondAddr = "fd00:20::5"
 	repairLocator    = "2001:db8:ff01::/48"
 	repairNodeID     = int32(7)
 	repairVRFID      = int32(3)
 )
 
+// repairHostAddr is the internal address of repairNode, which a virtual
+// kubelet Node it hosts shares.
+const repairHostAddr = "192.0.2.10"
+
+// repairClient returns a fake client holding objs and repairNode's Node.
 func repairClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	return repairClientWith(t, interceptor.Funcs{}, objs...)
+}
+
+func repairClientWith(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) client.Client {
 	t.Helper()
 	s := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(s))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(s))
-	return fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
+	return fake.NewClientBuilder().WithScheme(s).
+		WithObjects(append(objs, repairNodeObject(repairNode, repairHostAddr, false))...).
 		WithIndex(&corev1.Pod{}, podNodeNameField, func(o client.Object) []string {
 			return []string{o.(*corev1.Pod).Spec.NodeName}
-		}).Build()
+		}).WithInterceptorFuncs(funcs).Build()
+}
+
+// repairNodeObject returns a Node with internal address addr, labelled as a
+// virtual kubelet Node when virtual is set.
+func repairNodeObject(name, addr string, virtual bool) *corev1.Node {
+	n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	if virtual {
+		n.Labels = virtualnode.Selector()
+	}
+	n.Status.Addresses = []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: addr}}
+	return n
 }
 
 func repairNADObject(plugins string) *unstructured.Unstructured {
@@ -269,6 +294,116 @@ func TestRepairEndpointSlicesSupersededCount(t *testing.T) {
 	})
 }
 
+// instanceStatus is a compute instance pod's network-status: its Galactic
+// attachment is the default network.
+func instanceStatus() nadv1.NetworkStatus {
+	st := galacticStatus(repairPodAddr)
+	st.Default = true
+	return st
+}
+
+// A compute instance pod is covered whether it is bound to this node, as a
+// Kata pod is, or to a virtual kubelet Node this node hosts, as a Unikraft
+// pod is. Both carry their Galactic attachment as the default network. The
+// pass reports a superseded attachment and restores a missing slice for each.
+func TestRepairEndpointSlicesCoversInstancePods(t *testing.T) {
+	kraftlet := repairNodeObject("kraftlet-"+repairNode, repairHostAddr, true)
+	for name, podNode := range map[string]string{"kata": repairNode, "unikraft": kraftlet.Name} {
+		t.Run(name+" superseded", func(t *testing.T) {
+			withHostLinks(t, repairAttachment)
+			pod := repairPod("vm-0", podNode, corev1.PodRunning, instanceStatus())
+			replacement := repairNADObject(
+				fmt.Sprintf(`{"type":"galactic-bgp","vpc":%q,"vpcattachment":"ghi"}`, repairVPC))
+			k8s := repairClient(t, append(repairIdentity(), kraftlet, replacement, pod)...)
+
+			result, err := repairEndpointSlices(context.Background(), k8s, testNamespace, repairNode)
+			want := endpointSliceRepairResult{Restored: 1, Superseded: 1, Complete: true}
+			if err != nil || result != want {
+				t.Fatalf("repairEndpointSlices() = (%+v, %v), want %+v", result, err, want)
+			}
+		})
+		t.Run(name+" slice restored", func(t *testing.T) {
+			withHostLinks(t, repairAttachment)
+			pod := repairPod("vm-0", podNode, corev1.PodRunning, instanceStatus())
+			k8s := repairClient(t, append(repairIdentity(), kraftlet, galacticNAD(), pod)...)
+
+			result, err := repairEndpointSlices(context.Background(), k8s, testNamespace, repairNode)
+			want := endpointSliceRepairResult{Restored: 1, Complete: true}
+			if err != nil || result != want {
+				t.Fatalf("repairEndpointSlices() = (%+v, %v), want %+v", result, err, want)
+			}
+			slice, ok := getRepairSlice(t, k8s, "vm-0")
+			if !ok {
+				t.Fatal("EndpointSlice not recreated")
+			}
+			wantSID, err := srv6.ComputeSID(repairLocator, repairNodeID, repairVRFID, bgpv1alpha1.SRv6FunctionEndDT46)
+			if err != nil {
+				t.Fatalf("ComputeSID: %v", err)
+			}
+			if got := slice.Annotations[crdnames.AnnotationSID]; got != wantSID.String() {
+				t.Errorf("SID annotation = %q, want this host's %q", got, wantSID)
+			}
+		})
+	}
+}
+
+// A secondary Galactic attachment still wins over a Galactic default network,
+// as its ADD runs last.
+func TestRepairEndpointSlicesPrefersSecondaryOverDefault(t *testing.T) {
+	secondary := repairNADObject(fmt.Sprintf(`{"type":"galactic-bgp","vpc":%q,"vpcattachment":"ghi"}`, repairVPC))
+	secondary.SetName("second")
+	pod := repairPod("vm-0", repairNode, corev1.PodRunning, instanceStatus(),
+		nadv1.NetworkStatus{Name: repairPodNS + "/second", IPs: []string{repairSecondAddr}})
+	k8s := repairClient(t, append(repairIdentity(), galacticNAD(), secondary, pod)...)
+
+	if _, err := repairEndpointSlices(context.Background(), k8s, testNamespace, repairNode); err != nil {
+		t.Fatalf("repairEndpointSlices() error = %v", err)
+	}
+	slice, _ := getRepairSlice(t, k8s, "vm-0")
+	if got := slice.Endpoints[0].Addresses[0]; got != repairSecondAddr {
+		t.Errorf("address = %q, want the secondary attachment's", got)
+	}
+}
+
+// Pods on a virtual kubelet Node another host runs are that host's to repair.
+func TestRepairEndpointSlicesIgnoresOtherHostsVirtualNodes(t *testing.T) {
+	withHostLinks(t)
+	other := repairNodeObject("node-b", "192.0.2.11", false)
+	kraftlet := repairNodeObject("kraftlet-node-b", "192.0.2.11", true)
+	pod := repairPod("vm-0", kraftlet.Name, corev1.PodRunning, instanceStatus())
+	k8s := repairClient(t, append(repairIdentity(), other, kraftlet, galacticNAD(), pod)...)
+
+	result, err := repairEndpointSlices(context.Background(), k8s, testNamespace, repairNode)
+	want := endpointSliceRepairResult{Complete: true}
+	if err != nil || result != want {
+		t.Fatalf("repairEndpointSlices() = (%+v, %v), want %+v", result, err, want)
+	}
+}
+
+// When the virtual kubelet Nodes cannot be listed, this node's own pods are
+// still repaired, but the pass fails and its superseded count is incomplete.
+func TestRepairEndpointSlicesVirtualNodeListFails(t *testing.T) {
+	withHostLinks(t, repairAttachment)
+	pod := repairPod("web-0", repairNode, corev1.PodRunning, galacticStatus(repairPodAddr))
+	funcs := interceptor.Funcs{List: func(
+		ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption,
+	) error {
+		if _, ok := list.(*corev1.NodeList); ok {
+			return errors.New("nodes is forbidden")
+		}
+		return c.List(ctx, list, opts...)
+	}}
+	k8s := repairClientWith(t, funcs, append(repairIdentity(), galacticNAD(), pod)...)
+
+	result, err := repairEndpointSlices(context.Background(), k8s, testNamespace, repairNode)
+	if err == nil {
+		t.Fatal("repairEndpointSlices() error = nil, want the node list failure")
+	}
+	if want := (endpointSliceRepairResult{Restored: 1}); result != want {
+		t.Fatalf("result = %+v, want %+v", result, want)
+	}
+}
+
 func TestRepairEndpointSlicesSkipsPodsWithNothingToRepair(t *testing.T) {
 	deleting := repairPod("deleting", repairNode, corev1.PodRunning, galacticStatus(repairPodAddr))
 	now := metav1.Now()
@@ -286,6 +421,8 @@ func TestRepairEndpointSlicesSkipsPodsWithNothingToRepair(t *testing.T) {
 		repairPod("ipv4-only", repairNode, corev1.PodRunning, galacticStatus("192.0.2.5")),
 		repairPod("not-galactic", repairNode, corev1.PodRunning,
 			nadv1.NetworkStatus{Name: repairPodNS + "/plain", IPs: []string{repairPodAddr}}),
+		repairPod("cluster-network-only", repairNode, corev1.PodRunning,
+			nadv1.NetworkStatus{Name: "cilium", IPs: []string{"10.0.0.5", repairPodAddr}, Default: true}),
 	}
 	k8s := repairClient(t, append(append(repairIdentity(), galacticNAD(), plainNAD), pods...)...)
 
@@ -355,7 +492,7 @@ func TestRepairEndpointSlicesNoSRv6Identity(t *testing.T) {
 // attachment names a definition that has since been deleted: the earlier
 // galactic attachment still gets its slice.
 func TestRepairEndpointSlicesPassesOverDeletedDefinition(t *testing.T) {
-	gone := nadv1.NetworkStatus{Name: repairPodNS + "/gone", IPs: []string{"fd00:20::5"}}
+	gone := nadv1.NetworkStatus{Name: repairPodNS + "/gone", IPs: []string{repairSecondAddr}}
 	pod := repairPod("web-0", repairNode, corev1.PodRunning, galacticStatus(repairPodAddr), gone)
 	k8s := repairClient(t, append(repairIdentity(), galacticNAD(), pod)...)
 
