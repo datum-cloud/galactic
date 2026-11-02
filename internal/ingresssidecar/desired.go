@@ -74,8 +74,10 @@ func BuildDesiredRoute(slice *discoveryv1.EndpointSlice) (*DesiredRoute, error) 
 	}
 
 	return &DesiredRoute{
-		VPC:    vpc,
-		Prefix: &net.IPNet{IP: addr, Mask: net.CIDRMask(128, 128)},
-		SID:    sid,
+		VPC:          vpc,
+		Prefix:       &net.IPNet{IP: addr, Mask: net.CIDRMask(128, 128)},
+		SID:          sid,
+		SliceCreated: slice.CreationTimestamp.Time,
+		SliceUID:     string(slice.UID),
 	}, nil
 }

@@ -85,13 +85,14 @@ How far a sidecar's host state is from what its EndpointSlices ask for. A
 claim is one selected, ready EndpointSlice's route; claims sharing a prefix
 share one kernel route.
 
-| Metric                                                                  | Type    | Labels                | Meaning                                                                                                                                        |
-| ----------------------------------------------------------------------- | ------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `galactic_ingress_sidecar_route_claims_desired`                         | gauge   | none                  | Claims the sidecar wants installed, including any whose install failed                                                                         |
-| `galactic_ingress_sidecar_route_claims_apply_pending`                   | gauge   | none                  | Desired claims whose latest update is not applied, whether or not an earlier version of the route is installed                                 |
-| `galactic_ingress_sidecar_route_apply_oldest_pending_timestamp_seconds` | gauge   | none                  | Unix time the longest-pending claim stopped being applied; 0 when none is pending                                                              |
-| `galactic_ingress_sidecar_teardown_overdue`                             | gauge   | `resource`            | Routes or VRFs (`route`, `vrf`) whose own grace period ran out but whose removal has not completed, as of the last sweep                       |
-| `galactic_ingress_sidecar_operations_total`                             | counter | `operation`, `result` | Completed backend operations: `ensure_vrf`, `ensure_route`, `remove_vrf`, `remove_route`, `reapply_vrf`, `reapply_route`; `success` or `error` |
+| Metric                                                                  | Type      | Labels                | Meaning                                                                                                                                        |
+| ----------------------------------------------------------------------- | --------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_ingress_sidecar_route_claims_desired`                         | gauge     | none                  | Claims the sidecar wants installed, including any whose install failed                                                                         |
+| `galactic_ingress_sidecar_route_claims_apply_pending`                   | gauge     | none                  | Desired claims whose latest update is not applied, whether or not an earlier version of the route is installed                                 |
+| `galactic_ingress_sidecar_route_apply_oldest_pending_timestamp_seconds` | gauge     | none                  | Unix time the longest-pending claim stopped being applied; 0 when none is pending                                                              |
+| `galactic_ingress_sidecar_teardown_overdue`                             | gauge     | `resource`            | Routes or VRFs (`route`, `vrf`) whose own grace period ran out but whose removal has not completed, as of the last sweep                       |
+| `galactic_ingress_sidecar_operations_total`                             | counter   | `operation`, `result` | Completed backend operations: `ensure_vrf`, `ensure_route`, `remove_vrf`, `remove_route`, `reapply_vrf`, `reapply_route`; `success` or `error` |
+| `galactic_ingress_sidecar_route_apply_delay_seconds`                    | histogram | none                  | Time from a claim becoming pending, when its slice is first observed or updated, to that update applying, across failed attempts and retries   |
 
 - A claim's pending age starts when it first fails to apply after being
   applied or created, and survives failed retries and newer updates of the
@@ -112,7 +113,15 @@ share one kernel route.
 - `operations_total{result="error"}` counts the same failures as
   `reconcile_errors_total` for those six kinds, each failure once. Never add
   the two. `reconcile_errors_total` alone also counts `prune_datapath`.
-- These add 17 fixed series per sidecar.
+- `route_apply_delay_seconds` records a claim's update at the moment it
+  applies, so it keeps the history the oldest-pending gauge loses once a
+  backlog drains between scrapes. It times only updates that matter: a new
+  slice, one recreated under the same name, one reactivated during its grace
+  period, or a changed VPC, prefix or SID. Reconciles that change nothing,
+  such as resyncs, are not timed. A sidecar restart times each slice once, near
+  zero. A claim withdrawn before it applies is not recorded. Its buckets run
+  from 50 ms to 10 min.
+- These add 33 fixed series per sidecar: 17, plus 16 for the histogram.
 
 ```promql
 # Apply backlog: how long the oldest claim has been unapplied. 0 means none.
@@ -125,7 +134,29 @@ galactic_ingress_sidecar_teardown_overdue > 0
 # Backend error ratio by operation; absent, not zero, when nothing ran
 sum by (namespace, pod, operation) (rate(galactic_ingress_sidecar_operations_total{result="error"}[5m]))
   / sum by (namespace, pod, operation) (rate(galactic_ingress_sidecar_operations_total[5m]))
+
+# Slowest applies over the last 15 minutes, by sidecar
+histogram_quantile(0.99, sum by (le, namespace, pod) (rate(galactic_ingress_sidecar_route_apply_delay_seconds_bucket[15m])))
 ```
+
+#### Splitting a slow first install
+
+When a replacement backend stays unreachable from an edge after its
+EndpointSlice exists, two signals split the wait on that edge:
+
+- `endpoint_slice_observe_delay_seconds` (see
+  [EndpointSlice inputs](#endpointslice-inputs)) covers the time from the
+  slice's creation in this cluster to this sidecar seeing it ready. That is
+  projection lag, a late SID annotation, or watch lag.
+- `route_apply_delay_seconds` covers the time from this sidecar seeing it to
+  the route being applied.
+
+For one slice, set the sidecar's [log level](logging.md) to `debug`. The
+first install for each slice then logs `installed route for EndpointSlice`.
+That includes a slice recreated under the same name, as a replaced pod's is.
+The log line carries the slice key, `vpc`, `prefix`, `sliceCreated`,
+`observed`, `installed`, `sinceCreated` and `sinceObserved`. If both delays are short on the edge serving the requests,
+look past this sidecar: at the request path and at which edge received it.
 
 ### EndpointSlice inputs
 
@@ -136,10 +167,11 @@ into a route, `waiting_sid` while its node's SID annotation has not appeared
 parsed, for a malformed tenant identifier, SID or address, or a non-IPv6
 address type. Parsing reads only the first endpoint's first address.
 
-| Metric                                                      | Type    | Labels             | Meaning                                                                                                    |
-| ----------------------------------------------------------- | ------- | ------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `galactic_ingress_sidecar_endpoint_slices`                  | gauge   | `state`            | Selected slices by `state`: `ready`, `waiting_sid`, `invalid`                                              |
-| `galactic_ingress_sidecar_endpoint_slice_evaluations_total` | counter | `source`, `result` | Evaluations by `source` (`seed`, `watch`) and `result` (`ready`, `waiting_sid`, `invalid`, `not_selected`) |
+| Metric                                                          | Type      | Labels             | Meaning                                                                                                    |
+| --------------------------------------------------------------- | --------- | ------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `galactic_ingress_sidecar_endpoint_slices`                      | gauge     | `state`            | Selected slices by `state`: `ready`, `waiting_sid`, `invalid`                                              |
+| `galactic_ingress_sidecar_endpoint_slice_evaluations_total`     | counter   | `source`, `result` | Evaluations by `source` (`seed`, `watch`) and `result` (`ready`, `waiting_sid`, `invalid`, `not_selected`) |
+| `galactic_ingress_sidecar_endpoint_slice_observe_delay_seconds` | histogram | none               | Time from a slice's `creationTimestamp` to the watch first seeing it `ready`                               |
 
 - A slice that turns `invalid` keeps any route it had: the sidecar keeps the
   last good desired state rather than tearing the route down. A successful
@@ -155,7 +187,18 @@ address type. Parsing reads only the first endpoint's first address.
   slice deleted or without the tenant label. The watch currently drops an
   update that only removes the label, so a deselected slice keeps its last
   state here, and its route, until it is deleted or the sidecar restarts.
-  These add 11 fixed series per sidecar.
+- `endpoint_slice_observe_delay_seconds` times each slice once: at its first
+  `ready` observation by the watch, counting a SID annotation that arrives
+  late. It skips slices created before the sidecar started, which the watch's
+  initial list delivers, and slices without a `creationTimestamp`. A slice
+  deleted and recreated under the same name is timed again, by its new UID,
+  even when the two events reach the sidecar as one. A slice created during
+  the sidecar's own startup is timed when the watch first delivers it, so
+  its delay includes that startup.
+  `creationTimestamp` has whole seconds and comes from the API server's clock,
+  so expect up to a second of error plus any clock skew. A negative delay
+  counts as zero.
+- These add 27 fixed series per sidecar: 11, plus 16 for the histogram.
 
 ```promql
 # Slices that cannot be parsed, and slices still waiting for their SID

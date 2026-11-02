@@ -21,11 +21,11 @@ func (m *LifecycleMetrics) collectors() []prometheus.Collector {
 }
 
 func (m *ConvergenceMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.desired, m.applyPending, m.oldest, m.overdue, m.operations}
+	return []prometheus.Collector{m.desired, m.applyPending, m.oldest, m.overdue, m.operations, m.applyDelay}
 }
 
 func (m *InputMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.slices, m.evaluations}
+	return []prometheus.Collector{m.slices, m.evaluations, m.observeDelay}
 }
 
 func (m *DatapathMetrics) collectors() []prometheus.Collector {

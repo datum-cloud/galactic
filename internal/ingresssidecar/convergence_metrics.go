@@ -51,7 +51,12 @@ type ConvergenceMetrics struct {
 	oldest       prometheus.Gauge
 	overdue      *prometheus.GaugeVec
 	operations   *prometheus.CounterVec
+	applyDelay   prometheus.Histogram
 }
+
+// delayBuckets span a prompt apply or projection, well under a second, to one
+// stuck for many minutes.
+var delayBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600}
 
 // NewConvergenceMetrics creates convergence metrics on the instrumentation
 // library's registry, every series at zero. The registry keeps the series
@@ -88,6 +93,13 @@ func NewConvergenceMetrics() *ConvergenceMetrics {
 			Help: "Completed backend operations, by operation (ensure_vrf, ensure_route, remove_vrf, " +
 				"remove_route, reapply_vrf, reapply_route) and result (success, error).",
 		}, []string{"operation", resultLabel}),
+		applyDelay: newHistogram(prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Name:      "route_apply_delay_seconds",
+			Help: "Time from a route claim becoming apply-pending, when its EndpointSlice is first observed " +
+				"or updated, to that update being applied, including failed attempts and retries.",
+			Buckets: delayBuckets,
+		}),
 	}
 	for _, g := range []prometheus.Gauge{m.desired, m.applyPending, m.oldest} {
 		g.Set(0)
@@ -115,6 +127,14 @@ func (m *ConvergenceMetrics) operation(op string, err error) {
 		result = OpError
 	}
 	m.operations.WithLabelValues(op, result).Inc()
+}
+
+// applied records that a claim's pending update applied after waiting d.
+func (m *ConvergenceMetrics) applied(d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.applyDelay.Observe(max(d, 0).Seconds())
 }
 
 // claims publishes the desired and apply-pending claim counts and the oldest

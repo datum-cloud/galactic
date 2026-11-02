@@ -55,6 +55,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		ctrl.LoggerFrom(ctx).Error(err, "skipping malformed EndpointSlice", "endpointslice", req.String())
 		return ctrl.Result{}, nil
 	}
+	if desired != nil {
+		inputs.observeReady(req.String(), desired.SliceUID, desired.SliceCreated)
+	}
 	if err := r.Store.SetDesired(ctx, req.String(), desired); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile EndpointSlice %s: %w", req.NamespacedName, err)
 	}

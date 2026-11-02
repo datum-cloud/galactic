@@ -4,7 +4,10 @@
 
 package ingresssidecar
 
-import "net"
+import (
+	"net"
+	"time"
+)
 
 // DesiredRoute is the desired SRv6 egress-route state for one pod, derived from
 // a single EndpointSlice. The store keys each by that slice's namespace and
@@ -22,4 +25,13 @@ type DesiredRoute struct {
 	// SID is the pod's own computed SRv6 uSID — the seg6 encap gateway
 	// address for Prefix's route.
 	SID net.IP
+	// SliceCreated is the EndpointSlice's creationTimestamp, the zero Time
+	// when it has none. Diagnostics only: it says when the slice reached this
+	// cluster, so a slow install can be split between projection and this
+	// sidecar. It never takes part in deciding what to install.
+	SliceCreated time.Time
+	// SliceUID is the EndpointSlice's UID, empty when it has none. Also
+	// diagnostics only: it tells a slice recreated under the same name, as a
+	// replaced pod's is, from the one it replaced.
+	SliceUID string
 }
