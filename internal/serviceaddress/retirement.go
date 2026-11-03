@@ -5,7 +5,11 @@
 package serviceaddress
 
 import (
+	"cmp"
 	"context"
+	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -21,10 +25,23 @@ const withdrawalFinalizer = "galactic.datum.net/address-withdrawal"
 const addressLabel = "galactic.datum.net/service-address"
 const addressNamespaceLabel = "galactic.datum.net/service-address-namespace"
 
+const (
+	reasonAwaitingGateway  = "AwaitingGatewayAcknowledgement"
+	reasonForwardingState  = "ForwardingStatePresent"
+	minRetirementBackoff   = time.Second
+	maxRetirementBackoff   = 5 * time.Minute
+	maxReportedGatewayRefs = 3
+)
+
 // RetirementReconciler acknowledges terminal-at-creation allocations without serving gateways.
 type RetirementReconciler struct {
 	client.Client
 	APIReader client.Reader
+}
+
+type pendingRetirement struct {
+	reason  string
+	message string
 }
 
 func (r *RetirementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -53,9 +70,15 @@ func (r *RetirementReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		c.ObservedGeneration == address.Generation {
 		return ctrl.Result{}, nil
 	}
-	pending, err := r.pendingResources(ctx, reader, address)
-	if err != nil || pending {
-		return ctrl.Result{RequeueAfter: time.Second}, err
+	pending, err := r.pendingResources(ctx, r.Client, address)
+	if err == nil && pending == nil {
+		pending, err = r.pendingResources(ctx, reader, address)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if pending != nil {
+		return r.awaitRetirement(ctx, address, pending)
 	}
 	meta.SetStatusCondition(&address.Status.Conditions, metav1.Condition{Type: api.ConditionTypeAddressRetired,
 		Status: metav1.ConditionTrue, ObservedGeneration: address.Generation, Reason: "NeverActivated",
@@ -64,52 +87,114 @@ func (r *RetirementReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{}, r.Status().Update(ctx, address)
 }
 
+func (r *RetirementReconciler) awaitRetirement(
+	ctx context.Context,
+	address *api.NetworkServiceAddress,
+	pending *pendingRetirement,
+) (ctrl.Result, error) {
+	changed := meta.SetStatusCondition(&address.Status.Conditions, metav1.Condition{
+		Type: api.ConditionTypeAddressRetired, Status: metav1.ConditionFalse,
+		ObservedGeneration: address.Generation, Reason: pending.reason, Message: pending.message,
+	})
+	if changed {
+		address.Status.ObservedGeneration = address.Generation
+		if err := r.Status().Update(ctx, address); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	condition := meta.FindStatusCondition(address.Status.Conditions, api.ConditionTypeAddressRetired)
+	return ctrl.Result{RequeueAfter: retirementBackoff(time.Since(condition.LastTransitionTime.Time))}, nil
+}
+
+func retirementBackoff(waited time.Duration) time.Duration {
+	return min(max(waited, minRetirementBackoff), maxRetirementBackoff)
+}
+
 func (r *RetirementReconciler) pendingResources(
 	ctx context.Context,
 	reader client.Reader,
 	address *api.NetworkServiceAddress,
-) (bool, error) {
+) (*pendingRetirement, error) {
 	gateways := &api.NetworkGatewayList{}
 	if err := reader.List(ctx, gateways); err != nil {
-		return true, err
+		return nil, err
 	}
 	if len(gateways.Items) > 0 {
-		return true, nil
+		return &pendingRetirement{reason: reasonAwaitingGateway, message: gatewayWaitMessage(gateways.Items)}, nil
 	}
 	services := &api.NetworkServiceList{}
 	if err := reader.List(ctx, services); err != nil {
-		return true, err
+		return nil, err
 	}
+	var referrer referrer
 	for _, service := range services.Items {
 		if service.Spec.AddressGroup != nil && service.Spec.AddressGroup.UID == address.Spec.Group.UID {
-			return true, nil
+			referrer.offer(service.Namespace, service.Name)
 		}
+	}
+	if pending := referrer.pending("NetworkService"); pending != nil {
+		return pending, nil
 	}
 	ads := &api.BGPAdvertisementList{}
 	if err := reader.List(ctx, ads); err != nil {
-		return true, err
+		return nil, err
 	}
 	for _, ad := range ads.Items {
-		if (ad.Labels[addressLabel] == address.Name || ad.Annotations[addressLabel] == address.Name) &&
-			(ad.Labels[addressNamespaceLabel] == address.Namespace || ad.Namespace == address.Namespace) {
-			return true, nil
+		if ((ad.Labels[addressLabel] == address.Name || ad.Annotations[addressLabel] == address.Name) &&
+			(ad.Labels[addressNamespaceLabel] == address.Namespace || ad.Namespace == address.Namespace)) ||
+			slices.ContainsFunc(ad.OwnerReferences, func(o metav1.OwnerReference) bool { return o.UID == address.UID }) {
+			referrer.offer(ad.Namespace, ad.Name)
 		}
-		for _, owner := range ad.OwnerReferences {
-			if owner.UID == address.UID {
-				return true, nil
-			}
-		}
+	}
+	if pending := referrer.pending("BGPAdvertisement"); pending != nil {
+		return pending, nil
 	}
 	bindings := &api.ServiceVIPBindingList{}
 	if err := reader.List(ctx, bindings); err != nil {
-		return true, err
+		return nil, err
 	}
 	for _, binding := range bindings.Items {
 		if binding.Spec.SourceRef != nil && binding.Spec.SourceRef.AllocationUID == address.Spec.Group.UID {
-			return true, nil
+			referrer.offer(binding.Namespace, binding.Name)
 		}
 	}
-	return false, nil
+	return referrer.pending("ServiceVIPBinding"), nil
+}
+
+type referrer struct {
+	found           bool
+	namespace, name string
+}
+
+func (r *referrer) offer(namespace, name string) {
+	if !r.found || cmp.Or(cmp.Compare(namespace, r.namespace), cmp.Compare(name, r.name)) < 0 {
+		*r = referrer{found: true, namespace: namespace, name: name}
+	}
+}
+
+func (r *referrer) pending(kind string) *pendingRetirement {
+	if !r.found {
+		return nil
+	}
+	return &pendingRetirement{
+		reason:  reasonForwardingState,
+		message: fmt.Sprintf("Waiting for %s %s/%s to stop referring to this allocation", kind, r.namespace, r.name),
+	}
+}
+
+func gatewayWaitMessage(gateways []api.NetworkGateway) string {
+	slices.SortFunc(gateways, func(a, b api.NetworkGateway) int {
+		return cmp.Or(cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Name, b.Name))
+	})
+	refs := make([]string, 0, maxReportedGatewayRefs)
+	for _, gw := range gateways[:min(len(gateways), maxReportedGatewayRefs)] {
+		refs = append(refs, fmt.Sprintf("%s/%s (node %s)", gw.Namespace, gw.Name, gw.Spec.TargetRef.Name))
+	}
+	message := "Waiting for galactic-gateway to acknowledge withdrawal; NetworkGateways: " + strings.Join(refs, ", ")
+	if extra := len(gateways) - len(refs); extra > 0 {
+		message += fmt.Sprintf(" and %d more", extra)
+	}
+	return message
 }
 
 // SetupWithManager registers the retirement controller on the cell control plane.
