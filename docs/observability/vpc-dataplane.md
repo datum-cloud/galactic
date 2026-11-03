@@ -220,6 +220,9 @@ counted. See [host link repair](../cni/architecture.md#host-link-repair).
 | `galactic_cni_host_links_masterless`             | gauge     | none     | Host links still without a VRF master after the last pass                             |
 | `galactic_cni_host_link_reenslaved_total`        | counter   | none     | Host links the repair found without a VRF master and enslaved back to their VRF       |
 | `galactic_cni_host_link_repair_failures_total`   | counter   | none     | Repair passes that failed; one that could not list links leaves the gauge as it was   |
+| `galactic_cni_stale_taps_pending`                | gauge     | none     | Detached taps no attachment or advertisement names, awaiting the next pass or a retry |
+| `galactic_cni_stale_taps_reclaimed_total`        | counter   | none     | Taps removed, with their eBPF rows, after outliving their attachment                  |
+| `galactic_cni_stale_tap_reclaim_failures_total`  | counter   | none     | Stale tap passes that failed; one that could not list leaves the gauge as it was      |
 
 `GalacticHostLinkMasterless` fires when the gauge stays above zero for 10
 minutes. Any increase of the counter means a VRF was deleted with a link still
@@ -230,3 +233,15 @@ when the repair succeeded.
 max by (node) (galactic_cni_host_links_masterless) > 0
 increase(galactic_cni_host_link_reenslaved_total[1h]) > 0
 ```
+
+The same daemon removes a tenant tap whose DEL never ran once neither a
+`BGPAdvertisement` nor a `VPCAttachment` names it and no VMM holds it, after
+two 5-minute passes find it unchanged. Such a tap otherwise keeps a `linkdown`
+route for a prefix no attachment owns and a traffic policy row with no binding,
+so every decision on it is counted as an unattributed `policy_unavailable`
+drop. An increase of `galactic_cni_stale_taps_reclaimed_total` means a DEL was
+lost. The pending gauge also counts first sightings, so read failed removals
+and passes that could not list from
+`galactic_cni_stale_tap_reclaim_failures_total` and the daemon's log. A pass
+also fails, removing nothing, while the cluster lists no VPCAttachment with an
+identity.

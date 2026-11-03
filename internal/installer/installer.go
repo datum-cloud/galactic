@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/gc"
@@ -188,6 +189,8 @@ func init() {
 	// sweeps make. The client is shared with Bootstrap's plain Node lookup,
 	// which does not need it, but must know every kind either caller lists.
 	_ = bgpv1alpha1.AddToScheme(scheme)
+	// Registered for the VPCAttachment list the stale tap reclaim makes.
+	_ = cloudv1alpha1.AddToScheme(scheme)
 }
 
 var newK8sClientFn = func() (client.Client, error) {
@@ -1281,6 +1284,8 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	// arriving during one is dropped instead of piling up behind it.
 	tapNeighSem := make(chan struct{}, 1)
 	hostLinkRepairSem := make(chan struct{}, 1)
+	staleTapSem := make(chan struct{}, 1)
+	staleTaps := &staleTapReclaimer{}
 	sidecarReturnSem := make(chan struct{}, 1)
 	endpointSliceRepairSem := make(chan struct{}, 1)
 
@@ -1340,6 +1345,10 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// and the repair writes keys for live CRDs only.
 			repairDatapathOnTick(ctx, datapathRepairSem, ebpfState)
 			repairEndpointSlicesOnTick(ctx, endpointSliceRepairSem, ebpfState)
+			// Taps no DEL removed whose BGPAdvertisement is gone too: the
+			// router's GC no longer sees them, and this daemon owns their
+			// eBPF rows and the tap teardown.
+			startStaleTapReclaim(ctx, staleTapSem, staleTaps, ebpfState, m.HostLinks)
 			result := gc.SweepEBPFVRFTable(ctx, ebpfState.k8sClient, ebpfState.namespace, ebpfState.nodeName, attach.PinDir)
 			logEBPFVRFSweepResult(result)
 

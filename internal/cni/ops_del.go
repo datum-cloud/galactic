@@ -15,8 +15,7 @@ import (
 
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
-	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
-	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
@@ -111,8 +110,8 @@ func cmdDel(args *skel.CmdArgs) error {
 	return nil
 }
 
-// unregisterIfindexVRFEntry removes this attachment's ifindex_vrf_table,
-// ifindex_egress_kind_table and tenant_gw_table entries if they exist. The
+// unregisterIfindexVRFEntry removes every pinned map row keyed on this
+// attachment's host ifindex (see attachreg.UnregisterInterface). The
 // interface's ifindex is resolved by its deterministic name,
 // the same name the ADD path resolved it by, and before the interface is torn
 // down, since there is nothing to resolve from afterward.
@@ -141,51 +140,8 @@ func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 		return
 	}
 
-	table, closer, err := ifindexvrfmap.OpenPinned(attach.PinDir)
-	if err != nil {
-		// No pinned map to clean up — eBPF datapath not enabled, or the
-		// "run" container hasn't finished loading it yet. Not an error.
-		return
-	}
-	defer func() { _ = closer.Close() }()
-
-	if err := table.Unregister(uint32(link.Attrs().Index)); err != nil {
-		slog.Warn("DEL: failed to unregister eBPF ifindex_vrf_table entry", "err", err,
-			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
-	}
-
-	// The egress kind entry shares this row's lifecycle. Left behind, it would
-	// steer delivery for whatever attachment next reuses this ifindex until
-	// that attachment's own ADD overwrites it.
-	kinds, kindsCloser, err := ifindexvrfmap.OpenPinnedEgressKind(attach.PinDir)
-	if err != nil {
-		return
-	}
-	defer func() { _ = kindsCloser.Close() }()
-
-	if err := kinds.Unregister(uint32(link.Attrs().Index)); err != nil {
-		slog.Warn("DEL: failed to unregister eBPF ifindex_egress_kind_table entry", "err", err,
-			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
-	}
-
-	// The interface's traffic policy state belongs to this lifetime alone:
-	// its bindings, policy token, addresses and fallback counter rows.
-	if err := tpmap.RemovePinnedInterface(attach.PinDir, uint32(link.Attrs().Index)); err != nil {
-		slog.Warn("DEL: failed to remove traffic policy state", "err", err,
-			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
-	}
-
-	// The gateway entry shares this row's lifecycle too. Left behind, the next
-	// attachment on this ifindex would be sent errors from this one's gateway
-	// until its own ADD overwrites it.
-	gateways, gatewaysCloser, err := ifindexvrfmap.OpenPinnedGateway(attach.PinDir)
-	if err != nil {
-		return
-	}
-	defer func() { _ = gatewaysCloser.Close() }()
-
-	if err := gateways.Unregister(uint32(link.Attrs().Index)); err != nil {
-		slog.Warn("DEL: failed to unregister eBPF tenant_gw_table entry", "err", err,
+	if err := attachreg.UnregisterInterface(attach.PinDir, uint32(link.Attrs().Index)); err != nil {
+		slog.Warn("DEL: failed to remove eBPF interface state", "err", err,
 			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
 	}
 }
