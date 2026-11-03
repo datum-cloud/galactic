@@ -2,11 +2,9 @@
 
 [![CI](https://github.com/datum-cloud/galactic/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/datum-cloud/galactic/actions/workflows/ci.yaml)
 [![Documentation](https://github.com/datum-cloud/galactic/actions/workflows/docs.yaml/badge.svg?branch=main)](https://github.com/datum-cloud/galactic/actions/workflows/docs.yaml)
-[![codecov](https://codecov.io/gh/datum-cloud/galactic/branch/main/graph/badge.svg)](https://codecov.io/gh/datum-cloud/galactic)
 [![Release](https://img.shields.io/github/v/release/datum-cloud/galactic)](https://github.com/datum-cloud/galactic/releases/latest)
 [![Go Reference](https://pkg.go.dev/badge/go.datum.net/galactic.svg)](https://pkg.go.dev/go.datum.net/galactic)
 [![Go version](https://img.shields.io/github/go-mod/go-version/datum-cloud/galactic)](go.mod)
-[![Container images](https://img.shields.io/badge/images-ghcr.io-blue?logo=docker)](https://github.com/orgs/datum-cloud/packages?repo_name=galactic)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
 Galactic supplies SRv6 networking for multi-cloud VPC workloads on Kubernetes.
