@@ -32,7 +32,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"slices"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
@@ -55,6 +54,8 @@ type Maps struct {
 // PolicyRows is the part of the traffic policy maps the sidecar's rows live
 // in. *tpmap.Maps implements it.
 type PolicyRows interface {
+	// IsInfra reports whether ifindex has an infra row.
+	IsInfra(ifindex uint32) (bool, error)
 	// InfraInterfaces lists the ifindexes that have infra rows.
 	InfraInterfaces() ([]uint32, error)
 	// RemoveInfra deletes ifindex's row only while it is an infra row.
@@ -62,9 +63,10 @@ type PolicyRows interface {
 }
 
 // OpenPinned opens the maps from their pins under pinDir. The traffic policy
-// maps are optional: a datapath that does not pin them leaves Policy nil. The
-// returned closer releases this process's handles and must be closed when the
-// caller is done; the maps stay pinned.
+// maps are optional: when any of their pins is missing, as on a datapath that
+// predates them, Policy is left nil and their rows are neither read nor
+// removed. The returned closer releases this process's handles and must be
+// closed when the caller is done; the maps stay pinned.
 func OpenPinned(pinDir string) (Maps, io.Closer, error) {
 	registry, registryCloser, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
@@ -119,7 +121,8 @@ type Result struct {
 	VRFRows         int
 	IfindexRows     int
 	EgressRouteRows int
-	PolicyRows      int
+	// PolicyRows counts tp_iface_table infra rows.
+	PolicyRows int
 }
 
 // Total is the number of rows removed across every map.
@@ -143,11 +146,7 @@ func Present(m Maps, argument uint16) (bool, error) {
 	if m.Policy == nil {
 		return true, nil
 	}
-	rows, err := m.Policy.InfraInterfaces()
-	if err != nil {
-		return false, err
-	}
-	return slices.Contains(rows, peer), nil
+	return m.Policy.IsInfra(peer)
 }
 
 // Prune removes every ingress sidecar row whose uSID Argument is not in keep.

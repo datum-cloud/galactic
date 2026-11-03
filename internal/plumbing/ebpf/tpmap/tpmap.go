@@ -318,6 +318,19 @@ func (m *Maps) PutInfra(ifindex uint32) error {
 	return nil
 }
 
+// IsInfra reports whether ifindex has an infra row. A missing row, or a
+// tenant one, is not.
+func (m *Maps) IsInfra(ifindex uint32) (bool, error) {
+	var row prog.UsidTpIfaceValue
+	if err := m.Interfaces.Lookup(ifindex, &row); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read tp_iface_table[%d]: %w", ifindex, err)
+	}
+	return row.Kind == KindInfra, nil
+}
+
 // InfraInterfaces lists the ifindexes that have infra rows.
 func (m *Maps) InfraInterfaces() ([]uint32, error) {
 	var (

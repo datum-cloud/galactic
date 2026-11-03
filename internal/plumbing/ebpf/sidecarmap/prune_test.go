@@ -73,6 +73,10 @@ func (it *memIterator) Err() error { return nil }
 // tpmap.Maps' contract: RemoveInfra deletes only an infra row.
 type memPolicy map[uint32]uint32
 
+func (m memPolicy) IsInfra(ifindex uint32) (bool, error) {
+	return m[ifindex] == tpmap.KindInfra, nil
+}
+
 func (m memPolicy) InfraInterfaces() ([]uint32, error) {
 	var rows []uint32
 	for ifindex, kind := range m {
