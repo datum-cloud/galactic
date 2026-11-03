@@ -52,14 +52,27 @@ type ServiceRoutePolicyReconciler struct {
 	Programmer      serviceroute.RouteProgrammer
 	Metrics         *serviceroute.Metrics
 	FrontendEnabled bool
-	Now             func() time.Time
+	// SpreadPairing chooses the remote producer this node's consumers of a
+	// Spread endpoint are sent to. Empty is serviceroute.SpreadPairingFirst.
+	// Producer halves are installed under every pairing regardless.
+	SpreadPairing serviceroute.SpreadPairing
+	Now           func() time.Time
 
 	// startupRetryWait waits between startup sync attempts and reports false
 	// once ctx is done. Tests replace it; nil waits on a real timer.
 	startupRetryWait func(ctx context.Context, d time.Duration) bool
 
 	mu      sync.Mutex
-	Applied map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent
+	Applied map[types.NamespacedName]map[serviceroute.IntentSlot]serviceroute.RouteIntent
+}
+
+// compile compiles policy for node with this router's options.
+func (r *ServiceRoutePolicyReconciler) compile(policy *networkv1alpha1.ServiceRoutePolicy,
+	endpoint *networkv1alpha1.ServiceEndpoint, attachments []*cloudv1alpha1.VPCAttachment, node string,
+	resolveSID serviceroute.SIDResolver, vpcIdentity string,
+) ([]serviceroute.RouteIntent, error) {
+	return serviceroute.CompileWithOptions(policy, endpoint, attachments, node, resolveSID,
+		serviceroute.CompileOptions{ConsumerVPCIdentity: vpcIdentity, SpreadPairing: r.SpreadPairing})
 }
 
 const serviceRouteMapResyncInterval = 30 * time.Second
@@ -211,7 +224,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 			"multiple policies claim a translated consumer tuple"))
 		return ctrl.Result{RequeueAfter: serviceRouteMapResyncInterval}, errors.Join(errs...)
 	}
-	intents, err := serviceroute.CompileForConsumerVPC(policy, endpoint, all, r.NodeName, r.sidResolver(ctx), vpcIdentity)
+	intents, err := r.compile(policy, endpoint, all, r.NodeName, r.sidResolver(ctx), vpcIdentity)
 	if err != nil {
 		var dependencyErr *serviceroute.DependencyNotReadyError
 		if errors.As(err, &dependencyErr) {
@@ -455,7 +468,7 @@ func (r *ServiceRoutePolicyReconciler) syncAllPolicies(ctx context.Context) erro
 			compiled = append(compiled, compiledPolicy{key: key})
 			continue
 		}
-		intents, err := serviceroute.CompileForConsumerVPC(
+		intents, err := r.compile(
 			policy, endpoint, allAttachments, r.NodeName, r.sidResolver(ctx), vpcIdentity)
 		if err != nil {
 			// Invalid policies and node-local dependencies that are not ready
@@ -695,24 +708,24 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 ) error {
 	defer r.updateProgrammedGauge()
 	if r.Applied == nil {
-		r.Applied = make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent)
+		r.Applied = make(map[types.NamespacedName]map[serviceroute.IntentSlot]serviceroute.RouteIntent)
 	}
 	current := r.Applied[key]
 	if current == nil {
-		current = make(map[types.NamespacedName]serviceroute.RouteIntent)
+		current = make(map[serviceroute.IntentSlot]serviceroute.RouteIntent)
 		r.Applied[key] = current
 	}
-	desired := make(map[types.NamespacedName]serviceroute.RouteIntent, len(intents))
+	desired := make(map[serviceroute.IntentSlot]serviceroute.RouteIntent, len(intents))
 	for _, intent := range intents {
-		desired[intent.Attachment] = intent
+		desired[intent.Slot()] = intent
 	}
 
 	// A LocalSet intent whose producers or their health changed is replaced
 	// in place: the new one goes in before the old one comes out, so the
 	// consumer's route never disappears and the flows of producers that stay
 	// keep going.
-	for attachment, existing := range current {
-		next, ok := desired[attachment]
+	for slot, existing := range current {
+		next, ok := desired[slot]
 		if !ok || existing.Kind != serviceroute.RouteIntentLocalSet || next.Kind != serviceroute.RouteIntentLocalSet ||
 			reflect.DeepEqual(existing, next) {
 			continue
@@ -734,14 +747,14 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 			return errors.Join(&serviceRoutePolicyCleanupError{err: err}, r.Programmer.Remove(next))
 		}
 		r.Metrics.ObserveOperation("remove", nil)
-		current[attachment] = next
+		current[slot] = next
 	}
 
 	// Revoke obsolete or changed intents first. Each successful operation is
 	// reflected in Applied immediately, so a later failure leaves an accurate,
 	// retryable snapshot rather than leaking untracked kernel state.
-	for attachment, existing := range current {
-		next, ok := desired[attachment]
+	for slot, existing := range current {
+		next, ok := desired[slot]
 		if ok && reflect.DeepEqual(existing, next) {
 			continue
 		}
@@ -750,10 +763,10 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 			return &serviceRoutePolicyCleanupError{err: err}
 		}
 		r.Metrics.ObserveOperation("remove", nil)
-		delete(current, attachment)
+		delete(current, slot)
 	}
-	for attachment, intent := range desired {
-		if existing, ok := current[attachment]; ok && reflect.DeepEqual(existing, intent) {
+	for slot, intent := range desired {
+		if existing, ok := current[slot]; ok && reflect.DeepEqual(existing, intent) {
 			continue
 		}
 		if err := r.Programmer.Apply(intent); err != nil {
@@ -764,7 +777,7 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 			return err
 		}
 		r.Metrics.ObserveOperation("apply", nil)
-		current[attachment] = intent
+		current[slot] = intent
 	}
 	if len(current) == 0 {
 		delete(r.Applied, key)

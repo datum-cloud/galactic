@@ -5,6 +5,7 @@ package serviceroute
 
 import (
 	"fmt"
+	"maps"
 	"net"
 	"slices"
 	"strings"
@@ -148,47 +149,73 @@ func TestCompileSpreadDrainsUnhealthyProducers(t *testing.T) {
 }
 
 func TestCompileSpreadFallsBackToHealthyRemoteProducer(t *testing.T) {
-	policy, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
-	consumer := spreadConsumer()
-	first := readyAttachment(spreadProducerNamespace, firstRemoteProducer, "first-uid", testRemoteNodeName, "remote-a",
-		testLabels(testProducerLabel, "yes"))
-	last := readyAttachment(spreadProducerNamespace, "z-remote", "last-uid", testRemoteNodeName, "remote-z",
-		testLabels(testProducerLabel, "yes"))
-	resolver := func(attachment *cloudv1alpha1.VPCAttachment) (net.IP, error) {
-		return net.ParseIP("fd00::" + string(attachment.UID[0])), nil
-	}
-	attachments := []*cloudv1alpha1.VPCAttachment{consumer, first, last}
-	remote := func() types.NamespacedName {
-		t.Helper()
-		got, err := Compile(policy, endpoint, attachments, testNodeName, resolver)
-		if err != nil {
-			t.Fatalf("Compile: %v", err)
-		}
-		if len(got) != 1 || got[0].Kind != RouteIntentRemoteConsumer {
-			t.Fatalf("intents = %+v, want one RemoteConsumer intent", got)
-		}
-		return got[0].ProducerAttachment
-	}
+	for _, pairing := range spreadPairings {
+		t.Run(string(pairing), func(t *testing.T) {
+			policy, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+			consumer := spreadConsumer()
+			first := readyAttachment(spreadProducerNamespace, firstRemoteProducer, "first-uid", testRemoteNodeName,
+				"remote-a", testLabels(testProducerLabel, "yes"))
+			last := readyAttachment(spreadProducerNamespace, "z-remote", "last-uid", testRemoteNodeName, "remote-z",
+				testLabels(testProducerLabel, "yes"))
+			resolver := func(attachment *cloudv1alpha1.VPCAttachment) (net.IP, error) {
+				return net.ParseIP("fd00::" + string(attachment.UID[0])), nil
+			}
+			attachments := []*cloudv1alpha1.VPCAttachment{consumer, first, last}
+			options := CompileOptions{SpreadPairing: pairing}
+			remote := func() types.NamespacedName {
+				t.Helper()
+				got, err := CompileWithOptions(policy, endpoint, attachments, testNodeName, resolver, options)
+				if err != nil {
+					t.Fatalf("Compile: %v", err)
+				}
+				if len(got) != 1 || got[0].Kind != RouteIntentRemoteConsumer {
+					t.Fatalf("intents = %+v, want one RemoteConsumer intent", got)
+				}
+				return got[0].ProducerAttachment
+			}
 
-	if got := remote(); got.Name != firstRemoteProducer {
-		t.Fatalf("remote producer = %s, want a-remote", got)
-	}
-	reportHealth(endpoint, first, networkv1alpha1.BackendHealthUnhealthy)
-	if got := remote(); got.Name != "z-remote" {
-		t.Fatalf("remote producer with a-remote Unhealthy = %s, want z-remote", got)
-	}
-	reportHealth(endpoint, last, networkv1alpha1.BackendHealthUnhealthy)
-	if got := remote(); got.Name != firstRemoteProducer {
-		t.Fatalf("remote producer with both Unhealthy = %s, want a-remote", got)
-	}
+			chosen := remote()
+			other := map[string]*cloudv1alpha1.VPCAttachment{first.Name: last, last.Name: first}[chosen.Name]
+			if other == nil {
+				t.Fatalf("remote producer = %s, want a-remote or z-remote", chosen)
+			}
+			if pairing == SpreadPairingFirst && chosen.Name != first.Name {
+				t.Fatalf("remote producer = %s, want the first by name", chosen)
+			}
+			reportHealth(endpoint, map[string]*cloudv1alpha1.VPCAttachment{first.Name: first, last.Name: last}[chosen.Name],
+				networkv1alpha1.BackendHealthUnhealthy)
+			if got := remote(); got.Name != other.Name {
+				t.Fatalf("remote producer with %s Unhealthy = %s, want %s", chosen.Name, got, other.Name)
+			}
+			reportHealth(endpoint, other, networkv1alpha1.BackendHealthUnhealthy)
+			if got := remote(); got != chosen {
+				t.Fatalf("remote producer with both Unhealthy = %s, want %s again", got, chosen)
+			}
 
-	// Two producers on one remote node are told apart by their SIDs.
-	got, err := Compile(policy, endpoint, attachments, testRemoteNodeName, resolver)
-	if err != nil {
-		t.Fatalf("Compile on the producer node: %v", err)
-	}
-	if len(got) != 1 || got[0].Kind != RouteIntentRemoteProducer || got[0].ServiceDevice != "remote-a" {
-		t.Fatalf("producer node intents = %+v, want one RemoteProducer half through remote-a", got)
+			// The producer node installs a half for the producer each pairing
+			// picks, whichever one the consumer's node uses, and two producers
+			// on one remote node are told apart by their SIDs.
+			want := map[string]bool{}
+			for _, p := range spreadPairings {
+				picked := spreadRemoteProducer(consumer, []*cloudv1alpha1.VPCAttachment{first, last},
+					producersHealth(endpoint, []*cloudv1alpha1.VPCAttachment{first, last}, time.Now()), p)
+				want[picked.Status.HostInterface] = true
+			}
+			got, err := CompileWithOptions(policy, endpoint, attachments, testRemoteNodeName, resolver, options)
+			if err != nil {
+				t.Fatalf("Compile on the producer node: %v", err)
+			}
+			devices := map[string]bool{}
+			for _, intent := range got {
+				if intent.Kind != RouteIntentRemoteProducer {
+					t.Fatalf("producer node intent = %+v, want RemoteProducer", intent)
+				}
+				devices[intent.ServiceDevice] = true
+			}
+			if len(got) != len(want) || !maps.Equal(devices, want) {
+				t.Fatalf("producer node intents = %+v, want one RemoteProducer half through each of %v", got, want)
+			}
+		})
 	}
 }
 
@@ -269,9 +296,15 @@ func TestCompileSpreadAvoidsRemoteProducersWithExpiredReports(t *testing.T) {
 		t.Fatalf("remote producer with z-remote Unhealthy = %s, want a-remote", got)
 	}
 	endpoint.Status.Producers[1].State = networkv1alpha1.BackendHealthHealthy
+	// With every report expired, the consumer goes where it would with no
+	// reports at all.
 	expireReport(endpoint)
-	if got := remote(); got != firstRemoteProducer {
-		t.Fatalf("remote producer with every report expired = %s, want a-remote", got)
+	reports := endpoint.Status.Producers
+	endpoint.Status.Producers = nil
+	unreported := remote()
+	endpoint.Status.Producers = reports
+	if got := remote(); got != unreported {
+		t.Fatalf("remote producer with every report expired = %s, want %s as with no reports", got, unreported)
 	}
 }
 
@@ -394,5 +427,147 @@ func TestWithProducerReportsPrefersReportsOverStatus(t *testing.T) {
 		time.Now().Add(-networkv1alpha1.ServiceEndpointProducerReportLifetime - time.Second)))
 	if got := compile(stale); got != firstDraining {
 		t.Fatalf("producers after rollback = %s, want producer-a drained by its newer status entry", got)
+	}
+}
+
+// remoteAssignments compiles policy on testNodeName with pairing and returns
+// the remote producer each consumer there is sent to.
+func remoteAssignments(t *testing.T, policy *networkv1alpha1.ServiceRoutePolicy,
+	endpoint *networkv1alpha1.ServiceEndpoint, attachments []*cloudv1alpha1.VPCAttachment, pairing SpreadPairing,
+) map[string]string {
+	t.Helper()
+	resolver := func(attachment *cloudv1alpha1.VPCAttachment) (net.IP, error) {
+		return net.ParseIP("fd00::1"), nil
+	}
+	intents, err := CompileWithOptions(policy, endpoint, attachments, testNodeName, resolver,
+		CompileOptions{SpreadPairing: pairing})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := map[string]string{}
+	for _, intent := range intents {
+		if intent.Kind != RouteIntentRemoteConsumer {
+			t.Fatalf("intent = %+v, want RemoteConsumer", intent)
+		}
+		got[intent.Attachment.Name] = intent.ProducerAttachment.Name
+	}
+	return got
+}
+
+// Consumers with no producer on their node spread across the remote
+// producers, and a producer joining, leaving or turning Unhealthy moves only
+// the consumers it gains or loses.
+func TestCompileSpreadSpreadsConsumersAcrossRemoteProducers(t *testing.T) {
+	policy, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+	consumers := make([]*cloudv1alpha1.VPCAttachment, 0, 64)
+	producers := make([]*cloudv1alpha1.VPCAttachment, 0, 5)
+	for i := range cap(consumers) {
+		consumers = append(consumers, readyAttachment(eligibilityNamespace, fmt.Sprintf("consumer-%02d", i),
+			fmt.Sprintf("consumer-uid-%02d", i), testNodeName, fmt.Sprintf("consumer%d", i),
+			testLabels(testAccessLabel, "yes")))
+	}
+	for i := range cap(producers) {
+		producers = append(producers, readyAttachment(spreadProducerNamespace, fmt.Sprintf("producer-%d", i),
+			fmt.Sprintf("producer-uid-%d", i), fmt.Sprintf("node-p%d", i), fmt.Sprintf("remote%d", i),
+			testLabels(testProducerLabel, "yes")))
+	}
+	all := slices.Concat(consumers, producers[:4])
+	before := remoteAssignments(t, policy, endpoint, all, SpreadPairingRendezvous)
+	if len(before) != len(consumers) {
+		t.Fatalf("assignments = %d, want %d", len(before), len(consumers))
+	}
+	load := map[string]int{}
+	for _, producer := range before {
+		load[producer]++
+	}
+	for _, producer := range producers[:4] {
+		if load[producer.Name] == 0 {
+			t.Fatalf("producer %s took no consumer: %v", producer.Name, load)
+		}
+	}
+	// The default pairing sends every consumer to the first producer.
+	legacy := remoteAssignments(t, policy, endpoint, all, SpreadPairingFirst)
+	for consumer, producer := range legacy {
+		if producer != producers[0].Name {
+			t.Fatalf("first pairing sends %s to %s, want %s", consumer, producer, producers[0].Name)
+		}
+	}
+
+	// moved returns the consumers whose producer changed, failing if any
+	// moved for a reason other than allowed.
+	moved := func(after map[string]string, allowed func(from, to string) bool) int {
+		t.Helper()
+		n := 0
+		for consumer, from := range before {
+			to := after[consumer]
+			if from == to {
+				continue
+			}
+			if !allowed(from, to) {
+				t.Fatalf("consumer %s moved from %s to %s", consumer, from, to)
+			}
+			n++
+		}
+		return n
+	}
+
+	// Each producer's node, whatever its own pairing, installs the producer
+	// half of exactly the pairings a consumer's node chooses under either
+	// pairing, so nodes with different pairings refuse no consumer.
+	for _, producer := range producers[:4] {
+		want := map[string]bool{}
+		for _, consumer := range consumers {
+			if before[consumer.Name] == producer.Name || legacy[consumer.Name] == producer.Name {
+				want[consumer.Name] = true
+			}
+		}
+		for _, pairing := range spreadPairings {
+			intents, err := CompileWithOptions(policy, endpoint, all, producer.Status.Node,
+				func(*cloudv1alpha1.VPCAttachment) (net.IP, error) { return net.ParseIP("fd00::1"), nil },
+				CompileOptions{SpreadPairing: pairing})
+			if err != nil {
+				t.Fatalf("Compile on %s: %v", producer.Status.Node, err)
+			}
+			got := map[string]bool{}
+			for _, intent := range intents {
+				if intent.Kind != RouteIntentRemoteProducer || intent.ProducerAttachment.Name != producer.Name {
+					t.Fatalf("%s installs %+v", producer.Name, intent)
+				}
+				got[intent.Attachment.Name] = true
+			}
+			if len(intents) != len(want) || !maps.Equal(got, want) {
+				t.Fatalf("%s with pairing %s has producer halves for %v, want %v",
+					producer.Name, pairing, slices.Sorted(maps.Keys(got)), slices.Sorted(maps.Keys(want)))
+			}
+		}
+	}
+
+	joined := remoteAssignments(t, policy, endpoint, slices.Concat(consumers, producers), SpreadPairingRendezvous)
+	if moved(joined, func(_, to string) bool { return to == producers[4].Name }) == 0 {
+		t.Fatalf("producer-4 joined but took no consumer")
+	}
+	left := remoteAssignments(t, policy, endpoint, slices.Concat(consumers, producers[1:4]), SpreadPairingRendezvous)
+	fromFirst := func(from, _ string) bool { return from == producers[0].Name }
+	if got := moved(left, fromFirst); got != load[producers[0].Name] {
+		t.Fatalf("producer-0 left: %d consumers moved, want its %d", got, load[producers[0].Name])
+	}
+	reportHealth(endpoint, producers[1], networkv1alpha1.BackendHealthUnhealthy)
+	unhealthy := remoteAssignments(t, policy, endpoint, all, SpreadPairingRendezvous)
+	fromSecond := func(from, _ string) bool { return from == producers[1].Name }
+	if got := moved(unhealthy, fromSecond); got != load[producers[1].Name] {
+		t.Fatalf("producer-1 Unhealthy: %d consumers moved, want its %d", got, load[producers[1].Name])
+	}
+}
+
+func TestParseSpreadPairing(t *testing.T) {
+	for value, want := range map[string]SpreadPairing{
+		"": SpreadPairingFirst, "first": SpreadPairingFirst, "rendezvous": SpreadPairingRendezvous,
+	} {
+		if got, err := ParseSpreadPairing(value); err != nil || got != want {
+			t.Fatalf("ParseSpreadPairing(%q) = %q, %v; want %q", value, got, err, want)
+		}
+	}
+	if _, err := ParseSpreadPairing("hash"); err == nil {
+		t.Fatal("ParseSpreadPairing(hash) succeeded, want an error")
 	}
 }

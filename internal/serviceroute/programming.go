@@ -26,6 +26,23 @@ type ProgrammingRequirements struct {
 	Nodes       []string
 }
 
+// servingProducers returns the producers whose node installs part of
+// consumer's path: its node-local producer, or every remote producer that
+// accepts it under any Spread pairing, whichever pairing the consumer's node
+// uses.
+func servingProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv1alpha1.VPCAttachment,
+	producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth,
+) ([]*cloudv1alpha1.VPCAttachment, error) {
+	local, remote := selectProducers(endpoint, consumer, producers, health, SpreadPairingFirst)
+	if len(local) != 0 {
+		return local[:1], nil
+	}
+	if remote == nil {
+		return nil, fmt.Errorf("consumer attachment %s/%s has no eligible producer", consumer.Namespace, consumer.Name)
+	}
+	return acceptedProducers(endpoint, consumer, producers, health, remote), nil
+}
+
 // ProgrammingPlan identifies every consumer and selected producer node required
 // to serve a policy. Attachment health establishes network eligibility only.
 func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
@@ -81,17 +98,17 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 			continue
 		}
 		selected++
-		local, p := selectProducers(endpoint, a.Status.Node, producers, health)
-		if len(local) != 0 {
-			p = local[0]
+		serving, err := servingProducers(endpoint, a, producers, health)
+		if err != nil {
+			return plan, err
 		}
-		if p == nil {
-			return plan, fmt.Errorf("consumer attachment %s/%s has no eligible producer", a.Namespace, a.Name)
+		nodes[a.Status.Node] = true
+		for _, p := range serving {
+			if policy.Spec.Frontend != nil && (a.UID == "" || p.UID == "") {
+				return plan, errors.New("translated programming requires current attachment UIDs")
+			}
+			nodes[p.Status.Node] = true
 		}
-		if policy.Spec.Frontend != nil && (a.UID == "" || p.UID == "") {
-			return plan, errors.New("translated programming requires current attachment UIDs")
-		}
-		nodes[a.Status.Node], nodes[p.Status.Node] = true, true
 	}
 	if selected == 0 {
 		return plan, errors.New("no eligible consumer attachments")

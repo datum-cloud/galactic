@@ -284,3 +284,207 @@ func TestUsidServiceEgress_LocalSetFailsClosed(t *testing.T) {
 		t.Fatalf("request with no producer set: verdict=%d err=%v, want TC_ACT_SHOT", ret, err)
 	}
 }
+
+// A TCP connection whose flow pin is lost keeps its producer while that
+// producer stays in the set, and a producer joining takes only the pin-less
+// connections it gains.
+func TestUsidServiceEgress_LocalSetKeepsTCPFlowsWithoutPins(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	const (
+		tcp          = uint8(6)
+		joinedMember = uint32(51)
+		joinedToken  = uint64(51)
+		firstPort    = uint16(44000)
+		connections  = 64
+	)
+	setUpLocalSet(t, objs, tcp, spreadLocalProducer, spreadRemoteProducer)
+	pinKey := func(port uint16) UsidServiceReverseKey {
+		return UsidServiceReverseKey{
+			IngressIfindex: 1, Family: egressRouteFamilyINET6, Protocol: tcp,
+			SourcePort: bits.ReverseBytes16(port), DestPort: bits.ReverseBytes16(spreadServicePort),
+			SourceAddr: spreadConsumer.As16(), DestAddr: spreadService.As16(),
+		}
+	}
+	pinned := func(port uint16) uint32 {
+		t.Helper()
+		var pin UsidServiceFlowValue
+		if err := objs.ServiceFlowTable.Lookup(pinKey(port), &pin); err != nil {
+			t.Fatalf("flow pin for port %d: %v", port, err)
+		}
+		return pin.ProducerIfindex
+	}
+	dropPins := func() {
+		t.Helper()
+		for port := firstPort; port < firstPort+connections; port++ {
+			if err := objs.ServiceFlowTable.Delete(pinKey(port)); err != nil {
+				t.Fatalf("evict pin for port %d: %v", port, err)
+			}
+		}
+	}
+	// A third member joins the set, eligible for new flows.
+	join := func() {
+		t.Helper()
+		if err := objs.AttachmentIdentityTable.Put(joinedMember, joinedToken); err != nil {
+			t.Fatal(err)
+		}
+		var set UsidServiceProducerSetValue
+		set.Count, set.EligibleCount = 3, 3
+		for i, member := range []struct {
+			ifindex uint32
+			token   uint64
+		}{{spreadLocalProducer, spreadConsumerToken}, {spreadRemoteProducer, spreadOtherToken}, {joinedMember, joinedToken}} {
+			set.Members[i].Ifindex, set.Members[i].Token = member.ifindex, member.token
+			set.Eligible[i] = uint8(i)
+		}
+		if err := objs.ServiceProducerSetTable.Put(spreadRouteKey(tcp), set); err != nil {
+			t.Fatalf("populate producer set: %v", err)
+		}
+	}
+
+	before := map[uint16]uint32{}
+	for port := firstPort; port < firstPort+connections; port++ {
+		sendRequest(t, objs, tcp, port)
+		before[port] = pinned(port)
+	}
+
+	// The pins are evicted, but each connection's reverse row still names its
+	// producer.
+	join()
+	dropPins()
+	for port, producer := range before {
+		sendRequest(t, objs, tcp, port)
+		if got := pinned(port); got != producer {
+			t.Fatalf("connection from port %d lost its pin and moved from producer %d to %d", port, producer, got)
+		}
+	}
+
+	// With no flow state left at all, a connection is placed by its hash: it
+	// stays where it was or moves to the producer that joined.
+	setUpLocalSet(t, objs, tcp, spreadLocalProducer, spreadRemoteProducer)
+	dropPins()
+	clearReverse(t, objs)
+	for port := firstPort; port < firstPort+connections; port++ {
+		sendRequest(t, objs, tcp, port)
+		before[port] = pinned(port)
+	}
+	join()
+	dropPins()
+	clearReverse(t, objs)
+	gained := 0
+	for port, producer := range before {
+		sendRequest(t, objs, tcp, port)
+		switch got := pinned(port); got {
+		case producer:
+		case joinedMember:
+			gained++
+		default:
+			t.Fatalf("connection from port %d moved from producer %d to %d, not to the one that joined",
+				port, producer, got)
+		}
+	}
+	if gained == 0 {
+		t.Fatalf("the producer that joined gained none of %d connections", connections)
+	}
+
+	// With no flow state, the producer that joined leaving moves only its
+	// own connections.
+	for port := firstPort; port < firstPort+connections; port++ {
+		before[port] = pinned(port)
+	}
+	setUpLocalSet(t, objs, tcp, spreadLocalProducer, spreadRemoteProducer)
+	dropPins()
+	clearReverse(t, objs)
+	for port, producer := range before {
+		sendRequest(t, objs, tcp, port)
+		if got := pinned(port); producer != joinedMember && got != producer {
+			t.Fatalf("connection from port %d moved from producer %d to %d when another left", port, producer, got)
+		}
+	}
+}
+
+func spreadFlowKey(port uint16) UsidServiceReverseKey {
+	return UsidServiceReverseKey{
+		IngressIfindex: 1, Family: egressRouteFamilyINET6, Protocol: 6,
+		SourcePort: bits.ReverseBytes16(port), DestPort: bits.ReverseBytes16(spreadServicePort),
+		SourceAddr: spreadConsumer.As16(), DestAddr: spreadService.As16(),
+	}
+}
+
+// spreadPinned returns the producer the TCP flow from port is pinned to, or 0
+// when it has no pin.
+func spreadPinned(t *testing.T, objs *UsidObjects, port uint16) uint32 {
+	t.Helper()
+	var pin UsidServiceFlowValue
+	err := objs.ServiceFlowTable.Lookup(spreadFlowKey(port), &pin)
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pin.ProducerIfindex
+}
+
+// Without its pin, a TCP connection keeps a draining producer through its
+// reverse row, but an opening SYN on the same tuple, or a producer whose
+// interface was replaced, does not.
+func TestUsidServiceEgress_LocalSetReverseRowFallback(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	const tcp = uint8(6)
+	setUpLocalSet(t, objs, tcp, spreadLocalProducer, spreadRemoteProducer)
+	port := uint16(0)
+	for p := uint16(45000); p < 45064; p++ {
+		sendRequest(t, objs, tcp, p)
+		if spreadPinned(t, objs, p) == spreadRemoteProducer {
+			port = p
+			break
+		}
+	}
+	if port == 0 {
+		t.Fatal("64 TCP connections all went to producer 1")
+	}
+	members := []uint32{spreadLocalProducer, spreadRemoteProducer}
+	putProducerSet(t, objs, tcp, members, []uint32{spreadLocalProducer})
+	evict := func() {
+		t.Helper()
+		if err := objs.ServiceFlowTable.Delete(spreadFlowKey(port)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	evict()
+	sendRequest(t, objs, tcp, port)
+	if got := spreadPinned(t, objs, port); got != spreadRemoteProducer {
+		t.Fatalf("connection lost its pin and left draining producer %d for %d", spreadRemoteProducer, got)
+	}
+
+	evict()
+	syn := spreadPacket(t, tcp, spreadConsumer, spreadService, port, spreadServicePort)
+	syn[ethHeaderLen+ip6HeaderLen+13] = 0x02
+	if ret, _, err := objs.UsidServiceEgress.Test(syn); err != nil || ret != tcActRedirect {
+		t.Fatalf("SYN on a reused tuple: verdict=%d err=%v, want TC_ACT_REDIRECT", ret, err)
+	}
+	if got := spreadPinned(t, objs, port); got != spreadLocalProducer {
+		t.Fatalf("SYN on a reused tuple went to %d, want eligible producer %d", got, spreadLocalProducer)
+	}
+
+	// Put the flow back on the producer, drain it, then replace its interface.
+	evict()
+	clearReverse(t, objs)
+	putProducerSet(t, objs, tcp, members, []uint32{spreadRemoteProducer})
+	sendRequest(t, objs, tcp, port)
+	if got := spreadPinned(t, objs, port); got != spreadRemoteProducer {
+		t.Fatalf("connection pinned to %d, want %d", got, spreadRemoteProducer)
+	}
+	putProducerSet(t, objs, tcp, members, []uint32{spreadLocalProducer})
+	evict()
+	if err := objs.AttachmentIdentityTable.Put(spreadRemoteProducer, spreadOtherToken+1); err != nil {
+		t.Fatal(err)
+	}
+	sendRequest(t, objs, tcp, port)
+	if got := spreadPinned(t, objs, port); got != spreadLocalProducer {
+		t.Fatalf("connection of a replaced producer interface went to %d, want %d", got, spreadLocalProducer)
+	}
+}
