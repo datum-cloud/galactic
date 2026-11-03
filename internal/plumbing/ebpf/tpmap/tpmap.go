@@ -50,7 +50,10 @@ const (
 	DirEgress  uint32 = 1
 )
 
-// Interface kinds, tp_iface_table.kind.
+// Interface kinds, tp_iface_table.kind. Infra rows have two writers, split by
+// ifindex: the ingress sidecar owns those at or above
+// ifindexvrfmap.SidecarIfindexBase, and the node installer owns those below
+// it, which mark host interfaces the sidecar's return path delivers to.
 const (
 	KindTenant uint32 = 1
 	KindInfra  uint32 = 2
@@ -284,6 +287,71 @@ func (m *Maps) PutInterface(ifindex uint32, token uint64, kind uint32) error {
 	}
 	if err := m.Interfaces.Put(ifindex, prog.UsidTpIfaceValue{PolicyToken: token, Kind: kind}); err != nil {
 		return fmt.Errorf("write tp_iface_table[%d]: %w", ifindex, err)
+	}
+	return nil
+}
+
+// ErrTenantInterface is returned by PutInfra for an ifindex that already has a
+// tenant row.
+var ErrTenantInterface = errors.New("interface has a tenant traffic policy row")
+
+// PutInfra marks ifindex as a platform interface the datapath delivers
+// through but never evaluates. It never replaces an existing row: an ifindex
+// that already has a tenant row keeps it, and the call returns
+// ErrTenantInterface, so a stale ifindex can never exempt a tenant interface
+// from its policy.
+func (m *Maps) PutInfra(ifindex uint32) error {
+	err := m.Interfaces.Update(ifindex, prog.UsidTpIfaceValue{Kind: KindInfra}, ebpf.UpdateNoExist)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ebpf.ErrKeyExist) {
+		return fmt.Errorf("write tp_iface_table[%d]: %w", ifindex, err)
+	}
+	var row prog.UsidTpIfaceValue
+	if err := m.Interfaces.Lookup(ifindex, &row); err != nil {
+		return fmt.Errorf("read tp_iface_table[%d]: %w", ifindex, err)
+	}
+	if row.Kind != KindInfra {
+		return fmt.Errorf("mark ifindex %d as infrastructure: %w", ifindex, ErrTenantInterface)
+	}
+	return nil
+}
+
+// InfraInterfaces lists the ifindexes that have infra rows.
+func (m *Maps) InfraInterfaces() ([]uint32, error) {
+	var (
+		key  uint32
+		row  prog.UsidTpIfaceValue
+		rows []uint32
+	)
+	it := m.Interfaces.Iterate()
+	for it.Next(&key, &row) {
+		if row.Kind == KindInfra {
+			rows = append(rows, key)
+		}
+	}
+	if err := it.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tp_iface_table: %w", err)
+	}
+	return rows, nil
+}
+
+// RemoveInfra deletes ifindex's row if it is still an infra row. A tenant row
+// written since is left alone, and a missing row is not an error.
+func (m *Maps) RemoveInfra(ifindex uint32) error {
+	var row prog.UsidTpIfaceValue
+	if err := m.Interfaces.Lookup(ifindex, &row); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read tp_iface_table[%d]: %w", ifindex, err)
+	}
+	if row.Kind != KindInfra {
+		return nil
+	}
+	if err := m.Interfaces.Delete(ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("delete tp_iface_table[%d]: %w", ifindex, err)
 	}
 	return nil
 }
