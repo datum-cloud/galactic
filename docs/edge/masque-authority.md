@@ -20,6 +20,7 @@ selects the authority namespace and defaults to `POD_NAMESPACE`; one must be set
 | `--tls-key`                  | `/etc/masque-authority/tls/tls.key` | Server key, reread on change.                    |
 | `--audience`                 | `masque-authority`                  | Audience required on provider pod tokens.        |
 | `--sweep-interval`           | `1s`                                | Interval for sweeping revoked authorizations.    |
+| `--max-skew`                 | `2s`                                | Cell MaxSkew. See below.                         |
 
 Administrative commands also use the global namespace and Kubernetes client
 credentials. `ledger init` takes `--vpc` (`namespace/name`), `--cell`,
@@ -54,7 +55,7 @@ Provider pods call `serve` over HTTPS (TLS 1.3) at `POST /v1/authorize`, `/v1/re
 | `refresh`   | The incarnation is the calling pod's, unretired and unexpired, issued under the record's current revision, and the record, VPC and ledger entry still pass                                                                                                              | Moves `validUntil` forward. A refusal also retires the incarnation                                                                                                                             |
 | `retire`    | The incarnation is the calling pod's                                                                                                                                                                                                                                    | Marks it retired and sets `validUntil` in the past. Retiring one already deleted succeeds                                                                                                      |
 
-An issued or renewed `validUntil` is the credential's expiry or the grant read's start plus 28 s (30 s less a 2 s issuer allowance), whichever is earlier, rounded down to the second. Core and galactic-edge stop the connector 2 s (MaxSkew) before it. The adapter refreshes every 5 s, so a renewal comes well before that cutoff. Renewing in place is a new EdgeService generation, and core keeps the attachment, route and epoch across it (`TestAgainstCore/renewing_the_service_keeps_forwarding`).
+An issued or renewed `validUntil` is the credential's expiry or the grant read's start plus 28 s (30 s less a 2 s issuer allowance), whichever is earlier, rounded down to the second. Core and galactic-edge stop the connector 2 s (MaxSkew) before it. The adapter refreshes every 5 s, so a renewal comes well before that cutoff. Core never readmits an attachment it refused, so the authority treats an incarnation as expired from that same cutoff (`--max-skew`): `authorize` retires it rather than renewing it and answers 503 until core releases it, then issues a successor; `refresh` refuses it; and the sweep retires it. A credential that expires within MaxSkew is refused, since core would never admit its grant. `--max-skew` must equal galactic-controller's `--edge-max-skew` and galactic-edge's `--max-skew`. Renewing in place is a new EdgeService generation, and core keeps the attachment, route and epoch across it (`TestAgainstCore/renewing_the_service_keeps_forwarding`).
 
 Answers map to HTTP status as follows. 401 is unauthenticated: an unknown, malformed or expired credential, or a caller that is not a provider pod. 403 is forbidden: a disabled connector, another VPC or cell, a recreated VPC, a retired allocation or authorization, or a stale revision. 400 is a malformed call. 503 means the authority couldn't decide now and issued nothing.
 
@@ -77,7 +78,7 @@ Until then, `authorize` answers 503 and the client retries. An incarnation is na
 
 - its record is deleted, disabled or expired;
 - its record is at another revision; or
-- its `validUntil` has passed without renewal.
+- it reached `validUntil` less MaxSkew without renewal.
 
 Retired incarnations that core has released are deleted after `RetryWindow`. The provider learns of a revocation from its next `refresh` (403), at most 5 s later. The service's `validUntil` is the backstop if the provider, the authority or the API stalls: no packets 31 s after a committed revocation, or 1 s after credential expiry. Revocation push notifications are not built. Revoking one connector never touches another connector's incarnation, and the shared instance Lease keeps renewing.
 

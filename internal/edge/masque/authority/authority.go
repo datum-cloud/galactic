@@ -25,6 +25,7 @@ import (
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/admission"
 	"go.datum.net/galactic/internal/edge/connectip"
+	"go.datum.net/galactic/internal/edge/timing"
 )
 
 // Errors the authority's decisions wrap. connectip.ErrUnauthenticated and
@@ -122,8 +123,13 @@ type Authority struct {
 	// TTL and IssuerSkew bound an issued validUntil; zero means the
 	// defaults.
 	TTL, IssuerSkew time.Duration
-	Now             func() time.Time
-	Log             *slog.Logger
+	// MaxSkew is the cell's maximum wall-clock error, the one core and
+	// galactic-edge use: they stop an incarnation MaxSkew before its
+	// validUntil and never readmit it, so it is never renewed from then on.
+	// Zero or less means timing.Params.MaxSkew.
+	MaxSkew time.Duration
+	Now     func() time.Time
+	Log     *slog.Logger
 }
 
 func (a *Authority) now() time.Time {
@@ -138,6 +144,18 @@ func (a *Authority) log() *slog.Logger {
 		return a.Log
 	}
 	return slog.Default()
+}
+
+func (a *Authority) maxSkew() time.Duration {
+	if a.MaxSkew > 0 {
+		return a.MaxSkew
+	}
+	return timing.Params.MaxSkew
+}
+
+// expired reports whether core stopped s by now.
+func (a *Authority) expired(s *galacticv1alpha1.EdgeService, now time.Time) bool {
+	return s.Spec.ValidUntil == nil || !now.Before(s.Spec.ValidUntil.Add(-a.maxSkew()))
 }
 
 func (a *Authority) ledgers() Ledgers {
@@ -160,6 +178,21 @@ func (a *Authority) deadline(start time.Time, r *Record) time.Time {
 		until = r.Expires
 	}
 	return until.UTC().Truncate(time.Second)
+}
+
+// until is the validUntil a grant read of current record r that started at
+// start may issue. It refuses what current refuses, and a credential that
+// expires before core would admit that grant.
+func (a *Authority) until(start time.Time, r *Record) (time.Time, error) {
+	if err := a.current(r, start); err != nil {
+		return time.Time{}, err
+	}
+	v := a.deadline(start, r)
+	if !start.Before(v.Add(-a.maxSkew())) {
+		return time.Time{}, fmt.Errorf("%w: connector %s's credential expires within MaxSkew",
+			connectip.ErrUnauthenticated, r.Connector)
+	}
+	return v, nil
 }
 
 // caller refuses an identity that is not a pod of the provider's
@@ -202,7 +235,10 @@ func (a *Authority) Authorize(ctx context.Context, id admission.Identity, req Au
 	if err != nil {
 		return Grant{}, err
 	}
-	if err := a.current(r, start); err != nil {
+	// This precedes the retry lookup: a retry's grant expires no later than
+	// the credential, so core would refuse it too.
+	until, err := a.until(start, r)
+	if err != nil {
 		return Grant{}, err
 	}
 	if vpc != r.VPC.Selector() {
@@ -224,7 +260,7 @@ func (a *Authority) Authorize(ctx context.Context, id admission.Identity, req Au
 	for i := range list.Items {
 		s := &list.Items[i]
 		if s.Annotations[AnnotationNonce] == nonce && s.Annotations[AnnotationPod] == id.PodUID {
-			if retired(s) || expired(s, a.now()) ||
+			if retired(s) || a.expired(s, a.now()) ||
 				s.Annotations[AnnotationRevision] != strconv.FormatInt(r.Revision, 10) ||
 				s.Annotations[AnnotationAllocation] != e.Allocation {
 				return Grant{}, fmt.Errorf("%w: authorization %s is retired, expired or stale", connectip.ErrForbidden,
@@ -236,8 +272,8 @@ func (a *Authority) Authorize(ctx context.Context, id admission.Identity, req Au
 	for i := range list.Items {
 		s := &list.Items[i]
 		if !retired(s) && s.Annotations[AnnotationPod] == id.PodUID &&
-			s.Annotations[AnnotationRevision] == strconv.FormatInt(r.Revision, 10) && !expired(s, a.now()) {
-			if err := a.renew(ctx, s, a.deadline(start, r)); err != nil {
+			s.Annotations[AnnotationRevision] == strconv.FormatInt(r.Revision, 10) && !a.expired(s, a.now()) {
+			if err := a.renew(ctx, s, until); err != nil {
 				return Grant{}, err
 			}
 			return a.grant(s, r, e, vpcID)
@@ -262,7 +298,7 @@ func (a *Authority) Authorize(ctx context.Context, id admission.Identity, req Au
 		return Grant{}, fmt.Errorf("%w: connector %s's previous authorization is still being released",
 			ErrUnavailable, r.Connector)
 	}
-	return a.issue(ctx, id, r, e, vpcID, nonce, a.deadline(start, r))
+	return a.issue(ctx, id, r, e, vpcID, nonce, until)
 }
 
 // match returns the record whose digest is credential's, comparing every
@@ -421,7 +457,7 @@ func (a *Authority) Refresh(ctx context.Context, id admission.Identity, auth str
 		return Grant{}, fmt.Errorf("%w: authorization %s was not issued under revision %d", connectip.ErrForbidden,
 			auth, revision)
 	}
-	if retired(s) || expired(s, start) {
+	if retired(s) || a.expired(s, start) {
 		if err := a.retire(ctx, s, "expired"); err != nil {
 			a.log().Warn("could not retire an expired authorization", "authorization", auth, "error", err)
 		}
@@ -469,7 +505,11 @@ func (a *Authority) revalidate(ctx context.Context, s *galacticv1alpha1.EdgeServ
 		s.Spec.Prefixes[0] != e.Prefix.String() || s.Spec.ClientPool != e.Pool.String() {
 		return Grant{}, fmt.Errorf("%w: connector %s's allocation changed", connectip.ErrForbidden, connector)
 	}
-	if err := a.renew(ctx, s, a.deadline(start, r)); err != nil {
+	v, err := a.until(start, r)
+	if err != nil {
+		return Grant{}, err
+	}
+	if err := a.renew(ctx, s, v); err != nil {
 		return Grant{}, err
 	}
 	if err := a.unchanged(ctx, s, r); err != nil {
@@ -600,9 +640,9 @@ func (a *Authority) reap(ctx context.Context, s *galacticv1alpha1.EdgeService) (
 }
 
 // Sweep retires every issued authorization whose grant record is gone,
-// disabled, expired or at another revision, or whose validUntil passed
-// unrenewed, and deletes retired ones core has released. It returns the
-// errors it met.
+// disabled, expired or at another revision, or that reached validUntil less
+// MaxSkew unrenewed, and deletes retired ones core has released. It returns
+// the errors it met.
 func (a *Authority) Sweep(ctx context.Context) error {
 	var records corev1.SecretList
 	if err := a.Client.List(ctx, &records, client.InNamespace(a.Namespace),
@@ -636,7 +676,7 @@ func (a *Authority) Sweep(ctx context.Context) error {
 				reason = "grant disabled or expired"
 			case strconv.FormatInt(r.Revision, 10) != s.Annotations[AnnotationRevision]:
 				reason = "credential rotated"
-			case expired(s, now):
+			case a.expired(s, now):
 				reason = "not renewed"
 			}
 			if reason == "" {
@@ -671,7 +711,3 @@ func (a *Authority) RunSweeps(ctx context.Context, interval time.Duration) {
 }
 
 func retired(s *galacticv1alpha1.EdgeService) bool { return s.Annotations[AnnotationRetired] == yes }
-
-func expired(s *galacticv1alpha1.EdgeService, now time.Time) bool {
-	return s.Spec.ValidUntil == nil || !now.Before(s.Spec.ValidUntil.Time)
-}
