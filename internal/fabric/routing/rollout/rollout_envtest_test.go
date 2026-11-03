@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -348,22 +349,28 @@ func phase(c client.Client, name string) networkv1alpha1.FabricReleasePhase {
 }
 
 // report writes what a node agent reports for the deployment's active
-// epoch reaching stage, running applied.
+// epoch reaching stage, running applied. The controllers reconcile the same
+// deployment while the test reports, so a plain read-modify-write races their
+// writes and fails on a conflict; the agent this plays reads the deployment
+// again and retries, as the real agent does (fabricconfig.DeploymentAgent.writeStatus).
 func report(t *testing.T, c client.Client, stage networkv1alpha1.FabricActivationStage,
 	applied *networkv1alpha1.FabricRouterRevision) {
 	t.Helper()
-	d := getDeployment(t, c)
-	now := metav1.Now()
-	d.Status.HeartbeatTime = &now
-	d.Status.Epochs = []networkv1alpha1.FabricEpochStatus{{
-		Epoch: d.Spec.ActivationEpoch, Revision: d.Spec.ActiveRevisionRef.Name, Stage: stage,
-	}}
-	if applied != nil {
-		d.Status.AppliedEpoch = d.Spec.ActivationEpoch
-		d.Status.AppliedRevision = applied.Name
-		d.Status.AppliedDigest = applied.Spec.ActivationDependencyDigest
-	}
-	if err := c.Status().Update(context.Background(), d); err != nil {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		d := getDeployment(t, c)
+		now := metav1.Now()
+		d.Status.HeartbeatTime = &now
+		d.Status.Epochs = []networkv1alpha1.FabricEpochStatus{{
+			Epoch: d.Spec.ActivationEpoch, Revision: d.Spec.ActiveRevisionRef.Name, Stage: stage,
+		}}
+		if applied != nil {
+			d.Status.AppliedEpoch = d.Spec.ActivationEpoch
+			d.Status.AppliedRevision = applied.Name
+			d.Status.AppliedDigest = applied.Spec.ActivationDependencyDigest
+		}
+		return c.Status().Update(context.Background(), d)
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 }
