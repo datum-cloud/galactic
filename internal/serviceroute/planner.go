@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net"
+	"slices"
 	"sort"
 	"time"
 
@@ -56,6 +57,25 @@ type RouteIntent struct {
 	Producers []ProducerTarget
 }
 
+// IntentSlot identifies one intent among a node's intents for a policy. A node
+// holds at most one intent for a consumer's own half, but may hold several
+// producer halves for it, one per producer that accepts the consumer.
+type IntentSlot struct {
+	Attachment types.NamespacedName
+	// Producer is the producer attachment of a RouteIntentRemoteProducer
+	// intent, and empty for every other kind.
+	Producer types.NamespacedName
+}
+
+// Slot returns the slot intent occupies.
+func (intent RouteIntent) Slot() IntentSlot {
+	slot := IntentSlot{Attachment: intent.Attachment}
+	if intent.Kind == RouteIntentRemoteProducer {
+		slot.Producer = intent.ProducerAttachment
+	}
+	return slot
+}
+
 // ProducerTarget is one member of a LocalSet intent's producer set.
 type ProducerTarget struct {
 	Attachment types.NamespacedName
@@ -90,6 +110,48 @@ type DependencyNotReadyError struct{ Err error }
 func (e *DependencyNotReadyError) Error() string { return e.Err.Error() }
 func (e *DependencyNotReadyError) Unwrap() error { return e.Err }
 
+// SpreadPairing chooses the remote producer that a Spread endpoint's consumer
+// is sent to when the consumer's node has no producer.
+type SpreadPairing string
+
+const (
+	// SpreadPairingFirst sends every such consumer to the first producer by
+	// namespace and name.
+	SpreadPairingFirst SpreadPairing = "first"
+	// SpreadPairingRendezvous spreads such consumers across the producers by
+	// rendezvous hashing of the consumer's and each producer's UID.
+	SpreadPairingRendezvous SpreadPairing = "rendezvous"
+)
+
+// spreadPairings lists every pairing a producer's node accepts a remote
+// consumer under, whichever one the consumer's node uses.
+var spreadPairings = []SpreadPairing{SpreadPairingFirst, SpreadPairingRendezvous}
+
+// ParseSpreadPairing returns the pairing named by value. An empty value is
+// SpreadPairingFirst.
+func ParseSpreadPairing(value string) (SpreadPairing, error) {
+	switch pairing := SpreadPairing(value); pairing {
+	case "":
+		return SpreadPairingFirst, nil
+	case SpreadPairingFirst, SpreadPairingRendezvous:
+		return pairing, nil
+	default:
+		return "", fmt.Errorf("unknown Spread pairing %q, want %q or %q",
+			value, SpreadPairingFirst, SpreadPairingRendezvous)
+	}
+}
+
+// CompileOptions carries the optional inputs of CompileWithOptions.
+type CompileOptions struct {
+	// ConsumerVPCIdentity, when set, requires selected consumer attachments to
+	// carry the live provider VPC's allocated status identity.
+	ConsumerVPCIdentity string
+	// SpreadPairing is the pairing this node's consumers use. Empty means
+	// SpreadPairingFirst. A producer's node accepts a consumer under every
+	// pairing, so nodes using different pairings still interoperate.
+	SpreadPairing SpreadPairing
+}
+
 // Compile deterministically picks the ready producers for every selected
 // consumer and emits only intent halves owned by localNode. A Single endpoint
 // gets one producer per consumer; a Spread endpoint gets every producer on the
@@ -98,7 +160,7 @@ func (e *DependencyNotReadyError) Unwrap() error { return e.Err }
 func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment, localNode string, resolveSID SIDResolver,
 ) ([]RouteIntent, error) {
-	return compile(policy, endpoint, attachments, localNode, resolveSID, "")
+	return CompileWithOptions(policy, endpoint, attachments, localNode, resolveSID, CompileOptions{})
 }
 
 // CompileForConsumerVPC compiles a policy while requiring selected consumer
@@ -106,11 +168,24 @@ func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 func CompileForConsumerVPC(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment, localNode string, resolveSID SIDResolver, consumerVPCIdentity string,
 ) ([]RouteIntent, error) {
-	return compile(policy, endpoint, attachments, localNode, resolveSID, consumerVPCIdentity)
+	return CompileWithOptions(policy, endpoint, attachments, localNode, resolveSID,
+		CompileOptions{ConsumerVPCIdentity: consumerVPCIdentity})
+}
+
+// CompileWithOptions is Compile with the optional inputs in options.
+func CompileWithOptions(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
+	attachments []*cloudv1alpha1.VPCAttachment, localNode string, resolveSID SIDResolver, options CompileOptions,
+) ([]RouteIntent, error) {
+	pairing, err := ParseSpreadPairing(string(options.SpreadPairing))
+	if err != nil {
+		return nil, err
+	}
+	return compile(policy, endpoint, attachments, localNode, resolveSID, options.ConsumerVPCIdentity, pairing)
 }
 
 func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment, localNode string, resolveSID SIDResolver, consumerVPCIdentity string,
+	pairing SpreadPairing,
 ) ([]RouteIntent, error) {
 	if policy == nil || endpoint == nil {
 		return nil, errors.New("service route policy and endpoint are required")
@@ -158,7 +233,7 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 		if !consumerMatchesVPC(policy, consumer, consumerVPCIdentity) {
 			continue
 		}
-		local, producer := selectProducers(endpoint, consumer, producers, health)
+		local, producer := selectProducers(endpoint, consumer, producers, health, pairing)
 		consumerKey := types.NamespacedName{Namespace: consumer.Namespace, Name: consumer.Name}
 		if len(local) != 0 {
 			if consumer.Status.Node == localNode {
@@ -206,26 +281,23 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 				ConsumerNextHop: attachmentNextHop(consumer, service.IP),
 			})
 		}
-		if producer.Status.Node == localNode {
-			consumerSID, err := resolveSID(consumer)
-			if err != nil {
-				return nil, &DependencyNotReadyError{Err: fmt.Errorf(
-					"resolve consumer attachment %s SID: %w", consumerKey, err)}
-			}
-			intents = append(intents, RouteIntent{
-				Attachment: consumerKey, ProducerAttachment: producerKey, Kind: RouteIntentRemoteProducer,
-				Service: cloneIPNet(service), Frontend: cloneIPNet(frontend), ServiceDevice: producer.Status.HostInterface,
-				ConsumerSID: cloneIP(consumerSID), GrantID: grantID, Ports: clonePorts(ports),
-				ServiceNextHop: attachmentNextHop(producer, service.IP),
-			})
+		halves, err := producerHalves(policy, endpoint, consumer,
+			acceptedProducers(endpoint, consumer, producers, health, producer), localNode, resolveSID,
+			RouteIntent{Service: service, Frontend: frontend, Ports: ports})
+		if err != nil {
+			return nil, err
 		}
+		intents = append(intents, halves...)
 	}
 	setIntentAuthorization(policy, intents)
 	sort.Slice(intents, func(i, j int) bool {
 		if intents[i].Attachment != intents[j].Attachment {
 			return intents[i].Attachment.String() < intents[j].Attachment.String()
 		}
-		return intents[i].Kind < intents[j].Kind
+		if intents[i].Kind != intents[j].Kind {
+			return intents[i].Kind < intents[j].Kind
+		}
+		return intents[i].ProducerAttachment.String() < intents[j].ProducerAttachment.String()
 	})
 	return intents, nil
 }
@@ -345,14 +417,9 @@ func spread(endpoint *networkv1alpha1.ServiceEndpoint) bool {
 // selectProducers returns, for a Spread endpoint, every producer on
 // consumer's node as local. Otherwise, or when that node has none, it returns
 // the one producer the consumer is sent to, or nil. A Spread endpoint's remote
-// producer is chosen by rendezvous hashing of the consumer's UID with each
-// candidate's UID (see rendezvousKey), among the producers whose node currently reports them
-// Healthy or Unknown, or has never reported them; failing that, among those
-// whose report expired, since their node may be down; failing that, among all
-// of them. A producer joining or leaving a candidate set then moves only the
-// consumers it gains or loses.
+// producer is the one spreadRemoteProducer picks under pairing.
 func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv1alpha1.VPCAttachment,
-	producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth,
+	producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth, pairing SpreadPairing,
 ) (local []*cloudv1alpha1.VPCAttachment, remote *cloudv1alpha1.VPCAttachment) {
 	if spread(endpoint) {
 		for _, producer := range producers {
@@ -363,20 +430,111 @@ func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv
 		if len(local) != 0 {
 			return local, nil
 		}
-		if endpoint.Spec.DeliveryMode != networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal ||
-			len(producers) == 0 {
+		if endpoint.Spec.DeliveryMode != networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal {
 			return nil, nil
 		}
-		for _, want := range []producerHealth{producerEligible, producerReportExpired} {
-			if producer := rendezvousProducer(consumer, producers, func(p *cloudv1alpha1.VPCAttachment) bool {
-				return health[p.UID] == want
-			}); producer != nil {
-				return nil, producer
-			}
-		}
-		return nil, rendezvousProducer(consumer, producers, func(*cloudv1alpha1.VPCAttachment) bool { return true })
+		return nil, spreadRemoteProducer(consumer, producers, health, pairing)
 	}
 	return nil, chooseProducer(endpoint.Spec.DeliveryMode, consumer.Status.Node, producers)
+}
+
+// spreadRemoteProducer returns the remote producer of a Spread endpoint's
+// consumer, or nil when there is none. It picks among the producers whose node
+// currently reports them Healthy or Unknown, or has never reported them;
+// failing that, among those whose report expired, since their node may be
+// down; failing that, among all of them. SpreadPairingFirst picks the first by
+// namespace and name. SpreadPairingRendezvous picks by rendezvous hashing of
+// the consumer's UID with each candidate's UID (see rendezvousKey), so a
+// producer joining or leaving a candidate set moves only the consumers it
+// gains or loses.
+func spreadRemoteProducer(consumer *cloudv1alpha1.VPCAttachment, producers []*cloudv1alpha1.VPCAttachment,
+	health map[types.UID]producerHealth, pairing SpreadPairing,
+) *cloudv1alpha1.VPCAttachment {
+	pick := firstProducer
+	if pairing == SpreadPairingRendezvous {
+		pick = rendezvousProducer
+	}
+	for _, want := range []producerHealth{producerEligible, producerReportExpired} {
+		if producer := pick(consumer, producers, func(p *cloudv1alpha1.VPCAttachment) bool {
+			return health[p.UID] == want
+		}); producer != nil {
+			return producer
+		}
+	}
+	return pick(consumer, producers, func(*cloudv1alpha1.VPCAttachment) bool { return true })
+}
+
+// acceptedProducers returns the producers whose node installs a producer half
+// for consumer, whose own node sends it to chosen. For a Spread endpoint those
+// are the producers every pairing picks, so the consumer's traffic is accepted
+// while its node and the producer's node use different pairings, as during a
+// rolling upgrade or a change of the pairing setting. Otherwise it is chosen
+// alone.
+func acceptedProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv1alpha1.VPCAttachment,
+	producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth,
+	chosen *cloudv1alpha1.VPCAttachment,
+) []*cloudv1alpha1.VPCAttachment {
+	accepted := []*cloudv1alpha1.VPCAttachment{chosen}
+	if !spread(endpoint) {
+		return accepted
+	}
+	for _, pairing := range spreadPairings {
+		if producer := spreadRemoteProducer(consumer, producers, health, pairing); producer != nil &&
+			!slices.Contains(accepted, producer) {
+			accepted = append(accepted, producer)
+		}
+	}
+	return accepted
+}
+
+// producerHalves returns the RemoteProducer intents that localNode installs for
+// consumer, one for each of the accepted producers on localNode. Route
+// carries the service, frontend and ports of the intents.
+func producerHalves(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
+	consumer *cloudv1alpha1.VPCAttachment, accepted []*cloudv1alpha1.VPCAttachment, localNode string,
+	resolveSID SIDResolver, route RouteIntent,
+) ([]RouteIntent, error) {
+	var halves []RouteIntent
+	consumerKey := types.NamespacedName{Namespace: consumer.Namespace, Name: consumer.Name}
+	for _, producer := range accepted {
+		if producer.Status.Node != localNode {
+			continue
+		}
+		grantID, err := serviceGrantID(policy, endpoint, consumer, producer, route.Ports)
+		if err != nil {
+			return nil, err
+		}
+		consumerSID, err := resolveSID(consumer)
+		if err != nil {
+			return nil, &DependencyNotReadyError{Err: fmt.Errorf(
+				"resolve consumer attachment %s SID: %w", consumerKey, err)}
+		}
+		halves = append(halves, RouteIntent{
+			Attachment:         consumerKey,
+			ProducerAttachment: types.NamespacedName{Namespace: producer.Namespace, Name: producer.Name},
+			Kind:               RouteIntentRemoteProducer,
+			Service:            cloneIPNet(route.Service),
+			Frontend:           cloneIPNet(route.Frontend),
+			ServiceDevice:      producer.Status.HostInterface,
+			ConsumerSID:        cloneIP(consumerSID),
+			GrantID:            grantID,
+			Ports:              clonePorts(route.Ports),
+			ServiceNextHop:     attachmentNextHop(producer, route.Service.IP),
+		})
+	}
+	return halves, nil
+}
+
+// firstProducer returns the first producer accepted by include, or nil.
+func firstProducer(_ *cloudv1alpha1.VPCAttachment, producers []*cloudv1alpha1.VPCAttachment,
+	include func(*cloudv1alpha1.VPCAttachment) bool,
+) *cloudv1alpha1.VPCAttachment {
+	for _, producer := range producers {
+		if include(producer) {
+			return producer
+		}
+	}
+	return nil
 }
 
 // rendezvousProducer returns the producer accepted by include with the highest

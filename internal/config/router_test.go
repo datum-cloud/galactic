@@ -316,3 +316,22 @@ func TestRouterConfigTrafficPolicy(t *testing.T) {
 		t.Fatal("a route reflector accepted traffic policy")
 	}
 }
+
+func TestRouterConfigServiceSpreadPairing(t *testing.T) {
+	t.Setenv(EnvRouterNodeName, "node-a")
+	if got := NewRouterConfig().ServiceSpreadPairing; got != DefaultRouterServiceSpreadPairing {
+		t.Fatalf("default Spread pairing = %q, want %q", got, DefaultRouterServiceSpreadPairing)
+	}
+	t.Setenv(EnvRouterServiceSpreadPairing, "rendezvous")
+	cfg := NewRouterConfig()
+	if cfg.ServiceSpreadPairing != "rendezvous" {
+		t.Fatalf("Spread pairing = %q, want rendezvous", cfg.ServiceSpreadPairing)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+	cfg.ServiceSpreadPairing = "hash"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("an unknown Spread pairing was accepted")
+	}
+}

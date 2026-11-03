@@ -83,7 +83,7 @@ func (r *ServiceRoutePolicyReconciler) conflictingPolicies(
 		key := types.NamespacedName{Namespace: p.Namespace, Name: p.Name}
 		translated[key] = p.Spec.Frontend != nil
 		for node := range nodes {
-			intents, err := serviceroute.CompileForConsumerVPC(p, endpoint, attachments, node,
+			intents, err := r.compile(p, endpoint, attachments, node,
 				func(*cloudv1alpha1.VPCAttachment) (net.IP, error) { return net.ParseIP("fd00::1"), nil }, identity)
 			if err == nil {
 				desired[key] = append(desired[key], intents...)

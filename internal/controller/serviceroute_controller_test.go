@@ -138,12 +138,12 @@ func TestServiceRouteRemovePolicyResumesPartialRemove(t *testing.T) {
 	policy := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName}
 	reconciler := &ServiceRoutePolicyReconciler{
 		Programmer: programmer,
-		Applied: map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent{
+		Applied: map[types.NamespacedName]map[serviceroute.IntentSlot]serviceroute.RouteIntent{
 			policy: {
-				{Namespace: testServiceRouteTenantNamespace, Name: "a"}: {
+				{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "a"}}: {
 					Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "a"},
 				},
-				{Namespace: testServiceRouteTenantNamespace, Name: "b"}: {
+				{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "b"}}: {
 					Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "b"},
 				},
 			},
@@ -181,9 +181,11 @@ func TestServiceRouteStartupSyncRemovesOfflineDeletedPolicyBeforeSweep(t *testin
 	reconciler := &ServiceRoutePolicyReconciler{
 		Client:     fake.NewClientBuilder().WithScheme(scheme).Build(),
 		Programmer: programmer,
-		Applied: map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent{
+		Applied: map[types.NamespacedName]map[serviceroute.IntentSlot]serviceroute.RouteIntent{
 			deletedPolicy: {
-				{Namespace: testServiceRouteTenantNamespace, Name: testServiceRouteConsumerName}: {
+				{Attachment: types.NamespacedName{
+					Namespace: testServiceRouteTenantNamespace, Name: testServiceRouteConsumerName,
+				}}: {
 					Attachment: types.NamespacedName{
 						Namespace: testServiceRouteTenantNamespace,
 						Name:      testServiceRouteConsumerName,
@@ -217,9 +219,11 @@ func TestServiceRouteStartupSyncRemovalFailureKeepsGateClosed(t *testing.T) {
 	reconciler := &ServiceRoutePolicyReconciler{
 		Client:     fake.NewClientBuilder().WithScheme(scheme).Build(),
 		Programmer: programmer,
-		Applied: map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent{
+		Applied: map[types.NamespacedName]map[serviceroute.IntentSlot]serviceroute.RouteIntent{
 			deletedPolicy: {
-				{Namespace: testServiceRouteTenantNamespace, Name: testServiceRouteConsumerName}: {
+				{Attachment: types.NamespacedName{
+					Namespace: testServiceRouteTenantNamespace, Name: testServiceRouteConsumerName,
+				}}: {
 					Attachment: types.NamespacedName{
 						Namespace: testServiceRouteTenantNamespace,
 						Name:      testServiceRouteConsumerName,

@@ -68,7 +68,7 @@ func TestServiceRouteReplacePolicyAppliesChangedProducerSetFirst(t *testing.T) {
 		}
 	}
 	consumer := types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: testServiceRouteConsumerName}
-	if got := reconciler.Applied[policy][consumer].Producers[0].Device; got != "new" {
+	if got := reconciler.Applied[policy][serviceroute.IntentSlot{Attachment: consumer}].Producers[0].Device; got != "new" {
 		t.Fatalf("applied intent producer = %s, want new", got)
 	}
 }
@@ -178,5 +178,36 @@ func TestProducerReportsOnlyRenewedForReports(t *testing.T) {
 	}
 	if !equality.Semantic.DeepEqual(old, oldCopy) || !equality.Semantic.DeepEqual(renewed, renewedCopy) {
 		t.Error("producerReportsOnlyRenewed changed its arguments")
+	}
+}
+
+// A node holds a producer half for each producer that accepts a consumer, so
+// the halves of two producers on one node for the same consumer coexist.
+func TestServiceRouteReplacePolicyKeepsEveryProducerHalf(t *testing.T) {
+	programmer := &retryRouteProgrammer{}
+	reconciler := &ServiceRoutePolicyReconciler{Programmer: programmer}
+	policy := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName}
+	consumer := types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: testServiceRouteConsumerName}
+	half := func(producer string) serviceroute.RouteIntent {
+		return serviceroute.RouteIntent{
+			Attachment: consumer, Kind: serviceroute.RouteIntentRemoteProducer,
+			ProducerAttachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: producer},
+			ServiceDevice:      producer,
+		}
+	}
+
+	if err := reconciler.replacePolicy(policy, []serviceroute.RouteIntent{half("a"), half("z")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(reconciler.Applied[policy]); got != 2 || programmer.applyCalls != 2 {
+		t.Fatalf("applied %d halves with %d Apply calls, want 2 and 2", got, programmer.applyCalls)
+	}
+	if err := reconciler.replacePolicy(policy, []serviceroute.RouteIntent{half("z")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, kept := reconciler.Applied[policy][half("z").Slot()]; !kept || len(reconciler.Applied[policy]) != 1 ||
+		programmer.removeCalls != 1 {
+		t.Fatalf("after dropping a: applied %v with %d Remove calls, want only z and 1",
+			reconciler.Applied[policy], programmer.removeCalls)
 	}
 }

@@ -32,6 +32,7 @@ Logging takes `--log-level` (`LOG_LEVEL`), without the `GALACTIC_ROUTER` prefix 
 | GoBGP API directory      | `GALACTIC_ROUTER_GOBGP_API_DIR`            | `--gobgp-api-dir`            | _(empty; no API)_           |
 | Traffic policy           | `GALACTIC_ROUTER_TRAFFIC_POLICY`           | `--traffic-policy`           | `false`                     |
 | Service frontends        | `GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED` | `--service-frontend-enabled` | `false`                     |
+| Spread remote pairing    | `GALACTIC_ROUTER_SERVICE_SPREAD_PAIRING`   | `--service-spread-pairing`   | `first`                     |
 
 ## Required Options
 
@@ -262,6 +263,18 @@ The default is `false`. Enable it on participating routers only after their
 CNI datapaths support the frontend maps. The publishing controller supplies
 the producer address and `ServiceRoutePolicy.spec.frontend.address` supplies
 the consumer address; ports are not translated. See [private service frontends](../private-services/README.md#consumer-service-frontends) for lifecycle, rollout and compatibility requirements.
+
+### `--service-spread-pairing` / `GALACTIC_ROUTER_SERVICE_SPREAD_PAIRING`
+
+Chooses the remote producer that this node's consumers of a `Spread`
+`PreferNodeLocal` endpoint are sent to when their node has no producer. With
+`first`, the default, every such consumer goes to the first eligible producer
+by namespace and name. With `rendezvous`, the consumers spread across the
+eligible producers. A producer's node accepts a consumer under either pairing,
+whatever its own setting, so nodes with different settings interoperate. Set
+`rendezvous` only after every node runs a router that has this option: an
+older router accepts only the `first` pairing and refuses the others. See
+[several producers on one node](../private-services/README.md#several-producers-on-one-node).
 
 ## Configuration Precedence
 

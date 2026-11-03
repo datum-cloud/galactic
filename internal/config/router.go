@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,18 @@ const (
 // RouterBMPPolicies lists the accepted GALACTIC_ROUTER_BMP_POLICY values.
 var RouterBMPPolicies = []string{"pre-policy", "post-policy", "local-rib", "all"}
 
+// DefaultRouterServiceSpreadPairing sends the consumers of a Spread endpoint
+// whose node has no producer to the first producer by name. Every node accepts
+// consumers under both pairings, so the pairing can change node by node once
+// every node runs a router that does.
+const DefaultRouterServiceSpreadPairing = "first"
+
+// RouterServiceSpreadPairings lists the accepted
+// GALACTIC_ROUTER_SERVICE_SPREAD_PAIRING values: "first" sends every such
+// consumer to the first producer by name, and "rendezvous" spreads them across
+// the producers.
+var RouterServiceSpreadPairings = []string{DefaultRouterServiceSpreadPairing, "rendezvous"}
+
 // --- Router environment variable keys --------------------------------------
 
 const (
@@ -56,6 +69,10 @@ const (
 	EnvRouterGCNamespace            = "GALACTIC_ROUTER_GC_NAMESPACE"
 	EnvRouterGCInterval             = "GALACTIC_ROUTER_GC_INTERVAL"
 	EnvRouterServiceFrontendEnabled = "GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED"
+	// EnvRouterServiceSpreadPairing chooses the remote producer this node's
+	// consumers of a Spread ServiceEndpoint are sent to; see
+	// RouterServiceSpreadPairings.
+	EnvRouterServiceSpreadPairing = "GALACTIC_ROUTER_SERVICE_SPREAD_PAIRING"
 	// EnvRouterTrafficPolicy runs the node's traffic policy reconciler. Off by
 	// default, because it watches the galactic.datumapis.com CRDs, which a
 	// cluster may not have installed.
@@ -98,6 +115,8 @@ type RouterConfig struct {
 	GCNamespace            string
 	GCInterval             time.Duration
 	ServiceFrontendEnabled bool
+	// ServiceSpreadPairing is one of RouterServiceSpreadPairings.
+	ServiceSpreadPairing string
 	// TrafficPolicy runs the node's traffic policy reconciler. It needs the
 	// galactic.datumapis.com CRDs, and a route reflector cannot run it.
 	TrafficPolicy bool
@@ -130,6 +149,7 @@ func NewRouterConfig() *RouterConfig {
 	v.SetDefault("gc_namespace", DefaultRouterGCNamespace)
 	v.SetDefault("gc_interval", DefaultRouterGCInterval.String())
 	v.SetDefault("service_frontend_enabled", false)
+	v.SetDefault("service_spread_pairing", DefaultRouterServiceSpreadPairing)
 	v.SetDefault("traffic_policy", false)
 	v.SetDefault("bmp_stations", "")
 	v.SetDefault("bmp_policy", DefaultRouterBMPPolicy)
@@ -160,6 +180,7 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{"gc-namespace", "gc_namespace"},
 		{"gc-interval", "gc_interval"},
 		{"service-frontend-enabled", "service_frontend_enabled"},
+		{"service-spread-pairing", "service_spread_pairing"},
 		{"traffic-policy", "traffic_policy"},
 		{"bmp-stations", "bmp_stations"},
 		{"bmp-policy", "bmp_policy"},
@@ -188,6 +209,7 @@ func (c *RouterConfig) readFields() {
 	c.GCNamespace = c.v.GetString("gc_namespace")
 	c.GCInterval = c.v.GetDuration("gc_interval")
 	c.ServiceFrontendEnabled = c.v.GetBool("service_frontend_enabled")
+	c.ServiceSpreadPairing = c.v.GetString("service_spread_pairing")
 	c.TrafficPolicy = c.v.GetBool("traffic_policy")
 	c.BMPStations = splitCommaList(c.v.GetString("bmp_stations"))
 	c.BMPPolicy = c.v.GetString("bmp_policy")
@@ -209,6 +231,10 @@ func (c *RouterConfig) Validate() error {
 	}
 	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
 		return errors.New("grpc health port must be between 1 and 65535")
+	}
+	if !slices.Contains(RouterServiceSpreadPairings, c.ServiceSpreadPairing) {
+		return fmt.Errorf("%s must be one of %s, got %q", EnvRouterServiceSpreadPairing,
+			strings.Join(RouterServiceSpreadPairings, ", "), c.ServiceSpreadPairing)
 	}
 	if c.TrafficPolicy && c.Reflector {
 		return fmt.Errorf("%s needs a node with tenant interfaces, so a route reflector cannot enable it",

@@ -307,7 +307,7 @@ func runCmd(cfg *config.RouterConfig) error {
 	// serviceRouteControllerEnabled).
 	if serviceRouteControllerEnabled(cfg) {
 		if err := setupServiceRouteController(mgr, nodeName, cfg.GCNamespace, cfg.ServiceFrontendEnabled,
-			serviceRouteMetrics); err != nil {
+			cfg.ServiceSpreadPairing, serviceRouteMetrics); err != nil {
 			return fmt.Errorf("setup ServiceRoutePolicy controller: %w", err)
 		}
 	} else {
@@ -475,9 +475,13 @@ func serviceRouteControllerEnabled(cfg *config.RouterConfig) bool {
 
 func setupServiceRouteController(
 	mgr ctrl.Manager,
-	nodeName, bgpNamespace string, frontendEnabled bool,
+	nodeName, bgpNamespace string, frontendEnabled bool, spreadPairingName string,
 	serviceRouteMetrics *serviceroute.Metrics,
 ) error {
+	spreadPairing, err := serviceroute.ParseSpreadPairing(spreadPairingName)
+	if err != nil {
+		return err
+	}
 	programmer := &serviceroute.EBPFRouteProgrammer{}
 	if err := programmer.Initialize(); err != nil {
 		ctrl.Log.Error(err, "service route eBPF maps are not available yet; initialization will retry on reconcile")
@@ -491,7 +495,8 @@ func setupServiceRouteController(
 		Programmer:      programmer,
 		Metrics:         serviceRouteMetrics,
 		FrontendEnabled: frontendEnabled,
-		Applied:         make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
+		SpreadPairing:   spreadPairing,
+		Applied:         make(map[types.NamespacedName]map[serviceroute.IntentSlot]serviceroute.RouteIntent),
 	}).SetupWithManager(mgr); err != nil {
 		return err
 	}
@@ -556,6 +561,10 @@ func newRootCommand() *cobra.Command {
 		"Cleanup interval")
 	cmd.Flags().Bool("service-frontend-enabled", false,
 		"Enable consumer-facing private-service address translation")
+	cmd.Flags().String("service-spread-pairing", config.DefaultRouterServiceSpreadPairing,
+		"Remote producer for this node's consumers of a Spread endpoint whose node has no producer: "+
+			"first (first producer by name) or rendezvous (spread across producers); set rendezvous only "+
+			"once every node runs a router that has this flag")
 	cmd.Flags().Bool("traffic-policy", false,
 		"Enforce TrafficPolicy on this node's tenant interfaces; needs the galactic.datumapis.com CRDs")
 	cmd.Flags().String("bmp-stations", "",
