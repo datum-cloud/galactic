@@ -51,6 +51,12 @@ Admission fails closed. Deploy the webhook with its serving Deployment, and keep
 
 For `--edge`, first install the Edge prerequisites in `config/galactic-edge/` and its node agent on eligible nodes. A deleting attachment is held until the node reports `Released` or the node is removed. See [Edge troubleshooting](../edge/troubleshooting.md) and the [provider contract](../edge/provider-contract.md) for ownership and timing requirements.
 
+### Pod-interface injection
+
+The pod webhook admits a pod labelled `networking.datumapis.com/inject-interfaces=true` only when its controlling `Instance` has a bound `NetworkInterface` for every declared interface. Each one needs a NetworkAttachmentDefinition of the same name that belongs to that instance. The definition, its `VPCAttachment` and its `NetworkInterface` are named after the interface slot, so a replacement instance of the same name can find its predecessor's objects until garbage collection removes them. A pod wired from those objects attaches under the previous attachment identifier and is never reported `Programmed`.
+
+The webhook follows the controller references NSO writes, reading each object from the API server rather than the cache: definition → `VPCAttachment` → `NetworkInterface` → the claim in `spec.claimRef`. Every object must exist, must not be deleting, and must carry the UID its reference names. The attachment's interface must be the one bound to the instance, and the claim must be controlled by this `Instance` or by nothing. Otherwise admission is denied with the link that failed, and the provider retries pod creation once the chain belongs to the replacement. An interface retained across replacements keeps its chain and passes once the replacement holds its claim. A failed read returns an admission error rather than a denial. The controller's ClusterRole already grants read access to every kind in the chain.
+
 ## Fabric flags
 
 | Flag                   | Default   | Meaning                                                             |

@@ -31,13 +31,17 @@ import (
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	computev1alpha "go.datum.net/compute/api/v1alpha"
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	"go.datum.net/galactic/internal/cloud/galactic"
+	networkingv1alpha "go.datum.net/network-services-operator/api/v1alpha"
 )
 
 const (
@@ -66,10 +70,22 @@ const (
 	instanceKind = "Instance"
 )
 
+var (
+	// vpcAttachmentKind controls each NetworkAttachmentDefinition.
+	vpcAttachmentKind = cloudv1alpha1.GroupVersion.WithKind("VPCAttachment").GroupKind()
+	// networkInterfaceKind controls each VPCAttachment.
+	networkInterfaceKind = networkingv1alpha.GroupVersion.WithKind("NetworkInterface").GroupKind()
+)
+
 // PodInterfaceInjector injects the attachments prepared for a Pod's instance.
 type PodInterfaceInjector struct {
 	client.Client
-	Decoder admission.Decoder
+	// APIReader reads the attachment chain behind each definition without the
+	// cache. The chain is checked while a previous instance's objects are being
+	// replaced, and a cached read can still show them as current. When nil, the
+	// embedded Client is used.
+	APIReader client.Reader
+	Decoder   admission.Decoder
 }
 
 // +kubebuilder:rbac:groups=compute.datumapis.com,resources=instances,verbs=get;list;watch
@@ -153,11 +169,131 @@ func (i *PodInterfaceInjector) resolveNetworks(
 				"attachment definition %s carries no attachment identifier", key))
 			return nil, nil, &response
 		}
+		reason, err := i.verifyAttachmentChain(ctx, instance, &nad, interfaceName)
+		if err != nil {
+			response := admission.Errored(http.StatusInternalServerError, err)
+			return nil, nil, &response
+		}
+		if reason != "" {
+			response := admission.Denied(fmt.Sprintf(
+				"attachment definition %s does not belong to instance %s yet: %s", key, instance.Name, reason))
+			return nil, nil, &response
+		}
 
 		networks = append(networks, fmt.Sprintf("%s/%s", nad.Namespace, nad.Name))
 		injected = append(injected, interfaceName)
 	}
 	return networks, injected, nil
+}
+
+// verifyAttachmentChain checks that a definition found by name belongs to the
+// instance being admitted, and returns why not, or "" when it does.
+//
+// The definition, its VPCAttachment and its NetworkInterface are all named after
+// the instance's interface slot. A replacement instance of the same name finds
+// the previous instance's objects under those names until garbage collection
+// removes them. That definition still names the previous attachment identifier,
+// and nothing on the CNI path can tell it is stale: the runtime hands the plugin
+// the identifier the definition names, and the two agree. A pod admitted against
+// it is wired under an identifier no attachment record describes, and its
+// interface is never reported Programmed (#1332).
+//
+// So the controller references the operator writes are followed from the
+// definition to the claim holding its interface. Each link must be live and be
+// the object its reference was written for. The attachment's interface must be
+// the one bound to the instance, and the claim must be held by this instance or
+// by nothing; a claim without a controller is accepted, as compute accepts it.
+// An interface retained across replacements keeps its chain, and its claim is
+// held by the replacement, so it passes. A denial makes the provider retry pod
+// creation, by which time the chain belongs to the replacement.
+func (i *PodInterfaceInjector) verifyAttachmentChain(
+	ctx context.Context, instance *computev1alpha.Instance,
+	nad *nadv1.NetworkAttachmentDefinition, interfaceName string,
+) (string, error) {
+	if !nad.DeletionTimestamp.IsZero() {
+		return "it is being deleted", nil
+	}
+
+	var attachment cloudv1alpha1.VPCAttachment
+	reason, err := i.controller(ctx, nad, "attachment definition", vpcAttachmentKind, &attachment)
+	if reason != "" || err != nil {
+		return reason, err
+	}
+	var iface networkingv1alpha.NetworkInterface
+	reason, err = i.controller(ctx, &attachment, "VPCAttachment", networkInterfaceKind, &iface)
+	if reason != "" || err != nil {
+		return reason, err
+	}
+	if iface.Name != interfaceName {
+		return fmt.Sprintf("VPCAttachment %s is controlled by NetworkInterface %s, not the bound %s",
+			attachment.Name, iface.Name, interfaceName), nil
+	}
+
+	if iface.Spec.ClaimRef == nil {
+		return fmt.Sprintf("NetworkInterface %s is not held by a claim", iface.Name), nil
+	}
+	var claim networkingv1alpha.NetworkInterfaceClaim
+	key := types.NamespacedName{Namespace: iface.Namespace, Name: iface.Spec.ClaimRef.Name}
+	if err := i.reader().Get(ctx, key, &claim); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Sprintf("NetworkInterfaceClaim %s holding NetworkInterface %s no longer exists",
+				key.Name, iface.Name), nil
+		}
+		return "", fmt.Errorf("get NetworkInterfaceClaim %s: %w", key, err)
+	}
+	if !claim.DeletionTimestamp.IsZero() {
+		return fmt.Sprintf("NetworkInterfaceClaim %s is being deleted", claim.Name), nil
+	}
+	if holder := metav1.GetControllerOf(&claim); holder != nil && holder.UID != instance.UID {
+		return fmt.Sprintf("NetworkInterfaceClaim %s is held by %s %s (uid %s), not this instance (uid %s)",
+			claim.Name, holder.Kind, holder.Name, holder.UID, instance.UID), nil
+	}
+	return "", nil
+}
+
+// controller reads the object controlling child into parent and returns why it
+// cannot be trusted, or "" when it can. child must have a controller of the
+// wanted kind, and that object must still exist, carry the UID the reference
+// was written for, and not be on its way out.
+func (i *PodInterfaceInjector) controller(
+	ctx context.Context, child client.Object, childKind string,
+	want schema.GroupKind, parent client.Object,
+) (string, error) {
+	ref := metav1.GetControllerOf(child)
+	if ref == nil {
+		return fmt.Sprintf("%s %s has no controller", childKind, child.GetName()), nil
+	}
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil || gv.Group != want.Group || ref.Kind != want.Kind {
+		return fmt.Sprintf("%s %s is controlled by %s %s, not a %s",
+			childKind, child.GetName(), ref.Kind, ref.Name, want), nil
+	}
+
+	key := types.NamespacedName{Namespace: child.GetNamespace(), Name: ref.Name}
+	if err := i.reader().Get(ctx, key, parent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Sprintf("%s %s controlling %s %s no longer exists",
+				want.Kind, ref.Name, childKind, child.GetName()), nil
+		}
+		return "", fmt.Errorf("get %s %s: %w", want.Kind, key, err)
+	}
+	if parent.GetUID() != ref.UID {
+		return fmt.Sprintf("%s %s is controlled by a previous %s %s (uid %s, now %s)",
+			childKind, child.GetName(), want.Kind, ref.Name, ref.UID, parent.GetUID()), nil
+	}
+	if parent.GetDeletionTimestamp() != nil {
+		return fmt.Sprintf("%s %s controlling %s %s is being deleted",
+			want.Kind, ref.Name, childKind, child.GetName()), nil
+	}
+	return "", nil
+}
+
+// reader returns the uncached reader when one is configured.
+func (i *PodInterfaceInjector) reader() client.Reader {
+	if i.APIReader != nil {
+		return i.APIReader
+	}
+	return i.Client
 }
 
 // interfaceRefFor returns the NetworkInterface bound to an instance's entry.
