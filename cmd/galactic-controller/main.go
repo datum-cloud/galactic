@@ -237,7 +237,9 @@ func SetupCloud(mgr ctrl.Manager) error {
 			return fmt.Errorf("set up %s controller: %w", name, err)
 		}
 	}
-	(&cloudwebhook.PodInterfaceInjector{Client: mgr.GetClient()}).SetupWithManager(mgr)
+	(&cloudwebhook.PodInterfaceInjector{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(),
+	}).SetupWithManager(mgr)
 	metrics.MustRegister(&cloudcontroller.InstanceAttachmentCollector{Reader: mgr.GetClient()})
 	return nil
 }
