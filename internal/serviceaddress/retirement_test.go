@@ -19,6 +19,12 @@ import (
 	api "go.datum.net/galactic/api/network/v1alpha1"
 )
 
+const (
+	retiredName      = "retired"
+	allocationUID    = "claim"
+	gatewayNamespace = "gateways"
+)
+
 func TestPreemptiveRetirementWithoutGateways(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -36,7 +42,7 @@ func TestPreemptiveRetirementWithoutGateways(t *testing.T) {
 			}
 			address := &api.NetworkServiceAddress{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:       "retired",
+					Name:       retiredName,
 					Namespace:  "project",
 					UID:        "anchor",
 					Generation: tc.generation,
@@ -44,16 +50,16 @@ func TestPreemptiveRetirementWithoutGateways(t *testing.T) {
 				Spec: api.NetworkServiceAddressSpec{
 					Retired:    true,
 					VIPAddress: "2001:db8::1",
-					Group:      api.NetworkServiceAddressGroup{UID: "claim", Generation: 1, Revision: "retired"},
+					Group:      api.NetworkServiceAddressGroup{UID: allocationUID, Generation: 1, Revision: retiredName},
 				},
 			}
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(address).WithObjects(address)
 			if tc.pending {
 				builder = builder.WithObjects(
 					&api.ServiceVIPBinding{
-						ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "gateways"},
+						ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: gatewayNamespace},
 						Spec: api.ServiceVIPBindingSpec{
-							SourceRef: &api.ServiceVIPBindingSourceReference{AllocationUID: "claim"},
+							SourceRef: &api.ServiceVIPBindingSourceReference{AllocationUID: allocationUID},
 						},
 					},
 				)
@@ -90,18 +96,18 @@ func retirementFixture(t *testing.T) (*runtime.Scheme, *api.NetworkServiceAddres
 		t.Fatal(err)
 	}
 	return scheme, &api.NetworkServiceAddress{
-		ObjectMeta: metav1.ObjectMeta{Name: "retired", Namespace: "project", UID: "anchor", Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Name: retiredName, Namespace: "project", UID: "anchor", Generation: 1},
 		Spec: api.NetworkServiceAddressSpec{
 			Retired:    true,
 			VIPAddress: "2001:db8::1",
-			Group:      api.NetworkServiceAddressGroup{UID: "claim", Generation: 1, Revision: "retired"},
+			Group:      api.NetworkServiceAddressGroup{UID: allocationUID, Generation: 1, Revision: retiredName},
 		},
 	}
 }
 
 func gateway(name, node string) *api.NetworkGateway {
 	return &api.NetworkGateway{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "gateways"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gatewayNamespace},
 		Spec:       api.NetworkGatewaySpec{TargetRef: api.TargetRef{Name: node}},
 	}
 }
@@ -197,8 +203,10 @@ func TestRetirementNamesReferrersDeterministically(t *testing.T) {
 	builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(address).WithObjects(address)
 	for _, name := range []string{"binding-c", "binding-a", "binding-b"} {
 		builder = builder.WithObjects(&api.ServiceVIPBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "gateways"},
-			Spec:       api.ServiceVIPBindingSpec{SourceRef: &api.ServiceVIPBindingSourceReference{AllocationUID: "claim"}},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gatewayNamespace},
+			Spec: api.ServiceVIPBindingSpec{
+				SourceRef: &api.ServiceVIPBindingSourceReference{AllocationUID: allocationUID},
+			},
 		})
 	}
 	c := builder.Build()
@@ -225,7 +233,8 @@ func TestRetirementNamesReferrersDeterministically(t *testing.T) {
 
 func TestReferrerPicksLowestName(t *testing.T) {
 	var r referrer
-	for _, ref := range [][2]string{{"zone", "a"}, {"gateways", "c"}, {"gateways", "a"}, {"gateways", "b"}} {
+	refs := [][2]string{{"zone", "a"}, {gatewayNamespace, "c"}, {gatewayNamespace, "a"}, {gatewayNamespace, "b"}}
+	for _, ref := range refs {
 		r.offer(ref[0], ref[1])
 	}
 	if got := r.pending("ServiceVIPBinding"); got == nil || !strings.Contains(got.message, " gateways/a ") {
