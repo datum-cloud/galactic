@@ -82,10 +82,13 @@ routes rather than wait out each one's neighbor solicitation.
 The ingress sidecar (`galactic-vrf`) writes rows into the same maps from its
 pod's network namespace, each in a key range no host writer reaches: `vrf_table`
 under `uformat.BlockIngressSidecar`, `ifindex_vrf_table` at or above
-`ifindexvrfmap.SidecarIfindexBase`, and `egress_route_table` for tables at or
-above `vrf.SidecarTableIDBase`. It leaves them in place when it exits, so a
-restarted container keeps serving, and the host's GC and repair passes never
-touch them. Two things remove a deleted pod's rows
+`ifindexvrfmap.SidecarIfindexBase`, `egress_route_table` for tables at or
+above `vrf.SidecarTableIDBase`, and `infra` rows in `tp_iface_table` for its
+veth peers, at the same ifindexes as their `ifindex_vrf_table` rows. It leaves
+them in place when it exits, so a restarted container keeps serving, and the
+host's GC, repair and traffic policy startup passes never touch them. Its
+periodic sweep reads its rows back, the traffic policy row included, and
+rewrites them when one is missing. Two things remove a deleted pod's rows
 (`internal/plumbing/ebpf/sidecarmap`, #773). A new sidecar removes, at startup,
 every sidecar row its own VRFs do not account for. The installer's sidecar
 return sweep (`internal/installer/sidecarreap.go`) treats a sidecar gateway

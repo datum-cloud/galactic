@@ -106,6 +106,10 @@ func (s *trafficPolicyState) writeLocked() {
 // and neighbor discovery from a global source are ordinary traffic. A row
 // whose interface no longer exists, left by a DEL that could not find its
 // link, is removed so a reused ifindex cannot inherit it.
+//
+// Rows at or above ifindexvrfmap.SidecarIfindexBase are left alone. They are
+// the ingress sidecar's veth peers, in its pod's namespace, so this namespace
+// never finds their links; the sidecar and sidecarmap.Prune own them.
 func (s *trafficPolicyState) reconcileInterfaces() {
 	links, err := attach.ManagedInterfaces()
 	if err != nil {
@@ -140,7 +144,7 @@ func (s *trafficPolicyState) reconcileInterfaces() {
 	)
 	it := s.maps.Interfaces.Iterate()
 	for it.Next(&key, &row) {
-		if !present[key] {
+		if !present[key] && key < ifindexvrfmap.SidecarIfindexBase {
 			stale = append(stale, key)
 		}
 	}

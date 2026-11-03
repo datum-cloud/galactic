@@ -499,15 +499,20 @@ func pruneDatapath(keepTableIDs map[uint32]struct{}) (int, error) {
 	return result.Total(), err
 }
 
-// datapathRowsPresent reports whether vrf_table and ifindex_vrf_table still hold
-// the rows ensureEgressDatapath registered for each VRF in tableIDs.
+// datapathRowsPresent reports whether the shared maps still hold the rows
+// ensureEgressDatapath registered for each VRF in tableIDs: the vrf_table and
+// ifindex_vrf_table rows, and the veth peer's traffic policy infra row (see
+// sidecarmap.Present).
 //
-// Those two are written together, before any egress_route_table entry, and
-// removed together by every path that removes a sidecar's rows: this
-// sidecar's own startup prune in a later pod, and the host installer's reaper
-// once it judges every sidecar on the node gone. Either can be wrong about a
-// live sidecar, in a pod overlapping its predecessor or one slow to publish
-// its advertisements, and reading the rows back is what lets this one notice.
+// The vrf_table and ifindex_vrf_table rows are written together, before any
+// egress_route_table entry, and removed together by every path that removes a
+// sidecar's rows: this sidecar's own startup prune in a later pod, and the
+// host installer's reaper once it judges every sidecar on the node gone.
+// Either can be wrong about a live sidecar, in a pod overlapping its
+// predecessor or one slow to publish its advertisements, and reading the rows
+// back is what lets this one notice. Without the infra row, a node that
+// enforces traffic policy drops everything the peer carries, so it is read
+// back too.
 func datapathRowsPresent(tableIDs []uint32) (bool, error) {
 	if len(tableIDs) == 0 {
 		return true, nil
@@ -523,10 +528,7 @@ func datapathRowsPresent(tableIDs []uint32) (bool, error) {
 		if err != nil {
 			continue // not a table this sidecar registers rows for
 		}
-		if _, ok, err := maps.VRF.Get(ingressSidecarBlock, argument); err != nil || !ok {
-			return false, err
-		}
-		if _, ok, err := maps.Ifindex.Get(ifindexvrfmap.SidecarIfindex(argument)); err != nil || !ok {
+		if ok, err := sidecarmap.Present(maps, argument); err != nil || !ok {
 			return false, err
 		}
 	}
