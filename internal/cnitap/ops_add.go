@@ -25,6 +25,7 @@ import (
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/radv"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -225,8 +226,9 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 }
 
 // setHostOnlyPorts writes ports as hostLink's host-only TCP ports, or removes
-// any entry when ports is empty. A datapath without the table cannot enforce a
-// list, so asking for one there fails ADD; asking for none is a no-op.
+// any entry when ports is empty. A datapath without the table, or whose
+// tp_deliver does not read it, cannot enforce a list, so asking for one there
+// fails ADD; asking for none is a no-op.
 //
 // The list is also recorded in hostLink's alias, which outlasts the table, so
 // datapath repair can restore an entry a recreated table lost. The alias keeps
@@ -255,6 +257,14 @@ func setHostOnlyPorts(hostLink netlink.Link, ports []uint16, owner string) error
 			return fmt.Errorf("clear host-only alias on %s: %w", hostLink.Attrs().Name, err)
 		}
 		return nil
+	}
+	reads, err := attach.DeliverReadsHostOnlyPorts(attach.PinDir, closer)
+	if err != nil {
+		return err
+	}
+	if !reads {
+		return fmt.Errorf("host-only ports %v cannot be enforced: this node's tp_deliver does not read %s",
+			ports, prog.UsidMapHostOnlyPortTable)
 	}
 	if err := table.Register(ifindex, ports); err != nil {
 		return err
