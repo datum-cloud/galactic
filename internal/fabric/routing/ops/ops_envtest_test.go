@@ -208,7 +208,7 @@ func TestReleaseWorkflows(t *testing.T) {
 
 	// An emergency withdrawal that retires.
 	ew, err := BuildRelease(ctx, c, ReleaseSpec{Namespace: ns, Name: "ew-1", RoutingDomain: domain, FleetSequence: 3,
-		Deployments: []string{nodeB}, Withdraw: []string{"192.0.2.0/24"}, Retire: true}, now)
+		Deployments: []string{nodeB}, Withdraw: []string{"203.0.113.0/24"}, Retire: true}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +304,60 @@ func TestReleaseRefusesWhatRolloutWould(t *testing.T) {
 		FleetSequence: 1, Deployments: []string{nodeB}}, now); err == nil ||
 		!strings.Contains(err.Error(), "compiled for router") {
 		t.Errorf("naming a deployment the rollout manager would refuse: %v", err)
+	}
+}
+
+// TestWithdrawalRefusesStillOriginating: a withdrawal whose candidate still
+// originates a withdrawn prefix, or one inside it, is an error even
+// fleet-wide, never a deployment left out.
+func TestWithdrawalRefusesStillOriginating(t *testing.T) {
+	c := startAPI(t)
+	ctx := context.Background()
+	fleet(t, c, networkv1alpha1.FabricConfigSourceCRD, nodeA, nodeB)
+	var omitted []string
+	for _, named := range [][]string{nil, {nodeA}} {
+		_, err := BuildRelease(ctx, c, ReleaseSpec{Namespace: ns, Name: "ew", RoutingDomain: domain,
+			FleetSequence: 1, Deployments: named, Withdraw: []string{"192.0.0.0/16"},
+			Omitted: func(d string, _ error) { omitted = append(omitted, d) }}, time.Now())
+		if err == nil || !strings.Contains(err.Error(), "192.0.2.0/24") {
+			t.Errorf("deployments %v: %v, want a refusal naming the origination", named, err)
+		}
+	}
+	if len(omitted) > 0 {
+		t.Errorf("left out %v instead of refusing the withdrawal", omitted)
+	}
+}
+
+// TestWithdrawalOrdering: a fleet-wide withdrawal leaves out what no
+// release may promote, as any release does, but never a router it skips
+// while that router's running revision still originates a withdrawn prefix.
+func TestWithdrawalOrdering(t *testing.T) {
+	c := startAPI(t)
+	ctx := context.Background()
+	fleet(t, c, networkv1alpha1.FabricConfigSourceCRD, nodeA, nodeB)
+	spec := func(name string, omitted *[]string) ReleaseSpec {
+		return ReleaseSpec{Namespace: ns, Name: name, RoutingDomain: domain, FleetSequence: 1,
+			Withdraw: []string{"192.0.0.0/16"}, Omitted: func(d string, _ error) { *omitted = append(*omitted, d) }}
+	}
+	for _, n := range []string{nodeA, nodeB} {
+		if err := SetSuspended(ctx, c, ns, n, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var omitted []string
+	if _, err := BuildRelease(ctx, c, spec("ew-1", &omitted), time.Now()); !errors.Is(err, ErrNothingToRelease) ||
+		len(omitted) != 2 {
+		t.Errorf("suspended routers: %v, omitted %v; want both left out", err, omitted)
+	}
+
+	if err := SetSuspended(ctx, c, ns, nodeA, false); err != nil {
+		t.Fatal(err)
+	}
+	promoteTo(t, c, 1, revisions[nodeA], nil, true)
+	omitted = nil
+	if _, err := BuildRelease(ctx, c, spec("ew-2", &omitted), time.Now()); err == nil ||
+		!strings.Contains(err.Error(), "no candidate that stops it") {
+		t.Errorf("a router running a withdrawn origination: %v, want a refusal", err)
 	}
 }
 

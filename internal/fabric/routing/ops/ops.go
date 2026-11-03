@@ -151,7 +151,7 @@ func releaseTarget(ctx context.Context, c client.Client, spec ReleaseSpec, d *ne
 		if explicit {
 			return nil, fmt.Errorf("deployment %s has no candidate revision", d.Name)
 		}
-		return nil, nil
+		return nil, stillAnnounces(ctx, c, spec, d)
 	}
 	which, ref := "candidate", d.Spec.CandidateRevisionRef
 	if spec.Reactivate {
@@ -168,7 +168,7 @@ func releaseTarget(ctx context.Context, c client.Client, spec ReleaseSpec, d *ne
 	runs := d.Spec.ActiveRevisionRef != nil && d.Spec.ActiveRevisionRef.Name == rev.Name &&
 		d.Spec.ActivationDependencyDigest == rev.Spec.ActivationDependencyDigest
 	if runs && !explicit {
-		return nil, nil
+		return nil, stillAnnounces(ctx, c, spec, d)
 	}
 	target := networkv1alpha1.FabricReleaseTarget{
 		Deployment: d.Name, DeploymentUID: string(d.UID),
@@ -185,10 +185,40 @@ func releaseTarget(ctx context.Context, c client.Client, spec ReleaseSpec, d *ne
 	}
 	// The rollout manager fails a release on any target it cannot
 	// promote, so refuse here what it would refuse there.
-	if err := rollout.CheckTarget(d, rev, target, credentials); err != nil {
+	if err := rollout.CheckTarget(d, rev, target, credentials, nil); err != nil {
 		return nil, refusal{err}
 	}
+	if p := rollout.WithdrawnOrigination(spec.Withdraw, rev); p != "" {
+		// Left out, the deployment would keep announcing what the
+		// withdrawal is for.
+		return nil, errors.New(rollout.WithdrawnOriginationMessage(d.Name, rev.Name, p))
+	}
 	return &target, nil
+}
+
+// stillAnnounces refuses a withdrawal that would leave d out, having
+// nothing to promote, while the revision it runs still originates a
+// withdrawn prefix. A deployment no release may promote is not refused.
+func stillAnnounces(ctx context.Context, c client.Client, spec ReleaseSpec,
+	d *networkv1alpha1.FabricRouterDeployment) error {
+	if len(spec.Withdraw) == 0 || d.Spec.ActiveRevisionRef == nil ||
+		d.Spec.Source != networkv1alpha1.FabricConfigSourceCRD || d.Spec.Suspended ||
+		(d.Spec.Recovery != nil && d.Spec.Recovery.Retired) {
+		return nil
+	}
+	rev := &networkv1alpha1.FabricRouterRevision{}
+	err := c.Get(ctx, types.NamespacedName{Namespace: d.Namespace, Name: d.Spec.ActiveRevisionRef.Name}, rev)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("deployment %s's active revision %s: %w", d.Name, d.Spec.ActiveRevisionRef.Name, err)
+	}
+	if p := rollout.WithdrawnOrigination(spec.Withdraw, rev); p != "" {
+		return fmt.Errorf("%s, and the deployment has no candidate that stops it",
+			rollout.WithdrawnOriginationMessage(d.Name, rev.Name, p))
+	}
+	return nil
 }
 
 // reactivatable reports why d's active revision cannot be re-activated:

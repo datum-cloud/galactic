@@ -5,6 +5,7 @@ package rollout
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -600,4 +601,93 @@ func TestReleaseRestartsLostNode(t *testing.T) {
 	}
 	step("other", 4, other, 2)
 	step("back", 5, f.rev, 3)
+}
+
+// coverA covers prefixA, which the fleet's revision originates.
+const (
+	coverA = "192.0.0.0/16"
+	a1UID  = "a1-uid"
+)
+
+// TestWithdrawalRefusesStillOriginating: an emergency withdrawal whose
+// candidate still originates a withdrawn prefix, or one inside it, is
+// cancelled before anything is promoted or revoked.
+func TestWithdrawalRefusesStillOriginating(t *testing.T) {
+	for name, withdrawn := range map[string]string{"exact": prefixA, "covering": coverA} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeFleet(t, map[string]string{"a1": "a"})
+			a := &networkv1alpha1.FabricReleaseAuthorization{
+				ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: "ew", UID: "ew-uid"},
+				Spec: networkv1alpha1.FabricReleaseAuthorizationSpec{
+					Type: networkv1alpha1.FabricReleaseTypeEmergencyWithdrawal, RoutingDomain: testDomain,
+					FleetReleaseID: "ew", FleetSequence: 1, WithdrawnPrefixes: []string{withdrawn},
+					Deployments: []networkv1alpha1.FabricReleaseTarget{{
+						Deployment: "a1", DeploymentUID: a1UID, Revision: f.rev.Name, ActivationDependencyDigest: digestA,
+					}},
+				},
+			}
+			if err := f.c.Create(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			got := f.reconcile("ew")
+			c := meta.FindStatusCondition(got.Status.Conditions, ConditionProgressing)
+			if got.Status.Phase != networkv1alpha1.FabricReleasePhaseCancelled || c == nil ||
+				c.Reason != reasonInvalidTarget {
+				t.Fatalf("phase %s, condition %+v", got.Status.Phase, c)
+			}
+			if !strings.Contains(c.Message, f.rev.Name) || !strings.Contains(c.Message, prefixA) {
+				t.Errorf("refusal %q does not name the revision and prefix", c.Message)
+			}
+			if d := f.deployment("a1"); d.Spec.ActivationEpoch != 0 || d.Spec.Recovery != nil {
+				t.Errorf("a1 promoted to epoch %d, recovery %+v", d.Spec.ActivationEpoch, d.Spec.Recovery)
+			}
+		})
+	}
+}
+
+// TestCheckTargetWithdrawn: a target is refused when its revision
+// originates a withdrawn prefix or a prefix inside one, and only then.
+func TestCheckTargetWithdrawn(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a"})
+	d := f.deployment("a1")
+	target := networkv1alpha1.FabricReleaseTarget{
+		Deployment: "a1", DeploymentUID: a1UID, Revision: f.rev.Name, ActivationDependencyDigest: digestA,
+	}
+	for withdrawn, refused := range map[string]bool{
+		prefixA: true, coverA: true, "192.0.2.0/25": false, prefixB: false,
+	} {
+		err := CheckTarget(d, f.rev, target, nil, []string{withdrawn})
+		if (err != nil) != refused {
+			t.Errorf("withdrawing %s: %v, want refused %t", withdrawn, err, refused)
+		}
+	}
+	if err := CheckTarget(d, f.rev, target, nil, nil); err != nil {
+		t.Errorf("an ordinary release: %v", err)
+	}
+}
+
+// TestReleaseFailsOnRefusedPromotion: a promotion its agent refuses under
+// the release still running it fails the release instead of leaving it
+// waiting for an activation that never comes.
+func TestReleaseFailsOnRefusedPromotion(t *testing.T) {
+	f := newFakeFleet(t, map[string]string{"a1": "a"})
+	f.release(relName, networkv1alpha1.FabricReleaseTypeRelease, 1, "a1")
+	f.reconcile(relName)
+	d := f.deployment("a1")
+	if d.Spec.ActivationEpoch != 1 {
+		t.Fatal("a1 not promoted")
+	}
+	hb := metav1.Now()
+	d.Status.HeartbeatTime = &hb
+	d.Status.Conditions = []metav1.Condition{{
+		Type: networkv1alpha1.FabricConditionAccepted, Status: metav1.ConditionFalse,
+		Reason: networkv1alpha1.FabricReasonPromotionRefused, ObservedGeneration: d.Generation,
+		LastTransitionTime: hb,
+	}}
+	if err := f.c.Status().Update(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if a := f.reconcile(relName); a.Status.Phase != networkv1alpha1.FabricReleasePhaseFailed {
+		t.Errorf("phase %s, want Failed", a.Status.Phase)
+	}
 }

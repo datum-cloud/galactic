@@ -250,7 +250,7 @@ func (r *ReleaseReconciler) target(ctx context.Context, auth *networkv1alpha1.Fa
 	case err != nil:
 		return nil, nil, err
 	}
-	if err := CheckTarget(dep, rev, t, credentials); err != nil {
+	if err := CheckTarget(dep, rev, t, credentials, auth.Spec.WithdrawnPrefixes); err != nil {
 		return nil, nil, err
 	}
 	return dep, rev, nil
@@ -299,13 +299,14 @@ func Credentials(ctx context.Context, r client.Reader, namespace string,
 // CheckTarget reports why dep cannot be promoted to rev under target t:
 // another deployment UID, a source other than CRD, suspended, retired, a
 // digest the release does not name, a revision compiled for another
-// router, an originated prefix an emergency withdrawal revoked, a
-// credential that is revoked on the deployment or cannot be resolved, or a
-// re-activation of a revision the deployment does not run, committed.
-// credentials maps the Secrets rev uses to their current UIDs, as
-// Credentials reads them.
+// router, an originated prefix the deployment revokes or the release
+// withdraws, a credential that is revoked on the deployment or cannot be
+// resolved, or a re-activation of a revision the deployment does not run,
+// committed. credentials maps the Secrets rev uses to their current UIDs,
+// as Credentials reads them; withdrawn is the prefixes the release
+// withdraws, empty for an ordinary release.
 func CheckTarget(dep *networkv1alpha1.FabricRouterDeployment, rev *networkv1alpha1.FabricRouterRevision,
-	t networkv1alpha1.FabricReleaseTarget, credentials map[string]string) error {
+	t networkv1alpha1.FabricReleaseTarget, credentials map[string]string, withdrawn []string) error {
 	switch {
 	case string(dep.UID) != t.DeploymentUID:
 		return targetError{fmt.Sprintf("deployment %s is UID %s, the release names %s", dep.Name, dep.UID,
@@ -328,6 +329,11 @@ func CheckTarget(dep *networkv1alpha1.FabricRouterDeployment, rev *networkv1alph
 		return targetError{fmt.Sprintf("deployment %s does not run revision %s committed; a re-activation "+
 			"promotes only the revision a deployment runs", dep.Name, t.Revision)}
 	}
+	if p := WithdrawnOrigination(withdrawn, rev); p != "" {
+		// Promoted, it would keep announcing the prefix and revoke its own
+		// origination, holding a restarted pod in Init.
+		return targetError{WithdrawnOriginationMessage(dep.Name, rev.Name, p)}
+	}
 	var revoked []networkv1alpha1.FabricObjectIdentity
 	if dep.Spec.Recovery != nil {
 		if p := revokedOrigination(dep.Spec.Recovery.RevokedPrefixes, rev); p != "" {
@@ -342,6 +348,19 @@ func CheckTarget(dep *networkv1alpha1.FabricRouterDeployment, rev *networkv1alph
 		return targetError{fmt.Sprintf("revision %s %s on deployment %s", rev.Name, p, dep.Name)}
 	}
 	return nil
+}
+
+// WithdrawnOrigination returns the first prefix rev originates that
+// withdrawn covers: a withdrawn prefix or any prefix inside one.
+func WithdrawnOrigination(withdrawn []string, rev *networkv1alpha1.FabricRouterRevision) string {
+	return revokedOrigination(withdrawn, rev)
+}
+
+// WithdrawnOriginationMessage says why a withdrawal may not promote a
+// deployment's revision that still originates prefix.
+func WithdrawnOriginationMessage(deployment, revision, prefix string) string {
+	return fmt.Sprintf("revision %s still originates %s, which the emergency withdrawal withdraws, on deployment %s",
+		revision, prefix, deployment)
 }
 
 // eligibleRecovery drops spec's recovery target when no failure could
