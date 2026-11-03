@@ -338,7 +338,10 @@ func (m *Maps) InfraInterfaces() ([]uint32, error) {
 }
 
 // RemoveInfra deletes ifindex's row if it is still an infra row. A tenant row
-// written since is left alone, and a missing row is not an error.
+// written before the check is left alone, and a missing row is not an error.
+// The check and the delete are separate map operations, so a tenant row
+// written between them, which needs a reused ifindex, is deleted, and that
+// interface fails closed as policy_unavailable rather than open.
 func (m *Maps) RemoveInfra(ifindex uint32) error {
 	var row prog.UsidTpIfaceValue
 	if err := m.Interfaces.Lookup(ifindex, &row); err != nil {

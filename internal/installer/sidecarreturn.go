@@ -337,19 +337,20 @@ func installSidecarReturn(registry *usidmap.Registry, policy *tpmap.Maps, block 
 		return err
 	}
 
+	// First, so that an ifindex a tenant interface holds, which a stale
+	// annotation can name, gets no gateway route or neighbor pointed at it,
+	// and so that no reply meets the interface without a row once vrf_table
+	// lets usid_ingress deliver there.
+	if policy != nil {
+		if err := policy.PutInfra(uint32(e.hostIfindex)); err != nil { //nolint:gosec // a kernel ifindex
+			return fmt.Errorf("gateway address %s: %w", e.addr, err)
+		}
+	}
 	if err := ensureSidecarReturnRoute(table, e.addr, e.hostIfindex); err != nil {
 		return err
 	}
 	if err := ensureSidecarReturnNeighbor(e.addr, e.hostIfindex, e.hostMAC); err != nil {
 		return err
-	}
-	// Before vrf_table, which is what lets usid_ingress deliver here, so no
-	// reply meets the interface without a row. PutInfra refuses an ifindex a
-	// tenant interface holds, which a stale annotation can name.
-	if policy != nil {
-		if err := policy.PutInfra(uint32(e.hostIfindex)); err != nil { //nolint:gosec // a kernel ifindex
-			return fmt.Errorf("gateway address %s: %w", e.addr, err)
-		}
 	}
 
 	// EgressKindVeth is a real claim here, not a don't-care: the interface the
