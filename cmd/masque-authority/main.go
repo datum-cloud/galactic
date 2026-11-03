@@ -37,6 +37,7 @@ import (
 	"go.datum.net/galactic/internal/certreload"
 	"go.datum.net/galactic/internal/edge/admission"
 	"go.datum.net/galactic/internal/edge/masque/authority"
+	"go.datum.net/galactic/internal/edge/timing"
 	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 )
@@ -91,7 +92,7 @@ func requireNamespace(ns string) error {
 
 type serveOptions struct {
 	provider, providerSA, cell, listen, certFile, keyFile, audience string
-	sweep                                                           time.Duration
+	sweep, maxSkew                                                  time.Duration
 }
 
 func newServeCommand(namespace *string) *cobra.Command {
@@ -112,6 +113,8 @@ func newServeCommand(namespace *string) *cobra.Command {
 	f.StringVar(&o.keyFile, "tls-key", "/etc/masque-authority/tls/tls.key", "Server key, reread on change")
 	f.StringVar(&o.audience, "audience", authority.DefaultAudience, "Audience of the provider pods' tokens")
 	f.DurationVar(&o.sweep, "sweep-interval", time.Second, "How often revoked authorizations are swept")
+	f.DurationVar(&o.maxSkew, "max-skew", timing.Params.MaxSkew,
+		"The cell's maximum wall-clock error; must match galactic-controller's and galactic-edge's")
 	return cmd
 }
 
@@ -122,6 +125,9 @@ func serve(parent context.Context, namespace string, o *serveOptions) error {
 	saNS, saName, ok := strings.Cut(o.providerSA, "/")
 	if o.provider == "" || o.cell == "" || !ok || saNS == "" || saName == "" {
 		return errors.New("--provider, --cell and --provider-service-account namespace/name are required")
+	}
+	if o.maxSkew <= 0 {
+		return errors.New("--max-skew must be positive")
 	}
 	if parent == nil {
 		parent = context.Background()
@@ -137,7 +143,7 @@ func serve(parent context.Context, namespace string, o *serveOptions) error {
 		return err
 	}
 	a := &authority.Authority{
-		Client: c, Namespace: namespace, Provider: o.provider, Cell: o.cell,
+		Client: c, Namespace: namespace, Provider: o.provider, Cell: o.cell, MaxSkew: o.maxSkew,
 		ProviderServiceAccount: admission.ServiceAccount{Namespace: saNS, Name: saName}, Log: slog.Default(),
 	}
 	reviewer := authority.KubeTokenReviewer{Client: c, Audience: o.audience}
