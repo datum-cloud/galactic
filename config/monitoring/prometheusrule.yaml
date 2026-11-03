@@ -514,6 +514,68 @@ spec:
               {{ $labels.kind }} routes it holds a best path for, so this node cannot reach those prefixes.
               The router's "route install failed" log lines name each prefix and the error, usually a SID
               with no route over an SRv6 uplink or an unresolved neighbor.
+        # galactic_router_peer_established is refreshed on every BGPRouter
+        # reconcile (30s), and exists only for peers the router's GoBGP runtime
+        # holds. A runtime that is down reads 0 for every peer it last held.
+        - alert: GalacticRouterPeerNotEstablished
+          expr: galactic_router_peer_established{job=~"galactic-router|galactic-router-rr"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $labels.router }} on {{ $labels.node }} has no Established session to {{ $labels.peer }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouterpeernotestablished"
+            description: >-
+              galactic-router's overlay BGP session from {{ $labels.router }} to {{ $labels.peer }} has not been
+              Established for 5 minutes. The router still has its other sessions, but has lost this peer's EVPN
+              routes and redundancy. The BGPPeer's status and events, and the router's "bgp peer state
+              transition" log lines, give the FSM state and the disconnect reason.
+        - alert: GalacticRouterNoPeersEstablished
+          expr: max by (job, node, router) (galactic_router_peer_established{job=~"galactic-router|galactic-router-rr"}) == 0
+          for: 5m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $labels.router }} on {{ $labels.node }} has no Established BGP session"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouternopeersestablished"
+            description: >-
+              None of {{ $labels.router }}'s overlay BGP sessions has been Established for 5 minutes, which
+              supersedes GalacticRouterPeerNotEstablished for its peers. The router learns and advertises no
+              EVPN routes: a node's router loses reachability to and from other nodes' VPC prefixes as routes
+              are withdrawn, and a route reflector stops reflecting routes between its clients.
+        # The counter is driven by GoBGP's peer events, not the 30s status
+        # poll, so it counts sessions that drop and recover between polls.
+        - alert: GalacticRouterPeerFlapping
+          expr: increase(galactic_router_peer_session_drops_total{job=~"galactic-router|galactic-router-rr"}[15m]) >= 3
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "BGP session {{ $labels.router }} -> {{ $labels.peer }} on {{ $labels.node }} is flapping"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouterpeerflapping"
+            description: >-
+              The overlay BGP session from {{ $labels.router }} to {{ $labels.peer }} has left Established
+              {{ $value | printf "%.0f" }} times in 15 minutes. Each drop withdraws the peer's EVPN routes until
+              the session recovers. The router's "bgp peer state transition" log lines give each disconnect reason.
+        - alert: GalacticRouterNotReady
+          expr: galactic_router_ready{job=~"galactic-router|galactic-router-rr"} == 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "BGPRouter {{ $labels.router }} on {{ $labels.node }} is not Ready"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouternotready"
+            description: >-
+              BGPRouter {{ $labels.router }}'s Ready condition has not been True for 10 minutes: its GoBGP
+              runtime is not running, or galactic-router cannot build its desired configuration. The condition's
+              reason and message, and the ConfigApplied condition, say which.
         - alert: GalacticServiceRouteProgrammingFailing
           expr: sum without (operation, result) (increase(galactic_service_route_route_operations_total{job="galactic-router",result="error"}[10m])) > 0
           for: 15m
@@ -539,8 +601,8 @@ spec:
             summary: "{{ $labels.job }} metrics on {{ $labels.node }} cannot be scraped"
             runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticroutermetricsdown"
             description: >-
-              Prometheus cannot reach galactic-router's metrics port on {{ $labels.node }} (9179), so
-              GalacticRouterBMPStationDown and GalacticRouterRoutesNotInstalled cannot fire for it.
+              Prometheus cannot reach galactic-router's metrics port on {{ $labels.node }} (9179), so no
+              galactic-router alert (BGP sessions, readiness, BMP, route installation) can fire for it.
     # From each egress shard's galactic-nat (job galactic-nat, port 9182).
     - name: galactic-nat
       rules:

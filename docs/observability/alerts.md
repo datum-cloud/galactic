@@ -37,6 +37,10 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | FabricRouterControllerMetricsDown         | `fabric-router-controller` scrape down                                      | 5m    | warning    |
 | GalacticRouterBMPStationDown              | `galactic_router_bmp_station_up == 0`                                       | 10m   | warning    |
 | GalacticRouterRoutesNotInstalled          | `galactic_router_route_install_failing > 0`                                 | 10m   | warning    |
+| GalacticRouterPeerNotEstablished          | `galactic_router_peer_established == 0`                                     | 5m    | warning    |
+| GalacticRouterNoPeersEstablished          | no peer of a router Established                                             | 5m    | critical   |
+| GalacticRouterPeerFlapping                | 3+ `galactic_router_peer_session_drops_total` in 15m                        | 0     | warning    |
+| GalacticRouterNotReady                    | `galactic_router_ready == 0`                                                | 10m   | warning    |
 | GalacticRouterMetricsDown                 | `galactic-router` or `galactic-router-rr` scrape down                       | 5m    | warning    |
 | GalacticNatSessionTableEvictingLive       | table over 90% full, oldest row under 7440 s                                | 15m   | warning    |
 | GalacticNatPortExhausted                  | `*_pat_exhausted` drops in every 10-minute window                           | 15m   | warning    |

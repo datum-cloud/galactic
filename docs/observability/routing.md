@@ -58,19 +58,25 @@ metrics, lives with the rest of the operator guide in
 
 ### Tenant routing — `galactic_router_*`
 
-| Metric                                    | Type    | Labels                              | Meaning                                                                                                                                                                                                                                               |
-| ----------------------------------------- | ------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `galactic_router_route_install_failing`   | gauge   | `router` (namespace/name), `kind`   | Routes with a known best path whose last kernel/datapath install failed. `kind="vrf"` is tenant VRF routes, `kind="plain"` routes with no route target (egress shards, VIPs). Above zero means part of a VPC or shard is unreachable from this node   |
-| `galactic_router_bmp_station_up`          | gauge   | `router`, `station`                 | BMP session to the collector: `1` up, `0` down                                                                                                                                                                                                        |
+| Metric                                     | Type    | Labels                            | Meaning                                                                                                                                                                                                                                             |
+| ------------------------------------------ | ------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_router_route_install_failing`    | gauge   | `router` (namespace/name), `kind` | Routes with a known best path whose last kernel/datapath install failed. `kind="vrf"` is tenant VRF routes, `kind="plain"` routes with no route target (egress shards, VIPs). Above zero means part of a VPC or shard is unreachable from this node |
+| `galactic_router_bmp_station_up`           | gauge   | `router`, `station`               | BMP session to the collector: `1` up, `0` down                                                                                                                                                                                                      |
+| `galactic_router_ready`                    | gauge   | `router`                          | The BGPRouter's `Ready` condition as this node last wrote it: `1` True, `0` otherwise                                                                                                                                                               |
+| `galactic_router_peer_established`         | gauge   | `router`, `peer`                  | BGP session to the peer: `1` Established, `0` any other state. Refreshed each reconcile (30s); `0` for every peer while the runtime is down; removed with the peer                                                                                  |
+| `galactic_router_peer_session_drops_total` | counter | `router`, `peer`                  | Sessions that left Established, from GoBGP's peer events, so drops shorter than the 30s status poll are counted. Resets the runtime causes by deleting or updating a peer are not counted                                                           |
 
 `galactic-router` also exposes the standard controller-runtime metrics
 (`controller_runtime_reconcile_total`,
 `controller_runtime_reconcile_errors_total`, `workqueue_*`) and Go process
-metrics. GoBGP session state is not a metric: read it from `BGPPeer` status
-(`STATE=Established`) or the BMP stream.
+metrics. `BGPPeer` status (`STATE=Established`), its events and the BMP
+stream carry the detail behind the session metrics: the FSM state and the
+disconnect reason.
 
 ```promql
 sum by (node, kind) (galactic_router_route_install_failing) > 0
+galactic_router_peer_established == 0
+increase(galactic_router_peer_session_drops_total[15m]) >= 3
 sum by (controller) (rate(controller_runtime_reconcile_errors_total{job=~"galactic-router.*"}[10m]))
 ```
 
