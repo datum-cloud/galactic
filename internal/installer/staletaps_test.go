@@ -243,8 +243,8 @@ func TestStaleTapReclaimHostOnlyStamp(t *testing.T) {
 }
 
 // TestStaleTapReclaimOwnerlessHostOnlyStamp removes a stale tap whose
-// host-only stamp predates the owner being recorded in it, deleting it as the
-// empty owner, and only on the second pass.
+// host-only stamp names no owner, deleting it as the empty owner, and only on
+// the second pass.
 func TestStaleTapReclaimOwnerlessHostOnlyStamp(t *testing.T) {
 	alias := ifindexvrfmap.HostOnlyAlias([]uint16{22}, "")
 	f := newStaleTapFixture(t, staleTapLink(staleName, staleIndex, alias, 0))

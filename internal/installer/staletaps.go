@@ -45,11 +45,9 @@ import (
 // only a tap can be left behind.
 //
 // A tap is a candidate only while all of these hold:
-//   - its name is a tenant host link's and its alias carries an owner stamp, so
-//     an ADD created or adopted it. A host-only port stamp written before the
-//     stamp recorded its owner counts too: an ADD wrote it, and the tap's own
-//     DEL kept the tap because the stamp names no owner, so nothing else will
-//     remove it;
+//   - its name is a tenant host link's and its alias carries an owner stamp
+//     or a host-only port stamp, with or without an owner, so an ADD created
+//     or adopted it;
 //   - no file descriptor holds it, enabled or disabled queue alike, so no VMM
 //     is using it;
 //   - no BGPAdvertisement names its attachment, so the router's GC is not the
@@ -208,10 +206,8 @@ func detachedTenantTap(l netlink.Link) (staleTap, bool) {
 		vpc: vpc, vpcAttachment: vpcAttachment}, true
 }
 
-// stampedByADD reports whether alias is a stamp an ADD wrote: an owner, or a
-// host-only port stamp with or without one. A host-only stamp from before the
-// owner was recorded names none; tap.Delete removes such a tap when asked as
-// the empty owner.
+// stampedByADD reports whether alias is an owner, or a well-formed host-only
+// port stamp with or without one.
 func stampedByADD(alias string) bool {
 	if ifindexvrfmap.AliasOwner(alias) != "" {
 		return true

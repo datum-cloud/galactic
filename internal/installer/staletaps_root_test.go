@@ -33,7 +33,7 @@ import (
 // against freshly loaded maps. A tap whose sandbox and BGPAdvertisement are
 // both gone, still enslaved to its VRF with a pod-subnet route and traffic
 // policy and ifindex rows, is removed with its route and rows, and so is one
-// whose host-only stamp predates the owner being recorded in it. A tap whose
+// whose host-only stamp names no owner. A tap whose
 // VPCAttachment still exists is kept, detached or not.
 func TestStaleTapReclaimOnKernel(t *testing.T) {
 	requireRoot(t)
@@ -74,8 +74,7 @@ func TestStaleTapReclaimOnKernel(t *testing.T) {
 
 	err = nsObj.Do(func(ns.NetNS) error {
 		var staleIfindex uint32
-		// a3 carries the stamp a host-only ADD wrote before it recorded its
-		// owner.
+		// a3 carries a host-only stamp with no owner.
 		for _, att := range []struct{ name, alias string }{
 			{"a1", ""}, {"a2", ""}, {"a3", ifindexvrfmap.HostOnlyAlias([]uint16{22}, "")},
 		} {
