@@ -25,6 +25,7 @@ const (
 	tpModeEnforce = 2
 	tpDirIngress  = 0
 	tpKindTenant  = 1
+	tpKindInfra   = 2
 	tpFlagAllow   = 1 << 0
 	tpFlagPath    = 1 << 1
 	tpFlagFamily  = 1 << 2
@@ -118,6 +119,47 @@ func TestUsidIngress_TrafficPolicyDecidesDelivery(t *testing.T) {
 	if n := lab.tpHits(t, lab.vethIfindex); n != 2 {
 		t.Errorf("hits after the allowed frame = %d, want 2", n)
 	}
+}
+
+// TestUsidIngress_InfraInterfaceIsNotEvaluated covers delivery to a platform
+// interface, such as the host side of an ingress gateway pod's primary
+// interface: with no row it is denied as unattributed, and with an infra row
+// and no binding it is delivered without counting a drop.
+func TestUsidIngress_InfraInterfaceIsNotEvaluated(t *testing.T) {
+	lab := newRedirectLab(t)
+	lab.registerVeth(t)
+	lab.tpState(t, true)
+
+	lab.assertNotDelivered(t, lab.vethPeerCapture, readCapture(false), "veth, no interface row", vethInnerDst)
+	before := lab.tpUnattributedUnavailable(t)
+	if before == 0 {
+		t.Fatal("no interface row: unattributed policy_unavailable not counted")
+	}
+
+	if err := lab.objs.TpIfaceTable.Put(lab.vethIfindex, UsidTpIfaceValue{Kind: tpKindInfra}); err != nil {
+		t.Fatalf("write tp_iface_table: %v", err)
+	}
+	lab.assertVethDelivers(t, "veth, infra row", true)
+	if after := lab.tpUnattributedUnavailable(t); after != before {
+		t.Errorf("unattributed policy_unavailable went from %d to %d, want unchanged", before, after)
+	}
+}
+
+// tpUnattributedUnavailable sums the ingress unattributed policy_unavailable
+// counter across CPUs.
+func (lab *redirectLab) tpUnattributedUnavailable(t *testing.T) uint64 {
+	t.Helper()
+	const reasonPolicyUnavailable, reasonCount = 1, 4
+	key := uint32(tpDirIngress*reasonCount + reasonPolicyUnavailable)
+	var per []UsidTpCounter
+	if err := lab.objs.TpUnattributedCounters.Lookup(key, &per); err != nil {
+		t.Fatalf("read unattributed counter: %v", err)
+	}
+	var n uint64
+	for _, c := range per {
+		n += c.Packets
+	}
+	return n
 }
 
 // TestUsidIngress_TrafficPolicyDecidesOnceOnTap checks a tap delivery,

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"strings"
 	"testing"
@@ -52,13 +53,17 @@ type sidecarReturnHarness struct {
 	dp          *fakeSidecarReturn
 	registerErr error
 	pruneErr    error
+	// infraLive is the host ifindex set the pass's infra prune was given.
+	infraLive map[uint32]bool
 }
 
 func newSidecarReturnHarness(t *testing.T) *sidecarReturnHarness {
 	t.Helper()
 	h := &sidecarReturnHarness{dp: &fakeSidecarReturn{failAddrs: map[string]bool{}}}
-	open, prune := openSidecarReturnDatapath, pruneSidecarReturnRoutesFn
-	t.Cleanup(func() { openSidecarReturnDatapath, pruneSidecarReturnRoutesFn = open, prune })
+	open, prune, pruneInfra := openSidecarReturnDatapath, pruneSidecarReturnRoutesFn, pruneSidecarReturnInfraFn
+	t.Cleanup(func() {
+		openSidecarReturnDatapath, pruneSidecarReturnRoutesFn, pruneSidecarReturnInfraFn = open, prune, pruneInfra
+	})
 	openSidecarReturnDatapath = func(uint64, uint16) (sidecarReturnDatapath, error) {
 		if h.registerErr != nil {
 			return nil, h.registerErr
@@ -66,6 +71,10 @@ func newSidecarReturnHarness(t *testing.T) *sidecarReturnHarness {
 		return h.dp, nil
 	}
 	pruneSidecarReturnRoutesFn = func(map[uint32]netip.Addr) error { return h.pruneErr }
+	pruneSidecarReturnInfraFn = func(live map[uint32]bool) error {
+		h.infraLive = live
+		return nil
+	}
 	return h
 }
 
@@ -390,5 +399,37 @@ func TestSidecarReturnScrapeSeesOnePass(t *testing.T) {
 		if vals["applied"]+vals["pending"] != vals["desired"] || vals["desired"] != ts {
 			t.Fatalf("torn read: %v at %v", vals, ts)
 		}
+	}
+}
+
+// TestSidecarReturnInfraPruneKeepsEveryAdvertisedInterface: the infra prune
+// is given the host interface of every advertised gateway, including one
+// whose install fails and one on a node without an SRv6 identity yet, so a
+// row is removed only once no advertisement names its interface.
+func TestSidecarReturnInfraPruneKeepsEveryAdvertisedInterface(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		objs  []client.Object
+		setup func(*sidecarReturnHarness)
+		want  map[uint32]bool
+	}{
+		{name: "no advertisements", want: map[uint32]bool{}},
+		{name: "no node identity yet", objs: twoGatewayAdvs(), want: map[uint32]bool{24: true}},
+		{name: "one install fails",
+			objs:  append(twoGatewayAdvs(), router(testSidecarNode, testLocator, 6)),
+			setup: func(h *sidecarReturnHarness) { h.dp.failAddrs[testReturnAddr3] = true },
+			want:  map[uint32]bool{24: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSidecarReturnHarness(t)
+			if tc.setup != nil {
+				tc.setup(h)
+			}
+			_ = ensureSidecarReturnPath(context.Background(), sidecarReturnClient(t, nil, tc.objs...),
+				testNamespace, testSidecarNode, nil, time.Now)
+			if !maps.Equal(h.infraLive, tc.want) {
+				t.Errorf("infra prune live = %v, want %v", h.infraLive, tc.want)
+			}
+		})
 	}
 }

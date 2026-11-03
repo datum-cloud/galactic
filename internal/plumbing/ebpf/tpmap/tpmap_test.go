@@ -702,6 +702,71 @@ func TestRemoveInterface(t *testing.T) {
 	}
 }
 
+// TestInfraIsNotEvaluated: an enforcing node denies an interface with no row,
+// and passes one marked infra without counting an unattributed drop.
+func TestInfraIsNotEvaluated(t *testing.T) {
+	f := newFixture(t, ModeEnforce)
+	pkt := packet(tcp("2001:db8::1", "2001:db8::2", 1000, 80))
+	key := DirEgress*reasonCount + uint32(ReasonPolicyUnavailable)
+
+	if got := f.run(t, pkt); got != tcActShot {
+		t.Fatalf("no row: verdict = %d, want TC_ACT_SHOT", got)
+	}
+	before := sumCounter(t, f.objs.TpUnattributedCounters, key).Packets
+
+	if err := f.maps.PutInfra(ifindex); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.run(t, pkt); got != tcActUnspec {
+		t.Errorf("infra row: verdict = %d, want allowed", got)
+	}
+	if after := sumCounter(t, f.objs.TpUnattributedCounters, key).Packets; after != before {
+		t.Errorf("unattributed policy_unavailable went from %d to %d, want unchanged", before, after)
+	}
+	if err := f.maps.PutInfra(ifindex); err != nil {
+		t.Errorf("second PutInfra: %v", err)
+	}
+	rows, err := f.maps.InfraInterfaces()
+	if err != nil || len(rows) != 1 || rows[0] != ifindex {
+		t.Errorf("InfraInterfaces = %v, %v; want [%d]", rows, err, ifindex)
+	}
+
+	if err := f.maps.RemoveInfra(ifindex); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.run(t, pkt); got != tcActShot {
+		t.Errorf("after RemoveInfra: verdict = %d, want TC_ACT_SHOT", got)
+	}
+	if err := f.maps.RemoveInfra(ifindex); err != nil {
+		t.Errorf("second RemoveInfra: %v", err)
+	}
+}
+
+// TestInfraNeverReplacesTenant: a tenant row survives both PutInfra and
+// RemoveInfra, so a stale ifindex cannot exempt or unregister a tenant
+// interface.
+func TestInfraNeverReplacesTenant(t *testing.T) {
+	f := newFixture(t, ModeEnforce)
+	f.iface(t)
+
+	if err := f.maps.PutInfra(ifindex); !errors.Is(err, ErrTenantInterface) {
+		t.Fatalf("PutInfra over a tenant row: err = %v, want ErrTenantInterface", err)
+	}
+	if err := f.maps.RemoveInfra(ifindex); err != nil {
+		t.Fatal(err)
+	}
+	var row prog.UsidTpIfaceValue
+	if err := f.objs.TpIfaceTable.Lookup(ifindex, &row); err != nil {
+		t.Fatal(err)
+	}
+	if row.Kind != KindTenant || row.PolicyToken != token {
+		t.Errorf("tenant row = %+v, want kind %d token %#x", row, KindTenant, token)
+	}
+	if rows, err := f.maps.InfraInterfaces(); err != nil || len(rows) != 0 {
+		t.Errorf("InfraInterfaces = %v, %v; want none", rows, err)
+	}
+}
+
 func countKeys(t *testing.T, m *ebpf.Map) int {
 	t.Helper()
 	var (

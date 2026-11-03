@@ -337,9 +337,10 @@ max_over_time(galactic_ingress_sidecar_node_source_address_status{status=~"unres
 ### Host return path — `galactic_sidecar_return_*`
 
 `galactic-cni` installs the host side of each sidecar's return path: for every
-gateway address a sidecar on the node advertises, a route, a permanent
-neighbor and a `vrf_table` entry that point a decapsulated reply at the
-sidecar's pod. It runs one pass each tick, and these series report it. A
+gateway address a sidecar on the node advertises, a traffic policy `infra` row
+for the pod's host interface, then a route, a permanent neighbor and a
+`vrf_table` entry that point a decapsulated reply at the sidecar's pod. It
+runs one pass each tick, and these series report it. A
 published advertisement only shows the sidecar's half; these show whether
 replies can reach the pod.
 
@@ -352,7 +353,9 @@ replies can reach the pod.
 
 - `applied` and `pending` partition `desired`; do not add all three. A
   scrape reads the three counts and the timestamp from one pass.
-- `partial` means an endpoint failed to install or the prune failed.
+- `partial` means an endpoint failed to install or the prune failed. The
+  prune removes stale return routes and the `infra` rows of host interfaces
+  no advertised gateway uses.
   `waiting_identity` means endpoints are advertised but this node's
   `BGPRouter` has no SRv6 locator yet, so all are pending. `error` means
   nothing could be installed: listing the advertisements, reading the node's
@@ -363,8 +366,11 @@ replies can reach the pod.
   failing or stalled pass shows. A node with no sidecar reports a fresh
   timestamp and 0 desired. A node without a Kubernetes client or node name
   never runs a pass, and its timestamp stays 0.
-- `install` success means the route, neighbor and map entry were written. It
-  does not prove a reply reached the pod. These add 16 fixed series per node.
+- `install` success means the `infra` row, route, neighbor and map entry were
+  written. It does not prove a reply reached the pod. An `install` fails,
+  before any route is written, when the annotated interface already holds a
+  tenant traffic policy row, which a stale annotation on a reused ifindex can
+  cause. These add 16 fixed series per node.
 
 ```promql
 # Return path not installed for some endpoint for 10 minutes; a fresh node

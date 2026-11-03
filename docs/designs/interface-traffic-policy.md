@@ -366,9 +366,14 @@ public.
 program can deliver to or is attached to, with a kind:
 
 - `tenant`: a VPCAttachment interface. Policy applies.
-- `infra`: the ingress sidecar's synthetic veth peers. They belong to the
-  platform, carry no tenant identity, and are never evaluated; traffic they
-  pass on to a tenant interface is checked at that interface.
+- `infra`: the ingress sidecar's synthetic veth peers, and the host side of
+  each gateway pod's primary interface that the node installer routes the
+  sidecar's return path to. They belong to the platform, carry no tenant
+  identity, and are never evaluated; traffic they pass on to a tenant
+  interface is checked at that interface, and a backend's reply to the
+  gateway was already checked at the backend's interface. The installer
+  never replaces a tenant row with an `infra` one, and removes its rows once
+  no advertised gateway uses the interface.
 
 A program that finds no row for an interface it is attached to, or that
 `usid_ingress` is about to deliver to, denies as `policy_unavailable`

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -23,7 +24,9 @@ import (
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
+	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/nldump"
@@ -64,6 +67,13 @@ import (
 //  4. A permanent neighbor for that address on the same interface, because
 //     bpf_fib_lookup does not trigger NDP and an unresolved neighbor is a
 //     silent drop.
+//  5. An infra row in tp_iface_table for that interface. usid_ingress decides
+//     traffic policy on the interface it delivers to, and denies one without
+//     a row. One gateway serves many tenants' VPCs, so no tenant policy can
+//     govern it; the backend's own interface already decides both directions
+//     of the flow. The exemption is exact because this file's tables hold
+//     only gateway /128 routes, and no tenant VRF table routes to a
+//     cluster-CNI interface, so usid_ingress delivers nothing else there.
 //
 // The Argument is the subtlety worth stating, because getting it wrong is
 // invisible. The sidecar keys its own vrf_table registrations on its pod-netns
@@ -166,10 +176,14 @@ func ensureSidecarReturnPath(
 			live[table] = e.addr
 		}
 	}
-	perr := pruneSidecarReturnRoutesFn(live)
+	liveIfindexes := make(map[uint32]bool, len(endpoints))
+	for _, e := range endpoints {
+		liveIfindexes[uint32(e.hostIfindex)] = true //nolint:gosec // a kernel ifindex
+	}
+	perr := errors.Join(pruneSidecarReturnRoutesFn(live), pruneSidecarReturnInfraFn(liveIfindexes))
 	rec.Operation(metrics.SidecarReturnOpPrune, perr)
 	if perr != nil {
-		slog.Warn("Could not prune stale sidecar return routes", "err", perr)
+		slog.Warn("Could not prune stale sidecar return routes or traffic policy rows", "err", perr)
 	}
 	// result is the pass's outcome once every endpoint installed; a failed
 	// prune leaves it partial.
@@ -255,27 +269,59 @@ var openSidecarReturnDatapath = func(block uint64, nodeID uint16) (sidecarReturn
 		_ = closer.Close()
 		return nil, fmt.Errorf("register function_table entry for the sidecar return path: %w", err)
 	}
-	return kernelSidecarReturn{registry: registry, Closer: closer}, nil
+	policy, err := openPinnedTrafficPolicy()
+	if err != nil {
+		_ = closer.Close()
+		return nil, err
+	}
+	return kernelSidecarReturn{registry: registry, policy: policy, Closer: closer}, nil
+}
+
+// openPinnedTrafficPolicy opens the pinned traffic policy maps. It returns nil
+// maps, and no error, on a node whose datapath has none pinned.
+func openPinnedTrafficPolicy() (*tpmap.Maps, error) {
+	m, err := tpmap.OpenPinned(attach.PinDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open pinned traffic policy maps for the sidecar return path: %w", err)
+	}
+	return m, nil
 }
 
 // kernelSidecarReturn is the production sidecarReturnDatapath.
 type kernelSidecarReturn struct {
 	registry *usidmap.Registry
+	// policy is nil on a node without traffic policy maps.
+	policy *tpmap.Maps
 	io.Closer
 }
 
 func (k kernelSidecarReturn) install(block uint64, e sidecarEndpoint) error {
-	return installSidecarReturn(k.registry, block, e)
+	return installSidecarReturn(k.registry, k.policy, block, e)
 }
 
-// pruneSidecarReturnRoutesFn is pruneSidecarReturnRoutes, a variable so tests
-// can replace it.
-var pruneSidecarReturnRoutesFn = pruneSidecarReturnRoutes
+func (k kernelSidecarReturn) Close() error {
+	if k.policy != nil {
+		k.policy.Close()
+	}
+	return k.Closer.Close()
+}
 
-// installSidecarReturn wires up one endpoint: the route, the neighbor, and the
-// vrf_table entry that together point a decapsulated reply at the pod holding
-// that gateway address.
-func installSidecarReturn(registry *usidmap.Registry, block uint64, e sidecarEndpoint) error {
+// pruneSidecarReturnRoutesFn and pruneSidecarReturnInfraFn are
+// pruneSidecarReturnRoutes and pruneSidecarReturnInfra, variables so tests can
+// replace them.
+var (
+	pruneSidecarReturnRoutesFn = pruneSidecarReturnRoutes
+	pruneSidecarReturnInfraFn  = pruneSidecarReturnInfra
+)
+
+// installSidecarReturn wires up one endpoint: the route, the neighbor, the
+// traffic policy infra row, and the vrf_table entry that together point a
+// decapsulated reply at the pod holding that gateway address. policy may be
+// nil on a node without traffic policy maps.
+func installSidecarReturn(registry *usidmap.Registry, policy *tpmap.Maps, block uint64, e sidecarEndpoint) error {
 	// The interface the annotation names must still exist. The advertisement
 	// outlives any single Envoy pod, so between a pod being replaced and its
 	// sidecar republishing, this names a veth that is gone. Installing against
@@ -291,6 +337,15 @@ func installSidecarReturn(registry *usidmap.Registry, block uint64, e sidecarEnd
 		return err
 	}
 
+	// First, so that an ifindex a tenant interface holds, which a stale
+	// annotation can name, gets no gateway route or neighbor pointed at it,
+	// and so that no reply meets the interface without a row once vrf_table
+	// lets usid_ingress deliver there.
+	if policy != nil {
+		if err := policy.PutInfra(uint32(e.hostIfindex)); err != nil { //nolint:gosec // a kernel ifindex
+			return fmt.Errorf("gateway address %s: %w", e.addr, err)
+		}
+	}
 	if err := ensureSidecarReturnRoute(table, e.addr, e.hostIfindex); err != nil {
 		return err
 	}
@@ -374,6 +429,44 @@ func pruneSidecarReturnRoutes(live map[uint32]netip.Addr) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// pruneSidecarReturnInfra removes the infra rows this file wrote for host
+// interfaces that no advertised gateway still uses, so an interface stops
+// being exempt once nothing routes replies to it. A node without traffic
+// policy maps has nothing to prune.
+func pruneSidecarReturnInfra(live map[uint32]bool) error {
+	policy, err := openPinnedTrafficPolicy()
+	if err != nil || policy == nil {
+		return err
+	}
+	defer policy.Close()
+	rows, err := policy.InfraInterfaces()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, ifindex := range staleSidecarReturnInfra(rows, live) {
+		if err := policy.RemoveInfra(ifindex); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// staleSidecarReturnInfra selects, from the ifindexes with infra rows, those
+// this file wrote that live no longer accounts for. Rows at or above
+// ifindexvrfmap.SidecarIfindexBase are the ingress sidecar's own veth peers,
+// which it writes and owns, and are never selected.
+func staleSidecarReturnInfra(rows []uint32, live map[uint32]bool) []uint32 {
+	var stale []uint32
+	for _, ifindex := range rows {
+		if ifindex >= ifindexvrfmap.SidecarIfindexBase || live[ifindex] {
+			continue
+		}
+		stale = append(stale, ifindex)
+	}
+	return stale
 }
 
 // staleSidecarReturnRoute reports whether r is a route this file installed for

@@ -8,6 +8,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
@@ -255,6 +257,22 @@ func TestStaleSidecarReturnRoute(t *testing.T) {
 					tc.route.Dst, tc.route.Table, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestStaleSidecarReturnInfra: only a host interface no advertisement names
+// loses its infra row. The ingress sidecar's own veth peers, at and above
+// SidecarIfindexBase, are its rows and are never selected.
+func TestStaleSidecarReturnInfra(t *testing.T) {
+	base := ifindexvrfmap.SidecarIfindexBase
+	rows := []uint32{24, 31, base - 1, base, ifindexvrfmap.SidecarIfindex(7)}
+	got := staleSidecarReturnInfra(rows, map[uint32]bool{24: true})
+	want := []uint32{31, base - 1}
+	if !slices.Equal(got, want) {
+		t.Errorf("staleSidecarReturnInfra = %v, want %v", got, want)
+	}
+	if got := staleSidecarReturnInfra(nil, nil); len(got) != 0 {
+		t.Errorf("no rows: got %v, want none", got)
 	}
 }
 
