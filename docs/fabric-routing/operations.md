@@ -98,10 +98,10 @@ revision and digest each may activate. It is immutable. The rollout manager:
 1. Starts it once no earlier release in its routing domain is outstanding. It
    cancels it if a later fleet sequence already started, its start deadline
    passes, or a target cannot be promoted (wrong UID, not on `CRD`, suspended,
-   retired, wrong digest, originating a prefix revoked on the deployment, or
-   using a credential revoked on the deployment or whose Secret does not
-   exist). The condition's `InvalidTarget` message names the deployment and
-   what it refused, such as the credential.
+   retired, wrong digest, originating a prefix revoked on the deployment or
+   withdrawn by this release, or using a credential revoked on the deployment
+   or whose Secret does not exist). The condition's `InvalidTarget` message
+   names the deployment and what it refused, such as the credential.
 2. Promotes targets one epoch at a time, at most `maxUnavailable` at once per
    failure domain (the Node label `failureDomainLabel`, by default
    `topology.kubernetes.io/zone`). Every deployment still activating counts,
@@ -109,7 +109,8 @@ revision and digest each may activate. It is immutable. The rollout manager:
    promoting it, and fails the release with `InvalidTarget` if one became
    unpromotable since it started.
 3. Completes when every target commits, fails (and promotes nothing more) when
-   one fails, and goes `Unknown` while a promoted router stops reporting.
+   one fails or its agent refuses the promotion, and goes `Unknown` while a
+   promoted router stops reporting.
 
 A target the deployment already runs, committed by its status, counts as
 committed at once: the release promotes nothing to it. A target with
@@ -156,6 +157,21 @@ An `EmergencyWithdrawal` release names the prefixes it withdraws, may start
 beside an outstanding release, and adds those prefixes to the deployment's
 revoked prefixes, so no later release or recovery brings them back.
 
+Every revision a withdrawal promotes must stop originating what it withdraws. A
+candidate that still originates a withdrawn prefix, or a prefix inside one, is
+refused, naming the revision and the prefix: by `release create --withdraw`,
+fleet-wide or not, which also refuses to leave out a router whose running
+revision still originates one, and by the rollout manager when the release
+starts and again before each promotion, which cancels or fails it with
+`InvalidTarget`. Promoted anyway, the prefix would stay announced while the
+deployment revokes its own origination, and a restarted pod would be held in
+`Init` with no eligible recovery. The node agent makes the same check before it
+accepts the promotion: it reports `Accepted` False with reason
+`PromotionRefused` and leaves FRR as it was. The deployment already revokes the
+prefix, so until a corrected withdrawal commits, a restart holds that node's
+pod in `Init`. Fix the candidate's advertisements, let a new revision compile,
+and create a new withdrawal.
+
 A failed release keeps blocking its routing domain until every failed router
 reports `Recovered` on its recovery target. A router with no eligible recovery
 never will. Once an operator has confirmed the routers are safe, set the
@@ -189,13 +205,14 @@ ports shut down). The rollout manager never moves a deployment: when a
 
 ## When the agent refuses to act
 
-| Condition                                                             | Meaning                                                                                      | What to do                                                                                                                                                                                                       |
-| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RecoveryConflict`, journal bound to another deployment               | The deployment was deleted and recreated                                                     | Set `spec.rebind` naming the old deployment UID, after confirming the old one is gone                                                                                                                            |
-| `RecoveryConflict`, state belongs to another Node, cluster or machine | The host state directory came from elsewhere, or the Node was recreated                      | Remove `/var/lib/fabric-router/agent` on the host and restart the pod. Its replay protection starts over, so check no older promotion is pending first                                                           |
-| A pod held in Init on the CRD source                                  | Nothing may start yet: the router is retired, its epoch failed, or the journal is unreadable | Promote a new revision, hand the node back to its ConfigMap, or repair the state directory. With the ConfigMap path retired a handback is refused: see [A node that lost its state](#a-node-that-lost-its-state) |
-| `Accepted` False with reason `ConfigMapRetired`                       | The deployment asks for a source other than CRD on a node whose ConfigMap path is retired    | Move it back to `CRD`, or take [the way back](#the-way-back) first                                                                                                                                               |
-| frr-init exits with `the ConfigMap path is retired`                   | The ConfigMap path is retired and the node's journal records the ConfigMap or Shadow source  | Take [the way back](#the-way-back) for the node, which never reached CRD                                                                                                                                         |
+| Condition                                                                                            | Meaning                                                                                      | What to do                                                                                                                                                                                                       |
+| ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RecoveryConflict`, journal bound to another deployment                                              | The deployment was deleted and recreated                                                     | Set `spec.rebind` naming the old deployment UID, after confirming the old one is gone                                                                                                                            |
+| `RecoveryConflict`, state belongs to another Node, cluster or machine                                | The host state directory came from elsewhere, or the Node was recreated                      | Remove `/var/lib/fabric-router/agent` on the host and restart the pod. Its replay protection starts over, so check no older promotion is pending first                                                           |
+| A pod held in Init on the CRD source                                                                 | Nothing may start yet: the router is retired, its epoch failed, or the journal is unreadable | Promote a new revision, hand the node back to its ConfigMap, or repair the state directory. With the ConfigMap path retired a handback is refused: see [A node that lost its state](#a-node-that-lost-its-state) |
+| `Accepted` False with reason `ConfigMapRetired`                                                      | The deployment asks for a source other than CRD on a node whose ConfigMap path is retired    | Move it back to `CRD`, or take [the way back](#the-way-back) first                                                                                                                                               |
+| `Accepted` False with reason `PromotionRefused`, a revision that still originates a withdrawn prefix | An emergency withdrawal promoted a revision that still announces what it withdraws           | Fix the candidate's advertisements and create a new withdrawal. The release fails; confirm recovery once the router is safe                                                                                      |
+| frr-init exits with `the ConfigMap path is retired`                                                  | The ConfigMap path is retired and the node's journal records the ConfigMap or Shadow source  | Take [the way back](#the-way-back) for the node, which never reached CRD                                                                                                                                         |
 
 ## Retiring the ConfigMap path
 

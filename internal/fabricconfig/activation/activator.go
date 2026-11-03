@@ -638,6 +638,12 @@ func credentialNames(rev *networkv1alpha1.FabricRouterRevision) []string {
 	return out
 }
 
+// WithdrawnOrigination returns the first prefix rev originates that
+// withdrawn covers: a withdrawn prefix or any prefix inside one.
+func WithdrawnOrigination(withdrawn []string, rev *networkv1alpha1.FabricRouterRevision) string {
+	return revokedOrigination(Recovery{RevokedPrefixes: withdrawn}, originations(rev))
+}
+
 // revokedOrigination returns the first of originated that rec revokes: a
 // revoked prefix or any prefix inside one. A prefix that does not parse on
 // either side is treated as revoked.

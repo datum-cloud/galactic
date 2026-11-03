@@ -341,6 +341,11 @@ func stateOf(d *networkv1alpha1.FabricRouterDeployment, auth *networkv1alpha1.Fa
 			return targetFailed
 		}
 	}
+	if refused(d) {
+		// The agent will never activate it, so the release must not
+		// wait on it.
+		return targetFailed
+	}
 	if hb := d.Status.HeartbeatTime; hb == nil || now.Sub(hb.Time) > heartbeat {
 		return targetSilent
 	}

@@ -464,6 +464,35 @@ func TestDeploymentAgentRefusesUnauthorized(t *testing.T) {
 	}
 }
 
+// TestDeploymentAgentRefusesWithdrawnOrigination: an emergency withdrawal
+// whose revision still originates a withdrawn prefix, or one inside it, is
+// refused for good before anything is accepted or FRR changes.
+func TestDeploymentAgentRefusesWithdrawnOrigination(t *testing.T) {
+	// The fixture revision originates originated.
+	const originated = "192.0.2.0/24"
+	for name, withdrawn := range map[string]string{"exact": originated, "covering": "192.0.0.0/16"} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, deployment(networkv1alpha1.FabricConfigSourceCRD))
+			a := release(h.revs[0])
+			a.Spec.Type = networkv1alpha1.FabricReleaseTypeEmergencyWithdrawal
+			a.Spec.WithdrawnPrefixes = []string{withdrawn}
+			if err := h.client.Create(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			h.update(func(d *networkv1alpha1.FabricRouterDeployment) { promote(d, 1, h.revs[0]) })
+			got := h.sync()
+			c := condition(got, networkv1alpha1.FabricConditionAccepted)
+			if c == nil || c.Reason != networkv1alpha1.FabricReasonPromotionRefused ||
+				!strings.Contains(c.Message, h.revs[0].Name) || !strings.Contains(c.Message, originated) {
+				t.Fatalf("Accepted = %+v", c)
+			}
+			if _, accepted := h.agent.Activator.Journal().Accepted(depUID, 1); accepted || h.frr.reloads != 0 {
+				t.Error("a revision originating a withdrawn prefix reached FRR or was accepted")
+			}
+		})
+	}
+}
+
 func TestDeploymentAgentHandoff(t *testing.T) {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: depNamespace, Name: ConfigMapName(depNode),
 		UID: cmUID},

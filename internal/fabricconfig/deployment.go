@@ -598,11 +598,34 @@ func (d *DeploymentAgent) authorizedIn(ctx context.Context, dep *networkv1alpha1
 		if t.Deployment == dep.Name && t.DeploymentUID == string(dep.UID) &&
 			t.Revision == dep.Spec.ActiveRevisionRef.Name &&
 			t.ActivationDependencyDigest == dep.Spec.ActivationDependencyDigest {
-			return nil
+			return d.withdraws(ctx, &auth, t.Revision)
 		}
 	}
 	return fmt.Errorf("%w: release authorization %s does not cover %s at digest %s on this deployment",
 		errRefused, ref.Name, dep.Spec.ActiveRevisionRef.Name, dep.Spec.ActivationDependencyDigest)
+}
+
+// withdraws refuses revision name when auth is an emergency withdrawal and the
+// revision still originates a prefix it withdraws: activated, the prefix
+// would stay announced and the deployment would revoke its own origination.
+func (d *DeploymentAgent) withdraws(ctx context.Context, auth *networkv1alpha1.FabricReleaseAuthorization,
+	name string) error {
+	if auth.Spec.Type != networkv1alpha1.FabricReleaseTypeEmergencyWithdrawal {
+		return nil
+	}
+	rev, err := d.revision(ctx, name)
+	if apierrors.IsNotFound(err) {
+		// Nothing activates without it; the request reports it missing.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if p := activation.WithdrawnOrigination(auth.Spec.WithdrawnPrefixes, rev); p != "" {
+		return fmt.Errorf("%w: revision %s still originates %s, which emergency withdrawal %s withdraws",
+			errRefused, name, p, auth.Name)
+	}
+	return nil
 }
 
 // errRefused is a promotion no release authorization will ever allow, as
