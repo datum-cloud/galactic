@@ -1201,8 +1201,133 @@ tests:
               summary: "galactic-router-rr metrics on iad-worker3 cannot be scraped"
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticroutermetricsdown"
               description: >-
-                Prometheus cannot reach galactic-router's metrics port on iad-worker3 (9179), so
-                GalacticRouterBMPStationDown and GalacticRouterRoutesNotInstalled cannot fire for it.
+                Prometheus cannot reach galactic-router's metrics port on iad-worker3 (9179), so no
+                galactic-router alert (BGP sessions, readiness, BMP, route installation) can fire for it.
+
+  # A peer down for 5m fires; one that recovers inside that does not. A
+  # router whose only peer is down also fires the critical rule; one that
+  # keeps another Established peer does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_router_peer_established{job="galactic-router",node="dfw-worker",router="galactic-system/galactic-router",peer="2001:db8::1"}'
+        values: "1x5 0x30"
+      - series: 'galactic_router_peer_established{job="galactic-router",node="dfw-worker",router="galactic-system/galactic-router",peer="2001:db8::2"}'
+        values: "1x35"
+      - series: 'galactic_router_peer_established{job="galactic-router",node="sjc-worker",router="galactic-system/galactic-router",peer="2001:db8::1"}'
+        values: "1x5 0x30"
+      - series: 'galactic_router_peer_established{job="galactic-router-rr",node="iad-worker3",router="galactic-system/galactic-control",peer="2001:db8::3"}'
+        values: "1x5 0x6 1x24"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: GalacticRouterPeerNotEstablished
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-router
+              node: dfw-worker
+              router: galactic-system/galactic-router
+              peer: "2001:db8::1"
+            exp_annotations:
+              summary: "galactic-system/galactic-router on dfw-worker has no Established session to 2001:db8::1"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouterpeernotestablished"
+              description: >-
+                galactic-router's overlay BGP session from galactic-system/galactic-router to 2001:db8::1 has not
+                been Established for 5 minutes. The router still has its other sessions, but has lost this peer's
+                EVPN routes and redundancy. The BGPPeer's status and events, and the router's "bgp peer state
+                transition" log lines, give the FSM state and the disconnect reason.
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-router
+              node: sjc-worker
+              router: galactic-system/galactic-router
+              peer: "2001:db8::1"
+            exp_annotations:
+              summary: "galactic-system/galactic-router on sjc-worker has no Established session to 2001:db8::1"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouterpeernotestablished"
+              description: >-
+                galactic-router's overlay BGP session from galactic-system/galactic-router to 2001:db8::1 has not
+                been Established for 5 minutes. The router still has its other sessions, but has lost this peer's
+                EVPN routes and redundancy. The BGPPeer's status and events, and the router's "bgp peer state
+                transition" log lines, give the FSM state and the disconnect reason.
+      - eval_time: 14m
+        alertname: GalacticRouterNoPeersEstablished
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: galactic-router
+              node: sjc-worker
+              router: galactic-system/galactic-router
+            exp_annotations:
+              summary: "galactic-system/galactic-router on sjc-worker has no Established BGP session"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouternopeersestablished"
+              description: >-
+                None of galactic-system/galactic-router's overlay BGP sessions has been Established for 5 minutes,
+                which supersedes GalacticRouterPeerNotEstablished for its peers. The router learns and advertises
+                no EVPN routes: a node's router loses reachability to and from other nodes' VPC prefixes as routes
+                are withdrawn, and a route reflector stops reflecting routes between its clients.
+
+  # Three drops inside 15m fire; two do not, and the alert clears once the
+  # drops leave the window.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_router_peer_session_drops_total{job="galactic-router",node="dfw-worker",router="galactic-system/galactic-router",peer="2001:db8::1"}'
+        values: "0x15 1 2 3x40"
+      - series: 'galactic_router_peer_session_drops_total{job="galactic-router",node="sjc-worker",router="galactic-system/galactic-router",peer="2001:db8::1"}'
+        values: "0x15 1 2x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GalacticRouterPeerFlapping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-router
+              node: dfw-worker
+              router: galactic-system/galactic-router
+              peer: "2001:db8::1"
+            exp_annotations:
+              summary: "BGP session galactic-system/galactic-router -> 2001:db8::1 on dfw-worker is flapping"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouterpeerflapping"
+              description: >-
+                The overlay BGP session from galactic-system/galactic-router to 2001:db8::1 has left Established
+                3 times in 15 minutes. Each drop withdraws the peer's EVPN routes until the session recovers. The
+                router's "bgp peer state transition" log lines give each disconnect reason.
+      - eval_time: 26m
+        alertname: GalacticRouterPeerFlapping
+        exp_alerts: []
+
+  # A router not Ready for 10m fires; one that recovers inside that does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_router_ready{job="galactic-router",node="dfw-worker",router="galactic-system/galactic-router"}'
+        values: "1x5 0x30"
+      - series: 'galactic_router_ready{job="galactic-router",node="sjc-worker",router="galactic-system/galactic-router"}'
+        values: "1x5 0x15 1x15"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: GalacticRouterNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-router
+              node: dfw-worker
+              router: galactic-system/galactic-router
+            exp_annotations:
+              summary: "BGPRouter galactic-system/galactic-router on dfw-worker is not Ready"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouternotready"
+              description: >-
+                BGPRouter galactic-system/galactic-router's Ready condition has not been True for 10 minutes: its
+                GoBGP runtime is not running, or galactic-router cannot build its desired configuration. The
+                condition's reason and message, and the ConfigApplied condition, say which.
 
   # Routes failing for 10m fire; a burst during convergence that clears inside
   # that does not.

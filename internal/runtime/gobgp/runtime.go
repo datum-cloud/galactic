@@ -118,6 +118,10 @@ type GoBGPRuntime struct {
 	// the same state. Distinct from establishedAt, which records when a peer
 	// first reached Established for status reporting.
 	lastPeerState map[string]model.BGPPeerState
+	// selfResetPeers records, by canonical neighbor address, when the runtime
+	// last deleted or updated each peer, so the transition that causes is not
+	// counted as a session drop. Guarded by peerStateMu; see markSelfReset.
+	selfResetPeers map[string]time.Time
 	// appliedPeers tracks the last-applied peer config per address, so a peer
 	// whose config has not changed is not pushed again. GoBGP resets the
 	// session on every update, even an identical one, so without this any
@@ -345,6 +349,7 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 		addErr := b.AddPeer(ctx, &api.AddPeerRequest{Peer: peer})
 		if addErr != nil {
 			if strings.Contains(addErr.Error(), "can't overwrite") {
+				r.markSelfReset(p.Address)
 				if _, updateErr := b.UpdatePeer(ctx, &api.UpdatePeerRequest{Peer: peer}); updateErr != nil {
 					return fmt.Errorf("update peer %s: %w", p.Address, updateErr)
 				}
@@ -357,8 +362,10 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 
 	for addr := range currentPeers {
 		if _, ok := desiredPeers[addr]; !ok {
+			r.markSelfReset(addr)
 			_ = b.DeletePeer(ctx, &api.DeletePeerRequest{Address: addr})
 			delete(r.appliedPeers, addr)
+			peerSessionDrops.DeleteLabelValues(r.key.String(), canonicalPeerAddr(addr))
 		}
 	}
 	return nil
@@ -785,6 +792,7 @@ func (r *GoBGPRuntime) Stop(ctx context.Context) error {
 	}
 	r.wg.Wait()
 	routeInstallFailing.DeletePartialMatch(prometheus.Labels{labelRouter: r.key.String()})
+	peerSessionDrops.DeletePartialMatch(prometheus.Labels{labelRouter: r.key.String()})
 	return nil
 }
 

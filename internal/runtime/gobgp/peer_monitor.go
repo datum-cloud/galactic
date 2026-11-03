@@ -7,14 +7,58 @@ package gobgp
 import (
 	"context"
 	"log/slog"
+	"net/netip"
 	"time"
 
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/metrics"
 
 	"go.datum.net/galactic/internal/model"
 )
+
+// labelPeer is the metric label naming a BGP peer by its neighbor address.
+const labelPeer = "peer"
+
+// peerSessionDrops counts, per BGPRouter and peer, the sessions that left
+// Established. It is driven by GoBGP's peer event stream rather than the
+// controller's 30s status poll, so a session that drops and re-establishes
+// between two polls is still counted; a rising rate means a flapping session.
+var peerSessionDrops = metrics.NewCounterVec(prometheus.CounterOpts{
+	Name: "galactic_router_peer_session_drops_total",
+	Help: "BGP sessions to a peer that left the Established state.",
+}, []string{labelRouter, labelPeer})
+
+// selfResetGrace is how long after the runtime itself deletes or updates a
+// peer that peer's next transition out of Established is attributed to the
+// runtime rather than counted as a drop. GoBGP stops a peer it deletes, and
+// restarts one whose update needs a fresh OPEN, signalling Idle either way;
+// counting those would turn config churn into a flapping alert. An update
+// that leaves the session up signals nothing, so the mark is time-bounded
+// rather than left to swallow a later real drop.
+const selfResetGrace = 30 * time.Second
+
+// canonicalPeerAddr formats a peer address the way GoBGP's peer events do, so
+// every metric labels a peer identically.
+func canonicalPeerAddr(addr string) string {
+	if a, err := netip.ParseAddr(addr); err == nil {
+		return a.String()
+	}
+	return addr
+}
+
+// markSelfReset records that the runtime is about to delete or update the
+// peer at addr, so the transition it causes is not counted as a drop.
+func (r *GoBGPRuntime) markSelfReset(addr string) {
+	r.peerStateMu.Lock()
+	defer r.peerStateMu.Unlock()
+	if r.selfResetPeers == nil {
+		r.selfResetPeers = make(map[string]time.Time)
+	}
+	r.selfResetPeers[canonicalPeerAddr(addr)] = time.Now()
+}
 
 // startPeerMonitor starts the shared peer FSM watcher goroutine, once per
 // runtime lifetime, as startRIBMonitor does for best-path events. A node can
@@ -78,7 +122,10 @@ func (r *GoBGPRuntime) onPeerUpdate(ev *apiutil.WatchEventMessage_PeerEvent, ts 
 		return
 	}
 	r.lastPeerState[addr] = next
+	markedAt, marked := r.selfResetPeers[addr]
+	delete(r.selfResetPeers, addr)
 	r.peerStateMu.Unlock()
+	selfReset := marked && time.Since(markedAt) < selfResetGrace
 
 	if !seen {
 		prev = model.BGPPeerStateIdle
@@ -91,8 +138,18 @@ func (r *GoBGPRuntime) onPeerUpdate(ev *apiutil.WatchEventMessage_PeerEvent, ts 
 		"from", prev,
 		"to", next,
 	}
+	if next == model.BGPPeerStateEstablished {
+		// Create the series at 0 before the first drop, so increase() over
+		// a window sees that drop instead of starting from it. A session
+		// that establishes and drops within one scrape interval is still
+		// first scraped at 1, and that one drop is missed.
+		peerSessionDrops.WithLabelValues(r.key.String(), addr).Add(0)
+	}
 	leavingEstablished := next != model.BGPPeerStateEstablished && prev == model.BGPPeerStateEstablished
 	if leavingEstablished {
+		if !selfReset {
+			peerSessionDrops.WithLabelValues(r.key.String(), addr).Inc()
+		}
 		fields = append(fields,
 			"disconnectReason", ev.Peer.State.DisconnectReason,
 			"disconnectMessage", ev.Peer.State.DisconnectMessage,

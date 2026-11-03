@@ -77,6 +77,7 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if stopErr := r.RuntimeManager.Stop(ctx, req.NamespacedName); stopErr != nil {
 				return ctrl.Result{}, stopErr
 			}
+			forgetRouterMetrics(req.NamespacedName)
 			return ctrl.Result{}, r.releaseStoppedRouterAdvertisements(ctx, req.NamespacedName)
 		}
 		return ctrl.Result{}, fmt.Errorf("get BGPRouter %s: %w", req.NamespacedName, err)
@@ -97,6 +98,7 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if stopErr := r.RuntimeManager.Stop(ctx, req.NamespacedName); stopErr != nil {
 			return ctrl.Result{}, stopErr
 		}
+		forgetRouterMetrics(req.NamespacedName)
 		if err := r.releaseStoppedRouterAdvertisements(ctx, req.NamespacedName); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -116,6 +118,9 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	fenced, err := r.prepareCoordinatedAdvertisements(ctx, router)
 	if err != nil {
+		// Harmless for a router this node does not run: its status is empty,
+		// and only peers already exported here are touched.
+		r.recordRuntimePeers(ctx, req.NamespacedName)
 		return ctrl.Result{}, err
 	}
 
@@ -130,28 +135,34 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			Reason:  "ReconcileError",
 			Message: err.Error(),
 		})
+		recordRouterReady(routerCopy)
 		if updateErr := r.Status().Update(ctx, routerCopy); updateErr != nil {
 			logger.Error(updateErr, "update status after reconcile error")
 		}
 		return ctrl.Result{}, err
 	}
 	if desired == nil {
-		// Not for this node/role — skip silently.
+		// Not for this node/role — skip silently. A router retargeted away
+		// from this node must not keep reporting the state it had here.
+		forgetRouterMetrics(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
 	requeueAfter, err := r.advertisementRequeueAfter(ctx, router, time.Now())
 	if err != nil {
+		r.recordRuntimePeers(ctx, req.NamespacedName)
 		return ctrl.Result{}, err
 	}
 
 	if err := r.refreshAdvertisementLeases(ctx, req.NamespacedName, desired.Advertisements); err != nil {
+		r.recordRuntimePeers(ctx, req.NamespacedName)
 		return ctrl.Result{}, err
 	}
 
 	// Hash the desired state to skip no-op reconciles.
 	newHash, hashErr := r.Hasher(*desired)
 	if hashErr != nil {
+		r.recordRuntimePeers(ctx, req.NamespacedName)
 		return ctrl.Result{}, fmt.Errorf("hash desired router: %w", hashErr)
 	}
 
@@ -190,6 +201,8 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		routerCopy := router.DeepCopy()
 		routerCopy.Status.ObservedGeneration = router.Generation
 		r.updateRouterStatus(routerCopy, runtimeStatus)
+		recordRouterReady(routerCopy)
+		recordPeerStates(req.NamespacedName, runtimeStatus)
 		if updateErr := r.Status().Update(ctx, routerCopy); updateErr != nil {
 			logger.Error(updateErr, "update observedGeneration (no-op reconcile)")
 		}
@@ -210,6 +223,8 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			Reason:  "ApplyFailed",
 			Message: applyErr.Error(),
 		})
+		recordRouterReady(routerCopy)
+		recordPeerStates(req.NamespacedName, runtimeStatus)
 		if updateErr := r.Status().Update(ctx, routerCopy); updateErr != nil {
 			logger.Error(updateErr, "update status after apply error")
 		}
@@ -229,6 +244,8 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Update BGPRouter status.
 	routerCopy := router.DeepCopy()
 	r.updateRouterStatus(routerCopy, postApplyStatus)
+	recordRouterReady(routerCopy)
+	recordPeerStates(req.NamespacedName, postApplyStatus)
 	if updateErr := r.Status().Update(ctx, routerCopy); updateErr != nil {
 		logger.Error(updateErr, "update BGPRouter status")
 	}
@@ -256,6 +273,19 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	r.updateVRFInstanceStatuses(ctx, router, postApplyStatus)
 
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// recordRuntimePeers refreshes galactic_router_peer_established for key from
+// its runtime's current status. A reconcile that returns an error before
+// reaching the status update calls it, so a session that drops while
+// reconciles keep failing still reads 0 instead of its last value.
+func (r *BGPRouterReconciler) recordRuntimePeers(ctx context.Context, key types.NamespacedName) {
+	rs, err := r.RuntimeManager.Status(ctx, key)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "get runtime status for peer metrics")
+		return
+	}
+	recordPeerStates(key, rs)
 }
 
 // updateRouterStatus updates the BGPRouter status from runtime status.

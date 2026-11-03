@@ -15,6 +15,8 @@ import (
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/types"
 
 	"go.datum.net/galactic/internal/model"
@@ -260,4 +262,90 @@ func TestOnPeerUpdate_NilObserverDoesNotPanic(t *testing.T) {
 		lastPeerState: make(map[string]model.BGPPeerState),
 	}
 	r.onPeerUpdate(peerEvent(t, apiutil.PEER_EVENT_STATE, bgp.BGP_FSM_ACTIVE), time.Time{})
+}
+
+// TestOnPeerUpdate_CountsSessionDrops covers galactic_router_peer_session_drops_total:
+// only a transition out of Established counts, so a peer cycling through the
+// connecting states without ever establishing reads zero, and each
+// Established -> down transition adds one.
+func TestOnPeerUpdate_CountsSessionDrops(t *testing.T) {
+	captureSlog(t)
+	key := types.NamespacedName{Name: "drops-router"}
+	r := &GoBGPRuntime{
+		key:           key,
+		lastPeerState: make(map[string]model.BGPPeerState),
+	}
+	t.Cleanup(func() {
+		peerSessionDrops.DeletePartialMatch(prometheus.Labels{labelRouter: key.String()})
+	})
+	drops := func() float64 {
+		return testutil.ToFloat64(peerSessionDrops.WithLabelValues(key.String(), testPeerAddr))
+	}
+
+	for _, state := range []bgp.FSMState{bgp.BGP_FSM_ACTIVE, bgp.BGP_FSM_CONNECT, bgp.BGP_FSM_ACTIVE} {
+		r.onPeerUpdate(peerEvent(t, apiutil.PEER_EVENT_STATE, state), time.Time{})
+	}
+	if got := drops(); got != 0 {
+		t.Fatalf("drops before the session ever established = %v, want 0", got)
+	}
+
+	for range 2 {
+		r.onPeerUpdate(peerEvent(t, apiutil.PEER_EVENT_STATE, bgp.BGP_FSM_ESTABLISHED), time.Time{})
+		r.onPeerUpdate(peerEvent(t, apiutil.PEER_EVENT_STATE, bgp.BGP_FSM_IDLE), time.Time{})
+		r.onPeerUpdate(peerEvent(t, apiutil.PEER_EVENT_STATE, bgp.BGP_FSM_ACTIVE), time.Time{})
+	}
+	if got := drops(); got != 2 {
+		t.Errorf("drops after two Established -> Idle transitions = %v, want 2", got)
+	}
+}
+
+// TestOnPeerUpdate_SelfResetIsNotADrop covers peers the runtime itself
+// deletes or updates: GoBGP signals Idle for them, which must not count as a
+// drop, while a mark older than selfResetGrace no longer hides a real one.
+func TestOnPeerUpdate_SelfResetIsNotADrop(t *testing.T) {
+	captureSlog(t)
+	key := types.NamespacedName{Name: "self-reset-router"}
+	r := &GoBGPRuntime{
+		key:           key,
+		lastPeerState: make(map[string]model.BGPPeerState),
+	}
+	t.Cleanup(func() {
+		peerSessionDrops.DeletePartialMatch(prometheus.Labels{labelRouter: key.String()})
+	})
+	drops := func() float64 {
+		return testutil.ToFloat64(peerSessionDrops.WithLabelValues(key.String(), testPeerAddr))
+	}
+	establish := func() {
+		r.onPeerUpdate(peerEvent(t, apiutil.PEER_EVENT_STATE, bgp.BGP_FSM_ESTABLISHED), time.Time{})
+	}
+	drop := func() {
+		r.onPeerUpdate(peerEvent(t, apiutil.PEER_EVENT_STATE, bgp.BGP_FSM_IDLE), time.Time{})
+	}
+
+	// The runtime deletes or updates an Established peer; the address is
+	// spelled differently from GoBGP's event to cover canonicalization.
+	establish()
+	r.markSelfReset("2001:0db8::1")
+	drop()
+	if got := drops(); got != 0 {
+		t.Fatalf("drops after a runtime-caused reset = %v, want 0", got)
+	}
+
+	// The mark is consumed by the transition it explains.
+	establish()
+	drop()
+	if got := drops(); got != 1 {
+		t.Fatalf("drops after a later real drop = %v, want 1", got)
+	}
+
+	// A mark from an update that left the session up expires.
+	establish()
+	r.markSelfReset(testPeerAddr)
+	r.peerStateMu.Lock()
+	r.selfResetPeers[testPeerAddr] = time.Now().Add(-2 * selfResetGrace)
+	r.peerStateMu.Unlock()
+	drop()
+	if got := drops(); got != 2 {
+		t.Errorf("drops after a drop behind an expired mark = %v, want 2", got)
+	}
 }
