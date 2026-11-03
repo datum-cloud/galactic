@@ -46,7 +46,10 @@ import (
 //
 // A tap is a candidate only while all of these hold:
 //   - its name is a tenant host link's and its alias carries an owner stamp, so
-//     an ADD created or adopted it;
+//     an ADD created or adopted it. A host-only port stamp written before the
+//     stamp recorded its owner counts too: an ADD wrote it, and the tap's own
+//     DEL kept the tap because the stamp names no owner, so nothing else will
+//     remove it;
 //   - no file descriptor holds it, enabled or disabled queue alike, so no VMM
 //     is using it;
 //   - no BGPAdvertisement names its attachment, so the router's GC is not the
@@ -198,11 +201,23 @@ func detachedTenantTap(l netlink.Link) (staleTap, bool) {
 	}
 	attrs := l.Attrs()
 	vpc, vpcAttachment, ok := intf.ParseInterfaceNameHost(attrs.Name)
-	if !ok || ifindexvrfmap.AliasOwner(attrs.Alias) == "" {
+	if !ok || !stampedByADD(attrs.Alias) {
 		return staleTap{}, false
 	}
 	return staleTap{name: attrs.Name, index: attrs.Index, alias: attrs.Alias,
 		vpc: vpc, vpcAttachment: vpcAttachment}, true
+}
+
+// stampedByADD reports whether alias is a stamp an ADD wrote: an owner, or a
+// host-only port stamp with or without one. A host-only stamp from before the
+// owner was recorded names none; tap.Delete removes such a tap when asked as
+// the empty owner.
+func stampedByADD(alias string) bool {
+	if ifindexvrfmap.AliasOwner(alias) != "" {
+		return true
+	}
+	_, hostOnly, err := ifindexvrfmap.ParseHostOnlyAlias(alias)
+	return hostOnly && err == nil
 }
 
 // removeStaleTap removes t's eBPF interface rows and then t itself, under the

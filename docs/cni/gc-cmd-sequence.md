@@ -55,9 +55,11 @@ the advertisement was deleted by another path first or the tap leaked before
 this reclaim existed. `galactic-cni`'s `run` container covers that case on its
 eBPF GC tick (`staleTapReclaimer`, `internal/installer/staletaps.go`). It
 considers only a stamped tenant tap that no file descriptor holds, so no VMM is
-using it, whose `(VPC, attachment)` identity no `BGPAdvertisement` on any node
-and no `VPCAttachment` in the cluster carries, and only while the cluster lists
-at least one `VPCAttachment` with an identity. It removes a candidate only when
+using it. A host-only port stamp written before the stamp recorded its owner
+counts as stamped: its own DEL kept the tap because the stamp names no owner.
+The tap's `(VPC, attachment)` identity must be carried by no `BGPAdvertisement`
+on any node and no `VPCAttachment` in the cluster, and the cluster must list at
+least one `VPCAttachment` with an identity. It removes a candidate only when
 the previous tick read every input and found it too, with the same ifindex and
 owner stamp, and checks again under the VRF lock. It first removes the tap's
 ifindex-keyed eBPF rows through `attachreg.UnregisterInterface`, the helper CNI
