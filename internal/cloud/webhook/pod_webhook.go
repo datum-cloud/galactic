@@ -80,10 +80,10 @@ var (
 // PodInterfaceInjector injects the attachments prepared for a Pod's instance.
 type PodInterfaceInjector struct {
 	client.Client
-	// APIReader reads the attachment chain behind each definition without the
-	// cache. The chain is checked while a previous instance's objects are being
-	// replaced, and a cached read can still show them as current. When nil, the
-	// embedded Client is used.
+	// APIReader reads the instance, each definition and the attachment chain
+	// behind it without the cache. They are checked while a previous instance's
+	// objects are being replaced, and a cached read can still show those as
+	// current. When nil, the embedded Client is used.
 	APIReader client.Reader
 	Decoder   admission.Decoder
 }
@@ -102,19 +102,31 @@ func (i *PodInterfaceInjector) Handle(ctx context.Context, req admission.Request
 	}
 
 	namespace := req.Namespace
-	instanceName, found := InstanceOwner(pod)
-	if !found {
+	owner := instanceOwnerRef(pod)
+	if owner == nil {
 		return admission.Denied(fmt.Sprintf(
 			"pod carries %s but is not owned by a %s, so its interfaces cannot be resolved",
 			InjectInterfacesLabel, instanceKind))
 	}
 
 	var instance computev1alpha.Instance
-	if err := i.Get(ctx, types.NamespacedName{Namespace: namespace, Name: instanceName}, &instance); err != nil {
+	key := types.NamespacedName{Namespace: namespace, Name: owner.Name}
+	if err := i.reader().Get(ctx, key, &instance); err != nil {
 		if apierrors.IsNotFound(err) {
-			return admission.Denied(fmt.Sprintf("instance %s/%s does not exist", namespace, instanceName))
+			return admission.Denied(fmt.Sprintf("instance %s does not exist", key))
 		}
 		return admission.Errored(http.StatusInternalServerError, err)
+	}
+	// The pod names the instance it was created for by UID. A different UID
+	// under the same name is a predecessor or a replacement, and the claim
+	// check below must compare against the pod's own instance.
+	if owner.UID != "" && instance.UID != owner.UID {
+		return admission.Denied(fmt.Sprintf(
+			"pod was created for instance %s with uid %s, but that name now holds uid %s",
+			key, owner.UID, instance.UID))
+	}
+	if !instance.DeletionTimestamp.IsZero() {
+		return admission.Denied(fmt.Sprintf("instance %s is being deleted", key))
 	}
 
 	networks, injected, response := i.resolveNetworks(ctx, &instance, namespace)
@@ -136,7 +148,7 @@ func (i *PodInterfaceInjector) Handle(ctx context.Context, req admission.Request
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 	ctrl.LoggerFrom(ctx).Info("injected network interfaces into pod",
-		"instanceName", instanceName, "interfaces", injected,
+		"instanceName", instance.Name, "interfaces", injected,
 		"networks", pod.Annotations[MultusNetworksAnnotation],
 		"defaultNetwork", pod.Annotations[MultusDefaultNetworkAnnotation])
 	return admission.PatchResponseFromRaw(req.Object.Raw, patched)
@@ -159,7 +171,12 @@ func (i *PodInterfaceInjector) resolveNetworks(
 		// its name; the convention never crosses a component boundary.
 		var nad nadv1.NetworkAttachmentDefinition
 		key := types.NamespacedName{Namespace: namespace, Name: interfaceName}
-		if err := i.Get(ctx, key, &nad); err != nil {
+		if err := i.reader().Get(ctx, key, &nad); err != nil {
+			if !apierrors.IsNotFound(err) {
+				response := admission.Errored(http.StatusInternalServerError,
+					fmt.Errorf("get attachment definition %s: %w", key, err))
+				return nil, nil, &response
+			}
 			response := admission.Denied(fmt.Sprintf(
 				"no attachment definition prepared for NetworkInterface %s: %v", key, err))
 			return nil, nil, &response
@@ -309,16 +326,26 @@ func interfaceRefFor(instance *computev1alpha.Instance, name string) string {
 
 // InstanceOwner returns the name of the Instance controlling a Pod.
 func InstanceOwner(pod *corev1.Pod) (string, bool) {
-	for _, owner := range pod.OwnerReferences {
+	if owner := instanceOwnerRef(pod); owner != nil {
+		return owner.Name, true
+	}
+	return "", false
+}
+
+// instanceOwnerRef returns the reference to the Instance controlling a Pod, or
+// nil when no Instance does.
+func instanceOwnerRef(pod *corev1.Pod) *metav1.OwnerReference {
+	for idx := range pod.OwnerReferences {
+		owner := &pod.OwnerReferences[idx]
 		if owner.Kind != instanceKind || owner.Controller == nil || !*owner.Controller {
 			continue
 		}
 		if group, _, _ := strings.Cut(owner.APIVersion, "/"); group != computev1alpha.GroupVersion.Group {
 			continue
 		}
-		return owner.Name, true
+		return owner
 	}
-	return "", false
+	return nil
 }
 
 // injectNetworks makes the first network the Pod's default and lists the rest as

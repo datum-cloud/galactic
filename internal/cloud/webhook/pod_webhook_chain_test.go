@@ -19,18 +19,22 @@ package webhook
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	computev1alpha "go.datum.net/compute/api/v1alpha"
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
@@ -97,7 +101,7 @@ func chainScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		computev1alpha.AddToScheme, cloudv1alpha1.AddToScheme,
+		corev1.AddToScheme, computev1alpha.AddToScheme, cloudv1alpha1.AddToScheme,
 		networkingv1alpha.AddToScheme, nadv1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
@@ -125,6 +129,16 @@ func TestResolveNetworksAttachmentChain(t *testing.T) {
 	}{
 		{
 			name: "chain held by the instance",
+		},
+		{
+			// A retained interface keeps its interface, attachment and definition
+			// across a replacement. Compute replaces the claim under the same
+			// name, controlled by the replacement instance.
+			name: "retained interface held by the replacement's new claim",
+			mutate: func(c *attachmentChain) []client.Object {
+				c.claim.UID = "replacement-claim-uid"
+				return nil
+			},
 		},
 		{
 			name: "claim without a controller",
@@ -332,4 +346,155 @@ func TestResolveNetworksChainReadsUncached(t *testing.T) {
 	if denied == nil || denied.Allowed || denied.Result.Code != 500 {
 		t.Fatalf("got %+v, want a 500 error response", denied)
 	}
+}
+
+// TestResolveNetworksStopsAtFirstStaleInterface checks that an instance with
+// several interfaces is refused when any one of them still has its
+// predecessor's chain, even when the interfaces before it are current.
+func TestResolveNetworksStopsAtFirstStaleInterface(t *testing.T) {
+	first := newAttachmentChain()
+	second := newAttachmentChain()
+	for _, obj := range []client.Object{second.claim, second.iface, second.attachment, second.nad} {
+		obj.SetName("web-0-eth1")
+		obj.SetUID(obj.GetUID() + "-eth1")
+	}
+	second.iface.Spec.ClaimRef.Name = "web-0-eth1"
+	second.attachment.OwnerReferences = controllerRef(networkingv1alpha.GroupVersion.String(),
+		"NetworkInterface", second.iface.Name, second.iface.UID)
+	second.nad.OwnerReferences = controllerRef(cloudv1alpha1.GroupVersion.String(), "VPCAttachment",
+		second.attachment.Name, second.attachment.UID)
+	second.claim.OwnerReferences = controllerRef(computev1alpha.GroupVersion.String(), "Instance",
+		chainInstance, "previous-instance-uid")
+
+	instance := first.instance
+	instance.Spec.NetworkInterfaces = append(instance.Spec.NetworkInterfaces,
+		computev1alpha.InstanceNetworkInterface{Name: "eth1"})
+	instance.Status.NetworkInterfaces = append(instance.Status.NetworkInterfaces,
+		computev1alpha.InstanceNetworkInterfaceStatus{
+			Name:                "eth1",
+			NetworkInterfaceRef: &networkingv1alpha.LocalNetworkInterfaceRef{Name: "web-0-eth1"},
+		})
+
+	injector := &PodInterfaceInjector{Client: fake.NewClientBuilder().WithScheme(chainScheme(t)).
+		WithObjects(first.claim, first.iface, first.attachment, first.nad,
+			second.claim, second.iface, second.attachment, second.nad).Build()}
+	networks, _, denied := injector.resolveNetworks(context.Background(), instance, chainNamespace)
+	if denied == nil {
+		t.Fatalf("admitted %v with a stale second interface", networks)
+	}
+	if !strings.Contains(denied.Result.Message, "web-0-eth1") ||
+		!strings.Contains(denied.Result.Message, "previous-instance-uid") {
+		t.Errorf("denial names the wrong link: %q", denied.Result.Message)
+	}
+}
+
+// admissionRequest builds the admission request for a pod controlled by the
+// instance with the given UID.
+func admissionRequest(t *testing.T, ownerUID types.UID) admission.Request {
+	t.Helper()
+	pod := &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "web-0-pod", Namespace: chainNamespace,
+			Labels: map[string]string{InjectInterfacesLabel: "true"},
+			OwnerReferences: controllerRef(computev1alpha.GroupVersion.String(), "Instance",
+				chainInstance, ownerUID),
+		},
+	}
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		Namespace: chainNamespace,
+		Object:    runtime.RawExtension{Raw: raw},
+	}}
+}
+
+// TestHandleAnchorsOnThePodsInstance checks the instance is read uncached and
+// must be the one the pod was created for. A cache still holding the
+// predecessor would otherwise make the predecessor's claim look held.
+func TestHandleAnchorsOnThePodsInstance(t *testing.T) {
+	scheme := chainScheme(t)
+	chain := newAttachmentChain()
+
+	// The predecessor, under the same name, still controls the claim.
+	predecessor := chain.instance.DeepCopy()
+	predecessor.UID = "previous-instance-uid"
+	chain.claim.OwnerReferences = controllerRef(computev1alpha.GroupVersion.String(), "Instance",
+		chainInstance, predecessor.UID)
+	replacement := chain.instance.DeepCopy()
+	chainObjects := func(instance *computev1alpha.Instance) []client.Object {
+		return []client.Object{instance.DeepCopy(), chain.claim.DeepCopy(), chain.iface.DeepCopy(),
+			chain.attachment.DeepCopy(), chain.nad.DeepCopy()}
+	}
+
+	tests := []struct {
+		name     string
+		cached   *computev1alpha.Instance
+		live     *computev1alpha.Instance
+		ownerUID types.UID
+		deny     string
+	}{
+		{
+			name:   "cache holds the predecessor, API server the replacement",
+			cached: predecessor, live: replacement, ownerUID: replacement.UID,
+			deny: "held by Instance web-0 (uid previous-instance-uid), not this instance (uid instance-uid)",
+		},
+		{
+			name:   "pod created for an instance the name no longer holds",
+			cached: replacement, live: replacement, ownerUID: "previous-instance-uid",
+			deny: "created for instance tenant/web-0 with uid previous-instance-uid, " +
+				"but that name now holds uid instance-uid",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			injector := &PodInterfaceInjector{
+				Client:    fake.NewClientBuilder().WithScheme(scheme).WithObjects(chainObjects(test.cached)...).Build(),
+				APIReader: fake.NewClientBuilder().WithScheme(scheme).WithObjects(chainObjects(test.live)...).Build(),
+				Decoder:   admission.NewDecoder(scheme),
+			}
+			response := injector.Handle(context.Background(), admissionRequest(t, test.ownerUID))
+			if response.Allowed || !strings.Contains(response.Result.Message, test.deny) {
+				t.Errorf("got allowed=%v %q, want a denial containing %q",
+					response.Allowed, response.Result.Message, test.deny)
+			}
+		})
+	}
+}
+
+func TestHandleInstanceLifecycle(t *testing.T) {
+	scheme := chainScheme(t)
+	handle := func(t *testing.T, chain *attachmentChain) admission.Response {
+		t.Helper()
+		live := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(chain.instance, chain.claim, chain.iface, chain.attachment, chain.nad).Build()
+		injector := &PodInterfaceInjector{Client: live, Decoder: admission.NewDecoder(scheme)}
+		return injector.Handle(context.Background(), admissionRequest(t, chain.instance.UID))
+	}
+
+	t.Run("instance being deleted", func(t *testing.T) {
+		chain := newAttachmentChain()
+		deleting(chain.instance)
+		response := handle(t, chain)
+		if response.Allowed || !strings.Contains(response.Result.Message, "instance tenant/web-0 is being deleted") {
+			t.Errorf("got allowed=%v %q", response.Allowed, response.Result.Message)
+		}
+	})
+
+	t.Run("current chain is injected", func(t *testing.T) {
+		response := handle(t, newAttachmentChain())
+		if !response.Allowed {
+			t.Fatalf("denied: %s", response.Result.Message)
+		}
+		patches, err := json.Marshal(response.Patches)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `"` + MultusDefaultNetworkAnnotation + `":"` + chainNamespace + "/" + chainInterface + `"`
+		if !strings.Contains(string(patches), want) {
+			t.Errorf("patch does not set the default network: %s", patches)
+		}
+	})
 }
