@@ -206,8 +206,8 @@ func detachedTenantTap(l netlink.Link) (staleTap, bool) {
 		vpc: vpc, vpcAttachment: vpcAttachment}, true
 }
 
-// stampedByADD reports whether alias is an owner, or a well-formed host-only
-// port stamp with or without one.
+// stampedByADD reports whether alias names an owner or is a well-formed
+// host-only port stamp, with or without an owner.
 func stampedByADD(alias string) bool {
 	if ifindexvrfmap.AliasOwner(alias) != "" {
 		return true

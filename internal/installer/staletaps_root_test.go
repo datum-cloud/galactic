@@ -33,8 +33,8 @@ import (
 // against freshly loaded maps. A tap whose sandbox and BGPAdvertisement are
 // both gone, still enslaved to its VRF with a pod-subnet route and traffic
 // policy and ifindex rows, is removed with its route and rows, and so is one
-// whose host-only stamp names no owner. A tap whose
-// VPCAttachment still exists is kept, detached or not.
+// whose host-only stamp names no owner. A tap whose VPCAttachment still exists
+// is kept, detached or not.
 func TestStaleTapReclaimOnKernel(t *testing.T) {
 	requireRoot(t)
 	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-installer-staletaps-%d", os.Getpid())
