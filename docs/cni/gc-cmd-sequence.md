@@ -48,17 +48,35 @@ gone, or an unstamped link whose name maps to the advertisement exactly. It
 decides again under the VRF lock, so a link a new container adopted since is
 kept. A link it cannot remove keeps the advertisement for the next pass,
 because once the advertisement is gone nothing on the node can prove the link
-dead. A link that leaked before this reclaim existed has no record left and
-is never touched.
+dead.
 
-Both sweeps below are conceptually "GC" and live in the same `internal/gc`
-package, but run as two unrelated ticker loops in two different processes,
-each reading only the liveness signal it can see for itself:
+A tap can still outlive both its DEL and its advertisement, for example when
+the advertisement was deleted by another path first or the tap leaked before
+this reclaim existed. `galactic-cni`'s `run` container covers that case on its
+eBPF GC tick (`staleTapReclaimer`, `internal/installer/staletaps.go`). It
+considers only a stamped tenant tap that no file descriptor holds, so no VMM is
+using it, whose `(VPC, attachment)` identity no `BGPAdvertisement` on any node
+and no `VPCAttachment` in the cluster carries, and only while the cluster lists
+at least one `VPCAttachment` with an identity. It removes a candidate only when
+the previous tick read every input and found it too, with the same ifindex and
+owner stamp, and checks again under the VRF lock. It first removes the tap's
+ifindex-keyed eBPF rows through `attachreg.UnregisterInterface`, the helper CNI
+DEL uses (traffic policy state, `ifindex_vrf_table`, egress kind, gateway and
+host-only ports), then the tap through `tap.Delete`. The kernel removes the
+tap's routes with it. The distroless production image has no `iptables`, so a
+leaked tap's `FORWARD` accept rules stay behind. A failed list removes nothing,
+and a tap whose rows could not be removed is kept for the next tick.
+
+The sweeps below are all conceptually "GC". The first two live in
+`internal/gc`, and the stale tap reclaim in `internal/installer`. They run as
+unrelated ticker loops in two different processes, each reading only the
+liveness signal it can see for itself:
 
 | Sweep                                   | Process                            | Reads                                                                               | Removes                                                                                 |
 | --------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | Orphaned CRD + kernel VRF sweep         | `galactic-router` (`GCReconciler`) | `/var/run/netns` on this node, `BGPRouter`/`BGPAdvertisement`/`BGPVRFInstance` CRDs | `BGPAdvertisement`, `BGPVRFInstance` CRDs; a dead attachment's host link; kernel VRFs   |
 | eBPF `vrf_table` sweep                  | `galactic-cni`'s `run` container   | the pinned eBPF `vrf_table` map, `BGPRouter`/`BGPVRFInstance` CRDs                  | stale `vrf_table` map entries (`Block`, `Argument` keys)                                |
+| Stale tap reclaim                       | `galactic-cni`'s `run` container   | host taps, `BGPAdvertisement` and `VPCAttachment` CRDs                              | a detached tap no advertisement or attachment names, with its ifindex-keyed eBPF rows   |
 
 The loops have different ownership and liveness inputs. The installer loads and
 repairs the uSID maps and sweeps their stale VRF entries; the router reclaims

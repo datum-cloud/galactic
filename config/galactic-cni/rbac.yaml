@@ -19,6 +19,13 @@ rules:
     resources:
       - egressshards
     verbs: ["get", "list", "watch"]
+  # vpcattachments (list only): galactic-cni run's stale tap reclaim keeps
+  # every tap whose (VPC, attachment) identity a VPCAttachment still carries.
+  # See internal/installer/staletaps.go.
+  - apiGroups: ["galactic.datumapis.com"]
+    resources:
+      - vpcattachments
+    verbs: ["list"]
   - apiGroups: ["k8s.cni.cncf.io"]
     resources:
       - network-attachment-definitions

@@ -16,8 +16,8 @@ import (
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/plumbing/dan"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
-	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/radv"
 )
@@ -45,15 +45,12 @@ func cmdDel(args *skel.CmdArgs) error {
 		}
 	}
 
-	// Unregister this attachment's ifindex_vrf_table entry. Private to this
+	// Unregister this attachment's ifindex-keyed map rows. Private to this
 	// attachment's own ifindex, so it belongs alongside the device deletion
 	// below rather than the shared cleanup deferred to GC. Resolved and removed
 	// before the interface is torn down, since there is nothing to resolve an
 	// ifindex from afterward.
 	unregisterIfindexVRFEntry(vpc, vpcAtt, args.ContainerID)
-	if link, err := netlink.LinkByName(intf.GenerateInterfaceNameHost(vpc, vpcAtt)); err == nil {
-		removeHostOnlyPorts(uint32(link.Attrs().Index))
-	}
 
 	// Stop the node daemon resending Router Advertisements for this attachment.
 	// Best-effort and unconditional: a missing record, from an attachment that
@@ -99,60 +96,18 @@ func cmdDel(args *skel.CmdArgs) error {
 	return nil
 }
 
-// unregisterIfindexVRFEntry removes this attachment's ifindex_vrf_table,
-// ifindex_egress_kind_table and tenant_gw_table entries if they exist,
-// mirroring the veth plugin's identical helper but resolving a tap device's
-// host-side interface rather than a veth pair's.
+// unregisterIfindexVRFEntry removes every pinned map row keyed on this
+// attachment's host ifindex (see attachreg.UnregisterInterface), mirroring the
+// veth plugin's identical helper but resolving a tap device's host-side
+// interface rather than a veth pair's.
 func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	link, err := netlink.LinkByName(hostName)
 	if err != nil {
 		return
 	}
-
-	table, closer, err := ifindexvrfmap.OpenPinned(attach.PinDir)
-	if err != nil {
-		return
-	}
-	defer func() { _ = closer.Close() }()
-
-	if err := table.Unregister(uint32(link.Attrs().Index)); err != nil {
-		slog.Warn("DEL: failed to unregister eBPF ifindex_vrf_table entry", "err", err,
-			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
-	}
-
-	// The egress kind entry shares this row's lifecycle. Left behind, it would
-	// steer delivery for whatever attachment next reuses this ifindex until
-	// that attachment's own ADD overwrites it.
-	kinds, kindsCloser, err := ifindexvrfmap.OpenPinnedEgressKind(attach.PinDir)
-	if err != nil {
-		return
-	}
-	defer func() { _ = kindsCloser.Close() }()
-
-	if err := kinds.Unregister(uint32(link.Attrs().Index)); err != nil {
-		slog.Warn("DEL: failed to unregister eBPF ifindex_egress_kind_table entry", "err", err,
-			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
-	}
-
-	// The interface's traffic policy state belongs to this lifetime alone:
-	// its bindings, policy token, addresses and fallback counter rows.
-	if err := tpmap.RemovePinnedInterface(attach.PinDir, uint32(link.Attrs().Index)); err != nil {
-		slog.Warn("DEL: failed to remove traffic policy state", "err", err,
-			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
-	}
-
-	// The gateway entry shares this row's lifecycle too. Left behind, the next
-	// attachment on this ifindex would be sent errors from this one's gateway
-	// until its own ADD overwrites it.
-	gateways, gatewaysCloser, err := ifindexvrfmap.OpenPinnedGateway(attach.PinDir)
-	if err != nil {
-		return
-	}
-	defer func() { _ = gatewaysCloser.Close() }()
-
-	if err := gateways.Unregister(uint32(link.Attrs().Index)); err != nil {
-		slog.Warn("DEL: failed to unregister eBPF tenant_gw_table entry", "err", err,
+	if err := attachreg.UnregisterInterface(attach.PinDir, uint32(link.Attrs().Index)); err != nil {
+		slog.Warn("DEL: failed to remove eBPF interface state", "err", err,
 			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
 	}
 }
