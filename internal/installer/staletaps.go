@@ -45,8 +45,9 @@ import (
 // only a tap can be left behind.
 //
 // A tap is a candidate only while all of these hold:
-//   - its name is a tenant host link's and its alias carries an owner stamp, so
-//     an ADD created or adopted it;
+//   - its name is a tenant host link's and its alias carries an owner stamp
+//     or a host-only port stamp, with or without an owner, so an ADD created
+//     or adopted it;
 //   - no file descriptor holds it, enabled or disabled queue alike, so no VMM
 //     is using it;
 //   - no BGPAdvertisement names its attachment, so the router's GC is not the
@@ -198,11 +199,21 @@ func detachedTenantTap(l netlink.Link) (staleTap, bool) {
 	}
 	attrs := l.Attrs()
 	vpc, vpcAttachment, ok := intf.ParseInterfaceNameHost(attrs.Name)
-	if !ok || ifindexvrfmap.AliasOwner(attrs.Alias) == "" {
+	if !ok || !stampedByADD(attrs.Alias) {
 		return staleTap{}, false
 	}
 	return staleTap{name: attrs.Name, index: attrs.Index, alias: attrs.Alias,
 		vpc: vpc, vpcAttachment: vpcAttachment}, true
+}
+
+// stampedByADD reports whether alias names an owner or is a well-formed
+// host-only port stamp, with or without an owner.
+func stampedByADD(alias string) bool {
+	if ifindexvrfmap.AliasOwner(alias) != "" {
+		return true
+	}
+	_, hostOnly, err := ifindexvrfmap.ParseHostOnlyAlias(alias)
+	return hostOnly && err == nil
 }
 
 // removeStaleTap removes t's eBPF interface rows and then t itself, under the

@@ -32,8 +32,9 @@ import (
 // TestStaleTapReclaimOnKernel runs two reclaim passes in a private namespace
 // against freshly loaded maps. A tap whose sandbox and BGPAdvertisement are
 // both gone, still enslaved to its VRF with a pod-subnet route and traffic
-// policy and ifindex rows, is removed with its route and rows. A tap whose
-// VPCAttachment still exists is kept, detached or not.
+// policy and ifindex rows, is removed with its route and rows, and so is one
+// whose host-only stamp names no owner. A tap whose VPCAttachment still exists
+// is kept, detached or not.
 func TestStaleTapReclaimOnKernel(t *testing.T) {
 	requireRoot(t)
 	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-installer-staletaps-%d", os.Getpid())
@@ -73,22 +74,16 @@ func TestStaleTapReclaimOnKernel(t *testing.T) {
 
 	err = nsObj.Do(func(ns.NetNS) error {
 		var staleIfindex uint32
-		for _, att := range []string{"a1", "a2"} {
-			if err := vrf.EnsureAndEnslave(staleVPC, func(*netlink.Vrf) error {
-				_, err := tap.Add(staleVPC, att, staleOwner, 1500)
-				return err
-			}); err != nil {
-				return fmt.Errorf("tap %s: %w", att, err)
-			}
-			link, err := netlink.LinkByName(intf.GenerateInterfaceNameHost(staleVPC, att))
+		// a3 carries a host-only stamp with no owner.
+		for _, att := range []struct{ name, alias string }{
+			{"a1", ""}, {"a2", ""}, {"a3", ifindexvrfmap.HostOnlyAlias([]uint16{22}, "")},
+		} {
+			ifindex, err := addDetachedTap(staleVPC, att.name, att.alias)
 			if err != nil {
-				return err
+				return fmt.Errorf("tap %s: %w", att.name, err)
 			}
-			if err := netlink.LinkSetUp(link); err != nil {
-				return err
-			}
-			if att == "a1" {
-				staleIfindex = uint32(link.Attrs().Index) //nolint:gosec // a kernel ifindex
+			if att.name == "a1" {
+				staleIfindex = ifindex
 			}
 		}
 		if err := hostgw.RestoreHostGateway(staleVPC, "a1", res, nil); err != nil {
@@ -114,7 +109,7 @@ func TestStaleTapReclaimOnKernel(t *testing.T) {
 			if err != nil {
 				return fmt.Errorf("pass %d: %w", pass, err)
 			}
-			if want := pass - 1; got.Reclaimed != want {
+			if want := 2 * (pass - 1); got.Reclaimed != want {
 				return fmt.Errorf("pass %d reclaimed %d, want %d", pass, got.Reclaimed, want)
 			}
 		}
@@ -122,6 +117,9 @@ func TestStaleTapReclaimOnKernel(t *testing.T) {
 		var notFound netlink.LinkNotFoundError
 		if _, err := netlink.LinkByName(intf.GenerateInterfaceNameHost(staleVPC, "a1")); !errors.As(err, &notFound) {
 			return fmt.Errorf("stale tap after reclaim: err = %w, want it gone", err)
+		}
+		if _, err := netlink.LinkByName(intf.GenerateInterfaceNameHost(staleVPC, "a3")); !errors.As(err, &notFound) {
+			return fmt.Errorf("owner-less host-only tap after reclaim: err = %w, want it gone", err)
 		}
 		if _, err := netlink.LinkByName(intf.GenerateInterfaceNameHost(staleVPC, "a2")); err != nil {
 			return fmt.Errorf("live attachment's tap after reclaim: %w", err)
@@ -145,6 +143,31 @@ func TestStaleTapReclaimOnKernel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// addDetachedTap creates the tap for (vpc, att) in its VRF, stamped as
+// staleOwner, brings it up with no file descriptor holding it, and replaces the
+// stamp with alias when one is given. It returns the tap's ifindex.
+func addDetachedTap(vpc, att, alias string) (uint32, error) {
+	if err := vrf.EnsureAndEnslave(vpc, func(*netlink.Vrf) error {
+		_, err := tap.Add(vpc, att, staleOwner, 1500)
+		return err
+	}); err != nil {
+		return 0, err
+	}
+	link, err := netlink.LinkByName(intf.GenerateInterfaceNameHost(vpc, att))
+	if err != nil {
+		return 0, err
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return 0, err
+	}
+	if alias != "" {
+		if err := netlink.LinkSetAlias(link, alias); err != nil {
+			return 0, err
+		}
+	}
+	return uint32(link.Attrs().Index), nil //nolint:gosec // a kernel ifindex
 }
 
 // subnetRoutes lists the IPv6 routes to subnet in every table, the VRF's

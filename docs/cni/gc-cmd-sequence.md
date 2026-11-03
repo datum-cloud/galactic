@@ -55,17 +55,19 @@ the advertisement was deleted by another path first or the tap leaked before
 this reclaim existed. `galactic-cni`'s `run` container covers that case on its
 eBPF GC tick (`staleTapReclaimer`, `internal/installer/staletaps.go`). It
 considers only a stamped tenant tap that no file descriptor holds, so no VMM is
-using it, whose `(VPC, attachment)` identity no `BGPAdvertisement` on any node
-and no `VPCAttachment` in the cluster carries, and only while the cluster lists
-at least one `VPCAttachment` with an identity. It removes a candidate only when
-the previous tick read every input and found it too, with the same ifindex and
-owner stamp, and checks again under the VRF lock. It first removes the tap's
-ifindex-keyed eBPF rows through `attachreg.UnregisterInterface`, the helper CNI
-DEL uses (traffic policy state, `ifindex_vrf_table`, egress kind, gateway and
-host-only ports), then the tap through `tap.Delete`. The kernel removes the
-tap's routes with it. The distroless production image has no `iptables`, so a
-leaked tap's `FORWARD` accept rules stay behind. A failed list removes nothing,
-and a tap whose rows could not be removed is kept for the next tick.
+using it. A host-only port stamp counts as stamped whether or not it names an
+owner. The tap's `(VPC, attachment)` identity must be carried by no
+`BGPAdvertisement` on any node and no `VPCAttachment` in the cluster, and the
+cluster must list at least one `VPCAttachment` with an identity. It removes a
+candidate only when the previous tick read every input and found it too, with
+the same ifindex and owner stamp, and checks again under the VRF lock. It first
+removes the tap's ifindex-keyed eBPF rows through
+`attachreg.UnregisterInterface`, the helper CNI DEL uses (traffic policy state,
+`ifindex_vrf_table`, egress kind, gateway and host-only ports), then the tap
+through `tap.Delete`. The kernel removes the tap's routes with it. The
+distroless production image has no `iptables`, so a leaked tap's `FORWARD`
+accept rules stay behind. A failed list removes nothing, and a tap whose rows
+could not be removed is kept for the next tick.
 
 The sweeps below are all conceptually "GC". The first two live in
 `internal/gc`, and the stale tap reclaim in `internal/installer`. They run as

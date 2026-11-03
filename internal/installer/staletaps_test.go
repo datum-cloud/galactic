@@ -176,6 +176,16 @@ func TestStaleTapReclaimKeeps(t *testing.T) {
 			return l
 		}()},
 		{name: "no owner stamp", link: staleTapLink(staleName, staleIndex, "", 0)},
+		{name: "a malformed host-only stamp with no owner",
+			link: staleTapLink(staleName, staleIndex, "galactic-host-only-tcp=notaport", 0)},
+		{name: "an owner-less host-only stamp a VMM holds",
+			link: staleTapLink(staleName, staleIndex, ifindexvrfmap.HostOnlyAlias([]uint16{22}, ""), 1)},
+		{name: "an owner-less host-only stamp whose VPCAttachment exists",
+			link: staleTapLink(staleName, staleIndex, ifindexvrfmap.HostOnlyAlias([]uint16{22}, ""), 0),
+			objs: []client.Object{vpcAttachment("live", staleVPC, staleAttachment)}},
+		{name: "an owner-less host-only stamp an advertisement names",
+			link: staleTapLink(staleName, staleIndex, ifindexvrfmap.HostOnlyAlias([]uint16{22}, ""), 0),
+			objs: []client.Object{advertisement(crdnames.BGPAdvertisementName(staleVPC, staleAttachment, staleNode))}},
 		{name: "not a tenant host link", link: staleTapLink("tap0", staleIndex, staleOwner, 0)},
 		{name: "a tun device", link: func() netlink.Link {
 			l := staleTapLink(staleName, staleIndex, staleOwner, 0)
@@ -229,6 +239,31 @@ func TestStaleTapReclaimHostOnlyStamp(t *testing.T) {
 	}
 	if want := staleName + "/" + staleOwner; len(f.deleted) != 1 || f.deleted[0] != want {
 		t.Errorf("deleted %v; want [%s]", f.deleted, want)
+	}
+}
+
+// TestStaleTapReclaimOwnerlessHostOnlyStamp removes a stale tap whose
+// host-only stamp names no owner, deleting it as the empty owner, and only on
+// the second pass.
+func TestStaleTapReclaimOwnerlessHostOnlyStamp(t *testing.T) {
+	alias := ifindexvrfmap.HostOnlyAlias([]uint16{22}, "")
+	f := newStaleTapFixture(t, staleTapLink(staleName, staleIndex, alias, 0))
+	k8s := staleClient(t, interceptor.Funcs{})
+	r := &staleTapReclaimer{}
+	for pass, want := range []int{0, 1} {
+		got, err := r.reclaim(context.Background(), k8s, staleNamespace, staleNode)
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass+1, err)
+		}
+		if got.Reclaimed != want {
+			t.Fatalf("pass %d = %+v; want %d reclaimed", pass+1, got, want)
+		}
+	}
+	if want := staleName + "/"; len(f.deleted) != 1 || f.deleted[0] != want {
+		t.Errorf("deleted %v; want [%s]", f.deleted, want)
+	}
+	if len(f.unregistered) != 1 || f.unregistered[0] != staleIndex {
+		t.Errorf("unregistered %v; want [%d]", f.unregistered, staleIndex)
 	}
 }
 
