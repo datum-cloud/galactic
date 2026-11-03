@@ -43,6 +43,11 @@ func TestStoppedGrantIsNotRenewed(t *testing.T) {
 		if s := f.service(g); s == nil || !retired(s) {
 			t.Fatal("the stopped incarnation was left live")
 		}
+		f.set(f.clock().Add(RetryWindow))
+		r = f.authorize(podA, c.Credential, "nonceK0000000007")
+		if r.Service.UID == g.Service.UID || f.service(g) != nil {
+			t.Fatalf("Authorize after core released the stopped incarnation = %+v, want a successor", r.Service)
+		}
 	})
 	t.Run("refresh", func(t *testing.T) {
 		next()

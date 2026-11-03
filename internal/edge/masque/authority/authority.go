@@ -126,7 +126,7 @@ type Authority struct {
 	// MaxSkew is the cell's maximum wall-clock error, the one core and
 	// galactic-edge use: they stop an incarnation MaxSkew before its
 	// validUntil and never readmit it, so it is never renewed from then on.
-	// Zero means timing.Params.MaxSkew.
+	// Zero or less means timing.Params.MaxSkew.
 	MaxSkew time.Duration
 	Now     func() time.Time
 	Log     *slog.Logger
@@ -147,7 +147,7 @@ func (a *Authority) log() *slog.Logger {
 }
 
 func (a *Authority) maxSkew() time.Duration {
-	if a.MaxSkew != 0 {
+	if a.MaxSkew > 0 {
 		return a.MaxSkew
 	}
 	return timing.Params.MaxSkew
@@ -235,6 +235,8 @@ func (a *Authority) Authorize(ctx context.Context, id admission.Identity, req Au
 	if err != nil {
 		return Grant{}, err
 	}
+	// This precedes the retry lookup: a retry's grant expires no later than
+	// the credential, so core would refuse it too.
 	until, err := a.until(start, r)
 	if err != nil {
 		return Grant{}, err
