@@ -14,6 +14,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -68,27 +69,60 @@ func (it *memIterator) Next(keyOut, valueOut any) bool {
 
 func (it *memIterator) Err() error { return nil }
 
+// memPolicy is an in-memory tp_iface_table holding each row's kind, with
+// tpmap.Maps' contract: RemoveInfra deletes only an infra row.
+type memPolicy map[uint32]uint32
+
+func (m memPolicy) IsInfra(ifindex uint32) (bool, error) {
+	return m[ifindex] == tpmap.KindInfra, nil
+}
+
+func (m memPolicy) InfraInterfaces() ([]uint32, error) {
+	var rows []uint32
+	for ifindex, kind := range m {
+		if kind == tpmap.KindInfra {
+			rows = append(rows, ifindex)
+		}
+	}
+	return rows, nil
+}
+
+func (m memPolicy) RemoveInfra(ifindex uint32) error {
+	if m[ifindex] == tpmap.KindInfra {
+		delete(m, ifindex)
+	}
+	return nil
+}
+
 const (
 	hostBlock    = uint64(0xfd00_0000_0001)
 	hostArgument = uint16(7)
 	hostIfindex  = uint32(12)
 	hostTableID  = uint32(42)
+	// hostInfra is a host-side infra row, such as an ingress gateway pod's
+	// primary interface, which the installer owns.
+	hostInfra = uint32(30)
 )
 
 // fixture is one node's maps holding a host attachment's rows and the rows of
-// two sidecar VRFs, with Arguments 1 and 2.
+// two sidecar VRFs, with Arguments 1 and 2, and their traffic policy rows.
 type fixture struct {
 	maps                     Maps
 	vrfRaw, ifxRaw, routeRaw memTable
+	policy                   memPolicy
 }
 
 func newFixture(t *testing.T) fixture {
 	t.Helper()
-	f := fixture{vrfRaw: memTable{}, ifxRaw: memTable{}, routeRaw: memTable{}}
+	f := fixture{
+		vrfRaw: memTable{}, ifxRaw: memTable{}, routeRaw: memTable{},
+		policy: memPolicy{hostIfindex: tpmap.KindTenant, hostInfra: tpmap.KindInfra},
+	}
 	f.maps = Maps{
 		VRF:         usidmap.NewVRFTable(f.vrfRaw),
 		Ifindex:     ifindexvrfmap.NewIfindexVRFTable(f.ifxRaw),
 		EgressRoute: egressroutemap.NewEgressRouteTable(f.routeRaw),
+		Policy:      f.policy,
 	}
 
 	if err := f.maps.VRF.Register(hostBlock, hostArgument, hostTableID, usidmap.EgressKindVeth); err != nil {
@@ -109,6 +143,7 @@ func newFixture(t *testing.T) fixture {
 		}
 		f.putRoute(tableID, "2001:db8:2::5/128")
 		f.putRoute(tableID, "10.0.0.5/32")
+		f.policy[ifindexvrfmap.SidecarIfindex(arg)] = tpmap.KindInfra
 	}
 	return f
 }
@@ -152,7 +187,7 @@ func TestPrune_EmptyKeepRemovesEverySidecarRowAndNoHostRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if want := (Result{VRFRows: 2, IfindexRows: 2, EgressRouteRows: 4}); result != want {
+	if want := (Result{VRFRows: 2, IfindexRows: 2, EgressRouteRows: 4, PolicyRows: 2}); result != want {
 		t.Errorf("result = %+v, want %+v", result, want)
 	}
 
@@ -173,6 +208,9 @@ func TestPrune_EmptyKeepRemovesEverySidecarRowAndNoHostRow(t *testing.T) {
 	if got, want := f.routeTables(t), map[uint32]int{hostTableID: 1}; !reflect.DeepEqual(got, want) {
 		t.Errorf("egress_route_table rows per table = %v, want %v", got, want)
 	}
+	if want := (memPolicy{hostIfindex: tpmap.KindTenant, hostInfra: tpmap.KindInfra}); !reflect.DeepEqual(f.policy, want) {
+		t.Errorf("tp_iface_table = %v, want only the host rows %v", f.policy, want)
+	}
 }
 
 func TestPrune_KeepsTheNamedArguments(t *testing.T) {
@@ -182,7 +220,7 @@ func TestPrune_KeepsTheNamedArguments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if want := (Result{VRFRows: 1, IfindexRows: 1, EgressRouteRows: 2}); result != want {
+	if want := (Result{VRFRows: 1, IfindexRows: 1, EgressRouteRows: 2, PolicyRows: 1}); result != want {
 		t.Errorf("result = %+v, want %+v", result, want)
 	}
 
@@ -202,6 +240,12 @@ func TestPrune_KeepsTheNamedArguments(t *testing.T) {
 	if got := f.routeTables(t); !reflect.DeepEqual(got, want) {
 		t.Errorf("egress_route_table rows per table = %v, want %v", got, want)
 	}
+	if _, ok := f.policy[ifindexvrfmap.SidecarIfindex(1)]; ok {
+		t.Error("tp_iface_table still holds argument 1's interface")
+	}
+	if _, ok := f.policy[ifindexvrfmap.SidecarIfindex(2)]; !ok {
+		t.Error("tp_iface_table lost argument 2's interface, which keep names")
+	}
 }
 
 func TestPrune_KeepingEverythingRemovesNothing(t *testing.T) {
@@ -213,5 +257,83 @@ func TestPrune_KeepingEverythingRemovesNothing(t *testing.T) {
 	}
 	if result.Total() != 0 {
 		t.Errorf("removed %+v, want nothing", result)
+	}
+}
+
+func TestPrune_LeavesATenantPolicyRowInTheSidecarRange(t *testing.T) {
+	f := newFixture(t)
+	f.policy[ifindexvrfmap.SidecarIfindex(1)] = tpmap.KindTenant
+
+	result, err := Prune(f.maps, nil)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if result.PolicyRows != 1 {
+		t.Errorf("removed %d policy rows, want 1 (argument 2's infra row)", result.PolicyRows)
+	}
+	if f.policy[ifindexvrfmap.SidecarIfindex(1)] != tpmap.KindTenant {
+		t.Error("tenant row in the sidecar range removed")
+	}
+}
+
+func TestPrune_WithoutPolicyMaps(t *testing.T) {
+	f := newFixture(t)
+	f.maps.Policy = nil
+
+	result, err := Prune(f.maps, nil)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if want := (Result{VRFRows: 2, IfindexRows: 2, EgressRouteRows: 4}); result != want {
+		t.Errorf("result = %+v, want %+v", result, want)
+	}
+}
+
+func TestPresent(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(f fixture)
+		want   bool
+	}{
+		{name: "every row", change: func(fixture) {}, want: true},
+		{name: "no vrf_table row", change: func(f fixture) {
+			_ = f.maps.VRF.Unregister(uformat.BlockIngressSidecar, 1)
+		}},
+		{name: "no ifindex_vrf_table row", change: func(f fixture) {
+			_ = f.maps.Ifindex.Unregister(ifindexvrfmap.SidecarIfindex(1))
+		}},
+		{name: "no infra row", change: func(f fixture) {
+			delete(f.policy, ifindexvrfmap.SidecarIfindex(1))
+		}},
+		{name: "tenant row instead of infra", change: func(f fixture) {
+			f.policy[ifindexvrfmap.SidecarIfindex(1)] = tpmap.KindTenant
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			tc.change(f)
+			got, err := Present(f.maps, 1)
+			if err != nil {
+				t.Fatalf("Present: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("Present = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPresent_WithoutPolicyMaps(t *testing.T) {
+	f := newFixture(t)
+	f.maps.Policy = nil
+	delete(f.policy, ifindexvrfmap.SidecarIfindex(1))
+
+	got, err := Present(f.maps, 1)
+	if err != nil {
+		t.Fatalf("Present: %v", err)
+	}
+	if !got {
+		t.Error("Present = false on a node without traffic policy maps, want true")
 	}
 }

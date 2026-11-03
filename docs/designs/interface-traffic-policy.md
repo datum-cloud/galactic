@@ -373,7 +373,12 @@ program can deliver to or is attached to, with a kind:
   interface is checked at that interface, and a backend's reply to the
   gateway was already checked at the backend's interface. The installer
   never replaces a tenant row with an `infra` one, and removes its rows once
-  no advertised gateway uses the interface.
+  no advertised gateway uses the interface. The sidecar's rows sit at or
+  above `ifindexvrfmap.SidecarIfindexBase` and are removed with the rest of
+  its rows (`internal/plumbing/ebpf/sidecarmap`). The installer's startup
+  reconcile, which removes a row whose interface no longer exists, leaves
+  that range alone: the peers live in the gateway pod's namespace, where
+  the host never finds them.
 
 A program that finds no row for an interface it is attached to, or that
 `usid_ingress` is about to deliver to, denies as `policy_unavailable`

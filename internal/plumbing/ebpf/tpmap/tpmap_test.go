@@ -765,6 +765,19 @@ func TestInfraNeverReplacesTenant(t *testing.T) {
 	if rows, err := f.maps.InfraInterfaces(); err != nil || len(rows) != 0 {
 		t.Errorf("InfraInterfaces = %v, %v; want none", rows, err)
 	}
+
+	const platform = ifindex + 1
+	if err := f.maps.PutInfra(platform); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		ifindex uint32
+		want    bool
+	}{{ifindex, false}, {platform, true}, {ifindex + 2, false}} {
+		if got, err := f.maps.IsInfra(tc.ifindex); err != nil || got != tc.want {
+			t.Errorf("IsInfra(%d) = %v, %v; want %v", tc.ifindex, got, err, tc.want)
+		}
+	}
 }
 
 func countKeys(t *testing.T, m *ebpf.Map) int {
