@@ -146,6 +146,11 @@ type EBPFRouteProgrammer struct {
 	failedMutations        map[string]struct{}
 	generationIncomplete   bool
 	generationWasFinalized bool
+	// gateChecked records that this process has read the pinned policy gate.
+	// inheritedGate holds an open gate left by a previous process's finalized
+	// generation, kept open until this process finalizes or a mutation fails.
+	gateChecked   bool
+	inheritedGate bool
 
 	// These hooks keep map replacement and interface recreation tests
 	// deterministic without requiring a privileged kernel eBPF setup.
@@ -157,6 +162,12 @@ type EBPFRouteProgrammer struct {
 // Initialize opens the pinned maps without deleting state left by the running
 // datapath. It also repairs entries whose interface names now resolve to new
 // ifindexes. Apply initializes lazily so startup ordering remains tolerant.
+//
+// A restarted router that finds the gate open keeps serving the previous
+// process's finalized generation until its own startup sync finalizes, so
+// persistent access survives a restart while the API is unreachable. Kernel
+// deadlines still bound time-limited access, and identity tokens fence
+// recycled interfaces. A gate found closed stays closed.
 func (p *EBPFRouteProgrammer) Initialize() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -167,11 +178,30 @@ func (p *EBPFRouteProgrammer) Initialize() error {
 	if p.policyFinalized {
 		return nil
 	}
-	if err := p.tables.SetPolicyEnabled(false); err != nil {
-		return err
+	if !p.gateChecked {
+		enabled, err := p.tables.PolicyEnabled()
+		if err != nil {
+			return err
+		}
+		p.gateChecked = true
+		p.inheritedGate = enabled
+	}
+	if !p.inheritedGate {
+		if err := p.closeGate(); err != nil {
+			return err
+		}
 	}
 	p.syncFailures = 0
 	p.failedMutations = make(map[string]struct{})
+	return nil
+}
+
+// closeGate closes the node's service policy gate, ending any inherited one.
+func (p *EBPFRouteProgrammer) closeGate() error {
+	if err := p.tables.SetPolicyEnabled(false); err != nil {
+		return err
+	}
+	p.inheritedGate = false
 	return nil
 }
 
@@ -282,7 +312,18 @@ func (p *EBPFRouteProgrammer) Finalize() error {
 	return p.finalizeLocked()
 }
 
+// finalizeLocked sweeps and opens the gate on a complete generation. If it
+// cannot, an inherited gate closes: the previous generation is trusted only
+// until this process can replace it.
 func (p *EBPFRouteProgrammer) finalizeLocked() error {
+	err := p.finalizeGeneration()
+	if err != nil && p.inheritedGate {
+		return errors.Join(err, p.closeGate())
+	}
+	return err
+}
+
+func (p *EBPFRouteProgrammer) finalizeGeneration() error {
 	if p.syncFailures != 0 || len(p.pendingRollbacks) != 0 {
 		return fmt.Errorf("service route generation has %d failed mutations and %d pending rollbacks",
 			p.syncFailures, len(p.pendingRollbacks))
@@ -352,6 +393,7 @@ func (p *EBPFRouteProgrammer) finalizeLocked() error {
 		return err
 	}
 	p.policyFinalized = true
+	p.inheritedGate = false
 	return nil
 }
 
@@ -392,7 +434,7 @@ func (p *EBPFRouteProgrammer) ensureOpen() error {
 	if len(expired) != 0 {
 		// A replacement map set can still contain pinned rows from an expired
 		// authorization. Never replay or sweep those rows while serving them.
-		if err := p.tables.SetPolicyEnabled(false); err != nil {
+		if err := p.closeGate(); err != nil {
 			p.closeHandles()
 			return err
 		}
@@ -420,12 +462,17 @@ var serviceRouteMapNames = [...]string{
 	"attachment_identity_table",
 	"service_policy_state_table",
 	"service_deny_table",
-	"service_peer_table",
+	serviceroutemap.ServicePeerMapName,
 	serviceroutemap.ServiceProducerSetMapName,
 }
 
-// mapSetIDs holds the kernel IDs of serviceRouteMapNames, in that order. The
-// producer set map's ID is zero while the datapath has none, so its creation
+// optionalServiceRouteMap reports whether an older datapath may lack the map.
+func optionalServiceRouteMap(name string) bool {
+	return name == serviceroutemap.ServicePeerMapName || name == serviceroutemap.ServiceProducerSetMapName
+}
+
+// mapSetIDs holds the kernel IDs of serviceRouteMapNames, in that order. An
+// optional map's ID is zero while the datapath has none, so its creation
 // reads as a map set change and reopens every map.
 type mapSetIDs [len(serviceRouteMapNames)]ebpf.MapID
 
@@ -468,7 +515,7 @@ func (p *EBPFRouteProgrammer) readMapIDs(pinDir string) (mapSetIDs, error) {
 	var ids mapSetIDs
 	for index, name := range serviceRouteMapNames {
 		current, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, name), nil)
-		if err != nil && name == serviceroutemap.ServiceProducerSetMapName && errors.Is(err, os.ErrNotExist) {
+		if err != nil && optionalServiceRouteMap(name) && errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
@@ -503,6 +550,8 @@ func (p *EBPFRouteProgrammer) closeHandles() {
 	p.tables = nil
 	p.mapIDs = mapSetIDs{}
 	p.mapIDsValid = false
+	// An inherited gate belongs to the map set it was read from.
+	p.inheritedGate = false
 }
 
 // Missing links withdraw their entries while preserving intent for recreation.
@@ -572,7 +621,7 @@ func (p *EBPFRouteProgrammer) repairDesired() error {
 			p.policyFinalized = false
 			p.generationIncomplete = true
 			p.markSyncFailure("__generation__")
-			return errors.Join(err, p.tables.SetPolicyEnabled(false))
+			return errors.Join(err, p.closeGate())
 		}
 		return nil
 	}
@@ -580,7 +629,7 @@ func (p *EBPFRouteProgrammer) repairDesired() error {
 	// at a time lets a late release delete a value already rewritten with the
 	// new interface token. Rebuild one complete generation behind the closed
 	// gate instead.
-	if err := p.tables.SetPolicyEnabled(false); err != nil {
+	if err := p.closeGate(); err != nil {
 		return err
 	}
 	if !p.generationIncomplete {
@@ -647,6 +696,13 @@ func (p *EBPFRouteProgrammer) markSyncFailure(key string) {
 	}
 	p.failedMutations[key] = struct{}{}
 	p.syncFailures++
+	// The previous generation was only trusted while this one rebuilt
+	// cleanly. A failed mutation leaves the maps inconsistent, so fail closed
+	// as a gate this process never opened would be. A failed close leaves
+	// the gate inherited, and the next failure or Finalize retries it.
+	if p.inheritedGate && p.tables != nil {
+		_ = p.closeGate()
+	}
 }
 
 func (p *EBPFRouteProgrammer) clearSyncFailure(key string) {

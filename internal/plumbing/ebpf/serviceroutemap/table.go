@@ -28,7 +28,10 @@ const (
 	attachmentIdentityMapName = "attachment_identity_table"
 	servicePolicyStateMapName = "service_policy_state_table"
 	serviceDenyMapName        = "service_deny_table"
-	servicePeerMapName        = "service_peer_table"
+	// ServicePeerMapName is the attachment next-hop map. A datapath older
+	// than per-attachment next hops has no pin of this name and forwards to
+	// the packet's destination address instead.
+	ServicePeerMapName = "service_peer_table"
 	// ServiceProducerSetMapName is the producer set map of LocalSet routes.
 	// A datapath older than LocalSet routes has no pin of this name.
 	ServiceProducerSetMapName = "service_producer_set_table"
@@ -282,19 +285,26 @@ func OpenPinned(pinDir string) (*Tables, []*ebpf.Map, error) {
 		}
 		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", serviceDenyMapName, err)
 	}
-	peers, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, servicePeerMapName), nil)
-	if err != nil {
-		for _, opened := range []*ebpf.Map{routes, access, reverse, remoteGrants, identities, policyState, deny} {
-			_ = opened.Close()
-		}
-		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", servicePeerMapName, err)
-	}
 	tables := New(
 		usidmap.KernelTable{Map: routes}, usidmap.KernelTable{Map: access},
 		usidmap.KernelTable{Map: reverse}, usidmap.KernelTable{Map: remoteGrants}, usidmap.KernelTable{Map: identities},
-		usidmap.KernelTable{Map: policyState}, usidmap.KernelTable{Map: deny}, usidmap.KernelTable{Map: peers},
+		usidmap.KernelTable{Map: policyState}, usidmap.KernelTable{Map: deny},
 	)
-	handles := []*ebpf.Map{routes, access, reverse, remoteGrants, identities, policyState, deny, peers}
+	handles := []*ebpf.Map{routes, access, reverse, remoteGrants, identities, policyState, deny}
+	// A router that rolls before the datapath finds no next-hop map. The old
+	// program forwards to the destination address, so routes still program
+	// and SetPeer has nothing to record until the new program loads.
+	peers, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, ServicePeerMapName), nil)
+	switch {
+	case err == nil:
+		tables.peers = usidmap.KernelTable{Map: peers}
+		handles = append(handles, peers)
+	case !errors.Is(err, os.ErrNotExist):
+		for _, opened := range handles {
+			_ = opened.Close()
+		}
+		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", ServicePeerMapName, err)
+	}
 	// A datapath that predates LocalSet routes has no producer set map. Its
 	// absence leaves every other route working; RegisterProducerSet refuses.
 	producerSets, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, ServiceProducerSetMapName), nil)
@@ -431,12 +441,11 @@ type servicePeerValue struct {
 }
 
 // SetPeer records an attachment's next hop, fenced by its current identity.
+// It records nothing on a datapath without a next-hop map, which forwards to
+// the destination address.
 func (t *Tables) SetPeer(ifindex uint32, token uint64, address net.IP) error {
-	if address == nil {
+	if address == nil || t.peers == nil {
 		return nil
-	}
-	if t.peers == nil {
-		return errors.New("serviceroutemap: service peer table unavailable")
 	}
 	key := servicePeerKey{Ifindex: ifindex}
 	if address.To4() != nil {
@@ -492,6 +501,22 @@ func (t *Tables) SetPolicyEnabled(enabled bool) error {
 		return fmt.Errorf("serviceroutemap: set service policy enabled=%t: %w", enabled, err)
 	}
 	return nil
+}
+
+// PolicyEnabled reports whether the pinned service policy gate is open. A
+// missing entry reads as closed.
+func (t *Tables) PolicyEnabled() (bool, error) {
+	if t.policyState == nil {
+		return false, errors.New("serviceroutemap: service policy state table unavailable")
+	}
+	var value servicePolicyStateValue
+	if err := t.policyState.Lookup(uint32(0), &value); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("serviceroutemap: read service policy state: %w", err)
+	}
+	return value.Enabled != 0, nil
 }
 
 // IdentityToken returns the current nonzero incarnation token for ifindex.
