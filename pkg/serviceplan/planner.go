@@ -471,14 +471,14 @@ func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv
 // spreadRemoteProducer returns the remote producer of a Spread endpoint's
 // consumer, or nil when there is none. It considers only producers on other
 // nodes than the consumer's: one on its own node is never a remote producer,
-// even while the consumer leaves its node's producers for want of a usable
-// one. It picks among those whose node currently reports them Healthy or
-// Unknown, or has never reported them; failing that, among those whose report
-// expired, since their node may be down; failing that, among all of them. SpreadPairingFirst picks the first by
-// namespace and name. SpreadPairingRendezvous picks by rendezvous hashing of
-// the consumer's UID with each candidate's UID (see rendezvousKey), so a
-// producer joining or leaving a candidate set moves only the consumers it
-// gains or loses.
+// even while the consumer leaves its node's producers for want of a usable one.
+// It picks among those whose node currently reports them Healthy or Unknown, or
+// has never reported them; failing that, among those whose report expired,
+// since their node may be down; failing that, among all of them.
+// SpreadPairingFirst picks the first by namespace and name.
+// SpreadPairingRendezvous picks by rendezvous hashing of the consumer's UID
+// with each candidate's UID (see rendezvousKey), so a producer joining or
+// leaving a candidate set moves only the consumers it gains or loses.
 func spreadRemoteProducer(consumer *cloudv1alpha1.VPCAttachment, producers []*cloudv1alpha1.VPCAttachment,
 	health map[types.UID]producerHealth, pairing SpreadPairing,
 ) *cloudv1alpha1.VPCAttachment {

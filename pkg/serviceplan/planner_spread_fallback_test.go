@@ -341,6 +341,10 @@ func TestCompileSpreadFallbackSkipsLocalReplacement(t *testing.T) {
 	topology.requireRemote(t)
 
 	// Once the replacement passes its check, the consumer returns to it.
-	topology.endpoint.Status.Producers[2].State = networkv1alpha1.BackendHealthHealthy
+	for i := range topology.endpoint.Status.Producers {
+		if entry := &topology.endpoint.Status.Producers[i]; entry.AttachmentUID == replacement.UID {
+			entry.State = networkv1alpha1.BackendHealthHealthy
+		}
+	}
 	topology.requireLocal(t, "producer-new,producer-z(draining)")
 }
