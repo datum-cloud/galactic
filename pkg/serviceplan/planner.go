@@ -132,7 +132,8 @@ func (e *DependencyNotReadyError) Error() string { return e.Err.Error() }
 func (e *DependencyNotReadyError) Unwrap() error { return e.Err }
 
 // SpreadPairing chooses the remote producer that a Spread endpoint's consumer
-// is sent to when the consumer's node has no producer.
+// is sent to when the consumer's node has no producer, or none that is
+// usable (see selectProducers).
 type SpreadPairing string
 
 const (
@@ -176,8 +177,9 @@ type CompileOptions struct {
 // Compile deterministically picks the ready producers for every selected
 // consumer and emits only intent halves owned by localNode. A Single endpoint
 // gets one producer per consumer; a Spread endpoint gets every producer on the
-// consumer's node as one LocalSet intent, or one remote producer when its node
-// has none and DeliveryMode allows it.
+// consumer's node as one LocalSet intent, or one remote producer when
+// DeliveryMode allows it and its node has none, or none that is usable while
+// another node has an eligible producer.
 func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment, localNode string, resolveSID SIDResolver,
 ) ([]RouteIntent, error) {
@@ -436,23 +438,30 @@ func spread(endpoint *networkv1alpha1.ServiceEndpoint) bool {
 }
 
 // selectProducers returns, for a Spread endpoint, every producer on
-// consumer's node as local. Otherwise, or when that node has none, it returns
-// the one producer the consumer is sent to, or nil. A Spread endpoint's remote
-// producer is the one spreadRemoteProducer picks under pairing.
+// consumer's node as local. Otherwise it returns the one producer the consumer
+// is sent to, or nil. A Spread endpoint's consumer is sent to a remote
+// producer, the one spreadRemoteProducer picks under pairing, when DeliveryMode
+// is PreferNodeLocal and its node has no producer, or none that is usable (see
+// localUnusable) while another node's producer is eligible. Every node decides
+// this from the same reports, so the consumer's node, the producer's node and
+// ProgrammingPlan agree on the remote producer.
 func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv1alpha1.VPCAttachment,
 	producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth, pairing SpreadPairing,
 ) (local []*cloudv1alpha1.VPCAttachment, remote *cloudv1alpha1.VPCAttachment) {
 	if spread(endpoint) {
+		eligibleRemote := false
 		for _, producer := range producers {
 			if producer.Status.Node == consumer.Status.Node {
 				local = append(local, producer)
+			} else if health[producer.UID].eligible() {
+				eligibleRemote = true
 			}
 		}
-		if len(local) != 0 {
+		if endpoint.Spec.DeliveryMode != networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal {
 			return local, nil
 		}
-		if endpoint.Spec.DeliveryMode != networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal {
-			return nil, nil
+		if len(local) != 0 && (!eligibleRemote || !localUnusable(local, health)) {
+			return local, nil
 		}
 		return nil, spreadRemoteProducer(consumer, producers, health, pairing)
 	}
@@ -460,14 +469,16 @@ func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv
 }
 
 // spreadRemoteProducer returns the remote producer of a Spread endpoint's
-// consumer, or nil when there is none. It picks among the producers whose node
-// currently reports them Healthy or Unknown, or has never reported them;
-// failing that, among those whose report expired, since their node may be
-// down; failing that, among all of them. SpreadPairingFirst picks the first by
-// namespace and name. SpreadPairingRendezvous picks by rendezvous hashing of
-// the consumer's UID with each candidate's UID (see rendezvousKey), so a
-// producer joining or leaving a candidate set moves only the consumers it
-// gains or loses.
+// consumer, or nil when there is none. It considers only producers on other
+// nodes than the consumer's: one on its own node is never a remote producer,
+// even while the consumer leaves its node's producers for want of a usable one.
+// It picks among those whose node currently reports them Healthy or Unknown, or
+// has never reported them; failing that, among those whose report expired,
+// since their node may be down; failing that, among all of them.
+// SpreadPairingFirst picks the first by namespace and name.
+// SpreadPairingRendezvous picks by rendezvous hashing of the consumer's UID
+// with each candidate's UID (see rendezvousKey), so a producer joining or
+// leaving a candidate set moves only the consumers it gains or loses.
 func spreadRemoteProducer(consumer *cloudv1alpha1.VPCAttachment, producers []*cloudv1alpha1.VPCAttachment,
 	health map[types.UID]producerHealth, pairing SpreadPairing,
 ) *cloudv1alpha1.VPCAttachment {
@@ -475,10 +486,18 @@ func spreadRemoteProducer(consumer *cloudv1alpha1.VPCAttachment, producers []*cl
 	if pairing == SpreadPairingRendezvous {
 		pick = rendezvousProducer
 	}
-	for _, want := range []producerHealth{producerEligible, producerReportExpired} {
-		if producer := pick(consumer, producers, func(p *cloudv1alpha1.VPCAttachment) bool {
-			return health[p.UID] == want
-		}); producer != nil {
+	remote := make([]*cloudv1alpha1.VPCAttachment, 0, len(producers))
+	for _, producer := range producers {
+		if producer.Status.Node != consumer.Status.Node {
+			remote = append(remote, producer)
+		}
+	}
+	producers = remote
+	for _, include := range []func(*cloudv1alpha1.VPCAttachment) bool{
+		func(p *cloudv1alpha1.VPCAttachment) bool { return health[p.UID].eligible() },
+		func(p *cloudv1alpha1.VPCAttachment) bool { return health[p.UID] == producerReportExpired },
+	} {
+		if producer := pick(consumer, producers, include); producer != nil {
 			return producer
 		}
 	}
@@ -620,14 +639,53 @@ func chooseProducer(mode networkv1alpha1.ServiceEndpointDeliveryMode, consumerNo
 type producerHealth int
 
 const (
-	// producerEligible: its node currently reports it Healthy or Unknown, or
-	// has no entry for it.
-	producerEligible producerHealth = iota
+	// producerUnknown: its node currently reports it Unknown, or has no entry
+	// for it, as before its first probe result.
+	producerUnknown producerHealth = iota
+	// producerHealthy: its node currently reports it Healthy.
+	producerHealthy
 	// producerReportExpired: its node stopped renewing its entry.
 	producerReportExpired
 	// producerUnhealthy: its node currently reports it Unhealthy.
 	producerUnhealthy
 )
+
+// eligible reports whether a producer of this health may be chosen for new
+// flows ahead of producers whose report expired or says Unhealthy.
+func (h producerHealth) eligible() bool {
+	return h == producerUnknown || h == producerHealthy
+}
+
+// localUnusable reports whether a node's producers give a consumer nothing to
+// rely on: at least one is currently reported Unhealthy and the rest have no
+// current result yet, as when a replacement producer starts while the one it
+// replaces fails. A Healthy producer, or one whose report expired, makes them
+// usable. Producers with no result at all, as right after a router restart,
+// are usable too, since nothing says they fail.
+func localUnusable(producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth) bool {
+	unhealthy := false
+	for _, producer := range producers {
+		switch health[producer.UID] {
+		case producerUnhealthy:
+			unhealthy = true
+		case producerUnknown:
+		default:
+			return false
+		}
+	}
+	return unhealthy
+}
+
+// allUnhealthy reports whether every one of producers is currently reported
+// Unhealthy.
+func allUnhealthy(producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth) bool {
+	for _, producer := range producers {
+		if health[producer.UID] != producerUnhealthy {
+			return false
+		}
+	}
+	return true
+}
 
 // producerEntryKey identifies a producer entry by the producer and the node
 // that wrote it.
@@ -707,6 +765,8 @@ func producersHealth(endpoint *networkv1alpha1.ServiceEndpoint,
 			health[producer.UID] = producerReportExpired
 		case entry.State == networkv1alpha1.BackendHealthUnhealthy:
 			health[producer.UID] = producerUnhealthy
+		case entry.State == networkv1alpha1.BackendHealthHealthy:
+			health[producer.UID] = producerHealthy
 		}
 	}
 	return health
@@ -738,25 +798,30 @@ func NextProducerReportExpiry(endpoint *networkv1alpha1.ServiceEndpoint, now tim
 
 // producerTargets builds a LocalSet intent's members. Producers currently
 // reported Unhealthy drain, unless every one of them is: then all stay
-// eligible, since an empty set would drop every new flow. An expired report
-// drains nothing.
+// eligible, since an empty set would drop every new flow. While any of them is
+// currently reported Healthy, those with no current result yet, reported
+// Unknown or not reported at all, drain too, so a new producer takes new flows
+// only once its health check passes. An expired report drains nothing.
 func producerTargets(local []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth,
 	service net.IP,
 ) []ProducerTarget {
-	allUnhealthy := true
+	everyUnhealthy := allUnhealthy(local, health)
+	anyHealthy := false
 	for _, producer := range local {
-		if health[producer.UID] != producerUnhealthy {
-			allUnhealthy = false
+		if health[producer.UID] == producerHealthy {
+			anyHealthy = true
 			break
 		}
 	}
 	targets := make([]ProducerTarget, 0, len(local))
 	for _, producer := range local {
+		state := health[producer.UID]
 		targets = append(targets, ProducerTarget{
 			Attachment: types.NamespacedName{Namespace: producer.Namespace, Name: producer.Name},
 			Device:     producer.Status.HostInterface,
 			NextHop:    attachmentNextHop(producer, service),
-			Draining:   health[producer.UID] == producerUnhealthy && !allUnhealthy,
+			Draining: (state == producerUnhealthy && !everyUnhealthy) ||
+				(state == producerUnknown && anyHealthy),
 		})
 	}
 	return targets

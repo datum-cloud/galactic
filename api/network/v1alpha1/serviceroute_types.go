@@ -58,6 +58,10 @@ type ServiceEndpointSpec struct {
 	// DeliveryMode defines how a backing attachment is selected relative to a
 	// consumer. PreferNodeLocal uses a ready attachment on the consumer's node
 	// when one exists and otherwise falls back to a ready remote attachment.
+	// With Spread, it also falls back while the producers on the consumer's
+	// node include an Unhealthy one and none that is Healthy or whose report
+	// expired, and another node currently reports a producer Healthy or
+	// Unknown, or has not reported it.
 	// The dataplane preserves the consumer source address. If consumers with
 	// overlapping address space present an identical TCP or UDP five-tuple to the
 	// same replica, it rejects the later ambiguous flow fail-closed rather than
@@ -94,8 +98,13 @@ type ServiceEndpointSpec struct {
 	// request/response protocols such as DNS but not ones that need a UDP
 	// flow to stay on one producer. An Unhealthy producer keeps its existing
 	// TCP connections and replies, and gets new flows again once it is
-	// Healthy. When every producer on a node is Unhealthy, all of them stay
-	// eligible. A node may hold at most 16 producers of a Spread endpoint.
+	// Healthy. While any producer on a node is Healthy, those with no result
+	// yet get no new flows. When a node's producers include an Unhealthy one
+	// and the rest have no result yet, a PreferNodeLocal endpoint sends that
+	// node's consumers to a remote producer (see DeliveryMode) until one on
+	// the node is Healthy. Without such a remote producer, or for NodeLocal,
+	// a node whose producers are all Unhealthy keeps all of them eligible. A
+	// node may hold at most 16 producers of a Spread endpoint.
 	// +optional
 	// +kubebuilder:validation:Enum=Single;Spread
 	Distribution ServiceEndpointDistribution `json:"distribution,omitempty"`
@@ -242,9 +251,11 @@ type ServiceEndpointProducerStatus struct {
 	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port"`
 
-	// State is the decision. Healthy and Unknown producers receive new
-	// flows; Unhealthy ones do not, unless every producer on the node is
-	// Unhealthy.
+	// State is the decision. Healthy producers receive new flows. Unknown
+	// ones receive them from their own node's consumers only while no
+	// producer on the node is Healthy, and Unhealthy ones only while every
+	// producer on the node is Unhealthy and the consumers have no remote
+	// producer to fall back to.
 	// +kubebuilder:validation:Required
 	State BackendHealthState `json:"state"`
 
