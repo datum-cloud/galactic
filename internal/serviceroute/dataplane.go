@@ -600,11 +600,15 @@ func (p *EBPFRouteProgrammer) closeHandles() {
 func (p *EBPFRouteProgrammer) recoverableEntries(intent RouteIntent) ([]appliedEntry, error) {
 	entries, err := p.entries(intent)
 	var missing netlink.LinkNotFoundError
-	if errors.As(err, &missing) {
+	if errors.As(err, &missing) || errors.Is(err, errNoProducerInterface) {
 		return []appliedEntry{}, nil
 	}
 	return entries, err
 }
+
+// errNoProducerInterface reports a LocalSet intent none of whose producers has
+// an interface with an identity, so it withdraws like a missing interface.
+var errNoProducerInterface = errors.New("no producer interface is ready")
 
 func (p *EBPFRouteProgrammer) rebuildDesired() error {
 	for _, key := range sortedIntentKeys(p.desiredIntents) {
@@ -942,6 +946,13 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 // producerSet resolves a LocalSet intent's producers to their interfaces and
 // identity tokens. It returns the set, without its route key, and each
 // producer's reply markers.
+//
+// A producer whose interface does not exist, or has no identity yet, as while
+// a replacement pod recreates it under the same name, is left out so the other
+// producers keep serving. Only a set with no such producer left fails, with
+// the lookup error.
+// When the producers left are all draining, they all take new flows, because
+// draining only prefers the producers that are gone.
 func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []appliedEntry, error) {
 	if !p.tables.ProducerSetsAvailable() {
 		return nil, nil, ErrProducerSetsUnavailable
@@ -951,21 +962,37 @@ func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []applie
 			len(intent.Producers), serviceroutemap.MaxProducers)
 	}
 	serviceIP := intent.Service.IP.String()
-	set := &setRef{count: len(intent.Producers)}
+	set := &setRef{}
 	entries := make([]appliedEntry, 0, 2*len(intent.Producers))
-	for i, producer := range intent.Producers {
+	var missingErr error
+	eligible := false
+	for _, producer := range intent.Producers {
 		ifindex, err := p.target(producer.Device)
+		var missing netlink.LinkNotFoundError
+		if errors.As(err, &missing) {
+			missingErr = fmt.Errorf("resolve service interface %q: %w", producer.Device, err)
+			continue
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve service interface %q: %w", producer.Device, err)
 		}
 		token, err := p.tables.IdentityToken(ifindex)
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			// The CNI creates the interface before it records its identity.
+			missingErr = fmt.Errorf("resolve service interface %q identity: %w", producer.Device, err)
+			continue
+		}
 		if err != nil {
 			return nil, nil, err
 		}
 		if err := p.tables.SetPeer(ifindex, token, producer.NextHop); err != nil {
 			return nil, nil, err
 		}
-		set.members[i] = serviceroutemap.ProducerMember{Ifindex: ifindex, Token: token, Eligible: !producer.Draining}
+		set.members[set.count] = serviceroutemap.ProducerMember{
+			Ifindex: ifindex, Token: token, Eligible: !producer.Draining,
+		}
+		set.count++
+		eligible = eligible || !producer.Draining
 		entries = append(entries,
 			appliedEntry{access: &accessRef{
 				ingressIfindex: ifindex, address: serviceIP, attachmentToken: token,
@@ -976,6 +1003,14 @@ func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []applie
 				markerDirections: serviceroutemap.MarkerReply,
 			}},
 		)
+	}
+	if set.count == 0 {
+		return nil, nil, fmt.Errorf("%w: %w", errNoProducerInterface, missingErr)
+	}
+	if !eligible && missingErr != nil {
+		for i := range set.count {
+			set.members[i].Eligible = true
+		}
 	}
 	return set, entries, nil
 }

@@ -14,10 +14,16 @@ import (
 	api "go.datum.net/galactic/api/network/v1alpha1"
 )
 
-// The producer's old and new interfaces, as spreadTestProgrammer names them.
+// The producer interfaces spreadTestProgrammer names.
 const (
-	oldProducerDevice = "producer-a"
-	newProducerDevice = "producer-b"
+	producerADevice = "producer-a"
+	producerBDevice = "producer-b"
+)
+
+// The producer's old and new interfaces.
+const (
+	oldProducerDevice = producerADevice
+	newProducerDevice = producerBDevice
 )
 
 // remoteProducerIntent is the producer node's half of a remote path, for the

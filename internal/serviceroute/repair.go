@@ -7,12 +7,19 @@ package serviceroute
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 )
 
-// repairChangedEntries withdraws all changed references before installing any
-// replacements. Shared kernel keys must lose every old owner first; otherwise
-// a late release could delete a replacement written by an earlier owner.
+// repairChangedEntries moves changed intents to their fresh entries. An entry
+// present before and after keeps its references and kernel state, so a
+// consumer's route stays up while one producer's interface is recreated.
+//
+// Changed references are withdrawn before any replacement is installed.
+// Shared kernel keys must lose every old owner first; otherwise a late release
+// could delete a replacement written by an earlier owner. Producer sets are
+// the exception: their refs stack under the route's key, so a new set goes in
+// before the old one comes out and the route always has one.
 // Unchanged owners keep their references and forwarding state throughout.
 // On failure the caller closes the gate and retries a complete generation.
 func (p *EBPFRouteProgrammer) repairChangedEntries(changed map[string][][]appliedEntry) error {
@@ -21,25 +28,70 @@ func (p *EBPFRouteProgrammer) repairChangedEntries(changed map[string][][]applie
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	stale := make(map[string][][]appliedEntry, len(keys))
+	added := make(map[string][][]appliedEntry, len(keys))
 	for _, key := range keys {
-		for _, entries := range p.appliedRefs[key] {
-			for i := len(entries) - 1; i >= 0; i-- {
-				if err := p.release(entries[i]); err != nil {
-					return fmt.Errorf("withdraw changed service route %s: %w", key, err)
+		for i, entries := range p.appliedRefs[key] {
+			oldOnly, newOnly := diffEntries(entries, changed[key][i])
+			stale[key] = append(stale[key], oldOnly)
+			added[key] = append(added[key], newOnly)
+		}
+	}
+	withdraw := func(sets bool) error {
+		for _, key := range keys {
+			for _, entries := range stale[key] {
+				for i := len(entries) - 1; i >= 0; i-- {
+					if (entries[i].set != nil) != sets {
+						continue
+					}
+					if err := p.release(entries[i]); err != nil {
+						return fmt.Errorf("withdraw changed service route %s: %w", key, err)
+					}
 				}
 			}
 		}
+		return nil
+	}
+	if err := withdraw(false); err != nil {
+		return err
 	}
 	for _, key := range keys {
-		sets := make([][]appliedEntry, 0, len(changed[key]))
-		for _, entries := range changed[key] {
-			applied, err := p.acquireSet(entries)
-			if err != nil {
+		for _, entries := range added[key] {
+			if _, err := p.acquireSet(entries); err != nil {
 				return fmt.Errorf("repair changed service route %s: %w", key, err)
 			}
-			sets = append(sets, applied)
 		}
-		p.appliedRefs[key] = sets
+	}
+	if err := withdraw(true); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		p.appliedRefs[key] = changed[key]
 	}
 	return nil
+}
+
+// diffEntries returns the entries of before that after lacks, and those of
+// after that before lacks, each in its own order. Equal entries pair up one to
+// one.
+func diffEntries(before, after []appliedEntry) (oldOnly, newOnly []appliedEntry) {
+	matched := make([]bool, len(before))
+	for _, entry := range after {
+		found := false
+		for i, old := range before {
+			if !matched[i] && reflect.DeepEqual(old, entry) {
+				matched[i], found = true, true
+				break
+			}
+		}
+		if !found {
+			newOnly = append(newOnly, entry)
+		}
+	}
+	for i, old := range before {
+		if !matched[i] {
+			oldOnly = append(oldOnly, old)
+		}
+	}
+	return oldOnly, newOnly
 }
