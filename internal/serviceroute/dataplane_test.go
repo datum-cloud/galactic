@@ -350,8 +350,10 @@ func TestInitializeRepairsRecreatedInterface(t *testing.T) {
 		t.Fatalf("route deletes/puts = %d/%d, want 1/2 (withdraw old, install replacement)",
 			routes.deletes, routes.puts)
 	}
-	if access.deletes != 3 || access.puts != 6 {
-		t.Fatalf("access deletes/puts = %d/%d, want 3/6", access.deletes, access.puts)
+	// The producer's reply marker does not depend on the consumer interface
+	// and stays as it was.
+	if access.deletes != 2 || access.puts != 5 {
+		t.Fatalf("access deletes/puts = %d/%d, want 2/5", access.deletes, access.puts)
 	}
 }
 
