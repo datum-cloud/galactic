@@ -470,11 +470,13 @@ var serviceRouteMapNames = [...]string{
 	"service_deny_table",
 	serviceroutemap.ServicePeerMapName,
 	serviceroutemap.ServiceProducerSetMapName,
+	serviceroutemap.ServiceRemoteTargetMapName,
 }
 
 // optionalServiceRouteMap reports whether an older datapath may lack the map.
 func optionalServiceRouteMap(name string) bool {
-	return name == serviceroutemap.ServicePeerMapName || name == serviceroutemap.ServiceProducerSetMapName
+	return name == serviceroutemap.ServicePeerMapName || name == serviceroutemap.ServiceProducerSetMapName ||
+		name == serviceroutemap.ServiceRemoteTargetMapName
 }
 
 // mapSetIDs holds the kernel IDs of serviceRouteMapNames, in that order. An
@@ -534,6 +536,10 @@ func mapSetSlots(tables *serviceroutemap.Tables) []int {
 			}
 		case serviceroutemap.ServiceProducerSetMapName:
 			if !tables.ProducerSetsAvailable() {
+				continue
+			}
+		case serviceroutemap.ServiceRemoteTargetMapName:
+			if !tables.RemoteTargetsAvailable() {
 				continue
 			}
 		}

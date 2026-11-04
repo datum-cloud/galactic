@@ -528,6 +528,11 @@ func awaitLinkLocal(t *testing.T, ifindex uint32) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+		if errors.Is(err, netlink.ErrDumpInterrupted) {
+			// An address changed during the dump, as DAD finishing does.
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
 		if err != nil {
 			t.Fatalf("list addresses on ifindex %d: %v", ifindex, err)
 		}

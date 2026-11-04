@@ -18,10 +18,12 @@ prerequisites; they do not attest that a service listener is healthy. A
 listener may bind or configure the address in the producer, use a transparent
 socket, or use another service-owned mechanism. Galactic does not configure the
 producer VIP; that mechanism and its lifecycle are owned by the service.
-Whatever mechanism is used must make the exact VIP routable through the
-selected producer attachment and neighbor-resolvable on that attachment. A
-transparent socket bind by itself is insufficient when the producer VPC's FIB
-or neighbor discovery cannot deliver the VIP to that interface.
+Galactic delivers the packet to the selected producer attachment through
+that attachment's own address, on the producer's node and from a consumer on
+another node alike, so the producer VPC does not need a route for the VIP and
+the producer does not need to answer neighbor discovery for it. The producer
+must still accept a packet addressed to the VIP, for example by binding it or
+through a transparent socket.
 
 Galactic treats an attachment as ready only when its status has
 `observedGeneration` equal to its generation, non-empty `node`, `vpc` and
@@ -388,3 +390,15 @@ new program loads, the map set changes, and the router reopens the maps and
 replays its desired state, including next hops. Roll the CNI first to get
 next hops as soon as the router upgrades. Either order keeps routes
 programmed.
+
+### Remote target map roll order
+
+A producer's node finds the producer a remote request is for in the
+`service_remote_target_table` map, which the router writes with each remote
+grant. Without a row, as while the router is older than the map or the CNI
+datapath is older than the router, the node delivers the request by looking
+up its destination in the producer VPC's routes, and the request reaches the
+producer only if that VPC routes the service address to it. Roll the CNI
+first, then the router, to deliver remote requests to producers whose VPC
+does not route the service address. As with next hops, either order keeps
+routes programmed.

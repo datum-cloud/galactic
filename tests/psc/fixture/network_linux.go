@@ -91,11 +91,9 @@ func (f *fixture) addDestination(address string) error {
 			return err
 		}
 	}
-	if f.cfg.Role == roleProducer {
-		if err := ip("-6", ipRoute, ipReplace, ipTable, "801", address+"/128", ipDevice, f.producerHost); err != nil {
-			return err
-		}
-	}
+	// The producer VRF has no route for the destination, as in production:
+	// the producer's node delivers remote requests to the producer its grant
+	// names.
 	port := strconv.Itoa(12000 + len(f.destinations))
 	binary, err := os.Executable()
 	if err != nil {
