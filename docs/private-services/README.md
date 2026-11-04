@@ -331,9 +331,12 @@ while the router was down stops forwarding at the next successful startup
 sync.
 
 The inherited gate closes, as it did before this behavior, when the startup
-sync fails a dataplane mutation or cannot finalize, or when the datapath
-replaces its maps. A gate the previous process left closed, for example after
-a crash during a rebuild, stays closed until the startup sync finalizes.
+sync fails a dataplane mutation or cannot finalize. Only a finalizing router
+opens the gate, and the CNI datapath only ever closes it, which it does when
+it drains authorization to replace an incompatible map set. A compatible
+reload keeps the pinned gate, so the router keeps the inherited generation
+across it. A gate the previous process left closed, for example after a crash
+during a rebuild, stays closed until the startup sync finalizes.
 
 ### Next-hop map roll order
 

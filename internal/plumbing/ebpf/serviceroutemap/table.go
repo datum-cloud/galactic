@@ -332,6 +332,11 @@ func (t *Tables) WithProducerSets(producerSets usidmap.Table) *Tables {
 // which LocalSet routes need.
 func (t *Tables) ProducerSetsAvailable() bool { return t.producerSets != nil }
 
+// PeersAvailable reports whether the datapath has a next-hop map. OpenPinned
+// returns its handle after the required maps and before the producer set
+// map's, and only when it exists.
+func (t *Tables) PeersAvailable() bool { return t.peers != nil }
+
 // RegisterLocalSetRoute installs or replaces a service forwarding entry that
 // delivers to the producer set registered under the same key.
 func (t *Tables) RegisterLocalSetRoute(ingressIfindex uint32, address, backendAddress net.IP, protocol uint8,

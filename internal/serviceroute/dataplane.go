@@ -146,10 +146,10 @@ type EBPFRouteProgrammer struct {
 	failedMutations        map[string]struct{}
 	generationIncomplete   bool
 	generationWasFinalized bool
-	// gateChecked records that this process has read the pinned policy gate.
 	// inheritedGate holds an open gate left by a previous process's finalized
 	// generation, kept open until this process finalizes or a mutation fails.
-	gateChecked   bool
+	// Only a finalizing router opens the gate, so an open gate on a map set
+	// this process has not finalized is always inherited.
 	inheritedGate bool
 
 	// These hooks keep map replacement and interface recreation tests
@@ -178,15 +178,10 @@ func (p *EBPFRouteProgrammer) Initialize() error {
 	if p.policyFinalized {
 		return nil
 	}
-	if !p.gateChecked {
-		enabled, err := p.tables.PolicyEnabled()
-		if err != nil {
-			return err
-		}
-		p.gateChecked = true
-		p.inheritedGate = enabled
-	}
-	if !p.inheritedGate {
+	// An inherited gate stays open only while this process rebuilds
+	// cleanly. A failure whose close did not take is retried here, before
+	// the failure state resets.
+	if !p.inheritedGate || p.syncFailures != 0 || len(p.pendingRollbacks) != 0 {
 		if err := p.closeGate(); err != nil {
 			return err
 		}
@@ -425,6 +420,17 @@ func (p *EBPFRouteProgrammer) ensureOpen() error {
 	p.pendingRollbacks = make(map[string][]appliedEntry)
 	p.failedMutations = make(map[string]struct{})
 	p.syncFailures = 0
+	if !p.policyFinalized {
+		// Read the gate of every map set this process opens before
+		// finalizing. A compatible datapath reload keeps the pinned gate, so
+		// a generation inherited before the reload stays inherited after it.
+		enabled, err := p.tables.PolicyEnabled()
+		if err != nil {
+			p.closeHandles()
+			return err
+		}
+		p.inheritedGate = enabled
+	}
 	if p.desiredIntents == nil {
 		p.desiredIntents = make(map[string][]RouteIntent)
 		return nil
@@ -495,9 +501,16 @@ func (p *EBPFRouteProgrammer) openMapSet(pinDir string) (*serviceroutemap.Tables
 	if err != nil {
 		return nil, nil, mapSetIDs{}, err
 	}
+	slots := mapSetSlots(tables)
+	if len(slots) != len(handles) {
+		for _, opened := range handles {
+			_ = opened.Close()
+		}
+		return nil, nil, mapSetIDs{}, fmt.Errorf("service route map set has %d handles, want %d", len(handles), len(slots))
+	}
 	var ids mapSetIDs
 	for index, handle := range handles {
-		ids[index], err = kernelMapID(handle)
+		ids[slots[index]], err = kernelMapID(handle)
 		if err != nil {
 			for _, opened := range handles {
 				_ = opened.Close()
@@ -506,6 +519,27 @@ func (p *EBPFRouteProgrammer) openMapSet(pinDir string) (*serviceroutemap.Tables
 		}
 	}
 	return tables, handles, ids, nil
+}
+
+// mapSetSlots maps each OpenPinned handle to its serviceRouteMapNames slot.
+// An absent optional map has no handle, so the handles after it would
+// otherwise land in its slot and read as a map set change on every check.
+func mapSetSlots(tables *serviceroutemap.Tables) []int {
+	slots := make([]int, 0, len(serviceRouteMapNames))
+	for index, name := range serviceRouteMapNames {
+		switch name {
+		case serviceroutemap.ServicePeerMapName:
+			if !tables.PeersAvailable() {
+				continue
+			}
+		case serviceroutemap.ServiceProducerSetMapName:
+			if !tables.ProducerSetsAvailable() {
+				continue
+			}
+		}
+		slots = append(slots, index)
+	}
+	return slots
 }
 
 func (p *EBPFRouteProgrammer) readMapIDs(pinDir string) (mapSetIDs, error) {
@@ -550,7 +584,8 @@ func (p *EBPFRouteProgrammer) closeHandles() {
 	p.tables = nil
 	p.mapIDs = mapSetIDs{}
 	p.mapIDsValid = false
-	// An inherited gate belongs to the map set it was read from.
+	// An inherited gate belongs to the map set it was read from; ensureOpen
+	// reads the next map set's gate.
 	p.inheritedGate = false
 }
 
