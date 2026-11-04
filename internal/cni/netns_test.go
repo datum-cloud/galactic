@@ -568,3 +568,32 @@ func TestBlackholeDefaultDoesNotSuppressVPCDefault(t *testing.T) {
 		t.Fatalf("VPC default route = %v, want via %s", gateway, testGateway)
 	}
 }
+
+// TestSameMetricBlackholeDefaultNamesConflict: the kernel refuses a second
+// default at the metric a blackhole default already holds, and ADD must say
+// which route is in the way rather than leave the guest without a default.
+func TestSameMetricBlackholeDefaultNamesConflict(t *testing.T) {
+	netnsPath, cleanup := createTestNetnsWithDummy(t)
+	defer cleanup()
+	netns, err := ns.GetNS(netnsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = netns.Close() }()
+	err = netns.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = handle.Close() }()
+		_, all, _ := net.ParseCIDR("::/0")
+		return handle.RouteAdd(&netlink.Route{Dst: all, Type: unix.RTN_BLACKHOLE})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = configureInterfaceInNetns(netnsPath, "test-dummy", testIPNet, testGateway, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "forwards nothing") {
+		t.Fatalf("configureInterfaceInNetns error = %v, want the named blackhole conflict", err)
+	}
+}
