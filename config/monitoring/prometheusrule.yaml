@@ -577,7 +577,9 @@ spec:
               runtime is not running, or galactic-router cannot build its desired configuration. The condition's
               reason and message, and the ConfigApplied condition, say which.
         - alert: GalacticServiceRouteProgrammingFailing
-          expr: sum without (operation, result) (increase(galactic_service_route_route_operations_total{job="galactic-router",result="error"}[10m])) > 0
+          expr: >-
+            sum without (operation, result) (increase(galactic_service_route_route_operations_total{job="galactic-router",result="error"}[10m])) > 0
+            or galactic_service_route_unresolved_next_hops{job="galactic-router"} > 0
           for: 15m
           labels:
             severity: warning
@@ -587,9 +589,12 @@ spec:
             summary: "Private service routing on {{ $labels.node }} keeps failing"
             runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticservicerouteprogrammingfailing"
             description: >-
-              Private service routes have repeatedly failed to apply or remove on {{ $labels.node }}.
+              Private service routes on {{ $labels.node }} have repeatedly failed to apply or remove, or some
+              have no next hop for their consumer attachment and forward to the destination address instead.
               Consumers can lose access even when the router Pod is ready and policies are accepted.
-              Check the router's service policy errors, attachment host interfaces, and node programming acknowledgments.
+              Check the router's service policy errors, its "no consumer next hop" log lines and
+              galactic_service_route_unresolved_next_hops, attachment host interfaces and PodSubnet address
+              families, and node programming acknowledgments.
         - alert: GalacticRouterMetricsDown
           expr: up{job=~"galactic-router|galactic-router-rr"} == 0
           for: 5m

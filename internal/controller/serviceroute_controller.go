@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -263,6 +264,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 	logger.Info("compiled service eBPF policy", "serviceEndpoint", endpoint.Name, "attachments", len(intents))
+	logUnresolvedNextHops(logger, endpoint.Name, intents)
 	if err := r.replacePolicyLocked(req.NamespacedName, intents); err != nil {
 		resultLabel = reconcileResultError
 		logger.Error(err, "program service eBPF policy", "serviceEndpoint", endpoint.Name)
@@ -806,10 +808,28 @@ func (r *ServiceRoutePolicyReconciler) removePolicyLocked(key types.NamespacedNa
 	return nil
 }
 
+// logUnresolvedNextHops names each path that will forward to the destination
+// address for lack of a consumer next hop; the unresolved-next-hops gauge
+// counts them.
+func logUnresolvedNextHops(logger logr.Logger, endpoint string, intents []serviceroute.RouteIntent) {
+	for _, intent := range intents {
+		if intent.UnresolvedNextHop() {
+			logger.Info("service path has no consumer next hop and forwards to the destination address",
+				"serviceEndpoint", endpoint, "attachment", intent.Attachment.String(), "service", intent.Service.String())
+		}
+	}
+}
+
 func (r *ServiceRoutePolicyReconciler) updateProgrammedGauge() {
-	count := 0
+	count, unresolved := 0, 0
 	for _, intents := range r.Applied {
 		count += len(intents)
+		for _, intent := range intents {
+			if intent.UnresolvedNextHop() {
+				unresolved++
+			}
+		}
 	}
 	r.Metrics.SetProgrammedRoutes(count)
+	r.Metrics.SetUnresolvedNextHops(unresolved)
 }

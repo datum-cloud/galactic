@@ -57,6 +57,15 @@ type RouteIntent struct {
 	Producers []ProducerTarget
 }
 
+// UnresolvedNextHop reports whether the intent delivers to a consumer
+// attachment but has no next hop for it, because the attachment's PodSubnet
+// is missing or of the other address family. Such a path forwards to the
+// destination address instead, which leaves IPv4 services and attachments
+// with several subnets unreachable.
+func (intent RouteIntent) UnresolvedNextHop() bool {
+	return intent.Kind != RouteIntentRemoteProducer && intent.ConsumerNextHop == nil
+}
+
 // IntentSlot identifies one intent among a node's intents for a policy. A node
 // holds at most one intent for a consumer's own half, but may hold several
 // producer halves for it, one per producer that accepts the consumer.
