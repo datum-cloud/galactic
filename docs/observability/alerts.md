@@ -42,6 +42,8 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticRouterPeerFlapping                | 3+ `galactic_router_peer_session_drops_total` in 15m                        | 0     | warning    |
 | GalacticRouterNotReady                    | `galactic_router_ready == 0`                                                | 10m   | warning    |
 | GalacticRouterMetricsDown                 | `galactic-router` or `galactic-router-rr` scrape down                       | 5m    | warning    |
+| GalacticServiceRouteProgrammingFailing    | service route apply or remove errors in every 10-minute window              | 15m   | warning    |
+| GalacticServiceRouteNextHopUnresolved     | `galactic_service_route_unresolved_next_hops > 0`                           | 15m   | warning    |
 | GalacticNatSessionTableEvictingLive       | table over 90% full, oldest row under 7440 s                                | 15m   | warning    |
 | GalacticNatPortExhausted                  | `*_pat_exhausted` drops in every 10-minute window                           | 15m   | warning    |
 | GalacticNatUplinkRxQueueStalled           | one uplink rx queue delivers nothing while discarding                       | 10m   | critical   |

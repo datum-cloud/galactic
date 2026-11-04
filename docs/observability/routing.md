@@ -104,8 +104,8 @@ missing or of the other address family from the service, such as an IPv4
 service reached through an attachment whose `PodSubnet` is IPv6. It then
 forwards to the destination address, which IPv4 services and attachments with
 several subnets cannot use. The router logs each such path with its
-attachment, and `GalacticServiceRouteProgrammingFailing` fires while any
-persists.
+attachment, and `GalacticServiceRouteNextHopUnresolved` fires while any
+persists for 15 minutes.
 
 ```promql
 sum by (node, operation) (rate(galactic_service_route_route_operations_total{result="error"}[10m])) > 0
