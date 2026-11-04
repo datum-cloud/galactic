@@ -11,8 +11,10 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,6 +24,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -194,8 +197,9 @@ func DefaultPolicy(ns string) *galacticv1alpha1.TrafficPolicy {
 }
 
 // BindingReconciler resolves each TrafficPolicyBinding's references and
-// reports them in status.ingress and status.egress. It applies only those
-// fields, so the per-node entries galactic-router writes are left alone.
+// reports them in status.ingress and status.egress, and derives the Installed
+// and Enforcing conditions from the per-node entries galactic-router writes.
+// It applies only its own fields, so those entries are left alone.
 type BindingReconciler struct {
 	Client client.Client
 }
@@ -231,9 +235,26 @@ func (r *BindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	})
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("trafficpolicybinding").
-		For(&galacticv1alpha1.TrafficPolicyBinding{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&galacticv1alpha1.TrafficPolicyBinding{}, builder.WithPredicates(predicate.Or(
+			predicate.GenerationChangedPredicate{}, nodesChanged))).
 		Watches(&galacticv1alpha1.TrafficPolicy{}, referencing).
+		// A binding's interface moving to another node changes which node
+		// entry its readiness reads.
+		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(
+			func(_ context.Context, o client.Object) []reconcile.Request {
+				return []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(o)}}
+			}), builder.WithPredicates(attachmentNodeChanged)).
 		Complete(r)
+}
+
+// attachmentNodeChanged admits a VPCAttachment whose node changed, or that
+// appeared or went away.
+var attachmentNodeChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldA, ok1 := e.ObjectOld.(*cloudv1alpha1.VPCAttachment)
+		newA, ok2 := e.ObjectNew.(*cloudv1alpha1.VPCAttachment)
+		return ok1 && ok2 && oldA.Status.Node != newA.Status.Node
+	},
 }
 
 // Reconcile implements reconcile.Reconciler.
@@ -252,6 +273,14 @@ func (r *BindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	keepTransitionTimes(b.Status.Ingress, &ingress)
 	keepTransitionTimes(b.Status.Egress, &egress)
+	// The interface's node decides readiness; a missing attachment has none.
+	var att cloudv1alpha1.VPCAttachment
+	if err := r.Client.Get(ctx, req.NamespacedName, &att); client.IgnoreNotFound(err) != nil {
+		return ctrl.Result{}, err
+	}
+	installed, enforcing, next := Readiness(&b, att.Status.Node, time.Now())
+	conditions := []metav1.Condition{installed, enforcing}
+	keepConditionTimes(b.Status.Conditions, conditions)
 
 	apply := map[string]any{
 		"apiVersion": galacticv1alpha1.GroupVersion.String(),
@@ -261,6 +290,7 @@ func (r *BindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			"observedGeneration": b.Generation,
 			"ingress":            ingress,
 			"egress":             egress,
+			"conditions":         conditions,
 		},
 	}
 	body, err := json.Marshal(apply)
@@ -271,7 +301,39 @@ func (r *BindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		client.FieldOwner(FieldOwner), client.ForceOwnership); err != nil {
 		return ctrl.Result{}, fmt.Errorf("apply TrafficPolicyBinding %s status: %w", req.NamespacedName, err)
 	}
+	if next > 0 {
+		// No event marks a node going stale, so look again just after one
+		// would.
+		return ctrl.Result{RequeueAfter: next + time.Second}, nil
+	}
 	return ctrl.Result{}, nil
+}
+
+// nodesChanged admits a binding update whose status.nodes changed, since a
+// node's entry moves Installed and Enforcing without bumping the generation.
+var nodesChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldB, ok1 := e.ObjectOld.(*galacticv1alpha1.TrafficPolicyBinding)
+		newB, ok2 := e.ObjectNew.(*galacticv1alpha1.TrafficPolicyBinding)
+		return ok1 && ok2 && !equality.Semantic.DeepEqual(oldB.Status.Nodes, newB.Status.Nodes)
+	},
+	CreateFunc:  func(event.CreateEvent) bool { return false },
+	DeleteFunc:  func(event.DeleteEvent) bool { return false },
+	GenericFunc: func(event.GenericEvent) bool { return false },
+}
+
+// keepConditionTimes carries over each condition's transition time from old
+// when its status did not change.
+func keepConditionTimes(old, cur []metav1.Condition) {
+	now := metav1.Now()
+	for i := range cur {
+		c := &cur[i]
+		if prev := meta.FindStatusCondition(old, c.Type); prev != nil && prev.Status == c.Status {
+			c.LastTransitionTime = prev.LastTransitionTime
+		} else {
+			c.LastTransitionTime = now
+		}
+	}
 }
 
 // resolve reads the referenced policy from the informer cache, whose

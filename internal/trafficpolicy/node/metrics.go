@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.miloapis.com/instrumentation/labels"
 
+	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 )
 
@@ -20,6 +21,7 @@ const (
 	labelDirection  = "direction"
 	labelAction     = "action"
 	labelReason     = "reason"
+	labelMode       = "mode"
 )
 
 var (
@@ -52,6 +54,11 @@ var (
 	readErrorsDesc = prometheus.NewDesc("galactic_cni_traffic_policy_counter_read_errors",
 		"Counter rows the last scrape could not read and left out, rather than reporting zero.",
 		nil, nil)
+	modeDesc = prometheus.NewDesc("galactic_cni_traffic_policy_mode",
+		"The node's effective interface traffic policy mode: 1 for the current mode, 0 for the others. Only "+
+			"enforce drops what policy denies; unsupported is audit or enforce on a kernel that failed the "+
+			"preflight, and unknown means the mode could not be read.",
+		[]string{labelMode}, nil)
 )
 
 var directionNames = [2]string{"ingress", "egress"}
@@ -59,7 +66,7 @@ var directionNames = [2]string{"ingress", "egress"}
 // Describe implements prometheus.Collector.
 func (r *Reconciler) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{ruleHitsDesc, ruleBytesDesc, fallbackPacketsDesc, fallbackBytesDesc,
-		unattributedDesc, accountingErrorsDesc, readErrorsDesc} {
+		unattributedDesc, accountingErrorsDesc, readErrorsDesc, modeDesc} {
 		ch <- d
 	}
 }
@@ -75,8 +82,10 @@ func (r *Reconciler) Collect(ch chan<- prometheus.Metric) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.maps == nil {
+		collectMode(ch, galacticv1alpha1.ModeUnknown)
 		return
 	}
+	collectMode(ch, EffectiveMode(r.maps.GetState()))
 	readErrors := 0
 	for key, a := range r.state {
 		if cur, ok := r.ifaces[a.attachment]; !ok || cur.ifindex != key.ifindex {
@@ -129,6 +138,19 @@ func (r *Reconciler) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 	ch <- prometheus.MustNewConstMetric(readErrorsDesc, prometheus.GaugeValue, float64(readErrors))
+}
+
+// collectMode exports one galactic_cni_traffic_policy_mode series per mode,
+// 1 for current and 0 for the rest, so a query never mistakes a missing
+// series for a mode.
+func collectMode(ch chan<- prometheus.Metric, current galacticv1alpha1.EnforcementMode) {
+	for _, m := range modeNames {
+		v := 0.0
+		if m.mode == current {
+			v = 1
+		}
+		ch <- prometheus.MustNewConstMetric(modeDesc, prometheus.GaugeValue, v, m.name)
+	}
 }
 
 func actionName(allow bool) string {

@@ -701,6 +701,28 @@ _Appears in:_
 | `uid` _string_ | UID is the VPC's metadata.uid. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
 
 
+#### EnforcementMode
+
+_Underlying type:_ _string_
+
+EnforcementMode is a node's effective interface traffic policy mode, as
+galactic-router reads it from the datapath galactic-cni configured.
+
+_Validation:_
+- Enum: [Off Audit Enforce Unsupported Unknown]
+
+_Appears in:_
+- [NodeBindingStatus](#nodebindingstatus)
+
+| Field | Description |
+| --- | --- |
+| `Off` | ModeOff means the node decides nothing: installed policies are inert.<br /> |
+| `Audit` | ModeAudit means the node decides and counts every packet but forwards<br />as if every decision allowed it.<br /> |
+| `Enforce` | ModeEnforce means the node drops what policy denies.<br /> |
+| `Unsupported` | ModeUnsupported means the node is configured to audit or enforce, but<br />its kernel failed the traffic policy preflight, so it refuses new<br />interfaces and protects none.<br /> |
+| `Unknown` | ModeUnknown means galactic-router could not read the node's mode.<br /> |
+
+
 #### ForwardingPath
 
 _Underlying type:_ _string_
@@ -793,6 +815,8 @@ _Appears in:_
 | `node` _string_ | Node is the node's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
 | `ingress` _[AppliedPolicy](#appliedpolicy)_ | Ingress is the node's installed ingress policy. |  |  |
 | `egress` _[AppliedPolicy](#appliedpolicy)_ | Egress is the node's installed egress policy. |  |  |
+| `mode` _[EnforcementMode](#enforcementmode)_ | Mode is the node's effective enforcement mode when it last reported.<br />An Applied policy protects the interface only while Mode is Enforce.<br />Absent from a node that predates the field, which reads as Unknown. |  | Enum: [Off Audit Enforce Unsupported Unknown] <br /> |
+| `heartbeatTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | HeartbeatTime is when the node last confirmed this entry. The node<br />refreshes it at least every 10 minutes while it holds the interface,<br />so an older entry describes a node that stopped reporting. |  |  |
 
 
 #### PolicyIdentity
@@ -971,6 +995,7 @@ _Appears in:_
 | `observedGeneration` _integer_ | ObservedGeneration is the generation Ingress and Egress describe. |  |  |
 | `ingress` _[DirectionStatus](#directionstatus)_ | Ingress is the resolved ingress reference. |  |  |
 | `egress` _[DirectionStatus](#directionstatus)_ | Egress is the resolved egress reference. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Installed and Enforcing, which galactic-controller<br />derives from Nodes. |  | MaxItems: 8 <br /> |
 | `nodes` _[NodeBindingStatus](#nodebindingstatus) array_ | Nodes lists what each node with the interface enforces. |  | MaxItems: 64 <br /> |
 
 

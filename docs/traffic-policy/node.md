@@ -109,7 +109,9 @@ gone, being deleted, replaced or granting another provider; the link then
 denies everything as `policy_unavailable`. A change to the service or to a
 referenced policy is republished to the attachments on the node.
 
-galactic-router writes no status for an edge attachment. galactic-controller
+galactic-router writes no status for an edge attachment, so
+`galactic_cni_traffic_policy_mode` (see [Metrics](#metrics)) is the only
+record of whether its node enforces what it installed. galactic-controller
 reports whether the references resolve in the service's
 `TrafficPolicyResolved` condition, with reason `Default` while both
 directions take the built-in default and its attachments carry nothing, and
@@ -135,11 +137,63 @@ status:
         policy: {name: web, uid: ..., generation: 7}
         observedGeneration: 3
         lastTransitionTime: "2026-10-15T12:00:00Z"
+      mode: Enforce
+      heartbeatTime: "2026-10-15T12:05:00Z"
+  conditions:
+    - type: Installed
+      status: "True"
+      reason: Installed
+    - type: Enforcing
+      status: "True"
+      reason: Enforcing
 ```
 
 `Pending` means the interface's datapath state is not ready yet, or a
 reference resolves to nothing. `Failed` carries the reason in `message`. The
 entry disappears when the attachment leaves the node.
+
+`Applied` means a snapshot is installed, not that traffic is protected.
+`mode` is the node's effective mode, which galactic-router reads from the
+datapath galactic-cni configured on every reconcile, so a galactic-cni
+restart into another mode reaches status within the 5 minute resync without
+a policy edit:
+
+| `mode`        | Meaning                                                                                             |
+| ------------- | --------------------------------------------------------------------------------------------------- |
+| `Off`         | Installed policies decide nothing.                                                                  |
+| `Audit`       | Every packet is decided and counted, but forwarded as before.                                       |
+| `Enforce`     | What policy denies is dropped.                                                                      |
+| `Unsupported` | Audit or enforce is configured, but the kernel failed the preflight; the node protects nothing.     |
+| `Unknown`     | galactic-router could not read the mode, or the entry was written by a router that predates `mode`. |
+
+`heartbeatTime` is refreshed at least every 10 minutes while the node holds
+the interface, so the entry is rewritten at most once per heartbeat when
+nothing else changes. An entry whose heartbeat is 25 minutes old or more
+describes a node that stopped reporting.
+
+galactic-controller derives two conditions from `status.nodes`, alongside
+`Resolved` on each direction:
+
+- `Installed` is `True` when the node the interface is on, its
+  VPCAttachment's `status.node`, reports both directions `Applied` at the
+  binding's current generation, with a current heartbeat. Otherwise it is
+  `False` with reason `NoNodes` (the interface is on no node), `Failed`,
+  `Stale` or `Pending` (including no report yet), naming the node.
+- `Enforcing` is `True` when the binding is `Installed` and that node
+  reports `mode: Enforce`. Only then is the interface protected. Otherwise
+  it is `False` with `Installed`'s reason, or, when installed, with reason
+  `Unsupported`, `Off`, `Audit` or `Unknown`.
+
+Entries other nodes left behind, such as one from a node lost while the
+interface moved away, are ignored, and the controller reconciles the
+binding again when its attachment changes node.
+
+Neither condition is ever `True` from an `Applied` entry alone, and a node
+that stops reporting turns both `False` once its heartbeat goes stale: the
+controller requeues the binding for that moment rather than waiting for an
+event. It keeps no state of its own, so a restarted controller derives the
+same conditions. `kubectl get trafficpolicybindings` shows `Enforcing` as a
+column.
 
 ## Metrics
 
@@ -158,6 +212,12 @@ limit. After a restart, series return once galactic-router reconciles each
 interface and adopts its snapshot, with their counts intact. A counter row
 the collector cannot read is left out, never reported as zero, and counted
 in `galactic_cni_traffic_policy_counter_read_errors`.
+
+Audit and enforce count identically, so the counters cannot tell them apart.
+`galactic_cni_traffic_policy_mode{mode}` reports the node's effective mode:
+one series each for `off`, `audit`, `enforce`, `unsupported` and `unknown`,
+1 for the current mode and 0 for the rest. It reads `unknown` while
+galactic-router has not opened the datapath's maps yet.
 
 ## Diagnostics
 
