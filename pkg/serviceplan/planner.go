@@ -463,19 +463,18 @@ func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv
 		if len(local) != 0 && (!eligibleRemote || !localUnusable(local, health)) {
 			return local, nil
 		}
-		// With local producers, none is eligible while some remote producer
-		// is, so spreadRemoteProducer, which prefers an eligible producer, picks
-		// one on another node.
 		return nil, spreadRemoteProducer(consumer, producers, health, pairing)
 	}
 	return nil, chooseProducer(endpoint.Spec.DeliveryMode, consumer.Status.Node, producers)
 }
 
 // spreadRemoteProducer returns the remote producer of a Spread endpoint's
-// consumer, or nil when there is none. It picks among the producers whose node
-// currently reports them Healthy or Unknown, or has never reported them;
-// failing that, among those whose report expired, since their node may be
-// down; failing that, among all of them. SpreadPairingFirst picks the first by
+// consumer, or nil when there is none. It considers only producers on other
+// nodes than the consumer's: one on its own node is never a remote producer,
+// even while the consumer leaves its node's producers for want of a usable
+// one. It picks among those whose node currently reports them Healthy or
+// Unknown, or has never reported them; failing that, among those whose report
+// expired, since their node may be down; failing that, among all of them. SpreadPairingFirst picks the first by
 // namespace and name. SpreadPairingRendezvous picks by rendezvous hashing of
 // the consumer's UID with each candidate's UID (see rendezvousKey), so a
 // producer joining or leaving a candidate set moves only the consumers it
@@ -487,6 +486,13 @@ func spreadRemoteProducer(consumer *cloudv1alpha1.VPCAttachment, producers []*cl
 	if pairing == SpreadPairingRendezvous {
 		pick = rendezvousProducer
 	}
+	remote := make([]*cloudv1alpha1.VPCAttachment, 0, len(producers))
+	for _, producer := range producers {
+		if producer.Status.Node != consumer.Status.Node {
+			remote = append(remote, producer)
+		}
+	}
+	producers = remote
 	for _, include := range []func(*cloudv1alpha1.VPCAttachment) bool{
 		func(p *cloudv1alpha1.VPCAttachment) bool { return health[p.UID].eligible() },
 		func(p *cloudv1alpha1.VPCAttachment) bool { return health[p.UID] == producerReportExpired },

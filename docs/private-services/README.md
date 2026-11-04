@@ -130,8 +130,10 @@ producers on its node include an `Unhealthy` one and none that is `Healthy` or
 whose entry expired, so every one of them failed or has no result yet, as
 when a replacement starts while the producer it replaces fails. It moves only
 while another node currently reports a producer `Healthy` or `Unknown`, or has
-no entry for one, and the remote producer is picked exactly as for a node with
-no producer (below). It returns once a producer on its node is `Healthy`.
+no entry for one. The remote producer is picked among the producers on other
+nodes exactly as for a node with no producer (below), so a producer on the
+consumer's own node, such as a replacement with no result yet, is never
+picked. It returns once a producer on its node is `Healthy`.
 Every node decides this from the same reports, so the consumer's node and the
 remote producer's node agree on the path, apart from the moment a report
 reaches one before the other (below). Moving between the local set and the

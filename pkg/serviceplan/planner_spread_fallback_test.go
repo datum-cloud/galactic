@@ -304,3 +304,43 @@ func TestCompileSpreadHoldsNewFlowsFromUncheckedProducers(t *testing.T) {
 		t.Fatalf("producers with an expired report = %s, want %s", got, want)
 	}
 }
+
+// A consumer that leaves its node's producers never lands on one of them: the
+// remote pick and the producer halves skip the consumer's own node even when an
+// unchecked local replacement would otherwise rank first.
+func TestCompileSpreadFallbackSkipsLocalReplacement(t *testing.T) {
+	topology := newUnhealthyLocalTopology(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+	// The replacement sorts before the remote producer, so the first pairing
+	// would rank it first, and its UID is one rendezvous hashing ranks above
+	// the remote producer's for this consumer.
+	eligible := func(*cloudv1alpha1.VPCAttachment) bool { return true }
+	var replacement *cloudv1alpha1.VPCAttachment
+	for i := range 64 {
+		candidate := readyAttachment(spreadProducerNamespace, "a-new-producer", fmt.Sprintf("replacement-%02d", i),
+			testNodeName, "producer-new", testLabels(testProducerLabel, "yes"))
+		candidates := []*cloudv1alpha1.VPCAttachment{candidate, topology.remote}
+		if rendezvousProducer(topology.consumer, candidates, eligible) == candidate &&
+			firstProducer(topology.consumer, candidates, eligible) == candidate {
+			replacement = candidate
+			break
+		}
+	}
+	if replacement == nil {
+		t.Fatal("found no replacement UID that rendezvous hashing ranks above the remote producer")
+	}
+	topology.first = replacement
+	topology.attachments = []*cloudv1alpha1.VPCAttachment{
+		topology.consumer, replacement, topology.last, topology.remote,
+	}
+	// The producer it replaces fails while the replacement has no result yet.
+	reportHealth(topology.endpoint, topology.last, networkv1alpha1.BackendHealthUnhealthy)
+	reportHealth(topology.endpoint, topology.remote, networkv1alpha1.BackendHealthHealthy)
+	topology.requireRemote(t)
+
+	reportHealth(topology.endpoint, replacement, networkv1alpha1.BackendHealthUnknown)
+	topology.requireRemote(t)
+
+	// Once the replacement passes its check, the consumer returns to it.
+	topology.endpoint.Status.Producers[2].State = networkv1alpha1.BackendHealthHealthy
+	topology.requireLocal(t, "producer-new,producer-z(draining)")
+}
