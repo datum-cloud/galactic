@@ -14,6 +14,12 @@ import (
 	api "go.datum.net/galactic/api/network/v1alpha1"
 )
 
+// The producer's old and new interfaces, as spreadTestProgrammer names them.
+const (
+	oldProducerDevice = "producer-a"
+	newProducerDevice = "producer-b"
+)
+
 // remoteProducerIntent is the producer node's half of a remote path, for the
 // producer on device.
 func remoteProducerIntent(device string) RouteIntent {
@@ -45,12 +51,12 @@ func onlyTarget(t *testing.T, targets *persistedPolicyTable) (uint32, bool) {
 // While a producer's interface is replaced, its old and new interfaces hold
 // the same grant. Removing either leaves the target on the other.
 func TestRemoteTargetFollowsTheRemainingInterface(t *testing.T) {
-	for _, removed := range []string{"producer-a", "producer-b"} {
+	for _, removed := range []string{oldProducerDevice, newProducerDevice} {
 		t.Run("remove "+removed, func(t *testing.T) {
 			programmer, _, _ := spreadTestProgrammer()
 			targets := &persistedPolicyTable{}
 			programmer.tables.WithRemoteTargets(targets)
-			for _, device := range []string{"producer-a", "producer-b"} {
+			for _, device := range []string{oldProducerDevice, newProducerDevice} {
 				if err := programmer.Apply(remoteProducerIntent(device)); err != nil {
 					t.Fatalf("Apply(%s): %v", device, err)
 				}
@@ -59,15 +65,15 @@ func TestRemoteTargetFollowsTheRemainingInterface(t *testing.T) {
 				t.Fatalf("Remove(%s): %v", removed, err)
 			}
 			want := uint32(20)
-			if removed == "producer-a" {
+			if removed == oldProducerDevice {
 				want = 21
 			}
 			if got, ok := onlyTarget(t, targets); !ok || got != want {
 				t.Fatalf("target = %d, %t; want %d", got, ok, want)
 			}
-			remaining := "producer-a"
-			if removed == "producer-a" {
-				remaining = "producer-b"
+			remaining := oldProducerDevice
+			if removed == oldProducerDevice {
+				remaining = newProducerDevice
 			}
 			if err := programmer.Remove(remoteProducerIntent(remaining)); err != nil {
 				t.Fatalf("Remove(%s): %v", remaining, err)

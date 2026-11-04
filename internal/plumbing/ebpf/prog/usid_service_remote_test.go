@@ -101,13 +101,15 @@ func (lab *redirectLab) sendServiceRequest(t *testing.T, label string) []byte {
 	binary.BigEndian.PutUint16(udp[4:6], udpLen)
 	udp = append(udp, payload...)
 
-	inner := []byte{0x60, 0x00, 0x00, 0x00, byte(udpLen >> 8), byte(udpLen), ipProtoUDP, 64}
+	inner := make([]byte, 0, ip6HeaderLen+len(udp))
+	inner = append(inner, 0x60, 0x00, 0x00, 0x00, byte(udpLen>>8), byte(udpLen), ipProtoUDP, 64)
 	inner = append(inner, remoteServiceConsumer.AsSlice()...)
 	inner = append(inner, remoteServiceAddr.AsSlice()...)
 	inner = append(inner, udp...)
 
 	// version, inner next header, direction (request), reserved
-	tunnel := []byte{1, 41, 1, 0}
+	tunnel := make([]byte, 0, 4+len(remoteServiceGrant)+16)
+	tunnel = append(tunnel, 1, 41, 1, 0)
 	tunnel = append(tunnel, remoteServiceGrant[:]...)
 	tunnel = append(tunnel, remoteServiceFrontend.AsSlice()...)
 
