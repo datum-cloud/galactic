@@ -142,9 +142,7 @@ A replacement pod that keeps its attachment does not inherit its predecessor's
 health result. The node reports the producer `Unknown` while its interface is
 missing and probes the recreated interface afresh, with no result. Until its
 node reports a result reached after the interface was recreated, the
-replacement takes no new flows while another producer in the set does. A
-selection that picks a producer whose interface was just removed or recreated
-moves on to the next eligible producer instead of dropping the request.
+replacement takes no new flows while another producer in the set does.
 
 With `PreferNodeLocal`, a consumer moves to a remote producer when the
 producers on its node include an `Unhealthy` one and none that is `Healthy` or
