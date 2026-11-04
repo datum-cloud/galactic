@@ -285,6 +285,50 @@ func TestUsidServiceEgress_LocalSetFailsClosed(t *testing.T) {
 	}
 }
 
+// A new request skips an eligible producer whose interface was removed or
+// recreated, and goes to the other eligible producer.
+func TestUsidServiceEgress_LocalSetSkipsStaleProducer(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	const udp, tcp = uint8(17), uint8(6)
+	for _, stale := range []uint64{0, spreadOtherToken + 1} {
+		setUpLocalSet(t, objs, udp, spreadLocalProducer, spreadRemoteProducer)
+		setUpLocalSet(t, objs, tcp, spreadLocalProducer, spreadRemoteProducer)
+		if stale == 0 {
+			if err := objs.AttachmentIdentityTable.Delete(spreadRemoteProducer); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := objs.AttachmentIdentityTable.Put(spreadRemoteProducer, stale); err != nil {
+			t.Fatal(err)
+		}
+		clearReverse(t, objs)
+		for range 64 {
+			sendRequest(t, objs, udp, spreadClientPort)
+		}
+		if reachedProducer(t, objs, spreadRemoteProducer) {
+			t.Fatalf("identity %d: a UDP request reached the producer whose interface is gone", stale)
+		}
+		if !reachedProducer(t, objs, spreadLocalProducer) {
+			t.Fatalf("identity %d: no UDP request reached the remaining producer", stale)
+		}
+		for port := uint16(45000); port < 45064; port++ {
+			sendRequest(t, objs, tcp, port)
+			var pin UsidServiceFlowValue
+			if err := objs.ServiceFlowTable.Lookup(UsidServiceReverseKey{
+				IngressIfindex: 1, Family: egressRouteFamilyINET6, Protocol: tcp,
+				SourcePort: bits.ReverseBytes16(port), DestPort: bits.ReverseBytes16(spreadServicePort),
+				SourceAddr: spreadConsumer.As16(), DestAddr: spreadService.As16(),
+			}, &pin); err != nil {
+				t.Fatalf("identity %d: flow pin for port %d: %v", stale, port, err)
+			}
+			if pin.ProducerIfindex != spreadLocalProducer {
+				t.Fatalf("identity %d: connection from port %d pinned to %d, want %d",
+					stale, port, pin.ProducerIfindex, spreadLocalProducer)
+			}
+		}
+	}
+}
+
 // A TCP connection whose flow pin is lost keeps its producer while that
 // producer stays in the set, and a producer joining takes only the pin-less
 // connections it gains.
