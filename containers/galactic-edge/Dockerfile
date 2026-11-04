@@ -21,6 +21,7 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 
 # galactic-edge registers attachment host links in the uSID datapath's
 # pinned maps (internal/plumbing/ebpf/attachreg), which links against the

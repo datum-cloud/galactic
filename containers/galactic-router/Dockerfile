@@ -21,6 +21,7 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 
 # galactic-router transitively imports both internal/plumbing/ebpf/prog
 # (via usidmap) and, via the NetworkGateway/NetworkService reconcilers'

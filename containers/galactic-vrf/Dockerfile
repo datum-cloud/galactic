@@ -29,6 +29,7 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 
 # galactic-vrf reaches internal/plumbing/ebpf/prog transitively (via
 # internal/config -> usidmap/egressroutemap), and that package's bpf2go

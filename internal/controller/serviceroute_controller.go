@@ -37,6 +37,7 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/serviceroute"
+	"go.datum.net/galactic/pkg/serviceplan"
 )
 
 const reconcileResultError = "error"
@@ -54,9 +55,9 @@ type ServiceRoutePolicyReconciler struct {
 	Metrics         *serviceroute.Metrics
 	FrontendEnabled bool
 	// SpreadPairing chooses the remote producer this node's consumers of a
-	// Spread endpoint are sent to. Empty is serviceroute.SpreadPairingFirst.
+	// Spread endpoint are sent to. Empty is serviceplan.SpreadPairingFirst.
 	// Producer halves are installed under every pairing regardless.
-	SpreadPairing serviceroute.SpreadPairing
+	SpreadPairing serviceplan.SpreadPairing
 	Now           func() time.Time
 
 	// startupRetryWait waits between startup sync attempts and reports false
@@ -70,10 +71,10 @@ type ServiceRoutePolicyReconciler struct {
 // compile compiles policy for node with this router's options.
 func (r *ServiceRoutePolicyReconciler) compile(policy *networkv1alpha1.ServiceRoutePolicy,
 	endpoint *networkv1alpha1.ServiceEndpoint, attachments []*cloudv1alpha1.VPCAttachment, node string,
-	resolveSID serviceroute.SIDResolver, vpcIdentity string,
+	resolveSID serviceplan.SIDResolver, vpcIdentity string,
 ) ([]serviceroute.RouteIntent, error) {
-	return serviceroute.CompileWithOptions(policy, endpoint, attachments, node, resolveSID,
-		serviceroute.CompileOptions{ConsumerVPCIdentity: vpcIdentity, SpreadPairing: r.SpreadPairing})
+	return serviceplan.CompileWithOptions(policy, endpoint, attachments, node, resolveSID,
+		serviceplan.CompileOptions{ConsumerVPCIdentity: vpcIdentity, SpreadPairing: r.SpreadPairing})
 }
 
 const serviceRouteMapResyncInterval = 30 * time.Second
@@ -227,7 +228,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	intents, err := r.compile(policy, endpoint, all, r.NodeName, r.sidResolver(ctx), vpcIdentity)
 	if err != nil {
-		var dependencyErr *serviceroute.DependencyNotReadyError
+		var dependencyErr *serviceplan.DependencyNotReadyError
 		if errors.As(err, &dependencyErr) {
 			// Accepted describes the shared policy contract. SID readiness is a
 			// node-local dependency, so publishing Invalid here would race with
@@ -291,7 +292,7 @@ func serviceRouteRequeue(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *n
 	if len(intents) != 0 || policy.Spec.Frontend != nil {
 		requeue.RequeueAfter = serviceRouteMapResyncInterval
 	}
-	if left, ok := serviceroute.NextProducerReportExpiry(endpoint, now); ok &&
+	if left, ok := serviceplan.NextProducerReportExpiry(endpoint, now); ok &&
 		(requeue.RequeueAfter == 0 || left < requeue.RequeueAfter) {
 		requeue.RequeueAfter = left
 	}
@@ -588,7 +589,7 @@ func producerReportsOnlyRenewed(oldObj, newObj client.Object, now time.Time) boo
 	}
 	for _, list := range [][]networkv1alpha1.ServiceEndpointProducerStatus{oldEntries, newEntries} {
 		for i := range list {
-			if !serviceroute.ProducerReportCurrent(list[i], now) {
+			if !serviceplan.ProducerReportCurrent(list[i], now) {
 				return false
 			}
 			list[i].RenewTime = nil
@@ -602,7 +603,7 @@ func producerReportsOnlyRenewed(oldObj, newObj client.Object, now time.Time) boo
 }
 
 // withProducerReports returns endpoint with the producer entries of its
-// ServiceEndpointProducerReports, as serviceroute.WithProducerReports
+// ServiceEndpointProducerReports, as serviceplan.WithProducerReports
 // describes.
 func (r *ServiceRoutePolicyReconciler) withProducerReports(ctx context.Context,
 	endpoint *networkv1alpha1.ServiceEndpoint,
@@ -614,7 +615,7 @@ func (r *ServiceRoutePolicyReconciler) withProducerReports(ctx context.Context,
 	if err := r.List(ctx, reports, client.InNamespace(endpoint.Namespace)); err != nil {
 		return endpoint, fmt.Errorf("list ServiceEndpointProducerReports in %s: %w", endpoint.Namespace, err)
 	}
-	return serviceroute.WithProducerReports(endpoint, reports.Items), nil
+	return serviceplan.WithProducerReports(endpoint, reports.Items), nil
 }
 
 func (r *ServiceRoutePolicyReconciler) endpointPolicies(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -633,7 +634,7 @@ func (r *ServiceRoutePolicyReconciler) routingDependencyPolicies(ctx context.Con
 // BGPVRFInstance identities the CNI publish path used. It deliberately does not
 // resolve by address containment: a guest-managed attachment may advertise no
 // prefix, and tenant address spaces may overlap.
-func (r *ServiceRoutePolicyReconciler) sidResolver(ctx context.Context) serviceroute.SIDResolver {
+func (r *ServiceRoutePolicyReconciler) sidResolver(ctx context.Context) serviceplan.SIDResolver {
 	cache := make(map[string]net.IP)
 	return func(attachment *cloudv1alpha1.VPCAttachment) (net.IP, error) {
 		identity := attachment.Status.VPC + "|" + attachment.Status.Node

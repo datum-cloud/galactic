@@ -1,7 +1,7 @@
 // Copyright 2026 Datum Cloud, Inc.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package serviceroute
+package serviceplan
 
 import (
 	"errors"
@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -496,11 +495,5 @@ func TestUnresolvedNextHopIsReported(t *testing.T) {
 			t.Errorf("%s with next hop %v: UnresolvedNextHop = %t, want %t",
 				tt.intent.Kind, tt.intent.ConsumerNextHop, got, tt.want)
 		}
-	}
-
-	metrics := NewMetrics()
-	metrics.SetUnresolvedNextHops(2)
-	if got := testutil.ToFloat64(metrics.unresolved); got != 2 {
-		t.Fatalf("unresolved_next_hops = %v, want 2", got)
 	}
 }

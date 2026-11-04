@@ -1,8 +1,22 @@
 // Copyright 2026 Datum Cloud, Inc.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package serviceroute compiles service policy into node-local dataplane intents.
-package serviceroute
+// Package serviceplan decides how a ServiceRoutePolicy's consumers reach its
+// ServiceEndpoint's producers: which producer, or set of producers, serves each
+// consumer, and which nodes must program each half of that path. Galactic's
+// routers compile their node-local route intents with it, and ProgrammingPlan
+// gives other controllers the same answer, so a controller that waits for a
+// service path to be programmed waits for the same nodes the routers program.
+//
+// The plan for a Spread endpoint depends on producer health. Pass every
+// endpoint through WithProducerReports first, with the
+// ServiceEndpointProducerReports of the endpoint's namespace, so the plan reads
+// the same reports the routers do; it returns other endpoints unchanged.
+//
+// The route intents Compile returns are exported because the routers'
+// datapath consumes them. Controllers outside Galactic should depend only on
+// ProgrammingPlan and the producer report helpers.
+package serviceplan
 
 import (
 	"crypto/sha256"
@@ -24,15 +38,25 @@ import (
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
+// RouteIntentKind says which half of a service path a RouteIntent installs.
 type RouteIntentKind string
 
 const (
-	RouteIntentLocal          RouteIntentKind = "Local"
-	RouteIntentLocalSet       RouteIntentKind = "LocalSet"
+	// RouteIntentLocal sends a consumer to one producer on its own node.
+	RouteIntentLocal RouteIntentKind = "Local"
+	// RouteIntentLocalSet sends a consumer to the producer set on its own
+	// node.
+	RouteIntentLocalSet RouteIntentKind = "LocalSet"
+	// RouteIntentRemoteConsumer is the consumer's node's half of a path to a
+	// producer on another node.
 	RouteIntentRemoteConsumer RouteIntentKind = "RemoteConsumer"
+	// RouteIntentRemoteProducer is the producer's node's half of a path from
+	// a consumer on another node.
 	RouteIntentRemoteProducer RouteIntentKind = "RemoteProducer"
 )
 
+// ServiceGrantID identifies the grant that authorizes one remote
+// consumer-producer pair.
 type ServiceGrantID [16]byte
 
 // RouteIntent is one node's half of an attachment-scoped service path.
@@ -95,19 +119,7 @@ type ProducerTarget struct {
 	Draining bool
 }
 
-// ErrProducerSetsUnavailable is returned for a LocalSet intent while the
-// node's datapath predates LocalSet routes. Every other intent still applies.
-var ErrProducerSetsUnavailable = errors.New(
-	"node's eBPF datapath has no producer set map; LocalSet routes need a newer galactic-cni")
-
-type RouteProgrammer interface {
-	Initialize() error
-	Apply(RouteIntent) error
-	Cleanup(RouteIntent) error
-	Remove(RouteIntent) error
-	Finalize() error
-}
-
+// SIDResolver returns the SRv6 SID that reaches an attachment's VPC on its node.
 type SIDResolver func(*cloudv1alpha1.VPCAttachment) (net.IP, error)
 
 // DependencyNotReadyError reports a valid policy whose node-local routing

@@ -35,6 +35,7 @@ import (
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/healthprobe"
 	"go.datum.net/galactic/internal/serviceroute"
+	"go.datum.net/galactic/pkg/serviceplan"
 )
 
 // ServiceProducerHealthReconciler probes the producers on its node of every
@@ -104,7 +105,7 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 	for i := range list.Items {
 		attachments = append(attachments, &list.Items[i])
 	}
-	producers, err := serviceroute.Producers(endpoint, attachments)
+	producers, err := serviceplan.Producers(endpoint, attachments)
 	if err != nil {
 		// The policy controller reports an invalid endpoint; there is
 		// nothing to probe.

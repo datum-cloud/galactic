@@ -19,6 +19,13 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/serviceroutemap"
 )
 
+// Names of the attachments the Spread datapath tests program.
+const (
+	eligibilityNamespace    = "tenant"
+	spreadConsumerName      = "consumer"
+	spreadProducerNamespace = "service"
+)
+
 // spreadTestProgrammer returns a programmer over persisted fakes with a
 // producer set map, its route and producer set tables, and the interfaces
 // consumer0=10, producer-a=20, producer-b=21 and producer-c=22.
