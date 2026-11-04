@@ -79,6 +79,7 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticEdgeServicePolicyUnresolved       | an `EdgeService`'s `TrafficPolicyResolved` is False                         | 10m   | warning    |
 | GalacticEdgeScopeLost                     | `galactic_edge_foundation_scopes_lost > 0`                                  | 5m    | warning    |
 | GalacticEdgeCleanupFailing                | more than two cleanup failures in every 15-minute window                    | 15m   | warning    |
+| GalacticEdgeMTUExceedsUnderlay            | `--mtu` over a non-zero encapsulation limit, with or without attachments    | 10m   | warning    |
 | GalacticEdgeMetricsDown                   | `galactic-edge` or `galactic-controller` scrape down                        | 5m    | warning    |
 | GalacticInstanceAttachmentNotProgrammed   | a running instance's interface missing from its pod or not programmed       | 10m   | warning    |
 | GalacticInstanceAttachmentStateIncomplete | a `galactic-controller` replica cannot list the kinds it compares           | 10m   | warning    |

@@ -1405,6 +1405,24 @@ spec:
               galactic-edge on {{ $labels.node }} has failed more than twice in every 15-minute window for 15 minutes
               to release an attachment's host state or sweep expired gates. Deleted attachments stay held by their
               finalizer and their addresses stay allocated. The agent's log names the error.
+        # Checked on every node, so a bad --mtu shows before an attachment is
+        # refused for it. A limit galactic-cni has not set turns the check off.
+        - alert: GalacticEdgeMTUExceedsUnderlay
+          expr: >-
+            galactic_edge_foundation_mtu_bytes{job="galactic-edge"}
+              > (galactic_edge_foundation_encap_limit_bytes{job="galactic-edge"} > 0)
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "galactic-edge on {{ $labels.node }} has an attachment MTU over its underlay ceiling"
+            runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticedgemtuexceedsunderlay"
+            description: >-
+              galactic-edge on {{ $labels.node }} gives attachment links an MTU of {{ $value }}, more than the largest
+              packet the fabric underlay carries once encapsulated. It refuses every attachment on the node with
+              reason MTUExceedsUnderlay. galactic_edge_foundation_encap_limit_bytes gives the limit.
         - alert: GalacticEdgeMetricsDown
           expr: up{job=~"galactic-edge|galactic-controller"} == 0
           for: 5m

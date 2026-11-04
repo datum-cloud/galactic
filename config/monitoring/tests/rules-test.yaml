@@ -2675,6 +2675,71 @@ tests:
                 to release an attachment's host state or sweep expired gates. Deleted attachments stay held by their
                 finalizer and their addresses stay allocated. The agent's log names the error.
 
+  # An MTU over a set limit fires with no attachments; a limit galactic-cni
+  # has not set, or an MTU within the limit, does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_edge_foundation_mtu_bytes{job="galactic-edge",node="edge-1"}'
+        values: "1500x30"
+      - series: 'galactic_edge_foundation_encap_limit_bytes{job="galactic-edge",node="edge-1"}'
+        values: "1460x30"
+      - series: 'galactic_edge_foundation_mtu_bytes{job="galactic-edge",node="edge-2"}'
+        values: "1500x30"
+      - series: 'galactic_edge_foundation_encap_limit_bytes{job="galactic-edge",node="edge-2"}'
+        values: "0x30"
+      - series: 'galactic_edge_foundation_mtu_bytes{job="galactic-edge",node="edge-3"}'
+        values: "1400x30"
+      - series: 'galactic_edge_foundation_encap_limit_bytes{job="galactic-edge",node="edge-3"}'
+        values: "1460x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GalacticEdgeMTUExceedsUnderlay
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: GalacticEdgeMTUExceedsUnderlay
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-edge
+              node: edge-1
+            exp_annotations:
+              summary: "galactic-edge on edge-1 has an attachment MTU over its underlay ceiling"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticedgemtuexceedsunderlay"
+              description: >-
+                galactic-edge on edge-1 gives attachment links an MTU of 1500, more than the largest
+                packet the fabric underlay carries once encapsulated. It refuses every attachment on the node with
+                reason MTUExceedsUnderlay. galactic_edge_foundation_encap_limit_bytes gives the limit.
+
+  # A limit that falls under the MTU while the node runs fires.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_edge_foundation_mtu_bytes{job="galactic-edge",node="edge-1"}'
+        values: "1500x60"
+      - series: 'galactic_edge_foundation_encap_limit_bytes{job="galactic-edge",node="edge-1"}'
+        values: "0x10 1460x50"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticEdgeMTUExceedsUnderlay
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: GalacticEdgeMTUExceedsUnderlay
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-edge
+              node: edge-1
+            exp_annotations:
+              summary: "galactic-edge on edge-1 has an attachment MTU over its underlay ceiling"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticedgemtuexceedsunderlay"
+              description: >-
+                galactic-edge on edge-1 gives attachment links an MTU of 1500, more than the largest
+                packet the fabric underlay carries once encapsulated. It refuses every attachment on the node with
+                reason MTUExceedsUnderlay. galactic_edge_foundation_encap_limit_bytes gives the limit.
+
   # Either job's scrape down fires; other jobs do not.
   - interval: 30s
     input_series:
