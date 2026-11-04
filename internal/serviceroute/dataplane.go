@@ -163,12 +163,14 @@ type EBPFRouteProgrammer struct {
 	nowFn         func() time.Time
 }
 
-// producerIncarnation is one producer interface's current identity token, and
-// when producerSet first saw that token replace an earlier one. replacedAt is
-// zero for a token seen first, as after a router restart.
+// producerIncarnation is one producer interface's current identity token,
+// when producerSet last saw it, and when producerSet last saw the token it
+// replaced. predecessorSeen is zero for a token seen first, as after a router
+// restart.
 type producerIncarnation struct {
-	token      uint64
-	replacedAt time.Time
+	token           uint64
+	lastSeen        time.Time
+	predecessorSeen time.Time
 }
 
 // Initialize opens the pinned maps without deleting state left by the running
@@ -640,6 +642,7 @@ func (p *EBPFRouteProgrammer) rebuildDesired() error {
 }
 
 func (p *EBPFRouteProgrammer) repairDesired() error {
+	p.pruneProducerIncarnations()
 	expired := p.expiredDesiredKeys(time.Now())
 	needsRepair := p.generationIncomplete || len(expired) != 0
 	changed := make(map[string][][]appliedEntry)
@@ -1044,23 +1047,47 @@ func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []applie
 }
 
 // awaitingHealth records token as producer's interface identity and reports
-// whether producer's health decision predates the interface taking it. A
-// producer with no decision is never held, nor one whose token producerSet sees
-// first.
+// whether producer's health decision was made while the interface's
+// predecessor was still live. A producer with no decision is never held, nor
+// one whose interface producerSet has seen with no other token.
 func (p *EBPFRouteProgrammer) awaitingHealth(producer ProducerTarget, token uint64) bool {
 	if p.producerIncarnations == nil {
 		p.producerIncarnations = make(map[string]producerIncarnation)
 	}
+	now := p.now()
 	current, seen := p.producerIncarnations[producer.Device]
-	if !seen {
-		current = producerIncarnation{token: token}
-	} else if current.token != token {
-		current = producerIncarnation{token: token, replacedAt: p.now()}
+	if seen && current.token != token {
+		current.predecessorSeen = current.lastSeen
 	}
+	current.token, current.lastSeen = token, now
 	p.producerIncarnations[producer.Device] = current
-	// Decisions are published to the second.
-	return !current.replacedAt.IsZero() && !producer.HealthSince.IsZero() &&
-		producer.HealthSince.Before(current.replacedAt.Truncate(time.Second))
+	// The predecessor was still live when last seen, so a decision made
+	// before then is about it. Every decision about this interface is made
+	// after the predecessor went away, so the hold always lifts with the
+	// first one. Decisions are published to the second.
+	return !current.predecessorSeen.IsZero() && !producer.HealthSince.IsZero() &&
+		producer.HealthSince.Before(current.predecessorSeen.Truncate(time.Second))
+}
+
+// pruneProducerIncarnations forgets the interfaces no desired intent names as
+// a producer.
+func (p *EBPFRouteProgrammer) pruneProducerIncarnations() {
+	if len(p.producerIncarnations) == 0 {
+		return
+	}
+	wanted := make(map[string]bool, len(p.producerIncarnations))
+	for _, intents := range p.desiredIntents {
+		for _, intent := range intents {
+			for _, producer := range intent.Producers {
+				wanted[producer.Device] = true
+			}
+		}
+	}
+	for device := range p.producerIncarnations {
+		if !wanted[device] {
+			delete(p.producerIncarnations, device)
+		}
+	}
 }
 
 func (p *EBPFRouteProgrammer) now() time.Time {

@@ -23,20 +23,15 @@ func producerLinkWatch(changed func(name string)) manager.Runnable {
 		for ctx.Err() == nil {
 			updates := make(chan netlink.LinkUpdate, 64)
 			done := make(chan struct{})
-			failed := make(chan struct{}, 1)
+			// The subscription closes updates when it fails for good; the
+			// errors it reports here, it survives.
 			err := netlink.LinkSubscribeWithOptions(updates, done, netlink.LinkSubscribeOptions{
-				ErrorCallback: func(err error) {
-					log.Error(err, "interface watch failed; resubscribing")
-					select {
-					case failed <- struct{}{}:
-					default:
-					}
-				},
+				ErrorCallback: func(err error) { log.Error(err, "interface watch") },
 			})
 			if err != nil {
 				log.Error(err, "subscribe to interface changes")
 			} else {
-				watch(ctx, updates, failed, changed)
+				watch(ctx, updates, changed)
 			}
 			close(done)
 			select {
@@ -48,12 +43,10 @@ func producerLinkWatch(changed func(name string)) manager.Runnable {
 	})
 }
 
-func watch(ctx context.Context, updates <-chan netlink.LinkUpdate, failed <-chan struct{}, changed func(string)) {
+func watch(ctx context.Context, updates <-chan netlink.LinkUpdate, changed func(string)) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-failed:
 			return
 		case update, ok := <-updates:
 			if !ok {

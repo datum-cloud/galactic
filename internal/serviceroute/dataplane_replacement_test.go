@@ -286,3 +286,34 @@ func TestReplacementOfTheOnlyServingProducerIsNotHeld(t *testing.T) {
 		t.Fatalf("eligible = %v, want the replacement [23], since holding it serves nothing", eligible)
 	}
 }
+
+// A replacement first seen after its own decision arrived is not held: every
+// decision made since its predecessor was last seen is about it.
+func TestReplacementSeenAfterItsOwnDecisionIsNotHeld(t *testing.T) {
+	f := newReplacementFixture()
+	decided := time.Unix(1_700_000_000, 0)
+	now := decided.Add(time.Minute)
+	f.programmer.nowFn = func() time.Time { return now }
+	healthy := func(device string, since time.Time) ProducerTarget {
+		target := producer(device, false)
+		target.HealthSince = since
+		return target
+	}
+	if err := f.programmer.Apply(localSetIntent(healthy(producerADevice, decided),
+		healthy(producerBDevice, decided))); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pod is replaced and passes its own check before the programmer
+	// next looks.
+	f.links[producerADevice] = 23
+	fresh := now.Add(30 * time.Second)
+	now = now.Add(time.Minute)
+	if err := f.programmer.Apply(localSetIntent(healthy(producerADevice, fresh),
+		healthy(producerBDevice, decided))); err != nil {
+		t.Fatal(err)
+	}
+	if _, eligible := onlySet(t, f.set); !reflect.DeepEqual(eligible, []uint32{23, 21}) {
+		t.Fatalf("eligible = %v, want [23 21]", eligible)
+	}
+}
