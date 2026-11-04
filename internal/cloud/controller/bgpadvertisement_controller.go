@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -60,6 +61,10 @@ const (
 type BGPAdvertisementReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// APIReader reads uncached. A cached NotFound can trail a fast delete
+	// and recreate, so the reconciler confirms an advertisement is gone
+	// before clearing delivery status. Nil trusts the cache.
+	APIReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=bgpadvertisements;bgprouters,verbs=get;list;watch
@@ -68,10 +73,22 @@ type BGPAdvertisementReconciler struct {
 func (r *BGPAdvertisementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var advertisement bgpv1alpha1.BGPAdvertisement
 	if err := r.Get(ctx, req.NamespacedName, &advertisement); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, r.clearWithdrawnAdvertisement(ctx, req.NamespacedName)
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if r.APIReader != nil {
+			var live bgpv1alpha1.BGPAdvertisement
+			err := r.APIReader.Get(ctx, req.NamespacedName, &live)
+			if err == nil {
+				// Recreated faster than the cache saw it: its create event
+				// projects the status, so clearing now would only flap it.
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			if !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("confirm withdrawn advertisement %s: %w", req.NamespacedName, err)
+			}
+		}
+		return ctrl.Result{}, r.clearWithdrawnAdvertisement(ctx, req.NamespacedName)
 	}
 
 	vpc, attachmentID, ok := galactic.SplitAdvertisementName(advertisement.Name)
