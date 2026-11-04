@@ -26,7 +26,9 @@ objects behind a series with the Events and `kubectl` queries in
 | `galactic_edge_foundation_gates`                  | gauge   | node   | `state` (`open`, `expired`, `closed`)    | Gates on the node. `expired` passed its deadline before the agent closed it                             |
 | `galactic_edge_foundation_gate_drops_total`       | counter | node   | `check` (`ingress`, `egress`, `deliver`) | Packets dropped on an edge link because no open gate covered the address                                |
 | `galactic_edge_foundation_scopes_lost`            | gauge   | node   | none                                     | VPC ownership scopes another writer took from this process                                              |
-| `galactic_edge_foundation_node_collect_errors`    | gauge   | node   | none                                     | Gate table reads the last scrape could not make                                                         |
+| `galactic_edge_foundation_node_collect_errors`    | gauge   | node   | none                                     | Gate table and encapsulation limit reads the last scrape could not make                                 |
+| `galactic_edge_foundation_mtu_bytes`              | gauge   | node   | none                                     | The agent's `--mtu`, the MTU of every attachment link                                                   |
+| `galactic_edge_foundation_encap_limit_bytes`      | gauge   | node   | none                                     | `encap_mtu_table`, the largest packet the underlay carries once encapsulated. `0` turns the check off   |
 
 - Attachment `state`, in lifecycle order: `Admission`, `Allocation`,
   `Programming`, `Ready`, `Active`, then `Draining` and `Releasing`.

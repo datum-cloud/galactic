@@ -5,6 +5,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -27,8 +28,8 @@ type statGates struct {
 func (g statGates) Stats() (forwardgatemap.Stats, error) { return g.stats, nil }
 
 // TestCollector exports the node's links, its gates by state, the gate drop
-// counters and lost scopes, with no label naming a link, prefix or address
-// however many there are.
+// counters, lost scopes, and its MTU with the encapsulation limit, with no
+// label naming a link, prefix or address however many there are.
 func TestCollector(t *testing.T) {
 	g := newGates()
 	now := time.Hour
@@ -43,7 +44,8 @@ func TestCollector(t *testing.T) {
 		}
 	}
 	a := &Agent{Gates: statGates{gates: g, stats: forwardgatemap.Stats{Ingress: 3, Egress: 2, Deliver: 1}},
-		BootClock: func() time.Duration { return now }}
+		BootClock: func() time.Duration { return now },
+		MTU:       1500, EncapMTU: func() (int, error) { return 1460, nil }}
 	a.markLost("vpc/a")
 
 	reg := prometheus.NewRegistry()
@@ -52,9 +54,33 @@ func TestCollector(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Without a gate table only the lost scopes are known.
-	if n := testutil.CollectAndCount(Collector{Agent: &Agent{}}); n != 1 {
-		t.Fatalf("collector without gates exported %d series, want 1", n)
+	// Without a gate table or a limit only the lost scopes and the MTU are known.
+	if n := testutil.CollectAndCount(Collector{Agent: &Agent{MTU: 1500}}); n != 2 {
+		t.Fatalf("collector without gates exported %d series, want 2", n)
+	}
+}
+
+// TestCollectorEncapLimit exports the limit on a node with no attachments, and
+// counts a limit it cannot read as a collect error rather than reporting zero,
+// which would read as the check being off.
+func TestCollectorEncapLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		limit int
+		err   error
+	}{
+		{name: "set", limit: 1460},
+		{name: "unset", limit: 0},
+		{name: "unreadable", err: errors.New("map not pinned")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Collector{Agent: &Agent{MTU: 1500, EncapMTU: func() (int, error) { return tc.limit, tc.err }}}
+			if err := testutil.CollectAndCompare(c, openTestdata(t, "encap_limit_"+tc.name+".prom"),
+				"galactic_edge_foundation_encap_limit_bytes", "galactic_edge_foundation_mtu_bytes",
+				"galactic_edge_foundation_node_collect_errors"); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

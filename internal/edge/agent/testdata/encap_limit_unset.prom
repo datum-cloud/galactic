@@ -1,0 +1,9 @@
+# HELP galactic_edge_foundation_encap_limit_bytes The largest packet the fabric underlay carries once encapsulated (encap_mtu_table), read at scrape time. An attachment MTU above it is refused. Zero means galactic-cni has not set it and the check is off.
+# TYPE galactic_edge_foundation_encap_limit_bytes gauge
+galactic_edge_foundation_encap_limit_bytes 0
+# HELP galactic_edge_foundation_mtu_bytes The MTU the agent gives every attachment link, its --mtu flag.
+# TYPE galactic_edge_foundation_mtu_bytes gauge
+galactic_edge_foundation_mtu_bytes 1500
+# HELP galactic_edge_foundation_node_collect_errors Reads of the node's forwarding gate or encapsulation limit the last scrape could not make, rather than reporting zero.
+# TYPE galactic_edge_foundation_node_collect_errors gauge
+galactic_edge_foundation_node_collect_errors 0

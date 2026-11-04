@@ -2535,6 +2535,41 @@ tests:
                 Consumers can lose access even when the router Pod is ready and policies are accepted.
                 Check the router's service policy errors, attachment host interfaces, and node programming acknowledgments.
 
+  # Paths with no consumer next hop alert while they persist; a brief one
+  # during attachment programming does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_service_route_unresolved_next_hops{job="galactic-router",node="unresolved"}'
+        values: "2x60"
+      - series: 'galactic_service_route_unresolved_next_hops{job="galactic-router",node="settling"}'
+        values: "1x10 0x50"
+      - series: 'galactic_service_route_unresolved_next_hops{job="galactic-router",node="resolved"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticServiceRouteNextHopUnresolved
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: GalacticServiceRouteNextHopUnresolved
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-router
+              node: unresolved
+            exp_annotations:
+              summary: "2 private service paths on unresolved have no consumer next hop"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticserviceroutenexthopunresolved"
+              description: >-
+                2 private service paths on unresolved have no next hop for their consumer
+                attachment, because its PodSubnet is missing or of the other address family from the service.
+                They forward to the destination address instead, which IPv4 services and attachments with
+                several subnets cannot use. The router's "no consumer next hop" log lines name each attachment.
+      - eval_time: 25m
+        alertname: GalacticServiceRouteProgrammingFailing
+        exp_alerts: []
+
   # Attachments stuck in Programming fire per provider and reason, the max of
   # both replicas; a short Pending blip and Active attachments do not.
   - interval: 30s
@@ -2674,6 +2709,71 @@ tests:
                 galactic-edge on edge-2 has failed more than twice in every 15-minute window for 15 minutes
                 to release an attachment's host state or sweep expired gates. Deleted attachments stay held by their
                 finalizer and their addresses stay allocated. The agent's log names the error.
+
+  # An MTU over a set limit fires with no attachments; a limit galactic-cni
+  # has not set, or an MTU within the limit, does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_edge_foundation_mtu_bytes{job="galactic-edge",node="edge-1"}'
+        values: "1500x30"
+      - series: 'galactic_edge_foundation_encap_limit_bytes{job="galactic-edge",node="edge-1"}'
+        values: "1460x30"
+      - series: 'galactic_edge_foundation_mtu_bytes{job="galactic-edge",node="edge-2"}'
+        values: "1500x30"
+      - series: 'galactic_edge_foundation_encap_limit_bytes{job="galactic-edge",node="edge-2"}'
+        values: "0x30"
+      - series: 'galactic_edge_foundation_mtu_bytes{job="galactic-edge",node="edge-3"}'
+        values: "1400x30"
+      - series: 'galactic_edge_foundation_encap_limit_bytes{job="galactic-edge",node="edge-3"}'
+        values: "1460x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GalacticEdgeMTUExceedsUnderlay
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: GalacticEdgeMTUExceedsUnderlay
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-edge
+              node: edge-1
+            exp_annotations:
+              summary: "galactic-edge on edge-1 has an attachment MTU over its underlay ceiling"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticedgemtuexceedsunderlay"
+              description: >-
+                galactic-edge on edge-1 gives attachment links an MTU of 1500, more than the largest
+                packet the fabric underlay carries once encapsulated. It refuses every attachment on the node with
+                reason MTUExceedsUnderlay. galactic_edge_foundation_encap_limit_bytes gives the limit.
+
+  # A limit that falls under the MTU while the node runs fires.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_edge_foundation_mtu_bytes{job="galactic-edge",node="edge-1"}'
+        values: "1500x60"
+      - series: 'galactic_edge_foundation_encap_limit_bytes{job="galactic-edge",node="edge-1"}'
+        values: "0x10 1460x50"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticEdgeMTUExceedsUnderlay
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: GalacticEdgeMTUExceedsUnderlay
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-edge
+              node: edge-1
+            exp_annotations:
+              summary: "galactic-edge on edge-1 has an attachment MTU over its underlay ceiling"
+              runbook_url: "https://github.com/datum-cloud/galactic/blob/main/docs/edge/troubleshooting.md#galacticedgemtuexceedsunderlay"
+              description: >-
+                galactic-edge on edge-1 gives attachment links an MTU of 1500, more than the largest
+                packet the fabric underlay carries once encapsulated. It refuses every attachment on the node with
+                reason MTUExceedsUnderlay. galactic_edge_foundation_encap_limit_bytes gives the limit.
 
   # Either job's scrape down fires; other jobs do not.
   - interval: 30s

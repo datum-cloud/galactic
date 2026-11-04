@@ -21,6 +21,7 @@ type Metrics struct {
 	reconcileTime   prometheus.Histogram
 	operations      *prometheus.CounterVec
 	programmed      prometheus.Gauge
+	unresolved      prometheus.Gauge
 	producers       *prometheus.GaugeVec
 }
 
@@ -49,6 +50,12 @@ func NewMetrics() *Metrics {
 			Namespace: metricsNamespace,
 			Name:      "programmed_routes",
 			Help:      "Number of attachment-scoped eBPF service paths currently tracked by the controller.",
+		}),
+		unresolved: metrics.NewGauge(prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Name:      "unresolved_next_hops",
+			Help: "Tracked service paths with no next hop for their consumer attachment, " +
+				"which forward to the destination address instead.",
 		}),
 		producers: metrics.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
@@ -81,6 +88,14 @@ func (m *Metrics) ObserveOperation(operation string, err error) {
 func (m *Metrics) SetProgrammedRoutes(count int) {
 	if m != nil {
 		m.programmed.Set(float64(count))
+	}
+}
+
+// SetUnresolvedNextHops records how many tracked paths have no consumer next
+// hop.
+func (m *Metrics) SetUnresolvedNextHops(count int) {
+	if m != nil {
+		m.unresolved.Set(float64(count))
 	}
 }
 

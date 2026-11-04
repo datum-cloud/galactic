@@ -1,3 +1,6 @@
+# HELP galactic_edge_foundation_encap_limit_bytes The largest packet the fabric underlay carries once encapsulated (encap_mtu_table), read at scrape time. An attachment MTU above it is refused. Zero means galactic-cni has not set it and the check is off.
+# TYPE galactic_edge_foundation_encap_limit_bytes gauge
+galactic_edge_foundation_encap_limit_bytes 1460
 # HELP galactic_edge_foundation_gate_drops_total Packets the datapath dropped on an edge link because no open gate covered the address, by check: ingress (from the provider), egress (towards the provider) or deliver (local delivery).
 # TYPE galactic_edge_foundation_gate_drops_total counter
 galactic_edge_foundation_gate_drops_total{check="deliver"} 1
@@ -11,7 +14,10 @@ galactic_edge_foundation_gates{state="open"} 17
 # HELP galactic_edge_foundation_links Edge attachment host links registered with the node's forwarding gate.
 # TYPE galactic_edge_foundation_links gauge
 galactic_edge_foundation_links 50
-# HELP galactic_edge_foundation_node_collect_errors Reads of the node's forwarding gate the last scrape could not make, rather than reporting zero.
+# HELP galactic_edge_foundation_mtu_bytes The MTU the agent gives every attachment link, its --mtu flag.
+# TYPE galactic_edge_foundation_mtu_bytes gauge
+galactic_edge_foundation_mtu_bytes 1500
+# HELP galactic_edge_foundation_node_collect_errors Reads of the node's forwarding gate or encapsulation limit the last scrape could not make, rather than reporting zero.
 # TYPE galactic_edge_foundation_node_collect_errors gauge
 galactic_edge_foundation_node_collect_errors 0
 # HELP galactic_edge_foundation_scopes_lost VPC ownership scopes another writer took from this process, which no longer programs or releases there.

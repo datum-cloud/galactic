@@ -25,7 +25,14 @@ var (
 		"VPC ownership scopes another writer took from this process, which no longer programs or releases there.",
 		nil, nil)
 	nodeCollectErrorsDesc = prometheus.NewDesc("galactic_edge_foundation_node_collect_errors",
-		"Reads of the node's forwarding gate the last scrape could not make, rather than reporting zero.",
+		"Reads of the node's forwarding gate or encapsulation limit the last scrape could not make, rather than "+
+			"reporting zero.",
+		nil, nil)
+	mtuDesc = prometheus.NewDesc("galactic_edge_foundation_mtu_bytes",
+		"The MTU the agent gives every attachment link, its --mtu flag.", nil, nil)
+	encapLimitDesc = prometheus.NewDesc("galactic_edge_foundation_encap_limit_bytes",
+		"The largest packet the fabric underlay carries once encapsulated (encap_mtu_table), read at scrape time. "+
+			"An attachment MTU above it is refused. Zero means galactic-cni has not set it and the check is off.",
 		nil, nil)
 )
 
@@ -44,14 +51,16 @@ func (g PinnedGates) Stats() (s forwardgatemap.Stats, err error) {
 }
 
 // Collector exports the node's edge state at scrape time: its registered
-// links, its gates by state, the datapath's gate drop counters and lost
-// ownership scopes. No label names a link, prefix or attachment.
+// links, its gates by state, the datapath's gate drop counters, lost
+// ownership scopes, and its attachment MTU with the encapsulation limit it is
+// checked against, whether or not the node has attachments. No label names a
+// link, prefix or attachment.
 type Collector struct{ Agent *Agent }
 
 // Describe implements prometheus.Collector.
 func (c Collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{edgeLinksDesc, gatesDesc, gateDropsDesc, scopesLostDesc,
-		nodeCollectErrorsDesc} {
+		nodeCollectErrorsDesc, mtuDesc, encapLimitDesc} {
 		ch <- d
 	}
 }
@@ -64,9 +73,27 @@ func (c Collector) Collect(ch chan<- prometheus.Metric) {
 	lost := len(a.lost)
 	a.lostMu.Unlock()
 	ch <- prometheus.MustNewConstMetric(scopesLostDesc, prometheus.GaugeValue, float64(lost))
-	if a.Gates == nil {
+	ch <- prometheus.MustNewConstMetric(mtuDesc, prometheus.GaugeValue, float64(a.MTU))
+	if a.Gates == nil && a.EncapMTU == nil {
 		return
 	}
+	failed := 0
+	if a.EncapMTU != nil {
+		if limit, err := a.EncapMTU(); err != nil {
+			failed++
+		} else {
+			ch <- prometheus.MustNewConstMetric(encapLimitDesc, prometheus.GaugeValue, float64(limit))
+		}
+	}
+	if a.Gates != nil {
+		failed += collectGates(ch, a)
+	}
+	ch <- prometheus.MustNewConstMetric(nodeCollectErrorsDesc, prometheus.GaugeValue, float64(failed))
+}
+
+// collectGates exports a's links, gates by state and gate drop counters, and
+// returns the reads it could not make.
+func collectGates(ch chan<- prometheus.Metric, a *Agent) int {
 	failed := 0
 	if links, err := a.Gates.Links(); err != nil {
 		failed++
@@ -104,5 +131,5 @@ func (c Collector) Collect(ch chan<- prometheus.Metric) {
 			}
 		}
 	}
-	ch <- prometheus.MustNewConstMetric(nodeCollectErrorsDesc, prometheus.GaugeValue, float64(failed))
+	return failed
 }

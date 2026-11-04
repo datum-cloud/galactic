@@ -121,7 +121,7 @@ func startCore(t *testing.T) *coreFixture {
 		}
 	})
 	for _, ns := range []string{"galactic-system", coreTenantNS, coreProviderNS} {
-		f.create(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})
+		f.create(t, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})
 	}
 	for _, path := range []string{
 		filepath.Join("galactic-controller", "serviceaccount.yaml"),
@@ -133,12 +133,12 @@ func startCore(t *testing.T) *coreFixture {
 	} {
 		f.apply(filepath.Join(repoRoot, "config", path))
 	}
-	f.create(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: coreNode}})
+	f.create(t, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: coreNode}})
 	f.vpc = &cloudv1alpha1.VPC{
 		ObjectMeta: metav1.ObjectMeta{Name: testVPCName, Namespace: coreTenantNS},
 		Spec:       cloudv1alpha1.VPCSpec{Networks: []cloudv1alpha1.Network{"fd00:10::/48"}},
 	}
-	f.create(f.vpc)
+	f.create(t, f.vpc)
 	f.vpc.Status.VPC = coreVPCID
 	if err := admin.Status().Update(context.Background(), f.vpc); err != nil {
 		t.Fatal(err)
@@ -155,17 +155,17 @@ func startCore(t *testing.T) *coreFixture {
 			Configuration: galacticv1alpha1.ConfigurationKind{Group: "masque.example.com", Kind: "Config"},
 		},
 	}
-	f.create(p)
-	f.create(&galacticv1alpha1.EdgeProviderApproval{ObjectMeta: metav1.ObjectMeta{Name: coreProvider}})
+	f.create(t, p)
+	f.create(t, &galacticv1alpha1.EdgeProviderApproval{ObjectMeta: metav1.ObjectMeta{Name: coreProvider}})
 	f.startController()
 	f.startNode()
 	return f
 }
 
-func (f *coreFixture) create(obj client.Object) {
-	f.t.Helper()
+func (f *coreFixture) create(t testing.TB, obj client.Object) {
+	t.Helper()
 	if err := f.admin.Create(context.Background(), obj); err != nil {
-		f.t.Fatalf("create %T %s: %v", obj, obj.GetName(), err)
+		t.Fatalf("create %T %s: %v", obj, obj.GetName(), err)
 	}
 }
 
@@ -191,13 +191,13 @@ func (f *coreFixture) apply(path string) {
 
 // as is a client for user whose token carries extra, holding only the
 // permissions RBAC grants it.
-func (f *coreFixture) as(user string, groups []string, extra map[string][]string) client.Client {
-	f.t.Helper()
+func (f *coreFixture) as(t testing.TB, user string, groups []string, extra map[string][]string) client.Client {
+	t.Helper()
 	cfg := rest.CopyConfig(f.cfg)
 	cfg.Impersonate = rest.ImpersonationConfig{UserName: user, Groups: groups, Extra: extra}
 	c, err := client.New(cfg, client.Options{Scheme: f.scheme})
 	if err != nil {
-		f.t.Fatal(err)
+		t.Fatal(err)
 	}
 	return c
 }
@@ -311,9 +311,9 @@ func (f *coreFixture) closeGates(ctx context.Context, node client.Client) {
 
 // service creates an EdgeService granting prefixes to the provider with
 // capabilities and pool.
-func (f *coreFixture) service(name, pool string, capabilities []string,
+func (f *coreFixture) service(t testing.TB, name, pool string, capabilities []string,
 	prefixes ...string) *galacticv1alpha1.EdgeService {
-	f.t.Helper()
+	t.Helper()
 	s := &galacticv1alpha1.EdgeService{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: coreTenantNS},
 		Spec: galacticv1alpha1.EdgeServiceSpec{
@@ -323,7 +323,7 @@ func (f *coreFixture) service(name, pool string, capabilities []string,
 			DrainSeconds: ptr.To(int32(1)),
 		},
 	}
-	f.create(s)
+	f.create(t, s)
 	return s
 }
 
@@ -398,21 +398,22 @@ func (f *coreFixture) host(name string) *os.File {
 }
 
 // pod creates a provider pod on coreNode.
-func (f *coreFixture) pod(name string) *corev1.Pod {
-	f.t.Helper()
+func (f *coreFixture) pod(t testing.TB, name string) *corev1.Pod {
+	t.Helper()
 	p := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: coreProviderNS},
 		Spec: corev1.PodSpec{NodeName: coreNode, ServiceAccountName: coreProvider,
 			Containers: []corev1.Container{{Name: coreProvider, Image: coreProvider}}},
 	}
-	f.create(p)
+	f.create(t, p)
 	return p
 }
 
 // providerClient authenticates as the provider ServiceAccount with a token
 // bound to pod.
-func (f *coreFixture) providerClient(pod *corev1.Pod) client.Client {
-	return f.as("system:serviceaccount:"+coreProviderNS+":"+coreProvider,
+func (f *coreFixture) providerClient(t testing.TB, pod *corev1.Pod) client.Client {
+	t.Helper()
+	return f.as(t, "system:serviceaccount:"+coreProviderNS+":"+coreProvider,
 		[]string{"system:serviceaccounts", "system:serviceaccounts:" + coreProviderNS, "system:authenticated"},
 		map[string][]string{admission.PodUIDExtra: {string(pod.UID)}, nodeNameExtra: {coreNode}})
 }
@@ -422,7 +423,7 @@ func (f *coreFixture) providerClient(pod *corev1.Pod) client.Client {
 // refused by the policy rather than by RBAC.
 func (f *coreFixture) waitForBinding(pod *corev1.Pod) {
 	f.t.Helper()
-	c := f.providerClient(pod)
+	c := f.providerClient(f.t, pod)
 	eventually(f.t, "the provider binding to be enforced", func() bool {
 		probe := provider.NewInstance(coreProviderNS, coreProvider, "probe", "probe-uid", coreNode, "boot")
 		err := c.Create(context.Background(), probe)
@@ -436,9 +437,9 @@ func (f *coreFixture) waitForBinding(pod *corev1.Pod) {
 
 // adapter returns an adapter of pod authenticating as tokenPod, a new
 // process with its own holder ID.
-func (f *coreFixture) adapter(pod, tokenPod *corev1.Pod) *Adapter {
-	f.t.Helper()
-	c := f.providerClient(tokenPod)
+func (f *coreFixture) adapter(t testing.TB, pod, tokenPod *corev1.Pod) *Adapter {
+	t.Helper()
+	c := f.providerClient(t, tokenPod)
 	a, err := New(Config{
 		Client: c, Provider: coreProvider, Authorizer: f, OpenDevice: f.open,
 		Pod: Pod{Namespace: coreProviderNS, Name: pod.Name, UID: string(pod.UID), Node: coreNode, BootID: "boot",
@@ -448,17 +449,17 @@ func (f *coreFixture) adapter(pod, tokenPod *corev1.Pod) *Adapter {
 		Renew: 300 * time.Millisecond, Poll: 50 * time.Millisecond, Prepare: 20 * time.Second, Idle: time.Hour,
 	})
 	if err != nil {
-		f.t.Fatal(err)
+		t.Fatal(err)
 	}
 	return a
 }
 
 // run starts a and runs it until the returned function stops it, as a
 // process crash would, without shutting down.
-func (f *coreFixture) run(a *Adapter) (stop func()) {
-	f.t.Helper()
+func (f *coreFixture) run(t testing.TB, a *Adapter) (stop func()) {
+	t.Helper()
 	if err := a.Start(context.Background()); err != nil {
-		f.t.Fatal(err)
+		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -468,42 +469,42 @@ func (f *coreFixture) run(a *Adapter) (stop func()) {
 		once.Do(func() {
 			cancel()
 			if err := <-done; err != nil {
-				f.t.Errorf("adapter: %v", err)
+				t.Errorf("adapter: %v", err)
 			}
 		})
 	}
-	f.t.Cleanup(stop)
+	t.Cleanup(stop)
 	return stop
 }
 
-func (f *coreFixture) admit(a *Adapter, credential string) connectip.Lease {
-	f.t.Helper()
+func (f *coreFixture) admit(t testing.TB, a *Adapter, credential string) connectip.Lease {
+	t.Helper()
 	l, err := a.Admit(context.Background(), credential, f.vpc.Name)
 	if err != nil {
-		f.t.Fatalf("admit %s: %v", credential, err)
+		t.Fatalf("admit %s: %v", credential, err)
 	}
 	return l
 }
 
-func (f *coreFixture) attachment(name string) *galacticv1alpha1.EdgeAttachment {
-	f.t.Helper()
+func (f *coreFixture) attachment(t testing.TB, name string) *galacticv1alpha1.EdgeAttachment {
+	t.Helper()
 	var att galacticv1alpha1.EdgeAttachment
 	err := f.admin.Get(context.Background(), client.ObjectKey{Namespace: coreProviderNS, Name: name}, &att)
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
-		f.t.Fatal(err)
+		t.Fatal(err)
 	}
 	return &att
 }
 
-func (f *coreFixture) route(name string) *galacticv1alpha1.EdgeRoute {
-	f.t.Helper()
+func (f *coreFixture) route(t testing.TB, name string) *galacticv1alpha1.EdgeRoute {
+	t.Helper()
 	var rt galacticv1alpha1.EdgeRoute
 	if err := f.admin.Get(context.Background(), client.ObjectKey{Namespace: coreProviderNS, Name: name},
 		&rt); err != nil {
-		f.t.Fatal(err)
+		t.Fatal(err)
 	}
 	return &rt
 }
@@ -525,13 +526,13 @@ func eventually(t *testing.T, what string, cond func() bool) {
 // admission policies.
 func TestAgainstCore(t *testing.T) {
 	f := startCore(t)
-	pod := f.pod("masque-0")
-	shared := f.service("shared", "fd00:10:0:e::/120", Capabilities, "fd00:10:0:1:1::/96", "fd00:10:0:1:2::/96")
+	pod := f.pod(t, "masque-0")
+	shared := f.service(t, "shared", "fd00:10:0:e::/120", Capabilities, "fd00:10:0:1:1::/96", "fd00:10:0:1:2::/96")
 	f.connector("c1", shared, "fd00:10:0:1:1::/96")
 	f.connector("c2", shared, "fd00:10:0:1:2::/96")
 	f.waitForBinding(pod)
-	a := f.adapter(pod, pod)
-	stop := f.run(a)
+	a := f.adapter(t, pod, pod)
+	stop := f.run(t, a)
 	if _, err := a.Admit(context.Background(), "c1", f.vpc.Name); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("Admit before the lease is held = %v, want %v", err, ErrUnavailable)
 	}
@@ -551,7 +552,7 @@ func TestAgainstCore(t *testing.T) {
 		expectLive(t, l2, "a refused request on the same attachment")
 	})
 	t.Run("forged pod identity", func(t *testing.T) {
-		forged := f.adapter(f.pod("masque-1"), pod)
+		forged := f.adapter(t, f.pod(t, "masque-1"), pod)
 		err := forged.Start(context.Background())
 		if err == nil || !strings.Contains(err.Error(), "ValidatingAdmissionPolicy") {
 			t.Fatalf("registering another pod's instance = %v, want a policy refusal", err)
@@ -559,9 +560,9 @@ func TestAgainstCore(t *testing.T) {
 	})
 	t.Run("stale delete keeps the replacement", func(t *testing.T) { f.checkStaleDelete(t, a) })
 	t.Run("service withdrawn drains", func(t *testing.T) {
-		svc := f.service("withdrawn", "fd00:10:0:e::300/120", Capabilities, "fd00:10:0:1:5::/96")
+		svc := f.service(t, "withdrawn", "fd00:10:0:e::300/120", Capabilities, "fd00:10:0:1:5::/96")
 		f.connector("c5", svc, "fd00:10:0:1:5::/96")
-		l := f.admit(a, "c5")
+		l := f.admit(t, a, "c5")
 		defer func() { _ = l.Close() }()
 		if err := f.admin.Delete(context.Background(), svc); err != nil {
 			t.Fatal(err)
@@ -570,9 +571,9 @@ func TestAgainstCore(t *testing.T) {
 		expectLive(t, l2, "withdrawing another service")
 	})
 	t.Run("one connector's service expires", func(t *testing.T) {
-		svc := f.service("expiring", "fd00:10:0:e::400/120", Capabilities, "fd00:10:0:1:6::/96")
+		svc := f.service(t, "expiring", "fd00:10:0:e::400/120", Capabilities, "fd00:10:0:1:6::/96")
 		f.connector("c6", svc, "fd00:10:0:1:6::/96")
-		l := f.admit(a, "c6")
+		l := f.admit(t, a, "c6")
 		defer func() { _ = l.Close() }()
 		lease, _ := a.heldLease()
 		if err := f.admin.Get(context.Background(), client.ObjectKeyFromObject(svc), svc); err != nil {
@@ -593,7 +594,7 @@ func TestAgainstCore(t *testing.T) {
 		// validUntil forward in place. Each renewal is a new generation;
 		// the connector keeps its attachment, route and epoch past the
 		// first deadline.
-		svc := f.service("renewed", "fd00:10:0:e::600/120", Capabilities, "fd00:10:0:1:8::/96")
+		svc := f.service(t, "renewed", "fd00:10:0:e::600/120", Capabilities, "fd00:10:0:1:8::/96")
 		renew := func(ahead time.Duration) {
 			t.Helper()
 			if err := f.admin.Get(context.Background(), client.ObjectKeyFromObject(svc), svc); err != nil {
@@ -608,17 +609,17 @@ func TestAgainstCore(t *testing.T) {
 		renew(6 * time.Second)
 		first, deadline := svc.Generation, svc.Spec.ValidUntil.Time
 		f.connector("c8", svc, "fd00:10:0:1:8::/96")
-		l := f.admit(a, "c8")
+		l := f.admit(t, a, "c8")
 		defer func() { _ = l.Close() }()
-		attUID := f.attachment(l.Info().Attachment).UID
-		epoch := f.route(l.Info().Claim).Spec.Claim.Epoch
+		attUID := f.attachment(t, l.Info().Attachment).UID
+		epoch := f.route(t, l.Info().Claim).Spec.Claim.Epoch
 		for time.Now().Before(deadline.Add(2 * time.Second)) {
 			time.Sleep(time.Second)
 			renew(4 * time.Second)
 		}
 		expectLive(t, l, "renewing the connector's service")
-		att := f.attachment(l.Info().Attachment)
-		rt := f.route(l.Info().Claim)
+		att := f.attachment(t, l.Info().Attachment)
+		rt := f.route(t, l.Info().Claim)
 		if svc.Generation <= first+2 || att == nil || att.UID != attUID ||
 			!meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentAdmitted) ||
 			rt.Spec.Claim.Released || rt.Spec.Claim.Epoch != epoch ||
@@ -628,17 +629,17 @@ func TestAgainstCore(t *testing.T) {
 		expectLive(t, l2, "renewing another connector's service")
 	})
 	t.Run("replacement keeps the claim", func(t *testing.T) {
-		svc := f.service("handoff", "fd00:10:0:e::500/120", Capabilities, "fd00:10:0:1:7::/96")
+		svc := f.service(t, "handoff", "fd00:10:0:e::500/120", Capabilities, "fd00:10:0:1:7::/96")
 		f.connector("c7", svc, "fd00:10:0:1:7::/96")
-		old := f.admit(a, "c7")
+		old := f.admit(t, a, "c7")
 		serve(old, nil)
-		epoch := f.route(old.Info().Claim).Spec.Claim.Epoch
-		l := f.admit(a, "c7")
+		epoch := f.route(t, old.Info().Claim).Spec.Claim.Epoch
+		l := f.admit(t, a, "c7")
 		defer func() { _ = l.Close() }()
 		expectDoneWithin(t, old, time.Second, "the replacement")
-		rt := f.route(l.Info().Claim)
+		rt := f.route(t, l.Info().Claim)
 		if rt.Spec.Claim.Released || rt.Spec.Claim.Epoch != epoch || !acceptedFor(rt, l.Info().Attachment,
-			f.attachment(l.Info().Attachment).UID, mustLease(t, a)) {
+			f.attachment(t, l.Info().Attachment).UID, mustLease(t, a)) {
 			t.Fatalf("claim after the replacement: %+v, want epoch %d accepted throughout", rt.Spec.Claim, epoch)
 		}
 		expectLive(t, l2, "another connector's replacement")
@@ -647,7 +648,7 @@ func TestAgainstCore(t *testing.T) {
 	// The process dies without shutting down.
 	_ = s2.Close()
 	_ = l2.Close()
-	oldEpoch := f.route(l2.Info().Claim).Spec.Claim.InstanceEpoch
+	oldEpoch := f.route(t, l2.Info().Claim).Spec.Claim.InstanceEpoch
 	stop()
 	f.checkRestartAndShutdown(t, pod, l2.Info().Attachment, oldEpoch)
 }
@@ -657,11 +658,11 @@ func TestAgainstCore(t *testing.T) {
 // device, claim and packet stream intact. It returns the remaining request.
 func (f *coreFixture) checkSharedAttachment(t *testing.T, a *Adapter) (connectip.Lease, connectip.BackendSession) {
 	t.Helper()
-	l1, l2 := f.admit(a, "c1"), f.admit(a, "c2")
+	l1, l2 := f.admit(t, a, "c1"), f.admit(t, a, "c2")
 	if l1.Info().Attachment != l2.Info().Attachment {
 		t.Fatalf("connectors of one service use attachments %s and %s", l1.Info().Attachment, l2.Info().Attachment)
 	}
-	att := f.attachment(l1.Info().Attachment)
+	att := f.attachment(t, l1.Info().Attachment)
 	if !meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentReady) {
 		t.Fatalf("the provider could not report the attachment Ready: %v", att.Status.Conditions)
 	}
@@ -684,10 +685,10 @@ func (f *coreFixture) checkSharedAttachment(t *testing.T, a *Adapter) (connectip
 	_ = s1.Close()
 	_ = l1.Close()
 	expectLive(t, l2, "closing another connector's request")
-	if !f.route(l1.Info().Claim).Spec.Claim.Released {
+	if !f.route(t, l1.Info().Claim).Spec.Claim.Released {
 		t.Fatal("the ended connector's claim was not released")
 	}
-	if rt := f.route(l2.Info().Claim); rt.Spec.Claim.Released ||
+	if rt := f.route(t, l2.Info().Claim); rt.Spec.Claim.Released ||
 		!meta.IsStatusConditionTrue(rt.Status.Conditions, galacticv1alpha1.EdgeRouteAccepted) {
 		t.Fatalf("ending one connector disturbed another's claim: %+v", rt.Spec.Claim)
 	}
@@ -702,7 +703,7 @@ func (f *coreFixture) checkSharedAttachment(t *testing.T, a *Adapter) (connectip
 // PacketAccess but not PrefixReachability: core refuses its route and the
 // request fails without a claim left behind.
 func (f *coreFixture) checkCapabilityNotGranted(t *testing.T, a *Adapter) {
-	svc := f.service("socket-only", "fd00:10:0:e::100/120", []string{PacketAccess}, "fd00:10:0:1:3::/96")
+	svc := f.service(t, "socket-only", "fd00:10:0:e::100/120", []string{PacketAccess}, "fd00:10:0:1:3::/96")
 	f.connector("c3", svc, "fd00:10:0:1:3::/96")
 	_, err := a.Admit(context.Background(), "c3", f.vpc.Name)
 	if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "CapabilityNotGranted") {
@@ -723,19 +724,19 @@ func (f *coreFixture) checkCapabilityNotGranted(t *testing.T, a *Adapter) {
 // checkStaleDelete replaces an attachment under its name, then runs a
 // delete of the old object: the replacement survives.
 func (f *coreFixture) checkStaleDelete(t *testing.T, a *Adapter) {
-	svc := f.service("replaced", "fd00:10:0:e::200/120", Capabilities, "fd00:10:0:1:4::/96")
+	svc := f.service(t, "replaced", "fd00:10:0:e::200/120", Capabilities, "fd00:10:0:1:4::/96")
 	f.connector("c4", svc, "fd00:10:0:1:4::/96")
-	l := f.admit(a, "c4")
+	l := f.admit(t, a, "c4")
 	name := l.Info().Attachment
-	old := f.attachment(name).UID
+	old := f.attachment(t, name).UID
 	_ = l.Close()
-	if err := f.admin.Delete(context.Background(), f.attachment(name)); err != nil {
+	if err := f.admin.Delete(context.Background(), f.attachment(t, name)); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the deleted attachment to be released", func() bool { return f.attachment(name) == nil })
-	l = f.admit(a, "c4")
+	eventually(t, "the deleted attachment to be released", func() bool { return f.attachment(t, name) == nil })
+	l = f.admit(t, a, "c4")
 	defer func() { _ = l.Close() }()
-	if cur := f.attachment(name); cur == nil || cur.UID == old {
+	if cur := f.attachment(t, name); cur == nil || cur.UID == old {
 		t.Fatal("the attachment was not replaced")
 	}
 	stale := &attachment{svc: ServiceRef{Namespace: svc.Namespace, Name: svc.Name, UID: string(svc.UID)},
@@ -743,7 +744,7 @@ func (f *coreFixture) checkStaleDelete(t *testing.T, a *Adapter) {
 	if err := a.deleteAttachment(context.Background(), stale); err != nil {
 		t.Fatal(err)
 	}
-	if cur := f.attachment(name); cur == nil || cur.DeletionTimestamp != nil {
+	if cur := f.attachment(t, name); cur == nil || cur.DeletionTimestamp != nil {
 		t.Fatal("a stale delete removed the replacement")
 	}
 	expectLive(t, l, "a stale delete")
@@ -754,15 +755,15 @@ func (f *coreFixture) checkStaleDelete(t *testing.T, a *Adapter) {
 // epoch after oldEpoch. Its shutdown then releases the claim, removes the
 // attachments and releases the lease.
 func (f *coreFixture) checkRestartAndShutdown(t *testing.T, pod *corev1.Pod, attName string, oldEpoch int64) {
-	uid := f.attachment(attName).UID
-	b := f.adapter(pod, pod)
-	stop := f.run(b)
+	uid := f.attachment(t, attName).UID
+	b := f.adapter(t, pod, pod)
+	stop := f.run(t, b)
 	eventually(t, "the successor to hold the lease", func() bool { _, ok := b.heldLease(); return ok })
-	l := f.admit(b, "c2")
-	if l.Info().Attachment != attName || f.attachment(attName).UID != uid {
+	l := f.admit(t, b, "c2")
+	if l.Info().Attachment != attName || f.attachment(t, attName).UID != uid {
 		t.Fatalf("the successor served %s, not the adopted attachment", l.Info().Attachment)
 	}
-	if rt := f.route(l.Info().Claim); rt.Spec.Claim.InstanceEpoch <= oldEpoch {
+	if rt := f.route(t, l.Info().Claim); rt.Spec.Claim.InstanceEpoch <= oldEpoch {
 		t.Fatalf("the successor forwards under lease epoch %d, not after %d", rt.Spec.Claim.InstanceEpoch, oldEpoch)
 	}
 
@@ -771,7 +772,7 @@ func (f *coreFixture) checkRestartAndShutdown(t *testing.T, pod *corev1.Pod, att
 	if err := b.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !f.route(l.Info().Claim).Spec.Claim.Released {
+	if !f.route(t, l.Info().Claim).Spec.Claim.Released {
 		t.Fatal("shutdown left the claim held")
 	}
 	eventually(t, "shutdown to remove the attachments", func() bool {
