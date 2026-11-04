@@ -75,14 +75,14 @@ test measures it), most of it the preallocated `service_reverse_table` and
 container's limit leaves too little room for them, the map create fails with
 `cannot allocate memory` and the pod crash-loops (#808).
 
-The five service policy maps that only userspace writes
+The service policy maps that only userspace writes
 (`service_route_table`, `service_access_table`, `service_deny_table`,
-`service_remote_grant_table` and `attachment_identity_table`) are not
-preallocated. Created empty, they cost only their bucket arrays, about 3.5Mi
-together. Their rows are still charged to this container's memory cgroup as
-they are written (by `galactic-router` for the four policy maps, by
-`galactic-cni` for `attachment_identity_table`), up to about 28Mi more if all
-five filled to `max_entries`. A row that doesn't fit fails that write, which
+`service_remote_grant_table`, `service_remote_target_table` and
+`attachment_identity_table`) are not preallocated. Created empty, they cost
+only their bucket arrays, a few Mi together. Their rows are still charged to
+this container's memory cgroup as they are written (by `galactic-router` for
+the policy maps, by `galactic-cni` for `attachment_identity_table`), up to
+about 34Mi more if all of them filled to `max_entries`. A row that doesn't fit fails that write, which
 its writer retries, rather than failing the container's start.
 
 `TestUsid_MapMemoryFitsGalacticCNILimit` in `internal/plumbing/ebpf/prog`

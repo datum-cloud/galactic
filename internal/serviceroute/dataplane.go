@@ -470,11 +470,13 @@ var serviceRouteMapNames = [...]string{
 	"service_deny_table",
 	serviceroutemap.ServicePeerMapName,
 	serviceroutemap.ServiceProducerSetMapName,
+	serviceroutemap.ServiceRemoteTargetMapName,
 }
 
 // optionalServiceRouteMap reports whether an older datapath may lack the map.
 func optionalServiceRouteMap(name string) bool {
-	return name == serviceroutemap.ServicePeerMapName || name == serviceroutemap.ServiceProducerSetMapName
+	return name == serviceroutemap.ServicePeerMapName || name == serviceroutemap.ServiceProducerSetMapName ||
+		name == serviceroutemap.ServiceRemoteTargetMapName
 }
 
 // mapSetIDs holds the kernel IDs of serviceRouteMapNames, in that order. An
@@ -534,6 +536,10 @@ func mapSetSlots(tables *serviceroutemap.Tables) []int {
 			}
 		case serviceroutemap.ServiceProducerSetMapName:
 			if !tables.ProducerSetsAvailable() {
+				continue
+			}
+		case serviceroutemap.ServiceRemoteTargetMapName:
+			if !tables.RemoteTargetsAvailable() {
 				continue
 			}
 		}
@@ -1101,6 +1107,17 @@ func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
 			return err
 		}
 		delete(p.grantRefs, *entry.grant)
+		// The grant shares its remote target with the same grant on the
+		// producer's other interface, while one replaces the other. Unregister
+		// removed the target if it named this interface, so it goes back to the
+		// other one.
+		for other := range p.grantRefs {
+			if other.producerIfindex != g.producerIfindex && other.address == g.address &&
+				other.protocol == g.protocol && other.port == g.port && other.grantID == g.grantID {
+				return p.tables.SetRemoteTarget(other.producerIfindex, net.ParseIP(other.address),
+					other.protocol, other.port, [16]byte(other.grantID))
+			}
+		}
 		return nil
 	}
 	if entry.access != nil {

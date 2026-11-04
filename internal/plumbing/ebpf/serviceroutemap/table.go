@@ -35,6 +35,10 @@ const (
 	// ServiceProducerSetMapName is the producer set map of LocalSet routes.
 	// A datapath older than LocalSet routes has no pin of this name.
 	ServiceProducerSetMapName = "service_producer_set_table"
+	// ServiceRemoteTargetMapName names the producer interface of each remote
+	// grant. A datapath older than it has no pin of this name and delivers a
+	// tunneled request by a route lookup of the service address.
+	ServiceRemoteTargetMapName = "service_remote_target_table"
 
 	familyIPv6 = uint8(0)
 	familyIPv4 = uint8(1)
@@ -169,6 +173,14 @@ type serviceRemoteGrantValue struct {
 	AuthorizationValidUntilNS int64
 }
 
+type serviceRemoteTargetValue struct{ ProducerIfindex uint32 }
+
+// remoteTargetKey is grant's key in the remote target map.
+func remoteTargetKey(grant serviceRemoteGrantKey) serviceRemoteGrantKey {
+	grant.ProducerIfindex = 0
+	return grant
+}
+
 type servicePolicyStateValue struct{ Enabled uint8 }
 
 func addressBytes(address net.IP) []byte {
@@ -233,7 +245,9 @@ type Tables struct {
 	deny         usidmap.Table
 	peers        usidmap.Table
 	producerSets usidmap.Table
-	leaseClockFn func() (time.Time, uint64, error)
+	// remoteTargets is nil on a datapath without the remote target map.
+	remoteTargets usidmap.Table
+	leaseClockFn  func() (time.Time, uint64, error)
 }
 
 // OpenPinned opens both service maps under pinDir. The caller owns the
@@ -318,8 +332,33 @@ func OpenPinned(pinDir string) (*Tables, []*ebpf.Map, error) {
 		}
 		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", ServiceProducerSetMapName, err)
 	}
+	// A datapath that predates remote targets delivers tunneled requests by a
+	// route lookup, so grants still work wherever the producer VPC routes the
+	// service address.
+	remoteTargets, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, ServiceRemoteTargetMapName), nil)
+	switch {
+	case err == nil:
+		tables.remoteTargets = usidmap.KernelTable{Map: remoteTargets}
+		handles = append(handles, remoteTargets)
+	case !errors.Is(err, os.ErrNotExist):
+		for _, opened := range handles {
+			_ = opened.Close()
+		}
+		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", ServiceRemoteTargetMapName, err)
+	}
 	return tables, handles, nil
 }
+
+// WithRemoteTargets sets the remote target map of tables built by New, for
+// tests.
+func (t *Tables) WithRemoteTargets(remoteTargets usidmap.Table) *Tables {
+	t.remoteTargets = remoteTargets
+	return t
+}
+
+// RemoteTargetsAvailable reports whether the datapath has a remote target
+// map. OpenPinned returns its handle last, and only when it exists.
+func (t *Tables) RemoteTargetsAvailable() bool { return t.remoteTargets != nil }
 
 // WithProducerSets sets the producer set map of tables built by New, for
 // tests.
@@ -626,7 +665,32 @@ func (t *Tables) Clear() error {
 			return fmt.Errorf("serviceroutemap: clear deny catalog: %w", err)
 		}
 	}
+	if err := t.clearRemoteTargets(); err != nil {
+		return err
+	}
 	return t.clearProducerSets()
+}
+
+func (t *Tables) clearRemoteTargets() error {
+	if t.remoteTargets == nil {
+		return nil
+	}
+	var keys []serviceRemoteGrantKey
+	iterator := t.remoteTargets.Iterate()
+	var key serviceRemoteGrantKey
+	var value serviceRemoteTargetValue
+	for iterator.Next(&key, &value) {
+		keys = append(keys, key)
+	}
+	if err := iterator.Err(); err != nil {
+		return fmt.Errorf("serviceroutemap: iterate remote targets: %w", err)
+	}
+	for _, key := range keys {
+		if err := t.remoteTargets.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("serviceroutemap: clear remote target: %w", err)
+		}
+	}
+	return nil
 }
 
 func (t *Tables) clearProducerSets() error {
@@ -744,6 +808,37 @@ func (t *Tables) SweepPolicy(snapshot PolicySnapshot) error {
 			return fmt.Errorf("serviceroutemap: iterate remote grants for sweep: %w", err)
 		}
 	}
+	// A target stays while a desired grant names its interface. Every
+	// desired grant's key gets a target: one naming another desired
+	// interface of the same grant, as while a producer's interface is
+	// replaced, is kept, and a missing or stale one is rewritten.
+	var staleTargets []serviceRemoteGrantKey
+	missingTargets := make(map[serviceRemoteGrantKey]uint32)
+	if t.remoteTargets != nil {
+		for grant := range desiredGrants {
+			target := remoteTargetKey(grant)
+			if current, ok := missingTargets[target]; !ok || grant.ProducerIfindex > current {
+				missingTargets[target] = grant.ProducerIfindex
+			}
+		}
+		iterator := t.remoteTargets.Iterate()
+		var key serviceRemoteGrantKey
+		var value serviceRemoteTargetValue
+		for iterator.Next(&key, &value) {
+			grant := key
+			grant.ProducerIfindex = value.ProducerIfindex
+			if _, desired := desiredGrants[grant]; desired && key.ProducerIfindex == 0 {
+				delete(missingTargets, key)
+				continue
+			}
+			if _, rewrite := missingTargets[key]; !rewrite {
+				staleTargets = append(staleTargets, key)
+			}
+		}
+		if err := iterator.Err(); err != nil {
+			return fmt.Errorf("serviceroutemap: iterate remote targets for sweep: %w", err)
+		}
+	}
 	var staleSets []serviceRouteKey
 	if t.producerSets != nil {
 		iterator := t.producerSets.Iterate()
@@ -790,6 +885,16 @@ func (t *Tables) SweepPolicy(snapshot PolicySnapshot) error {
 	for _, key := range staleRoutes {
 		if err := t.routes.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			deleteErrs = append(deleteErrs, fmt.Errorf("serviceroutemap: sweep route: %w", err))
+		}
+	}
+	for _, key := range staleTargets {
+		if err := t.remoteTargets.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			deleteErrs = append(deleteErrs, fmt.Errorf("serviceroutemap: sweep remote target: %w", err))
+		}
+	}
+	for key, ifindex := range missingTargets {
+		if err := t.remoteTargets.Put(key, serviceRemoteTargetValue{ProducerIfindex: ifindex}); err != nil {
+			deleteErrs = append(deleteErrs, fmt.Errorf("serviceroutemap: restore remote target: %w", err))
 		}
 	}
 	for _, key := range staleSets {
@@ -884,6 +989,31 @@ func (t *Tables) RegisterRemoteGrant(
 	if err := t.remoteGrants.Put(key, value); err != nil {
 		return fmt.Errorf("serviceroutemap: register remote grant: %w", err)
 	}
+	if t.remoteTargets != nil {
+		target := serviceRemoteTargetValue{ProducerIfindex: producerIfindex}
+		if err := t.remoteTargets.Put(remoteTargetKey(key), target); err != nil {
+			return fmt.Errorf("serviceroutemap: register remote target: %w", err)
+		}
+	}
+	return nil
+}
+
+// SetRemoteTarget points the remote target of a grant at producerIfindex,
+// where a grant for that interface is registered. It does nothing on a
+// datapath without the map.
+func (t *Tables) SetRemoteTarget(
+	producerIfindex uint32, address net.IP, protocol uint8, port uint16, grantID [16]byte,
+) error {
+	if t.remoteTargets == nil {
+		return nil
+	}
+	key, err := remoteGrantKey(0, address, protocol, port, grantID)
+	if err != nil {
+		return err
+	}
+	if err := t.remoteTargets.Put(key, serviceRemoteTargetValue{ProducerIfindex: producerIfindex}); err != nil {
+		return fmt.Errorf("serviceroutemap: register remote target: %w", err)
+	}
 	return nil
 }
 
@@ -896,6 +1026,23 @@ func (t *Tables) UnregisterRemoteGrant(
 	}
 	if err := t.remoteGrants.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("serviceroutemap: unregister remote grant: %w", err)
+	}
+	if t.remoteTargets == nil {
+		return nil
+	}
+	// The target goes only while it names this grant's interface: a grant
+	// for the producer's next incarnation may have replaced it already.
+	var target serviceRemoteTargetValue
+	switch err := t.remoteTargets.Lookup(remoteTargetKey(key), &target); {
+	case errors.Is(err, ebpf.ErrKeyNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("serviceroutemap: look up remote target: %w", err)
+	case target.ProducerIfindex != producerIfindex:
+		return nil
+	}
+	if err := t.remoteTargets.Delete(remoteTargetKey(key)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("serviceroutemap: unregister remote target: %w", err)
 	}
 	return nil
 }

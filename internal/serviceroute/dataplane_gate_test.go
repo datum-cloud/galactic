@@ -190,6 +190,11 @@ func TestMapSetSlotsSkipAbsentOptionalMaps(t *testing.T) {
 			&recordingTable{}, required()...), append(base[:7:7], 7)},
 		{"both", serviceroutemap.New(&recordingTable{}, &recordingTable{}, &recordingTable{},
 			required()...).WithProducerSets(&recordingTable{}), append(base[:7:7], 7, 8)},
+		{"remote targets only", serviceroutemap.New(&recordingTable{}, &recordingTable{}, &recordingTable{},
+			required()[:4]...).WithRemoteTargets(&recordingTable{}), append(base[:7:7], 9)},
+		{"all", serviceroutemap.New(&recordingTable{}, &recordingTable{}, &recordingTable{},
+			required()...).WithProducerSets(&recordingTable{}).WithRemoteTargets(&recordingTable{}),
+			append(base[:7:7], 7, 8, 9)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

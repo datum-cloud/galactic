@@ -1059,6 +1059,13 @@ struct service_remote_grant_value {
 	__s64 authorization_valid_until_ns;
 };
 
+// service_remote_target_value names the producer interface of a remote grant,
+// in service_remote_target_table under the grant's key with producer_ifindex
+// zero.
+struct service_remote_target_value {
+	__u32 producer_ifindex;
+};
+
 struct service_policy_state_value {
 	__u8 enabled;
 };
@@ -1667,6 +1674,21 @@ struct {
 	__type(key, struct service_remote_grant_key);
 	__type(value, struct service_remote_grant_value);
 } service_remote_grant_table SEC(".maps");
+
+// The producer node delivers a tunneled request to the producer interface
+// this table names, not to the interface a route lookup of the service
+// address finds: the address is virtual, so the producer's VPC need not route
+// it. Keyed like service_remote_grant_table with producer_ifindex zero, since
+// that is what the request is looked up to find. Only userspace writes it. A
+// request with no row falls back to the route lookup. The row only chooses
+// where to deliver; the grant at that interface still authorizes the request.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 65536);
+	__type(key, struct service_remote_grant_key);
+	__type(value, struct service_remote_target_value);
+} service_remote_target_table SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -4056,6 +4078,53 @@ static USID_ALWAYS_INLINE int service_id_equal(const __u8 a[16], const __u8 b[16
 // this branch in a BPF subprogram prevents its request/reply states from being
 // multiplied through the legacy ingress redirect path. Return 1 when request
 // reverse state was installed, 0 for an authorized reply, and -1 on denial.
+// service_remote_target returns the producer interface that a tunneled
+// service request's grant names, or zero when there is none, and sets *nh to
+// that producer's next hop. It reads the request's tuple into the service
+// scratch. A global function, so the verifier checks it once rather than on
+// every path that reaches the call.
+__attribute__((noinline)) __u32 service_remote_target(struct __sk_buff *skb, __u32 h_proto, __u64 vrf_key,
+						       struct bpf_redir_neigh *nh)
+{
+	__u32 scratch_key = 0;
+	struct service_fib_scratch_value *s = bpf_map_lookup_elem(&service_fib_scratch, &scratch_key);
+	if (!skb || !nh || !s || parse_service_packet(skb, (__be16) h_proto, s))
+		return 0;
+	__builtin_memset(&s->remote_grant, 0, sizeof(s->remote_grant));
+	s->remote_grant.family = s->meta_family;
+	s->remote_grant.protocol = s->protocol;
+	s->remote_grant.port = s->dest_port;
+	__builtin_memcpy(s->remote_grant.grant_id, s->tunnel_grant_id, 16);
+	__builtin_memcpy(s->remote_grant.addr, s->dest_addr, 16);
+	struct service_remote_target_value *target =
+		bpf_map_lookup_elem(&service_remote_target_table, &s->remote_grant);
+	if (!target || !target->producer_ifindex)
+		return 0;
+	__u32 ifindex = target->producer_ifindex;
+	// Only a producer in the VRF the tunnel's SID names, as the route lookup
+	// it replaces is scoped to that VRF.
+	struct ifindex_vrf_value *iv = bpf_map_lookup_elem(&ifindex_vrf_table, &ifindex);
+	if (!iv || ((iv->block << 12) | iv->argument) != vrf_key)
+		return 0;
+	// The producer's own address, as the local path delivers through it. A
+	// producer with no recorded next hop takes the service address itself; one
+	// whose next hop belongs to an earlier incarnation of its interface takes
+	// the route lookup.
+	struct service_peer_key key = {.ifindex = ifindex, .family = s->meta_family};
+	struct service_peer_value *peer = bpf_map_lookup_elem(&service_peer_table, &key);
+	if (peer && !service_identity_matches(ifindex, peer->token))
+		return 0;
+	__builtin_memset(nh, 0, sizeof(*nh));
+	if (s->meta_family == USID_EGRESS_ROUTE_FAMILY_INET6) {
+		nh->nh_family = USID_AF_INET6;
+		__builtin_memcpy(nh->ipv6_nh, peer ? peer->address : s->dest_addr, 16);
+	} else {
+		nh->nh_family = USID_AF_INET;
+		__builtin_memcpy(&nh->ipv4_nh, peer ? peer->address : s->dest_addr, 4);
+	}
+	return ifindex;
+}
+
 static USID_NOINLINE int service_ingress_authorize(struct __sk_buff *skb, __be16 h_proto,
 						    __u32 ifindex, struct service_fib_scratch_value *s)
 {
@@ -4569,8 +4638,36 @@ int usid_ingress(struct __sk_buff *skb)
 	// FIB lookup scoped to that table exactly as the kernel's stock End.DT46
 	// does, reached through a dynamic Argument-keyed lookup rather than a
 	// static per-address route.
-	long fib_rc = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params),
-				      BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID);
+	//
+	// A tunneled service request is the exception: its destination is the
+	// endpoint's virtual address, which the producer's VPC does not route, so
+	// it goes to the producer its grant names, through that producer's next
+	// hop, the way the local path delivers. Authorization below still checks
+	// the grant at that interface. Without a row, as from a router older than
+	// the table, the lookup runs as for any packet.
+	struct bpf_redir_neigh service_nh;
+	__u32 service_target = 0;
+	long fib_rc;
+
+	__builtin_memset(&service_nh, 0, sizeof(service_nh));
+	if (service_tunnel && service_scratch && service_scratch->tunnel_direction == SERVICE_TUNNEL_REQUEST)
+		service_target = service_remote_target(skb, new_eth->h_proto, vrf_key, &service_nh);
+	if (service_target) {
+		fib_params.ifindex = service_target;
+		fib_rc = BPF_FIB_LKUP_RET_NO_NEIGH;
+	} else {
+		fib_rc = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params),
+					BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID);
+		// The next hop the cold-neighbor redirect below takes, set on both
+		// paths so they reach it in the same shape.
+		if (inner_version == 6) {
+			service_nh.nh_family = USID_AF_INET6;
+			__builtin_memcpy(service_nh.ipv6_nh, fib_params.ipv6_dst, sizeof(service_nh.ipv6_nh));
+		} else {
+			service_nh.nh_family = USID_AF_INET;
+			service_nh.ipv4_nh = fib_params.ipv4_dst;
+		}
+	}
 
 	// The route resolved, but the attachment's neighbor entry is missing or
 	// not yet valid, so there is no MAC to write. The kernel garbage-collects
@@ -4654,14 +4751,7 @@ int usid_ingress(struct __sk_buff *skb)
 	if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH) {
 		struct bpf_redir_neigh nh;
 
-		__builtin_memset(&nh, 0, sizeof(nh));
-		if (inner_version == 6) {
-			nh.nh_family = USID_AF_INET6;
-			__builtin_memcpy(nh.ipv6_nh, fib_params.ipv6_dst, sizeof(nh.ipv6_nh));
-		} else {
-			nh.nh_family = USID_AF_INET;
-			nh.ipv4_nh = fib_params.ipv4_dst;
-		}
+		__builtin_memcpy(&nh, &service_nh, sizeof(nh));
 		skb->mark |= tp_mark;
 		long neigh_rc = bpf_redirect_neigh(fib_params.ifindex, &nh, sizeof(nh), 0);
 		if (neigh_rc == TC_ACT_REDIRECT) {
