@@ -5180,8 +5180,8 @@ static USID_ALWAYS_INLINE __u64 service_rendezvous_score(__u32 hash, __u64 token
 // pins it. A UDP packet takes an eligible producer at random, so the requests
 // of one socket spread too. A member whose interface identity no longer matches
 // its token is never kept, pinned or picked, so a flow retried while the router
-// repairs the set is not held to it and a new flow goes to the next eligible
-// member. It returns nonzero when the route has no producer set or no eligible
+// repairs the set is not held to it and a new flow goes to the eligible member
+// with a current identity that ranks first. It returns nonzero when the route has no producer set or no eligible
 // producer with a current identity. It overwrites s->reverse.
 static USID_NOINLINE int service_select_producer(struct service_fib_scratch_value *s, __u32 ifindex,
 						 __u32 *target_ifindex, __u64 *producer_token, int opening)
@@ -5253,7 +5253,7 @@ place:
 			USID_BARRIER_VAR(candidate);
 			struct service_producer_member *option = &set->members[candidate & (SERVICE_PRODUCER_SET_MAX - 1)];
 			// A member whose interface is gone or was recreated is skipped,
-			// so the flow goes to the next eligible member instead.
+			// so the flow goes to the best ranked member that is current.
 			if (!service_identity_matches(option->ifindex, option->token))
 				continue;
 			__u64 score = service_rendezvous_score(hash, option->token);

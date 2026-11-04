@@ -291,7 +291,10 @@ func TestUsidServiceEgress_LocalSetSkipsStaleProducer(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
 	const udp, tcp = uint8(17), uint8(6)
-	for _, stale := range []uint64{0, spreadOtherToken + 1} {
+	// Each pass uses its own TCP ports, so no pin left by the first pass
+	// decides where the second pass's connections go.
+	for pass, stale := range []uint64{0, spreadOtherToken + 1} {
+		firstPort := uint16(45000 + 100*pass)
 		setUpLocalSet(t, objs, udp, spreadLocalProducer, spreadRemoteProducer)
 		setUpLocalSet(t, objs, tcp, spreadLocalProducer, spreadRemoteProducer)
 		if stale == 0 {
@@ -311,7 +314,7 @@ func TestUsidServiceEgress_LocalSetSkipsStaleProducer(t *testing.T) {
 		if !reachedProducer(t, objs, spreadLocalProducer) {
 			t.Fatalf("identity %d: no UDP request reached the remaining producer", stale)
 		}
-		for port := uint16(45000); port < 45064; port++ {
+		for port := firstPort; port < firstPort+64; port++ {
 			sendRequest(t, objs, tcp, port)
 			var pin UsidServiceFlowValue
 			if err := objs.ServiceFlowTable.Lookup(UsidServiceReverseKey{
