@@ -15,6 +15,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // requireRoot skips the test when not running as root.
@@ -534,5 +535,36 @@ func TestSecondaryInterfacePreservesPrimaryDefault(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestBlackholeDefaultDoesNotSuppressVPCDefault: a default route that
+// forwards nothing, as the kernel reports it, must not cost the attachment
+// its VPC default.
+func TestBlackholeDefaultDoesNotSuppressVPCDefault(t *testing.T) {
+	netnsPath, cleanup := createTestNetnsWithDummy(t)
+	defer cleanup()
+	netns, err := ns.GetNS(netnsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = netns.Close() }()
+	err = netns.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = handle.Close() }()
+		_, all, _ := net.ParseCIDR("::/0")
+		return handle.RouteAdd(&netlink.Route{Dst: all, Type: unix.RTN_BLACKHOLE, Priority: 4000})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := configureInterfaceInNetns(netnsPath, "test-dummy", testIPNet, testGateway, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if gateway := defaultRouteVia(t, netnsPath); !gateway.Equal(testGateway) {
+		t.Fatalf("VPC default route = %v, want via %s", gateway, testGateway)
 	}
 }

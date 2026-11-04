@@ -11,6 +11,7 @@ import (
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/nldump"
 )
@@ -143,7 +144,7 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 		return fmt.Errorf("list namespace routes: %w", err)
 	}
 	for _, route := range routes {
-		if isDefaultRouteDst(route.Dst) && route.LinkIndex != link.Attrs().Index {
+		if isDefaultRouteDst(route.Dst) && forwardsThroughOtherLink(route, link.Attrs().Index) {
 			return nil
 		}
 	}
@@ -162,6 +163,27 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 		return fmt.Errorf("add default route via %s: %w", gateway, err)
 	}
 	return nil
+}
+
+// forwardsThroughOtherLink reports whether route is a unicast route that
+// leaves through a link other than linkIndex, which makes it the guest's
+// primary default. Blackhole, unreachable and prohibit routes and routes with
+// no egress link carry LinkIndex 0 and forward nothing, so they must not
+// suppress the VPC default. A multipath route counts when any of its next
+// hops leaves through another link.
+func forwardsThroughOtherLink(route netlink.Route, linkIndex int) bool {
+	if route.Type != 0 && route.Type != unix.RTN_UNICAST {
+		return false
+	}
+	if route.LinkIndex > 0 {
+		return route.LinkIndex != linkIndex
+	}
+	for _, hop := range route.MultiPath {
+		if hop != nil && hop.LinkIndex > 0 && hop.LinkIndex != linkIndex {
+			return true
+		}
+	}
+	return false
 }
 
 // isDefaultRouteDst reports whether dst is a default route. Netlink represents
