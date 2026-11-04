@@ -23,7 +23,6 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/google/uuid"
 	"github.com/vishvananda/netlink"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -180,24 +179,25 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	update, res, err := r.reconcile(ctx, req)
 	if update != nil {
-		if serr := r.writeStatus(ctx, req.NamespacedName, update.results); serr != nil {
+		if serr := r.writeStatus(ctx, req.NamespacedName, update.results, update.mode); serr != nil {
 			err = errors.Join(err, serr)
 		}
 	}
 	return res, err
 }
 
-// statusUpdate is this node's entry for a binding: both directions, or, when
-// results is nil, no entry.
+// statusUpdate is this node's entry for a binding: both directions and the
+// node's mode, or, when results is nil, no entry.
 type statusUpdate struct {
 	results *[2]galacticv1alpha1.AppliedPolicy
+	mode    galacticv1alpha1.EnforcementMode
 }
 
 var removeStatus = &statusUpdate{}
 
-func pendingStatus(msg string) *statusUpdate {
+func pendingStatus(msg string, mode galacticv1alpha1.EnforcementMode) *statusUpdate {
 	p := galacticv1alpha1.AppliedPolicy{State: galacticv1alpha1.StatePending, Message: msg}
-	return &statusUpdate{results: &[2]galacticv1alpha1.AppliedPolicy{p, p}}
+	return &statusUpdate{results: &[2]galacticv1alpha1.AppliedPolicy{p, p}, mode: mode}
 }
 
 func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (*statusUpdate, ctrl.Result, error) {
@@ -212,6 +212,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (*statusUp
 	}
 	r.sweepAdopted(ctx)
 	r.sweepPins(ctx)
+	// Read on every pass, so a galactic-cni restart into another mode
+	// reaches status by the next resync without a policy edit.
+	mode := EffectiveMode(r.maps.GetState())
 
 	key := subject{NamespacedName: req.NamespacedName}
 	var att cloudv1alpha1.VPCAttachment
@@ -231,7 +234,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (*statusUp
 		return nil, ctrl.Result{}, err
 	}
 	if pending != "" {
-		return pendingStatus(pending), ctrl.Result{RequeueAfter: pendingRetry}, nil
+		return pendingStatus(pending, mode), ctrl.Result{RequeueAfter: pendingRetry}, nil
 	}
 
 	var binding galacticv1alpha1.TrafficPolicyBinding
@@ -265,7 +268,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (*statusUp
 	}
 	var update *statusUpdate
 	if bindingFound {
-		update = &statusUpdate{results: &results}
+		update = &statusUpdate{results: &results, mode: mode}
 	}
 	return update, ctrl.Result{RequeueAfter: resync}, errors.Join(errs...)
 }
@@ -774,10 +777,10 @@ func fieldOwner(node string) string {
 
 // writeStatus applies this node's entry in the binding's status.nodes, or,
 // when results is nil, removes it. It writes only when the entry would
-// change, so resyncs, pending retries and attachments on other nodes cost no
-// API writes.
+// change or its heartbeat is due, so resyncs, pending retries and
+// attachments on other nodes cost no API writes between heartbeats.
 func (r *Reconciler) writeStatus(ctx context.Context, binding types.NamespacedName,
-	results *[2]galacticv1alpha1.AppliedPolicy,
+	results *[2]galacticv1alpha1.AppliedPolicy, mode galacticv1alpha1.EnforcementMode,
 ) error {
 	var cur galacticv1alpha1.TrafficPolicyBinding
 	if err := r.Client.Get(ctx, binding, &cur); err != nil {
@@ -799,22 +802,13 @@ func (r *Reconciler) writeStatus(ctx context.Context, binding types.NamespacedNa
 		}
 	} else {
 		in, eg := results[0], results[1]
-		now := metav1.Now()
 		for _, a := range []*galacticv1alpha1.AppliedPolicy{&in, &eg} {
 			if a.ObservedGeneration == 0 {
 				a.ObservedGeneration = cur.Generation
 			}
 		}
-		if existing != nil {
-			keepTransitionTimes(&[2]*galacticv1alpha1.AppliedPolicy{&in, &eg}, *existing)
-		}
-		for _, a := range []*galacticv1alpha1.AppliedPolicy{&in, &eg} {
-			if a.LastTransitionTime == nil {
-				a.LastTransitionTime = &now
-			}
-		}
-		entry := galacticv1alpha1.NodeBindingStatus{Node: r.NodeName, Ingress: &in, Egress: &eg}
-		if existing != nil && equality.Semantic.DeepEqual(*existing, entry) {
+		entry, changed := nodeEntry(existing, r.NodeName, in, eg, mode, nowFunc())
+		if !changed {
 			return nil
 		}
 		nodes = append(nodes, entry)

@@ -18,6 +18,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/vishvananda/netlink"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -217,7 +219,8 @@ func newPolicyShowCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show <namespace>/<attachment>",
 		Short: "Show what this node applies to one VPCAttachment's interface",
-		Long: `show prints a VPCAttachment's binding, this node's status entry for it, and
+		Long: `show prints this node's traffic policy mode, a VPCAttachment's binding with
+its Installed and Enforcing conditions, this node's status entry for it, and
 the snapshot each direction of its interface holds in this node's datapath,
 with every rule's counters. Run it in the galactic-router pod on the node
 the attachment is on.`,
@@ -265,6 +268,7 @@ func show(ctx context.Context, w io.Writer, c client.Client, maps *tpmap.Maps, k
 	out := &printer{w: tw}
 	out.printf("attachment\t%s (uid %s)\n", key, att.UID)
 	out.printf("interface\t%s (ifindex %d)\n", att.Status.HostInterface, ifindex)
+	printEnforcement(out, tpnode.EffectiveMode(maps.GetState()), binding.Status.Conditions)
 	for _, d := range []struct {
 		dir  uint32
 		name string
@@ -403,6 +407,28 @@ func policyClient() (client.Client, error) {
 type printer struct {
 	w   io.Writer
 	err error
+}
+
+// printEnforcement prints the node's live mode, which decides whether an
+// installed snapshot drops anything, and the binding's Installed and
+// Enforcing conditions across every node that holds the interface.
+func printEnforcement(out *printer, mode galacticv1alpha1.EnforcementMode, conditions []metav1.Condition) {
+	note := ""
+	if mode != galacticv1alpha1.ModeEnforce {
+		note = ": installed snapshots decide but drop nothing on this node"
+		if mode == galacticv1alpha1.ModeUnsupported {
+			note = ": the kernel failed the traffic policy preflight, so this node protects nothing"
+		}
+	}
+	out.printf("mode\t%s%s\n", mode, note)
+	for _, t := range []string{galacticv1alpha1.BindingInstalled, galacticv1alpha1.BindingEnforcing} {
+		c := meta.FindStatusCondition(conditions, t)
+		if c == nil {
+			out.printf("%s\tnot reported\n", strings.ToLower(t))
+			continue
+		}
+		out.printf("%s\t%s %s: %s\n", strings.ToLower(t), c.Status, c.Reason, c.Message)
+	}
 }
 
 func (p *printer) printf(format string, args ...any) {

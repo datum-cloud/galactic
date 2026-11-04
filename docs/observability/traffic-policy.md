@@ -19,6 +19,7 @@ export them. See [traffic-policy/node.md](../traffic-policy/node.md).
 | `galactic_cni_traffic_policy_unattributed_drops_total` | counter | direction, reason                                                                                          | Policy denials whose interface or fallback row could not be resolved                    |
 | `galactic_cni_traffic_policy_accounting_errors_total`  | counter | direction, action, reason                                                                                  | Verdicts whose rule counter row was missing; the verdict stood, the count was lost      |
 | `galactic_cni_traffic_policy_counter_read_errors`      | gauge   | none                                                                                                       | Counter rows the last scrape could not read, and so left out rather than reporting zero |
+| `galactic_cni_traffic_policy_mode`                     | gauge   | mode                                                                                                       | Effective mode: 1 for the current one of off, audit, enforce, unsupported or unknown    |
 
 - `direction` is `ingress` or `egress`; `action` is `allow` or `deny`.
 - `reason` is one of `no_match`, `policy_unavailable`, `parse_error` or
