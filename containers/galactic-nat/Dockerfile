@@ -21,6 +21,7 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 
 # galactic-nat's build graph reaches all four of this module's eBPF
 # program packages, so all four must be generated here -- none of their

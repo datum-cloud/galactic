@@ -22,6 +22,7 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 
 # Install the eBPF build toolchain and regenerate
 # internal/plumbing/ebpf/prog's bpf2go output (usid_bpfel.go/.o,

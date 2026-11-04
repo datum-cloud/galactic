@@ -21,6 +21,7 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 
 # galactic-gateway transitively imports both internal/plumbing/ebpf/edgeprog
 # (the edge DSR load-balancer XDP program it loads directly) and, via
