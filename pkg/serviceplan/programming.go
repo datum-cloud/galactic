@@ -20,6 +20,17 @@ import (
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
 
+// ErrNoEligibleConsumers is returned by ProgrammingPlan when no consumer
+// attachment the policy selects is placed on a node, so there is no path to
+// program yet. A placed consumer that is not ready yet returns
+// ErrConsumersNotReady instead.
+var ErrNoEligibleConsumers = errors.New("no eligible consumer attachments")
+
+// ErrConsumersNotReady is returned by ProgrammingPlan when consumer
+// attachments the policy selects are placed on a node but none of them is
+// ready yet.
+var ErrConsumersNotReady = errors.New("no consumer attachment is ready")
+
 // ProgrammingRequirements fences acknowledgments to a complete topology snapshot.
 type ProgrammingRequirements struct {
 	// InputDigest identifies the policy, endpoint and attachment inputs the
@@ -57,8 +68,21 @@ func servingProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloud
 // pass the endpoint through WithProducerReports first. consumerVPCIdentity,
 // when set, selects only consumers whose status carries that VPC identity; a
 // policy with a frontend requires it.
+//
+// For a Spread endpoint the plan depends on which producer reports are
+// current, so it can change when a report expires without any object
+// changing. A caller should recompute it when a ServiceEndpointProducerReport
+// changes and at the time NextProducerReportExpiry returns.
 func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment, consumerVPCIdentity string,
+) (ProgrammingRequirements, error) {
+	return ProgrammingPlanAt(policy, endpoint, attachments, consumerVPCIdentity, time.Now())
+}
+
+// ProgrammingPlanAt is ProgrammingPlan with producer reports judged current
+// or expired as of now.
+func ProgrammingPlanAt(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
+	attachments []*cloudv1alpha1.VPCAttachment, consumerVPCIdentity string, now time.Time,
 ) (ProgrammingRequirements, error) {
 	plan := ProgrammingRequirements{}
 	if policy == nil || endpoint == nil {
@@ -78,7 +102,7 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 	if err := validateProducerTopology(endpoint, producers); err != nil {
 		return plan, err
 	}
-	health := producersHealth(endpoint, producers, time.Now())
+	health := producersHealth(endpoint, producers, now)
 	ready := map[types.NamespacedName]bool{}
 	for _, a := range readyAttachments(attachments) {
 		ready[types.NamespacedName{Namespace: a.Namespace, Name: a.Name}] = a.Status.HostInterface != ""
@@ -88,16 +112,8 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 		relevant[types.NamespacedName{Namespace: p.Namespace, Name: p.Name}] = true
 	}
 	nodes := map[string]bool{}
-	selected := 0
-	sorted := make([]*cloudv1alpha1.VPCAttachment, 0, len(attachments))
-	for _, a := range attachments {
-		if a != nil {
-			sorted = append(sorted, a)
-		}
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Namespace+"/"+sorted[i].Name < sorted[j].Namespace+"/"+sorted[j].Name
-	})
+	selected, placed := 0, 0
+	sorted := sortedAttachments(attachments)
 	for _, a := range sorted {
 		if !selector.Matches(labels.Set(a.Labels)) {
 			continue
@@ -106,6 +122,9 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 			continue
 		}
 		relevant[types.NamespacedName{Namespace: a.Namespace, Name: a.Name}] = true
+		if a.DeletionTimestamp == nil && a.Status.Node != "" {
+			placed++
+		}
 		if a.DeletionTimestamp != nil || !ready[types.NamespacedName{Namespace: a.Namespace, Name: a.Name}] {
 			continue
 		}
@@ -122,9 +141,43 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 			nodes[p.Status.Node] = true
 		}
 	}
-	if selected == 0 {
-		return plan, errors.New("no eligible consumer attachments")
+	if selected == 0 && placed == 0 {
+		return plan, ErrNoEligibleConsumers
 	}
+	if selected == 0 {
+		return plan, ErrConsumersNotReady
+	}
+	plan.InputDigest, err = programmingDigest(policy, endpoint, consumerVPCIdentity, sorted, relevant)
+	if err != nil {
+		return plan, err
+	}
+	for node := range nodes {
+		plan.Nodes = append(plan.Nodes, node)
+	}
+	sort.Strings(plan.Nodes)
+	return plan, nil
+}
+
+// sortedAttachments returns the attachments that are not nil, ordered by
+// namespace and name.
+func sortedAttachments(attachments []*cloudv1alpha1.VPCAttachment) []*cloudv1alpha1.VPCAttachment {
+	sorted := make([]*cloudv1alpha1.VPCAttachment, 0, len(attachments))
+	for _, a := range attachments {
+		if a != nil {
+			sorted = append(sorted, a)
+		}
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Namespace+"/"+sorted[i].Name < sorted[j].Namespace+"/"+sorted[j].Name
+	})
+	return sorted
+}
+
+// programmingDigest hashes the inputs of a plan: policy, endpoint, the
+// consumer VPC identity and the relevant attachments of sorted.
+func programmingDigest(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
+	consumerVPCIdentity string, sorted []*cloudv1alpha1.VPCAttachment, relevant map[types.NamespacedName]bool,
+) (string, error) {
 	// Resource versions and node reports are excluded: heartbeat writes do not
 	// invalidate the desired topology. UIDs, generations, specs, and statuses do.
 	snapshot := struct {
@@ -155,13 +208,8 @@ func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *netwo
 	}
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
-		return plan, fmt.Errorf("encode service programming snapshot: %w", err)
+		return "", fmt.Errorf("encode service programming snapshot: %w", err)
 	}
 	sum := sha256.Sum256(encoded)
-	plan.InputDigest = hex.EncodeToString(sum[:])
-	for node := range nodes {
-		plan.Nodes = append(plan.Nodes, node)
-	}
-	sort.Strings(plan.Nodes)
-	return plan, nil
+	return hex.EncodeToString(sum[:]), nil
 }

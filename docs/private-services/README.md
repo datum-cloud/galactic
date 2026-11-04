@@ -284,9 +284,13 @@ before rebuilding the node's state.
 A controller that waits for these reports computes the required nodes and the
 input digest with `serviceplan.ProgrammingPlan` from the public
 `go.datum.net/galactic/pkg/serviceplan` package, the same planner the routers
-compile their routes with. For a `Spread` endpoint, it first passes the endpoint
-through `serviceplan.WithProducerReports` so the plan reads the same producer
-health the routers do.
+compile their routes with. It first passes the endpoint through
+`serviceplan.WithProducerReports`, with the `ServiceEndpointProducerReport`
+objects of the endpoint's namespace, so the plan reads the same producer
+health the routers do; that needs permission to list those reports. For a
+`Spread` endpoint the plan changes when a report changes or expires, so the
+controller recomputes it on report changes and at the time
+`serviceplan.NextProducerReportExpiry` returns.
 
 ## Attachment replacement continuity
 

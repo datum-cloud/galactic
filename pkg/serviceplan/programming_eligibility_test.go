@@ -1,6 +1,10 @@
+// Copyright 2026 Datum Cloud, Inc.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package serviceplan
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
@@ -76,12 +80,13 @@ func TestProgrammingPlanKeepsEligibleConsumersIndependent(t *testing.T) {
 	if restored.InputDigest != before.InputDigest {
 		t.Fatal("restored topology has inconsistent digest")
 	}
-	if _, err := ProgrammingPlan(policy, endpoint, []*cloud.VPCAttachment{producer}, ""); err == nil {
-		t.Fatal("producer-only topology reported ready")
+	if _, err := ProgrammingPlan(policy, endpoint, []*cloud.VPCAttachment{producer}, ""); !errors.Is(err,
+		ErrNoEligibleConsumers) {
+		t.Fatalf("producer-only topology error = %v, want ErrNoEligibleConsumers", err)
 	}
 	healthy.Status.HostInterface = ""
 	sibling.Status.HostInterface = ""
-	if _, err := ProgrammingPlan(policy, endpoint, topology, ""); err == nil {
-		t.Fatal("topology without eligible consumers reported ready")
+	if _, err := ProgrammingPlan(policy, endpoint, topology, ""); !errors.Is(err, ErrConsumersNotReady) {
+		t.Fatalf("topology with placed but unready consumers error = %v, want ErrConsumersNotReady", err)
 	}
 }
