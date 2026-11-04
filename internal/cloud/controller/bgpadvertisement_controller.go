@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -80,9 +79,10 @@ func (r *BGPAdvertisementReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			var live bgpv1alpha1.BGPAdvertisement
 			err := r.APIReader.Get(ctx, req.NamespacedName, &live)
 			if err == nil {
-				// Recreated faster than the cache saw it: its create event
-				// projects the status, so clearing now would only flap it.
-				return ctrl.Result{RequeueAfter: time.Second}, nil
+				// Recreated faster than the cache saw it. The informer's
+				// create event reconciles it again, so clearing now would
+				// only flap the status.
+				return ctrl.Result{}, nil
 			}
 			if !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("confirm withdrawn advertisement %s: %w", req.NamespacedName, err)

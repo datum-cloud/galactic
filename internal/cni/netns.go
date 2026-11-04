@@ -143,10 +143,15 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 	if err != nil {
 		return fmt.Errorf("list namespace routes: %w", err)
 	}
+	nonForwarding := false
 	for _, route := range routes {
-		if isDefaultRouteDst(route.Dst) && forwardsThroughOtherLink(route, link.Attrs().Index) {
+		if !isDefaultRouteDst(route.Dst) {
+			continue
+		}
+		if forwardsThroughOtherLink(route, link.Attrs().Index) {
 			return nil
 		}
+		nonForwarding = nonForwarding || route.LinkIndex != link.Attrs().Index
 	}
 
 	// The on-link flag: a VPC gateway sits outside the prefix allocated to the
@@ -160,6 +165,13 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 		Flags:     int(netlink.FLAG_ONLINK),
 	}
 	if err := handle.RouteAdd(defaultRoute); err != nil {
+		if nonForwarding {
+			// A blackhole, unreachable or prohibit default at the same
+			// metric makes the kernel refuse this one. Name it rather than
+			// leave the attachment without a default route.
+			return fmt.Errorf("add default route via %s beside a default route that forwards nothing: %w",
+				gateway, err)
+		}
 		return fmt.Errorf("add default route via %s: %w", gateway, err)
 	}
 	return nil
