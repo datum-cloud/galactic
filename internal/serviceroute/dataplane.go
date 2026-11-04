@@ -600,11 +600,15 @@ func (p *EBPFRouteProgrammer) closeHandles() {
 func (p *EBPFRouteProgrammer) recoverableEntries(intent RouteIntent) ([]appliedEntry, error) {
 	entries, err := p.entries(intent)
 	var missing netlink.LinkNotFoundError
-	if errors.As(err, &missing) {
+	if errors.As(err, &missing) || errors.Is(err, errNoProducerInterface) {
 		return []appliedEntry{}, nil
 	}
 	return entries, err
 }
+
+// errNoProducerInterface reports a LocalSet intent none of whose producers has
+// an interface with an identity, so it withdraws like a missing interface.
+var errNoProducerInterface = errors.New("no producer interface is ready")
 
 func (p *EBPFRouteProgrammer) rebuildDesired() error {
 	for _, key := range sortedIntentKeys(p.desiredIntents) {
@@ -943,9 +947,10 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 // identity tokens. It returns the set, without its route key, and each
 // producer's reply markers.
 //
-// A producer whose interface does not exist, as while a replacement pod
-// recreates it under the same name, is left out so the other producers keep
-// serving. Only a set with no interface at all fails, with the lookup error.
+// A producer whose interface does not exist, or has no identity yet, as while
+// a replacement pod recreates it under the same name, is left out so the other
+// producers keep serving. Only a set with no such producer left fails, with
+// the lookup error.
 // When the producers left are all draining, they all take new flows, because
 // draining only prefers the producers that are gone.
 func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []appliedEntry, error) {
@@ -972,6 +977,11 @@ func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []applie
 			return nil, nil, fmt.Errorf("resolve service interface %q: %w", producer.Device, err)
 		}
 		token, err := p.tables.IdentityToken(ifindex)
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			// The CNI creates the interface before it records its identity.
+			missingErr = err
+			continue
+		}
 		if err != nil {
 			return nil, nil, err
 		}
@@ -995,7 +1005,7 @@ func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []applie
 		)
 	}
 	if set.count == 0 {
-		return nil, nil, missingErr
+		return nil, nil, fmt.Errorf("%w: %w", errNoProducerInterface, missingErr)
 	}
 	if !eligible && missingErr != nil {
 		for i := range set.count {

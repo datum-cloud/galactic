@@ -199,3 +199,30 @@ func TestLocalSetWithNoProducerInterfaceIsWithdrawn(t *testing.T) {
 		t.Fatal("lost the intent to restore when a producer returns")
 	}
 }
+
+func TestReplacingServingProducerInterfaceKeepsServing(t *testing.T) {
+	f := newReplacementFixture()
+	intent := localSetIntent(producer("producer-a", false), producer("producer-b", false))
+	if err := f.programmer.Apply(intent); err != nil {
+		t.Fatal(err)
+	}
+	f.requireServing(t)
+	delete(f.links, "producer-a")
+	f.repair(t, intent)
+	if members, eligible := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{21}) ||
+		!reflect.DeepEqual(eligible, []uint32{21}) {
+		t.Fatalf("set without producer-a = %v/%v, want [21]/[21]", members, eligible)
+	}
+	// The new interface exists before the CNI records its identity.
+	f.links["producer-a"] = 24
+	f.repair(t, intent)
+	if members, _ := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{21}) {
+		t.Fatalf("set with an interface that has no identity = %v, want [21]", members)
+	}
+	f.links["producer-a"] = 23
+	f.repair(t, intent)
+	if members, eligible := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{23, 21}) ||
+		!reflect.DeepEqual(eligible, []uint32{23, 21}) {
+		t.Fatalf("set with recreated producer-a = %v/%v, want [23 21]/[23 21]", members, eligible)
+	}
+}
