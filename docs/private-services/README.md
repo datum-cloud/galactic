@@ -281,6 +281,13 @@ that forwarding is installed. Reports cover network programming, not the
 health of the producer application. Startup withdraws previous local readiness
 before rebuilding the node's state.
 
+A controller that waits for these reports computes the required nodes and the
+input digest with `serviceplan.ProgrammingPlan` from the public
+`go.datum.net/galactic/pkg/serviceplan` package, the same planner the routers
+compile their routes with. For a `Spread` endpoint, it first passes the endpoint
+through `serviceplan.WithProducerReports` so the plan reads the same producer
+health the routers do.
+
 ## Attachment replacement continuity
 
 When an attachment disappears, reappears or changes identity, the router repairs

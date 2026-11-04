@@ -46,6 +46,7 @@ import (
 	"go.datum.net/galactic/internal/runtime/gobgp"
 	"go.datum.net/galactic/internal/serviceroute"
 	tpnode "go.datum.net/galactic/internal/trafficpolicy/node"
+	"go.datum.net/galactic/pkg/serviceplan"
 )
 
 const (
@@ -478,7 +479,7 @@ func setupServiceRouteController(
 	nodeName, bgpNamespace string, frontendEnabled bool, spreadPairingName string,
 	serviceRouteMetrics *serviceroute.Metrics,
 ) error {
-	spreadPairing, err := serviceroute.ParseSpreadPairing(spreadPairingName)
+	spreadPairing, err := serviceplan.ParseSpreadPairing(spreadPairingName)
 	if err != nil {
 		return err
 	}

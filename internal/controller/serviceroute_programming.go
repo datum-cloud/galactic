@@ -16,7 +16,7 @@ import (
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
-	"go.datum.net/galactic/internal/serviceroute"
+	"go.datum.net/galactic/pkg/serviceplan"
 )
 
 const serviceProgrammingAckDuration = 60 * time.Second
@@ -69,7 +69,7 @@ func (r *ServiceRoutePolicyReconciler) setNodeProgramming(
 func serviceProgrammingDigest(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment, vpcIdentity, nodeName string,
 ) string {
-	plan, err := serviceroute.ProgrammingPlan(policy, endpoint, attachments, vpcIdentity)
+	plan, err := serviceplan.ProgrammingPlan(policy, endpoint, attachments, vpcIdentity)
 	if err != nil || !slices.Contains(plan.Nodes, nodeName) {
 		return ""
 	}

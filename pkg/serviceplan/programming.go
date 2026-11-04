@@ -1,7 +1,7 @@
 // Copyright 2026 Datum Cloud, Inc.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package serviceroute
+package serviceplan
 
 import (
 	"crypto/sha256"
@@ -22,8 +22,14 @@ import (
 
 // ProgrammingRequirements fences acknowledgments to a complete topology snapshot.
 type ProgrammingRequirements struct {
+	// InputDigest identifies the policy, endpoint and attachment inputs the
+	// plan was computed from. A node's report in ServiceRoutePolicy
+	// status.nodes counts only when it carries the same digest.
 	InputDigest string
-	Nodes       []string
+	// Nodes lists, sorted, every node that must report the path programmed:
+	// each selected consumer's node and each node holding a producer that
+	// serves one of them.
+	Nodes []string
 }
 
 // servingProducers returns the producers whose node installs part of
@@ -45,6 +51,12 @@ func servingProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloud
 
 // ProgrammingPlan identifies every consumer and selected producer node required
 // to serve a policy. Attachment health establishes network eligibility only.
+// It selects producers exactly as Compile does on every node, Spread endpoints
+// included, so a caller that waits for every node in Nodes to report
+// InputDigest waits for the nodes the routers program. For a Spread endpoint,
+// pass the endpoint through WithProducerReports first. consumerVPCIdentity,
+// when set, selects only consumers whose status carries that VPC identity; a
+// policy with a frontend requires it.
 func ProgrammingPlan(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment, consumerVPCIdentity string,
 ) (ProgrammingRequirements, error) {

@@ -1,8 +1,17 @@
 // Copyright 2026 Datum Cloud, Inc.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package serviceroute compiles service policy into node-local dataplane intents.
-package serviceroute
+// Package serviceplan decides how a ServiceRoutePolicy's consumers reach its
+// ServiceEndpoint's producers: which producer, or set of producers, serves each
+// consumer, and which nodes must program each half of that path. Galactic's
+// routers compile their node-local route intents with it, and ProgrammingPlan
+// gives other controllers the same answer, so a controller that waits for a
+// service path to be programmed waits for the same nodes the routers program.
+//
+// The plan for a Spread endpoint depends on producer health. Pass the endpoint
+// through WithProducerReports first so the plan reads the same reports the
+// routers do.
+package serviceplan
 
 import (
 	"crypto/sha256"
@@ -84,19 +93,6 @@ type ProducerTarget struct {
 	// Draining keeps the producer's existing flows and replies but gives it
 	// no new flow.
 	Draining bool
-}
-
-// ErrProducerSetsUnavailable is returned for a LocalSet intent while the
-// node's datapath predates LocalSet routes. Every other intent still applies.
-var ErrProducerSetsUnavailable = errors.New(
-	"node's eBPF datapath has no producer set map; LocalSet routes need a newer galactic-cni")
-
-type RouteProgrammer interface {
-	Initialize() error
-	Apply(RouteIntent) error
-	Cleanup(RouteIntent) error
-	Remove(RouteIntent) error
-	Finalize() error
 }
 
 type SIDResolver func(*cloudv1alpha1.VPCAttachment) (net.IP, error)

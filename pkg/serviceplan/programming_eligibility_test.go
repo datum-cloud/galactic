@@ -1,4 +1,4 @@
-package serviceroute
+package serviceplan
 
 import (
 	"reflect"
