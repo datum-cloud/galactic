@@ -647,14 +647,17 @@ func TestConflictsAndOwnership(t *testing.T) {
 		c := meta.FindStatusCondition(ep.Status.Conditions, networkv1alpha1.FabricEndpointConditionConflict)
 		return c != nil && c.Status == metav1.ConditionTrue && c.Reason == networkv1alpha1.FabricEndpointReasonAddressInUse
 	})
-	ep := &networkv1alpha1.FabricEndpoint{}
-	if err := e.c.Get(e.ctx, client.ObjectKeyFromObject(winner), ep); err != nil {
-		t.Fatal(err)
-	}
-	if c := meta.FindStatusCondition(ep.Status.Conditions, networkv1alpha1.FabricEndpointConditionConflict); c == nil ||
-		c.Status != metav1.ConditionFalse {
-		t.Errorf("the endpoint whose name sorts first lost its address: %+v", c)
-	}
+	// The pass that flags the loser writes the winner's status in the same
+	// sweep, so read the winner through its own condition instead of as soon
+	// as the loser's appears.
+	eventually(t, "the endpoint whose name sorts first keeping its address", func() bool {
+		ep := &networkv1alpha1.FabricEndpoint{}
+		if err := e.c.Get(e.ctx, client.ObjectKeyFromObject(winner), ep); err != nil {
+			return false
+		}
+		c := meta.FindStatusCondition(ep.Status.Conditions, networkv1alpha1.FabricEndpointConditionConflict)
+		return c != nil && c.Status == metav1.ConditionFalse
+	})
 }
 
 // TestRefsAndLimit: a missing profile holds every write until it exists;

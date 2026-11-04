@@ -458,3 +458,16 @@ func TestPeerNextHopFollowsAttachmentIdentity(t *testing.T) {
 		t.Fatal("recycled attachment retained next hops")
 	}
 }
+
+// A router that rolls before the datapath has no next-hop map. Recording a
+// next hop must leave the old destination-address fallback in place rather
+// than fail every route on the node.
+func TestSetPeerWithoutPeerTableKeepsFallback(t *testing.T) {
+	tables := New(&fakeTable{}, &fakeTable{}, &fakeTable{}, &fakeTable{}, &fakeTable{}, &fakeTable{}, &fakeTable{})
+	if err := tables.SetPeer(42, 7, net.ParseIP("2001:db8::7")); err != nil {
+		t.Fatalf("SetPeer without a next-hop map: %v", err)
+	}
+	if err := tables.sweepPeers(); err != nil {
+		t.Fatalf("sweepPeers without a next-hop map: %v", err)
+	}
+}

@@ -1,0 +1,6 @@
+# HELP galactic_edge_foundation_mtu_bytes The MTU the agent gives every attachment link, its --mtu flag.
+# TYPE galactic_edge_foundation_mtu_bytes gauge
+galactic_edge_foundation_mtu_bytes 1500
+# HELP galactic_edge_foundation_node_collect_errors Reads of the node's forwarding gate or encapsulation limit the last scrape could not make, rather than reporting zero.
+# TYPE galactic_edge_foundation_node_collect_errors gauge
+galactic_edge_foundation_node_collect_errors 1

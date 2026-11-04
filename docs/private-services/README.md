@@ -247,8 +247,17 @@ Both addresses must use the same IP family. Ports are not translated.
 
 A translated policy pins the consumer VPC by name and UID. Selected attachments
 must match that VPC's allocated network identity. Persistent access remains
-active during control plane outages and ends when the policy is withdrawn or
+active during control plane outages, including a router restart (see
+[Router restarts](#router-restarts)), and ends when the policy is withdrawn or
 the VPC lifetime changes.
+
+Persistent access removes the node-side deadline that otherwise bounds an
+authorization, so nothing on the node revokes it while the control plane is
+unreachable. The only limit on who can grant it is RBAC on
+`ServiceRoutePolicy`. Galactic ships no role that lets tenants write these
+policies. Grant create, update and patch on `serviceroutepolicies` only to
+the network control plane that publishes the service. Any principal that can
+write a policy can give a VPC persistent access to the selected endpoint.
 
 ```yaml
 spec:
@@ -300,9 +309,10 @@ forwarding entries and shared references throughout the repair, so replacing one
 instance does not interrupt another instance's private DNS requests.
 
 A failed repair closes the policy gate and retries a complete generation.
-Startup, authorization expiry and inconsistent state also retain the complete
-rebuild path. Attachment continuity therefore does not imply uninterrupted
-forwarding during a router restart or an incompatible map replacement.
+Authorization expiry and inconsistent state also retain the complete rebuild
+path. Attachment continuity therefore does not imply uninterrupted forwarding
+during an incompatible map replacement. A router restart is covered in
+[Router restarts](#router-restarts).
 
 ## CNI program reloads
 
@@ -318,3 +328,34 @@ This continuity applies to an unchanged set of referenced maps. A program that
 starts referencing another map conservatively requires reauthorization even
 if existing map layouts did not change. Router startup still performs its
 cache-synchronized policy rebuild and stale-entry sweep.
+
+## Router restarts
+
+A restarted router reads the pinned policy gate before it touches anything.
+If the previous process left it open, the node keeps forwarding that process's
+last finalized generation until the new process's startup sync rebuilds and
+sweeps the policy. This keeps persistent access working when the router
+restarts while the API is unreachable. Kernel checks still enforce
+time-bounded deadlines, and attachment identity tokens keep a recycled
+interface from inheriting another attachment's access. A policy withdrawn
+while the router was down stops forwarding at the next successful startup
+sync.
+
+The inherited gate closes, as it did before this behavior, when the startup
+sync fails a dataplane mutation or cannot finalize. Only a finalizing router
+opens the gate, and the CNI datapath only ever closes it, which it does when
+it drains authorization to replace an incompatible map set. A compatible
+reload keeps the pinned gate, so the router keeps the inherited generation
+across it. A gate the previous process left closed, for example after a crash
+during a rebuild, stays closed until the startup sync finalizes.
+
+### Next-hop map roll order
+
+Per-attachment next hops live in the `service_peer_table` map, which the CNI
+datapath pins when its program loads. A router that rolls before the CNI finds
+no such map. It programs every other map and records no next hops, and the
+older program forwards to the destination address as it did before. When the
+new program loads, the map set changes, and the router reopens the maps and
+replays its desired state, including next hops. Roll the CNI first to get
+next hops as soon as the router upgrades. Either order keeps routes
+programmed.

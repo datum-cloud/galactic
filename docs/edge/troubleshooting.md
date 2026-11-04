@@ -240,14 +240,42 @@ Their ends are `request ended` (with `endReason`) and `CONNECT-IP request ended`
 `galactic-edge` alert group, listed in
 [the metrics reference](../observability/alerts.md#shipped-alerts). They fire on what the
 foundation itself stopped doing: attachments not programmed, services
-without a resolvable policy, lost ownership scopes, failing cleanup and
-unreachable metrics. A refused admission is a tenant or provider decision
-and alerts nothing.
+without a resolvable policy, lost ownership scopes, failing cleanup, an
+attachment MTU over the underlay's ceiling and unreachable metrics. A
+refused admission is a tenant or provider decision and alerts nothing.
 
 The `masque-provider` alert group fires on a MASQUE provider pod failing
 requests on its own side. A request the client or its grant gets wrong
 alerts nothing. Each alert names the pod; start from its logs as in
 [Diagnose a MASQUE connector](#diagnose-a-masque-connector).
+
+### GalacticEdgeMTUExceedsUnderlay
+
+The node's `--mtu` is larger than the largest packet the fabric underlay
+carries once encapsulated, so the agent refuses every attachment there with
+`Programmed` False, reason `MTUExceedsUnderlay`. The alert fires whether or
+not the node has attachments yet. Compare the two values on the node:
+
+```promql
+galactic_edge_foundation_mtu_bytes{node="<node>"}
+galactic_edge_foundation_encap_limit_bytes{node="<node>"}
+```
+
+- The MTU changed: an overlay's `GALACTIC_EDGE_MTU` was raised above the
+  limit. Lower it to at most the uplink MTU less the 40-byte encapsulation
+  header, as the [provider contract](provider-contract.md#attachment)
+  requires.
+- The limit fell: `galactic-cni` writes the limit from the uplink MTU, so a
+  smaller uplink MTU, or a `galactic-cni` restart that wrote it for the
+  first time, lowers it under an MTU that used to fit. Restore the uplink
+  MTU or lower `GALACTIC_EDGE_MTU` to fit.
+
+Attachments recover on the agent's next resync, within a minute of the two
+values agreeing.
+
+A limit the agent cannot read exports no limit series, so this alert stays
+silent and `galactic_edge_foundation_node_collect_errors` counts the failed
+read instead. An attachment on that node then fails with `DatapathFailed`.
 
 ### GalacticMasqueRequestsFailing
 

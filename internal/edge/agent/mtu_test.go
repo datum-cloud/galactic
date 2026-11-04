@@ -13,6 +13,7 @@ import (
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/hostattach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/mssclamp"
 )
 
 // encapMTU returns an Agent.EncapMTU that reads limit, or fails with err.
@@ -39,6 +40,7 @@ func TestProgramChecksUnderlayMTU(t *testing.T) {
 		{"LimitOff", encapMTU(0, nil), ReasonNamespaceUnavailable},
 		{"LimitAboveMTU", encapMTU(mtu+40, nil), ReasonNamespaceUnavailable},
 		{"LimitAtMTU", encapMTU(mtu, nil), ReasonNamespaceUnavailable},
+		{"LimitOneBelowMTU", encapMTU(mtu-1, nil), ReasonMTUExceedsUnderlay},
 		{"LimitBelowMTU", encapMTU(mtu-40, nil), ReasonMTUExceedsUnderlay},
 		{"ReadFails", encapMTU(0, errors.New("map not pinned")), ReasonDatapathFailed},
 	}
@@ -48,6 +50,42 @@ func TestProgramChecksUnderlayMTU(t *testing.T) {
 			o := a.program(att, noPod, hostattach.ObservedAttachment{})
 			if o.status != metav1.ConditionFalse || o.reason != tt.want {
 				t.Errorf("program = %s/%s (%s), want False/%s", o.status, o.reason, o.message, tt.want)
+			}
+		})
+	}
+}
+
+// TestUnderlayMTUCeilingAt1500 checks the refusal boundary against the limit
+// galactic-cni writes for a 1500-byte uplink: the largest MTU that fits once
+// encapsulated is accepted and one byte more is refused.
+func TestUnderlayMTUCeilingAt1500(t *testing.T) {
+	v, err := mssclamp.FromMTU(1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := int(v.MaxPacket)
+	if limit != 1460 {
+		t.Fatalf("encapsulation limit for a 1500-byte uplink = %d, want 1460", limit)
+	}
+	att := &galacticv1alpha1.EdgeAttachment{
+		ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: edgeNS, UID: types.UID(attA)},
+		Status:     galacticv1alpha1.EdgeAttachmentStatus{NodeName: node, VPC: vpcA, Address: addr},
+	}
+	noPod := podNS{err: ErrNamespaceUnavailable}
+	tests := []struct {
+		name string
+		mtu  int
+		want string
+	}{
+		{"MTUAtLimit", limit, ReasonNamespaceUnavailable},
+		{"MTUOneAboveLimit", limit + 1, ReasonMTUExceedsUnderlay},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &Agent{NodeName: node, MTU: tt.mtu, EncapMTU: encapMTU(limit, nil)}
+			o := a.program(att, noPod, hostattach.ObservedAttachment{})
+			if o.status != metav1.ConditionFalse || o.reason != tt.want {
+				t.Errorf("--mtu %d: program = %s/%s (%s), want False/%s", tt.mtu, o.status, o.reason, o.message, tt.want)
 			}
 		})
 	}

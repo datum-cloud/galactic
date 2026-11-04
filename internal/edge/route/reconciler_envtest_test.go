@@ -978,3 +978,64 @@ func TestRouteDiagnostics(t *testing.T) {
 		t.Errorf("revocation correlation %v", corr)
 	}
 }
+
+// TestRecreatedRouteWaitsForItsPredecessor: a route deleted and recreated
+// under its name, as a provider does for the same VPC and prefix, is blocked
+// by its predecessor's entry until that holder is fenced, but waits rather
+// than being refused, and is accepted once the entry leaves.
+func TestRecreatedRouteWaitsForItsPredecessor(t *testing.T) {
+	t.Parallel()
+	f := startAPI(t)
+	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
+	f.newRoute("r", prefixA)
+	f.claim("r", a)
+	f.clearRebuilt()
+	f.expectAccepted("r", a, 1)
+	if err := f.admin.Delete(context.Background(), f.route("r")); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile("r")
+	f.newRoute("r", prefixA)
+	f.claim("r", b)
+	f.reconcile("r")
+	if got := f.claimReason("r"); got != ReasonWaiting {
+		t.Fatalf("recreated route before its predecessor is fenced: %s, want %s", got, ReasonWaiting)
+	}
+	f.clock.advance(params.TakeoverWait() - time.Millisecond)
+	f.reconcile("r")
+	if got := f.claimReason("r"); got != ReasonWaiting {
+		t.Fatalf("recreated route just before its predecessor is fenced: %s, want %s", got, ReasonWaiting)
+	}
+	if e := f.indexEntries(); len(e) != 1 || e[0].Removing != RemovingDeleted {
+		t.Fatalf("index while the recreated route waits %+v", e)
+	}
+	f.clock.advance(time.Millisecond)
+	f.reconcile("r")
+	f.expectAccepted("r", b, 1)
+}
+
+// TestRecreatedRouteOverlappingAnotherIsRefused: a recreated route whose
+// prefix also overlaps another route is refused at once, not left waiting
+// on its own predecessor.
+func TestRecreatedRouteOverlappingAnotherIsRefused(t *testing.T) {
+	t.Parallel()
+	f := startAPI(t)
+	a, b := f.newHolder("a", nodeA, "fd00:10:0:e::1"), f.newHolder("b", nodeB, "fd00:10:0:e::2")
+	f.newRoute("r", prefixA)
+	f.claim("r", a)
+	f.clearRebuilt()
+	f.expectAccepted("r", a, 1)
+	if err := f.admin.Delete(context.Background(), f.route("r")); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile("r")
+	f.newRoute("other", "fd00:10:0:f:1::/96")
+	f.claim("other", b)
+	f.reconcile("other")
+	f.newRoute("r", "fd00:10:0:f::/64")
+	f.claim("r", b)
+	f.reconcile("r")
+	if got := f.claimReason("r"); got != ReasonPrefixConflict {
+		t.Fatalf("recreated route overlapping another route: %s, want %s", got, ReasonPrefixConflict)
+	}
+}

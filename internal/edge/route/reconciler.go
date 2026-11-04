@@ -235,9 +235,16 @@ func (r *Reconciler) accept(ctx context.Context, rt *galacticv1alpha1.EdgeRoute)
 					prev.epoch, prev.node), after)
 			}
 		}
-		if conflict := overlapping(idx, string(rt.UID), auth.Prefix); conflict != nil {
+		self := rt.Namespace + "/" + rt.Name
+		predecessor := func(e *galacticv1alpha1.EdgeRouteIndexEntry) bool { return e.Route == self }
+		if conflict := overlappingExcept(idx, string(rt.UID), auth.Prefix, predecessor); conflict != nil {
 			return pending(ReasonPrefixConflict, fmt.Sprintf("prefix %s overlaps route %s's %s",
 				auth.Prefix, conflict.Route, conflict.Prefix), refusedRetry)
+		}
+		if conflict := overlapping(idx, string(rt.UID), auth.Prefix); conflict != nil {
+			return pending(ReasonWaiting, fmt.Sprintf(
+				"waiting for the entry of a deleted route %s, uid %s, to leave the index once its holder is fenced",
+				conflict.Route, conflict.RouteUID), r.Params.TakeoverWait()/4)
 		}
 		if entry == nil && len(idx.Spec.Routes) >= maxIndexEntries {
 			return pending(ReasonIndexFull, fmt.Sprintf("the VPC's route index holds its limit of %d routes",
@@ -520,9 +527,15 @@ func setEntry(idx *galacticv1alpha1.EdgeRouteIndex, e galacticv1alpha1.EdgeRoute
 // contained in it, including one still being removed.
 func overlapping(idx *galacticv1alpha1.EdgeRouteIndex, routeUID string, p netip.Prefix,
 ) *galacticv1alpha1.EdgeRouteIndexEntry {
+	return overlappingExcept(idx, routeUID, p, nil)
+}
+
+// overlappingExcept is overlapping, ignoring the entries skip reports.
+func overlappingExcept(idx *galacticv1alpha1.EdgeRouteIndex, routeUID string, p netip.Prefix,
+	skip func(*galacticv1alpha1.EdgeRouteIndexEntry) bool) *galacticv1alpha1.EdgeRouteIndexEntry {
 	for i := range idx.Spec.Routes {
 		e := &idx.Spec.Routes[i]
-		if e.RouteUID == routeUID {
+		if e.RouteUID == routeUID || (skip != nil && skip(e)) {
 			continue
 		}
 		q, err := netip.ParsePrefix(e.Prefix)
