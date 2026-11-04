@@ -229,7 +229,9 @@ func SetupCloud(mgr ctrl.Manager) error {
 	}
 	for name, setup := range map[string]func() error{
 		"BGPAdvertisement": func() error {
-			reconciler := &cloudcontroller.BGPAdvertisementReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
+			reconciler := &cloudcontroller.BGPAdvertisementReconciler{
+				Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(),
+			}
 			return reconciler.SetupWithManager(mgr)
 		},
 	} {

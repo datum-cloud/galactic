@@ -590,6 +590,21 @@ spec:
               Private service routes have repeatedly failed to apply or remove on {{ $labels.node }}.
               Consumers can lose access even when the router Pod is ready and policies are accepted.
               Check the router's service policy errors, attachment host interfaces, and node programming acknowledgments.
+        - alert: GalacticServiceRouteNextHopUnresolved
+          expr: galactic_service_route_unresolved_next_hops{job="galactic-router"} > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $value }} private service paths on {{ $labels.node }} have no consumer next hop"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticserviceroutenexthopunresolved"
+            description: >-
+              {{ $value }} private service paths on {{ $labels.node }} have no next hop for their consumer
+              attachment, because its PodSubnet is missing or of the other address family from the service.
+              They forward to the destination address instead, which IPv4 services and attachments with
+              several subnets cannot use. The router's "no consumer next hop" log lines name each attachment.
         - alert: GalacticRouterMetricsDown
           expr: up{job=~"galactic-router|galactic-router-rr"} == 0
           for: 5m

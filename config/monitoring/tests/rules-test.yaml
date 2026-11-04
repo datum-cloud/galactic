@@ -2535,6 +2535,41 @@ tests:
                 Consumers can lose access even when the router Pod is ready and policies are accepted.
                 Check the router's service policy errors, attachment host interfaces, and node programming acknowledgments.
 
+  # Paths with no consumer next hop alert while they persist; a brief one
+  # during attachment programming does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_service_route_unresolved_next_hops{job="galactic-router",node="unresolved"}'
+        values: "2x60"
+      - series: 'galactic_service_route_unresolved_next_hops{job="galactic-router",node="settling"}'
+        values: "1x10 0x50"
+      - series: 'galactic_service_route_unresolved_next_hops{job="galactic-router",node="resolved"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticServiceRouteNextHopUnresolved
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: GalacticServiceRouteNextHopUnresolved
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-router
+              node: unresolved
+            exp_annotations:
+              summary: "2 private service paths on unresolved have no consumer next hop"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticserviceroutenexthopunresolved"
+              description: >-
+                2 private service paths on unresolved have no next hop for their consumer
+                attachment, because its PodSubnet is missing or of the other address family from the service.
+                They forward to the destination address instead, which IPv4 services and attachments with
+                several subnets cannot use. The router's "no consumer next hop" log lines name each attachment.
+      - eval_time: 25m
+        alertname: GalacticServiceRouteProgrammingFailing
+        exp_alerts: []
+
   # Attachments stuck in Programming fire per provider and reason, the max of
   # both replicas; a short Pending blip and Active attachments do not.
   - interval: 30s

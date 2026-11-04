@@ -93,10 +93,19 @@ labels, so the series stay bounded.
 | `galactic_service_route_reconcile_duration_seconds` | histogram | none                                                           | Time per reconcile (default buckets)                      |
 | `galactic_service_route_route_operations_total`     | counter   | `operation` (`apply`, `remove`), `result` (`success`, `error`) | Datapath writes and removals                              |
 | `galactic_service_route_programmed_routes`          | gauge     | none                                                           | Attachment-scoped service paths the controller now tracks |
+| `galactic_service_route_unresolved_next_hops`       | gauge     | none                                                           | Tracked paths with no consumer next hop                   |
 | `galactic_service_route_producers`                  | gauge     | `state` (`Healthy`, `Unhealthy`, `Unknown`)                    | Producers of `Spread` endpoints this node probes          |
 
 Datapath drops on these paths are the `service_route_*` reasons of
 `galactic_usid_drops_total`.
+
+A path has no consumer next hop when the consumer attachment's `PodSubnet` is
+missing or of the other address family from the service, such as an IPv4
+service reached through an attachment whose `PodSubnet` is IPv6. It then
+forwards to the destination address, which IPv4 services and attachments with
+several subnets cannot use. The router logs each such path with its
+attachment, and `GalacticServiceRouteNextHopUnresolved` fires while any
+persists for 15 minutes.
 
 ```promql
 sum by (node, operation) (rate(galactic_service_route_route_operations_total{result="error"}[10m])) > 0

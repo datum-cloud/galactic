@@ -11,6 +11,7 @@ import (
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/nldump"
 )
@@ -142,10 +143,15 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 	if err != nil {
 		return fmt.Errorf("list namespace routes: %w", err)
 	}
+	nonForwarding := false
 	for _, route := range routes {
-		if isDefaultRouteDst(route.Dst) && route.LinkIndex != link.Attrs().Index {
+		if !isDefaultRouteDst(route.Dst) {
+			continue
+		}
+		if forwardsThroughOtherLink(route, link.Attrs().Index) {
 			return nil
 		}
+		nonForwarding = nonForwarding || route.LinkIndex != link.Attrs().Index
 	}
 
 	// The on-link flag: a VPC gateway sits outside the prefix allocated to the
@@ -159,9 +165,37 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 		Flags:     int(netlink.FLAG_ONLINK),
 	}
 	if err := handle.RouteAdd(defaultRoute); err != nil {
+		if nonForwarding {
+			// A blackhole, unreachable or prohibit default at the same
+			// metric makes the kernel refuse this one. Name it rather than
+			// leave the attachment without a default route.
+			return fmt.Errorf("add default route via %s beside a default route that forwards nothing: %w",
+				gateway, err)
+		}
 		return fmt.Errorf("add default route via %s: %w", gateway, err)
 	}
 	return nil
+}
+
+// forwardsThroughOtherLink reports whether route is a unicast route that
+// leaves through a link other than linkIndex, which makes it the guest's
+// primary default. Blackhole, unreachable and prohibit routes and routes with
+// no egress link carry LinkIndex 0 and forward nothing, so they must not
+// suppress the VPC default. A multipath route counts when any of its next
+// hops leaves through another link.
+func forwardsThroughOtherLink(route netlink.Route, linkIndex int) bool {
+	if route.Type != 0 && route.Type != unix.RTN_UNICAST {
+		return false
+	}
+	if route.LinkIndex > 0 {
+		return route.LinkIndex != linkIndex
+	}
+	for _, hop := range route.MultiPath {
+		if hop != nil && hop.LinkIndex > 0 && hop.LinkIndex != linkIndex {
+			return true
+		}
+	}
+	return false
 }
 
 // isDefaultRouteDst reports whether dst is a default route. Netlink represents

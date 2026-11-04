@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -472,5 +473,34 @@ func TestAttachmentNextHopUsesGuestAddress(t *testing.T) {
 	attachment.Status.PodSubnet = ""
 	if got := attachmentNextHop(attachment, net.ParseIP("fd70::53")); got != nil {
 		t.Fatalf("missing subnet next hop = %v", got)
+	}
+}
+
+// A consumer path without a next hop forwards to the destination address and
+// is unreachable for IPv4 services, so it must be visible. A remote producer
+// half has no consumer attachment on this node and never needs one.
+func TestUnresolvedNextHopIsReported(t *testing.T) {
+	nextHop := net.ParseIP("fd20::4:0:0")
+	tests := []struct {
+		intent RouteIntent
+		want   bool
+	}{
+		{RouteIntent{Kind: RouteIntentLocal, ConsumerNextHop: nextHop}, false},
+		{RouteIntent{Kind: RouteIntentLocal}, true},
+		{RouteIntent{Kind: RouteIntentLocalSet}, true},
+		{RouteIntent{Kind: RouteIntentRemoteConsumer}, true},
+		{RouteIntent{Kind: RouteIntentRemoteProducer}, false},
+	}
+	for _, tt := range tests {
+		if got := tt.intent.UnresolvedNextHop(); got != tt.want {
+			t.Errorf("%s with next hop %v: UnresolvedNextHop = %t, want %t",
+				tt.intent.Kind, tt.intent.ConsumerNextHop, got, tt.want)
+		}
+	}
+
+	metrics := NewMetrics()
+	metrics.SetUnresolvedNextHops(2)
+	if got := testutil.ToFloat64(metrics.unresolved); got != 2 {
+		t.Fatalf("unresolved_next_hops = %v, want 2", got)
 	}
 }
