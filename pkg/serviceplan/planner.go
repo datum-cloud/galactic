@@ -123,7 +123,8 @@ func (e *DependencyNotReadyError) Error() string { return e.Err.Error() }
 func (e *DependencyNotReadyError) Unwrap() error { return e.Err }
 
 // SpreadPairing chooses the remote producer that a Spread endpoint's consumer
-// is sent to when the consumer's node has no producer.
+// is sent to when the consumer's node has no producer, or none that is
+// usable (see selectProducers).
 type SpreadPairing string
 
 const (
@@ -168,8 +169,8 @@ type CompileOptions struct {
 // consumer and emits only intent halves owned by localNode. A Single endpoint
 // gets one producer per consumer; a Spread endpoint gets every producer on the
 // consumer's node as one LocalSet intent, or one remote producer when
-// DeliveryMode allows it and its node has none, or every one of them is
-// Unhealthy while another node has an eligible producer.
+// DeliveryMode allows it and its node has none, or none that is usable while
+// another node has an eligible producer.
 func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment, localNode string, resolveSID SIDResolver,
 ) ([]RouteIntent, error) {
@@ -431,10 +432,10 @@ func spread(endpoint *networkv1alpha1.ServiceEndpoint) bool {
 // consumer's node as local. Otherwise it returns the one producer the consumer
 // is sent to, or nil. A Spread endpoint's consumer is sent to a remote
 // producer, the one spreadRemoteProducer picks under pairing, when DeliveryMode
-// is PreferNodeLocal and its node has no producer, or every producer on its
-// node is currently reported Unhealthy while another node's producer is
-// eligible. Every node decides this from the same reports, so the consumer's
-// node, the producer's node and ProgrammingPlan agree on the remote producer.
+// is PreferNodeLocal and its node has no producer, or none that is usable (see
+// localUnusable) while another node's producer is eligible. Every node decides
+// this from the same reports, so the consumer's node, the producer's node and
+// ProgrammingPlan agree on the remote producer.
 func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv1alpha1.VPCAttachment,
 	producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth, pairing SpreadPairing,
 ) (local []*cloudv1alpha1.VPCAttachment, remote *cloudv1alpha1.VPCAttachment) {
@@ -450,11 +451,12 @@ func selectProducers(endpoint *networkv1alpha1.ServiceEndpoint, consumer *cloudv
 		if endpoint.Spec.DeliveryMode != networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal {
 			return local, nil
 		}
-		if len(local) != 0 && (!eligibleRemote || !allUnhealthy(local, health)) {
+		if len(local) != 0 && (!eligibleRemote || !localUnusable(local, health)) {
 			return local, nil
 		}
-		// No producer on consumer's node is eligible, so spreadRemoteProducer,
-		// which prefers an eligible producer, picks one on another node.
+		// With local producers, none is eligible while some remote producer
+		// is, so spreadRemoteProducer, which prefers an eligible producer, picks
+		// one on another node.
 		return nil, spreadRemoteProducer(consumer, producers, health, pairing)
 	}
 	return nil, chooseProducer(endpoint.Spec.DeliveryMode, consumer.Status.Node, producers)
@@ -637,6 +639,26 @@ const (
 // flows ahead of producers whose report expired or says Unhealthy.
 func (h producerHealth) eligible() bool {
 	return h == producerUnknown || h == producerHealthy
+}
+
+// localUnusable reports whether a node's producers give a consumer nothing to
+// rely on: at least one is currently reported Unhealthy and the rest have no
+// current result yet, as when a replacement producer starts while the one it
+// replaces fails. A Healthy producer, or one whose report expired, makes them
+// usable. Producers with no result at all, as right after a router restart,
+// are usable too, since nothing says they fail.
+func localUnusable(producers []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth) bool {
+	unhealthy := false
+	for _, producer := range producers {
+		switch health[producer.UID] {
+		case producerUnhealthy:
+			unhealthy = true
+		case producerUnknown:
+		default:
+			return false
+		}
+	}
+	return unhealthy
 }
 
 // allUnhealthy reports whether every one of producers is currently reported

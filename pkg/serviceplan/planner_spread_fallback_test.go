@@ -4,15 +4,40 @@
 package serviceplan
 
 import (
+	"fmt"
 	"net"
 	"slices"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 )
+
+// Health states for reportState beyond the API's own.
+const (
+	// unreported writes no entry for the producer.
+	unreported networkv1alpha1.BackendHealthState = "unreported"
+	// staleEntry writes a Healthy entry for an earlier attachment of the
+	// same name, which says nothing of this one.
+	staleEntry networkv1alpha1.BackendHealthState = "stale"
+)
+
+// reportState reports producer in state, or as unreported or staleEntry say.
+func reportState(endpoint *networkv1alpha1.ServiceEndpoint, producer *cloudv1alpha1.VPCAttachment,
+	state networkv1alpha1.BackendHealthState,
+) {
+	switch state {
+	case unreported:
+	case staleEntry:
+		reportHealth(endpoint, producer, networkv1alpha1.BackendHealthHealthy)
+		endpoint.Status.Producers[len(endpoint.Status.Producers)-1].AttachmentUID = "earlier-uid"
+	default:
+		reportHealth(endpoint, producer, state)
+	}
+}
 
 // unhealthyLocalTopology is a consumer with two producers on its own node and
 // one on testRemoteNodeName.
@@ -108,23 +133,85 @@ func (topology *unhealthyLocalTopology) requireRemote(t *testing.T) {
 	}
 }
 
-func TestCompileSpreadSendsConsumerRemoteWhenEveryLocalProducerIsUnhealthy(t *testing.T) {
-	for _, state := range []networkv1alpha1.BackendHealthState{
-		networkv1alpha1.BackendHealthHealthy, networkv1alpha1.BackendHealthUnknown, "",
+func TestCompileSpreadSendsConsumerRemoteWhenNoLocalProducerIsUsable(t *testing.T) {
+	for _, remoteState := range []networkv1alpha1.BackendHealthState{
+		networkv1alpha1.BackendHealthHealthy, networkv1alpha1.BackendHealthUnknown, unreported,
 	} {
-		t.Run("remote "+string(state), func(t *testing.T) {
-			topology := newUnhealthyLocalTopology(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
-			reportHealth(topology.endpoint, topology.first, networkv1alpha1.BackendHealthUnhealthy)
-			reportHealth(topology.endpoint, topology.last, networkv1alpha1.BackendHealthUnhealthy)
-			if state != "" {
-				reportHealth(topology.endpoint, topology.remote, state)
-			}
-			topology.requireRemote(t)
+		// first is Unhealthy; last is Unhealthy, or has no result yet, as a
+		// replacement starting while first fails.
+		for _, lastState := range []networkv1alpha1.BackendHealthState{
+			networkv1alpha1.BackendHealthUnhealthy, networkv1alpha1.BackendHealthUnknown, unreported, staleEntry,
+		} {
+			t.Run("remote "+string(remoteState)+" last "+string(lastState), func(t *testing.T) {
+				topology := newUnhealthyLocalTopology(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+				reportHealth(topology.endpoint, topology.first, networkv1alpha1.BackendHealthUnhealthy)
+				reportState(topology.endpoint, topology.last, lastState)
+				reportState(topology.endpoint, topology.remote, remoteState)
+				topology.requireRemote(t)
 
-			// One local producer recovering brings the consumer back.
-			topology.endpoint.Status.Producers[1].State = networkv1alpha1.BackendHealthHealthy
-			topology.requireLocal(t, firstDraining)
-		})
+				// The consumer returns once a local producer passes its check.
+				topology.endpoint.Status.Producers = topology.endpoint.Status.Producers[:1]
+				reportHealth(topology.endpoint, topology.last, networkv1alpha1.BackendHealthHealthy)
+				reportState(topology.endpoint, topology.remote, remoteState)
+				topology.requireLocal(t, firstDraining)
+			})
+		}
+	}
+}
+
+func TestCompileSpreadSendsLoneUnhealthyLocalProducersConsumerRemote(t *testing.T) {
+	topology := newUnhealthyLocalTopology(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+	topology.attachments = []*cloudv1alpha1.VPCAttachment{topology.consumer, topology.first, topology.remote}
+	reportHealth(topology.endpoint, topology.first, networkv1alpha1.BackendHealthUnhealthy)
+	topology.requireRemote(t)
+	topology.endpoint.Status.Producers[0].State = networkv1alpha1.BackendHealthHealthy
+	topology.requireLocal(t, "producer-a")
+}
+
+func TestCompileSpreadFallbackAcceptedOnEveryPairingsNode(t *testing.T) {
+	topology := newUnhealthyLocalTopology(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+	reportHealth(topology.endpoint, topology.first, networkv1alpha1.BackendHealthUnhealthy)
+	reportHealth(topology.endpoint, topology.last, networkv1alpha1.BackendHealthUnhealthy)
+	const extraRemotes = 8
+	remotes := make([]*cloudv1alpha1.VPCAttachment, 0, 1+extraRemotes)
+	remotes = append(remotes, topology.remote)
+	for i := range extraRemotes {
+		remotes = append(remotes, readyAttachment(spreadProducerNamespace, fmt.Sprintf("remote-%02d", i),
+			fmt.Sprintf("remote-%02d-uid", i), fmt.Sprintf("node-r%02d", i), fmt.Sprintf("remote%02d", i),
+			testLabels(testProducerLabel, "yes")))
+	}
+	topology.attachments = append([]*cloudv1alpha1.VPCAttachment{topology.consumer, topology.first, topology.last},
+		remotes...)
+	producers := append([]*cloudv1alpha1.VPCAttachment{topology.first, topology.last}, remotes...)
+	health := producersHealth(topology.endpoint, producers, time.Now())
+	picks := map[string]*cloudv1alpha1.VPCAttachment{}
+	for _, pairing := range spreadPairings {
+		picks[string(pairing)] = spreadRemoteProducer(topology.consumer, producers, health, pairing)
+	}
+	if picks[string(SpreadPairingFirst)] == picks[string(SpreadPairingRendezvous)] {
+		t.Fatal("test topology needs pairings that pick different remote producers")
+	}
+	nodes := make([]string, 0, 1+len(spreadPairings))
+	nodes = append(nodes, testNodeName)
+	for _, pairing := range spreadPairings {
+		picked := picks[string(pairing)]
+		nodes = append(nodes, picked.Status.Node)
+		got := topology.compile(t, testNodeName, pairing)
+		if len(got) != 1 || got[0].Kind != RouteIntentRemoteConsumer || got[0].ProducerAttachment.Name != picked.Name {
+			t.Fatalf("%s: consumer node intents = %+v, want one RemoteConsumer intent to %s", pairing, got, picked.Name)
+		}
+		// Whichever pairing it uses itself, each picked producer's node
+		// accepts the consumer.
+		for _, other := range spreadPairings {
+			got = topology.compile(t, picked.Status.Node, other)
+			if len(got) != 1 || got[0].Kind != RouteIntentRemoteProducer || got[0].ProducerAttachment.Name != picked.Name {
+				t.Fatalf("%s node using %s: intents = %+v, want one RemoteProducer half", picked.Status.Node, other, got)
+			}
+		}
+	}
+	slices.Sort(nodes)
+	if got := topology.planNodes(t); !slices.Equal(got, nodes) {
+		t.Fatalf("ProgrammingPlan nodes = %v, want %v", got, nodes)
 	}
 }
 
@@ -141,12 +228,19 @@ func TestCompileSpreadKeepsUnhealthyLocalProducersWithoutAnEligibleRemote(t *tes
 	topology.requireLocal(t, bothLocalProducers)
 }
 
-func TestCompileSpreadKeepsLocalProducersUnlessEveryOneIsUnhealthy(t *testing.T) {
+func TestCompileSpreadKeepsUsableLocalProducers(t *testing.T) {
 	topology := newUnhealthyLocalTopology(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
 	reportHealth(topology.endpoint, topology.remote, networkv1alpha1.BackendHealthHealthy)
+	// Before any result, as after a router restart, nothing says the local
+	// producers fail.
+	topology.requireLocal(t, bothLocalProducers)
+
 	reportHealth(topology.endpoint, topology.first, networkv1alpha1.BackendHealthUnhealthy)
+	reportHealth(topology.endpoint, topology.last, networkv1alpha1.BackendHealthHealthy)
+	topology.requireLocal(t, firstDraining)
+
 	// An expired Unhealthy report is no evidence the producer is down.
-	reportHealth(topology.endpoint, topology.last, networkv1alpha1.BackendHealthUnhealthy)
+	topology.endpoint.Status.Producers[2].State = networkv1alpha1.BackendHealthUnhealthy
 	expireReport(topology.endpoint)
 	topology.requireLocal(t, firstDraining)
 }

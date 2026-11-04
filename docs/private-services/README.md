@@ -110,29 +110,34 @@ with no `renewTime` is expired too.
 
 What a current decision does:
 
-| State                 | New flows                                            | Existing TCP connections and replies |
-| --------------------- | ---------------------------------------------------- | ------------------------------------ |
-| `Healthy`             | yes                                                  | yes                                  |
-| `Unknown` or no entry | only while no producer on its node is `Healthy`      | yes                                  |
-| `Unhealthy`           | only while every producer on its node is `Unhealthy` | yes                                  |
+| State                 | New flows from its own node's consumers                                                        | Existing TCP connections and replies |
+| --------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `Healthy`             | yes                                                                                            | yes                                  |
+| `Unknown` or no entry | only while no producer on its node is `Healthy` and its consumers have not moved               | yes, unless its consumers move       |
+| `Unhealthy`           | only while every producer on its node is `Unhealthy` and its consumers have no remote producer | yes, unless its consumers move       |
 
 A producer with no result yet, such as one just added, takes new flows only
 once its health check passes, as long as another producer on its node is
 `Healthy`. When none is, as right after a node's router restarts before any
-probe completes, producers with no result keep taking new flows. An expired
-entry never drains a producer on its own node, so a producer reported
+probe completes, producers with no result keep taking new flows. A producer
+whose probe cannot be sent at all (`ProbeUnavailable`) is `Unknown` too. An
+expired entry never drains a producer on its own node, so a producer reported
 `Unhealthy` just before its node's router stopped takes new flows again once
 the entry expires.
 
-When every producer on the consumer's node is `Unhealthy` and the endpoint is
-`PreferNodeLocal`, the consumer is sent to a remote producer, picked exactly as
-for a node with no producer (below), as long as another node currently reports
-a producer `Healthy` or `Unknown` or has no entry for one. When a producer on
-the consumer's node is no longer `Unhealthy`, the consumer returns to its own
-node. Every node decides this from the same reports, so the consumer's node and
-the remote producer's node agree on the path. Moving between the local set and
-the remote producer replaces the consumer's route: UDP requests follow at
-once, and a TCP connection opened before the move does not survive it.
+With `PreferNodeLocal`, a consumer moves to a remote producer when the
+producers on its node include an `Unhealthy` one and none that is `Healthy` or
+whose entry expired, so every one of them failed or has no result yet, as
+when a replacement starts while the producer it replaces fails. It moves only
+while another node currently reports a producer `Healthy` or `Unknown`, or has
+no entry for one, and the remote producer is picked exactly as for a node with
+no producer (below). It returns once a producer on its node is `Healthy`.
+Every node decides this from the same reports, so the consumer's node and the
+remote producer's node agree on the path, apart from the moment a report
+reaches one before the other (below). Moving between the local set and the
+remote producer replaces the consumer's route: UDP requests follow at once,
+and a TCP connection opened before the move does not survive it.
+
 While routers are being upgraded to a version that moves such consumers, a
 remote producer whose node still runs an older router does not accept them,
 so their requests are refused until that node is upgraded too, or a producer
@@ -152,8 +157,8 @@ health check first and keep serving for at least that detection time plus its
 longest request, then stop it. Its in-flight requests and open connections
 finish while new ones go to the other producers.
 
-When the consumer's node has no producer, or every producer on it is
-`Unhealthy`, `PreferNodeLocal` sends the consumer to one remote producer, through the SRv6 service tunnel as with `Single`. It
+When the consumer's node has no producer, or none it can use as described
+above, `PreferNodeLocal` sends the consumer to one remote producer, through the SRv6 service tunnel as with `Single`. It
 is picked among the producers whose node currently reports them `Healthy` or
 `Unknown`, or has no entry for them. If there are none, it is picked among the
 producers whose entry expired, and failing that among all producers. The
@@ -168,7 +173,10 @@ producer's node installs the producer half for the producer each pairing
 picks, whatever its own setting, so the consumer's traffic is accepted while
 its node and the producer's node use different settings. Set `rendezvous` only
 after every node runs a router that has the option, since an older router
-accepts only the `first` pairing. When a node
+accepts only the `first` pairing. With `first`, every consumer that moves off
+its node goes to the same producer, so a failure that turns many nodes'
+producers `Unhealthy` at once concentrates their consumers there; prefer
+`rendezvous` for endpoints with many nodes. When a node
 goes down while its producers' attachments still read ready, its consumers move
 to other producers within 60 seconds of the node's last renewal, as long as
 another node currently reports a producer that can take them. Each consumer's

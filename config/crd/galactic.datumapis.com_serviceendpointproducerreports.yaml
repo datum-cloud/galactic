@@ -136,9 +136,10 @@ spec:
                     state:
                       description: |-
                         State is the decision. Healthy producers receive new flows. Unknown
-                        ones do only while no producer on the node is Healthy, and Unhealthy
-                        ones only while every producer on the node is Unhealthy and no other
-                        node offers a producer to fall back to.
+                        ones receive them from their own node's consumers only while no
+                        producer on the node is Healthy, and Unhealthy ones only while every
+                        producer on the node is Unhealthy and the consumers have no remote
+                        producer to fall back to.
                       enum:
                       - Healthy
                       - Unhealthy
