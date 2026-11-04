@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/vishvananda/netlink"
 
@@ -226,5 +227,62 @@ func TestReplacingServingProducerInterfaceKeepsServing(t *testing.T) {
 	if members, eligible := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{23, 21}) ||
 		!reflect.DeepEqual(eligible, []uint32{23, 21}) {
 		t.Fatalf("set with recreated producer-a = %v/%v, want [23 21]/[23 21]", members, eligible)
+	}
+}
+
+// A replacement producer takes no new flow on its predecessor's health
+// decision: it waits for one made since its interface was recreated, unless
+// waiting would leave the set with no producer taking new flows.
+func TestReplacementProducerWaitsForItsOwnHealthDecision(t *testing.T) {
+	f := newReplacementFixture()
+	decided := time.Unix(1_700_000_000, 0)
+	now := decided.Add(time.Minute)
+	f.programmer.nowFn = func() time.Time { return now }
+	healthy := func(device string, since time.Time) ProducerTarget {
+		target := producer(device, false)
+		target.HealthSince = since
+		return target
+	}
+	intent := localSetIntent(healthy(producerADevice, decided), healthy(producerBDevice, decided))
+	if err := f.programmer.Apply(intent); err != nil {
+		t.Fatal(err)
+	}
+	if _, eligible := onlySet(t, f.set); !reflect.DeepEqual(eligible, []uint32{20, 21}) {
+		t.Fatalf("eligible = %v, want [20 21]", eligible)
+	}
+
+	// The pod is replaced; its node still reports the old decision.
+	f.links[producerADevice] = 23
+	f.repair(t, intent)
+	if members, eligible := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{23, 21}) ||
+		!reflect.DeepEqual(eligible, []uint32{21}) {
+		t.Fatalf("set with replaced producer-a = %v/%v, want [23 21]/[21]", members, eligible)
+	}
+
+	// A decision made since the replacement lets it take new flows.
+	now = now.Add(time.Minute)
+	fresh := localSetIntent(healthy(producerADevice, now), healthy(producerBDevice, decided))
+	if err := f.programmer.Apply(fresh); err != nil {
+		t.Fatal(err)
+	}
+	if _, eligible := onlySet(t, f.set); !reflect.DeepEqual(eligible, []uint32{23, 21}) {
+		t.Fatalf("eligible after its own decision = %v, want [23 21]", eligible)
+	}
+}
+
+func TestReplacementOfTheOnlyServingProducerIsNotHeld(t *testing.T) {
+	f := newReplacementFixture()
+	decided := time.Unix(1_700_000_000, 0)
+	f.programmer.nowFn = func() time.Time { return decided.Add(time.Minute) }
+	target := producer(producerADevice, false)
+	target.HealthSince = decided
+	intent := localSetIntent(target, producer(producerBDevice, true))
+	if err := f.programmer.Apply(intent); err != nil {
+		t.Fatal(err)
+	}
+	f.links[producerADevice] = 23
+	f.repair(t, intent)
+	if _, eligible := onlySet(t, f.set); !reflect.DeepEqual(eligible, []uint32{23}) {
+		t.Fatalf("eligible = %v, want the replacement [23], since holding it serves nothing", eligible)
 	}
 }

@@ -117,6 +117,11 @@ type ProducerTarget struct {
 	// Draining keeps the producer's existing flows and replies but gives it
 	// no new flow.
 	Draining bool
+	// HealthSince is when the producer's node reached its current health
+	// decision, or zero when it reports none. A producer whose interface was
+	// recreated after this decision is held from new flows until its node
+	// decides again, since the decision was about the interface's predecessor.
+	HealthSince time.Time
 }
 
 // SIDResolver returns the SRv6 SID that reaches an attachment's VPC on its node.
@@ -245,7 +250,9 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 	if err := validateProducerTopology(endpoint, producers); err != nil {
 		return nil, err
 	}
-	health := producersHealth(endpoint, producers, time.Now())
+	now := time.Now()
+	health := producersHealth(endpoint, producers, now)
+	healthSince := producersHealthSince(endpoint, producers, now)
 
 	consumers := readyAttachments(attachments)
 	intents := make([]RouteIntent, 0, len(consumers))
@@ -264,7 +271,7 @@ func compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 					Attachment: consumerKey, Kind: RouteIntentLocalSet,
 					Service: cloneIPNet(service), Frontend: cloneIPNet(frontend), ConsumerDevice: consumer.Status.HostInterface,
 					Ports: clonePorts(ports), ConsumerNextHop: attachmentNextHop(consumer, service.IP),
-					Producers: producerTargets(local, health, service.IP),
+					Producers: producerTargets(local, health, healthSince, service.IP),
 				})
 			}
 			continue
@@ -772,6 +779,28 @@ func producersHealth(endpoint *networkv1alpha1.ServiceEndpoint,
 	return health
 }
 
+// producersHealthSince returns when each Spread producer's node reached the
+// decision producersHealth classifies it by, for the producers whose node
+// currently reports one.
+func producersHealthSince(endpoint *networkv1alpha1.ServiceEndpoint,
+	producers []*cloudv1alpha1.VPCAttachment, now time.Time,
+) map[types.UID]time.Time {
+	if !spread(endpoint) {
+		return nil
+	}
+	since := make(map[types.UID]time.Time, len(producers))
+	for _, producer := range producers {
+		for _, entry := range endpoint.Status.Producers {
+			if entry.Namespace == producer.Namespace && entry.Name == producer.Name &&
+				entry.Node == producer.Status.Node && entry.AttachmentUID == producer.UID &&
+				ProducerReportCurrent(entry, now) {
+				since[producer.UID] = entry.LastTransitionTime.Time
+			}
+		}
+	}
+	return since
+}
+
 // ProducerReportCurrent reports whether entry was renewed within
 // ServiceEndpointProducerReportLifetime before now.
 func ProducerReportCurrent(entry networkv1alpha1.ServiceEndpointProducerStatus, now time.Time) bool {
@@ -803,7 +832,7 @@ func NextProducerReportExpiry(endpoint *networkv1alpha1.ServiceEndpoint, now tim
 // Unknown or not reported at all, drain too, so a new producer takes new flows
 // only once its health check passes. An expired report drains nothing.
 func producerTargets(local []*cloudv1alpha1.VPCAttachment, health map[types.UID]producerHealth,
-	service net.IP,
+	healthSince map[types.UID]time.Time, service net.IP,
 ) []ProducerTarget {
 	everyUnhealthy := allUnhealthy(local, health)
 	anyHealthy := false
@@ -822,6 +851,7 @@ func producerTargets(local []*cloudv1alpha1.VPCAttachment, health map[types.UID]
 			NextHop:    attachmentNextHop(producer, service),
 			Draining: (state == producerUnhealthy && !everyUnhealthy) ||
 				(state == producerUnknown && anyHealthy),
+			HealthSince: healthSince[producer.UID],
 		})
 	}
 	return targets

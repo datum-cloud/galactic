@@ -138,6 +138,14 @@ producers keep serving throughout. If the producers left are all draining,
 they take new flows until it returns, even those reported `Unhealthy`. Only a
 set with no ready interface left stops serving.
 
+A replacement pod that keeps its attachment does not inherit its predecessor's
+health result. The node reports the producer `Unknown` while its interface is
+missing and probes the recreated interface afresh, with no result. Until its
+node reports a result reached after the interface was recreated, the
+replacement takes no new flows while another producer in the set does. A
+selection that picks a producer whose interface was just removed or recreated
+moves on to the next eligible producer instead of dropping the request.
+
 With `PreferNodeLocal`, a consumer moves to a remote producer when the
 producers on its node include an `Unhealthy` one and none that is `Healthy` or
 whose entry expired, so every one of them failed or has no result yet, as
