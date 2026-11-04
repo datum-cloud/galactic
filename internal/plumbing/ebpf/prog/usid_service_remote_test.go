@@ -70,6 +70,12 @@ func (lab *redirectLab) setUpRemoteProducer(t *testing.T, withTarget bool) {
 	}); err != nil {
 		t.Fatalf("populate remote grant: %v", err)
 	}
+	// What CNI ADD writes for the producer: its VPC's (block, argument).
+	if err := objs.IfindexVrfTable.Put(lab.vethIfindex, UsidIfindexVrfValue{
+		Block: baseUSID.block, Argument: baseUSID.argument,
+	}); err != nil {
+		t.Fatalf("populate producer VRF: %v", err)
+	}
 	if withTarget {
 		target := grant
 		target.ProducerIfindex = 0
@@ -191,5 +197,22 @@ func TestUsidIngress_RemoteServiceRequestWithoutTargetUsesRoute(t *testing.T) {
 	marker = lab.sendServiceRequest(t, "routed")
 	if !awaitMarker(t, lab.vethPeerCapture, marker, deliveryWait, readCapture(false)) {
 		t.Fatal("routed request without a target never reached the producer")
+	}
+}
+
+// A target in another VRF than the tunnel's SID names is not used: the
+// request falls back to the route lookup of the SID's VRF, which has no
+// route for the address.
+func TestUsidIngress_RemoteServiceTargetOutsideTheVRFIsIgnored(t *testing.T) {
+	lab := newRedirectLab(t)
+	lab.setUpRemoteProducer(t, true)
+	if err := lab.objs.IfindexVrfTable.Put(lab.vethIfindex, UsidIfindexVrfValue{
+		Block: baseUSID.block, Argument: baseUSID.argument + 1,
+	}); err != nil {
+		t.Fatalf("move producer to another VRF: %v", err)
+	}
+	marker := lab.sendServiceRequest(t, "other-vrf")
+	if awaitMarker(t, lab.vethPeerCapture, marker, quietWait, readCapture(false)) {
+		t.Fatal("request reached a producer outside the tunnel's VRF")
 	}
 }

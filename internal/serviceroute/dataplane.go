@@ -1107,6 +1107,17 @@ func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
 			return err
 		}
 		delete(p.grantRefs, *entry.grant)
+		// The grant shares its remote target with the same grant on the
+		// producer's other interface, while one replaces the other. Unregister
+		// removed the target if it named this interface, so it goes back to the
+		// other one.
+		for other := range p.grantRefs {
+			if other.producerIfindex != g.producerIfindex && other.address == g.address &&
+				other.protocol == g.protocol && other.port == g.port && other.grantID == g.grantID {
+				return p.tables.SetRemoteTarget(other.producerIfindex, net.ParseIP(other.address),
+					other.protocol, other.port, [16]byte(other.grantID))
+			}
+		}
 		return nil
 	}
 	if entry.access != nil {

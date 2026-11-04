@@ -19,11 +19,16 @@ listener may bind or configure the address in the producer, use a transparent
 socket, or use another service-owned mechanism. Galactic does not configure the
 producer VIP; that mechanism and its lifecycle are owned by the service.
 Galactic delivers the packet to the selected producer attachment through
-that attachment's own address, on the producer's node and from a consumer on
-another node alike, so the producer VPC does not need a route for the VIP and
-the producer does not need to answer neighbor discovery for it. The producer
-must still accept a packet addressed to the VIP, for example by binding it or
-through a transparent socket.
+the attachment's own address of the VIP's family, from the producer's subnet,
+on the producer's node and from a consumer on another node alike. The
+producer VPC then needs no route for the VIP and the producer need not answer
+neighbor discovery for it, but it must still accept a packet addressed to the
+VIP, for example by binding it or through a transparent socket. An attachment
+with no subnet of the VIP's family is delivered the VIP itself as the next
+hop, so it must answer neighbor discovery for the VIP. While the CNI or router
+is older than the remote target map (see
+[Remote target map roll order](#remote-target-map-roll-order)), a request from
+another node reaches the producer only if its VPC routes the VIP to it.
 
 Galactic treats an attachment as ready only when its status has
 `observedGeneration` equal to its generation, non-empty `node`, `vpc` and

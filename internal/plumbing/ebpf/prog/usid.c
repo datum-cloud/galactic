@@ -4083,7 +4083,7 @@ static USID_ALWAYS_INLINE int service_id_equal(const __u8 a[16], const __u8 b[16
 // that producer's next hop. It reads the request's tuple into the service
 // scratch. A global function, so the verifier checks it once rather than on
 // every path that reaches the call.
-__attribute__((noinline)) __u32 service_remote_target(struct __sk_buff *skb, __u32 h_proto,
+__attribute__((noinline)) __u32 service_remote_target(struct __sk_buff *skb, __u32 h_proto, __u64 vrf_key,
 						       struct bpf_redir_neigh *nh)
 {
 	__u32 scratch_key = 0;
@@ -4101,12 +4101,19 @@ __attribute__((noinline)) __u32 service_remote_target(struct __sk_buff *skb, __u
 	if (!target || !target->producer_ifindex)
 		return 0;
 	__u32 ifindex = target->producer_ifindex;
+	// Only a producer in the VRF the tunnel's SID names, as the route lookup
+	// it replaces is scoped to that VRF.
+	struct ifindex_vrf_value *iv = bpf_map_lookup_elem(&ifindex_vrf_table, &ifindex);
+	if (!iv || ((iv->block << 12) | iv->argument) != vrf_key)
+		return 0;
 	// The producer's own address, as the local path delivers through it. A
-	// producer with no recorded next hop takes the service address itself.
+	// producer with no recorded next hop takes the service address itself; one
+	// whose next hop belongs to an earlier incarnation of its interface takes
+	// the route lookup.
 	struct service_peer_key key = {.ifindex = ifindex, .family = s->meta_family};
 	struct service_peer_value *peer = bpf_map_lookup_elem(&service_peer_table, &key);
 	if (peer && !service_identity_matches(ifindex, peer->token))
-		peer = 0;
+		return 0;
 	__builtin_memset(nh, 0, sizeof(*nh));
 	if (s->meta_family == USID_EGRESS_ROUTE_FAMILY_INET6) {
 		nh->nh_family = USID_AF_INET6;
@@ -4644,7 +4651,7 @@ int usid_ingress(struct __sk_buff *skb)
 
 	__builtin_memset(&service_nh, 0, sizeof(service_nh));
 	if (service_tunnel && service_scratch && service_scratch->tunnel_direction == SERVICE_TUNNEL_REQUEST)
-		service_target = service_remote_target(skb, new_eth->h_proto, &service_nh);
+		service_target = service_remote_target(skb, new_eth->h_proto, vrf_key, &service_nh);
 	if (service_target) {
 		fib_params.ifindex = service_target;
 		fib_rc = BPF_FIB_LKUP_RET_NO_NEIGH;

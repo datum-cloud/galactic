@@ -808,16 +808,30 @@ func (t *Tables) SweepPolicy(snapshot PolicySnapshot) error {
 			return fmt.Errorf("serviceroutemap: iterate remote grants for sweep: %w", err)
 		}
 	}
-	// A target stays while a desired grant names its interface.
+	// A target stays while a desired grant names its interface. Every
+	// desired grant's key gets a target: one naming another desired
+	// interface of the same grant, as while a producer's interface is
+	// replaced, is kept, and a missing or stale one is rewritten.
 	var staleTargets []serviceRemoteGrantKey
+	missingTargets := make(map[serviceRemoteGrantKey]uint32)
 	if t.remoteTargets != nil {
+		for grant := range desiredGrants {
+			target := remoteTargetKey(grant)
+			if current, ok := missingTargets[target]; !ok || grant.ProducerIfindex > current {
+				missingTargets[target] = grant.ProducerIfindex
+			}
+		}
 		iterator := t.remoteTargets.Iterate()
 		var key serviceRemoteGrantKey
 		var value serviceRemoteTargetValue
 		for iterator.Next(&key, &value) {
 			grant := key
 			grant.ProducerIfindex = value.ProducerIfindex
-			if _, desired := desiredGrants[grant]; !desired || key.ProducerIfindex != 0 {
+			if _, desired := desiredGrants[grant]; desired && key.ProducerIfindex == 0 {
+				delete(missingTargets, key)
+				continue
+			}
+			if _, rewrite := missingTargets[key]; !rewrite {
 				staleTargets = append(staleTargets, key)
 			}
 		}
@@ -876,6 +890,11 @@ func (t *Tables) SweepPolicy(snapshot PolicySnapshot) error {
 	for _, key := range staleTargets {
 		if err := t.remoteTargets.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			deleteErrs = append(deleteErrs, fmt.Errorf("serviceroutemap: sweep remote target: %w", err))
+		}
+	}
+	for key, ifindex := range missingTargets {
+		if err := t.remoteTargets.Put(key, serviceRemoteTargetValue{ProducerIfindex: ifindex}); err != nil {
+			deleteErrs = append(deleteErrs, fmt.Errorf("serviceroutemap: restore remote target: %w", err))
 		}
 	}
 	for _, key := range staleSets {
@@ -975,6 +994,25 @@ func (t *Tables) RegisterRemoteGrant(
 		if err := t.remoteTargets.Put(remoteTargetKey(key), target); err != nil {
 			return fmt.Errorf("serviceroutemap: register remote target: %w", err)
 		}
+	}
+	return nil
+}
+
+// SetRemoteTarget points the remote target of a grant at producerIfindex,
+// where a grant for that interface is registered. It does nothing on a
+// datapath without the map.
+func (t *Tables) SetRemoteTarget(
+	producerIfindex uint32, address net.IP, protocol uint8, port uint16, grantID [16]byte,
+) error {
+	if t.remoteTargets == nil {
+		return nil
+	}
+	key, err := remoteGrantKey(0, address, protocol, port, grantID)
+	if err != nil {
+		return err
+	}
+	if err := t.remoteTargets.Put(key, serviceRemoteTargetValue{ProducerIfindex: producerIfindex}); err != nil {
+		return fmt.Errorf("serviceroutemap: register remote target: %w", err)
 	}
 	return nil
 }
