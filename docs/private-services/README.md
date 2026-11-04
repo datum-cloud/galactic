@@ -136,7 +136,7 @@ A producer whose host-side interface is gone, as while a replacement pod
 recreates it, leaves its node's set until the interface returns, and the other
 producers keep serving throughout. If the producers left are all draining,
 they take new flows until it returns, even those reported `Unhealthy`. Only a
-set with no interface left at all stops serving.
+set with no ready interface left stops serving.
 
 With `PreferNodeLocal`, a consumer moves to a remote producer when the
 producers on its node include an `Unhealthy` one and none that is `Healthy` or

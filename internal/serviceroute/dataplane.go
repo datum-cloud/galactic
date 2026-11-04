@@ -979,7 +979,7 @@ func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []applie
 		token, err := p.tables.IdentityToken(ifindex)
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
 			// The CNI creates the interface before it records its identity.
-			missingErr = err
+			missingErr = fmt.Errorf("resolve service interface %q identity: %w", producer.Device, err)
 			continue
 		}
 		if err != nil {

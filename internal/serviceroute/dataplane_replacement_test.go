@@ -29,7 +29,7 @@ type replacementFixture struct {
 func newReplacementFixture() *replacementFixture {
 	f := &replacementFixture{
 		routes: &persistedPolicyTable{}, access: &persistedPolicyTable{}, set: &persistedPolicyTable{},
-		links: map[string]uint32{testConsumerDeviceName: 10, "producer-a": 20, "producer-b": 21},
+		links: map[string]uint32{testConsumerDeviceName: 10, producerADevice: 20, producerBDevice: 21},
 	}
 	p := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
 	p.tables = serviceroutemap.New(f.routes, f.access, &persistedPolicyTable{}, &persistedPolicyTable{},
@@ -42,7 +42,7 @@ func newReplacementFixture() *replacementFixture {
 		if index, ok := f.links[name]; ok {
 			return index, nil
 		}
-		if name == "producer-a" || name == "producer-b" {
+		if name == producerADevice || name == producerBDevice {
 			return 0, netlink.LinkNotFoundError{}
 		}
 		return 0, fmt.Errorf("unknown interface %q", name)
@@ -104,14 +104,14 @@ func (f *replacementFixture) repair(t *testing.T, intent RouteIntent) {
 
 func TestReplacingDrainingProducerInterfaceKeepsServing(t *testing.T) {
 	f := newReplacementFixture()
-	intent := localSetIntent(producer("producer-a", true), producer("producer-b", false))
+	intent := localSetIntent(producer(producerADevice, true), producer(producerBDevice, false))
 	if err := f.programmer.Apply(intent); err != nil {
 		t.Fatal(err)
 	}
 	f.requireServing(t)
 
 	// The old pod stops: its interface is gone.
-	delete(f.links, "producer-a")
+	delete(f.links, producerADevice)
 	f.repair(t, intent)
 	if members, eligible := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{21}) ||
 		!reflect.DeepEqual(eligible, []uint32{21}) {
@@ -119,7 +119,7 @@ func TestReplacingDrainingProducerInterfaceKeepsServing(t *testing.T) {
 	}
 
 	// The replacement pod recreates it under the same name.
-	f.links["producer-a"] = 23
+	f.links[producerADevice] = 23
 	f.repair(t, intent)
 	if members, eligible := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{23, 21}) ||
 		!reflect.DeepEqual(eligible, []uint32{21}) {
@@ -134,13 +134,13 @@ func TestReplacingDrainingProducerInterfaceKeepsServing(t *testing.T) {
 
 func TestRecreatingProducerInterfaceInPlaceKeepsServing(t *testing.T) {
 	f := newReplacementFixture()
-	intent := localSetIntent(producer("producer-a", true), producer("producer-b", false))
+	intent := localSetIntent(producer(producerADevice, true), producer(producerBDevice, false))
 	if err := f.programmer.Apply(intent); err != nil {
 		t.Fatal(err)
 	}
 	f.requireServing(t)
 	// The interface comes back before any repair sees it missing.
-	f.links["producer-a"] = 23
+	f.links[producerADevice] = 23
 	f.repair(t, intent)
 	if members, _ := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{23, 21}) {
 		t.Fatalf("set members = %v, want [23 21]", members)
@@ -157,9 +157,10 @@ func TestRecreatingProducerInterfaceInPlaceKeepsServing(t *testing.T) {
 
 func TestApplyLocalSetWithMissingProducerInterface(t *testing.T) {
 	f := newReplacementFixture()
-	delete(f.links, "producer-a")
+	delete(f.links, producerADevice)
 	// A draining producer that is gone leaves the others as they are.
-	if err := f.programmer.Apply(localSetIntent(producer("producer-a", true), producer("producer-b", false))); err != nil {
+	intent := localSetIntent(producer(producerADevice, true), producer(producerBDevice, false))
+	if err := f.programmer.Apply(intent); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if members, eligible := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{21}) ||
@@ -169,8 +170,9 @@ func TestApplyLocalSetWithMissingProducerInterface(t *testing.T) {
 
 	// When the only eligible producer is gone, the draining ones serve.
 	f = newReplacementFixture()
-	delete(f.links, "producer-a")
-	if err := f.programmer.Apply(localSetIntent(producer("producer-a", false), producer("producer-b", true))); err != nil {
+	delete(f.links, producerADevice)
+	intent = localSetIntent(producer(producerADevice, false), producer(producerBDevice, true))
+	if err := f.programmer.Apply(intent); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if _, eligible := onlySet(t, f.set); !reflect.DeepEqual(eligible, []uint32{21}) {
@@ -180,14 +182,14 @@ func TestApplyLocalSetWithMissingProducerInterface(t *testing.T) {
 
 func TestLocalSetWithNoProducerInterfaceIsWithdrawn(t *testing.T) {
 	f := newReplacementFixture()
-	intent := localSetIntent(producer("producer-a", false), producer("producer-b", false))
+	intent := localSetIntent(producer(producerADevice, false), producer(producerBDevice, false))
 	if err := f.programmer.Apply(intent); err != nil {
 		t.Fatal(err)
 	}
-	delete(f.links, "producer-a")
-	delete(f.links, "producer-b")
-	if err := f.programmer.Apply(localSetIntent(producer("producer-a", true), producer("producer-b", false))); !errors.As(err,
-		&netlink.LinkNotFoundError{}) {
+	delete(f.links, producerADevice)
+	delete(f.links, producerBDevice)
+	err := f.programmer.Apply(localSetIntent(producer(producerADevice, true), producer(producerBDevice, false)))
+	if !errors.As(err, &netlink.LinkNotFoundError{}) {
 		t.Fatalf("Apply with no producer interface = %v, want a missing link error", err)
 	}
 	f.repair(t, intent)
@@ -202,24 +204,24 @@ func TestLocalSetWithNoProducerInterfaceIsWithdrawn(t *testing.T) {
 
 func TestReplacingServingProducerInterfaceKeepsServing(t *testing.T) {
 	f := newReplacementFixture()
-	intent := localSetIntent(producer("producer-a", false), producer("producer-b", false))
+	intent := localSetIntent(producer(producerADevice, false), producer(producerBDevice, false))
 	if err := f.programmer.Apply(intent); err != nil {
 		t.Fatal(err)
 	}
 	f.requireServing(t)
-	delete(f.links, "producer-a")
+	delete(f.links, producerADevice)
 	f.repair(t, intent)
 	if members, eligible := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{21}) ||
 		!reflect.DeepEqual(eligible, []uint32{21}) {
 		t.Fatalf("set without producer-a = %v/%v, want [21]/[21]", members, eligible)
 	}
 	// The new interface exists before the CNI records its identity.
-	f.links["producer-a"] = 24
+	f.links[producerADevice] = 24
 	f.repair(t, intent)
 	if members, _ := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{21}) {
 		t.Fatalf("set with an interface that has no identity = %v, want [21]", members)
 	}
-	f.links["producer-a"] = 23
+	f.links[producerADevice] = 23
 	f.repair(t, intent)
 	if members, eligible := onlySet(t, f.set); !reflect.DeepEqual(members, []uint32{23, 21}) ||
 		!reflect.DeepEqual(eligible, []uint32{23, 21}) {

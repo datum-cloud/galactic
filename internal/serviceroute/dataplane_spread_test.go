@@ -43,9 +43,9 @@ func spreadTestProgrammer() (*EBPFRouteProgrammer, *persistedPolicyTable, *persi
 		switch name {
 		case testConsumerDeviceName:
 			return 10, nil
-		case "producer-a":
+		case producerADevice:
 			return 20, nil
-		case "producer-b":
+		case producerBDevice:
 			return 21, nil
 		case "producer-c":
 			return 22, nil
@@ -108,7 +108,7 @@ func onlyRouteMode(t *testing.T, routes *persistedPolicyTable) uint64 {
 
 func TestApplyLocalSetWritesRouteAndProducerSet(t *testing.T) {
 	programmer, routes, sets := spreadTestProgrammer()
-	intent := localSetIntent(producer("producer-a", false), producer("producer-b", true))
+	intent := localSetIntent(producer(producerADevice, false), producer(producerBDevice, true))
 	if err := programmer.Apply(intent); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -137,8 +137,9 @@ func TestApplyLocalSetWritesRouteAndProducerSet(t *testing.T) {
 // removed, so the route row stays throughout and the newer set wins.
 func TestLocalSetReplacementKeepsRouteAndPrefersNewestSet(t *testing.T) {
 	programmer, routes, sets := spreadTestProgrammer()
-	old := localSetIntent(producer("producer-a", false), producer("producer-b", false))
-	next := localSetIntent(producer("producer-a", false), producer("producer-b", true), producer("producer-c", false))
+	old := localSetIntent(producer(producerADevice, false), producer(producerBDevice, false))
+	next := localSetIntent(producer(producerADevice, false), producer(producerBDevice, true),
+		producer("producer-c", false))
 	if intentKey(old) == intentKey(next) {
 		t.Fatal("intents with different producer sets share an identity")
 	}
@@ -178,11 +179,11 @@ func TestLocalSetReplacementKeepsRouteAndPrefersNewestSet(t *testing.T) {
 func TestLocalSetNeedsProducerSetMap(t *testing.T) {
 	programmer, _, _ := spreadTestProgrammer()
 	programmer.tables.WithProducerSets(nil)
-	err := programmer.Apply(localSetIntent(producer("producer-a", false)))
+	err := programmer.Apply(localSetIntent(producer(producerADevice, false)))
 	if !errors.Is(err, ErrProducerSetsUnavailable) {
 		t.Fatalf("Apply without a producer set map: %v, want ErrProducerSetsUnavailable", err)
 	}
-	if err := programmer.Apply(localTestIntentFor(testConsumerDeviceName, "producer-a")); err != nil {
+	if err := programmer.Apply(localTestIntentFor(testConsumerDeviceName, producerADevice)); err != nil {
 		t.Fatalf("Apply of a single-producer intent without a producer set map: %v", err)
 	}
 }
@@ -195,7 +196,7 @@ func localTestIntentFor(consumer, producer string) RouteIntent {
 
 func TestFinalizeSweepsStaleProducerSets(t *testing.T) {
 	programmer, _, sets := spreadTestProgrammer()
-	stale := localSetIntent(producer("producer-a", false))
+	stale := localSetIntent(producer(producerADevice, false))
 	stale.ConsumerDevice = testConsumerDeviceName
 	if err := programmer.tables.RegisterProducerSet(99, net.ParseIP("fd00::99"), serviceroutemap.ProtocolUDP, 53,
 		[]serviceroutemap.ProducerMember{{Ifindex: 20, Token: 200, Eligible: true}}); err != nil {
