@@ -239,7 +239,8 @@ jobs:
         run: |
           current=true
           if [ "$REF" = refs/heads/main ]; then
-            head="$(git ls-remote "https://github.com/${REPOSITORY}" refs/heads/main | cut -f1)"
+            # If the head cannot be read, publish as before rather than fail.
+            head="$(git ls-remote "https://github.com/${REPOSITORY}" refs/heads/main | cut -f1 || true)"
             if [ -n "$head" ] && [ "$head" != "$SHA" ]; then
               echo "main is now at ${head}; its run publishes the bundle instead of ${SHA}."
               current=false
