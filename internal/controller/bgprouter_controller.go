@@ -91,6 +91,7 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{}, stopErr
 			}
 			forgetRouterMetrics(req.NamespacedName)
+			r.forgetVRFRetry(req.NamespacedName)
 			return ctrl.Result{}, r.releaseStoppedRouterAdvertisements(ctx, req.NamespacedName)
 		}
 		return ctrl.Result{}, fmt.Errorf("get BGPRouter %s: %w", req.NamespacedName, err)
@@ -112,6 +113,7 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, stopErr
 		}
 		forgetRouterMetrics(req.NamespacedName)
+		r.forgetVRFRetry(req.NamespacedName)
 		if err := r.releaseStoppedRouterAdvertisements(ctx, req.NamespacedName); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -278,6 +280,9 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Update per-VRF-instance BGPVRFInstance statuses.
 	r.updateVRFInstanceStatuses(ctx, router, postApplyStatus)
 
+	if _, absent := unwiredVRFs(desired.VRFInstances, postApplyStatus); absent != 0 {
+		requeueAfter = earliestRequeue(requeueAfter, vrfNotInNetnsRetryInterval)
+	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
@@ -727,6 +732,14 @@ func earliestRequeue(a, b time.Duration) time.Duration {
 		return b
 	}
 	return a
+}
+
+// forgetVRFRetry stops tracking the VRF retry of a router this node no longer
+// runs.
+func (r *BGPRouterReconciler) forgetVRFRetry(key types.NamespacedName) {
+	r.vrfRetryMu.Lock()
+	defer r.vrfRetryMu.Unlock()
+	delete(r.vrfRetryAt, key)
 }
 
 // unwiredVRFs counts the desired VRFs the runtime reports failed, and those it

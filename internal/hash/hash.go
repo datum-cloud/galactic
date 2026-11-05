@@ -25,6 +25,7 @@ type sortableRouter struct {
 	AddressFamilies []model.AddressFamily
 	ListenPort      *int32
 	Peers           []sortablePeer
+	VRFInstances    []sortableVRFInstance
 	Advertisements  []sortableAdvertisement
 	Policies        []sortablePolicy
 }
@@ -37,6 +38,13 @@ type sortablePeer struct {
 	HoldTime        int64
 	KeepaliveTime   int64
 	AuthPassword    string
+}
+
+type sortableVRFInstance struct {
+	Name               string
+	VRFID              int32
+	ImportRouteTargets []string
+	ExportRouteTargets []string
 }
 
 type sortableAdvertisement struct {
@@ -107,6 +115,20 @@ func toSortable(r model.DesiredRouter) sortableRouter {
 	}
 	sort.Slice(peers, func(i, j int) bool { return peers[i].Address < peers[j].Address })
 	sr.Peers = peers
+
+	// Sort VRF instances by Name, so adding, removing or changing one moves
+	// the hash and is applied.
+	vrfs := make([]sortableVRFInstance, len(r.VRFInstances))
+	for i, v := range r.VRFInstances {
+		vrfs[i] = sortableVRFInstance{
+			Name:               v.Name,
+			VRFID:              v.VRFID,
+			ImportRouteTargets: sorted(v.ImportRouteTargets),
+			ExportRouteTargets: sorted(v.ExportRouteTargets),
+		}
+	}
+	sort.Slice(vrfs, func(i, j int) bool { return vrfs[i].Name < vrfs[j].Name })
+	sr.VRFInstances = vrfs
 
 	// Sort advertisements by Name.
 	advs := make([]sortableAdvertisement, len(r.Advertisements))

@@ -79,3 +79,45 @@ func TestDesiredRouter_Deterministic(t *testing.T) {
 		t.Fatalf("hash not deterministic: %s != %s", first, second)
 	}
 }
+
+// Adding, removing or changing a VRF instance moves the hash, so the router
+// applies it, while reordering VRFs or their route targets does not.
+func TestDesiredRouter_VRFInstanceChangeAltersHash(t *testing.T) {
+	base := model.DesiredRouter{Name: "r", VRFInstances: []model.DesiredVRFInstance{
+		{Name: "a", VRFID: 1, ImportRouteTargets: []string{"65000:1", "65000:2"}},
+		{Name: "b", VRFID: 2},
+	}}
+	sum := func(r model.DesiredRouter) string {
+		t.Helper()
+		h, err := DesiredRouter(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	want := sum(base)
+	reordered := base
+	reordered.VRFInstances = []model.DesiredVRFInstance{
+		{Name: "b", VRFID: 2},
+		{Name: "a", VRFID: 1, ImportRouteTargets: []string{"65000:2", "65000:1"}},
+	}
+	if sum(reordered) != want {
+		t.Error("reordering VRFs or route targets moved the hash")
+	}
+	for name, mutate := range map[string]func(*model.DesiredRouter){
+		"added": func(r *model.DesiredRouter) {
+			r.VRFInstances = append(r.VRFInstances, model.DesiredVRFInstance{Name: "c"})
+		},
+		"removed": func(r *model.DesiredRouter) { r.VRFInstances = r.VRFInstances[:1] },
+		"route target changed": func(r *model.DesiredRouter) {
+			r.VRFInstances[0].ImportRouteTargets = []string{"65000:9"}
+		},
+	} {
+		changed := base
+		changed.VRFInstances = append([]model.DesiredVRFInstance(nil), base.VRFInstances...)
+		mutate(&changed)
+		if sum(changed) == want {
+			t.Errorf("a VRF instance %s left the hash unchanged", name)
+		}
+	}
+}
