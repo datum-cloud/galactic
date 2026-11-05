@@ -181,6 +181,47 @@ func TestReconcileRetriesUnwiredVRF(t *testing.T) {
 	}
 }
 
+// A reconcile that changes nothing about a VRF instance does not write its
+// status: every applying BGPRouter reconcile visits every VRF instance of the
+// router, and an unchanged write still costs the API server a full update.
+func TestReconcileSkipsUnchangedVRFStatus(t *testing.T) {
+	// A VRF served only by the ingress sidecar is never wired in the router's
+	// network namespace, so every reconcile goes through Apply again.
+	rm := &fakeRuntimeManager{status: model.RuntimeStatus{Healthy: true,
+		VRFs: []model.VRFStatus{{Name: testVRFName, State: model.VRFStateNotInNetns,
+			Reason: model.VRFReasonNotInRouterNetns}}}}
+	r, c := newVRFStatusTestReconciler(t, rm)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testVRFRouterName}}
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if cond := vrfReady(t, c); cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("reconcile 1: Ready = %+v, want True", cond)
+	}
+	applies := rm.applies
+	resourceVersion := func() string {
+		t.Helper()
+		got := &bgpv1alpha1.BGPVRFInstance{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testVRFName}, got); err != nil {
+			t.Fatalf("get BGPVRFInstance: %v", err)
+		}
+		return got.ResourceVersion
+	}
+	before := resourceVersion()
+	for i := 2; i <= 3; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+	if rm.applies == applies {
+		t.Fatal("later reconciles did not apply, so they never reached the VRF status update")
+	}
+	if after := resourceVersion(); after != before {
+		t.Errorf("BGPVRFInstance resourceVersion %s -> %s: an unchanged status was written", before, after)
+	}
+}
+
 func TestVRFReadyCondition(t *testing.T) {
 	tests := []struct {
 		name       string

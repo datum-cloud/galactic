@@ -374,6 +374,9 @@ func (r *BGPRouterReconciler) updatePeerStatuses(
 		if ps.LastEstablishedTime != nil {
 			peerCopy.Status.LastEstablishedTime = ps.LastEstablishedTime
 		}
+		if equality.Semantic.DeepEqual(peer.Status, peerCopy.Status) {
+			continue
+		}
 		if updateErr := r.Status().Update(ctx, peerCopy); updateErr != nil {
 			logger.Error(updateErr, "update BGPPeer status", "peer", peer.Name)
 		}
@@ -524,6 +527,9 @@ func (r *BGPRouterReconciler) updatePolicyStatuses(ctx context.Context, router *
 			Reason:  "Ready",
 			Message: "Policy is ready",
 		})
+		if equality.Semantic.DeepEqual(policy.Status, policyCopy.Status) {
+			continue
+		}
 		if updateErr := r.Status().Update(ctx, policyCopy); updateErr != nil {
 			logger.Error(updateErr, "update BGPPolicy status", "policy", policy.Name)
 		}
@@ -557,6 +563,9 @@ func (r *BGPRouterReconciler) updateVRFInstanceStatuses(
 		setVRFInstanceCondition(vrfCopy, vrfReadyCondition(vs, ok))
 		if vrfCopy.Spec.NPTv6 != nil {
 			setVRFInstanceCondition(vrfCopy, nptv6ConfiguredCondition(vrfCopy.Spec.NPTv6))
+		}
+		if equality.Semantic.DeepEqual(vrf.Status, vrfCopy.Status) {
+			continue
 		}
 		if updateErr := r.Status().Update(ctx, vrfCopy); updateErr != nil {
 			logger.Error(updateErr, "update BGPVRFInstance status", "vrf", vrf.Name)
