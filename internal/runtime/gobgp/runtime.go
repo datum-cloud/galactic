@@ -754,8 +754,10 @@ func (r *GoBGPRuntime) Status(ctx context.Context) (model.RuntimeStatus, error) 
 				mt := metav1.NewTime(t)
 				ps.LastEstablishedTime = &mt
 			} else {
-				// First time we observe Established; record the time.
-				now := time.Now()
+				// First time we observe Established; record the time. The API
+				// stores it to the second, so it is kept to the second here
+				// too, or the published status never compares equal.
+				now := time.Now().Truncate(time.Second)
 				r.establishedAt[p.Conf.NeighborAddress] = now
 				mt := metav1.NewTime(now)
 				ps.LastEstablishedTime = &mt

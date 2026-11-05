@@ -7,6 +7,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -98,7 +99,7 @@ func newVRFStatusTestReconciler(t *testing.T, rm *fakeRuntimeManager) (*BGPRoute
 	}
 	b := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.BGPRouter{}, &bgpv1alpha1.BGPVRFInstance{}).
+		WithStatusSubresource(&bgpv1alpha1.BGPRouter{}, &bgpv1alpha1.BGPVRFInstance{}, &bgpv1alpha1.BGPPeer{}).
 		WithObjects(router, vrf)
 	for _, obj := range []client.Object{
 		&bgpv1alpha1.BGPAdvertisement{}, &bgpv1alpha1.BGPVRFInstance{},
@@ -219,6 +220,55 @@ func TestReconcileSkipsUnchangedVRFStatus(t *testing.T) {
 	}
 	if after := resourceVersion(); after != before {
 		t.Errorf("BGPVRFInstance resourceVersion %s -> %s: an unchanged status was written", before, after)
+	}
+}
+
+// An Established peer's status is not rewritten either: its session time is
+// kept to the second, as the API stores it, so the published status compares
+// equal.
+func TestReconcileSkipsUnchangedPeerStatus(t *testing.T) {
+	established := metav1.NewTime(time.Now().Truncate(time.Second))
+	rm := &fakeRuntimeManager{status: model.RuntimeStatus{Healthy: true,
+		VRFs: []model.VRFStatus{{Name: testVRFName, State: model.VRFStateNotInNetns,
+			Reason: model.VRFReasonNotInRouterNetns}},
+		Peers: []model.PeerStatus{{Name: "upstream", Address: "2001:db8::2",
+			SessionState: bgpv1alpha1.BGPPeerStateEstablished, LastEstablishedTime: &established}}}}
+	r, c := newVRFStatusTestReconciler(t, rm)
+	ctx := context.Background()
+	peer := &bgpv1alpha1.BGPPeer{
+		ObjectMeta: metav1.ObjectMeta{Name: "upstream", Namespace: testNamespace},
+		Spec: bgpv1alpha1.BGPPeerSpec{
+			RouterTarget: bgpv1alpha1.RouterTarget{RouterRef: &bgpv1alpha1.RouterRef{Name: testVRFRouterName}},
+			PeerASN:      65001, Address: "2001:db8::2",
+			AddressFamilies: []bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
+		},
+	}
+	if err := c.Create(ctx, peer); err != nil {
+		t.Fatal(err)
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testVRFRouterName}}
+	resourceVersion := func() string {
+		t.Helper()
+		got := &bgpv1alpha1.BGPPeer{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "upstream"}, got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status.LastEstablishedTime == nil {
+			t.Fatal("peer status has no session time")
+		}
+		return got.ResourceVersion
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	before := resourceVersion()
+	for i := 2; i <= 3; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+	if after := resourceVersion(); after != before {
+		t.Errorf("BGPPeer resourceVersion %s -> %s: an unchanged status was written", before, after)
 	}
 }
 
