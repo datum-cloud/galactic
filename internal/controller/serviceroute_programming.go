@@ -21,6 +21,13 @@ import (
 
 const serviceProgrammingAckDuration = 60 * time.Second
 
+// serviceProgrammingAckRenewal is how much of an unchanged acknowledgment may
+// remain before a reconcile renews it. A programmed policy reconciles at least
+// every serviceRouteMapResyncInterval, so renewing once less than this is left
+// keeps it current with half a resync interval to spare, while the many
+// reconciles in between write nothing.
+const serviceProgrammingAckRenewal = serviceProgrammingAckDuration - serviceRouteMapResyncInterval/2
+
 func (r *ServiceRoutePolicyReconciler) setNodeProgramming(
 	ctx context.Context, policy *networkv1alpha1.ServiceRoutePolicy, digest string, ready bool,
 ) error {
@@ -49,6 +56,9 @@ func (r *ServiceRoutePolicyReconciler) setNodeProgramming(
 		found := false
 		for i := range current.Status.Nodes {
 			if current.Status.Nodes[i].NodeName == r.NodeName {
+				if ackCurrent(current.Status.Nodes[i], report, r.now()) {
+					return nil
+				}
 				current.Status.Nodes[i] = report
 				found = true
 			}
@@ -64,6 +74,22 @@ func (r *ServiceRoutePolicyReconciler) setNodeProgramming(
 		})
 		return r.Status().Update(ctx, current)
 	})
+}
+
+// ackCurrent reports whether published already acknowledges what report does,
+// and need not be renewed yet: the same policy generation and inputs, the same
+// readiness, and either enough time left or an end the policy's authorization
+// already caps it at.
+func ackCurrent(published, report networkv1alpha1.ServiceRouteNodeStatus, now time.Time) bool {
+	if published.PolicyUID != report.PolicyUID || published.ObservedGeneration != report.ObservedGeneration ||
+		published.InputDigest != report.InputDigest || published.Ready != report.Ready {
+		return false
+	}
+	if published.ValidUntil.Equal(&report.ValidUntil) {
+		return true
+	}
+	return published.ValidUntil.Sub(now) > serviceProgrammingAckRenewal &&
+		!published.ValidUntil.After(report.ValidUntil.Time)
 }
 
 func serviceProgrammingDigest(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alpha1.ServiceEndpoint,
