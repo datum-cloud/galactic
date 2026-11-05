@@ -27,6 +27,8 @@ const (
 	testVRFRouterNode = "edge-node"
 	testVRFRouterName = "edge-node"
 	testVRFName       = "35-edge-node"
+	testVRFPeerName   = "upstream"
+	testVRFPeerAddr   = "2001:db8:9::2"
 )
 
 // fakeRuntimeManager is a RuntimeManager whose reported status the test
@@ -231,15 +233,15 @@ func TestReconcileSkipsUnchangedPeerStatus(t *testing.T) {
 	rm := &fakeRuntimeManager{status: model.RuntimeStatus{Healthy: true,
 		VRFs: []model.VRFStatus{{Name: testVRFName, State: model.VRFStateNotInNetns,
 			Reason: model.VRFReasonNotInRouterNetns}},
-		Peers: []model.PeerStatus{{Name: "upstream", Address: "2001:db8::2",
+		Peers: []model.PeerStatus{{Name: testVRFPeerName, Address: testVRFPeerAddr,
 			SessionState: bgpv1alpha1.BGPPeerStateEstablished, LastEstablishedTime: &established}}}}
 	r, c := newVRFStatusTestReconciler(t, rm)
 	ctx := context.Background()
 	peer := &bgpv1alpha1.BGPPeer{
-		ObjectMeta: metav1.ObjectMeta{Name: "upstream", Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testVRFPeerName, Namespace: testNamespace},
 		Spec: bgpv1alpha1.BGPPeerSpec{
 			RouterTarget: bgpv1alpha1.RouterTarget{RouterRef: &bgpv1alpha1.RouterRef{Name: testVRFRouterName}},
-			PeerASN:      65001, Address: "2001:db8::2",
+			PeerASN:      65001, Address: testVRFPeerAddr,
 			AddressFamilies: []bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
 		},
 	}
@@ -250,7 +252,7 @@ func TestReconcileSkipsUnchangedPeerStatus(t *testing.T) {
 	resourceVersion := func() string {
 		t.Helper()
 		got := &bgpv1alpha1.BGPPeer{}
-		if err := c.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "upstream"}, got); err != nil {
+		if err := c.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testVRFPeerName}, got); err != nil {
 			t.Fatal(err)
 		}
 		if got.Status.LastEstablishedTime == nil {
