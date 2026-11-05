@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -200,5 +201,44 @@ func TestUninvolvedNodeDoesNotPublishProgrammingReport(t *testing.T) {
 	}
 	if len(current.Status.Nodes) != 0 {
 		t.Fatalf("uninvolved node published a report: %+v", current.Status.Nodes)
+	}
+}
+
+// An unchanged acknowledgment is renewed only as it nears its end, so the
+// reconciles in between write no status.
+func TestUnchangedProgrammingAcknowledgmentIsRenewedOnlyNearItsEnd(t *testing.T) {
+	r, p, _ := pscFixture(t)
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: p.Namespace, Name: p.Name}
+	now := time.Now().Truncate(time.Second)
+	r.Now = func() time.Time { return now }
+	reconcileAck := func() (string, metav1.Time) {
+		t.Helper()
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatal(err)
+		}
+		current := &networkv1alpha1.ServiceRoutePolicy{}
+		if err := r.Get(ctx, key, current); err != nil {
+			t.Fatal(err)
+		}
+		if len(current.Status.Nodes) != 1 || !current.Status.Nodes[0].Ready {
+			t.Fatalf("nodes=%+v", current.Status.Nodes)
+		}
+		return current.ResourceVersion, current.Status.Nodes[0].ValidUntil
+	}
+	version, until := reconcileAck()
+
+	// Well before the renewal point nothing is written.
+	now = now.Add(serviceRouteMapResyncInterval / 4)
+	if v, u := reconcileAck(); v != version || !u.Equal(&until) {
+		t.Fatalf("an unchanged acknowledgment was rewritten early: %s -> %s, validUntil %s -> %s",
+			version, v, until, u)
+	}
+
+	// Once less than the renewal margin is left, it is renewed.
+	now = until.Add(-serviceProgrammingAckRenewal + time.Second)
+	if v, u := reconcileAck(); v == version || !u.After(until.Time) {
+		t.Fatalf("an acknowledgment near its end was not renewed: %s -> %s, validUntil %s -> %s",
+			version, v, until, u)
 	}
 }
