@@ -351,8 +351,14 @@ func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 			}})).
 		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies)).
 		Watches(&cloudv1alpha1.VPC{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies)).
-		Watches(&networkv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies)).
-		Watches(&networkv1alpha1.BGPVRFInstance{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies)).
+		// Only the spec of a BGPRouter or BGPVRFInstance feeds an attachment's
+		// SID. Their status, and the router's config-hash annotation, change
+		// on nearly every BGPRouter reconcile, and each change would requeue
+		// every policy on every node.
+		Watches(&networkv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies),
+			builder.WithPredicates(routingDependencyChanged)).
+		Watches(&networkv1alpha1.BGPVRFInstance{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies),
+			builder.WithPredicates(routingDependencyChanged)).
 		Complete(r)
 }
 
@@ -625,6 +631,10 @@ func (r *ServiceRoutePolicyReconciler) endpointPolicies(ctx context.Context, obj
 func (r *ServiceRoutePolicyReconciler) attachmentPolicies(ctx context.Context, _ client.Object) []ctrl.Request {
 	return r.allPolicies(ctx)
 }
+
+// routingDependencyChanged passes the BGPRouter and BGPVRFInstance events that
+// can change an attachment's SID: creation, deletion, and a spec change.
+var routingDependencyChanged = predicate.GenerationChangedPredicate{}
 
 func (r *ServiceRoutePolicyReconciler) routingDependencyPolicies(ctx context.Context, _ client.Object) []ctrl.Request {
 	return r.allPolicies(ctx)
