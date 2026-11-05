@@ -189,7 +189,7 @@ func TestReconcileRetriesUnwiredVRF(t *testing.T) {
 // router, and an unchanged write still costs the API server a full update.
 func TestReconcileSkipsUnchangedVRFStatus(t *testing.T) {
 	// A VRF served only by the ingress sidecar is never wired in the router's
-	// network namespace, so every reconcile goes through Apply again.
+	// network namespace, so each due retry goes through Apply again.
 	rm := &fakeRuntimeManager{status: model.RuntimeStatus{Healthy: true,
 		VRFs: []model.VRFStatus{{Name: testVRFName, State: model.VRFStateNotInNetns,
 			Reason: model.VRFReasonNotInRouterNetns}}}}
@@ -213,6 +213,8 @@ func TestReconcileSkipsUnchangedVRFStatus(t *testing.T) {
 	}
 	before := resourceVersion()
 	for i := 2; i <= 3; i++ {
+		// Each reconcile is a due retry, so it applies again.
+		r.vrfRetryAt = nil
 		if _, err := r.Reconcile(ctx, req); err != nil {
 			t.Fatalf("reconcile %d: %v", i, err)
 		}
@@ -310,31 +312,79 @@ func TestVRFReadyCondition(t *testing.T) {
 	}
 }
 
-func TestAllDesiredVRFsApplied(t *testing.T) {
+func TestUnwiredVRFs(t *testing.T) {
 	vrfs := []model.DesiredVRFInstance{{Name: "a"}, {Name: "b"}}
 	tests := []struct {
-		name string
-		rs   model.RuntimeStatus
-		want bool
+		name           string
+		rs             model.RuntimeStatus
+		failed, absent int
 	}{
-		{name: "all applied", want: true, rs: model.RuntimeStatus{VRFs: []model.VRFStatus{
+		{name: "all applied", rs: model.RuntimeStatus{VRFs: []model.VRFStatus{
 			{Name: "a", State: model.VRFStateApplied}, {Name: "b", State: model.VRFStateApplied},
 		}}},
-		{name: "one failed", want: false, rs: model.RuntimeStatus{VRFs: []model.VRFStatus{
+		{name: "one failed", failed: 1, rs: model.RuntimeStatus{VRFs: []model.VRFStatus{
 			{Name: "a", State: model.VRFStateApplied}, {Name: "b", State: model.VRFStateFailed},
 		}}},
-		{name: "one not in netns", want: false, rs: model.RuntimeStatus{VRFs: []model.VRFStatus{
+		{name: "one not in netns", absent: 1, rs: model.RuntimeStatus{VRFs: []model.VRFStatus{
 			{Name: "a", State: model.VRFStateApplied}, {Name: "b", State: model.VRFStateNotInNetns},
 		}}},
-		{name: "one unreported", want: false, rs: model.RuntimeStatus{VRFs: []model.VRFStatus{
+		{name: "one unreported", absent: 1, rs: model.RuntimeStatus{VRFs: []model.VRFStatus{
 			{Name: "a", State: model.VRFStateApplied},
 		}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := allDesiredVRFsApplied(vrfs, tt.rs); got != tt.want {
-				t.Errorf("allDesiredVRFsApplied() = %v, want %v", got, tt.want)
+			if failed, absent := unwiredVRFs(vrfs, tt.rs); failed != tt.failed || absent != tt.absent {
+				t.Errorf("unwiredVRFs() = %d failed, %d absent, want %d, %d", failed, absent, tt.failed, tt.absent)
 			}
 		})
+	}
+}
+
+// A VRF the runtime reports not in the router's network namespace, as for a
+// VPC served only by the ingress sidecar, is retried on an interval rather
+// than on every reconcile, so events reaching the router do not each
+// re-apply it and rewrite its status.
+func TestNotInNetnsVRFIsRetriedOnlyOnItsInterval(t *testing.T) {
+	rm := &fakeRuntimeManager{status: model.RuntimeStatus{Healthy: true,
+		VRFs: []model.VRFStatus{{Name: testVRFName, State: model.VRFStateNotInNetns,
+			Reason: model.VRFReasonNotInRouterNetns}}}}
+	r, _ := newVRFStatusTestReconciler(t, rm)
+	key := types.NamespacedName{Namespace: testNamespace, Name: testVRFRouterName}
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if rm.applies != 1 {
+		t.Fatalf("reconcile 1: applies = %d, want 1", rm.applies)
+	}
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	if err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	if rm.applies != 1 {
+		t.Errorf("reconcile 2: applies = %d, want 1 (retried before its interval)", rm.applies)
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > vrfNotInNetnsRetryInterval {
+		t.Errorf("reconcile 2: RequeueAfter = %s, want the time left until the retry", result.RequeueAfter)
+	}
+
+	// Once the interval passes, the router applies again to look for it.
+	r.vrfRetryAt[key] = time.Now().Add(-time.Second)
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile 3: %v", err)
+	}
+	if rm.applies != 2 {
+		t.Errorf("reconcile 3: applies = %d, want 2 (not retried once due)", rm.applies)
+	}
+
+	// When the VRF is wired, the router stops tracking it.
+	rm.status.VRFs = []model.VRFStatus{{Name: testVRFName, State: model.VRFStateApplied}}
+	r.vrfRetryAt[key] = time.Now().Add(-time.Second)
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile 4: %v", err)
+	}
+	if _, tracked := r.vrfRetryAt[key]; tracked {
+		t.Error("a router with every VRF wired still schedules VRF retries")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -64,7 +65,19 @@ type BGPRouterReconciler struct {
 	// desired router is built from changed outside the API, such as a
 	// forwarding gate opening or closing.
 	Wake <-chan event.GenericEvent
+
+	// vrfRetryAt holds, by router, when a VRF the runtime last reported not
+	// in the router's network namespace is next retried.
+	vrfRetryMu sync.Mutex
+	vrfRetryAt map[types.NamespacedName]time.Time
 }
+
+// vrfNotInNetnsRetryInterval is how often a router whose only unwired VRFs
+// are not in its network namespace re-applies to look for them. Such a VRF
+// is usually served by the ingress sidecar and never appears, so retrying it
+// on every reconcile would re-apply the whole router, and rewrite its status,
+// on every event that reaches it.
+const vrfNotInNetnsRetryInterval = 30 * time.Second
 
 // Reconcile reconciles a single BGPRouter.
 func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -78,6 +91,7 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{}, stopErr
 			}
 			forgetRouterMetrics(req.NamespacedName)
+			r.forgetVRFRetry(req.NamespacedName)
 			return ctrl.Result{}, r.releaseStoppedRouterAdvertisements(ctx, req.NamespacedName)
 		}
 		return ctrl.Result{}, fmt.Errorf("get BGPRouter %s: %w", req.NamespacedName, err)
@@ -99,6 +113,7 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, stopErr
 		}
 		forgetRouterMetrics(req.NamespacedName)
+		r.forgetVRFRetry(req.NamespacedName)
 		if err := r.releaseStoppedRouterAdvertisements(ctx, req.NamespacedName); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -192,25 +207,16 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// not fail for one, so as not to hold every other VRF back, and the hash
 	// is persisted regardless; without this check a VRF whose first attempt
 	// failed would never be retried until some unrelated change moved the
-	// hash.
+	// hash. A VRF not in this netns is retried only every
+	// vrfNotInNetnsRetryInterval: it is usually served by the ingress sidecar
+	// and never appears here.
+	vrfsSettled, retryIn := r.vrfsSettled(req.NamespacedName, desired.VRFInstances, runtimeStatus, time.Now())
 	if router.Annotations[annotationConfigHash] == newHash && runtimeStatus.Healthy &&
-		allDesiredPeersPresent(desired.Peers, runtimeStatus) &&
-		allDesiredVRFsApplied(desired.VRFInstances, runtimeStatus) &&
+		allDesiredPeersPresent(desired.Peers, runtimeStatus) && vrfsSettled &&
 		advertisementsMatchRuntime(desired.Advertisements, runtimeStatus) {
 		// True no-op: runtime is healthy with the current config.
-		routerCopy := router.DeepCopy()
-		routerCopy.Status.ObservedGeneration = router.Generation
-		r.updateRouterStatus(routerCopy, runtimeStatus)
-		recordRouterReady(routerCopy)
-		recordPeerStates(req.NamespacedName, runtimeStatus)
-		if updateErr := r.Status().Update(ctx, routerCopy); updateErr != nil {
-			logger.Error(updateErr, "update observedGeneration (no-op reconcile)")
-		}
-		r.updatePeerStatuses(ctx, router, runtimeStatus)
-		// A Galactic Edge advertisement left out by a closed gate does not
-		// move the hash, so it is reported here too.
-		r.updateAdvertisementStatuses(ctx, router, runtimeStatus)
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		r.reportNoOp(ctx, req.NamespacedName, router, runtimeStatus)
+		return ctrl.Result{RequeueAfter: earliestRequeue(requeueAfter, retryIn)}, nil
 	}
 
 	// Apply to runtime.
@@ -250,6 +256,8 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		logger.Error(updateErr, "update BGPRouter status")
 	}
 
+	r.scheduleVRFRetry(req.NamespacedName, postApplyStatus, desired.VRFInstances, time.Now())
+
 	// Persist the config hash as an annotation so no-op detection survives pod restarts.
 	patchBase := router.DeepCopy()
 	if patchBase.Annotations == nil {
@@ -272,6 +280,9 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Update per-VRF-instance BGPVRFInstance statuses.
 	r.updateVRFInstanceStatuses(ctx, router, postApplyStatus)
 
+	if _, absent := unwiredVRFs(desired.VRFInstances, postApplyStatus); absent != 0 {
+		requeueAfter = earliestRequeue(requeueAfter, vrfNotInNetnsRetryInterval)
+	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
@@ -697,20 +708,98 @@ func allDesiredPeersPresent(peers []model.DesiredPeer, rs model.RuntimeStatus) b
 	return true
 }
 
-// allDesiredVRFsApplied reports whether the runtime has wired every desired VRF
-// into the kernel. A VRF that failed, is not in this netns, or has no reported
-// outcome yet sends the reconcile through Apply, which retries it.
-func allDesiredVRFsApplied(vrfs []model.DesiredVRFInstance, rs model.RuntimeStatus) bool {
-	applied := make(map[string]bool, len(rs.VRFs))
+// reportNoOp publishes the statuses of a reconcile that applies nothing.
+func (r *BGPRouterReconciler) reportNoOp(ctx context.Context, key types.NamespacedName,
+	router *bgpv1alpha1.BGPRouter, runtimeStatus model.RuntimeStatus,
+) {
+	routerCopy := router.DeepCopy()
+	routerCopy.Status.ObservedGeneration = router.Generation
+	r.updateRouterStatus(routerCopy, runtimeStatus)
+	recordRouterReady(routerCopy)
+	recordPeerStates(key, runtimeStatus)
+	if updateErr := r.Status().Update(ctx, routerCopy); updateErr != nil {
+		log.FromContext(ctx).Error(updateErr, "update observedGeneration (no-op reconcile)")
+	}
+	r.updatePeerStatuses(ctx, router, runtimeStatus)
+	// A Galactic Edge advertisement left out by a closed gate does not
+	// move the hash, so it is reported here too.
+	r.updateAdvertisementStatuses(ctx, router, runtimeStatus)
+}
+
+// earliestRequeue returns the sooner of two requeue delays, zero meaning none.
+func earliestRequeue(a, b time.Duration) time.Duration {
+	if a == 0 || (b > 0 && b < a) {
+		return b
+	}
+	return a
+}
+
+// forgetVRFRetry stops tracking the VRF retry of a router this node no longer
+// runs.
+func (r *BGPRouterReconciler) forgetVRFRetry(key types.NamespacedName) {
+	r.vrfRetryMu.Lock()
+	defer r.vrfRetryMu.Unlock()
+	delete(r.vrfRetryAt, key)
+}
+
+// unwiredVRFs counts the desired VRFs the runtime reports failed, and those it
+// reports not in the router's network namespace or not at all. A failed VRF
+// sends every reconcile through Apply; the others are retried every
+// vrfNotInNetnsRetryInterval.
+func unwiredVRFs(vrfs []model.DesiredVRFInstance, rs model.RuntimeStatus) (failed, absent int) {
+	state := make(map[string]model.VRFState, len(rs.VRFs))
 	for _, vs := range rs.VRFs {
-		applied[vs.Name] = vs.State == model.VRFStateApplied
+		state[vs.Name] = vs.State
 	}
 	for _, v := range vrfs {
-		if !applied[v.Name] {
-			return false
+		switch state[v.Name] {
+		case model.VRFStateApplied:
+		case model.VRFStateFailed:
+			failed++
+		default:
+			absent++
 		}
 	}
-	return true
+	return failed, absent
+}
+
+// vrfsSettled reports whether key's VRFs need no apply now: none failed, and
+// any not in its network namespace are not yet due a retry, in which case it
+// also returns how long until they are. A router with every VRF wired stops
+// being tracked.
+func (r *BGPRouterReconciler) vrfsSettled(key types.NamespacedName, vrfs []model.DesiredVRFInstance,
+	rs model.RuntimeStatus, now time.Time,
+) (bool, time.Duration) {
+	failed, absent := unwiredVRFs(vrfs, rs)
+	r.vrfRetryMu.Lock()
+	defer r.vrfRetryMu.Unlock()
+	if absent == 0 {
+		delete(r.vrfRetryAt, key)
+		return failed == 0, 0
+	}
+	at, ok := r.vrfRetryAt[key]
+	if failed != 0 || !ok || !now.Before(at) {
+		return false, 0
+	}
+	return true, at.Sub(now)
+}
+
+// scheduleVRFRetry records, after an apply, when key's VRFs that are still
+// not in its network namespace are next retried, and forgets the router when
+// none are left.
+func (r *BGPRouterReconciler) scheduleVRFRetry(key types.NamespacedName, rs model.RuntimeStatus,
+	vrfs []model.DesiredVRFInstance, now time.Time,
+) {
+	r.vrfRetryMu.Lock()
+	defer r.vrfRetryMu.Unlock()
+	if _, absent := unwiredVRFs(vrfs, rs); absent == 0 {
+		delete(r.vrfRetryAt, key)
+		return
+	}
+	if r.vrfRetryAt == nil {
+		r.vrfRetryAt = make(map[types.NamespacedName]time.Time)
+	}
+	r.vrfRetryAt[key] = now.Add(vrfNotInNetnsRetryInterval)
 }
 
 // normalizeIP returns the canonical text form of an IP address, so an IPv6
