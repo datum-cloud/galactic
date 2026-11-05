@@ -501,12 +501,16 @@ func setupServiceRouteController(
 	}).SetupWithManager(mgr); err != nil {
 		return err
 	}
-	if err := (&controller.ServiceProducerHealthReconciler{
+	producerHealth := &controller.ServiceProducerHealthReconciler{
 		Client:   mgr.GetClient(),
 		NodeName: nodeName,
 		Metrics:  serviceRouteMetrics,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if err := producerHealth.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup service producer health controller: %w", err)
+	}
+	if err := mgr.Add(producerLinkWatch(producerHealth.InterfaceChanged)); err != nil {
+		return fmt.Errorf("setup service producer interface watch: %w", err)
 	}
 	return nil
 }

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +68,11 @@ type ServiceProducerHealthReconciler struct {
 	// Metrics counts this node's producers by state; nil disables it.
 	Metrics *serviceroute.Metrics
 
+	// InterfaceIndex returns the index of the named host interface; nil means
+	// net.InterfaceByName. A producer whose interface is recreated, as when
+	// its pod is replaced, gets a new index and so a new probe with no result.
+	InterfaceIndex func(name string) (int, error)
+
 	events chan event.GenericEvent
 
 	mu sync.Mutex
@@ -74,6 +80,11 @@ type ServiceProducerHealthReconciler struct {
 	// last published state.
 	owners map[types.NamespacedName]map[string]bool
 	states map[string]networkv1alpha1.BackendHealthState
+	// incarnations holds the interface index each probe owner last saw, zero
+	// while its interface was missing, and interfaces the endpoints whose
+	// producers use each host interface.
+	incarnations map[string]int
+	interfaces   map[string]map[types.NamespacedName]bool
 }
 
 // Reconcile converges one endpoint's probes and this node's entries in its
@@ -128,6 +139,7 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	port := producerHealthCheckPort(endpoint)
 	wanted := make(map[string]bool)
+	seen := make(map[string]int)
 	var entries []networkv1alpha1.ServiceEndpointProducerStatus
 	for _, producer := range producers {
 		if producer.Status.Node != r.NodeName {
@@ -148,9 +160,25 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 			continue
 		}
 		owner := producerProbeOwner(req.NamespacedName, key)
+		index := r.interfaceIndex(target.Interface)
+		seed := r.observeIncarnation(owner, index, seen)
+		if index == 0 {
+			// Its pod is gone or being replaced; whatever comes next is probed
+			// afresh.
+			entry.State = networkv1alpha1.BackendHealthUnknown
+			entry.Reason = healthprobe.ReasonProbeUnavailable
+			entry.Message = "host interface is missing"
+			entry.LastTransitionTime = keepTransition(published[key], entry, metav1.Now())
+			entries = append(entries, entry)
+			continue
+		}
 		wanted[owner] = true
-		decision := r.Prober.Ensure(owner, healthTargetID(producer.UID, target), target,
-			seedProducerDecision(published[key], producer.UID, port))
+		var start *healthprobe.Decision
+		if seed {
+			start = seedProducerDecision(published[key], producer.UID, port)
+		}
+		decision := r.Prober.Ensure(owner, healthTargetID(producer.UID, target)+"|"+strconv.Itoa(index), target,
+			start)
 		entry.State = networkv1alpha1.BackendHealthState(decision.State)
 		entry.Reason = decision.Reason
 		entry.Message = truncateMessage(decision.Message)
@@ -158,6 +186,7 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 		entries = append(entries, entry)
 	}
 	r.track(req.NamespacedName, wanted, entries)
+	r.trackIncarnations(req.NamespacedName, seen, producers)
 	// A node with producers reconciles every renew interval, so it sweeps
 	// regularly; one without has nothing to renew and does not.
 	if len(entries) != 0 {
@@ -166,6 +195,107 @@ func (r *ServiceProducerHealthReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 	return r.publish(ctx, endpoint, entries, time.Now())
+}
+
+// interfaceIndex returns the index of the host interface name, or zero when it
+// does not exist.
+func (r *ServiceProducerHealthReconciler) interfaceIndex(name string) int {
+	lookup := r.InterfaceIndex
+	if lookup == nil {
+		lookup = func(name string) (int, error) {
+			iface, err := net.InterfaceByName(name)
+			if err != nil {
+				return 0, err
+			}
+			return iface.Index, nil
+		}
+	}
+	index, err := lookup(name)
+	if err != nil || index < 0 {
+		return 0
+	}
+	return index
+}
+
+// observeIncarnation records index as the interface owner's producer has now,
+// in seen and in r.incarnations, and reports whether the probe may start from
+// the decision published before. Only a probe this process has never seen for
+// owner, as after a restart, may: once the interface changes, the published
+// decision was about its predecessor.
+func (r *ServiceProducerHealthReconciler) observeIncarnation(owner string, index int, seen map[string]int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.incarnations == nil {
+		r.incarnations = make(map[string]int)
+	}
+	previous, known := r.incarnations[owner]
+	r.incarnations[owner] = index
+	seen[owner] = index
+	return !known || previous == index
+}
+
+// trackIncarnations forgets the incarnations of endpoint's owners not in seen,
+// and records which host interfaces endpoint's producers on this node use.
+func (r *ServiceProducerHealthReconciler) trackIncarnations(endpoint types.NamespacedName, seen map[string]int,
+	producers []*cloudv1alpha1.VPCAttachment,
+) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.forgetIncarnationsLocked(endpoint, seen, producers)
+}
+
+func (r *ServiceProducerHealthReconciler) forgetIncarnationsLocked(endpoint types.NamespacedName,
+	seen map[string]int, producers []*cloudv1alpha1.VPCAttachment,
+) {
+	prefix := endpoint.String() + "|"
+	for owner := range r.incarnations {
+		if _, ok := seen[owner]; !ok && strings.HasPrefix(owner, prefix) {
+			delete(r.incarnations, owner)
+		}
+	}
+	if r.interfaces == nil {
+		r.interfaces = make(map[string]map[types.NamespacedName]bool)
+	}
+	for name, endpoints := range r.interfaces {
+		delete(endpoints, endpoint)
+		if len(endpoints) == 0 {
+			delete(r.interfaces, name)
+		}
+	}
+	if len(seen) == 0 {
+		return
+	}
+	for _, producer := range producers {
+		name := producer.Status.HostInterface
+		if producer.Status.Node != r.NodeName || name == "" {
+			continue
+		}
+		if r.interfaces[name] == nil {
+			r.interfaces[name] = make(map[types.NamespacedName]bool)
+		}
+		r.interfaces[name][endpoint] = true
+	}
+}
+
+// InterfaceChanged asks for a reconcile of every endpoint with a producer on
+// the named host interface, so a recreated interface is probed afresh at once
+// rather than at the next renewal.
+func (r *ServiceProducerHealthReconciler) InterfaceChanged(name string) {
+	r.mu.Lock()
+	endpoints := make([]types.NamespacedName, 0, len(r.interfaces[name]))
+	for endpoint := range r.interfaces[name] {
+		endpoints = append(endpoints, endpoint)
+	}
+	r.mu.Unlock()
+	for _, endpoint := range endpoints {
+		select {
+		case r.events <- event.GenericEvent{Object: &networkv1alpha1.ServiceEndpoint{
+			ObjectMeta: metav1.ObjectMeta{Namespace: endpoint.Namespace, Name: endpoint.Name},
+		}}:
+		default:
+			// The queue is full of reconciles that will see the change too.
+		}
+	}
 }
 
 // producerHealthCheckPort returns the port endpoint's healthCheck probes: its
@@ -263,6 +393,10 @@ func (r *ServiceProducerHealthReconciler) releaseExcept(endpoint types.Namespace
 	}
 	if len(r.owners[endpoint]) == 0 {
 		delete(r.owners, endpoint)
+	}
+	if keep == nil {
+		// The endpoint probes nothing on this node any more.
+		r.forgetIncarnationsLocked(endpoint, nil, nil)
 	}
 	r.recordStatesLocked(endpoint, nil)
 }

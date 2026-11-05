@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -221,8 +223,10 @@ func TestServiceProducerHealthReconcilerPublishesThisNodesProducers(t *testing.T
 		Reason: healthprobe.ReasonProbeSucceeded, Since: since}
 	prober.decisions[secondOwner] = healthprobe.Decision{State: healthprobe.StateUnhealthy,
 		Reason: healthprobe.ReasonProbeFailed, Message: producerHealthRefused, Since: since}
-	reconcilerA := &ServiceProducerHealthReconciler{Client: c, NodeName: producerHealthNode, Prober: prober}
-	reconcilerB := &ServiceProducerHealthReconciler{Client: c, NodeName: producerHealthOtherNode,
+	reconcilerA := &ServiceProducerHealthReconciler{
+		InterfaceIndex: presentInterface, Client: c, NodeName: producerHealthNode, Prober: prober}
+	reconcilerB := &ServiceProducerHealthReconciler{
+		InterfaceIndex: presentInterface, Client: c, NodeName: producerHealthOtherNode,
 		Prober: newOwnerProber()}
 	reconcile := func(r *ServiceProducerHealthReconciler) {
 		t.Helper()
@@ -264,7 +268,8 @@ func TestServiceProducerHealthReconcilerPublishesThisNodesProducers(t *testing.T
 
 	// A restarted router starts each probe from its published decision.
 	restarted := newOwnerProber()
-	reconcile(&ServiceProducerHealthReconciler{Client: c, NodeName: producerHealthNode, Prober: restarted})
+	reconcile(&ServiceProducerHealthReconciler{
+		InterfaceIndex: presentInterface, Client: c, NodeName: producerHealthNode, Prober: restarted})
 	if seed := restarted.seeds[secondOwner]; seed == nil || seed.State != healthprobe.StateUnhealthy {
 		t.Errorf("seed for resolver-b = %+v, want its published Unhealthy decision", seed)
 	}
@@ -305,6 +310,103 @@ func TestServiceProducerHealthReconcilerPublishesThisNodesProducers(t *testing.T
 	}
 }
 
+// presentInterface reports every host interface present, with index 7.
+func presentInterface(string) (int, error) { return 7, nil }
+
+// A producer whose host interface is recreated, as when its pod is replaced
+// under the same attachment, is probed afresh: its predecessor's decision is
+// neither kept nor seeded, and it is Unknown while the interface is missing.
+func TestServiceProducerHealthReconcilerProbesAReplacementAfresh(t *testing.T) {
+	c := startProducerHealthAPI(t)
+	ctx := context.Background()
+	endpoint := &networkv1alpha1.ServiceEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: producerHealthEndpoint, Namespace: producerHealthNamespace},
+		Spec: networkv1alpha1.ServiceEndpointSpec{
+			ServiceClass: producerHealthClass, Address: producerHealthAddress, Port: 53,
+			Protocol:     networkv1alpha1.NetworkServiceProtocolUDP,
+			DeliveryMode: networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal,
+			AttachmentSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{producerHealthLabel: producerHealthEndpoint},
+			},
+			Distribution: networkv1alpha1.ServiceEndpointDistributionSpread,
+			HealthCheck:  &networkv1alpha1.ServiceEndpointHealthCheck{Port: 8053},
+		},
+	}
+	if err := c.Create(ctx, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	producer := createProducer(t, c, "resolver-a", producerHealthNode, "fd00:1::a/64")
+	key := client.ObjectKeyFromObject(endpoint)
+	owner := producerProbeOwner(key, client.ObjectKeyFromObject(producer))
+
+	index, indexErr := 7, error(nil)
+	prober := newOwnerProber()
+	prober.decisions[owner] = healthprobe.Decision{State: healthprobe.StateHealthy,
+		Reason: healthprobe.ReasonProbeSucceeded, Since: time.Unix(1_700_000_100, 0)}
+	r := &ServiceProducerHealthReconciler{Client: c, NodeName: producerHealthNode, Prober: prober,
+		InterfaceIndex: func(string) (int, error) { return index, indexErr }}
+	reconcile := func() {
+		t.Helper()
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reconcile()
+	firstID := prober.owners[owner]
+	if got := producerEntries(t, c)["resolver-a"]; got.State != networkv1alpha1.BackendHealthHealthy {
+		t.Fatalf("resolver-a = %+v, want Healthy", got)
+	}
+
+	// The pod is replaced: its interface comes back with a new index.
+	index = 9
+	reconcile()
+	if id := prober.owners[owner]; id == firstID {
+		t.Errorf("probe of a recreated interface kept its predecessor's target %q", id)
+	}
+	if seed := prober.seeds[owner]; seed != nil {
+		t.Errorf("probe of a recreated interface seeded from %+v, want no result", seed)
+	}
+
+	// While the interface is missing the producer is Unknown and unprobed,
+	// and what comes back is probed afresh.
+	index, indexErr = 0, errors.New("no such network interface")
+	reconcile()
+	if got := producerEntries(t, c)["resolver-a"]; got.State != networkv1alpha1.BackendHealthUnknown ||
+		got.Reason != healthprobe.ReasonProbeUnavailable {
+		t.Errorf("resolver-a with no interface = %+v, want Unknown", got)
+	}
+	if _, probed := prober.owners[owner]; probed {
+		t.Error("a producer with no interface is still probed")
+	}
+	prober.decisions[owner] = healthprobe.Decision{State: healthprobe.StateHealthy,
+		Reason: healthprobe.ReasonProbeSucceeded, Since: time.Unix(1_700_000_100, 0)}
+	index, indexErr = 11, nil
+	reconcile()
+	if seed := prober.seeds[owner]; seed != nil {
+		t.Errorf("probe of an interface back after a gap seeded from %+v, want no result", seed)
+	}
+
+	// The same interface keeps its probe.
+	id := prober.owners[owner]
+	reconcile()
+	if prober.owners[owner] != id {
+		t.Error("an unchanged interface was probed afresh")
+	}
+
+	// Interface changes reconcile the endpoints using that interface.
+	r.events = make(chan event.GenericEvent, 1)
+	r.InterfaceChanged("unrelated")
+	r.InterfaceChanged(producer.Status.HostInterface)
+	select {
+	case e := <-r.events:
+		if e.Object.GetName() != producerHealthEndpoint {
+			t.Errorf("interface change enqueued %s", e.Object.GetName())
+		}
+	default:
+		t.Error("a producer interface change enqueued nothing")
+	}
+}
+
 func TestServiceProducerHealthReconcilerRenewsReports(t *testing.T) {
 	c := startProducerHealthAPI(t)
 	ctx := context.Background()
@@ -326,7 +428,8 @@ func TestServiceProducerHealthReconcilerRenewsReports(t *testing.T) {
 	}
 	createProducer(t, c, "resolver-a", producerHealthNode, "fd00:1::a/64")
 	key := client.ObjectKeyFromObject(endpoint)
-	r := &ServiceProducerHealthReconciler{Client: c, NodeName: producerHealthNode, Prober: newOwnerProber()}
+	r := &ServiceProducerHealthReconciler{
+		InterfaceIndex: presentInterface, Client: c, NodeName: producerHealthNode, Prober: newOwnerProber()}
 	interval := networkv1alpha1.ServiceEndpointProducerReportRenewInterval
 
 	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
@@ -425,7 +528,8 @@ func TestServiceProducerHealthReconcilerSweepsReports(t *testing.T) {
 	// node-a's report from an earlier endpoint of the same name.
 	earlier := report(producerHealthNode, "uid-earlier", 0)
 
-	r := &ServiceProducerHealthReconciler{Client: c, NodeName: producerHealthNode, Prober: newOwnerProber()}
+	r := &ServiceProducerHealthReconciler{
+		InterfaceIndex: presentInterface, Client: c, NodeName: producerHealthNode, Prober: newOwnerProber()}
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(endpoint)}); err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +605,8 @@ func TestServiceProducerHealthReconcilerMovesStatusEntriesToReport(t *testing.T)
 	applyStatusEntries(t, c, producerHealthOtherNode, other)
 
 	prober := newOwnerProber()
-	r := &ServiceProducerHealthReconciler{Client: c, NodeName: producerHealthNode, Prober: prober}
+	r := &ServiceProducerHealthReconciler{
+		InterfaceIndex: presentInterface, Client: c, NodeName: producerHealthNode, Prober: prober}
 	key := client.ObjectKeyFromObject(endpoint)
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)

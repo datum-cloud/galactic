@@ -151,12 +151,26 @@ type EBPFRouteProgrammer struct {
 	// Only a finalizing router opens the gate, so an open gate on a map set
 	// this process has not finalized is always inherited.
 	inheritedGate bool
+	// producerIncarnations holds, by producer interface name, the identity
+	// token producerSet last saw and when it first saw it replace another.
+	producerIncarnations map[string]producerIncarnation
 
 	// These hooks keep map replacement and interface recreation tests
 	// deterministic without requiring a privileged kernel eBPF setup.
 	openMapSetFn  func(string) (*serviceroutemap.Tables, []*ebpf.Map, mapSetIDs, error)
 	readMapIDsFn  func(string) (mapSetIDs, error)
 	targetIndexFn func(string) (uint32, error)
+	nowFn         func() time.Time
+}
+
+// producerIncarnation is one producer interface's current identity token,
+// when producerSet last saw it, and when producerSet last saw the token it
+// replaced. predecessorSeen is zero for a token seen first, as after a router
+// restart.
+type producerIncarnation struct {
+	token           uint64
+	lastSeen        time.Time
+	predecessorSeen time.Time
 }
 
 // Initialize opens the pinned maps without deleting state left by the running
@@ -628,6 +642,7 @@ func (p *EBPFRouteProgrammer) rebuildDesired() error {
 }
 
 func (p *EBPFRouteProgrammer) repairDesired() error {
+	p.pruneProducerIncarnations()
 	expired := p.expiredDesiredKeys(time.Now())
 	needsRepair := p.generationIncomplete || len(expired) != 0
 	changed := make(map[string][][]appliedEntry)
@@ -953,6 +968,10 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 // the lookup error.
 // When the producers left are all draining, they all take new flows, because
 // draining only prefers the producers that are gone.
+//
+// A producer whose interface was recreated after its node's health decision
+// takes no new flow while another member does, until a decision made since
+// arrives: the one it has is about the interface's predecessor.
 func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []appliedEntry, error) {
 	if !p.tables.ProducerSetsAvailable() {
 		return nil, nil, ErrProducerSetsUnavailable
@@ -966,6 +985,7 @@ func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []applie
 	entries := make([]appliedEntry, 0, 2*len(intent.Producers))
 	var missingErr error
 	eligible := false
+	var held [serviceroutemap.MaxProducers]bool
 	for _, producer := range intent.Producers {
 		ifindex, err := p.target(producer.Device)
 		var missing netlink.LinkNotFoundError
@@ -991,6 +1011,7 @@ func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []applie
 		set.members[set.count] = serviceroutemap.ProducerMember{
 			Ifindex: ifindex, Token: token, Eligible: !producer.Draining,
 		}
+		held[set.count] = !producer.Draining && p.awaitingHealth(producer, token)
 		set.count++
 		eligible = eligible || !producer.Draining
 		entries = append(entries,
@@ -1012,7 +1033,68 @@ func (p *EBPFRouteProgrammer) producerSet(intent RouteIntent) (*setRef, []applie
 			set.members[i].Eligible = true
 		}
 	}
+	// Holding every member would drop every new flow; hold none then.
+	anyServing := false
+	for i := range set.count {
+		anyServing = anyServing || (set.members[i].Eligible && !held[i])
+	}
+	if anyServing {
+		for i := range set.count {
+			set.members[i].Eligible = set.members[i].Eligible && !held[i]
+		}
+	}
 	return set, entries, nil
+}
+
+// awaitingHealth records token as producer's interface identity and reports
+// whether producer's health decision was made while the interface's
+// predecessor was still live. A producer with no decision is never held, nor
+// one whose interface producerSet has seen with no other token.
+func (p *EBPFRouteProgrammer) awaitingHealth(producer ProducerTarget, token uint64) bool {
+	if p.producerIncarnations == nil {
+		p.producerIncarnations = make(map[string]producerIncarnation)
+	}
+	now := p.now()
+	current, seen := p.producerIncarnations[producer.Device]
+	if seen && current.token != token {
+		current.predecessorSeen = current.lastSeen
+	}
+	current.token, current.lastSeen = token, now
+	p.producerIncarnations[producer.Device] = current
+	// The predecessor was still live when last seen, so a decision made
+	// before then is about it. Every decision about this interface is made
+	// after the predecessor went away, so the hold always lifts with the
+	// first one. Decisions are published to the second.
+	return !current.predecessorSeen.IsZero() && !producer.HealthSince.IsZero() &&
+		producer.HealthSince.Before(current.predecessorSeen.Truncate(time.Second))
+}
+
+// pruneProducerIncarnations forgets the interfaces no desired intent names as
+// a producer.
+func (p *EBPFRouteProgrammer) pruneProducerIncarnations() {
+	if len(p.producerIncarnations) == 0 {
+		return
+	}
+	wanted := make(map[string]bool, len(p.producerIncarnations))
+	for _, intents := range p.desiredIntents {
+		for _, intent := range intents {
+			for _, producer := range intent.Producers {
+				wanted[producer.Device] = true
+			}
+		}
+	}
+	for device := range p.producerIncarnations {
+		if !wanted[device] {
+			delete(p.producerIncarnations, device)
+		}
+	}
+}
+
+func (p *EBPFRouteProgrammer) now() time.Time {
+	if p.nowFn != nil {
+		return p.nowFn()
+	}
+	return time.Now()
 }
 
 func ipv6Bytes(ip net.IP) ([16]byte, error) {
@@ -1364,8 +1446,9 @@ func intentKey(intent RouteIntent) string {
 		fmt.Fprintf(&builder, "|%s:%d", port.Protocol, port.Port)
 	}
 	for _, producer := range intent.Producers {
-		fmt.Fprintf(&builder, "|producer:%s,%s,%s,%t",
-			producer.Attachment, producer.Device, producer.NextHop, producer.Draining)
+		fmt.Fprintf(&builder, "|producer:%s,%s,%s,%t,%d",
+			producer.Attachment, producer.Device, producer.NextHop, producer.Draining,
+			producer.HealthSince.UnixNano())
 	}
 	return builder.String()
 }

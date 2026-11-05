@@ -102,6 +102,37 @@ func TestCompileSpreadAcceptsEveryLocalProducer(t *testing.T) {
 	}
 }
 
+// Each producer of a LocalSet intent carries when its node made its current
+// decision, so the datapath can tell a decision about a replaced interface's
+// predecessor; a producer with no current report carries none.
+func TestCompileSpreadCarriesHealthDecisionTime(t *testing.T) {
+	policy, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal)
+	consumer := spreadConsumer()
+	first := readyAttachment(spreadProducerNamespace, "a-producer", "first-uid", testNodeName, "producer-a",
+		testLabels(testProducerLabel, "yes"))
+	last := readyAttachment(spreadProducerNamespace, "z-producer", "last-uid", testNodeName, "producer-z",
+		testLabels(testProducerLabel, "yes"))
+	reportHealth(endpoint, first, networkv1alpha1.BackendHealthHealthy)
+	decided := endpoint.Status.Producers[0].LastTransitionTime.Time
+	reportHealth(endpoint, last, networkv1alpha1.BackendHealthHealthy)
+	expireReport(endpoint)
+
+	got, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{consumer, first, last}, testNodeName, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(got) != 1 || len(got[0].Producers) != 2 {
+		t.Fatalf("intents = %+v, want one LocalSet intent with two producers", got)
+	}
+	since := map[string]time.Time{}
+	for _, p := range got[0].Producers {
+		since[p.Device] = p.HealthSince
+	}
+	if !since["producer-a"].Equal(decided) || !since["producer-z"].IsZero() {
+		t.Fatalf("health decision times = %v, want producer-a's and none for the expired producer-z", since)
+	}
+}
+
 func TestCompileSpreadDrainsUnhealthyProducers(t *testing.T) {
 	policy, endpoint := spreadEndpoint(networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal)
 	consumer := spreadConsumer()
