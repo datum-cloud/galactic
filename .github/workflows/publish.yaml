@@ -207,9 +207,56 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
-  publish-kustomize-bundles:
+  # The staging labs follow the bundle's moving v0.0.0-main tag, and every
+  # push to main pushes it. Commits merged close together publish at the same
+  # time and finish in any order, so an older commit could move the tag back
+  # behind a newer one. A main commit that is no longer the branch head when
+  # its images are ready leaves the bundle to the newer commit's run.
+  bundle-is-current:
     needs:
       [
+        publish-galactic-cni-image,
+        publish-galactic-router-image,
+        publish-galactic-gateway-image,
+        publish-fabric-router-image,
+        publish-fabric-api-image,
+        publish-galactic-nat-image,
+        publish-galactic-edge-image,
+        publish-galactic-controller-image,
+        publish-fabric-router-controller-image,
+        publish-masque-provider-image,
+        publish-masque-authority-image,
+      ]
+    runs-on: ubuntu-latest
+    outputs:
+      current: ${{ steps.check.outputs.current }}
+    steps:
+      - id: check
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          current=true
+          if [ "$REF" = refs/heads/main ]; then
+            head="$(git ls-remote "https://github.com/${REPOSITORY}" refs/heads/main | cut -f1)"
+            if [ -n "$head" ] && [ "$head" != "$SHA" ]; then
+              echo "main is now at ${head}; its run publishes the bundle instead of ${SHA}."
+              current=false
+            fi
+          fi
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+
+  publish-kustomize-bundles:
+    if: needs.bundle-is-current.outputs.current == 'true'
+    # One bundle publish per ref at a time, so a check above cannot be
+    # overtaken by an older commit's push already in flight.
+    concurrency:
+      group: publish-kustomize-bundle-${{ github.ref }}
+      cancel-in-progress: false
+    needs:
+      [
+        bundle-is-current,
         publish-galactic-cni-image,
         publish-galactic-router-image,
         publish-galactic-gateway-image,
