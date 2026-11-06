@@ -53,6 +53,8 @@ const (
 	shardFlagAlive    uint32 = 1 << 0
 	shardFlagDraining uint32 = 1 << 1
 	shardFlagLocal    uint32 = 1 << 2
+	shardFlagStandby  uint32 = 1 << 3
+	shardFlagHeld     uint32 = 1 << 4
 
 	classKindNAT66 uint8 = 1
 	classKindNAT64 uint8 = 2
@@ -181,6 +183,12 @@ type ShardCandidate struct {
 	// takes no tenant from this node, the same as in ordered mode, but it is
 	// reported as local rather than unreachable, since nothing is wrong.
 	Local bool
+	// Standby marks a NAT64 standby shard: its IPv4 address is attracted to
+	// a sibling shard's node while that sibling is up, so replies to it never
+	// reach it. In a NAT64 group, Apply holds a standby out of the class while
+	// any shard without the flag is alive, and lets it serve only when none
+	// is. A NAT66 group ignores it.
+	Standby bool
 }
 
 // ShardState reports one group member.
@@ -197,6 +205,12 @@ type ShardState struct {
 	Draining bool
 	// Local echoes the candidate's Local.
 	Local bool
+	// Standby echoes the candidate's Standby.
+	Standby bool
+	// Held reports that a standby shard is held out of the class because a
+	// shard without Standby is alive to serve it. A held shard resolves but
+	// is not alive: it takes no new tenant and no pin to it is honoured.
+	Held bool
 	// Err is why the SID did not resolve, when it did not.
 	Err error
 	// Assigned reports that this Apply gave the shard its slot, so nothing
@@ -204,7 +218,8 @@ type ShardState struct {
 	Assigned bool
 }
 
-// Active reports whether the shard takes new tenant addresses.
+// Active reports whether the shard takes new tenant addresses. A held shard
+// is never alive, so it is never active.
 func (s ShardState) Active() bool { return s.Alive && !s.Draining }
 
 // GroupResult reports what Apply found and published.
@@ -405,6 +420,8 @@ func (g *ShardGroupTable) Members(groupID uint32) ([]ShardState, error) {
 			Alive:      s.Flags&shardFlagAlive != 0,
 			Draining:   s.Flags&shardFlagDraining != 0,
 			Local:      s.Flags&shardFlagLocal != 0,
+			Standby:    s.Flags&shardFlagStandby != 0,
+			Held:       s.Flags&shardFlagHeld != 0,
 		})
 	}
 	return members, nil
@@ -445,6 +462,14 @@ func (a *allocator) take() uint32 {
 // Every node computes the same table from the same set, whatever slots the
 // shards occupy locally.
 //
+// In a NAT64 group, a standby candidate that resolves is held rather than
+// alive while any candidate without Standby is alive, draining or not: a
+// draining sibling still attracts the standby's replies. A held shard keeps
+// its slot and generation but is not alive, so it gets no share of the Maglev
+// table and the datapath stops honouring every pin to it. Each Apply decides
+// afresh, so a standby takes tenants as soon as its last alive sibling stops
+// resolving and is held again once one resolves.
+//
 // A shard keeps its slot, and the slot keeps its generation, for as long as
 // the shard stays a candidate of the same class, so a rebuild leaves its pins
 // intact. A new shard takes the lowest free slot under a fresh generation.
@@ -476,6 +501,7 @@ func (g *ShardGroupTable) Apply(groupID uint32, policy GroupPolicy, candidates [
 
 	assignment := assignSlots(previous, wanted)
 	resolved := resolveShards(wanted)
+	hold := policy.Class.NAT64 && anyPrimaryAlive(wanted, resolved)
 
 	var (
 		value    prog.UsidEgressShardGroupValue
@@ -491,7 +517,9 @@ func (g *ShardGroupTable) Apply(groupID uint32, policy GroupPolicy, candidates [
 		if assigned {
 			member.Generation = alloc.take()
 		}
-		if !c.local && hop.err == nil {
+		held := hold && c.standby && !c.local && hop.err == nil
+		alive := !c.local && hop.err == nil && !held
+		if alive {
 			member.Flags |= shardFlagAlive
 			member.LinkIfindex = uint32(hop.hop.link) //nolint:gosec // a kernel ifindex
 			copy(member.Dmac[:], hop.hop.dmac)
@@ -503,11 +531,18 @@ func (g *ShardGroupTable) Apply(groupID uint32, policy GroupPolicy, candidates [
 		if c.local {
 			member.Flags |= shardFlagLocal
 		}
+		if c.standby && policy.Class.NAT64 {
+			member.Flags |= shardFlagStandby
+		}
+		if held {
+			member.Flags |= shardFlagHeld
+		}
 		value.Shards[slot] = member
 
 		state := ShardState{
-			SID: c.sid, Slot: slot, Generation: member.Generation, Alive: !c.local && hop.err == nil,
-			Draining: c.draining, Local: c.local, Err: hop.err, Assigned: assigned,
+			SID: c.sid, Slot: slot, Generation: member.Generation, Alive: alive,
+			Draining: c.draining, Local: c.local, Standby: member.Flags&shardFlagStandby != 0, Held: held,
+			Err: hop.err, Assigned: assigned,
 		}
 		result.Shards = append(result.Shards, state)
 		if state.Active() {
@@ -562,6 +597,7 @@ func (g *ShardGroupTable) Close(groupID uint32) (bool, error) {
 				SID:      net.IP(netip.AddrFrom16(s.Sid).AsSlice()),
 				Draining: s.Flags&shardFlagDraining != 0,
 				Local:    s.Flags&shardFlagLocal != 0,
+				Standby:  s.Flags&shardFlagStandby != 0,
 			})
 		}
 	}
@@ -608,10 +644,12 @@ type candidate struct {
 	sid      netip.Addr
 	draining bool
 	local    bool
+	standby  bool
 }
 
 // canonicalCandidates reduces candidates to base SIDs, ordered by SID. A
-// shard listed twice is draining, or local, if either listing says so.
+// shard listed twice is draining, local, or a standby, if either listing says
+// so.
 func canonicalCandidates(candidates []ShardCandidate) ([]candidate, error) {
 	bySID := map[netip.Addr]candidate{}
 	for _, c := range candidates {
@@ -620,7 +658,10 @@ func canonicalCandidates(candidates []ShardCandidate) ([]candidate, error) {
 			return nil, fmt.Errorf("egressroutemap: %w", err)
 		}
 		prev := bySID[base]
-		bySID[base] = candidate{sid: base, draining: prev.draining || c.Draining, local: prev.local || c.Local}
+		bySID[base] = candidate{
+			sid: base, draining: prev.draining || c.Draining, local: prev.local || c.Local,
+			standby: prev.standby || c.Standby,
+		}
 	}
 	out := make([]candidate, 0, len(bySID))
 	for _, c := range bySID {
@@ -660,6 +701,18 @@ func assignSlots(slots [MaxShardsPerGroup]prog.UsidEgressShardMember, wanted []c
 		taken[next] = true
 	}
 	return assignment
+}
+
+// anyPrimaryAlive reports whether a wanted shard without Standby resolved, so
+// it can serve the class and the standbys are held. A local shard does not
+// count: this node cannot send it tenants.
+func anyPrimaryAlive(wanted []candidate, resolved map[netip.Addr]resolution) bool {
+	for _, c := range wanted {
+		if !c.standby && !c.local && resolved[c.sid].err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveShards resolves every wanted shard's next hop, except a local one's.
