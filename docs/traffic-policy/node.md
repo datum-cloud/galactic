@@ -51,7 +51,12 @@ within one policy and one interface lifetime, so editing a match does not
 reset its counts. Renaming a rule, flipping its action, binding a different
 policy or recreating the interface starts a new series.
 
-galactic-router reconciles on every change and every five minutes. When it
+galactic-router reconciles on every change and every five minutes. A new
+interface denies everything until its policy is published. galactic-router
+watches the node's interfaces, so it publishes as soon as the interface comes
+up, even when the attachment's status landed before the interface existed;
+an interface still waiting for its datapath row is retried every five
+seconds as a fallback. When it
 restarts, it adopts each snapshot still bound in the datapath that holds
 exactly what the current policy compiles to, for the same token, policy UID
 and generation, so counts continue; a snapshot an older galactic-router

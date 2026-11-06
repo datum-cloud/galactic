@@ -463,6 +463,9 @@ func setupTrafficPolicyController(mgr ctrl.Manager, nodeName string) error {
 	if err := rec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup traffic policy controller: %w", err)
 	}
+	if err := mgr.Add(linkWatch("traffic-policy-links", rec.InterfaceChanged)); err != nil {
+		return fmt.Errorf("setup traffic policy interface watch: %w", err)
+	}
 	metrics.MustRegister(rec)
 	return nil
 }
@@ -509,7 +512,7 @@ func setupServiceRouteController(
 	if err := producerHealth.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup service producer health controller: %w", err)
 	}
-	if err := mgr.Add(producerLinkWatch(producerHealth.InterfaceChanged)); err != nil {
+	if err := mgr.Add(linkWatch("service-producer-links", producerHealth.InterfaceChanged)); err != nil {
 		return fmt.Errorf("setup service producer interface watch: %w", err)
 	}
 	return nil

@@ -29,8 +29,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
@@ -44,8 +46,14 @@ import (
 const resync = 5 * time.Minute
 
 // pendingRetry is how soon an interface whose datapath state is not ready
-// yet is looked at again.
+// yet is looked at again if no interface event arrives first. CNI ADD brings
+// the host interface up only after writing its policy row, so the link-up
+// event reported through InterfaceChanged normally ends the wait at once.
 const pendingRetry = 5 * time.Second
+
+// hostInterfaceIndex indexes VPCAttachments by their status.hostInterface, so
+// an interface event finds the attachment it belongs to.
+const hostInterfaceIndex = "galactic.datumapis.com/node-attachment-host-interface"
 
 // policyRefIndex indexes bindings by every policy name they reference.
 const policyRefIndex = "galactic.datumapis.com/node-policy-refs"
@@ -124,6 +132,10 @@ type Reconciler struct {
 	openedAt time.Time
 	sweptAt  time.Time // the last snapshot pin sweep
 
+	// events carries InterfaceChanged requests into the VPCAttachment
+	// controller.
+	events chan event.GenericEvent
+
 	// openMaps opens the datapath's maps, and counterRows sizes the row
 	// allocator, zero meaning the whole of tp_rule_counters; tests set both.
 	openMaps    func(pinDir string) (*tpmap.Maps, error)
@@ -146,6 +158,11 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}); err != nil {
 		return fmt.Errorf("index bindings by policy: %w", err)
 	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &cloudv1alpha1.VPCAttachment{},
+		hostInterfaceIndex, attachmentHostInterface); err != nil {
+		return fmt.Errorf("index attachments by host interface: %w", err)
+	}
+	r.events = make(chan event.GenericEvent, 1024)
 	sameName := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
 		return []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(o)}}
 	})
@@ -167,10 +184,50 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&cloudv1alpha1.VPCAttachment{}).
 		Watches(&galacticv1alpha1.TrafficPolicyBinding{}, sameName).
 		Watches(&galacticv1alpha1.TrafficPolicy{}, byPolicy).
+		// An attachment's host interface appeared, came up or changed.
+		WatchesRawSource(source.Channel(r.events, &handler.EnqueueRequestForObject{})).
 		Complete(r); err != nil {
 		return err
 	}
 	return r.setupEdge(mgr)
+}
+
+// attachmentHostInterface is the hostInterfaceIndex key of a VPCAttachment.
+func attachmentHostInterface(o client.Object) []string {
+	a, ok := o.(*cloudv1alpha1.VPCAttachment)
+	if !ok || a.Status.HostInterface == "" {
+		return nil
+	}
+	return []string{a.Status.HostInterface}
+}
+
+// InterfaceChanged asks for a reconcile of every attachment on this node whose
+// host interface is name. A new interface denies everything until its policy
+// is published, and its attachment's status may have landed before the
+// interface existed, so without this the wait lasts until pendingRetry.
+func (r *Reconciler) InterfaceChanged(name string) {
+	if r.events == nil || name == "" {
+		return
+	}
+	var attachments cloudv1alpha1.VPCAttachmentList
+	if err := r.Client.List(context.Background(), &attachments,
+		client.MatchingFields{hostInterfaceIndex: name}); err != nil {
+		ctrl.Log.WithName("traffic-policy-node").Error(err, "list attachments for interface", "interface", name)
+		return
+	}
+	for i := range attachments.Items {
+		a := &attachments.Items[i]
+		if a.Status.Node != r.NodeName {
+			continue
+		}
+		select {
+		case r.events <- event.GenericEvent{Object: &cloudv1alpha1.VPCAttachment{
+			ObjectMeta: metav1.ObjectMeta{Namespace: a.Namespace, Name: a.Name},
+		}}:
+		default:
+			// The queue is full; this attachment falls back to pendingRetry.
+		}
+	}
 }
 
 // Reconcile implements reconcile.Reconciler. It changes the datapath under
