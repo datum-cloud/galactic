@@ -43,9 +43,12 @@ const (
 // picking its own address, so no entry was ever installed and every packet
 // dropped.
 //
-// So resolve it the only way available, by asking the guest. This deliberately
-// does not install a permanent entry the way the veth path does: the host never
-// learns a tap guest's MAC authoritatively, and a permanent entry holding a
+// A tap handed to its guest by a DAN file is the exception: the file sets the
+// guest's MAC, so galactic-bgp primes a permanent entry at ADD as for a veth,
+// and this sweep finds it already resolved. For any other tap, resolve it the
+// only way available, by asking the guest. This deliberately does not install
+// a permanent entry for those: the host never learns such a guest's MAC
+// authoritatively, and a permanent entry holding a
 // stale one after a guest reboots is worse than none, since nothing would
 // correct it. A dynamically resolved entry is what the lookup needs, any valid
 // state satisfying it, the kernel refreshes it from the guest's own

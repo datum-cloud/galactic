@@ -31,7 +31,7 @@ func ipv6Result() *cniipam.IPAMResult {
 // values the plugin already holds, including the guest address and default
 // route the guest is told to configure.
 func TestBuildDANDocumentDescribesTheAttachment(t *testing.T) {
-	document, err := buildDANDocument("G00000000bayhH", ipv6Result(), 1460)
+	document, err := buildDANDocument("G00000000bayhH", nil, ipv6Result(), 1460)
 	if err != nil {
 		t.Fatalf("buildDANDocument: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestBuildDANDocumentOrdersDualStackAddresses(t *testing.T) {
 	res.IPv4Address = net.ParseIP("10.244.1.5")
 	res.IPv4Gateway = net.ParseIP("10.244.1.1")
 
-	document, err := buildDANDocument("G00000000bayhH", res, 1460)
+	document, err := buildDANDocument("G00000000bayhH", nil, res, 1460)
 	if err != nil {
 		t.Fatalf("buildDANDocument: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestBuildDANDocumentMarksTheDefaultRouteOnLink(t *testing.T) {
 	res.IPv4Address = net.ParseIP("10.244.1.5")
 	res.IPv4Gateway = net.ParseIP("10.244.1.1")
 
-	document, err := buildDANDocument("G00000000bayhH", res, 1460)
+	document, err := buildDANDocument("G00000000bayhH", nil, res, 1460)
 	if err != nil {
 		t.Fatalf("buildDANDocument: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestBuildDANDocumentRequiresAddresses(t *testing.T) {
 		"empty result":   {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := buildDANDocument("G00000000bayhH", res, 1460); err == nil {
+			if _, err := buildDANDocument("G00000000bayhH", nil, res, 1460); err == nil {
 				t.Error("buildDANDocument succeeded, want an error")
 			}
 		})
@@ -155,7 +155,7 @@ func TestBuildDANDocumentRequiresAddresses(t *testing.T) {
 // to bytes on disk against the document observed to work on a real node.
 func TestWriteDANFileProducesTheProvenShape(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeDANFile(dir, "sandbox-1", "G00000000bayhH", ipv6Result(), 1460); err != nil {
+	if err := writeDANFile(dir, "sandbox-1", "G00000000bayhH", nil, ipv6Result(), 1460); err != nil {
 		t.Fatalf("writeDANFile: %v", err)
 	}
 
@@ -196,7 +196,7 @@ func TestWriteDANFileProducesTheProvenShape(t *testing.T) {
 // TestWriteDANFileFailsOnTheGoShimDirectory checks that ADD's write reaches the
 // guardrail rather than routing around it.
 func TestWriteDANFileFailsOnTheGoShimDirectory(t *testing.T) {
-	if err := writeDANFile(dan.GoShimDir, "sandbox-1", "G00000000bayhH", ipv6Result(), 1460); err == nil {
+	if err := writeDANFile(dan.GoShimDir, "sandbox-1", "G00000000bayhH", nil, ipv6Result(), 1460); err == nil {
 		t.Error("writeDANFile succeeded on the Go shim's directory, want refusal")
 	}
 }
@@ -209,7 +209,7 @@ func TestWriteDANFileReportsWriteFailures(t *testing.T) {
 	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("create blocking file: %v", err)
 	}
-	if err := writeDANFile(blocked, "sandbox-1", "G00000000bayhH", ipv6Result(), 1460); err == nil {
+	if err := writeDANFile(blocked, "sandbox-1", "G00000000bayhH", nil, ipv6Result(), 1460); err == nil {
 		t.Error("writeDANFile succeeded where the directory cannot exist, want an error")
 	}
 }
@@ -232,5 +232,27 @@ func TestDANRequestedIsOptIn(t *testing.T) {
 				t.Errorf("danRequested = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBuildDANDocumentPinsGatewayNeighbors checks that each gateway gets a
+// permanent neighbor entry for the tap's host MAC, so the guest's first packet
+// needs no Neighbor Solicitation or ARP request and is never held for one.
+func TestBuildDANDocumentPinsGatewayNeighbors(t *testing.T) {
+	res := ipv6Result()
+	res.IPv4Address = net.ParseIP("10.244.1.5")
+	res.IPv4Gateway = net.ParseIP("10.244.1.1")
+	hostMAC := net.HardwareAddr{0x42, 0x2e, 0x8a, 0xa2, 0x3c, 0x4d}
+
+	document, err := buildDANDocument("G00000000bayhH", hostMAC, res, 1460)
+	if err != nil {
+		t.Fatalf("buildDANDocument: %v", err)
+	}
+	want := []dan.Neighbor{
+		{IPAddress: "fd20:0:f::1/128", HardwareAddr: "42:2e:8a:a2:3c:4d", State: dan.NeighborStatePermanent},
+		{IPAddress: "10.244.1.1/32", HardwareAddr: "42:2e:8a:a2:3c:4d", State: dan.NeighborStatePermanent},
+	}
+	if got := document.Devices[0].NetworkInfo.Neighbors; !reflect.DeepEqual(got, want) {
+		t.Errorf("neighbors = %+v, want %+v", got, want)
 	}
 }

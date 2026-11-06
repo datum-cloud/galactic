@@ -22,8 +22,8 @@ const ipv4TapMask = 25
 // it in the sandbox's DAN file.
 //
 // Callers must treat an error as fatal to CNI ADD. See dan.Write.
-func writeDANFile(dir, sandboxID, tapName string, res *cniipam.IPAMResult, mtu int) error {
-	document, err := buildDANDocument(tapName, res, mtu)
+func writeDANFile(dir, sandboxID, tapName string, hostMAC net.HardwareAddr, res *cniipam.IPAMResult, mtu int) error {
+	document, err := buildDANDocument(tapName, hostMAC, res, mtu)
 	if err != nil {
 		return fmt.Errorf("build DAN document: %w", err)
 	}
@@ -33,22 +33,40 @@ func writeDANFile(dir, sandboxID, tapName string, res *cniipam.IPAMResult, mtu i
 // buildDANDocument describes this attachment to a Kata runtime-rs shim. It
 // names the tap to adopt and what the guest should configure on it.
 //
+// Each gateway gets a permanent neighbor entry for hostMAC, the tap's host
+// side, so the guest's first packet goes out without a Neighbor Solicitation
+// or ARP request and the entry is never reconfirmed.
+//
 // Every value comes from state this plugin already owns, so the shim discovers
 // nothing. The document carries exactly one device, because an attachment is
 // one interface.
-func buildDANDocument(tapName string, res *cniipam.IPAMResult, mtu int) (*dan.Document, error) {
+func buildDANDocument(
+	tapName string, hostMAC net.HardwareAddr, res *cniipam.IPAMResult, mtu int,
+) (*dan.Document, error) {
 	if res == nil {
 		return nil, fmt.Errorf("no addresses were allocated for tap %q", tapName)
 	}
 
 	var addresses []string
 	routes := []dan.Route{}
+	neighbors := []dan.Neighbor{}
+	gatewayNeighbor := func(gateway net.IP, bits int) {
+		if len(hostMAC) == 0 {
+			return
+		}
+		neighbors = append(neighbors, dan.Neighbor{
+			IPAddress:    (&net.IPNet{IP: gateway, Mask: net.CIDRMask(bits, bits)}).String(),
+			HardwareAddr: hostMAC.String(),
+			State:        dan.NeighborStatePermanent,
+		})
+	}
 
 	if res.IPv6Subnet != nil {
 		addresses = append(addresses, res.IPv6Subnet.String())
 	}
 	if res.IPv6Gateway != nil {
 		routes = append(routes, defaultRoute(res.IPv6Gateway))
+		gatewayNeighbor(res.IPv6Gateway, 128)
 	}
 	if res.IPv4Address != nil {
 		ipv4 := net.IPNet{IP: res.IPv4Address, Mask: net.CIDRMask(ipv4TapMask, 32)}
@@ -56,6 +74,7 @@ func buildDANDocument(tapName string, res *cniipam.IPAMResult, mtu int) (*dan.Do
 	}
 	if res.IPv4Gateway != nil {
 		routes = append(routes, defaultRoute(res.IPv4Gateway))
+		gatewayNeighbor(res.IPv4Gateway.To4(), 32)
 	}
 
 	if len(addresses) == 0 {
@@ -77,7 +96,7 @@ func buildDANDocument(tapName string, res *cniipam.IPAMResult, mtu int) (*dan.Do
 					Ntype:       dan.InterfaceTypeTap,
 				},
 				Routes:    routes,
-				Neighbors: []any{},
+				Neighbors: neighbors,
 			},
 		}},
 	}, nil

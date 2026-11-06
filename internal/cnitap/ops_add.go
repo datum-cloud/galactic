@@ -208,7 +208,8 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	// best-effort. See dan.Write.
 	if danRequested(args.StdinData) {
 		tracker.danDir, tracker.danSandboxID = cniConfig.DANDir, args.ContainerID
-		if err := writeDANFile(cniConfig.DANDir, args.ContainerID, hostName, ipamResult, hostMTU); err != nil {
+		if err := writeDANFile(cniConfig.DANDir, args.ContainerID, hostName, hostLink.Attrs().HardwareAddr,
+			ipamResult, hostMTU); err != nil {
 			return fmt.Errorf("emit DAN file: %w", err)
 		}
 		slog.Debug("ADD: DAN file written", "containerID", args.ContainerID,

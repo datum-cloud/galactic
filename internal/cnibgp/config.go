@@ -185,6 +185,7 @@ func parseConf(data []byte) (*PluginConf, error) {
 		EgressShardSIDs: hostConf.EgressShardSIDs,
 		NAT64Prefix:     hostConf.NAT64Prefix,
 		EBPFInterfaces:  hostConf.EBPFInterfaces,
+		DANDir:          hostConf.DANDir,
 	})
 
 	if cniConfig.NodeName == "" {

@@ -31,7 +31,7 @@ func sampleDocument() *Document {
 					Ntype:       InterfaceTypeTap,
 				},
 				Routes:    []Route{{Gateway: "fd20:0:f::1", Flags: RouteFlagOnLink}},
-				Neighbors: []any{},
+				Neighbors: []Neighbor{},
 			},
 		}},
 	}
@@ -258,5 +258,31 @@ func TestWriteFailsWhenDirectoryCannotBeCreated(t *testing.T) {
 func TestDefaultDirIsNotTheGoShimDir(t *testing.T) {
 	if DefaultDir == GoShimDir {
 		t.Fatalf("DefaultDir is the Go shim's directory %q", GoShimDir)
+	}
+}
+
+// TestGuestMACReadsTheDeviceForTheTap checks that GuestMAC returns the MAC the
+// file gives the device adopting the tap, and reports a missing file or device
+// as not found rather than as an error.
+func TestGuestMACReadsTheDeviceForTheTap(t *testing.T) {
+	dir := t.TempDir()
+	doc := &Document{Devices: []Device{{
+		Name:     "guest0",
+		GuestMAC: "02:a7:de:f3:26:ef",
+		Device:   DeviceSpec{Type: DeviceTypeHostTap, TapName: "Gtap"},
+	}}}
+	if err := Write(dir, "sandbox-1", doc); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	mac, ok, err := GuestMAC(dir, "sandbox-1", "Gtap")
+	if err != nil || !ok || mac.String() != "02:a7:de:f3:26:ef" {
+		t.Fatalf("GuestMAC = %v, %v, %v; want 02:a7:de:f3:26:ef, true, nil", mac, ok, err)
+	}
+	if _, ok, err := GuestMAC(dir, "sandbox-1", "Gother"); ok || err != nil {
+		t.Errorf("another tap: ok=%v err=%v, want false, nil", ok, err)
+	}
+	if _, ok, err := GuestMAC(dir, "sandbox-2", "Gtap"); ok || err != nil {
+		t.Errorf("no file: ok=%v err=%v, want false, nil", ok, err)
 	}
 }
