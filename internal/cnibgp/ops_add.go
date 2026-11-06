@@ -81,6 +81,9 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		vpc: pluginConf.VPC, vpcAttachment: pluginConf.VPCAttachment, ifaceType: ifaceType,
 		guestHWAddr: guestHWAddrFrom(prevResult),
 	}
+	if cfg.guestHWAddr == nil && ifaceType == ifaceTypeTap {
+		cfg.guestHWAddr = tapGuestHWAddr(args.ContainerID, pluginConf.VPC, pluginConf.VPCAttachment)
+	}
 	result, err := publishBGPState(args, cfg, nodeName, namespace, ipamResult, vpcHex, k8sClient)
 	tracker.publishResult = result
 	if err != nil {

@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/plumbing/dan"
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 // inferFromPrevResult reconstructs the IPAM result and infers whether the
@@ -113,4 +116,27 @@ func guestHWAddrFrom(prevResult types.Result) net.HardwareAddr {
 		return mac
 	}
 	return nil
+}
+
+// tapGuestHWAddr returns the guest MAC a DAN file gives the tap of this
+// attachment, or nil when the tap was not handed to its guest by one. With it,
+// the host gateway primes a permanent neighbor entry for the guest, as for a
+// veth, so the first packet toward a new guest is delivered without waiting
+// for the guest to make itself known. Without a DAN file the guest picks its
+// own MAC, which the host cannot know, so nothing is primed.
+func tapGuestHWAddr(sandboxID, vpc, vpcAttachment string) net.HardwareAddr {
+	if cniConfig == nil || cniConfig.DANDir == "" {
+		return nil
+	}
+	tapName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	mac, ok, err := dan.GuestMAC(cniConfig.DANDir, sandboxID, tapName)
+	if err != nil {
+		slog.Warn("ADD: could not read the tap's guest MAC from its DAN file; not priming its neighbor entry",
+			"err", err, "tap", tapName)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	return mac
 }

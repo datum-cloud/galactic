@@ -106,6 +106,14 @@ prefix allocated to the attachment, so the guest kernel has nothing telling it
 the gateway is reachable and rejects the route as unreachable otherwise. The
 host side of the tap is given the same treatment.
 
+Neither side has to discover the other. The file gives the guest a permanent
+neighbor entry for each gateway, pointing at the tap's host MAC, and
+`galactic-bgp` reads the guest MAC back from the file and installs a permanent
+neighbor entry for the guest's addresses on the host side, as it does for a
+veth. Without them, a new guest's first packets wait for neighbor discovery to
+complete in both directions, which can hold its first DNS lookups for several
+seconds.
+
 A failed write fails ADD. Kata treats a missing file as "discover the network
 yourself", which produces a healthy-looking sandbox on the wrong network — a
 far worse outcome than an attachment that does not come up.

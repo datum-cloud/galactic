@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,9 +78,22 @@ type DeviceSpec struct {
 
 // NetworkInfo is what the guest is told to configure on the interface.
 type NetworkInfo struct {
-	Interface Interface `json:"interface"`
-	Routes    []Route   `json:"routes"`
-	Neighbors []any     `json:"neighbors"`
+	Interface Interface  `json:"interface"`
+	Routes    []Route    `json:"routes"`
+	Neighbors []Neighbor `json:"neighbors"`
+}
+
+// NeighborStatePermanent is the kernel's NUD_PERMANENT: the guest never
+// solicits or reconfirms the entry.
+const NeighborStatePermanent uint32 = 0x80
+
+// Neighbor is a neighbor entry the guest installs on the interface at boot.
+type Neighbor struct {
+	// IPAddress is the neighbor's address, as a CIDR with a full-length mask.
+	IPAddress    string `json:"ip_address"`
+	HardwareAddr string `json:"hardware_addr"`
+	State        uint32 `json:"state"`
+	Flags        uint32 `json:"flags"`
 }
 
 // Interface carries the guest-side addressing for one device.
@@ -195,4 +209,37 @@ func Remove(dir, sandboxID string) error {
 		return fmt.Errorf("remove DAN file %q: %w", path, err)
 	}
 	return nil
+}
+
+// GuestMAC returns the guest MAC that sandboxID's DAN file in dir gives the
+// device adopting tapName. ok is false, with a nil error, when there is no
+// such file or no such device: the tap is not handed to a guest by a DAN
+// file, so its guest picks its own MAC.
+func GuestMAC(dir, sandboxID, tapName string) (mac net.HardwareAddr, ok bool, err error) {
+	path, err := Path(dir, sandboxID)
+	if err != nil {
+		return nil, false, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("read DAN file %q: %w", path, err)
+	}
+	var doc Document
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, false, fmt.Errorf("parse DAN file %q: %w", path, err)
+	}
+	for _, device := range doc.Devices {
+		if device.Device.TapName != tapName {
+			continue
+		}
+		mac, err := net.ParseMAC(device.GuestMAC)
+		if err != nil {
+			return nil, false, fmt.Errorf("DAN file %q: guest MAC of %q: %w", path, tapName, err)
+		}
+		return mac, true, nil
+	}
+	return nil, false, nil
 }
