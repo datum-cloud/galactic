@@ -75,3 +75,16 @@ func TestDeletedInterfaceIsNotAnError(t *testing.T) {
 		f.iface.Name))
 	f.reconcile(t, f.tenantAdv)
 }
+
+// Any other failure still surfaces as an error.
+func TestOtherStatusWriteFailuresStillSurface(t *testing.T) {
+	f := newOwnershipFixture(t, false)
+	failInterfaceStatus(f, apierrors.NewForbidden(
+		schema.GroupResource{Group: networkingv1alpha.GroupVersion.Group, Resource: "networkinterfaces"},
+		f.iface.Name, nil))
+	if _, err := f.reconciler.Reconcile(context.Background(), ctrlreconcile.Request{
+		NamespacedName: types.NamespacedName{Namespace: f.tenantAdv.Namespace, Name: f.tenantAdv.Name},
+	}); err == nil {
+		t.Fatal("Reconcile error = nil, want the forbidden write to surface")
+	}
+}

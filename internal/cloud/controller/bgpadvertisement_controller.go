@@ -148,6 +148,10 @@ func (r *BGPAdvertisementReconciler) reconcile(ctx context.Context, req ctrl.Req
 		}
 		meta.SetStatusCondition(&attachment.Status.Conditions, programmed)
 		if err := r.Status().Update(ctx, attachment); err != nil {
+			// Collected with an interface deleted mid-pass.
+			if apierrors.IsNotFound(err) {
+				continue
+			}
 			return fmt.Errorf("update VPC attachment %s status: %w",
 				client.ObjectKeyFromObject(attachment), err)
 		}
@@ -204,7 +208,7 @@ func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Con
 		if err := r.projectOntoInterface(ctx, attachment, programmed); err != nil {
 			return err
 		}
-		if err := r.Status().Update(ctx, attachment); err != nil {
+		if err := r.Status().Update(ctx, attachment); client.IgnoreNotFound(err) != nil {
 			return fmt.Errorf("clear withdrawn attachment %s: %w", client.ObjectKeyFromObject(attachment), err)
 		}
 	}
