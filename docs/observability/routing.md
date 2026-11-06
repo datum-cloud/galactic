@@ -89,12 +89,21 @@ labels, so the series stay bounded.
 
 | Metric                                              | Type      | Labels                                                         | Meaning                                                   |
 | --------------------------------------------------- | --------- | -------------------------------------------------------------- | --------------------------------------------------------- |
-| `galactic_service_route_reconciliations_total`      | counter   | `result` (`success`, `error`)                                  | `ServiceRoutePolicy` reconciliations                      |
+| `galactic_service_route_reconciliations_total`      | counter   | `result` (`success`, `error`), `reason` (see below)            | `ServiceRoutePolicy` reconciliations                      |
 | `galactic_service_route_reconcile_duration_seconds` | histogram | none                                                           | Time per reconcile (default buckets)                      |
 | `galactic_service_route_route_operations_total`     | counter   | `operation` (`apply`, `remove`), `result` (`success`, `error`) | Datapath writes and removals                              |
 | `galactic_service_route_programmed_routes`          | gauge     | none                                                           | Attachment-scoped service paths the controller now tracks |
 | `galactic_service_route_unresolved_next_hops`       | gauge     | none                                                           | Tracked paths with no consumer next hop                   |
 | `galactic_service_route_producers`                  | gauge     | `state` (`Healthy`, `Unhealthy`, `Unknown`)                    | Producers of `Spread` endpoints this node probes          |
+
+A failed reconcile's `reason` names the step that failed: `get_policy`,
+`get_endpoint`, `producer_reports`, `list_attachments`,
+`dependency_not_ready` (a SID the path needs isn't resolved yet), `compile`,
+`refresh_maps`, `program`, `accept_status`, `remove_deleted` or
+`revoke_missing_endpoint`. A successful one has `reason="none"`. A failed
+reconcile also publishes this node's acknowledgment of a translated policy as
+not ready until a retry succeeds, so a burst here shows up as brief
+`NetworkPathNotReady` flips on the network contexts that own those policies.
 
 Datapath drops on these paths are the `service_route_*` reasons of
 `galactic_usid_drops_total`.

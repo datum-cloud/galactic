@@ -13,6 +13,13 @@ import (
 
 const metricsNamespace = "galactic_service_route"
 
+// Label values of the reconciliations metric.
+const (
+	ReconcileResultSuccess = "success"
+	ReconcileResultError   = "error"
+	ReconcileReasonNone    = "none"
+)
+
 // Metrics contains bounded-cardinality metrics for the node-local service
 // route controller. Resource names are deliberately kept in logs instead of
 // labels so a large tenant population does not create an unbounded registry.
@@ -38,8 +45,9 @@ func NewMetrics() *Metrics {
 		reconciliations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "reconciliations_total",
-			Help:      "ServiceRoutePolicy reconciliations by outcome.",
-		}, []string{"result"}),
+			Help: "ServiceRoutePolicy reconciliations by outcome. A failed reconcile " +
+				"carries the step that failed in reason; a successful one has reason none.",
+		}, []string{"result", "reason"}),
 		reconcileTime: reconcileTime,
 		operations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -66,11 +74,17 @@ func NewMetrics() *Metrics {
 	}
 }
 
-func (m *Metrics) ObserveReconcile(result string, duration time.Duration) {
+// ObserveReconcile records one reconcile. errorReason names the step that
+// failed, from a fixed set the controller uses, or is empty on success.
+func (m *Metrics) ObserveReconcile(errorReason string, duration time.Duration) {
 	if m == nil {
 		return
 	}
-	m.reconciliations.WithLabelValues(result).Inc()
+	result, reason := ReconcileResultSuccess, ReconcileReasonNone
+	if errorReason != "" {
+		result, reason = ReconcileResultError, errorReason
+	}
+	m.reconciliations.WithLabelValues(result, reason).Inc()
 	m.reconcileTime.Observe(duration.Seconds())
 }
 
