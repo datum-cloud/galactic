@@ -11,6 +11,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -198,5 +199,51 @@ func TestVPCEventRequeuesPoliciesThatReferenceIt(t *testing.T) {
 	got, want := requestNames(r.vpcPolicies(context.Background(), vpc)), []string{requeueDNSB}
 	if !slices.Equal(got, want) {
 		t.Fatalf("requeued %v, want %v", got, want)
+	}
+}
+
+// A reconcile that sees another policy enter or leave the conflict set
+// requeues it, since that policy's own inputs may not have changed.
+func TestNoteConflictsRequeuesPoliciesThatEnteredOrLeft(t *testing.T) {
+	key := func(name string) types.NamespacedName { return types.NamespacedName{Namespace: requeueNS, Name: name} }
+	r := &ServiceRoutePolicyReconciler{requeue: make(chan event.GenericEvent, 8)}
+	drain := func() []string {
+		var names []string
+		for len(r.requeue) > 0 {
+			names = append(names, (<-r.requeue).Object.GetName())
+		}
+		slices.Sort(names)
+		return names
+	}
+
+	r.noteConflicts(key("b"), map[types.NamespacedName]bool{key("a"): true, key("b"): true})
+	if got, want := drain(), []string{"a"}; !slices.Equal(got, want) {
+		t.Fatalf("entering conflict requeued %v, want %v", got, want)
+	}
+	r.noteConflicts(key("b"), map[types.NamespacedName]bool{key("a"): true, key("b"): true})
+	if got := drain(); len(got) != 0 {
+		t.Fatalf("an unchanged conflict set requeued %v", got)
+	}
+	r.noteConflicts(key("b"), map[types.NamespacedName]bool{})
+	if got, want := drain(), []string{"a"}; !slices.Equal(got, want) {
+		t.Fatalf("leaving conflict requeued %v, want %v", got, want)
+	}
+}
+
+// A delete event requeues the policies the deleted attachment was selected by.
+func TestAttachmentEventDeleteRequeuesItsPolicies(t *testing.T) {
+	r := newRequeueReconciler(t, requeueObjects()...)
+	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+	defer q.ShutDown()
+	gone := requeueAttachment("guest-1", requeueVPCA, map[string]string{requeueRole: requeueGuest})
+
+	r.attachmentEventPolicies().Delete(context.Background(), event.DeleteEvent{Object: gone}, q)
+
+	if q.Len() != 1 {
+		t.Fatalf("queue holds %d requests, want 1", q.Len())
+	}
+	req, _ := q.Get()
+	if req.Name != requeueDNSA {
+		t.Fatalf("requeued %s, want %s", req.Name, requeueDNSA)
 	}
 }

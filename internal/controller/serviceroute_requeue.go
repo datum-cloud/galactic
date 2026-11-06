@@ -35,7 +35,9 @@ type requestQueue = workqueue.TypedRateLimitingInterface[reconcile.Request]
 // that select the attachment as it was or as it is: as a consumer, or as a
 // producer of their endpoint. An attachment leaving a selector requeues the
 // policy it left, so that policy withdraws its route. Policies that conflict
-// over a consumer both select it, so both are requeued.
+// over a consumer both select it, so both are requeued for a consumer's
+// event; a conflict that a producer, endpoint or VPC event creates or clears
+// requeues the other policies through noteConflicts.
 func (r *ServiceRoutePolicyReconciler) attachmentEventPolicies() handler.EventHandler {
 	enqueue := func(ctx context.Context, q requestQueue, objs ...client.Object) {
 		attachments := make([]*cloudv1alpha1.VPCAttachment, 0, len(objs))
@@ -191,4 +193,43 @@ func (r *ServiceRoutePolicyReconciler) policyEventPolicies(ctx context.Context, 
 
 func policyRequest(policy *networkv1alpha1.ServiceRoutePolicy) ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}}
+}
+
+// noteConflicts requeues, apart from self, every policy that entered or left
+// the conflict set since the last reconcile. A conflict can start or end
+// through an event that requeues only one of the policies involved, such as
+// its producer becoming ready, and the reconcile that sees it withdraws or
+// would restore the others' routes. The caller holds r.mu.
+func (r *ServiceRoutePolicyReconciler) noteConflicts(self types.NamespacedName,
+	conflicts map[types.NamespacedName]bool,
+) {
+	previous := r.conflicted
+	r.conflicted = make(map[types.NamespacedName]bool, len(conflicts))
+	for key, conflicted := range conflicts {
+		if conflicted {
+			r.conflicted[key] = true
+		}
+	}
+	changed := func(key types.NamespacedName) {
+		if key == self || r.requeue == nil {
+			return
+		}
+		select {
+		case r.requeue <- event.GenericEvent{Object: &networkv1alpha1.ServiceRoutePolicy{
+			ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
+		}}:
+		default:
+			// Full: the policy's own periodic requeue still reaches it.
+		}
+	}
+	for key := range r.conflicted {
+		if !previous[key] {
+			changed(key)
+		}
+	}
+	for key := range previous {
+		if !r.conflicted[key] {
+			changed(key)
+		}
+	}
 }

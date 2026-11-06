@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -64,6 +65,12 @@ type ServiceRoutePolicyReconciler struct {
 
 	mu      sync.Mutex
 	Applied map[types.NamespacedName]map[serviceroute.IntentSlot]serviceroute.RouteIntent
+
+	// conflicted is the conflict set the last reconcile computed, and
+	// requeue carries the policies that entered or left it since
+	// (noteConflicts).
+	conflicted map[types.NamespacedName]bool
+	requeue    chan event.GenericEvent
 }
 
 // compile compiles policy for node with this router's options.
@@ -228,6 +235,7 @@ func (r *ServiceRoutePolicyReconciler) reconcilePolicy(
 		*errorReason = serviceroute.ReconcileConflictLookup
 		return ctrl.Result{}, errors.Join(conflictErr, r.removePolicyLocked(req.NamespacedName))
 	}
+	r.noteConflicts(req.NamespacedName, conflicts)
 	if conflicts[req.NamespacedName] {
 		var errs []error
 		for key := range conflicts {
@@ -346,8 +354,11 @@ func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	})); err != nil {
 		return fmt.Errorf("add initial service route policy map sync: %w", err)
 	}
+	r.requeue = make(chan event.GenericEvent, 1024)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkv1alpha1.ServiceRoutePolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// A policy another policy's reconcile moved into or out of conflict.
+		WatchesRawSource(source.Channel(r.requeue, &handler.EnqueueRequestForObject{})).
 		Watches(&networkv1alpha1.ServiceRoutePolicy{}, handler.EnqueueRequestsFromMapFunc(r.policyEventPolicies),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// A renewal of producer entries that are still current changes no
