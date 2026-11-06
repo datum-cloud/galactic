@@ -348,7 +348,7 @@ func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkv1alpha1.ServiceRoutePolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Watches(&networkv1alpha1.ServiceRoutePolicy{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies),
+		Watches(&networkv1alpha1.ServiceRoutePolicy{}, handler.EnqueueRequestsFromMapFunc(r.policyEventPolicies),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// A renewal of producer entries that are still current changes no
 		// route; expiry is handled by requeueing.
@@ -360,8 +360,10 @@ func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 				return !producerReportsOnlyRenewed(e.ObjectOld, e.ObjectNew, time.Now())
 			}})).
-		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies)).
-		Watches(&cloudv1alpha1.VPC{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies)).
+		// An attachment or VPC event requeues only the policies it can change
+		// (serviceroute_requeue.go).
+		Watches(&cloudv1alpha1.VPCAttachment{}, r.attachmentEventPolicies()).
+		Watches(&cloudv1alpha1.VPC{}, handler.EnqueueRequestsFromMapFunc(r.vpcPolicies)).
 		// Only the spec of a BGPRouter or BGPVRFInstance feeds an attachment's
 		// SID. Their status, and the router's config-hash annotation, change
 		// on nearly every BGPRouter reconcile, and each change would requeue
@@ -633,14 +635,6 @@ func (r *ServiceRoutePolicyReconciler) withProducerReports(ctx context.Context,
 		return endpoint, fmt.Errorf("list ServiceEndpointProducerReports in %s: %w", endpoint.Namespace, err)
 	}
 	return serviceplan.WithProducerReports(endpoint, reports.Items), nil
-}
-
-func (r *ServiceRoutePolicyReconciler) endpointPolicies(ctx context.Context, obj client.Object) []ctrl.Request {
-	return r.allPolicies(ctx)
-}
-
-func (r *ServiceRoutePolicyReconciler) attachmentPolicies(ctx context.Context, _ client.Object) []ctrl.Request {
-	return r.allPolicies(ctx)
 }
 
 // routingDependencyChanged passes the BGPRouter and BGPVRFInstance events that
