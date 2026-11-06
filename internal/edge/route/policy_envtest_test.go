@@ -7,6 +7,7 @@ package route
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -348,9 +349,13 @@ func TestLeasePolicies(t *testing.T) {
 	expect("galactic-controller writing another workload's Lease", false, core.Update(ctx, &other))
 }
 
+// systemLeaseNamespaces are where Kubernetes writes its own Leases.
+var systemLeaseNamespaces = []string{"kube-system", "kube-node-lease"}
+
 // A provider binding that cannot find its provider, as right after an API
 // server starts, denies every Lease write it matches. Kubernetes' own Leases
-// in kube-system and kube-node-lease are outside it.
+// in kube-system and kube-node-lease are outside it, and no provider may act
+// from those namespaces.
 func TestLeasePoliciesLeaveSystemNamespacesAlone(t *testing.T) {
 	t.Parallel()
 	f := startAPI(t)
@@ -365,7 +370,7 @@ func TestLeasePoliciesLeaveSystemNamespacesAlone(t *testing.T) {
 		},
 	})
 	const writer = "lease-writer"
-	for _, ns := range []string{"kube-system", "kube-node-lease", providerNS} {
+	for _, ns := range append(append([]string(nil), systemLeaseNamespaces...), providerNS) {
 		f.create(&rbacv1.Role{
 			ObjectMeta: metav1.ObjectMeta{Name: writer, Namespace: ns},
 			Rules: []rbacv1.PolicyRule{{APIGroups: []string{coordinationv1.GroupName}, Resources: []string{"leases"},
@@ -377,24 +382,52 @@ func TestLeasePoliciesLeaveSystemNamespacesAlone(t *testing.T) {
 			Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Namespace: ns, Name: writer}},
 		})
 	}
-	write := func(ns string) error {
+	write := func(ns, name string) error {
 		return f.as("system:serviceaccount:"+ns+":"+writer, nil).Create(ctx, &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "heartbeat"}})
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}})
 	}
-	// The binding is enforced once it denies a write in the provider's
-	// namespace.
+	// The binding is enforced once its own denial reaches a write in the
+	// provider's namespace; RBAC may still be catching up before then.
+	const missing = "no params found"
 	deadline := time.Now().Add(20 * time.Second)
-	for write(providerNS) == nil {
-		_ = f.admin.Delete(ctx, &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Namespace: providerNS, Name: "heartbeat"}})
+	for n := 0; ; n++ {
+		err := write(providerNS, fmt.Sprintf("probe-%d", n))
+		if err != nil && strings.Contains(err.Error(), missing) {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("binding with a missing provider not enforced")
+			t.Fatalf("binding with a missing provider not enforced: last result %v", err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	for _, ns := range []string{"kube-system", "kube-node-lease"} {
-		if err := write(ns); err != nil {
+	for _, ns := range systemLeaseNamespaces {
+		var err error
+		for n := range 50 {
+			if err = write(ns, fmt.Sprintf("heartbeat-%d", n)); err == nil ||
+				strings.Contains(err.Error(), missing) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond) // RBAC for the new Role may lag.
+		}
+		if err != nil {
 			t.Errorf("a Lease write in %s refused: %v", ns, err)
+		}
+	}
+
+	// A provider cannot list a ServiceAccount in those namespaces, so the
+	// policy never needs to hold a provider there.
+	for _, ns := range systemLeaseNamespaces {
+		err := f.admin.Create(ctx, &galacticv1alpha1.EdgeProvider{
+			ObjectMeta: metav1.ObjectMeta{Name: "in-" + ns},
+			Spec: galacticv1alpha1.EdgeProviderSpec{
+				ContractVersions: []string{galacticv1alpha1.GroupVersion.Version},
+				Capabilities:     []galacticv1alpha1.EdgeCapability{{Name: socketAccess, Version: "v1"}},
+				ServiceAccounts:  []galacticv1alpha1.ServiceAccountReference{{Namespace: ns, Name: writer}},
+				Configuration:    galacticv1alpha1.ConfigurationKind{Group: "connect.example.com", Kind: "Config"},
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "cannot be in kube-system or kube-node-lease") {
+			t.Errorf("an EdgeProvider acting from %s: %v, want it refused", ns, err)
 		}
 	}
 }

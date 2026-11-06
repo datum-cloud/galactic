@@ -110,7 +110,8 @@ spec:
                   description: |-
                     ServiceAccounts are the only identities whose bound tokens act for the
                     provider. A request from any other identity is refused. The
-                    foundation's own identities cannot be listed.
+                    foundation's own identities cannot be listed, nor any in kube-system or
+                    kube-node-lease, which the provider policy leaves to Kubernetes.
                   items:
                     description: ServiceAccountReference names one ServiceAccount.
                     properties:
@@ -135,6 +136,8 @@ spec:
                   x-kubernetes-validations:
                     - message: the foundation's ServiceAccounts cannot act for a provider
                       rule: self.all(sa, !(sa.namespace == 'galactic-system' && sa.name in ['galactic-controller', 'galactic-edge']))
+                    - message: a provider's ServiceAccounts cannot be in kube-system or kube-node-lease
+                      rule: self.all(sa, !(sa.namespace in ['kube-system', 'kube-node-lease']))
               required:
                 - capabilities
                 - configuration

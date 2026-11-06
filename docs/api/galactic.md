@@ -392,7 +392,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `contractVersions` _string array_ | ContractVersions are the provider contract versions it speaks. |  | MaxItems: 4 <br />MinItems: 1 <br />items:Pattern: `^v[0-9]+((alpha\|beta)[0-9]+)?$` <br /> |
 | `capabilities` _[EdgeCapability](#edgecapability) array_ | Capabilities are the capability versions it implements. |  | MaxItems: 16 <br />MinItems: 1 <br /> |
-| `serviceAccounts` _[ServiceAccountReference](#serviceaccountreference) array_ | ServiceAccounts are the only identities whose bound tokens act for the<br />provider. A request from any other identity is refused. The<br />foundation's own identities cannot be listed. |  | MaxItems: 16 <br />MinItems: 1 <br /> |
+| `serviceAccounts` _[ServiceAccountReference](#serviceaccountreference) array_ | ServiceAccounts are the only identities whose bound tokens act for the<br />provider. A request from any other identity is refused. The<br />foundation's own identities cannot be listed, nor any in kube-system or<br />kube-node-lease, which the provider policy leaves to Kubernetes. |  | MaxItems: 16 <br />MinItems: 1 <br /> |
 | `configuration` _[ConfigurationKind](#configurationkind)_ | Configuration is the kind of the provider's own per-service<br />configuration. |  |  |
 
 
