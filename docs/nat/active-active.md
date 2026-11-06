@@ -105,7 +105,10 @@ hashed mode with more than three NAT64 prefixes in
 - **A shard counts only while it is reachable.** A dead node's `EgressShard`
   status goes stale, but its BGP session drops and the route to its SID is
   withdrawn. A candidate takes tenants only while its SID resolves to a
-  neighbor on an SRv6 uplink. `galactic-cni` rebuilds the groups on every
+  neighbor on an SRv6 uplink through a route more specific than the
+  default: once the SID's route is withdrawn, a lookup that falls through
+  to a default route, even one over an uplink, counts as unreachable.
+  `galactic-cni` rebuilds the groups on every
   route or neighbor change that can affect a candidate, and every 30 seconds
   as a backstop, so failover takes as long as BGP takes to withdraw the
   route, plus a fraction of a second.

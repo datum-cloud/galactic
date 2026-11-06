@@ -183,6 +183,9 @@ func resolveLinkAndL2(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, e
 				"(the fabric has most likely not advertised this SID yet and the lookup fell through to a "+
 				"default route)", sid, linkIndex)
 	}
+	if err := rejectDefaultRoute(sid); err != nil {
+		return 0, nil, nil, err
+	}
 	nextHop := routes[0].Gw
 	if nextHop == nil {
 		nextHop = sid // gateway itself is on-link
@@ -199,6 +202,34 @@ func resolveLinkAndL2(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, e
 		return 0, nil, nil, fmt.Errorf("%w (next-hop for sid %s)", err, sid)
 	}
 	return linkIndex, dmac, smac, nil
+}
+
+// rejectDefaultRoute fails when the route sid matches is a default route,
+// even one leaving through an SRv6 uplink. The fabric advertises every SID it
+// can reach as a specific route, so a lookup that only finds the default has
+// lost that advertisement: the SID's node is gone, and the upstream router
+// behind the default has never heard of its locator. Accepting it would keep
+// a dead shard reachable and its tenants pinned to it for as long as the node
+// is down.
+//
+// A kernel that cannot answer a FIB-match lookup cannot tell the two apart, so
+// the check is skipped there rather than failing every SID.
+func rejectDefaultRoute(sid net.IP) error {
+	matched, err := netlink.RouteGetWithOptions(sid, &netlink.RouteGetOptions{FIBMatch: true})
+	if err != nil || len(matched) == 0 {
+		return nil
+	}
+	if dst := matched[0].Dst; dst == nil || isDefault(dst) {
+		return fmt.Errorf(
+			"no route to %s over an SRv6 uplink: only a default route matches it, so the fabric no longer "+
+				"advertises it", sid)
+	}
+	return nil
+}
+
+func isDefault(dst *net.IPNet) bool {
+	ones, _ := dst.Mask.Size()
+	return ones == 0
 }
 
 // resolveNeighbor returns nextHop's resolved L2 address on linkIndex, actively
