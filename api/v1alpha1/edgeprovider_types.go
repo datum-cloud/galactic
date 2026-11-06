@@ -73,12 +73,14 @@ type EdgeProviderSpec struct {
 
 	// ServiceAccounts are the only identities whose bound tokens act for the
 	// provider. A request from any other identity is refused. The
-	// foundation's own identities cannot be listed.
+	// foundation's own identities cannot be listed, nor any in kube-system or
+	// kube-node-lease, which the provider policy leaves to Kubernetes.
 	// +required
 	// +listType=atomic
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:XValidation:rule="self.all(sa, !(sa.namespace == 'galactic-system' && sa.name in ['galactic-controller', 'galactic-edge']))",message="the foundation's ServiceAccounts cannot act for a provider"
+	// +kubebuilder:validation:XValidation:rule="self.all(sa, !(sa.namespace in ['kube-system', 'kube-node-lease']))",message="a provider's ServiceAccounts cannot be in kube-system or kube-node-lease"
 	ServiceAccounts []ServiceAccountReference `json:"serviceAccounts"`
 
 	// Configuration is the kind of the provider's own per-service

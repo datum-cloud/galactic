@@ -82,11 +82,7 @@ func (r *ProviderBindingReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	namespaces := map[string][]rbacv1.Subject{}
 	if approved {
-		for _, sa := range p.Spec.ServiceAccounts {
-			namespaces[sa.Namespace] = append(namespaces[sa.Namespace], rbacv1.Subject{
-				Kind: rbacv1.ServiceAccountKind, Namespace: sa.Namespace, Name: sa.Name,
-			})
-		}
+		namespaces = providerSubjects(p.Spec.ServiceAccounts)
 	}
 	name := bindingName(p.Name)
 
@@ -191,4 +187,24 @@ func (r *ProviderBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&admissionregistrationv1.ValidatingAdmissionPolicyBinding{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Complete(r)
+}
+
+// systemNamespaces are where Kubernetes writes its own Leases. The provider
+// policy leaves them alone, so a provider is never bound in them, even one
+// that lists a ServiceAccount there from before EdgeProvider refused it.
+var systemNamespaces = map[string]bool{"kube-system": true, "kube-node-lease": true}
+
+// providerSubjects groups a provider's ServiceAccounts by the namespace its
+// RoleBinding goes in, leaving out the system namespaces.
+func providerSubjects(accounts []galacticv1alpha1.ServiceAccountReference) map[string][]rbacv1.Subject {
+	namespaces := map[string][]rbacv1.Subject{}
+	for _, sa := range accounts {
+		if systemNamespaces[sa.Namespace] {
+			continue
+		}
+		namespaces[sa.Namespace] = append(namespaces[sa.Namespace], rbacv1.Subject{
+			Kind: rbacv1.ServiceAccountKind, Namespace: sa.Namespace, Name: sa.Name,
+		})
+	}
+	return namespaces
 }
