@@ -191,6 +191,46 @@ func TestReplayExcludesFabricAdvertisements(t *testing.T) {
 	}
 }
 
+func TestUnplacedAttachmentProjectsFromExistingAdvertisement(t *testing.T) {
+	for _, fabricFirst := range []bool{true, false} {
+		f := newOwnershipFixture(t, fabricFirst)
+		requests := f.reconciler.advertisementForAttachment(context.Background(), f.attachment)
+		if len(requests) != 1 || requests[0].Name != f.tenantAdv.Name {
+			t.Fatalf("fabricFirst=%v: requests = %+v, want only %s", fabricFirst, requests, f.tenantAdv.Name)
+		}
+		if _, err := f.reconciler.Reconcile(context.Background(), requests[0]); err != nil {
+			t.Fatal(err)
+		}
+		status := f.attachmentStatus(t)
+		if status.Node != "node-a" || !meta.IsStatusConditionTrue(status.Conditions, cloudv1alpha1.ConditionTypeProgrammed) {
+			t.Errorf("fabricFirst=%v: attachment status = %+v, want node-a and Programmed", fabricFirst, status)
+		}
+		var iface networkingv1alpha.NetworkInterface
+		if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(f.iface), &iface); err != nil {
+			t.Fatal(err)
+		}
+		if !meta.IsStatusConditionTrue(iface.Status.Conditions, networkingv1alpha.NetworkInterfaceProgrammed) {
+			t.Errorf("fabricFirst=%v: interface conditions = %+v, want Programmed", fabricFirst, iface.Status.Conditions)
+		}
+		var claim networkingv1alpha.NetworkInterfaceClaim
+		if err := f.client.Get(context.Background(), types.NamespacedName{Namespace: "tenant", Name: "claim"}, &claim); err != nil {
+			t.Fatal(err)
+		}
+		if !meta.IsStatusConditionTrue(claim.Status.Conditions, networkingv1alpha.NetworkInterfaceClaimProgrammed) {
+			t.Errorf("fabricFirst=%v: claim conditions = %+v, want Programmed", fabricFirst, claim.Status.Conditions)
+		}
+	}
+}
+
+func TestUnidentifiedAttachmentMapsToNothing(t *testing.T) {
+	f := newOwnershipFixture(t, false)
+	attachment := f.attachment.DeepCopy()
+	attachment.Status.VPCAttachment = ""
+	if requests := f.reconciler.advertisementForAttachment(context.Background(), attachment); len(requests) != 0 {
+		t.Fatalf("requests = %+v, want none", requests)
+	}
+}
+
 func TestWithdrawnAdvertisementClearsDeliveryStatus(t *testing.T) {
 	f := newOwnershipFixture(t, false)
 	f.reconcile(t, f.tenantAdv)
@@ -202,7 +242,7 @@ func TestWithdrawnAdvertisementClearsDeliveryStatus(t *testing.T) {
 	if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(f.attachment), &attachment); err != nil {
 		t.Fatal(err)
 	}
-	requests := advertisementForAttachment(context.Background(), &attachment)
+	requests := f.reconciler.advertisementForAttachment(context.Background(), &attachment)
 	if len(requests) != 1 || requests[0].Name != f.tenantAdv.Name {
 		t.Fatalf("withdrawal requests = %v", requests)
 	}
