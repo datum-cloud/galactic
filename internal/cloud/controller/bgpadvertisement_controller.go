@@ -199,18 +199,23 @@ func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Con
 	return nil
 }
 
-func advertisementForAttachment(_ context.Context, obj client.Object) []reconcile.Request {
+func (r *BGPAdvertisementReconciler) advertisementForAttachment(ctx context.Context, obj client.Object) []reconcile.Request {
 	attachment, ok := obj.(*cloudv1alpha1.VPCAttachment)
-	if !ok || attachment.Status.Node == "" {
+	if !ok {
 		return nil
 	}
 	identity := galactic.AdvertisementName(attachment.Status.VPC, attachment.Status.VPCAttachment)
 	if identity == "" {
 		return nil
 	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{
-		Namespace: galactic.SystemNamespace, Name: identity + "-" + attachment.Status.Node,
-	}}}
+	if attachment.Status.Node != "" {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{
+			Namespace: galactic.SystemNamespace, Name: identity + "-" + attachment.Status.Node,
+		}}}
+	}
+	// A recreated instance keeps its attachment identifier, so its advertisement
+	// can predate the new attachment unchanged and never fire an event.
+	return r.tenantAdvertisements(ctx, identity, client.ObjectKeyFromObject(attachment))
 }
 
 // projectOntoInterface closes the Programmed condition NSO deliberately leaves
@@ -283,9 +288,15 @@ func (r *BGPAdvertisementReconciler) advertisementForInterface(ctx context.Conte
 	if identity == "" {
 		return nil
 	}
+	return r.tenantAdvertisements(ctx, identity, key)
+}
+
+func (r *BGPAdvertisementReconciler) tenantAdvertisements(
+	ctx context.Context, identity string, source types.NamespacedName,
+) []reconcile.Request {
 	var advertisements bgpv1alpha1.BGPAdvertisementList
 	if err := r.List(ctx, &advertisements, client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
-		log.FromContext(ctx).Error(err, "list advertisements for migrated interface", "interface", key)
+		log.FromContext(ctx).Error(err, "list advertisements for attachment identity", "identity", identity, "source", source)
 		return nil
 	}
 	requests := make([]reconcile.Request, 0, len(advertisements.Items))
@@ -369,7 +380,7 @@ func programmedCondition(advertisement *bgpv1alpha1.BGPAdvertisement) metav1.Con
 func (r *BGPAdvertisementReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.BGPAdvertisement{}).
-		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(advertisementForAttachment),
+		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(r.advertisementForAttachment),
 			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 				oldAttachment, oldOK := e.ObjectOld.(*cloudv1alpha1.VPCAttachment)
 				newAttachment, newOK := e.ObjectNew.(*cloudv1alpha1.VPCAttachment)
