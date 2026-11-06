@@ -100,6 +100,8 @@ func activateTrafficPolicy(
 			return err
 		}
 	}
+	// The row must be written before bringUp: galactic-router publishes the
+	// interface's policy on the link-up event, which finds this row.
 	if err := maps.PutInterface(ifindex, token, tpmap.KindTenant); err != nil {
 		return err
 	}

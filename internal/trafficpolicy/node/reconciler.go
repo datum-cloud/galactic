@@ -225,7 +225,7 @@ func (r *Reconciler) InterfaceChanged(name string) {
 			ObjectMeta: metav1.ObjectMeta{Namespace: a.Namespace, Name: a.Name},
 		}}:
 		default:
-			// The queue is full of reconciles that will see the interface too.
+			// The queue is full; this attachment falls back to pendingRetry.
 		}
 	}
 }
