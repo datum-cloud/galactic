@@ -43,6 +43,15 @@ spec:
         apiVersions: ["*"]
         operations: [CREATE, UPDATE, DELETE]
         resources: [leases]
+    # Kubernetes writes its own Leases in these namespaces: the API servers'
+    # identity leases and node heartbeats. A binding whose provider is not
+    # yet cached, as right after an API server starts, denies every request
+    # it matches, and must not block those. No provider runs in them.
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: [kube-system, kube-node-lease]
   # Every ServiceAccount but the foundation's own is checked; a person's
   # access is RBAC's alone, so an operator can still clear a stuck object.
   # The foundation's identities are in galactic-system, which this file
