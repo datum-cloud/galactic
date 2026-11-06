@@ -159,6 +159,20 @@ spec:
                   rule: self == '' || isCIDR(self)
                 - message: nat64Prefix is immutable once assigned
                   rule: self == oldSelf || oldSelf == ''
+              nat64Standby:
+                description: |-
+                  NAT64Standby marks a shard whose ShardAddressIPv4 is attracted to a
+                  sibling shard's node while that sibling is up, as when every edge in a
+                  site announces one shared IPv4 prefix and the standby prepends its
+                  announcement. Replies to a standby's IPv4 address then reach the
+                  sibling, which holds no session for them and drops them.
+
+                  In hashed mode, compute nodes hold a standby out of every NAT64 class
+                  while any shard without the flag can serve it, and let it serve NAT64
+                  only once none can. NAT66 placement ignores it, since each shard's IPv6
+                  address is advertised from its own node. Compute nodes that send each
+                  tenant to a single configured shard ignore it.
+                type: boolean
               shardAddressIPv4:
                 description: |-
                   ShardAddressIPv4 is the dedicated, publicly-routable IPv4 address this
@@ -359,6 +373,9 @@ spec:
               rule: '!has(oldSelf.shardAddressIPv6ClaimRef) || has(self.shardAddressIPv6ClaimRef)'
             - message: shardAddressIPv4ClaimRef cannot be unassigned once assigned
               rule: '!has(oldSelf.shardAddressIPv4ClaimRef) || has(self.shardAddressIPv4ClaimRef)'
+            - message: nat64Standby requires nat64Prefix
+              rule: '!(has(self.nat64Standby) && self.nat64Standby) || (has(self.nat64Prefix)
+                && size(self.nat64Prefix) > 0)'
             - message: translateWellKnownPrefix requires nat64Prefix
               rule: '!(has(self.translateWellKnownPrefix) && self.translateWellKnownPrefix)
                 || (has(self.nat64Prefix) && size(self.nat64Prefix) > 0)'

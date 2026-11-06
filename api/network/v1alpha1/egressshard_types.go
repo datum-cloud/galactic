@@ -213,6 +213,7 @@ type AddressClaimRef struct {
 // +kubebuilder:validation:XValidation:rule="!(has(oldSelf.nat64Prefix) && size(oldSelf.nat64Prefix) > 0) || (has(self.nat64Prefix) && size(self.nat64Prefix) > 0)",message="nat64Prefix cannot be unassigned once assigned"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.shardAddressIPv6ClaimRef) || has(self.shardAddressIPv6ClaimRef)",message="shardAddressIPv6ClaimRef cannot be unassigned once assigned"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.shardAddressIPv4ClaimRef) || has(self.shardAddressIPv4ClaimRef)",message="shardAddressIPv4ClaimRef cannot be unassigned once assigned"
+// +kubebuilder:validation:XValidation:rule="!(has(self.nat64Standby) && self.nat64Standby) || (has(self.nat64Prefix) && size(self.nat64Prefix) > 0)",message="nat64Standby requires nat64Prefix"
 // +kubebuilder:validation:XValidation:rule="!(has(self.translateWellKnownPrefix) && self.translateWellKnownPrefix) || (has(self.nat64Prefix) && size(self.nat64Prefix) > 0)",message="translateWellKnownPrefix requires nat64Prefix"
 type EgressShardSpec struct {
 	// TargetRef identifies the Node this shard executes on.
@@ -330,6 +331,20 @@ type EgressShardSpec struct {
 	// it.
 	// +optional
 	Drain bool `json:"drain,omitempty"`
+
+	// NAT64Standby marks a shard whose ShardAddressIPv4 is attracted to a
+	// sibling shard's node while that sibling is up, as when every edge in a
+	// site announces one shared IPv4 prefix and the standby prepends its
+	// announcement. Replies to a standby's IPv4 address then reach the
+	// sibling, which holds no session for them and drops them.
+	//
+	// In hashed mode, compute nodes hold a standby out of every NAT64 class
+	// while any shard without the flag can serve it, and let it serve NAT64
+	// only once none can. NAT66 placement ignores it, since each shard's IPv6
+	// address is advertised from its own node. Compute nodes that send each
+	// tenant to a single configured shard ignore it.
+	// +optional
+	NAT64Standby bool `json:"nat64Standby,omitempty"`
 }
 
 // EgressShardStatus defines the observed state of an EgressShard.

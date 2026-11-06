@@ -599,3 +599,55 @@ func TestGroupDatapath_CountsVRFEgress(t *testing.T) {
 		t.Errorf("vrf_traffic_counters = %+v, want %+v", got, want)
 	}
 }
+
+// TestGroupDatapath_HeldStandbyLosesItsPins checks that a tenant pinned to a
+// NAT64 standby while the primary was down is re-placed on the primary once it
+// returns and the standby is held, rather than kept on a shard whose replies
+// the primary's node attracts, and that it goes back to the standby when the
+// primary fails again.
+func TestGroupDatapath_HeldStandbyLosesItsPins(t *testing.T) {
+	dp := loadDatapath(t)
+	primary, standby := shardSID(0x10), shardSID(0x11)
+	nat64 := netip.MustParsePrefix("64:ff9b::/96")
+	const nat64Group = NAT66ShardGroup + 1
+	route := &net.IPNet{IP: nat64.Addr().AsSlice(), Mask: net.CIDRMask(nat64.Bits(), 128)}
+	if err := dp.routes.RegisterGroup(dpTableID, route, nat64Group, dpArgument); err != nil {
+		t.Fatalf("RegisterGroup(%s): %v", nat64, err)
+	}
+	policy := GroupPolicy{Class: NAT64Class(nat64), PinIdle: time.Hour}
+	in := []ShardCandidate{{SID: net.IP(primary.AsSlice())}, {SID: net.IP(standby.AsSlice()), Standby: true}}
+	apply := func() {
+		t.Helper()
+		if _, err := dp.groups.Apply(nat64Group, policy, in); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+	}
+	pkt := func(port uint16) []byte {
+		return udp6(tenant(1), netip.MustParseAddr("64:ff9b::c000:201"), port, 443)
+	}
+
+	reachable(t, standby) // the primary is down
+	apply()
+	if verdict, got, _ := dp.send(t, pkt(1)); verdict != tcActRedirect || got != standby {
+		t.Fatalf("with the primary down: verdict %d toward %s, want redirect to the standby %s", verdict, got, standby)
+	}
+
+	reachable(t, primary, standby)
+	apply()
+	if verdict, got, _ := dp.send(t, pkt(2)); verdict != tcActRedirect || got != primary {
+		t.Fatalf("after the primary returned: verdict %d toward %s, want the pinned tenant re-placed on %s",
+			verdict, got, primary)
+	}
+	if got := stat(t, dp.objs.EgressShardStats, prog.EgressShardStatPinStale); got != 1 {
+		t.Errorf("egress_shard_stats[pin_stale] = %d, want 1: the pin to the held standby must be rejected", got)
+	}
+	if _, got, _ := dp.send(t, pkt(3)); got != primary {
+		t.Errorf("next packet went to %s, want it to follow its new pin to %s", got, primary)
+	}
+
+	reachable(t, standby)
+	apply()
+	if verdict, got, _ := dp.send(t, pkt(4)); verdict != tcActRedirect || got != standby {
+		t.Errorf("after the primary failed again: verdict %d toward %s, want the standby %s", verdict, got, standby)
+	}
+}
