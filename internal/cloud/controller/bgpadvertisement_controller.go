@@ -70,10 +70,22 @@ type BGPAdvertisementReconciler struct {
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=vpcattachments/status,verbs=get;update;patch
 
 func (r *BGPAdvertisementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	err := r.reconcile(ctx, req)
+	if apierrors.IsConflict(err) {
+		// NSO writes the same attachment, interface and claim status. Losing
+		// that race only means the cached copy was stale, so read it again
+		// rather than report a controller error.
+		log.FromContext(ctx).V(1).Info("status changed while reconciling; retrying", "reason", err.Error())
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return ctrl.Result{}, err
+}
+
+func (r *BGPAdvertisementReconciler) reconcile(ctx context.Context, req ctrl.Request) error {
 	var advertisement bgpv1alpha1.BGPAdvertisement
 	if err := r.Get(ctx, req.NamespacedName, &advertisement); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, err
+			return err
 		}
 		if r.APIReader != nil {
 			var live bgpv1alpha1.BGPAdvertisement
@@ -82,18 +94,18 @@ func (r *BGPAdvertisementReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				// Recreated faster than the cache saw it. The informer's
 				// create event reconciles it again, so clearing now would
 				// only flap the status.
-				return ctrl.Result{}, nil
+				return nil
 			}
 			if !apierrors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("confirm withdrawn advertisement %s: %w", req.NamespacedName, err)
+				return fmt.Errorf("confirm withdrawn advertisement %s: %w", req.NamespacedName, err)
 			}
 		}
-		return ctrl.Result{}, r.clearWithdrawnAdvertisement(ctx, req.NamespacedName)
+		return r.clearWithdrawnAdvertisement(ctx, req.NamespacedName)
 	}
 
 	vpc, attachmentID, ok := galactic.SplitAdvertisementName(advertisement.Name)
 	if !ok {
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	// Ownership is checked before any status write: an advertisement on a
@@ -101,19 +113,19 @@ func (r *BGPAdvertisementReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// a tenant attachment, interface or claim, whatever its name looks like.
 	router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 	if router != nil && !bgpv1alpha1.IsLegacyOwned(router) {
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	var attachments cloudv1alpha1.VPCAttachmentList
 	if err := r.List(ctx, &attachments,
 		client.MatchingFields{IndexVPCAttachmentIdentity: galactic.AdvertisementName(vpc, attachmentID)}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("list VPC attachments for advertisement %s: %w", advertisement.Name, err)
+		return fmt.Errorf("list VPC attachments for advertisement %s: %w", advertisement.Name, err)
 	}
 	if len(attachments.Items) == 0 {
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	var node string
@@ -136,15 +148,19 @@ func (r *BGPAdvertisementReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		meta.SetStatusCondition(&attachment.Status.Conditions, programmed)
 		if err := r.Status().Update(ctx, attachment); err != nil {
-			return ctrl.Result{}, fmt.Errorf("update VPC attachment %s status: %w",
+			// Collected with an interface deleted mid-pass.
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("update VPC attachment %s status: %w",
 				client.ObjectKeyFromObject(attachment), err)
 		}
 		if err := r.projectOntoInterface(ctx, attachment, programmed); err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
 	}
 
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // clearWithdrawnAdvertisement removes delivery status only when no tenant
@@ -192,7 +208,7 @@ func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Con
 		if err := r.projectOntoInterface(ctx, attachment, programmed); err != nil {
 			return err
 		}
-		if err := r.Status().Update(ctx, attachment); err != nil {
+		if err := r.Status().Update(ctx, attachment); client.IgnoreNotFound(err) != nil {
 			return fmt.Errorf("clear withdrawn attachment %s: %w", client.ObjectKeyFromObject(attachment), err)
 		}
 	}
@@ -244,6 +260,10 @@ func (r *BGPAdvertisementReconciler) projectOntoInterface(
 	interfaceProgrammed.ObservedGeneration = networkInterface.Generation
 	meta.SetStatusCondition(&networkInterface.Status.Conditions, interfaceProgrammed)
 	if err := r.Status().Update(ctx, &networkInterface); err != nil {
+		// A guest torn down mid-pass leaves nothing to certify.
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("update network interface %s status: %w", key, err)
 	}
 	if networkInterface.Spec.ClaimRef == nil {
@@ -265,6 +285,9 @@ func (r *BGPAdvertisementReconciler) projectOntoInterface(
 		})
 	}
 	if err := r.Status().Update(ctx, &claim); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("update network interface claim %s status: %w", claimKey, err)
 	}
 	return nil

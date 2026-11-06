@@ -299,6 +299,11 @@ func (r *BindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	if err := r.Client.Status().Patch(ctx, &b, client.RawPatch(types.ApplyPatchType, body),
 		client.FieldOwner(FieldOwner), client.ForceOwnership); err != nil {
+		// The binding goes with its interface, often between the read above
+		// and this apply. A deleted binding has no status to report.
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("apply TrafficPolicyBinding %s status: %w", req.NamespacedName, err)
 	}
 	if next > 0 {
