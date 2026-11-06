@@ -81,6 +81,27 @@ hashed mode with more than three NAT64 prefixes in
   toward the pool minimum, since it takes over without anyone acting. A
   primary running on this node is local and never resolves, so on the
   primary's own node the standby still takes NAT64 tenants.
+
+  Moving between a primary and a standby is not a failover of sessions.
+  When a held standby takes the class, or is held again once a primary
+  resolves, every NAT64 flow pinned to the shard it leaves is re-placed
+  onto a shard that holds no state for it, so those connections reset.
+  Nothing damps this: each sweep decides afresh, so a primary SID route
+  that flaps resets the class's NAT64 flows each time, and compute nodes
+  see a primary's loss at slightly different moments.
+
+  A draining primary still holds the standby out, because it still
+  attracts the standby's IPv4 replies. Draining the last primary therefore
+  leaves the class with no active shard until the drain ends, and new
+  NAT64 flows are dropped as `group_empty`; `GalacticEgressPoolEmpty`
+  fires. Do not drain the last primary expecting the standby to take over.
+
+  On the primary's own node, the standby that takes NAT64 tenants still
+  has its IPv4 replies attracted to that node, so NAT64 from tenants on a
+  primary's node does not work in this topology. Marking every shard
+  `nat64Standby` holds none of them out, which leaves the same reply
+  problem the flag exists to avoid; the API accepts it.
+
 - **A shard counts only while it is reachable.** A dead node's `EgressShard`
   status goes stale, but its BGP session drops and the route to its SID is
   withdrawn. A candidate takes tenants only while its SID resolves to a

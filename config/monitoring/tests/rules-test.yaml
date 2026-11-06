@@ -1936,6 +1936,25 @@ tests:
         alertname: GalacticEgressPoolBelowMinimum
         exp_alerts: []
 
+  # A held NAT64 standby counts as a shard that can translate the class, so
+  # a draining primary with a held standby does not fire ClassUnserved.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_cni_egress_pool_enabled{job="galactic-cni",node="dfw-worker",class="nat64:64:ff9b::/96"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat64:64:ff9b::/96",state="active"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat64:64:ff9b::/96",state="draining"}'
+        values: "0x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat64:64:ff9b::/96",state="standby"}'
+        values: "1x40"
+      - series: 'galactic_cni_egress_pool_members{job="galactic-cni",node="dfw-worker",class="nat64:64:ff9b::/96",state="ineligible"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: GalacticEgressClassUnserved
+        exp_alerts: []
+
   # Steady group_empty drops fire after 10m; a single burst of shard_dead
   # drops, the race between a withdrawal and the rebuild, does not.
   - interval: 30s
