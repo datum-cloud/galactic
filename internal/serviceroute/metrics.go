@@ -5,13 +5,53 @@
 package serviceroute
 
 import (
+	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.miloapis.com/instrumentation/labels"
 	"go.miloapis.com/instrumentation/metrics"
 )
 
 const metricsNamespace = "galactic_service_route"
+
+// Labels and values of the reconciliations metric.
+const (
+	reconcileResultLabel   = "result"
+	ReconcileResultSuccess = "success"
+	ReconcileResultError   = "error"
+	ReconcileReasonNone    = "none"
+)
+
+// Reasons a ServiceRoutePolicy reconcile fails, for the reason label of the
+// reconciliations metric. Keep this set fixed and the routing observability
+// doc in step with it.
+const (
+	ReconcileGetPolicy             = "get_policy"
+	ReconcileRemoveDeleted         = "remove_deleted"
+	ReconcileGetEndpoint           = "get_endpoint"
+	ReconcileRevokeMissingEndpoint = "revoke_missing_endpoint"
+	ReconcileProducerReports       = "producer_reports"
+	ReconcileListAttachments       = "list_attachments"
+	ReconcileConflictLookup        = "conflict_lookup"
+	ReconcileDependencyNotReady    = "dependency_not_ready"
+	ReconcileCompile               = "compile"
+	ReconcileRefreshMaps           = "refresh_maps"
+	ReconcileProgram               = "program"
+	ReconcileAcceptStatus          = "accept_status"
+	// ReconcileOther is any other failed reconcile, such as a status update
+	// that failed while revoking a policy that is disabled, invalid or in
+	// conflict.
+	ReconcileOther = "other"
+)
+
+// ReconcileReasons lists every reason ObserveReconcile records.
+var ReconcileReasons = []string{
+	ReconcileReasonNone, ReconcileGetPolicy, ReconcileRemoveDeleted, ReconcileGetEndpoint,
+	ReconcileRevokeMissingEndpoint, ReconcileProducerReports, ReconcileListAttachments, ReconcileConflictLookup,
+	ReconcileDependencyNotReady, ReconcileCompile, ReconcileRefreshMaps, ReconcileProgram, ReconcileAcceptStatus,
+	ReconcileOther,
+}
 
 // Metrics contains bounded-cardinality metrics for the node-local service
 // route controller. Resource names are deliberately kept in logs instead of
@@ -38,8 +78,9 @@ func NewMetrics() *Metrics {
 		reconciliations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "reconciliations_total",
-			Help:      "ServiceRoutePolicy reconciliations by outcome.",
-		}, []string{"result"}),
+			Help: "ServiceRoutePolicy reconciliations by outcome. A failed reconcile " +
+				"carries the step that failed in reason; a successful one has reason none.",
+		}, []string{reconcileResultLabel, labels.Reason}),
 		reconcileTime: reconcileTime,
 		operations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -66,11 +107,21 @@ func NewMetrics() *Metrics {
 	}
 }
 
-func (m *Metrics) ObserveReconcile(result string, duration time.Duration) {
+// ObserveReconcile records one reconcile. errorReason is one of the
+// Reconcile reasons above, or empty on success. Any other value is recorded
+// as ReconcileOther, so the label stays bounded.
+func (m *Metrics) ObserveReconcile(errorReason string, duration time.Duration) {
 	if m == nil {
 		return
 	}
-	m.reconciliations.WithLabelValues(result).Inc()
+	result, reason := ReconcileResultSuccess, ReconcileReasonNone
+	if errorReason != "" {
+		result, reason = ReconcileResultError, ReconcileOther
+		if errorReason != ReconcileReasonNone && slices.Contains(ReconcileReasons, errorReason) {
+			reason = errorReason
+		}
+	}
+	m.reconciliations.WithLabelValues(result, reason).Inc()
 	m.reconcileTime.Observe(duration.Seconds())
 }
 

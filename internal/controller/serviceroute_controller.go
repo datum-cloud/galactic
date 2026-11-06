@@ -40,8 +40,6 @@ import (
 	"go.datum.net/galactic/pkg/serviceplan"
 )
 
-const reconcileResultError = "error"
-
 // ServiceRoutePolicyReconciler resolves service policies against local Cloud
 // API attachments and programs the resulting stateful eBPF forwarding policy
 // directly on this node. It intentionally does not create child Kubernetes
@@ -123,8 +121,20 @@ func startupSyncNeedsRetry(err error) bool {
 // programmed for that policy.
 func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	start := time.Now()
-	resultLabel := "success"
-	defer func() { r.Metrics.ObserveReconcile(resultLabel, time.Since(start)) }()
+	errorReason := ""
+	result, err := r.reconcilePolicy(ctx, req, &errorReason)
+	if err != nil && errorReason == "" {
+		errorReason = serviceroute.ReconcileOther
+	}
+	r.Metrics.ObserveReconcile(errorReason, time.Since(start))
+	return result, err
+}
+
+// reconcilePolicy is Reconcile without its metric. It sets *errorReason to
+// the step that failed, when it knows which.
+func (r *ServiceRoutePolicyReconciler) reconcilePolicy(
+	ctx context.Context, req ctrl.Request, errorReason *string,
+) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("policy", req.String(), "nodeName", r.NodeName)
 
 	r.mu.Lock()
@@ -135,12 +145,12 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if apierrors.IsNotFound(err) {
 			err := r.removePolicyLocked(req.NamespacedName)
 			if err != nil {
-				resultLabel = reconcileResultError
+				*errorReason = serviceroute.ReconcileRemoveDeleted
 				logger.Error(err, "remove eBPF policy for deleted ServiceRoutePolicy")
 			}
 			return ctrl.Result{}, err
 		}
-		resultLabel = reconcileResultError
+		*errorReason = serviceroute.ReconcileGetPolicy
 		logger.Error(err, "get ServiceRoutePolicy")
 		return ctrl.Result{}, err
 	}
@@ -170,12 +180,12 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 				r.setAccepted(ctx, policy, metav1.ConditionFalse, "EndpointNotFound", "referenced ServiceEndpoint does not exist"),
 			)
 			if joined != nil {
-				resultLabel = reconcileResultError
+				*errorReason = serviceroute.ReconcileRevokeMissingEndpoint
 				logger.Error(joined, "revoke eBPF policy for missing ServiceEndpoint")
 			}
 			return ctrl.Result{}, joined
 		}
-		resultLabel = reconcileResultError
+		*errorReason = serviceroute.ReconcileGetEndpoint
 		logger.Error(err, "get ServiceEndpoint", "serviceEndpoint", policy.Spec.ServiceRef.Name)
 		return ctrl.Result{}, fmt.Errorf("get ServiceEndpoint %s/%s: %w", policy.Namespace, policy.Spec.ServiceRef.Name, err)
 	}
@@ -185,7 +195,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	endpoint, err := r.withProducerReports(ctx, endpoint)
 	if err != nil {
-		resultLabel = reconcileResultError
+		*errorReason = serviceroute.ReconcileProducerReports
 		logger.Error(err, "read producer reports", "serviceEndpoint", endpoint.Name)
 		return ctrl.Result{}, err
 	}
@@ -202,7 +212,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	attachments := &cloudv1alpha1.VPCAttachmentList{}
 	if err := r.List(ctx, attachments); err != nil {
-		resultLabel = reconcileResultError
+		*errorReason = serviceroute.ReconcileListAttachments
 		logger.Error(err, "list VPCAttachments")
 		return ctrl.Result{}, fmt.Errorf("list VPCAttachments: %w", err)
 	}
@@ -215,6 +225,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	conflicts, conflictErr := r.conflictingPolicies(ctx, all)
 	if conflictErr != nil {
+		*errorReason = serviceroute.ReconcileConflictLookup
 		return ctrl.Result{}, errors.Join(conflictErr, r.removePolicyLocked(req.NamespacedName))
 	}
 	if conflicts[req.NamespacedName] {
@@ -240,7 +251,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 				r.removePolicyLocked(req.NamespacedName),
 				r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid"),
 			)
-			resultLabel = reconcileResultError
+			*errorReason = serviceroute.ReconcileDependencyNotReady
 			logger.Error(joined, "resolve service routing dependency", "serviceEndpoint", endpoint.Name)
 			return ctrl.Result{}, joined
 		}
@@ -249,7 +260,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 			r.removePolicyLocked(req.NamespacedName),
 			r.setAccepted(ctx, policy, metav1.ConditionFalse, "Invalid", err.Error()),
 		)
-		resultLabel = reconcileResultError
+		*errorReason = serviceroute.ReconcileCompile
 		logger.Error(joined, "compile service eBPF policy", "serviceEndpoint", endpoint.Name)
 		return ctrl.Result{}, joined
 	}
@@ -259,7 +270,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// change and reconstructs all desired state before an unchanged intent
 		// is otherwise skipped by replacePolicy.
 		if err := r.Programmer.Initialize(); err != nil {
-			resultLabel = reconcileResultError
+			*errorReason = serviceroute.ReconcileRefreshMaps
 			logger.Error(err, "refresh service route maps", "serviceEndpoint", endpoint.Name)
 			return ctrl.Result{}, fmt.Errorf("refresh service route maps: %w", err)
 		}
@@ -267,13 +278,13 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	logger.Info("compiled service eBPF policy", "serviceEndpoint", endpoint.Name, "attachments", len(intents))
 	logUnresolvedNextHops(logger, endpoint.Name, intents)
 	if err := r.replacePolicyLocked(req.NamespacedName, intents); err != nil {
-		resultLabel = reconcileResultError
+		*errorReason = serviceroute.ReconcileProgram
 		logger.Error(err, "program service eBPF policy", "serviceEndpoint", endpoint.Name)
 		return ctrl.Result{}, err
 	}
 	programmed = len(intents) != 0 && inputDigest != ""
 	if err := r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid"); err != nil {
-		resultLabel = reconcileResultError
+		*errorReason = serviceroute.ReconcileAcceptStatus
 		logger.Error(err, "update ServiceRoutePolicy acceptance status")
 		return ctrl.Result{}, err
 	}
