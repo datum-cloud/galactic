@@ -16,6 +16,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
@@ -80,17 +81,28 @@ func (f *fixture) bindProvider(probe *podHolder) {
 	})
 	c := f.providerPod(probe)
 	deadline := time.Now().Add(20 * time.Second)
+	var last error
 	for n := 0; ; n++ {
 		rt := routeObject("probe", "fd00:10:0:f:ff::/80", string(f.vpc.UID))
 		rt.Name += string(rune('a' + n%26))
 		rt.Spec.Claim = &galacticv1alpha1.EdgeRouteClaim{Attachment: "x", HolderPodUID: "someone-else",
 			HolderInstance: "x", InstanceEpoch: 1, Epoch: 1}
-		if err := c.Create(context.Background(), rt); err != nil {
+		err := c.Create(context.Background(), rt)
+		// Only the binding's own refusal shows that it is enforced. A
+		// RoleBinding that has not taken effect refuses with Forbidden,
+		// and a transient error is no evidence, so probe again until the
+		// deadline. A policy refusal is Invalid, which is also how the
+		// provider's store reports a lost lease.
+		if apierrors.IsInvalid(err) {
 			return
 		}
-		_ = f.admin.Delete(context.Background(), rt)
+		if err == nil {
+			_ = f.admin.Delete(context.Background(), rt)
+		} else {
+			last = err
+		}
 		if time.Now().After(deadline) {
-			f.t.Fatal("provider policy binding not enforced")
+			f.t.Fatalf("provider policy binding not enforced: %v", last)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
