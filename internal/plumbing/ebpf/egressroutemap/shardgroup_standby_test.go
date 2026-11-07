@@ -124,6 +124,22 @@ func TestApplyNAT64Standby(t *testing.T) {
 			},
 			want: map[netip.Addr]wantShard{primary: {unreachable: true}, other: {active: true}, standby: {held: true}},
 		},
+		{
+			name:  "every shard unreachable: the NAT64 group is empty and nothing is held",
+			class: standbyTestNAT64,
+			shards: []standbyShard{
+				{sid: primary}, {sid: other}, {sid: standby, standby: true},
+			},
+			want: map[netip.Addr]wantShard{
+				primary: {unreachable: true}, other: {unreachable: true}, standby: {unreachable: true},
+			},
+		},
+		{
+			name:   "every shard unreachable: the NAT66 group is empty",
+			class:  NAT66Class,
+			shards: []standbyShard{{sid: primary}, {sid: other}},
+			want:   map[netip.Addr]wantShard{primary: {unreachable: true}, other: {unreachable: true}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
