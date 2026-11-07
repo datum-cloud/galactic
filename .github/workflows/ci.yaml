@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 env:
-  GO_VERSION: '1.26'
+  GO_VERSION: '1.27'
   # Pinned rather than 3.x: setup-task resolves a range from git tags, so a
   # tag pushed before its release assets exist (v3.54.0) breaks every job
   # with a 404 on download.
