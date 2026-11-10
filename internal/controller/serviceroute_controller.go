@@ -91,6 +91,25 @@ func (r *ServiceRoutePolicyReconciler) compile(policy *networkv1alpha1.ServiceRo
 
 const serviceRouteMapResyncInterval = 30 * time.Second
 
+// retryHeld shortens result to heldInterfaceRetry while the programmer holds a
+// consumer whose interface is not ready, and logs that it does.
+func (r *ServiceRoutePolicyReconciler) retryHeld(logger logr.Logger, endpoint string, result ctrl.Result) ctrl.Result {
+	holder, ok := r.Programmer.(interface{ Holding() bool })
+	if !ok || !holder.Holding() {
+		return result
+	}
+	logger.Info("holding service routes until their interfaces are ready", "serviceEndpoint", endpoint)
+	if result.RequeueAfter == 0 || result.RequeueAfter > heldInterfaceRetry {
+		result.RequeueAfter = heldInterfaceRetry
+	}
+	return result
+}
+
+// heldInterfaceRetry is how soon a policy is rechecked while a consumer is held
+// for an interface that has no attachment identity yet. An interface event
+// installs one that only lacked the interface.
+const heldInterfaceRetry = time.Second
+
 // Startup sync retries back off from startupSyncInitialBackoff to
 // startupSyncMaxBackoff. A map that is not pinned yet logs at V(1) until it
 // has been missing for startupSyncMissingMapGrace, since the datapath loader
@@ -303,7 +322,7 @@ func (r *ServiceRoutePolicyReconciler) reconcilePolicy(
 		logger.Error(err, "update ServiceRoutePolicy acceptance status")
 		return ctrl.Result{}, err
 	}
-	return serviceRouteRequeue(policy, endpoint, intents, time.Now()), nil
+	return r.retryHeld(logger, endpoint.Name, serviceRouteRequeue(policy, endpoint, intents, time.Now())), nil
 }
 
 // serviceRouteRequeue returns when a programmed policy is next checked: at the

@@ -188,19 +188,21 @@ func TestLocalSetWithNoProducerInterfaceIsWithdrawn(t *testing.T) {
 	}
 	delete(f.links, producerADevice)
 	delete(f.links, producerBDevice)
-	held := localSetIntent(producer(producerADevice, true), producer(producerBDevice, false))
-	if err := f.programmer.Apply(held); err != nil {
+	next := localSetIntent(producer(producerADevice, true), producer(producerBDevice, false))
+	if err := f.programmer.Apply(next); err != nil {
 		t.Fatalf("Apply with no producer interface = %v, want the route held", err)
 	}
-	if err := f.programmer.Remove(held); err != nil {
+	if !f.programmer.Holding() {
+		t.Fatal("Holding = false with every producer gone")
+	}
+	if err := f.programmer.Remove(intent); err != nil {
 		t.Fatal(err)
 	}
-	f.repair(t, intent)
 	if len(f.routes.rows) != 0 || len(f.set.rows) != 0 {
 		t.Fatalf("routes=%d sets=%d with every producer gone, want the route withdrawn",
 			len(f.routes.rows), len(f.set.rows))
 	}
-	if len(f.programmer.desiredIntents[intentKey(intent)]) != 1 {
+	if len(f.programmer.desiredIntents[intentKey(next)]) != 1 {
 		t.Fatal("lost the intent to restore when a producer returns")
 	}
 }
