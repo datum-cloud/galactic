@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
@@ -80,7 +81,15 @@ type kernelBackend struct{}
 
 // NewKernelBackend returns the production Backend, wired to real kernel state.
 // Requires CAP_NET_ADMIN.
-func NewKernelBackend() Backend { return kernelBackend{} }
+//
+// It also makes the process accept a default route to a backend's SID. The
+// sidecar resolves SIDs in Envoy's pod namespace, where the default toward the
+// host is the only route, so the shard check that rejects a default-route
+// match would refuse every backend.
+func NewKernelBackend() Backend {
+	egressroutemap.AcceptDefaultRoute()
+	return kernelBackend{}
+}
 
 func (kernelBackend) EnsureVRF(vpc string) (uint32, error) {
 	if err := vrf.AddInRange(vpc, sidecarTableIDMin, sidecarTableIDMax); err != nil {
