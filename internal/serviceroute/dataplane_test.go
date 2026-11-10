@@ -1035,3 +1035,73 @@ func TestInterfaceChurnKeepsUnrelatedRoutesServing(t *testing.T) {
 	}
 	observe()
 }
+
+// A consumer whose interface is not on the node yet, or has no attachment
+// identity yet, is held with nothing installed instead of failing the policy,
+// and the next repair installs it once the interface is ready.
+func TestApplyHoldsConsumerUntilItsInterfaceIsReady(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		block func(programmer *EBPFRouteProgrammer, ready *bool)
+	}{
+		{"interface missing", func(programmer *EBPFRouteProgrammer, ready *bool) {
+			programmer.targetIndexFn = func(name string) (uint32, error) {
+				if name == testConsumerDeviceName && !*ready {
+					return 0, netlink.LinkNotFoundError{}
+				}
+				if name == testConsumerDeviceName {
+					return 10, nil
+				}
+				return 20, nil
+			}
+		}},
+		{"identity missing", func(programmer *EBPFRouteProgrammer, ready *bool) {
+			programmer.targetIndexFn = func(name string) (uint32, error) {
+				if name == testConsumerDeviceName && !*ready {
+					return 77, nil
+				}
+				if name == testConsumerDeviceName {
+					return 10, nil
+				}
+				return 20, nil
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			programmer := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
+			programmer.mapIDs = mapSetIDs{1, 2, 3, 4, 5, 6}
+			programmer.mapIDsValid = true
+			programmer.readMapIDsFn = func(string) (mapSetIDs, error) { return programmer.mapIDs, nil }
+			ready := false
+			tc.block(programmer, &ready)
+			intent := localTestIntent()
+			if err := programmer.Apply(intent); err != nil {
+				t.Fatalf("Apply = %v, want the consumer held", err)
+			}
+			if len(programmer.routeRefs) != 0 {
+				t.Fatal("held consumer installed routes")
+			}
+			if len(programmer.desiredIntents[intentKey(intent)]) != 1 {
+				t.Fatal("held consumer was not kept for repair")
+			}
+			if !programmer.Holding([]RouteIntent{intent}) {
+				t.Fatal("Holding = false while the consumer is held")
+			}
+			other := intent
+			other.Attachment.Name = "another-consumer"
+			if programmer.Holding([]RouteIntent{other}) {
+				t.Fatal("Holding = true for an intent of another policy")
+			}
+			ready = true
+			if err := programmer.Initialize(); err != nil {
+				t.Fatalf("repair once ready: %v", err)
+			}
+			if len(programmer.routeRefs) == 0 {
+				t.Fatal("ready consumer was not installed")
+			}
+			if programmer.Holding([]RouteIntent{intent}) {
+				t.Fatal("Holding = true after the consumer was installed")
+			}
+		})
+	}
+}

@@ -7,7 +7,6 @@
 package serviceroute
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -189,16 +188,21 @@ func TestLocalSetWithNoProducerInterfaceIsWithdrawn(t *testing.T) {
 	}
 	delete(f.links, producerADevice)
 	delete(f.links, producerBDevice)
-	err := f.programmer.Apply(localSetIntent(producer(producerADevice, true), producer(producerBDevice, false)))
-	if !errors.As(err, &netlink.LinkNotFoundError{}) {
-		t.Fatalf("Apply with no producer interface = %v, want a missing link error", err)
+	next := localSetIntent(producer(producerADevice, true), producer(producerBDevice, false))
+	if err := f.programmer.Apply(next); err != nil {
+		t.Fatalf("Apply with no producer interface = %v, want the route held", err)
 	}
-	f.repair(t, intent)
+	if !f.programmer.Holding([]RouteIntent{next}) {
+		t.Fatal("Holding = false with every producer gone")
+	}
+	if err := f.programmer.Remove(intent); err != nil {
+		t.Fatal(err)
+	}
 	if len(f.routes.rows) != 0 || len(f.set.rows) != 0 {
 		t.Fatalf("routes=%d sets=%d with every producer gone, want the route withdrawn",
 			len(f.routes.rows), len(f.set.rows))
 	}
-	if len(f.programmer.desiredIntents[intentKey(intent)]) != 1 {
+	if len(f.programmer.desiredIntents[intentKey(next)]) != 1 {
 		t.Fatal("lost the intent to restore when a producer returns")
 	}
 }

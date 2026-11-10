@@ -563,6 +563,10 @@ func (t *Tables) PolicyEnabled() (bool, error) {
 	return value.Enabled != 0, nil
 }
 
+// ErrNoAttachmentIdentity reports an interface the CNI has not registered an
+// attachment identity for, either yet or any more.
+var ErrNoAttachmentIdentity = errors.New("no attachment identity")
+
 // IdentityToken returns the current nonzero incarnation token for ifindex.
 func (t *Tables) IdentityToken(ifindex uint32) (uint64, error) {
 	if t.identities == nil {
@@ -570,6 +574,10 @@ func (t *Tables) IdentityToken(ifindex uint32) (uint64, error) {
 	}
 	var token uint64
 	if err := t.identities.Lookup(ifindex, &token); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, fmt.Errorf("serviceroutemap: lookup attachment identity ifindex=%d: %w: %w",
+				ifindex, ErrNoAttachmentIdentity, err)
+		}
 		return 0, fmt.Errorf("serviceroutemap: lookup attachment identity ifindex=%d: %w", ifindex, err)
 	}
 	if token == 0 {

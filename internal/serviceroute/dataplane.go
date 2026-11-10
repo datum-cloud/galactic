@@ -221,7 +221,10 @@ func (p *EBPFRouteProgrammer) Apply(intent RouteIntent) error {
 	if err := p.ensureOpen(); err != nil {
 		return err
 	}
-	entries, err := p.entries(intent)
+	// An interface that is not on this node yet, or not registered yet, holds
+	// the intent with nothing installed: repairDesired installs it when the
+	// interface appears.
+	entries, err := p.recoverableEntries(intent)
 	if err != nil {
 		return err
 	}
@@ -251,6 +254,27 @@ func (p *EBPFRouteProgrammer) Apply(intent RouteIntent) error {
 	p.appliedRefs[key] = append(p.appliedRefs[key], applied)
 	p.desiredIntents[key] = append(p.desiredIntents[key], cloneRouteIntent(intent))
 	return nil
+}
+
+// Holding reports whether any of intents is held with nothing installed
+// because its interface is missing or has no attachment identity yet. The CNI
+// writes an interface's identity after the interface appears, with no
+// interface event of its own, so a caller rechecks a policy that holds one.
+func (p *EBPFRouteProgrammer) Holding(intents []RouteIntent) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, intent := range intents {
+		key := intentKey(intent)
+		if len(p.desiredIntents[key]) == 0 {
+			continue
+		}
+		for _, applied := range p.appliedRefs[key] {
+			if len(applied) == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *EBPFRouteProgrammer) Remove(intent RouteIntent) error {
@@ -609,12 +633,14 @@ func (p *EBPFRouteProgrammer) closeHandles() {
 	p.inheritedGate = false
 }
 
-// Missing links withdraw their entries while preserving intent for recreation.
-// Other lookup errors cannot prove that an interface has disappeared.
+// Missing links, and links with no attachment identity, withdraw their entries
+// while preserving intent for recreation. Other lookup errors cannot prove that
+// an interface has disappeared.
 func (p *EBPFRouteProgrammer) recoverableEntries(intent RouteIntent) ([]appliedEntry, error) {
 	entries, err := p.entries(intent)
 	var missing netlink.LinkNotFoundError
-	if errors.As(err, &missing) || errors.Is(err, errNoProducerInterface) {
+	if errors.As(err, &missing) || errors.Is(err, errNoProducerInterface) ||
+		errors.Is(err, serviceroutemap.ErrNoAttachmentIdentity) {
 		return []appliedEntry{}, nil
 	}
 	return entries, err

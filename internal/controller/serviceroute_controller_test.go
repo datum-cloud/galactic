@@ -10,13 +10,17 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -504,5 +508,106 @@ func TestServiceRouteStartupSyncBacksOffWhileMapsMissing(t *testing.T) {
 				t.Fatalf("Initialize calls = %d, want %d", programmer.initializeCalls, tt.wantInits)
 			}
 		})
+	}
+}
+
+// One consumer that cannot be programmed does not hold back the rest of the
+// policy: every other intent is applied and the failure is still returned.
+func TestServiceRouteReplacePolicyAppliesPastAFailingConsumer(t *testing.T) {
+	programmer := &retryRouteProgrammer{failAttachment: "b"}
+	reconciler := &ServiceRoutePolicyReconciler{Programmer: programmer}
+	policy := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName}
+	intents := []serviceroute.RouteIntent{
+		{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "a"}},
+		{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "b"}},
+		{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "c"}},
+	}
+	for range 5 {
+		reconciler.Applied = nil
+		programmer.applyCalls = 0
+		if err := reconciler.replacePolicy(policy, intents); err == nil {
+			t.Fatal("replacePolicy succeeded, want the failing consumer reported")
+		}
+		if programmer.applyCalls != 3 {
+			t.Fatalf("Apply calls = %d, want every intent tried", programmer.applyCalls)
+		}
+		if got := len(reconciler.Applied[policy]); got != 2 {
+			t.Fatalf("tracked intents = %d, want the two that succeeded", got)
+		}
+	}
+}
+
+// An interface event requeues the policies whose applied intents use that
+// interface, and only those.
+func TestServiceRouteInterfaceChangedRequeuesPoliciesUsingIt(t *testing.T) {
+	reconciler := &ServiceRoutePolicyReconciler{
+		Programmer: &retryRouteProgrammer{},
+		requeue:    make(chan event.GenericEvent, 8),
+	}
+	dns := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName}
+	other := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: "dns-tcp"}
+	if err := reconciler.replacePolicy(dns, []serviceroute.RouteIntent{{
+		Attachment:     types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "a"},
+		ConsumerDevice: "tap-a",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.replacePolicy(other, []serviceroute.RouteIntent{{
+		Attachment:     types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "b"},
+		ConsumerDevice: "tap-b",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	reconciler.InterfaceChanged("tap-a")
+	if len(reconciler.requeue) != 1 || (<-reconciler.requeue).Object.GetName() != dns.Name {
+		t.Fatal("tap-a did not requeue exactly the dns policy")
+	}
+	reconciler.InterfaceChanged("unknown")
+	if len(reconciler.requeue) != 0 {
+		t.Fatal("an unused interface requeued a policy")
+	}
+	if err := reconciler.removePolicy(dns); err != nil {
+		t.Fatal(err)
+	}
+	reconciler.InterfaceChanged("tap-a")
+	if len(reconciler.requeue) != 0 {
+		t.Fatal("a removed policy was still requeued")
+	}
+}
+
+type holdingProgrammer struct {
+	retryRouteProgrammer
+	holding bool
+}
+
+func (p *holdingProgrammer) Holding([]serviceroute.RouteIntent) bool { return p.holding }
+
+// A policy holding a consumer is rechecked soon, backing off to the resync
+// interval, and a policy that holds nothing keeps its own requeue.
+func TestServiceRouteRetryHeldBacksOffPerPolicy(t *testing.T) {
+	programmer := &holdingProgrammer{holding: true}
+	reconciler := &ServiceRoutePolicyReconciler{Programmer: programmer}
+	key := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName}
+	got := make([]time.Duration, 0, 7)
+	for range 7 {
+		got = append(got, reconciler.retryHeld(logr.Discard(), key, nil, ctrl.Result{}).RequeueAfter)
+	}
+	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
+		16 * time.Second, 30 * time.Second, 30 * time.Second}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("held requeues = %v, want %v", got, want)
+	}
+	programmer.holding = false
+	if r := reconciler.retryHeld(logr.Discard(), key, nil, ctrl.Result{}); r.RequeueAfter != 0 {
+		t.Fatalf("policy no longer holding requeued after %v, want its own result", r.RequeueAfter)
+	}
+	own := ctrl.Result{RequeueAfter: 30 * time.Second}
+	if r := reconciler.retryHeld(logr.Discard(), key, nil, own); r.RequeueAfter != own.RequeueAfter {
+		t.Fatalf("requeue = %v, want the policy's own 30s", r.RequeueAfter)
+	}
+	programmer.holding = true
+	if r := reconciler.retryHeld(logr.Discard(), key, nil, ctrl.Result{}); r.RequeueAfter != time.Second {
+		t.Fatalf("a new hold started at %v, want 1s", r.RequeueAfter)
 	}
 }

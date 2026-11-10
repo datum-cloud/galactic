@@ -71,6 +71,17 @@ type ServiceRoutePolicyReconciler struct {
 	// (noteConflicts).
 	conflicted map[types.NamespacedName]bool
 	requeue    chan event.GenericEvent
+
+	// devices maps each interface name an applied intent uses to the
+	// policies using it, so an interface event requeues them
+	// (InterfaceChanged). It has its own lock so the interface watch never
+	// waits on a reconcile.
+	devicesMu sync.Mutex
+	devices   map[string]map[types.NamespacedName]struct{}
+
+	// heldBackoff is the next recheck delay of each policy that holds a
+	// consumer for an interface that is not ready (retryHeld).
+	heldBackoff map[types.NamespacedName]time.Duration
 }
 
 // compile compiles policy for node with this router's options.
@@ -83,6 +94,41 @@ func (r *ServiceRoutePolicyReconciler) compile(policy *networkv1alpha1.ServiceRo
 }
 
 const serviceRouteMapResyncInterval = 30 * time.Second
+
+// retryHeld rechecks a policy sooner while the programmer holds one of its
+// consumers for an interface that is not ready, backing off from
+// heldInterfaceRetry to serviceRouteMapResyncInterval so a consumer whose
+// interface never returns costs one reconcile per resync. It logs when a
+// policy starts holding.
+func (r *ServiceRoutePolicyReconciler) retryHeld(logger logr.Logger, key types.NamespacedName,
+	intents []serviceroute.RouteIntent, result ctrl.Result,
+) ctrl.Result {
+	holder, ok := r.Programmer.(interface {
+		Holding([]serviceroute.RouteIntent) bool
+	})
+	if !ok || !holder.Holding(intents) {
+		delete(r.heldBackoff, key)
+		return result
+	}
+	if r.heldBackoff == nil {
+		r.heldBackoff = make(map[types.NamespacedName]time.Duration)
+	}
+	wait, held := r.heldBackoff[key]
+	if !held {
+		logger.Info("holding a service route until its interface is ready")
+		wait = heldInterfaceRetry
+	}
+	r.heldBackoff[key] = min(2*wait, serviceRouteMapResyncInterval)
+	if result.RequeueAfter == 0 || result.RequeueAfter > wait {
+		result.RequeueAfter = wait
+	}
+	return result
+}
+
+// heldInterfaceRetry is the first recheck delay of a policy holding a consumer
+// for an interface that has no attachment identity yet. An interface event
+// installs one that only lacked the interface.
+const heldInterfaceRetry = time.Second
 
 // Startup sync retries back off from startupSyncInitialBackoff to
 // startupSyncMaxBackoff. A map that is not pinned yet logs at V(1) until it
@@ -296,7 +342,8 @@ func (r *ServiceRoutePolicyReconciler) reconcilePolicy(
 		logger.Error(err, "update ServiceRoutePolicy acceptance status")
 		return ctrl.Result{}, err
 	}
-	return serviceRouteRequeue(policy, endpoint, intents, time.Now()), nil
+	result := serviceRouteRequeue(policy, endpoint, intents, time.Now())
+	return r.retryHeld(logger, req.NamespacedName, intents, result), nil
 }
 
 // serviceRouteRequeue returns when a programmed policy is next checked: at the
@@ -736,6 +783,7 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 	intents []serviceroute.RouteIntent,
 ) error {
 	defer r.updateProgrammedGauge()
+	defer r.indexPolicyDevices(key)
 	if r.Applied == nil {
 		r.Applied = make(map[types.NamespacedName]map[serviceroute.IntentSlot]serviceroute.RouteIntent)
 	}
@@ -794,6 +842,9 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 		r.Metrics.ObserveOperation("remove", nil)
 		delete(current, slot)
 	}
+	// One consumer that cannot be programmed must not hold back the others,
+	// so every intent is tried and the failures are returned together.
+	var applyErrs []error
 	for slot, intent := range desired {
 		if existing, ok := current[slot]; ok && reflect.DeepEqual(existing, intent) {
 			continue
@@ -801,9 +852,10 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 		if err := r.Programmer.Apply(intent); err != nil {
 			r.Metrics.ObserveOperation("apply", err)
 			if cleanupErr := r.Programmer.Cleanup(intent); cleanupErr != nil {
-				return errors.Join(err, &serviceRoutePolicyCleanupError{err: cleanupErr})
+				return errors.Join(append(applyErrs, err, &serviceRoutePolicyCleanupError{err: cleanupErr})...)
 			}
-			return err
+			applyErrs = append(applyErrs, err)
+			continue
 		}
 		r.Metrics.ObserveOperation("apply", nil)
 		current[slot] = intent
@@ -811,7 +863,7 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 	if len(current) == 0 {
 		delete(r.Applied, key)
 	}
-	return nil
+	return errors.Join(applyErrs...)
 }
 
 func (r *ServiceRoutePolicyReconciler) removePolicy(key types.NamespacedName) error {
@@ -822,6 +874,8 @@ func (r *ServiceRoutePolicyReconciler) removePolicy(key types.NamespacedName) er
 
 func (r *ServiceRoutePolicyReconciler) removePolicyLocked(key types.NamespacedName) error {
 	defer r.updateProgrammedGauge()
+	defer r.indexPolicyDevices(key)
+	delete(r.heldBackoff, key)
 	current := r.Applied[key]
 	for attachment, intent := range current {
 		if err := r.Programmer.Remove(intent); err != nil {
