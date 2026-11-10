@@ -78,6 +78,10 @@ type ServiceRoutePolicyReconciler struct {
 	// waits on a reconcile.
 	devicesMu sync.Mutex
 	devices   map[string]map[types.NamespacedName]struct{}
+
+	// heldBackoff is the next recheck delay of each policy that holds a
+	// consumer for an interface that is not ready (retryHeld).
+	heldBackoff map[types.NamespacedName]time.Duration
 }
 
 // compile compiles policy for node with this router's options.
@@ -91,21 +95,37 @@ func (r *ServiceRoutePolicyReconciler) compile(policy *networkv1alpha1.ServiceRo
 
 const serviceRouteMapResyncInterval = 30 * time.Second
 
-// retryHeld shortens result to heldInterfaceRetry while the programmer holds a
-// consumer whose interface is not ready, and logs that it does.
-func (r *ServiceRoutePolicyReconciler) retryHeld(logger logr.Logger, endpoint string, result ctrl.Result) ctrl.Result {
-	holder, ok := r.Programmer.(interface{ Holding() bool })
-	if !ok || !holder.Holding() {
+// retryHeld rechecks a policy sooner while the programmer holds one of its
+// consumers for an interface that is not ready, backing off from
+// heldInterfaceRetry to serviceRouteMapResyncInterval so a consumer whose
+// interface never returns costs one reconcile per resync. It logs when a
+// policy starts holding.
+func (r *ServiceRoutePolicyReconciler) retryHeld(logger logr.Logger, key types.NamespacedName,
+	intents []serviceroute.RouteIntent, result ctrl.Result,
+) ctrl.Result {
+	holder, ok := r.Programmer.(interface {
+		Holding([]serviceroute.RouteIntent) bool
+	})
+	if !ok || !holder.Holding(intents) {
+		delete(r.heldBackoff, key)
 		return result
 	}
-	logger.Info("holding service routes until their interfaces are ready", "serviceEndpoint", endpoint)
-	if result.RequeueAfter == 0 || result.RequeueAfter > heldInterfaceRetry {
-		result.RequeueAfter = heldInterfaceRetry
+	if r.heldBackoff == nil {
+		r.heldBackoff = make(map[types.NamespacedName]time.Duration)
+	}
+	wait, held := r.heldBackoff[key]
+	if !held {
+		logger.Info("holding a service route until its interface is ready")
+		wait = heldInterfaceRetry
+	}
+	r.heldBackoff[key] = min(2*wait, serviceRouteMapResyncInterval)
+	if result.RequeueAfter == 0 || result.RequeueAfter > wait {
+		result.RequeueAfter = wait
 	}
 	return result
 }
 
-// heldInterfaceRetry is how soon a policy is rechecked while a consumer is held
+// heldInterfaceRetry is the first recheck delay of a policy holding a consumer
 // for an interface that has no attachment identity yet. An interface event
 // installs one that only lacked the interface.
 const heldInterfaceRetry = time.Second
@@ -322,7 +342,8 @@ func (r *ServiceRoutePolicyReconciler) reconcilePolicy(
 		logger.Error(err, "update ServiceRoutePolicy acceptance status")
 		return ctrl.Result{}, err
 	}
-	return r.retryHeld(logger, endpoint.Name, serviceRouteRequeue(policy, endpoint, intents, time.Now())), nil
+	result := serviceRouteRequeue(policy, endpoint, intents, time.Now())
+	return r.retryHeld(logger, req.NamespacedName, intents, result), nil
 }
 
 // serviceRouteRequeue returns when a programmed policy is next checked: at the
@@ -854,6 +875,7 @@ func (r *ServiceRoutePolicyReconciler) removePolicy(key types.NamespacedName) er
 func (r *ServiceRoutePolicyReconciler) removePolicyLocked(key types.NamespacedName) error {
 	defer r.updateProgrammedGauge()
 	defer r.indexPolicyDevices(key)
+	delete(r.heldBackoff, key)
 	current := r.Applied[key]
 	for attachment, intent := range current {
 		if err := r.Programmer.Remove(intent); err != nil {

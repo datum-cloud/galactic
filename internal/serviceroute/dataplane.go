@@ -256,14 +256,18 @@ func (p *EBPFRouteProgrammer) Apply(intent RouteIntent) error {
 	return nil
 }
 
-// Holding reports whether any intent is held with nothing installed because
-// its interface is missing or has no attachment identity yet. The CNI writes
-// an interface's identity after the interface appears, with no interface event
-// of its own, so a caller retries soon while something is held.
-func (p *EBPFRouteProgrammer) Holding() bool {
+// Holding reports whether any of intents is held with nothing installed
+// because its interface is missing or has no attachment identity yet. The CNI
+// writes an interface's identity after the interface appears, with no
+// interface event of its own, so a caller rechecks a policy that holds one.
+func (p *EBPFRouteProgrammer) Holding(intents []RouteIntent) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for key := range p.desiredIntents {
+	for _, intent := range intents {
+		key := intentKey(intent)
+		if len(p.desiredIntents[key]) == 0 {
+			continue
+		}
 		for _, applied := range p.appliedRefs[key] {
 			if len(applied) == 0 {
 				return true

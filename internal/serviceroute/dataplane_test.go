@@ -1084,7 +1084,7 @@ func TestApplyHoldsConsumerUntilItsInterfaceIsReady(t *testing.T) {
 			if len(programmer.desiredIntents[intentKey(intent)]) != 1 {
 				t.Fatal("held consumer was not kept for repair")
 			}
-			if !programmer.Holding() {
+			if !programmer.Holding([]RouteIntent{intent}) {
 				t.Fatal("Holding = false while the consumer is held")
 			}
 			ready = true
@@ -1094,7 +1094,7 @@ func TestApplyHoldsConsumerUntilItsInterfaceIsReady(t *testing.T) {
 			if len(programmer.routeRefs) == 0 {
 				t.Fatal("ready consumer was not installed")
 			}
-			if programmer.Holding() {
+			if programmer.Holding([]RouteIntent{intent}) {
 				t.Fatal("Holding = true after the consumer was installed")
 			}
 		})
