@@ -71,6 +71,13 @@ type ServiceRoutePolicyReconciler struct {
 	// (noteConflicts).
 	conflicted map[types.NamespacedName]bool
 	requeue    chan event.GenericEvent
+
+	// devices maps each interface name an applied intent uses to the
+	// policies using it, so an interface event requeues them
+	// (InterfaceChanged). It has its own lock so the interface watch never
+	// waits on a reconcile.
+	devicesMu sync.Mutex
+	devices   map[string]map[types.NamespacedName]struct{}
 }
 
 // compile compiles policy for node with this router's options.
@@ -736,6 +743,7 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 	intents []serviceroute.RouteIntent,
 ) error {
 	defer r.updateProgrammedGauge()
+	defer r.indexPolicyDevices(key)
 	if r.Applied == nil {
 		r.Applied = make(map[types.NamespacedName]map[serviceroute.IntentSlot]serviceroute.RouteIntent)
 	}
@@ -794,6 +802,9 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 		r.Metrics.ObserveOperation("remove", nil)
 		delete(current, slot)
 	}
+	// One consumer that cannot be programmed must not hold back the others,
+	// so every intent is tried and the failures are returned together.
+	var applyErrs []error
 	for slot, intent := range desired {
 		if existing, ok := current[slot]; ok && reflect.DeepEqual(existing, intent) {
 			continue
@@ -801,9 +812,10 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 		if err := r.Programmer.Apply(intent); err != nil {
 			r.Metrics.ObserveOperation("apply", err)
 			if cleanupErr := r.Programmer.Cleanup(intent); cleanupErr != nil {
-				return errors.Join(err, &serviceRoutePolicyCleanupError{err: cleanupErr})
+				return errors.Join(append(applyErrs, err, &serviceRoutePolicyCleanupError{err: cleanupErr})...)
 			}
-			return err
+			applyErrs = append(applyErrs, err)
+			continue
 		}
 		r.Metrics.ObserveOperation("apply", nil)
 		current[slot] = intent
@@ -811,7 +823,7 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 	if len(current) == 0 {
 		delete(r.Applied, key)
 	}
-	return nil
+	return errors.Join(applyErrs...)
 }
 
 func (r *ServiceRoutePolicyReconciler) removePolicy(key types.NamespacedName) error {
@@ -822,6 +834,7 @@ func (r *ServiceRoutePolicyReconciler) removePolicy(key types.NamespacedName) er
 
 func (r *ServiceRoutePolicyReconciler) removePolicyLocked(key types.NamespacedName) error {
 	defer r.updateProgrammedGauge()
+	defer r.indexPolicyDevices(key)
 	current := r.Applied[key]
 	for attachment, intent := range current {
 		if err := r.Programmer.Remove(intent); err != nil {

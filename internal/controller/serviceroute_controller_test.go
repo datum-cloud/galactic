@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -504,5 +505,70 @@ func TestServiceRouteStartupSyncBacksOffWhileMapsMissing(t *testing.T) {
 				t.Fatalf("Initialize calls = %d, want %d", programmer.initializeCalls, tt.wantInits)
 			}
 		})
+	}
+}
+
+// One consumer that cannot be programmed does not hold back the rest of the
+// policy: every other intent is applied and the failure is still returned.
+func TestServiceRouteReplacePolicyAppliesPastAFailingConsumer(t *testing.T) {
+	programmer := &retryRouteProgrammer{failAttachment: "b"}
+	reconciler := &ServiceRoutePolicyReconciler{Programmer: programmer}
+	policy := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName}
+	intents := []serviceroute.RouteIntent{
+		{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "a"}},
+		{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "b"}},
+		{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "c"}},
+	}
+	for range 5 {
+		reconciler.Applied = nil
+		programmer.applyCalls = 0
+		if err := reconciler.replacePolicy(policy, intents); err == nil {
+			t.Fatal("replacePolicy succeeded, want the failing consumer reported")
+		}
+		if programmer.applyCalls != 3 {
+			t.Fatalf("Apply calls = %d, want every intent tried", programmer.applyCalls)
+		}
+		if got := len(reconciler.Applied[policy]); got != 2 {
+			t.Fatalf("tracked intents = %d, want the two that succeeded", got)
+		}
+	}
+}
+
+// An interface event requeues the policies whose applied intents use that
+// interface, and only those.
+func TestServiceRouteInterfaceChangedRequeuesPoliciesUsingIt(t *testing.T) {
+	reconciler := &ServiceRoutePolicyReconciler{
+		Programmer: &retryRouteProgrammer{},
+		requeue:    make(chan event.GenericEvent, 8),
+	}
+	dns := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName}
+	other := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: "dns-tcp"}
+	if err := reconciler.replacePolicy(dns, []serviceroute.RouteIntent{{
+		Attachment:     types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "a"},
+		ConsumerDevice: "tap-a",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.replacePolicy(other, []serviceroute.RouteIntent{{
+		Attachment:     types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "b"},
+		ConsumerDevice: "tap-b",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	reconciler.InterfaceChanged("tap-a")
+	if len(reconciler.requeue) != 1 || (<-reconciler.requeue).Object.GetName() != dns.Name {
+		t.Fatal("tap-a did not requeue exactly the dns policy")
+	}
+	reconciler.InterfaceChanged("unknown")
+	if len(reconciler.requeue) != 0 {
+		t.Fatal("an unused interface requeued a policy")
+	}
+	if err := reconciler.removePolicy(dns); err != nil {
+		t.Fatal(err)
+	}
+	reconciler.InterfaceChanged("tap-a")
+	if len(reconciler.requeue) != 0 {
+		t.Fatal("a removed policy was still requeued")
 	}
 }

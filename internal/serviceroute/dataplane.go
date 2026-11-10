@@ -221,7 +221,10 @@ func (p *EBPFRouteProgrammer) Apply(intent RouteIntent) error {
 	if err := p.ensureOpen(); err != nil {
 		return err
 	}
-	entries, err := p.entries(intent)
+	// An interface that is not on this node yet, or not registered yet, holds
+	// the intent with nothing installed: repairDesired installs it when the
+	// interface appears.
+	entries, err := p.recoverableEntries(intent)
 	if err != nil {
 		return err
 	}
@@ -609,12 +612,14 @@ func (p *EBPFRouteProgrammer) closeHandles() {
 	p.inheritedGate = false
 }
 
-// Missing links withdraw their entries while preserving intent for recreation.
-// Other lookup errors cannot prove that an interface has disappeared.
+// Missing links, and links with no attachment identity, withdraw their entries
+// while preserving intent for recreation. Other lookup errors cannot prove that
+// an interface has disappeared.
 func (p *EBPFRouteProgrammer) recoverableEntries(intent RouteIntent) ([]appliedEntry, error) {
 	entries, err := p.entries(intent)
 	var missing netlink.LinkNotFoundError
-	if errors.As(err, &missing) || errors.Is(err, errNoProducerInterface) {
+	if errors.As(err, &missing) || errors.Is(err, errNoProducerInterface) ||
+		errors.Is(err, serviceroutemap.ErrNoAttachmentIdentity) {
 		return []appliedEntry{}, nil
 	}
 	return entries, err

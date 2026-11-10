@@ -491,7 +491,7 @@ func setupServiceRouteController(
 		ctrl.Log.Error(err, "service route eBPF maps are not available yet; initialization will retry on reconcile")
 	}
 
-	if err := (&controller.ServiceRoutePolicyReconciler{
+	serviceRoutes := &controller.ServiceRoutePolicyReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		NodeName:        nodeName,
@@ -501,8 +501,12 @@ func setupServiceRouteController(
 		FrontendEnabled: frontendEnabled,
 		SpreadPairing:   spreadPairing,
 		Applied:         make(map[types.NamespacedName]map[serviceroute.IntentSlot]serviceroute.RouteIntent),
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if err := serviceRoutes.SetupWithManager(mgr); err != nil {
 		return err
+	}
+	if err := mgr.Add(linkWatch("service-route-links", serviceRoutes.InterfaceChanged)); err != nil {
+		return fmt.Errorf("setup service route interface watch: %w", err)
 	}
 	producerHealth := &controller.ServiceProducerHealthReconciler{
 		Client:   mgr.GetClient(),

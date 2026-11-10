@@ -20,6 +20,7 @@ import (
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	networkv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/serviceroute"
 )
 
 // requestQueue is the controller's work queue.
@@ -230,6 +231,70 @@ func (r *ServiceRoutePolicyReconciler) noteConflicts(self types.NamespacedName,
 	for key := range previous {
 		if !r.conflicted[key] {
 			changed(key)
+		}
+	}
+}
+
+// intentDevices returns the interface names intent is programmed through.
+func intentDevices(intent serviceroute.RouteIntent) []string {
+	devices := make([]string, 0, 2+len(intent.Producers))
+	for _, name := range []string{intent.ConsumerDevice, intent.ServiceDevice} {
+		if name != "" {
+			devices = append(devices, name)
+		}
+	}
+	for _, producer := range intent.Producers {
+		if producer.Device != "" {
+			devices = append(devices, producer.Device)
+		}
+	}
+	return devices
+}
+
+// indexPolicyDevices records which interfaces key's applied intents use. The
+// caller holds r.mu.
+func (r *ServiceRoutePolicyReconciler) indexPolicyDevices(key types.NamespacedName) {
+	r.devicesMu.Lock()
+	defer r.devicesMu.Unlock()
+	if r.devices == nil {
+		r.devices = make(map[string]map[types.NamespacedName]struct{})
+	}
+	for name, policies := range r.devices {
+		delete(policies, key)
+		if len(policies) == 0 {
+			delete(r.devices, name)
+		}
+	}
+	for _, intent := range r.Applied[key] {
+		for _, name := range intentDevices(intent) {
+			if r.devices[name] == nil {
+				r.devices[name] = make(map[types.NamespacedName]struct{})
+			}
+			r.devices[name][key] = struct{}{}
+		}
+	}
+}
+
+// InterfaceChanged requeues every policy with an applied intent through the
+// interface name, so a consumer held while its interface was missing, or a
+// recreated interface, is programmed as soon as the interface appears.
+func (r *ServiceRoutePolicyReconciler) InterfaceChanged(name string) {
+	r.devicesMu.Lock()
+	keys := make([]types.NamespacedName, 0, len(r.devices[name]))
+	for key := range r.devices[name] {
+		keys = append(keys, key)
+	}
+	r.devicesMu.Unlock()
+	if r.requeue == nil {
+		return
+	}
+	for _, key := range keys {
+		select {
+		case r.requeue <- event.GenericEvent{Object: &networkv1alpha1.ServiceRoutePolicy{
+			ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
+		}}:
+		default:
+			// Full: the policy's periodic requeue still reaches it.
 		}
 	}
 }
