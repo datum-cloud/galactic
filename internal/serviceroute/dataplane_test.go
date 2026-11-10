@@ -1087,6 +1087,11 @@ func TestApplyHoldsConsumerUntilItsInterfaceIsReady(t *testing.T) {
 			if !programmer.Holding([]RouteIntent{intent}) {
 				t.Fatal("Holding = false while the consumer is held")
 			}
+			other := intent
+			other.Attachment.Name = "another-consumer"
+			if programmer.Holding([]RouteIntent{other}) {
+				t.Fatal("Holding = true for an intent of another policy")
+			}
 			ready = true
 			if err := programmer.Initialize(); err != nil {
 				t.Fatalf("repair once ready: %v", err)
