@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -213,8 +214,12 @@ func resolveLinkAndL2(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, e
 // is down.
 //
 // A kernel that cannot answer a FIB-match lookup cannot tell the two apart, so
-// the check is skipped there rather than failing every SID.
+// the check is skipped there rather than failing every SID. So is a process
+// that called AcceptDefaultRoute.
 func rejectDefaultRoute(sid net.IP) error {
+	if defaultRouteAccepted.Load() {
+		return nil
+	}
 	matched, err := netlink.RouteGetWithOptions(sid, &netlink.RouteGetOptions{FIBMatch: true})
 	if err != nil || len(matched) == 0 {
 		return nil
@@ -225,6 +230,26 @@ func rejectDefaultRoute(sid net.IP) error {
 				"advertises it", sid)
 	}
 	return nil
+}
+
+// defaultRouteAccepted is set by AcceptDefaultRoute.
+var defaultRouteAccepted atomic.Bool
+
+// AcceptDefaultRoute makes a default route an acceptable route to any SID for
+// the rest of the process, turning off rejectDefaultRoute.
+//
+// It is for a process that resolves SIDs from a network namespace that never
+// holds fabric routes. The ingress sidecar runs in Envoy's pod namespace, whose
+// only route is the default toward the host, and the host carries the fabric's
+// specific routes. There a default-route match is the only answer a reachable
+// SID can ever give, so rejecting it would refuse every backend.
+func AcceptDefaultRoute() {
+	defaultRouteAccepted.Store(true)
+}
+
+// DefaultRouteAccepted reports whether AcceptDefaultRoute has been called.
+func DefaultRouteAccepted() bool {
+	return defaultRouteAccepted.Load()
 }
 
 func isDefault(dst *net.IPNet) bool {
