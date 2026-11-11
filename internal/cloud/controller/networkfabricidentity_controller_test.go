@@ -65,6 +65,10 @@ type fakeIdentityIPAM struct {
 	// claim was deleted under Retain. It is what makes a second claim of the
 	// same name a conflict rather than a fresh allocation.
 	retained map[string]string
+	// limit is the platform project's quota on claims, when set. Quota
+	// admission counts live claims and refuses a create before the address
+	// service sees it, so a retained allocation holds no unit.
+	limit int
 }
 
 func allocationNameFor(claimName string) string { return "alloc-" + claimName }
@@ -114,6 +118,9 @@ func newFakeIdentityIPAM(t *testing.T) *fakeIdentityIPAM {
 			}
 			f.created = append(f.created, ipClaim.Name)
 
+			if err := f.refuseOverQuota(ctx, c, ipClaim); err != nil {
+				return err
+			}
 			if err := refuseWhatTheServerWouldRefuse(ipClaim); err != nil {
 				return err
 			}
@@ -134,8 +141,53 @@ func newFakeIdentityIPAM(t *testing.T) *fakeIdentityIPAM {
 			ipClaim.Status.AllocatedCIDR = blockForIndex(index)
 			return c.Create(ctx, obj, opts...)
 		},
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*ipamv1alpha1.IPClaim); !ok {
+				return c.Delete(ctx, obj, opts...)
+			}
+			return f.retain(ctx, c, obj.GetName(), opts...)
+		},
 	}).Build()
 	return f
+}
+
+// refuseOverQuota mirrors the platform's quota admission on claims: a create
+// that would pass the limit is refused before the address service runs.
+func (f *fakeIdentityIPAM) refuseOverQuota(ctx context.Context, c client.WithWatch, ipClaim *ipamv1alpha1.IPClaim) error {
+	if f.limit == 0 {
+		return nil
+	}
+	var live ipamv1alpha1.IPClaimList
+	if err := c.List(ctx, &live, client.InNamespace(ipClaim.Namespace)); err != nil {
+		return err
+	}
+	if len(live.Items) >= f.limit {
+		return apierrors.NewForbidden(ipamv1alpha1.SchemeGroupVersion.WithResource("ipclaims").GroupResource(),
+			ipClaim.Name, fmt.Errorf("You've reached your quota of %d", f.limit))
+	}
+	return nil
+}
+
+// retain deletes a claim the way the address service does under Retain: the
+// claim goes and its allocation stays, holding the block under the claim's
+// name so that no other claim is ever handed it.
+func (f *fakeIdentityIPAM) retain(ctx context.Context, c client.WithWatch, claimName string, opts ...client.DeleteOption) error {
+	var ipClaim ipamv1alpha1.IPClaim
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: claimName}, &ipClaim); err != nil {
+		return err
+	}
+	allocation := &ipamv1alpha1.IPAllocation{}
+	allocation.Namespace = "default"
+	allocation.Name = allocationNameFor(claimName)
+	allocation.Status.AllocatedCIDR = ipClaim.Status.AllocatedCIDR
+	if err := c.Create(ctx, allocation); err != nil {
+		return err
+	}
+	if err := c.Delete(ctx, &ipClaim, opts...); err != nil {
+		return err
+	}
+	f.retained[allocation.Name] = ipClaim.Status.AllocatedCIDR
+	return nil
 }
 
 // blockForIndex renders the block a pool rooted at fc00::/32 hands out for an
@@ -161,22 +213,12 @@ func hex16(v int) string {
 // stays, and the block it holds becomes readable through the allocation.
 func (f *fakeIdentityIPAM) release(t *testing.T, ctx context.Context, claimName string) {
 	t.Helper()
-	var ipClaim ipamv1alpha1.IPClaim
-	if err := f.client.Get(ctx, client.ObjectKey{Namespace: "default", Name: claimName}, &ipClaim); err != nil {
-		t.Fatalf("read the claim being released: %v", err)
+	ipClaim := &ipamv1alpha1.IPClaim{}
+	ipClaim.Namespace = "default"
+	ipClaim.Name = claimName
+	if err := f.client.Delete(ctx, ipClaim); err != nil {
+		t.Fatalf("release the claim: %v", err)
 	}
-
-	allocation := &ipamv1alpha1.IPAllocation{}
-	allocation.Namespace = "default"
-	allocation.Name = allocationNameFor(claimName)
-	allocation.Status.AllocatedCIDR = ipClaim.Status.AllocatedCIDR
-	if err := f.client.Create(ctx, allocation); err != nil {
-		t.Fatalf("retain the allocation: %v", err)
-	}
-	if err := f.client.Delete(ctx, &ipClaim); err != nil {
-		t.Fatalf("delete the claim: %v", err)
-	}
-	f.retained[allocation.Name] = ipClaim.Status.AllocatedCIDR
 }
 
 func (f *fakeIdentityIPAM) ClientForPlatform() (client.Client, error) { return f.client, nil }
