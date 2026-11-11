@@ -168,3 +168,43 @@ func TestAnUnconfirmedGoneNetworkKeepsItsClaim(t *testing.T) {
 		t.Fatalf("an unconfirmed release must keep the claim, got %d claims", n)
 	}
 }
+
+// The block is kept from reissue by the policy the address service recorded on
+// the allocation when the claim bound, not by the claim's own. A claim whose
+// allocation is recorded as anything but Retain is kept: deleting it would put
+// the network's identity back in the pool for another network.
+func TestAClaimWhoseAllocationIsNotRetainedIsKept(t *testing.T) {
+	f := newIdentityFixture(t, "us-central-1")
+	f.ipam.recordPolicy = ipamv1alpha1.ReclaimDelete
+	f.reconcile()
+
+	f.deleteNetwork()
+	if err := f.reconcileNamed(testNetworkName); err == nil {
+		t.Fatal("a claim that would free its block must fail the reconcile, so the log names it")
+	}
+	if n := f.liveClaims(); n != 1 {
+		t.Fatalf("a claim whose allocation is not retained must be kept, got %d claims", n)
+	}
+}
+
+// A network the cache reads as gone while it lives is not collected at all: its
+// identity, its placement and its claim all wait for a read past the cache.
+func TestALiveNetworkThatReadsGoneIsNotCollected(t *testing.T) {
+	f := newIdentityFixture(t, "us-central-1")
+	f.reconcile()
+	before, _ := f.placement()
+
+	f.reconciler.Networks = staleGetter{Client: f.networks}
+	if err := f.reconcileNamed(testNetworkName); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if _, ok := f.published(); !ok {
+		t.Fatal("a network that lives must keep its identity")
+	}
+	if after, placed := f.placement(); !placed || len(after) != len(before) {
+		t.Fatalf("a network that lives must keep its placement, got %v then %v", before, after)
+	}
+	if n := f.liveClaims(); n != 1 {
+		t.Fatalf("a network that lives must keep its claim, got %d claims", n)
+	}
+}

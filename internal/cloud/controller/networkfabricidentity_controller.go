@@ -106,7 +106,7 @@ type NetworkFabricIdentityReconciler struct {
 
 	// NetworkReader reads a network past any cache. Networks is served from the
 	// hub's cache, where a network deleted and recreated under one name can still
-	// read as gone; a claim is released only once this read agrees.
+	// read as gone; a network is collected only once this read agrees.
 	NetworkReader client.Reader
 
 	// Hub is where the identity and its placement are written, and from where
@@ -338,6 +338,13 @@ func (r *NetworkFabricIdentityReconciler) collect(
 	namespace string,
 	networkName string,
 ) error {
+	// The cache can read a network as gone while it lives, after a delete and a
+	// create under one name. Nothing is withdrawn until a read past it agrees.
+	gone, err := r.confirmedGone(ctx, namespace, networkName)
+	if err != nil || !gone {
+		return err
+	}
+
 	object := &cloudv1alpha1.NetworkFabricIdentity{}
 	object.Namespace = namespace
 	object.Name = networkName
@@ -356,17 +363,22 @@ func (r *NetworkFabricIdentityReconciler) collect(
 	return r.release(ctx, namespace, networkName)
 }
 
+// confirmedGone reads the network past the cache. A network that lives, or a
+// read that fails, collects nothing.
+func (r *NetworkFabricIdentityReconciler) confirmedGone(ctx context.Context, namespace, networkName string) (bool, error) {
+	err := r.NetworkReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: networkName}, &networkingv1alpha.Network{})
+	switch {
+	case err == nil:
+		return false, nil
+	case apierrors.IsNotFound(err):
+		return true, nil
+	default:
+		return false, fmt.Errorf("confirm network %q is gone before collecting it: %w", networkName, err)
+	}
+}
+
 // release gives the gone network's claim back to the platform's quota.
 func (r *NetworkFabricIdentityReconciler) release(ctx context.Context, namespace, networkName string) error {
-	// A live network keeps its claim, whatever the cache said: released, its
-	// block would stay held with no claim, uncounted by the quota while it lives.
-	err := r.NetworkReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: networkName}, &networkingv1alpha.Network{})
-	if err == nil {
-		return nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("confirm network %q is gone before releasing its claim: %w", networkName, err)
-	}
 	ipamClient, err := r.IPAM.ClientForPlatform()
 	if err != nil {
 		return fmt.Errorf("reach the address service to release network %q: %w", networkName, err)

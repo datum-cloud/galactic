@@ -175,12 +175,46 @@ func Claim(ctx context.Context, ipamClient client.Client, request Request) (int6
 // What goes is the claim, and with it the quota unit it held in the platform's
 // one project. A network of the same name that returns adopts the block it gave
 // up. A claim already gone is released.
+//
+// The policy that keeps the block is the one recorded on the allocation when
+// the claim bound, not the claim's own, which can change. So the claim is
+// deleted only once that allocation reads Retain, and only the claim that was
+// read.
 func Release(ctx context.Context, ipamClient client.Client, request Request) error {
 	ipClaim := &ipamv1alpha1.IPClaim{}
-	ipClaim.Namespace = request.Namespace
-	ipClaim.Name = ClaimName(request.NetworkNamespace, request.NetworkName)
-	if err := ipamClient.Delete(ctx, ipClaim); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("release the identity claim %q: %w", ipClaim.Name, err)
+	key := client.ObjectKey{Namespace: request.Namespace, Name: ClaimName(request.NetworkNamespace, request.NetworkName)}
+	if err := ipamClient.Get(ctx, key, ipClaim); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("read the identity claim %q before releasing it: %w", key.Name, err)
+	}
+	if err := requireRetained(ctx, ipamClient, ipClaim); err != nil {
+		return err
+	}
+	if err := ipamClient.Delete(ctx, ipClaim, client.Preconditions{UID: &ipClaim.UID}); err != nil &&
+		!apierrors.IsNotFound(err) {
+		return fmt.Errorf("release the identity claim %q: %w", key.Name, err)
+	}
+	return nil
+}
+
+// requireRetained refuses a claim whose bound allocation is not recorded as
+// Retain: deleting that claim would put the network's block back in the pool,
+// where any network could be handed it.
+func requireRetained(ctx context.Context, ipamClient client.Client, ipClaim *ipamv1alpha1.IPClaim) error {
+	ref := ipClaim.Status.BoundAllocationRef
+	if ref == nil {
+		return fmt.Errorf("keep the identity claim %q: it names no bound allocation, so its policy cannot be read",
+			ipClaim.Name)
+	}
+	allocation := &ipamv1alpha1.IPAllocation{}
+	if err := ipamClient.Get(ctx, client.ObjectKey{Namespace: ipClaim.Namespace, Name: ref.Name}, allocation); err != nil {
+		return fmt.Errorf("keep the identity claim %q: read its allocation %q: %w", ipClaim.Name, ref.Name, err)
+	}
+	if allocation.Spec.ReclaimPolicy != ipamv1alpha1.ReclaimRetain {
+		return fmt.Errorf("keep the identity claim %q: its allocation %q is recorded %q, not Retain, "+
+			"so a delete would free the block for reissue", ipClaim.Name, ref.Name, allocation.Spec.ReclaimPolicy)
 	}
 	return nil
 }
