@@ -86,7 +86,7 @@ func runFabric(parent context.Context, o *options) error {
 		return fmt.Errorf("add federation hub cache: %w", err)
 	}
 	if err := (&cloudcontroller.NetworkFabricIdentityReconciler{
-		Networks: hub.GetClient(), Hub: hub.GetClient(), HubCluster: hub,
+		Networks: hub.GetClient(), NetworkReader: hub.GetAPIReader(), Hub: hub.GetClient(), HubCluster: hub,
 		IPAM: ipamClients, IdentityClass: o.identityClass, IdentityNamespace: o.identityNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up fabric identity controller: %w", err)

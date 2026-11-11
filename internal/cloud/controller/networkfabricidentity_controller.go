@@ -104,6 +104,11 @@ type NetworkFabricIdentityReconciler struct {
 	// withdrawal in this controller is conditioned on a read having succeeded.
 	Networks client.Client
 
+	// NetworkReader reads a network past any cache. Networks is served from the
+	// hub's cache, where a network deleted and recreated under one name can still
+	// read as gone; a claim is released only once this read agrees.
+	NetworkReader client.Reader
+
 	// Hub is where the identity and its placement are written, and from where
 	// federation carries them to the cells.
 	Hub client.Client
@@ -353,6 +358,15 @@ func (r *NetworkFabricIdentityReconciler) collect(
 
 // release gives the gone network's claim back to the platform's quota.
 func (r *NetworkFabricIdentityReconciler) release(ctx context.Context, namespace, networkName string) error {
+	// A live network keeps its claim, whatever the cache said: released, its
+	// block would stay held with no claim, uncounted by the quota while it lives.
+	err := r.NetworkReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: networkName}, &networkingv1alpha.Network{})
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("confirm network %q is gone before releasing its claim: %w", networkName, err)
+	}
 	ipamClient, err := r.IPAM.ClientForPlatform()
 	if err != nil {
 		return fmt.Errorf("reach the address service to release network %q: %w", networkName, err)
@@ -544,6 +558,9 @@ func (r *NetworkFabricIdentityReconciler) SetupWithManager(mgr ctrl.Manager) err
 	}
 	if r.HubCluster == nil {
 		return errors.New("a hub to watch is required")
+	}
+	if r.NetworkReader == nil {
+		return errors.New("a direct network reader is required")
 	}
 
 	hubCache := r.HubCluster.GetCache()

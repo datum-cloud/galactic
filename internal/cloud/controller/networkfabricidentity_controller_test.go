@@ -69,6 +69,8 @@ type fakeIdentityIPAM struct {
 	// admission counts live claims and refuses a create before the address
 	// service sees it, so a retained allocation holds no unit.
 	limit int
+	// refuseDelete stands in for an identity not yet granted delete on claims.
+	refuseDelete bool
 }
 
 func allocationNameFor(claimName string) string { return "alloc-" + claimName }
@@ -144,6 +146,10 @@ func newFakeIdentityIPAM(t *testing.T) *fakeIdentityIPAM {
 		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
 			if _, ok := obj.(*ipamv1alpha1.IPClaim); !ok {
 				return c.Delete(ctx, obj, opts...)
+			}
+			if f.refuseDelete {
+				return apierrors.NewForbidden(ipamv1alpha1.SchemeGroupVersion.WithResource("ipclaims").GroupResource(),
+					obj.GetName(), errors.New("delete is not granted"))
 			}
 			return f.retain(ctx, c, obj.GetName(), opts...)
 		},
@@ -278,6 +284,7 @@ func newIdentityFixture(t *testing.T, presences ...string) *identityFixture {
 		ipam:     ipam,
 		reconciler: &NetworkFabricIdentityReconciler{
 			Networks:          networks,
+			NetworkReader:     networks,
 			Hub:               hub,
 			IPAM:              ipam,
 			IdentityClass:     testClass,
