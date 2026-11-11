@@ -226,3 +226,42 @@ func admit(ipClaim *ipamv1alpha1.IPClaim) error {
 	}
 	return nil
 }
+
+// A claim already gone has nothing left to give back, and a collection that
+// retries after a crash must not fail on it.
+func TestReleasingAClaimAlreadyGoneIsReleased(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ipamv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("build the IPAM scheme: %v", err)
+	}
+	ipamClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	err := Release(context.Background(), ipamClient, Request{
+		Namespace: "default", NetworkNamespace: "ns-project", NetworkName: "prod",
+	})
+	if err != nil {
+		t.Fatalf("a claim already gone must count as released: %v", err)
+	}
+}
+
+// A refused release is an error, so the collection is retried rather than
+// leaving the quota unit held without a word.
+func TestARefusedReleaseIsAnError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ipamv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("build the IPAM scheme: %v", err)
+	}
+	ipamClient := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+			return apierrors.NewForbidden(ipamv1alpha1.SchemeGroupVersion.WithResource("ipclaims").GroupResource(),
+				"fabric-identity.ns-project.prod", errors.New("delete is not granted"))
+		},
+	}).Build()
+
+	err := Release(context.Background(), ipamClient, Request{
+		Namespace: "default", NetworkNamespace: "ns-project", NetworkName: "prod",
+	})
+	if !apierrors.IsForbidden(err) {
+		t.Fatalf("a refused release must be returned as the refusal, got %v", err)
+	}
+}

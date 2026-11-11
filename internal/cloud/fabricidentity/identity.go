@@ -168,6 +168,23 @@ func Claim(ctx context.Context, ipamClient client.Client, request Request) (int6
 	return FromBlock(ipClaim.Status.AllocatedCIDR)
 }
 
+// Release gives a gone network's claim back.
+//
+// Under Retain, the address service keeps the claim's allocation, so the block
+// stays held under the network's name and is never handed to another network.
+// What goes is the claim, and with it the quota unit it held in the platform's
+// one project. A network of the same name that returns adopts the block it gave
+// up. A claim already gone is released.
+func Release(ctx context.Context, ipamClient client.Client, request Request) error {
+	ipClaim := &ipamv1alpha1.IPClaim{}
+	ipClaim.Namespace = request.Namespace
+	ipClaim.Name = ClaimName(request.NetworkNamespace, request.NetworkName)
+	if err := ipamClient.Delete(ctx, ipClaim); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("release the identity claim %q: %w", ipClaim.Name, err)
+	}
+	return nil
+}
+
 // adopt reads the identity out of an allocation this network already holds.
 // The allocation outlives the claim that made it, which is what retention is
 // for, so the block it names is the same one this network has always had.
