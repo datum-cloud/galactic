@@ -512,9 +512,10 @@ func deleteOtherNodeAdvertisements(
 	ctx context.Context, k8s client.Client, namespace, vpc, vpcAttachment, nodeName string,
 	own *bgpv1alpha1.BGPAdvertisement,
 ) error {
-	// The current form encodes both segments; names written before that
-	// encoding carry the raw base62 values.
-	prefixes := []string{crdnames.BGPAdvertisementName(vpc, vpcAttachment, ""), vpc + "-" + vpcAttachment + "-"}
+	// Only the current name form, which encodes both segments: a raw base62
+	// legacy name can collide with another attachment's encoded one, and a
+	// wrong guess here deletes a live advertisement. GC collects legacy ones.
+	prefixes := []string{crdnames.BGPAdvertisementName(vpc, vpcAttachment, "")}
 	var advertisements bgpv1alpha1.BGPAdvertisementList
 	if err := k8s.List(ctx, &advertisements, client.InNamespace(namespace)); err != nil {
 		return fmt.Errorf("list BGPAdvertisements: %w", err)

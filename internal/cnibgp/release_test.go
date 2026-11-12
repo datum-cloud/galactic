@@ -111,8 +111,8 @@ func TestReleaseWithoutAdvertisement(t *testing.T) {
 }
 
 // TestAddDeletesOlderOtherNodesAdvertisements: an ADD deletes the
-// attachment's older advertisements on other nodes, under either name form,
-// never its own, a newer one, or another attachment's.
+// attachment's older advertisements on other nodes, never its own, a newer
+// one, a legacy-named one, or another attachment's.
 func TestAddDeletesOlderOtherNodesAdvertisements(t *testing.T) {
 	t0 := metav1.NewTime(time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC))
 	t1 := metav1.NewTime(t0.Add(time.Minute))
@@ -135,7 +135,7 @@ func TestAddDeletesOlderOtherNodesAdvertisements(t *testing.T) {
 	for _, c := range []struct {
 		adv  *bgpv1alpha1.BGPAdvertisement
 		kept bool
-	}{{own, true}, {older, false}, {legacy, false}, {newer, true}, {unrelated, true}} {
+	}{{own, true}, {older, false}, {legacy, true}, {newer, true}, {unrelated, true}} {
 		err := k8s.Get(context.Background(), client.ObjectKeyFromObject(c.adv), &bgpv1alpha1.BGPAdvertisement{})
 		if kept := err == nil; kept != c.kept {
 			t.Errorf("%s kept = %v, want %v (err %v)", c.adv.Name, kept, c.kept, err)
