@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -116,6 +117,19 @@ func (r *BGPAdvertisementReconciler) reconcile(ctx context.Context, req ctrl.Req
 		return err
 	}
 	if router != nil && !bgpv1alpha1.IsLegacyOwned(router) {
+		return nil
+	}
+
+	// After the instance moves node, the old node's advertisement lingers
+	// until its teardown withdraws it. Only the newest may write: two writers
+	// would overwrite each other's node on every pass, and every node router
+	// would add and remove the attachment's routes on each flip.
+	current, err := r.isCurrentAdvertisement(ctx, &advertisement, galactic.AdvertisementName(vpc, attachmentID))
+	if err != nil {
+		return err
+	}
+	if !current {
+		log.FromContext(ctx).V(1).Info("skipping an advertisement a newer one for the same attachment supersedes")
 		return nil
 	}
 
@@ -342,6 +356,65 @@ func (r *BGPAdvertisementReconciler) tenantAdvertisements(
 		}})
 	}
 	return requests
+}
+
+// isCurrentAdvertisement reports whether advertisement is the one an
+// attachment's delivery status follows among the tenant advertisements for
+// identity: the one a CNI ADD published most recently. One being deleted is
+// never current while another remains.
+func (r *BGPAdvertisementReconciler) isCurrentAdvertisement(ctx context.Context,
+	advertisement *bgpv1alpha1.BGPAdvertisement, identity string,
+) (bool, error) {
+	var advertisements bgpv1alpha1.BGPAdvertisementList
+	if err := r.List(ctx, &advertisements, client.InNamespace(advertisement.Namespace),
+		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
+		return false, fmt.Errorf("list advertisements for attachment identity %s: %w", identity, err)
+	}
+	for i := range advertisements.Items {
+		other := &advertisements.Items[i]
+		if other.Name == advertisement.Name {
+			continue
+		}
+		if !newerAdvertisement(other, advertisement) {
+			continue
+		}
+		router, err := r.routerFor(ctx, other.Namespace, other.Spec.RouterRef.Name)
+		if err != nil {
+			return false, err
+		}
+		if router != nil && !bgpv1alpha1.IsLegacyOwned(router) {
+			continue // a fabric advertisement never certifies an attachment
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+// newerAdvertisement reports whether a supersedes b: a live advertisement
+// beats one being deleted, then the later CNI ADD wins, then the later
+// creation for advertisements published before AnnotationLastAdd existed, and
+// the name breaks a tie so every pass agrees.
+func newerAdvertisement(a, b *bgpv1alpha1.BGPAdvertisement) bool {
+	aDeleting, bDeleting := a.DeletionTimestamp != nil, b.DeletionTimestamp != nil
+	if aDeleting != bDeleting {
+		return bDeleting
+	}
+	aTime, bTime := lastAdd(a), lastAdd(b)
+	if !aTime.Equal(bTime) {
+		return aTime.After(bTime)
+	}
+	return a.Name > b.Name
+}
+
+// lastAdd returns when a CNI ADD last published advertisement, falling back
+// to its creation time.
+func lastAdd(advertisement *bgpv1alpha1.BGPAdvertisement) time.Time {
+	if value, ok := advertisement.Annotations[galactic.AnnotationLastAdd]; ok {
+		if at, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return at
+		}
+	}
+	return advertisement.CreationTimestamp.Time
 }
 
 // BGPAdvertisementIdentity returns the attachment identity shared by every

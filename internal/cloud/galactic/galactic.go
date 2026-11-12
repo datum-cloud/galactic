@@ -69,6 +69,11 @@ const (
 	// addressing, so an empty prefix list is intentional.
 	AnnotationNoAddressing = "galactic.datum.net/no-addressing"
 
+	// AnnotationLastAdd records when a CNI ADD last published an
+	// advertisement. Of several advertisements for one attachment, the one
+	// published most recently is where the instance runs now.
+	AnnotationLastAdd = "galactic.datum.net/last-add"
+
 	// ConditionAdvertised is set on a BGPAdvertisement from live GoBGP state.
 	ConditionAdvertised = "Advertised"
 )

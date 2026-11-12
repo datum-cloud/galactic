@@ -436,6 +436,7 @@ func publishBGPState(
 				adv.Annotations = make(map[string]string)
 			}
 			adv.Annotations[crdnames.NetNSKey(args.ContainerID)] = args.Netns
+			adv.Annotations[crdnames.AnnotationLastAdd] = time.Now().UTC().Format(time.RFC3339Nano)
 			if ipv6Subnet != "" {
 				adv.Annotations[crdnames.SubnetKeyIPv6(args.ContainerID)] = ipv6Subnet
 			}

@@ -70,6 +70,15 @@ const (
 // agree on whether addressing was requested.
 const AnnotationNoAddressing = "galactic.datum.net/no-addressing"
 
+// AnnotationLastAdd is the BGPAdvertisement annotation holding when a CNI ADD
+// last published it, as an RFC 3339 UTC timestamp.
+//
+// A recreated instance keeps its attachment identity, so after it moves to
+// another node both nodes hold an advertisement for it until the old node's
+// teardown withdraws its own. The attachment's delivery status follows the
+// advertisement published most recently, and this is what orders them.
+const AnnotationLastAdd = "galactic.datum.net/last-add"
+
 // AnnotationNoAddressingValue is the only value AnnotationNoAddressing is set
 // to. Named so callers and tests share one spelling.
 const AnnotationNoAddressingValue = "true"
