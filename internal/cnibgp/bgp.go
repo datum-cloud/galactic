@@ -436,7 +436,7 @@ func publishBGPState(
 				adv.Annotations = make(map[string]string)
 			}
 			adv.Annotations[crdnames.NetNSKey(args.ContainerID)] = args.Netns
-			adv.Annotations[crdnames.AnnotationLastAdd] = time.Now().UTC().Format(time.RFC3339Nano)
+			delete(adv.Annotations, crdnames.AnnotationReplacedBy)
 			if ipv6Subnet != "" {
 				adv.Annotations[crdnames.SubnetKeyIPv6(args.ContainerID)] = ipv6Subnet
 			}
@@ -470,6 +470,9 @@ func publishBGPState(
 		if advOp == controllerutil.OperationResultCreated {
 			result.advertisementCreated = true
 		}
+		if err := markReplacedAdvertisements(ctx, k8s, namespace, cfg.vpc, cfg.vpcAttachment, nodeName); err != nil {
+			return err
+		}
 		slog.Debug("BGP: BGPAdvertisement applied", "resource_name", adv.Name, "resource_namespace", namespace,
 			"prefixes", mergedPrefixes, "addedPrefixes", prefixes, "containerID", args.ContainerID, "operation", advOp)
 
@@ -478,6 +481,39 @@ func publishBGPState(
 		return nil
 	})
 	return result, err
+}
+
+// markReplacedAdvertisements marks every other node's advertisement for this
+// attachment as replaced by nodeName. The instance now runs here, so their
+// nodes' delivery status is stale, yet each stays for its own node's GC,
+// which reclaims the old host link through it.
+func markReplacedAdvertisements(
+	ctx context.Context, k8s client.Client, namespace, vpc, vpcAttachment, nodeName string,
+) error {
+	own := crdnames.BGPAdvertisementName(vpc, vpcAttachment, nodeName)
+	prefix := crdnames.BGPAdvertisementName(vpc, vpcAttachment, "")
+	var advertisements bgpv1alpha1.BGPAdvertisementList
+	if err := k8s.List(ctx, &advertisements, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("list BGPAdvertisements to mark replaced: %w", err)
+	}
+	for i := range advertisements.Items {
+		other := &advertisements.Items[i]
+		if other.Name == own || !strings.HasPrefix(other.Name, prefix) ||
+			other.Annotations[crdnames.AnnotationReplacedBy] == nodeName {
+			continue
+		}
+		patch := client.MergeFrom(other.DeepCopy())
+		if other.Annotations == nil {
+			other.Annotations = map[string]string{}
+		}
+		other.Annotations[crdnames.AnnotationReplacedBy] = nodeName
+		if err := k8s.Patch(ctx, other, patch); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("mark BGPAdvertisement %s replaced: %w", other.Name, err)
+		}
+		slog.Info("ADD: marked another node's advertisement for this attachment replaced",
+			"resource_name", other.Name, "vpc", vpc, "vpcAttachment", vpcAttachment)
+	}
+	return nil
 }
 
 // egressConfig returns the egress shard configuration CNI ADD installs a

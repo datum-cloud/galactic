@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"testing"
-	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,11 +29,14 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 )
 
-// movedFixture adds a second Galactic router on node-c and an advertisement
-// there for the same attachment, as a recreated instance that moved from
-// node-a leaves until node-a's teardown withdraws the old one.
-func movedFixture(t *testing.T, oldAdd, newAdd time.Time) (*ownershipFixture, *bgpv1alpha1.BGPAdvertisement) {
+// movedFixture adds a Galactic router on node-c and an advertisement there
+// for the same attachment, as an instance recreated on node-c leaves while
+// node-a's advertisement waits for node-a's GC.
+func movedFixture(t *testing.T) (*ownershipFixture, *bgpv1alpha1.BGPAdvertisement) {
 	t.Helper()
+	if crdnames.AnnotationReplacedBy != galactic.AnnotationReplacedBy {
+		t.Fatalf("CNI writes %q but the controller reads %q", crdnames.AnnotationReplacedBy, galactic.AnnotationReplacedBy)
+	}
 	f := newOwnershipFixture(t, false)
 	ctx := context.Background()
 	router := &bgpv1alpha1.BGPRouter{
@@ -44,15 +46,11 @@ func movedFixture(t *testing.T, oldAdd, newAdd time.Time) (*ownershipFixture, *b
 	if err := f.client.Create(ctx, router); err != nil {
 		t.Fatal(err)
 	}
-	stampLastAdd(t, f, f.tenantAdv, oldAdd)
 	identity := galactic.AdvertisementName(f.attachment.Status.VPC, f.attachment.Status.VPCAttachment)
 	moved := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: identity + "-node-c", Namespace: bgpNamespace,
-			Annotations: map[string]string{galactic.AnnotationLastAdd: newAdd.UTC().Format(time.RFC3339Nano)},
-		},
-		Spec:   bgpv1alpha1.BGPAdvertisementSpec{RouterRef: bgpv1alpha1.RouterRef{Name: router.Name}},
-		Status: f.tenantAdv.Status,
+		ObjectMeta: metav1.ObjectMeta{Name: identity + "-node-c", Namespace: bgpNamespace},
+		Spec:       bgpv1alpha1.BGPAdvertisementSpec{RouterRef: bgpv1alpha1.RouterRef{Name: router.Name}},
+		Status:     f.tenantAdv.Status,
 	}
 	if err := f.client.Create(ctx, moved); err != nil {
 		t.Fatal(err)
@@ -60,7 +58,9 @@ func movedFixture(t *testing.T, oldAdd, newAdd time.Time) (*ownershipFixture, *b
 	return f, moved
 }
 
-func stampLastAdd(t *testing.T, f *ownershipFixture, adv *bgpv1alpha1.BGPAdvertisement, at time.Time) {
+// setReplacedBy marks adv replaced by node, or clears the mark when node is
+// empty, as a CNI ADD does.
+func setReplacedBy(t *testing.T, f *ownershipFixture, adv *bgpv1alpha1.BGPAdvertisement, node string) {
 	t.Helper()
 	var live bgpv1alpha1.BGPAdvertisement
 	if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(adv), &live); err != nil {
@@ -69,104 +69,86 @@ func stampLastAdd(t *testing.T, f *ownershipFixture, adv *bgpv1alpha1.BGPAdverti
 	if live.Annotations == nil {
 		live.Annotations = map[string]string{}
 	}
-	live.Annotations[galactic.AnnotationLastAdd] = at.UTC().Format(time.RFC3339Nano)
+	if node == "" {
+		delete(live.Annotations, galactic.AnnotationReplacedBy)
+	} else {
+		live.Annotations[galactic.AnnotationReplacedBy] = node
+	}
 	if err := f.client.Update(context.Background(), &live); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// TestMovedInstanceStatusFollowsNewestAdvertisement: while both nodes hold an
-// advertisement for a moved instance, the attachment keeps the node of the
-// one published last, whichever order they are reconciled in, so its routes
-// stop flipping between nodes.
-func TestMovedInstanceStatusFollowsNewestAdvertisement(t *testing.T) {
-	now := time.Now()
-	f, moved := movedFixture(t, now.Add(-time.Minute), now)
+func wantNode(t *testing.T, f *ownershipFixture, want string) {
+	t.Helper()
+	if got := f.attachmentStatus(t).Node; got != want {
+		t.Fatalf("attachment node = %q, want %q", got, want)
+	}
+}
+
+// TestReplacedAdvertisementNeverProjects: once node-c's ADD marks node-a's
+// advertisement replaced, the attachment stays on node-c whatever order the
+// two are reconciled in, so its routes stop flipping between nodes.
+func TestReplacedAdvertisementNeverProjects(t *testing.T) {
+	f, moved := movedFixture(t)
+	setReplacedBy(t, f, f.tenantAdv, "node-c")
 	for range 3 {
 		for _, adv := range []*bgpv1alpha1.BGPAdvertisement{moved, f.tenantAdv} {
 			f.reconcile(t, adv)
-			if got := f.attachmentStatus(t).Node; got != "node-c" {
-				t.Fatalf("after reconciling %s, attachment node = %q, want node-c", adv.Name, got)
-			}
+			wantNode(t, f, "node-c")
 		}
 	}
 }
 
-// TestInstanceMovedBackRetakesStatus: a new ADD on the old node makes its
-// advertisement the newest again, so the instance moving back is followed.
-func TestInstanceMovedBackRetakesStatus(t *testing.T) {
-	now := time.Now()
-	f, moved := movedFixture(t, now.Add(-time.Minute), now)
-	f.reconcile(t, moved)
-	stampLastAdd(t, f, f.tenantAdv, now.Add(time.Minute))
+// TestMarkAfterOldWriteHandsOver: node-a's advertisement wrote last before
+// the mark landed, so its own next pass hands the attachment to node-c.
+func TestMarkAfterOldWriteHandsOver(t *testing.T) {
+	f, moved := movedFixture(t)
 	f.reconcile(t, moved)
 	f.reconcile(t, f.tenantAdv)
-	if got := f.attachmentStatus(t).Node; got != "node-a" {
-		t.Fatalf("attachment node = %q, want node-a", got)
-	}
+	wantNode(t, f, "node-a")
+	setReplacedBy(t, f, f.tenantAdv, "node-c")
+	f.reconcile(t, f.tenantAdv)
+	wantNode(t, f, "node-c")
 }
 
-// TestWithdrawnNewestHandsStatusToSurvivor: when the newest advertisement is
-// withdrawn while an older one remains, the survivor projects at once instead
-// of leaving the attachment on a node with no advertisement.
-func TestWithdrawnNewestHandsStatusToSurvivor(t *testing.T) {
-	now := time.Now()
-	f, moved := movedFixture(t, now.Add(-time.Minute), now)
+// TestInstanceMovedBackRetakesStatus: an ADD back on node-a clears its own
+// mark and marks node-c's, so the attachment follows it back.
+func TestInstanceMovedBackRetakesStatus(t *testing.T) {
+	f, moved := movedFixture(t)
+	setReplacedBy(t, f, f.tenantAdv, "node-c")
+	f.reconcile(t, moved)
+	setReplacedBy(t, f, f.tenantAdv, "")
+	setReplacedBy(t, f, moved, "node-a")
+	f.reconcile(t, moved)
+	f.reconcile(t, f.tenantAdv)
+	wantNode(t, f, "node-a")
+}
+
+// TestWithdrawnCurrentWithOnlyReplacedLeftClears: when the current
+// advertisement is withdrawn and only a replaced one remains, the attachment
+// has no delivery any more and its status is cleared rather than kept on the
+// withdrawn node or handed to the replaced one.
+func TestWithdrawnCurrentWithOnlyReplacedLeftClears(t *testing.T) {
+	f, moved := movedFixture(t)
+	setReplacedBy(t, f, f.tenantAdv, "node-c")
 	f.reconcile(t, moved)
 	if err := f.client.Delete(context.Background(), moved); err != nil {
 		t.Fatal(err)
 	}
 	f.reconcile(t, moved)
-	if got := f.attachmentStatus(t).Node; got != "node-a" {
-		t.Fatalf("attachment node = %q, want node-a", got)
-	}
+	wantNode(t, f, "")
 }
 
-// TestNewerAdvertisementOrdering covers the order between advertisements the
-// fixture cannot build: one being deleted, and ones published before
-// AnnotationLastAdd existed.
-func TestNewerAdvertisementOrdering(t *testing.T) {
-	if crdnames.AnnotationLastAdd != galactic.AnnotationLastAdd {
-		t.Fatalf("CNI writes %q but the controller reads %q", crdnames.AnnotationLastAdd, galactic.AnnotationLastAdd)
+// TestWithdrawnCurrentHandsOverToUnreplaced: a withdrawn current
+// advertisement hands the attachment to a remaining one that was not
+// replaced, at once.
+func TestWithdrawnCurrentHandsOverToUnreplaced(t *testing.T) {
+	f, moved := movedFixture(t)
+	f.reconcile(t, moved)
+	if err := f.client.Delete(context.Background(), moved); err != nil {
+		t.Fatal(err)
 	}
-	at := func(name string, created time.Time, add string) *bgpv1alpha1.BGPAdvertisement {
-		adv := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
-			Name: name, CreationTimestamp: metav1.NewTime(created),
-		}}
-		if add != "" {
-			adv.Annotations = map[string]string{galactic.AnnotationLastAdd: add}
-		}
-		return adv
-	}
-	t0 := time.Date(2026, 11, 12, 15, 0, 0, 0, time.UTC)
-	t1 := t0.Add(time.Second)
-	cases := []struct {
-		name string
-		a, b *bgpv1alpha1.BGPAdvertisement
-		want bool
-	}{
-		{"later ADD wins", at("x", t0, t1.Format(time.RFC3339Nano)), at("y", t1, t0.Format(time.RFC3339Nano)), true},
-		{"earlier ADD loses", at("x", t1, t0.Format(time.RFC3339Nano)), at("y", t0, t1.Format(time.RFC3339Nano)), false},
-		{"no annotation falls back to creation", at("x", t1, ""), at("y", t0, ""), true},
-		{"unparsable annotation counts as unstamped", at("x", t0, "garbage"), at("y", t1, ""), false},
-		{"tie broken by name", at("y", t0, ""), at("x", t0, ""), true},
-		{"stamped beats unstamped created later", at("x", t0, t0.Format(time.RFC3339Nano)), at("y", t1, ""), true},
-		{"unstamped loses to stamped", at("x", t1, ""), at("y", t0, t0.Format(time.RFC3339Nano)), false},
-	}
-	for _, tc := range cases {
-		if got := newerAdvertisement(tc.a, tc.b); got != tc.want {
-			t.Errorf("%s: newerAdvertisement = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-	deleting := at("x", t1, t1.Format(time.RFC3339Nano))
-	deleting.DeletionTimestamp = ptrTime(t1)
-	live := at("y", t0, t0.Format(time.RFC3339Nano))
-	if newerAdvertisement(deleting, live) || !newerAdvertisement(live, deleting) {
-		t.Error("an advertisement being deleted must lose to a live one")
-	}
-}
-
-func ptrTime(t time.Time) *metav1.Time {
-	v := metav1.NewTime(t)
-	return &v
+	f.reconcile(t, moved)
+	wantNode(t, f, "node-a")
 }

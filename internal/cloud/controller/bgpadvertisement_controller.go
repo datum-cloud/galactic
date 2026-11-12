@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -128,17 +127,22 @@ func (r *BGPAdvertisementReconciler) reconcile(ctx context.Context, req ctrl.Req
 	if len(attachments.Items) == 0 {
 		return nil
 	}
-
-	// After the instance moves node, the old node's advertisement lingers
-	// until its teardown withdraws it. Only the newest may write: two writers
-	// would overwrite each other's node on every pass, and every node router
-	// would add and remove the attachment's routes on each flip.
-	current, err := r.isCurrentAdvertisement(ctx, &advertisement, galactic.AdvertisementName(vpc, attachmentID))
-	if err != nil {
-		return err
-	}
-	if !current {
-		log.FromContext(ctx).V(1).Info("skipping an advertisement a newer one for the same attachment supersedes")
+	// The instance moved: a CNI ADD on another node took the attachment, and
+	// this advertisement only waits for its own node's GC. Projecting from
+	// it as well would overwrite the new node's status on every pass, and
+	// every node router would add and remove the attachment's routes on each
+	// flip.
+	//
+	// If this one wrote last, as when the mark landed after a pass of it, the
+	// advertisement that replaced it projects now: the attachment watch only
+	// wakes the advertisement of the node already in status.
+	if replaced(&advertisement) {
+		for i := range attachments.Items {
+			if router != nil && attachments.Items[i].Status.Node == router.Spec.TargetRef.Name {
+				_, err := r.projectFromCurrent(ctx, advertisement.Namespace, galactic.AdvertisementName(vpc, attachmentID))
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -185,32 +189,11 @@ func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Con
 		return nil
 	}
 	identity := galactic.AdvertisementName(vpc, attachmentID)
-	var advertisements bgpv1alpha1.BGPAdvertisementList
-	if err := r.List(ctx, &advertisements, client.InNamespace(key.Namespace),
-		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
-		return fmt.Errorf("list replacement advertisements: %w", err)
-	}
-	// A surviving tenant advertisement takes over: the newest projects now,
-	// since nothing else would wake it while its own state is unchanged and
-	// the attachment would keep the withdrawn node until then.
-	var survivor *bgpv1alpha1.BGPAdvertisement
-	for i := range advertisements.Items {
-		advertisement := &advertisements.Items[i]
-		router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
-		if err != nil {
-			return err
-		}
-		// No router means its node is gone, so it cannot say where the
-		// instance runs; a fabric router never certifies an attachment.
-		if router == nil || !bgpv1alpha1.IsLegacyOwned(router) {
-			continue
-		}
-		if survivor == nil || newerAdvertisement(advertisement, survivor) {
-			survivor = advertisement
-		}
-	}
-	if survivor != nil {
-		return r.reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(survivor)})
+	// A remaining current advertisement takes over now, since nothing else
+	// would wake it while its own state is unchanged and the attachment would
+	// keep the withdrawn node.
+	if projected, err := r.projectFromCurrent(ctx, key.Namespace, identity); err != nil || projected {
+		return err
 	}
 	var attachments cloudv1alpha1.VPCAttachmentList
 	if err := r.List(ctx, &attachments, client.MatchingFields{IndexVPCAttachmentIdentity: identity}); err != nil {
@@ -370,72 +353,38 @@ func (r *BGPAdvertisementReconciler) tenantAdvertisements(
 	return requests
 }
 
-// isCurrentAdvertisement reports whether advertisement is the one an
-// attachment's delivery status follows among the tenant advertisements for
-// identity: the one a CNI ADD published most recently. One being deleted is
-// never current while another remains.
-func (r *BGPAdvertisementReconciler) isCurrentAdvertisement(ctx context.Context,
-	advertisement *bgpv1alpha1.BGPAdvertisement, identity string,
-) (bool, error) {
+// projectFromCurrent projects the attachment's status from the first tenant
+// advertisement for identity that has not been replaced and whose router
+// exists, reporting whether there was one. A replaced advertisement, or one
+// whose node's router is gone, cannot say where the instance runs.
+func (r *BGPAdvertisementReconciler) projectFromCurrent(ctx context.Context, namespace, identity string) (bool, error) {
 	var advertisements bgpv1alpha1.BGPAdvertisementList
-	if err := r.List(ctx, &advertisements, client.InNamespace(advertisement.Namespace),
+	if err := r.List(ctx, &advertisements, client.InNamespace(namespace),
 		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
 		return false, fmt.Errorf("list advertisements for attachment identity %s: %w", identity, err)
 	}
 	for i := range advertisements.Items {
-		other := &advertisements.Items[i]
-		if other.Name == advertisement.Name {
+		advertisement := &advertisements.Items[i]
+		if replaced(advertisement) {
 			continue
 		}
-		if !newerAdvertisement(other, advertisement) {
-			continue
-		}
-		router, err := r.routerFor(ctx, other.Namespace, other.Spec.RouterRef.Name)
+		router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
 		if err != nil {
 			return false, err
 		}
-		if router != nil && !bgpv1alpha1.IsLegacyOwned(router) {
-			continue // a fabric advertisement never certifies an attachment
+		if router == nil || !bgpv1alpha1.IsLegacyOwned(router) {
+			continue
 		}
-		return false, nil
+		return true, r.reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(advertisement)})
 	}
-	return true, nil
+	return false, nil
 }
 
-// newerAdvertisement reports whether a supersedes b: a live advertisement
-// beats one being deleted, a stamped one beats an unstamped one, then the
-// later CNI ADD wins, or the later creation between unstamped ones, and the
-// name breaks a tie so every pass agrees. Stamps come from each node's clock,
-// so nodes are assumed to agree to well under the time an instance takes to
-// be recreated elsewhere.
-func newerAdvertisement(a, b *bgpv1alpha1.BGPAdvertisement) bool {
-	aDeleting, bDeleting := a.DeletionTimestamp != nil, b.DeletionTimestamp != nil
-	if aDeleting != bDeleting {
-		return bDeleting
-	}
-	aTime, aStamped := lastAdd(a)
-	bTime, bStamped := lastAdd(b)
-	// While nodes roll to a CNI that stamps, a stamp is newer than no stamp:
-	// an advertisement reused across pod churn keeps its first creation time,
-	// which says nothing about its latest ADD.
-	if aStamped != bStamped {
-		return aStamped
-	}
-	if !aTime.Equal(bTime) {
-		return aTime.After(bTime)
-	}
-	return a.Name > b.Name
-}
-
-// lastAdd returns when a CNI ADD last published advertisement and true, or
-// its creation time and false when it carries no readable stamp.
-func lastAdd(advertisement *bgpv1alpha1.BGPAdvertisement) (time.Time, bool) {
-	if value, ok := advertisement.Annotations[galactic.AnnotationLastAdd]; ok {
-		if at, err := time.Parse(time.RFC3339Nano, value); err == nil {
-			return at, true
-		}
-	}
-	return advertisement.CreationTimestamp.Time, false
+// replaced reports whether a CNI ADD on another node has taken advertisement's
+// attachment.
+func replaced(advertisement *bgpv1alpha1.BGPAdvertisement) bool {
+	_, ok := advertisement.Annotations[galactic.AnnotationReplacedBy]
+	return ok
 }
 
 // BGPAdvertisementIdentity returns the attachment identity shared by every
