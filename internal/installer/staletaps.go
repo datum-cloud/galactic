@@ -60,8 +60,9 @@ import (
 //
 // A candidate is removed only when the previous pass read every input and found it too, with the
 // same ifindex and owner stamp. A workload's ADD can create its tap between
-// this pass's reads, before its VMM opens the tap; by the next pass its
-// VPCAttachment is listed or its VMM holds the tap. The removal decides again
+// this pass's reads, before its VMM opens the tap; by the next pass its ADD
+// has published this node's advertisement, its VMM holds the tap, or, for an
+// attachment advertised nowhere, its VPCAttachment is listed. The removal decides again
 // under the node's VRF lock, which every ADD holds while it creates, adopts and
 // stamps a host link.
 

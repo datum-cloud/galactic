@@ -7,6 +7,7 @@ package cnibgp
 import (
 	"context"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -109,23 +110,47 @@ func TestReleaseWithoutAdvertisement(t *testing.T) {
 	}
 }
 
-// TestAddDeletesOtherNodesAdvertisements: an ADD deletes the attachment's
-// advertisements on other nodes, never its own or another attachment's.
-func TestAddDeletesOtherNodesAdvertisements(t *testing.T) {
-	other := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
-		Name: crdnames.BGPAdvertisementName(relVPC, "bQz", "node-a"), Namespace: relNS,
-	}}
-	k8s := fakeClient(recordedAdvertisement(relNode, newSandbox), recordedAdvertisement("node-a", oldSandbox), other)
-	if err := deleteOtherNodeAdvertisements(context.Background(), k8s, relNS, relVPC, relAtt, relNode); err != nil {
+// TestAddDeletesOlderOtherNodesAdvertisements: an ADD deletes the
+// attachment's older advertisements on other nodes, under either name form,
+// never its own, a newer one, or another attachment's.
+func TestAddDeletesOlderOtherNodesAdvertisements(t *testing.T) {
+	t0 := metav1.NewTime(time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC))
+	t1 := metav1.NewTime(t0.Add(time.Minute))
+	t2 := metav1.NewTime(t0.Add(2 * time.Minute))
+	at := func(adv *bgpv1alpha1.BGPAdvertisement, ts metav1.Time) *bgpv1alpha1.BGPAdvertisement {
+		adv.CreationTimestamp = ts
+		return adv
+	}
+	own := at(recordedAdvertisement(relNode, newSandbox), t1)
+	older := at(recordedAdvertisement("node-a", oldSandbox), t0)
+	legacy := at(&bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
+		Name: relVPC + "-" + relAtt + "-node-l", Namespace: relNS}}, t0)
+	newer := at(recordedAdvertisement("node-c", oldSandbox), t2)
+	unrelated := at(&bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
+		Name: crdnames.BGPAdvertisementName(relVPC, "bQz", "node-a"), Namespace: relNS}}, t0)
+	k8s := fakeClient(own, older, legacy, newer, unrelated)
+	if err := deleteOtherNodeAdvertisements(context.Background(), k8s, relNS, relVPC, relAtt, relNode, own); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := getAdvertisement(t, k8s, "node-a"); ok {
-		t.Error("other node's leftover advertisement kept")
+	for _, c := range []struct {
+		adv  *bgpv1alpha1.BGPAdvertisement
+		kept bool
+	}{{own, true}, {older, false}, {legacy, false}, {newer, true}, {unrelated, true}} {
+		err := k8s.Get(context.Background(), client.ObjectKeyFromObject(c.adv), &bgpv1alpha1.BGPAdvertisement{})
+		if kept := err == nil; kept != c.kept {
+			t.Errorf("%s kept = %v, want %v (err %v)", c.adv.Name, kept, c.kept, err)
+		}
+	}
+}
+
+// TestReleaseLeavesUnrecordedAdvertisement: an advertisement recording no
+// container at all has unknown liveness, so DEL leaves it to GC.
+func TestReleaseLeavesUnrecordedAdvertisement(t *testing.T) {
+	k8s := fakeClient(recordedAdvertisement(relNode))
+	if err := releaseAdvertisement(context.Background(), k8s, relNS, relVPC, relAtt, relNode, oldSandbox); err != nil {
+		t.Fatal(err)
 	}
 	if _, ok := getAdvertisement(t, k8s, relNode); !ok {
-		t.Error("own advertisement deleted")
-	}
-	if err := k8s.Get(context.Background(), client.ObjectKeyFromObject(other), other); err != nil {
-		t.Errorf("another attachment's advertisement: %v", err)
+		t.Fatal("unrecorded advertisement deleted")
 	}
 }

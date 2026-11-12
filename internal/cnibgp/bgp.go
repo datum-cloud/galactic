@@ -432,33 +432,44 @@ func publishBGPState(
 			},
 		}
 		var mergedPrefixes []string
-		advOp, err := controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
-			if adv.Annotations == nil {
-				adv.Annotations = make(map[string]string)
-			}
-			adv.Annotations[crdnames.NetNSKey(args.ContainerID)] = args.Netns
-			if ipv6Subnet != "" {
-				adv.Annotations[crdnames.SubnetKeyIPv6(args.ContainerID)] = ipv6Subnet
-			}
-			if ipv4Addr != "" {
-				adv.Annotations[crdnames.SubnetKeyIPv4(args.ContainerID)] = ipv4Addr
-			}
-			// The attachment's config carries no "ipam" block, such as a tap
-			// workload managing its own addressing. Mark the advertisement so
-			// its empty spec.prefixes reads as intentional rather than as
-			// addressing that failed to arrive. Cleared once any ADD for this
-			// attachment does carry an allocation.
-			if ipamResult == nil {
-				adv.Annotations[crdnames.AnnotationNoAddressing] = crdnames.AnnotationNoAddressingValue
-			} else {
-				delete(adv.Annotations, crdnames.AnnotationNoAddressing)
-			}
-			// Prune dead siblings first, so a replaced pod's stale annotation
-			// cannot collide with this ADD's usually identical prefix.
-			pruneDeadContainerAnnotations(adv.Annotations)
-			mergedPrefixes = allAdvertisedPrefixes(adv.Annotations)
-			adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, mergedPrefixes, vrfID)
-			return nil
+		var advOp controllerutil.OperationResult
+		// A predecessor's DEL on this node can update or delete the same
+		// advertisement between CreateOrUpdate's read and write; reread and
+		// write again rather than fail the ADD.
+		err = retry.OnError(retry.DefaultRetry, func(err error) bool {
+			return apierrors.IsConflict(err) || apierrors.IsNotFound(err)
+		}, func() error {
+			*adv = bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Name: adv.Name, Namespace: adv.Namespace}}
+			var err error
+			advOp, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
+				if adv.Annotations == nil {
+					adv.Annotations = make(map[string]string)
+				}
+				adv.Annotations[crdnames.NetNSKey(args.ContainerID)] = args.Netns
+				if ipv6Subnet != "" {
+					adv.Annotations[crdnames.SubnetKeyIPv6(args.ContainerID)] = ipv6Subnet
+				}
+				if ipv4Addr != "" {
+					adv.Annotations[crdnames.SubnetKeyIPv4(args.ContainerID)] = ipv4Addr
+				}
+				// The attachment's config carries no "ipam" block, such as a tap
+				// workload managing its own addressing. Mark the advertisement so
+				// its empty spec.prefixes reads as intentional rather than as
+				// addressing that failed to arrive. Cleared once any ADD for this
+				// attachment does carry an allocation.
+				if ipamResult == nil {
+					adv.Annotations[crdnames.AnnotationNoAddressing] = crdnames.AnnotationNoAddressingValue
+				} else {
+					delete(adv.Annotations, crdnames.AnnotationNoAddressing)
+				}
+				// Prune dead siblings first, so a replaced pod's stale annotation
+				// cannot collide with this ADD's usually identical prefix.
+				pruneDeadContainerAnnotations(adv.Annotations)
+				mergedPrefixes = allAdvertisedPrefixes(adv.Annotations)
+				adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, mergedPrefixes, vrfID)
+				return nil
+			})
+			return err
 		})
 		if err != nil {
 			return fmt.Errorf("apply BGPAdvertisement: %w", err)
@@ -475,7 +486,7 @@ func publishBGPState(
 		// node's GC, and the attachment's status would flip between the two.
 		// Best effort, since failing the ADD over it would roll back this
 		// node's own advertisement.
-		if err := deleteOtherNodeAdvertisements(ctx, k8s, namespace, cfg.vpc, cfg.vpcAttachment, nodeName); err != nil {
+		if err := deleteOtherNodeAdvertisements(ctx, k8s, namespace, cfg.vpc, cfg.vpcAttachment, nodeName, adv); err != nil {
 			slog.Warn("ADD: could not delete other nodes' advertisements for this attachment",
 				"err", err, "vpc", cfg.vpc, "vpcAttachment", cfg.vpcAttachment)
 		}
@@ -490,14 +501,20 @@ func publishBGPState(
 }
 
 // deleteOtherNodeAdvertisements deletes every other node's advertisement for
-// this attachment. The instance runs on this node now, so theirs are leftovers
-// of a predecessor whose DEL never ran. That node's GC reclaims the host link
-// such a predecessor leaves (ReclaimUnrecordedHostLinks).
+// this attachment created before own, this node's. An attachment identity runs
+// on one node at a time, so an older one elsewhere is the leftover of a
+// predecessor whose DEL never ran. That node's galactic-cni removes the tap
+// such a predecessor leaves once no VMM holds it (internal/installer
+// staletaps.go). A newer one is left alone, so two ADDs racing on two nodes
+// never delete each other's; the newer node's ADD removes the older.
+// Creation times are the API server's, so node clocks do not matter.
 func deleteOtherNodeAdvertisements(
 	ctx context.Context, k8s client.Client, namespace, vpc, vpcAttachment, nodeName string,
+	own *bgpv1alpha1.BGPAdvertisement,
 ) error {
-	own := crdnames.BGPAdvertisementName(vpc, vpcAttachment, nodeName)
-	prefix := crdnames.BGPAdvertisementName(vpc, vpcAttachment, "")
+	// The current form encodes both segments; names written before that
+	// encoding carry the raw base62 values.
+	prefixes := []string{crdnames.BGPAdvertisementName(vpc, vpcAttachment, ""), vpc + "-" + vpcAttachment + "-"}
 	var advertisements bgpv1alpha1.BGPAdvertisementList
 	if err := k8s.List(ctx, &advertisements, client.InNamespace(namespace)); err != nil {
 		return fmt.Errorf("list BGPAdvertisements: %w", err)
@@ -505,7 +522,8 @@ func deleteOtherNodeAdvertisements(
 	var errs []error
 	for i := range advertisements.Items {
 		other := &advertisements.Items[i]
-		if other.Name == own || !strings.HasPrefix(other.Name, prefix) {
+		if other.Name == own.Name || !otherNodeAdvertisement(other.Name, prefixes, nodeName) ||
+			!other.CreationTimestamp.Before(&own.CreationTimestamp) {
 			continue
 		}
 		if err := k8s.Delete(ctx, other, client.Preconditions{UID: &other.UID}); client.IgnoreNotFound(err) != nil {
@@ -518,10 +536,23 @@ func deleteOtherNodeAdvertisements(
 	return errors.Join(errs...)
 }
 
+// otherNodeAdvertisement reports whether name is, under one of prefixes, an
+// advertisement for the attachment on a node other than nodeName.
+func otherNodeAdvertisement(name string, prefixes []string, nodeName string) bool {
+	for _, p := range prefixes {
+		if rest, ok := strings.CutPrefix(name, p); ok && rest != "" && rest != nodeName {
+			return true
+		}
+	}
+	return false
+}
+
 // releaseAdvertisement removes containerID from this node's advertisement for
 // the attachment, the record its ADD added it to, and deletes the
 // advertisement once no container it records is still alive. A replacement
-// container whose ADD ran first keeps it, with only its own entries left.
+// container whose ADD ran first keeps it, with only its own entries left. In
+// the kubelet's usual order, the old sandbox's DEL before the new one's ADD,
+// the advertisement is deleted and the ADD creates it again.
 // Writes carry the advertisement's resourceVersion, so a concurrent ADD is
 // never overwritten or deleted out from under: the conflict rereads it.
 func releaseAdvertisement(
@@ -535,6 +566,11 @@ func releaseAdvertisement(
 		}
 		if adv.Annotations == nil {
 			adv.Annotations = map[string]string{}
+		}
+		// One that records no container at all has unknown liveness, as GC
+		// treats it, so it is left to GC.
+		if !recordsContainer(adv.Annotations) {
+			return nil
 		}
 		delete(adv.Annotations, crdnames.NetNSKey(containerID))
 		delete(adv.Annotations, crdnames.SubnetKeyIPv6(containerID))
