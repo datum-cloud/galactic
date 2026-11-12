@@ -200,7 +200,9 @@ func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Con
 		if err != nil {
 			return err
 		}
-		if router != nil && !bgpv1alpha1.IsLegacyOwned(router) {
+		// No router means its node is gone, so it cannot say where the
+		// instance runs; a fabric router never certifies an attachment.
+		if router == nil || !bgpv1alpha1.IsLegacyOwned(router) {
 			continue
 		}
 		if survivor == nil || newerAdvertisement(advertisement, survivor) {
