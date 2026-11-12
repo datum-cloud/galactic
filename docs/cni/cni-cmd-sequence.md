@@ -412,7 +412,11 @@ sequenceDiagram
   EndpointSlice when this sandbox wrote it, and removes this container's
   entries from this node's `BGPAdvertisement`, deleting the advertisement once
   no container it records is still alive (`releaseAdvertisement`). A
-  replacement container on the same node whose ADD ran first keeps it. Every
+  replacement container on the same node whose ADD ran first keeps it; in the
+  kubelet's usual order, DEL then ADD, the advertisement is deleted and
+  created again, so the attachment's routes are withdrawn and re-advertised
+  across a same-node restart. An advertisement recording no container is left
+  to GC. Every
   failure is logged and DEL still succeeds; GC is the backstop. The
   `BGPVRFInstance` and `vrf_table` entry are shared by every attachment on the
   VPC and node, so GC still reclaims them. `galactic-route` is a pure no-op on
@@ -421,7 +425,9 @@ sequenceDiagram
   A recreated instance keeps its attachment identity, so when it moves node a
   predecessor whose DEL never ran leaves its old node's `BGPAdvertisement`
   behind, and the cloud controller would copy the attachment's node from
-  both in turn. `galactic-bgp` ADD deletes them, best effort. The old node's
+  both in turn. `galactic-bgp` ADD deletes those created before its own, best
+  effort. An attachment identity runs on one node at a time, so an older one
+  elsewhere is a leftover; a newer one is left for that node's ADD to judge. The old node's
   `galactic-cni` then removes the predecessor's tap once no VMM holds it
   (see [gc-cmd-sequence.md](gc-cmd-sequence.md)).
 - **A config parse failure never fails DEL.** If `parseConf` can't parse
