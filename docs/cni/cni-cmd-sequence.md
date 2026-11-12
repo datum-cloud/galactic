@@ -313,6 +313,7 @@ sequenceDiagram
     participant Master as galactic-veth or galactic-tap
     participant IPAM as galactic-ipam
     participant HostDevice as host-device (veth only)
+    participant K8s
 
     Note over Runtime: DEL runs on every chain entry that had a successful<br/>ADD, in reverse conflist order. Every call below is<br/>independently idempotent.
 
@@ -320,8 +321,9 @@ sequenceDiagram
         Runtime->>BGP: DEL (stdin config)
         activate BGP
         BGP->>BGP: parseConf() (parse failure: log + return empty result, still success)
-        Note over BGP: BGPVRFInstance/BGPAdvertisement CRDs and the eBPF<br/>vrf_table entry are shared by (vpc, attachment) —<br/>NOT deleted here, another pod/VM may still need them
-        BGP->>BGP: slog.Info("DEL: skipping shared resource cleanup (handled by GC)")
+        BGP->>BGP: deleteEndpointSliceBestEffort() (only if this sandbox wrote it)
+        BGP->>K8s: releaseAdvertisement(): drop this container's entries from this node's BGPAdvertisement
+        Note over BGP,K8s: Deleted once no container it records is alive;<br/>a replacement whose ADD ran first keeps it.<br/>Writes carry resourceVersion, a conflict rereads.<br/>BGPVRFInstance and vrf_table stay for GC (shared per VPC and node)
         BGP-->>Runtime: empty CNI result
         deactivate BGP
     end
@@ -406,10 +408,28 @@ sequenceDiagram
   `veth.Delete`/`tap.Delete` here are the same idempotent functions already
   used for ADD-failure rollback, so calling them again from DEL adds no new
   failure mode.
-- **`galactic-bgp` and `galactic-route` are pure no-ops on DEL.** Neither
-  holds any per-container state to release — their entire DEL body is a log
-  line plus an empty CNI result. `galactic-route`'s DEL doesn't even parse
-  `vpc`/`vpcAttachment` for logging, unlike the other four binaries.
+- **`galactic-bgp` releases what its ADD published.** It deletes the pod's
+  EndpointSlice when this sandbox wrote it, and removes this container's
+  entries from this node's `BGPAdvertisement`, deleting the advertisement once
+  no container it records is still alive (`releaseAdvertisement`). A
+  replacement container on the same node whose ADD ran first keeps it; in the
+  kubelet's usual order, DEL then ADD, the advertisement is deleted and
+  created again, so the attachment's routes are withdrawn and re-advertised
+  across a same-node restart. An advertisement recording no container is left
+  to GC. Every
+  failure is logged and DEL still succeeds; GC is the backstop. The
+  `BGPVRFInstance` and `vrf_table` entry are shared by every attachment on the
+  VPC and node, so GC still reclaims them. `galactic-route` is a pure no-op on
+  DEL; it doesn't even parse `vpc`/`vpcAttachment` for logging.
+- **ADD deletes the attachment's leftover advertisements on other nodes.**
+  A recreated instance keeps its attachment identity, so when it moves node a
+  predecessor whose DEL never ran leaves its old node's `BGPAdvertisement`
+  behind, and the cloud controller would copy the attachment's node from
+  both in turn. `galactic-bgp` ADD deletes those created before its own, best
+  effort. An attachment identity runs on one node at a time, so an older one
+  elsewhere is a leftover; a newer one is left for that node's ADD to judge. The old node's
+  `galactic-cni` then removes the predecessor's tap once no VMM holds it
+  (see [gc-cmd-sequence.md](gc-cmd-sequence.md)).
 - **A config parse failure never fails DEL.** If `parseConf` can't parse
   `stdin`, every binary logs the error and still prints an empty, successful
   CNI result — per the CNI spec, DEL must never propagate an error the

@@ -176,19 +176,45 @@ func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Con
 		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
 		return fmt.Errorf("list replacement advertisements: %w", err)
 	}
+	var attachments cloudv1alpha1.VPCAttachmentList
+	if err := r.List(ctx, &attachments, client.MatchingFields{IndexVPCAttachmentIdentity: identity}); err != nil {
+		return fmt.Errorf("list withdrawn attachments: %w", err)
+	}
+	onWithdrawn := false
+	for i := range attachments.Items {
+		if attachments.Items[i].Status.Node != "" && key.Name == identity+"-"+attachments.Items[i].Status.Node {
+			onWithdrawn = true
+		}
+	}
+	// A surviving tenant advertisement keeps the attachment delivered. When
+	// the attachment was on the withdrawn node, the newest survivor projects
+	// now: nothing else wakes it while its own state is unchanged, and the
+	// attachment would keep naming a node with no advertisement.
+	var survivor *bgpv1alpha1.BGPAdvertisement
 	for i := range advertisements.Items {
 		advertisement := &advertisements.Items[i]
 		router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
 		if err != nil {
 			return err
 		}
-		if router == nil || bgpv1alpha1.IsLegacyOwned(router) {
-			return nil
+		if router == nil {
+			if !onWithdrawn {
+				return nil
+			}
+			continue
+		}
+		if !bgpv1alpha1.IsLegacyOwned(router) {
+			continue
+		}
+		if survivor == nil || newerAdvertisement(advertisement, survivor) {
+			survivor = advertisement
 		}
 	}
-	var attachments cloudv1alpha1.VPCAttachmentList
-	if err := r.List(ctx, &attachments, client.MatchingFields{IndexVPCAttachmentIdentity: identity}); err != nil {
-		return fmt.Errorf("list withdrawn attachments: %w", err)
+	if survivor != nil {
+		if !onWithdrawn {
+			return nil
+		}
+		return r.reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(survivor)})
 	}
 	for i := range attachments.Items {
 		attachment := &attachments.Items[i]
@@ -342,6 +368,15 @@ func (r *BGPAdvertisementReconciler) tenantAdvertisements(
 		}})
 	}
 	return requests
+}
+
+// newerAdvertisement reports whether a was created after b, by the API
+// server's clock, with the name breaking a tie so every pass agrees.
+func newerAdvertisement(a, b *bgpv1alpha1.BGPAdvertisement) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return b.CreationTimestamp.Before(&a.CreationTimestamp)
+	}
+	return a.Name > b.Name
 }
 
 // BGPAdvertisementIdentity returns the attachment identity shared by every

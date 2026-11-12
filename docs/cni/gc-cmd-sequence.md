@@ -56,9 +56,11 @@ this reclaim existed. `galactic-cni`'s `run` container covers that case on its
 eBPF GC tick (`staleTapReclaimer`, `internal/installer/staletaps.go`). It
 considers only a stamped tenant tap that no file descriptor holds, so no VMM is
 using it. A host-only port stamp counts as stamped whether or not it names an
-owner. The tap's `(VPC, attachment)` identity must be carried by no
-`BGPAdvertisement` on any node and no `VPCAttachment` in the cluster, and the
-cluster must list at least one `VPCAttachment` with an identity. It removes a
+owner. No `BGPAdvertisement` on this node may carry the tap's `(VPC,
+attachment)` identity. Either one on another node must, the workload having
+moved there (its ADD deletes this node's leftover advertisement), or no
+`VPCAttachment` in the cluster may carry it, while the cluster lists at least
+one `VPCAttachment` with an identity. It removes a
 candidate only when the previous tick read every input and found it too, with
 the same ifindex and owner stamp, and checks again under the VRF lock. It first
 removes the tap's ifindex-keyed eBPF rows through
