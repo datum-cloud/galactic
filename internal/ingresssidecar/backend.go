@@ -153,7 +153,7 @@ func (kernelBackend) EnsureRoute(prefix *net.IPNet, sid net.IP, tableID uint32) 
 }
 
 func (kernelBackend) RemoveRoute(prefix *net.IPNet, tableID uint32) error {
-	if err := removeRedirectRoute(prefix); err != nil {
+	if err := removeRedirectRoute(prefix, tableID); err != nil {
 		return fmt.Errorf("remove main-table redirect route for %s: %w", prefix, err)
 	}
 	if err := srv6.RouteEgressDel(prefix, tableID); err != nil {
