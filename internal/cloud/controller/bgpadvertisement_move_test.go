@@ -106,6 +106,22 @@ func TestInstanceMovedBackRetakesStatus(t *testing.T) {
 	}
 }
 
+// TestWithdrawnNewestHandsStatusToSurvivor: when the newest advertisement is
+// withdrawn while an older one remains, the survivor projects at once instead
+// of leaving the attachment on a node with no advertisement.
+func TestWithdrawnNewestHandsStatusToSurvivor(t *testing.T) {
+	now := time.Now()
+	f, moved := movedFixture(t, now.Add(-time.Minute), now)
+	f.reconcile(t, moved)
+	if err := f.client.Delete(context.Background(), moved); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t, moved)
+	if got := f.attachmentStatus(t).Node; got != "node-a" {
+		t.Fatalf("attachment node = %q, want node-a", got)
+	}
+}
+
 // TestNewerAdvertisementOrdering covers the order between advertisements the
 // fixture cannot build: one being deleted, and ones published before
 // AnnotationLastAdd existed.
@@ -132,8 +148,10 @@ func TestNewerAdvertisementOrdering(t *testing.T) {
 		{"later ADD wins", at("x", t0, t1.Format(time.RFC3339Nano)), at("y", t1, t0.Format(time.RFC3339Nano)), true},
 		{"earlier ADD loses", at("x", t1, t0.Format(time.RFC3339Nano)), at("y", t0, t1.Format(time.RFC3339Nano)), false},
 		{"no annotation falls back to creation", at("x", t1, ""), at("y", t0, ""), true},
-		{"unparsable annotation falls back to creation", at("x", t0, "garbage"), at("y", t1, ""), false},
+		{"unparsable annotation counts as unstamped", at("x", t0, "garbage"), at("y", t1, ""), false},
 		{"tie broken by name", at("y", t0, ""), at("x", t0, ""), true},
+		{"stamped beats unstamped created later", at("x", t0, t0.Format(time.RFC3339Nano)), at("y", t1, ""), true},
+		{"unstamped loses to stamped", at("x", t1, ""), at("y", t0, t0.Format(time.RFC3339Nano)), false},
 	}
 	for _, tc := range cases {
 		if got := newerAdvertisement(tc.a, tc.b); got != tc.want {

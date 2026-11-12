@@ -120,6 +120,15 @@ func (r *BGPAdvertisementReconciler) reconcile(ctx context.Context, req ctrl.Req
 		return nil
 	}
 
+	var attachments cloudv1alpha1.VPCAttachmentList
+	if err := r.List(ctx, &attachments,
+		client.MatchingFields{IndexVPCAttachmentIdentity: galactic.AdvertisementName(vpc, attachmentID)}); err != nil {
+		return fmt.Errorf("list VPC attachments for advertisement %s: %w", advertisement.Name, err)
+	}
+	if len(attachments.Items) == 0 {
+		return nil
+	}
+
 	// After the instance moves node, the old node's advertisement lingers
 	// until its teardown withdraws it. Only the newest may write: two writers
 	// would overwrite each other's node on every pass, and every node router
@@ -130,15 +139,6 @@ func (r *BGPAdvertisementReconciler) reconcile(ctx context.Context, req ctrl.Req
 	}
 	if !current {
 		log.FromContext(ctx).V(1).Info("skipping an advertisement a newer one for the same attachment supersedes")
-		return nil
-	}
-
-	var attachments cloudv1alpha1.VPCAttachmentList
-	if err := r.List(ctx, &attachments,
-		client.MatchingFields{IndexVPCAttachmentIdentity: galactic.AdvertisementName(vpc, attachmentID)}); err != nil {
-		return fmt.Errorf("list VPC attachments for advertisement %s: %w", advertisement.Name, err)
-	}
-	if len(attachments.Items) == 0 {
 		return nil
 	}
 
@@ -190,15 +190,25 @@ func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Con
 		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
 		return fmt.Errorf("list replacement advertisements: %w", err)
 	}
+	// A surviving tenant advertisement takes over: the newest projects now,
+	// since nothing else would wake it while its own state is unchanged and
+	// the attachment would keep the withdrawn node until then.
+	var survivor *bgpv1alpha1.BGPAdvertisement
 	for i := range advertisements.Items {
 		advertisement := &advertisements.Items[i]
 		router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
 		if err != nil {
 			return err
 		}
-		if router == nil || bgpv1alpha1.IsLegacyOwned(router) {
-			return nil
+		if router != nil && !bgpv1alpha1.IsLegacyOwned(router) {
+			continue
 		}
+		if survivor == nil || newerAdvertisement(advertisement, survivor) {
+			survivor = advertisement
+		}
+	}
+	if survivor != nil {
+		return r.reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(survivor)})
 	}
 	var attachments cloudv1alpha1.VPCAttachmentList
 	if err := r.List(ctx, &attachments, client.MatchingFields{IndexVPCAttachmentIdentity: identity}); err != nil {
@@ -391,30 +401,39 @@ func (r *BGPAdvertisementReconciler) isCurrentAdvertisement(ctx context.Context,
 }
 
 // newerAdvertisement reports whether a supersedes b: a live advertisement
-// beats one being deleted, then the later CNI ADD wins, then the later
-// creation for advertisements published before AnnotationLastAdd existed, and
-// the name breaks a tie so every pass agrees.
+// beats one being deleted, a stamped one beats an unstamped one, then the
+// later CNI ADD wins, or the later creation between unstamped ones, and the
+// name breaks a tie so every pass agrees. Stamps come from each node's clock,
+// so nodes are assumed to agree to well under the time an instance takes to
+// be recreated elsewhere.
 func newerAdvertisement(a, b *bgpv1alpha1.BGPAdvertisement) bool {
 	aDeleting, bDeleting := a.DeletionTimestamp != nil, b.DeletionTimestamp != nil
 	if aDeleting != bDeleting {
 		return bDeleting
 	}
-	aTime, bTime := lastAdd(a), lastAdd(b)
+	aTime, aStamped := lastAdd(a)
+	bTime, bStamped := lastAdd(b)
+	// While nodes roll to a CNI that stamps, a stamp is newer than no stamp:
+	// an advertisement reused across pod churn keeps its first creation time,
+	// which says nothing about its latest ADD.
+	if aStamped != bStamped {
+		return aStamped
+	}
 	if !aTime.Equal(bTime) {
 		return aTime.After(bTime)
 	}
 	return a.Name > b.Name
 }
 
-// lastAdd returns when a CNI ADD last published advertisement, falling back
-// to its creation time.
-func lastAdd(advertisement *bgpv1alpha1.BGPAdvertisement) time.Time {
+// lastAdd returns when a CNI ADD last published advertisement and true, or
+// its creation time and false when it carries no readable stamp.
+func lastAdd(advertisement *bgpv1alpha1.BGPAdvertisement) (time.Time, bool) {
 	if value, ok := advertisement.Annotations[galactic.AnnotationLastAdd]; ok {
 		if at, err := time.Parse(time.RFC3339Nano, value); err == nil {
-			return at
+			return at, true
 		}
 	}
-	return advertisement.CreationTimestamp.Time
+	return advertisement.CreationTimestamp.Time, false
 }
 
 // BGPAdvertisementIdentity returns the attachment identity shared by every
