@@ -125,11 +125,11 @@ func TestInstanceMovedBackRetakesStatus(t *testing.T) {
 	wantNode(t, f, "node-a")
 }
 
-// TestStaleMarkFallsBack: a mark naming a node whose advertisement is gone,
-// as after that node's ADD was rolled back or its pod collected, no longer
-// holds the old advertisement back, so the attachment falls back to it
-// rather than losing its status.
-func TestStaleMarkFallsBack(t *testing.T) {
+// TestWithdrawnCurrentWithOnlyReplacedLeftClears: when the current
+// advertisement is withdrawn and only a replaced one remains, as when the
+// instance stopped after moving off a node that is down, the status is
+// cleared rather than handed back to the node the instance left.
+func TestWithdrawnCurrentWithOnlyReplacedLeftClears(t *testing.T) {
 	f, moved := movedFixture(t)
 	setReplacedBy(t, f, f.tenantAdv, "node-c")
 	f.reconcile(t, moved)
@@ -138,22 +138,7 @@ func TestStaleMarkFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.reconcile(t, moved)
-	wantNode(t, f, "node-a")
-}
-
-// TestLateOldAddRecovers: a slow ADD on node-a finishes after node-c's,
-// marking node-c's advertisement and taking the status. Once node-a's
-// advertisement is collected, node-c's mark is stale and it takes over.
-func TestLateOldAddRecovers(t *testing.T) {
-	f, moved := movedFixture(t)
-	setReplacedBy(t, f, moved, "node-a")
-	f.reconcile(t, f.tenantAdv)
-	wantNode(t, f, "node-a")
-	if err := f.client.Delete(context.Background(), f.tenantAdv); err != nil {
-		t.Fatal(err)
-	}
-	f.reconcile(t, f.tenantAdv)
-	wantNode(t, f, "node-c")
+	wantNode(t, f, "")
 }
 
 // TestHandOverWithoutOldRouter: the replaced advertisement wrote last and its

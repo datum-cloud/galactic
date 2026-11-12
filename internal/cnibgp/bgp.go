@@ -82,6 +82,10 @@ type publishResult struct {
 	// attachment on this VPC and node rather than one reusing a live sibling's
 	// CRD. Rollback may delete the CRD only in that case.
 	vrfInstanceCreated bool
+	// markedReplaced names the other nodes' advertisements this ADD marked
+	// replaced by its node. Rolling back its freshly created advertisement
+	// unmarks them, so the attachment falls back to where it ran before.
+	markedReplaced []string
 	// sid is the computed SRv6 uSID for this attachment. Valid only when this
 	// node's BGPRouter has an SRv6 locator and node ID configured, the same
 	// condition registerEBPFDatapath skips on. Consumed by the EndpointSlice
@@ -473,7 +477,9 @@ func publishBGPState(
 		// Best effort: failing the ADD over it would roll back this node's
 		// advertisement, and an unmarked old one only costs the status flip
 		// this exists to stop.
-		if err := markReplacedAdvertisements(ctx, k8s, namespace, cfg.vpc, cfg.vpcAttachment, nodeName); err != nil {
+		marked, err := markReplacedAdvertisements(ctx, k8s, namespace, cfg.vpc, cfg.vpcAttachment, nodeName)
+		result.markedReplaced = append(result.markedReplaced, marked...)
+		if err != nil {
 			slog.Warn("ADD: could not mark other nodes' advertisements for this attachment replaced",
 				"err", err, "vpc", cfg.vpc, "vpcAttachment", cfg.vpcAttachment)
 		}
@@ -491,15 +497,18 @@ func publishBGPState(
 // attachment as replaced by nodeName. The instance now runs here, so their
 // nodes' delivery status is stale, yet each stays for its own node's GC,
 // which reclaims the old host link through it.
+//
+// It returns the names it marked, even alongside an error.
 func markReplacedAdvertisements(
 	ctx context.Context, k8s client.Client, namespace, vpc, vpcAttachment, nodeName string,
-) error {
+) ([]string, error) {
 	own := crdnames.BGPAdvertisementName(vpc, vpcAttachment, nodeName)
 	prefix := crdnames.BGPAdvertisementName(vpc, vpcAttachment, "")
 	var advertisements bgpv1alpha1.BGPAdvertisementList
 	if err := k8s.List(ctx, &advertisements, client.InNamespace(namespace)); err != nil {
-		return fmt.Errorf("list BGPAdvertisements to mark replaced: %w", err)
+		return nil, fmt.Errorf("list BGPAdvertisements to mark replaced: %w", err)
 	}
+	var marked []string
 	for i := range advertisements.Items {
 		other := &advertisements.Items[i]
 		if other.Name == own || !strings.HasPrefix(other.Name, prefix) ||
@@ -511,13 +520,39 @@ func markReplacedAdvertisements(
 			other.Annotations = map[string]string{}
 		}
 		other.Annotations[crdnames.AnnotationReplacedBy] = nodeName
-		if err := k8s.Patch(ctx, other, patch); client.IgnoreNotFound(err) != nil {
-			return fmt.Errorf("mark BGPAdvertisement %s replaced: %w", other.Name, err)
+		if err := k8s.Patch(ctx, other, patch); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return marked, fmt.Errorf("mark BGPAdvertisement %s replaced: %w", other.Name, err)
 		}
+		marked = append(marked, other.Name)
 		slog.Info("ADD: marked another node's advertisement for this attachment replaced",
 			"resource_name", other.Name, "vpc", vpc, "vpcAttachment", vpcAttachment)
 	}
-	return nil
+	return marked, nil
+}
+
+// unmarkReplacedAdvertisements removes the replaced mark this node put on each
+// of names, leaving any mark a later ADD on another node has since written.
+func unmarkReplacedAdvertisements(ctx context.Context, k8s client.Client, namespace, nodeName string, names []string) {
+	for _, name := range names {
+		var adv bgpv1alpha1.BGPAdvertisement
+		if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &adv); err != nil {
+			if !apierrors.IsNotFound(err) {
+				slog.Error("Rollback: could not read advertisement to unmark", "err", err, "resource_name", name)
+			}
+			continue
+		}
+		if adv.Annotations[crdnames.AnnotationReplacedBy] != nodeName {
+			continue
+		}
+		patch := client.MergeFrom(adv.DeepCopy())
+		delete(adv.Annotations, crdnames.AnnotationReplacedBy)
+		if err := k8s.Patch(ctx, &adv, patch); client.IgnoreNotFound(err) != nil {
+			slog.Error("Rollback: could not unmark advertisement", "err", err, "resource_name", name)
+		}
+	}
 }
 
 // egressConfig returns the egress shard configuration CNI ADD installs a

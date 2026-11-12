@@ -29,8 +29,9 @@ A recreated instance keeps its attachment, so after it moves node the old
 node's advertisement stays until that node's GC collects it. The CNI ADD on
 the new node marks the old one `galactic.datum.net/replaced-by: <new node>`,
 and the controller never takes `status.node` or `Programmed` from a marked
-advertisement, so the status stays on the new node. A mark naming a node that
-no longer has an advertisement for the attachment is ignored.
+advertisement, so the status stays on the new node. The mark stays until that
+advertisement is collected; only a failed ADD that rolls back its own new
+advertisement removes the marks it wrote.
 
 A pod can start on the cluster's default network without Multus, for example
 during a node boot. It can report Ready with no VPC connectivity. Its

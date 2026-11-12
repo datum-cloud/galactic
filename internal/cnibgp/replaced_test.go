@@ -28,8 +28,12 @@ func TestMarkReplacedAdvertisements(t *testing.T) {
 	unrelated := adv(crdnames.BGPAdvertisementName(vpc, other, "node-a"))
 	k8s := fakeClient(own, old, unrelated)
 
-	if err := markReplacedAdvertisements(context.Background(), k8s, ns, vpc, att, "node-b"); err != nil {
+	marked, err := markReplacedAdvertisements(context.Background(), k8s, ns, vpc, att, "node-b")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(marked) != 1 || marked[0] != old.Name {
+		t.Fatalf("marked = %v, want [%s]", marked, old.Name)
 	}
 	want := map[*bgpv1alpha1.BGPAdvertisement]string{own: "", old: "node-b", unrelated: ""}
 	for a, by := range want {
@@ -39,6 +43,29 @@ func TestMarkReplacedAdvertisements(t *testing.T) {
 		}
 		if got.Annotations[crdnames.AnnotationReplacedBy] != by {
 			t.Errorf("%s replaced-by = %q, want %q", a.Name, got.Annotations[crdnames.AnnotationReplacedBy], by)
+		}
+	}
+}
+
+// TestUnmarkLeavesLaterMarks: rolling back an ADD removes only the marks that
+// still name its node, never one a later ADD on another node wrote.
+func TestUnmarkLeavesLaterMarks(t *testing.T) {
+	const ns = "galactic-system"
+	mine := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
+		Name: "a", Namespace: ns, Annotations: map[string]string{crdnames.AnnotationReplacedBy: "node-b"},
+	}}
+	later := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
+		Name: "c", Namespace: ns, Annotations: map[string]string{crdnames.AnnotationReplacedBy: "node-d"},
+	}}
+	k8s := fakeClient(mine, later)
+	unmarkReplacedAdvertisements(context.Background(), k8s, ns, "node-b", []string{"a", "c", "gone"})
+	for name, want := range map[string]string{"a": "", "c": "node-d"} {
+		var got bgpv1alpha1.BGPAdvertisement
+		if err := k8s.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Annotations[crdnames.AnnotationReplacedBy] != want {
+			t.Errorf("%s replaced-by = %q, want %q", name, got.Annotations[crdnames.AnnotationReplacedBy], want)
 		}
 	}
 }

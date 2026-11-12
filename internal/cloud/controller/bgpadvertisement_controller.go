@@ -137,11 +137,7 @@ func (r *BGPAdvertisementReconciler) reconcile(ctx context.Context, req ctrl.Req
 	// advertisement that replaced it projects now: the attachment watch only
 	// wakes the advertisement of the node already in status.
 	identity := galactic.AdvertisementName(vpc, attachmentID)
-	siblings, err := r.advertisementNames(ctx, advertisement.Namespace, identity)
-	if err != nil {
-		return err
-	}
-	if replacedAmong(&advertisement, identity, siblings) {
+	if replaced(&advertisement) {
 		ownNode := strings.TrimPrefix(advertisement.Name, identity+"-")
 		for i := range attachments.Items {
 			if attachments.Items[i].Status.Node == ownNode {
@@ -375,13 +371,9 @@ func (r *BGPAdvertisementReconciler) projectFromCurrent(ctx context.Context, nam
 		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
 		return false, fmt.Errorf("list advertisements for attachment identity %s: %w", identity, err)
 	}
-	siblings := make(map[string]struct{}, len(advertisements.Items))
-	for i := range advertisements.Items {
-		siblings[advertisements.Items[i].Name] = struct{}{}
-	}
 	for i := range advertisements.Items {
 		advertisement := &advertisements.Items[i]
-		if replacedAmong(advertisement, identity, siblings) {
+		if replaced(advertisement) {
 			continue
 		}
 		router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
@@ -396,33 +388,13 @@ func (r *BGPAdvertisementReconciler) projectFromCurrent(ctx context.Context, nam
 	return false, nil
 }
 
-// advertisementNames returns the names of every advertisement for identity.
-func (r *BGPAdvertisementReconciler) advertisementNames(ctx context.Context, namespace, identity string,
-) (map[string]struct{}, error) {
-	var advertisements bgpv1alpha1.BGPAdvertisementList
-	if err := r.List(ctx, &advertisements, client.InNamespace(namespace),
-		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
-		return nil, fmt.Errorf("list advertisements for attachment identity %s: %w", identity, err)
-	}
-	names := make(map[string]struct{}, len(advertisements.Items))
-	for i := range advertisements.Items {
-		names[advertisements.Items[i].Name] = struct{}{}
-	}
-	return names, nil
-}
-
-// replacedAmong reports whether a CNI ADD on another node has taken
-// advertisement's attachment and that node's advertisement, one of siblings,
-// still exists. A mark naming a node with no advertisement any more is stale,
-// as after that ADD was rolled back or its pod is gone, so the attachment
-// falls back to this one.
-func replacedAmong(advertisement *bgpv1alpha1.BGPAdvertisement, identity string, siblings map[string]struct{}) bool {
-	by, ok := advertisement.Annotations[galactic.AnnotationReplacedBy]
-	if !ok || by == "" {
-		return false
-	}
-	_, exists := siblings[identity+"-"+by]
-	return exists
+// replaced reports whether a CNI ADD on another node has taken advertisement's
+// attachment. The mark never lapses on its own: a replacing advertisement that
+// is gone may have been collected after the instance stopped, and falling back
+// would report delivery on a node the instance left, possibly a dead one. A
+// rolled-back ADD removes its marks itself.
+func replaced(advertisement *bgpv1alpha1.BGPAdvertisement) bool {
+	return advertisement.Annotations[galactic.AnnotationReplacedBy] != ""
 }
 
 // BGPAdvertisementIdentity returns the attachment identity shared by every
