@@ -584,4 +584,15 @@ func TestCompileConnectRetry(t *testing.T) {
 	if !strings.Contains(res.Config, " neighbor 2001:db8::1 timers connect 5\n") {
 		t.Errorf("peer override not rendered:\n%s", res.Config)
 	}
+
+	// A peer whose profile sets no retry renders its own.
+	in.Profiles["upstream"].Spec.Transport = nil
+	res, err = Compile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Config, " neighbor 2001:db8::1 timers connect 5\n") ||
+		strings.Contains(res.Config, " neighbor upstream timers connect") {
+		t.Errorf("peer-only connect retry rendered wrongly:\n%s", res.Config)
+	}
 }

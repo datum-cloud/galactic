@@ -142,14 +142,20 @@ spec:
               protocol: TCP
           # Drain before stopping. `bgp graceful-shutdown` re-announces every
           # route with the well-known GRACEFUL_SHUTDOWN community (and
-          # LOCAL_PREF 0 to iBGP peers), so peers that honor it -- our own
-          # IBGP-IN does -- move traffic to another path while this session
-          # still forwards. Only then does frrinit.sh stop close the
-          # sessions. The live command is lost with the pod, so it never
-          # outlives the restart. The sleep stays well under the 30 s grace
-          # period (and Talos' critical-pod shutdown budget) so FRR always
-          # gets its clean stop instead of a SIGKILL, which would leave
-          # peers waiting out their hold timer.
+          # LOCAL_PREF 0 to iBGP peers), so peers with a policy for it move
+          # traffic to another path while this node still forwards; peers
+          # without one see no change. Only then does frrinit.sh stop send
+          # Cease and close the sessions. The live command is lost with the
+          # pod, so it never outlives the restart.
+          #
+          # Limits: a peer whose advertisement-interval timer is running (30 s
+          # for eBGP under `frr defaults traditional`) may get the update only
+          # after the stop, i.e. no drain. vtysh is bounded and a failure skips
+          # the wait, so a wedged bgpd still reaches frrinit.sh stop. The whole
+          # hook must finish inside the pod's 30 s grace period and the node's
+          # critical-pod shutdown budget (Talos defaults that to 10 s; set
+          # shutdownGracePeriodCriticalPods to at least 30 s), or FRR is
+          # SIGKILLed without Cease and peers wait out their hold timer.
           lifecycle:
             preStop:
               exec:
@@ -157,8 +163,12 @@ spec:
                   - sh
                   - -c
                   - |
-                    vtysh -c 'configure terminal' -c 'bgp graceful-shutdown' || true
-                    sleep 15
+                    if timeout 5 vtysh -c 'configure terminal' -c 'bgp graceful-shutdown'; then
+                      echo "preStop: graceful-shutdown set, draining 15s" >/proc/1/fd/1 2>/dev/null
+                      sleep 15
+                    else
+                      echo "preStop: graceful-shutdown failed, stopping without drain" >/proc/1/fd/1 2>/dev/null
+                    fi
                     exec /usr/lib/frr/frrinit.sh stop
           securityContext:
             capabilities:
