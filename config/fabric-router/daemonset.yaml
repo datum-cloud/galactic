@@ -140,12 +140,26 @@ spec:
             - name: bgp
               containerPort: 179
               protocol: TCP
+          # Drain before stopping. `bgp graceful-shutdown` re-announces every
+          # route with the well-known GRACEFUL_SHUTDOWN community (and
+          # LOCAL_PREF 0 to iBGP peers), so peers that honor it -- our own
+          # IBGP-IN does -- move traffic to another path while this session
+          # still forwards. Only then does frrinit.sh stop close the
+          # sessions. The live command is lost with the pod, so it never
+          # outlives the restart. The sleep stays well under the 30 s grace
+          # period (and Talos' critical-pod shutdown budget) so FRR always
+          # gets its clean stop instead of a SIGKILL, which would leave
+          # peers waiting out their hold timer.
           lifecycle:
             preStop:
               exec:
                 command:
-                  - /usr/lib/frr/frrinit.sh
-                  - stop
+                  - sh
+                  - -c
+                  - |
+                    vtysh -c 'configure terminal' -c 'bgp graceful-shutdown' || true
+                    sleep 15
+                    exec /usr/lib/frr/frrinit.sh stop
           securityContext:
             capabilities:
               add:

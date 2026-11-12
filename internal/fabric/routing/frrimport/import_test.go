@@ -215,3 +215,22 @@ func TestObjectName(t *testing.T) {
 		t.Errorf("objectName with a prefix = %q", got)
 	}
 }
+
+func TestImportConnectRetry(t *testing.T) {
+	text := strings.Replace(minimal, " neighbor 2001:db8::1 remote-as 64496\n",
+		" neighbor 2001:db8::1 remote-as 64496\n neighbor 2001:db8::1 timers connect 10\n", 1)
+	o, err := importText(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := o.Peers[0].Spec.Transport
+	if tr == nil || tr.ConnectRetrySeconds == nil || *tr.ConnectRetrySeconds != 10 {
+		t.Errorf("transport = %+v, want connect retry 10", tr)
+	}
+	// Keepalive and hold timers have no field: the importer names them.
+	text = strings.Replace(minimal, " neighbor 2001:db8::1 remote-as 64496\n",
+		" neighbor 2001:db8::1 remote-as 64496\n neighbor 2001:db8::1 timers 3 9\n", 1)
+	if _, err := importText(text); err == nil {
+		t.Error("imported keepalive/hold timers without error")
+	}
+}

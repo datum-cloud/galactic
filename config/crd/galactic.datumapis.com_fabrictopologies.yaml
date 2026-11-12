@@ -473,6 +473,16 @@ spec:
                               maximum: 600
                               minimum: 0
                               type: integer
+                            connectRetrySeconds:
+                              description: |-
+                                ConnectRetrySeconds is how long the router waits between attempts to
+                                open the session while it is down. Unset leaves the implementation's
+                                default (120 s in FRR), which can keep a session to a peer that
+                                refused the first attempt after a restart down for minutes.
+                              format: int32
+                              maximum: 65535
+                              minimum: 1
+                              type: integer
                             ebgpMultihopTTL:
                               description: |-
                                 EBGPMultihopTTL allows an eBGP session over up to this many hops.
@@ -881,6 +891,16 @@ spec:
                               maximum: 600
                               minimum: 0
                               type: integer
+                            connectRetrySeconds:
+                              description: |-
+                                ConnectRetrySeconds is how long the router waits between attempts to
+                                open the session while it is down. Unset leaves the implementation's
+                                default (120 s in FRR), which can keep a session to a peer that
+                                refused the first attempt after a restart down for minutes.
+                              format: int32
+                              maximum: 65535
+                              minimum: 1
+                              type: integer
                             ebgpMultihopTTL:
                               description: |-
                                 EBGPMultihopTTL allows an eBGP session over up to this many hops.
@@ -1128,6 +1148,16 @@ spec:
                               format: int32
                               maximum: 600
                               minimum: 0
+                              type: integer
+                            connectRetrySeconds:
+                              description: |-
+                                ConnectRetrySeconds is how long the router waits between attempts to
+                                open the session while it is down. Unset leaves the implementation's
+                                default (120 s in FRR), which can keep a session to a peer that
+                                refused the first attempt after a restart down for minutes.
+                              format: int32
+                              maximum: 65535
+                              minimum: 1
                               type: integer
                             ebgpMultihopTTL:
                               description: |-
@@ -1406,6 +1436,16 @@ spec:
                               format: int32
                               maximum: 600
                               minimum: 0
+                              type: integer
+                            connectRetrySeconds:
+                              description: |-
+                                ConnectRetrySeconds is how long the router waits between attempts to
+                                open the session while it is down. Unset leaves the implementation's
+                                default (120 s in FRR), which can keep a session to a peer that
+                                refused the first attempt after a restart down for minutes.
+                              format: int32
+                              maximum: 65535
+                              minimum: 1
                               type: integer
                             ebgpMultihopTTL:
                               description: |-

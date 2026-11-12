@@ -159,6 +159,9 @@ func renderTransport(w *writer, who string, t *networkv1alpha1.BGPPeerTransport)
 	if t.AdvertisementIntervalSeconds != nil {
 		w.line(" neighbor %s advertisement-interval %d", who, *t.AdvertisementIntervalSeconds)
 	}
+	if t.ConnectRetrySeconds != nil {
+		w.line(" neighbor %s timers connect %d", who, *t.ConnectRetrySeconds)
+	}
 }
 
 // overriddenTransport is the part of a peer's transport that differs from
@@ -177,6 +180,10 @@ func overriddenTransport(own, inherited *networkv1alpha1.BGPPeerTransport) *netw
 	if own.AdvertisementIntervalSeconds != nil &&
 		!equalInt32(own.AdvertisementIntervalSeconds, inherited.AdvertisementIntervalSeconds) {
 		out.AdvertisementIntervalSeconds = own.AdvertisementIntervalSeconds
+	}
+	if own.ConnectRetrySeconds != nil &&
+		!equalInt32(own.ConnectRetrySeconds, inherited.ConnectRetrySeconds) {
+		out.ConnectRetrySeconds = own.ConnectRetrySeconds
 	}
 	return out
 }

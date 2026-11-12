@@ -556,3 +556,32 @@ func TestCompileOptionalDefaults(t *testing.T) {
 		t.Errorf("the default syslog level is not left out:\n%s", res.Config)
 	}
 }
+
+// TestCompileConnectRetry: a profile's connect retry renders on the peer
+// group, and a peer renders its own only where it differs.
+func TestCompileConnectRetry(t *testing.T) {
+	in := baseline()
+	in.Profiles["upstream"].Spec.Transport = &networkv1alpha1.BGPPeerTransport{ConnectRetrySeconds: ptr.To[int32](10)}
+	same := baselinePeer()
+	same.Spec.Transport = &networkv1alpha1.BGPPeerTransport{ConnectRetrySeconds: ptr.To[int32](10)}
+	in.Peers = []networkv1alpha1.BGPPeer{same}
+	res, err := Compile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Config, " neighbor upstream timers connect 10\n") {
+		t.Errorf("profile connect retry not rendered:\n%s", res.Config)
+	}
+	if strings.Contains(res.Config, " neighbor 2001:db8::1 timers connect") {
+		t.Errorf("peer repeated the inherited connect retry:\n%s", res.Config)
+	}
+
+	in.Peers[0].Spec.Transport.ConnectRetrySeconds = ptr.To[int32](5)
+	res, err = Compile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Config, " neighbor 2001:db8::1 timers connect 5\n") {
+		t.Errorf("peer override not rendered:\n%s", res.Config)
+	}
+}
