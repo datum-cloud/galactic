@@ -470,8 +470,12 @@ func publishBGPState(
 		if advOp == controllerutil.OperationResultCreated {
 			result.advertisementCreated = true
 		}
+		// Best effort: failing the ADD over it would roll back this node's
+		// advertisement, and an unmarked old one only costs the status flip
+		// this exists to stop.
 		if err := markReplacedAdvertisements(ctx, k8s, namespace, cfg.vpc, cfg.vpcAttachment, nodeName); err != nil {
-			return err
+			slog.Warn("ADD: could not mark other nodes' advertisements for this attachment replaced",
+				"err", err, "vpc", cfg.vpc, "vpcAttachment", cfg.vpcAttachment)
 		}
 		slog.Debug("BGP: BGPAdvertisement applied", "resource_name", adv.Name, "resource_namespace", namespace,
 			"prefixes", mergedPrefixes, "addedPrefixes", prefixes, "containerID", args.ContainerID, "operation", advOp)
