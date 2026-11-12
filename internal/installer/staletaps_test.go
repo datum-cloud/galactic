@@ -201,8 +201,6 @@ func TestStaleTapReclaimKeeps(t *testing.T) {
 			objs: []client.Object{vpcAttachment("live", "00"+staleVPC, "0"+staleAttachment)}},
 		{name: "an advertisement names it", link: staleTapLink(staleName, staleIndex, staleOwner, 0),
 			objs: []client.Object{advertisement(crdnames.BGPAdvertisementName(staleVPC, staleAttachment, staleNode))}},
-		{name: "another node's advertisement names it", link: staleTapLink(staleName, staleIndex, staleOwner, 0),
-			objs: []client.Object{advertisement(crdnames.BGPAdvertisementName(staleVPC, staleAttachment, "node-b"))}},
 		{name: "a legacy advertisement names it", link: staleTapLink(staleName, staleIndex, staleOwner, 0),
 			objs: []client.Object{advertisement(staleVPC + "-" + staleAttachment + "-" + staleNode)}},
 		{name: "kept host-only stamp still reads its owner, but a VMM holds it",
@@ -465,5 +463,46 @@ func TestStaleTapReclaimAdvertisedWithoutAttachments(t *testing.T) {
 	}
 	if len(f.deleted) != 0 {
 		t.Errorf("deleted %v; want the advertised tap kept", f.deleted)
+	}
+}
+
+// TestStaleTapReclaimMovedAttachment: a detached tap whose attachment is now
+// advertised only on another node, the workload having moved there, is
+// removed even though its VPCAttachment still exists, once a second pass
+// confirms it.
+func TestStaleTapReclaimMovedAttachment(t *testing.T) {
+	f := newStaleTapFixture(t, staleTapLink(staleName, staleIndex, staleOwner, 0))
+	k8s := staleClient(t, interceptor.Funcs{},
+		vpcAttachment("moved", staleVPC, staleAttachment),
+		advertisement(crdnames.BGPAdvertisementName(staleVPC, staleAttachment, "other-node")))
+	r := &staleTapReclaimer{}
+	for pass, want := range []int{0, 1} {
+		got, err := r.reclaim(context.Background(), k8s, staleNamespace, staleNode)
+		if err != nil || got.Reclaimed != want {
+			t.Fatalf("pass %d = %+v, err %v; want %d reclaimed", pass+1, got, err, want)
+		}
+	}
+	if len(f.deleted) != 1 {
+		t.Errorf("deleted %v; want the moved attachment's tap", f.deleted)
+	}
+}
+
+// TestStaleTapReclaimKeepsAttachedTapAdvertisedHere: a tap whose attachment
+// is advertised on this node is kept, even while another node advertises it
+// too.
+func TestStaleTapReclaimKeepsAttachedTapAdvertisedHere(t *testing.T) {
+	f := newStaleTapFixture(t, staleTapLink(staleName, staleIndex, staleOwner, 0))
+	k8s := staleClient(t, interceptor.Funcs{},
+		vpcAttachment("here", staleVPC, staleAttachment),
+		advertisement(crdnames.BGPAdvertisementName(staleVPC, staleAttachment, staleNode)),
+		advertisement(crdnames.BGPAdvertisementName(staleVPC, staleAttachment, "other-node")))
+	r := &staleTapReclaimer{}
+	for range 2 {
+		if _, err := r.reclaim(context.Background(), k8s, staleNamespace, staleNode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(f.deleted) != 0 {
+		t.Errorf("deleted %v; want the tap kept", f.deleted)
 	}
 }

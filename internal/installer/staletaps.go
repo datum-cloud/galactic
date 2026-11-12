@@ -50,11 +50,13 @@ import (
 //     or adopted it;
 //   - no file descriptor holds it, enabled or disabled queue alike, so no VMM
 //     is using it;
-//   - no BGPAdvertisement names its attachment, so the router's GC is not the
-//     one to judge it;
-//   - no VPCAttachment carries its (VPC, attachment) identity, so no workload
-//     can be given it again, while the cluster lists at least one
-//     VPCAttachment that does carry an identity.
+//   - no BGPAdvertisement on this node names its attachment, so the router's
+//     GC is not the one to judge it;
+//   - either a BGPAdvertisement on another node names its attachment, so the
+//     workload now runs there (a CNI ADD on the new node deletes this node's
+//     leftover advertisement), or no VPCAttachment carries its (VPC,
+//     attachment) identity, so no workload can be given it again, while the
+//     cluster lists at least one VPCAttachment that does carry an identity.
 //
 // A candidate is removed only when the previous pass read every input and found it too, with the
 // same ifindex and owner stamp. A workload's ADD can create its tap between
@@ -140,10 +142,14 @@ func (r *staleTapReclaimer) reclaim(
 		return result, err
 	}
 	var unadvertised []staleTap
+	moved := map[string]bool{}
 	for _, t := range found {
-		if !advertised(t.vpc, t.vpcAttachment) {
-			unadvertised = append(unadvertised, t)
+		here, elsewhere := advertised(t.vpc, t.vpcAttachment, nodeName)
+		if here {
+			continue
 		}
+		unadvertised = append(unadvertised, t)
+		moved[t.name] = elsewhere
 	}
 	if len(unadvertised) == 0 {
 		r.pending = nil
@@ -167,7 +173,7 @@ func (r *staleTapReclaimer) reclaim(
 	next := map[string]staleTap{}
 	var errs []error
 	for _, t := range unadvertised {
-		if _, ok := attached[attachmentKey(t.vpc, t.vpcAttachment)]; ok {
+		if _, ok := attached[attachmentKey(t.vpc, t.vpcAttachment)]; ok && !moved[t.name] {
 			continue
 		}
 		if prev, ok := r.pending[t.name]; !ok || prev != t {
@@ -255,11 +261,11 @@ func removeStaleTap(t staleTap, nodeName string) (bool, error) {
 }
 
 // advertisedAttachments lists every BGPAdvertisement in namespace and returns
-// a test for whether any of them, on any node and under either name form,
-// names (vpc, vpcAttachment).
+// a test for whether any of them, under either name form, names (vpc,
+// vpcAttachment) on nodeName, and whether any names it on another node.
 func advertisedAttachments(
 	ctx context.Context, k8s client.Client, namespace string,
-) (func(vpc, vpcAttachment string) bool, error) {
+) (func(vpc, vpcAttachment, nodeName string) (here, elsewhere bool), error) {
 	list := &bgpv1alpha1.BGPAdvertisementList{}
 	if err := k8s.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list BGPAdvertisements: %w", err)
@@ -268,18 +274,23 @@ func advertisedAttachments(
 	for _, adv := range list.Items {
 		names = append(names, adv.Name)
 	}
-	return func(vpc, vpcAttachment string) bool {
+	return func(vpc, vpcAttachment, nodeName string) (here, elsewhere bool) {
 		// The current form encodes both segments; names written before that
 		// encoding carry the raw base62 values.
 		prefixes := []string{crdnames.BGPAdvertisementName(vpc, vpcAttachment, ""), vpc + "-" + vpcAttachment + "-"}
 		for _, name := range names {
 			for _, p := range prefixes {
-				if strings.HasPrefix(name, p) {
-					return true
+				if !strings.HasPrefix(name, p) {
+					continue
+				}
+				if strings.TrimPrefix(name, p) == nodeName {
+					here = true
+				} else {
+					elsewhere = true
 				}
 			}
 		}
-		return false
+		return here, elsewhere
 	}, nil
 }
 

@@ -25,14 +25,6 @@ The controller copies `Programmed` from the `Advertised` condition that
 GoBGP state. A `Running` pod already has its sandbox, so Multus should already
 have attached each interface through the Galactic CNI.
 
-A recreated instance keeps its attachment, so after it moves node the old
-node's advertisement stays until that node's GC collects it. The CNI ADD on
-the new node marks the old one `galactic.datum.net/replaced-by: <new node>`,
-and the controller never takes `status.node` or `Programmed` from a marked
-advertisement, so the status stays on the new node. The mark stays until that
-advertisement is collected; only a failed ADD that rolls back its own new
-advertisement removes the marks it wrote.
-
 A pod can start on the cluster's default network without Multus, for example
 during a node boot. It can report Ready with no VPC connectivity. Its
 network-status does not list the attachment, so it is reported as

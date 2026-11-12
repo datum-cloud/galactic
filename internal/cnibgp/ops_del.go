@@ -16,19 +16,22 @@ import (
 	"go.datum.net/galactic/internal/podslice"
 )
 
-// cmdDel deletes the per-pod EndpointSlice the ADD path published, then falls
-// through to the same no-op the rest of the chain's DEL paths follow for the BGP
-// CRDs and the vrf_table entry. Those are keyed by attachment and may still be
-// in use by another pod sharing it, so deleting them here would race a
-// concurrent ADD during a restart; that cleanup stays garbage collection's job.
+// cmdDel releases what this container's ADD published: its per-pod
+// EndpointSlice, and its entry on this node's BGPAdvertisement for the
+// attachment, deleting the advertisement once no container it records is
+// still alive (releaseAdvertisement). A replacement container on this node
+// whose ADD ran first keeps the advertisement. The BGPVRFInstance and the
+// vrf_table entry are shared by every attachment on this VPC on this node, so
+// reclaiming them stays garbage collection's job, as does anything a DEL that
+// never ran leaves behind.
 //
-// The EndpointSlice is a deliberate divergence: it is one per pod and never
-// shared with another attachment. It is still shared across a pod's sandboxes,
-// so DEL deletes it only when this sandbox wrote it.
+// The EndpointSlice is still shared across a pod's sandboxes, so DEL deletes
+// it only when this sandbox wrote it.
+//
 // Deletion is best-effort, and any failure, including failing to build a
 // client at all, is logged while DEL still returns success: an API hiccup
-// during teardown must not block the pod from going away. The owner reference
-// is the backstop for exactly that case.
+// during teardown must not block the pod from going away. GC is the backstop
+// for exactly that case.
 func cmdDel(args *skel.CmdArgs) error {
 	// DEL is idempotent per the CNI spec and always returns success, even when
 	// the config fails to parse. Parsing exists only to log the identifiers when
@@ -42,10 +45,8 @@ func cmdDel(args *skel.CmdArgs) error {
 		return nil
 	}
 
-	slog.Info("DEL: skipping shared resource cleanup (handled by GC)", "containerID", args.ContainerID,
-		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
-
 	deleteEndpointSliceBestEffort(args)
+	releaseAdvertisementBestEffort(args, pluginConf.Namespace, pluginConf.VPC, pluginConf.VPCAttachment)
 
 	result := &type100.Result{}
 	_ = types.PrintResult(result, pluginConf.CNIVersion)
@@ -87,4 +88,30 @@ func deleteEndpointSliceBestEffort(args *skel.CmdArgs) {
 	}
 	slog.Info("DEL: EndpointSlice deleted",
 		"containerID", args.ContainerID, "podName", podName, "podNamespace", podNamespace)
+}
+
+// releaseAdvertisementBestEffort releases this container's entry on this
+// node's advertisement for the attachment (releaseAdvertisement), logging
+// rather than failing DEL on any error.
+func releaseAdvertisementBestEffort(args *skel.CmdArgs, namespace, vpc, vpcAttachment string) {
+	if cniConfig == nil || cniConfig.NodeName == "" {
+		slog.Warn("DEL: no node name, advertisement cleanup deferred to GC", "containerID", args.ContainerID)
+		return
+	}
+	k8sClient, err := newK8sClient()
+	if err != nil {
+		slog.Error("DEL: failed to create k8s client, advertisement cleanup deferred to GC",
+			"err", err, "containerID", args.ContainerID)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
+	defer cancel()
+	if err := releaseAdvertisement(ctx, k8sClient, namespace, vpc, vpcAttachment, cniConfig.NodeName,
+		args.ContainerID); err != nil {
+		slog.Error("DEL: failed to release advertisement, cleanup deferred to GC", "err", err,
+			"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAttachment)
+		return
+	}
+	slog.Info("DEL: released advertisement", "containerID", args.ContainerID,
+		"vpc", vpc, "vpcAttachment", vpcAttachment)
 }

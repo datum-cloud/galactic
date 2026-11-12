@@ -70,17 +70,6 @@ const (
 // agree on whether addressing was requested.
 const AnnotationNoAddressing = "galactic.datum.net/no-addressing"
 
-// AnnotationReplacedBy marks a BGPAdvertisement whose attachment a CNI ADD on
-// another node has since taken, naming that node.
-//
-// A recreated instance keeps its attachment identity, so after it moves node
-// the old node's advertisement stays until that node's GC collects it, the
-// GC needing it to find and reclaim the old host link. Until then the cloud
-// controller must not project the attachment's status from it. A CNI ADD
-// marks every other node's advertisement for its attachment and clears the
-// mark on its own, so an instance that moves back takes its old one again.
-const AnnotationReplacedBy = "galactic.datum.net/replaced-by"
-
 // AnnotationNoAddressingValue is the only value AnnotationNoAddressing is set
 // to. Named so callers and tests share one spelling.
 const AnnotationNoAddressingValue = "true"

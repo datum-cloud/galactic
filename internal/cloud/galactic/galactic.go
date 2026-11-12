@@ -69,11 +69,6 @@ const (
 	// addressing, so an empty prefix list is intentional.
 	AnnotationNoAddressing = "galactic.datum.net/no-addressing"
 
-	// AnnotationReplacedBy marks an advertisement whose attachment a CNI ADD
-	// on another node has since taken. Its attachment's status is never
-	// projected from it.
-	AnnotationReplacedBy = "galactic.datum.net/replaced-by"
-
 	// ConditionAdvertised is set on a BGPAdvertisement from live GoBGP state.
 	ConditionAdvertised = "Advertised"
 )

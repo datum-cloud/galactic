@@ -99,9 +99,6 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 				"resource_name", adv.Name, "resource_namespace", rt.namespace)
 		} else {
 			slog.Debug("Rollback: deleted BGPAdvertisement", "resource_name", adv.Name, "resource_namespace", rt.namespace)
-			// The attachment never ran here, so where it ran before is
-			// current again.
-			unmarkReplacedAdvertisements(ctx, rt.k8s, rt.namespace, rt.nodeName, rt.markedReplaced)
 		}
 	}
 

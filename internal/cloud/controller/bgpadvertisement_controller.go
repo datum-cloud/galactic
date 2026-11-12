@@ -127,26 +127,6 @@ func (r *BGPAdvertisementReconciler) reconcile(ctx context.Context, req ctrl.Req
 	if len(attachments.Items) == 0 {
 		return nil
 	}
-	// The instance moved: a CNI ADD on another node took the attachment, and
-	// this advertisement only waits for its own node's GC. Projecting from
-	// it as well would overwrite the new node's status on every pass, and
-	// every node router would add and remove the attachment's routes on each
-	// flip.
-	//
-	// If this one wrote last, as when the mark landed after a pass of it, the
-	// advertisement that replaced it projects now: the attachment watch only
-	// wakes the advertisement of the node already in status.
-	identity := galactic.AdvertisementName(vpc, attachmentID)
-	if replaced(&advertisement) {
-		ownNode := strings.TrimPrefix(advertisement.Name, identity+"-")
-		for i := range attachments.Items {
-			if attachments.Items[i].Status.Node == ownNode {
-				_, err := r.projectFromCurrent(ctx, advertisement.Namespace, identity)
-				return err
-			}
-		}
-		return nil
-	}
 
 	var node string
 	if router != nil {
@@ -191,21 +171,24 @@ func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Con
 		return nil
 	}
 	identity := galactic.AdvertisementName(vpc, attachmentID)
+	var advertisements bgpv1alpha1.BGPAdvertisementList
+	if err := r.List(ctx, &advertisements, client.InNamespace(key.Namespace),
+		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
+		return fmt.Errorf("list replacement advertisements: %w", err)
+	}
+	for i := range advertisements.Items {
+		advertisement := &advertisements.Items[i]
+		router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
+		if err != nil {
+			return err
+		}
+		if router == nil || bgpv1alpha1.IsLegacyOwned(router) {
+			return nil
+		}
+	}
 	var attachments cloudv1alpha1.VPCAttachmentList
 	if err := r.List(ctx, &attachments, client.MatchingFields{IndexVPCAttachmentIdentity: identity}); err != nil {
 		return fmt.Errorf("list withdrawn attachments: %w", err)
-	}
-	// When the attachment was on the withdrawn node, a remaining current
-	// advertisement takes over now, since nothing else would wake it while
-	// its own state is unchanged.
-	for i := range attachments.Items {
-		if key.Name != identity+"-"+attachments.Items[i].Status.Node {
-			continue
-		}
-		if projected, err := r.projectFromCurrent(ctx, key.Namespace, identity); err != nil || projected {
-			return err
-		}
-		break
 	}
 	for i := range attachments.Items {
 		attachment := &attachments.Items[i]
@@ -359,42 +342,6 @@ func (r *BGPAdvertisementReconciler) tenantAdvertisements(
 		}})
 	}
 	return requests
-}
-
-// projectFromCurrent projects the attachment's status from the first tenant
-// advertisement for identity that has not been replaced and whose router
-// exists, reporting whether there was one. A replaced advertisement, or one
-// whose node's router is gone, cannot say where the instance runs.
-func (r *BGPAdvertisementReconciler) projectFromCurrent(ctx context.Context, namespace, identity string) (bool, error) {
-	var advertisements bgpv1alpha1.BGPAdvertisementList
-	if err := r.List(ctx, &advertisements, client.InNamespace(namespace),
-		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
-		return false, fmt.Errorf("list advertisements for attachment identity %s: %w", identity, err)
-	}
-	for i := range advertisements.Items {
-		advertisement := &advertisements.Items[i]
-		if replaced(advertisement) {
-			continue
-		}
-		router, err := r.routerFor(ctx, advertisement.Namespace, advertisement.Spec.RouterRef.Name)
-		if err != nil {
-			return false, err
-		}
-		if router == nil || !bgpv1alpha1.IsLegacyOwned(router) {
-			continue
-		}
-		return true, r.reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(advertisement)})
-	}
-	return false, nil
-}
-
-// replaced reports whether a CNI ADD on another node has taken advertisement's
-// attachment. The mark never lapses on its own: a replacing advertisement that
-// is gone may have been collected after the instance stopped, and falling back
-// would report delivery on a node the instance left, possibly a dead one. A
-// rolled-back ADD removes its marks itself.
-func replaced(advertisement *bgpv1alpha1.BGPAdvertisement) bool {
-	return advertisement.Annotations[galactic.AnnotationReplacedBy] != ""
 }
 
 // BGPAdvertisementIdentity returns the attachment identity shared by every
