@@ -41,7 +41,9 @@ Caveats for the translated traffic and state series:
   `redirect` over another one.
 - Messages the shard sends on its own behalf (Packet Too Big, Fragmentation
   Needed, echo replies to its own address) and packets it passes on
-  unclaimed are not translations and are not counted.
+  unclaimed are not translations and are not counted. Neither are return
+  packets handed to the kernel for neighbor resolution; they are counted in
+  `galactic_nat_neigh_fallbacks_total`.
 - The counters live in a pinned map, so they outlive a pod restart, like
   `galactic_nat_drops_total`.
 - A shard can be attached and programmed and still translate nothing, when
@@ -78,10 +80,16 @@ Caveats for the neighbor fallback:
   `fib_no_neigh`. The next hop is one only the datapath uses, so the kernel
   never confirms its entry, and its neighbor GC deletes the entry once the
   node holds more than `gc_thresh1` neighbors. Short bursts are expected then.
+- The kernel's resolved entry is again one only the datapath uses, so it
+  ages out and is collected the same way, and the bursts recur while the node
+  stays above `gc_thresh1`. Each burst costs a few packets through the kernel
+  rather than seconds of drops.
 - Steady growth means neighbor entries keep expiring or a next hop does not
-  answer, and the kernel drops what it cannot resolve. The counter records the
-  handoff, not delivery: these packets cross the node's netfilter FORWARD hook,
-  unlike the XDP path.
+  answer, and the kernel drops what it cannot resolve. A next hop that never
+  answers sends every reply to it through the kernel's slow path. The counter
+  records the handoff, not delivery: these packets cross the node's netfilter
+  FORWARD hook, unlike the XDP path, and a strict IPv6 reverse-path filter
+  drops them (see the NAT configuration notes).
 - `fib_no_neigh` still counts the outbound legs and the ICMP messages the
   shard sends itself.
 

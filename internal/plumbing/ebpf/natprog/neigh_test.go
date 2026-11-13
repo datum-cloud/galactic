@@ -229,7 +229,10 @@ func TestReturn_KernelResolvesUnresolvedNextHop(t *testing.T) {
 	t.Cleanup(func() { _ = unix.Close(nextHopNS) })
 	setNetns(t, shardNS)
 
-	setLinkUp(t, "lo")
+	lo := setLinkUp(t, "lo")
+	// The outer source is the shard's own SID, a real address on the node as
+	// in production, so the kernel forwards a packet sourced from itself.
+	addLinkAddr(t, lo, shardSID, 128)
 	for _, path := range []string{ipv6AllForwarding, "/proc/sys/net/ipv6/conf/default/forwarding"} {
 		if err := os.WriteFile(path, []byte("1"), 0o644); err != nil {
 			t.Fatalf("enable forwarding via %s: %v", path, err)
@@ -344,6 +347,10 @@ func awaitLinkLocal(t *testing.T, ifindex int) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		addrs, err := netlink.AddrList(l, netlink.FAMILY_V6)
+		if errors.Is(err, netlink.ErrDumpInterrupted) {
+			// Addresses changed mid-dump, as while DAD completes; list again.
+			continue
+		}
 		if err != nil {
 			t.Fatalf("list addresses on ifindex %d: %v", ifindex, err)
 		}
@@ -360,6 +367,12 @@ func awaitLinkLocal(t *testing.T, ifindex int) {
 func neighborValid(t *testing.T, ifindex int, dst netip.Addr) bool {
 	t.Helper()
 	neighs, err := netlink.NeighList(ifindex, netlink.FAMILY_V6)
+	for range 10 {
+		if !errors.Is(err, netlink.ErrDumpInterrupted) {
+			break
+		}
+		neighs, err = netlink.NeighList(ifindex, netlink.FAMILY_V6)
+	}
 	if err != nil {
 		t.Fatalf("list neighbors on ifindex %d: %v", ifindex, err)
 	}
