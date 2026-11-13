@@ -215,3 +215,46 @@ func TestObjectName(t *testing.T) {
 		t.Errorf("objectName with a prefix = %q", got)
 	}
 }
+
+func TestImportConnectRetry(t *testing.T) {
+	text := strings.Replace(minimal, " neighbor 2001:db8::1 remote-as 64496\n",
+		" neighbor 2001:db8::1 remote-as 64496\n neighbor 2001:db8::1 timers connect 10\n", 1)
+	o, err := importText(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := o.Peers[0].Spec.Transport
+	if tr == nil || tr.ConnectRetrySeconds == nil || *tr.ConnectRetrySeconds != 10 {
+		t.Errorf("transport = %+v, want connect retry 10", tr)
+	}
+	// A peer group's retry lands on its profile.
+	grouped := `frr defaults traditional
+hostname node-a-fabric
+router bgp 64500
+ bgp router-id 192.0.2.1
+ neighbor UP peer-group
+ neighbor UP remote-as 64496
+ neighbor UP timers connect 15
+ neighbor 2001:db8::1 peer-group UP
+ address-family ipv6 unicast
+  neighbor UP activate
+  neighbor UP route-map OUT out
+ exit-address-family
+route-map OUT permit 10
+exit
+`
+	o, err = importText(grouped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o.Profiles) != 1 || o.Profiles[0].Spec.Transport == nil ||
+		o.Profiles[0].Spec.Transport.ConnectRetrySeconds == nil || *o.Profiles[0].Spec.Transport.ConnectRetrySeconds != 15 {
+		t.Errorf("profiles = %+v, want connect retry 15 on the group", o.Profiles)
+	}
+	// Keepalive and hold timers have no field: the importer names them.
+	text = strings.Replace(minimal, " neighbor 2001:db8::1 remote-as 64496\n",
+		" neighbor 2001:db8::1 remote-as 64496\n neighbor 2001:db8::1 timers 3 9\n", 1)
+	if _, err := importText(text); err == nil {
+		t.Error("imported keepalive/hold timers without error")
+	}
+}

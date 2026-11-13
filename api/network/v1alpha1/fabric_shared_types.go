@@ -45,6 +45,16 @@ type BGPPeerTransport struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=600
 	AdvertisementIntervalSeconds *int32 `json:"advertisementIntervalSeconds,omitempty"`
+
+	// ConnectRetrySeconds is how long the router waits between attempts to
+	// open the session while it is down. Unset leaves the implementation's
+	// default (120 s under FRR's traditional profile, 10 s under
+	// datacenter); a long retry can keep a session to a peer that refused
+	// the first attempt after a restart down for minutes.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	ConnectRetrySeconds *int32 `json:"connectRetrySeconds,omitempty"`
 }
 
 // BGPPrefixLimitAction is what a session does once a family's received

@@ -217,6 +217,9 @@ func Classify(added, removed []string) networkv1alpha1.FabricChangeClass {
 		switch {
 		case len(f) >= 2 && f[0] == "frr" && f[1] == "defaults":
 			return networkv1alpha1.FabricChangeRestartRequired
+		case len(f) >= 4 && f[0] == "neighbor" && f[2] == "timers" && f[3] == "connect":
+			// The connect retry only paces attempts while a session is
+			// down; an established session is untouched.
 		case len(f) >= 3 && f[0] == "neighbor" && sessionVerb(f[2]):
 			class = networkv1alpha1.FabricChangeSessionReset
 		case len(f) >= 3 && f[0] == "router" && f[1] == "bgp":

@@ -397,6 +397,12 @@ func (p *parser) neighborSession(f []string, line string) error {
 			return err
 		}
 		ensure(transport).AdvertisementIntervalSeconds = ptr.To(int32(n))
+	case verb == "timers" && len(f) == 5 && f[3] == "connect":
+		n, err := strconv.ParseInt(f[4], 10, 32)
+		if err != nil {
+			return err
+		}
+		ensure(transport).ConnectRetrySeconds = ptr.To(int32(n))
 	default:
 		return errUnsupported
 	}

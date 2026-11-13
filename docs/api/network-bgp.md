@@ -745,6 +745,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `ebgpMultihopTTL` _integer_ | EBGPMultihopTTL allows an eBGP session over up to this many hops.<br />Unset renders no multihop line. |  | Maximum: 255 <br />Minimum: 1 <br /> |
 | `advertisementIntervalSeconds` _integer_ | AdvertisementIntervalSeconds is the minimum interval between UPDATE<br />messages. Unset leaves the implementation's default. |  | Maximum: 600 <br />Minimum: 0 <br /> |
+| `connectRetrySeconds` _integer_ | ConnectRetrySeconds is how long the router waits between attempts to<br />open the session while it is down. Unset leaves the implementation's<br />default (120 s under FRR's traditional profile, 10 s under<br />datacenter); a long retry can keep a session to a peer that refused<br />the first attempt after a restart down for minutes. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 
 
 #### BGPPolicy
