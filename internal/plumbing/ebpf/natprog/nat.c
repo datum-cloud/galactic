@@ -74,7 +74,10 @@
 //
 // Each leaf ends in leave_via: XDP_TX where the route egresses the interface
 // the packet arrived on, XDP_REDIRECT where it does not. No leaf ends in
-// XDP_PASS once it has touched the packet.
+// XDP_PASS once it has touched the packet, with one exception: a return
+// packet whose next hop toward the tenant node has no neighbor entry goes to
+// the kernel fully encapsulated, so the kernel resolves the neighbor (see
+// push_outer_header).
 //
 // The split is not stylistic. A single program holding both families' full
 // translation paths -- each with its own header synthesis, checksum handling,
@@ -589,6 +592,17 @@ struct {
 	__type(key, __u32);
 	__type(value, __u64);
 } drop_reasons SEC(".maps");
+
+// neigh_fallbacks counts the encapsulated return packets passed to the kernel
+// because the next hop toward the tenant node had no neighbor entry; see
+// push_outer_header. They are not drops, so they have their own map rather
+// than a drop_reasons bucket.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} neigh_fallbacks SEC(".maps");
 
 // Translated traffic, by address family, direction and how the packet left.
 // The slot is family * 4 + direction * 2 + action, mirrored in Go by
@@ -1229,10 +1243,32 @@ static NAT_ALWAYS_INLINE int leave_translated(struct xdp_md *ctx, __u32 egress_i
 // A packet the encapsulated route is too small for still counts as
 // fib_frag_needed here, and also reports that route's MTU through frag_mtu so
 // the caller can tell the sender.
+//
+// A next hop with no neighbor entry is not a failure. The return leg reaches
+// the tenant node through a fabric next hop that only this datapath uses, so
+// the kernel never confirms that entry: it goes stale, and the kernel's
+// neighbor GC deletes it once the table holds more than gc_thresh1 entries.
+// XDP has no way to start neighbor resolution, so a drop here would repeat for
+// every packet until something else made the kernel resolve the neighbor. The
+// encapsulated packet goes to the kernel instead, framed as the original was
+// so the stack takes it as addressed to this host: the kernel forwards it to
+// the tenant node's uSID, queuing it while it solicits the neighbor, and every
+// later packet finds the entry and stays in XDP. That case returns
+// NAT_PUSH_TO_KERNEL and is counted in neigh_fallbacks, not as a drop.
+#define NAT_PUSH_TO_KERNEL 1
+
 static NAT_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 src[16], const __u8 dst[16],
 						__be16 inner_payload_len_plus_ip6hdr,
 						__u32 *egress_ifindex, __u16 *frag_mtu)
 {
+	struct nat_ethhdr orig_eth;
+	void *orig = (void *) (long) ctx->data;
+	if (orig + sizeof(orig_eth) > (void *) (long) ctx->data_end) {
+		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
+		return -1;
+	}
+	__builtin_memcpy(&orig_eth, orig, sizeof(orig_eth));
+
 	if (bpf_xdp_adjust_head(ctx, -NAT_IP6HDR_LEN) != 0) {
 		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
 		return -1;
@@ -1262,6 +1298,16 @@ static NAT_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 sr
 	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, src, dst,
 						 (__u16) (sizeof(*outer) + __builtin_bswap16(inner_payload_len_plus_ip6hdr)),
 						 eth, egress_ifindex, frag_mtu);
+	if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH) {
+		__builtin_memcpy(eth->h_dest, orig_eth.h_dest, sizeof(eth->h_dest));
+		__builtin_memcpy(eth->h_source, orig_eth.h_source, sizeof(eth->h_source));
+		eth->h_proto = __builtin_bswap16(NAT_ETH_P_IPV6);
+		__u32 key = 0;
+		__u64 *counter = bpf_map_lookup_elem(&neigh_fallbacks, &key);
+		if (counter)
+			*counter += 1;
+		return NAT_PUSH_TO_KERNEL;
+	}
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		count_fib_drop(fib_rc);
 		return -1;
@@ -1866,8 +1912,11 @@ static NAT_ALWAYS_INLINE int reencap_to_tenant(struct xdp_md *ctx, struct shard_
 	// internet peer's.
 	__u32 egress_ifindex = 0;
 	__u16 frag_mtu = 0;
-	if (push_outer_header(ctx, cfg->shard_sid, backend_usid, inner_payload_len_plus_ip6hdr,
-			       &egress_ifindex, &frag_mtu) != 0) {
+	int pushed = push_outer_header(ctx, cfg->shard_sid, backend_usid, inner_payload_len_plus_ip6hdr,
+				       &egress_ifindex, &frag_mtu);
+	if (pushed == NAT_PUSH_TO_KERNEL)
+		return XDP_PASS;
+	if (pushed != 0) {
 		if (quote && frag_mtu > NAT_IP6HDR_LEN)
 			return send_too_big6(ctx, cfg, quote, frag_mtu - NAT_IP6HDR_LEN);
 		return XDP_DROP;
@@ -2513,8 +2562,11 @@ static NAT_ALWAYS_INLINE int nat64_return_leg(struct xdp_md *ctx, struct shard_c
 
 	__u32 egress_ifindex = 0;
 	__u16 frag_mtu = 0;
-	if (push_outer_header(ctx, cfg->shard_sid, cv.backend_usid, inner_payload_len_plus_ip6hdr,
-			       &egress_ifindex, &frag_mtu) != 0) {
+	int pushed = push_outer_header(ctx, cfg->shard_sid, cv.backend_usid, inner_payload_len_plus_ip6hdr,
+				       &egress_ifindex, &frag_mtu);
+	if (pushed == NAT_PUSH_TO_KERNEL)
+		return XDP_PASS;
+	if (pushed != 0) {
 		// The sender's packet grows by the translation's 20 bytes as well as
 		// the encapsulation's 40.
 		if (frag_mtu > NAT_IP6HDR_LEN + NAT_V6_V4_DELTA)

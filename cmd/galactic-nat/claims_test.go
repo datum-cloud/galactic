@@ -50,3 +50,18 @@ func TestNatCollectorReportsClaims(t *testing.T) {
 		}
 	}
 }
+
+func TestNatCollectorReportsNeighFallbacks(t *testing.T) {
+	c := &natCollector{neighFallbacks: fakeClaims{0: {3, 4}}}
+	got := gatherAll(t, c)
+	if v := got["galactic_nat_neigh_fallbacks_total"][""]; v != 7 {
+		t.Errorf("neigh_fallbacks_total = %v, want 7 (summed across CPUs): %v", v, got["galactic_nat_neigh_fallbacks_total"])
+	}
+}
+
+func TestNatCollectorOmitsNeighFallbacksWithoutMap(t *testing.T) {
+	got := gatherAll(t, &natCollector{})
+	if series, ok := got["galactic_nat_neigh_fallbacks_total"]; ok {
+		t.Errorf("neigh_fallbacks_total reported without a map: %v", series)
+	}
+}

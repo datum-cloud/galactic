@@ -11,6 +11,7 @@ One `galactic-nat` pod per egress shard; every value is per shard.
 | `galactic_nat_conn_table_oldest_row_age_seconds`         | gauge     | none                                                                        | Seconds since the least recently seen session, expired ones included, last translated a packet. Meaningful only on a near-full table   |
 | `galactic_nat_conn_table_max_entries`                    | gauge     | none                                                                        | Table capacity in rows, shared by both families                                                                                        |
 | `galactic_nat_drops_total`                               | counter   | `reason`                                                                    | Packets dropped by the NAT datapath                                                                                                    |
+| `galactic_nat_neigh_fallbacks_total`                     | counter   | none                                                                        | Return packets handed to the kernel because the next hop toward the tenant node had no neighbor entry. Not drops                       |
 | `galactic_nat_packets_total`                             | counter   | `family`, `direction` (`outbound`, `return`), `action` (`redirect`, `tx`)   | Packets the shard translated and queued for transmit. Every combination is reported, zero included                                     |
 | `galactic_nat_bytes_total`                               | counter   | same                                                                        | Bytes of those packets: the translated IP packet, without Ethernet or the SRv6 outer header                                            |
 | `galactic_nat_datapath_enabled`                          | gauge     | none                                                                        | 1 when the datapath is turned on by configuration, 0 when it is turned off                                                             |
@@ -68,6 +69,21 @@ Caveats for the masquerade port series:
   still hold its ports.
 - Both are read from the session table walk at scrape time, like
   `galactic_nat_sessions`, so they are approximate on a churning table.
+
+Caveats for the neighbor fallback:
+
+- A return packet whose next hop toward the tenant node has no neighbor entry
+  goes to the kernel encapsulated, and the kernel resolves the neighbor and
+  forwards it. It is counted in `galactic_nat_neigh_fallbacks_total`, not as
+  `fib_no_neigh`. The next hop is one only the datapath uses, so the kernel
+  never confirms its entry, and its neighbor GC deletes the entry once the
+  node holds more than `gc_thresh1` neighbors. Short bursts are expected then.
+- Steady growth means neighbor entries keep expiring or a next hop does not
+  answer, and the kernel drops what it cannot resolve. The counter records the
+  handoff, not delivery: these packets cross the node's netfilter FORWARD hook,
+  unlike the XDP path.
+- `fib_no_neigh` still counts the outbound legs and the ICMP messages the
+  shard sends itself.
 
 Caveats for session creation:
 

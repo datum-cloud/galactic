@@ -91,7 +91,10 @@ func populateProgArray(t *testing.T, objs *NatObjects) {
 }
 
 // assertLeftFromDatapath is the shared regression guard for #565: no leg of
-// this datapath may hand a packet it has translated to the kernel.
+// this datapath may hand a packet it has translated to the kernel. The one
+// exception, a return packet whose next hop has no neighbor entry, is covered
+// in neigh_test.go and cannot arise here: these tests route nothing through an
+// unresolved neighbor.
 //
 // A shard's return leg is claimed at ingress and re-encapsulated straight back
 // out of the driver, so netfilter never sees a reply. A forward leg that went
