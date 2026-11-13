@@ -45,6 +45,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/nldump"
+	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 // MinMTU is the smallest MTU an attachment link or packet device may have:
@@ -478,18 +479,30 @@ func prefixNet(p netip.Prefix) *net.IPNet {
 	return &net.IPNet{IP: p.Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), p.Addr().BitLen())}
 }
 
+// lockVRF runs fn under the node's VRF lock; a variable so a test can run
+// without the lock's host directory.
+var lockVRF = vrf.Locked
+
 // configureHostLink enslaves the host end to the canonical VRF, calls beforeUp,
 // brings the link up and routes the attachment address and its prefixes to it
 // through one permanent neighbor.
 func configureHostLink(
 	h *netlink.Handle, link netlink.Link, a Attachment, table uint32, podMAC net.HardwareAddr, beforeUp func() error,
 ) error {
-	vrfLink, err := h.LinkByName(a.HostVRF)
-	if err != nil {
-		return fmt.Errorf("hostattach: look up host VRF %q: %w", a.HostVRF, err)
-	}
-	if err := h.LinkSetMasterByIndex(link, vrfLink.Attrs().Index); err != nil {
-		return fmt.Errorf("hostattach: enslave %q to %q: %w", a.HostLink, a.HostVRF, err)
+	// Under the node's VRF lock, which galactic-router GC takes to delete a
+	// VRF only when no link is enslaved to it, so the VRF cannot be deleted
+	// between the lookup and the enslavement.
+	if err := lockVRF(func() error {
+		vrfLink, err := h.LinkByName(a.HostVRF)
+		if err != nil {
+			return fmt.Errorf("hostattach: look up host VRF %q: %w", a.HostVRF, err)
+		}
+		if err := h.LinkSetMasterByIndex(link, vrfLink.Attrs().Index); err != nil {
+			return fmt.Errorf("hostattach: enslave %q to %q: %w", a.HostLink, a.HostVRF, err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if err := ensureMTU(h, link, a.MTU); err != nil {
 		return err

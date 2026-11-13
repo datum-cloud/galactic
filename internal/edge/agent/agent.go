@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/netip"
@@ -116,6 +117,12 @@ type Agent struct {
 	// programmed while MTU exceeds it, since usid_egress drops a larger
 	// packet from an edge link with no error sent. Nil checks nothing.
 	EncapMTU func() (int, error)
+	// VPCState creates a gVPC's state on the node, its canonical host VRF,
+	// BGPVRFInstance and vrf_table row, when an attachment is the gVPC's
+	// only user here. galactic-router GC removes that state once no
+	// workload or attachment uses it. Nil creates nothing: an attachment
+	// then waits, as HostVRFMissing, for a workload of the gVPC on the node.
+	VPCState func(vpc string) error
 
 	// APIReader reads every input of a gate decision from the API server.
 	APIReader ctrl.Reader
@@ -440,6 +447,18 @@ func (a *Agent) applyScope(vpc string, active, releasing []*galacticv1alpha1.Edg
 		att := out[i].att
 		out[i] = a.program(att, pods[att.Spec.PodUID], current[hostattach.LinkID(att.Status.VPC, string(att.UID))])
 	}
+	// The gVPC's node state is made whole once per pass while it has a live
+	// attachment here, which recreates a BGPVRFInstance or rewrites a
+	// vrf_table row that changed under the attachment and that nothing else
+	// on the node would notice. It is best effort: program already created
+	// what an attachment needs and reported a failure as HostVRFMissing, so
+	// a failure here must not withhold the outcomes of this pass.
+	if a.VPCState != nil && len(active) > 0 {
+		if err := a.VPCState(vpc); err != nil {
+			slog.Warn("galactic-edge: could not make the VPC's node state whole; retrying next pass",
+				"vpc", vpc, "err", err)
+		}
+	}
 	if err := a.syncRoutes(vpc); err != nil {
 		errs = append(errs, fmt.Errorf("sync local routes: %w", err))
 	}
@@ -632,7 +651,7 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 		return fail(ReasonNamespaceUnavailable, err)
 	}
 	defer func() { _ = pod.Close() }()
-	if reason, err := a.checkHostVRF(att.Status.VPC, spec.HostVRF); err != nil {
+	if reason, err := a.ensureHostVRF(att.Status.VPC, spec.HostVRF); err != nil {
 		return fail(reason, err)
 	}
 	fresh := link.ID != spec.ID
@@ -661,9 +680,19 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 			_, err = hostattach.ProvisionRegistered(a.Host, pod, spec, register)
 		}
 	}
+	if errors.Is(datapathErr, attachreg.ErrVRFNotRegistered) && a.VPCState != nil {
+		// The VRF is there but its vrf_table row is not, such as a VRF a
+		// workload's CNI ADD left whose row a map reload cleared. Creating
+		// the gVPC's state writes the row, and the link is registered again.
+		if verr := a.VPCState(att.Status.VPC); verr != nil {
+			return fail(ReasonHostVRFMissing, fmt.Errorf("%w; create the VPC's node state: %w", err, verr))
+		}
+		datapathErr = nil
+		_, err = hostattach.ProvisionRegistered(a.Host, pod, spec, register)
+	}
 	switch {
 	case errors.Is(datapathErr, attachreg.ErrVRFNotRegistered):
-		return fail(ReasonHostVRFMissing, fmt.Errorf("%w: %s", err, noWorkload(att.Status.VPC)))
+		return fail(ReasonHostVRFMissing, fmt.Errorf("%w: %s", err, a.noVPCState(att.Status.VPC)))
 	case datapathErr != nil:
 		return fail(ReasonDatapathFailed, err)
 	case errors.Is(err, hostattach.ErrNamespaceReplaced):
@@ -702,23 +731,38 @@ func (a *Agent) checkUnderlay() (string, error) {
 	return "", nil
 }
 
-// checkHostVRF refuses an attachment whose gVPC has no canonical host VRF on
-// the node. Only CNI ADD of a workload of the gVPC creates it, so the agent
-// cannot provision until one runs here, and keeps retrying until then.
-func (a *Agent) checkHostVRF(vpc, name string) (string, error) {
+// ensureHostVRF makes sure the gVPC has its canonical host VRF on the node.
+// When it has none, VPCState creates the gVPC's node state. Without VPCState,
+// or when that fails, the attachment is refused as HostVRFMissing and retried
+// by the next pass.
+func (a *Agent) ensureHostVRF(vpc, name string) (string, error) {
 	_, ok, err := hostattach.VRFTable(a.Host, name)
 	switch {
 	case err != nil:
 		return ReasonProvisionFailed, fmt.Errorf("look up canonical host VRF %s: %w", name, err)
-	case !ok:
-		return ReasonHostVRFMissing, fmt.Errorf("canonical host VRF %s is not on this node: %s", name, noWorkload(vpc))
+	case ok:
+		return "", nil
+	case a.VPCState == nil:
+		return ReasonHostVRFMissing, fmt.Errorf("canonical host VRF %s is not on this node: %s", name,
+			a.noVPCState(vpc))
+	}
+	if err := a.VPCState(vpc); err != nil {
+		return ReasonHostVRFMissing, fmt.Errorf("create canonical host VRF %s for VPC %s: %w", name, vpc, err)
+	}
+	if _, ok, err := hostattach.VRFTable(a.Host, name); err != nil {
+		return ReasonProvisionFailed, fmt.Errorf("look up canonical host VRF %s: %w", name, err)
+	} else if !ok {
+		return ReasonHostVRFMissing, fmt.Errorf("canonical host VRF %s is not on this node after creating it", name)
 	}
 	return "", nil
 }
 
-// noWorkload says why a gVPC's host VRF or its uSID entry is missing.
-func noWorkload(vpc string) string {
-	return fmt.Sprintf("a workload of the VPC %s must run on the node", vpc)
+// noVPCState says why a gVPC's host VRF or its uSID entry is missing.
+func (a *Agent) noVPCState(vpc string) string {
+	if a.VPCState == nil {
+		return fmt.Sprintf("a workload of the VPC %s must run on the node", vpc)
+	}
+	return fmt.Sprintf("the node state of the VPC %s could not be created", vpc)
 }
 
 // report writes one outcome, with the attachment's resourceVersion as

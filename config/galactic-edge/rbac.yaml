@@ -44,3 +44,37 @@ subjects:
   - kind: ServiceAccount
     name: galactic-edge
     namespace: galactic-system
+---
+# On a node where an attachment's VPC has no workload, the node agent creates
+# the VPC's node state as CNI ADD does: it lists the BGPRouters to find its
+# node's, and creates or updates the node's BGPVRFInstance for the VPC under
+# the node's Argument lock. Only in the namespace the cell's BGP objects live
+# in, which --bgp-namespace names; an agent given another namespace needs this
+# Role and RoleBinding there instead. It never deletes one; galactic-router GC
+# does.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: galactic-edge-vpc-state
+  namespace: galactic-system
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [bgprouters]
+    verbs: [list]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [bgpvrfinstances]
+    verbs: [get, list, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: galactic-edge-vpc-state
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: galactic-edge-vpc-state
+subjects:
+  - kind: ServiceAccount
+    name: galactic-edge
+    namespace: galactic-system

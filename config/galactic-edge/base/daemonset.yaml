@@ -112,6 +112,12 @@ spec:
             # (docs/edge/troubleshooting.md#node-requirements).
             - name: tun
               mountPath: /dev/net/tun
+            # The node's VRF and Argument locks and VRF table reservations,
+            # shared with CNI ADD and galactic-router's GC. The agent takes
+            # them to create a VPC's host VRF and BGPVRFInstance on a node
+            # where the VPC has no workload, and to enslave a host link.
+            - name: vrf-lock-dir
+              mountPath: /var/lib/cni/galactic-vrf
       volumes:
         - name: bpffs
           hostPath:
@@ -141,3 +147,7 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        - name: vrf-lock-dir
+          hostPath:
+            path: /var/lib/cni/galactic-vrf
+            type: DirectoryOrCreate
