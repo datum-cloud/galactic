@@ -101,8 +101,12 @@ func vrfLinkForTable(tableID uint32) (*netlink.Vrf, error) {
 			return link, nil
 		}
 	}
-	return nil, fmt.Errorf("no VRF interface found for table %d", tableID)
+	return nil, fmt.Errorf("table %d: %w", tableID, errNoVRFForTable)
 }
+
+// errNoVRFForTable is vrfLinkForTable's error when no VRF device uses the
+// table.
+var errNoVRFForTable = errors.New("no VRF interface found")
 
 // egressVethNames derives a VPC's veth pair names from tableID alone, since the
 // callers carry only a tableID forward. Collision-free because table IDs are
@@ -564,17 +568,34 @@ func ensureRedirectRoute(prefix *net.IPNet, tableID uint32) error {
 }
 
 // removeRedirectRoute removes the main-table route ensureRedirectRoute
-// installed for prefix. Deleting by destination and table alone is enough to
-// identify it.
+// installed for prefix toward tableID's VRF device, and only that route.
+//
+// The main table holds one route per destination, and ensureRedirectRoute
+// replaces it. Two VPCs can carry the same backend address, as when IPAM hands
+// a deleted Network's subnet to the next one, so by the time a deleted VPC's
+// route is torn down the destination may already point at the live VPC's
+// VRF. The delete therefore names the device as well: the kernel then removes
+// the route only while it still points at this VPC's VRF.
+//
+// A missing VRF device means the kernel already dropped every route through
+// it, so there is nothing of this VPC's left to remove, and any route still
+// held for prefix belongs to another VPC.
 //
 // An absent route is the outcome a removal asks for, so ESRCH counts as
 // success. Reporting failure instead retries a teardown that can never
-// complete, and keeps the entry alive to collide with the next tenant given
-// this address.
-func removeRedirectRoute(prefix *net.IPNet) error {
-	err := netlink.RouteDel(&netlink.Route{
-		Dst:   prefix,
-		Table: unix.RT_TABLE_MAIN,
+// complete.
+func removeRedirectRoute(prefix *net.IPNet, tableID uint32) error {
+	link, err := vrfLinkForTable(tableID)
+	if errors.Is(err, errNoVRFForTable) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = netlink.RouteDel(&netlink.Route{
+		Dst:       prefix,
+		Table:     unix.RT_TABLE_MAIN,
+		LinkIndex: link.Attrs().Index,
 	})
 	if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT) {
 		return nil
