@@ -40,17 +40,24 @@ Every replica reads its cache at scrape time, so aggregate replicas with
 injection label. The Edge controllers watch every pod. Every Node is cached,
 to find the host behind each virtual kubelet node.
 
-| Metric                                            | Type  | Labels                                                                                                            | Meaning                                                                                         |
-| ------------------------------------------------- | ----- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `galactic_vpc_instance_interfaces`                | gauge | `state` (`Programmed`, `NotProgrammed`)                                                                           | Interfaces of running instances. Both series are always exported, at 0 when empty               |
-| `galactic_vpc_instance_interface_unprogrammed`    | gauge | `instance_namespace`, `compute_instance`, `interface`, `vpc`, `attachment`, `instance_node`, `location`, `reason` | 1 for each interface that no running pod holds programmed. Programmed interfaces have no series |
-| `galactic_vpc_instance_interfaces_collect_errors` | gauge | none                                                                                                              | Kinds the last scrape could not list. While above 0, no interface series are exported           |
+| Metric                                            | Type  | Labels                                                                                                                                           | Meaning                                                                                         |
+| ------------------------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `galactic_vpc_instance_interfaces`                | gauge | `state` (`Programmed`, `NotProgrammed`)                                                                                                          | Interfaces of running instances. Both series are always exported, at 0 when empty               |
+| `galactic_vpc_instance_interface_unprogrammed`    | gauge | `instance_namespace`, `compute_instance`, `interface`, `vpc`, `attachment`, `instance_node`, `location`, `reason`, `vpc_id`, `vpc_attachment_id` | 1 for each interface that no running pod holds programmed. Programmed interfaces have no series |
+| `galactic_vpc_instance_interfaces_collect_errors` | gauge | none                                                                                                                                             | Kinds the last scrape could not list. While above 0, no interface series are exported           |
 
 `instance_node` is the newest running pod's node, the virtual node rather
 than its host for a Unikraft instance, and `location` is the
-instance's `spec.location`. `vpc` and `attachment` are empty when the
-interface does not resolve to an attachment. `reason` takes one of these
-values:
+instance's `spec.location`. `vpc` and `attachment` are the `VPC` and
+`VPCAttachment` resource names, and are empty when the interface does not
+resolve to an attachment. `vpc_id` and `vpc_attachment_id` are the
+attachment's `status.vpc` and `status.vpcAttachment`, the base62 IDs without
+zero padding. They hold the same values as the `vpc` and `vpc_attachment`
+labels of the `galactic-cni` series, such as
+`galactic_vpc_attachment_receive_bytes_total`, so join on them rather than
+on `vpc`. They are empty when the interface does not resolve to an
+attachment, or the attachment has not recorded its IDs yet. `reason` takes
+one of these values:
 
 | `reason`                  | Meaning                                                                                                                                                                               |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

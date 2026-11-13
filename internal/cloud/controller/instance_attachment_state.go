@@ -37,6 +37,7 @@ import (
 	computev1alpha "go.datum.net/compute/api/v1alpha"
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	"go.datum.net/galactic/internal/cloud/webhook"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/virtualnode"
 	networkingv1alpha "go.datum.net/network-services-operator/api/v1alpha"
 )
@@ -89,7 +90,7 @@ var (
 		"1 for each interface of a running instance that no running pod of the instance holds programmed, with the "+
 			"reason for its newest pod.",
 		[]string{"instance_namespace", "compute_instance", "interface", "vpc", "attachment", "instance_node",
-			"location", "reason"}, nil)
+			"location", "reason", "vpc_id", "vpc_attachment_id"}, nil)
 	instanceInterfacesCollectErrorsDesc = prometheus.NewDesc("galactic_vpc_instance_interfaces_collect_errors",
 		"Kinds the last scrape could not list. While it is above zero no interface series are exported.", nil, nil)
 )
@@ -210,7 +211,7 @@ func (c *InstanceAttachmentCollector) Collect(ch chan<- prometheus.Metric) {
 			unprogrammed++
 			ch <- prometheus.MustNewConstMetric(instanceInterfaceUnprogrammedDesc, prometheus.GaugeValue, 1,
 				instance.Namespace, instance.Name, declared.Name, newest.vpc, newest.attachment,
-				instancePods[0].Spec.NodeName, location, newest.reason)
+				instancePods[0].Spec.NodeName, location, newest.reason, newest.vpcID, newest.attachmentID)
 		}
 	}
 	ch <- prometheus.MustNewConstMetric(instanceInterfacesDesc, prometheus.GaugeValue, float64(programmed),
@@ -262,9 +263,12 @@ func (v clusterView) liveInstance(pod *corev1.Pod) *computev1alpha.Instance {
 }
 
 // interfaceState is one instance interface's attachment as the data plane
-// sees it. reason is empty when the attachment is programmed on node.
+// sees it. reason is empty when the attachment is programmed on node. vpc and
+// attachment are resource names. vpcID and attachmentID are the attachment's
+// unpadded base62 IDs, the form galactic-cni labels its series with, and stay
+// empty until the attachment records them.
 type interfaceState struct {
-	vpc, attachment, reason string
+	vpc, attachment, vpcID, attachmentID, reason string
 }
 
 // interfaceState follows an instance's declared interface to its VPCAttachment
@@ -290,7 +294,10 @@ func (v clusterView) interfaceState(instance *computev1alpha.Instance, declared 
 	if attachment == nil {
 		return interfaceState{attachment: name, reason: ReasonAttachmentMissing}
 	}
-	s := interfaceState{vpc: attachment.Spec.VPC.Name, attachment: name}
+	s := interfaceState{
+		vpc: attachment.Spec.VPC.Name, attachment: name,
+		vpcID: unpadID(attachment.Status.VPC), attachmentID: unpadID(attachment.Status.VPCAttachment),
+	}
 	// The pod webhook names each NetworkAttachmentDefinition after its
 	// NetworkInterface, and Multus records it as namespace/name.
 	if s.reason = podAttached(pod, instance.Namespace+"/"+ref); s.reason != "" {
@@ -306,6 +313,15 @@ func (v clusterView) interfaceState(instance *computev1alpha.Instance, declared 
 		s.reason = ReasonNodeMismatch
 	}
 	return s
+}
+
+// unpadID strips the zero padding from a base62 ID and keeps an unset ID
+// empty.
+func unpadID(id string) string {
+	if id == "" {
+		return ""
+	}
+	return intf.Unpad(id)
 }
 
 // podAttached returns an empty reason when pod's Multus network-status lists
