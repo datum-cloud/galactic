@@ -45,6 +45,7 @@ type natCollector struct {
 	dropReasons    natmap.DropReasonsReader
 	traffic        natmap.TrafficReader
 	claims         natmap.CounterReader
+	neighFallbacks natmap.CounterReader
 
 	// shardConfig names the masquerade addresses whose port usage is always
 	// reported, zero included. Nil reports only the addresses rows hold.
@@ -75,6 +76,7 @@ func newNatCollector(objs *natprog.NatObjects) *natCollector {
 		dropReasons:    objs.DropReasons,
 		traffic:        objs.NatTraffic,
 		claims:         objs.NatClaims,
+		neighFallbacks: objs.NeighFallbacks,
 		shardConfig:    natmap.NewShardConfigTable(natmap.KernelTable{Map: objs.ShardConfigTable}),
 	}
 }
@@ -162,6 +164,14 @@ var (
 			"claims needing more than one probe estimates how full the busiest destinations are.",
 		[]string{labelFamily, labelProto, "probes"}, nil,
 	)
+	neighFallbacksDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "", "neigh_fallbacks_total"),
+		"Return packets this shard handed to the kernel, encapsulated, because the next hop toward the tenant "+
+			"node had no neighbor entry. The kernel delivers them and resolves the neighbor, so they are not "+
+			"drops. Normal in small bursts after a neighbor entry ages out; steady growth means the next hop "+
+			"does not answer.",
+		nil, nil,
+	)
 	dropsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(metricsNamespace, "", "drops_total"),
 		"Packets dropped by this shard's datapath, by reason (drop_reasons map).",
@@ -183,6 +193,7 @@ func (c *natCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- portRangeDesc
 	ch <- sessionCreatesDesc
 	ch <- claimProbesDesc
+	ch <- neighFallbacksDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -192,6 +203,25 @@ func (c *natCollector) Collect(ch chan<- prometheus.Metric) {
 	c.collectDrops(ch)
 	c.collectTraffic(ch)
 	c.collectClaims(ch)
+	c.collectNeighFallbacks(ch)
+}
+
+// collectNeighFallbacks reports the return packets passed to the kernel for
+// neighbor resolution, summed across CPUs.
+func (c *natCollector) collectNeighFallbacks(ch chan<- prometheus.Metric) {
+	if c.neighFallbacks == nil {
+		return
+	}
+	var perCPU []uint64
+	if err := c.neighFallbacks.Lookup(uint32(0), &perCPU); err != nil {
+		slog.Warn("cannot read neigh_fallbacks; skipping neighbor fallback metric", "err", err)
+		return
+	}
+	var total uint64
+	for _, v := range perCPU {
+		total += v
+	}
+	ch <- prometheus.MustNewConstMetric(neighFallbacksDesc, prometheus.CounterValue, float64(total))
 }
 
 // Family label values, one per address family a shard translates.

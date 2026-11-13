@@ -69,7 +69,7 @@ func narrowFabric(t *testing.T, usid netip.Addr, peers ...netip.Addr) {
 	// A test run's ingress device is this namespace's loopback, and
 	// bpf_fib_lookup refuses to route for one that does not forward.
 	for _, path := range []string{
-		"/proc/sys/net/ipv6/conf/all/forwarding",
+		ipv6AllForwarding,
 		"/proc/sys/net/ipv4/conf/all/forwarding",
 		"/proc/sys/net/ipv4/conf/lo/forwarding",
 	} {

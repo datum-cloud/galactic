@@ -516,6 +516,16 @@ knowing before you rely on this component in production:
   kernel's full output path — so `ip rule` policy routing is not consulted
   — and the only ICMP error generated on the shard's behalf is the one the
   datapath builds itself, for a reply too big for the fabric (see below).
+  The one exception is a return packet whose next hop toward the tenant
+  node has no neighbor entry: it goes to the kernel encapsulated, so the
+  kernel resolves the neighbor, and that packet does cross `PREROUTING`,
+  `FORWARD` and connection tracking (as an IPv6-in-IPv6 flow, not the
+  tenant's) and is routed by the kernel's full path, `ip rule` included.
+  A strict IPv6 reverse-path filter on the uplink (`ip6tables -m rpfilter`,
+  an nftables `fib saddr . iif oif missing drop` rule, firewalld's
+  `IPv6_rpfilter`) drops these, since their source is the shard's own SID;
+  shard nodes must not run one. See `galactic_nat_neigh_fallbacks_total` in
+  [the NAT metrics](../observability/nat.md).
   Each of the rest surfaces as a named drop counter instead; a tenant
   packet whose hop limit expires at the shard, for one, is dropped as
   `hop_limit_exceeded` with no Time Exceeded, so traceroute shows the
