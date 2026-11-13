@@ -71,7 +71,8 @@ func NewCollectorFromObjects(objs *edgeprog.EdgedsrObjects, attribution VPCAttri
 	collector := NewCollector(
 		edgemap.NewVIPTable(
 			edgemap.KernelTable{Map: objs.VipTable}, edgemap.KernelTable{Map: objs.VipStatsTable},
-			edgemap.KernelTable{Map: objs.VipAddrTable}, edgemap.KernelTable{Map: objs.VipReturnStatsTable}),
+			edgemap.KernelTable{Map: objs.VipAddrTable}, edgemap.KernelTable{Map: objs.VipReturnStatsTable},
+		).WithPeerTable(edgemap.KernelTable{Map: objs.VipRangeBackends}),
 		objs.DropReasons,
 		attribution,
 	).WithNeighFallbacks(objs.NeighFallbacks)
@@ -145,22 +146,24 @@ var (
 	)
 	returnPacketsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "return", "packets_total"),
-		"Reply packets this node forwarded for traffic sourced from this VIP, bypassing the kernel "+
-			"forwarding path (edge_return). Counted per VIP address, with no port or protocol "+
-			"dimension, since the return program matches on the source address alone.",
-		[]string{labelVIP, labelVPC}, nil,
+		"Reply packets this node forwarded for traffic sourced from this VIP+port+protocol, bypassing "+
+			"the kernel forwarding path (edge_return). Keyed as rule_packets_total is, a UDP port range "+
+			"under its start port. A reply whose source port matches no listener, or that carries no "+
+			"ports (ICMP, a non-first IPv4 fragment), counts under port 0, so summing by vip gives "+
+			"every reply the VIP sourced.",
+		[]string{labelProto, labelPort, labelVIP, labelVPC}, nil,
 	)
 	returnBytesDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "return", "bytes_total"),
-		"Reply bytes this node forwarded for traffic sourced from this VIP -- see "+
+		"Reply bytes this node forwarded for traffic sourced from this VIP+port+protocol -- see "+
 			"return_packets_total's help text.",
-		[]string{labelVIP, labelVPC}, nil,
+		[]string{labelProto, labelPort, labelVIP, labelVPC}, nil,
 	)
 	returnDroppedDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "return", "dropped_packets_total"),
-		"Reply packets sourced from this VIP that the datapath then dropped (e.g. an expired hop "+
-			"limit, or no route) -- a subset of return_packets_total, not an additional count.",
-		[]string{labelVIP, labelVPC}, nil,
+		"Reply packets sourced from this VIP+port+protocol that the datapath then dropped (e.g. an "+
+			"expired hop limit, or no route) -- a subset of return_packets_total, not an additional count.",
+		[]string{labelProto, labelPort, labelVIP, labelVPC}, nil,
 	)
 )
 
@@ -205,6 +208,14 @@ func protoLabel(proto uint8) string {
 		return "tcp"
 	case 17:
 		return "udp"
+	case 1:
+		return "icmp"
+	case 58:
+		return "icmpv6"
+	case 0:
+		// The return path's bucket for every protocol it does not key on
+		// by name; see return_stats_key in edgedsr.c.
+		return "other"
 	default:
 		return strconv.Itoa(int(proto))
 	}
@@ -249,23 +260,29 @@ func (c *Collector) collectRules(ch chan<- prometheus.Metric) {
 	}
 }
 
-// collectReturn reports the return path's per-VIP counters. A node with no
-// compute tier behind it never attaches edge_return, and vip_addr_table's rows
-// then simply never gain counters, so these read zero rather than going absent.
+// collectReturn reports the return path's per-listener counters. Every
+// registered listener on a claimed address has a series, reading zero until it
+// sources a reply, so a node with no compute tier behind it, which never
+// attaches edge_return, reports zeros rather than nothing. The VPC label comes
+// from the address, which belongs to one VPC whatever the port.
 func (c *Collector) collectReturn(ch chan<- prometheus.Metric) {
-	entries, err := c.vipTable.ListReturn()
+	entries, err := c.vipTable.ListReturnStats()
 	if err != nil {
-		ch <- prometheus.NewInvalidMetric(returnPacketsDesc, fmt.Errorf("list vip_addr_table: %w", err))
+		ch <- prometheus.NewInvalidMetric(returnPacketsDesc, fmt.Errorf("list vip_return_stats_table: %w", err))
 		return
 	}
 	_, vpcs := c.vpcs()
 	for _, e := range entries {
+		proto := protoLabel(e.Proto)
+		port := strconv.Itoa(int(e.VPort))
 		vip := e.VIP.String()
 		vpc := vpcs[e.VIP]
-		ch <- prometheus.MustNewConstMetric(returnPacketsDesc, prometheus.CounterValue, float64(e.Packets), vip, vpc)
-		ch <- prometheus.MustNewConstMetric(returnBytesDesc, prometheus.CounterValue, float64(e.Bytes), vip, vpc)
 		ch <- prometheus.MustNewConstMetric(
-			returnDroppedDesc, prometheus.CounterValue, float64(e.DroppedPackets), vip, vpc)
+			returnPacketsDesc, prometheus.CounterValue, float64(e.Packets), proto, port, vip, vpc)
+		ch <- prometheus.MustNewConstMetric(
+			returnBytesDesc, prometheus.CounterValue, float64(e.Bytes), proto, port, vip, vpc)
+		ch <- prometheus.MustNewConstMetric(
+			returnDroppedDesc, prometheus.CounterValue, float64(e.DroppedPackets), proto, port, vip, vpc)
 	}
 }
 

@@ -204,8 +204,10 @@ func newFakeAddrTable() *fakeReturnMap[edgeprog.EdgedsrVipAddrValue] {
 	return newFakeReturnMap[edgeprog.EdgedsrVipAddrValue]()
 }
 
-func newFakeReturnStatsTable() *fakeReturnMap[edgeprog.EdgedsrVipStatsValue] {
-	return newFakeReturnMap[edgeprog.EdgedsrVipStatsValue]()
+// newFakeReturnStatsTable fakes vip_return_stats_table, keyed like
+// vip_stats_table.
+func newFakeReturnStatsTable() *fakeStatsTable {
+	return newFakeStatsTable()
 }
 
 func newTestKernelDatapath() *KernelDatapath {

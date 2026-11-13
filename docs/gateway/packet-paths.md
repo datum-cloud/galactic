@@ -389,6 +389,12 @@ unchanged.
 
 `vip_addr_table` is maintained by `edgemap.VIPTable` alongside `vip_table`
 itself, an address present exactly while some rule still uses it, with its
-own generation for the same crash-safe reconcile cutoff. Its counters live
-in `vip_return_stats_table` and surface as `galactic_edge_return_*`,
-labeled by `vip` and `vpc`.
+own generation for the same crash-safe reconcile cutoff. The return
+counters live in `vip_return_stats_table`, keyed like `vip_stats_table` by
+the listener a reply came from: its protocol and source port, resolved
+through `vip_table` and the UDP range maps the way `edge_lb` resolves a
+request. A reply whose port matches no listener, or that carries no ports,
+counts under port 0 of TCP, UDP, ICMP, ICMPv6 or, for any other protocol,
+protocol 0. That holds the map to one row per listener plus five per
+address, whatever ports and protocols a backend sources. They surface as `galactic_edge_return_*`, labeled by `proto`,
+`port`, `vip` and `vpc`.

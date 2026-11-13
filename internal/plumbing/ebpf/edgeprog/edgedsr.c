@@ -144,6 +144,7 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 // offset. A packet with More Fragments or a non-zero offset is a fragment.
 #define EDGE_IP_DF 0x4000
 #define EDGE_IP_FRAGMENT 0x3fff
+#define EDGE_IP_OFFSET 0x1fff
 
 // EDGE_IPV6_MIN_MTU is the smallest MTU an IPv6 sender ever uses (RFC 8200
 // section 5). A Packet Too Big reporting less cannot help: the sender keeps
@@ -391,10 +392,15 @@ struct {
 	__type(value, struct vip_addr_value);
 } vip_addr_table SEC(".maps");
 
+// vip_return_stats_table is keyed like vip_stats_table, by the listener a reply
+// came from: see return_stats_key. A reply matching no listener counts under
+// port 0 of TCP, UDP, ICMP, ICMPv6 or, for any other protocol, protocol 0, so
+// the map holds at most one row per listener plus five per address, and a
+// backend sourcing from arbitrary ports or protocols cannot fill it.
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);
-	__type(key, struct vip_addr_key);
+	__type(key, struct vip_key);
 	__type(value, struct vip_stats_value);
 } vip_return_stats_table SEC(".maps");
 
@@ -1075,6 +1081,29 @@ static EDGE_ALWAYS_INLINE int vip_owned(const __u8 *addr)
 	return value ? ((value->blocked || value->expires_at_ns <= bpf_ktime_get_ns()) ? 2 : 1) : 0;
 }
 
+// return_stats_key fills key with the listener a reply sourced from vip came
+// from, for vip_return_stats_table: proto and the reply's source port, resolved
+// the way edge_lb resolves a request's destination port, so a UDP port range
+// counts under its start port as the forward counters do. has_ports is 0 for a
+// reply carrying no readable ports. A reply whose port matches no listener, or
+// that has none, counts under port 0. Protocols other than TCP, UDP, ICMP and
+// ICMPv6 share protocol 0, since edge_return claims any protocol and keying on
+// each would let one address take up to 256 rows.
+static EDGE_ALWAYS_INLINE void return_stats_key(struct vip_key *key, const __u8 *vip, __u8 proto, int has_ports,
+						__be16 sport)
+{
+	__builtin_memset(key, 0, sizeof(*key));
+	if (proto == EDGE_IPPROTO_TCP || proto == EDGE_IPPROTO_UDP || proto == EDGE_IPPROTO_ICMP ||
+	    proto == EDGE_IPPROTO_ICMPV6)
+		key->proto = proto;
+	__builtin_memcpy(key->vip, vip, 16);
+	if (!has_ports)
+		return;
+	key->port = sport;
+	if (!lookup_vip_rule(key))
+		key->port = 0;
+}
+
 static EDGE_ALWAYS_INLINE int edge_lb_v6(struct xdp_md *ctx, struct edge_ethhdr *eth, void *data_end)
 {
 	struct edge_ip6hdr *ip6 = (void *) (eth + 1);
@@ -1284,7 +1313,17 @@ static EDGE_ALWAYS_INLINE int edge_return_v6(struct xdp_md *ctx, struct edge_eth
 	// Claimed past this point: this node owns the source address, so every
 	// subsequent failure is a counted drop rather than a pass-through that
 	// would meet the connection-tracking drop this program exists to avoid.
-	struct vip_stats_value *stats = stats_row(&vip_return_stats_table, &ak);
+	int has_ports = 0;
+	__be16 sport = 0;
+	struct edge_l4ports *ports = (void *) (ip6 + 1);
+	if ((ip6->nexthdr == EDGE_IPPROTO_TCP || ip6->nexthdr == EDGE_IPPROTO_UDP) &&
+	    (void *) (ports + 1) <= data_end) {
+		has_ports = 1;
+		sport = ports->source;
+	}
+	struct vip_key rk;
+	return_stats_key(&rk, ip6->saddr, ip6->nexthdr, has_ports, sport);
+	struct vip_stats_value *stats = stats_row(&vip_return_stats_table, &rk);
 	count_match(stats, (__u64) ((char *) data_end - (char *) eth));
 
 	// Forwarding in XDP means the kernel never sees this packet, so nothing
@@ -1343,7 +1382,21 @@ static EDGE_ALWAYS_INLINE int edge_return_v4(struct xdp_md *ctx, struct edge_eth
 	if (!bpf_map_lookup_elem(&vip_addr_table, &ak))
 		return pass_unclaimed_return(ctx);
 
-	struct vip_stats_value *stats = stats_row(&vip_return_stats_table, &ak);
+	// Only a first or unfragmented TCP or UDP packet carries ports, and only
+	// inside the header's total length.
+	__u8 proto = ip4->protocol;
+	int has_ports = 0;
+	__be16 sport = 0;
+	struct edge_l4ports *ports = (void *) ((__u8 *) ip4 + hlen);
+	if ((proto == EDGE_IPPROTO_TCP || proto == EDGE_IPPROTO_UDP) &&
+	    !(__builtin_bswap16(ip4->frag_off) & EDGE_IP_OFFSET) && hlen + sizeof(*ports) <= tot_len &&
+	    (void *) (ports + 1) <= data_end) {
+		has_ports = 1;
+		sport = ports->source;
+	}
+	struct vip_key rk;
+	return_stats_key(&rk, ak.vip, proto, has_ports, sport);
+	struct vip_stats_value *stats = stats_row(&vip_return_stats_table, &rk);
 	count_match(stats, (__u64) ((char *) data_end - (char *) eth));
 
 	if (ip4->ttl <= 1) {

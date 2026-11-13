@@ -95,20 +95,26 @@ type VIPEntry struct {
 }
 
 // ReturnEntry is one vip_addr_table row: a VIP address this node claims return
-// traffic for, joined with the counters edge_return keeps for it.
-//
-// Keyed by address alone, with no port or protocol, because the return program
-// matches on the source address alone -- so one ReturnEntry covers every rule
-// sharing that VIP, and its counters aggregate across them.
+// traffic for. Keyed by address alone, with no port or protocol, because the
+// return program claims a reply on its source address alone.
 type ReturnEntry struct {
 	VIP netip.Addr
 
 	// Generation is this table's monotonic-clock reading when the address was
 	// last written, serving the same reconcile cutoff as VIPEntry's.
 	Generation uint64
+}
+
+// ReturnStatsEntry is one vip_return_stats_table row: the counters edge_return
+// keeps for replies from one listener, keyed like vip_stats_table. A reply
+// whose source port matches no listener, or that carries no ports, counts
+// under VPort 0 of its protocol, so the rows for an address sum to every reply
+// it sourced.
+type ReturnStatsEntry struct {
+	VIPKey
 
 	// Packets, Bytes, DroppedPackets, and LastSeenNs mirror VIPEntry's, for
-	// traffic this VIP sourced rather than traffic addressed to it.
+	// traffic this listener sourced rather than traffic addressed to it.
 	Packets        uint64
 	Bytes          uint64
 	DroppedPackets uint64
@@ -118,8 +124,9 @@ type ReturnEntry struct {
 // VIPTable is the read/write API for vip_table, vip_stats_table, and the two
 // return-path maps, which this type presents as one logical table. table holds
 // the configuration: backend list, Maglev table, and generation. stats holds the
-// datapath's counters, which Register never touches. addrs and returnStats are
-// the return path's equivalents, keyed by VIP address alone.
+// datapath's counters, which Register never touches. addrs is the return
+// path's address set, keyed by VIP address alone, and returnStats its counters,
+// keyed like stats.
 //
 // The address set is maintained here rather than by a caller because every
 // mutation of vip_table already passes through this type: an address is present
@@ -310,14 +317,43 @@ func (t *VIPTable) releaseAddr(vip netip.Addr) error {
 	if err := t.addrs.Delete(wireAddr); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("release %s from vip_addr_table: %w", vip, err)
 	}
-	if err := t.returnStats.Delete(wireAddr); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("delete %s vip_return_stats_table row: %w", vip, err)
+	if err := t.deleteReturnStats(vip); err != nil {
+		return fmt.Errorf("delete %s vip_return_stats_table rows: %w", vip, err)
 	}
 	return nil
 }
 
+// deleteReturnStats deletes every vip_return_stats_table row for vip: one per
+// listener, and the port-0 rows for replies that matched none. The keys are
+// collected before any is deleted, since deleting while iterating a hash map
+// can skip or repeat keys.
+func (t *VIPTable) deleteReturnStats(vip netip.Addr) error {
+	var (
+		keys   []edgeprog.EdgedsrVipKey
+		rawKey edgeprog.EdgedsrVipKey
+		value  edgeprog.EdgedsrVipStatsValue
+	)
+	it := t.returnStats.Iterate()
+	for it.Next(&rawKey, &value) {
+		if fromWireAddr(rawKey.Vip) == vip {
+			keys = append(keys, rawKey)
+		}
+	}
+	if err := it.Err(); err != nil {
+		return err
+	}
+	var errs []error
+	for _, k := range keys {
+		if err := t.returnStats.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Unregister removes the vip_table entry for key, if present, and its
-// statistics row, if any. Neither being present is not an error.
+// forward and return statistics rows, if any. None being present is not an
+// error. Once the entry is gone, replies from its port count under port 0.
 //
 // The statistics row is deleted rather than left behind so that map does not
 // accumulate rows for VIPs that no longer exist: unlike vip_table, whose
@@ -338,6 +374,9 @@ func (t *VIPTable) Unregister(key VIPKey) error {
 	if err := t.stats.Delete(wireKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("edgemap: vip_table: unregister %+v: delete vip_stats_table row: %w", key, err)
 	}
+	if err := t.returnStats.Delete(wireKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("edgemap: vip_table: unregister %+v: delete vip_return_stats_table row: %w", key, err)
+	}
 	if err := t.releaseAddr(key.VIP); err != nil {
 		return fmt.Errorf("edgemap: vip_table: unregister %+v: %w", key, err)
 	}
@@ -346,13 +385,14 @@ func (t *VIPTable) Unregister(key VIPKey) error {
 
 // ReplaceReturnAddrs makes vip_addr_table hold exactly addrs and empties
 // vip_table, for a node whose datapath is turned off: it load-balances no rule
-// but still forwards the replies its compute-facing links carry.
+// but still forwards the replies its compute-facing links carry. With no
+// listener left, those replies count under port 0 of their protocol.
 //
 // Every address in addrs is claimed before anything is removed, so a reply
 // from a VIP present before and after is never left unclaimed. Each vip_table
-// row goes with its counters, so no rule series outlives the rules this node
-// stopped serving. An address no longer in addrs is released with its
-// counters.
+// row goes with its forward and return counters, so no rule series outlives
+// the rules this node stopped serving. An address no longer in addrs is
+// released with its counters.
 func (t *VIPTable) ReplaceReturnAddrs(addrs []netip.Addr) error {
 	want := make(map[netip.Addr]struct{}, len(addrs))
 	generation := t.clock()
@@ -381,6 +421,10 @@ func (t *VIPTable) ReplaceReturnAddrs(addrs []netip.Addr) error {
 			errs = append(errs, fmt.Errorf("edgemap: vip_table: replace: delete %+v vip_stats_table row: %w",
 				e.VIPKey, err))
 		}
+		if err := t.returnStats.Delete(wireKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, fmt.Errorf("edgemap: vip_table: replace: delete %+v vip_return_stats_table row: %w",
+				e.VIPKey, err))
+		}
 	}
 
 	returns, err := t.ListReturn()
@@ -398,9 +442,7 @@ func (t *VIPTable) ReplaceReturnAddrs(addrs []netip.Addr) error {
 	return errors.Join(errs...)
 }
 
-// ListReturn returns every vip_addr_table row joined with its counters, in
-// unspecified order. A row with no counters yet reads back as zero rather than
-// an error, as with vip_stats_table.
+// ListReturn returns every vip_addr_table row, in unspecified order.
 func (t *VIPTable) ListReturn() ([]ReturnEntry, error) {
 	var (
 		entries []ReturnEntry
@@ -409,13 +451,44 @@ func (t *VIPTable) ListReturn() ([]ReturnEntry, error) {
 	)
 	it := t.addrs.Iterate()
 	for it.Next(&rawKey, &value) {
-		var stats edgeprog.EdgedsrVipStatsValue
-		if err := t.returnStats.Lookup(rawKey, &stats); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil, fmt.Errorf("edgemap: vip_addr_table: list: read vip_return_stats_table row: %w", err)
+		entries = append(entries, ReturnEntry{VIP: fromWireAddr(rawKey.Vip), Generation: value.Generation})
+	}
+	if err := it.Err(); err != nil {
+		return nil, fmt.Errorf("edgemap: vip_addr_table: list: %w", err)
+	}
+	return entries, nil
+}
+
+// ListReturnStats returns the return counters of every address in
+// vip_addr_table, in unspecified order: each vip_return_stats_table row, and a
+// zero row for each listener in table or peer that has not yet sourced a
+// reply, so a listener's series reads zero rather than going absent. A row for
+// an address no longer claimed is left out.
+func (t *VIPTable) ListReturnStats() ([]ReturnStatsEntry, error) {
+	addrs, err := t.ListReturn()
+	if err != nil {
+		return nil, fmt.Errorf("edgemap: vip_return_stats_table: list: %w", err)
+	}
+	claimed := make(map[netip.Addr]struct{}, len(addrs))
+	for _, a := range addrs {
+		claimed[a.VIP] = struct{}{}
+	}
+
+	seen := make(map[VIPKey]struct{})
+	var (
+		entries []ReturnStatsEntry
+		rawKey  edgeprog.EdgedsrVipKey
+		stats   edgeprog.EdgedsrVipStatsValue
+	)
+	it := t.returnStats.Iterate()
+	for it.Next(&rawKey, &stats) {
+		key := VIPKey{Proto: rawKey.Proto, VPort: beU16(rawKey.Port), VIP: fromWireAddr(rawKey.Vip)}
+		if _, ok := claimed[key.VIP]; !ok {
+			continue
 		}
-		entries = append(entries, ReturnEntry{
-			VIP:            fromWireAddr(rawKey.Vip),
-			Generation:     value.Generation,
+		seen[key] = struct{}{}
+		entries = append(entries, ReturnStatsEntry{
+			VIPKey:         key,
 			Packets:        stats.Packets,
 			Bytes:          stats.Bytes,
 			DroppedPackets: stats.DroppedPackets,
@@ -423,7 +496,29 @@ func (t *VIPTable) ListReturn() ([]ReturnEntry, error) {
 		})
 	}
 	if err := it.Err(); err != nil {
-		return nil, fmt.Errorf("edgemap: vip_addr_table: list: %w", err)
+		return nil, fmt.Errorf("edgemap: vip_return_stats_table: list: %w", err)
+	}
+
+	for _, listeners := range []Table{t.table, t.peer} {
+		if listeners == nil {
+			continue
+		}
+		var value edgeprog.EdgedsrVipValue
+		it := listeners.Iterate()
+		for it.Next(&rawKey, &value) {
+			key := VIPKey{Proto: rawKey.Proto, VPort: beU16(rawKey.Port), VIP: fromWireAddr(rawKey.Vip)}
+			if _, ok := claimed[key.VIP]; !ok {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			entries = append(entries, ReturnStatsEntry{VIPKey: key})
+		}
+		if err := it.Err(); err != nil {
+			return nil, fmt.Errorf("edgemap: vip_return_stats_table: list listeners: %w", err)
+		}
 	}
 	return entries, nil
 }
