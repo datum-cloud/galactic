@@ -30,7 +30,6 @@ import (
 	"net"
 	"net/netip"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +44,7 @@ import (
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/gc"
+	"go.datum.net/galactic/internal/nodevpc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
@@ -151,85 +151,22 @@ type bgpConfig struct {
 	nodeID      int32
 }
 
-// routeTarget returns the route target in "ASN:NN" form, from the low 32 bits
-// of the 16-bit hex VPC identifier vpcHex. Every node in the same VRF derives
-// the same value, which is what scopes route import and export to a VPC.
-func routeTarget(asNumber int64, vpcHex string) (string, error) {
-	v, err := strconv.ParseUint(vpcHex, 16, 64)
-	if err != nil {
-		return "", fmt.Errorf("parse VPC hex %q: %w", vpcHex, err)
-	}
-	return fmt.Sprintf("%d:%d", asNumber, uint32(v)), nil
-}
+// routeTarget returns the route target in "ASN:NN" form; see
+// nodevpc.RouteTarget.
+var routeTarget = nodevpc.RouteTarget
 
-// allocateArgument returns the 12-bit Argument value for the VPC attachment
-// named vrfInstanceName under routerName. An existing BGPVRFInstance of that
-// name keeps its value, which makes a repeat ADD idempotent. Otherwise the
-// lowest value in [uformat.ArgumentMin, uformat.ArgumentMax] unused by that
-// router's other instances is returned.
-func allocateArgument(
-	ctx context.Context, k8s client.Client, namespace, routerName, vrfInstanceName string,
-) (int32, error) {
-	list := &bgpv1alpha1.BGPVRFInstanceList{}
-	if err := k8s.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		return 0, fmt.Errorf("list BGPVRFInstances in namespace %s: %w", namespace, err)
-	}
-
-	for _, inst := range list.Items {
-		if inst.Spec.RouterRef != nil && inst.Spec.RouterRef.Name == routerName && inst.Name == vrfInstanceName {
-			return inst.Spec.VRFID, nil
-		}
-	}
-	return lowestFreeArgument(list.Items, routerName, vrfInstanceName)
-}
-
-// lookupBGPRouter finds the Galactic-owned BGPRouter (one with no
-// routerClassName) targeting this node in the given namespace.
-// Returns an error if none is found or if multiple are found (ambiguous).
+// lookupBGPRouter finds the Galactic-owned BGPRouter targeting this node in
+// the given namespace; see nodevpc.LookupRouter.
 func lookupBGPRouter(ctx context.Context, k8s client.Client, nodeName, namespace string) (bgpConfig, error) {
-	routerList := &bgpv1alpha1.BGPRouterList{}
-	if err := k8s.List(ctx, routerList, client.InNamespace(namespace)); err != nil {
-		return bgpConfig{}, fmt.Errorf("list BGPRouters in namespace %s: %w", namespace, err)
+	r, err := nodevpc.LookupRouter(ctx, k8s, nodeName, namespace)
+	if err != nil {
+		return bgpConfig{}, err
 	}
-
-	var matches []bgpv1alpha1.BGPRouter
-	for _, r := range bgpv1alpha1.LegacyOwnedRouters(routerList.Items) {
-		if r.Spec.TargetRef.Name == nodeName {
-			matches = append(matches, r)
-		}
-	}
-
-	switch len(matches) {
-	case 0:
-		return bgpConfig{}, fmt.Errorf("no BGPRouter found for node %s in namespace %s", nodeName, namespace)
-	case 1:
-	default:
-		return bgpConfig{}, fmt.Errorf("ambiguous BGP config: %d BGPRouters target node %s in namespace %s",
-			len(matches), nodeName, namespace)
-	}
-
-	slog.Debug("BGP: router matched", "nodeName", nodeName, "router", matches[0].Name,
-		"asNumber", matches[0].Spec.LocalASN, "srv6Locator", matches[0].Spec.SRv6Locator, "nodeID", matches[0].Spec.NodeID)
-
-	return bgpConfig{
-		asNumber:    uint32(matches[0].Spec.LocalASN),
-		routerName:  matches[0].Name,
-		srv6Locator: matches[0].Spec.SRv6Locator,
-		nodeID:      matches[0].Spec.NodeID,
-	}, nil
+	return bgpConfig{asNumber: r.ASN, routerName: r.Name, srv6Locator: r.SRv6Locator, nodeID: r.NodeID}, nil
 }
 
 // buildVRFInstanceSpec constructs the BGPVRFInstanceSpec for a VPC attachment.
-func buildVRFInstanceSpec(routerName, rtValue string, vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec {
-	return bgpv1alpha1.BGPVRFInstanceSpec{
-		RouterTarget: bgpv1alpha1.RouterTarget{
-			RouterRef: &bgpv1alpha1.RouterRef{Name: routerName},
-		},
-		VRFID:              vrfID,
-		ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
-		ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
-	}
-}
+var buildVRFInstanceSpec = nodevpc.InstanceSpec
 
 // buildAdvertisementSpec constructs the BGPAdvertisementSpec for a VPC
 // attachment's pod subnets: one IPv6 prefix, plus an IPv4 prefix when the
