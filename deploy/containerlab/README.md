@@ -613,6 +613,19 @@ Quick smoke test:
 task verify  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
 ```
 
+### Edge attachment without a local workload
+
+`task verify:edge-no-local-workload` runs rows 26 to 26d of the
+[failure-test matrix](../../docs/edge/provider-contract.md#failure-test-matrix)
+(`TestNoLocalWorkload` in `tests/edgeconformance`). It needs Galactic Edge on
+dfw (`deploy:galactic-edge`) and the `ns10` scenario. It scales ns10's
+`edge-client-3` on dfw-worker3 to zero, waits for galactic-router GC to remove
+the VPC's state there, attaches a reference provider on that node, and checks
+the VPC's host VRF and `BGPVRFInstance` as a workload arrives and leaves, as
+galactic-edge restarts and as the attachment is removed. It restores
+`edge-client-3` when it ends. Run it on its own: `verify:edge-conformance`
+also places providers on dfw-worker3.
+
 ### MASQUE service
 
 `task verify:masque-service` runs the shipped MASQUE CONNECT-IP service and
