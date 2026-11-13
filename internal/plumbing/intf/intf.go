@@ -66,12 +66,13 @@ func ParseInterfaceNameHost(name string) (vpc, vpcAttachment string, ok bool) {
 	if m == nil {
 		return "", "", false
 	}
-	return unpad(m[1]), unpad(m[2]), true
+	return Unpad(m[1]), Unpad(m[2]), true
 }
 
-// unpad reverses the zero padding an interface name applies to a base62
-// identifier, which CRD names do not carry.
-func unpad(s string) string {
+// Unpad reverses the zero padding an interface name applies to a base62
+// identifier, which CRD names do not carry. All zeros, or an empty string,
+// becomes "0".
+func Unpad(s string) string {
 	if t := strings.TrimLeft(s, "0"); t != "" {
 		return t
 	}

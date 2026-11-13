@@ -49,6 +49,10 @@ import (
 const (
 	tenantNamespace = "tenant"
 	podNode         = "node-a"
+	// fixtureVPCID and fixtureAttachmentID are the base62 IDs every fixture
+	// attachment records, unpadded as galactic-cni labels them.
+	fixtureVPCID        = "4c"
+	fixtureAttachmentID = "1z"
 )
 
 func instanceScheme(t *testing.T) *runtime.Scheme {
@@ -116,6 +120,8 @@ func newInstanceFixture(name string) instanceFixture {
 	}
 	attachment := &cloudv1alpha1.VPCAttachment{ObjectMeta: metav1.ObjectMeta{Name: name + "-nic0", Namespace: tenantNamespace}}
 	attachment.Spec.VPC.Name = "vpc-a"
+	attachment.Status.VPC = fixtureVPCID
+	attachment.Status.VPCAttachment = fixtureAttachmentID
 	attachment.Status.Node = podNode
 	attachment.Status.Conditions = []metav1.Condition{{
 		Type: cloudv1alpha1.ConditionTypeProgrammed, Status: metav1.ConditionTrue, Reason: "Advertised",
@@ -195,6 +201,9 @@ func TestInstanceAttachmentState(t *testing.T) {
 		// reason is empty when the interface counts as programmed, and
 		// "ignored" when the pod is not expected to have an attachment yet.
 		reason string
+		// noIDs is set when the attachment resolves but has recorded no
+		// base62 IDs, so vpc_id and vpc_attachment_id are empty.
+		noIDs bool
 	}{
 		{name: "programmed on the pod's node"},
 		{
@@ -233,6 +242,25 @@ func TestInstanceAttachmentState(t *testing.T) {
 			name:   "pod attached, never advertised",
 			mutate: func(f *instanceFixture) { f.attachment.Status.Conditions = nil },
 			reason: ReasonAwaitingDataPlane,
+		},
+		{
+			name: "attachment has no IDs yet",
+			mutate: func(f *instanceFixture) {
+				f.attachment.Status = cloudv1alpha1.VPCAttachmentStatus{}
+			},
+			reason: ReasonAwaitingDataPlane,
+			noIDs:  true,
+		},
+		{
+			// The IDs are labelled in the unpadded form galactic-cni
+			// reads from host-side link names.
+			name: "zero-padded IDs",
+			mutate: func(f *instanceFixture) {
+				f.pod.Annotations = nil
+				f.attachment.Status.VPC = "00" + fixtureVPCID
+				f.attachment.Status.VPCAttachment = "0" + fixtureAttachmentID
+			},
+			reason: ReasonPodNotAttached,
 		},
 		{
 			name: "advertisement withdrawn",
@@ -413,9 +441,17 @@ func TestInstanceAttachmentState(t *testing.T) {
 				}
 			}
 			// Only an interface that resolves to its attachment can name it.
-			if test.reason != ReasonInterfaceUnbound && test.reason != ReasonAttachmentMissing &&
-				(labels["vpc"] != "vpc-a" || labels["attachment"] != "web-0-nic0") {
+			resolved := test.reason != ReasonInterfaceUnbound && test.reason != ReasonAttachmentMissing
+			if resolved && (labels["vpc"] != "vpc-a" || labels["attachment"] != "web-0-nic0") {
 				t.Errorf("vpc/attachment labels %q/%q, want vpc-a/web-0-nic0", labels["vpc"], labels["attachment"])
+			}
+			wantVPCID, wantAttachmentID := fixtureVPCID, fixtureAttachmentID
+			if !resolved || test.noIDs {
+				wantVPCID, wantAttachmentID = "", ""
+			}
+			if labels["vpc_id"] != wantVPCID || labels["vpc_attachment_id"] != wantAttachmentID {
+				t.Errorf("vpc_id/vpc_attachment_id labels %q/%q, want %q/%q",
+					labels["vpc_id"], labels["vpc_attachment_id"], wantVPCID, wantAttachmentID)
 			}
 		})
 	}
