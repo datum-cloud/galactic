@@ -213,8 +213,10 @@ func newFakeAddrTable() *fakeReturnMap[edgeprog.EdgedsrVipAddrValue] {
 	return newFakeReturnMap[edgeprog.EdgedsrVipAddrValue]()
 }
 
-func newFakeReturnStatsTable() *fakeReturnMap[edgeprog.EdgedsrVipStatsValue] {
-	return newFakeReturnMap[edgeprog.EdgedsrVipStatsValue]()
+// newFakeReturnStatsTable fakes vip_return_stats_table, keyed like
+// vip_stats_table.
+func newFakeReturnStatsTable() *fakeStatsTable {
+	return newFakeStatsTable()
 }
 
 type fakeDropReasons map[uint32]uint64
@@ -453,10 +455,10 @@ func TestCollector_CollectsNeighFallbacks(t *testing.T) {
 	}
 }
 
-// TestCollector_CollectsReturnCounters covers the return path's own counters.
-// They are keyed by VIP address alone, with no port or protocol, since
-// edge_return matches a reply on its source address -- so one series covers
-// every rule sharing that VIP rather than one per rule.
+// TestCollector_CollectsReturnCounters covers #1377: the return counters are
+// keyed per listener, as the forward counters are, so two listeners sharing
+// one address report separate series. A listener that has not sourced a reply
+// reads zero, and replies that matched no listener report under port 0.
 func TestCollector_CollectsReturnCounters(t *testing.T) {
 	table := newFakeVIPTable()
 	addrs := newFakeAddrTable()
@@ -464,42 +466,59 @@ func TestCollector_CollectsReturnCounters(t *testing.T) {
 	vt := edgemap.NewVIPTable(table, newFakeStatsTable(), addrs, returnStats)
 
 	vip := mustAddr(t, "2001:db8:6060::1")
-	key := edgemap.VIPKey{Proto: 6, VPort: 80, VIP: vip}
 	backend := edgemap.Backend{
 		Addr: mustAddr(t, "fd20:60:ff01::100:0"),
 		Port: 80,
 		USID: mustAddr(t, "2001:db8:ff01:1:e003::"),
 	}
-	if err := vt.Register(key, edgeprog.AffinityNone,
-		[]edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
-		t.Fatalf("Register: %v", err)
+	keys := []edgemap.VIPKey{
+		{Proto: 6, VPort: 80, VIP: vip},
+		{Proto: 6, VPort: 443, VIP: vip},
+		{Proto: 17, VPort: 53, VIP: vip},
 	}
-
-	// As in TestCollector_CollectsRuleCounters, seeded on the fake's backing
-	// map the way edge_return's own increments would arrive.
-	for k := range addrs.entries {
-		returnStats.entries[k] = edgeprog.EdgedsrVipStatsValue{Packets: 12, Bytes: 9000, DroppedPackets: 2}
-	}
-
-	c := NewCollector(vt, fakeDropReasons{}, nil)
-	metrics := collect(t, c)
-
-	for _, tc := range []struct {
-		desc *prometheus.Desc
-		name string
-		want float64
-	}{
-		{returnPacketsDesc, "return_packets_total", 12},
-		{returnBytesDesc, "return_bytes_total", 9000},
-		{returnDroppedDesc, "return_dropped_packets_total", 2},
-	} {
-		m := findMetric(t, metrics, tc.desc, "vip", vip.String())
-		if m == nil {
-			t.Errorf("%s: no metric for vip %s", tc.name, vip)
-			continue
+	for _, key := range keys {
+		if err := vt.Register(key, edgeprog.AffinityNone,
+			[]edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
+			t.Fatalf("Register(%+v): %v", key, err)
 		}
-		if got := metricValue(m); got != tc.want {
-			t.Errorf("%s = %v, want %v", tc.name, got, tc.want)
+	}
+
+	// Seeded on the fake's backing map the way edge_return's own increments
+	// would arrive. UDP 53 has sourced nothing yet.
+	wireKey := func(proto uint8, port uint16) edgeprog.EdgedsrVipKey {
+		return edgeprog.EdgedsrVipKey{Proto: proto, Port: port<<8 | port>>8, Vip: vip.As16()}
+	}
+	returnStats.entries[wireKey(6, 80)] = edgeprog.EdgedsrVipStatsValue{Packets: 12, Bytes: 9000, DroppedPackets: 2}
+	returnStats.entries[wireKey(6, 443)] = edgeprog.EdgedsrVipStatsValue{Packets: 5, Bytes: 4000}
+	returnStats.entries[wireKey(58, 0)] = edgeprog.EdgedsrVipStatsValue{Packets: 1, Bytes: 90}
+
+	metrics := collect(t, NewCollector(vt, fakeDropReasons{}, nil))
+
+	type series struct{ proto, port string }
+	want := map[series][3]float64{
+		{protoLabel(6), "80"}:  {12, 9000, 2},
+		{protoLabel(6), "443"}: {5, 4000, 0},
+		{protoLabel(17), "53"}: {0, 0, 0},
+		{protoLabel(58), "0"}:  {1, 90, 0},
+	}
+	for i, desc := range []*prometheus.Desc{returnPacketsDesc, returnBytesDesc, returnDroppedDesc} {
+		got := make(map[series]float64)
+		for _, m := range metrics {
+			if m.desc != desc {
+				continue
+			}
+			if v := labelValue(m.pb, "vip"); v != vip.String() {
+				t.Errorf("%v: vip = %q, want %s", desc, v, vip)
+			}
+			got[series{labelValue(m.pb, "proto"), labelValue(m.pb, "port")}] = metricValue(m.pb)
+		}
+		if len(got) != len(want) {
+			t.Errorf("%v: %d series, want %d: %v", desc, len(got), len(want), got)
+		}
+		for s, w := range want {
+			if v, ok := got[s]; !ok || v != w[i] {
+				t.Errorf("%v{proto=%s,port=%s} = %v (present %v), want %v", desc, s.proto, s.port, v, ok, w[i])
+			}
 		}
 	}
 }
@@ -599,8 +618,12 @@ func TestCollector_SharedAddressKeepsRuleVPCs(t *testing.T) {
 			t.Errorf("rule_packets_total{proto=%s} vpc = %q, want %q", tc.proto, got, tc.want)
 		}
 	}
-	if got := labelValue(findMetric(t, metrics, returnPacketsDesc, "vip", vip.String()), "vpc"); got != "" {
-		t.Errorf("return_packets_total{vip=%s} vpc = %q, want empty", vip, got)
+	// Both listeners' return series come from the shared address, which no
+	// single VPC owns.
+	for _, port := range []string{"443", "53"} {
+		if got := labelValue(findMetric(t, metrics, returnPacketsDesc, "port", port), "vpc"); got != "" {
+			t.Errorf("return_packets_total{vip=%s,port=%s} vpc = %q, want empty", vip, port, got)
+		}
 	}
 }
 

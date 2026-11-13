@@ -590,6 +590,76 @@ func TestLoad_UpgradeReplacesOnlyTheGrownDropReasons(t *testing.T) {
 	}
 }
 
+// TestLoad_UpgradeRecreatesAddressKeyedReturnStats covers the upgrade that
+// keys reply counters per listener (#1377): the previous release pinned
+// vip_return_stats_table with a 16-byte address key, so Load replaces it with
+// the 20-byte vip_key layout and its counters restart from zero. vip_table and
+// vip_addr_table keep their rows, so edge_return keeps claiming replies.
+func TestLoad_UpgradeRecreatesAddressKeyedReturnStats(t *testing.T) {
+	requireRoot(t)
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-edge-test-return-%d", os.Getpid()))
+	if err := os.MkdirAll(pinDir, 0o755); err != nil {
+		t.Skipf("bpffs not writable at /sys/fs/bpf: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	first, err := Load(pinDir, nil)
+	if err != nil {
+		t.Fatalf("first Load: %v", err)
+	}
+	vip := netip.MustParseAddr("2001:db8::100").As16()
+	key := edgeprog.EdgedsrVipKey{Proto: 6, Port: 0xbb01, Vip: vip}
+	if err := first.VipTable.Put(key, edgeprog.EdgedsrVipValue{BackendCount: 1, Generation: 9}); err != nil {
+		t.Fatalf("populate vip_table: %v", err)
+	}
+	addrKey := edgeprog.EdgedsrVipAddrKey{Vip: vip}
+	if err := first.VipAddrTable.Put(addrKey, edgeprog.EdgedsrVipAddrValue{Generation: 9}); err != nil {
+		t.Fatalf("populate vip_addr_table: %v", err)
+	}
+	_ = first.Close()
+
+	// Stand in for the previous release's vip_return_stats_table, keyed by
+	// address alone.
+	statsPin := filepath.Join(pinDir, "vip_return_stats_table")
+	if err := os.Remove(statsPin); err != nil {
+		t.Fatalf("remove vip_return_stats_table pin: %v", err)
+	}
+	old, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name: "vip_return_stat", Type: ebpf.Hash, KeySize: 16, ValueSize: 32, MaxEntries: 4096,
+	})
+	if err != nil {
+		t.Fatalf("create old vip_return_stats_table: %v", err)
+	}
+	if err := old.Put(vip, edgeprog.EdgedsrVipStatsValue{Packets: 5}); err != nil {
+		t.Fatalf("seed old vip_return_stats_table: %v", err)
+	}
+	if err := old.Pin(statsPin); err != nil {
+		t.Fatalf("pin old vip_return_stats_table: %v", err)
+	}
+	_ = old.Close()
+
+	objs, err := Load(pinDir, nil)
+	if err != nil {
+		t.Fatalf("Load over the old pins: %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	if got := objs.VipReturnStatsTable.KeySize(); got != 20 {
+		t.Errorf("vip_return_stats_table key size = %d, want 20 (struct vip_key)", got)
+	}
+	var stats edgeprog.EdgedsrVipStatsValue
+	if err := objs.VipReturnStatsTable.Lookup(key, &stats); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Errorf("recreated vip_return_stats_table holds %+v, %v; want it empty", stats, err)
+	}
+	var rule edgeprog.EdgedsrVipValue
+	if err := objs.VipTable.Lookup(key, &rule); err != nil || rule.Generation != 9 {
+		t.Errorf("vip_table row after the upgrade = %+v, %v; want it kept", rule, err)
+	}
+	var addr edgeprog.EdgedsrVipAddrValue
+	if err := objs.VipAddrTable.Lookup(addrKey, &addr); err != nil || addr.Generation != 9 {
+		t.Errorf("vip_addr_table row after the upgrade = %+v, %v; want it kept", addr, err)
+	}
+}
+
 // TestLoad_KeepsPinnedVipTableWithZeroedAffinity: vip_value's affinity byte
 // sits in the alignment gap before generation, so a pinned vip_table of
 // 3216-byte values with that gap zeroed stays compatible. Load keeps it and

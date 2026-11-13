@@ -15,9 +15,9 @@ so there is no connection table to report. See
 | `galactic_edge_rule_dropped_packets_total`              | counter | same                                | Matched packets the datapath then dropped, such as for no backends. A subset of `rule_packets_total` |
 | `galactic_edge_rule_backends`                           | gauge   | same                                | Backends registered for the VIP                                                                      |
 | `galactic_edge_rule_seconds_since_last_packet`          | gauge   | same                                | Seconds since a packet last matched the VIP. Absent until the first one                              |
-| `galactic_edge_return_packets_total`                    | counter | `vip`, `vpc`                        | Replies sourced from the VIP that this node forwarded past the kernel (`edge_return`)                |
+| `galactic_edge_return_packets_total`                    | counter | `proto`, `port`, `vip`, `vpc`       | Replies from the VIP, port and protocol that this node forwarded past the kernel (`edge_return`)     |
 | `galactic_edge_return_bytes_total`                      | counter | same                                | Bytes of those replies                                                                               |
-| `galactic_edge_return_dropped_packets_total`            | counter | same                                | Replies sourced from the VIP that the datapath dropped. A subset of `return_packets_total`           |
+| `galactic_edge_return_dropped_packets_total`            | counter | same                                | Those replies that the datapath dropped. A subset of `return_packets_total`                          |
 | `galactic_edge_drops_total`                             | counter | `reason`                            | Packets `edge_lb` and `edge_return` dropped, by reason                                               |
 | `galactic_edge_neigh_fallbacks_total`                   | counter | none                                | Packets `edge_lb` handed to the kernel to resolve the next hop. Not counted as drops                 |
 | `galactic_edge_control_plane_drops_total`               | counter | `rule`, `reason` (`quota_exceeded`) | Rule applications refused before they reached the datapath                                           |
@@ -25,13 +25,22 @@ so there is no connection table to report. See
 | `galactic_edge_dispatch_lease_expiry_timestamp_seconds` | gauge   | `slot`                              | Unix time each lease, as last renewed, expires. Dispatch mode only                                   |
 
 - `proto` is `tcp`, `udp`, or the protocol number for anything else.
+- The return series use the rule series' key, attributing a reply by its
+  source port alone. A reply from inside a UDP port range counts under the
+  range's start port. A reply whose source port matches no listener, or that
+  carries no ports (ICMP, a non-first IPv4 fragment), counts under
+  `port="0"` of its protocol, so summing by `vip` gives every reply the VIP
+  sourced. On the return series `proto` can also be `icmp`, `icmpv6`, or
+  `other` for every protocol besides those four.
 - `vpc` is empty until the process has applied a rule that owns the VIP,
   as after a restart before the first reconcile. A VIP address used by
   rules of more than one VPC has an empty `vpc` on its return series, since
   the return counters can't be split between them.
 - The per-VIP counters survive re-registration, such as a reconcile that
-  only changes the backend list. The return series read zero, not absent,
-  on a node with no compute tier behind it.
+  only changes the backend list. A listener's return series read zero, not
+  absent, on a node with no compute tier behind it. Removing a listener
+  removes its return series, though a reply in flight at that moment can
+  bring it back until the address's last listener goes.
 - `galactic_edge_drops_total` reasons: `empty_backend_list`,
   `no_encap_config`, `fib_no_neigh`, `fib_unreachable`, `fib_frag_needed`,
   `fib_lookup_failed`, `adjust_head_failed`, `no_egress_ifindex`,

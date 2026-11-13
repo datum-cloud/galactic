@@ -518,7 +518,7 @@ func TestEdgeReturn_IPv4ForwardsWithTTLAndChecksum(t *testing.T) {
 		}
 	}
 	var stats EdgedsrVipStatsValue
-	if err := objs.VipReturnStatsTable.Lookup(vipAddrKey(testVIP4), &stats); err != nil {
+	if err := objs.VipReturnStatsTable.Lookup(vipKey(ipprotoTCP, 0, testVIP4), &stats); err != nil {
 		t.Fatalf("lookup vip_return_stats_table: %v", err)
 	}
 	if want := uint64(len(cases)); stats.Packets != want || stats.DroppedPackets != 0 {
@@ -580,9 +580,8 @@ func TestEdgeReturn_IPv4MalformedIsNotClaimed(t *testing.T) {
 			t.Errorf("drop_reasons[%s] = %d, want 0", DropReasonNames[i], got)
 		}
 	}
-	var stats EdgedsrVipStatsValue
-	if err := objs.VipReturnStatsTable.Lookup(vipAddrKey(testVIP4), &stats); err == nil {
-		t.Errorf("vip_return_stats row created for unclaimed packets: %+v", stats)
+	if rows := returnStatsRows(t, objs); len(rows) != 0 {
+		t.Errorf("vip_return_stats rows created for unclaimed packets: %+v", rows)
 	}
 }
 
@@ -608,8 +607,8 @@ func TestEdgedsr_IPv6PathsIgnoreIPv4MappedAddresses(t *testing.T) {
 	if err := objs.VipStatsTable.Lookup(key, &stats); err == nil {
 		t.Errorf("vip_stats row created by an IPv6 packet: %+v", stats)
 	}
-	if err := objs.VipReturnStatsTable.Lookup(vipAddrKey(testVIP4), &stats); err == nil {
-		t.Errorf("vip_return_stats row created by an IPv6 packet: %+v", stats)
+	if rows := returnStatsRows(t, objs); len(rows) != 0 {
+		t.Errorf("vip_return_stats rows created by an IPv6 packet: %+v", rows)
 	}
 }
 
@@ -674,7 +673,7 @@ func TestEdgeReturn_IPv4Failures(t *testing.T) {
 	}
 
 	var stats EdgedsrVipStatsValue
-	if err := objs.VipReturnStatsTable.Lookup(vipAddrKey(testVIP4), &stats); err != nil {
+	if err := objs.VipReturnStatsTable.Lookup(vipKey(ipprotoUDP, 0, testVIP4), &stats); err != nil {
 		t.Fatalf("lookup vip_return_stats_table: %v", err)
 	}
 	if stats.Packets != 2 || stats.DroppedPackets != 2 {

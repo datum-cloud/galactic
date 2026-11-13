@@ -89,7 +89,7 @@ type (
 	fakeTable            = fakeMap[edgeprog.EdgedsrVipKey, edgeprog.EdgedsrVipValue]
 	fakeStatsTable       = fakeMap[edgeprog.EdgedsrVipKey, edgeprog.EdgedsrVipStatsValue]
 	fakeAddrTable        = fakeMap[edgeprog.EdgedsrVipAddrKey, edgeprog.EdgedsrVipAddrValue]
-	fakeReturnStatsTable = fakeMap[edgeprog.EdgedsrVipAddrKey, edgeprog.EdgedsrVipStatsValue]
+	fakeReturnStatsTable = fakeMap[edgeprog.EdgedsrVipKey, edgeprog.EdgedsrVipStatsValue]
 )
 
 func newFakeTable() *fakeTable { return newFakeMap[edgeprog.EdgedsrVipKey, edgeprog.EdgedsrVipValue]() }
@@ -103,7 +103,7 @@ func newFakeAddrTable() *fakeAddrTable {
 }
 
 func newFakeReturnStatsTable() *fakeReturnStatsTable {
-	return newFakeMap[edgeprog.EdgedsrVipAddrKey, edgeprog.EdgedsrVipStatsValue]()
+	return newFakeMap[edgeprog.EdgedsrVipKey, edgeprog.EdgedsrVipStatsValue]()
 }
 
 var _ Table = (*fakeTable)(nil)
@@ -746,7 +746,11 @@ func TestVIPTable_ReplaceReturnAddrs(t *testing.T) {
 	if err := addrs.Put(staleKey, edgeprog.EdgedsrVipAddrValue{Generation: 1}); err != nil {
 		t.Fatalf("seed vip_addr_table row: %v", err)
 	}
-	if err := returnStats.Put(staleKey, edgeprog.EdgedsrVipStatsValue{Packets: 3}); err != nil {
+	staleStatsKey := edgeprog.EdgedsrVipKey{Proto: 6, Vip: stale.As16()}
+	if err := returnStats.Put(staleStatsKey, edgeprog.EdgedsrVipStatsValue{Packets: 3}); err != nil {
+		t.Fatalf("seed vip_return_stats_table row: %v", err)
+	}
+	if err := returnStats.Put(wireKey, edgeprog.EdgedsrVipStatsValue{Packets: 4}); err != nil {
 		t.Fatalf("seed vip_return_stats_table row: %v", err)
 	}
 
@@ -781,8 +785,11 @@ func TestVIPTable_ReplaceReturnAddrs(t *testing.T) {
 		if !slices.Equal(got, []netip.Addr{v4, served.VIP}) {
 			t.Errorf("pass %d: vip_addr_table holds %v, want %v", pass, got, want)
 		}
-		if err := returnStats.Lookup(staleKey, &leftover); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		if err := returnStats.Lookup(staleStatsKey, &leftover); !errors.Is(err, ebpf.ErrKeyNotExist) {
 			t.Errorf("pass %d: stale address kept its counters: %+v, err %v", pass, leftover, err)
+		}
+		if err := returnStats.Lookup(wireKey, &leftover); !errors.Is(err, ebpf.ErrKeyNotExist) {
+			t.Errorf("pass %d: removed listener kept its return counters: %+v, err %v", pass, leftover, err)
 		}
 	}
 

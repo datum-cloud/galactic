@@ -394,7 +394,7 @@ func TestEdgeReturn_ForwardsReplyFromAClaimedVIP(t *testing.T) {
 	}
 
 	var stats EdgedsrVipStatsValue
-	if err := objs.VipReturnStatsTable.Lookup(vipAddrKey(vip), &stats); err != nil {
+	if err := objs.VipReturnStatsTable.Lookup(vipKey(ipprotoTCP, 0, vip), &stats); err != nil {
 		t.Fatalf("lookup vip_return_stats_table: %v", err)
 	}
 	if stats.Packets != 1 || stats.DroppedPackets != 1 {

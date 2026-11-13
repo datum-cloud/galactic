@@ -516,7 +516,9 @@ Relevant series: `galactic_edge_rule_packets_total`,
 `galactic_edge_rule_backends`, `galactic_edge_rule_seconds_since_last_packet`
 (all labeled by `proto`/`port`/`vip`/`vpc`),
 `galactic_edge_return_packets_total`, `galactic_edge_return_bytes_total` and
-`galactic_edge_return_dropped_packets_total` (labeled by `vip`/`vpc`),
+`galactic_edge_return_dropped_packets_total` (also labeled by
+`proto`/`port`/`vip`/`vpc`; replies that match no listener count under port
+0),
 `galactic_edge_drops_total` (labeled
 by `reason`; `ipv4_fragment` counts IPv4 fragments addressed to a VIP, which
 are dropped because a later fragment has no ports to pick a backend by;
