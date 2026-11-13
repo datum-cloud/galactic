@@ -29,6 +29,15 @@ const (
 	instanceSendBytes = 200 * 1000
 	hostSendBytes     = 50 * 1000
 	datagramSize      = 1000
+	// receiveBufferBytes holds an entire sendUDP burst (each datagram's
+	// payload plus its per-skb kernel overhead). SO_RCVBUFFORCE ignores
+	// net.core.rmem_max, so the receiver keeps the whole burst buffered even
+	// when the scheduler does not run its reader goroutine promptly; a plain
+	// SetReadBuffer is capped by rmem_max and cannot. Without this, a loaded
+	// runner overflows the default (~212992 byte) receive queue, drops
+	// datagrams, and sendUDP fails waiting for bytes that never arrive.
+	// The test already requires root (CAP_NET_ADMIN), which SO_RCVBUFFORCE needs.
+	receiveBufferBytes = 4 << 20
 )
 
 var (
@@ -172,7 +181,10 @@ func sendUDP(t *testing.T, fromNS, toNS ns.NetNS, dst net.IP, total int) {
 	err := toNS.Do(func(ns.NetNS) error {
 		var err error
 		conn, err = net.ListenUDP("udp6", &net.UDPAddr{IP: dst, Port: directionPort})
-		return err
+		if err != nil {
+			return err
+		}
+		return forceReceiveBuffer(conn, receiveBufferBytes)
 	})
 	if err != nil {
 		t.Fatalf("listen on %s: %v", dst, err)
@@ -216,6 +228,22 @@ func sendUDP(t *testing.T, fromNS, toNS ns.NetNS, dst net.IP, total int) {
 	if n := <-got; n < total {
 		t.Fatalf("receiver at %s read %d bytes, want %d", dst, n, total)
 	}
+}
+
+// forceReceiveBuffer sets the socket's receive buffer with SO_RCVBUFFORCE,
+// which bypasses the net.core.rmem_max cap that SetReadBuffer honors.
+func forceReceiveBuffer(conn *net.UDPConn, size int) error {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var serr error
+	if err := raw.Control(func(fd uintptr) {
+		serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, size)
+	}); err != nil {
+		return err
+	}
+	return serr
 }
 
 // gatherDirection gathers the attachment collector over nldump.LinkList in
