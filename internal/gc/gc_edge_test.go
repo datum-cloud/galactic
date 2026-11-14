@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -127,7 +128,7 @@ func vrfLinks(vpcs ...string) []*netlink.Vrf {
 // TestEdgeAttachmentKeepsBGPVRFInstance leaves an edge attachment as the
 // only user of VPC a on the node: a's BGPVRFInstance is kept, b's, which
 // nothing uses, is reclaimed through b's fence, and c's, whose VRF is gone,
-// is deleted outright.
+// is reclaimed through the fence of the VPC its name encodes.
 func TestEdgeAttachmentKeepsBGPVRFInstance(t *testing.T) {
 	ctx := context.Background()
 	withFakeLinks(t, vrfLinks("a", "b"), nil)
@@ -176,8 +177,8 @@ func TestEdgeAttachmentKeepsBGPVRFInstance(t *testing.T) {
 	if res := RemoveOrphanedCRDs(ctx, k8s, orphans, edge); res.Errors != 0 || res.OrphanedCRDsRemoved != 1 {
 		t.Fatalf("remove = %+v, want b's BGPVRFInstance removed", res)
 	}
-	if !slices.Equal(edge.reclaimed, []string{"b"}) {
-		t.Errorf("reclaims ran for %v, want only b's last one", edge.reclaimed)
+	if !slices.Equal(edge.reclaimed, []string{"c", "b"}) {
+		t.Errorf("reclaims ran for %v, want c's, then only b's last one", edge.reclaimed)
 	}
 	if err := instance("b"); !apierrors.IsNotFound(err) {
 		t.Fatalf("b's BGPVRFInstance after reclaim: %v, want it gone", err)
@@ -243,5 +244,52 @@ func TestRunGCReadsEdgeUseOnce(t *testing.T) {
 	}
 	if edge.reads != 1 {
 		t.Fatalf("edge use read %d times in one pass, want 1", edge.reads)
+	}
+}
+
+// TestEdgeAttachmentKeepsInstanceCollectedWithoutVRF collects VPC d's
+// BGPVRFInstance while d has neither a VRF nor a user on the node. An edge
+// attachment for d is then admitted, and galactic-edge creates d's VRF again
+// and reuses the instance before its link joins the VRF. The removal, decided
+// again under d's fence, keeps the instance.
+func TestEdgeAttachmentKeepsInstanceCollectedWithoutVRF(t *testing.T) {
+	ctx := context.Background()
+	withFakeLinks(t, vrfLinks("a"), nil)
+	k8s := edgeTestClient(t, "a", "d")
+	edge := using("a")
+	orphans, err := CollectOrphanedCRDs(ctx, k8s, edgeTestNamespace, edgeTestNode, edge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := crdnames.BGPVRFInstanceName("d", edgeTestNode)
+	var collected bool
+	for _, o := range orphans {
+		if o.Kind == kindBGPVRFInstance && o.Name == name {
+			collected = o.VPC == ""
+		}
+	}
+	if !collected {
+		t.Fatalf("orphans %v do not hold d's BGPVRFInstance with no VRF", orphanNames(orphans))
+	}
+
+	edge.vpcs["d"] = struct{}{}
+	withFakeLinks(t, vrfLinks("a", "d"), nil)
+	if res := RemoveOrphanedCRDs(ctx, k8s, orphans, edge); res.Errors != 0 {
+		t.Fatalf("remove = %+v", res)
+	}
+	var inst bgpv1alpha1.BGPVRFInstance
+	if err := k8s.Get(ctx, types.NamespacedName{Namespace: edgeTestNamespace, Name: name}, &inst); err != nil {
+		t.Fatalf("d's BGPVRFInstance after GC: %v, want it kept for the attachment", err)
+	}
+}
+
+func TestInstanceNameVPC(t *testing.T) {
+	for _, vpc := range []string{"a", "10", "0000000e1", "zZ9"} {
+		if got := instanceNameVPC(crdnames.BGPVRFInstanceName(vpc, edgeTestNode)); got != strings.TrimLeft(vpc, "0") {
+			t.Errorf("instanceNameVPC(name of %q) = %q", vpc, got)
+		}
+	}
+	if got := instanceNameVPC("x0123456789ab-" + edgeTestNode); got != "" {
+		t.Errorf("instanceNameVPC of a hashed segment = %q, want none", got)
 	}
 }
