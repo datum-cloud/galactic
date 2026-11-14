@@ -19,6 +19,8 @@ source "${SCRIPT_DIR}/lib.sh"
 GALACTIC_CNI_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-cni" && pwd)
 
 CILIUM_VERSION="v0.18.8"
+# The Cilium release to install. The CLI's default, v1.18.2, exits on Linux 7.3.
+CILIUM_RELEASE="v1.20.4"
 MULTUS_VERSION="v4.2.3"
 
 # Must match the podSubnet in node_files/{dfw,sjc,iad}/config.yaml.
@@ -69,6 +71,7 @@ for site in dfw sjc iad; do
     CILIUM_ACTION=install
     cilium status &>/dev/null && CILIUM_ACTION=upgrade
     cilium \${CILIUM_ACTION} \
+      --version ${CILIUM_RELEASE} \
       --set ipv4.enabled=false \
       --set ipv6.enabled=true \
       --set ipam.mode=cluster-pool \
