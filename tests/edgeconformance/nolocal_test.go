@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,9 +28,14 @@ import (
 )
 
 // TestNoLocalWorkload runs a provider on an edge node where its VPC has no
-// workload (#1288): galactic-edge creates the VPC's host VRF, BGPVRFInstance
-// and vrf_table row there, and galactic-router GC removes them once nothing
-// on the node uses the VPC.
+// workload (#1288): galactic-edge creates whatever of the VPC's host VRF,
+// BGPVRFInstance and vrf_table row the node lacks, and galactic-router GC
+// removes the BGPVRFInstance once nothing on the node uses the VPC.
+//
+// GC keeps a node's host VRF while the VPC has a tenant EndpointSlice anywhere
+// in the cluster, and tenant A always has workloads on other nodes, so the VRF
+// stays on the node throughout, with nothing enslaved to it once the node has
+// no user. That is the state most edge nodes are in when a provider attaches.
 //
 // It uses tenant A on edgeNode2, scaling that node's edge-client to zero for
 // the rows that need no workload there, and restores it at the end. It runs
@@ -45,10 +51,10 @@ func TestNoLocalWorkload(t *testing.T) {
 	}
 
 	// Precondition: nothing on the node uses the VPC, so GC has removed its
-	// state there.
+	// BGPVRFInstance there.
 	if !t.Run("setup", func(t *testing.T) {
 		l.scaleClient(t, a.tn, a.node, 0)
-		l.waitNodeVPCState(t, a.tn, a.node, false, l.gcInterval(t)+time.Minute)
+		l.waitNodeVPCReleased(t, a.tn, a.node, l.gcInterval(t)+time.Minute)
 	}) {
 		t.FailNow()
 	}
@@ -112,7 +118,7 @@ func TestNoLocalWorkload(t *testing.T) {
 
 	t.Run("26d-removal-with-no-user", func(t *testing.T) {
 		l.scaleClient(t, a.tn, a.node, 0)
-		l.waitNodeVPCState(t, a.tn, a.node, false, l.gcInterval(t)+time.Minute)
+		l.waitNodeVPCReleased(t, a.tn, a.node, l.gcInterval(t)+time.Minute)
 	})
 }
 
@@ -182,17 +188,30 @@ func (l *lab) requireNodeVPCState(t *testing.T, tn tenant, node string) {
 	}
 }
 
-// waitNodeVPCState waits up to timeout for the VPC's node state on node to be
-// present (want) or gone.
-func (l *lab) waitNodeVPCState(t *testing.T, tn tenant, node string, want bool, timeout time.Duration) {
+// waitNodeVPCReleased waits up to timeout for the VPC's BGPVRFInstance for
+// node to be gone and for no link on node to be enslaved to the VPC's host
+// VRF. It records whether GC kept the VRF itself, which it does while the VPC
+// has workloads elsewhere in the cluster.
+func (l *lab) waitNodeVPCReleased(t *testing.T, tn tenant, node string, timeout time.Duration) {
 	t.Helper()
 	start := time.Now()
-	eventually(t, timeout, 5*time.Second, fmt.Sprintf("VPC %s node state on %s present=%t", tn.vpc, node, want),
+	vrfName := intf.GenerateInterfaceNameVRF(tn.vpc)
+	var vrf bool
+	eventually(t, timeout, 5*time.Second, fmt.Sprintf("VPC %s released on %s", tn.vpc, node),
 		func() (bool, error) {
-			vrf, inst := l.nodeVPCState(t, tn, node)
-			return vrf == want && inst == want, nil
+			var inst bool
+			vrf, inst = l.nodeVPCState(t, tn, node)
+			if inst {
+				return false, nil
+			}
+			if !vrf {
+				return true, nil
+			}
+			slaves, err := nodeExec(node, "ip", "-br", "link", "show", "master", vrfName)
+			return err == nil && strings.TrimSpace(slaves) == "", nil
 		})
-	l.record(t, fmt.Sprintf("VPC node state present=%t after", want), time.Since(start).Round(time.Second))
+	l.record(t, "VPC BGPVRFInstance removed and VRF unused after", time.Since(start).Round(time.Second))
+	l.record(t, "host VRF kept by GC for the VPC's workloads elsewhere", vrf)
 }
 
 // requireProgrammed fails unless s's attachment is still the one of the

@@ -620,9 +620,12 @@ task verify  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
 (`TestNoLocalWorkload` in `tests/edgeconformance`). It needs Galactic Edge on
 dfw (`deploy:galactic-edge`) and the `ns10` scenario. It scales ns10's
 `edge-client-3` on dfw-worker3 to zero, waits for galactic-router GC to remove
-the VPC's state there, attaches a reference provider on that node, and checks
+the VPC's `BGPVRFInstance` there, attaches a reference provider on that node,
+and checks
 the VPC's host VRF and `BGPVRFInstance` as a workload arrives and leaves, as
-galactic-edge restarts and as the attachment is removed. It restores
+galactic-edge restarts and as the attachment is removed. GC keeps the host VRF
+itself while ns10 has workloads on other nodes, so it stays throughout. It
+restores
 `edge-client-3` when it ends. Run it on its own: `verify:edge-conformance`
 also places providers on dfw-worker3.
 
