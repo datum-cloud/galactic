@@ -1,0 +1,25 @@
+# ---
+# Workflow: Triage
+# Adds the needs-triage label to every newly opened issue so untriaged work is
+# visible in one filter. A maintainer removes the label once the issue has
+# component and priority labels.
+# Uses only the GitHub CLI preinstalled on the runner and the workflow token.
+# ---
+name: Triage
+on:
+  issues:
+    types: [opened]
+permissions:
+  issues: write
+jobs:
+  label:
+    name: Label new issue
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Add needs-triage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue edit "$ISSUE" --add-label needs-triage
