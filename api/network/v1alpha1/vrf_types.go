@@ -26,10 +26,12 @@ type BGPVRFInstance struct {
 type BGPVRFInstanceSpec struct {
 	RouterTarget `json:",inline"`
 
-	// VRFID is the 16-bit PoP-local VRF identifier used for RFC 9800 uSID
-	// Argument addressing and to derive the RFC 4364 Type 1 Route
-	// Distinguisher ("routerID:vrfID"). Unique per (VPC, PoP). Value 0 is
-	// reserved.
+	// VRFID is the PoP-local VRF identifier carried in the 12-bit Argument
+	// field of this VRF's SRv6 SIDs (see
+	// docs/cni/architecture.md#srv6-sid-encoding) and used to derive the
+	// RFC 4364 Type 1 Route Distinguisher ("routerID:vrfID"). A VRF that
+	// originates SIDs needs a value of 4095 or less. Unique per (VPC, PoP).
+	// Value 0 is reserved.
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
@@ -59,7 +61,7 @@ type BGPVRFInstanceSpec struct {
 	// specifically so two VRFs may configure the identical ULAPrefix (e.g.
 	// both using the same private range) without collision — each VRF's
 	// mapping is independent, looked up only after this VRF's own identity
-	// is already resolved from the SRv6 uSID Argument, never derived from
+	// is already resolved from the SRv6 SID's Argument field, never derived from
 	// address content alone.
 	// +optional
 	NPTv6 *NPTv6Spec `json:"nptv6,omitempty"`

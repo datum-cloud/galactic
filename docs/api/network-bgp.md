@@ -277,8 +277,8 @@ _Appears in:_
 | `policyRef` _[AdvertisementPolicyRef](#advertisementpolicyref)_ | PolicyRef references a BGPPolicy to apply as a conditional filter before advertisement.<br />Only routes that match the policy are originated. |  |  |
 | `communities` _[Community](#community) array_ | Communities is the default list of BGP communities to attach to all advertised prefixes.<br />Per-prefix communities in Prefixes[n].communities replace this value for individual prefixes. |  | MaxItems: 64 <br />MaxLength: 32 <br /> |
 | `localPreference` _integer_ | LocalPreference sets the default BGP LOCAL_PREF attribute for all advertised prefixes.<br />Per-prefix localPreference in Prefixes[n].localPreference overrides this value.<br />Only meaningful for iBGP sessions. |  | Minimum: 0 <br /> |
-| `vrfID` _integer_ | VRFID is the 16-bit PoP-local VRF identifier this advertisement's SRv6<br />SID resolves into, per RFC 9800 uSID Argument addressing. Required when<br />Function is set. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
-| `function` _[SRv6Function](#srv6function)_ | Function is the RFC 8986 SRv6 endpoint behavior applied when this<br />advertisement originates a compressed uSID. Required when VRFID is set. |  | Enum: [End.DT4 End.DT6 End.DT46] <br /> |
+| `vrfID` _integer_ | VRFID is the PoP-local VRF identifier this advertisement's SRv6 SID<br />resolves into, carried in the SID's 12-bit Argument field, so it must be<br />4095 or less to encode; see docs/cni/architecture.md#srv6-sid-encoding.<br />Required when Function is set. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `function` _[SRv6Function](#srv6function)_ | Function is the RFC 8986 SRv6 endpoint behavior applied when this<br />advertisement originates an SRv6 SID. Required when VRFID is set. |  | Enum: [End.DT4 End.DT6 End.DT46] <br /> |
 
 
 #### BGPAdvertisementStatus
@@ -1277,7 +1277,7 @@ _Appears in:_
 | `routerID` _string_ | RouterID is a unique 32-bit identifier expressed in IPv4 dotted-decimal notation.<br />In an IPv6-only underlay this is a logical identifier only. |  | Format: ipv4 <br />Required: \{\} <br /> |
 | `addressFamilies` _[AddressFamily](#addressfamily) array_ | AddressFamilies defines the address families this router activates. |  | MinItems: 1 <br /> |
 | `srv6Locator` _string_ | SRv6Locator is the SRv6 locator block this router owns, expressed as an<br />IPv6 CIDR (e.g. "2001:db8:ff01::/48"). Individual SRv6 endpoint SIDs are<br />host addresses within this block. |  |  |
-| `nodeID` _integer_ | NodeID is this router's 16-bit slot within its PoP's SRv6Locator block,<br />used for RFC 9800 NEXT-CSID compression. Unique within the PoP.<br />The uSID carrier format reserves 0x0000 and 0xE000-0xFFFF (the latter is<br />Function space, not Node-ID space), leaving 0x0001-0xDFFF assignable. |  | Maximum: 57343 <br />Minimum: 1 <br /> |
+| `nodeID` _integer_ | NodeID is this router's 16-bit slot within its PoP's SRv6Locator block.<br />It fills the Node-ID field of every SID this router advertises, so the<br />block and NodeID together form the node's locator; see<br />docs/cni/architecture.md#srv6-sid-encoding. Unique within the PoP.<br />The uSID carrier format reserves 0x0000 and 0xE000-0xFFFF (the latter is<br />Function space, not Node-ID space), leaving 0x0001-0xDFFF assignable. |  | Maximum: 57343 <br />Minimum: 1 <br /> |
 | `listenPort` _integer_ | ListenPort is the TCP port this router listens on for incoming BGP<br />peer connections. Defaults to 179 (the IANA-assigned BGP port) if unset. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 
 
@@ -1436,10 +1436,10 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `routerRef` _[RouterRef](#routerref)_ | RouterRef targets a single BGPRouter by name.<br />Mutually exclusive with routerSelector. |  |  |
 | `routerSelector` _[RouterSelector](#routerselector)_ | RouterSelector targets one or more BGPRouters by label.<br />Mutually exclusive with routerRef. |  |  |
-| `vrfID` _integer_ | VRFID is the 16-bit PoP-local VRF identifier used for RFC 9800 uSID<br />Argument addressing and to derive the RFC 4364 Type 1 Route<br />Distinguisher ("routerID:vrfID"). Unique per (VPC, PoP). Value 0 is<br />reserved. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
+| `vrfID` _integer_ | VRFID is the PoP-local VRF identifier carried in the 12-bit Argument<br />field of this VRF's SRv6 SIDs (see<br />docs/cni/architecture.md#srv6-sid-encoding) and used to derive the<br />RFC 4364 Type 1 Route Distinguisher ("routerID:vrfID"). A VRF that<br />originates SIDs needs a value of 4095 or less. Unique per (VPC, PoP).<br />Value 0 is reserved. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
 | `importRouteTargets` _[RouteTarget](#routetarget) array_ | ImportRouteTargets is the list of BGP extended community route targets<br />used to import routes into this VRF. |  | MaxItems: 32 <br />MinItems: 1 <br /> |
 | `exportRouteTargets` _[RouteTarget](#routetarget) array_ | ExportRouteTargets is the list of BGP extended community route targets<br />attached to routes exported from this VRF. |  | MaxItems: 32 <br />MinItems: 1 <br /> |
-| `nptv6` _[NPTv6Spec](#nptv6spec)_ | NPTv6 configures stateless RFC 6296 Network Prefix Translation for<br />this VRF: backends presenting an address within ULAPrefix are<br />translated, checksum-neutrally and bidirectionally, to the<br />corresponding address in PublicPrefix. Unset means this VRF's traffic<br />crosses the SRv6 fabric with its own ULA source/destination<br />unmodified — the common case. Keyed by this VRFID, never by address,<br />specifically so two VRFs may configure the identical ULAPrefix (e.g.<br />both using the same private range) without collision — each VRF's<br />mapping is independent, looked up only after this VRF's own identity<br />is already resolved from the SRv6 uSID Argument, never derived from<br />address content alone. |  |  |
+| `nptv6` _[NPTv6Spec](#nptv6spec)_ | NPTv6 configures stateless RFC 6296 Network Prefix Translation for<br />this VRF: backends presenting an address within ULAPrefix are<br />translated, checksum-neutrally and bidirectionally, to the<br />corresponding address in PublicPrefix. Unset means this VRF's traffic<br />crosses the SRv6 fabric with its own ULA source/destination<br />unmodified — the common case. Keyed by this VRFID, never by address,<br />specifically so two VRFs may configure the identical ULAPrefix (e.g.<br />both using the same private range) without collision — each VRF's<br />mapping is independent, looked up only after this VRF's own identity<br />is already resolved from the SRv6 SID's Argument field, never derived from<br />address content alone. |  |  |
 
 
 #### BGPVRFInstanceStatus
@@ -3189,7 +3189,8 @@ _Appears in:_
 _Underlying type:_ _string_
 
 SRv6Function is the RFC 8986 endpoint behavior applied to a decapsulated
-SRv6 packet, addressed via the uSID Argument space per RFC 9800.
+SRv6 packet. The datapath implements only End.DT46; see
+docs/cni/architecture.md#srv6-sid-encoding.
 
 _Validation:_
 - Enum: [End.DT4 End.DT6 End.DT46]
