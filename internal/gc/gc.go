@@ -29,6 +29,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/nptv6map"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/nptv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -210,6 +211,21 @@ func routersForNode(
 // the suffix holds, including a node name that itself contains '-'.
 func vpcFromName(name string) string {
 	vpc, _, _ := strings.Cut(name, "-")
+	return vpc
+}
+
+// instanceNameVPC returns the base62 VPC whose encoded segment leads the
+// BGPVRFInstance name name, or "" when the segment is not hex, such as the
+// hashed segment of an identifier that is not base62. A name written before
+// the encoding carries the raw VPC, which may decode to another VPC, so the
+// fence taken for it is not that VPC's. galactic-edge only ever reuses an
+// instance under the encoded name nodevpc.Ensure writes, so its use is always
+// fenced.
+func instanceNameVPC(name string) string {
+	vpc, err := intf.HexToBase62(vpcFromName(name))
+	if err != nil {
+		return ""
+	}
 	return vpc
 }
 
@@ -432,8 +448,11 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 					Namespace: o.Namespace,
 				},
 			}
-			// Its name carries an encoded VPC, so the fence is found through
-			// the VRF it serves. With no VRF, no edge attachment can use it.
+			// The fence is found through the VRF it serves or, when that VRF
+			// was gone at collection, through the VPC its name encodes:
+			// galactic-edge may since have created the VRF again for an
+			// attachment and reused this instance, before enslaving its
+			// link, and only the fence shows that use.
 			deleteInst := func() error {
 				return deleteInstanceIfUnoccupied(o, func() error {
 					// Bounded: the delete runs under the VRF lock, which
@@ -443,11 +462,15 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 					return k8s.Delete(delCtx, vrfInst)
 				})
 			}
+			vpc := o.VPC
+			if vpc == "" {
+				vpc = instanceNameVPC(o.Name)
+			}
 			var err error
-			if o.VPC == "" {
+			if vpc == "" {
 				err = deleteInst()
 			} else {
-				err = edge.Reclaim(ctx, o.VPC, deleteInst)
+				err = edge.Reclaim(ctx, vpc, deleteInst)
 			}
 			if errors.Is(err, maintenance.ErrInUse) {
 				slog.Info("GC: kept BGPVRFInstance an edge attachment uses",

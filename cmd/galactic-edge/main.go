@@ -32,10 +32,13 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/edge/agent"
 	"go.datum.net/galactic/internal/edge/diag"
 	"go.datum.net/galactic/internal/edge/hostattach"
@@ -44,7 +47,9 @@ import (
 	"go.datum.net/galactic/internal/edge/timing"
 	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/nodevpc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
 type options struct {
@@ -58,6 +63,7 @@ type options struct {
 	healthAddress  string
 	maxSkew        time.Duration
 	bootIDPath     string
+	bgpNamespace   string
 }
 
 func main() {
@@ -96,12 +102,20 @@ func newRootCommand() *cobra.Command {
 	f.DurationVar(&o.maxSkew, "max-skew", timing.Params.MaxSkew,
 		"Maximum wall-clock error of any node; a gate closes this long before its grant's validUntil. "+
 			"It must equal galactic-controller's --edge-max-skew")
+	f.StringVar(&o.bgpNamespace, "bgp-namespace", config.DefaultNamespace,
+		"Namespace of this node's BGPRouter and BGPVRFInstances, where the agent claims a VPC's "+
+			"BGPVRFInstance on a node where the VPC has no workload")
 	f.StringVar(&o.bootIDPath, "boot-id-path", "/proc/sys/kernel/random/boot_id", "File holding this boot's ID")
 	f.StringVar(&o.metricsAddress, "metrics-bind-address", ":9186", "Address serving /metrics")
 	f.StringVar(&o.healthAddress, "health-probe-bind-address", ":9187", "Address serving /healthz and /readyz")
 	logOpts.BindFlags(cmd.PersistentFlags())
 	return cmd
 }
+
+// vpcStateTimeout bounds creating one VPC's node state, which takes the
+// node's VRF and Argument locks and makes a few API calls while the agent
+// holds the VPC's write fence, which galactic-router GC waits for.
+const vpcStateTimeout = 10 * time.Second
 
 func run(parent context.Context, o *options) error {
 	if o.nodeName == "" {
@@ -116,6 +130,11 @@ func run(parent context.Context, o *options) error {
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	hostattach.SysctlRoot = o.procSys
+	// A host VRF the agent creates gets its interface sysctls through the
+	// same writable mount.
+	if err := sysctl.SetProcSysPath(o.procSys); err != nil {
+		return err
+	}
 
 	// A new owner ID per process start: a restarted agent must fence its
 	// predecessor's scopes, never continue its tickets.
@@ -152,6 +171,7 @@ func run(parent context.Context, o *options) error {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(galacticv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(coordinationv1.AddToScheme(scheme))
+	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Cache:                  cache.Options{ByObject: route.LeaseCache()},
@@ -160,6 +180,12 @@ func run(parent context.Context, o *options) error {
 	})
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
+	}
+	// Uncached: Argument allocation must read every BGPVRFInstance as the
+	// API server holds it, and the agent watches none of them.
+	direct, err := client.New(mgr.GetConfig(), client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("create API client: %w", err)
 	}
 	a := &agent.Agent{
 		Client:     mgr.GetClient(),
@@ -179,6 +205,9 @@ func run(parent context.Context, o *options) error {
 			Events:  mgr.GetEventRecorder("galactic-edge"),
 			Metrics: diag.NewMetrics(diag.RoleNode),
 		},
+		VPCState: agent.HostVPCState(host, nodevpc.Config{
+			K8s: direct, Namespace: o.bgpNamespace, Node: o.nodeName, PinDir: o.pinDir,
+		}, vpcStateTimeout),
 	}
 	metrics.MustRegister(agent.Collector{Agent: a})
 	if err := a.SetupWithManager(mgr); err != nil {

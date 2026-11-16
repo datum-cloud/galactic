@@ -92,6 +92,16 @@ func (n *Namespace) do(fn func() error) error {
 	return runInNamespace(n.fd, fn)
 }
 
+// Do runs fn on a thread switched into the namespace, for a caller whose own
+// code acts on the calling thread's namespace, such as nodevpc.Ensure creating
+// a host VRF. fn must not hand namespace-bound work to another goroutine.
+func (n *Namespace) Do(fn func() error) error {
+	if err := n.Verify(); err != nil {
+		return err
+	}
+	return n.do(fn)
+}
+
 // runInNamespace runs fn on a locked OS thread switched into target. If the
 // thread cannot be switched back, it stays locked so the Go runtime retires it
 // instead of reusing a thread left in the wrong namespace.

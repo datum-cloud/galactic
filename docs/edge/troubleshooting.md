@@ -148,15 +148,22 @@ The agent's `--mtu` must be no larger than the fabric uplink MTU less the
 values. The [provider contract](provider-contract.md#attachment) gives the
 bounds.
 
-An attachment joins its gVPC's canonical host VRF on its node, which only a
-workload of the gVPC running there creates. Without one, the attachment
+An attachment joins its gVPC's canonical host VRF on its node. When the gVPC
+has no workload there, the agent creates the VRF, the node's `BGPVRFInstance`
+for the gVPC and its `vrf_table` row first. If it cannot, the attachment
 reports `Programmed` False, reason `HostVRFMissing`, with a message naming the
-VRF and the VPC, and gets no host link. Run the provider on a node where the
-gVPC has a workload, or run one there. Nothing wakes the agent when the
-workload arrives, so it programs the attachment on its next resync, within a
-minute. Until then a provider that refuses on this reason, such as MASQUE,
-keeps refusing. The [provider contract](provider-contract.md#provider-interface)
-explains why.
+cause, and gets no host link. Causes include:
+
+- The node's `BGPRouter` is missing or has no SRv6 locator or node ID.
+- The agent cannot reach `/var/lib/cni/galactic-vrf`, the node lock
+  directory it shares with the CNI, or lacks the RBAC to write
+  `bgpvrfinstances`.
+- The Argument space of the node's router is exhausted.
+
+The agent retries on its next resync, within a minute. Until then a provider
+that refuses on this reason, such as MASQUE, keeps refusing. The
+[provider contract](provider-contract.md#provider-interface) explains the
+rule.
 
 An agent that exits at startup with `invalid argument "$(GALACTIC_EDGE_MTU)"
 for "--mtu" flag` runs from an overlay that does not set the

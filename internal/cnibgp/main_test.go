@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"testing"
+
+	"go.datum.net/galactic/internal/nodevpc"
 )
 
 // TestMain points the node-wide Argument lock at a temporary directory, so
@@ -22,7 +24,7 @@ func TestMain(m *testing.M) {
 			return 1
 		}
 		defer func() { _ = os.RemoveAll(dir) }()
-		argumentLockDir = dir
+		nodevpc.ArgumentLockDir = dir
 		if os.Geteuid() != 0 {
 			vrfLockedFn = func(fn func() error) error { return fn() }
 		}

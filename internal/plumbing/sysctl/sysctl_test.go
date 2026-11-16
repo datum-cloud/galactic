@@ -197,3 +197,31 @@ func TestSetProcSysPath_missingDirectory(t *testing.T) {
 		t.Errorf("procSysPath changed to %q after a rejected path", procSysPath)
 	}
 }
+
+// TestConfigureInterfaceSysctls_procSysPath writes an interface's sysctls
+// under the root SetProcSysPath sets, keeping a dot in the interface's name,
+// so a container whose /proc/sys is read-only sets them through its writable
+// mount.
+func TestConfigureInterfaceSysctls_procSysPath(t *testing.T) {
+	for _, iface := range []string{"G0000000e1V", testVLAN} {
+		t.Run(iface, func(t *testing.T) {
+			sysctls := make([][]string, 0, len(interfaceSettings))
+			for _, entry := range interfaceSettings {
+				sysctls = append(sysctls, interfaceSysctl(entry.format, iface))
+			}
+			root := fakeProcSys(t, sysctls, "9", 0o644)
+			if err := ConfigureInterfaceSysctls(iface); err != nil {
+				t.Fatal(err)
+			}
+			for i, entry := range interfaceSettings {
+				got, err := os.ReadFile(filepath.Join(append([]string{root}, sysctls[i]...)...))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.TrimSpace(string(got)) != entry.value {
+					t.Errorf("%s = %q, want %q", sysctlName(sysctls[i]), got, entry.value)
+				}
+			}
+		})
+	}
+}

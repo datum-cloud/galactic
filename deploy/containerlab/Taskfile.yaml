@@ -1323,6 +1323,16 @@ tasks:
     cmds:
       - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig go test -count=1 -v -timeout 40m -run '^TestMASQUE$' ./tests/edgeconformance/
 
+  # Not part of verify: it takes about 15 minutes, scales ns10's edge-client
+  # on dfw-worker3 to zero and back, and restarts galactic-edge there. Run it
+  # on its own; edge-conformance also uses dfw-worker3. Results land beside
+  # the conformance suite's in bin/edge-conformance/.
+  "verify:edge-no-local-workload":
+    desc: Verify an edge attachment on a node where its VPC has no workload, and its VPC state's removal
+    dir: ../..
+    cmds:
+      - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig go test -count=1 -v -timeout 40m -run '^TestNoLocalWorkload$' ./tests/edgeconformance/
+
   # Not part of verify: it takes about 20 minutes, deploys the shipped MASQUE
   # service from config/masque through resources/masque-service (images from
   # build:masque-service and build:masque-authority, loaded by

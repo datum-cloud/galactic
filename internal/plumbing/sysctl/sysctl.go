@@ -7,6 +7,7 @@
 package sysctl
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -43,23 +44,52 @@ var interfaceSettings = []struct {
 // proxy ARP and NDP settings iface needs for correct VRF packet handling. A
 // sysctl that does not exist is skipped silently, as happens for dynamically
 // created interfaces in some container environments.
+//
+// It writes under the procfs root SetProcSysPath sets, so a host-network
+// container whose /proc/sys is read-only, such as galactic-edge creating a
+// host VRF, sets them through its writable mount.
 func ConfigureInterfaceSysctls(iface string) error {
 	for _, entry := range interfaceSettings {
-		key := fmt.Sprintf(entry.format, iface)
-		if err := gosysctl.Set(key, entry.value); err != nil {
+		segments := interfaceSysctl(entry.format, iface)
+		key := sysctlName(segments)
+		path := filepath.Join(append([]string{procSysPath}, segments...)...)
+		if err := writeExisting(path, entry.value); err != nil {
 			log().Warn("failed to set sysctl (non-fatal)", "sysctl", key, "err", err)
 		}
 	}
 	return nil
 }
 
-// procSysPath is the procfs root the FIB-lookup helpers read and write their
-// sysctls under. See SetProcSysPath. Set once at startup, before any helper
+// interfaceSysctl splits a dotted sysctl format holding one %s into path
+// segments, with iface as that segment, so a dot in iface stays part of it.
+func interfaceSysctl(format, iface string) []string {
+	segments := strings.Split(format, ".")
+	for i, seg := range segments {
+		if seg == "%s" {
+			segments[i] = iface
+		}
+	}
+	return segments
+}
+
+// writeExisting writes value to the sysctl file at path, which must exist.
+func writeExisting(path, value string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return err
+	}
+	_, werr := f.WriteString(value)
+	return errors.Join(werr, f.Close())
+}
+
+// procSysPath is the procfs root the FIB-lookup and interface helpers read
+// and write their sysctls under. See SetProcSysPath. Set once at startup, before any helper
 // runs; it is not guarded for concurrent use.
 var procSysPath = "/proc/sys"
 
-// SetProcSysPath points ConfigureFIBLookupUplinkSysctls and
-// ConfigureFIBLookupUplinkSysctlsIPv4 at a procfs root other than /proc/sys.
+// SetProcSysPath points ConfigureFIBLookupUplinkSysctls,
+// ConfigureFIBLookupUplinkSysctlsIPv4 and ConfigureInterfaceSysctls at a
+// procfs root other than /proc/sys.
 //
 // An unprivileged container gets /proc/sys read-only, so a host-network pod
 // that must change the host's forwarding sysctls mounts the host's

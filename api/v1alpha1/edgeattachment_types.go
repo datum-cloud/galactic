@@ -128,8 +128,8 @@ const (
 const (
 	// EdgeAttachmentReasonHostVRFMissing: the attachment's gVPC has no
 	// canonical host VRF on the node, or the node's uSID datapath has no
-	// entry for it. Only a workload of the gVPC running on the node creates
-	// both.
+	// entry for it, and the node agent could not create them, for example
+	// because the node's BGPRouter has no SRv6 identity.
 	EdgeAttachmentReasonHostVRFMissing = "HostVRFMissing"
 	// EdgeAttachmentReasonMTUExceedsUnderlay: the node's attachment MTU
 	// exceeds the largest packet the fabric underlay carries once
