@@ -7,7 +7,9 @@
 // encodes and decodes the fixed-offset fields inside a 128-bit uSID address and
 // derives the map keys the datapath's locator_table and function_table use.
 //
-// Bit layout, in the RFC 9800 REPLACE-CSID flavor:
+// Bit layout of the one SID a packet carries in its outer destination address,
+// with no SRH and no compressed-SID processing (see
+// docs/cni/architecture.md#srv6-sid-encoding):
 //
 //	| uSID Block (48) | Node-ID (16) | Fn (4) | Argument (12) | Slot (16) | Padding (32, zero) |
 //	  bits 1-48         bits 49-64     65-68    69-80           81-96       97-128

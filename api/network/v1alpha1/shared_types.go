@@ -38,7 +38,8 @@ type AddressFamily struct {
 }
 
 // SRv6Function is the RFC 8986 endpoint behavior applied to a decapsulated
-// SRv6 packet, addressed via the uSID Argument space per RFC 9800.
+// SRv6 packet. The datapath implements only End.DT46; see
+// docs/cni/architecture.md#srv6-sid-encoding.
 //
 // +kubebuilder:validation:Enum=End.DT4;End.DT6;End.DT46
 type SRv6Function string

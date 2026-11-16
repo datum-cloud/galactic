@@ -35,9 +35,62 @@ pre-populated identifiers and acts on them.
 
 ### SRv6 SID encoding
 
+Galactic carries tenant traffic between nodes in IPv6 encapsulation whose outer
+destination address is one SRv6 SID. This section is the reference for that
+encoding. Other pages and the API field descriptions link here.
 
-Each attachment endpoint is assigned a /128 USID (Unique Local SID, RFC 8986
-Section 3.2). There is no companion-operator-injected `srv6_sid` NAD/config
+**Layout.** Every SID uses the uSID-style 48-bit block and 16-bit node layout,
+defined in `internal/plumbing/ebpf/uformat`. Block and Node-ID together are the
+node's /64 locator.
+
+| Bits   | Field    | Width | Value                                                                  |
+| ------ | -------- | ----- | ---------------------------------------------------------------------- |
+| 1-48   | Block    | 48    | The /48 `BGPRouter.spec.srv6Locator`                                   |
+| 49-64  | Node-ID  | 16    | `BGPRouter.spec.nodeID`, 0x0001-0xDFFF                                 |
+| 65-68  | Function | 4     | 0xE for End.DT46; 0xF is reserved for a future End.DT2                 |
+| 69-80  | Argument | 12    | The VRF handle: the VPC's `BGPVRFInstance.spec.vrfID`, 0x001-0xFFF     |
+| 81-96  | Slot     | 16    | Zero, except on a gateway-to-backend SID                               |
+| 97-128 | Padding  | 32    | Zero                                                                   |
+
+**Headend.** In RFC 8986 terms the headend behavior is H.Encaps.Red with a
+one-segment list. The encapsulating node prepends one outer IPv6 header whose
+destination is the SID, with Next Header 41 for an IPv6 tenant packet or 4 for
+an IPv4 one. Reduced encapsulation of a single segment carries no Segment
+Routing Header (SRH). A private service route puts Galactic's service tunnel
+header between the two, with Next Header 253; see
+[private service routes](../private-services/README.md).
+
+**Transit.** Fabric routers forward on the destination address with ordinary
+IPv6 longest-prefix match toward the node's locator. No router on the path
+reads, shifts or rewrites the SID.
+
+**Endpoint.** The endpoint behavior is End.DT46. `usid_ingress`
+(`internal/plumbing/ebpf/prog/usid.c`) reads Block, Node-ID, Function and
+Argument at their fixed offsets from the unmodified destination, removes the
+outer header, and looks the inner packet up in the Linux VRF the Argument
+names. A destination outside this node's locator passes through untouched.
+Once Function and Argument match, the outer Next Header must be 41 or 4, or
+253 followed by a valid service tunnel header. Any other value, an SRH (43)
+included, is dropped and counted as an unexpected next header.
+
+**Galactic-specific fields.** No other SRv6 implementation interprets these two
+fields:
+
+- **Argument** is a per-node VRF handle, not a VPC identifier. Each node
+  allocates its own, and the node's `vrf_table` maps it to a Linux VRF.
+- **Slot** names the backend of a load-balanced VIP that `galactic-gateway`
+  chose. The backend node keys its `vip_xlat_table` lookup on it, so several
+  backends of one VIP can share a node. Every SID a node advertises has Slot
+  zero.
+
+**Not RFC 9800 compression.** The layout borrows the uSID block and node widths
+of RFC 9800, but Galactic does none of its compressed-SID processing. A packet
+carries one SID and no SID list, so there is no REPLACE-CSID. No node shifts the
+destination to expose a following SID, so there is no NEXT-CSID. Multi-hop
+steering and SRH processing are not supported.
+
+Each attachment endpoint is assigned a /128 SID in this layout. There is no
+companion-operator-injected `srv6_sid` NAD/config
 field: `galactic-bgp` (`internal/cnibgp/bgp.go`'s `registerEBPFDatapath`,
 which calls `internal/plumbing/ebpf/attachreg`'s `RegisterDatapath`)
 derives the uSID `Block` from the node's `BGPRouter.spec.srv6Locator` via

@@ -25,9 +25,9 @@ func functionNibble(fn bgpv1alpha1.SRv6Function) (uint8, error) {
 	return 0, fmt.Errorf("unsupported SRv6 function %q for uFMT 48+16 encoding", fn)
 }
 
-// ComputeSID derives the compressed SRv6 uSID for a (locator, nodeID,
-// argument, function) tuple in the uFMT 48+16 REPLACE-CSID layout of RFC 9800
-// §4.2.7:
+// ComputeSID derives the SRv6 SID for a (locator, nodeID, argument, function)
+// tuple in the uFMT 48+16 layout described in
+// docs/cni/architecture.md#srv6-sid-encoding:
 //
 //	bits 1-48   uSID Block    (locator's network prefix; must be an IPv6 /48)
 //	bits 49-64  Node-ID       (nodeID; BGPRouterSpec.NodeID, this router's PoP-local slot)
