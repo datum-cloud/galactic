@@ -119,6 +119,14 @@ func (r *BGPAdvertisementReconciler) reconcile(ctx context.Context, req ctrl.Req
 		return nil
 	}
 
+	superseded, err := r.newerSiblingExists(ctx, &advertisement, galactic.AdvertisementName(vpc, attachmentID))
+	if err != nil {
+		return err
+	}
+	if superseded {
+		return nil
+	}
+
 	var attachments cloudv1alpha1.VPCAttachmentList
 	if err := r.List(ctx, &attachments,
 		client.MatchingFields{IndexVPCAttachmentIdentity: galactic.AdvertisementName(vpc, attachmentID)}); err != nil {
@@ -368,6 +376,30 @@ func (r *BGPAdvertisementReconciler) tenantAdvertisements(
 		}})
 	}
 	return requests
+}
+
+func (r *BGPAdvertisementReconciler) newerSiblingExists(
+	ctx context.Context, advertisement *bgpv1alpha1.BGPAdvertisement, identity string,
+) (bool, error) {
+	var advertisements bgpv1alpha1.BGPAdvertisementList
+	if err := r.List(ctx, &advertisements, client.InNamespace(advertisement.Namespace),
+		client.MatchingFields{IndexBGPAdvertisementIdentity: identity}); err != nil {
+		return false, fmt.Errorf("list sibling advertisements for %s: %w", advertisement.Name, err)
+	}
+	for i := range advertisements.Items {
+		sibling := &advertisements.Items[i]
+		if sibling.Name == advertisement.Name || !newerAdvertisement(sibling, advertisement) {
+			continue
+		}
+		router, err := r.routerFor(ctx, sibling.Namespace, sibling.Spec.RouterRef.Name)
+		if err != nil {
+			return false, err
+		}
+		if router != nil && bgpv1alpha1.IsLegacyOwned(router) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // newerAdvertisement reports whether a was created after b, by the API
