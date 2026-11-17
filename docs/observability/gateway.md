@@ -20,6 +20,7 @@ so there is no connection table to report. See
 | `galactic_edge_return_dropped_packets_total`            | counter | same                                | Those replies that the datapath dropped. A subset of `return_packets_total`                          |
 | `galactic_edge_drops_total`                             | counter | `reason`                            | Packets `edge_lb` and `edge_return` dropped, by reason                                               |
 | `galactic_edge_neigh_fallbacks_total`                   | counter | none                                | Packets `edge_lb` handed to the kernel to resolve the next hop. Not counted as drops                 |
+| `galactic_edge_redirect_xmit_drops_total`               | counter | `interface`, `reason`               | Frames the kernel dropped after any XDP program redirected them, which no other counter shows        |
 | `galactic_edge_control_plane_drops_total`               | counter | `rule`, `reason` (`quota_exceeded`) | Rule applications refused before they reached the datapath                                           |
 | `galactic_edge_dispatch_lease_renewals_total`           | counter | `slot`, `result`                    | Renewals of the gateway's XDP dispatcher slot leases. Dispatch mode only                             |
 | `galactic_edge_dispatch_lease_expiry_timestamp_seconds` | gauge   | `slot`                              | Unix time each lease, as last renewed, expires. Dispatch mode only                                   |
@@ -55,6 +56,26 @@ so there is no connection table to report. See
   kernel drops what it cannot resolve. The counter records the handoff, not
   delivery: these packets cross the node's netfilter FORWARD hook, unlike the
   XDP path, so a host firewall that drops forwarded traffic drops them too.
+- `galactic_edge_redirect_xmit_drops_total` counts frames the kernel dropped
+  after an XDP program returned `XDP_REDIRECT`, which the program itself
+  records as forwarded. `reason` is the stage and errno: `redirect_<errno>`
+  for a frame the kernel could not queue to its target, such as
+  `redirect_eopnotsupp` for an interface that cannot take XDP frames, and
+  `xmit_<errno>` or `xmit_dropped` for frames the target's driver dropped
+  when they were flushed to it. An interface cannot take XDP frames when its
+  driver has no XDP transmit support, as with a bridge, dummy or tunnel
+  device, or when it is a veth whose peer has neither an XDP program nor
+  GRO. `interface` is the target, or its ifindex if the interface no longer
+  exists. Only targets in the gateway's own network namespace are counted.
+  The counters come from the kernel's `xdp_redirect_err` and
+  `xdp_devmap_xmit` tracepoints, which name no owning program, so they count
+  every XDP program that redirects into that namespace, including the egress
+  translation shard. The counter is absent on kernels whose tracepoint layout
+  predates `map_type`, with the attach warning in the gateway log. Any
+  growth means traffic is being lost: usually a route that sends forwarded
+  traffic out of an interface the datapath cannot use, such as a management
+  link. The series is absent if the gateway could not attach the tracepoints,
+  which it logs at startup, and it resets when the gateway restarts.
 
 The port also serves controller-runtime's metrics for the
 `NetworkGateway`/`NetworkService` reconcilers.

@@ -243,7 +243,11 @@ forward half, so it has exactly one branch, not two. Replies are
    differ on every gateway that reaches its clients and its compute nodes over
    separate links, which is this role's normal shape — see [Known
    Constraints](architecture.md#health-and-failures) for the bug that came from returning
-   `XDP_TX` unconditionally. A next hop with no neighbor entry, as after a
+   `XDP_TX` unconditionally. A redirect can still fail inside the kernel after
+   the program returns, for example to an interface whose driver cannot
+   transmit XDP frames; the program has already counted the packet as
+   forwarded, so only `galactic_edge_redirect_xmit_drops_total` records the
+   loss. A next hop with no neighbor entry, as after a
    link flap or a node rejoining the fabric, sends the encapsulated packet to
    the kernel with `XDP_PASS` instead, since XDP cannot start neighbor
    resolution: the kernel solicits the neighbor and forwards the packet, and

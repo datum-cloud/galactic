@@ -38,6 +38,8 @@ RUN PATH=/usr/lib/llvm-19/bin:$PATH BPF2GO_CC=clang-19 go generate ./internal/pl
 # internal/plumbing/ebpf/xdpattach, which this binary attaches through,
 # links the shared XDP dispatcher's bindings too.
 RUN PATH=/usr/lib/llvm-19/bin:$PATH BPF2GO_CC=clang-19 go generate ./internal/plumbing/ebpf/xdpdispatch/...
+# internal/plumbing/ebpf/xmitdrops counts the XDP redirects the kernel drops.
+RUN PATH=/usr/lib/llvm-19/bin:$PATH BPF2GO_CC=clang-19 go generate ./internal/plumbing/ebpf/xmitdrops/...
 
 # Build galactic-gateway
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
