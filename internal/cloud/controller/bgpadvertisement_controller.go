@@ -141,18 +141,15 @@ func (r *BGPAdvertisementReconciler) reconcile(ctx context.Context, req ctrl.Req
 		node = router.Spec.TargetRef.Name
 	}
 	programmed := programmedCondition(&advertisement)
-	subnets := galactic.AllocatedSubnets(advertisement.Annotations)
+	podSubnet, havePodSubnet := galactic.PodSubnet(advertisement.Annotations)
 
 	for i := range attachments.Items {
 		attachment := &attachments.Items[i]
 		attachment.Status.Node = node
 		attachment.Status.HostInterface = galactic.HostInterfaceName(vpc, attachmentID)
 		attachment.Status.VRFInterface = galactic.VRFInterfaceName(vpc)
-		if len(subnets) == 1 {
-			// One live pod per interface at a time, so a single recorded subnet
-			// is this attachment's; several means a container is still being
-			// collected and neither is unambiguously current.
-			attachment.Status.PodSubnet = subnets[0]
+		if havePodSubnet {
+			attachment.Status.PodSubnet = podSubnet
 		}
 		meta.SetStatusCondition(&attachment.Status.Conditions, programmed)
 		if err := r.Status().Update(ctx, attachment); err != nil {

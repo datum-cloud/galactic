@@ -259,7 +259,7 @@ _Appears in:_
 | `hostInterface` _string_ | Host-side veth or tap device name (e.g., "G000000010013H"). |  | MinLength: 1 <br /> |
 | `vrfInterface` _string_ | VRF device name, which is per-VPC (e.g., "G000000010V"). |  | MinLength: 1 <br /> |
 | `guestInterface` _string_ | Guest-side veth device name (e.g., "G000000010013G"). |  | MinLength: 1 <br /> |
-| `podSubnet` _string_ | Allocated subnet in CIDR notation (e.g., "fd00:10:ff01:0:1::/80"). |  | MinLength: 1 <br /> |
+| `podSubnet` _string_ | Allocated subnet in CIDR notation (e.g., "fd00:10:ff01:0:1::/80"). An<br />IPv4-only attachment reports its pod address as a /32. |  | MinLength: 1 <br /> |
 | `networkAttachmentDefinition` _string_ | NetworkAttachmentDefinition rendered for this attachment. |  | MinLength: 1 <br /> |
 
 
