@@ -202,15 +202,41 @@ func SplitAdvertisementName(name string) (vpc, vpcAttachment string, ok bool) {
 	return vpc, vpcAttachment, true
 }
 
-// AllocatedSubnets returns every allocated subnet recorded on an advertisement,
-// across both families and every container ID.
-func AllocatedSubnets(annotations map[string]string) []string {
-	var subnets []string
+// PodSubnet returns the pod subnet, in CIDR notation, recorded on an
+// advertisement for its one live container: the IPv6 subnet when the
+// container has one, otherwise its IPv4 address as a /32, since the CNI
+// records an IPv4 allocation as a bare address. It reports false when no
+// container or several containers are recorded: one live pod runs per
+// interface at a time, so several means one is still being collected and
+// neither is unambiguously current.
+func PodSubnet(annotations map[string]string) (string, bool) {
+	ipv6 := make(map[string]string)
+	ipv4 := make(map[string]string)
 	for key, value := range annotations {
-		if strings.HasPrefix(key, AnnotationAllocatedSubnetIPv6+".") ||
-			strings.HasPrefix(key, AnnotationAllocatedSubnetIPv4+".") {
-			subnets = append(subnets, value)
+		if id, ok := strings.CutPrefix(key, AnnotationAllocatedSubnetIPv6+"."); ok {
+			ipv6[id] = value
+		} else if id, ok := strings.CutPrefix(key, AnnotationAllocatedSubnetIPv4+"."); ok {
+			ipv4[id] = value
 		}
 	}
-	return subnets
+	containers := make(map[string]struct{}, len(ipv6)+len(ipv4))
+	for id := range ipv6 {
+		containers[id] = struct{}{}
+	}
+	for id := range ipv4 {
+		containers[id] = struct{}{}
+	}
+	if len(containers) != 1 {
+		return "", false
+	}
+	for id := range containers {
+		if subnet, ok := ipv6[id]; ok {
+			return subnet, true
+		}
+		if ipv4[id] == "" {
+			return "", false
+		}
+		return ipv4[id] + "/32", true
+	}
+	return "", false
 }

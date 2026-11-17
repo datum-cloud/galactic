@@ -188,11 +188,13 @@ spec:
                 minLength: 1
                 type: string
               podSubnet:
-                description: Allocated subnet in CIDR notation (e.g., "fd00:10:ff01:0:1::/80").
+                description: |-
+                  Allocated subnet in CIDR notation (e.g., "fd00:10:ff01:0:1::/80"). An
+                  IPv4-only attachment reports its pod address as a /32.
                 minLength: 1
                 type: string
                 x-kubernetes-validations:
-                - message: podSubnet must be a valid IPv6 CIDR
+                - message: podSubnet must be a valid CIDR
                   rule: isCIDR(self)
               vpc:
                 description: Base62-encoded VPC identifier.

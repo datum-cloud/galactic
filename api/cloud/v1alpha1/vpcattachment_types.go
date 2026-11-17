@@ -170,11 +170,12 @@ type VPCAttachmentStatus struct {
 	// +optional
 	GuestInterface string `json:"guestInterface,omitempty"`
 
-	// Allocated subnet in CIDR notation (e.g., "fd00:10:ff01:0:1::/80").
+	// Allocated subnet in CIDR notation (e.g., "fd00:10:ff01:0:1::/80"). An
+	// IPv4-only attachment reports its pod address as a /32.
 	// +kubebuilder:validation:MinLength=1
 	// +optional
 	//
-	// +kubebuilder:validation:XValidation:rule="isCIDR(self)",message="podSubnet must be a valid IPv6 CIDR"
+	// +kubebuilder:validation:XValidation:rule="isCIDR(self)",message="podSubnet must be a valid CIDR"
 	PodSubnet string `json:"podSubnet,omitempty"`
 
 	// NetworkAttachmentDefinition rendered for this attachment.
