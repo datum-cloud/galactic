@@ -7,11 +7,13 @@ package connectip
 import (
 	"context"
 	"net"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/quic-go/quic-go"
 	"golang.org/x/net/icmp"
 )
@@ -165,5 +167,107 @@ func TestH3PathShrinkAboveFloorAnswersPacketTooBig(t *testing.T) {
 	}
 	if n := path.dropped.Load(); n != 0 {
 		t.Fatalf("the path dropped %d datagrams toward the client, want none", n)
+	}
+}
+
+// TestH3PathShrinkBelowFloorEndsTunnel shrinks the path toward the client
+// until it can no longer carry a MinInnerMTU packet. Then the request ends as
+// path_mtu, a connector on another QUIC connection keeps forwarding, a new
+// request on the same connection is refused by the admission probe, and one
+// is accepted again once the path recovers.
+// The gVPC either keeps sending MinInnerMTU packets, which keeps restarting
+// quic-go's probe timeout, or sends one and falls silent.
+func TestH3PathShrinkBelowFloorEndsTunnel(t *testing.T) {
+	t.Run("steady", func(t *testing.T) { testPathShrinkBelowFloor(t, 50*time.Millisecond) })
+	t.Run("single", func(t *testing.T) { testPathShrinkBelowFloor(t, 0) })
+}
+
+// testPathShrinkBelowFloor sends a MinInnerMTU packet toward the client
+// every interval after the path shrinks, or only one when interval is 0.
+func testPathShrinkBelowFloor(t *testing.T, interval time.Duration) {
+	env := startServer(t, nil)
+	path := newShrinkingPath(t, env.addr)
+	cc := newClientConn(t, env.dialThrough(t, path))
+	s := open(t, cc, env.newRequest(t, authHeaders(tokenAlice, vpcBlue)))
+	sess := env.backend.nextOpened(t)
+	// other is a second connector on its own QUIC connection, whose path
+	// never shrinks. It must keep forwarding while the first tunnel ends.
+	other := open(t, newClientConn(t, env.dialQUIC(t)), env.newRequest(t, authHeaders(tokenAlice, vpcGreen)))
+	otherSess := env.backend.nextOpened(t)
+
+	sess.inject(echoRequest(t, testTarget, s.address, 1, MinInnerMTU))
+	if got := len(readPacket(t, s.conn)); got != MinInnerMTU {
+		t.Fatalf("delivered %d bytes, want %d", got, MinInnerMTU)
+	}
+	endsBefore := ends(transportH3, causePathMTU)
+	deniedBefore := testutil.ToFloat64(packetsDenied.WithLabelValues(toClient, reasonPathMTU))
+	refusedBefore := requests(transportH3, outcomeMTU)
+
+	// A MinInnerMTU packet travels in a UDP payload of more than 1300 bytes.
+	path.shrink(1300)
+	shrunk := time.Now()
+	stopPinging := make(chan struct{})
+	var pinging sync.WaitGroup
+	pinging.Go(func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stopPinging:
+				return
+			case <-sess.closed:
+				return
+			case sess.toClient <- echoRequest(t, testTarget, s.address, 10+i, MinInnerMTU):
+			default:
+			}
+			if interval == 0 {
+				return
+			}
+			time.Sleep(interval)
+		}
+	})
+	defer func() {
+		close(stopPinging)
+		pinging.Wait()
+	}()
+
+	select {
+	case <-sess.closed:
+	case <-time.After(3 * testTimeout):
+		t.Fatalf("tunnel still open %v after the path stopped carrying %d-byte packets", 3*testTimeout, MinInnerMTU)
+	}
+	t.Logf("tunnel ended %v after the path shrank", time.Since(shrunk))
+	eventually(t, "the tunnel end is counted as path_mtu", func() bool {
+		return ends(transportH3, causePathMTU)-endsBefore == 1
+	})
+	if got := testutil.ToFloat64(packetsDenied.WithLabelValues(toClient, reasonPathMTU)) - deniedBefore; got != 1 {
+		t.Fatalf("%s/%s denials = %v, want 1", toClient, reasonPathMTU, got)
+	}
+	otherSess.inject(echoRequest(t, testTarget, other.address, 3, MinInnerMTU))
+	if got := len(readPacket(t, other.conn)); got != MinInnerMTU {
+		t.Fatalf("the other connector delivered %d bytes, want %d", got, MinInnerMTU)
+	}
+	if otherSess.isClosed() {
+		t.Fatal("the other connector's session closed when only the shrunk path's tunnel should end")
+	}
+
+	dialed := time.Now()
+	conn, rsp, err := cc.Dial(env.newRequest(t, authHeaders(tokenAlice, vpcBlue)))
+	t.Logf("request over the shrunk path answered in %v", time.Since(dialed))
+	if err == nil {
+		_ = conn.Close()
+	}
+	if rsp == nil || rsp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("request over the shrunk path: response %v, error %v; want 503", rsp, err)
+	}
+	if got := requests(transportH3, outcomeMTU) - refusedBefore; got != 1 {
+		t.Fatalf("%s/%s requests = %v, want 1", transportH3, outcomeMTU, got)
+	}
+
+	// New variables, not s and sess, which the pinging goroutine still reads.
+	path.shrink(0)
+	recovered := open(t, cc, env.newRequest(t, authHeaders(tokenAlice, vpcBlue)))
+	recoveredSess := env.backend.nextOpened(t)
+	recoveredSess.inject(echoRequest(t, testTarget, recovered.address, 2, MinInnerMTU))
+	if got := len(readPacket(t, recovered.conn)); got != MinInnerMTU {
+		t.Fatalf("after the path recovered, delivered %d bytes, want %d", got, MinInnerMTU)
 	}
 }

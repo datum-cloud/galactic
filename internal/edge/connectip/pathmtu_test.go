@@ -55,6 +55,8 @@ func (t *narrowTunnel) receiveAddressRequest(ctx context.Context) (addressReques
 
 func (t *narrowTunnel) abort() { _ = t.Close() }
 
+func (*narrowTunnel) pathLost() <-chan struct{} { return nil }
+
 func (t *narrowTunnel) Close() error {
 	t.once.Do(func() { close(t.closed) })
 	return nil
