@@ -172,6 +172,13 @@ whatever `node` or `galactic` value a node also carries. See
 `config/fabric-router/daemonset.yaml`'s own affinity comment for the full
 history of why this is a dedicated label rather than an enumerated list.
 
+On stop, the `frr` container drains BGP for 15 seconds and then stops FRR,
+inside a 45 second pod grace period. A node shutdown gives critical pods only
+the kubelet's `shutdownGracePeriodCriticalPods`, so set that to at least 45
+seconds on these nodes. Talos defaults it to 10 seconds; anything shorter cuts
+the drain or kills FRR before it closes its sessions, and peers then wait out
+their hold timer.
+
 ### `galactic.datumapis.com/fabric=control`
 
 The underlay's own iBGP route reflector, distinct from the EVPN one above.
