@@ -162,11 +162,11 @@ func TestEdgeLB_KernelResolvesUnresolvedNextHop(t *testing.T) {
 	}
 	setNetns(t, nextHopNS)
 	peer = setLinkUp(t, "nh1")
-	addLinkAddr(t, peer, unresolvedNextHop, 64)
+	addLinkAddr(t, peer, unresolvedNextHop)
 	capture := openCapture(t, peer.Attrs().Index)
 	setNetns(t, gatewayNS)
 	fabric := setLinkUp(t, "nh0")
-	addLinkAddr(t, fabric, unresolvedLocal, 64)
+	addLinkAddr(t, fabric, unresolvedLocal)
 	awaitLinkLocal(t, fabric.Attrs().Index)
 	routeOver(t, fabric, testUSID, unresolvedNextHop)
 
@@ -231,7 +231,7 @@ func routeViaUnresolvedNextHop(t *testing.T, dst netip.Addr) {
 	}
 	setLinkUp(t, "nh1")
 	fabric := setLinkUp(t, "nh0")
-	addLinkAddr(t, fabric, unresolvedLocal, 64)
+	addLinkAddr(t, fabric, unresolvedLocal)
 	routeOver(t, fabric, dst, unresolvedNextHop)
 }
 
@@ -246,12 +246,12 @@ func routeOver(t *testing.T, l netlink.Link, dst, via netip.Addr) {
 	}
 }
 
-// addLinkAddr assigns addr/bits to l, without duplicate address detection, so
+// addLinkAddr assigns addr/64 to l, without duplicate address detection, so
 // it can send and answer solicitations at once.
-func addLinkAddr(t *testing.T, l netlink.Link, addr netip.Addr, bits int) {
+func addLinkAddr(t *testing.T, l netlink.Link, addr netip.Addr) {
 	t.Helper()
 	a := &netlink.Addr{
-		IPNet: &net.IPNet{IP: net.IP(addr.AsSlice()), Mask: net.CIDRMask(bits, 128)},
+		IPNet: &net.IPNet{IP: net.IP(addr.AsSlice()), Mask: net.CIDRMask(64, 128)},
 		Flags: unix.IFA_F_NODAD,
 	}
 	if err := netlink.AddrAdd(l, a); err != nil {

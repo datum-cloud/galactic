@@ -526,7 +526,10 @@ the drop applies to any TCP or UDP port on a VIP address, and it is not
 counted in a VIP's own dropped packets because the port is unknown),
 `galactic_edge_neigh_fallbacks_total` (load-balanced packets handed to the
 kernel because the next hop toward the backend had no neighbor entry, for it
-to resolve the neighbor and forward them; not counted as drops), and
+to resolve the neighbor and forward them; not counted as drops),
+`galactic_edge_redirect_xmit_drops_total` (frames the kernel dropped after an
+XDP program on the node redirected them, labeled by target `interface` and
+`reason`; see [the observability guide](../observability/gateway.md)), and
 `galactic_edge_control_plane_drops_total` (rule
 applications rejected before ever reaching the datapath, e.g. quota
 denials). In dispatch mode, `galactic_edge_dispatch_lease_renewals_total`

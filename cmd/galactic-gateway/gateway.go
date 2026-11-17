@@ -24,6 +24,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xmitdrops"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
@@ -47,6 +48,7 @@ var gatewayDatapathKeepAlive struct {
 	publicSet  targetSet
 	returnSet  targetSet
 	dispatcher *xdpdispatch.Dispatcher
+	xmitDrops  *xmitdrops.Counter
 }
 
 // setupGatewayDatapath loads and attaches the edge Maglev datapath to
@@ -245,6 +247,18 @@ func installGateway(
 		return err
 	}
 	metrics.MustRegister(edgemetrics.NewCollectorFromObjects(objs, attribution))
+
+	// A redirect the kernel fails after edge_lb or edge_return has returned
+	// counts as forwarded in drops_total. These tracepoint counters are the
+	// only record of it, but the datapath works without them, so a node that
+	// cannot attach them still runs.
+	if xmitDrops, err := xmitdrops.Attach(); err != nil {
+		slog.Warn("Cannot count the XDP redirects the kernel drops; "+
+			edgemetrics.Namespace+"_redirect_xmit_drops_total will be absent", "err", err)
+	} else {
+		metrics.MustRegister(xmitdrops.NewCollector(edgemetrics.Namespace, xmitDrops))
+		gatewayDatapathKeepAlive.xmitDrops = xmitDrops
+	}
 
 	gatewayDatapathKeepAlive.objs = objs
 	gatewayDatapathKeepAlive.publicSet = publicSet
