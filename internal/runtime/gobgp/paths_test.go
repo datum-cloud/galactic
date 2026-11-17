@@ -355,11 +355,11 @@ func TestBuildEVPNPathsMixedFamily(t *testing.T) {
 // TestPrefixSIDAttrCarriesSIDStructure verifies that prefixSIDAttr's
 // PathAttributePrefixSID, once serialized to wire bytes and decoded back via
 // GoBGP's own DecodeFromBytes, carries an RFC 9252 §3.2.1 SRv6 SID Structure
-// Sub-Sub-TLV describing the uFMT 48+16 layout with no transposition. Before
-// this fix, NewSRv6InformationSubTLV was called with no sub-sub-TLV values at
-// all, so the attribute Galactic put on the wire never contained a Structure
-// Sub-Sub-TLV — a spec-compliant third-party EVPN/SRv6 receiver would be
-// missing the structure description entirely.
+// Sub-Sub-TLV describing the uFMT 48+16 layout with no transposition.
+//
+// End.DT46 takes no argument (RFC 8986 §4.8), and RFC 9252 §3.2.1 requires AL=0
+// for such SIDs. The 16 bits after the Node-ID, the datapath's Function and
+// Argument fields together, are therefore declared as one function.
 func TestPrefixSIDAttrCarriesSIDStructure(t *testing.T) {
 	sid := netip.MustParseAddr(testSID1)
 
@@ -386,17 +386,77 @@ func TestPrefixSIDAttrCarriesSIDStructure(t *testing.T) {
 	if structure.LocatorNodeLength != uformat.NodeIDBits {
 		t.Errorf("LocatorNodeLength = %d, want %d", structure.LocatorNodeLength, uformat.NodeIDBits)
 	}
-	if structure.FunctionLength != uformat.FunctionBits {
-		t.Errorf("FunctionLength = %d, want %d", structure.FunctionLength, uformat.FunctionBits)
+	if want := uint8(uformat.FunctionBits + uformat.ArgumentBits); structure.FunctionLength != want {
+		t.Errorf("FunctionLength = %d, want %d", structure.FunctionLength, want)
 	}
-	if structure.ArgumentLength != uformat.ArgumentBits {
-		t.Errorf("ArgumentLength = %d, want %d", structure.ArgumentLength, uformat.ArgumentBits)
+	if structure.ArgumentLength != 0 {
+		t.Errorf("ArgumentLength = %d, want 0 (End.DT46 takes no argument)", structure.ArgumentLength)
+	}
+	total := int(structure.LocatorBlockLength) + int(structure.LocatorNodeLength) +
+		int(structure.FunctionLength) + int(structure.ArgumentLength)
+	if want := uformat.LocatorBits + uformat.FunctionBits + uformat.ArgumentBits; total != want {
+		t.Errorf("LBL+LNL+FL+AL = %d, want %d (the uFMT bits ahead of Slot)", total, want)
 	}
 	if structure.TranspositionLength != 0 {
 		t.Errorf("TranspositionLength = %d, want 0", structure.TranspositionLength)
 	}
 	if structure.TranspositionOffset != 0 {
 		t.Errorf("TranspositionOffset = %d, want 0", structure.TranspositionOffset)
+	}
+}
+
+// TestEVPNPrefixSIDIgnoresSIDStructure verifies that the receiver takes the SID
+// whatever structure lengths arrive with it, so a node advertising the old
+// FL=4/AL=12 descriptor and one advertising FL=16/AL=0 interoperate during a
+// mixed-version rollout.
+func TestEVPNPrefixSIDIgnoresSIDStructure(t *testing.T) {
+	sid := netip.MustParseAddr(testSID1)
+
+	tests := []struct {
+		name      string
+		structure []bgp.PrefixSIDTLVInterface
+	}{
+		{
+			name: "no argument (FL=16, AL=0)",
+			structure: []bgp.PrefixSIDTLVInterface{
+				bgp.NewSRv6SIDStructureSubSubTLV(48, 16, 16, 0, 0, 0),
+			},
+		},
+		{
+			name: "argument declared (FL=4, AL=12)",
+			structure: []bgp.PrefixSIDTLVInterface{
+				bgp.NewSRv6SIDStructureSubSubTLV(48, 16, 4, 12, 0, 0),
+			},
+		},
+		{
+			name: "no structure descriptor",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attr := bgp.NewPathAttributePrefixSID(
+				bgp.NewSRv6ServiceTLV(bgp.TLVTypeSRv6L3Service,
+					bgp.NewSRv6InformationSubTLV(sid, bgp.END_DT46, tt.structure...),
+				),
+			)
+			serialized, err := attr.Serialize()
+			if err != nil {
+				t.Fatalf("Serialize() error = %v", err)
+			}
+			decoded := &bgp.PathAttributePrefixSID{}
+			if err := decoded.DecodeFromBytes(serialized); err != nil {
+				t.Fatalf("DecodeFromBytes() error = %v", err)
+			}
+
+			got, ok := evpnPrefixSID([]bgp.PathAttributeInterface{decoded})
+			if !ok {
+				t.Fatal("evpnPrefixSID() found no SID")
+			}
+			if gotAddr, _ := netip.AddrFromSlice(got); gotAddr != sid {
+				t.Errorf("evpnPrefixSID() = %s, want %s", got, sid)
+			}
+		})
 	}
 }
 

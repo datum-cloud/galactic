@@ -63,14 +63,20 @@ func gatewayForPrefix(prefix netip.Prefix) netip.Addr {
 // present in sid, with no transposition. The field widths come from the shared
 // format constants rather than being hardcoded again, so the wire encoding and
 // the datapath's bit layout cannot drift apart.
+//
+// End.DT46 takes no argument (RFC 8986 §4.8), and RFC 9252 §3.2.1 requires AL=0
+// for such SIDs. The datapath's 4-bit Function and 12-bit Argument fields, the
+// latter holding the VRF handle, are therefore declared together as one 16-bit
+// function that names a per-VRF End.DT46 instance. Receivers read only the SID,
+// so this description does not change what any Galactic node installs.
 func prefixSIDAttr(sid netip.Addr) bgp.PathAttributeInterface {
 	structure := bgp.NewSRv6SIDStructureSubSubTLV(
-		uformat.BlockBits,    // LBL = 48, uSID Block
-		uformat.NodeIDBits,   // LNL = 16, Node-ID
-		uformat.FunctionBits, // FL  = 4,  Function
-		uformat.ArgumentBits, // AL  = 12, Instance ID (Argument)
-		0,                    // TL  = 0,  no transposition
-		0,                    // TO  = 0,  n/a when TL=0
+		uformat.BlockBits,                         // LBL = 48, uSID Block
+		uformat.NodeIDBits,                        // LNL = 16, Node-ID
+		uformat.FunctionBits+uformat.ArgumentBits, // FL  = 16, per-VRF End.DT46 function
+		0, // AL  = 0,  End.DT46 takes no argument
+		0, // TL  = 0,  no transposition
+		0, // TO  = 0,  n/a when TL=0
 	)
 	return bgp.NewPathAttributePrefixSID(
 		bgp.NewSRv6ServiceTLV(bgp.TLVTypeSRv6L3Service,
