@@ -38,19 +38,13 @@ type AddressFamily struct {
 }
 
 // SRv6Function is the RFC 8986 endpoint behavior applied to a decapsulated
-// SRv6 packet. The datapath implements only End.DT46; see
-// docs/cni/architecture.md#srv6-sid-encoding.
+// SRv6 packet. Only End.DT46 is admitted, because the datapath implements
+// only End.DT46; see docs/cni/architecture.md#srv6-sid-encoding.
 //
-// +kubebuilder:validation:Enum=End.DT4;End.DT6;End.DT46
+// +kubebuilder:validation:Enum=End.DT46
 type SRv6Function string
 
 const (
-	// SRv6FunctionEndDT4 decapsulates and looks up the packet in an IPv4 VRF.
-	SRv6FunctionEndDT4 SRv6Function = "End.DT4"
-
-	// SRv6FunctionEndDT6 decapsulates and looks up the packet in an IPv6 VRF.
-	SRv6FunctionEndDT6 SRv6Function = "End.DT6"
-
 	// SRv6FunctionEndDT46 decapsulates and looks up the packet in an IPv4 or
 	// IPv6 VRF based on the inner packet's address family.
 	SRv6FunctionEndDT46 SRv6Function = "End.DT46"

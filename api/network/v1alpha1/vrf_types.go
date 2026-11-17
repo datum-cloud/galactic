@@ -29,13 +29,12 @@ type BGPVRFInstanceSpec struct {
 	// VRFID is the PoP-local VRF identifier carried in the 12-bit Argument
 	// field of this VRF's SRv6 SIDs (see
 	// docs/cni/architecture.md#srv6-sid-encoding) and used to derive the
-	// RFC 4364 Type 1 Route Distinguisher ("routerID:vrfID"). A VRF that
-	// originates SIDs needs a value of 4095 or less. Unique per (VPC, PoP).
-	// Value 0 is reserved.
+	// RFC 4364 Type 1 Route Distinguisher ("routerID:vrfID"). It ranges from
+	// 1 to 4095; 0 is reserved. Unique per (VPC, PoP).
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:validation:Maximum=4095
 	VRFID int32 `json:"vrfID"`
 
 	// ImportRouteTargets is the list of BGP extended community route targets

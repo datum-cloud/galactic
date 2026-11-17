@@ -837,7 +837,7 @@ type vipBindingVRF struct {
 
 // argument is the vip_xlat_table key's Argument, the VRF's ID.
 func (v vipBindingVRF) argument() uint16 {
-	return uint16(v.instance.Spec.VRFID) //nolint:gosec // VRFID is kubebuilder-validated 1-65535
+	return uint16(v.instance.Spec.VRFID) //nolint:gosec // VRFID is kubebuilder-validated 1-4095
 }
 
 // resolveVIPBindingVRF finds vpcRef's VRF on nodeName. See

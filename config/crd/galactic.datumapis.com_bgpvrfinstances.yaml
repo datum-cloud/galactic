@@ -199,11 +199,10 @@ spec:
                   VRFID is the PoP-local VRF identifier carried in the 12-bit Argument
                   field of this VRF's SRv6 SIDs (see
                   docs/cni/architecture.md#srv6-sid-encoding) and used to derive the
-                  RFC 4364 Type 1 Route Distinguisher ("routerID:vrfID"). A VRF that
-                  originates SIDs needs a value of 4095 or less. Unique per (VPC, PoP).
-                  Value 0 is reserved.
+                  RFC 4364 Type 1 Route Distinguisher ("routerID:vrfID"). It ranges from
+                  1 to 4095; 0 is reserved. Unique per (VPC, PoP).
                 format: int32
-                maximum: 65535
+                maximum: 4095
                 minimum: 1
                 type: integer
             required:

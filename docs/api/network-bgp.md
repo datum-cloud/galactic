@@ -277,8 +277,8 @@ _Appears in:_
 | `policyRef` _[AdvertisementPolicyRef](#advertisementpolicyref)_ | PolicyRef references a BGPPolicy to apply as a conditional filter before advertisement.<br />Only routes that match the policy are originated. |  |  |
 | `communities` _[Community](#community) array_ | Communities is the default list of BGP communities to attach to all advertised prefixes.<br />Per-prefix communities in Prefixes[n].communities replace this value for individual prefixes. |  | MaxItems: 64 <br />MaxLength: 32 <br /> |
 | `localPreference` _integer_ | LocalPreference sets the default BGP LOCAL_PREF attribute for all advertised prefixes.<br />Per-prefix localPreference in Prefixes[n].localPreference overrides this value.<br />Only meaningful for iBGP sessions. |  | Minimum: 0 <br /> |
-| `vrfID` _integer_ | VRFID is the PoP-local VRF identifier this advertisement's SRv6 SID<br />resolves into, carried in the SID's 12-bit Argument field, so it must be<br />4095 or less to encode; see docs/cni/architecture.md#srv6-sid-encoding.<br />Required when Function is set. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
-| `function` _[SRv6Function](#srv6function)_ | Function is the RFC 8986 SRv6 endpoint behavior applied when this<br />advertisement originates an SRv6 SID. Required when VRFID is set. |  | Enum: [End.DT4 End.DT6 End.DT46] <br /> |
+| `vrfID` _integer_ | VRFID is the PoP-local VRF identifier this advertisement's SRv6 SID<br />resolves into, carried in the SID's 12-bit Argument field, so it ranges<br />from 1 to 4095; see docs/cni/architecture.md#srv6-sid-encoding.<br />Required when Function is set. |  | Maximum: 4095 <br />Minimum: 1 <br /> |
+| `function` _[SRv6Function](#srv6function)_ | Function is the RFC 8986 SRv6 endpoint behavior applied when this<br />advertisement originates an SRv6 SID. Required when VRFID is set. |  | Enum: [End.DT46] <br /> |
 
 
 #### BGPAdvertisementStatus
@@ -1436,7 +1436,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `routerRef` _[RouterRef](#routerref)_ | RouterRef targets a single BGPRouter by name.<br />Mutually exclusive with routerSelector. |  |  |
 | `routerSelector` _[RouterSelector](#routerselector)_ | RouterSelector targets one or more BGPRouters by label.<br />Mutually exclusive with routerRef. |  |  |
-| `vrfID` _integer_ | VRFID is the PoP-local VRF identifier carried in the 12-bit Argument<br />field of this VRF's SRv6 SIDs (see<br />docs/cni/architecture.md#srv6-sid-encoding) and used to derive the<br />RFC 4364 Type 1 Route Distinguisher ("routerID:vrfID"). A VRF that<br />originates SIDs needs a value of 4095 or less. Unique per (VPC, PoP).<br />Value 0 is reserved. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
+| `vrfID` _integer_ | VRFID is the PoP-local VRF identifier carried in the 12-bit Argument<br />field of this VRF's SRv6 SIDs (see<br />docs/cni/architecture.md#srv6-sid-encoding) and used to derive the<br />RFC 4364 Type 1 Route Distinguisher ("routerID:vrfID"). It ranges from<br />1 to 4095; 0 is reserved. Unique per (VPC, PoP). |  | Maximum: 4095 <br />Minimum: 1 <br />Required: \{\} <br /> |
 | `importRouteTargets` _[RouteTarget](#routetarget) array_ | ImportRouteTargets is the list of BGP extended community route targets<br />used to import routes into this VRF. |  | MaxItems: 32 <br />MinItems: 1 <br /> |
 | `exportRouteTargets` _[RouteTarget](#routetarget) array_ | ExportRouteTargets is the list of BGP extended community route targets<br />attached to routes exported from this VRF. |  | MaxItems: 32 <br />MinItems: 1 <br /> |
 | `nptv6` _[NPTv6Spec](#nptv6spec)_ | NPTv6 configures stateless RFC 6296 Network Prefix Translation for<br />this VRF: backends presenting an address within ULAPrefix are<br />translated, checksum-neutrally and bidirectionally, to the<br />corresponding address in PublicPrefix. Unset means this VRF's traffic<br />crosses the SRv6 fabric with its own ULA source/destination<br />unmodified — the common case. Keyed by this VRFID, never by address,<br />specifically so two VRFs may configure the identical ULAPrefix (e.g.<br />both using the same private range) without collision — each VRF's<br />mapping is independent, looked up only after this VRF's own identity<br />is already resolved from the SRv6 SID's Argument field, never derived from<br />address content alone. |  |  |
@@ -3189,19 +3189,17 @@ _Appears in:_
 _Underlying type:_ _string_
 
 SRv6Function is the RFC 8986 endpoint behavior applied to a decapsulated
-SRv6 packet. The datapath implements only End.DT46; see
-docs/cni/architecture.md#srv6-sid-encoding.
+SRv6 packet. Only End.DT46 is admitted, because the datapath implements
+only End.DT46; see docs/cni/architecture.md#srv6-sid-encoding.
 
 _Validation:_
-- Enum: [End.DT4 End.DT6 End.DT46]
+- Enum: [End.DT46]
 
 _Appears in:_
 - [BGPAdvertisementSpec](#bgpadvertisementspec)
 
 | Field | Description |
 | --- | --- |
-| `End.DT4` | SRv6FunctionEndDT4 decapsulates and looks up the packet in an IPv4 VRF.<br /> |
-| `End.DT6` | SRv6FunctionEndDT6 decapsulates and looks up the packet in an IPv6 VRF.<br /> |
 | `End.DT46` | SRv6FunctionEndDT46 decapsulates and looks up the packet in an IPv4 or<br />IPv6 VRF based on the inner packet's address family.<br /> |
 
 
