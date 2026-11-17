@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -42,8 +43,10 @@ func TestWithdrawnNodeHandsStatusToSurvivor(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := galactic.AdvertisementName(f.attachment.Status.VPC, f.attachment.Status.VPCAttachment)
+	t0 := metav1.NewTime(time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC))
+	f.setCreated(t, f.tenantAdv, metav1.NewTime(t0.Add(time.Minute)))
 	other := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{Name: identity + "-node-c", Namespace: bgpNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: identity + "-node-c", Namespace: bgpNamespace, CreationTimestamp: t0},
 		Spec:       bgpv1alpha1.BGPAdvertisementSpec{RouterRef: bgpv1alpha1.RouterRef{Name: router.Name}},
 		Status:     f.tenantAdv.Status,
 	}
