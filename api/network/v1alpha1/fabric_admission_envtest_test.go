@@ -283,6 +283,38 @@ func TestFabricRoutingAdmission(t *testing.T) {
 		})
 	})
 
+	// The SID encoding carries the VRF ID in a 12-bit Argument field and has a
+	// code point only for End.DT46, so admission refuses anything else rather
+	// than letting SID computation fail later.
+	t.Run("srv6 encoding bounds", func(t *testing.T) {
+		adv := func(i int, vrfID int32, fn networkv1alpha1.SRv6Function) client.Object {
+			return &networkv1alpha1.BGPAdvertisement{ObjectMeta: meta("srv6-adv", i), Spec: networkv1alpha1.BGPAdvertisementSpec{
+				RouterRef: r1, AddressFamily: ipv6, Prefixes: []networkv1alpha1.Prefix{"2001:db8:10c::/64"},
+				VRFID: ptr.To(vrfID), Function: ptr.To(fn),
+			}}
+		}
+		vrf := func(i int, vrfID int32) client.Object {
+			rt := []networkv1alpha1.RouteTarget{{Value: "65000:1"}}
+			return &networkv1alpha1.BGPVRFInstance{ObjectMeta: meta("srv6-vrf", i), Spec: networkv1alpha1.BGPVRFInstanceSpec{
+				RouterTarget: networkv1alpha1.RouterTarget{RouterRef: &r1},
+				VRFID:        vrfID, ImportRouteTargets: rt, ExportRouteTargets: rt,
+			}}
+		}
+		dt46 := networkv1alpha1.SRv6FunctionEndDT46
+		runAdmission(t, c, []admissionCase{
+			{"advertisement at the largest encodable VRF ID", adv(0, 4095, dt46), ""},
+			{"advertisement with End.DT4", adv(1, 100, networkv1alpha1.SRv6Function("End.DT4")), `supported values: "End.DT46"`},
+			{"advertisement with End.DT6", adv(2, 100, networkv1alpha1.SRv6Function("End.DT6")), `supported values: "End.DT46"`},
+			{"advertisement with reserved VRF ID 0", adv(3, 0, dt46), "spec.vrfID"},
+			{"advertisement with VRF ID 4096", adv(4, 4096, dt46), "spec.vrfID"},
+			{"advertisement with VRF ID 65535", adv(5, 65535, dt46), "spec.vrfID"},
+			{"VRF instance at the largest encodable VRF ID", vrf(0, 4095), ""},
+			{"VRF instance with reserved VRF ID 0", vrf(1, 0), "spec.vrfID"},
+			{"VRF instance with VRF ID 4096", vrf(2, 4096), "spec.vrfID"},
+			{"VRF instance with VRF ID 65535", vrf(3, 65535), "spec.vrfID"},
+		})
+	})
+
 	t.Run("compatibility and bounds", func(t *testing.T) {
 		peer := func(i int, mutate func(*networkv1alpha1.BGPPeerSpec)) client.Object {
 			p := &networkv1alpha1.BGPPeer{ObjectMeta: meta("compat-peer", i), Spec: networkv1alpha1.BGPPeerSpec{

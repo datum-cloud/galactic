@@ -19,7 +19,7 @@ func testAdvertisement(generation int64, srv6 bool) *bgpv1alpha1.BGPAdvertisemen
 	adv.Generation = generation
 	if srv6 {
 		adv.Spec.VRFID = ptr(int32(7))
-		adv.Spec.Function = ptr(bgpv1alpha1.SRv6FunctionEndDT6)
+		adv.Spec.Function = ptr(bgpv1alpha1.SRv6FunctionEndDT46)
 	}
 	return adv
 }

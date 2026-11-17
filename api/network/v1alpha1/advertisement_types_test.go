@@ -262,7 +262,7 @@ func TestBGPAdvertisementListDeepCopy(t *testing.T) {
 func TestBGPAdvertisementSRv6JSONRoundTrip(t *testing.T) {
 	orig := newTestAdvertisement()
 	orig.Spec.VRFID = ptr(int32(100))
-	orig.Spec.Function = ptr(SRv6FunctionEndDT6)
+	orig.Spec.Function = ptr(SRv6FunctionEndDT46)
 
 	data, err := json.Marshal(orig)
 	if err != nil {
@@ -277,8 +277,8 @@ func TestBGPAdvertisementSRv6JSONRoundTrip(t *testing.T) {
 	if got.Spec.VRFID == nil || *got.Spec.VRFID != 100 {
 		t.Errorf("VRFID: got %v, want 100", got.Spec.VRFID)
 	}
-	if got.Spec.Function == nil || *got.Spec.Function != SRv6FunctionEndDT6 {
-		t.Errorf("Function: got %v, want %q", got.Spec.Function, SRv6FunctionEndDT6)
+	if got.Spec.Function == nil || *got.Spec.Function != SRv6FunctionEndDT46 {
+		t.Errorf("Function: got %v, want %q", got.Spec.Function, SRv6FunctionEndDT46)
 	}
 }
 
@@ -333,16 +333,16 @@ func TestBGPAdvertisementSRv6OmitEmpty(t *testing.T) {
 func TestBGPAdvertisementSRv6DeepCopy(t *testing.T) {
 	orig := newTestAdvertisement()
 	orig.Spec.VRFID = ptr(int32(100))
-	orig.Spec.Function = ptr(SRv6FunctionEndDT4)
+	orig.Spec.Function = ptr(SRv6FunctionEndDT46)
 
 	dup := orig.DeepCopy()
 	*dup.Spec.VRFID = 999
-	*dup.Spec.Function = SRv6FunctionEndDT6
+	*dup.Spec.Function = SRv6Function("mutated")
 
 	if *orig.Spec.VRFID != 100 {
 		t.Errorf("VRFID mutated: got %d", *orig.Spec.VRFID)
 	}
-	if *orig.Spec.Function != SRv6FunctionEndDT4 {
+	if *orig.Spec.Function != SRv6FunctionEndDT46 {
 		t.Errorf("Function mutated: got %q", *orig.Spec.Function)
 	}
 }
@@ -353,8 +353,6 @@ func TestSRv6FunctionConstants(t *testing.T) {
 		fn   SRv6Function
 		want string
 	}{
-		{SRv6FunctionEndDT4, "End.DT4"},
-		{SRv6FunctionEndDT6, "End.DT6"},
 		{SRv6FunctionEndDT46, "End.DT46"},
 	}
 	for _, tt := range cases {
