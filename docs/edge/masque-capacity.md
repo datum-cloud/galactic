@@ -95,6 +95,7 @@ The overload runs admitted 64 flood requests each, which held free session slots
 - A QUIC connection to a client that stopped reading still sends two datagrams per probe timeout, so no single write blocks for 5 s, and the probe timeouts double from well below the 1.25 s that counts a write as slow. The watchdog therefore times a stall from the first write that waited, not from the first slow one, and ends a stalled client's session on both transports after 5.5 s. A client that keeps accepting packets ends the run of waiting writes, so its session stays open.
 - The watchdog checks every 1.25 s, so a session blocked for 5 s ends within 6.25 s. The harness fails a run past 6.25 s.
 - The harness reaches the contract's 32 connectors per pod with headroom on both transports. Latency grows with the connector count because each connector keeps 32 packets in flight: the p99 is 23.6 ms at 32 connectors over HTTP/3.
+- Since [#1247](https://github.com/datum-cloud/galactic/issues/1247), every HTTP/3 connection records its packets to watch for a [path that stops carrying 1280 bytes](masque-service.md#packet-size). On 2026-11-17, alternating eight runs of each build on one shared host and comparing the four runs taken while it was quiet, this cost one HTTP/3 connector about 8% of its 1280-byte goodput and 6% of its 64-byte packet rate, and 32 connectors about 2% at either size. Every disturbance scenario passed, and the impaired run, at 1% loss and 50 ms added delay, ended no tunnel as a path MTU drop.
 
 ## Still open
 
