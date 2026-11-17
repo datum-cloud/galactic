@@ -9,7 +9,7 @@
 # pinned to the same major version galactic-router embeds (see go.mod's
 # github.com/osrg/gobgp/v4 line) so RIB queries against a live GoBGP
 # instance speak a protocol version it actually understands.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev

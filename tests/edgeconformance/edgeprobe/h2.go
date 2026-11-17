@@ -12,11 +12,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/quic-go/quic-go/quicvarint"
 	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
 )
 
 // Capsule types from RFC 9297 and RFC 9484. The probe frames them itself
@@ -34,7 +40,9 @@ const (
 
 // dialH2 opens the request as an HTTP/2 Extended CONNECT (RFC 8441) for
 // connect-ip on a TLS connection that negotiated ALPN h2. Packets travel as
-// DATAGRAM capsules on the request stream (RFC 9297).
+// DATAGRAM capsules on the request stream (RFC 9297). The probe speaks the
+// frames itself because net/http's client rejects the :protocol
+// pseudo-header from Go 1.27.
 func dialH2(ctx context.Context, r cipRequest) (cipTunnel, cipResponse, error) {
 	cfg := r.tls.Clone()
 	cfg.NextProtos = []string{http2.NextProtoTLS}
@@ -48,52 +56,319 @@ func dialH2(ctx context.Context, r cipRequest) (cipTunnel, cipResponse, error) {
 		_ = conn.Close()
 		return nil, rsp, fmt.Errorf("ALPN %q, want %s", rsp.Proto, http2.NextProtoTLS)
 	}
-	// net/http's ClientConn refuses the :protocol pseudo-header Extended
-	// CONNECT needs, so the deprecated x/net client stays.
-	cc, err := (&http2.Transport{}).NewClientConn(conn) //nolint:staticcheck // see above
+	target, err := r.template.Expand(nil)
 	if err != nil {
 		_ = conn.Close()
 		return nil, rsp, err
 	}
-	target, err := r.template.Expand(nil)
+	u, err := url.Parse(target)
 	if err != nil {
-		_ = cc.Close()
+		_ = conn.Close()
 		return nil, rsp, err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	s, err := openH2Stream(conn, u, r.header)
+	if err != nil {
+		_ = conn.Close()
+		if ctx.Err() != nil {
+			return nil, rsp, ctx.Err()
+		}
+		return nil, rsp, err
+	}
+	rsp.Status = s.status
+	if s.status != http.StatusOK {
+		_ = conn.Close()
+		return nil, rsp, fmt.Errorf("status %d", s.status)
+	}
+	return &h2Tunnel{s: s, cr: newCapsuleReader(s.body)}, rsp, nil
+}
+
+const (
+	h2StreamID       = 1
+	h2DefaultWindow  = 65535
+	h2DefaultMaxData = 16384
+	h2ReadWindow     = 1 << 20
+)
+
+// h2Stream is one client-initiated HTTP/2 stream on a connection of its own.
+type h2Stream struct {
+	conn   net.Conn
+	fr     *http2.Framer
+	status int
+	body   *io.PipeReader
+
+	wmu sync.Mutex
+
+	mu         sync.Mutex
+	cond       *sync.Cond
+	connWindow int64
+	strWindow  int64
+	initWindow int64
+	maxData    int64
+	err        error
+}
+
+func openH2Stream(conn net.Conn, u *url.URL, header http.Header) (*h2Stream, error) {
+	fr := http2.NewFramer(conn, conn)
+	fr.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
+	if _, err := io.WriteString(conn, http2.ClientPreface); err != nil {
+		return nil, err
+	}
+	if err := fr.WriteSettings(
+		http2.Setting{ID: http2.SettingEnablePush, Val: 0},
+		http2.Setting{ID: http2.SettingInitialWindowSize, Val: h2ReadWindow},
+	); err != nil {
+		return nil, err
+	}
+	if err := fr.WriteWindowUpdate(0, h2ReadWindow-h2DefaultWindow); err != nil {
+		return nil, err
+	}
+	s := &h2Stream{
+		conn:       conn,
+		fr:         fr,
+		connWindow: h2DefaultWindow,
+		initWindow: h2DefaultWindow,
+		strWindow:  h2DefaultWindow,
+		maxData:    h2DefaultMaxData,
+	}
+	s.cond = sync.NewCond(&s.mu)
+	extended := false
+	for !extended {
+		f, err := fr.ReadFrame()
+		if err != nil {
+			return nil, err
+		}
+		sf, ok := f.(*http2.SettingsFrame)
+		if !ok || sf.IsAck() {
+			continue
+		}
+		if v, ok := sf.Value(http2.SettingEnableConnectProtocol); ok && v == 1 {
+			extended = true
+		}
+		s.applySettings(sf)
+		if err := s.write(func() error { return fr.WriteSettingsAck() }); err != nil {
+			return nil, err
+		}
+		if !extended {
+			return nil, errors.New("server does not offer Extended CONNECT")
+		}
+	}
+	var block bytes.Buffer
+	enc := hpack.NewEncoder(&block)
+	field := func(k, v string) error { return enc.WriteField(hpack.HeaderField{Name: k, Value: v}) }
+	path := u.RequestURI()
+	for _, kv := range [][2]string{
+		{":method", http.MethodConnect},
+		{":scheme", "https"},
+		{":authority", u.Host},
+		{":path", path},
+		{":protocol", "connect-ip"},
+	} {
+		if err := field(kv[0], kv[1]); err != nil {
+			return nil, err
+		}
+	}
+	for k, vv := range header {
+		for _, v := range vv {
+			if err := field(strings.ToLower(k), v); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := field("capsule-protocol", "?1"); err != nil {
+		return nil, err
+	}
+	if err := s.write(func() error {
+		return fr.WriteHeaders(http2.HeadersFrameParam{
+			StreamID:      h2StreamID,
+			BlockFragment: block.Bytes(),
+			EndHeaders:    true,
+		})
+	}); err != nil {
+		return nil, err
 	}
 	pr, pw := io.Pipe()
-	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, target, pr)
-	if err != nil {
-		_ = cc.Close()
-		return nil, rsp, err
+	s.body = pr
+	statusc := make(chan int, 1)
+	go s.readLoop(pw, statusc)
+	status, ok := <-statusc
+	if !ok {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return nil, s.err
 	}
-	req.Header = r.header.Clone()
-	// x/net/http2 sends this header as the :protocol pseudo-header and
-	// waits for the server's SETTINGS_ENABLE_CONNECT_PROTOCOL.
-	req.Header.Set(":protocol", "connect-ip")
-	req.Header.Set("Capsule-Protocol", "?1")
-	hrsp, err := cc.RoundTrip(req)
-	if err != nil {
-		_ = pw.Close()
-		_ = cc.Close()
-		return nil, rsp, err
+	s.status = status
+	return s, nil
+}
+
+func (s *h2Stream) write(f func() error) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	return f()
+}
+
+func (s *h2Stream) applySettings(sf *http2.SettingsFrame) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = sf.ForeachSetting(func(st http2.Setting) error {
+		switch st.ID {
+		case http2.SettingInitialWindowSize:
+			s.strWindow += int64(st.Val) - s.initWindow
+			s.initWindow = int64(st.Val)
+		case http2.SettingMaxFrameSize:
+			s.maxData = int64(st.Val)
+		}
+		return nil
+	})
+	s.cond.Broadcast()
+}
+
+func (s *h2Stream) fail(err error) {
+	s.mu.Lock()
+	if s.err == nil {
+		s.err = err
 	}
-	rsp.Status = hrsp.StatusCode
-	if hrsp.StatusCode != http.StatusOK {
-		_ = hrsp.Body.Close()
-		_ = pw.Close()
-		_ = cc.Close()
-		return nil, rsp, fmt.Errorf("status %d", hrsp.StatusCode)
+	s.cond.Broadcast()
+	s.mu.Unlock()
+}
+
+// readLoop delivers the response status once, then the response body until
+// the stream or the connection ends.
+func (s *h2Stream) readLoop(pw *io.PipeWriter, statusc chan<- int) {
+	var unacked uint32
+	sentStatus := false
+	finish := func(err error) {
+		s.fail(err)
+		if !sentStatus {
+			close(statusc)
+		}
+		_ = pw.CloseWithError(err)
 	}
-	return &h2Tunnel{cc: cc, body: hrsp.Body, pw: pw, cr: newCapsuleReader(hrsp.Body)}, rsp, nil
+	for {
+		f, err := s.fr.ReadFrame()
+		if err != nil {
+			finish(err)
+			return
+		}
+		switch f := f.(type) {
+		case *http2.MetaHeadersFrame:
+			if f.StreamID != h2StreamID {
+				continue
+			}
+			if !sentStatus {
+				code, err := strconv.Atoi(f.PseudoValue("status"))
+				if err != nil {
+					finish(fmt.Errorf("response has no :status: %w", err))
+					return
+				}
+				sentStatus = true
+				statusc <- code
+				if code != http.StatusOK {
+					return
+				}
+			}
+			if f.StreamEnded() {
+				finish(io.EOF)
+				return
+			}
+		case *http2.DataFrame:
+			if f.StreamID != h2StreamID {
+				continue
+			}
+			if data := f.Data(); len(data) > 0 {
+				if _, err := pw.Write(data); err != nil {
+					s.fail(err)
+					return
+				}
+				unacked += uint32(len(data))
+				if unacked >= h2ReadWindow/4 {
+					n := unacked
+					unacked = 0
+					if err := s.write(func() error {
+						if err := s.fr.WriteWindowUpdate(0, n); err != nil {
+							return err
+						}
+						return s.fr.WriteWindowUpdate(h2StreamID, n)
+					}); err != nil {
+						finish(err)
+						return
+					}
+				}
+			}
+			if f.StreamEnded() {
+				finish(io.EOF)
+				return
+			}
+		case *http2.WindowUpdateFrame:
+			s.mu.Lock()
+			switch f.StreamID {
+			case 0:
+				s.connWindow += int64(f.Increment)
+			case h2StreamID:
+				s.strWindow += int64(f.Increment)
+			}
+			s.cond.Broadcast()
+			s.mu.Unlock()
+		case *http2.SettingsFrame:
+			if f.IsAck() {
+				continue
+			}
+			s.applySettings(f)
+			if err := s.write(func() error { return s.fr.WriteSettingsAck() }); err != nil {
+				finish(err)
+				return
+			}
+		case *http2.PingFrame:
+			if f.IsAck() {
+				continue
+			}
+			if err := s.write(func() error { return s.fr.WritePing(true, f.Data) }); err != nil {
+				finish(err)
+				return
+			}
+		case *http2.RSTStreamFrame:
+			if f.StreamID == h2StreamID {
+				finish(fmt.Errorf("stream reset: %v", f.ErrCode))
+				return
+			}
+		case *http2.GoAwayFrame:
+			finish(fmt.Errorf("GOAWAY: %v", f.ErrCode))
+			return
+		}
+	}
+}
+
+// send writes b as DATA frames, waiting for flow-control credit.
+func (s *h2Stream) send(b []byte) error {
+	for len(b) > 0 {
+		s.mu.Lock()
+		for s.err == nil && (s.connWindow <= 0 || s.strWindow <= 0) {
+			s.cond.Wait()
+		}
+		if s.err != nil {
+			err := s.err
+			s.mu.Unlock()
+			return err
+		}
+		n := min(int64(len(b)), s.connWindow, s.strWindow, s.maxData)
+		s.connWindow -= n
+		s.strWindow -= n
+		s.mu.Unlock()
+		chunk := b[:n]
+		b = b[n:]
+		if err := s.write(func() error { return s.fr.WriteData(h2StreamID, false, chunk) }); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // h2Tunnel carries packets as capsules on one HTTP/2 stream: the request
 // body toward the server, the response body back.
 type h2Tunnel struct {
-	cc   *http2.ClientConn //nolint:staticcheck // dialH2 explains why
-	body io.ReadCloser
-	pw   *io.PipeWriter
-	cr   *capsuleReader
+	s  *h2Stream
+	cr *capsuleReader
 	// wbuf is only used by WritePacket.
 	wbuf []byte
 }
@@ -101,7 +376,7 @@ type h2Tunnel struct {
 // assigned reads capsules until the first ADDRESS_ASSIGN and returns its
 // prefixes. A packet that arrives before it is dropped.
 func (t *h2Tunnel) assigned(ctx context.Context) ([]netip.Prefix, error) {
-	stop := context.AfterFunc(ctx, func() { _ = t.body.Close() })
+	stop := context.AfterFunc(ctx, func() { _ = t.s.body.Close() })
 	defer stop()
 	for {
 		typ, v, err := t.cr.next()
@@ -143,16 +418,16 @@ func (t *h2Tunnel) WritePacket(pkt []byte) error {
 	b = quicvarint.Append(b, uint64(1+len(pkt)))
 	b = quicvarint.Append(b, 0)
 	t.wbuf = append(b, pkt...)
-	_, err := t.pw.Write(t.wbuf)
+	err := t.s.send(t.wbuf)
 	return err
 }
 
 // Close ends the request body, cancels the stream and closes the
 // connection, which ends a ReadPacket in progress.
 func (t *h2Tunnel) Close() error {
-	_ = t.pw.Close()
-	_ = t.body.Close()
-	return t.cc.Close()
+	_ = t.s.write(func() error { return t.s.fr.WriteData(h2StreamID, true, nil) })
+	_ = t.s.body.Close()
+	return t.s.conn.Close()
 }
 
 // capsuleReader parses capsules from a stream. A capsule may be split across

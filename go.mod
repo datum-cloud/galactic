@@ -2,6 +2,8 @@ module go.datum.net/galactic
 
 go 1.26.4
 
+toolchain go1.27.3
+
 require (
 	github.com/cilium/ebpf v0.22.0
 	github.com/containernetworking/cni v1.3.1

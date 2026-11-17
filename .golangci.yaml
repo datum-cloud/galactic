@@ -36,6 +36,13 @@ linters:
       # A kubebuilder marker is one line by definition and cannot be wrapped.
       - linters: [lll]
         source: '^\s*// \+kubebuilder:'
+      - linters:
+          - staticcheck
+        text: 'SA1019: \(sigs\.k8s\.io/controller-runtime\.Result\)\.Requeue is deprecated'
+      - linters:
+          - errcheck
+        path: _test\.go
+        source: '<-'
   settings:
     gocyclo:
       min-complexity: 30
