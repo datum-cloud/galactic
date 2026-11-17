@@ -58,10 +58,15 @@ type Counter struct {
 // tracepoints, which need no tracefs mount. Only drops to interfaces in the
 // calling thread's network namespace are counted, so that each count's ifindex
 // resolves there. It needs CAP_BPF and CAP_PERFMON, or CAP_SYS_ADMIN, and
-// kernel BTF to resolve the device field reads.
+// kernel BTF to resolve the device field reads. It returns an error, without
+// loading anything, on a kernel whose tracepoint argument layout predates
+// the map_type argument.
 func Attach() (*Counter, error) {
 	inum, err := threadNetnsInode()
 	if err != nil {
+		return nil, err
+	}
+	if err := checkTracepointLayout(); err != nil {
 		return nil, err
 	}
 	c := &Counter{}

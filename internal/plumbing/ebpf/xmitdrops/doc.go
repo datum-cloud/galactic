@@ -18,6 +18,10 @@
 // The counts cover every XDP program that redirects to an interface in the
 // network namespace Attach runs in, not only the caller's.
 //
+// The counter is absent on kernels whose xdp_redirect_err tracepoint layout
+// predates map_type: Attach fails with an unsupported-layout error and the
+// gateway logs the attach warning.
+//
 // As with the other datapath packages, `go generate` compiles xmitdrops.c and
 // writes the Go bindings, which are gitignored rather than committed.
 package xmitdrops

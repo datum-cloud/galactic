@@ -70,7 +70,8 @@ so there is no connection table to report. See
   The counters come from the kernel's `xdp_redirect_err` and
   `xdp_devmap_xmit` tracepoints, which name no owning program, so they count
   every XDP program that redirects into that namespace, including the egress
-  translation shard. Any
+  translation shard. The counter is absent on kernels whose tracepoint layout
+  predates `map_type`, with the attach warning in the gateway log. Any
   growth means traffic is being lost: usually a route that sends forwarded
   traffic out of an interface the datapath cannot use, such as a management
   link. The series is absent if the gateway could not attach the tracepoints,
