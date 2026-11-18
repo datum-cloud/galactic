@@ -45,3 +45,4 @@
 Full documentation — topology, addressing, tasks — is in [README.md](README.md).
 Verification commands are in [docs/verification.md](docs/verification.md).
 Deploying the five test VPCs and verifying cross-site/same-node connectivity is documented in [docs/tenants.md](docs/tenants.md).
+The dedicated-placement baseline (`ns80`, `task baseline:twice`) is documented in [docs/baseline.md](docs/baseline.md).

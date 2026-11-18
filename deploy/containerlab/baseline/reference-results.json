@@ -1,0 +1,758 @@
+[
+  {
+    "scenario": "cross-node-a",
+    "check": "dfw->sjc echo replies",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "dfw-compute-underlay dfw->sjc requests",
+    "expect": "-",
+    "got": "5",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "dfw-compute-underlay sjc->dfw requests",
+    "expect": "-",
+    "got": "5",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "dfw-edge-uplink dfw->sjc requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "dfw-edge-uplink sjc->dfw requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "dfw-guest dfw->sjc requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "dfw-guest sjc->dfw requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "dfw-veth-host dfw->sjc requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "dfw-veth-host sjc->dfw requests (peer redirect)",
+    "expect": "-",
+    "got": "0",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "sjc->dfw echo replies",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "sjc-compute-underlay dfw->sjc requests",
+    "expect": "-",
+    "got": "5",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "sjc-compute-underlay sjc->dfw requests",
+    "expect": "-",
+    "got": "5",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "sjc-edge-uplink dfw->sjc requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "sjc-edge-uplink sjc->dfw requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "sjc-guest dfw->sjc requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "sjc-guest sjc->dfw requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "sjc-veth-host dfw->sjc requests (peer redirect)",
+    "expect": "-",
+    "got": "0",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-a",
+    "check": "sjc-veth-host sjc->dfw requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "dfw->sjc echo replies",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "dfw-compute-underlay dfw->sjc requests",
+    "expect": "-",
+    "got": "5",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "dfw-compute-underlay sjc->dfw requests",
+    "expect": "-",
+    "got": "5",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "dfw-edge-uplink dfw->sjc requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "dfw-edge-uplink sjc->dfw requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "dfw-guest dfw->sjc requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "dfw-guest sjc->dfw requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "dfw-veth-host dfw->sjc requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "dfw-veth-host sjc->dfw requests (peer redirect)",
+    "expect": "-",
+    "got": "0",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "sjc->dfw echo replies",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "sjc-compute-underlay dfw->sjc requests",
+    "expect": "-",
+    "got": "5",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "sjc-compute-underlay sjc->dfw requests",
+    "expect": "-",
+    "got": "5",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "sjc-edge-uplink dfw->sjc requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "sjc-edge-uplink sjc->dfw requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "sjc-guest dfw->sjc requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "sjc-guest sjc->dfw requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "sjc-veth-host dfw->sjc requests (peer redirect)",
+    "expect": "-",
+    "got": "0",
+    "result": "observed"
+  },
+  {
+    "scenario": "cross-node-b",
+    "check": "sjc-veth-host sjc->dfw requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "fixture",
+    "check": "dfw vpc-a guest address",
+    "expect": "fd20:80:ff01::1:0:0",
+    "got": "fd20:80:ff01::1:0:0",
+    "result": "pass"
+  },
+  {
+    "scenario": "fixture",
+    "check": "dfw vpc-a guest on compute worker",
+    "expect": "dfw-worker",
+    "got": "dfw-worker",
+    "result": "pass"
+  },
+  {
+    "scenario": "fixture",
+    "check": "dfw vpc-b guest address equals vpc-a's",
+    "expect": "fd20:80:ff01::1:0:0",
+    "got": "fd20:80:ff01::1:0:0",
+    "result": "pass"
+  },
+  {
+    "scenario": "fixture",
+    "check": "dfw vpc-b guest on compute worker",
+    "expect": "dfw-worker",
+    "got": "dfw-worker",
+    "result": "pass"
+  },
+  {
+    "scenario": "fixture",
+    "check": "sjc vpc-a guest address",
+    "expect": "fd20:80:ff02::1:0:0",
+    "got": "fd20:80:ff02::1:0:0",
+    "result": "pass"
+  },
+  {
+    "scenario": "fixture",
+    "check": "sjc vpc-a guest on compute worker",
+    "expect": "sjc-worker",
+    "got": "sjc-worker",
+    "result": "pass"
+  },
+  {
+    "scenario": "fixture",
+    "check": "sjc vpc-b guest address equals vpc-a's",
+    "expect": "fd20:80:ff02::1:0:0",
+    "got": "fd20:80:ff02::1:0:0",
+    "result": "pass"
+  },
+  {
+    "scenario": "fixture",
+    "check": "sjc vpc-b guest on compute worker",
+    "expect": "sjc-worker",
+    "got": "sjc-worker",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv4",
+    "check": "backend-guest replies to client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv4",
+    "check": "backend-guest requests from client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv4",
+    "check": "backend-veth-host replies to client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv4",
+    "check": "backend-veth-host requests from client (peer redirect)",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "gateway-ipv4",
+    "check": "dfw-compute-underlay requests",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "gateway-ipv4",
+    "check": "public replies out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv4",
+    "check": "public requests in",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv4",
+    "check": "tcp flows answered by a backend",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv4",
+    "check": "udp flows answered by a backend",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "backend-guest replies to client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "backend-guest requests from client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "backend-veth-host replies to client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "backend-veth-host requests from client (peer redirect)",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "dfw-compute-underlay requests",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "peer replies back",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "peer requests out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "public replies out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "public requests in",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "tcp flows answered by a backend",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "gateway-ipv6",
+    "check": "udp flows answered by a backend",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "isolation",
+    "check": "dfw-guest-a receives from vpc-a",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "isolation",
+    "check": "dfw-guest-a receives from vpc-b",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "isolation",
+    "check": "dfw-guest-b receives from vpc-a",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "isolation",
+    "check": "dfw-guest-b receives from vpc-b",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "isolation",
+    "check": "dfw-veth-host-a carries from vpc-a (peer redirect)",
+    "expect": "-",
+    "got": "0",
+    "result": "observed"
+  },
+  {
+    "scenario": "isolation",
+    "check": "dfw-veth-host-a carries from vpc-b (peer redirect)",
+    "expect": "-",
+    "got": "0",
+    "result": "observed"
+  },
+  {
+    "scenario": "isolation",
+    "check": "dfw-veth-host-b carries from vpc-a (peer redirect)",
+    "expect": "-",
+    "got": "0",
+    "result": "observed"
+  },
+  {
+    "scenario": "isolation",
+    "check": "dfw-veth-host-b carries from vpc-b (peer redirect)",
+    "expect": "-",
+    "got": "0",
+    "result": "observed"
+  },
+  {
+    "scenario": "nat64",
+    "check": "dfw-compute-underlay SYN out",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "nat64",
+    "check": "dfw-compute-underlay SYN-ACK back",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "nat64",
+    "check": "dfw-guest-a SYN out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "dfw-guest-a SYN-ACK back",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "dfw-guest-b SYN out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "dfw-guest-b SYN-ACK back",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "dfw-veth-host-a SYN out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "dfw-veth-host-a SYN-ACK back (peer redirect)",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "nat64",
+    "check": "dfw-veth-host-b SYN out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "dfw-veth-host-b SYN-ACK back (peer redirect)",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "nat64",
+    "check": "peer SYN-ACK sent",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "peer distinct translated tuples",
+    "expect": "2",
+    "got": "2",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "peer sees guest address",
+    "expect": "no",
+    "got": "no",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "peer sources are shard addresses",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "public SYN out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "public SYN-ACK back",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "vpc-a fetch status",
+    "expect": "200",
+    "got": "200",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat64",
+    "check": "vpc-b fetch status",
+    "expect": "200",
+    "got": "200",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "dfw-compute-underlay SYN out",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "nat66",
+    "check": "dfw-compute-underlay SYN-ACK back",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "nat66",
+    "check": "dfw-guest-a SYN out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "dfw-guest-a SYN-ACK back",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "dfw-guest-b SYN out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "dfw-guest-b SYN-ACK back",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "dfw-veth-host-a SYN out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "dfw-veth-host-a SYN-ACK back (peer redirect)",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "nat66",
+    "check": "dfw-veth-host-b SYN out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "dfw-veth-host-b SYN-ACK back (peer redirect)",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "nat66",
+    "check": "peer SYN-ACK sent",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "peer distinct translated tuples",
+    "expect": "2",
+    "got": "2",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "peer sees guest address",
+    "expect": "no",
+    "got": "no",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "peer sources are shard addresses",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "public SYN out",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "public SYN-ACK back",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "vpc-a fetch status",
+    "expect": "200",
+    "got": "200",
+    "result": "pass"
+  },
+  {
+    "scenario": "nat66",
+    "check": "vpc-b fetch status",
+    "expect": "200",
+    "got": "200",
+    "result": "pass"
+  }
+]

@@ -1,0 +1,8 @@
+# ns80: two VPCs, 80 (vpc-a) and 81 (vpc-b), whose guests use identical
+# addresses at each site. One guest per VPC runs on each site's compute worker,
+# so the pair spans two physical workers. This is the dedicated-placement
+# baseline fixture (docs/baseline.md).
+namespace: ns80
+resources:
+  - namespace.yaml
+  - guests.yaml
