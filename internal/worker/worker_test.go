@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"sync"
 	"testing"
@@ -490,4 +491,35 @@ func versions() *workerv1alpha1.GetCapabilitiesRequest {
 
 func srcAttachment(uid, vpc string) sources.Attachment {
 	return sources.Attachment{UID: uid, VPC: vpc, Node: node, Kind: sources.KindVPCAttachment, Admitted: true}
+}
+
+// TestFabricCapabilityFailsClosed refuses a remote destination to a caller
+// without fabric.srv6 while the destination's locator is still unknown, and
+// leaves unprogrammed a destination that only becomes remote after
+// admission.
+func TestFabricCapabilityFailsClosed(t *testing.T) {
+	e := newEnv(t)
+	e.src.SetLocator(otherNode, netip.Prefix{})
+	e.start()
+	tap := func(uids ...string) *workerv1alpha1.ClaimSpec {
+		return spec(workerv1alpha1.Handoff_HANDOFF_TAP, uids...)
+	}
+	wantRefusal(t, e.request(gwSA, key(vpcA, "svc-a"), 1, tap("guest-a2")), codes.PermissionDenied,
+		workerv1alpha1.ReasonCapabilityNotAllowed)
+
+	k := mkey(vpcA, "svc-a")
+	e.mustOK(e.request(gwSA, key(vpcA, "svc-a"), 1, tap("guest-a3")))
+	e.waitReady(k, 1)
+	moved := srcAttachment("guest-a3", vpcA)
+	moved.Node = otherNode
+	e.src.SetAttachment(moved)
+	e.src.SetLocator(otherNode, locB)
+	e.w.Changed(vpcA)
+	e.eventually("remote destination refused at reconcile", func() bool {
+		return condOf(e.status(k), workerv1alpha1.ConditionProgrammed).GetReason() ==
+			workerv1alpha1.ReasonCapabilityNotAllowed
+	})
+	if rows := e.host.Rows(vpcA); len(rows) != 0 {
+		t.Fatalf("rows = %v, want the destination the owner may not reach unprogrammed", rowIDs(rows))
+	}
 }

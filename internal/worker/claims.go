@@ -177,7 +177,10 @@ func (w *Worker) admit(ctx context.Context, caller auth.Caller, k module.ClaimKe
 	case !att.Admitted:
 		return notAuthorized("the claim's attachment is not admitted")
 	}
-	own, _ := w.d.Sources.Locator(ctx, w.cfg.Node)
+	own, err := w.d.Sources.Locator(ctx, w.cfg.Node)
+	if err != nil {
+		return refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "trusted sources unavailable", nil)
+	}
 	needFabric := spec.GetMode() == workerv1alpha1.Mode_MODE_FABRIC
 	for _, d := range spec.GetDestinations() {
 		t, ok := d.GetTarget().(*workerv1alpha1.Destination_Attachment)
@@ -199,7 +202,19 @@ func (w *Worker) admit(ctx context.Context, caller auth.Caller, k module.ClaimKe
 		if spec.GetMode() == workerv1alpha1.Mode_MODE_LOCAL {
 			continue
 		}
-		if loc, _ := w.d.Sources.Locator(ctx, dst.Node); own.IsValid() && loc.IsValid() && loc != own {
+		// A destination on another node needs fabric.srv6 even while its
+		// locator is unknown, so the check cannot be skipped during
+		// bring-up. Reconciliation checks the recorded capabilities again
+		// when the destination resolves.
+		if dst.Node != w.cfg.Node {
+			needFabric = true
+			continue
+		}
+		loc, err := w.d.Sources.Locator(ctx, dst.Node)
+		if err != nil {
+			return refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "trusted sources unavailable", nil)
+		}
+		if own.IsValid() && loc.IsValid() && loc != own {
 			needFabric = true
 		}
 	}
@@ -265,7 +280,7 @@ func (w *Worker) put(ctx context.Context, caller auth.Caller, key *workerv1alpha
 		return nil, refusal.New(codes.Internal, workerv1alpha1.ReasonMalformedSpec, "encode spec", nil)
 	}
 	rec := store.Record{Node: k.Node, VPC: k.VPC, AttachmentUID: k.AttachmentUID, Owner: caller.ServiceAccount,
-		Generation: gen, SpecHash: hash, Spec: raw}
+		Capabilities: caller.Capabilities, Generation: gen, SpecHash: hash, Spec: raw}
 	if err := w.d.Store.Put(rec); err != nil {
 		w.log.Error("record claim", "error", err)
 		return nil, refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "cannot record the claim durably", nil)
