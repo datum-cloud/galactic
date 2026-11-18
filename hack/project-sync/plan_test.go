@@ -28,8 +28,9 @@ func TestCompute(t *testing.T) {
 	const retention = 14 * 24 * time.Hour
 
 	// Each row is one piece of content. onBoard places it on the board
-	// with status; closedAgo > 0 makes it a closed issue; open lists it as
-	// an open repository issue with ready reporting a ready pull request.
+	// with status; closedAgo > 0 makes it a closed issue and closedAgo < 0
+	// a closed issue without a close time; open lists it as an open
+	// repository issue with ready reporting a ready pull request.
 	rows := []struct {
 		name      string
 		pr        bool
@@ -45,6 +46,7 @@ func TestCompute(t *testing.T) {
 			want: []string{chArchive}},
 		{name: "done at retention", onBoard: true, status: optDone, closedAgo: retention},
 		{name: "done recently", onBoard: true, status: optDone, closedAgo: time.Hour},
+		{name: "done without close time", onBoard: true, status: optDone, closedAgo: -1},
 		{name: "closed outside done", onBoard: true, status: optProgress, closedAgo: retention + time.Hour},
 		{name: "open in done", onBoard: true, status: optDone, open: true},
 		{name: "ready in progress", onBoard: true, status: optProgress, open: true, ready: true,
@@ -64,7 +66,10 @@ func TestCompute(t *testing.T) {
 			if r.pr {
 				it.Kind = KindPullRequest
 			}
-			if r.closedAgo > 0 {
+			switch {
+			case r.closedAgo < 0:
+				it.Closed = true
+			case r.closedAgo > 0:
 				it.Closed, it.ClosedAt = true, now.Add(-r.closedAgo)
 			}
 			items = append(items, it)

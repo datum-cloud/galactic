@@ -80,8 +80,6 @@ type fakeGitHub struct {
 	t *testing.T
 	// failID makes mutations on this item or content ID fail.
 	failID string
-	// archivedID makes adding this content return an archived item.
-	archivedID string
 
 	mu        sync.Mutex
 	mutations []string
@@ -151,7 +149,7 @@ func (f *fakeGitHub) mutate(w http.ResponseWriter, query string, vars map[string
 	f.mutations = append(f.mutations, rec)
 	f.mu.Unlock()
 	if name == "addProjectV2ItemById" {
-		reply(fmt.Sprintf(`{"addProjectV2ItemById": {"item": {"id": "item-%s", "isArchived": %t}}}`, id, id == f.archivedID))
+		reply(fmt.Sprintf(`{"addProjectV2ItemById": {"item": {"id": "item-%s"}}}`, id))
 		return
 	}
 	reply(`{}`)
@@ -183,18 +181,6 @@ func TestRunAppliesRules(t *testing.T) {
 	}
 	if !slices.Equal(f.mutations, want) {
 		t.Errorf("mutations:\n got %q\nwant %q", f.mutations, want)
-	}
-}
-
-func TestRunRestoresArchivedOpenIssue(t *testing.T) {
-	f := &fakeGitHub{t: t, archivedID: "issue-new"}
-	if err := runAgainst(t, f); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	restore := slices.Index(f.mutations, "unarchiveProjectV2Item item-issue-new")
-	review := slices.Index(f.mutations, "updateProjectV2ItemFieldValue item-issue-new status="+optReview)
-	if restore < 0 || review < restore {
-		t.Errorf("archived open issue not restored before its status was set; mutations: %q", f.mutations)
 	}
 }
 

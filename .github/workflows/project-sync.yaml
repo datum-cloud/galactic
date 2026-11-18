@@ -40,7 +40,8 @@ jobs:
       - run: go test -race ./hack/project-sync/
   sync:
     name: Sync
-    if: github.event_name != 'pull_request' && github.repository == 'datum-cloud/galactic'
+    # The App token writes the live board, so only code on main gets it.
+    if: github.event_name != 'pull_request' && github.repository == 'datum-cloud/galactic' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -55,6 +56,9 @@ jobs:
           app-id: ${{ secrets.DATUM_PROJECT_AUTOMATION_APP_ID }}
           private-key: ${{ secrets.DATUM_PROJECT_AUTOMATION_PRIVATE_KEY }}
           owner: datum-cloud
+          # Issues and pull requests here are public, so the token needs
+          # only project write.
+          permission-organization-projects: write
       - name: Sync the board
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

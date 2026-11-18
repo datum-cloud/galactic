@@ -6,11 +6,11 @@
 // repository's issues:
 //
 //   - every open issue in the repository is on the board and not archived;
-//   - pull requests are removed from the board;
-//   - an open issue with a linked pull request that is open and not a draft
-//     has Status In review;
-//   - a closed issue with Status Done is archived once it has been closed
-//     longer than the retention period.
+//   - an open issue in the repository with a linked pull request that is
+//     open and not a draft has Status In review;
+//   - every pull request is removed from the board, whatever its repository;
+//   - every closed issue with Status Done is archived once it has been
+//     closed longer than the retention period, whatever its repository.
 //
 // Linked pull requests are those GitHub lists as closing the issue, from a
 // closing keyword or the issue's Development panel. The board's Status field

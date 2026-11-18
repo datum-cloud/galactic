@@ -50,8 +50,8 @@ type Board struct {
 type Plan struct {
 	// Remove holds pull request items; the project tracks only issues.
 	Remove []Item
-	// Add holds open issues that have no visible item. Adding an issue
-	// whose item is archived returns that item, which is then restored.
+	// Add holds open issues that have no visible item, including issues
+	// whose item is archived.
 	Add []Issue
 	// Review holds open issues with a ready pull request whose Status is
 	// not In review, including issues in Add.
@@ -84,8 +84,10 @@ func (p Plan) Lines() []string {
 }
 
 // Compute returns the changes the rules require for the project's visible
-// items and the repository's open issues. An issue counts as Done for
-// archiving only once it is closed, and its age is measured from closing.
+// items and the repository's open issues. The pull request and archive
+// rules apply to every item on the board, whatever its repository. An issue
+// counts as Done for archiving only once it is closed, and its age is
+// measured from closing; a closed issue without a close time is kept.
 func Compute(board Board, items []Item, open []Issue, now time.Time, retention time.Duration) Plan {
 	var p Plan
 	byContent := make(map[string]Item, len(items))
@@ -96,7 +98,7 @@ func Compute(board Board, items []Item, open []Issue, now time.Time, retention t
 			p.Remove = append(p.Remove, it)
 		case KindIssue:
 			byContent[it.ContentID] = it
-			if it.Closed && it.StatusID == board.DoneID && it.ClosedAt.Before(cutoff) {
+			if it.Closed && it.StatusID == board.DoneID && !it.ClosedAt.IsZero() && it.ClosedAt.Before(cutoff) {
 				p.Archive = append(p.Archive, it)
 			}
 		}

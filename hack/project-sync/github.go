@@ -271,10 +271,7 @@ const (
   deleteProjectV2Item(input: {projectId: $project, itemId: $item}) { deletedItemId }
 }`
 	addMutation = `mutation($project: ID!, $content: ID!) {
-  addProjectV2ItemById(input: {projectId: $project, contentId: $content}) { item { id isArchived } }
-}`
-	unarchiveMutation = `mutation($project: ID!, $item: ID!) {
-  unarchiveProjectV2Item(input: {projectId: $project, itemId: $item}) { item { id } }
+  addProjectV2ItemById(input: {projectId: $project, contentId: $content}) { item { id } }
 }`
 	statusMutation = `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
   updateProjectV2ItemFieldValue(input: {
@@ -287,14 +284,14 @@ const (
 )
 
 // Apply makes the plan's changes: it removes pull requests, adds missing
-// issues and restores any whose item was archived, sets In review, and
-// archives old Done issues. A failed change does not stop the others;
+// issues, sets In review, and archives old Done issues. Adding an issue
+// whose item is archived restores that item with its field values. A failed change does not stop the others;
 // every failure is returned. Each change is idempotent, so the next run
 // retries what failed.
 func Apply(ctx context.Context, c *Client, proj *Project, p Plan) error {
 	var errs []error
 	// onItem runs a mutation on one project item and reports its outcome.
-	onItem := func(query, itemID, done string, extra map[string]any) bool {
+	onItem := func(query, itemID, done string, extra map[string]any) {
 		vars := map[string]any{"project": proj.ID, "item": itemID}
 		for k, v := range extra {
 			vars[k] = v
@@ -304,10 +301,9 @@ func Apply(ctx context.Context, c *Client, proj *Project, p Plan) error {
 			err = fmt.Errorf("%s: %w", done, err)
 			errs = append(errs, err)
 			fmt.Println("error:", err)
-			return false
+			return
 		}
 		fmt.Println(done)
-		return true
 	}
 
 	for _, it := range p.Remove {
@@ -322,8 +318,7 @@ func Apply(ctx context.Context, c *Client, proj *Project, p Plan) error {
 		var out struct {
 			Add struct {
 				Item struct {
-					ID         string `json:"id"`
-					IsArchived bool   `json:"isArchived"`
+					ID string `json:"id"`
 				} `json:"item"`
 			} `json:"addProjectV2ItemById"`
 		}
@@ -333,19 +328,12 @@ func Apply(ctx context.Context, c *Client, proj *Project, p Plan) error {
 			fmt.Println("error:", err)
 			continue
 		}
-		item := out.Add.Item
-		if !item.IsArchived {
-			itemOf[is.ID] = item.ID
-			fmt.Println("add issue", is.Ref)
-			continue
-		}
-		if onItem(unarchiveMutation, item.ID, "restore archived issue "+is.Ref, nil) {
-			itemOf[is.ID] = item.ID
-		}
+		itemOf[is.ID] = out.Add.Item.ID
+		fmt.Println("add issue", is.Ref)
 	}
 
 	for _, is := range p.Review {
-		// An issue whose add or restore failed was already reported.
+		// An issue whose add failed was already reported.
 		if item, ok := itemOf[is.ID]; ok {
 			onItem(statusMutation, item, "set issue "+is.Ref+" to In review",
 				map[string]any{"field": proj.StatusFieldID, "option": proj.Board.InReviewID})
