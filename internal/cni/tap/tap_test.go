@@ -450,3 +450,55 @@ func findLink(t *testing.T, name string) (netlink.Link, error) {
 	}
 	return link, nil
 }
+
+// TestReleaseLeavesSuccessorTap replays a predecessor container's DEL after a
+// successor's ADD took the tap over: the successor's tap and the rows keyed on
+// its ifindex stay. The owner's own DEL then removes both, and a repeat finds
+// nothing to unregister.
+func TestReleaseLeavesSuccessorTap(t *testing.T) {
+	requireRoot(t)
+
+	vpc, att := "rl", "c1"
+	addVRFStandIn(t, vpc)
+	t.Cleanup(func() { _ = Delete(vpc, att, "successor") })
+	if _, err := Add(vpc, att, "successor", 1500); err != nil {
+		t.Fatalf("Add = %v", err)
+	}
+	link, err := findLink(t, intf.GenerateInterfaceNameHost(vpc, att))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unregistered []uint32
+	unregister := func(ifindex uint32) error {
+		unregistered = append(unregistered, ifindex)
+		return nil
+	}
+
+	owned, err := Release(vpc, att, "predecessor", unregister)
+	if err != nil || owned {
+		t.Fatalf("stale Release = (%t, %v), want (false, nil)", owned, err)
+	}
+	if len(unregistered) != 0 {
+		t.Fatalf("stale Release unregistered ifindexes %v", unregistered)
+	}
+	if _, err := findLink(t, link.Attrs().Name); err != nil {
+		t.Fatalf("stale Release removed the successor's tap: %v", err)
+	}
+
+	owned, err = Release(vpc, att, "successor", unregister)
+	if err != nil || !owned {
+		t.Fatalf("owner Release = (%t, %v), want (true, nil)", owned, err)
+	}
+	if len(unregistered) != 1 || unregistered[0] != uint32(link.Attrs().Index) {
+		t.Fatalf("owner Release unregistered %v, want [%d]", unregistered, link.Attrs().Index)
+	}
+	if _, err := netlink.LinkByName(link.Attrs().Name); err == nil {
+		t.Fatal("owner Release left the tap")
+	}
+
+	owned, err = Release(vpc, att, "successor", unregister)
+	if err != nil || !owned || len(unregistered) != 1 {
+		t.Fatalf("repeated Release = (%t, %v) with %v unregistered, want (true, nil) and no new call",
+			owned, err, unregistered)
+	}
+}

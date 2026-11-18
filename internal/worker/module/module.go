@@ -18,7 +18,7 @@ import (
 	"slices"
 
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/ownership"
 )
 
 // Scope is one VPC on this node: the unit of ownership and reconciliation.
@@ -122,7 +122,7 @@ type Capability struct {
 // Module programs the host for one delivery mode.
 //
 // Plan and Read must not write. Apply runs inside the scope's fence commit
-// (internal/edge/ownership): it must finish every write before it returns,
+// (internal/ownership): it must finish every write before it returns,
 // must not call the fence, and must leave the host matching desired even
 // when the host held rows from an earlier incarnation or a partial commit,
 // because Worker calls it with the complete desired state of the scope.

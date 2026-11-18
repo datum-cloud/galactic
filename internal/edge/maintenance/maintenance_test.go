@@ -24,7 +24,7 @@ import (
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/hostattach"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/ownership"
 )
 
 const node = "edge-1"

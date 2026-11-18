@@ -27,9 +27,9 @@ import (
 
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 	"go.datum.net/galactic/internal/config"
-	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/worker"
 	"go.datum.net/galactic/internal/worker/auth"
 	"go.datum.net/galactic/internal/worker/module"

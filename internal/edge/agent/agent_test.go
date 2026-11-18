@@ -21,7 +21,7 @@ import (
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/diag"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/forwardgatemap"
 )
 

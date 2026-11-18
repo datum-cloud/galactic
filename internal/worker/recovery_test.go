@@ -309,8 +309,9 @@ func TestWithdrawalDuringRepair(t *testing.T) {
 	}
 	fenced, err := e.fence.Read(module.Scope{VPC: vpcA}.Name())
 	e.mustOK(err)
-	if !fenced.Transitioning || fenced.Generation <= before.Generation {
-		t.Fatalf("release during repair did not fence the scope: %+v", fenced)
+	if fenced.Transitioning || !fenced.Pending || fenced.Generation <= before.Generation ||
+		fenced.Owner != e.w.Owner() {
+		t.Fatalf("release during repair did not take the scope over again: %+v", fenced)
 	}
 	e.local.ResumePlan()
 

@@ -26,7 +26,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/worker/auth"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/module/fake"
