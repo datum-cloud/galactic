@@ -11,7 +11,6 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ipam"
-	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/plumbing/dan"
@@ -45,18 +44,29 @@ func cmdDel(args *skel.CmdArgs) error {
 		}
 	}
 
-	// Unregister this attachment's ifindex-keyed map rows. Private to this
-	// attachment's own ifindex, so it belongs alongside the device deletion
-	// below rather than the shared cleanup deferred to GC. Resolved and removed
-	// before the interface is torn down, since there is nothing to resolve an
-	// ifindex from afterward.
-	unregisterIfindexVRFEntry(vpc, vpcAtt, args.ContainerID)
+	// Remove this attachment's ifindex-keyed map rows and its tap, but only
+	// while the tap still belongs to this container: the host name is keyed
+	// by (vpc, vpcAttachment) alone, so a replacement container's ADD can
+	// already have taken this same device over by the time this DEL, for a
+	// predecessor still terminating, arrives. The rows are removed before the
+	// tap, since there is nothing to resolve its ifindex from afterward. A VMM
+	// still holding the device's descriptor open can make the kernel delete
+	// lazily rather than immediately, but never blocks or fails this call.
+	owned, err := tap.Release(vpc, vpcAtt, args.ContainerID, func(ifindex uint32) error {
+		return attachreg.UnregisterInterface(attach.PinDir, ifindex)
+	})
+	if err != nil {
+		slog.Warn("DEL: failed to delete tap device", "err", err,
+			"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
+	}
 
-	// Stop the node daemon resending Router Advertisements for this attachment.
-	// Best-effort and unconditional: a missing record, from an attachment that
-	// never had an IPv6 gateway allocated, is not an error, and DEL must stay
-	// idempotent.
-	removeRadvState(vpc, vpcAtt, args.ContainerID)
+	// Stop the node daemon resending Router Advertisements for this
+	// attachment, unless a successor owns the tap and its advertisements.
+	// Best-effort: a missing record, from an attachment that never had an IPv6
+	// gateway allocated, is not an error, and DEL must stay idempotent.
+	if owned {
+		removeRadvState(vpc, vpcAtt, args.ContainerID)
+	}
 
 	// Remove the sandbox's DAN file. Nothing in Kata deletes it, so files would
 	// accumulate in a tmpfs directory for the node's uptime.
@@ -69,21 +79,6 @@ func cmdDel(args *skel.CmdArgs) error {
 			"containerID", args.ContainerID, "dir", cniConfig.DANDir)
 	}
 
-	// Delete this attachment's tap device, but only while it still belongs to
-	// this container: the host name is keyed by (vpc, vpcAttachment) alone, so
-	// a replacement container's ADD can already have taken this same device
-	// over by the time this DEL, for a predecessor still terminating, arrives.
-	// tap.Delete checks the ownership stamp Add leaves and leaves a
-	// successor's tap alone rather than tearing it down by name.
-	//
-	// A VMM still holding the device's descriptor open can make the kernel
-	// delete lazily rather than immediately, but never blocks or fails this
-	// call.
-	if err := tap.Delete(vpc, vpcAtt, args.ContainerID); err != nil {
-		slog.Warn("DEL: failed to delete tap device", "err", err,
-			"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
-	}
-
 	// Shared resources, the VRF and the BGP CRDs, are keyed by attachment or by
 	// node and may still be in use by another VM. Deleting them here races
 	// cmdAdd during a restart, so cleanup is left to garbage collection.
@@ -94,22 +89,6 @@ func cmdDel(args *skel.CmdArgs) error {
 	_ = types.PrintResult(result, pluginConf.CNIVersion)
 
 	return nil
-}
-
-// unregisterIfindexVRFEntry removes every pinned map row keyed on this
-// attachment's host ifindex (see attachreg.UnregisterInterface), mirroring the
-// veth plugin's identical helper but resolving a tap device's host-side
-// interface rather than a veth pair's.
-func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
-	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
-	link, err := netlink.LinkByName(hostName)
-	if err != nil {
-		return
-	}
-	if err := attachreg.UnregisterInterface(attach.PinDir, uint32(link.Attrs().Index)); err != nil {
-		slog.Warn("DEL: failed to remove eBPF interface state", "err", err,
-			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
-	}
 }
 
 // removeRadvState removes this attachment's router-advertisement resend record,

@@ -17,7 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/store"
 )
@@ -298,38 +298,33 @@ func modeName(m workerv1alpha1.Mode) string {
 }
 
 // acquire returns a ticket for this incarnation's next commit to scope:
-// Begin for a scope it owns, Claim for an unowned one, and Fence then Adopt
-// for one an earlier Worker incarnation owned or this one fenced.
+// Begin for a scope it owns, Claim for an unowned one, and Takeover for one
+// an earlier Worker incarnation owned or left transitioning. A scope another
+// writer owns, or is moving to, is errOwnedElsewhere or ErrTransitioning.
 func (w *Worker) acquire(scope module.Scope) (ownership.Ticket, error) {
 	name := scope.Name()
 	rec, err := w.d.Fence.Read(name)
 	if err != nil {
 		return ownership.Ticket{}, err
 	}
-	w.mu.Lock()
-	fenced := w.scope(scope.VPC).fenced
-	w.mu.Unlock()
-	workerOwned := rec.Owner == "" || strings.HasPrefix(rec.Owner, ownerPrefix)
 	switch {
-	case rec.Transitioning && fenced == rec.Generation:
-	case rec.Transitioning && workerOwned, !rec.Transitioning && rec.Owner != w.owner && rec.Owner != "" && workerOwned:
-		if fenced, err = w.d.Fence.Fence(name); err != nil {
-			return ownership.Ticket{}, err
-		}
+	case !rec.Transitioning && rec.Owner == w.owner:
+		return w.d.Fence.Begin(name, w.owner)
+	case !rec.Transitioning && rec.Owner == "":
+		return w.d.Fence.Claim(name, w.owner)
+	case rec.Owner == "" || ownership.WorkerOwned(rec.Owner):
+		return w.d.Fence.Takeover(name, w.owner, workerOrUnowned)
 	case rec.Transitioning:
 		return ownership.Ticket{}, fmt.Errorf("%w: %s is moving to another owner", ownership.ErrTransitioning, name)
-	case rec.Owner == "":
-		return w.d.Fence.Claim(name, w.owner)
-	case rec.Owner == w.owner:
-		return w.d.Fence.Begin(name, w.owner)
 	default:
 		return ownership.Ticket{}, fmt.Errorf("%w: %q owns %s", errOwnedElsewhere, rec.Owner, name)
 	}
-	t, err := w.d.Fence.Adopt(name, w.owner, fenced)
-	w.mu.Lock()
-	w.scope(scope.VPC).fenced = 0
-	w.mu.Unlock()
-	return t, err
+}
+
+// workerOrUnowned accepts a scope no writer owns or a Worker incarnation
+// owns, as it stands under the fence's lock.
+func workerOrUnowned(r ownership.Record) bool {
+	return r.Owner == "" || ownership.WorkerOwned(r.Owner)
 }
 
 // reportFailure sets Programmed=False with reason on every live claim of

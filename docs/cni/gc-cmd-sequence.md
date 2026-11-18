@@ -286,7 +286,7 @@ sequenceDiagram
   counts a VPC as used while an `EdgeAttachment` on this node is not
   `Released`, read uncached, or a host link stamped
   `galactic-edge:hostattach:` for it remains. Each delete runs inside
-  `Reclaim`, which takes the VPC's write fence (`internal/edge/ownership`,
+  `Reclaim`, which takes the VPC's write fence (`internal/ownership`,
   `/var/lib/galactic-edge/ownership`) that `galactic-edge` holds while it
   programs, checks again and deletes only if nothing uses the VPC. An
   attachment admitted after collection therefore keeps the VRF, and a change

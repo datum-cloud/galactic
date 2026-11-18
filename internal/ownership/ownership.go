@@ -256,11 +256,18 @@ func (a *Authority) commit(t Ticket, snapshot bool, mutate func() error) (Ticket
 // authority for the same scope, and mutate must finish every write before it
 // returns.
 func (a *Authority) Exclusive(scope string, check, mutate func() error) error {
+	return a.ExclusiveIf(scope, func(Record) error { return check() }, mutate)
+}
+
+// ExclusiveIf is Exclusive with a check that also reads the scope's record as
+// it stands under the lock, so a writer can refuse a scope by its owner
+// without a window in which the owner changes.
+func (a *Authority) ExclusiveIf(scope string, check func(Record) error, mutate func() error) error {
 	return a.lockedStaged(scope, func(r *Record, persist func() error) error {
 		if r.Transitioning {
 			return ErrTransitioning
 		}
-		if err := check(); err != nil {
+		if err := check(*r); err != nil {
 			return err
 		}
 		pending := r.Pending
@@ -312,6 +319,39 @@ func (a *Authority) Adopt(scope, owner string, generation uint64) (Ticket, error
 	})
 	return t, err
 }
+
+// Takeover moves scope to owner in one step under the scope's lock: it
+// advances the generation, so no ticket issued before it can commit, names
+// owner, and returns a ticket that requires a snapshot commit. from decides,
+// from the record as it stands, whether the current owner may be replaced;
+// when it refuses, Takeover returns ErrNotOwner and changes nothing.
+//
+// Takeover leaves no window between fencing and adopting, so a process that
+// dies during the transfer cannot leave the scope transitioning and refuse
+// every Exclusive writer until it returns. It also completes a transfer an
+// earlier Fence left open.
+func (a *Authority) Takeover(scope, owner string, from func(Record) bool) (Ticket, error) {
+	if owner == "" {
+		return Ticket{}, ErrNoOwner
+	}
+	var t Ticket
+	err := a.locked(scope, func(r *Record) (bool, error) {
+		if !from(*r) {
+			return false, fmt.Errorf("%w: %q owns %q", ErrNotOwner, r.Owner, scope)
+		}
+		r.Owner, r.Generation, r.Transitioning, r.Pending = owner, r.Generation+1, false, true
+		t = ticket(scope, *r)
+		return true, nil
+	})
+	return t, err
+}
+
+// WorkerOwnerPrefix starts the owner ID of every galactic-worker
+// incarnation.
+const WorkerOwnerPrefix = "galactic-worker:"
+
+// WorkerOwned reports whether owner is a galactic-worker incarnation.
+func WorkerOwned(owner string) bool { return strings.HasPrefix(owner, WorkerOwnerPrefix) }
 
 // Read returns the scope's record.
 func (a *Authority) Read(scope string) (Record, error) {

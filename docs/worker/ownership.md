@@ -19,11 +19,11 @@ workload while Worker is down. CNI never owns a scope. It writes with
 `Exclusive` whether or not Worker runs, and Worker adopts that state when it
 starts. A write that bypasses the fence is a defect.
 
-The fence is `internal/edge/ownership`, generalized from its current VPC scope
-(`internal/edge/ownership/ownership.go:150-317`). Its state directory must
-outlive every writer, as the package documentation requires. Worker uses the
-package in place, with its `VPCScope` names and its shared `DefaultDir`;
-relocating it is part of [#1434](https://github.com/datum-cloud/galactic/issues/1434).
+The fence is `internal/ownership`, generalized from the VPC scope Galactic
+Edge introduced. Its state directory must outlive every writer, as the package
+documentation requires. Every writer uses the package's `VPCScope` names and its
+shared `DefaultDir`, `/var/lib/galactic-edge/ownership`, which the galactic-router
+and galactic-cni DaemonSets mount from the host.
 
 A resource class has one of two kinds of authority:
 
@@ -66,20 +66,24 @@ Each step uses the fence operations that exist today (D13).
 
 1. **Bootstrap with Worker down.** CNI ADD writes the VPC scope with
    `Exclusive`, which needs no owner. Workload attach never waits for Worker.
-   `Exclusive` returns `ErrTransitioning` only between `Fence` and `Adopt`, and
-   CNI retries within its own ADD deadline.
+   `Exclusive` returns `ErrTransitioning` only while a `Fence` waits for its
+   `Adopt`, and CNI retries within its own ADD deadline. Worker never leaves a
+   scope in that state: it takes scopes over with `Takeover` (D23), which
+   fences and adopts under one lock, so a Worker that dies while taking a
+   scope over cannot block CNI until it returns.
 2. **Adoption of preexisting state.** When Worker starts, it takes each scope it
-   finds (from `vrf_table`, the VRF devices and `tables.json`). It uses `Claim`
-   for an unowned scope, or `Fence` then `Adopt` for one an earlier Worker
-   incarnation owned. Both return a ticket that requires `CommitSnapshot`, which
-   Worker runs with its complete desired state read from disk, merged with the
-   host's current rows. Until that snapshot commits, Worker refuses claim
-   changes for the scope with `UNAVAILABLE`/`Resyncing`. Each Worker
+   finds (from the VRF devices and the table reservations in `tables.json`).
+   It uses `Claim` for an unowned scope, or `Takeover` for one an earlier
+   Worker incarnation owned, including one an older incarnation left between
+   `Fence` and `Adopt`. Both return a ticket that requires `CommitSnapshot`,
+   which Worker runs with its complete desired state read from disk, merged
+   with the host's current rows. Until that snapshot commits, Worker refuses
+   claim changes for the scope with `UNAVAILABLE`/`Resyncing`. Each Worker
    incarnation's owner ID starts with `galactic-worker:`, which is how a new
-   incarnation recognizes a scope an earlier one owned. Worker never fences a
-   scope another writer owns: its claims there report `Programmed=False` with
-   reason `ScopeOwnedElsewhere` until that writer's transfer step (3) hands the
-   scope over.
+   incarnation recognizes a scope an earlier one owned. Worker never takes
+   over a scope another writer owns: its claims there report
+   `Programmed=False` with reason `ScopeOwnedElsewhere` until that writer's
+   transfer step (3) hands the scope over.
 3. **Ownership transfer.** A legacy writer moves to Worker in two steps. First it
    writes with `Exclusive` on the shared fence instead of writing directly.
    Then Worker adopts the scope, and the legacy writer calls Worker instead of
@@ -89,7 +93,7 @@ Each step uses the fence operations that exist today (D13).
    a full snapshot before accepting incremental changes, so a half-applied
    change is neither assumed done nor assumed undone.
 5. **Loss of the state directory.** Stop every writer, reconcile host state, and
-   create a new authority, as `internal/edge/ownership` requires. Never restore
+   create a new authority, as `internal/ownership` requires. Never restore
    the directory while writers run.
 
 ## Defects this transfer removes

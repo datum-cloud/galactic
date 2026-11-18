@@ -32,7 +32,7 @@ import (
 	"go.datum.net/galactic/internal/edge/diag"
 	"go.datum.net/galactic/internal/edge/diag/diagtest"
 	"go.datum.net/galactic/internal/edge/hostattach"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/forwardgatemap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 )

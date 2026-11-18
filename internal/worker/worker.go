@@ -9,7 +9,7 @@
 // sources and recorded durably before it returns; nothing is programmed on
 // the call path. Reconciliation runs per VPC scope from a deduplicating
 // queue. It resolves every destination, takes the scope's ticket from the
-// ownership fence (internal/edge/ownership), commits the complete desired
+// ownership fence (internal/ownership), commits the complete desired
 // state of the scope through the delivery modules and reads the host back to
 // report programmed and observed state. Desired state is durable;
 // programmed and observed state are rebuilt from the host after a restart.
@@ -30,7 +30,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/worker/auth"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/sources"
@@ -53,11 +53,6 @@ const (
 	// refresh observed state.
 	DefaultResyncInterval = 30 * time.Second
 )
-
-// ownerPrefix starts the fence owner ID of every Worker incarnation, so a
-// new incarnation can tell a scope an earlier one owned from a scope another
-// writer owns.
-const ownerPrefix = "galactic-worker:"
 
 // Authenticator authenticates the caller of a call.
 type Authenticator interface {
@@ -132,9 +127,6 @@ type scopeState struct {
 	resyncing bool
 	// repair is set after a failed commit, until a commit succeeds.
 	repair bool
-	// fenced is the fence generation of a Fence this incarnation started and
-	// has not yet adopted.
-	fenced uint64
 }
 
 // Worker is the reconciliation core and gRPC service.
@@ -183,7 +175,7 @@ func New(cfg Config, d Deps) (*Worker, error) {
 	w := &Worker{
 		cfg:      cfg,
 		d:        d,
-		owner:    ownerPrefix + cfg.Node + ":" + hex.EncodeToString(id),
+		owner:    ownership.WorkerOwnerPrefix + cfg.Node + ":" + hex.EncodeToString(id),
 		log:      d.Log.With("component", "galactic-worker"),
 		claims:   map[module.ClaimKey]*claim{},
 		scopes:   map[string]*scopeState{},

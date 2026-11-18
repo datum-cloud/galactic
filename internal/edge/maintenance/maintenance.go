@@ -16,7 +16,7 @@
 //     attachment whose object is gone or unreadable but whose host state is
 //     not yet released.
 //
-// Reclaim decides again under the VPC's write fence (internal/edge/ownership),
+// Reclaim decides again under the VPC's write fence (internal/ownership),
 // which galactic-edge holds while it programs, so a reclaim decided from an
 // earlier view cannot remove state an attachment programmed since.
 package maintenance
@@ -33,7 +33,7 @@ import (
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/hostattach"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/ownership"
 )
 
 // ErrInUse is returned by Reclaim when an edge attachment uses the VPC.
