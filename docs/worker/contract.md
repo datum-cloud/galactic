@@ -1,9 +1,12 @@
 # Worker service contract
 
-Status: proposed, version `v1alpha1`. Nothing in this page is implemented at
-the branch start. [#1433](https://github.com/datum-cloud/galactic/issues/1433)
-implements the API, and the Tasks named in each section own its tests. Decision
-IDs (D1, D2, …) refer to the [decision log](README.md#decision-log).
+Status: version `v1alpha1`.
+[#1433](https://github.com/datum-cloud/galactic/issues/1433) implements the
+service (`cmd/galactic-worker`, `internal/worker`), its protobuf API
+(`api/galactic/worker/v1alpha1`), the client library (`pkg/workerclient`) and
+the delivery module interface (`internal/worker/module`). The Tasks named in
+each section own the rest and its tests. Decision IDs (D1, D2, …) refer to the
+[decision log](README.md#decision-log).
 
 Galactic Worker is one process per node. Service agents (NAT, Gateway, the
 Envoy galactic-vrf sidecar and the provider connector) ask it to deliver tenant
@@ -31,6 +34,14 @@ attachment (its TAP, internal veth pair or routed link) belong to one caller.
 A second caller that names the same attachment gets `PERMISSION_DENIED` with
 reason `AttachmentClaimedByAnotherCaller`. Fabric state for a VPC is shared:
 any number of claims may resolve destinations through the same VPC.
+
+A destination names an attachment, a shard or a backend. Worker resolves
+attachment destinations. The shard resolver, from NAT's trusted source, is added
+inside Worker by [#1437](https://github.com/datum-cloud/galactic/issues/1437),
+and the backend resolver by
+[#1438](https://github.com/datum-cloud/galactic/issues/1438). Until then a shard
+or backend destination is accepted and reports `Resolved=False` with reason
+`DestinationKindUnsupported` (D20).
 
 The mode preference is `auto`, `local` or `fabric`. `auto` lets Worker resolve
 each destination. `local` and `fabric` restrict the result; a destination that
@@ -63,6 +74,12 @@ row is `Available` or `Unavailable` with a machine reason, for example
 that needs an unavailable capability is accepted and reports `Programmed=False`
 with the same reason, so a client can tell a temporary module outage from a
 refused request.
+
+A claim needs the Local capability of its handoff (`local.tap`,
+`local.veth_pair`, `local.routed_link` or `local.socket`) for its Local
+destinations, and `fabric.srv6` for its Fabric destinations. The caller must
+be allowed the handoff's capability, and `fabric.srv6` when a destination
+resolves to Fabric at admission.
 
 ### Version negotiation
 
@@ -119,6 +136,12 @@ Worker takes these facts only from the sources below, never from the request (D1
 | Backend SID              | The backend node's locator plus the slot the gateway encodes in the uSID, as `docs/gateway/architecture.md` describes.                |
 | Interface traffic policy | TrafficPolicyBinding, resolved by the cell controller. Worker applies no policy of its own.                                           |
 
+Worker compares a VPC as the base62 identifier the attachment's status records
+(`VPCAttachment.status.vpc`, `EdgeAttachment.status.vpc`). That identifier is
+the VPC's fabric identity as this cell received it, and a claim's `vpc` is the
+same identifier. An attachment whose identifier is still empty authorizes
+nothing.
+
 A claim is cross-VPC when any destination belongs to a VPC other than the
 claim's attachment VPC. Worker refuses it. Two VPCs may use the same addresses,
 so Worker compares VPC identity, never addresses.
@@ -130,10 +153,28 @@ so Worker compares VPC identity, never addresses.
 | `INVALID_ARGUMENT`    | `MalformedSpec`, `WrongNode`                                                               | Fix the request. Do not retry.                              |
 | `UNAUTHENTICATED`     | `NoIdentity`, `IdentityExpired`                                                            | Refresh the credential, then retry.                         |
 | `PERMISSION_DENIED`   | `VPCNotAuthorized`, `AttachmentClaimedByAnotherCaller`, `NotOwner`, `CapabilityNotAllowed` | Do not retry until authority changes.                       |
-| `FAILED_PRECONDITION` | `UnsupportedVersion`, `ClaimExists`, `GenerationConflict`                                  | Re-read with `Observe`, then use the right operation.       |
+| `FAILED_PRECONDITION` | `UnsupportedVersion`, `ClaimExists`, `ClaimNotFound`, `GenerationConflict`                 | Re-read with `Observe`, then use the right operation.       |
+| `FAILED_PRECONDITION` | `NoSession`                                                                                | Call `GetCapabilities` for a new session, then retry.       |
 | `ABORTED`             | `StaleGeneration`                                                                          | Re-read with `Observe`; retry only with a newer generation. |
 | `UNAVAILABLE`         | `Resyncing`, `ShuttingDown`                                                                | Retry with backoff.                                         |
 | `RESOURCE_EXHAUSTED`  | `ClaimLimit`, `TableRangeExhausted`                                                        | Retry with backoff; report if it persists.                  |
+
+`Update` of a claim that does not exist, or is being withdrawn, gets
+`ClaimNotFound`.
+
+Status carries these reasons besides the ones above:
+
+| Reason                                             | Where         | Meaning                                                                                                   |
+| -------------------------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------- |
+| `Pending`                                          | Any condition | Worker has not yet reconciled the generation                                                              |
+| `DestinationKindUnsupported`                       | `Resolved`    | A shard or backend destination, until #1437 or #1438 resolves it                                          |
+| `DestinationNotFound`                              | `Resolved`    | The destination attachment no longer exists                                                               |
+| `LocatorUnknown`                                   | `Resolved`    | This node or the destination's node has no SRv6 locator yet                                               |
+| `ModeUnavailable`                                  | `Resolved`    | The destination resolves to a mode the preference excludes                                                |
+| `ModuleNotRunning` and other capability reasons    | `Programmed`  | The capability the destination needs is unavailable                                                       |
+| `ProgrammingFailed`                                | `Programmed`  | The last commit failed; the message carries the error                                                     |
+| `ScopeOwnedElsewhere`                              | `Programmed`  | Another writer owns the VPC scope's fence (see [ownership](ownership.md#bootstrap-adoption-and-transfer)) |
+| `Released`, `LeaseExpired`, `AuthorizationRevoked` | `Withdrawing` | Why the claim is being withdrawn                                                                          |
 
 Clients retry with exponential backoff from 200 ms to 30 s with full jitter.
 Every mutating call is idempotent for a given generation, so a retry after a
@@ -142,6 +183,11 @@ reason from this table (D6). Worker retries its own programming from 1 s to
 60 s and reports the last error as the reason on `Programmed=False`.
 
 ## Sessions, restart and stale deletion
+
+Every call after `GetCapabilities` carries the session ID in the
+`x-galactic-worker-session` metadata key. A call without a live session of the
+caller gets `FAILED_PRECONDITION`/`NoSession`. A `GetCapabilities` that carries
+a live session ID renews that session instead of starting another (D19).
 
 A session starts with `GetCapabilities` and carries a lease of 120 s, renewed by
 an open `Observe` stream or a call at least every 10 s. These are the XDP
@@ -175,12 +221,26 @@ D8 and D9 were confirmed on 2026-11-18.
   `/run/galactic-worker/worker.sock`, mode `0660`, owned by a dedicated group.
   No TCP listener serves the mutating API.
 - **Client identity (D8).** Each call carries a projected ServiceAccount token
-  with audience `galactic-worker`, bound to the calling pod. Worker validates it
-  with TokenReview, caches the result until the token expires, and checks that
-  the bound pod runs on this node. Worker also reads the peer's credentials
-  (`SO_PEERCRED`) and refuses a peer that is not a process of that pod. A static
-  allowlist maps each ServiceAccount to the capabilities it may use, for
-  example the NAT agent to `local.veth_pair` and `fabric.srv6`.
+  with audience `galactic-worker`, bound to the calling pod, as
+  `authorization: Bearer <token>`. Worker validates it with TokenReview, caches
+  the result until the token expires, and checks that the bound pod runs on
+  this node. Worker also reads the peer's credentials (`SO_PEERCRED`) and
+  refuses a peer that is not a process of that pod. It maps the peer PID to a
+  pod through the pod UID in `/proc/<pid>/cgroup`, so Worker runs in the host
+  PID namespace and reads the host's `/proc`; in any other PID namespace the
+  kernel reports PID 0 for a peer in another pod (D21).
+  [#1441](https://github.com/datum-cloud/galactic/issues/1441) packages
+  `hostPID` and the `/proc` mount.
+- **Allowlist (D8, D22).** A static YAML file, passed with `--allowlist`, maps
+  each ServiceAccount to the capabilities it may use. A ServiceAccount it does
+  not list may use none.
+
+  ```yaml
+  serviceAccounts:
+    - serviceAccount: galactic-system/galactic-nat
+      capabilities: [local.veth_pair, fabric.srv6]
+  ```
+
 - **Access model (D9).** Host-network agents (NAT, Gateway, galactic-edge) mount
   `/run/galactic-worker` with a `hostPath` volume. The galactic-vrf sidecar runs
   in the Envoy pod's network namespace and mounts the same directory; pod

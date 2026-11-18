@@ -21,7 +21,9 @@ starts. A write that bypasses the fence is a defect.
 
 The fence is `internal/edge/ownership`, generalized from its current VPC scope
 (`internal/edge/ownership/ownership.go:150-317`). Its state directory must
-outlive every writer, as the package documentation requires.
+outlive every writer, as the package documentation requires. Worker uses the
+package in place, with its `VPCScope` names and its shared `DefaultDir`;
+relocating it is part of [#1434](https://github.com/datum-cloud/galactic/issues/1434).
 
 A resource class has one of two kinds of authority:
 
@@ -72,7 +74,12 @@ Each step uses the fence operations that exist today (D13).
    incarnation owned. Both return a ticket that requires `CommitSnapshot`, which
    Worker runs with its complete desired state read from disk, merged with the
    host's current rows. Until that snapshot commits, Worker refuses claim
-   changes for the scope with `UNAVAILABLE`/`Resyncing`.
+   changes for the scope with `UNAVAILABLE`/`Resyncing`. Each Worker
+   incarnation's owner ID starts with `galactic-worker:`, which is how a new
+   incarnation recognizes a scope an earlier one owned. Worker never fences a
+   scope another writer owns: its claims there report `Programmed=False` with
+   reason `ScopeOwnedElsewhere` until that writer's transfer step (3) hands the
+   scope over.
 3. **Ownership transfer.** A legacy writer moves to Worker in two steps. First it
    writes with `Exclusive` on the shared fence instead of writing directly.
    Then Worker adopts the scope, and the legacy writer calls Worker instead of
