@@ -267,3 +267,28 @@ func TestUnavailable(t *testing.T) {
 		t.Error("Reclaim succeeded")
 	}
 }
+
+// TestReclaimLeavesWorkerOwnedScope refuses, under the fence, a VPC whose
+// scope a galactic-worker incarnation owns, and runs nothing; a scope another
+// writer owns is still reclaimed.
+func TestReclaimLeavesWorkerOwnedScope(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).Build()
+	g := newGuard(t, c)
+	for vpc, owner := range map[string]string{"a": ownership.WorkerOwnerPrefix + node + ":1", "b": "galactic-edge:1"} {
+		tk, err := g.Ownership.Claim(ownership.VPCScope(vpc), owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.Ownership.CommitSnapshot(tk, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ran := false
+	err := g.Reclaim(context.Background(), "a", func() error { ran = true; return nil })
+	if !errors.Is(err, ownership.ErrWorkerOwned) || ran {
+		t.Fatalf("Reclaim of a Worker-owned VPC = %v (ran %t), want ErrWorkerOwned and nothing run", err, ran)
+	}
+	if err := g.Reclaim(context.Background(), "b", func() error { ran = true; return nil }); err != nil || !ran {
+		t.Fatalf("Reclaim of an edge-owned VPC = %v (ran %t), want it reclaimed", err, ran)
+	}
+}

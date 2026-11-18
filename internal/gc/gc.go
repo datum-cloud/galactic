@@ -25,6 +25,7 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/edge/hostattach"
 	"go.datum.net/galactic/internal/edge/maintenance"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/nptv6map"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
@@ -68,7 +69,8 @@ type OrphanedCRD struct {
 }
 
 // EdgeUsers keeps garbage collection off the VPCs Galactic Edge attachments
-// use on this node (internal/edge/maintenance). An edge attachment joins its
+// use on this node (internal/edge/maintenance), and off the VPCs whose scope a
+// galactic-worker incarnation owns, which that Worker reclaims itself. An edge attachment joins its
 // VPC's canonical host VRF, so that VRF, its BGPVRFInstance and its uSID rows
 // must outlive the VPC's last workload while an edge attachment remains.
 //
@@ -78,8 +80,9 @@ type EdgeUsers interface {
 	// means the answer is unknown.
 	VPCs(ctx context.Context) (map[string]struct{}, error)
 	// Reclaim runs reclaim under vpc's write fence, after confirming under
-	// the fence that no edge attachment uses vpc; otherwise it returns an
-	// error wrapping maintenance.ErrInUse and runs nothing.
+	// the fence that no edge attachment uses vpc and no galactic-worker owns
+	// its scope; otherwise it returns an error wrapping maintenance.ErrInUse
+	// or ownership.ErrWorkerOwned and runs nothing.
 	Reclaim(ctx context.Context, vpc string, reclaim func() error) error
 }
 
@@ -477,6 +480,11 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 					"resource_name", o.Name, "resource_namespace", o.Namespace, "vpc", o.VPC)
 				continue
 			}
+			if errors.Is(err, ownership.ErrWorkerOwned) {
+				slog.Info("GC: left BGPVRFInstance to the galactic-worker that owns its VPC",
+					"resource_name", o.Name, "resource_namespace", o.Namespace, "vpc", o.VPC)
+				continue
+			}
 			if errors.Is(err, vrf.ErrInUse) {
 				slog.Info("GC: kept BGPVRFInstance whose VRF a link joined since it was collected",
 					"resource_name", o.Name, "resource_namespace", o.Namespace, "reason", err.Error())
@@ -708,6 +716,8 @@ func RemoveOrphanedVRFs(ctx context.Context, vrfNames []string, edge EdgeUsers) 
 		switch {
 		case errors.Is(err, maintenance.ErrInUse):
 			slog.Info("GC: kept VRF an edge attachment uses", "name", name, "vpc", vpc)
+		case errors.Is(err, ownership.ErrWorkerOwned):
+			slog.Info("GC: left VRF to the galactic-worker that owns its VPC", "name", name, "vpc", vpc)
 		case errors.Is(err, vrf.ErrInUse):
 			slog.Info("GC: kept VRF that a link joined since it was collected", "name", name, "vpc", vpc,
 				"reason", err.Error())
@@ -746,7 +756,13 @@ func removeVRF(name string) (removed bool, err error) {
 // because the datapath has not finished loading or merely inaccessible, means
 // there is no reachable datapath this tick. That is treated as nothing to do,
 // not an error.
-func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeName, pinDir string) CleanupResult {
+//
+// Each repair is shared state of the instance's VPC, and runs through write.
+// A repair write refuses with ownership.ErrWorkerOwned is skipped: the
+// galactic-worker incarnation that owns the VPC's scope keeps its rows.
+func SweepEBPFVRFTable(
+	ctx context.Context, k8s client.Client, namespace, nodeName, pinDir string, write VPCWriter,
+) CleanupResult {
 	result := CleanupResult{}
 
 	if _, statErr := os.Stat(pinDir); statErr != nil {
@@ -875,7 +891,7 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 		live[key] = struct{}{}
 	}
 
-	repairVRFRows(reg.VRF, nodeName, liveCRDNames, existingRows, &result)
+	repairVRFRows(ctx, reg.VRF, nodeName, liveCRDNames, existingRows, write, &result)
 
 	removed, err := reg.VRF.Reconcile(live, cutoff)
 	for _, e := range removed {
@@ -924,8 +940,9 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 // was recreated on another table with no CNI ADD to re-register it, and the
 // datapath would otherwise route the VPC through a table another VPC can be
 // given (#1270). The egress kind the CNI wrote is kept.
-func repairVRFRows(table *usidmap.VRFTable, nodeName string, liveCRDNames map[usidmap.VRFKey]string,
-	existingRows map[usidmap.VRFKey]usidmap.VRFEntry, result *CleanupResult) {
+func repairVRFRows(ctx context.Context, table *usidmap.VRFTable, nodeName string,
+	liveCRDNames map[usidmap.VRFKey]string, existingRows map[usidmap.VRFKey]usidmap.VRFEntry, write VPCWriter,
+	result *CleanupResult) {
 	if len(liveCRDNames) == 0 {
 		return
 	}
@@ -946,7 +963,15 @@ func repairVRFRows(table *usidmap.VRFTable, nodeName string, liveCRDNames map[us
 		row, present := existingRows[key]
 		switch {
 		case !present:
-			if err := table.Register(key.Block, key.Argument, vrfTableID, egressKind); err != nil {
+			err := writeVPC(ctx, write, instanceNameVPC(instName), func() error {
+				return table.Register(key.Block, key.Argument, vrfTableID, egressKind)
+			})
+			if errors.Is(err, ownership.ErrWorkerOwned) {
+				slog.Debug("GC: left a missing eBPF vrf_table entry to the VPC's galactic-worker",
+					"vrfInstance", instName, "block", key.Block, "argument", key.Argument)
+				continue
+			}
+			if err != nil {
 				slog.Error("GC: failed to repair missing eBPF vrf_table entry",
 					"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
 				result.Errors++
@@ -957,7 +982,15 @@ func repairVRFRows(table *usidmap.VRFTable, nodeName string, liveCRDNames map[us
 				"vrfTableID", vrfTableID, "egressKind", egressKind)
 			result.EBPFVRFEntriesRegistered++
 		case row.VRFTableID != vrfTableID:
-			if err := table.Register(key.Block, key.Argument, vrfTableID, row.EgressKind); err != nil {
+			err := writeVPC(ctx, write, instanceNameVPC(instName), func() error {
+				return table.Register(key.Block, key.Argument, vrfTableID, row.EgressKind)
+			})
+			if errors.Is(err, ownership.ErrWorkerOwned) {
+				slog.Debug("GC: left an eBPF vrf_table entry with a stale table ID to the VPC's galactic-worker",
+					"vrfInstance", instName, "block", key.Block, "argument", key.Argument)
+				continue
+			}
+			if err != nil {
 				slog.Error("GC: failed to rewrite eBPF vrf_table entry with a stale table ID",
 					"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
 				result.Errors++
@@ -969,6 +1002,25 @@ func repairVRFRows(table *usidmap.VRFTable, nodeName string, liveCRDNames map[us
 			result.EBPFVRFEntriesRewritten++
 		}
 	}
+}
+
+// VPCWriter runs write as a write to vpc's shared state on the node, under
+// whatever coordination the caller's process needs. An error wrapping
+// ownership.ErrWorkerOwned means write did not run, because a galactic-worker
+// incarnation owns the VPC's scope.
+type VPCWriter func(ctx context.Context, vpc string, write func() error) error
+
+// Unfenced is a VPCWriter that runs write directly, for a process that is
+// the node's only writer, such as a test.
+func Unfenced(_ context.Context, _ string, write func() error) error { return write() }
+
+// writeVPC runs write through w for vpc, or directly when vpc is "", which
+// names no fence.
+func writeVPC(ctx context.Context, w VPCWriter, vpc string, write func() error) error {
+	if vpc == "" {
+		return write()
+	}
+	return w(ctx, vpc, write)
 }
 
 // instanceVPC returns the VPC of the kernel VRF among links that the

@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/cni/vpcfence"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/nldump"
@@ -83,9 +84,26 @@ type resourceTracker struct {
 // sibling writes anything of its own. Its host link is already enslaved to
 // the VPC's VRF by then, so the instance is kept while any link other than
 // this attachment's own is enslaved there.
+//
+// Both are shared state of the VPC on the node, so the rollback runs under
+// the VPC's write fence. A rollback the fence refuses leaves both for GC.
 func (rt *resourceTracker) cleanup(ctx context.Context) {
 	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
 		"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+	if !rt.advertisementCreated && !rt.vrfInstanceCreated {
+		return
+	}
+	if err := vpcfence.Write(ctx, rt.vpc, func() error {
+		rt.cleanupFenced(ctx)
+		return nil
+	}); err != nil {
+		slog.Error("Rollback: kept created resources, could not take the VPC's write fence; GC reclaims them",
+			"err", err, "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+	}
+}
+
+// cleanupFenced is cleanup's work, run under the VPC's write fence.
+func (rt *resourceTracker) cleanupFenced(ctx context.Context) {
 
 	if rt.advertisementCreated && rt.k8s != nil {
 		adv := &bgpv1alpha1.BGPAdvertisement{
