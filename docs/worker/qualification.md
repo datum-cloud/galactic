@@ -69,6 +69,7 @@ hardware.
 | Worker reconcile time, claim change to `Programmed=True`      | p99 under 1 s              |
 | Re-convergence after a Worker restart, to every claim `Ready` | Under 5 s                  |
 | Worker resident memory                                        | Under 256 MiB              |
+| Claims one caller holds (`ClaimLimit`, `--claim-limit`)       | 1024                       |
 
 CPU per packet, drops and guest contention are measured and reported against
 the base without a limit, as the MASQUE benchmark does, because they depend on
