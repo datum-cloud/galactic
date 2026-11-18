@@ -1,0 +1,71 @@
+# sjc: both VPCs' guests get the same address, fd20:80:ff02::1:0:0.
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: vpc-a
+  namespace: ns80
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "vpc-a",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "80",
+          "vpcattachment": "80",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              {
+                "address": "fd20:80:ff02:0:0:1::/96",
+                "gateway": "fd20:80:ff02::1"
+              }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "80",
+          "vpcattachment": "80",
+          "namespace": "galactic-system"
+        }
+      ]
+    }
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: vpc-b
+  namespace: ns80
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "vpc-b",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "81",
+          "vpcattachment": "81",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              {
+                "address": "fd20:80:ff02:0:0:1::/96",
+                "gateway": "fd20:80:ff02::1"
+              }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "81",
+          "vpcattachment": "81",
+          "namespace": "galactic-system"
+        }
+      ]
+    }

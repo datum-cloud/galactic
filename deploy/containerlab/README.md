@@ -599,7 +599,9 @@ PublicNAT and PublicService paths and the built-in default. See
 
 See [docs/verification.md](docs/verification.md) for transit fabric, FRR, and galactic-router
 health checks, and [docs/tenants.md](docs/tenants.md) for deploying and verifying
-the `ns10`/`ns20`/`ns30`/`ns40` test VPCs.
+the `ns10`/`ns20`/`ns30`/`ns40` test VPCs. [docs/baseline.md](docs/baseline.md)
+covers the dedicated-placement baseline: the `ns80` fixture, its scripted packet
+observations and pinned versions (`task baseline:twice`).
 
 `task verify` (and its constituent `task verify:scenarios`) also pings every
 VPC's pods end-to-end via `task verify:ns10`/`ns20`/`ns30`/`ns40` —
