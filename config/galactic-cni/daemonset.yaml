@@ -171,6 +171,12 @@ spec:
             # stranded tap or veth under it. See config/galactic-cni/README.md.
             - name: vrf-lock-dir
               mountPath: /var/lib/cni/galactic-vrf
+            # The node's VPC write fence (internal/ownership), shared with
+            # host-executed CNI, galactic-router, galactic-edge and
+            # galactic-worker. The sidecar return path, its reaper and the
+            # vrf_table repair write a VPC's shared state only under it.
+            - name: vpc-ownership
+              mountPath: /var/lib/galactic-edge/ownership
           # BPF map creation under load (image pull + verifier work on a
           # slow node) can outrun readinessProbe/livenessProbe's short
           # initialDelaySeconds, risking a liveness-triggered restart loop
@@ -224,6 +230,10 @@ spec:
         - name: vrf-lock-dir
           hostPath:
             path: /var/lib/cni/galactic-vrf
+            type: DirectoryOrCreate
+        - name: vpc-ownership
+          hostPath:
+            path: /var/lib/galactic-edge/ownership
             type: DirectoryOrCreate
         - name: bpf-fs
           # Host bpffs for pinned-map continuity; `Directory` (not

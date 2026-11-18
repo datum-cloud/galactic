@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/cni/vpcfence"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
@@ -29,6 +30,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/nldump"
 )
 
@@ -221,7 +223,9 @@ func ensureSidecarReturnPath(
 	var errs []error
 	applied := 0
 	for _, e := range endpoints {
-		err := dp.install(block, e)
+		// The vrf_table row the install writes is shared state of the
+		// endpoint's VPC on the node.
+		err := underAdvertisementFence(ctx, e.advName, func() error { return dp.install(block, e) })
 		rec.Operation(metrics.SidecarReturnOpInstall, err)
 		if err != nil {
 			// Per-endpoint and never fatal to the sweep: one Envoy pod still
@@ -650,4 +654,17 @@ func galacticRouterNamesForNode(
 		}
 	}
 	return names, nil
+}
+
+// underAdvertisementFence runs write under the write fence of the VPC whose
+// encoded segment leads the BGPAdvertisement name advName. A name whose
+// segment does not decode, which no current writer produces, names no fence,
+// and write runs without one.
+func underAdvertisementFence(ctx context.Context, advName string, write func() error) error {
+	segment, _, _ := strings.Cut(advName, "-")
+	vpc, err := intf.HexToBase62(segment)
+	if err != nil {
+		return write()
+	}
+	return vpcfence.Write(ctx, vpc, write)
 }

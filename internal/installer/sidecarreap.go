@@ -170,7 +170,10 @@ func (r *sidecarReaper) reap(ctx context.Context, k8s client.Client, namespace, 
 
 	var errs []error
 	for _, a := range gone {
-		if err := deleteIngressAdvertisement(ctx, k8s, namespace, a); err != nil {
+		// The advertisement is shared state of its VPC on the node.
+		if err := underAdvertisementFence(ctx, a.name, func() error {
+			return deleteIngressAdvertisement(ctx, k8s, namespace, a)
+		}); err != nil {
 			errs = append(errs, err)
 		}
 	}

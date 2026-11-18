@@ -96,7 +96,7 @@ func TestSweepEBPFVRFTable_RewritesStaleTableID(t *testing.T) {
 		t.Fatalf("seed entry: %v", err)
 	}
 
-	result := SweepEBPFVRFTable(context.Background(), k8s, "default", vrfTablesNode, pinDir)
+	result := SweepEBPFVRFTable(context.Background(), k8s, "default", vrfTablesNode, pinDir, Unfenced)
 	if result.Errors != 0 || result.EBPFVRFEntriesRewritten != 1 {
 		t.Errorf("result = %+v, want 1 entry rewritten and no errors", result)
 	}
@@ -180,7 +180,7 @@ func TestRecreatedVRFKeepsItsTableWhileAnotherVPCIsCreated(t *testing.T) {
 		t.Fatalf("recreated A's table = %d, %v; want its own table %d", got, err, tableA)
 	}
 
-	result := SweepEBPFVRFTable(context.Background(), k8s, "default", vrfTablesNode, pinDir)
+	result := SweepEBPFVRFTable(context.Background(), k8s, "default", vrfTablesNode, pinDir, Unfenced)
 	if result.Errors != 0 {
 		t.Errorf("result.Errors = %d, want 0", result.Errors)
 	}

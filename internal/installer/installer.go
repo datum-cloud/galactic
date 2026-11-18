@@ -33,6 +33,7 @@ import (
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/cni/vpcfence"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/hostconf"
@@ -1352,7 +1353,8 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// router's GC no longer sees them, and this daemon owns their
 			// eBPF rows and the tap teardown.
 			startStaleTapReclaim(ctx, staleTapSem, staleTaps, ebpfState, m.HostLinks)
-			result := gc.SweepEBPFVRFTable(ctx, ebpfState.k8sClient, ebpfState.namespace, ebpfState.nodeName, attach.PinDir)
+			result := gc.SweepEBPFVRFTable(ctx, ebpfState.k8sClient, ebpfState.namespace, ebpfState.nodeName, attach.PinDir,
+				vpcfence.WriteUnlessWorker)
 			logEBPFVRFSweepResult(result)
 
 			// nptv6_table's sweep is its map's only writer, so it registers

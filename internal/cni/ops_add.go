@@ -15,6 +15,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cni/veth"
+	"go.datum.net/galactic/internal/cni/vpcfence"
 	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/hostconf"
 	"go.datum.net/galactic/internal/nadpatch"
@@ -98,15 +99,19 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}()
 
 	// The VRF is created and the veth enslaved to it under one lock, so
-	// garbage collection never finds this VPC's VRF empty in between.
+	// garbage collection never finds this VPC's VRF empty in between. The VRF
+	// is shared state of the VPC on the node, so the write runs under the
+	// VPC's write fence; it never waits for the fence's owner to run.
 	var addRes veth.AddResult
-	if err := vrf.EnsureAndEnslave(pluginConf.VPC, func(*netlink.Vrf) error {
-		var addErr error
-		addRes, addErr = veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, args.ContainerID, pluginConf.MTU)
-		if addErr != nil {
-			return fmt.Errorf("add veth: %w", addErr)
-		}
-		return nil
+	if err := vpcfence.Write(context.Background(), pluginConf.VPC, func() error {
+		return vrf.EnsureAndEnslave(pluginConf.VPC, func(*netlink.Vrf) error {
+			var addErr error
+			addRes, addErr = veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, args.ContainerID, pluginConf.MTU)
+			if addErr != nil {
+				return fmt.Errorf("add veth: %w", addErr)
+			}
+			return nil
+		})
 	}); err != nil {
 		return err
 	}

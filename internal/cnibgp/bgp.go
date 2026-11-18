@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/cni/vpcfence"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/gc"
@@ -296,145 +297,158 @@ func publishBGPState(
 	vpcHex string, k8s client.Client,
 ) (publishResult, error) {
 	var result publishResult
+	// Every write publishFenced makes is shared state of the VPC on this
+	// node, so each attempt runs under the VPC's write fence.
 	err := retryK8sOps(cniTimeout, func(ctx context.Context) error {
-		bgp, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
-		if err != nil {
-			return err
-		}
-
-		// Keyed by (vpc, node) rather than (vpc, attachment): the kernel VRF
-		// is shared by every attachment on this VPC on this node, so they all
-		// converge on one CRD and one Argument.
-		vrfName := crdnames.BGPVRFInstanceName(cfg.vpc, nodeName)
-		rtValue, err := routeTarget(int64(bgp.asNumber), vpcHex)
-		if err != nil {
-			return fmt.Errorf("compute route target: %w", err)
-		}
-
-		// Allocated, written and checked for a collision under the node's
-		// Argument lock; see claimArgument.
-		siblings := func() ([]string, error) { return siblingHostLinks(cfg.vpc, cfg.vpcAttachment) }
-		release := func(argument int32) error {
-			return attachreg.ReleaseArgument(ebpfPinDir,
-				attachreg.Node{Locator: bgp.srv6Locator, NodeID: bgp.nodeID}, cfg.vpc, uint16(argument))
-		}
-		vrfID, created, err := claimArgument(ctx, k8s, namespace, bgp.routerName, vrfName,
-			result.vrfInstanceCreated, siblings, func(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec {
-				return buildVRFInstanceSpec(bgp.routerName, rtValue, vrfID)
-			}, release)
-		if created {
-			result.vrfInstanceCreated = true
-		}
-		if err != nil {
-			return err
-		}
-		slog.Debug("BGP: BGPVRFInstance applied", "resource_name", vrfName, "resource_namespace", namespace,
-			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName, "created", created)
-
-		// Advertise guest prefixes only. Gateway addresses stay host-local
-		// and are included separately in the eBPF pass-through routes.
-		prefixes, ipv6Subnet, ipv4Addr := ipamAdvertisementPrefixes(ipamResult)
-
-		// Nothing to publish when this node's router has no SRv6 locator or
-		// node ID, so leave result.sid invalid rather than compute a SID for
-		// an attachment that has no SRv6 endpoint.
-		if bgp.srv6Locator != "" && bgp.nodeID != 0 {
-			sid, err := srv6.ComputeSID(bgp.srv6Locator, bgp.nodeID, vrfID, bgpv1alpha1.SRv6FunctionEndDT46)
-			if err != nil {
-				return fmt.Errorf("compute SRv6 uSID: %w", err)
-			}
-			result.sid = sid
-		}
-
-		// Not tracked for rollback: the vrf_table entry is shared by every
-		// attachment on this VPC and node, like the BGPVRFInstance above.
-		registered, err := registerEBPFDatapath(
-			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, localEgressPrefixes(ipamResult),
-		)
-		if err != nil {
-			return fmt.Errorf("register eBPF uSID datapath: %w", err)
-		}
-		if registered {
-			registerTenantGateway(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, ipamResult)
-		}
-		err = activateTrafficPolicy(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, registered, ipamResult, cfg.guestHWAddr)
-		if err != nil {
-			return fmt.Errorf("activate traffic policy: %w", err)
-		}
-
-		adv := &bgpv1alpha1.BGPAdvertisement{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      crdnames.BGPAdvertisementName(cfg.vpc, cfg.vpcAttachment, nodeName),
-				Namespace: namespace,
-			},
-		}
-		var mergedPrefixes []string
-		var advOp controllerutil.OperationResult
-		// A predecessor's DEL on this node can update or delete the same
-		// advertisement between CreateOrUpdate's read and write; reread and
-		// write again rather than fail the ADD.
-		err = retry.OnError(retry.DefaultRetry, func(err error) bool {
-			return apierrors.IsConflict(err) || apierrors.IsNotFound(err)
-		}, func() error {
-			*adv = bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Name: adv.Name, Namespace: adv.Namespace}}
-			var err error
-			advOp, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
-				if adv.Annotations == nil {
-					adv.Annotations = make(map[string]string)
-				}
-				adv.Annotations[crdnames.NetNSKey(args.ContainerID)] = args.Netns
-				if ipv6Subnet != "" {
-					adv.Annotations[crdnames.SubnetKeyIPv6(args.ContainerID)] = ipv6Subnet
-				}
-				if ipv4Addr != "" {
-					adv.Annotations[crdnames.SubnetKeyIPv4(args.ContainerID)] = ipv4Addr
-				}
-				// The attachment's config carries no "ipam" block, such as a tap
-				// workload managing its own addressing. Mark the advertisement so
-				// its empty spec.prefixes reads as intentional rather than as
-				// addressing that failed to arrive. Cleared once any ADD for this
-				// attachment does carry an allocation.
-				if ipamResult == nil {
-					adv.Annotations[crdnames.AnnotationNoAddressing] = crdnames.AnnotationNoAddressingValue
-				} else {
-					delete(adv.Annotations, crdnames.AnnotationNoAddressing)
-				}
-				// Prune dead siblings first, so a replaced pod's stale annotation
-				// cannot collide with this ADD's usually identical prefix.
-				pruneDeadContainerAnnotations(adv.Annotations)
-				mergedPrefixes = allAdvertisedPrefixes(adv.Annotations)
-				adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, mergedPrefixes, vrfID)
-				return nil
-			})
-			return err
+		return vpcfence.Write(ctx, cfg.vpc, func() error {
+			return publishFenced(ctx, args, cfg, nodeName, namespace, ipamResult, vpcHex, k8s, &result)
 		})
-		if err != nil {
-			return fmt.Errorf("apply BGPAdvertisement: %w", err)
-		}
-		// Gated on a genuine create, like vrfInstanceCreated above. A
-		// BGPAdvertisement is reused across pod churn on the same attachment,
-		// so marking it created on a mere update would let rollback delete one
-		// still backing a live container's route.
-		if advOp == controllerutil.OperationResultCreated {
-			result.advertisementCreated = true
-		}
-		// The fallback for an instance that moved here from a node whose DEL
-		// never ran: its advertisement would otherwise stay until that
-		// node's GC, and the attachment's status would flip between the two.
-		// Best effort, since failing the ADD over it would roll back this
-		// node's own advertisement.
-		if err := deleteOtherNodeAdvertisements(ctx, k8s, namespace, cfg.vpc, cfg.vpcAttachment, nodeName, adv); err != nil {
-			slog.Warn("ADD: could not delete other nodes' advertisements for this attachment",
-				"err", err, "vpc", cfg.vpc, "vpcAttachment", cfg.vpcAttachment)
-		}
-		slog.Debug("BGP: BGPAdvertisement applied", "resource_name", adv.Name, "resource_namespace", namespace,
-			"prefixes", mergedPrefixes, "addedPrefixes", prefixes, "containerID", args.ContainerID, "operation", advOp)
-
-		slog.Info("ADD: BGP state published", "containerID", args.ContainerID,
-			"vpc", cfg.vpc, "vpcAttachment", cfg.vpcAttachment)
-		return nil
 	})
 	return result, err
+}
+
+// publishFenced is one attempt of publishBGPState, run under the VPC's write
+// fence. It records what it created in result.
+func publishFenced(
+	ctx context.Context, args *skel.CmdArgs, cfg publishConfig, nodeName, namespace string,
+	ipamResult *cniipam.IPAMResult, vpcHex string, k8s client.Client, result *publishResult,
+) error {
+	bgp, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
+	if err != nil {
+		return err
+	}
+
+	// Keyed by (vpc, node) rather than (vpc, attachment): the kernel VRF
+	// is shared by every attachment on this VPC on this node, so they all
+	// converge on one CRD and one Argument.
+	vrfName := crdnames.BGPVRFInstanceName(cfg.vpc, nodeName)
+	rtValue, err := routeTarget(int64(bgp.asNumber), vpcHex)
+	if err != nil {
+		return fmt.Errorf("compute route target: %w", err)
+	}
+
+	// Allocated, written and checked for a collision under the node's
+	// Argument lock; see claimArgument.
+	siblings := func() ([]string, error) { return siblingHostLinks(cfg.vpc, cfg.vpcAttachment) }
+	release := func(argument int32) error {
+		return attachreg.ReleaseArgument(ebpfPinDir,
+			attachreg.Node{Locator: bgp.srv6Locator, NodeID: bgp.nodeID}, cfg.vpc, uint16(argument))
+	}
+	vrfID, created, err := claimArgument(ctx, k8s, namespace, bgp.routerName, vrfName,
+		result.vrfInstanceCreated, siblings, func(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec {
+			return buildVRFInstanceSpec(bgp.routerName, rtValue, vrfID)
+		}, release)
+	if created {
+		result.vrfInstanceCreated = true
+	}
+	if err != nil {
+		return err
+	}
+	slog.Debug("BGP: BGPVRFInstance applied", "resource_name", vrfName, "resource_namespace", namespace,
+		"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName, "created", created)
+
+	// Advertise guest prefixes only. Gateway addresses stay host-local
+	// and are included separately in the eBPF pass-through routes.
+	prefixes, ipv6Subnet, ipv4Addr := ipamAdvertisementPrefixes(ipamResult)
+
+	// Nothing to publish when this node's router has no SRv6 locator or
+	// node ID, so leave result.sid invalid rather than compute a SID for
+	// an attachment that has no SRv6 endpoint.
+	if bgp.srv6Locator != "" && bgp.nodeID != 0 {
+		sid, err := srv6.ComputeSID(bgp.srv6Locator, bgp.nodeID, vrfID, bgpv1alpha1.SRv6FunctionEndDT46)
+		if err != nil {
+			return fmt.Errorf("compute SRv6 uSID: %w", err)
+		}
+		result.sid = sid
+	}
+
+	// Not tracked for rollback: the vrf_table entry is shared by every
+	// attachment on this VPC and node, like the BGPVRFInstance above.
+	registered, err := registerEBPFDatapath(
+		bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, localEgressPrefixes(ipamResult),
+	)
+	if err != nil {
+		return fmt.Errorf("register eBPF uSID datapath: %w", err)
+	}
+	if registered {
+		registerTenantGateway(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, ipamResult)
+	}
+	err = activateTrafficPolicy(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, registered, ipamResult, cfg.guestHWAddr)
+	if err != nil {
+		return fmt.Errorf("activate traffic policy: %w", err)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      crdnames.BGPAdvertisementName(cfg.vpc, cfg.vpcAttachment, nodeName),
+			Namespace: namespace,
+		},
+	}
+	var mergedPrefixes []string
+	var advOp controllerutil.OperationResult
+	// A predecessor's DEL on this node can update or delete the same
+	// advertisement between CreateOrUpdate's read and write; reread and
+	// write again rather than fail the ADD.
+	err = retry.OnError(retry.DefaultRetry, func(err error) bool {
+		return apierrors.IsConflict(err) || apierrors.IsNotFound(err)
+	}, func() error {
+		*adv = bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Name: adv.Name, Namespace: adv.Namespace}}
+		var err error
+		advOp, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
+			if adv.Annotations == nil {
+				adv.Annotations = make(map[string]string)
+			}
+			adv.Annotations[crdnames.NetNSKey(args.ContainerID)] = args.Netns
+			if ipv6Subnet != "" {
+				adv.Annotations[crdnames.SubnetKeyIPv6(args.ContainerID)] = ipv6Subnet
+			}
+			if ipv4Addr != "" {
+				adv.Annotations[crdnames.SubnetKeyIPv4(args.ContainerID)] = ipv4Addr
+			}
+			// The attachment's config carries no "ipam" block, such as a tap
+			// workload managing its own addressing. Mark the advertisement so
+			// its empty spec.prefixes reads as intentional rather than as
+			// addressing that failed to arrive. Cleared once any ADD for this
+			// attachment does carry an allocation.
+			if ipamResult == nil {
+				adv.Annotations[crdnames.AnnotationNoAddressing] = crdnames.AnnotationNoAddressingValue
+			} else {
+				delete(adv.Annotations, crdnames.AnnotationNoAddressing)
+			}
+			// Prune dead siblings first, so a replaced pod's stale annotation
+			// cannot collide with this ADD's usually identical prefix.
+			pruneDeadContainerAnnotations(adv.Annotations)
+			mergedPrefixes = allAdvertisedPrefixes(adv.Annotations)
+			adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, mergedPrefixes, vrfID)
+			return nil
+		})
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("apply BGPAdvertisement: %w", err)
+	}
+	// Gated on a genuine create, like vrfInstanceCreated above. A
+	// BGPAdvertisement is reused across pod churn on the same attachment,
+	// so marking it created on a mere update would let rollback delete one
+	// still backing a live container's route.
+	if advOp == controllerutil.OperationResultCreated {
+		result.advertisementCreated = true
+	}
+	// The fallback for an instance that moved here from a node whose DEL
+	// never ran: its advertisement would otherwise stay until that
+	// node's GC, and the attachment's status would flip between the two.
+	// Best effort, since failing the ADD over it would roll back this
+	// node's own advertisement.
+	if err := deleteOtherNodeAdvertisements(ctx, k8s, namespace, cfg.vpc, cfg.vpcAttachment, nodeName, adv); err != nil {
+		slog.Warn("ADD: could not delete other nodes' advertisements for this attachment",
+			"err", err, "vpc", cfg.vpc, "vpcAttachment", cfg.vpcAttachment)
+	}
+	slog.Debug("BGP: BGPAdvertisement applied", "resource_name", adv.Name, "resource_namespace", namespace,
+		"prefixes", mergedPrefixes, "addedPrefixes", prefixes, "containerID", args.ContainerID, "operation", advOp)
+
+	slog.Info("ADD: BGP state published", "containerID", args.ContainerID,
+		"vpc", cfg.vpc, "vpcAttachment", cfg.vpcAttachment)
+	return nil
 }
 
 // deleteOtherNodeAdvertisements deletes every other node's advertisement for

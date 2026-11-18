@@ -46,6 +46,7 @@
 package ownership
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +54,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -259,6 +261,28 @@ func (a *Authority) Exclusive(scope string, check, mutate func() error) error {
 	return a.ExclusiveIf(scope, func(Record) error { return check() }, mutate)
 }
 
+// transitionPoll is how often ExclusiveWait retries a scope whose ownership
+// is moving.
+const transitionPoll = 50 * time.Millisecond
+
+// ExclusiveWait is ExclusiveIf, retried while ownership of the scope moves
+// until ctx is done, when it returns the last ErrTransitioning joined with
+// ctx's error.
+func (a *Authority) ExclusiveWait(ctx context.Context, scope string, check func(Record) error,
+	mutate func() error) error {
+	for {
+		err := a.ExclusiveIf(scope, check, mutate)
+		if !errors.Is(err, ErrTransitioning) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(transitionPoll):
+		}
+	}
+}
+
 // ExclusiveIf is Exclusive with a check that also reads the scope's record as
 // it stands under the lock, so a writer can refuse a scope by its owner
 // without a window in which the owner changes.
@@ -352,6 +376,19 @@ const WorkerOwnerPrefix = "galactic-worker:"
 
 // WorkerOwned reports whether owner is a galactic-worker incarnation.
 func WorkerOwned(owner string) bool { return strings.HasPrefix(owner, WorkerOwnerPrefix) }
+
+// ErrWorkerOwned is returned by a writer that leaves a scope alone because a
+// galactic-worker incarnation owns it and does that writer's work there.
+var ErrWorkerOwned = errors.New("ownership: a galactic-worker incarnation owns the scope")
+
+// RefuseWorkerOwned is an ExclusiveIf check that refuses a scope a
+// galactic-worker incarnation owns with ErrWorkerOwned.
+func RefuseWorkerOwned(r Record) error {
+	if WorkerOwned(r.Owner) {
+		return fmt.Errorf("%w: %q", ErrWorkerOwned, r.Owner)
+	}
+	return nil
+}
 
 // Read returns the scope's record.
 func (a *Authority) Read(scope string) (Record, error) {
