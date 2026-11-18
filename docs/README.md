@@ -15,6 +15,7 @@ with the [system overview](overview.md) for components and ownership, or
 | Inspect metrics and alerts                           | [Observability](observability/README.md)                                               |
 | Look up API resources                                | [API reference index](api/README.md)                                                   |
 | Evaluate a proposal or remaining implementation work | [Designs](designs/README.md)                                                           |
+| Follow the Galactic Worker integration branch        | [Worker contract](worker/README.md)                                                    |
 | Find a dated review or test result                   | [Archive](archive/README.md)                                                           |
 | Change this documentation                            | [Documentation maintenance](development/documentation.md)                              |
 
