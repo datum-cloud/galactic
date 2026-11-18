@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -218,7 +219,13 @@ func (w *Worker) resolve(ctx context.Context, vpc string, claims []claim) (
 			}
 			if de.resolved {
 				capName := module.RequiredCapability(c.spec.GetHandoff(), de.mode)
-				if cp := w.d.Modules.Capability(capName); !cp.Available {
+				if !slices.Contains(c.rec.Capabilities, capName) {
+					// The destination resolved to a mode the owner was
+					// not allowed when it was admitted, for example once a
+					// locator became known.
+					de.capReason = workerv1alpha1.ReasonCapabilityNotAllowed
+					de.capMsg = c.rec.Owner + " may not use " + capName
+				} else if cp := w.d.Modules.Capability(capName); !cp.Available {
 					de.capReason, de.capMsg = cp.Reason, cp.Message
 					if de.capMsg == "" {
 						de.capMsg = capName + " is unavailable"

@@ -33,8 +33,12 @@ type Record struct {
 	VPC           string `json:"vpc"`
 	AttachmentUID string `json:"attachmentUID"`
 	// Owner is the ServiceAccount, "namespace/name", that created the claim.
-	Owner      string `json:"owner"`
-	Generation uint64 `json:"generation"`
+	Owner string `json:"owner"`
+	// Capabilities are the capabilities the owner was allowed when the
+	// generation was accepted. Reconciliation programs no destination
+	// whose capability is missing from them.
+	Capabilities []string `json:"capabilities,omitempty"`
+	Generation   uint64   `json:"generation"`
 	// SpecHash is the hash of the deterministic encoding of Spec.
 	SpecHash string `json:"specHash"`
 	// Spec is the claim spec in protobuf JSON.

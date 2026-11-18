@@ -78,8 +78,10 @@ refused request.
 A claim needs the Local capability of its handoff (`local.tap`,
 `local.veth_pair`, `local.routed_link` or `local.socket`) for its Local
 destinations, and `fabric.srv6` for its Fabric destinations. The caller must
-be allowed the handoff's capability, and `fabric.srv6` when a destination
-resolves to Fabric at admission.
+be allowed the handoff's capability, and `fabric.srv6` when a destination is
+on another node or resolves to Fabric at admission. Worker records the owner's
+capabilities with each generation and does not program a destination that
+later resolves to a mode they do not cover.
 
 ### Version negotiation
 
@@ -172,6 +174,7 @@ Status carries these reasons besides the ones above:
 | `LocatorUnknown`                                   | `Resolved`    | This node or the destination's node has no SRv6 locator yet                                               |
 | `ModeUnavailable`                                  | `Resolved`    | The destination resolves to a mode the preference excludes                                                |
 | `ModuleNotRunning` and other capability reasons    | `Programmed`  | The capability the destination needs is unavailable                                                       |
+| `CapabilityNotAllowed`                             | `Programmed`  | The destination resolved to a mode the owner was not allowed at admission, so it stays unprogrammed       |
 | `ProgrammingFailed`                                | `Programmed`  | The last commit failed; the message carries the error                                                     |
 | `ScopeOwnedElsewhere`                              | `Programmed`  | Another writer owns the VPC scope's fence (see [ownership](ownership.md#bootstrap-adoption-and-transfer)) |
 | `Released`, `LeaseExpired`, `AuthorizationRevoked` | `Withdrawing` | Why the claim is being withdrawn                                                                          |
