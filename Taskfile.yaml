@@ -53,10 +53,11 @@ tasks:
     deps: [golangci-lint, yamlfmt, yaml-ext, 'build:ebpf']
     cmds:
       - '{{.GOLANGCI_LINT}} run'
-      # examples/edge-provider and examples/looking-glass-client are their
-      # own modules, which the root run skips.
+      # examples/edge-provider, examples/looking-glass-client and
+      # examples/worker-client are their own modules, which the root run skips.
       - cd examples/edge-provider && {{.GOLANGCI_LINT}} run --config ../../.golangci.yaml
       - cd examples/looking-glass-client && {{.GOLANGCI_LINT}} run --config ../../.golangci.yaml
+      - cd examples/worker-client && {{.GOLANGCI_LINT}} run --config ../../.golangci.yaml
       - '{{.YAMLFMT}} -lint'
   lint-fix:
     desc: Lint and apply fixes
@@ -171,6 +172,7 @@ tasks:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-gateway ./cmd/galactic-gateway
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-nat ./cmd/galactic-nat
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-vrf ./cmd/galactic-vrf
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-worker ./cmd/galactic-worker
       - go build -ldflags "{{.LDFLAGS}}" -o bin/fabric-config-agent ./cmd/fabric-config-agent
       - go build -ldflags "{{.LDFLAGS}}" -o bin/fabric-api ./cmd/fabric-api
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-controller ./cmd/galactic-controller
@@ -186,6 +188,7 @@ tasks:
       - bash scripts/ci.sh unittest
       - task: test:edge-provider
       - task: test:looking-glass-client
+      - task: test:worker-client
   test:edge-provider:
     desc: Build, vet and unit-test the reference edge provider (examples/edge-provider, its own module)
     dir: examples/edge-provider
@@ -204,6 +207,19 @@ tasks:
       - |
         if go list -deps ./... | grep -E '^go\.datum\.net/galactic/' | grep -vxE 'go\.datum\.net/galactic/api/fabric/(service/)?v1'; then
           echo "the client imports Galactic packages beyond the published service API" >&2
+          exit 1
+        fi
+  test:worker-client:
+    desc: Build, vet and unit-test the independent Worker client (examples/worker-client, its own module)
+    dir: examples/worker-client
+    cmds:
+      - go build ./...
+      - go vet ./...
+      - go test -race ./...
+      # The client must build from the published Worker API alone.
+      - |
+        if go list -deps ./... | grep -E '^go\.datum\.net/galactic/' | grep -vxE 'go\.datum\.net/galactic/(api/galactic/worker/v1alpha1|pkg/workerclient)'; then
+          echo "the client imports Galactic packages beyond the published Worker API" >&2
           exit 1
         fi
   test:unit-root:

@@ -1,0 +1,251 @@
+// Copyright 2026 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// The Galactic Worker service contract: the node-local API a service agent
+// calls to deliver tenant traffic between its own handoff point and tenant
+// destinations. docs/worker/contract.md is the normative description of every
+// operation, state and error.
+//
+// Worker serves it on a unix socket only. Every call except GetCapabilities
+// carries the session ID GetCapabilities returned, in the
+// x-galactic-worker-session metadata key, and every call carries a projected
+// ServiceAccount token with audience galactic-worker as
+// "authorization: Bearer <token>". Every refusal is a gRPC status carrying a
+// google.rpc.ErrorInfo whose domain is worker.galactic.datumapis.com and whose
+// reason is one of the machine reasons the contract lists.
+
+syntax = "proto3";
+
+package galactic.worker.v1alpha1;
+
+import "google/protobuf/duration.proto";
+
+option go_package = "go.datum.net/galactic/api/galactic/worker/v1alpha1;workerv1alpha1";
+
+// Worker runs once per node. The contract names the service Worker.
+// buf:lint:ignore SERVICE_SUFFIX
+service Worker {
+  // GetCapabilities negotiates the API version and starts a session. It must
+  // be the first call of a session.
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  // Request creates a claim. It returns once the claim is validated,
+  // authorized and durably recorded, not once it is programmed.
+  rpc Request(RequestRequest) returns (RequestResponse);
+  // Update replaces the spec of an existing claim.
+  rpc Update(UpdateRequest) returns (UpdateResponse);
+  // Observe streams complete status snapshots for one claim or for every
+  // claim of the caller. An open stream renews the session lease.
+  rpc Observe(ObserveRequest) returns (stream ObserveResponse);
+  // Release removes a claim at its current generation.
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+}
+
+message GetCapabilitiesRequest {
+  // versions are the API versions the client supports, such as "v1alpha1".
+  // Worker picks the highest one it also serves.
+  repeated string versions = 1;
+}
+
+message GetCapabilitiesResponse {
+  // version is the API version chosen for the session.
+  string version = 1;
+  // session_id identifies the session. Send it with every later call.
+  string session_id = 2;
+  // lease is how long the session lives without a renewal.
+  google.protobuf.Duration lease = 3;
+  // renew_interval is how often a client renews the lease, by a call or an
+  // open Observe stream.
+  google.protobuf.Duration renew_interval = 4;
+  // capabilities lists every capability with its current state.
+  repeated Capability capabilities = 5;
+  // node is the node this Worker runs on, which every claim key must name.
+  string node = 6;
+}
+
+// CapabilityState reports whether a capability can be programmed now.
+enum CapabilityState {
+  CAPABILITY_STATE_UNSPECIFIED = 0;
+  CAPABILITY_STATE_AVAILABLE = 1;
+  CAPABILITY_STATE_UNAVAILABLE = 2;
+}
+
+message Capability {
+  // name is one of local.tap, local.veth_pair, local.routed_link,
+  // local.socket and fabric.srv6.
+  string name = 1;
+  CapabilityState state = 2;
+  // reason is a machine reason when the capability is unavailable, such as
+  // ModuleNotRunning, DatapathNotLoaded or HookUnsupported.
+  string reason = 3;
+  string message = 4;
+  // allowed reports whether the caller's ServiceAccount may use it.
+  bool allowed = 5;
+}
+
+// ClaimKey names a claim. The caller is part of the key too, but Worker
+// derives it from the connection; a client never supplies it.
+message ClaimKey {
+  string node = 1;
+  // vpc is the base62 identifier of the VPC of the attachment.
+  string vpc = 2;
+  // attachment_uid is the UID of the VPCAttachment or EdgeAttachment that is
+  // the service's handoff point in the VPC.
+  string attachment_uid = 3;
+}
+
+// Handoff is how traffic passes between the service and the tenant side.
+enum Handoff {
+  HANDOFF_UNSPECIFIED = 0;
+  HANDOFF_TAP = 1;
+  HANDOFF_VETH_PAIR = 2;
+  HANDOFF_ROUTED_LINK = 3;
+  HANDOFF_SOCKET = 4;
+}
+
+// Mode is a delivery mode: the preference in a spec, or the result of
+// resolving a destination.
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  // MODE_AUTO lets Worker resolve each destination. A spec only.
+  MODE_AUTO = 1;
+  MODE_LOCAL = 2;
+  MODE_FABRIC = 3;
+}
+
+message AttachmentRef {
+  // uid is a VPCAttachment or EdgeAttachment UID.
+  string uid = 1;
+}
+
+message ShardRef {
+  // group names the shard group.
+  string group = 1;
+  uint32 index = 2;
+}
+
+message BackendRef {
+  // node is the backend's node name.
+  string node = 1;
+  // slot is the slot the gateway encodes in the backend SID.
+  uint32 slot = 2;
+}
+
+// Destination is one tenant destination of a claim.
+message Destination {
+  oneof target {
+    AttachmentRef attachment = 1;
+    // shard is resolved by #1437. Until then it reports
+    // DestinationKindUnsupported.
+    ShardRef shard = 2;
+    // backend is resolved by #1438. Until then it reports
+    // DestinationKindUnsupported.
+    BackendRef backend = 3;
+  }
+}
+
+message ClaimSpec {
+  Handoff handoff = 1;
+  repeated Destination destinations = 2;
+  // mode is the mode preference. Unset means MODE_AUTO.
+  Mode mode = 3;
+}
+
+message RequestRequest {
+  ClaimKey key = 1;
+  // generation is client-assigned and must be at least 1.
+  uint64 generation = 2;
+  ClaimSpec spec = 3;
+}
+
+message RequestResponse {
+  ClaimStatus status = 1;
+}
+
+message UpdateRequest {
+  ClaimKey key = 1;
+  uint64 generation = 2;
+  ClaimSpec spec = 3;
+}
+
+message UpdateResponse {
+  ClaimStatus status = 1;
+}
+
+message ReleaseRequest {
+  ClaimKey key = 1;
+  // generation must equal the claim's current generation.
+  uint64 generation = 2;
+}
+
+message ReleaseResponse {
+  // status is the claim's status after the release was recorded, or unset
+  // when no such claim exists.
+  ClaimStatus status = 1;
+}
+
+message ObserveRequest {
+  // key selects one claim. Unset selects every claim of the caller.
+  ClaimKey key = 1;
+}
+
+message ObserveResponse {
+  ClaimStatus status = 1;
+}
+
+// ConditionStatus is the status of one condition.
+enum ConditionStatus {
+  CONDITION_STATUS_UNSPECIFIED = 0;
+  CONDITION_STATUS_TRUE = 1;
+  CONDITION_STATUS_FALSE = 2;
+  CONDITION_STATUS_UNKNOWN = 3;
+}
+
+// Condition is one of Admitted, Resolved, Programmed, Ready and Withdrawing.
+message Condition {
+  string type = 1;
+  ConditionStatus status = 2;
+  string reason = 3;
+  string message = 4;
+}
+
+// WithdrawalScope names what a withdrawal stops.
+enum WithdrawalScope {
+  WITHDRAWAL_SCOPE_UNSPECIFIED = 0;
+  WITHDRAWAL_SCOPE_DESTINATION = 1;
+  WITHDRAWAL_SCOPE_CLAIM = 2;
+  WITHDRAWAL_SCOPE_CALLER = 3;
+  WITHDRAWAL_SCOPE_VPC = 4;
+}
+
+message DestinationStatus {
+  Destination destination = 1;
+  // mode is MODE_LOCAL or MODE_FABRIC once resolved.
+  Mode mode = 2;
+  bool resolved = 3;
+  bool programmed = 4;
+  bool ready = 5;
+  // reason explains the first of resolved, programmed and ready that is
+  // false.
+  string reason = 6;
+  string message = 7;
+}
+
+// ClaimStatus is a complete snapshot of one claim. A client drops a
+// duplicate or reordered snapshot by comparing observed_generation and
+// revision.
+message ClaimStatus {
+  ClaimKey key = 1;
+  // generation is the accepted generation.
+  uint64 generation = 2;
+  // observed_generation is the generation the conditions describe.
+  uint64 observed_generation = 3;
+  repeated Condition conditions = 4;
+  repeated DestinationStatus destinations = 5;
+  WithdrawalScope withdrawal_scope = 6;
+  // released is true in the last snapshot of a claim whose removal is
+  // confirmed.
+  bool released = 7;
+  // revision increases with every snapshot Worker produces for the claim.
+  uint64 revision = 8;
+}

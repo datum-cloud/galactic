@@ -60,6 +60,7 @@ var Binaries = []string{
 	"galactic-nat",
 	"galactic-router",
 	"galactic-vrf",
+	"galactic-worker",
 	"masque-authority",
 	"masque-provider",
 }

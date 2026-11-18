@@ -1,12 +1,18 @@
 # Galactic Worker
 
-Galactic Worker is a proposed node-local service. Service agents use it to
+Galactic Worker is a node-local service. Service agents use it to
 deliver tenant traffic locally or across the fabric, and it becomes the single
 writer of shared host state. These pages are the contract for
 [epic #1430](https://github.com/datum-cloud/galactic/issues/1430). Every Task of
 the epic implements against them on the `integration/galactic-worker` branch.
 
-Status: proposed. Nothing described here is implemented at the branch start.
+Status: the service API, reconciliation core, client library and module
+interface are implemented by
+[#1433](https://github.com/datum-cloud/galactic/issues/1433). No delivery module
+is built in yet: Local ([#1435](https://github.com/datum-cloud/galactic/issues/1435))
+and Fabric ([#1436](https://github.com/datum-cloud/galactic/issues/1436)) add
+them, so every capability reports `ModuleNotRunning` until then.
+`examples/worker-client` is an independent client of the published API.
 
 | Page                                   | Contents                                                                                  |
 | -------------------------------------- | ----------------------------------------------------------------------------------------- |
@@ -41,4 +47,8 @@ PR. "Confirmed" means the product owner approved the decision on the date given.
 | D15 | Branch workflow with start commit `451eb40`                                                                                                       | Accepted             | [Branch workflow](branch-workflow.md)                       |
 | D16 | NIC: Broadcom NetXtreme-C/E (`bnxt_en`) in generic mode; native mode on lab veth devices                                                          | Confirmed 2026-11-18 | [Qualification](qualification.md#platform)                  |
 | D17 | Comparison against the main base on the same host, using the MASQUE benchmark method                                                              | Proposed             | [Qualification](qualification.md#comparison-method)         |
-| D18 | Numeric limits                                                                                                                                    | Confirmed 2026-11-18 | [Qualification](qualification.md#limits)                    |
+| D18 | Numeric limits, including 1024 claims per caller                                                                                                  | Confirmed 2026-11-18 | [Qualification](qualification.md#limits)                    |
+| D19 | The session ID travels in the `x-galactic-worker-session` metadata key; a call without a live session is `FAILED_PRECONDITION`/`NoSession`        | Accepted             | [Contract](contract.md#sessions-restart-and-stale-deletion) |
+| D20 | Shard and backend destinations report `DestinationKindUnsupported` until #1437 and #1438 add their resolvers inside Worker                        | Accepted             | [Contract](contract.md#claims)                              |
+| D21 | The peer check maps `SO_PEERCRED` to a pod by the cgroup path, so Worker needs `hostPID` and the host `/proc`                                     | Accepted             | [Contract](contract.md#transport-identity-and-access)       |
+| D22 | The allowlist is a YAML file passed with `--allowlist`                                                                                            | Accepted             | [Contract](contract.md#transport-identity-and-access)       |
