@@ -37,6 +37,7 @@ import (
 	_ "go.datum.net/galactic/internal/plumbing/nldump"
 	_ "go.datum.net/galactic/internal/runtime/gobgp"
 	_ "go.datum.net/galactic/internal/serviceroute"
+	_ "go.datum.net/galactic/internal/worker"
 )
 
 const (
