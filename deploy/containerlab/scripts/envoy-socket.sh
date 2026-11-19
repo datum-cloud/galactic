@@ -197,7 +197,7 @@ stop_backends() {
     kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- cat /tmp/envoy-backend.log \
       </dev/null >"${OUT}/logs/backend-${p//\//-}.log" 2>&1 || true
     kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- sh -c \
-      'pkill -f envoy-backend.py; rm -f /tmp/envoy-backend.py /tmp/envoy-backend.log' </dev/null >/dev/null 2>&1 || true
+      'pkill -f "[e]nvoy-backend.py"; rm -f /tmp/envoy-backend.py /tmp/envoy-backend.log' </dev/null >/dev/null 2>&1 || true
   done
 }
 
@@ -226,7 +226,7 @@ cleanup() {
   kd -n "${NS}" logs deploy/envoy -c galactic-vrf --tail=-1 >"${OUT}/logs/galactic-vrf.log" 2>&1
   [ "${BACKENDS_STARTED}" = 1 ] && stop_backends
   if [ "${MOVED}" = 1 ]; then
-    kd -n ns80 scale deployment/guest-a --replicas=1
+    kd -n ns80 scale deployment/guest-a --replicas="${GUEST_A_REPLICAS:-1}"
     kd -n ns80 rollout status deployment/guest-a --timeout=120s
     "${SCRIPT_DIR}/publish-attachments.sh" ns80 dfw >>"${OUT}/logs/publish-attachments.log" 2>&1
   fi
@@ -413,7 +413,7 @@ start_backend() {
   [ -n "${pod}" ] || return 1
   kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec -i "${pod}" -- sh -c 'cat >/tmp/envoy-backend.py' \
     <"${SCRIPT_DIR}/envoy-backend.py"
-  kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- sh -c "pkill -f envoy-backend.py; \
+  kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- sh -c "pkill -f '[e]nvoy-backend.py'; \
     setsid nohup python3 /tmp/envoy-backend.py ${p#*/} ${p%%/*} ${BNODE[${p}]} 8080 \
     >/tmp/envoy-backend.log 2>&1 </dev/null & exit 0" </dev/null
   for i in $(seq 1 25); do
@@ -782,6 +782,7 @@ state
 # on dfw-worker (ns80 has no TAP guest; a veth is the same state for the
 # claim), so only the claim keeps the host VRF.
 window move
+GUEST_A_REPLICAS=$(kd -n ns80 get deployment guest-a -o jsonpath='{.spec.replicas}' </dev/null)
 MOVED=1
 kd -n ns80 scale deployment/guest-a --replicas=0 >/dev/null
 kd -n ns80 wait --for=delete pod -l app=vpc-a --timeout=120s >/dev/null 2>&1 || true
@@ -798,7 +799,7 @@ mapfile -t a < <(curl_args "${n}" 80/local/fresh)
 out=$(client curl "${a[@]}" 2>&1 || true)
 record move "80/local: no backend answers" yes "$(jq -R -s '[split("\n")[] | fromjson? | objects] | length == 0' <<<"${out}" |
   sed 's/true/yes/;s/false/no/')"
-kd -n ns80 scale deployment/guest-a --replicas=1 >/dev/null
+kd -n ns80 scale deployment/guest-a --replicas="${GUEST_A_REPLICAS}" >/dev/null
 kd -n ns80 rollout status deployment/guest-a --timeout=120s >/dev/null
 MOVED=0
 "${SCRIPT_DIR}/publish-attachments.sh" ns80 dfw >"${OUT}/logs/publish-attachments.log" 2>&1

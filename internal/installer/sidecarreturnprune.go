@@ -192,9 +192,9 @@ func isRetiredSidecarReturnRow(block uint64, argument uint16, tableID, egressKin
 // Argument vpcOf resolves, each under its VPC's write fence: CNI writes a row
 // with the same key for that VPC, so the row is re-read under the fence and
 // changed only if it is still a retired one. A row whose VPC has a host VRF
-// on the node points at that VRF's table again; any other is removed. It returns how many rows it
-// removed and how many it kept for want of a VPC. A datapath with no pinned
-// maps has none.
+// on the node points at that VRF's table again; any other is removed. It
+// returns how many rows it repaired or removed and how many it kept for want
+// of a VPC. A datapath with no pinned maps has none.
 func pruneRetiredSidecarReturnVRFRows(
 	ctx context.Context, pinDir string, vpcOf func(argument uint16) (string, bool),
 ) (removed, kept int, err error) {
