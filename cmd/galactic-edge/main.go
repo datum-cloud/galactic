@@ -207,11 +207,12 @@ func run(parent context.Context, o *options) error {
 	}, vpcStateTimeout)
 	var workerDP *agent.WorkerDatapath
 	if o.workerSocket != "" {
-		wc, err := workerclient.Dial(ctx, workerclient.Options{SocketPath: o.workerSocket,
-			TokenFile: o.workerTokenFile})
-		if err != nil {
-			return fmt.Errorf("connect to Galactic Worker: %w", err)
-		}
+		// Connected on first use: galactic-edge keeps running, and renewing
+		// the gates of links Worker registered, while Worker is down.
+		wc := &agent.WorkerConn{Dial: func(ctx context.Context) (*workerclient.Client, error) {
+			return workerclient.Dial(ctx, workerclient.Options{SocketPath: o.workerSocket,
+				TokenFile: o.workerTokenFile})
+		}}
 		defer func() { _ = wc.Close() }()
 		workerDP = &agent.WorkerDatapath{Client: wc, Node: o.nodeName, Gates: agent.PinnedLinkGates{PinDir: o.pinDir},
 			Wait: o.workerWait, Capabilities: wc.Capabilities}
