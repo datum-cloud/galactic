@@ -158,3 +158,20 @@ func TestSocketClaimAdvertisesItsAddresses(t *testing.T) {
 		t.Fatal("releasing VPC A's claim withdrew VPC B's advertisement")
 	}
 }
+
+// TestAdvertisementOfAVPCWithoutVRFIsWithdrawn removes an advertisement Worker
+// left for a VPC that has neither claims nor a host VRF any more, before
+// forgetting the VPC: nothing would requeue it afterwards.
+func TestAdvertisementOfAVPCWithoutVRFIsWithdrawn(t *testing.T) {
+	e, h := hostEnv(t)
+	ah := &advertisingHost{fakeHostState: h, ads: map[string]map[string]hostscope.Advertisement{
+		vpcB: {svcB: {AttachmentUID: svcB, PodUID: podOne, Addresses: []netip.Addr{netip.MustParseAddr("2001:db8:ff::1")}}},
+	}}
+	e.hostState = ah
+	e.start()
+	e.w.HostChanged(vpcB)
+	e.eventually("the advertisement of a VPC with no VRF is withdrawn", func() bool {
+		_, ok := ah.pod(vpcB, svcB)
+		return !ok
+	})
+}

@@ -74,6 +74,25 @@ func TestAdvertise(t *testing.T) {
 	name := crdnames.WorkerAdvertisementName(testVPC, testAtt, testNode)
 	checkAdvertisement(t, k8s, name, "pod-1")
 
+	// The VPC's instance moves to another VRF ID: the advertisement is no
+	// longer current, and publishing again follows the instance.
+	inst := &bgpv1alpha1.BGPVRFInstance{}
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: testNS,
+		Name: crdnames.BGPVRFInstanceName(testVPC, testNode)}, inst); err != nil {
+		t.Fatal(err)
+	}
+	inst.Spec.VRFID = 10
+	if err := k8s.Update(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := k.Current(ctx, testVPC, want); ok {
+		t.Fatal("Current = true after the instance's VRF ID changed")
+	}
+	inst.Spec.VRFID = 9
+	if err := k8s.Update(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+
 	// The owner's pod is replaced: the same advertisement names the new pod.
 	want[0].PodUID = "pod-2"
 	if ok, _ := k.Current(ctx, testVPC, want); ok {

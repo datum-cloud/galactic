@@ -213,6 +213,11 @@ func (w *Worker) reconcileHost(ctx context.Context, vpc string) error {
 		if err := w.completeTransfer(vpc); err != nil {
 			return err
 		}
+		// A VPC whose VRF is gone has no claims to advertise for; nothing
+		// requeues it once forgotten, so its advertisements go now.
+		if err := w.withdrawAdvertisements(ctx, vpc); err != nil {
+			return err
+		}
 		w.forgetScope(vpc)
 		return nil
 	}
@@ -833,4 +838,42 @@ func acquireFailureReason(err error) string {
 		return workerv1alpha1.ReasonScopeOwnedElsewhere
 	}
 	return workerv1alpha1.ReasonProgrammingFailed
+}
+
+// withdrawAdvertisements removes Worker's advertisements for vpc, a VPC with
+// no claims, inside a commit of its scope. A scope another writer owns is
+// left alone.
+func (w *Worker) withdrawAdvertisements(ctx context.Context, vpc string) error {
+	current, err := w.advertisementsCurrent(ctx, vpc, nil)
+	if err != nil || current {
+		return err
+	}
+	scope := module.Scope{VPC: vpc}
+	t, err := w.acquire(scope)
+	if errors.Is(err, errOwnedElsewhere) || errors.Is(err, ownership.ErrTransitioning) ||
+		errors.Is(err, ownership.ErrNotOwner) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// The commit carries the scope's complete state with no claims, so it
+	// also serves a scope that needs a snapshot.
+	mods, changes, _, err := w.planModules(ctx, scope, nil)
+	if err != nil {
+		return err
+	}
+	commit := w.d.Fence.Commit
+	if t.Resync {
+		commit = w.d.Fence.CommitSnapshot
+	}
+	if _, err := commit(t, func() error {
+		if err := applyModules(ctx, scope, mods, changes); err != nil {
+			return err
+		}
+		return w.advertise(ctx, vpc, nil)
+	}); err != nil {
+		return fmt.Errorf("commit %s: %w", scope.Name(), err)
+	}
+	return nil
 }
