@@ -29,14 +29,18 @@ tenant traffic.
    ═  two-member LACP bond        ─  single link
 ```
 
+`dfw-worker4`, dfw's second compute node, is wired exactly like `dfw-worker`
+and left out of the drawing: one bond to each of dfw's edge nodes, landing on
+each edge node's `bond2`.
+
 Only edge nodes touch the transit. Each holds the eBGP session to its site's
 transit router, and every other worker in the site sits behind it, reaching
 the fabric over an iBGP session to that edge node — compute nodes and the
 route reflector have no transit uplink and no eBGP session anywhere.
 
-`dfw-worker` is **dual-homed**, one bond to each of dfw's two edge nodes, so
-losing an edge node does not take the site's compute node off the fabric with
-it. sjc and iad have a single edge node each and nothing to dual-home to. The
+`dfw-worker` and `dfw-worker4` are **dual-homed**, one bond to each of dfw's
+two edge nodes, so losing an edge node takes neither of the site's compute
+nodes off the fabric with it. sjc and iad have a single edge node each and nothing to dual-home to. The
 two bonds are equal paths — see the BGP design below.
 
 ### Bonded links
@@ -61,12 +65,15 @@ link and the transit mesh stay single links: nothing attaches to them.
   DaemonSet name the same interfaces on every node in a site:
   - `bond0` is the node's first uplink: the transit uplink on an edge node,
     the uplink to the site's first edge node on a compute node.
-  - `bond1` is an edge node's compute-facing link, and on `dfw-worker` its
-    uplink to the second edge node.
+  - `bond1` is an edge node's compute-facing link, and on `dfw-worker` and
+    `dfw-worker4` the uplink to the second edge node.
+  - `bond2` exists only on dfw's edge nodes: the link to `dfw-worker4`. Each
+    datapath list that names it is set for those nodes alone, since a list
+    naming an interface a node lacks fails to attach there.
 
   On the transit routers the bonds are `bond1`/`bond2`, per edge node faced.
 - **A bond's members go to one peer.** LACP aggregates links between two
-  systems, so `dfw-worker`'s dual-homing is two bonds with ECMP across them,
+  systems, so each dfw compute node's dual-homing is two bonds with ECMP across them,
   not one bond split across two edge nodes, which would need MLAG or EVPN
   multihoming.
 - **The original link keeps its interface number** and the second member takes
@@ -79,8 +86,12 @@ link and the transit mesh stay single links: nothing attaches to them.
 | dfw-worker    | bond1   | eth2 eth4   | dfw-worker3 bond1          |
 | dfw-worker2   | bond0   | eth1 eth3   | tr1 bond1 (eth1 eth6)      |
 | dfw-worker2   | bond1   | eth2 eth4   | dfw-worker bond0           |
+| dfw-worker2   | bond2   | eth5 eth6   | dfw-worker4 bond0          |
 | dfw-worker3   | bond0   | eth1 eth3   | tr1 bond2 (eth5 eth7)      |
 | dfw-worker3   | bond1   | eth2 eth4   | dfw-worker bond1           |
+| dfw-worker3   | bond2   | eth5 eth6   | dfw-worker4 bond1          |
+| dfw-worker4   | bond0   | eth1 eth3   | dfw-worker2 bond2          |
+| dfw-worker4   | bond1   | eth2 eth4   | dfw-worker3 bond2          |
 | sjc-worker    | bond0   | eth1 eth2   | sjc-worker2 bond1          |
 | sjc-worker2   | bond0   | eth1 eth3   | tr2 bond1 (eth1 eth5)      |
 | sjc-worker2   | bond1   | eth2 eth4   | sjc-worker bond0           |
@@ -101,7 +112,7 @@ per-member attach never has to wait for a member to rejoin its aggregate. A NIC 
 only be tested on real hardware.
 
 Every worker's role comes from its labels alone — Kind's sequential names
-(`<cluster>-worker`, `-worker2`, `-worker3`) are used as-is, with no renaming
+(`<cluster>-worker`, `-worker2`, `-worker3`, `-worker4`) are used as-is, with no renaming
 step. `remote-host` is the one node outside every cluster: a plain nginx host
 hanging off `tr4`, the transit router with no site attached.
 
@@ -113,6 +124,7 @@ hanging off `tr4`, the transit router with no site attached.
 | `dfw-worker`          | ext-container   | compute: FRR PE, galactic-router PE, galactic-cni                                |
 | `dfw-worker2`         | ext-container   | edge: FRR PE, galactic-router PE, galactic-cni, egress shard, galactic-gateway   |
 | `dfw-worker3`         | ext-container   | edge: dfw's second edge node, same components as `dfw-worker2`                   |
+| `dfw-worker4`         | ext-container   | compute: dfw's second compute node, same components as `dfw-worker`; tainted     |
 | `sjc-control-plane`   | ext-container   | Kind control-plane; runs Cilium, Multus                                          |
 | `sjc-worker`          | ext-container   | compute: FRR PE, galactic-router PE, galactic-cni                                |
 | `sjc-worker2`         | ext-container   | edge: FRR PE, galactic-router PE, galactic-cni, egress shard, galactic-gateway   |
@@ -177,12 +189,14 @@ underlay (FRR fabric, IPv6 + IPv4 unicast)
 
   everything else     ──iBGP──▶  its own site's edge node (AS 65000)
     dfw-worker  ──▶ dfw-worker2     sjc-worker  ──▶ sjc-worker2
-    iad-worker  ──▶ iad-worker2     iad-worker3 ──▶ iad-worker2
+    dfw-worker4 ──▶ dfw-worker2     iad-worker  ──▶ iad-worker2
+    (each dfw compute node also     iad-worker3 ──▶ iad-worker2
+     ──▶ dfw-worker3)
 
 overlay (galactic-router, l2vpn/evpn)
-  dfw-worker, dfw-worker2, dfw-worker3  ─┐
-  sjc-worker, sjc-worker2               ─┼─iBGP─▶  iad-worker3 (AS 65000 RR)
-  iad-worker, iad-worker2               ─┘
+  dfw-worker, dfw-worker2, dfw-worker3, dfw-worker4  ─┐
+  sjc-worker, sjc-worker2                            ─┼─iBGP─▶  iad-worker3 (AS 65000 RR)
+  iad-worker, iad-worker2                            ─┘
 ```
 
 - All clusters use a single AS (65000) for both the FRR fabric and the galactic-router tenant.
@@ -195,12 +209,12 @@ overlay (galactic-router, l2vpn/evpn)
 - The IPv4 address family carries per-node `/32` loopbacks only. There is no IPv4 counterpart to the
   SRv6 locator block, and the numbered link subnets are never redistributed — so a ping between
   underlay nodes must be sourced from a loopback (`task verify:underlay` does this).
-- Each site's **compute** node originates that site's covering SRv6 locator `2001:db8:ff0X::/48` and its `fc00:0:X::/48` loopback pool; its edge nodes originate their own `/128` peering loopback and their egress shard's `/64`. dfw's edge nodes, which run Galactic Edge, also originate their tenant-delivery `/64` (`0x1002`, `0x1003`), since an edge attachment receives its VPC's traffic there and the site `/48` would otherwise send it to the compute node. Every other per-node `/64` in [Node-ID allocation](#node-id-allocation) is reachable only via the one site aggregate.
-- **Known gap:** the addressing plan's `fabric.md` calls for per-node `/64` origination instead of one site-wide `/48`. Originating the covering aggregate from a single compute node means a second compute node joining a site would create an anycast ambiguity — the `/48` would attract its `/64` too, to a node that cannot deliver it. The lab has not hit this (one compute node per site) and the renumber onto service-classed Node-IDs deliberately did not change origination.
+- Each site's first **compute** node (`<site>-worker`) originates that site's covering SRv6 locator `2001:db8:ff0X::/48` and its `fc00:0:X::/48` loopback pool; its edge nodes originate their own `/128` peering loopback and their egress shard's `/64`. dfw's edge nodes, which run Galactic Edge, also originate their tenant-delivery `/64` (`0x1002`, `0x1003`), since an edge attachment receives its VPC's traffic there and the site `/48` would otherwise send it to the compute node. dfw's second compute node, `dfw-worker4`, originates its own delivery `/64` (`0x1004`) and its `fc00:0:d::/48` pool, not the site `/48`. Every other per-node `/64` in [Node-ID allocation](#node-id-allocation) is reachable only via the one site aggregate.
+- **Known gap:** the addressing plan's `fabric.md` calls for per-node `/64` origination instead of one site-wide `/48`. The lab keeps the `/48` on each site's first compute node. A second compute node avoids the anycast ambiguity that would cause by originating its own `/64`, which wins over the `/48` by length: `dfw-worker4` does this.
 - `allowas-in 1` is configured on all cluster FRR instances so each site accepts prefixes that carry AS 65000 in the path — necessary because the transit reflects routes from one AS 65000 site to another.
 - **Only edge nodes are transit-facing.** They alone hold eBGP sessions to AS 65100; a compute node or the route reflector has no link to a transit router and no eBGP session anywhere. Each site's edge node is its border router.
 - Everything behind an edge node reaches the fabric over an iBGP session to it. The edge node sets `next-hop-self force` on those sessions (a path learned from the transit carries the transit router's own address as next hop, which the node behind it has no route to; `force` is required because plain `next-hop-self` is not applied to *reflected* paths — a route reflector preserves the originator's NEXT_HOP by design, RFC 4456 §10) and `route-reflector-client` (iBGP split horizon would otherwise stop it passing one client's prefixes to another — iad has two behind it).
-- **`dfw-worker`'s two uplinks are equal paths**, plain ECMP with no steering policy. The uSID decap hook attaches to both uplinks, each a bond, via `GALACTIC_CNI_EBPF_INTERFACES` (`bond0,bond1` in dfw, `bond0` elsewhere), so losing either edge node costs this node none of its fabric connectivity. Its egress leaves through dfw's edge shards, which run on the edge nodes themselves, so nothing here steers it toward either uplink. This used to be a primary/backup pair, from before the links were bonded — `dfw-worker` tagged what it advertised over `eth2` with community `65000:900`, `dfw-worker3` re-advertised that to `tr1` with `MED 100`, and `dfw-worker` set `local-preference 90` on what it learned over `eth2` — purely because `galactic-nat`, then running on this node, attached to one interface and traffic reaching `eth2` would have missed translation ([#545](https://github.com/datum-cloud/galactic/issues/545)). That policy went when the shard learned to attach to both, and the shard has since moved to the edge nodes.
+- **Each dfw compute node's two uplinks are equal paths**, plain ECMP with no steering policy. The uSID decap hook attaches to both uplinks, each a bond, via `GALACTIC_CNI_EBPF_INTERFACES` (`bond0,bond1` in dfw, `bond0` elsewhere), so losing either edge node costs this node none of its fabric connectivity. Its egress leaves through dfw's edge shards, which run on the edge nodes themselves, so nothing here steers it toward either uplink. This used to be a primary/backup pair, from before the links were bonded — `dfw-worker` tagged what it advertised over `eth2` with community `65000:900`, `dfw-worker3` re-advertised that to `tr1` with `MED 100`, and `dfw-worker` set `local-preference 90` on what it learned over `eth2` — purely because `galactic-nat`, then running on this node, attached to one interface and traffic reaching `eth2` would have missed translation ([#545](https://github.com/datum-cloud/galactic/issues/545)). That policy went when the shard learned to attach to both, and the shard has since moved to the edge nodes.
 - Edge and compute nodes exchange EVPN paths over iBGP **through the reflector**, never as direct sessions between them: `iad-worker3` is the lab's single route reflector and every galactic-router in all three clusters is a client of it. A node cannot be both a reflector and a compute/edge node, since `galactic=control` and `galactic=router` are two values of one label key.
 - galactic-router runs with outbound-only mode (`listenPort=-1`) on every client; only the reflector listens, on port `1790`. All sessions are initiated outbound toward it.
 
@@ -230,6 +244,7 @@ node's pre-existing `bgp router-id`, so router-id and loopback are the same valu
 | dfw-worker2   | edge      | fc00:0:a::1/128   | 10.255.255.6/32   |
 | dfw-worker3   | edge      | fc00:0:b::1/128   | 10.255.255.7/32   |
 | sjc-worker2   | edge      | fc00:0:c::1/128   | 10.255.255.8/32   |
+| dfw-worker4   | compute   | fc00:0:d::1/128   | 10.255.255.9/32   |
 
 ### TR–TR point-to-point links (numbered)
 
@@ -276,6 +291,8 @@ behind it `::2`/`.2`.
 | -------------------------------- | -------------------- | ------------------ | ------------------ | -------------- | -------------- | -------------- |
 | dfw-worker – dfw-worker2:bond1   | 2001:db8:1:10::/64   | 2001:db8:1:10::1   | 2001:db8:1:10::2   | 10.1.10.0/24   | 10.1.10.1      | 10.1.10.2      |
 | dfw-worker – dfw-worker3:bond1   | 2001:db8:1:13::/64   | 2001:db8:1:13::1   | 2001:db8:1:13::2   | 10.1.13.0/24   | 10.1.13.1      | 10.1.13.2      |
+| dfw-worker4 – dfw-worker2:bond2  | 2001:db8:1:14::/64   | 2001:db8:1:14::1   | 2001:db8:1:14::2   | 10.1.14.0/24   | 10.1.14.1      | 10.1.14.2      |
+| dfw-worker4 – dfw-worker3:bond2  | 2001:db8:1:15::/64   | 2001:db8:1:15::1   | 2001:db8:1:15::2   | 10.1.15.0/24   | 10.1.15.1      | 10.1.15.2      |
 | sjc-worker – sjc-worker2:bond1   | 2001:db8:1:20::/64   | 2001:db8:1:20::1   | 2001:db8:1:20::2   | 10.1.20.0/24   | 10.1.20.1      | 10.1.20.2      |
 | iad-worker – iad-worker2:bond1   | 2001:db8:1:30::/64   | 2001:db8:1:30::1   | 2001:db8:1:30::2   | 10.1.30.0/24   | 10.1.30.1      | 10.1.30.2      |
 | iad-worker3 – iad-worker2:eth3   | 2001:db8:1:31::/64   | 2001:db8:1:31::1   | 2001:db8:1:31::2   | 10.1.31.0/24   | 10.1.31.1      | 10.1.31.2      |
@@ -318,13 +335,14 @@ invalid), and `0xE`–`0xF` are the LIB — Function space, not Node-ID space. S
 `uformat.go`'s `NodeIDMin`/`NodeIDMax`.
 
 The node index is per site and stable across services: `*-worker` is `001`,
-`*-worker2` is `002`, `*-worker3` is `003`.
+`*-worker2` is `002`, `*-worker3` is `003`, `dfw-worker4` is `004`.
 
 | Node          | BGPRouter nodeID   | Shard SID                     |
 | ------------- | ------------------ | ----------------------------- |
 | dfw-worker    | 4097 (`0x1001`)    | —                             |
 | dfw-worker2   | 4098 (`0x1002`)    | `2001:db8:ff01:2002:e001::`   |
 | dfw-worker3   | 4099 (`0x1003`)    | `2001:db8:ff01:2003:e001::`   |
+| dfw-worker4   | 4100 (`0x1004`)    | —                             |
 | sjc-worker    | 4097 (`0x1001`)    | —                             |
 | sjc-worker2   | 4098 (`0x1002`)    | `2001:db8:ff02:2002:e001::`   |
 | iad-worker    | 4097 (`0x1001`)    | —                             |
@@ -347,6 +365,7 @@ order; see docs/tenants.md's [SRv6 USID Argument allocation](docs/tenants.md#srv
 | Cluster   | Compute node   | FRR loopback      | Node locator block        | USID ns10                         |
 | --------- | -------------- | ----------------- | ------------------------- | --------------------------------- |
 | dfw       | dfw-worker     | fc00:0:2::1/128   | 2001:db8:ff01:1001::/64   | 2001:db8:ff01:1001:e001::/128     |
+| dfw       | dfw-worker4    | fc00:0:d::1/128   | 2001:db8:ff01:1004::/64   | — (no ns10 guest)                 |
 | sjc       | sjc-worker     | fc00:0:3::1/128   | 2001:db8:ff02:1001::/64   | 2001:db8:ff02:1001:e001::/128     |
 | iad       | iad-worker     | fc00:0:4::1/128   | 2001:db8:ff03:1001::/64   | 2001:db8:ff03:1001:e001::/128     |
 
@@ -363,6 +382,7 @@ FRR loopback address on the same host.
 | dfw-worker          | fc00:10::103   |
 | dfw-worker2         | fc00:10::104   |
 | dfw-worker3         | fc00:10::105   |
+| dfw-worker4         | fc00:10::106   |
 | iad-control-plane   | fc00:10::112   |
 | iad-worker          | fc00:10::113   |
 | iad-worker2         | fc00:10::114   |

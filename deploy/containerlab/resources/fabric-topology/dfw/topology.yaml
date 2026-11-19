@@ -12,12 +12,13 @@ spec:
       - name: dfw-worker
       - name: dfw-worker2
       - name: dfw-worker3
+      - name: dfw-worker4
   reflection:
-    # Each edge node reflects for the compute node at the other end of its
-    # link, rewriting the next hop to itself; the compute node accepts
+    # Each edge node reflects for the compute nodes at the other end of its
+    # links, rewriting the next hop to itself; the compute node accepts
     # paths carrying its own AS, which the transit reflects between sites.
     - name: edge-hub
-      transports: [link-10, link-13]
+      transports: [link-10, link-13, link-14, link-15]
       families: [ipv4, ipv6]
       updateSource: None
       reflectorSelector:

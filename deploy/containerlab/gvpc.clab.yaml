@@ -76,6 +76,7 @@ topology:
         - ip -6 route add blackhole 2001:db8:ff01:1002::/64 metric 2048
         - /galactic/scripts/mkbond.sh bond0 eth1 eth3
         - /galactic/scripts/mkbond.sh bond1 eth2 eth4
+        - /galactic/scripts/mkbond.sh bond2 eth5 eth6
         - /galactic/scripts/install.sh
 
     dfw-worker3:
@@ -96,6 +97,31 @@ topology:
         net.ipv6.conf.all.forwarding: "1"
       exec:
         - ip -6 route add blackhole 2001:db8:ff01:1003::/64 metric 2048
+        - /galactic/scripts/mkbond.sh bond0 eth1 eth3
+        - /galactic/scripts/mkbond.sh bond1 eth2 eth4
+        - /galactic/scripts/mkbond.sh bond2 eth5 eth6
+        - /galactic/scripts/install.sh
+
+    # dfw's second compute node, wired like dfw-worker: dual-homed, one bond
+    # to each edge node, no transit uplink.
+    dfw-worker4:
+      kind: ext-container
+      labels:
+        cluster: dfw
+        graph-group: kind-worker
+        graph-level: 1
+        graph-icon: server
+        platform: kind
+        reload: disabled
+        worker-index: "4"
+      mgmt-ipv6: fc00:10::106
+      sysctls:
+        fs.inotify.max_user_instances: "256"
+        net.ipv4.conf.all.arp_announce: "2"
+        net.ipv4.ip_forward: "1"
+        net.ipv6.conf.all.forwarding: "1"
+      exec:
+        - ip -6 route add blackhole 2001:db8:ff01:1004::/64 metric 2048
         - /galactic/scripts/mkbond.sh bond0 eth1 eth3
         - /galactic/scripts/mkbond.sh bond1 eth2 eth4
         - /galactic/scripts/install.sh
@@ -329,8 +355,9 @@ topology:
     # every node in a site:
     #   bond0  the node's first uplink -- the transit uplink on an edge node,
     #          the uplink to the site's first edge node on a compute node
-    #   bond1  an edge node's compute-facing link; on dfw-worker, its uplink
-    #          to the second edge node
+    #   bond1  an edge node's compute-facing link; on dfw-worker and
+    #          dfw-worker4, the uplink to the second edge node
+    #   bond2  on dfw's edge nodes only, the link to dfw-worker4
     #
     # A bond's members go to one peer, never two -- LACP aggregates links
     # between two systems, and splitting one across two edge nodes would need
@@ -415,6 +442,17 @@ topology:
     - endpoints: ["dfw-worker:eth2", "dfw-worker3:eth2"]   # dfw-worker bond1 / dfw-worker3 bond1
       mtu: 1500
     - endpoints: ["dfw-worker:eth4", "dfw-worker3:eth4"]
+      mtu: 1500
+    # dfw-worker4, dfw's second compute node, homes the same way: bond0 to
+    # dfw-worker2 and bond1 to dfw-worker3, each landing on that edge node's
+    # bond2.
+    - endpoints: ["dfw-worker4:eth1", "dfw-worker2:eth5"]  # dfw-worker4 bond0 / dfw-worker2 bond2
+      mtu: 1500
+    - endpoints: ["dfw-worker4:eth3", "dfw-worker2:eth6"]
+      mtu: 1500
+    - endpoints: ["dfw-worker4:eth2", "dfw-worker3:eth5"]  # dfw-worker4 bond1 / dfw-worker3 bond2
+      mtu: 1500
+    - endpoints: ["dfw-worker4:eth4", "dfw-worker3:eth6"]
       mtu: 1500
     - endpoints: ["sjc-worker:eth1", "sjc-worker2:eth2"]   # sjc-worker bond0 / sjc-worker2 bond1
       mtu: 1500

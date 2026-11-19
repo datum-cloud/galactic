@@ -24,7 +24,8 @@ or `policy/<site>/` for a site with attachments the others lack, see
 attachment's status after its pods start (`scripts/publish-attachments.sh`). A
 pod's interface forwards nothing until then.
 
-`ns80`, two VPCs whose guests share addresses across two workers, is the
+`ns80`, two VPCs whose guests share addresses across workers, including both
+of dfw's compute workers, is the
 dedicated-placement baseline fixture and is described in [baseline.md](baseline.md).
 
 They differ only in scope and addressing:
@@ -154,8 +155,9 @@ For the 3-site VPCs (`ns10`, `ns20`), expect one `Running` pod per
 site. For the single-site VPCs, expect **two** `Running` pods — one per
 attachment (`private`/`private-b`, distinct Deployments) — both on the one
 site's compute worker (`dfw-worker` for `ns30`, `iad-worker` for `ns40`).
-Every edge node and the route reflector are tainted, so the compute worker is
-the only place an untolerated pod can land.
+Every edge node, the route reflector and dfw's second compute worker
+(`dfw-worker4`, lab-only taint) are tainted, so `<site>-worker` is the only
+place an untolerated pod can land.
 
 ### Inspect a pod's VPC interface
 

@@ -234,7 +234,7 @@ Mutually exclusive with `fabric=router` on the same node, the same way
 
 | Node                                                         | `node`      | `galactic`   | `fabric`   | Runs                                                                                                                         |
 | ------------------------------------------------------------ | ----------- | ------------ | ---------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `dfw-worker`, `sjc-worker`, `iad-worker`                     | `compute`   | `router`     | `router`   | `galactic-cni`, `galactic-router`, `fabric-router`                                                                           |
+| `dfw-worker`, `dfw-worker4`, `sjc-worker`, `iad-worker`      | `compute`   | `router`     | `router`   | `galactic-cni`, `galactic-router`, `fabric-router`                                                                           |
 | `dfw-worker2`, `dfw-worker3`, `sjc-worker2`, `iad-worker2`   | `edge`      | `router`     | `router`   | `galactic-gateway` (`gateway=enabled`), `galactic-nat` (`nat=enabled`), `galactic-cni`, `galactic-router`, `fabric-router`   |
 | `iad-worker3`                                                | —           | `control`    | `router`   | `galactic-router-rr`, `fabric-router`                                                                                        |
 
@@ -243,6 +243,15 @@ The lab's edge workers carry `node=edge` plus both `gateway=enabled` and
 each; the lab deploys no `galactic-vrf` yet. The shard runs with
 `GALACTIC_NAT_XDP_ATTACH=dispatch`, so it and the gateway share the uplinks
 through the node's XDP dispatcher.
+
+dfw has two compute workers, so a Worker claim between them stays inside one
+cell. The second, `dfw-worker4`, also carries a lab-only taint,
+`lab.galactic.datumapis.com/compute=secondary:NoSchedule`. It is not part of
+the label scheme. It keeps the lab's tenant fixtures, which select
+`node=compute` and were written for one compute node per site, on
+`dfw-worker`, so only workloads that tolerate it (`ns80`'s second guests) land
+on `dfw-worker4`. Every Galactic DaemonSet tolerates all taints, so the taint
+changes no placement above. A real deployment has no reason to copy it.
 
 The reflector row is the one that shows why `galactic` is a mode enum rather
 than a boolean: `iad-worker3` carries no `node` value at all. Both `node`
