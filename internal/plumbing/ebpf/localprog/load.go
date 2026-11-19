@@ -180,6 +180,10 @@ var StatNames = []string{
 	"link_too_big",
 	"link_local_shard",
 	"link_local_shard_no_pair",
+	"rx_sid_mismatch",
+	"rx_no_binding",
+	"rx_xlat_refused",
+	"rx_xlat_failed",
 }
 
 // Stats reads lt_stats by name, summed over CPUs.

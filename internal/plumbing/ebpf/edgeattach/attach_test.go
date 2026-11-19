@@ -711,3 +711,38 @@ func TestLoad_KeepsPinnedVipTableWithZeroedAffinity(t *testing.T) {
 			got.BackendCount, got.Generation, got.Affinity, edgeprog.AffinityNone)
 	}
 }
+
+// TestLoad_PinsEdgeLocalTable covers edge_local_table, the gateway's Local
+// backends: it is pinned under the edge pin directory with the other edge
+// maps, and a restarted gateway reuses its rows.
+func TestLoad_PinsEdgeLocalTable(t *testing.T) {
+	requireRoot(t)
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-edge-test-local-%d", os.Getpid()))
+	if err := os.MkdirAll(pinDir, 0o755); err != nil {
+		t.Skipf("bpffs not writable at /sys/fs/bpf: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	first, err := Load(pinDir, nil)
+	if err != nil {
+		t.Fatalf("first Load: %v", err)
+	}
+	key := edgeprog.EdgedsrEdgeLocalKey{Usid: netip.MustParseAddr("fc00:1:2:3:e1a5:7::").As16()}
+	if err := first.EdgeLocalTable.Put(key, edgeprog.EdgedsrEdgeLocalValue{TapIfindex: 42, Generation: 3}); err != nil {
+		t.Fatalf("populate edge_local_table: %v", err)
+	}
+	_ = first.Close()
+	if _, err := os.Stat(filepath.Join(pinDir, "edge_local_table")); err != nil {
+		t.Fatalf("edge_local_table is not pinned: %v", err)
+	}
+
+	again, err := Load(pinDir, nil)
+	if err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	var got edgeprog.EdgedsrEdgeLocalValue
+	if err := again.EdgeLocalTable.Lookup(key, &got); err != nil || got.TapIfindex != 42 || got.Generation != 3 {
+		t.Errorf("edge_local_table row after reload = %+v, %v; want it kept", got, err)
+	}
+}
