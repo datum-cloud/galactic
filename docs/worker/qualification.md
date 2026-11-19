@@ -2,7 +2,7 @@
 
 Status: proposed. The NIC and the numeric limits (D16, D18) were confirmed on
 2026-11-18. [#1444](https://github.com/datum-cloud/galactic/issues/1444)
-proves the handoffs on this platform, and
+proved the handoffs on this platform and amended the mechanisms that failed (D27), and
 [#1442](https://github.com/datum-cloud/galactic/issues/1442) runs the
 comparison and reports against the limits.
 
@@ -19,7 +19,12 @@ comparison and reports against the limits.
 A combination of mode and device type that fails is recorded here as
 unsupported, and Worker reports it as `HookUnsupported` in its capabilities.
 
-## Handoffs #1444 proves
+The `bnxt_en` hardware itself is outstanding: no lab host has one. #1444 forced
+generic mode on the lab's veth, bond and VLAN devices, which is the mode such a
+host selects, and [#1442](https://github.com/datum-cloud/galactic/issues/1442)
+carries the run on the NIC.
+
+## Handoffs
 
 | Handoff                                                                                                 | Capability                          | Consumer                                                                    |
 | ------------------------------------------------------------------------------------------------------- | ----------------------------------- | --------------------------------------------------------------------------- |
@@ -29,6 +34,37 @@ unsupported, and Worker reports it as `HookUnsupported` in its capabilities.
 
 Each proof covers both directions, a packet that policy denies, and the
 absence of local encapsulation on the physical wire.
+[#1444](https://github.com/datum-cloud/galactic/issues/1444) proved them in the
+lab ([handoff checks](../../deploy/containerlab/docs/handoffs.md)); the
+mechanisms it adopted, and their requirements, are in the
+[contract](contract.md#local-handoffs).
+
+### Supported combinations
+
+| Handoff                             | Interface                                                | Native                                                                                                                 | Generic                                                                |
+| ----------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `local.tap`                         | Plain receiving interface                                | Supported                                                                                                              | Supported                                                              |
+| `local.tap`                         | Bond member                                              | Supported                                                                                                              | Supported                                                              |
+| `local.tap`                         | VLAN device                                              | `HookUnsupported`: native XDP does not attach. Use its lower device.                                                   | Supported                                                              |
+| `local.tap`                         | VLAN's lower device, tc on the VLAN                      | Supported                                                                                                              | Not needed                                                             |
+| `local.veth_pair`                   | NAT end of the pair                                      | Supported                                                                                                              | `HookUnsupported`: never sees tc-redirected packets. Attach it native. |
+| `local.veth_pair`                   | Peer's `XDP_REDIRECT` to a plain or bond egress          | Supported                                                                                                              | Supported                                                              |
+| `local.veth_pair`                   | Peer's `XDP_REDIRECT` to a VLAN egress                   | `HookUnsupported`: no XDP transmit. Push the tag and redirect to the lower device.                                     | `HookUnsupported`: as native                                           |
+| `local.tap`, `local.veth_pair`      | A veth receiving interface above about 3500 bytes of MTU | `HookUnsupported`: the dispatcher's programs are not multi-buffer, so native XDP does not attach (MTU 9000 in the lab) | Supported                                                              |
+| `local.routed_link`, `local.socket` | Any                                                      | No XDP hook                                                                                                            | No XDP hook                                                            |
+
+Measured in the lab ([handoff measurements](../../deploy/containerlab/docs/handoffs.md#measurements)):
+a 1500-byte packet (the largest unfragmented at MTU 1500) reaches a TAP guest in
+both modes, an IPv6 fragment does not, and 1 MiB crosses each handoff intact
+when the sender's checksum offload is off. Generic XDP sees GSO frames of up to
+34358 bytes when the sender uses TSO; native XDP on a veth sees at most 1514,
+because the veth turns GSO off on its peer.
+
+Checksums: XDP that rewrites an address treats the L4 checksum as complete. A
+frame that a sender on the same host sent through a veth with checksum offload
+carries a partial checksum, and the rewrite corrupts it. Receiving NICs deliver
+complete checksums; a pod on the node does not unless its offload is off. See
+the [measurements](../../deploy/containerlab/docs/handoffs.md#measurements).
 
 ## Workload
 

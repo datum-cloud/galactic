@@ -6,7 +6,7 @@ COMMAND="${1:-}"
 case "$COMMAND" in
   unittest)
     echo "--- Running Go unit tests"
-    go test -v -race -coverprofile=coverage.out ./api/... ./cmd/... ./internal/... ./tests/edgeconformance/edgeprobe/...
+    go test -v -race -coverprofile=coverage.out ./api/... ./cmd/... ./internal/... ./tests/edgeconformance/edgeprobe/... ./tests/handoffs/...
     ;;
 
   unittest-root)
@@ -24,7 +24,7 @@ case "$COMMAND" in
     # differently once actually run as root.
     echo "--- Discovering root-gated packages"
     mapfile -t pkgs < <(
-      grep -rl 'requireRoot(t)' --include='*_test.go' ./cmd ./internal 2>/dev/null \
+      grep -rl 'requireRoot(t)' --include='*_test.go' ./cmd ./internal ./tests/handoffs 2>/dev/null \
         | xargs -n1 dirname | sort -u | sed 's#^\./#./#'
     )
     if [ "${#pkgs[@]}" -eq 0 ]; then
