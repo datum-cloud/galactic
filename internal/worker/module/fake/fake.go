@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -86,6 +87,8 @@ type Module struct {
 	planGate    chan struct{}
 	planEntered chan struct{}
 	ready       func(module.ClaimKey, string) (bool, string)
+	// desired is the desired state of each scope's last Plan.
+	desired map[string][]module.Claim
 
 	PlanCalls  atomic.Int64
 	ApplyCalls atomic.Int64
@@ -213,6 +216,10 @@ func (c change) Empty() bool { return c.empty }
 func (m *Module) Plan(ctx context.Context, scope module.Scope, desired []module.Claim) (module.Change, error) {
 	m.PlanCalls.Add(1)
 	m.mu.Lock()
+	if m.desired == nil {
+		m.desired = map[string][]module.Claim{}
+	}
+	m.desired[scope.VPC] = slices.Clone(desired)
 	gate, entered := m.planGate, m.planEntered
 	m.mu.Unlock()
 	if gate != nil {
@@ -377,4 +384,11 @@ func sortedIDs(m map[string]uint64) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Desired returns the desired state the last Plan of vpc's scope received.
+func (m *Module) Desired(vpc string) []module.Claim {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.desired[vpc])
 }

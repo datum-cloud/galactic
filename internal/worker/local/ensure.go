@@ -86,7 +86,10 @@ func (k *Kernel) ensure(m *model, dry bool) (applied, error) {
 	if !haveVRF {
 		// Nothing to program into; whatever is left of the VPC goes.
 		p.m, p.table, p.vrfIdx = &model{vpc: m.vpc}, 0, 0
-		return p.res, p.removeStale()
+		if err := p.removeStale(); err != nil {
+			return p.res, err
+		}
+		return p.res, p.ensureLocalShard()
 	}
 	if err := p.ensurePairs(); err != nil {
 		return p.res, err
@@ -105,7 +108,10 @@ func (k *Kernel) ensure(m *model, dry bool) (applied, error) {
 			return p.res, err
 		}
 	}
-	return p.res, p.removeStale()
+	if err := p.removeStale(); err != nil {
+		return p.res, err
+	}
+	return p.res, p.ensureLocalShard()
 }
 
 // ensurePairs makes each pair exist with its row and filter.

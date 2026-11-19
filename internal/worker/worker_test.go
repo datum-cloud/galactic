@@ -409,16 +409,14 @@ func TestSessionsAndValidation(t *testing.T) {
 	}
 }
 
-// TestDestinationResolution covers destinations that do not resolve: shard
-// and backend kinds, which later Tasks resolve, and a mode preference the
+// TestDestinationResolution covers destinations that do not resolve: a
+// backend, which a later Task resolves, and a mode preference the
 // destination cannot meet. None falls back to the other mode.
 func TestDestinationResolution(t *testing.T) {
 	e := newEnv(t)
 	e.start()
 	s := veth("guest-a1")
 	s.Destinations = append(s.Destinations,
-		&workerv1alpha1.Destination{Target: &workerv1alpha1.Destination_Shard{
-			Shard: &workerv1alpha1.ShardRef{Group: "g", Index: 1}}},
 		&workerv1alpha1.Destination{Target: &workerv1alpha1.Destination_Backend{
 			Backend: &workerv1alpha1.BackendRef{Node: otherNode, Slot: 2}}})
 	e.mustOK(e.request(natSA, key(vpcA, "svc-a"), 1, s))

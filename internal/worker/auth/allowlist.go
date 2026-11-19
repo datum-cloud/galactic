@@ -19,6 +19,10 @@ import (
 // capabilities it may use. A ServiceAccount it does not list may use none.
 type Allowlist struct {
 	entries map[string][]string
+	// shardClaims are the ServiceAccounts that may name an EgressShard as a
+	// claim's attachment: the NAT shard, which has no VPCAttachment of its
+	// own in the VPCs it serves.
+	shardClaims map[string]bool
 }
 
 // allowlistFile is the YAML form of an allowlist:
@@ -26,10 +30,14 @@ type Allowlist struct {
 //	serviceAccounts:
 //	- serviceAccount: galactic-system/galactic-nat
 //	  capabilities: [local.veth_pair, fabric.srv6]
+//	  egressShardClaims: true
 type allowlistFile struct {
 	ServiceAccounts []struct {
 		ServiceAccount string   `json:"serviceAccount"`
 		Capabilities   []string `json:"capabilities"`
+		// EgressShardClaims lets the ServiceAccount name an EgressShard
+		// as a veth_pair claim's attachment.
+		EgressShardClaims bool `json:"egressShardClaims,omitempty"`
 	} `json:"serviceAccounts"`
 }
 
@@ -49,7 +57,7 @@ func ParseAllowlist(b []byte) (*Allowlist, error) {
 	if err := yaml.UnmarshalStrict(b, &f); err != nil {
 		return nil, fmt.Errorf("auth: parse allowlist: %w", err)
 	}
-	a := &Allowlist{entries: map[string][]string{}}
+	a := &Allowlist{entries: map[string][]string{}, shardClaims: map[string]bool{}}
 	for _, e := range f.ServiceAccounts {
 		ns, name, ok := strings.Cut(e.ServiceAccount, "/")
 		if !ok || ns == "" || name == "" || strings.Contains(name, "/") {
@@ -64,13 +72,19 @@ func ParseAllowlist(b []byte) (*Allowlist, error) {
 			}
 		}
 		a.entries[e.ServiceAccount] = slices.Clone(e.Capabilities)
+		if e.EgressShardClaims {
+			a.shardClaims[e.ServiceAccount] = true
+		}
 	}
 	return a, nil
 }
 
 // NewAllowlist builds an allowlist from a map, for tests and embedding.
-func NewAllowlist(entries map[string][]string) *Allowlist {
-	a := &Allowlist{entries: map[string][]string{}}
+func NewAllowlist(entries map[string][]string, shardClaims ...string) *Allowlist {
+	a := &Allowlist{entries: map[string][]string{}, shardClaims: map[string]bool{}}
+	for _, sa := range shardClaims {
+		a.shardClaims[sa] = true
+	}
 	for k, v := range entries {
 		a.entries[k] = slices.Clone(v)
 	}
@@ -85,4 +99,10 @@ func (a *Allowlist) Capabilities(serviceAccount string) ([]string, bool) {
 	}
 	c, ok := a.entries[serviceAccount]
 	return slices.Clone(c), ok
+}
+
+// EgressShardClaims reports whether serviceAccount may name an EgressShard
+// as a veth_pair claim's attachment.
+func (a *Allowlist) EgressShardClaims(serviceAccount string) bool {
+	return a != nil && a.shardClaims[serviceAccount]
 }
