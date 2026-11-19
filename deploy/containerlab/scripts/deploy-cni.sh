@@ -60,6 +60,16 @@ for site in dfw sjc iad; do
   # node silently kept serving the old config instead of applying the fix
   # above. `set -e` inside the inner script plus install-or-upgrade makes
   # reruns actually idempotent.
+  # devices pins the interfaces Cilium attaches its host programs to, as
+  # production deployments pin them to their uplink bonds and primary
+  # Ethernet interfaces. Left to
+  # auto-detection, Cilium also adopts every interface with a global address:
+  # a galactic-tap host TAP (it carries the guest's gateway), galactic-vip0.
+  # Its tcx attach then deletes every legacy tc filter there, including
+  # galactic-cni's egress chain and tp_deliver (docs/handoffs.md). Here the
+  # pin is eth0 and the bonds: eth+ would also match the bonds' members,
+  # eth1 to eth4, whose legacy tc filters (usid_ingress) Cilium would delete
+  # the same way.
   # k8sServiceHost/k8sServicePort point the agent at the API server directly.
   # Without them it uses the kubernetes Service, which Cilium itself
   # load-balances, so an API server restart can leave the site unable to
@@ -79,6 +89,7 @@ for site in dfw sjc iad; do
       --set ipam.operator.clusterPoolIPv6MaskSize=${CILIUM_POD_CIDR_V6_MASK_SIZE} \
       --set cni.exclusive=false \
       --set kubeProxyReplacement=true \
+      --set devices='eth0 bond+' \
       --set k8sServiceHost=${node} \
       --set k8sServicePort=6443 \
       --set tunnelProtocol=vxlan \
