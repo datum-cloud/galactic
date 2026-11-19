@@ -226,3 +226,82 @@ func admit(ipClaim *ipamv1alpha1.IPClaim) error {
 	}
 	return nil
 }
+
+// A claim already gone has nothing left to give back, and a collection that
+// retries after a crash must not fail on it.
+func TestReleasingAClaimAlreadyGoneIsReleased(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ipamv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("build the IPAM scheme: %v", err)
+	}
+	ipamClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	err := Release(context.Background(), ipamClient, Request{
+		Namespace: "default", NetworkNamespace: "ns-project", NetworkName: "prod",
+	})
+	if err != nil {
+		t.Fatalf("a claim already gone must count as released: %v", err)
+	}
+}
+
+// A refused release is an error, so the collection is retried rather than
+// leaving the quota unit held without a word.
+func TestARefusedReleaseIsAnError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ipamv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("build the IPAM scheme: %v", err)
+	}
+	ipamClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(boundClaim("prod", ipamv1alpha1.ReclaimRetain)...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+				return apierrors.NewForbidden(ipamv1alpha1.SchemeGroupVersion.WithResource("ipclaims").GroupResource(),
+					"fabric-identity.ns-project.prod", errors.New("delete is not granted"))
+			},
+		}).Build()
+
+	err := Release(context.Background(), ipamClient, Request{
+		Namespace: "default", NetworkNamespace: "ns-project", NetworkName: "prod",
+	})
+	if !apierrors.IsForbidden(err) {
+		t.Fatalf("a refused release must be returned as the refusal, got %v", err)
+	}
+}
+
+// A claim whose allocation is recorded as anything but Retain would free the
+// network's block for reissue when deleted, so it is kept and named.
+func TestAClaimWhoseAllocationIsNotRetainedIsNotReleased(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ipamv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("build the IPAM scheme: %v", err)
+	}
+	ipamClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(boundClaim("prod", ipamv1alpha1.ReclaimDelete)...).Build()
+
+	err := Release(context.Background(), ipamClient, Request{
+		Namespace: "default", NetworkNamespace: "ns-project", NetworkName: "prod",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not Retain") {
+		t.Fatalf("a claim whose allocation is not retained must be kept with an error naming why, got %v", err)
+	}
+	var kept ipamv1alpha1.IPClaim
+	if err := ipamClient.Get(context.Background(),
+		client.ObjectKey{Namespace: "default", Name: ClaimName("ns-project", "prod")}, &kept); err != nil {
+		t.Fatalf("the claim must still be there: %v", err)
+	}
+}
+
+// boundClaim is a network's claim and the allocation it is bound to, recorded
+// with the given policy.
+func boundClaim(networkName string, policy ipamv1alpha1.ReclaimPolicy) []client.Object {
+	ipClaim := &ipamv1alpha1.IPClaim{}
+	ipClaim.Namespace = "default"
+	ipClaim.Name = ClaimName("ns-project", networkName)
+	ipClaim.Status.BoundAllocationRef = &ipamv1alpha1.LocalRef{Name: "alloc-" + networkName}
+	allocation := &ipamv1alpha1.IPAllocation{}
+	allocation.Namespace = "default"
+	allocation.Name = "alloc-" + networkName
+	allocation.Spec.ClaimRef = &ipamv1alpha1.LocalRef{Name: ipClaim.Name}
+	allocation.Spec.ReclaimPolicy = policy
+	return []client.Object{ipClaim, allocation}
+}

@@ -104,6 +104,11 @@ type NetworkFabricIdentityReconciler struct {
 	// withdrawal in this controller is conditioned on a read having succeeded.
 	Networks client.Client
 
+	// NetworkReader reads a network past any cache. Networks is served from the
+	// hub's cache, where a network deleted and recreated under one name can still
+	// read as gone; a network is collected only once this read agrees.
+	NetworkReader client.Reader
+
 	// Hub is where the identity and its placement are written, and from where
 	// federation carries them to the cells.
 	Hub client.Client
@@ -323,16 +328,23 @@ func (r *NetworkFabricIdentityReconciler) claim(
 // collect removes the published identity once the network it belongs to is
 // gone.
 //
-// The IPAM claim is deliberately not released. A Route Target still installed
-// in a remote location's import policy would silently merge a new network into
-// a dead one's routes, so the allocation is retained forever and the identity
-// is never reissued. Only the object goes; the per-location policies are shared
-// and stay.
+// The claim is released last, and only its quota unit goes with it: under
+// Retain the allocation stays held under the network's name, so the identity
+// is never reissued. A Route Target still installed in a remote location's
+// import policy can then never merge a new network into a dead one's routes.
+// The per-location policies are shared and stay.
 func (r *NetworkFabricIdentityReconciler) collect(
 	ctx context.Context,
 	namespace string,
 	networkName string,
 ) error {
+	// The cache can read a network as gone while it lives, after a delete and a
+	// create under one name. Nothing is withdrawn until a read past it agrees.
+	gone, err := r.confirmedGone(ctx, namespace, networkName)
+	if err != nil || !gone {
+		return err
+	}
+
 	object := &cloudv1alpha1.NetworkFabricIdentity{}
 	object.Namespace = namespace
 	object.Name = networkName
@@ -342,7 +354,40 @@ func (r *NetworkFabricIdentityReconciler) collect(
 	}
 	// The policy names this one identity, so nothing else can be left holding
 	// it and it would otherwise outlive the network forever.
-	return r.unplace(ctx, namespace, networkName)
+	if err := r.unplace(ctx, namespace, networkName); err != nil {
+		return err
+	}
+	// Every network claims in the platform's one project, under its quota, so
+	// a claim kept after its network would hold a unit until the quota is full
+	// and no new network anywhere gets an identity.
+	return r.release(ctx, namespace, networkName)
+}
+
+// confirmedGone reads the network past the cache. A network that lives, or a
+// read that fails, collects nothing.
+func (r *NetworkFabricIdentityReconciler) confirmedGone(ctx context.Context, namespace, networkName string) (bool, error) {
+	err := r.NetworkReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: networkName}, &networkingv1alpha.Network{})
+	switch {
+	case err == nil:
+		return false, nil
+	case apierrors.IsNotFound(err):
+		return true, nil
+	default:
+		return false, fmt.Errorf("confirm network %q is gone before collecting it: %w", networkName, err)
+	}
+}
+
+// release gives the gone network's claim back to the platform's quota.
+func (r *NetworkFabricIdentityReconciler) release(ctx context.Context, namespace, networkName string) error {
+	ipamClient, err := r.IPAM.ClientForPlatform()
+	if err != nil {
+		return fmt.Errorf("reach the address service to release network %q: %w", networkName, err)
+	}
+	return fabricidentity.Release(ctx, ipamClient, fabricidentity.Request{
+		Namespace:        r.IdentityNamespace,
+		NetworkNamespace: namespace,
+		NetworkName:      networkName,
+	})
 }
 
 // placeLocations keeps one policy per location, not one per network.
@@ -525,6 +570,9 @@ func (r *NetworkFabricIdentityReconciler) SetupWithManager(mgr ctrl.Manager) err
 	}
 	if r.HubCluster == nil {
 		return errors.New("a hub to watch is required")
+	}
+	if r.NetworkReader == nil {
+		return errors.New("a direct network reader is required")
 	}
 
 	hubCache := r.HubCluster.GetCache()
