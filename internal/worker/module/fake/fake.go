@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -86,6 +87,8 @@ type Module struct {
 	planGate    chan struct{}
 	planEntered chan struct{}
 	ready       func(module.ClaimKey, string) (bool, string)
+	// desired is each scope's desired claims from its last Plan.
+	desired map[string][]module.Claim
 
 	PlanCalls  atomic.Int64
 	ApplyCalls atomic.Int64
@@ -106,6 +109,14 @@ func New(name string, mode workerv1alpha1.Mode, host *Host) *Module {
 		}
 	}
 	return m
+}
+
+// Desired returns the desired claims of vpc's scope from the module's last
+// Plan of it.
+func (m *Module) Desired(vpc string) []module.Claim {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.desired[vpc])
 }
 
 // SetCapability sets one capability's state.
@@ -231,6 +242,12 @@ func (m *Module) Plan(ctx context.Context, scope module.Scope, desired []module.
 			return nil, err
 		}
 	}
+	m.mu.Lock()
+	if m.desired == nil {
+		m.desired = map[string][]module.Claim{}
+	}
+	m.desired[scope.VPC] = slices.Clone(desired)
+	m.mu.Unlock()
 	want := map[module.ClaimKey]map[string]uint64{}
 	for _, c := range desired {
 		for _, d := range c.Destinations {
