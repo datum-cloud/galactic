@@ -1,0 +1,37 @@
+# Opt-in galactic-vrf ingress sidecar for an Envoy proxy Deployment. Include
+# it from the consumer's kustomization, next to the Envoy Deployment:
+#
+#   resources:
+#     - <the Envoy Deployment>
+#   components:
+#     - ../../config/galactic-vrf
+#
+# and label that Deployment galactic.datumapis.com/galactic-vrf: enabled. The
+# patch targets only Deployments carrying that label, so a Deployment without
+# it is left untouched. The consumer must also:
+#
+#   - set GALACTIC_VRF_ATTACHMENT_SELECTOR on the galactic-vrf container to a
+#     label selector matching its proxy's own VPCAttachments (this Component
+#     ships the placeholder galactic.datumapis.com/proxy=REPLACE_ME, which
+#     selects nothing useful);
+#   - set `namespace:` in its kustomization to the Deployment's namespace, so
+#     the ServiceAccount and the ClusterRoleBinding's subject follow it (they
+#     default to envoy-gateway-system);
+#   - add this ServiceAccount to the Worker allowlist (see README.md).
+#
+# Everything the sidecar needs is here: the ServiceAccount, its read-only
+# RBAC, the container, and the hostPath and projected-token volumes. The
+# proxy's VPCAttachments are not: NSO creates them (see README.md).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+patches:
+  - path: deployment-patch.yaml
+    target:
+      kind: Deployment
+      labelSelector: galactic.datumapis.com/galactic-vrf=enabled
+images:
+  - name: ghcr.io/datum-cloud/galactic-vrf
+    newTag: latest
