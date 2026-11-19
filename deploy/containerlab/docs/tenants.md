@@ -24,6 +24,9 @@ or `policy/<site>/` for a site with attachments the others lack, see
 attachment's status after its pods start (`scripts/publish-attachments.sh`). A
 pod's interface forwards nothing until then.
 
+`ns80`, two VPCs whose guests share addresses across two workers, is the
+dedicated-placement baseline fixture and is described in [baseline.md](baseline.md).
+
 They differ only in scope and addressing:
 
 | VPC    | Sites                   | Address families             | VRF interface | Notes                                                                                                                                                                                                                                                                            |
