@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -67,6 +68,9 @@ func configurePodLink(vrfName, podEnd string, gateway []netip.Addr, hostLL netip
 			return fmt.Errorf("assign gateway %s to %s: %w", a, podEnd, err)
 		}
 	}
+	if err := removeStaleGateways(pl, gateway); err != nil {
+		return err
+	}
 	if pl.Attrs().Flags&net.FlagUp == 0 {
 		if err := netlink.LinkSetUp(pl); err != nil {
 			return fmt.Errorf("set %s up: %w", podEnd, err)
@@ -123,4 +127,30 @@ func routeDst(r netlink.Route) (netip.Addr, bool) {
 	}
 	a, ok := netip.AddrFromSlice(r.Dst.IP)
 	return a.Unmap(), ok
+}
+
+// removeStaleGateways removes the global /128 addresses on the pod end l
+// that are no longer gateway addresses, as after the proxy attachment's
+// addresses changed. Configure assigns only such addresses to the link.
+func removeStaleGateways(l netlink.Link, gateway []netip.Addr) error {
+	addrs, err := netlink.AddrList(l, netlink.FAMILY_V6)
+	if err != nil {
+		return fmt.Errorf("list addresses of %s: %w", l.Attrs().Name, err)
+	}
+	for _, a := range addrs {
+		ip, ok := netip.AddrFromSlice(a.IP)
+		if !ok || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		if ones, bits := a.Mask.Size(); ones != 128 || bits != 128 {
+			continue
+		}
+		if slices.Contains(gateway, ip.Unmap()) {
+			continue
+		}
+		if err := netlink.AddrDel(l, &a); err != nil && !errors.Is(err, unix.EADDRNOTAVAIL) {
+			return fmt.Errorf("remove stale gateway %s from %s: %w", ip, l.Attrs().Name, err)
+		}
+	}
+	return nil
 }

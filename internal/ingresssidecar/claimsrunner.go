@@ -78,7 +78,17 @@ func (r *ClaimsRunner) Start(ctx context.Context) error {
 	r.ready.Store(claims)
 
 	kick := make(chan struct{}, 1)
-	go r.observe(ctx, cl, claims, kick)
+	octx, stopObserve := context.WithCancel(ctx)
+	observed := make(chan struct{})
+	go func() {
+		defer close(observed)
+		r.observe(octx, cl, claims, kick)
+	}()
+	// The stream stops before the client closes, deferred above.
+	defer func() {
+		stopObserve()
+		<-observed
+	}()
 
 	t := time.NewTicker(r.Interval)
 	defer t.Stop()
@@ -103,27 +113,37 @@ func (r *ClaimsRunner) Start(ctx context.Context) error {
 }
 
 // observe feeds every status snapshot of the caller's claims to claims,
-// reopening the stream when it ends, and kicks a pass after each.
+// reopening the stream with backoff when it ends, and kicks a pass after
+// each snapshot.
 func (r *ClaimsRunner) observe(ctx context.Context, cl *workerclient.Client, claims *Claims, kick chan struct{}) {
+	backoff := time.Second
 	for ctx.Err() == nil {
 		obs, err := cl.Observe(ctx, nil)
-		if err != nil {
-			if ctx.Err() == nil {
-				r.Log.Warn("open the Worker status stream", "error", err)
-				time.Sleep(time.Second)
+		if err == nil {
+			got := false
+			for {
+				st, err := obs.Recv()
+				if err != nil {
+					break
+				}
+				got = true
+				claims.Observe(st)
+				select {
+				case kick <- struct{}{}:
+				default:
+				}
 			}
-			continue
+			if got {
+				backoff = time.Second
+			}
+		} else if ctx.Err() == nil {
+			r.Log.Warn("open the Worker status stream", "error", err)
 		}
-		for {
-			st, err := obs.Recv()
-			if err != nil {
-				break
-			}
-			claims.Observe(st)
-			select {
-			case kick <- struct{}{}:
-			default:
-			}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
 		}
+		backoff = min(backoff*2, 30*time.Second)
 	}
 }

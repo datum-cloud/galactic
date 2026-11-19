@@ -146,9 +146,35 @@ func TestConfigurePodLink_TwoVPCsShareABackendAddress(t *testing.T) {
 		if routes := localRoutes(t, links[1].table); len(routes) != 2 {
 			t.Errorf("VPC B routes = %v, want both", routes)
 		}
+
+		// VPC A's proxy attachment changes its address: the old gateway goes.
+		checkGatewayChange(t, links[0].vrf, links[0].pod, gw, hostLL, backend)
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// checkGatewayChange reconfigures pod in vrfName with a new gateway address
+// and checks that the old one, gw, is gone from it.
+func checkGatewayChange(t *testing.T, vrfName, pod string, gw, hostLL, backend netip.Addr) {
+	t.Helper()
+	gw2 := netip.MustParseAddr("2001:db8:ff::2")
+	if err := configurePodLink(vrfName, pod, []netip.Addr{gw2}, hostLL, []netip.Addr{backend}); err != nil {
+		t.Fatal(err)
+	}
+	pl, err := netlink.LinkByName(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addrs, err := netlink.AddrList(pl, netlink.FAMILY_V6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range addrs {
+		if a.IP.Equal(gw.AsSlice()) {
+			t.Errorf("%s keeps the old gateway %s", pod, gw)
+		}
 	}
 }
