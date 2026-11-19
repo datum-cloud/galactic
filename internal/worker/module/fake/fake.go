@@ -223,7 +223,12 @@ func (m *Module) Plan(ctx context.Context, scope module.Scope, desired []module.
 		select {
 		case <-gate:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+		}
+		// A crash cancels the context and then opens the gate. When both
+		// are ready, select picks either, so check the context again: a
+		// stopped incarnation must not go on to Apply.
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 	}
 	want := map[module.ClaimKey]map[string]uint64{}
@@ -263,7 +268,10 @@ func (m *Module) Apply(ctx context.Context, scope module.Scope, c module.Change)
 		select {
 		case <-gate:
 		case <-ctx.Done():
-			return ctx.Err()
+		}
+		// As in Plan: a stopped incarnation writes nothing.
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 	}
 	want := c.(change).want

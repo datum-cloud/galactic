@@ -152,10 +152,19 @@ func (w *Worker) Observe(req *workerv1alpha1.ObserveRequest,
 		delete(w.subs, sub)
 		w.mu.Unlock()
 	}()
+	if w.subscribed != nil {
+		w.subscribed()
+	}
 	if err := stream.SendHeader(metadata.MD{}); err != nil {
 		return err
 	}
-	sub.notify <- struct{}{}
+	// A status published since subscribing may already have filled notify.
+	// pending holds the latest snapshot either way, so one wake-up is enough,
+	// and a blocking send here would wait on the only reader.
+	select {
+	case sub.notify <- struct{}{}:
+	default:
+	}
 
 	renew := time.NewTicker(w.cfg.RenewInterval)
 	defer renew.Stop()
