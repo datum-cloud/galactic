@@ -6,7 +6,9 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/netip"
 	"slices"
@@ -305,13 +307,49 @@ func TestObserveDeliversCompleteSnapshots(t *testing.T) {
 	all, err := e.api.Observe(ctx, &workerv1alpha1.ObserveRequest{})
 	e.mustOK(err)
 	e.mustOK(e.request(natSA, key(vpcA, "svc-a"), 2, veth("guest-a1")))
-	if r, err := all.Recv(); status.Code(err) != codes.DeadlineExceeded {
+	// When the deadline passes, the server ends the stream cleanly. That end
+	// can reach the client before its own deadline error does, and before
+	// ctx's timer runs, so a clean end at the deadline is correct as long as
+	// nothing was sent. The margin covers the deadline's encoding on the
+	// wire; an early end still fails.
+	r, err := all.Recv()
+	dl, _ := ctx.Deadline()
+	deadlineEnd := status.Code(err) == codes.DeadlineExceeded ||
+		(errors.Is(err, io.EOF) && time.Until(dl) < 50*time.Millisecond)
+	if r != nil || !deadlineEnd {
 		t.Fatalf("another caller's stream got %v, %v; want nothing until the deadline", r, err)
 	}
 	named, err := e.api.Observe(e.ctx(otherSA), &workerv1alpha1.ObserveRequest{Key: key(vpcA, "svc-a")})
 	e.mustOK(err)
 	if _, err := named.Recv(); !refusal.Is(err, codes.PermissionDenied, workerv1alpha1.ReasonNotOwner) {
 		t.Fatalf("observing another caller's claim: %v, want NotOwner", err)
+	}
+}
+
+// TestObservePublishBeforeFirstSnapshot publishes a status after Observe
+// registers its subscriber and before it queues the first snapshot. The
+// stream still delivers the claim instead of blocking on its own wake-up.
+func TestObservePublishBeforeFirstSnapshot(t *testing.T) {
+	e := newEnv(t)
+	e.start()
+	k := mkey(vpcA, "svc-a")
+	e.mustOK(e.request(natSA, key(vpcA, "svc-a"), 1, veth("guest-a1")))
+	e.waitReady(k, 1)
+	e.w.subscribed = func() {
+		e.w.mu.Lock()
+		defer e.w.mu.Unlock()
+		e.w.publish(e.w.claims[k])
+	}
+	ctx, cancel := context.WithTimeout(e.ctx(natSA), 5*time.Second)
+	defer cancel()
+	stream, err := e.api.Observe(ctx, &workerv1alpha1.ObserveRequest{Key: key(vpcA, "svc-a")})
+	e.mustOK(err)
+	r, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("first snapshot: %v", err)
+	}
+	if !isTrue(r.GetStatus(), workerv1alpha1.ConditionReady) {
+		t.Fatalf("first snapshot = %v, want the Ready claim", r.GetStatus())
 	}
 }
 
