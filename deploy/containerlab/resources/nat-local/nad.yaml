@@ -1,0 +1,72 @@
+# Both edge guests get the same address, fd20:80:ff01::2:0:0, in VPC 80 and
+# VPC 81: only VPC identity tells their sessions apart.
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: vpc-a-edge
+  namespace: ns80
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "vpc-a-edge",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "80",
+          "vpcattachment": "802",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              {
+                "address": "fd20:80:ff01:0:0:2::/96",
+                "gateway": "fd20:80:ff01::1"
+              }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "80",
+          "vpcattachment": "802",
+          "namespace": "galactic-system"
+        }
+      ]
+    }
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: vpc-b-edge
+  namespace: ns80
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "vpc-b-edge",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "81",
+          "vpcattachment": "802",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              {
+                "address": "fd20:80:ff01:0:0:2::/96",
+                "gateway": "fd20:80:ff01::1"
+              }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "81",
+          "vpcattachment": "802",
+          "namespace": "galactic-system"
+        }
+      ]
+    }
