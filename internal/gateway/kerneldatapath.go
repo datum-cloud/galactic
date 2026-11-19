@@ -169,7 +169,13 @@ type KernelDatapath struct {
 	// is in memory only: after a restart it is empty until the first
 	// reconcile re-applies every rule.
 	vpcByKey map[edgemap.VIPKey]string
+
+	// local is edge_local_table (LocalTable).
+	local *LocalTable
 }
+
+// LocalTable returns the datapath's edge_local_table.
+func (d *KernelDatapath) LocalTable() *LocalTable { return d.local }
 
 // NewKernelDatapath constructs a KernelDatapath and writes encapSrc into the
 // encapsulation config once, immediately. encapSrc is this node's plain
@@ -186,6 +192,7 @@ func NewKernelDatapath(objs *edgeprog.EdgedsrObjects, encapSrc netip.Addr) (*Ker
 	}
 
 	return &KernelDatapath{
+		local: NewLocalTable(objs),
 		vipTable: edgemap.NewVIPTable(
 			edgemap.KernelTable{Map: objs.VipTable},
 			edgemap.KernelTable{Map: objs.VipStatsTable},

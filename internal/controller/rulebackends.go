@@ -38,8 +38,11 @@ type ruleBackend struct {
 	attachment types.NamespacedName
 	// uid is the attachment's UID, which a published health decision must
 	// name to apply to this backend.
-	uid        types.UID
-	node       string
+	uid  types.UID
+	node string
+	// vpc is the attachment's VPC identity (status.vpc), which a Worker
+	// claim names.
+	vpc        string
 	addr       netip.Addr
 	port       uint16
 	egressKind bgpv1alpha1.ServiceVIPBindingEgressKind
@@ -250,6 +253,7 @@ func ruleCandidateBackends(
 				attachment: key,
 				uid:        attachment.UID,
 				node:       attachment.Status.Node,
+				vpc:        attachment.Status.VPC,
 				addr:       addr,
 				port:       port,
 				egressKind: kind,

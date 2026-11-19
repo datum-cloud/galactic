@@ -38,6 +38,12 @@ rules:
     resources:
       - networkservices
     verbs: ["get", "list", "watch"]
+  # BackendHealthReconciler reads the NetworkGateway on this node, whose
+  # status.localBackends reports a backend not ready for the Local handoff.
+  - apiGroups: ["galactic.datumapis.com"]
+    resources:
+      - networkgateways
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["galactic.datumapis.com"]
     resources:
       - serviceendpoints

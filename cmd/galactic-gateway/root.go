@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.miloapis.com/instrumentation/metrics"
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -27,6 +29,7 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/gateway"
+	"go.datum.net/galactic/internal/gateway/localhandoff"
 	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
@@ -141,10 +144,14 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// datapath's watch goroutine, possibly before setup returns, so it only
 	// nudges and followCoverage does the work.
 	coverageChanged := make(chan struct{}, 1)
+	var pathChanged atomic.Pointer[func()]
 	coverage := newDatapathCoverage(func() {
 		select {
 		case coverageChanged <- struct{}{}:
 		default:
+		}
+		if f := pathChanged.Load(); f != nil {
+			(*f)()
 		}
 	})
 	var gwDatapath gateway.Datapath = gateway.NoopDatapath{}
@@ -181,6 +188,33 @@ func runCmd(cfg *config.GatewayConfig) error {
 		// this node's VIPs withdrawn, so no rule reaches this datapath.
 		turnOffDatapath(ctx, xdpdispatch.PinDir, xdpdispatch.SlotGatewayLB, xdpdispatch.SlotGatewayReturn)
 	}
+	// Backends on this node are handed to their TAPs through Galactic
+	// Worker when its socket is configured (internal/gateway/localhandoff).
+	// Without it, rows an earlier run left are removed, so those backends
+	// are encapsulated again rather than dropped.
+	var local *localhandoff.Manager
+	var pp *publicPath
+	if kdp, ok := gwDatapath.(*gateway.KernelDatapath); ok {
+		if cfg.WorkerSocket != "" {
+			local = localhandoff.New(nodeName, localhandoff.WorkerclientDial(cfg.WorkerSocket, cfg.WorkerTokenFile),
+				kdp.LocalTable(), func() {
+					if pp != nil {
+						pp.Changed()
+					}
+				})
+		} else if err := clearLocalTable(kdp.LocalTable()); err != nil {
+			return err
+		}
+	}
+	pp = newPublicPath(coverage, local)
+	nudge := pp.Changed
+	pathChanged.Store(&nudge)
+	go pp.Run(ctx)
+	metrics.MustRegister(&localCollector{local: local, path: pp})
+	if local != nil {
+		go local.Run(ctx)
+	}
+
 	// Only now is the datapath attached and its rule table reachable. Report
 	// serving from here on, not from process start.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
@@ -208,6 +242,9 @@ func runCmd(cfg *config.GatewayConfig) error {
 		// Forwarding follows need: on only once an IPv4 VIP is about to load.
 		EnsureIPv4Forwarding: ipv4.enable,
 		Scope:                scope,
+		LocalHandoff:         localHandoffOrNil(local),
+		PublicPath:           pp.Current,
+		LocalEvents:          pp.events,
 	}, &controller.NetworkServiceReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
@@ -321,6 +358,11 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().String("gateway-project-vip-prefixes", "",
 		"Comma-separated prefixes the platform allocates load balancer addresses from; a project "+
 			"NetworkService with a VIP outside them is refused (required with --gateway-project-services)")
+	cmd.Flags().String("gateway-worker-socket", "",
+		"galactic-worker's socket. Set, backends on this node are handed to their TAPs through Worker's "+
+			"Local handoff instead of encapsulated toward; needs --gateway-xdp-attach=dispatch")
+	cmd.Flags().String("gateway-worker-token-file", "",
+		"The projected ServiceAccount token presented to galactic-worker (default: the workerclient default)")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	logOpts.BindFlags(cmd.PersistentFlags())
