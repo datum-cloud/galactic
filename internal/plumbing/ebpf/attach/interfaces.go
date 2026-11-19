@@ -72,7 +72,7 @@ func ResolveInterfaces() ([]string, error) {
 	// one: a value made only of whitespace is a malformed override, rejected
 	// like one made only of commas, rather than a request to auto-detect.
 	if override := os.Getenv(config.EnvCNIEBPFInterfaces); override != "" {
-		names = parseInterfaceList(override)
+		names = withoutInternalLinks(parseInterfaceList(override))
 		if len(names) == 0 {
 			return nil, fmt.Errorf("attach: %s is set to %q but contains no usable interface names",
 				config.EnvCNIEBPFInterfaces, override)
@@ -84,6 +84,23 @@ func ResolveInterfaces() ([]string, error) {
 		}
 	}
 	return expandBondSlaves(names)
+}
+
+// withoutInternalLinks drops each override name that resolves to an internal
+// link (IsInternalLink), which an operator can name by mistake but is never
+// an uplink. A name that does not resolve is kept, as the override has never
+// required its interfaces to exist.
+func withoutInternalLinks(names []string) []string {
+	out := names[:0:0]
+	for _, name := range names {
+		if link, err := linkByNameFn(name); err == nil && IsInternalLink(link) {
+			slog.Warn("attach: ignoring an internal Galactic link named as an uplink",
+				"env", config.EnvCNIEBPFInterfaces, "interface", name)
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 // DetectUplinks returns the interfaces carrying the IPv6 default route or a
@@ -152,6 +169,12 @@ func autoDetectInterfaces() ([]string, error) {
 			return
 		}
 		if isVRFSlave(link) {
+			return
+		}
+		// A link Galactic creates for tenant delivery, such as the NAT end
+		// of a Local veth pair in the host's namespace, can carry a route
+		// FRR learned over it without ever being an uplink.
+		if IsInternalLink(link) {
 			return
 		}
 		if link.Attrs().Flags&net.FlagLoopback != 0 {
