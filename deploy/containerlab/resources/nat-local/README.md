@@ -9,14 +9,14 @@ there ([Local NAT shards](../../../../docs/worker/contract.md#local-nat-shards))
 The guests then reach `remote-host` through their own node's shard (Local) and
 through `dfw-worker3`'s (Fabric).
 
-| Resource                | Purpose                                                                      |
-| ----------------------- | ---------------------------------------------------------------------------- |
-| `nad.yaml`              | `vpc-a-edge` and `vpc-b-edge`, attachment 802 in VPC 80 and 81, one address  |
-| `vpcattachments.yaml`   | Their VPCAttachments, with the address the Local pair returns to             |
-| `bindings.yaml`         | Traffic policy for both, the same as the other `ns80` guests                 |
-| `guests.yaml`           | The guests, pinned to `dfw-worker2` and tolerating its NAT taint             |
-| `allowlist.yaml`        | Worker's allowlist: galactic-router's routes and galactic-nat's shard claims |
-| `nat-worker-patch.yaml` | Lab-only: galactic-nat's Worker socket, projected token and flags            |
+| Resource                | Purpose                                                                            |
+| ----------------------- | ---------------------------------------------------------------------------------- |
+| `nad.yaml`              | `vpc-a-edge` and `vpc-b-edge`, attachments 86 and 87 in VPC 80 and 81, one address |
+| `vpcattachments.yaml`   | Their VPCAttachments, with the address the Local pair returns to                   |
+| `bindings.yaml`         | Traffic policy for both, the same as the other `ns80` guests                       |
+| `guests.yaml`           | The guests, pinned to `dfw-worker2` and tolerating its NAT taint                   |
+| `allowlist.yaml`        | Worker's allowlist: galactic-router's routes and galactic-nat's shard claims       |
+| `nat-worker-patch.yaml` | Lab-only: galactic-nat's Worker socket, projected token and flags                  |
 
 The check runs Worker, which takes over every VPC scope on its node and never
 hands one back. It therefore ends with `task destroy`, `task deploy`,

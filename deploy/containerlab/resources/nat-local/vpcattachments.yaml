@@ -11,8 +11,9 @@ spec:
     name: "80"
   interface:
     name: eth0
+    mode: Netns
     addresses:
-      - fd20:80:ff01::2:0:0/96
+      - fd20:80:ff01::3:0:0/96
 ---
 apiVersion: galactic.datumapis.com/v1alpha1
 kind: VPCAttachment
@@ -24,5 +25,6 @@ spec:
     name: "81"
   interface:
     name: eth0
+    mode: Netns
     addresses:
-      - fd20:80:ff01::2:0:0/96
+      - fd20:80:ff01::3:0:0/96
