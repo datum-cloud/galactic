@@ -71,3 +71,11 @@ func TestProcPodsOpensOnlyTheCallersPod(t *testing.T) {
 		t.Fatalf("Open(pod-b) after its processes left = %v, want ErrPodNotFound", err)
 	}
 }
+
+// TestProcPodsAlive checks that a pod runs while a process's cgroup names it.
+func TestProcPodsAlive(t *testing.T) {
+	pods := &ProcPods{ProcRoot: procRoot(t, 100), Pods: cgroupPods{100: podB}}
+	if !pods.Alive(podB) || pods.Alive("pod-a") || pods.Alive("") {
+		t.Fatal("Alive did not follow the processes' pods")
+	}
+}

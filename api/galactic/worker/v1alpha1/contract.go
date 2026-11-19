@@ -92,12 +92,16 @@ const (
 	ReasonClaimExists                      = "ClaimExists"
 	ReasonClaimNotFound                    = "ClaimNotFound"
 	ReasonGenerationConflict               = "GenerationConflict"
-	ReasonNoSession                        = "NoSession"
-	ReasonStaleGeneration                  = "StaleGeneration"
-	ReasonResyncing                        = "Resyncing"
-	ReasonShuttingDown                     = "ShuttingDown"
-	ReasonClaimLimit                       = "ClaimLimit"
-	ReasonTableRangeExhausted              = "TableRangeExhausted"
+	// ReasonClaimHeldByAnotherPod refuses a call on a routed_link or socket
+	// claim from a pod other than the one the claim's link serves, while
+	// that pod still runs.
+	ReasonClaimHeldByAnotherPod = "ClaimHeldByAnotherPod"
+	ReasonNoSession             = "NoSession"
+	ReasonStaleGeneration       = "StaleGeneration"
+	ReasonResyncing             = "Resyncing"
+	ReasonShuttingDown          = "ShuttingDown"
+	ReasonClaimLimit            = "ClaimLimit"
+	ReasonTableRangeExhausted   = "TableRangeExhausted"
 )
 
 // Status reasons, carried in conditions, destination status and

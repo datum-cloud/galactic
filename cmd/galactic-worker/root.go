@@ -184,8 +184,9 @@ func run(o *options) error {
 		return err
 	}
 	fabric.InitMetrics()
+	pods := &local.ProcPods{ProcRoot: o.procRoot, Pods: auth.CgroupPodResolver{ProcRoot: o.procRoot}}
 	localKernel := &local.Kernel{PinDir: o.pinDir, LocalPinDir: o.localPinDir, DispatchDir: o.dispatchDir,
-		Pods: &local.ProcPods{ProcRoot: o.procRoot, Pods: auth.CgroupPodResolver{ProcRoot: o.procRoot}}}
+		Pods: pods}
 	defer func() { _ = localKernel.Close() }()
 	loc, err := local.New(local.Config{Kernel: localKernel, Node: o.nodeName, Log: slog.Default()})
 	if err != nil {
@@ -213,8 +214,9 @@ func run(o *options) error {
 			Allowlist: allow,
 			Node:      o.nodeName,
 		},
-		Routes: tenantRoutes,
-		Log:    slog.Default(),
+		Routes:   tenantRoutes,
+		Log:      slog.Default(),
+		PodAlive: pods.Alive,
 	})
 	if err != nil {
 		return err
