@@ -50,9 +50,12 @@
 #      the pool answered through dfw-worker3 and, for its remote backends,
 #      through G, then re-advertisement and w2 back once the row is back.
 #      The lab's edge nodes originate the site's VIP /64 and /26 from FRR,
-#      which the gateway can neither see nor withdraw: the transit and
-#      traffic-moves checks report GAP while tr1 still routes the VIPs to G.
-#      A GAP never fails the run; RESULT is then PASS WITH GAPS.
+#      which the gateway can neither see nor withdraw (D44). With the pins
+#      off, the check withdraws G's FRR network statement for one family at
+#      a time (vtysh in G's fabric-router, as verify:nat-active-active does)
+#      and asserts that tr1 loses its route via G, that unpinned clients'
+#      flows enter through dfw-worker3 (its rule counters rise, G's do not)
+#      and are answered, and that the route via G is back once re-added.
 #
 # Throughout, the egress shards' translation counters on both edge nodes
 # must not move: no VIP reply may take the NAT path. A TCP request that
@@ -64,10 +67,17 @@
 # created and stops Worker; the lab then needs task destroy, task deploy and
 # task baseline:twice, as after verify:nat-local-shard.
 #
+# It stops with a PRECONDITION line, exit 0, before changing anything, when
+# backend health (GALACTIC_GATEWAY_BACKEND_HEALTH, D48) is off on any dfw
+# gateway or NetworkGateway, or dfw-worker2's FRR does not originate both
+# site prefixes. Its own gateway patch sets backend health again, and a
+# gateway without it after the patch fails the run.
+#
 # Usage:
 #   verify-gateway-local.sh                  run the check
 #   verify-gateway-local.sh --check-harness  only the harness precondition
-#   verify-gateway-local.sh --unpin          remove leftover tr1 pins
+#   verify-gateway-local.sh --unpin          remove leftover tr1 pins and
+#                                            re-originate the site prefixes
 #
 # EXPECT_HEAD, when set, must be this checkout's HEAD. EVIDENCE_DIR names the
 # directory for captures and the log (default: a new directory under /tmp).
@@ -146,9 +156,53 @@ pin() {
   done
 }
 
+# --- the site aggregate -----------------------------------------------------------
+
+# dfw's edge nodes originate the site's VIP prefixes from FRR, in AS 65000
+# (resources/fabric-router/dfw/frr.conf.dfw-worker2). The public-path step
+# withdraws them on dfw-worker2 at runtime through vtysh, as
+# verify-nat-active-active.sh does a shard's SID; the fabric-router
+# ConfigMap is untouched, and every exit path re-adds them.
+EDGE_ASN=65000
+declare -A SITE_PREFIX=([6]=2001:db8:6060:1::/64 [4]=198.51.100.0/26)
+AGGREGATE_NODE=dfw-worker2
+FRR_WITHDRAWN=()
+edge_frr() { # NODE vtysh-args...
+  local node=$1 pod
+  shift
+  pod=$(kc -n galactic-system get pods -l app.kubernetes.io/name=fabric-router \
+    --field-selector "spec.nodeName=${node}" -o jsonpath='{.items[0].metadata.name}')
+  kc -n galactic-system exec "${pod}" -c frr -- vtysh "$@"
+}
+originate_site() { # FAMILY yes|no
+  local no="" af=ipv6
+  [ "$1" = 4 ] && af=ipv4
+  [ "$2" = no ] && no="no "
+  edge_frr "${AGGREGATE_NODE}" -c 'conf t' -c "router bgp ${EDGE_ASN}" -c "address-family ${af} unicast" \
+    -c "${no}network ${SITE_PREFIX[$1]}" >/dev/null
+}
+# tr1_routes FAMILY prints tr1's routes covering the family's pool VIP.
+tr1_routes() {
+  if [ "$1" = 6 ]; then
+    transit tr1 ip -6 route show match "${VIP6[pool]}"
+  else
+    transit tr1 ip -4 route show match "${VIP4[pool]}"
+  fi
+}
+# tr1_via GATEWAY FAMILY counts tr1's next hops toward GATEWAY among them.
+tr1_via() {
+  local a routes
+  if [ "$2" = 6 ]; then read -r a _ <<<"${UPLINK6[$1]}"; else read -r a _ <<<"${UPLINK4[$1]}"; fi
+  routes=$(tr1_routes "$2")
+  grep -cE "via ${a//./\\.}( |\$)" <<<"${routes}" || true
+}
+
 case "${1:-}" in
   --unpin)
     unpin
+    # Re-adding a network statement FRR already has changes nothing.
+    originate_site 6 yes || true
+    originate_site 4 yes || true
     exit 0
     ;;
   --check-harness | "") ;;
@@ -212,6 +266,20 @@ msum() {
     END {if (c) printf "%.0f\n", s; else print "missing"}' <<<"${text}"
 }
 
+# health_report sets HEALTH_MISSING to every NetworkGateway in dfw's
+# galactic-system without status.backendHealthFiltering, and every gateway pod
+# there whose container lacks GALACTIC_GATEWAY_BACKEND_HEALTH=true, or "".
+health_report() {
+  local gws pods
+  gws=$(kc -n galactic-system get networkgateways -o json |
+    jq -r '.items[] | select(.status.backendHealthFiltering != true) | "NetworkGateway \(.metadata.name), "')
+  pods=$(kc -n galactic-system get pods -l app.kubernetes.io/name=galactic-gateway -o json |
+    jq -r '.items[] | select([.spec.containers[] | select(.name == "galactic-gateway") | .env // [] | .[] |
+      select(.name == "GALACTIC_GATEWAY_BACKEND_HEALTH" and .value == "true")] | length == 0)
+      | "pod \(.metadata.name), "')
+  HEALTH_MISSING=$(tr -d '\n' <<<"${gws}${pods}")
+}
+
 lab_preconditions() {
   local c gw text n
   for c in "${CP}" dfw-worker dfw-worker2 dfw-worker3 dfw-worker4 "clab-${LAB}-tr1" "${CLIENT_HOST}"; do
@@ -235,12 +303,24 @@ lab_preconditions() {
     text=$(scrape "${gw}" "${GW_METRICS}")
     n=$(grep -cE '^galactic_edge_(local_handoffs_total|family_withdrawn)' <<<"${text}" || true)
     [ "${n}" -ge 2 ] || precondition "${gw}'s galactic-gateway predates #1438 (no galactic_edge_local_handoffs_total or galactic_edge_family_withdrawn): deploy this branch's images"
-    [ "$(kc -n galactic-system get networkgateway "${gw}" -o jsonpath='{.status.backendHealthFiltering}' 2>/dev/null || true)" = true ] ||
-      precondition "${gw}'s gateway does not apply backend health (GALACTIC_GATEWAY_BACKEND_HEALTH, resources/galactic-gateway/base/)"
     n=$(docker exec "${gw}" sh -c 'pgrep -f "^/opt/galactic-worker/galactic-worker" || true' | wc -l)
     [ "${n}" -eq 0 ] || precondition "galactic-worker already runs on ${gw}: an earlier run did not stop it (task destroy, task deploy)"
     n=$(docker exec "${gw}" sh -c 'cat /var/lib/galactic-edge/ownership/vpc-*.json 2>/dev/null || true' | grep -c 'galactic-worker:' || true)
     [ "${n}" -eq 0 ] || precondition "a galactic-worker owns VPC scopes on ${gw} since the last deploy (task destroy, task deploy)"
+  done
+  # Backend health is what takes a backend whose Local handoff is not ready
+  # out of every gateway's Maglev table (D48), and a gateway applies it only
+  # while every NetworkGateway in the namespace reports it.
+  health_report
+  [ -z "${HEALTH_MISSING}" ] ||
+    precondition "backend health is off: ${HEALTH_MISSING}(GALACTIC_GATEWAY_BACKEND_HEALTH=true, resources/galactic-gateway/base/; task deploy:galactic-gateway)"
+  for fam in 6 4; do
+    text=$(edge_frr "${AGGREGATE_NODE}" -c 'show running-config' 2>/dev/null || true)
+    pfx=${SITE_PREFIX[${fam}]}
+    n=$(grep -cE "^[[:space:]]*network ${pfx//./\\.}[[:space:]]*\$" <<<"${text}" || true)
+    [ "${n}" -ge 1 ] || precondition "${AGGREGATE_NODE}'s FRR does not originate ${SITE_PREFIX[${fam}]} (network statement missing; task deploy:fabric)"
+    [ "$(tr1_via "${AGGREGATE_NODE}" "${fam}")" -gt 0 ] ||
+      precondition "tr1 does not route ${SITE_PREFIX[${fam}]} via ${AGGREGATE_NODE}"
   done
   for c in guest-a guest-a2; do
     [ "$(kc -n ns80 get deployment "${c}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)" = 1 ] ||
@@ -271,7 +351,7 @@ git -C "${REPO_DIR}" status --short -- . | sed 's/^/  dirty: /' || true
 
 RESULTS=()
 RARE=0
-# record PASS|FAIL|GAP|INFO NAME DETAIL
+# record PASS|FAIL|INFO NAME DETAIL
 record() {
   local line
   line=$(printf '%-4s %-46s %s' "$1" "$2" "${3:-}")
@@ -311,30 +391,26 @@ json.dump(d, sys.stdout)' "$1" | kci replace -f - >/dev/null
 }
 
 summary() {
-  local fails gaps r
+  local fails r
   fails=$(printf '%s\n' "${RESULTS[@]}" | grep -c '^FAIL' || true)
-  gaps=$(printf '%s\n' "${RESULTS[@]}" | grep -c '^GAP' || true)
   echo
   echo "==== verify:gateway-local evidence summary ===="
   for r in "${RESULTS[@]}"; do echo "${r}"; done
   echo "RARE-NO-REPLY observed: ${RARE} time(s)"
   echo "evidence: ${OUT}"
   if [ "$1" -ne 0 ] || [ "${fails}" -ne 0 ]; then
-    echo "RESULT: FAIL (${fails} FAIL, ${gaps} GAP)"
+    echo "RESULT: FAIL (${fails} FAIL)"
     return 1
   fi
-  if [ "${gaps}" -ne 0 ]; then
-    echo "RESULT: PASS WITH GAPS (${gaps} GAP; see the GAP lines)"
-  else
-    echo "RESULT: PASS"
-  fi
+  echo "RESULT: PASS"
 }
 
 cleanup() {
-  local rc=$? c gw
+  local rc=$? c gw f
   set +e
   log "restoring"
   unpin
+  for f in "${FRR_WITHDRAWN[@]}"; do originate_site "${f}" yes; done
   [ -z "${UPLINK_SAVED}" ] || uplink_write dfw-worker2 "${UPLINK_SAVED}"
   if [ "${HOLD}" -eq 1 ]; then
     kc -n ns80 exec deploy/gwlocal-w2 -c vmm -- rm -f /tmp/hold
@@ -452,6 +528,12 @@ local_unavailable() {
   zero_if_missing "$(msum "$1" "${GW_METRICS}" galactic_edge_drops_total 'reason="local_unavailable"')"
 }
 rule_packets() { msum "$1" "${GW_METRICS}" galactic_edge_rule_packets_total "vip=\"$2\""; }
+rp_sum() { # NODE VIP... sums rule packets over the VIPs, a missing series as 0
+  local node=$1 v n=0
+  shift
+  for v in "$@"; do n=$((n + $(zero_if_missing "$(rule_packets "${node}" "${v}")"))); done
+  echo "${n}"
+}
 rule_backends() { msum "$1" "${GW_METRICS}" galactic_edge_rule_backends "vip=\"$2\"" "proto=\"$3\"" 'port="80"'; }
 
 nat_total() {
@@ -658,6 +740,17 @@ for gw in "${GATEWAYS[@]}"; do
   kc -n galactic-system rollout status "daemonset/galactic-gateway-${gw}" --timeout=600s >/dev/null ||
     die "galactic-gateway-${gw} did not roll out with the Worker socket"
 done
+# gateway-worker-patch.yaml sets GALACTIC_GATEWAY_BACKEND_HEALTH itself, so
+# a gateway without it now is this check's failure, not the lab's.
+health_on() {
+  health_report
+  [ -z "${HEALTH_MISSING}" ]
+}
+if wait_until 60 health_on; then
+  record PASS "setup backend health on every gateway" "every NetworkGateway reports backendHealthFiltering, every pod sets it"
+else
+  die "backend health is off after the gateway patch: ${HEALTH_MISSING}"
+fi
 
 declare -A UID_OF
 for b in "${BACKENDS[@]}"; do UID_OF[${b}]=$(attach_uid "${B_ATTACH[${b}]}"); done
@@ -1025,33 +1118,55 @@ else
     record INFO "public row rebuilt during the step" "zeroed again"
     uplink_write "${G}" "${ZERO}"
   }
-  sleep 5
-  routes=$( (transit tr1 ip -6 route show match "${VIP6[w1]}"; transit tr1 ip -4 route show match "${VIP4[w1]}"))
-  echo "${routes}" >"${OUT}/tr1-routes-withdrawn.txt"
-  transit tr1 vtysh -c "show bgp ipv6 unicast ${VIP6[w1]}" >>"${OUT}/tr1-routes-withdrawn.txt" 2>&1 || true
-  read -r g6 _ <<<"${UPLINK6[${G}]}"
-  read -r g4 _ <<<"${UPLINK4[${G}]}"
-  via_g=$(grep -cE "via (${g6}|${g4})( |$)" <<<"${routes}" || true)
-  rp0=0
-  for b in w1 w3 w4; do rp0=$((rp0 + $(zero_if_missing "$(rule_packets "${G}" "${VIP6[${b}]}")"))); done
-  ok=0 total=0
-  for b in w1 w3 w4; do
-    flows unpinned tcp 6 "${VIP6[${b}]}" 4
-    ok=$((ok + F_OK)) total=$((total + 4))
+  # The transit learns the site's VIP prefixes from the edge nodes' FRR,
+  # which originates them to Null0, not from the gateway's -v4/-v6
+  # advertisements (EVPN paths the transit never receives). The gateway can
+  # neither see nor withdraw that aggregate (docs/gateway/architecture.md,
+  # D44), so the lab withdraws it on ${G} for one family at a time, as an
+  # operator's tooling would with the gateway's withdrawal, and checks that
+  # clients then enter through ${OG}. The pins are off for this, or they
+  # would hide the withdrawal.
+  unpin
+  for fam in 6 4; do
+    vips=()
+    for b in w1 w3 w4 pool; do
+      if [ "${fam}" = 6 ]; then vips+=("${VIP6[${b}]}"); else vips+=("${VIP4[${b}]}"); fi
+    done
+    n=$(tr1_via "${G}" "${fam}")
+    if [ "${n}" -eq 0 ]; then
+      record FAIL "public v${fam} tr1 routes via ${G} before" "no route via ${G}: $(tr1_routes "${fam}" | tr '\n' ';')"
+      continue
+    fi
+    FRR_WITHDRAWN+=("${fam}")
+    originate_site "${fam}" no
+    t0=${SECONDS}
+    gone() { [ "$(tr1_via "${G}" "$1")" -eq 0 ] && [ "$(tr1_via "${OG}" "$1")" -gt 0 ]; }
+    if wait_until 60 gone "${fam}"; then
+      record PASS "public v${fam} route via ${G} gone at tr1" "after $((SECONDS - t0))s; via ${OG} only"
+    else
+      record FAIL "public v${fam} route via ${G} gone at tr1" "$(tr1_routes "${fam}" | tr '\n' ';')"
+    fi
+    {
+      tr1_routes "${fam}"
+      transit tr1 vtysh -c "show bgp ipv${fam} unicast ${vips[3]}" 2>&1 || true
+    } >"${OUT}/tr1-routes-v${fam}-withdrawn.txt"
+    rpg0=$(rp_sum "${G}" "${vips[@]}") rpo0=$(rp_sum "${OG}" "${vips[@]}")
+    ok=0 total=0
+    for vip in "${vips[@]}"; do
+      for proto in tcp udp; do
+        flows unpinned "${proto}" "${fam}" "${vip}" 2
+        ok=$((ok + F_OK)) total=$((total + 2))
+      done
+    done
+    rpg1=$(rp_sum "${G}" "${vips[@]}") rpo1=$(rp_sum "${OG}" "${vips[@]}")
+    check "public v${fam} unpinned clients enter through ${OG}" \
+      "${ok}/${total} answered; rule packets ${G} ${rpg0}->${rpg1}, ${OG} ${rpo0}->${rpo1}" \
+      eval '[ "${ok}" -eq "${total}" ] && [ "${rpg1}" -eq "${rpg0}" ] && [ "${rpo1}" -gt "${rpo0}" ]'
+    originate_site "${fam}" yes
+    FRR_WITHDRAWN=()
+    back() { [ "$(tr1_via "${G}" "$1")" -gt 0 ]; }
+    check "public v${fam} route via ${G} back at tr1" "" wait_until 60 back "${fam}"
   done
-  rp1=0
-  for b in w1 w3 w4; do rp1=$((rp1 + $(zero_if_missing "$(rule_packets "${G}" "${VIP6[${b}]}")"))); done
-  if [ "${via_g}" -gt 0 ]; then
-    record GAP "public route gone at tr1" "tr1 still routes the VIPs via ${G}"
-    echo "  why: ${G}'s fabric FRR originates the site's VIP /64 and /26 to Null0 (resources/fabric-router/dfw/)." \
-      "That aggregate is not a BGPAdvertisement, so the gateway can neither see nor withdraw it; it withdraws" \
-      "only its -v4/-v6 rule advertisements, which are EVPN paths the transit never receives."
-    record GAP "public unpinned clients moved off ${G}" "${ok}/${total} answered; ${G} rule packets ${rp0} -> ${rp1}"
-  else
-    record PASS "public route gone at tr1" "no route via ${G}"
-    check "public unpinned clients moved off ${G}" "${ok}/${total} answered; ${G} rule packets ${rp0} -> ${rp1}" \
-      eval '[ "${ok}" -eq "${total}" ] && [ "${rp1}" -eq "${rp0}" ]'
-  fi
   for gw in "${OG}" "${G}"; do
     pin "${gw}"
     for fam in 6 4; do

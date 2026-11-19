@@ -27,7 +27,7 @@ Fabric.
 | `guests.yaml`               | The TAP guests: a hypervisor stand-in and a responder, pinned to one edge node each |
 | `networkservices.yaml`      | A TCP and a UDP rule per backend, and the pool's                                    |
 | `allowlist.yaml`            | Worker's allowlist: galactic-router's routes and galactic-gateway's `local.tap`     |
-| `gateway-worker-patch.yaml` | Lab-only: the dfw gateways' Worker socket, token file and projected token           |
+| `gateway-worker-patch.yaml` | Lab-only: the dfw gateways' Worker socket, token, and backend health on             |
 
 For its duration the script also labels `vpc-a` and `vpc-a2` for the
 services, binds them to this fixture's policies, and starts the same
@@ -44,6 +44,13 @@ compare each shard's totals and assume nothing else uses the shards while
 the check runs. A rule whose only backend is reported Unhealthy keeps that
 backend, so the failure steps send traffic to the pool rather than to `w2`'s
 own VIP.
+
+The public-path step also withdraws `dfw-worker2`'s FRR origination of the
+site's VIP `/64` and `/26` (`network` in AS 65000), one family at a time,
+with `vtysh` in its fabric-router pod; the fabric-router ConfigMap is not
+edited. The gateway cannot withdraw that aggregate itself, since it is FRR
+configuration rather than a BGPAdvertisement. The script's exit trap and
+`--unpin` re-add both statements.
 
 The check runs Worker, which takes over every VPC scope on its node and never
 hands one back. It therefore ends with `task destroy`, `task deploy` and
