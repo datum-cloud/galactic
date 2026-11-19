@@ -1,0 +1,19 @@
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicyBinding
+metadata:
+  name: vpc-a-tap
+spec:
+  ingressPolicyRef:
+    name: handoff-ingress
+  egressPolicyRef:
+    name: handoff-egress
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicyBinding
+metadata:
+  name: vpc-b-tap
+spec:
+  ingressPolicyRef:
+    name: handoff-ingress
+  egressPolicyRef:
+    name: handoff-egress

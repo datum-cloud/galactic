@@ -8,6 +8,7 @@ export BPF2GO_CC=clang-18
 for pkg in prog edgeprog natprog xdpdispatch xmitdrops; do
   go generate "./internal/plumbing/ebpf/$pkg/..."
 done
+go generate ./tests/handoffs/probe/...
 
 go build ./...
 
@@ -15,4 +16,4 @@ assets=$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@32759fab31191
 test -x "$assets/kube-apiserver"
 export KUBEBUILDER_ASSETS=$assets
 
-go test -timeout 20m ./api/... ./cmd/... ./internal/... ./tests/edgeconformance/edgeprobe/...
+go test -timeout 20m ./api/... ./cmd/... ./internal/... ./tests/edgeconformance/edgeprobe/... ./tests/handoffs/...

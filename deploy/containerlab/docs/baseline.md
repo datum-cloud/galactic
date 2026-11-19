@@ -6,8 +6,10 @@ on two physical workers. Services run on dedicated edge nodes, and workloads
 run on compute nodes. Later work on the Galactic Worker reuses this fixture
 and compares its results against the reference recorded here.
 
-The fixture has no TAP-backed guest. The tenant TAP capture point belongs to
-[#1444](https://github.com/datum-cloud/galactic/issues/1444).
+The fixture has no TAP-backed guest. The tenant TAP guests and their capture
+points are in the separate `ns80-tap` fixture of the
+[Local handoff checks](handoffs.md), which is deployed only while those checks
+run.
 
 ## Fixture
 

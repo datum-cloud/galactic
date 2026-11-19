@@ -1,0 +1,9 @@
+# ns80-tap: the Local handoff fixture (docs/handoffs.md). Two TAP-backed
+# guests on dfw's compute worker, one in each of ns80's VPCs, with the same
+# address, and a pod standing in for Envoy. It is deployed only for a handoff
+# run (task deploy:ns80-tap) and removed after it, so the ns80 baseline
+# (docs/baseline.md) never sees it.
+namespace: ns80-tap
+resources:
+  - namespace.yaml
+  - guests.yaml
