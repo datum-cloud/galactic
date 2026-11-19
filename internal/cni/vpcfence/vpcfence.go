@@ -24,7 +24,9 @@ import (
 var Dir = ownership.DefaultDir
 
 // Wait bounds how long Write waits while ownership of the scope moves, which
-// takes one locked file write.
+// takes one locked file write. It does not bound the wait for the scope's
+// lock itself: a writer that holds the lock without finishing stalls Write
+// until it does, as the fence requires of every bounded mutation.
 const Wait = 30 * time.Second
 
 // Write runs mutate under vpc's write fence, waiting up to Wait, or until ctx
