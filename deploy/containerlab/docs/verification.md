@@ -254,8 +254,11 @@ reader away and zeroes dfw-worker2's `public_uplink_table`, and checks the
 gateway's Maglev table, the gateway's BGPAdvertisements and the egress
 shards' counters. Worker keeps the edge nodes' VPC scopes, so the lab needs
 `task destroy`, `task deploy` and `task baseline:twice` after it. The edge
-nodes originate the site's VIP prefixes from FRR, so its transit checks for
-a withdrawn gateway report `GAP` rather than pass or fail.
+nodes originate the site's VIP prefixes from FRR, which the gateway cannot
+withdraw, so for its transit checks the script withdraws dfw-worker2's
+origination of each family in turn with `vtysh` and re-adds it on exit. It
+requires backend health (`GALACTIC_GATEWAY_BACKEND_HEALTH`) on every dfw
+gateway.
 
 ```bash
 # NetworkGateways Ready, NetworkServices Accepted, ServiceVIPBindings Bound
