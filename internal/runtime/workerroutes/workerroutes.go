@@ -87,7 +87,7 @@ type Handoff struct {
 	log     *slog.Logger
 	now     func() time.Time
 
-	mu     sync.Mutex
+	mu        sync.Mutex
 	routes    map[key]route
 	withdrawn map[key]withdrawal
 	// dirty are the keys changed since they were last sent.
