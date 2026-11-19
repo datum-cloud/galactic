@@ -1,0 +1,5 @@
+# The galactic-vrf Component composed onto a stand-in Envoy Deployment.
+resources:
+  - envoy-deployment.yaml
+components:
+  - ../../../config/galactic-vrf

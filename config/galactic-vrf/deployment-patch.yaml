@@ -1,0 +1,110 @@
+# The name is a placeholder: kustomize applies this to every Deployment the
+# Component's target label selector matches.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: placeholder
+spec:
+  # A Worker claim serves one pod at a time: Worker refuses a new pod with
+  # ClaimHeldByAnotherPod while the pod holding the claim runs, and the
+  # sidecar is ready only once it holds every claim. A rollout that keeps
+  # the old pod until the new one is ready would wait forever, so the old
+  # pod stops first; its sidecar releases the claims on SIGTERM and the new
+  # pod takes them over.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    spec:
+      serviceAccountName: galactic-vrf
+      containers:
+        - name: galactic-vrf
+          image: ghcr.io/datum-cloud/galactic-vrf:latest
+          env:
+            - name: GALACTIC_VRF_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: GALACTIC_VRF_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Placeholder: the consumer patches in the selector for its
+            # proxy's own VPCAttachments.
+            - name: GALACTIC_VRF_ATTACHMENT_SELECTOR
+              value: galactic.datumapis.com/proxy=REPLACE_ME
+            - name: GALACTIC_VRF_WORKER_SOCKET
+              value: /run/galactic-worker/worker.sock
+            - name: GALACTIC_VRF_WORKER_TOKEN_FILE
+              value: /var/run/secrets/galactic-worker/token
+            - name: GALACTIC_VRF_METRICS_PORT
+              value: "9182"
+            - name: GALACTIC_VRF_HEALTH_PORT
+              value: "9183"
+          ports:
+            - name: vrf-metrics
+              containerPort: 9182
+              protocol: TCP
+            - name: vrf-health
+              containerPort: 9183
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: vrf-health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          # Ready once every VPC's Worker claim is Ready.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: vrf-health
+            periodSeconds: 10
+          # NET_ADMIN for the VRF devices, routes and tc attach in the pod's
+          # netns; BPF to open and update the node's pinned uSID maps under
+          # /sys/fs/bpf. It loads no programs, so PERFMON is not needed.
+          # Root is required to write the hostPath bpffs and to connect to
+          # the Worker's root-owned socket.
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              drop: ["ALL"]
+              add:
+                - NET_ADMIN
+                - BPF
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: galactic-worker-socket
+              mountPath: /run/galactic-worker
+            # bpffs must already be mounted on the node (type: Directory,
+            # not DirectoryOrCreate), as in config/galactic-nat.
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+            - name: galactic-worker-token
+              mountPath: /var/run/secrets/galactic-worker
+              readOnly: true
+      volumes:
+        - name: galactic-worker-socket
+          hostPath:
+            path: /run/galactic-worker
+            type: Directory
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
+        - name: galactic-worker-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: galactic-worker
+                  expirationSeconds: 3600
+                  path: token
