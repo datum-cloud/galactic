@@ -69,30 +69,29 @@ the 9182 default with `galactic-nat` without clashing, even on the edge
 nodes that run both. `galactic-controller`, `fabric-router-controller` and
 the fabric-api gateway are Deployments, scraped per pod.
 
-| Area                    | Component                                                 | Metric prefix                                                 | Port           | `job` from `config/monitoring/`          |
-| ----------------------- | --------------------------------------------------------- | ------------------------------------------------------------- | -------------- | ---------------------------------------- |
-| VPC dataplane           | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_usid_*`                                             | 9180           | `galactic-cni`                           |
-| VPC attachment traffic  | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_vpc_attachment_*`                                   | 9180           | `galactic-cni`                           |
-| Tenant egress pool      | `galactic-cni`                                            | `galactic_cni_egress_*`                                       | 9180           | `galactic-cni`                           |
-| VPC ingress             | `galactic-vrf`                                            | `galactic_ingress_sidecar_*`                                  | 9182 (default) | none shipped                             |
-| VPC ingress return path | `galactic-cni` (`credential-refresh`)                     | `galactic_sidecar_return_*`                                   | 9180           | `galactic-cni`                           |
-| VPC ingress backends    | `galactic-cni` (`credential-refresh`)                     | `galactic_endpointslice_repair_*`                             | 9180           | `galactic-cni`                           |
-| VPC host link repair    | `galactic-cni` (`credential-refresh`)                     | `galactic_cni_host_link*`                                     | 9180           | `galactic-cni`                           |
-| Edge load balancer      | `galactic-gateway`                                        | `galactic_edge_*`, controller-runtime                         | 8081           | none shipped                             |
-| Tenant routing (GoBGP)  | `galactic-router`, `galactic-router-rr`                   | `galactic_router_*`, controller-runtime                       | 9179           | `galactic-router` / `galactic-router-rr` |
-| Private service routes  | `galactic-router` (plain mode only)                       | `galactic_service_route_*`                                    | 9179           | `galactic-router`                        |
-| Traffic policy          | `galactic-router` with `GALACTIC_ROUTER_TRAFFIC_POLICY`   | `galactic_cni_traffic_policy_*`                               | 9179           | `galactic-router`                        |
-| Traffic policy webhook  | `galactic-controller`                                     | controller-runtime                                            | 9184           | `galactic-controller`                    |
-| Instance attachments    | `galactic-controller --role=cell`                         | `galactic_vpc_instance_*`                                     | 9184           | `galactic-controller`                    |
-| Galactic Edge (core)    | `galactic-controller --role=cell --edge`                  | `galactic_edge_foundation_*`                                  | 9184           | `galactic-controller`                    |
-| Galactic Edge (node)    | `galactic-edge`                                           | `galactic_edge_foundation_*`, controller-runtime              | 9186           | `galactic-edge`                          |
-| Underlay routing (FRR)  | `fabric-router` `frr-exporter` sidecar                    | `frr_*`                                                       | 9342           | `fabric-router`                          |
-| Underlay config         | `fabric-router` `fabric-config-agent`                     | `fabric_router_*`                                             | 9343           | `fabric-config-agent`                    |
-| Fabric routing (API)    | `fabric-router-controller`                                | `galactic_fabric_routing_*` (leader only), controller-runtime | 9185           | `fabric-router-controller`               |
-| Fabric looking glass    | `fabric-api` node sidecar                                 | `fabric_api_node_*`, `fabric_api_*`                           | 9345           | `fabric-api-node`                        |
-| Fabric looking glass    | `fabric-api` cell gateway                                 | `fabric_api_gateway_*`, `fabric_api_*`                        | 9347           | `fabric-api-gateway`                     |
-| NAT66 / NAT64           | `galactic-nat` (one per egress shard)                     | `galactic_nat_*`                                              | 9182           | `galactic-nat`                           |
-| MASQUE connector        | `masque-provider`                                         | `galactic_connectip_*`, `galactic_masque_*`                   | 9188           | `masque-provider`                        |
+| Area                   | Component                                                 | Metric prefix                                                 | Port           | `job` from `config/monitoring/`          |
+| ---------------------- | --------------------------------------------------------- | ------------------------------------------------------------- | -------------- | ---------------------------------------- |
+| VPC dataplane          | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_usid_*`                                             | 9180           | `galactic-cni`                           |
+| VPC attachment traffic | `galactic-cni` (`credential-refresh`, the datapath owner) | `galactic_vpc_attachment_*`                                   | 9180           | `galactic-cni`                           |
+| Tenant egress pool     | `galactic-cni`                                            | `galactic_cni_egress_*`                                       | 9180           | `galactic-cni`                           |
+| VPC ingress            | `galactic-vrf`                                            | `galactic_ingress_sidecar_*`                                  | 9182 (default) | none shipped                             |
+| VPC ingress backends   | `galactic-cni` (`credential-refresh`)                     | `galactic_endpointslice_repair_*`                             | 9180           | `galactic-cni`                           |
+| VPC host link repair   | `galactic-cni` (`credential-refresh`)                     | `galactic_cni_host_link*`                                     | 9180           | `galactic-cni`                           |
+| Edge load balancer     | `galactic-gateway`                                        | `galactic_edge_*`, controller-runtime                         | 8081           | none shipped                             |
+| Tenant routing (GoBGP) | `galactic-router`, `galactic-router-rr`                   | `galactic_router_*`, controller-runtime                       | 9179           | `galactic-router` / `galactic-router-rr` |
+| Private service routes | `galactic-router` (plain mode only)                       | `galactic_service_route_*`                                    | 9179           | `galactic-router`                        |
+| Traffic policy         | `galactic-router` with `GALACTIC_ROUTER_TRAFFIC_POLICY`   | `galactic_cni_traffic_policy_*`                               | 9179           | `galactic-router`                        |
+| Traffic policy webhook | `galactic-controller`                                     | controller-runtime                                            | 9184           | `galactic-controller`                    |
+| Instance attachments   | `galactic-controller --role=cell`                         | `galactic_vpc_instance_*`                                     | 9184           | `galactic-controller`                    |
+| Galactic Edge (core)   | `galactic-controller --role=cell --edge`                  | `galactic_edge_foundation_*`                                  | 9184           | `galactic-controller`                    |
+| Galactic Edge (node)   | `galactic-edge`                                           | `galactic_edge_foundation_*`, controller-runtime              | 9186           | `galactic-edge`                          |
+| Underlay routing (FRR) | `fabric-router` `frr-exporter` sidecar                    | `frr_*`                                                       | 9342           | `fabric-router`                          |
+| Underlay config        | `fabric-router` `fabric-config-agent`                     | `fabric_router_*`                                             | 9343           | `fabric-config-agent`                    |
+| Fabric routing (API)   | `fabric-router-controller`                                | `galactic_fabric_routing_*` (leader only), controller-runtime | 9185           | `fabric-router-controller`               |
+| Fabric looking glass   | `fabric-api` node sidecar                                 | `fabric_api_node_*`, `fabric_api_*`                           | 9345           | `fabric-api-node`                        |
+| Fabric looking glass   | `fabric-api` cell gateway                                 | `fabric_api_gateway_*`, `fabric_api_*`                        | 9347           | `fabric-api-gateway`                     |
+| NAT66 / NAT64          | `galactic-nat` (one per egress shard)                     | `galactic_nat_*`                                              | 9182           | `galactic-nat`                           |
+| MASQUE connector       | `masque-provider`                                         | `galactic_connectip_*`, `galactic_masque_*`                   | 9188           | `masque-provider`                        |
 
 `config/monitoring/` ships PodMonitors for `galactic-cni`,
 `galactic-router`, `fabric-router` (including the opt-in fabric-api
